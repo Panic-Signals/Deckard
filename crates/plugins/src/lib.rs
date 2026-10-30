@@ -14,6 +14,8 @@ pub mod native;
 pub use deckard_mi::LICENSE as MUTABLE_INSTRUMENTS_LICENSE;
 mod plaits;
 mod replicant;
+#[cfg(target_os = "linux")]
+pub mod runloop;
 pub mod scan;
 pub mod state;
 
@@ -50,8 +52,26 @@ pub fn on_main_thread() -> bool {
         }
         unsafe { pthread_main_np() != 0 }
     }
-    #[cfg(not(target_os = "macos"))]
-    true
+    #[cfg(target_os = "linux")]
+    {
+        // The main thread's id is the process's.
+        unsafe { libc::gettid() == libc::getpid() }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // Known once `mark_main_thread` has run; until then, trust the caller.
+        MAIN_THREAD.get().is_none_or(|t| *t == std::thread::current().id())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Call first thing in `main` on systems that can't tell the main thread apart
+/// (Windows), so [`on_main_thread`] can.
+pub fn mark_main_thread() {
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = MAIN_THREAD.set(std::thread::current().id());
 }
 
 /// Largest block passed to a plug-in; longer requests are split by the caller.

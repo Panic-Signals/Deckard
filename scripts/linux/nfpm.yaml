@@ -60,6 +60,12 @@ contents:
     dst: /usr/share/deckard/install-demucs.sh
     file_info:
       mode: 0755
+  # yabridge's installer (Windows plug-ins through Wine): Preferences ▸ Plug-ins runs
+  # it; it downloads into ~/.local/share/yabridge.
+  - src: scripts/install-yabridge.sh
+    dst: /usr/share/deckard/install-yabridge.sh
+    file_info:
+      mode: 0755
 
 overrides:
   deb:

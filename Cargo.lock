@@ -2204,12 +2204,16 @@ version = "0.1.0"
 dependencies = [
  "deckard-mi",
  "deckard-model",
+ "libc",
+ "libloading 0.8.9",
  "mxprj",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde_json",
  "vst3",
+ "windows-sys 0.59.0",
+ "x11rb",
 ]
 
 [[package]]

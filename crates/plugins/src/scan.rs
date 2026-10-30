@@ -88,10 +88,18 @@ pub fn vst3_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
     bundles_with(dirs, "vst3")
 }
 
-/// VST2 bundles (`.vst`) in `dirs`.
+/// VST2 plug-ins in `dirs`: `.vst` bundles on macOS, `.so` files on Linux, `.dll`s on
+/// Windows.
 pub fn vst2_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    bundles_with(dirs, "vst")
+    bundles_with(dirs, VST2_EXTENSION)
 }
+
+#[cfg(target_os = "linux")]
+const VST2_EXTENSION: &str = "so";
+#[cfg(windows)]
+const VST2_EXTENSION: &str = "dll";
+#[cfg(not(any(target_os = "linux", windows)))]
+const VST2_EXTENSION: &str = "vst";
 
 fn bundles_with(dirs: &[PathBuf], ext: &str) -> Vec<PathBuf> {
     let is = |p: &Path| p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext));
@@ -209,11 +217,33 @@ pub fn vst2_entries(dirs: &[PathBuf]) -> Vec<Entry> {
 
 /// The standard VST2 folders.
 pub fn default_vst2_paths() -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("/Library/Audio/Plug-Ins/VST")];
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.insert(0, PathBuf::from(home).join("Library/Audio/Plug-Ins/VST"));
+    #[cfg(target_os = "macos")]
+    {
+        let mut dirs = vec![PathBuf::from("/Library/Audio/Plug-Ins/VST")];
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.insert(0, PathBuf::from(home).join("Library/Audio/Plug-Ins/VST"));
+        }
+        dirs
     }
-    dirs
+    #[cfg(target_os = "linux")]
+    {
+        // `$VST_PATH` (colon-separated) is the convention Linux hosts share.
+        let mut dirs: Vec<PathBuf> = std::env::var_os("VST_PATH").map_or(Vec::new(), |p| std::env::split_paths(&p).collect());
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join(".vst"));
+        }
+        dirs.extend(["/usr/lib/vst", "/usr/local/lib/vst"].map(PathBuf::from));
+        dirs.dedup();
+        dirs
+    }
+    #[cfg(windows)]
+    {
+        let programs = std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
+        let common = std::env::var_os("CommonProgramFiles").map_or_else(|| programs.join("Common Files"), PathBuf::from);
+        vec![programs.join("VstPlugins"), programs.join(r"Steinberg\VstPlugins"), common.join("VST2")]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    Vec::new()
 }
 
 pub use module::default_search_paths as default_vst3_paths;

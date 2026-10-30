@@ -3,10 +3,16 @@
 //!
 //! Usage: cargo run --release -p deckard-plugins --example plugin-params <bundle.vst3>
 
-use deckard_plugins::{Host, Slot, scan};
+use deckard_plugins::{Host, Slot, module, scan};
 
 fn main() {
     let bundle = std::path::PathBuf::from(std::env::args().nth(1).expect("usage: plugin-params <bundle.vst3>"));
+    // The host finds plug-ins in the configured folders: add the bundle's own.
+    if let Some(dir) = bundle.parent() {
+        let mut dirs = module::search_paths();
+        dirs.insert(0, dir.to_path_buf());
+        module::set_search_paths(dirs);
+    }
     let entries = scan::vst3_from_moduleinfo(&bundle).map(Ok).unwrap_or_else(|| scan::vst3_by_loading(&bundle)).expect("scan");
     let e = entries.first().expect("a class");
     let id = e.maschine_id().unwrap();

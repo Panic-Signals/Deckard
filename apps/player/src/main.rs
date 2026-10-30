@@ -17,6 +17,7 @@ fn arg<T: std::str::FromStr>(args: &[String], flag: &str, n: usize) -> Option<T>
 }
 
 fn main() {
+    deckard_plugins::mark_main_thread();
     run();
     // Skip loaded plug-ins' exit-time destructors (Massive's crash in them).
     deckard_plugins::exit(0)
