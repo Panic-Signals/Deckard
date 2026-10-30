@@ -60,6 +60,7 @@ install -m 644 scripts/linux/deckard.desktop "$STAGE/deckard.desktop"
 target/release/deckard --write-icon "$STAGE/deckard.png" 256
 install -m 644 scripts/linux/50-deckard-maschine-mk3.rules "$STAGE/50-deckard-maschine-mk3.rules"
 install -m 755 scripts/install-demucs.sh "$STAGE/install-demucs.sh"
+install -m 755 scripts/install-yabridge.sh "$STAGE/install-yabridge.sh"
 cat > "$STAGE/README.txt" <<README
 DECKARD $VERSION for Linux ($ARCH)
 
@@ -69,6 +70,11 @@ Stem separation (Sampling > EDIT > STEMS) needs its model (84 MB), installed onc
   ./install-demucs.sh
 (DECKARD offers to install it the first time it starts, and runs it the first time
 you use STEMS.)
+
+Windows plug-ins (NI's and others without Linux versions) run through Wine and
+yabridge: Preferences > Plug-ins installs both, or
+  sudo apt install wine   (or: sudo dnf install wine)
+  ./install-yabridge.sh
 
 Maschine MK3: to use the controller without root, install the udev rule once:
   sudo cp 50-deckard-maschine-mk3.rules /etc/udev/rules.d/

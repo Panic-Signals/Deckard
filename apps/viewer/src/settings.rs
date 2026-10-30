@@ -16,6 +16,9 @@ pub struct Settings {
     pub use_au: bool,
     /// Rescan when the app starts.
     pub scan_on_start: bool,
+    /// Linux: run `yabridgectl sync` before each rescan, so Windows plug-ins installed
+    /// into Wine are bridged.
+    pub bridge_windows: bool,
     /// Folders searched for `.vst3` and `.vst` bundles.
     pub dirs: Vec<PathBuf>,
     /// Plug-ins switched off in the Manager ([`key`]).
@@ -257,6 +260,7 @@ impl Default for Settings {
             count_in_bars: 1,
             input_quantize: false,
             scan_on_start: false,
+            bridge_windows: true,
             dirs: scan::default_vst3_paths().into_iter().chain(scan::default_vst2_paths()).collect(),
             disabled: BTreeSet::new(),
             input_device: None,
@@ -335,6 +339,7 @@ impl Settings {
                 "use_vst2" => s.use_vst2 = v == "true",
                 "use_au" => s.use_au = v == "true",
                 "scan_on_start" => s.scan_on_start = v == "true",
+                "bridge_windows" => s.bridge_windows = v == "true",
                 "show_waveform" => s.show_waveform = v == "true",
                 "dir" => dirs.push(PathBuf::from(v)),
                 "favorite_folder" => s.favorite_folders.push(PathBuf::from(v)),
@@ -562,6 +567,9 @@ impl Settings {
             "use_vst3 = {}\nuse_vst2 = {}\nuse_au = {}\nscan_on_start = {}\nshow_waveform = {}\n",
             self.use_vst3, self.use_vst2, self.use_au, self.scan_on_start, self.show_waveform
         );
+        if !self.bridge_windows {
+            out += "bridge_windows = false\n";
+        }
         if self.dirs.is_empty() {
             out += "dirs = none\n";
         }
@@ -723,6 +731,12 @@ impl Catalog {
         let s = settings.clone();
         let old = std::fs::read_to_string(file("plugins.txt").unwrap_or_default()).unwrap_or_default();
         std::thread::spawn(move || {
+            // Linux: Windows plug-ins installed into Wine are bridged first (yabridge
+            // makes a bundle per plug-in in ~/.vst3/yabridge).
+            if cfg!(target_os = "linux") && s.bridge_windows && crate::wine::sync_wanted() {
+                let _ = tx.send(ScanMsg::Progress("Syncing Windows plug-ins (yabridge)…".into()));
+                let _ = crate::wine::sync();
+            }
             // Bundles scanned before, with their mtime, and their entries.
             let mut known: Vec<(String, u64, Vec<Entry>)> = Vec::new();
             for line in old.lines() {
@@ -799,8 +813,10 @@ impl Catalog {
     }
 }
 
-/// Run `--scan-vst3 <bundle>` in a helper process (20 s at most).
+/// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
+/// bundle, which starts Wine).
 fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
+    let limit = if bundle.to_string_lossy().contains("yabridge") { 90 } else { 20 };
     let Ok(exe) = std::env::current_exe() else { return Vec::new() };
     let Ok(mut child) = std::process::Command::new(exe)
         .arg("--scan-vst3")
@@ -815,7 +831,7 @@ fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if start.elapsed().as_secs() < 20 => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Ok(None) if start.elapsed().as_secs() < limit => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
                 return Vec::new();
@@ -1014,5 +1030,23 @@ mod sync_tests {
         assert_eq!((back.clock_send_offset_ms, back.clock_receive_offset_ms), (12, -30));
         let s = Settings::parse("midi_sync = receive\nclock_send_offset_ms = 900\nclock_receive_offset_ms = -500\n");
         assert_eq!((s.midi_sync, s.clock_send_offset_ms, s.clock_receive_offset_ms), (MidiSync::Receive, 200, -100));
+    }
+}
+
+#[cfg(test)]
+mod wine_tests {
+    use super::Settings;
+
+    /// Syncing Windows plug-ins before a rescan (Linux) is on unless switched off, and
+    /// only "off" is written, so other systems' settings files don't change.
+    #[test]
+    fn bridging_windows_plugins_is_on_unless_switched_off() {
+        let mut s = Settings::default();
+        assert!(s.bridge_windows);
+        assert!(!s.to_text().contains("bridge_windows"));
+        s.bridge_windows = false;
+        assert!(s.to_text().contains("bridge_windows = false\n"));
+        assert!(!Settings::parse(&s.to_text()).bridge_windows);
+        assert!(Settings::parse("").bridge_windows);
     }
 }

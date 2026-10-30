@@ -339,6 +339,18 @@ module) play through the installed VST3, restored to the state Maschine saved.
     `%LOCALAPPDATA%\Programs\Common\VST3` and `Common Files\VST3`.
   - `cargo run --release -p deckard-plugins --example plugin-window <bundle.vst3>`
     opens a plug-in's window on its own, to try a system without a project.
+- **Windows plug-ins on Linux** (`apps/viewer/src/wine.rs`): Preferences ▸ Plug-ins
+  shows Wine, yabridge, the plug-ins in the Wine prefix (`$WINEPREFIX`, else
+  `~/.wine`) and the bridged bundles in `~/.vst3/yabridge`. Install Wine runs the
+  distribution's package manager through `pkexec` (polkit asks for the password;
+  Debian/Ubuntu, Fedora and Arch families from `/etc/os-release`). Install yabridge
+  runs `scripts/install-yabridge.sh`, which fetches yabridge's release archive (SHA-256
+  checked) into `~/.local/share/yabridge`, as its README says. Sync runs
+  `yabridgectl add` on the prefix's `Common Files/VST3` and `yabridgectl sync`; the
+  catalogue does the same before each rescan when `bridge_windows` is on. Bridged
+  bundles get 90 s in the scan helper instead of 20, as the first one starts Wine.
+  yabridge 5.1.1 (November 2024) is documented not to work with Wine 9.22 and later;
+  the panel says so when it sees such a Wine.
 
 - **Formats:**
   - VST3 is hosted directly.

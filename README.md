@@ -418,9 +418,14 @@ tests it kept their settings when it re-saved the project.
   Maschine saved, and you can open its own window. Audio Units (macOS) are listed but
   not loaded yet. DECKARD's built-in instruments and effects work everywhere.
   - **Linux:** plug-ins are looked for in `~/.vst3` and the system's `vst3` folders.
-    NI's plug-ins have no Linux versions; with [yabridge](https://github.com/robbert-vdh/yabridge)
-    their Windows versions appear in `~/.vst3/yabridge` and load like any other.
-    Plug-in windows are X11 windows (through XWayland on a Wayland desktop).
+    NI's plug-ins have no Linux versions, but their Windows versions run through Wine
+    and [yabridge](https://github.com/robbert-vdh/yabridge). **Preferences ▸ Plug-ins
+    ▸ Windows plug-ins** shows what you have and installs what you don't: Wine from
+    your distribution's packages (Debian, Ubuntu, Mint, Fedora, Arch; it asks for an
+    administrator's password), and yabridge into your home folder. Then install your
+    plug-ins into Wine (NI's through Native Access, run with `wine`) and press Sync;
+    DECKARD also syncs before each rescan. Plug-in windows are X11 windows (through
+    XWayland on a Wayland desktop).
   - **Windows:** plug-ins are looked for in `Common Files\VST3`, system-wide and per
     user.
 - **File compatibility:** DECKARD reads and writes Maschine projects, groups, sounds

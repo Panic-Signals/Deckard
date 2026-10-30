@@ -124,6 +124,7 @@ mod surface_strip_tests;
 mod sync_tests;
 mod transport_sync;
 mod user_chords;
+mod wine;
 
 use deckard_doc::{Document, Shared};
 use deckard_engine::{Engine, Mode, SampleCache, output::Output};
@@ -634,6 +635,14 @@ enum Pending {
     Quit,
 }
 
+/// A button of Preferences ▸ Plug-ins ▸ Windows plug-ins.
+#[derive(Debug, Clone, Copy)]
+enum WineAction {
+    InstallWine(wine::Family),
+    InstallYabridge,
+    Sync,
+}
+
 #[derive(Default)]
 pub struct App {
     /// The open project, shared with the controller scripts.
@@ -861,6 +870,11 @@ pub struct App {
     output_fallback: Option<String>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
+    /// Windows plug-ins through Wine (Preferences ▸ Plug-ins, Linux): what's installed,
+    /// the task running (what it is, where its result comes), the last task's message.
+    wine_status: Option<wine::Status>,
+    wine_task: Option<(&'static str, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    wine_message: String,
     samples: SampleCache,
     /// What the output is playing (follows the engine through scene switches), and a
     /// note about it (e.g. sounds that are not played).
@@ -2226,6 +2240,7 @@ impl App {
         let mut rescan = false;
         let mut library_change = None;
         let mut controller_change = None;
+        let mut wine_action = None;
         egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([620.0, 460.0]).open(&mut open).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, 7, "General");
@@ -2356,6 +2371,9 @@ impl App {
                     }
                     ui.label(egui::RichText::new(&self.catalog.status).weak());
                 });
+                if cfg!(target_os = "linux") {
+                    self.wine_section(ui, &mut wine_action);
+                }
                 ui.separator();
                 let mut entries: Vec<deckard_plugins::scan::Entry> = self.catalog.entries.clone();
                 entries.sort_by(|a, b| {
@@ -2444,6 +2462,13 @@ impl App {
             self.browse(browser::BrowseAct::LibraryFolder(dir, on));
         }
         self.prefs = open.then_some(tab);
+        if !open {
+            // Looked at again when the window next opens.
+            self.wine_status = None;
+        }
+        if let Some(a) = wine_action {
+            self.start_wine(a);
+        }
     }
 
     /// The unsaved-changes question and the About box.
@@ -7811,6 +7836,134 @@ impl App {
         }
     }
 
+    /// Preferences ▸ Plug-ins ▸ Windows plug-ins (Linux): what's installed, and the
+    /// buttons that install the rest. What a button starts is put in `action`.
+    fn wine_section(&mut self, ui: &mut egui::Ui, action: &mut Option<WineAction>) {
+        ui.separator();
+        ui.strong("Windows plug-ins (through Wine and yabridge)");
+        ui.label(
+            egui::RichText::new(
+                "NI's plug-ins have no Linux versions. Installed into Wine, yabridge makes them plug-ins DECKARD hosts like any other: \
+                 install Wine, then yabridge, then your plug-ins into Wine (NI's through Native Access: wine <its installer>.exe), then Sync.",
+            )
+            .weak(),
+        );
+        let st = self.wine_status.get_or_insert_with(wine::Status::probe).clone();
+        let busy = self.wine_task.is_some();
+        egui::Grid::new("wine").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
+            ui.label("Wine");
+            match &st.wine {
+                Some(v) => {
+                    ui.label(v);
+                    if st.wine_version().is_some_and(wine::newer_than_yabridge_supports) {
+                        ui.label(egui::RichText::new("yabridge 5.1.1 is known to have trouble with Wine 9.22 and later").weak());
+                    } else {
+                        ui.label("");
+                    }
+                }
+                None => {
+                    ui.label("not installed");
+                    match (st.family.wine_command(), st.pkexec) {
+                        (Some(_), true) => {
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Install Wine…"))
+                                .on_hover_text("Asks for an administrator's password")
+                                .clicked()
+                            {
+                                *action = Some(WineAction::InstallWine(st.family));
+                            }
+                        }
+                        (Some(cmd), false) => {
+                            ui.label(format!("as root: {cmd}"));
+                        }
+                        (None, _) => {
+                            ui.label("install it with your distribution's package manager");
+                        }
+                    }
+                }
+            }
+            ui.end_row();
+            ui.label("yabridge");
+            match &st.yabridgectl {
+                Some(p) => {
+                    ui.label(p.display().to_string());
+                    ui.label("");
+                }
+                None => {
+                    ui.label("not installed");
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Install yabridge"))
+                        .on_hover_text("Downloads yabridge 5.1.1 into ~/.local/share/yabridge")
+                        .clicked()
+                    {
+                        *action = Some(WineAction::InstallYabridge);
+                    }
+                }
+            }
+            ui.end_row();
+            ui.label("Plug-ins in Wine");
+            ui.label(format!("{} in {}", st.windows_plugins, st.windows_vst3.display()));
+            ui.label("");
+            ui.end_row();
+            ui.label("Bridged");
+            ui.label(format!("{} in {}", st.bridged, wine::bridged_dir().display()));
+            if ui.add_enabled(!busy && st.yabridgectl.is_some(), egui::Button::new("Sync now")).clicked() {
+                *action = Some(WineAction::Sync);
+            }
+            ui.end_row();
+        });
+        ui.checkbox(&mut self.settings.bridge_windows, "Sync before each rescan");
+        ui.horizontal(|ui| {
+            if let Some((what, _)) = &self.wine_task {
+                ui.spinner();
+                ui.label(format!("{what}…"));
+            } else if !self.wine_message.is_empty() {
+                ui.label(egui::RichText::new(&self.wine_message).weak());
+            }
+        });
+    }
+
+    /// Run a Windows-plug-ins task in the background (one at a time).
+    fn start_wine(&mut self, action: WineAction) {
+        if self.wine_task.is_some() {
+            return;
+        }
+        let (what, job): (&'static str, Box<dyn FnOnce() -> Result<String, String> + Send>) = match action {
+            WineAction::InstallWine(f) => ("Installing Wine", Box::new(move || wine::install_wine(f))),
+            WineAction::InstallYabridge => ("Installing yabridge", Box::new(wine::install_yabridge)),
+            WineAction::Sync => ("Syncing Windows plug-ins", Box::new(wine::sync)),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("wine".into())
+            .spawn(move || {
+                let _ = tx.send(job());
+            })
+            .expect("a thread for the task");
+        self.wine_task = Some((what, rx));
+    }
+
+    /// Take up a finished Windows-plug-ins task (call every frame). A sync that worked
+    /// rescans, so the bridged plug-ins show up.
+    fn poll_wine(&mut self) {
+        let result = match &self.wine_task {
+            Some((_, rx)) => match rx.try_recv() {
+                Ok(r) => r,
+                Err(_) => return,
+            },
+            None => return,
+        };
+        let what = self.wine_task.take().map_or("", |(w, _)| w);
+        self.wine_message = match &result {
+            Ok(m) => format!("{what}: {m}"),
+            Err(e) => format!("{what}: {e}"),
+        };
+        self.wine_status = None;
+        if what == "Syncing Windows plug-ins" && result.is_ok() {
+            self.catalog.rescan(&self.settings);
+        }
+    }
+
     /// Close windows the user closed, keeping what was changed in them.
     fn poll_plugin_editors(&mut self) {
         for (.., e) in &self.editors {
@@ -8165,6 +8318,10 @@ impl App {
         if self.pending_editor && self.started.elapsed().as_secs_f32() > 1.0 {
             self.pending_editor = false;
             self.open_plugin_editor(self.group, self.sound);
+        }
+        self.poll_wine();
+        if self.wine_task.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         if !self.editors.is_empty() {
             self.poll_plugin_editors();

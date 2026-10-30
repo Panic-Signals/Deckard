@@ -146,11 +146,14 @@ pub fn install(settings: &Path) -> Result<(), String> {
     }
 }
 
-/// The installer: beside the program, in the app bundle's Resources, in the package's
-/// share folder (/usr/share/deckard, from /usr/bin), or the repository's (a build run
-/// from it).
 fn installer() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "install-demucs.ps1" } else { "install-demucs.sh" };
+    script(if cfg!(windows) { "install-demucs.ps1" } else { "install-demucs.sh" })
+}
+
+/// One of DECKARD's scripts: beside the program, in the app bundle's Resources, in
+/// the package's share folder (/usr/share/deckard, from /usr/bin), or the repository's
+/// (a build run from it).
+pub(crate) fn script(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     [
