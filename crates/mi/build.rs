@@ -36,11 +36,14 @@ fn main() {
     // Plaits' `TEST` mocks (user_data.h) call printf without including <cstdio>; macOS's
     // headers happen to pull it in transitively, Linux's and Windows' do not. Force-include it.
     if b.get_compiler().is_like_msvc() {
-        b.flag("/FIcstdio");
+        // And stmlib's GCC `__attribute__`s, which MSVC lacks (src/msvc.h).
+        let shim = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/msvc.h");
+        b.flag("/FIcstdio").flag(&format!("/FI{}", shim.display()));
     } else {
         b.flag("-include").flag("cstdio");
     }
     b.compile("mi");
     println!("cargo:rerun-if-changed=src/bridge.cc");
+    println!("cargo:rerun-if-changed=src/msvc.h");
     println!("cargo:rerun-if-changed=vendor");
 }

@@ -109,4 +109,4 @@ for format in deb rpm; do
     "${NFPM[@]}" package --config "$PKG/nfpm.yaml" --packager "$format" --target dist/ >/dev/null
 done
 rm -rf "$PKG"
-ls dist/deckard_*.deb dist/deckard-*.rpm | sed 's/^/wrote /'
+printf 'wrote %s\n' dist/deckard_*.deb dist/deckard-*.rpm

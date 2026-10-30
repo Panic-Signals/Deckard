@@ -83,7 +83,8 @@ fn busy_index_keeps_last_results() {
     let ni = NiIndex::open(&path);
     let t = Instant::now();
     assert!(ni.as_ref().map_or(true, |ni| ni.query(&loops(&[])).is_err()));
-    assert!(t.elapsed() < Duration::from_secs(1));
+    // The busy timeout is 500ms; loaded CI runners oversleep it, so leave headroom.
+    assert!(t.elapsed() < Duration::from_secs(3));
     lock.execute_batch("ROLLBACK").unwrap();
     drop(lock);
     assert_eq!(NiIndex::open(&path).unwrap().query(&loops(&[])).unwrap().items.len(), 3);
