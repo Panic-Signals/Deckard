@@ -1,0 +1,35 @@
+# Build output.
+/target
+# Burn's GPU autotune cache (stem separation), written where it runs.
+**/target/autotune/
+/dist
+
+# Extracted from the user's own NI install (scripts, style sheets, pictures, binaries,
+# captures): never committed.
+/out
+/analysis
+/tools
+
+# NI content and recordings that may land in the tree while testing.
+*.mxprj
+*.mxgrp
+*.mxsnd
+*.mxinst
+*.mxfx
+*.mxprj.bak
+*.nki
+*.nksn
+*.wav
+*.aif
+*.aiff
+
+# Local tools and editors.
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+/Maschine_*Manual*.pdf
+.superpowers/

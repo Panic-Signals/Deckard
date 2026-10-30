@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DECKARD
+Comment=Groovebox for Maschine projects and the Maschine MK3
+Exec=deckard %f
+Icon=deckard
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+MimeType=application/x-maschine-project;

@@ -1,0 +1,16 @@
+[package]
+name = "deckard-lua-host"
+version = "0.1.0"
+edition = "2024"
+description = "Runs Maschine's hardware-controller Lua scripts (loaded from the user's own install) against a Rust implementation of the NI.* API"
+
+[dependencies]
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
+deckard-doc = { path = "../doc" }
+deckard-model = { path = "../model" }
+mxprj = { path = "../mxprj" }
+deckard-nwl = { version = "0.1.0", path = "../nwl" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

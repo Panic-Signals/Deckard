@@ -1,0 +1,9 @@
+[package]
+name = "deckard-nwl"
+version = "0.1.0"
+edition = "2024"
+description = "Draws NI's hardware-display widget trees from their NWL style sheets, fonts and pictures"
+
+[dependencies]
+fontdue = "0.9.4"
+png = "0.18.1"

@@ -1,0 +1,16 @@
+[package]
+name = "deckard-surface"
+version = "0.1.0"
+edition = "2024"
+description = "DECKARD's own MK3 controller layer: runs DECKARD's Lua controller scripts (one file per page) and draws their screens"
+
+[dependencies]
+deckard-mk3 = { path = "../mk3" }
+deckard-model = { path = "../model" }
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
+fontdue = "0.9.4"
+epaint_default_fonts = "0.36.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+png = "0.18.1"

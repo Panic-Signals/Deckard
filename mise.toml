@@ -1,0 +1,70 @@
+# Tool versions and tasks for building DECKARD (https://mise.jdx.dev).
+#
+#   mise install                      # the pinned Rust (via rustup) and tools, then
+#                                     # the stem separation model (install:demucs)
+#   mise run install:demucs           # just the model (Demucs htdemucs, 84 MB)
+#   mise run build                    # debug build
+#   mise run test                     # the workspace's tests
+#   mise run release:macos [version]  # dist/DECKARD-<version>-macos-universal.zip
+#   mise run release:linux [version]  # dist/deckard-<version>-linux-<arch>.tar.gz, .deb, .rpm
+#   mise run release:windows [version]# dist/DECKARD-<version>-windows-x64.zip
+#   mise run check-platforms          # type-check Linux and Windows from a Mac
+#   mise run lint                     # rustfmt, the workflows and the scripts
+#
+# mise sets RUSTUP_TOOLCHAIN, so cargo and rustc in these tasks are this Rust, whatever
+# else is on PATH. CI installs the same versions (jdx/mise-action).
+
+[tools]
+# Every target the release builds and the cross-platform check use; rustup fetches only
+# each one's standard library.
+rust = { version = "1.99.1", profile = "minimal", components = ["rustfmt", "clippy"], targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+] }
+
+# After the tools: the stem separation model, which isn't bundled (an intact copy is kept).
+[hooks]
+postinstall = { task = "install:demucs" }
+
+[tasks."install:demucs"]
+description = "The stem separation model (Demucs htdemucs) into DECKARD's settings folder"
+run = "scripts/install-demucs.sh"
+run_windows = "pwsh -NoProfile -File scripts/install-demucs.ps1"
+
+[tasks.build]
+description = "Build everything (debug)"
+run = "cargo build --workspace"
+
+[tasks.test]
+description = "Run the workspace's tests"
+run = "cargo test --workspace"
+
+[tasks."release:macos"]
+description = "Universal DECKARD.app for macOS, zipped into dist/ (optional arg: version)"
+run = "scripts/build-macos.sh"
+
+[tasks."release:linux"]
+description = "DECKARD for Linux: a tarball, a .deb and an .rpm in dist/ (optional arg: version)"
+tools = { nfpm = "2.48.0" }
+run = "scripts/build-linux.sh"
+
+[tasks."release:windows"]
+description = "DECKARD.exe for Windows, zipped into dist/ (optional arg: version)"
+run = "pwsh -NoProfile -File scripts/build-windows.ps1"
+
+[tasks.check-platforms]
+description = "Type-check Linux and Windows from this machine (zig as the C compiler)"
+tools = { zig = "0.17.0" }
+run = "scripts/check-platforms.sh"
+
+[tasks.lint]
+description = "rustfmt, the GitHub workflows and the shell scripts"
+tools = { actionlint = "latest", shellcheck = "latest" }
+run = [
+    "cargo fmt --all --check",
+    "actionlint .github/workflows/*.yml",
+    "shellcheck scripts/*.sh",
+]

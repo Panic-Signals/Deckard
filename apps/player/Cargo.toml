@@ -1,0 +1,12 @@
+[package]
+name = "deckard-player"
+version = "0.1.0"
+edition = "2024"
+description = "Play or render a Maschine project"
+
+[dependencies]
+deckard-engine = { path = "../../crates/engine", features = ["output"] }
+deckard-model = { path = "../../crates/model" }
+deckard-plugins = { path = "../../crates/plugins" }
+mxprj = { path = "../../crates/mxprj" }
+hound = "3.5"

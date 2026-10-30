@@ -1,0 +1,7 @@
+[package]
+name = "mxprj"
+version = "0.1.0"
+edition = "2024"
+description = "Reader for Maschine project files (.mxprj): NI hsin container + portable binary archive"
+
+[dependencies]

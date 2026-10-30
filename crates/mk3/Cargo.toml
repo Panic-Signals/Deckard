@@ -1,0 +1,23 @@
+[package]
+name = "deckard-mk3"
+version = "0.1.0"
+edition = "2024"
+description = "Direct USB driver for the Maschine MK3 controller: pads, buttons, encoders, LEDs, displays"
+
+[dependencies]
+hidapi = { version = "2.6.7", default-features = false }
+nusb = "0.2.8"
+
+# The HID backend for each system: shared with NI's agent on macOS; pure Rust on Linux
+# (no libudev needed) and Windows.
+[target.'cfg(target_os = "macos")'.dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["macos-shared-device"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["linux-native-basic-udev"] }
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }
+
+[dev-dependencies]
+png = "0.18.1"

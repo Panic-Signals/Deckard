@@ -1,0 +1,8 @@
+[package]
+name = "deckard-stretch"
+version = "0.1.0"
+edition = "2024"
+description = "Time-stretching and pitch-shifting (Signalsmith Stretch, MIT, vendored) for the Audio plug-in's Stretch and Formant engines"
+
+[build-dependencies]
+cc = "1"

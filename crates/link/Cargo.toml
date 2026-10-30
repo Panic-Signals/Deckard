@@ -1,0 +1,11 @@
+[package]
+name = "deckard-link"
+version = "0.1.0"
+edition = "2024"
+description = "Ableton Link (tempo, beat phase and start/stop shared over the network), through Ableton's abl_link"
+# Ableton Link is GPL-2.0-or-later (vendor/link/LICENSE.md); asio is under the Boost
+# Software License (vendor/asio/LICENSE_1_0.txt).
+license = "GPL-2.0-or-later"
+
+[build-dependencies]
+cc = "1.8"

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maschine projects, so the desktop opens .mxprj files with DECKARD (its desktop
+     entry claims the type). -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-maschine-project">
+    <comment>Maschine project</comment>
+    <glob pattern="*.mxprj"/>
+  </mime-type>
+</mime-info>

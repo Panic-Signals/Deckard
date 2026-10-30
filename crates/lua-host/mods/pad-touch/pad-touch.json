@@ -1,0 +1,6 @@
+{
+  "name": "DECKARD Pad Touch",
+  "resources": [
+    { "name": "KeyboardModePageMK3", "extensionFile": "KeyboardModePageMK3.lua", "placement": "append" }
+  ]
+}

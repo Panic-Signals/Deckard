@@ -1,0 +1,43 @@
+[package]
+name = "deckard"
+version = "0.1.0"
+edition = "2024"
+description = "Read-only viewer for Maschine projects"
+
+[dependencies]
+serde_json = "1"
+eframe = "0.36"
+deckard-plugins = { path = "../../crates/plugins" }
+deckard-engine = { path = "../../crates/engine", features = ["output"] }
+deckard-doc = { path = "../../crates/doc" }
+deckard-lua-host = { path = "../../crates/lua-host" }
+deckard-mk3 = { path = "../../crates/mk3" }
+deckard-surface = { path = "../../crates/surface" }
+deckard-stems = { path = "../../crates/stems" }
+deckard-model = { path = "../../crates/model" }
+deckard-library = { path = "../../crates/library" }
+# Ableton Link (GPL-2.0-or-later).
+deckard-link = { path = "../../crates/link" }
+mxprj = { path = "../../crates/mxprj" }
+png = "0.18.1"
+fontdue = "0.9.4"
+rfd = "0.17.2"
+cpal = "0.18"
+midir = "0.11.1"
+midly = "0.5.3"
+deckard-nwl = { version = "0.1.0", path = "../../crates/nwl" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+hound = "3.5"
+vst3 = "0.3"
+egui_kittest = { version = "0.36", features = ["wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

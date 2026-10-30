@@ -1,0 +1,13 @@
+[package]
+name = "deckard-doc"
+version = "0.1.0"
+edition = "2024"
+description = "The open Maschine project: one shared, editable copy with undo, saved with the mxprj writer"
+
+[dependencies]
+deckard-model = { path = "../model" }
+mxprj = { path = "../mxprj" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+deckard-engine = { path = "../engine" }

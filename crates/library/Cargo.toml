@@ -1,0 +1,12 @@
+[package]
+name = "deckard-library"
+version = "0.1.0"
+edition = "2024"
+description = "The browser's library: NI's index (read-only) and DECKARD's own"
+
+[dependencies]
+mxprj = { path = "../mxprj" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

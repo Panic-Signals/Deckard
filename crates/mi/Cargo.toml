@@ -1,0 +1,9 @@
+[package]
+name = "deckard-mi"
+version = "0.1.0"
+edition = "2024"
+description = "Mutable Instruments' module DSP (Plaits), built from Émilie Gillet's open source code"
+license-file = "vendor/LICENSE"
+
+[build-dependencies]
+cc = "1.8"

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/mxprj", "crates/model", "crates/doc", "apps/viewer", "crates/lua-host", "crates/engine", "crates/plugins", "apps/player", "crates/mk3", "crates/nwl", "crates/mi", "crates/stems", "crates/stretch", "crates/library", "crates/link", "crates/surface"]
+
+# The display renderer runs every time a screen changes: fast even in dev builds.
+[profile.dev.package.deckard-nwl]
+opt-level = 3
+
+[profile.dev.package.fontdue]
+opt-level = 3
+
+[profile.dev.package.deckard-stretch]
+opt-level = 3
