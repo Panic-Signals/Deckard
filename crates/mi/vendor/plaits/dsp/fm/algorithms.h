@@ -195,6 +195,10 @@ class Algorithms {
   DISALLOW_COPY_AND_ASSIGN(Algorithms);
 };
 
+// DECKARD: MSVC takes these declarations for definitions without initializers
+// (C2737). Skipped there; the definitions in algorithms.cc are linked by name.
+#ifndef _MSC_VER
+
 /* static */
 template<> const uint8_t Algorithms<4>::opcodes_[][4];  // From DX100
 
@@ -206,6 +210,8 @@ template<> const uint8_t Algorithms<6>::opcodes_[][6];  // From DX7
 
 /* static */
 template<> const Algorithms<6>::RendererSpecs Algorithms<6>::renderers_[];
+
+#endif  // _MSC_VER
 
 }  // namespace fm
 
