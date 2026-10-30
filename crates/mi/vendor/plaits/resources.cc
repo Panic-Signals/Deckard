@@ -4029,8 +4029,8 @@ const int16_t* const lookup_table_i16_table[] = {
 
 
 
-const int32_t* const lookup_table_i32_table[] = {
-};
+// DECKARD: the empty lookup_table_i32_table (a zero-size array, which MSVC rejects:
+// C2466) is left out; nothing uses it.
 
 const int8_t lut_lpc_excitation_pulse[] = {
        0,      0,      0,      0,
