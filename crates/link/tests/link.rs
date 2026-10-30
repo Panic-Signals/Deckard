@@ -15,14 +15,18 @@ fn alone() {
     assert!((link.tempo() - 98.5).abs() < 1e-9);
     link.set_start_stop_sync(true);
     assert!(link.start_stop_sync());
-    // Its beats at 98.5 BPM: about 0.164 of a beat in 100 ms.
+    // Its beats at 98.5 BPM: about 0.164 of a beat in 100 ms; measured against the time
+    // that actually passed, since a loaded machine oversleeps.
     let mut clock = link.audio_clock();
+    let t = Instant::now();
     let a = clock.at(0, 4.0);
     std::thread::sleep(Duration::from_millis(100));
     let b = clock.at(0, 4.0);
+    let slept = t.elapsed().as_secs_f64();
     assert!((b.tempo - 98.5).abs() < 1e-9);
     let advanced = b.beat - a.beat;
-    assert!((0.12..0.35).contains(&advanced), "advanced {advanced} beats");
+    let at_most = slept * 98.5 / 60.0;
+    assert!(advanced > 0.12 && advanced <= at_most + 0.01, "advanced {advanced} beats in {slept} s");
     // Looking ahead: 1 s on is 98.5 / 60 beats further.
     let c = clock.at(1_000_000, 4.0);
     assert!((c.beat - clock.at(0, 4.0).beat - 98.5 / 60.0).abs() < 0.01);

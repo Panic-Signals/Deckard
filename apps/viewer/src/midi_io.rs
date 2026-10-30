@@ -836,7 +836,9 @@ mod tests {
         let got = got.lock().unwrap();
         assert_eq!(got.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>(), [vec![0x90, 60, 100], vec![0xf8]]);
         let late = got[1].1.duration_since(t0);
-        assert!(late >= std::time::Duration::from_millis(78) && late < std::time::Duration::from_millis(150), "{late:?}");
+        // Not before it's due; the upper bound only catches a wait gone wrong (loaded CI
+        // runners oversleep).
+        assert!(late >= std::time::Duration::from_millis(78) && late < std::time::Duration::from_millis(400), "{late:?}");
     }
 
     /// Incoming MIDI clock, on an input listened to, goes to the clock follower (and
