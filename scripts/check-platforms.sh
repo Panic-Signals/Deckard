@@ -16,7 +16,7 @@ command -v zig >/dev/null || { echo "missing: zig (brew install zig)" >&2; exit 
 platforms=("$@")
 [ ${#platforms[@]} -eq 0 ] && platforms=(linux windows)
 
-tools="$(mktemp -d -t deckard-cross)"
+tools="$(mktemp -d "${TMPDIR:-/tmp}/deckard-cross.XXXXXX")"
 trap 'rm -rf "$tools"' EXIT
 # A stand-in pkg-config entry for ALSA: checking compiles but doesn't link.
 mkdir -p "$tools/pc"

@@ -3,7 +3,20 @@
 
 use deckard_plugins::{Host, Slot, Transport, scan};
 
-const BUNDLE: &str = "/Library/Audio/Plug-Ins/VST3/Dexed.vst3";
+/// The bundle to test with: `$DECKARD_TEST_VST3`, else Dexed in the system's folder.
+fn bundle() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("DECKARD_TEST_VST3") {
+        return p.into();
+    }
+    let dir = if cfg!(target_os = "macos") {
+        "/Library/Audio/Plug-Ins/VST3"
+    } else if cfg!(windows) {
+        r"C:\Program Files\Common Files\VST3"
+    } else {
+        "/usr/lib/vst3"
+    };
+    std::path::Path::new(dir).join("Dexed.vst3")
+}
 
 fn main() {
     a_routed_parameter_saves_the_knobs_value();
@@ -14,9 +27,10 @@ fn main() {
 /// BUGS #16: a parameter a modulation route holds is saved at the knob's value, not
 /// the route's, and goes on playing the route's.
 fn a_routed_parameter_saves_the_knobs_value() {
-    let bundle = std::path::Path::new(BUNDLE);
+    let bundle = bundle();
+    let bundle = bundle.as_path();
     if !bundle.exists() {
-        eprintln!("no {BUNDLE}; skipping");
+        eprintln!("no {}; skipping", bundle.display());
         return;
     }
     let entries = scan::vst3_from_moduleinfo(bundle).map(Ok).unwrap_or_else(|| scan::vst3_by_loading(bundle)).expect("scan");

@@ -132,6 +132,7 @@ use eframe::egui;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    deckard_plugins::mark_main_thread();
     // A panic would leave through the loaded plug-ins' exit-time destructors (which
     // crash in Massive, Guitar Rig, Kontakt); report it and end the process instead.
     let report = std::panic::take_hook();
@@ -8167,7 +8168,8 @@ impl App {
         }
         if !self.editors.is_empty() {
             self.poll_plugin_editors();
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            // On Linux the editors' timers run from these ticks: keep them coming.
+            ctx.request_repaint_after(std::time::Duration::from_millis(if cfg!(target_os = "linux") { 16 } else { 250 }));
         }
         if self.held.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
             self.release_held();

@@ -132,9 +132,9 @@ to the crate's and is shown in About DECKARD.
   attaches them to the release. It can also be run by hand with a version, which keeps
   the builds as workflow artifacts.
 
-Not yet on Linux and Windows: hosting third-party plug-ins and their windows. These are
-macOS only so far: `crates/plugins/src/module.rs` returns "plug-in hosting is only
-implemented on macOS" elsewhere.
+Plug-ins are hosted on all three systems; see [Plug-ins](#plug-ins-cratesplugins) for
+what each one needs. Windows hosting is type-checked by CI but hasn't been tried with a
+plug-in yet.
 
 ## The app (`apps/viewer`)
 
@@ -316,10 +316,29 @@ each audio block, sending clock) and `apps/viewer/src/transport_sync.rs` is the 
 
 ## Plug-ins (`crates/plugins`)
 
-### Hosting (macOS)
+### Hosting
 
 Sounds whose instrument or effect is a VST or VST3 plug-in (Maschine's `PluginHost`
 module) play through the installed VST3, restored to the state Maschine saved.
+
+- **Per system** (`module.rs` loads the bundle, `editor.rs` makes the window):
+  - **macOS:** the bundle is loaded with `CFBundle`; the editor gets an `NSWindow`.
+  - **Linux:** the bundle's `Contents/<uname -m>-linux/<name>.so` is `dlopen`ed
+    (`RTLD_LAZY`, as Steinberg's loader) and its `ModuleEntry` run. The editor gets an
+    X11 window of its own (`x11rb`, on its own connection, so XWayland serves it on a
+    Wayland desktop), and the host's `IPlugFrame` is also the plug-in's
+    `Linux::IRunLoop` (`runloop.rs`): the plug-in registers its X connection and its
+    timers there, and `Editor::tick` serves them every frame. Plug-ins can't draw
+    without it (VSTGUI, JUCE, nih-plug and yabridge all use it), which is why the app
+    repaints every 16 ms while a window is open. Folders: `~/.vst3`, `/usr/lib64/vst3`,
+    `/usr/lib/vst3`, `/usr/local/lib64/vst3`, `/usr/local/lib/vst3`.
+  - **Windows:** the bundle's `Contents/x86_64-win/<name>.vst3` DLL (or an old
+    single-file `.vst3`) is loaded and its `InitDll` run. The editor gets a window of
+    the `DeckardPlugin` class; the app's winit loop dispatches its messages, and
+    `WM_DPICHANGED` is passed on through `IPlugViewContentScaleSupport`. Folders:
+    `%LOCALAPPDATA%\Programs\Common\VST3` and `Common Files\VST3`.
+  - `cargo run --release -p deckard-plugins --example plugin-window <bundle.vst3>`
+    opens a plug-in's window on its own, to try a system without a project.
 
 - **Formats:**
   - VST3 is hosted directly.
