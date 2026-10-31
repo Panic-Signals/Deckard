@@ -17,10 +17,12 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 const GIF: &[u8] = include_bytes!("../assets/about.gif");
-const SIZE: Vec2 = Vec2::new(560.0, 316.0);
-const INSET: f32 = 24.0;
-const CARD_RADIUS: f32 = 14.0;
-/// Blur radius in GIF pixels (the GIF is 220 wide, shown at 560: 6 px here is 15 on
+const SIZE: Vec2 = Vec2::new(720.0, 410.0);
+const INSET: f32 = 28.0;
+const CARD_RADIUS: f32 = 16.0;
+/// The avatars' size.
+const AVATAR: f32 = 40.0;
+/// Blur radius in GIF pixels (the GIF is 220 wide, shown at 720: 6 px here is 20 on
 /// screen).
 const BLUR: usize = 6;
 
@@ -125,7 +127,7 @@ impl State {
                 let people = list.clone().unwrap_or_default();
                 let _ = ctx_tx.send(list);
                 for c in people {
-                    let url = if c.avatar_url.contains('?') { format!("{}&s=56", c.avatar_url) } else { format!("{}?s=56", c.avatar_url) };
+                    let url = if c.avatar_url.contains('?') { format!("{}&s=80", c.avatar_url) } else { format!("{}?s=80", c.avatar_url) };
                     if let Ok(bytes) = crate::github::fetch(&url, 1 << 20) {
                         let _ = av_tx.send((c.login, bytes));
                     }
@@ -258,8 +260,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
                 open = false;
             }
             // The content.
-            let inner = card.shrink2(Vec2::new(18.0, 14.0));
+            let inner = card.shrink2(Vec2::new(26.0, 20.0));
             ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                // Larger type than the rest of the app: this is a page, not a panel.
+                let styles = &mut ui.style_mut().text_styles;
+                styles.insert(egui::TextStyle::Body, FontId::proportional(17.0));
+                styles.insert(egui::TextStyle::Button, FontId::proportional(17.0));
+                styles.insert(egui::TextStyle::Small, FontId::proportional(13.5));
+                ui.spacing_mut().button_padding = Vec2::new(12.0, 6.0);
                 let v = ui.visuals_mut();
                 v.override_text_color = Some(Color32::WHITE);
                 v.hyperlink_color = Color32::from_rgb(0xbf, 0xdc, 0xff);
@@ -269,17 +277,17 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
                 v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_white_alpha(70));
                 v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_white_alpha(140));
                 v.selection.bg_fill = Color32::from_white_alpha(40);
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                let logo_at = ui.cursor().left_top() + Vec2::new(0.0, 14.0);
-                let logo = crate::layout::deckard_logo(ui.painter(), logo_at);
+                ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
+                let logo_at = ui.cursor().left_top() + Vec2::new(0.0, 22.0);
+                let logo = crate::layout::deckard_logo_scaled(ui.painter(), logo_at, 1.8);
                 ui.painter().text(
-                    Pos2::new(logo.right() + 12.0, logo.center().y + 1.0),
+                    Pos2::new(logo.right() + 20.0, logo.center().y + 2.0),
                     Align2::LEFT_CENTER,
                     crate::VERSION,
-                    FontId::proportional(13.0),
-                    Color32::from_white_alpha(200),
+                    FontId::proportional(20.0),
+                    Color32::from_white_alpha(210),
                 );
-                ui.add_space(30.0);
+                ui.add_space(48.0);
                 ui.horizontal(|ui| {
                     ui.label("Created by");
                     ui.hyperlink_to("Josh Summitt", AUTHOR_URL).on_hover_text(AUTHOR_URL);
@@ -287,9 +295,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
                     ui.hyperlink_to("More from Panic-Signals", PROJECTS_URL).on_hover_text(PROJECTS_URL);
                 });
                 contributors_row(state, ui);
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 crate::update::line(update, ui);
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label("Support DECKARD:");
                     if ui.button("Splice").on_hover_text(crate::splice::DISCLOSURE).clicked() {
@@ -302,12 +310,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) -> bool {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(GITHUB_SPONSORS_URL));
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(10.0);
                 let licences = egui::CollapsingHeader::new(egui::RichText::new("Licences and trademarks").small())
                     .id_salt("about-licences")
                     .open(Some(state.licences))
                     .show(ui, |ui| {
-                        egui::ScrollArea::vertical().max_height(70.0).show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(90.0).show(ui, |ui| {
                             ui.label(egui::RichText::new("An independent, open music workstation that opens and plays Maschine projects. Not affiliated with Native Instruments. MASCHINE is a trademark of Native Instruments.").small());
                             ui.label(egui::RichText::new("Plaits is Mutable Instruments' code by Émilie Gillet (MIT License).").small());
                             ui.label(egui::RichText::new(deckard_link::LICENSE).small());
@@ -340,25 +348,31 @@ fn contributors_row(state: &State, ui: &mut egui::Ui) {
             }
             Some(Ok(list)) => {
                 for c in list.iter().take(16) {
-                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(28.0), egui::Sense::click());
+                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(AVATAR), egui::Sense::click());
                     let hover = format!("{} · {} commit{}", c.login, c.contributions, if c.contributions == 1 { "" } else { "s" });
                     let resp = resp.on_hover_text(hover);
                     match state.avatars.get(&c.login) {
                         Some(tex) => {
                             let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
                             ui.painter().add(
-                                egui::epaint::RectShape::new(r, CornerRadius::same(14), Color32::WHITE, Stroke::NONE, StrokeKind::Inside)
-                                    .with_texture(tex.id(), full),
+                                egui::epaint::RectShape::new(
+                                    r,
+                                    CornerRadius::same(AVATAR as u8 / 2),
+                                    Color32::WHITE,
+                                    Stroke::NONE,
+                                    StrokeKind::Inside,
+                                )
+                                .with_texture(tex.id(), full),
                             );
                         }
                         None => {
-                            ui.painter().circle_filled(r.center(), 14.0, Color32::from_white_alpha(50));
+                            ui.painter().circle_filled(r.center(), AVATAR / 2.0, Color32::from_white_alpha(50));
                             let initial = c.login.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_default();
-                            ui.painter().text(r.center(), Align2::CENTER_CENTER, initial, FontId::proportional(13.0), Color32::WHITE);
+                            ui.painter().text(r.center(), Align2::CENTER_CENTER, initial, FontId::proportional(18.0), Color32::WHITE);
                         }
                     }
                     if resp.hovered() {
-                        ui.painter().circle_stroke(r.center(), 14.0, Stroke::new(1.5, Color32::WHITE));
+                        ui.painter().circle_stroke(r.center(), AVATAR / 2.0, Stroke::new(1.5, Color32::WHITE));
                     }
                     if resp.clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(c.url.clone()));

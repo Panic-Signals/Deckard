@@ -12,7 +12,7 @@ the releases page.
 
 ## The About window
 
-A frameless window, 560 × 316, centred, closed with its × or Escape, opened from
+A frameless window, 720 × 410, centred, closed with its × or Escape, opened from
 Help ▸ About DECKARD (and the macOS application menu) as today.
 
 **Background.** `apps/viewer/assets/about.gif` (the Blade Runner Japan GIF, 220 × 129,
@@ -20,7 +20,7 @@ Help ▸ About DECKARD (and the macOS application menu) as today.
 frame delays. Frames are decoded once, the first time the window opens, into one
 texture per frame.
 
-**Glass card.** Inset 24 px from the window's edges, corner radius 14. It is made of:
+**Glass card.** Inset 28 px from the window's edges, corner radius 16. It is made of:
 
 1. the current GIF frame, blurred (two passes of a box blur, radius 6 at GIF scale,
    done once per decoded frame), drawn clipped to the card's rounded rectangle;
@@ -36,7 +36,7 @@ frame.
 - The DECKARD wordmark (the existing `deckard_logo`) and the version (`VERSION`).
 - "Created by Josh Summitt" → https://github.com/summitt.
 - "More from Panic-Signals" → https://github.com/Panic-Signals.
-- Contributors: avatars (28 px, round) in a row, login on hover, each a link to the
+- Contributors: avatars (40 px, round) in a row, login on hover, each a link to the
   profile. Fetched from GitHub when the window opens; "contributors: offline" when that
   fails. Fetched once per launch.
 - Update line: "You have the latest" / "Checking…" / "Update available: 0.2.0", with
