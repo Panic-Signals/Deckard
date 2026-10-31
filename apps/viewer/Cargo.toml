@@ -26,6 +26,9 @@ cpal = "0.18"
 midir = "0.11.1"
 midly = "0.5.3"
 deckard-nwl = { version = "0.1.0", path = "../../crates/nwl" }
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+sha2 = "0.11.1"
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

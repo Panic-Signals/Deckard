@@ -50,6 +50,8 @@ pub struct Settings {
     /// and recorded notes snapped to the grid.
     pub count_in_bars: u32,
     pub input_quantize: bool,
+    /// Ask GitHub for a newer release at launch (default on).
+    pub check_updates: bool,
     /// Preferences ▸ Library: folders of sound packs listed under Factory.
     pub library_folders: Vec<PathBuf>,
     /// MIDI ports switched off (Preferences > MIDI): `in:<name>` and `out:<name>`.
@@ -259,6 +261,7 @@ impl Default for Settings {
             library_folders: Vec::new(),
             count_in_bars: 1,
             input_quantize: false,
+            check_updates: true,
             scan_on_start: false,
             bridge_windows: true,
             dirs: scan::default_vst3_paths().into_iter().chain(scan::default_vst2_paths()).collect(),
@@ -346,6 +349,7 @@ impl Settings {
                 "library_folder" => s.library_folders.push(PathBuf::from(v)),
                 "count_in_bars" => s.count_in_bars = v.parse().unwrap_or(1),
                 "input_quantize" => s.input_quantize = v == "true",
+                "check_updates" => s.check_updates = v != "false",
                 "input_device" => s.input_device = Some(v.to_string()),
                 "output_device" => s.output_device = Some(v.to_string()),
                 // A device's routing: `<device>\t<channel>:<route or alias>`.
@@ -601,6 +605,9 @@ impl Settings {
             out += &format!("favorite_folder = {}\n", d.display());
         }
         out += &format!("count_in_bars = {}\ninput_quantize = {}\n", self.count_in_bars, self.input_quantize);
+        if !self.check_updates {
+            out += "check_updates = false\n";
+        }
         for d in &self.library_folders {
             out += &format!("library_folder = {}\n", d.display());
         }

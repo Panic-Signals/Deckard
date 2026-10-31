@@ -29,6 +29,16 @@ DECKARD also does a few things Maschine doesn't:
   them, but it doesn't come with any. Without them DECKARD still works: you can use your
   own samples and DECKARD's built-in instruments.
 
+## Sponsoring DECKARD
+
+DECKARD is free and open. If it earns a place in your music, these keep it going:
+
+- **[GitHub Sponsors](https://github.com/sponsors/panic-signals)**
+- **[Patreon](https://www.patreon.com/c/null0perat0r)**
+- **[Splice](https://splice.sjv.io/c/8024859/3810236/49453)**: sounds for your
+  projects, through a referral link that pays DECKARD's author a commission at no cost
+  to you.
+
 ## Getting DECKARD
 
 1. Download the build for your system from the

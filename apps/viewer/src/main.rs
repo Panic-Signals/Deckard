@@ -22,6 +22,7 @@
 // the log.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod about;
 mod arp_ui;
 mod audio_settings;
 mod audio_ui;
@@ -39,6 +40,7 @@ mod controller;
 mod drop_pos;
 mod drum_ui;
 mod export;
+mod github;
 mod goodbye;
 mod icon;
 
@@ -48,6 +50,8 @@ pub const VERSION: &str = match option_env!("DECKARD_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };
+/// Built by the release scripts (with a version minted on GitHub), not from source.
+pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
 #[cfg(test)]
 mod auto_length_tests;
 #[cfg(test)]
@@ -124,6 +128,7 @@ mod surface_strip_tests;
 #[cfg(test)]
 mod sync_tests;
 mod transport_sync;
+mod update;
 mod user_chords;
 mod wine;
 
@@ -229,6 +234,7 @@ fn main() {
             };
             app.recent = menu::load_recent();
             app.settings = settings::Settings::load();
+            app.update = update::Notice::start(app.settings.check_updates);
             app.surface = app.new_surface();
             if let Some(m) = &app.mk3 {
                 m.set_display_brightness(app.settings.display_brightness);
@@ -972,7 +978,9 @@ pub struct App {
     /// What to do once the user has said what happens to unsaved changes.
     confirm: Option<Pending>,
     /// The About box is open.
-    about: bool,
+    about: Option<about::State>,
+    /// The update check and what it found.
+    update: update::Notice,
     /// Quitting was confirmed: let the window close.
     quitting: bool,
     /// Where the open project is kept between runs, saved or not (see [`App::keep_session`]);
@@ -1779,7 +1787,7 @@ impl App {
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
             C::Splice => splice::open(ctx, None),
-            C::About => self.about = true,
+            C::About => self.about = Some(about::State::open()),
             C::Preferences => self.prefs = Some(self.prefs.unwrap_or(0)),
             C::Mixer => {
                 self.mixer = !self.mixer;
@@ -2229,6 +2237,10 @@ impl App {
                 });
             });
             ui.end_row();
+            ui.label("Updates");
+            ui.checkbox(&mut self.settings.check_updates, "Check for updates at launch")
+                .on_hover_text("Asks GitHub for DECKARD's latest release once per launch. Help ▸ About shows what it found.");
+            ui.end_row();
             ui.label("");
             ui.label(egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak());
             ui.end_row();
@@ -2601,24 +2613,8 @@ impl App {
         }
         self.stems_offer_dialog(ctx);
         self.preferences(ctx);
-        if self.about {
-            let mut open = true;
-            egui::Window::new("About DECKARD").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
-                crate::layout::deckard_logo(ui.painter(), ui.cursor().left_top() + egui::vec2(0.0, 14.0));
-                ui.add_space(30.0);
-                ui.label(format!("DECKARD {VERSION}"));
-                ui.label("An independent, open music workstation that opens and plays Maschine projects.");
-                ui.label("Not affiliated with Native Instruments. MASCHINE is a trademark of Native Instruments.");
-                ui.add_space(6.0);
-                ui.label("Plaits is Mutable Instruments' code by Émilie Gillet (MIT License).");
-                ui.label(deckard_link::LICENSE);
-                ui.collapsing("Mutable Instruments' license", |ui| {
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        ui.label(egui::RichText::new(deckard_plugins::MUTABLE_INSTRUMENTS_LICENSE).small());
-                    });
-                });
-            });
-            self.about = open;
+        if self.about.is_some() && !about::show(self, ctx) {
+            self.about = None;
         }
     }
 
@@ -8196,6 +8192,7 @@ impl App {
         self.update_waveform();
         self.update_sampling();
         self.poll_recorded();
+        self.update.poll();
         if self.recording {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }

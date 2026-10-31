@@ -12,7 +12,7 @@ the releases page.
 
 ## The About window
 
-A frameless window, 560 × 380, centred, closed with its × or Escape, opened from
+A frameless window, 560 × 316, centred, closed with its × or Escape, opened from
 Help ▸ About DECKARD (and the macOS application menu) as today.
 
 **Background.** `apps/viewer/assets/about.gif` (the Blade Runner Japan GIF, 220 × 129,

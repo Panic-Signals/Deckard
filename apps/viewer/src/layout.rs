@@ -1344,6 +1344,12 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     );
                 }
                 let t = deckard_logo(ui.painter(), r.left_center());
+                if let Some(rel) = app.update.available() {
+                    let dot = Pos2::new(t.right() + 2.0, t.top() - 1.0);
+                    ui.painter().circle_filled(dot, 3.5, Color32::from_rgb(0xff, 0x80, 0x60));
+                    ui.interact(Rect::from_center_size(dot, Vec2::splat(12.0)), ui.id().with("update-dot"), Sense::hover())
+                        .on_hover_text(format!("Update available: {} (Help ▸ About)", rel.version_text()));
+                }
                 let c = Pos2::new(t.right() + 9.0, r.center().y + 1.0);
                 ui.painter().add(egui::Shape::convex_polygon(
                     vec![c + Vec2::new(-4.0, -2.5), c + Vec2::new(4.0, -2.5), c + Vec2::new(0.0, 2.5)],
