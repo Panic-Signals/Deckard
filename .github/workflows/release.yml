@@ -1,6 +1,6 @@
 # Build DECKARD for macOS, Linux and Windows when a release is published on GitHub, and
-# attach the builds to it. The version is the release's name (else its tag), without a
-# leading "v": a release named "v1.2.0" gives DECKARD 1.2.0 and
+# attach the builds to it. The version is the release's tag, without a leading "v" (the
+# title is free prose): a tag "v1.2.0" gives DECKARD 1.2.0 and
 # DECKARD-1.2.0-macos-universal.zip, deckard-1.2.0-linux-x86_64.tar.gz (with
 # deckard_1.2.0-1_amd64.deb and deckard-1.2.0-1.x86_64.rpm) and DECKARD-1.2.0-windows-x64.zip.
 #
@@ -47,12 +47,12 @@ jobs:
         id: version
         shell: bash
         env:
-          RELEASE_NAME: ${{ github.event.release.name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          v="${INPUT_VERSION:-${RELEASE_NAME:-$RELEASE_TAG}}"
-          [ -n "$v" ] || v="$RELEASE_TAG"
+          # The tag, not the release's title: the version must be numbers (1.2.3) for
+          # the update check in the app, and the title is prose.
+          v="${INPUT_VERSION:-$RELEASE_TAG}"
           v="${v#v}"; v="${v#V}"
           # Keep it to what file names and bundle versions take.
           v="$(printf '%s' "$v" | tr ' /' '--' | tr -cd 'A-Za-z0-9._+-')"
