@@ -137,12 +137,26 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         format!("{n} results")
     };
     ui.label(RichText::new(status).size(10.0).color(white(142)));
+    // Nothing matched: offer Splice, searched for the same words.
+    if n == 0 && !b.waiting() && !q.text.trim().is_empty() {
+        splice_line(ui, &format!("Nothing here for \"{}\". Find it on Splice ↗", q.text.trim()), Some(&q.text));
+    }
     results(app, ui, acts);
+    splice_line(ui, "Get more sounds on Splice ↗", None);
+}
+
+/// A line that opens Splice (through DECKARD's referral link), saying so on hover.
+fn splice_line(ui: &mut Ui, text: &str, search: Option<&str>) {
+    let link =
+        ui.add(egui::Button::new(RichText::new(text).size(10.0).color(white(170))).frame(false)).on_hover_text(crate::splice::DISCLOSURE);
+    if link.clicked() {
+        crate::splice::open(ui.ctx(), search);
+    }
 }
 
 fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let b = &app.browser;
-    let height = (ui.available_height() - 34.0).max(60.0);
+    let height = (ui.available_height() - 50.0).max(60.0);
     egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show_rows(
         ui,
         RESULT_ROW,
