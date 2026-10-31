@@ -691,7 +691,39 @@ pub struct Catalog {
 
 enum ScanMsg {
     Progress(String),
-    Done(Vec<Entry>, Vec<(String, u64)>),
+    /// The entries, the cache text and the bundles that couldn't be scanned.
+    Done(Vec<Entry>, String, Vec<String>),
+}
+
+/// What a scan came to: per VST3 bundle its path, mtime and classes, or why they
+/// couldn't be read; and the other entries. Gives the entries, the cache text
+/// (`plugins.txt`: a bundle that couldn't be scanned is left out, so the next scan tries
+/// it again instead of remembering it as empty) and the problems to show.
+fn scan_outcome(bundles: Vec<(String, u64, Result<Vec<Entry>, String>)>, others: Vec<Entry>) -> (Vec<Entry>, String, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut cache = String::new();
+    let mut problems = Vec::new();
+    for (key, t, found) in bundles {
+        match found {
+            Ok(found) => {
+                cache += &format!("#bundle\t{key}\t{t}\n");
+                for e in &found {
+                    cache += &(e.to_line() + "\n");
+                }
+                entries.extend(found);
+            }
+            Err(e) => {
+                let name = Path::new(&key).file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned());
+                problems.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    cache += "#other\t\t0\n";
+    for e in &others {
+        cache += &(e.to_line() + "\n");
+    }
+    entries.extend(others);
+    (entries, cache, problems)
 }
 
 fn mtime(p: &Path) -> u64 {
@@ -747,7 +779,6 @@ impl Catalog {
                     last.2.push(e);
                 }
             }
-            let mut entries = Vec::new();
             let mut bundles = Vec::new();
             for b in scan::vst3_bundles(&s.dirs) {
                 let key = b.display().to_string();
@@ -757,19 +788,18 @@ impl Catalog {
                     b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
                 )));
                 let found = if let Some((_, _, e)) = known.iter().find(|(p, kt, _)| *p == key && *kt == t) {
-                    e.clone()
+                    Ok(e.clone())
                 } else if let Some(e) = scan::vst3_from_moduleinfo(&b) {
-                    e
+                    Ok(e)
                 } else {
                     scan_in_helper(&b)
                 };
-                bundles.push((key, t));
-                entries.push(found);
+                bundles.push((key, t, found));
             }
-            let mut all: Vec<Entry> = entries.concat();
-            all.extend(scan::vst2_entries(&s.dirs));
-            all.extend(scan::audio_units());
-            let _ = tx.send(ScanMsg::Done(all, bundles));
+            let mut others = scan::vst2_entries(&s.dirs);
+            others.extend(scan::audio_units());
+            let (all, cache, problems) = scan_outcome(bundles, others);
+            let _ = tx.send(ScanMsg::Done(all, cache, problems));
         });
         self.scanning = Some(rx);
         self.status = "Scanning plug-ins…".into();
@@ -782,26 +812,17 @@ impl Catalog {
         while let Ok(m) = rx.try_recv() {
             match m {
                 ScanMsg::Progress(p) => self.status = p,
-                ScanMsg::Done(entries, bundles) => {
-                    // The cache: per VST3 bundle, its mtime and entries; then the rest.
-                    let mut out = String::new();
-                    for (b, t) in &bundles {
-                        out += &format!("#bundle\t{b}\t{t}\n");
-                        for e in entries.iter().filter(|e| e.kind == Kind::Vst3 && e.location == *b) {
-                            out += &(e.to_line() + "\n");
-                        }
-                    }
-                    out += "#other\t\t0\n";
-                    for e in entries.iter().filter(|e| e.kind != Kind::Vst3) {
-                        out += &(e.to_line() + "\n");
-                    }
+                ScanMsg::Done(entries, cache, problems) => {
                     if let Some(f) = file("plugins.txt") {
                         if let Some(dir) = f.parent() {
                             let _ = std::fs::create_dir_all(dir);
                         }
-                        let _ = std::fs::write(f, out);
+                        let _ = std::fs::write(f, cache);
                     }
                     self.status = format!("{} plug-ins found", entries.len());
+                    if !problems.is_empty() {
+                        self.status += &format!("; couldn't scan {}", problems.join("; "));
+                    }
                     self.entries = entries;
                     self.scanning = None;
                     changed = true;
@@ -814,36 +835,50 @@ impl Catalog {
 }
 
 /// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
-/// bundle, which starts Wine).
-fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
+/// bundle, which starts Wine). The error says why the helper failed: its last line of
+/// complaint, or that it didn't answer in time.
+fn scan_in_helper(bundle: &Path) -> Result<Vec<Entry>, String> {
+    use std::io::Read;
     let limit = if bundle.to_string_lossy().contains("yabridge") { 90 } else { 20 };
-    let Ok(exe) = std::env::current_exe() else { return Vec::new() };
-    let Ok(mut child) = std::process::Command::new(exe)
+    let exe = std::env::current_exe().map_err(|e| format!("can't find DECKARD's own program: {e}"))?;
+    let mut child = std::process::Command::new(exe)
         .arg("--scan-vst3")
         .arg(bundle)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
-    else {
-        return Vec::new();
-    };
+        .map_err(|e| format!("couldn't start the scan helper: {e}"))?;
+    // Read what it complains about as it goes: a full pipe would stall it (Wine is
+    // talkative).
+    let complaints = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = err.read_to_string(&mut text);
+            text
+        })
+    });
     let start = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if start.elapsed().as_secs() < limit => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
-                return Vec::new();
+                let _ = child.wait();
+                return Err(format!("didn't answer in {limit} s"));
             }
         }
-    }
+    };
     let mut text = String::new();
     if let Some(mut out) = child.stdout.take() {
-        use std::io::Read;
         let _ = out.read_to_string(&mut text);
     }
-    text.lines().filter_map(Entry::from_line).collect()
+    let complaints = complaints.and_then(|t| t.join().ok()).unwrap_or_default();
+    if !status.success() {
+        let why = complaints.lines().rev().find(|l| !l.trim().is_empty()).map(str::trim).unwrap_or("");
+        return Err(if why.is_empty() { format!("the scan helper failed ({status})") } else { why.to_string() });
+    }
+    Ok(text.lines().filter_map(Entry::from_line).collect())
 }
 
 /// `--scan-vst3 <bundle>`: print the bundle's classes, one [`Entry`] line each.
@@ -1035,7 +1070,7 @@ mod sync_tests {
 
 #[cfg(test)]
 mod wine_tests {
-    use super::Settings;
+    use super::{Entry, Settings, scan_outcome};
 
     /// Syncing Windows plug-ins before a rescan (Linux) is on unless switched off, and
     /// only "off" is written, so other systems' settings files don't change.
@@ -1048,5 +1083,24 @@ mod wine_tests {
         assert!(s.to_text().contains("bridge_windows = false\n"));
         assert!(!Settings::parse(&s.to_text()).bridge_windows);
         assert!(Settings::parse("").bridge_windows);
+    }
+
+    /// A bundle the helper couldn't scan (crashed, hung, Wine failed to start) isn't
+    /// written to the cache as "no plug-ins": the next scan tries it again, and the
+    /// status says what went wrong.
+    #[test]
+    fn a_failed_scan_is_not_cached_as_empty() {
+        let dexed = Entry::from_line("VST3\tDigital Suburban\tDexed\t1\t/x/Dexed.vst3\tABCD").unwrap();
+        let outcomes = vec![
+            ("/x/Dexed.vst3".to_string(), 7, Ok(vec![dexed.clone()])),
+            ("/x/Empty.vst3".to_string(), 8, Ok(vec![])),
+            ("/x/Portal.vst3".to_string(), 9, Err("didn't answer in 90 s".to_string())),
+        ];
+        let (entries, cache, problems) = scan_outcome(outcomes, vec![]);
+        assert_eq!(entries, vec![dexed]);
+        assert!(cache.contains("#bundle\t/x/Dexed.vst3\t7\n"));
+        assert!(cache.contains("#bundle\t/x/Empty.vst3\t8\n"));
+        assert!(!cache.contains("Portal"), "{cache}");
+        assert_eq!(problems, vec!["Portal.vst3: didn't answer in 90 s"]);
     }
 }
