@@ -8192,7 +8192,10 @@ impl App {
         self.update_waveform();
         self.update_sampling();
         self.poll_recorded();
-        self.update.poll();
+        // An update was installed: quit (saving, if asked), and the helper restarts us.
+        if self.update.poll() && self.update.restarting() {
+            self.quit(ctx);
+        }
         if self.recording {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }

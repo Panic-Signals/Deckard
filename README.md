@@ -42,7 +42,7 @@ DECKARD is free and open. If it earns a place in your music, these keep it going
 ## Getting DECKARD
 
 1. Download the build for your system from the
-   [releases page](https://github.com/summitt/deckard/releases):
+   [releases page](https://github.com/Panic-Signals/Deckard/releases):
    - **macOS:** `DECKARD-<version>-macos-universal.zip`, which holds `DECKARD.app` and
      runs on both Apple Silicon and Intel Macs.
    - **Linux:** the `.deb` (Debian, Ubuntu, Mint) or `.rpm` (Fedora, openSUSE) package,
@@ -60,6 +60,12 @@ DECKARD is free and open. If it earns a place in your music, these keep it going
 3. Start DECKARD. It opens the project you had open last, or a new empty one. The
    first time, it offers to download the stem separation model (84 MB); you can also
    leave that until you first use STEMS.
+4. Keep it current. At launch DECKARD asks GitHub once whether a newer release exists
+   (Preferences ▸ General turns this off). When one does, a dot appears on the DECKARD
+   wordmark in the header, and **Help ▸ About DECKARD** shows the version with an
+   **Update** button that downloads it, checks it, installs it the way yours was
+   installed (the package through apt or dnf, with your password; the app bundle,
+   tarball or zip swapped in place) and restarts DECKARD.
 
 If you build DECKARD yourself, the packages end up in the `dist/` folder of your
 checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
