@@ -438,3 +438,8 @@ not part of DECKARD.
 DECKARD includes Ableton Link, which is licensed under the GPL (version 2 or later). A
 DECKARD built with Link is distributed under the GPL, as the About box says. Plaits'
 code is Mutable Instruments' (MIT licence).
+
+"Sounds on Splice" in the Help menu and the "find it on Splice" lines in the browser
+open splice.com through a referral link. Splice pays DECKARD's author a commission on
+subscriptions started through it; it costs you nothing extra and changes nothing on
+Splice's side.

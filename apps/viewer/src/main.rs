@@ -97,6 +97,7 @@ mod remote;
 mod sampler_ui;
 mod sampling_hw;
 mod settings;
+mod splice;
 mod stems;
 #[cfg(test)]
 mod surface_edit_tests;
@@ -1762,6 +1763,7 @@ impl App {
                 let url = "https://docs.native-instruments.com/ni-tech-manuals/maschine-software-manual/en/welcome-to-maschine-software";
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
+            C::Splice => splice::open(ctx, None),
             C::About => self.about = true,
             C::Preferences => self.prefs = Some(self.prefs.unwrap_or(0)),
             C::Mixer => {

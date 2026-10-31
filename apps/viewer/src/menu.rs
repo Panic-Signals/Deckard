@@ -38,6 +38,8 @@ pub enum Command {
     /// The folder of the user's own controller scripts and themes.
     ControllerFolder,
     Manual,
+    /// Splice, through DECKARD's referral link.
+    Splice,
     About,
     Preferences,
     Mixer,
@@ -233,7 +235,11 @@ pub fn menus(app: &App) -> Vec<(&'static str, Vec<Item>)> {
     controller.push(Item::Separator);
     controller.push(cmd("Open Controller Scripts Folder", Command::ControllerFolder));
 
-    let help = vec![cmd("MASCHINE Software Manual", Command::Manual), cmd("About DECKARD", Command::About)];
+    let help = vec![
+        cmd("MASCHINE Software Manual", Command::Manual),
+        cmd("Sounds on Splice", Command::Splice),
+        cmd("About DECKARD", Command::About),
+    ];
     vec![("File", file), ("Edit", edit), ("View", view), ("Controller", controller), ("Help", help)]
 }
 
