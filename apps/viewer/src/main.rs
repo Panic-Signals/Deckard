@@ -921,6 +921,9 @@ pub struct App {
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
+    /// Text for the system clipboard, put there at the end of the frame (see
+    /// [`App::flush_clipboard`]).
+    clipboard_text: Option<String>,
     /// Where the editing keys act (the part of the window clicked last).
     key_focus: layout::KeyFocus,
     /// The Sampling view (instead of the pattern editor) and its state; the recorder.
@@ -1195,11 +1198,13 @@ impl App {
             Act::SetColor(targets, color) => doc.borrow_mut().set_color(&targets, color),
             Act::CopySound(g, s) => doc.borrow().copy_sound(g, s).map(|c| {
                 self.status = format!("copied {}", c.name);
+                self.clipboard_text = Some(c.name.clone());
                 self.sound_clipboard = vec![c];
             }),
             Act::CutSound(g, s) => {
                 let clip = doc.borrow().copy_sound(g, s);
                 clip.and_then(|c| {
+                    self.clipboard_text = Some(c.name.clone());
                     self.sound_clipboard = vec![c];
                     let mut d = doc.borrow_mut();
                     d.reset_sound(g, s)?;
@@ -1252,6 +1257,7 @@ impl App {
         let Some(doc) = self.doc.clone() else { return Ok(()) };
         let bytes = doc.borrow().file_bytes(deckard_doc::FileItem::Group(g), &mxprj::sound_info::SoundInfo::default())?;
         self.group_clipboard = Some(bytes);
+        self.clipboard_text = doc.borrow().project().groups.get(g).map(|x| x.name.clone());
         self.status = "copied the group".into();
         Ok(())
     }
@@ -7436,6 +7442,17 @@ impl App {
         }
     }
 
+    /// Put what a copy left in `clipboard_text` on the system clipboard. Every copy in
+    /// DECKARD (sounds, groups, notes, macros) does this, and not for the text's sake:
+    /// the window layer (egui-winit) turns ⌘V into a Paste event only when the system
+    /// clipboard holds text, and drops the keystroke otherwise; so without this, ⌘V
+    /// after ⌘C did nothing unless some unrelated text happened to be there.
+    pub fn flush_clipboard(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.clipboard_text.take() {
+            ctx.copy_text(text);
+        }
+    }
+
     /// The editing keys in the Sound and Group lists (the event area handles its own):
     /// ⌘X / ⌘C / ⌘V, Del and ⌘R on the focused sound; ⌘R on the focused group.
     pub fn editing_keys(&mut self, ctx: &egui::Context) {
@@ -7498,6 +7515,7 @@ impl App {
         if notes.is_empty() {
             return;
         }
+        self.clipboard_text = Some(if notes.len() == 1 { "1 note".into() } else { format!("{} notes", notes.len()) });
         self.note_clip = Some(clipboard::NoteClip { notes: notes.clone(), sound: self.sound });
         if cut && let Some(doc) = self.doc.clone() {
             if let Err(e) = doc.borrow_mut().edit_notes("Cut Notes", self.group, self.pattern, &notes, &[]) {
@@ -8464,6 +8482,7 @@ impl App {
         if (self.group, self.sound, self.scene, self.section, self.song_view) != before {
             self.sync_controller();
         }
+        self.flush_clipboard(ctx);
     }
 }
 

@@ -504,6 +504,51 @@ fn editing_keys_follow_the_list_clicked_last() {
     assert!(app.sound_clipboard.is_empty());
 }
 
+/// What the window layer really sends: ⌘C arrives as a Copy event (never as the key),
+/// and ⌘V as a Paste event only when the system clipboard holds text; without text
+/// there, the keystroke is dropped. So every copy in DECKARD puts text on the system
+/// clipboard, and a Paste event pastes what was copied.
+#[test]
+fn copies_reach_the_system_clipboard_so_paste_events_arrive() {
+    use crate::layout::{Act, KeyFocus};
+    use eframe::egui::{Event, OutputCommand};
+    let mut app = perform_app();
+    let doc = app.doc.clone().unwrap();
+    doc.borrow_mut().rename(deckard_doc::Target::Sound(0, 2), "Kick").unwrap();
+    let ctx = eframe::egui::Context::default();
+    let send = |app: &mut crate::App, ev: Event| -> Vec<OutputCommand> {
+        let input = eframe::egui::RawInput { events: vec![ev], ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.editing_keys(ui.ctx());
+            app.flush_clipboard(ui.ctx());
+        });
+        out.textures_delta.clear();
+        out.platform_output.commands
+    };
+    let copied_text =
+        |cmds: &[OutputCommand]| cmds.iter().find_map(|c| if let OutputCommand::CopyText(t) = c { Some(t.clone()) } else { None });
+
+    // A sound: ⌘C puts its name there; a Paste event pastes it onto the focused sound.
+    crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Sounds)]);
+    let cmds = send(&mut app, Event::Copy);
+    assert_eq!(app.sound_clipboard.len(), 1, "the sound copied");
+    assert_eq!(copied_text(&cmds).as_deref(), Some("Kick"));
+    crate::layout::apply_acts(&mut app, vec![Act::FocusSound(5)]);
+    send(&mut app, Event::Paste("Kick".into()));
+    assert_eq!(doc.borrow().project().groups[0].sounds[5].name, "Kick", "pasted from the Paste event");
+    // Nothing on the next frame: the text is put there once.
+    assert!(copied_text(&send(&mut app, Event::Paste("Kick".into()))).is_none());
+
+    // Notes: the same, through the event area's copy.
+    let note =
+        |k: i64| deckard_model::Note { expr: None, sound: 2, position: k * 240, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note(0), note(1), note(2)]).unwrap();
+    crate::layout::apply_acts(&mut app, vec![Act::KeyFocus(KeyFocus::Events), Act::CopyNotes { cut: false }]);
+    assert_eq!(app.note_clip.as_ref().map(|c| c.notes.len()), Some(3));
+    let cmds = send(&mut app, Event::Paste("3 notes".into()));
+    assert_eq!(copied_text(&cmds).as_deref(), Some("3 notes"));
+}
+
 /// A new project whose first group has a pattern and a Perform FX.
 fn perform_app() -> crate::App {
     let mut app = crate::App::default();

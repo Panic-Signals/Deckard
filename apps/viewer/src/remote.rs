@@ -363,8 +363,9 @@ impl App {
     pub fn copy_macro(&mut self, (ch, page, m): MacroSlot) {
         let Some(doc) = &self.doc else { return };
         let x = doc.borrow().macro_pages(ch).get(page).and_then(|p| p.macros.get(m).cloned());
-        if x.is_some() {
-            self.remote.macro_clip = x;
+        if let Some(x) = x {
+            self.clipboard_text = Some(if x.name.is_empty() { "macro".into() } else { x.name.clone() });
+            self.remote.macro_clip = Some(x);
         }
     }
 
