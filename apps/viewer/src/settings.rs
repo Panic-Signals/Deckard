@@ -19,7 +19,8 @@ pub struct Settings {
     /// Linux: run `yabridgectl sync` before each rescan, so Windows plug-ins installed
     /// into Wine are bridged.
     pub bridge_windows: bool,
-    /// Folders searched for `.vst3` and `.vst` bundles.
+    /// Folders searched for plug-ins besides the platform's standard ones
+    /// ([`Settings::scan_dirs`]), added in Preferences.
     pub dirs: Vec<PathBuf>,
     /// Plug-ins switched off in the Manager ([`key`]).
     pub disabled: BTreeSet<String>,
@@ -50,6 +51,8 @@ pub struct Settings {
     /// and recorded notes snapped to the grid.
     pub count_in_bars: u32,
     pub input_quantize: bool,
+    /// Ask GitHub for a newer release at launch (default on).
+    pub check_updates: bool,
     /// Preferences ▸ Library: folders of sound packs listed under Factory.
     pub library_folders: Vec<PathBuf>,
     /// MIDI ports switched off (Preferences > MIDI): `in:<name>` and `out:<name>`.
@@ -259,9 +262,10 @@ impl Default for Settings {
             library_folders: Vec::new(),
             count_in_bars: 1,
             input_quantize: false,
+            check_updates: true,
             scan_on_start: false,
             bridge_windows: true,
-            dirs: scan::default_vst3_paths().into_iter().chain(scan::default_vst2_paths()).collect(),
+            dirs: Vec::new(),
             disabled: BTreeSet::new(),
             input_device: None,
             input_routing: default_routing(),
@@ -325,6 +329,25 @@ impl Settings {
         file("settings.txt").and_then(|f| std::fs::read_to_string(f).ok()).map_or_else(Settings::default, |t| Settings::parse(&t))
     }
 
+    /// The platform's standard plug-in folders (VST3, then VST), always scanned.
+    pub fn standard_dirs() -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = scan::default_vst3_paths().into_iter().chain(scan::default_vst2_paths()).collect();
+        let mut seen = std::collections::HashSet::new();
+        dirs.retain(|d| seen.insert(d.clone()));
+        dirs
+    }
+
+    /// Every folder scanned: the standard ones, then the user's additions.
+    pub fn scan_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Settings::standard_dirs();
+        for d in &self.dirs {
+            if !dirs.contains(d) {
+                dirs.push(d.clone());
+            }
+        }
+        dirs
+    }
+
     /// Settings from their saved text ([`Settings::to_text`]).
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
@@ -346,6 +369,7 @@ impl Settings {
                 "library_folder" => s.library_folders.push(PathBuf::from(v)),
                 "count_in_bars" => s.count_in_bars = v.parse().unwrap_or(1),
                 "input_quantize" => s.input_quantize = v == "true",
+                "check_updates" => s.check_updates = v != "false",
                 "input_device" => s.input_device = Some(v.to_string()),
                 "output_device" => s.output_device = Some(v.to_string()),
                 // A device's routing: `<device>\t<channel>:<route or alias>`.
@@ -497,9 +521,12 @@ impl Settings {
                 _ => {}
             }
         }
-        if !dirs.is_empty() || text.contains("dirs = none") {
-            s.dirs = dirs;
-        }
+        // Settings from before listed the standard folders too (and a settings file
+        // carried over from another platform lists that platform's): only the others
+        // are the user's additions. The standard ones are always scanned.
+        let standard = Settings::standard_dirs();
+        s.dirs = dirs.into_iter().filter(|d| !standard.contains(d)).collect();
+        s.dirs.dedup();
         // Settings from before: everything straight through, but for what they list.
         let has_routing = s.routings.keys().any(|(side, _)| side == "in");
         if !has_routing && (legacy.is_some() || text.contains("input_device = ")) {
@@ -570,9 +597,6 @@ impl Settings {
         if !self.bridge_windows {
             out += "bridge_windows = false\n";
         }
-        if self.dirs.is_empty() {
-            out += "dirs = none\n";
-        }
         for d in &self.dirs {
             out += &format!("dir = {}\n", d.display());
         }
@@ -601,6 +625,9 @@ impl Settings {
             out += &format!("favorite_folder = {}\n", d.display());
         }
         out += &format!("count_in_bars = {}\ninput_quantize = {}\n", self.count_in_bars, self.input_quantize);
+        if !self.check_updates {
+            out += "check_updates = false\n";
+        }
         for d in &self.library_folders {
             out += &format!("library_folder = {}\n", d.display());
         }
@@ -749,7 +776,8 @@ impl Catalog {
             }
             let mut entries = Vec::new();
             let mut bundles = Vec::new();
-            for b in scan::vst3_bundles(&s.dirs) {
+            let dirs = s.scan_dirs();
+            for b in scan::vst3_bundles(&dirs) {
                 let key = b.display().to_string();
                 let t = mtime(&b);
                 let _ = tx.send(ScanMsg::Progress(format!(
@@ -767,7 +795,7 @@ impl Catalog {
                 entries.push(found);
             }
             let mut all: Vec<Entry> = entries.concat();
-            all.extend(scan::vst2_entries(&s.dirs));
+            all.extend(scan::vst2_entries(&dirs));
             all.extend(scan::audio_units());
             let _ = tx.send(ScanMsg::Done(all, bundles));
         });
@@ -951,6 +979,31 @@ mod recording_tests {
 #[cfg(test)]
 mod sync_tests {
     use super::{MidiSync, Settings};
+
+    /// The standard folders are scanned whatever the settings say (a settings file
+    /// from an older build, or from another platform, listed its own); only folders
+    /// added in Preferences are saved.
+    #[test]
+    fn standard_folders_are_always_scanned_and_only_additions_saved() {
+        let standard = Settings::standard_dirs();
+        assert!(!standard.is_empty());
+        assert!(Settings::default().dirs.is_empty());
+        assert_eq!(Settings::default().scan_dirs(), standard);
+        let foreign = std::path::PathBuf::from("/Library/Audio/Plug-Ins/VST3 from a Mac");
+        let text = format!("dir = {}\ndir = {}\ndir = {}\n", standard[0].display(), foreign.display(), foreign.display());
+        let s = Settings::parse(&text);
+        assert_eq!(s.dirs, vec![foreign.clone()], "the standard folder isn't an addition; the addition once");
+        let scanned = s.scan_dirs();
+        assert_eq!(&scanned[..standard.len()], &standard[..]);
+        assert_eq!(scanned.last(), Some(&foreign));
+        let saved = s.to_text();
+        assert!(saved.contains("dir = /Library/Audio/Plug-Ins/VST3 from a Mac\n"));
+        assert_eq!(saved.matches("dir = ").count(), 1, "only the addition is saved:\n{saved}");
+        assert!(!saved.contains("dirs = none"));
+        assert_eq!(Settings::parse(&saved).dirs, s.dirs);
+        // An old file saying there are no folders at all: the standard ones still.
+        assert_eq!(Settings::parse("dirs = none\n").scan_dirs(), standard);
+    }
 
     /// The default project (Preferences ▸ General, BUGS #10): none unless set.
     #[test]

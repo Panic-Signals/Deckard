@@ -3,7 +3,8 @@
 //! `~/.vst3/yabridge`, which DECKARD hosts like any other. This module tells what is
 //! installed ([`Status`]), installs what isn't (Wine from the distribution's packages
 //! with administrator rights through `pkexec`; yabridge from its own release archive,
-//! `scripts/install-yabridge.sh`), and runs `yabridgectl sync`, which makes the bundles.
+//! `scripts/install-yabridge.sh`, or, for Wine 9.22 and later, built from its source,
+//! `scripts/build-yabridge.sh`), and runs `yabridgectl sync`, which makes the bundles.
 //!
 //! Compiles everywhere (it is only process calls and paths) so its tests run on every
 //! system; the app shows it on Linux.
@@ -74,7 +75,9 @@ pub fn parse_version(text: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// yabridge's README: its 5.1.1 release has trouble with Wine 9.22 and later.
+/// yabridge's 5.1.1 release (its last) predates Wine 9.22, whose window changes keep
+/// mouse clicks and keys from reaching plug-in windows through it (yabridge #382,
+/// #409); its master branch fixes that.
 pub fn newer_than_yabridge_supports(version: (u32, u32)) -> bool {
     version >= (9, 22)
 }
@@ -123,6 +126,53 @@ pub fn count_bundles(dir: &Path) -> usize {
         .map_or(0, |rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("vst3"))).count())
 }
 
+/// yabridge's build marker, `BUILD` in its folder, written by `scripts/build-yabridge.sh`
+/// (`yabridge master <commit> built <date> for wine-11.0 by DECKARD`). None for a
+/// release archive.
+pub fn yabridge_build() -> Option<String> {
+    std::fs::read_to_string(yabridge_dir().join("BUILD")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// What `build-yabridge.sh --check` found: the packages missing to build yabridge, and
+/// the command (to run as root) that installs them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BuildCheck {
+    pub missing: Vec<String>,
+    pub root_command: Option<String>,
+}
+
+impl BuildCheck {
+    /// From the script's output: `ready`, or `missing: a b c` and `root: <command>`.
+    pub fn parse(text: &str) -> BuildCheck {
+        let mut c = BuildCheck::default();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("missing:") {
+                c.missing = rest.split_whitespace().map(str::to_string).collect();
+            } else if let Some(rest) = line.strip_prefix("root:") {
+                let cmd = rest.trim();
+                c.root_command = (!cmd.is_empty()).then(|| cmd.to_string());
+            }
+        }
+        c
+    }
+
+    /// Everything the build needs is there.
+    pub fn ready(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+/// Ask the build script what's missing.
+pub fn build_check() -> BuildCheck {
+    let Some(script) = crate::stems::script("build-yabridge.sh") else {
+        return BuildCheck { missing: vec!["build-yabridge.sh (not with DECKARD)".into()], root_command: None };
+    };
+    match Command::new("bash").arg(&script).arg("--check").output() {
+        Ok(o) => BuildCheck::parse(&String::from_utf8_lossy(&o.stdout)),
+        Err(e) => BuildCheck { missing: vec![format!("{e}")], root_command: None },
+    }
+}
+
 /// What is installed, as Preferences shows it.
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -130,6 +180,10 @@ pub struct Status {
     /// Wine's version text (`11.0`), if it runs.
     pub wine: Option<String>,
     pub yabridgectl: Option<PathBuf>,
+    /// yabridge was built from source by DECKARD ([`yabridge_build`]).
+    pub yabridge_build: Option<String>,
+    /// What building yabridge would still need.
+    pub build: BuildCheck,
     pub windows_vst3: PathBuf,
     /// Plug-ins installed into Wine.
     pub windows_plugins: usize,
@@ -149,10 +203,20 @@ impl Status {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
         let windows_vst3 = windows_vst3_dir();
+        let wine_version = wine.as_deref().and_then(parse_version);
+        let yabridge_build = yabridge_build();
+        // The build's prerequisites are only worth checking when a build is wanted.
+        let build = if wine_version.is_some_and(newer_than_yabridge_supports) && yabridge_build.is_none() {
+            build_check()
+        } else {
+            BuildCheck::default()
+        };
         Status {
             family: Family::detect(),
             wine,
             yabridgectl: find_yabridgectl(),
+            yabridge_build,
+            build,
             windows_plugins: count_bundles(&windows_vst3),
             windows_vst3,
             bridged: count_bundles(&bridged_dir()),
@@ -163,23 +227,47 @@ impl Status {
     pub fn wine_version(&self) -> Option<(u32, u32)> {
         self.wine.as_deref().and_then(parse_version)
     }
+
+    /// Wine is 9.22 or later and yabridge is (or would be) the 5.1.1 release: plug-in
+    /// windows would take no clicks or keys. yabridge has to be built from its source.
+    pub fn yabridge_needs_build(&self) -> bool {
+        self.wine_version().is_some_and(newer_than_yabridge_supports) && self.yabridge_build.is_none()
+    }
 }
 
 fn last_line(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).lines().filter(|l| !l.trim().is_empty()).next_back().unwrap_or("").to_string()
 }
 
+/// Run a shell command as root, asking for an administrator's password through
+/// `pkexec`; `done` is the message when it worked, `what` names the task in errors.
+fn run_as_root(cmd: &str, what: &str, done: &str) -> Result<String, String> {
+    let out = Command::new("pkexec").args(["sh", "-c", cmd]).output().map_err(|e| format!("pkexec: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(done.into()),
+        Some(126) => Err("cancelled".into()),
+        Some(127) => Err("not allowed by the system's policy".into()),
+        _ => Err(format!("{what} failed: {}", last_line(&out.stderr))),
+    }
+}
+
 /// Install Wine with the distribution's package manager, asking for an administrator's
 /// password through `pkexec`.
 pub fn install_wine(family: Family) -> Result<String, String> {
     let cmd = family.wine_command().ok_or("no known package manager for this distribution")?;
-    let out = Command::new("pkexec").args(["sh", "-c", cmd]).output().map_err(|e| format!("pkexec: {e}"))?;
-    match out.status.code() {
-        Some(0) => Ok("Wine installed".into()),
-        Some(126) => Err("cancelled".into()),
-        Some(127) => Err("not allowed by the system's policy".into()),
-        _ => Err(format!("installing Wine failed: {}", last_line(&out.stderr))),
-    }
+    run_as_root(cmd, "installing Wine", "Wine installed")
+}
+
+/// Install what building yabridge needs (`cmd` from [`BuildCheck::root_command`]).
+pub fn install_build_tools(cmd: &str) -> Result<String, String> {
+    run_as_root(cmd, "installing the build tools", "build tools installed")
+}
+
+/// Build yabridge from its source and install it (`scripts/build-yabridge.sh`; minutes).
+pub fn build_yabridge() -> Result<String, String> {
+    let script = crate::stems::script("build-yabridge.sh").ok_or("yabridge's build script isn't with DECKARD")?;
+    let out = Command::new("bash").arg(&script).output().map_err(|e| format!("{}: {e}", script.display()))?;
+    if out.status.success() { Ok(last_line(&out.stdout)) } else { Err(format!("building yabridge failed: {}", last_line(&out.stderr))) }
 }
 
 /// Install yabridge into [`yabridge_dir`] (`scripts/install-yabridge.sh`: a download).
@@ -242,6 +330,39 @@ mod tests {
         assert!(!newer_than_yabridge_supports((9, 21)));
         assert!(newer_than_yabridge_supports((9, 22)));
         assert!(newer_than_yabridge_supports((11, 0)));
+    }
+
+    /// With Wine 9.22 or later, yabridge has to be built from source unless it was.
+    #[test]
+    fn a_build_is_wanted_with_new_wine_unless_already_built() {
+        let st = |wine: &str, build: Option<&str>| Status {
+            family: Family::Debian,
+            wine: Some(wine.into()),
+            yabridgectl: None,
+            yabridge_build: build.map(str::to_string),
+            build: BuildCheck::default(),
+            windows_vst3: PathBuf::new(),
+            windows_plugins: 0,
+            bridged: 0,
+            pkexec: true,
+        };
+        assert!(!st("wine-9.21", None).yabridge_needs_build());
+        assert!(st("wine-11.0", None).yabridge_needs_build());
+        assert!(!st("wine-11.0", Some("yabridge master b580a9f built 2026-11-01 for wine-11.0 by DECKARD")).yabridge_needs_build());
+    }
+
+    #[test]
+    fn the_build_check_is_read_from_the_script() {
+        let c = BuildCheck::parse(
+            "missing: meson ninja-build wine-stable-dev\nroot: export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y meson ninja-build wine-stable-dev\n",
+        );
+        assert_eq!(c.missing, ["meson", "ninja-build", "wine-stable-dev"]);
+        assert!(c.root_command.as_deref().is_some_and(|r| r.ends_with("install -y meson ninja-build wine-stable-dev")));
+        assert!(!c.ready());
+        let ready = BuildCheck::parse("ready\n");
+        assert!(ready.ready() && ready.root_command.is_none());
+        let unknown = BuildCheck::parse("missing: meson\nroot:\n");
+        assert_eq!((unknown.missing.len(), unknown.root_command), (1, None));
     }
 
     #[test]

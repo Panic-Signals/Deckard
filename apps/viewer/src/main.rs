@@ -22,6 +22,7 @@
 // the log.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod about;
 mod arp_ui;
 mod audio_settings;
 mod audio_ui;
@@ -39,6 +40,7 @@ mod controller;
 mod drop_pos;
 mod drum_ui;
 mod export;
+mod github;
 mod goodbye;
 mod icon;
 
@@ -48,6 +50,8 @@ pub const VERSION: &str = match option_env!("DECKARD_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };
+/// Built by the release scripts (with a version minted on GitHub), not from source.
+pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
 #[cfg(test)]
 mod auto_length_tests;
 #[cfg(test)]
@@ -97,6 +101,7 @@ mod remote;
 mod sampler_ui;
 mod sampling_hw;
 mod settings;
+mod splice;
 mod stems;
 #[cfg(test)]
 mod surface_edit_tests;
@@ -123,6 +128,7 @@ mod surface_strip_tests;
 #[cfg(test)]
 mod sync_tests;
 mod transport_sync;
+mod update;
 mod user_chords;
 mod wine;
 
@@ -228,12 +234,13 @@ fn main() {
             };
             app.recent = menu::load_recent();
             app.settings = settings::Settings::load();
+            app.update = update::Notice::start(app.settings.check_updates);
             app.surface = app.new_surface();
             if let Some(m) = &app.mk3 {
                 m.set_display_brightness(app.settings.display_brightness);
             }
             app.recorder = recorder::Recorder::new();
-            deckard_plugins::module::set_search_paths(app.settings.dirs.clone());
+            deckard_plugins::module::set_search_paths(app.settings.scan_dirs());
             app.catalog = settings::Catalog::load(&app.settings);
             app.session_dir = menu::settings_dir();
             // The first start without the stem separation model: offer it (not when
@@ -636,10 +643,14 @@ enum Pending {
 }
 
 /// A button of Preferences ▸ Plug-ins ▸ Windows plug-ins.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum WineAction {
     InstallWine(wine::Family),
     InstallYabridge,
+    /// The packages a yabridge build needs, as root.
+    InstallBuildTools(String),
+    /// yabridge from its source (Wine 9.22 and later).
+    BuildYabridge,
     Sync,
 }
 
@@ -914,6 +925,11 @@ pub struct App {
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
+    /// Which of the clipboards was filled last: the one ⌘V pastes.
+    last_copied: clipboard::Copied,
+    /// Text for the system clipboard, put there at the end of the frame (see
+    /// [`App::flush_clipboard`]).
+    clipboard_text: Option<String>,
     /// Where the editing keys act (the part of the window clicked last).
     key_focus: layout::KeyFocus,
     /// The Sampling view (instead of the pattern editor) and its state; the recorder.
@@ -971,7 +987,9 @@ pub struct App {
     /// What to do once the user has said what happens to unsaved changes.
     confirm: Option<Pending>,
     /// The About box is open.
-    about: bool,
+    about: Option<about::State>,
+    /// The update check and what it found.
+    update: update::Notice,
     /// Quitting was confirmed: let the window close.
     quitting: bool,
     /// Where the open project is kept between runs, saved or not (see [`App::keep_session`]);
@@ -1186,12 +1204,16 @@ impl App {
             Act::SetColor(targets, color) => doc.borrow_mut().set_color(&targets, color),
             Act::CopySound(g, s) => doc.borrow().copy_sound(g, s).map(|c| {
                 self.status = format!("copied {}", c.name);
+                self.clipboard_text = Some(c.name.clone());
                 self.sound_clipboard = vec![c];
+                self.last_copied = clipboard::Copied::Sound;
             }),
             Act::CutSound(g, s) => {
                 let clip = doc.borrow().copy_sound(g, s);
                 clip.and_then(|c| {
+                    self.clipboard_text = Some(c.name.clone());
                     self.sound_clipboard = vec![c];
+                    self.last_copied = clipboard::Copied::Sound;
                     let mut d = doc.borrow_mut();
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
@@ -1243,6 +1265,8 @@ impl App {
         let Some(doc) = self.doc.clone() else { return Ok(()) };
         let bytes = doc.borrow().file_bytes(deckard_doc::FileItem::Group(g), &mxprj::sound_info::SoundInfo::default())?;
         self.group_clipboard = Some(bytes);
+        self.clipboard_text = doc.borrow().project().groups.get(g).map(|x| x.name.clone());
+        self.last_copied = clipboard::Copied::Group;
         self.status = "copied the group".into();
         Ok(())
     }
@@ -1777,7 +1801,8 @@ impl App {
                 let url = "https://docs.native-instruments.com/ni-tech-manuals/maschine-software-manual/en/welcome-to-maschine-software";
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
-            C::About => self.about = true,
+            C::Splice => splice::open(ctx, None),
+            C::About => self.about = Some(about::State::open()),
             C::Preferences => self.prefs = Some(self.prefs.unwrap_or(0)),
             C::Mixer => {
                 self.mixer = !self.mixer;
@@ -2227,6 +2252,10 @@ impl App {
                 });
             });
             ui.end_row();
+            ui.label("Updates");
+            ui.checkbox(&mut self.settings.check_updates, "Check for updates at launch")
+                .on_hover_text("Asks GitHub for DECKARD's latest release once per launch. Help ▸ About shows what it found.");
+            ui.end_row();
             ui.label("");
             ui.label(egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak());
             ui.end_row();
@@ -2406,6 +2435,18 @@ impl App {
                 });
             } else {
                 ui.label("Folders searched for VST3 and VST plug-ins (Audio Units are found by the system):");
+                for d in settings::Settings::standard_dirs() {
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(false, egui::Button::new("Standard").small());
+                        let exists = d.exists();
+                        ui.label(egui::RichText::new(d.display().to_string()).color(if exists {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::GRAY
+                        }))
+                        .on_hover_text(if exists { "A standard folder; always searched" } else { "A standard folder; it doesn't exist here" });
+                    });
+                }
                 let mut remove = None;
                 for (i, d) in self.settings.dirs.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -2431,8 +2472,8 @@ impl App {
                     {
                         self.settings.dirs.push(dir);
                     }
-                    if ui.button("Restore Defaults").clicked() {
-                        self.settings.dirs = settings::Settings::default().dirs;
+                    if ui.add_enabled(!self.settings.dirs.is_empty(), egui::Button::new("Remove Added")).clicked() {
+                        self.settings.dirs.clear();
                     }
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;
@@ -2442,7 +2483,7 @@ impl App {
         });
         if self.settings != before {
             self.settings.save();
-            deckard_plugins::module::set_search_paths(self.settings.dirs.clone());
+            deckard_plugins::module::set_search_paths(self.settings.scan_dirs());
             if self.settings.dirs != before.dirs {
                 rescan = true;
             }
@@ -2599,24 +2640,8 @@ impl App {
         }
         self.stems_offer_dialog(ctx);
         self.preferences(ctx);
-        if self.about {
-            let mut open = true;
-            egui::Window::new("About DECKARD").collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
-                crate::layout::deckard_logo(ui.painter(), ui.cursor().left_top() + egui::vec2(0.0, 14.0));
-                ui.add_space(30.0);
-                ui.label(format!("DECKARD {VERSION}"));
-                ui.label("An independent, open music workstation that opens and plays Maschine projects.");
-                ui.label("Not affiliated with Native Instruments. MASCHINE is a trademark of Native Instruments.");
-                ui.add_space(6.0);
-                ui.label("Plaits is Mutable Instruments' code by Émilie Gillet (MIT License).");
-                ui.label(deckard_link::LICENSE);
-                ui.collapsing("Mutable Instruments' license", |ui| {
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        ui.label(egui::RichText::new(deckard_plugins::MUTABLE_INSTRUMENTS_LICENSE).small());
-                    });
-                });
-            });
-            self.about = open;
+        if self.about.is_some() && !about::show(self, ctx) {
+            self.about = None;
         }
     }
 
@@ -7451,6 +7476,17 @@ impl App {
         }
     }
 
+    /// Put what a copy left in `clipboard_text` on the system clipboard. Every copy in
+    /// DECKARD (sounds, groups, notes, macros) does this, and not for the text's sake:
+    /// the window layer (egui-winit) turns ⌘V into a Paste event only when the system
+    /// clipboard holds text, and drops the keystroke otherwise; so without this, ⌘V
+    /// after ⌘C did nothing unless some unrelated text happened to be there.
+    pub fn flush_clipboard(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.clipboard_text.take() {
+            ctx.copy_text(text);
+        }
+    }
+
     /// The editing keys in the Sound and Group lists (the event area handles its own):
     /// ⌘X / ⌘C / ⌘V, Del and ⌘R on the focused sound; ⌘R on the focused group.
     pub fn editing_keys(&mut self, ctx: &egui::Context) {
@@ -7485,11 +7521,23 @@ impl App {
             if cmd(egui::Key::C) || ev(|e| matches!(e, egui::Event::Copy)) {
                 acts.push(Act::CopySound(g, s));
             }
-            if (cmd(egui::Key::V) || ev(|e| matches!(e, egui::Event::Paste(_)))) && !self.sound_clipboard.is_empty() {
-                acts.push(Act::PasteSound(g, s));
-            }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
                 acts.push(Act::ResetSound(g, s));
+            }
+        }
+        // ⌘V in either list pastes what was copied last: notes copied in the Pattern
+        // Editor onto the sound clicked (the group's first, for a group clicked), at
+        // their times; a sound onto the focused sound; a group over the group clicked.
+        if matches!(self.key_focus, KeyFocus::Sounds | KeyFocus::Groups)
+            && (cmd(egui::Key::V) || ev(|e| matches!(e, egui::Event::Paste(_))))
+        {
+            match self.last_copied {
+                clipboard::Copied::Notes if self.note_clip.is_some() => acts.push(Act::PasteNotes(clipboard::PasteAt::Keys)),
+                clipboard::Copied::Group if self.key_focus == KeyFocus::Groups && self.group_clipboard.is_some() => {
+                    acts.push(Act::PasteGroup(g));
+                }
+                _ if !self.sound_clipboard.is_empty() => acts.push(Act::PasteSound(g, s)),
+                _ => {}
             }
         }
         layout::apply_acts(self, acts);
@@ -7513,7 +7561,9 @@ impl App {
         if notes.is_empty() {
             return;
         }
+        self.clipboard_text = Some(if notes.len() == 1 { "1 note".into() } else { format!("{} notes", notes.len()) });
         self.note_clip = Some(clipboard::NoteClip { notes: notes.clone(), sound: self.sound });
+        self.last_copied = clipboard::Copied::Notes;
         if cut && let Some(doc) = self.doc.clone() {
             if let Err(e) = doc.borrow_mut().edit_notes("Cut Notes", self.group, self.pattern, &notes, &[]) {
                 self.status = format!("can't cut: {e}");
@@ -7527,29 +7577,47 @@ impl App {
     /// past its end; the pasted notes are selected.
     pub fn paste_notes(&mut self, at: clipboard::PasteAt) {
         let (Some(clip), Some(doc)) = (self.note_clip.clone(), self.doc.clone()) else { return };
-        let (g, pi) = (self.group, self.pattern);
-        let (add, start, len, bar) = {
-            let d = doc.borrow();
-            let p = d.project();
-            let Some(group) = p.groups.get(g) else { return };
-            let Some(pat) = group.patterns.get(pi) else { return };
-            let add = clipboard::paste(&clip, at, self.sound, self.piano_roll, pat.start, self.grid, group.sounds.len());
-            (add, pat.start, layout::pattern_len(p, g, pi), p.bar_length())
-        };
-        if add.is_empty() {
-            return;
-        }
-        let end = add.iter().map(|n| n.position + n.length).max().unwrap_or(start) - start;
+        let (g, focused, scene, song_view) = (self.group, self.pattern, self.scene, self.song_view);
+        let (sound, keyboard, grid) = (self.sound, self.piano_roll, self.grid);
+        let mut pasted = None;
         let r = doc.borrow_mut().transaction("Paste Notes", |d| {
+            // The focused pattern; a group without one (clicked in the Group list)
+            // gets "Pattern 1", playing in the focused scene, as drawing a note does.
+            let n = d.project().groups.get(g).ok_or("no such group")?.patterns.len();
+            let pi = if focused < n {
+                focused
+            } else if n == 0 {
+                let pi = d.add_pattern(g, usize::MAX, "Pattern 1")?;
+                if !song_view {
+                    d.assign_pattern(scene, g, Some(pi))?;
+                }
+                pi
+            } else {
+                0
+            };
+            let p = d.project();
+            let group = &p.groups[g];
+            let pat = &group.patterns[pi];
+            let add = clipboard::paste(&clip, at, sound, keyboard, pat.start, grid, group.sounds.len());
+            if add.is_empty() {
+                return Ok(());
+            }
+            let (start, len, bar) = (pat.start, layout::pattern_len(p, g, pi), p.bar_length());
+            let end = add.iter().map(|n| n.position + n.length).max().unwrap_or(start) - start;
             d.edit_notes("Paste Notes", g, pi, &[], &add)?;
             if end > len {
                 d.set_pattern_length(g, pi, (end + bar - 1) / bar * bar)?;
             }
+            pasted = Some((pi, add));
             Ok(())
         });
-        match r {
-            Ok(()) => self.selected = add,
-            Err(e) => self.status = format!("can't paste: {e}"),
+        match (r, pasted) {
+            (Ok(()), Some((pi, add))) => {
+                self.pattern = pi;
+                self.selected = add;
+            }
+            (Ok(()), None) => {}
+            (Err(e), _) => self.status = format!("can't paste: {e}"),
         }
     }
 
@@ -7868,8 +7936,9 @@ impl App {
             match &st.wine {
                 Some(v) => {
                     ui.label(v);
-                    if st.wine_version().is_some_and(wine::newer_than_yabridge_supports) {
-                        ui.label(egui::RichText::new("yabridge 5.1.1 is known to have trouble with Wine 9.22 and later").weak());
+                    if st.yabridge_needs_build() {
+                        ui.label(egui::RichText::new("newer than yabridge's 5.1.1 release: with it, plug-in windows take no clicks or typing. yabridge has to be built from its source (below).").weak())
+                            .on_hover_text("yabridge issues #382 and #409. The fix is in yabridge's master branch, which DECKARD can build; docs/windows-plugins-troubleshooting.md tells the whole story.");
                     } else {
                         ui.label("");
                     }
@@ -7897,12 +7966,55 @@ impl App {
             }
             ui.end_row();
             ui.label("yabridge");
-            match &st.yabridgectl {
-                Some(p) => {
-                    ui.label(p.display().to_string());
+            // The button that gets a built yabridge: the build itself, or first the
+            // tools it needs (as root), or what to install by hand.
+            let build_button = |ui: &mut egui::Ui, action: &mut Option<WineAction>| {
+                if st.build.ready() {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Build yabridge"))
+                        .on_hover_text("Builds yabridge's master branch from its source into ~/.local/share/yabridge; a few minutes. The release copy is kept as yabridge.release.")
+                        .clicked()
+                    {
+                        *action = Some(WineAction::BuildYabridge);
+                    }
+                } else {
+                    let missing = st.build.missing.join(" ");
+                    match (&st.build.root_command, st.pkexec) {
+                        (Some(cmd), true) => {
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Install build tools…"))
+                                .on_hover_text(format!("Asks for an administrator's password and installs: {missing}"))
+                                .clicked()
+                            {
+                                *action = Some(WineAction::InstallBuildTools(cmd.clone()));
+                            }
+                        }
+                        (Some(cmd), false) => {
+                            ui.label(format!("as root: {cmd}"));
+                        }
+                        (None, _) => {
+                            ui.label(format!("to build it, install: {missing}"));
+                        }
+                    }
+                }
+            };
+            match (&st.yabridgectl, st.yabridge_needs_build()) {
+                (Some(p), false) => {
+                    ui.label(match &st.yabridge_build {
+                        Some(b) => format!("{} ({b})", p.display()),
+                        None => p.display().to_string(),
+                    });
                     ui.label("");
                 }
-                None => {
+                (Some(p), true) => {
+                    ui.label(format!("{} (the 5.1.1 release)", p.display()));
+                    build_button(ui, action);
+                }
+                (None, true) => {
+                    ui.label("not installed");
+                    build_button(ui, action);
+                }
+                (None, false) => {
                     ui.label("not installed");
                     if ui
                         .add_enabled(!busy, egui::Button::new("Install yabridge"))
@@ -7944,6 +8056,8 @@ impl App {
         let (what, job): (&'static str, Box<dyn FnOnce() -> Result<String, String> + Send>) = match action {
             WineAction::InstallWine(f) => ("Installing Wine", Box::new(move || wine::install_wine(f))),
             WineAction::InstallYabridge => ("Installing yabridge", Box::new(wine::install_yabridge)),
+            WineAction::InstallBuildTools(cmd) => ("Installing the build tools", Box::new(move || wine::install_build_tools(&cmd))),
+            WineAction::BuildYabridge => ("Building yabridge", Box::new(wine::build_yabridge)),
             WineAction::Sync => ("Syncing Windows plug-ins", Box::new(wine::sync)),
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -7974,6 +8088,10 @@ impl App {
         self.wine_status = None;
         if what == "Syncing Windows plug-ins" && result.is_ok() {
             self.catalog.rescan(&self.settings);
+        }
+        // A new yabridge: its bundles have to be made again.
+        if what == "Building yabridge" && result.is_ok() {
+            self.start_wine(WineAction::Sync);
         }
     }
 
@@ -8207,6 +8325,10 @@ impl App {
         self.update_waveform();
         self.update_sampling();
         self.poll_recorded();
+        // An update was installed: quit (saving, if asked), and the helper restarts us.
+        if self.update.poll() && self.update.restarting() {
+            self.quit(ctx);
+        }
         if self.recording {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
@@ -8475,6 +8597,7 @@ impl App {
         if (self.group, self.sound, self.scene, self.section, self.song_view) != before {
             self.sync_controller();
         }
+        self.flush_clipboard(ctx);
     }
 }
 

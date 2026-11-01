@@ -66,6 +66,12 @@ contents:
     dst: /usr/share/deckard/install-yabridge.sh
     file_info:
       mode: 0755
+  # yabridge built from its source, for Wine 9.22 and later (its release predates
+  # them): Preferences ▸ Plug-ins runs it.
+  - src: scripts/build-yabridge.sh
+    dst: /usr/share/deckard/build-yabridge.sh
+    file_info:
+      mode: 0755
 
 overrides:
   deb:

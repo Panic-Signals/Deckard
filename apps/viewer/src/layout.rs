@@ -358,16 +358,21 @@ fn section_at(p: &Project, ticks: f64) -> Option<usize> {
 /// both ends, the slice above the line lighter than the letters below it. Returns its
 /// extent (letters only).
 pub fn deckard_logo(painter: &Painter, left_center: Pos2) -> Rect {
+    deckard_logo_scaled(painter, left_center, 1.0)
+}
+
+/// [`deckard_logo`] at `scale` times the header's size (About draws it large).
+pub fn deckard_logo_scaled(painter: &Painter, left_center: Pos2, scale: f32) -> Rect {
     // The logo font, if one was given (logo.ttf in the settings folder).
     if painter.ctx().data(|d| d.get_temp::<bool>(egui::Id::new(LOGO_FONT))).unwrap_or(false) {
-        let font = FontId::new(LOGO_SIZE, egui::FontFamily::Name(LOGO_FONT.into()));
+        let font = FontId::new(LOGO_SIZE * scale, egui::FontFamily::Name(LOGO_FONT.into()));
         // All lowercase: the font's capital R (U+0052) is the whole "BLADE RUNNER" logo,
         // so the r is U+0072.
         const NAME: &str = "d\u{65}ck\u{61}\u{72}d";
         return painter.text(Pos2::new(left_center.x + 4.0, left_center.y), Align2::LEFT_CENTER, NAME, font, white(240));
     }
-    let font = FontId::proportional(18.0);
-    let spacing = 2.5;
+    let font = FontId::proportional(18.0 * scale);
+    let spacing = 2.5 * scale;
     let galleys: Vec<_> = "DECKARD".chars().map(|c| painter.layout_no_wrap(c.to_string(), font.clone(), Color32::WHITE)).collect();
     let width: f32 = galleys.iter().map(|g| g.size().x).sum::<f32>() + spacing * (galleys.len() - 1) as f32;
     let h = galleys[0].size().y;
@@ -376,8 +381,9 @@ pub fn deckard_logo(painter: &Painter, left_center: Pos2) -> Rect {
     // the capitals.
     let cap_top = rect.top() + h * 0.24;
     let cut = (cap_top + h * 0.25).round() + 0.5;
-    let upper = Rect::from_min_max(Pos2::new(rect.left() - 10.0, rect.top()), Pos2::new(rect.right() + 10.0, cut - 1.0));
-    let lower = Rect::from_min_max(Pos2::new(rect.left() - 10.0, cut + 1.0), Pos2::new(rect.right() + 10.0, rect.bottom()));
+    let over = 10.0 * scale;
+    let upper = Rect::from_min_max(Pos2::new(rect.left() - over, rect.top()), Pos2::new(rect.right() + over, cut - 1.0));
+    let lower = Rect::from_min_max(Pos2::new(rect.left() - over, cut + 1.0), Pos2::new(rect.right() + over, rect.bottom()));
     for (clip, ink) in [(upper, white(150)), (lower, white(240))] {
         let p = painter.with_clip_rect(clip.intersect(painter.clip_rect()));
         let mut x = rect.left();
@@ -386,7 +392,7 @@ pub fn deckard_logo(painter: &Painter, left_center: Pos2) -> Rect {
             x += g.size().x + spacing;
         }
     }
-    painter.hline((rect.left() - 6.0)..=(rect.right() + 6.0), cut, Stroke::new(1.0, white(200)));
+    painter.hline((rect.left() - 6.0 * scale)..=(rect.right() + 6.0 * scale), cut, Stroke::new(1.0, white(200)));
     rect
 }
 
@@ -890,7 +896,14 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 erase_span(app, l, from.min(to), from.max(to));
             }
             Act::LaneSpan(span) => app.lane_span = span,
-            Act::SelectNotes(n) => app.selected = n,
+            Act::SelectNotes(n) => {
+                // Selecting notes (a click, a drag, ⌘A) puts the editing keys in the
+                // Pattern Editor: ⌘C then copies the notes, not the focused sound.
+                if !n.is_empty() {
+                    app.key_focus = KeyFocus::Events;
+                }
+                app.selected = n;
+            }
             Act::DrawMode(on) => app.mouse = if on { MouseMode::Draw } else { MouseMode::Select },
             Act::SetMouse(m) => app.mouse = m,
             Act::PerformEngage(g, on) => {
@@ -1344,6 +1357,12 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     );
                 }
                 let t = deckard_logo(ui.painter(), r.left_center());
+                if let Some(rel) = app.update.available() {
+                    let dot = Pos2::new(t.right() + 2.0, t.top() - 1.0);
+                    ui.painter().circle_filled(dot, 3.5, Color32::from_rgb(0xff, 0x80, 0x60));
+                    ui.interact(Rect::from_center_size(dot, Vec2::splat(12.0)), ui.id().with("update-dot"), Sense::hover())
+                        .on_hover_text(format!("Update available: {} (Help ▸ About)", rel.version_text()));
+                }
                 let c = Pos2::new(t.right() + 9.0, r.center().y + 1.0);
                 ui.painter().add(egui::Shape::convex_polygon(
                     vec![c + Vec2::new(-4.0, -2.5), c + Vec2::new(4.0, -2.5), c + Vec2::new(0.0, 2.5)],
@@ -5842,7 +5861,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 acts.push(Act::CopyNotes { cut });
             }
             if paste {
-                acts.push(Act::PasteNotes(crate::clipboard::PasteAt::Keys));
+                // A sound copied last pastes onto the focused sound even from here.
+                if app.last_copied == crate::clipboard::Copied::Sound && !app.sound_clipboard.is_empty() {
+                    acts.push(Act::PasteSound(app.group, app.sound));
+                } else {
+                    acts.push(Act::PasteNotes(crate::clipboard::PasteAt::Keys));
+                }
             }
         }
         // ⌘A selects the focused sound's notes; Esc clears the selection.

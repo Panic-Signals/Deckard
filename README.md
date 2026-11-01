@@ -29,10 +29,20 @@ DECKARD also does a few things Maschine doesn't:
   them, but it doesn't come with any. Without them DECKARD still works: you can use your
   own samples and DECKARD's built-in instruments.
 
+## Sponsoring DECKARD
+
+DECKARD is free and open. If it earns a place in your music, these keep it going:
+
+- **[GitHub Sponsors](https://github.com/sponsors/panic-signals)**
+- **[Patreon](https://www.patreon.com/c/null0perat0r)**
+- **[Splice](https://splice.sjv.io/c/8024859/3810236/49453)**: sounds for your
+  projects, through a referral link that pays DECKARD's author a commission at no cost
+  to you.
+
 ## Getting DECKARD
 
 1. Download the build for your system from the
-   [releases page](https://github.com/summitt/deckard/releases):
+   [releases page](https://github.com/Panic-Signals/Deckard/releases):
    - **macOS:** `DECKARD-<version>-macos-universal.zip`, which holds `DECKARD.app` and
      runs on both Apple Silicon and Intel Macs.
    - **Linux:** the `.deb` (Debian, Ubuntu, Mint) or `.rpm` (Fedora, openSUSE) package,
@@ -50,6 +60,12 @@ DECKARD also does a few things Maschine doesn't:
 3. Start DECKARD. It opens the project you had open last, or a new empty one. The
    first time, it offers to download the stem separation model (84 MB); you can also
    leave that until you first use STEMS.
+4. Keep it current. At launch DECKARD asks GitHub once whether a newer release exists
+   (Preferences ▸ General turns this off). When one does, a dot appears on the DECKARD
+   wordmark in the header, and **Help ▸ About DECKARD** shows the version with an
+   **Update** button that downloads it, checks it, installs it the way yours was
+   installed (the package through apt or dnf, with your password; the app bundle,
+   tarball or zip swapped in place) and restarts DECKARD.
 
 If you build DECKARD yourself, the packages end up in the `dist/` folder of your
 checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
@@ -417,7 +433,10 @@ tests it kept their settings when it re-saved the project.
   and the VST2 plug-ins that have a VST3 version. Each one is restored to the state
   Maschine saved, and you can open its own window. Audio Units (macOS) are listed but
   not loaded yet. DECKARD's built-in instruments and effects work everywhere.
-  - **Linux:** plug-ins are looked for in `~/.vst3` and the system's `vst3` folders.
+  - The standard plug-in folders are always searched; **Preferences ▸ Plug-ins ▸ Add…**
+    adds your own. On macOS they are `/Library/Audio/Plug-Ins/VST3` and `VST`, and the
+    same under your home folder's `Library`.
+  - **Linux:** `~/.vst3`, the system's `vst3` folders, `~/.vst` and `$VST_PATH`.
     NI's plug-ins have no Linux versions, but their Windows versions run through Wine
     and [yabridge](https://github.com/robbert-vdh/yabridge). **Preferences ▸ Plug-ins
     ▸ Windows plug-ins** shows what you have and installs what you don't: Wine from
@@ -425,9 +444,14 @@ tests it kept their settings when it re-saved the project.
     administrator's password), and yabridge into your home folder. Then install your
     plug-ins into Wine (NI's through Native Access, run with `wine`) and press Sync;
     DECKARD also syncs before each rescan. Plug-in windows are X11 windows (through
-    XWayland on a Wayland desktop).
-  - **Windows:** plug-ins are looked for in `Common Files\VST3`, system-wide and per
-    user.
+    XWayland on a Wayland desktop). With Wine 9.22 or later, yabridge's 5.1.1 release
+    takes no mouse clicks or typing in plug-in windows; Preferences notices and
+    offers to build yabridge from its source instead (**Build yabridge**, after
+    **Install build tools…**). When a plug-in doesn't show up or its window doesn't
+    answer, see [Windows plug-ins on Linux: troubleshooting](docs/windows-plugins-troubleshooting.md).
+  - **Windows:** `Common Files\VST3` (system-wide and per user), `VstPlugins`,
+    `Steinberg\VstPlugins`, `Native Instruments\VSTPlugins 64 bit` and
+    `Common Files\VST2`.
 - **File compatibility:** DECKARD reads and writes Maschine projects, groups, sounds
   and presets. Projects it saves open in Maschine 3, and files it doesn't change are
   written back byte for byte.
@@ -447,3 +471,9 @@ not part of DECKARD.
 DECKARD includes Ableton Link, which is licensed under the GPL (version 2 or later). A
 DECKARD built with Link is distributed under the GPL, as the About box says. Plaits'
 code is Mutable Instruments' (MIT licence).
+
+"Sounds on Splice" in the Help menu, the Splice button at the top of the browser's
+LIBRARY tab and its "find it on Splice" line open splice.com through a referral link.
+Splice pays DECKARD's author a commission on subscriptions started through it; it
+costs you nothing extra and changes nothing on Splice's side. The Splice name and logo
+are Splice's trademarks, used under its affiliate programme.
