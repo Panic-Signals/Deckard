@@ -16,10 +16,11 @@ Status: **working**, October 2026 (plan: `docs/superpowers/plans/2026-10-22-phas
   count-in only the metronome clicks.
 - **Input Quantize** (Preferences ▸ Recording): starts snap to the pattern editor's grid.
 - **Auto length** (docs/superpowers/plans/2026-10-23-auto-length-recording.md): a pattern
-  no length was chosen for (the default) recorded into from empty starts as **one bar**,
-  looping; a note in its last bar adds the next; when the song comes round with the last
-  bar empty it **settles** on the bars played (bar 1 played, bar 2 not: it loops bar 1)
-  and grows no more. REC off trims it to the bars played (nothing played: as it was).
+  no length was chosen for (the default) recorded into from empty starts as **one bar**
+  and **grows for as long as the take goes on**: when the song (or a note) reaches its
+  last bar, the next is added, a bar ahead, so it never comes round to the start while
+  recording, empty bars or not. REC off trims it to the bars up to the last note
+  (nothing played: as it was).
   Choosing a length (the pattern editor's LENGTH menu, the MK3's Record Prepare: hold
   REC, knob 4, buttons 5–8) turns Auto off; LENGTH ▸ Auto turns it back on. LENGTH and
   Record Prepare show "Auto". Auto is the session's (not saved), as in Maschine.

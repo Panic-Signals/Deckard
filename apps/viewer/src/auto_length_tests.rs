@@ -1,6 +1,7 @@
 //! Auto length recording (docs/superpowers/plans/2026-10-23-auto-length-recording.md):
 //! REC arms when stopped, SHIFT + REC counts in, and an Auto-length pattern recorded
-//! into from empty grows a bar at a time and settles on the bars played.
+//! into from empty grows a bar ahead of the song until REC is off, then keeps the bars
+//! played.
 
 use deckard_engine::{Mode, Recorded};
 
@@ -52,7 +53,8 @@ fn shift_rec_counts_in() {
     assert!(app.playing.is_some() || app.count_in_next == 1, "a bar's count-in");
 }
 
-/// Auto length, nothing played: one bar, looping.
+/// Auto length, nothing played: it grows a bar ahead of the song all the same; REC off,
+/// it's as it was.
 #[test]
 fn an_empty_auto_pattern_records_from_one_bar() {
     let mut app = app();
@@ -61,47 +63,74 @@ fn an_empty_auto_pattern_records_from_one_bar() {
     app.set_recording(true, false);
     assert_eq!(length(&app), bar);
     app.auto_grow_at(Mode::Scene(0), 500.0);
-    app.auto_grow_at(Mode::Scene(0), 10.0);
-    assert_eq!(length(&app), bar);
+    assert_eq!(length(&app), 2 * bar, "a bar ahead");
+    app.auto_grow_at(Mode::Scene(0), (bar + 10) as f64);
+    assert_eq!(length(&app), 3 * bar);
     app.set_recording(false, false);
     assert_eq!(length(&app), before, "nothing played: as it was");
 }
 
-/// Bar 1 played, bar 2 not: on into bar 2, then round to loop bar 1, which it stays.
+/// An empty bar doesn't stop it: it grows on until REC is off, then keeps the bars
+/// played (up to the last note's).
 #[test]
-fn an_auto_pattern_settles_on_the_bars_played() {
+fn an_auto_pattern_grows_until_rec_is_off() {
     let mut app = app();
     let bar = bar(&app);
     app.set_recording(true, false);
     app.auto_grow_at(Mode::Scene(0), 100.0);
     play(&mut app, 600.0, 240.0);
-    assert_eq!(length(&app), 2 * bar, "the next bar added");
-    app.auto_grow_at(Mode::Scene(0), (bar + 100) as f64);
     assert_eq!(length(&app), 2 * bar);
-    app.auto_grow_at(Mode::Scene(0), 20.0);
-    assert_eq!(length(&app), bar, "bar 2 empty: bar 1");
-    play(&mut app, 700.0, 100.0);
-    app.auto_grow_at(Mode::Scene(0), 900.0);
-    assert_eq!(length(&app), bar, "settled");
+    app.auto_grow_at(Mode::Scene(0), (bar + 100) as f64);
+    assert_eq!(length(&app), 3 * bar, "bar 2 empty: on into bar 3");
+    app.auto_grow_at(Mode::Scene(0), (2 * bar + 100) as f64);
+    play(&mut app, (2 * bar + 700) as f64, 100.0);
+    assert_eq!(length(&app), 4 * bar);
     app.set_recording(false, false);
-    assert_eq!(length(&app), bar);
+    assert_eq!(length(&app), 3 * bar, "to the last note's bar");
     let doc = app.doc.clone().unwrap();
     assert_eq!(doc.borrow().project().groups[0].patterns[0].notes.len(), 2);
 }
 
-/// Each bar played into adds the next.
+/// A note in the last bar adds the next too (before the song gets there).
 #[test]
 fn an_auto_pattern_grows_while_played_into() {
     let mut app = app();
     let bar = bar(&app);
     app.set_recording(true, false);
     play(&mut app, 100.0, 100.0);
-    app.auto_grow_at(Mode::Scene(0), (bar + 10) as f64);
+    assert_eq!(length(&app), 2 * bar);
     play(&mut app, (bar + 200) as f64, 100.0);
     assert_eq!(length(&app), 3 * bar);
-    app.auto_grow_at(Mode::Scene(0), (2 * bar + 10) as f64);
-    app.auto_grow_at(Mode::Scene(0), 5.0);
+    app.set_recording(false, false);
     assert_eq!(length(&app), 2 * bar);
+}
+
+/// A new pattern after a 4-bar one (chosen, with notes): recorded into, it grows past 4
+/// bars, not held to the other's length.
+#[test]
+fn a_new_pattern_after_a_long_one_grows_past_it() {
+    use crate::layout::{Act, apply_acts};
+    let mut app = app();
+    let bar = bar(&app);
+    let doc = app.doc.clone().unwrap();
+    doc.borrow_mut().set_pattern_length(0, 0, 4 * bar).unwrap();
+    doc.borrow_mut().set_length_auto(0, 0, false);
+    let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+    doc.borrow_mut().edit_notes("t", 0, 0, &[], &[n]).unwrap();
+    apply_acts(&mut app, vec![Act::NewPattern(0, 0)]);
+    assert_eq!(app.pattern, 1);
+    assert_eq!(doc.borrow().project().scenes[0].patterns, [(0, 1)]);
+    app.set_recording(true, false);
+    assert!(app.grow.is_some(), "auto length: {}", app.status);
+    let len = |app: &crate::App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[1].length;
+    assert_eq!(len(&app), bar);
+    for b in 0..6 {
+        app.auto_grow_at(Mode::Scene(0), (b * bar + 10) as f64);
+        play(&mut app, (b * bar + 200) as f64, 100.0);
+    }
+    assert_eq!(len(&app), 7 * bar, "a bar past the last played");
+    app.set_recording(false, false);
+    assert_eq!(len(&app), 6 * bar);
 }
 
 /// A chosen length (not Auto) records at that length.

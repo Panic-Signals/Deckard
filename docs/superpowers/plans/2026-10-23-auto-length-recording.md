@@ -14,6 +14,12 @@ each new bar is played into, and settles on the bars played as soon as a bar pas
 - **SHIFT + REC** (SHIFT + click on ●; the MK3's SHIFT + REC) counts in, then plays and
   records: Preferences ▸ Recording ▸ Count-in bars (default 1 bar: 4 clicks in 4/4;
   Off counts 1).
+> **Changed 2026-11-01** (user's request): the pattern no longer loops one bar before the
+> first note or settles when a bar passes empty. It grows a bar ahead of the song for as
+> long as the take goes on, and REC off trims it to the bars up to the last note. Growing
+> only on a note in the last bar also raced the engine: the song could come round
+> before the new bar reached it. The rules below are the original ones.
+
 - **Auto length** (a pattern no length was chosen for), recorded into from empty:
   - Nothing played yet: the pattern is **1 bar**, looping.
   - A note played in the pattern's last bar adds the **next bar** (the song plays on into
