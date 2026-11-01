@@ -3,6 +3,17 @@
 
 use deckard_model::Note;
 
+/// What was copied last: ⌘V pastes it, whichever list the keys are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Copied {
+    #[default]
+    Nothing,
+    Sound,
+    Group,
+    Notes,
+    Macro,
+}
+
 /// Notes cut or copied, as they were (their pattern's ticks), with what was in focus.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoteClip {

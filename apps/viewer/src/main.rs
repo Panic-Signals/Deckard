@@ -925,6 +925,8 @@ pub struct App {
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
+    /// Which of the clipboards was filled last: the one ⌘V pastes.
+    last_copied: clipboard::Copied,
     /// Text for the system clipboard, put there at the end of the frame (see
     /// [`App::flush_clipboard`]).
     clipboard_text: Option<String>,
@@ -1204,12 +1206,14 @@ impl App {
                 self.status = format!("copied {}", c.name);
                 self.clipboard_text = Some(c.name.clone());
                 self.sound_clipboard = vec![c];
+                self.last_copied = clipboard::Copied::Sound;
             }),
             Act::CutSound(g, s) => {
                 let clip = doc.borrow().copy_sound(g, s);
                 clip.and_then(|c| {
                     self.clipboard_text = Some(c.name.clone());
                     self.sound_clipboard = vec![c];
+                    self.last_copied = clipboard::Copied::Sound;
                     let mut d = doc.borrow_mut();
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
@@ -1262,6 +1266,7 @@ impl App {
         let bytes = doc.borrow().file_bytes(deckard_doc::FileItem::Group(g), &mxprj::sound_info::SoundInfo::default())?;
         self.group_clipboard = Some(bytes);
         self.clipboard_text = doc.borrow().project().groups.get(g).map(|x| x.name.clone());
+        self.last_copied = clipboard::Copied::Group;
         self.status = "copied the group".into();
         Ok(())
     }
@@ -7503,8 +7508,14 @@ impl App {
             if cmd(egui::Key::C) || ev(|e| matches!(e, egui::Event::Copy)) {
                 acts.push(Act::CopySound(g, s));
             }
-            if (cmd(egui::Key::V) || ev(|e| matches!(e, egui::Event::Paste(_)))) && !self.sound_clipboard.is_empty() {
-                acts.push(Act::PasteSound(g, s));
+            if cmd(egui::Key::V) || ev(|e| matches!(e, egui::Event::Paste(_))) {
+                // What was copied last: notes copied in the Pattern Editor paste onto
+                // the sound clicked here, at their times.
+                match self.last_copied {
+                    clipboard::Copied::Notes if self.note_clip.is_some() => acts.push(Act::PasteNotes(clipboard::PasteAt::Keys)),
+                    _ if !self.sound_clipboard.is_empty() => acts.push(Act::PasteSound(g, s)),
+                    _ => {}
+                }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
                 acts.push(Act::ResetSound(g, s));
@@ -7533,6 +7544,7 @@ impl App {
         }
         self.clipboard_text = Some(if notes.len() == 1 { "1 note".into() } else { format!("{} notes", notes.len()) });
         self.note_clip = Some(clipboard::NoteClip { notes: notes.clone(), sound: self.sound });
+        self.last_copied = clipboard::Copied::Notes;
         if cut && let Some(doc) = self.doc.clone() {
             if let Err(e) = doc.borrow_mut().edit_notes("Cut Notes", self.group, self.pattern, &notes, &[]) {
                 self.status = format!("can't cut: {e}");

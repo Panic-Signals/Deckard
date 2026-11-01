@@ -366,6 +366,7 @@ impl App {
         if let Some(x) = x {
             self.clipboard_text = Some(if x.name.is_empty() { "macro".into() } else { x.name.clone() });
             self.remote.macro_clip = Some(x);
+            self.last_copied = crate::clipboard::Copied::Macro;
         }
     }
 

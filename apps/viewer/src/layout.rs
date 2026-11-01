@@ -5854,7 +5854,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 acts.push(Act::CopyNotes { cut });
             }
             if paste {
-                acts.push(Act::PasteNotes(crate::clipboard::PasteAt::Keys));
+                // A sound copied last pastes onto the focused sound even from here.
+                if app.last_copied == crate::clipboard::Copied::Sound && !app.sound_clipboard.is_empty() {
+                    acts.push(Act::PasteSound(app.group, app.sound));
+                } else {
+                    acts.push(Act::PasteNotes(crate::clipboard::PasteAt::Keys));
+                }
             }
         }
         // ⌘A selects the focused sound's notes; Esc clears the selection.

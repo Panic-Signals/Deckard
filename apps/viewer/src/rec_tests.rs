@@ -549,6 +549,30 @@ fn copies_reach_the_system_clipboard_so_paste_events_arrive() {
     assert_eq!(copied_text(&cmds).as_deref(), Some("3 notes"));
 }
 
+/// Copied notes paste onto a sound clicked in the Sound list too: ⌘V pastes what was
+/// copied last, whichever list the keys are in.
+#[test]
+fn notes_paste_onto_the_sound_clicked_in_the_sound_list() {
+    use crate::layout::{Act, KeyFocus};
+    use eframe::egui::Event;
+    let mut app = perform_app();
+    let doc = app.doc.clone().unwrap();
+    let note =
+        |k: i64| deckard_model::Note { expr: None, sound: 2, position: k * 240, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note(0), note(1)]).unwrap();
+    crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Events), Act::CopyNotes { cut: false }]);
+    assert_eq!(app.note_clip.as_ref().map(|c| c.notes.len()), Some(2));
+    // Another track, clicked in the Sound list.
+    crate::layout::apply_acts(&mut app, vec![Act::FocusSound(5), Act::KeyFocus(KeyFocus::Sounds)]);
+    let ctx = eframe::egui::Context::default();
+    let input = eframe::egui::RawInput { events: vec![Event::Paste("2 notes".into())], ..Default::default() };
+    ctx.run_ui(input, |ui| app.editing_keys(ui.ctx())).textures_delta.clear();
+    let mut on_5: Vec<i64> =
+        doc.borrow().project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 5).map(|n| n.position).collect();
+    on_5.sort_unstable();
+    assert_eq!(on_5, [0, 240], "the notes pasted onto sound 5 at their times");
+}
+
 /// A new project whose first group has a pattern and a Perform FX.
 fn perform_app() -> crate::App {
     let mut app = crate::App::default();
