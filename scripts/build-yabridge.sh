@@ -32,7 +32,8 @@ for v in stable staging devel; do
 done
 
 family() {
-    local id like
+    local id
+    # shellcheck disable=SC1091
     id=$(. /etc/os-release 2>/dev/null && echo "${ID:-} ${ID_LIKE:-}")
     case " $id " in
         *" debian "*|*" ubuntu "*|*" linuxmint "*) echo debian ;;
