@@ -445,8 +445,10 @@ tests it kept their settings when it re-saved the project.
     plug-ins into Wine (NI's through Native Access, run with `wine`) and press Sync;
     DECKARD also syncs before each rescan. Plug-in windows are X11 windows (through
     XWayland on a Wayland desktop). With Wine 9.22 or later, yabridge's 5.1.1 release
-    loses mouse clicks and typing in plug-in windows; a build of yabridge's master
-    branch fixes that, and Preferences says so when it applies.
+    takes no mouse clicks or typing in plug-in windows; Preferences notices and
+    offers to build yabridge from its source instead (**Build yabridge**, after
+    **Install build tools…**). When a plug-in doesn't show up or its window doesn't
+    answer, see [Windows plug-ins on Linux: troubleshooting](docs/windows-plugins-troubleshooting.md).
   - **Windows:** `Common Files\VST3` (system-wide and per user), `VstPlugins`,
     `Steinberg\VstPlugins`, `Native Instruments\VSTPlugins 64 bit` and
     `Common Files\VST2`.

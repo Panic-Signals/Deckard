@@ -643,10 +643,14 @@ enum Pending {
 }
 
 /// A button of Preferences ▸ Plug-ins ▸ Windows plug-ins.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum WineAction {
     InstallWine(wine::Family),
     InstallYabridge,
+    /// The packages a yabridge build needs, as root.
+    InstallBuildTools(String),
+    /// yabridge from its source (Wine 9.22 and later).
+    BuildYabridge,
     Sync,
 }
 
@@ -7883,9 +7887,9 @@ impl App {
             match &st.wine {
                 Some(v) => {
                     ui.label(v);
-                    if st.wine_version().is_some_and(wine::newer_than_yabridge_supports) {
-                        ui.label(egui::RichText::new("With Wine 9.22 and later, yabridge 5.1.1 loses mouse clicks and typing in plug-in windows; fixed in yabridge's master branch, not yet released").weak())
-                            .on_hover_text("Build yabridge from https://github.com/robbert-vdh/yabridge (master) and put it in ~/.local/share/yabridge, or use Wine 9.21.");
+                    if st.yabridge_needs_build() {
+                        ui.label(egui::RichText::new("newer than yabridge's 5.1.1 release: with it, plug-in windows take no clicks or typing. yabridge has to be built from its source (below).").weak())
+                            .on_hover_text("yabridge issues #382 and #409. The fix is in yabridge's master branch, which DECKARD can build; docs/windows-plugins-troubleshooting.md tells the whole story.");
                     } else {
                         ui.label("");
                     }
@@ -7913,12 +7917,55 @@ impl App {
             }
             ui.end_row();
             ui.label("yabridge");
-            match &st.yabridgectl {
-                Some(p) => {
-                    ui.label(p.display().to_string());
+            // The button that gets a built yabridge: the build itself, or first the
+            // tools it needs (as root), or what to install by hand.
+            let build_button = |ui: &mut egui::Ui, action: &mut Option<WineAction>| {
+                if st.build.ready() {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Build yabridge"))
+                        .on_hover_text("Builds yabridge's master branch from its source into ~/.local/share/yabridge; a few minutes. The release copy is kept as yabridge.release.")
+                        .clicked()
+                    {
+                        *action = Some(WineAction::BuildYabridge);
+                    }
+                } else {
+                    let missing = st.build.missing.join(" ");
+                    match (&st.build.root_command, st.pkexec) {
+                        (Some(cmd), true) => {
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Install build tools…"))
+                                .on_hover_text(format!("Asks for an administrator's password and installs: {missing}"))
+                                .clicked()
+                            {
+                                *action = Some(WineAction::InstallBuildTools(cmd.clone()));
+                            }
+                        }
+                        (Some(cmd), false) => {
+                            ui.label(format!("as root: {cmd}"));
+                        }
+                        (None, _) => {
+                            ui.label(format!("to build it, install: {missing}"));
+                        }
+                    }
+                }
+            };
+            match (&st.yabridgectl, st.yabridge_needs_build()) {
+                (Some(p), false) => {
+                    ui.label(match &st.yabridge_build {
+                        Some(b) => format!("{} ({b})", p.display()),
+                        None => p.display().to_string(),
+                    });
                     ui.label("");
                 }
-                None => {
+                (Some(p), true) => {
+                    ui.label(format!("{} (the 5.1.1 release)", p.display()));
+                    build_button(ui, action);
+                }
+                (None, true) => {
+                    ui.label("not installed");
+                    build_button(ui, action);
+                }
+                (None, false) => {
                     ui.label("not installed");
                     if ui
                         .add_enabled(!busy, egui::Button::new("Install yabridge"))
@@ -7960,6 +8007,8 @@ impl App {
         let (what, job): (&'static str, Box<dyn FnOnce() -> Result<String, String> + Send>) = match action {
             WineAction::InstallWine(f) => ("Installing Wine", Box::new(move || wine::install_wine(f))),
             WineAction::InstallYabridge => ("Installing yabridge", Box::new(wine::install_yabridge)),
+            WineAction::InstallBuildTools(cmd) => ("Installing the build tools", Box::new(move || wine::install_build_tools(&cmd))),
+            WineAction::BuildYabridge => ("Building yabridge", Box::new(wine::build_yabridge)),
             WineAction::Sync => ("Syncing Windows plug-ins", Box::new(wine::sync)),
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -7990,6 +8039,10 @@ impl App {
         self.wine_status = None;
         if what == "Syncing Windows plug-ins" && result.is_ok() {
             self.catalog.rescan(&self.settings);
+        }
+        // A new yabridge: its bundles have to be made again.
+        if what == "Building yabridge" && result.is_ok() {
+            self.start_wine(WineAction::Sync);
         }
     }
 

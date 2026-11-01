@@ -61,6 +61,7 @@ target/release/deckard --write-icon "$STAGE/deckard.png" 256
 install -m 644 scripts/linux/50-deckard-maschine-mk3.rules "$STAGE/50-deckard-maschine-mk3.rules"
 install -m 755 scripts/install-demucs.sh "$STAGE/install-demucs.sh"
 install -m 755 scripts/install-yabridge.sh "$STAGE/install-yabridge.sh"
+install -m 755 scripts/build-yabridge.sh "$STAGE/build-yabridge.sh"
 cat > "$STAGE/README.txt" <<README
 DECKARD $VERSION for Linux ($ARCH)
 
@@ -75,6 +76,10 @@ Windows plug-ins (NI's and others without Linux versions) run through Wine and
 yabridge: Preferences > Plug-ins installs both, or
   sudo apt install wine   (or: sudo dnf install wine)
   ./install-yabridge.sh
+With Wine 9.22 or later, yabridge's release takes no clicks or typing in plug-in
+windows; build it from its source instead (Preferences does this too):
+  ./build-yabridge.sh --check    (lists the packages it needs)
+  ./build-yabridge.sh
 
 Maschine MK3: to use the controller without root, install the udev rule once:
   sudo cp 50-deckard-maschine-mk3.rules /etc/udev/rules.d/
