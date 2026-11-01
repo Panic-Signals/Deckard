@@ -1,17 +1,22 @@
 //! The browser panel, left of the arranger (the LIBRARY button, F4): the LIBRARY tab
 //! (sections, Factory/User, favourites, product, Types, Characters, search, results,
 //! prehear) and the FILES tab (a plain folder browser). As the approved mockup
-//! (docs/superpowers/specs/2026-10-22-browser-design.md).
+//! (docs/superpowers/specs/2026-10-22-browser-design.md). The LIBRARY tab starts with
+//! a Splice button (DECKARD's referral link, see `splice`).
 
 use super::{Act, S00, S01, S02, S03, apply, font, white};
 use crate::App;
 use crate::browser::{BrowseAct, Tab};
 use deckard_library::Kind;
-use eframe::egui::{self, Align2, Color32, RichText, Sense, Ui, Vec2};
+use eframe::egui::{self, Align2, Color32, ColorImage, Id, Rect, RichText, Sense, TextureHandle, TextureOptions, Ui, Vec2};
 
 pub const WIDTH: f32 = 300.0;
 const ACCENT: Color32 = Color32::from_rgb(0xF3, 0x9C, 0x12);
 const RESULT_ROW: f32 = 20.0;
+/// Splice's lockup (symbol and wordmark), black on transparent, 944 × 288.
+const SPLICE_LOGO: &[u8] = include_bytes!("../../assets/splice-logo.png");
+const SPLICE_BUTTON_HEIGHT: f32 = 36.0;
+const SPLICE_LOGO_HEIGHT: f32 = 20.0;
 
 /// What dragging a result carries: its index in the results.
 #[derive(Clone, Copy)]
@@ -54,6 +59,7 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
 fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let b = &app.browser;
     let q = &b.query;
+    splice_button(ui);
     ui.horizontal_wrapped(|ui| {
         for (k, label) in KINDS {
             if chip(ui, label, q.kind == k, 11.0).clicked() {
@@ -142,7 +148,41 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         splice_line(ui, &format!("Nothing here for \"{}\". Find it on Splice ↗", q.text.trim()), Some(&q.text));
     }
     results(app, ui, acts);
-    splice_line(ui, "Get more sounds on Splice ↗", None);
+}
+
+/// The Splice button: white, the width of the panel, Splice's logo on it. Opens
+/// Splice's front page through DECKARD's referral link, saying so on hover.
+fn splice_button(ui: &mut Ui) {
+    // Decoded once per run; kept in the context's data. (Loading the texture must
+    // happen outside `data_mut`: both take the context's lock.)
+    let id = Id::new("splice-logo");
+    let logo: TextureHandle = match ui.ctx().data(|d| d.get_temp(id)) {
+        Some(t) => t,
+        None => {
+            let img = image::load_from_memory(SPLICE_LOGO).expect("the Splice logo is a PNG").to_rgba8();
+            let ci = ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            let t = ui.ctx().load_texture("splice-logo", ci, TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, t.clone()));
+            t
+        }
+    };
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), SPLICE_BUTTON_HEIGHT), Sense::click());
+    let resp = resp.on_hover_text(crate::splice::DISCLOSURE);
+    let fill = if resp.is_pointer_button_down_on() {
+        Color32::from_gray(0xD8)
+    } else if resp.hovered() {
+        Color32::from_gray(0xEE)
+    } else {
+        Color32::WHITE
+    };
+    ui.painter().rect_filled(r, 6.0, fill);
+    let [w, h] = logo.size();
+    let size = Vec2::new(SPLICE_LOGO_HEIGHT * w as f32 / h as f32, SPLICE_LOGO_HEIGHT);
+    let logo_rect = Rect::from_center_size(r.center(), size);
+    ui.painter().image(logo.id(), logo_rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+    if resp.clicked() {
+        crate::splice::open(ui.ctx(), None);
+    }
 }
 
 /// A line that opens Splice (through DECKARD's referral link), saying so on hover.
@@ -156,7 +196,7 @@ fn splice_line(ui: &mut Ui, text: &str, search: Option<&str>) {
 
 fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let b = &app.browser;
-    let height = (ui.available_height() - 50.0).max(60.0);
+    let height = (ui.available_height() - 34.0).max(60.0);
     egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show_rows(
         ui,
         RESULT_ROW,

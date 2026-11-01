@@ -1,6 +1,7 @@
-//! Sounds on Splice, through DECKARD's referral link: the Help menu's entry and the
-//! browser's "find it on Splice" lines open splice.com, and subscriptions started that
-//! way pay DECKARD a commission. The link is an Impact tracking link; Impact lands the
+//! Sounds on Splice, through DECKARD's referral link: the Help menu's entry, the
+//! browser's Splice button and its "find it on Splice" line open splice.com, and
+//! subscriptions started that way pay DECKARD a commission. The link is an Impact
+//! tracking link; Impact lands the
 //! visitor on the page named by its `u` parameter (a Splice search for what was
 //! typed), or on Splice's front page without one.
 
