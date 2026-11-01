@@ -573,6 +573,57 @@ fn notes_paste_onto_the_sound_clicked_in_the_sound_list() {
     assert_eq!(on_5, [0, 240], "the notes pasted onto sound 5 at their times");
 }
 
+/// Copied notes paste into a group clicked in the Group list: into its pattern of the
+/// focused scene, made (and put in the scene) when it has none, as one undo step.
+#[test]
+fn notes_paste_into_a_group_clicked_in_the_group_list() {
+    use crate::layout::{Act, KeyFocus};
+    use eframe::egui::Event;
+    let mut app = perform_app();
+    let doc = app.doc.clone().unwrap();
+    // A second group, with no pattern yet.
+    let g = doc.borrow_mut().add_group().unwrap();
+    assert!(doc.borrow().project().groups[g].patterns.is_empty());
+    let note =
+        |k: i64| deckard_model::Note { expr: None, sound: 2, position: k * 240, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note(0), note(1)]).unwrap();
+    crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Events), Act::CopyNotes { cut: false }]);
+    crate::layout::apply_acts(&mut app, vec![Act::FocusGroup(g), Act::KeyFocus(KeyFocus::Groups)]);
+    let ctx = eframe::egui::Context::default();
+    let input = eframe::egui::RawInput { events: vec![Event::Paste("2 notes".into())], ..Default::default() };
+    ctx.run_ui(input, |ui| app.editing_keys(ui.ctx())).textures_delta.clear();
+    let d = doc.borrow();
+    let p = d.project();
+    assert_eq!(p.groups[g].patterns.len(), 1, "a pattern was made for the group");
+    let mut notes: Vec<(usize, i64)> = p.groups[g].patterns[0].notes.iter().map(|n| (n.sound, n.position)).collect();
+    notes.sort_unstable();
+    assert_eq!(notes, [(0, 0), (0, 240)], "onto the group's focused sound, at their times");
+    assert!(p.scenes[0].patterns.contains(&(g, 0)), "the new pattern plays in the focused scene: {:?}", p.scenes[0].patterns);
+    assert_eq!(d.undo_label(), Some("Paste Notes"));
+    assert_eq!((app.group, app.pattern), (g, 0));
+}
+
+/// Selecting notes (⌘A after a click in the Sound list, say) moves the editing keys
+/// to the Pattern Editor, so ⌘C copies the notes and not the sound.
+#[test]
+fn selecting_notes_moves_the_keys_to_the_pattern_editor() {
+    use crate::layout::{Act, KeyFocus};
+    use eframe::egui::Event;
+    let mut app = perform_app();
+    let doc = app.doc.clone().unwrap();
+    let note = deckard_model::Note { expr: None, sound: 2, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note]).unwrap();
+    crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Sounds), Act::SelectNotes(vec![note])]);
+    assert_eq!(app.key_focus, KeyFocus::Events);
+    let ctx = eframe::egui::Context::default();
+    let input = eframe::egui::RawInput { events: vec![Event::Copy], ..Default::default() };
+    ctx.run_ui(input, |ui| app.editing_keys(ui.ctx())).textures_delta.clear();
+    assert!(app.sound_clipboard.is_empty(), "the Sound list's copy stays out of it");
+    // Clearing the selection doesn't move the keys.
+    crate::layout::apply_acts(&mut app, vec![Act::KeyFocus(KeyFocus::Sounds), Act::SelectNotes(Vec::new())]);
+    assert_eq!(app.key_focus, KeyFocus::Sounds);
+}
+
 /// A new project whose first group has a pattern and a Perform FX.
 fn perform_app() -> crate::App {
     let mut app = crate::App::default();

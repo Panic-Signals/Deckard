@@ -896,7 +896,14 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 erase_span(app, l, from.min(to), from.max(to));
             }
             Act::LaneSpan(span) => app.lane_span = span,
-            Act::SelectNotes(n) => app.selected = n,
+            Act::SelectNotes(n) => {
+                // Selecting notes (a click, a drag, ⌘A) puts the editing keys in the
+                // Pattern Editor: ⌘C then copies the notes, not the focused sound.
+                if !n.is_empty() {
+                    app.key_focus = KeyFocus::Events;
+                }
+                app.selected = n;
+            }
             Act::DrawMode(on) => app.mouse = if on { MouseMode::Draw } else { MouseMode::Select },
             Act::SetMouse(m) => app.mouse = m,
             Act::PerformEngage(g, on) => {

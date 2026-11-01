@@ -7508,17 +7508,23 @@ impl App {
             if cmd(egui::Key::C) || ev(|e| matches!(e, egui::Event::Copy)) {
                 acts.push(Act::CopySound(g, s));
             }
-            if cmd(egui::Key::V) || ev(|e| matches!(e, egui::Event::Paste(_))) {
-                // What was copied last: notes copied in the Pattern Editor paste onto
-                // the sound clicked here, at their times.
-                match self.last_copied {
-                    clipboard::Copied::Notes if self.note_clip.is_some() => acts.push(Act::PasteNotes(clipboard::PasteAt::Keys)),
-                    _ if !self.sound_clipboard.is_empty() => acts.push(Act::PasteSound(g, s)),
-                    _ => {}
-                }
-            }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
                 acts.push(Act::ResetSound(g, s));
+            }
+        }
+        // ⌘V in either list pastes what was copied last: notes copied in the Pattern
+        // Editor onto the sound clicked (the group's first, for a group clicked), at
+        // their times; a sound onto the focused sound; a group over the group clicked.
+        if matches!(self.key_focus, KeyFocus::Sounds | KeyFocus::Groups)
+            && (cmd(egui::Key::V) || ev(|e| matches!(e, egui::Event::Paste(_))))
+        {
+            match self.last_copied {
+                clipboard::Copied::Notes if self.note_clip.is_some() => acts.push(Act::PasteNotes(clipboard::PasteAt::Keys)),
+                clipboard::Copied::Group if self.key_focus == KeyFocus::Groups && self.group_clipboard.is_some() => {
+                    acts.push(Act::PasteGroup(g));
+                }
+                _ if !self.sound_clipboard.is_empty() => acts.push(Act::PasteSound(g, s)),
+                _ => {}
             }
         }
         layout::apply_acts(self, acts);
@@ -7558,29 +7564,47 @@ impl App {
     /// past its end; the pasted notes are selected.
     pub fn paste_notes(&mut self, at: clipboard::PasteAt) {
         let (Some(clip), Some(doc)) = (self.note_clip.clone(), self.doc.clone()) else { return };
-        let (g, pi) = (self.group, self.pattern);
-        let (add, start, len, bar) = {
-            let d = doc.borrow();
-            let p = d.project();
-            let Some(group) = p.groups.get(g) else { return };
-            let Some(pat) = group.patterns.get(pi) else { return };
-            let add = clipboard::paste(&clip, at, self.sound, self.piano_roll, pat.start, self.grid, group.sounds.len());
-            (add, pat.start, layout::pattern_len(p, g, pi), p.bar_length())
-        };
-        if add.is_empty() {
-            return;
-        }
-        let end = add.iter().map(|n| n.position + n.length).max().unwrap_or(start) - start;
+        let (g, focused, scene, song_view) = (self.group, self.pattern, self.scene, self.song_view);
+        let (sound, keyboard, grid) = (self.sound, self.piano_roll, self.grid);
+        let mut pasted = None;
         let r = doc.borrow_mut().transaction("Paste Notes", |d| {
+            // The focused pattern; a group without one (clicked in the Group list)
+            // gets "Pattern 1", playing in the focused scene, as drawing a note does.
+            let n = d.project().groups.get(g).ok_or("no such group")?.patterns.len();
+            let pi = if focused < n {
+                focused
+            } else if n == 0 {
+                let pi = d.add_pattern(g, usize::MAX, "Pattern 1")?;
+                if !song_view {
+                    d.assign_pattern(scene, g, Some(pi))?;
+                }
+                pi
+            } else {
+                0
+            };
+            let p = d.project();
+            let group = &p.groups[g];
+            let pat = &group.patterns[pi];
+            let add = clipboard::paste(&clip, at, sound, keyboard, pat.start, grid, group.sounds.len());
+            if add.is_empty() {
+                return Ok(());
+            }
+            let (start, len, bar) = (pat.start, layout::pattern_len(p, g, pi), p.bar_length());
+            let end = add.iter().map(|n| n.position + n.length).max().unwrap_or(start) - start;
             d.edit_notes("Paste Notes", g, pi, &[], &add)?;
             if end > len {
                 d.set_pattern_length(g, pi, (end + bar - 1) / bar * bar)?;
             }
+            pasted = Some((pi, add));
             Ok(())
         });
-        match r {
-            Ok(()) => self.selected = add,
-            Err(e) => self.status = format!("can't paste: {e}"),
+        match (r, pasted) {
+            (Ok(()), Some((pi, add))) => {
+                self.pattern = pi;
+                self.selected = add;
+            }
+            (Ok(()), None) => {}
+            (Err(e), _) => self.status = format!("can't paste: {e}"),
         }
     }
 
