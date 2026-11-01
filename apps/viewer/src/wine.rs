@@ -74,7 +74,9 @@ pub fn parse_version(text: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// yabridge's README: its 5.1.1 release has trouble with Wine 9.22 and later.
+/// yabridge's 5.1.1 release (its last) predates Wine 9.22, whose window changes keep
+/// mouse clicks and keys from reaching plug-in windows through it (yabridge #382,
+/// #409); its master branch fixes that.
 pub fn newer_than_yabridge_supports(version: (u32, u32)) -> bool {
     version >= (9, 22)
 }

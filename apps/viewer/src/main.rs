@@ -7884,7 +7884,8 @@ impl App {
                 Some(v) => {
                     ui.label(v);
                     if st.wine_version().is_some_and(wine::newer_than_yabridge_supports) {
-                        ui.label(egui::RichText::new("yabridge 5.1.1 is known to have trouble with Wine 9.22 and later").weak());
+                        ui.label(egui::RichText::new("With Wine 9.22 and later, yabridge 5.1.1 loses mouse clicks and typing in plug-in windows; fixed in yabridge's master branch, not yet released").weak())
+                            .on_hover_text("Build yabridge from https://github.com/robbert-vdh/yabridge (master) and put it in ~/.local/share/yabridge, or use Wine 9.21.");
                     } else {
                         ui.label("");
                     }
