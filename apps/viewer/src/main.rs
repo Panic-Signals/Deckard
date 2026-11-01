@@ -3385,6 +3385,11 @@ impl App {
             return;
         }
         let Some(doc) = self.doc.clone() else { return };
+        // No pattern of the focused group in the focused scene: a new one to record into.
+        let scene_exists = self.scene < doc.borrow().project().scenes.len();
+        if on && scene_exists && self.scene_pattern(self.group).is_none() {
+            layout::apply_acts(self, vec![layout::Act::NewPattern(self.scene, self.group)]);
+        }
         self.recording = on;
         if let Some(Ok(c)) = &mut self.controller {
             c.set_recording(on);
@@ -3972,6 +3977,10 @@ impl App {
             if self.scene_pattern(self.group) == Some(self.pattern) {
                 v.pattern_position = self.pattern_at(self.group, head).map(|(at, _)| pt.start + at);
             }
+        } else {
+            // None: as long as a new one would be (a step makes it), so the Step page
+            // takes its pads.
+            v.pattern_length = self.default_pattern_length(p);
         }
         v.scenes = (0..p.scenes.len())
             .map(|i| deckard_surface::SceneView {
