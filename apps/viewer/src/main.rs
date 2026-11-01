@@ -3375,10 +3375,7 @@ impl App {
     fn set_recording(&mut self, on: bool, count_in: bool) {
         // Armed, SHIFT + REC: count in and start.
         if on && self.recording && count_in && self.playing.is_none() {
-            self.count_in_next = self.settings.count_in_bars.max(1);
-            self.transport_play();
-            self.sync_transport();
-            self.status = "Recording".into();
+            self.count_in_and_play();
             return;
         }
         if on == self.recording {
@@ -3419,10 +3416,7 @@ impl App {
                 self.status = "Recording".into();
             } else if count_in {
                 // SHIFT + REC: count in, then play and record.
-                self.count_in_next = self.settings.count_in_bars.max(1);
-                self.transport_play();
-                self.sync_transport();
-                self.status = "Recording".into();
+                self.count_in_and_play();
             } else {
                 // Armed: PLAY starts the take.
                 self.status = "Armed: PLAY to record".into();
@@ -3452,6 +3446,16 @@ impl App {
             doc.borrow_mut().end_take();
             self.status = "Recorded".into();
         }
+    }
+
+    /// SHIFT + REC: count in (Preferences' bars, at least one), then play and record
+    /// from the beginning, as PLAY from a fresh start does (not where STOP left it).
+    fn count_in_and_play(&mut self) {
+        self.count_in_next = self.settings.count_in_bars.max(1);
+        self.parked = None;
+        self.transport_play();
+        self.sync_transport();
+        self.status = "Recording".into();
     }
 
     /// Notes the engine recorded: written as their releases come.
@@ -8654,6 +8658,35 @@ mod tests {
         let first = at(&mut app, 0.0);
         app.stop();
         assert!(first < parked, "RESTART: from the start ({first})");
+    }
+
+    /// SHIFT + REC counts in from the start (of the scene, or the focused section), not
+    /// from where STOP left the song.
+    #[test]
+    fn a_count_in_starts_from_the_beginning() {
+        let mut app = App::default();
+        app.new_project();
+        app.transport_play();
+        if !matches!(app.output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let ctx = egui::Context::default();
+        let quarter = deckard_model::PPQ as f64;
+        let wait = std::time::Instant::now();
+        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < std::time::Duration::from_millis(2000) {
+            app.background(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.stop();
+        let parked = app.shown_playhead().expect("shown where it stopped").position;
+        assert!(parked > quarter, "{parked}");
+        app.set_recording(true, true);
+        app.background(&ctx);
+        let first = app.playhead().map_or(0.0, |h| h.position);
+        app.set_recording(false, false);
+        app.stop();
+        assert!(first < quarter, "counted in from the start, not {parked}: {first}");
     }
 
     /// BUGS #6: a project reopens where it was saved: the focused sound and slot, the
