@@ -111,6 +111,44 @@ fn a_step_makes_a_pattern_when_theres_none() {
     assert_eq!(p.groups[0].patterns[0].notes.len(), 1);
 }
 
+/// With no pattern, the controller is told the length a new one would have: the Step
+/// page takes its pads as steps in it (a step past the length is dropped).
+#[test]
+fn with_no_pattern_the_steps_span_a_new_ones_length() {
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.scene) = (0, 0);
+    let bar = app.doc.as_ref().unwrap().borrow().project().bar_length();
+    assert_eq!(app.surface_view().pattern_length, bar);
+}
+
+/// REC with no pattern in the focused scene: a new one, and what's played lands in it.
+#[test]
+fn recording_makes_a_pattern_when_theres_none() {
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.scene, app.sound) = (0, 0, 0);
+    app.set_recording(true, false);
+    let doc = app.doc.clone().unwrap();
+    assert_eq!(doc.borrow().project().groups[0].patterns.len(), 1, "{}", app.status);
+    assert_eq!(doc.borrow().project().scenes[0].patterns, [(0, 0)]);
+    assert_eq!(app.pattern, 0);
+    let on = deckard_engine::Recorded {
+        group: 0,
+        sound: 0,
+        pitch: 60,
+        velocity: 100,
+        length: i64::MAX,
+        tick: 0.0,
+        mode: deckard_engine::Mode::Scene(0),
+        seq: 0,
+        played: 0.0,
+    };
+    app.take_in_recorded(vec![on, deckard_engine::Recorded { velocity: 0, tick: 240.0, played: 240.0, ..on }]);
+    app.set_recording(false, false);
+    assert_eq!(doc.borrow().project().groups[0].patterns[0].notes.len(), 1, "{}", app.status);
+}
+
 /// #7: quantizing while recording is its own undo step: undo takes back the notes
 /// recorded after it, not the quantize too.
 #[test]

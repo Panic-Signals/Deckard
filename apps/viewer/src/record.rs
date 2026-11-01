@@ -339,9 +339,10 @@ fn write(doc: &mut Document, (g, pi, sound, lane): (usize, usize, usize, LaneRef
 }
 
 /// Auto length (docs/superpowers/plans/2026-10-23-auto-length-recording.md): an empty
-/// pattern recorded into starts as one bar, looping; a note in its last bar adds the
-/// next; coming round to its start with the last bar empty, it settles on the bars
-/// played and grows no more.
+/// pattern recorded into starts as one bar and grows for as long as the take goes on.
+/// The song (or a note) reaching its last bar adds the next, a bar ahead of the playhead,
+/// so it never comes round to the start while recording; REC off trims it to the bars
+/// played.
 #[derive(Debug, Clone)]
 pub struct Grow {
     pub group: usize,
@@ -350,44 +351,25 @@ pub struct Grow {
     pub before: i64,
     bar: i64,
     bars: i64,
-    /// The last bar a note was played in.
-    played: Option<i64>,
-    settled: bool,
-    /// Where in the pattern the song was last seen.
-    last: i64,
 }
 
 impl Grow {
     pub fn new(group: usize, pattern: usize, bar: i64) -> Grow {
-        Grow { group, pattern, before: bar, bar: bar.max(1), bars: 1, played: None, settled: false, last: 0 }
+        Grow { group, pattern, before: bar, bar: bar.max(1), bars: 1 }
     }
 
     pub fn length(&self) -> i64 {
         self.bars * self.bar
     }
 
-    pub fn settled(&self) -> bool {
-        self.settled
-    }
-
-    /// A note started `at` ticks into the pattern: its new length, if it grows.
-    pub fn hit(&mut self, at: i64) -> Option<i64> {
+    /// The song, or a note played, `at` ticks into the pattern: its new length, if it
+    /// grows.
+    pub fn reach(&mut self, at: i64) -> Option<i64> {
         let b = at.max(0) / self.bar;
-        self.played = Some(self.played.map_or(b, |p| p.max(b)));
-        if self.settled || b + 1 < self.bars {
+        if b + 1 < self.bars {
             return None;
         }
         self.bars = b + 2;
-        Some(self.length())
-    }
-
-    /// The song `at` ticks into the pattern: its new length, if it settles.
-    pub fn at(&mut self, at: i64) -> Option<i64> {
-        let wrapped = at < self.last;
-        self.last = at;
-        let played = self.played.filter(|_| wrapped && !self.settled)?;
-        self.settled = true;
-        self.bars = played + 1;
         Some(self.length())
     }
 }
@@ -410,51 +392,28 @@ mod grow_tests {
 
     const BAR: i64 = 3840;
 
-    /// Nothing played: one bar, looping.
+    /// It starts as a bar; the song reaching it (its last) adds the next, played into or
+    /// not.
     #[test]
-    fn nothing_played_loops_a_bar() {
+    fn the_song_reaching_the_last_bar_adds_the_next() {
         let mut g = Grow::new(0, 0, BAR);
         assert_eq!(g.length(), BAR);
-        for at in [0, 1000, 3000, 10, 2000] {
-            assert_eq!(g.at(at), None);
+        assert_eq!(g.reach(0), Some(2 * BAR), "a bar ahead from the start");
+        assert_eq!(g.reach(500), None);
+        assert_eq!(g.reach(BAR + 10), Some(3 * BAR));
+        assert_eq!(g.reach(2 * BAR + 10), Some(4 * BAR), "an empty bar: it grows on");
+        assert_eq!(g.reach(BAR + 900), None, "an earlier bar: no change");
+        assert_eq!(g.length(), 4 * BAR);
+    }
+
+    /// It grows for as long as it's reached: past any length.
+    #[test]
+    fn it_grows_without_end() {
+        let mut g = Grow::new(0, 0, BAR);
+        for b in 0..20 {
+            g.reach(b * BAR + 100);
         }
-        assert_eq!(g.length(), BAR);
-    }
-
-    /// Bar 1 played, bar 2 not: it goes on into bar 2, then comes round to loop bar 1.
-    #[test]
-    fn an_empty_bar_settles_it() {
-        let mut g = Grow::new(0, 0, BAR);
-        assert_eq!(g.at(500), None);
-        assert_eq!(g.hit(600), Some(2 * BAR), "the next bar added");
-        assert_eq!(g.at(BAR + 100), None, "on into bar 2");
-        assert_eq!(g.at(2 * BAR - 10), None);
-        assert_eq!(g.at(20), Some(BAR), "round again, bar 2 empty: bar 1 only");
-        assert!(g.settled());
-        assert_eq!(g.hit(700), None, "settled: no more growing");
-        assert_eq!(g.length(), BAR);
-    }
-
-    /// Each bar played into adds the next.
-    #[test]
-    fn each_bar_played_adds_the_next() {
-        let mut g = Grow::new(0, 0, BAR);
-        assert_eq!(g.hit(100), Some(2 * BAR));
-        assert_eq!(g.at(BAR + 50), None);
-        assert_eq!(g.hit(BAR + 200), Some(3 * BAR));
-        assert_eq!(g.at(2 * BAR + 50), None);
-        assert_eq!(g.hit(BAR + 900), None, "an earlier bar: no change");
-        assert_eq!(g.at(10), Some(2 * BAR), "bar 3 empty: two bars");
-    }
-
-    /// Notes first played on a later pass of the one-bar loop still start it.
-    #[test]
-    fn the_first_note_may_come_late() {
-        let mut g = Grow::new(0, 0, BAR);
-        for at in [100, 3000, 50, 3500, 20] {
-            assert_eq!(g.at(at), None);
-        }
-        assert_eq!(g.hit(2000), Some(2 * BAR));
+        assert_eq!(g.length(), 21 * BAR);
     }
 }
 

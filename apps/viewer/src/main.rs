@@ -3375,16 +3375,18 @@ impl App {
     fn set_recording(&mut self, on: bool, count_in: bool) {
         // Armed, SHIFT + REC: count in and start.
         if on && self.recording && count_in && self.playing.is_none() {
-            self.count_in_next = self.settings.count_in_bars.max(1);
-            self.transport_play();
-            self.sync_transport();
-            self.status = "Recording".into();
+            self.count_in_and_play();
             return;
         }
         if on == self.recording {
             return;
         }
         let Some(doc) = self.doc.clone() else { return };
+        // No pattern of the focused group in the focused scene: a new one to record into.
+        let scene_exists = self.scene < doc.borrow().project().scenes.len();
+        if on && scene_exists && self.scene_pattern(self.group).is_none() {
+            layout::apply_acts(self, vec![layout::Act::NewPattern(self.scene, self.group)]);
+        }
         self.recording = on;
         if let Some(Ok(c)) = &mut self.controller {
             c.set_recording(on);
@@ -3414,10 +3416,7 @@ impl App {
                 self.status = "Recording".into();
             } else if count_in {
                 // SHIFT + REC: count in, then play and record.
-                self.count_in_next = self.settings.count_in_bars.max(1);
-                self.transport_play();
-                self.sync_transport();
-                self.status = "Recording".into();
+                self.count_in_and_play();
             } else {
                 // Armed: PLAY starts the take.
                 self.status = "Armed: PLAY to record".into();
@@ -3432,8 +3431,8 @@ impl App {
             let held = self.take.close(now);
             self.apply_take(held);
             self.controls.finish(&mut doc.borrow_mut());
-            // A grown pattern: the bars played (settled already, or now), or as it was.
-            if let Some(grow) = self.grow.take().filter(|x| !x.settled()) {
+            // A grown pattern: the bars played, or as it was.
+            if let Some(grow) = self.grow.take() {
                 let (g, pi) = (grow.group, grow.pattern);
                 let d = doc.borrow();
                 let p = d.project();
@@ -3447,6 +3446,16 @@ impl App {
             doc.borrow_mut().end_take();
             self.status = "Recorded".into();
         }
+    }
+
+    /// SHIFT + REC: count in (Preferences' bars, at least one), then play and record
+    /// from the beginning, as PLAY from a fresh start does (not where STOP left it).
+    fn count_in_and_play(&mut self) {
+        self.count_in_next = self.settings.count_in_bars.max(1);
+        self.parked = None;
+        self.transport_play();
+        self.sync_transport();
+        self.status = "Recording".into();
     }
 
     /// Notes the engine recorded: written as their releases come.
@@ -3485,7 +3494,7 @@ impl App {
                 let at = record::pattern_at(doc.borrow().project(), r.mode, r.tick, r.group);
                 let start = doc.borrow().project().groups[grow.group].patterns.get(grow.pattern).map_or(0, |p| p.start);
                 if let Some((pi, pos)) = at.filter(|x| x.0 == grow.pattern)
-                    && let Some(len) = grow.hit(pos - start)
+                    && let Some(len) = grow.reach(pos - start)
                     && let Err(e) = doc.borrow_mut().set_pattern_length(r.group, pi, len)
                 {
                     self.status = format!("can't grow the pattern: {e}");
@@ -3586,8 +3595,8 @@ impl App {
         }
     }
 
-    /// A growing pattern, with the song at `tick` in `mode`: come round to its start
-    /// with its last bar empty, it settles on the bars played.
+    /// A growing pattern, with the song at `tick` in `mode`: into its last bar, the next
+    /// is added (a bar ahead, so the song plays on into it).
     fn auto_grow_at(&mut self, mode: Mode, tick: f64) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(grow) = &mut self.grow else { return };
@@ -3595,10 +3604,10 @@ impl App {
         let at = record::pattern_at(doc.borrow().project(), mode, tick, g).filter(|x| x.0 == pi);
         let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
         if let Some((_, pos)) = at
-            && let Some(len) = grow.at(pos - start)
+            && let Some(len) = grow.reach(pos - start)
             && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
         {
-            self.status = format!("can't settle the pattern: {e}");
+            self.status = format!("can't grow the pattern: {e}");
         }
     }
 
@@ -3972,6 +3981,10 @@ impl App {
             if self.scene_pattern(self.group) == Some(self.pattern) {
                 v.pattern_position = self.pattern_at(self.group, head).map(|(at, _)| pt.start + at);
             }
+        } else {
+            // None: as long as a new one would be (a step makes it), so the Step page
+            // takes its pads.
+            v.pattern_length = self.default_pattern_length(p);
         }
         v.scenes = (0..p.scenes.len())
             .map(|i| deckard_surface::SceneView {
@@ -8645,6 +8658,85 @@ mod tests {
         let first = at(&mut app, 0.0);
         app.stop();
         assert!(first < parked, "RESTART: from the start ({first})");
+    }
+
+    /// SHIFT + REC counts in from the start (of the scene, or the focused section), not
+    /// from where STOP left the song.
+    #[test]
+    fn a_count_in_starts_from_the_beginning() {
+        let mut app = App::default();
+        app.new_project();
+        app.transport_play();
+        if !matches!(app.output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let ctx = egui::Context::default();
+        let quarter = deckard_model::PPQ as f64;
+        let wait = std::time::Instant::now();
+        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < std::time::Duration::from_millis(2000) {
+            app.background(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.stop();
+        let parked = app.shown_playhead().expect("shown where it stopped").position;
+        assert!(parked > quarter, "{parked}");
+        app.set_recording(true, true);
+        app.background(&ctx);
+        let first = app.playhead().map_or(0.0, |h| h.position);
+        app.set_recording(false, false);
+        app.stop();
+        assert!(first < quarter, "counted in from the start, not {parked}: {first}");
+    }
+
+    /// Played (with audio): a new Auto-length pattern after a 4-bar one, recorded into
+    /// bar after bar, grows for as long as the take goes on: it isn't caught by the song
+    /// coming round before the new bar reaches the engine.
+    #[test]
+    fn a_new_pattern_grows_past_a_long_one_while_playing() {
+        let mut app = App::default();
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        let bar = doc.borrow().project().bar_length();
+        {
+            let mut d = doc.borrow_mut();
+            d.set_tempo(480.0).unwrap();
+            d.add_pattern(0, 0, "Pattern 1").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+            d.set_pattern_length(0, 0, 4 * bar).unwrap();
+            d.set_length_auto(0, 0, false);
+            let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+            d.edit_notes("t", 0, 0, &[], &[n]).unwrap();
+        }
+        (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+        layout::apply_acts(&mut app, vec![layout::Act::NewPattern(0, 0)]);
+        app.set_recording(true, false);
+        app.transport_play();
+        if !matches!(app.output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let ctx = egui::Context::default();
+        let len = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[1].length;
+        // A note every beat (480 BPM: a bar is half a second) for 7 bars' time.
+        let beat = std::time::Duration::from_millis(125);
+        let wait = std::time::Instant::now();
+        while wait.elapsed() < beat * 4 * 7 {
+            if let Some(Ok(out)) = &app.output {
+                out.live(deckard_engine::Live::NoteIn { group: 0, sound: 0, pitch: 60, velocity: 100, thru: false });
+            }
+            std::thread::sleep(beat / 2);
+            if let Some(Ok(out)) = &app.output {
+                out.live(deckard_engine::Live::NoteRelease { group: 0, sound: 0, pitch: 60 });
+            }
+            std::thread::sleep(beat / 2);
+            app.background(&ctx);
+            app.poll_recorded();
+        }
+        app.set_recording(false, false);
+        app.stop();
+        // About 7 bars played (less what starting takes): kept, past the other's 4.
+        assert!(len(&app) >= 6 * bar, "{} bars ({})", len(&app) as f64 / bar as f64, app.status);
     }
 
     /// BUGS #6: a project reopens where it was saved: the focused sound and slot, the
