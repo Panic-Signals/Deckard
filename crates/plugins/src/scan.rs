@@ -240,7 +240,13 @@ pub fn default_vst2_paths() -> Vec<PathBuf> {
     {
         let programs = std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
         let common = std::env::var_os("CommonProgramFiles").map_or_else(|| programs.join("Common Files"), PathBuf::from);
-        vec![programs.join("VstPlugins"), programs.join(r"Steinberg\VstPlugins"), common.join("VST2")]
+        // Native Instruments' installers put their VST plug-ins in a folder of their own.
+        vec![
+            programs.join("VstPlugins"),
+            programs.join(r"Steinberg\VstPlugins"),
+            programs.join(r"Native Instruments\VSTPlugins 64 bit"),
+            common.join("VST2"),
+        ]
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     Vec::new()

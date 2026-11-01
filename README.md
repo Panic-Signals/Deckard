@@ -433,7 +433,10 @@ tests it kept their settings when it re-saved the project.
   and the VST2 plug-ins that have a VST3 version. Each one is restored to the state
   Maschine saved, and you can open its own window. Audio Units (macOS) are listed but
   not loaded yet. DECKARD's built-in instruments and effects work everywhere.
-  - **Linux:** plug-ins are looked for in `~/.vst3` and the system's `vst3` folders.
+  - The standard plug-in folders are always searched; **Preferences ▸ Plug-ins ▸ Add…**
+    adds your own. On macOS they are `/Library/Audio/Plug-Ins/VST3` and `VST`, and the
+    same under your home folder's `Library`.
+  - **Linux:** `~/.vst3`, the system's `vst3` folders, `~/.vst` and `$VST_PATH`.
     NI's plug-ins have no Linux versions, but their Windows versions run through Wine
     and [yabridge](https://github.com/robbert-vdh/yabridge). **Preferences ▸ Plug-ins
     ▸ Windows plug-ins** shows what you have and installs what you don't: Wine from
@@ -442,8 +445,9 @@ tests it kept their settings when it re-saved the project.
     plug-ins into Wine (NI's through Native Access, run with `wine`) and press Sync;
     DECKARD also syncs before each rescan. Plug-in windows are X11 windows (through
     XWayland on a Wayland desktop).
-  - **Windows:** plug-ins are looked for in `Common Files\VST3`, system-wide and per
-    user.
+  - **Windows:** `Common Files\VST3` (system-wide and per user), `VstPlugins`,
+    `Steinberg\VstPlugins`, `Native Instruments\VSTPlugins 64 bit` and
+    `Common Files\VST2`.
 - **File compatibility:** DECKARD reads and writes Maschine projects, groups, sounds
   and presets. Projects it saves open in Maschine 3, and files it doesn't change are
   written back byte for byte.

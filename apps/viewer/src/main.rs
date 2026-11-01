@@ -240,7 +240,7 @@ fn main() {
                 m.set_display_brightness(app.settings.display_brightness);
             }
             app.recorder = recorder::Recorder::new();
-            deckard_plugins::module::set_search_paths(app.settings.dirs.clone());
+            deckard_plugins::module::set_search_paths(app.settings.scan_dirs());
             app.catalog = settings::Catalog::load(&app.settings);
             app.session_dir = menu::settings_dir();
             // The first start without the stem separation model: offer it (not when
@@ -2426,6 +2426,18 @@ impl App {
                 });
             } else {
                 ui.label("Folders searched for VST3 and VST plug-ins (Audio Units are found by the system):");
+                for d in settings::Settings::standard_dirs() {
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(false, egui::Button::new("Standard").small());
+                        let exists = d.exists();
+                        ui.label(egui::RichText::new(d.display().to_string()).color(if exists {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::GRAY
+                        }))
+                        .on_hover_text(if exists { "A standard folder; always searched" } else { "A standard folder; it doesn't exist here" });
+                    });
+                }
                 let mut remove = None;
                 for (i, d) in self.settings.dirs.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -2451,8 +2463,8 @@ impl App {
                     {
                         self.settings.dirs.push(dir);
                     }
-                    if ui.button("Restore Defaults").clicked() {
-                        self.settings.dirs = settings::Settings::default().dirs;
+                    if ui.add_enabled(!self.settings.dirs.is_empty(), egui::Button::new("Remove Added")).clicked() {
+                        self.settings.dirs.clear();
                     }
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;
@@ -2462,7 +2474,7 @@ impl App {
         });
         if self.settings != before {
             self.settings.save();
-            deckard_plugins::module::set_search_paths(self.settings.dirs.clone());
+            deckard_plugins::module::set_search_paths(self.settings.scan_dirs());
             if self.settings.dirs != before.dirs {
                 rescan = true;
             }
