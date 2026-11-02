@@ -574,8 +574,16 @@ impl Document {
             }
         }
         for (g, s, text) in b.routes {
-            if let Ok(ops) = self.mod_route_ops(g, s, &deckard_model::mod_matrix::from_text(&text)) {
-                let _ = self.run(&ops);
+            let routes = deckard_model::mod_matrix::from_text(&text);
+            if crate::mod_routes::log_routes() {
+                eprintln!("routes: sound {g}/{s} read {} of {} lines", routes.len(), text.lines().count());
+            }
+            match self.mod_route_ops(g, s, &routes) {
+                Ok(ops) => {
+                    let _ = self.run(&ops);
+                }
+                Err(e) if crate::mod_routes::log_routes() => eprintln!("routes: sound {g}/{s} dropped: {e}"),
+                Err(_) => {}
             }
         }
         for (g, s) in b.prob_locked {
