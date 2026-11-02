@@ -1519,7 +1519,7 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
             .first()
             .filter(|m| m.type_name == "NI::MASCHINE::DATA::PluginHost")
             .map(|m| plugin_ref(m))
-            .filter(|p| !(p.id.contains(":FX:") || p.id.contains(":Fx:"))),
+            .filter(|p| !(p.id.contains(":FX:") || p.id.contains(":Fx:") || p.id.contains(":MF:"))),
         audio: modules.iter().find(|m| m.type_name == AUDIO_MODULE).map(|m| audio_loop(ix, m)),
         sampler: modules.into_iter().find(|m| m.type_name == "NI::MASCOMMON::DATA::Sampler").map(|m| sampler(ix, m)),
         swing: swing_of(s),
@@ -1669,7 +1669,7 @@ impl SlotInfo {
     pub fn is_instrument(&self) -> bool {
         const SOURCES: [&str; 10] = ["Sampler", "AudioModule", "Kick", "Snare", "Hihat", "Tom", "Perc", "Cymbal", "BassSynth", "PolySynth"];
         match &self.plugin {
-            Some(p) => !(p.id.contains(":FX:") || p.id.contains(":Fx:")),
+            Some(p) => !(p.id.contains(":FX:") || p.id.contains(":Fx:") || p.id.contains(":MF:")),
             None => SOURCES.contains(&self.module.as_str()),
         }
     }

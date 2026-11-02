@@ -431,8 +431,8 @@ tests it kept their settings when it re-saved the project.
 - **Undo history:** **Edit ▸ Undo History** jumps back up to 30 steps at once.
 - <a id="plug-ins"></a>**Plug-ins:** DECKARD loads the VST3 plug-ins a project uses,
   and the VST2 plug-ins that have a VST3 version. Each one is restored to the state
-  Maschine saved, and you can open its own window. Audio Units (macOS) are listed but
-  not loaded yet. DECKARD's built-in instruments and effects work everywhere.
+  Maschine saved, and you can open its own window. On macOS it also loads Audio Units.
+  DECKARD's built-in instruments and effects work everywhere.
   - The standard plug-in folders are always searched; **Preferences ▸ Plug-ins ▸ Add…**
     adds your own. On macOS they are `/Library/Audio/Plug-Ins/VST3` and `VST`, and the
     same under your home folder's `Library`.
