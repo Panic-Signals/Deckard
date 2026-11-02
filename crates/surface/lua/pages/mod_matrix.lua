@@ -4,7 +4,9 @@
 -- MIDI) names rows 3-5 Port, Channel and CC.
 --
 --   display 1-8       its column's highlight down a row (Source, Group, Sound, Module,
---                     Destination, Depth), back to the top after Depth
+--                     Destination, Depth), back to the top after Depth. The page opens
+--                     on Depth (the row turned most; a fast turn on Source runs it down
+--                     to None, which removes the route)
 --   knobs 1-8         its column's highlighted row; with ERASE held, the slot's route
 --                     removed
 --   LEFT / RIGHT      the eight slots before / after
@@ -29,9 +31,17 @@ local TURNS = { 0.1, 0.1, 0.1, 0.1, 0.1, 0.02 }
 -- A CC route's: CC (0-119) a fiftieth too.
 local MIDI_TURNS = { 0.1, 0.1, 0.1, 0.1, 0.02, 0.02 }
 
+-- The row the page opens on: Depth.
+local DEPTH = #ROWS
+
 -- Each column's highlighted row, and the eight slots shown (from 0).
-local row = { 1, 1, 1, 1, 1, 1, 1, 1 }
+local row = { DEPTH, DEPTH, DEPTH, DEPTH, DEPTH, DEPTH, DEPTH, DEPTH }
 local bank = 0
+
+-- The page shown (SHIFT + SOLO): every column back on Depth.
+function mod_matrix.shown()
+  for n = 1, 8 do row[n] = DEPTH end
+end
 
 -- The columns ERASE has removed a route from since it went down (once a press: the
 -- slots after move up into its place).
