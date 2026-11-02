@@ -195,6 +195,9 @@ pub fn step(app: &mut App, slot: usize, row: usize, steps: i64) {
         let p = d.project().clone();
         (app.mod_columns(&p).get(slot).copied(), p)
     };
+    if std::env::var_os("DECKARD_LOG_ROUTES").is_some() {
+        eprintln!("mod matrix: slot {} row {} steps {steps}: {at:?}", slot + 1, row + 1);
+    }
     match at {
         Some(ModSlot::Route(g, s, i)) => route_step(app, &p, (g, s, i), row, steps),
         Some(ModSlot::Cc(i)) => cc_step(app, &p, i, row, steps),
@@ -1330,5 +1333,294 @@ mod tests {
         app.surface_act(A::ModSlot(1, 4, 100));
         assert_eq!(ccs(&app)[0].cc, 119);
         assert_eq!(rows(&app, 1)[4], "119");
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::*;
+    use deckard_surface::Action as A;
+
+    /// An app with LFOs, a sound with a Sampler and a Filter, routes of every kind (a
+    /// live one, one left from another module, a plug-in's), CC routes and an output port.
+    fn full_app() -> App {
+        let mut app = App::default();
+        app.new_project();
+        app.midi_ports.1 = vec!["Out A".into(), "Out B".into()];
+        let doc = app.doc.clone().unwrap();
+        {
+            let mut d = doc.borrow_mut();
+            d.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+            let n = d.project().groups[0].sounds[0].slots.len();
+            d.add_slot(0, 0, n, &deckard_doc::NewModule::Effect("Filter")).unwrap();
+            d.add_group().unwrap();
+        }
+        app.surface_act(A::Lfo("create", 1, 0.0));
+        app.surface_act(A::Lfo("create", 2, 0.0));
+        let n = doc.borrow().project().groups[0].sounds[0].slots.len();
+        let routes = vec![
+            ModRoute { low: 0.2, high: 0.7, ..ModRoute::new(ModSource::Pressure, 0, "Sampler", ModParam::Field("cutoff".into())) },
+            ModRoute::new(ModSource::Lfo(1), n - 1, "Compressor", ModParam::Field("cutoff".into())),
+            ModRoute::new(ModSource::Lfo(2), 7, "X:VST3:FX:1", ModParam::Plugin(4)),
+            ModRoute::new(ModSource::Pitch, n - 1, "Filter", ModParam::Field("resonance".into())),
+        ];
+        doc.borrow_mut().set_mod_routes(0, 0, routes).unwrap();
+        let ccs =
+            vec![CcRoute::new(ModSource::Lfo(1), "Out A", 1, 74), CcRoute { high: 0.5, ..CcRoute::new(ModSource::Lfo(2), "Gone", 3, 1) }];
+        doc.borrow_mut().set_cc_routes(ccs).unwrap();
+        app
+    }
+
+    fn count(app: &App) -> (usize, usize) {
+        let d = app.doc.as_ref().unwrap().borrow();
+        (d.project().groups[0].sounds[0].mod_routes.len(), d.project().cc_routes.len())
+    }
+
+    /// Depth turned on every slot, up and down, far and near: nothing panics and no
+    /// route goes.
+    #[test]
+    fn depth_turns_keep_every_route() {
+        let mut app = full_app();
+        let before = count(&app);
+        for _ in 0..3 {
+            let n = app.mod_slot_views().len();
+            for slot in 0..n {
+                for steps in [1, 1, -1, 3, -3, 100, -100, 1] {
+                    app.surface_act(A::ModSlot(slot, 5, steps));
+                    let _ = app.mod_slot_views();
+                    assert_eq!(count(&app), before, "slot {slot} steps {steps}: {}", app.status);
+                }
+            }
+        }
+    }
+
+    /// Every row of every slot turned every which way, drafts included: nothing panics.
+    #[test]
+    fn turning_every_row_never_panics() {
+        let mut app = full_app();
+        for round in 0..2 {
+            for row in 0..6 {
+                let n = app.mod_slot_views().len();
+                for slot in 0..n {
+                    for steps in [1, -1, 2, -2, 50, -50, 1] {
+                        app.surface_act(A::ModSlot(slot, row, steps));
+                        let _ = app.mod_slot_views();
+                    }
+                }
+            }
+            if round == 0 {
+                app.surface_act(A::ModSlotsClosed);
+            }
+        }
+    }
+    /// Depth turned, the engine rebuilt after each step as the app does on an edit, a
+    /// note held and blocks played: nothing panics.
+    fn depth_turns_through_the_engine(app: &mut App) {
+        use deckard_engine::{Engine, Mode, SampleCache};
+        let doc = app.doc.clone().unwrap();
+        let mut cache = SampleCache::default();
+        let mut old = doc.borrow().project().clone();
+        let (mut e, report) = Engine::new(&old, None, 48_000, Mode::Arrangement, &mut cache);
+        let mut chains = report.chains;
+        e.note_hold(0, 0, 60, 100);
+        let mut buf = vec![0f32; 256 * 2];
+        let n = app.mod_slot_views().len();
+        for slot in 0..n {
+            for steps in [1, 1, -1, 3, -3, 100, -100, 1] {
+                app.surface_act(A::ModSlot(slot, 5, steps));
+                let new = doc.borrow().project().clone();
+                let (fresh, report) = Engine::new_after(&new, Some((&old, &chains)), None, 48_000, Mode::Arrangement, &mut cache);
+                chains = report.chains;
+                drop(e.adopt(fresh, &new));
+                for _ in 0..4 {
+                    e.process(&mut buf);
+                }
+                old = new;
+            }
+        }
+    }
+
+    #[test]
+    fn depth_turns_reach_the_engine() {
+        let mut app = full_app();
+        let before = count(&app);
+        depth_turns_through_the_engine(&mut app);
+        assert_eq!(count(&app), before);
+    }
+
+    /// `DECKARD_TEST_PROJECT`: its routes listed, and Depth turned on each slot through
+    /// the engine.
+    #[test]
+    #[ignore]
+    fn depth_turns_on_the_test_project() {
+        let Ok(path) = std::env::var("DECKARD_TEST_PROJECT") else { return };
+        let mut app = App::default();
+        app.open(std::path::Path::new(&path));
+        let doc = app.doc.clone().unwrap();
+        {
+            let d = doc.borrow();
+            let p = d.project();
+            eprintln!("LFOs: {:?}", p.lfos.iter().map(|l| (l.pad, l.name())).collect::<Vec<_>>());
+            eprintln!("CC routes: {:?}", p.cc_routes);
+            for (g, grp) in p.groups.iter().enumerate() {
+                for (s, snd) in grp.sounds.iter().enumerate() {
+                    if !snd.mod_routes.is_empty() {
+                        eprintln!("G{g} S{s} {}: {:?}", snd.name, snd.mod_routes);
+                    }
+                }
+            }
+        }
+        for v in app.mod_slot_views() {
+            eprintln!("{:?}", v.rows);
+        }
+        depth_turns_through_the_engine(&mut app);
+        eprintln!("status: {}", app.status);
+    }
+    /// `DECKARD_TEST_PROJECT`: its routes survive the session backup's round trip.
+    #[test]
+    #[ignore]
+    fn the_test_projects_routes_survive_the_backup() {
+        let Ok(path) = std::env::var("DECKARD_TEST_PROJECT") else { return };
+        let mut app = App::default();
+        app.open(std::path::Path::new(&path));
+        let doc = app.doc.clone().unwrap();
+        let before: Vec<_> = doc.borrow().project().groups.iter().flat_map(|g| g.sounds.iter().map(|s| s.mod_routes.clone())).collect();
+        let bytes = doc.borrow().to_bytes().unwrap();
+        let back = deckard_doc::Document::from_bytes(bytes, None).unwrap();
+        let after: Vec<_> = back.project().groups.iter().flat_map(|g| g.sounds.iter().map(|s| s.mod_routes.clone())).collect();
+        assert_eq!(before, after);
+        eprintln!("{} routes kept", before.iter().map(Vec::len).sum::<usize>());
+    }
+    fn all_routes(app: &App) -> usize {
+        let d = app.doc.as_ref().unwrap().borrow();
+        d.project().groups.iter().flat_map(|g| g.sounds.iter()).map(|s| s.mod_routes.len()).sum::<usize>() + d.project().cc_routes.len()
+    }
+
+    /// On the MK3 (DECKARD's layer, events as the hardware sends them): SHIFT + SOLO
+    /// opens the mod matrix, each column's display button is pressed down to Depth,
+    /// then each knob is turned far up and far down. No route goes.
+    fn mk3_depth_turns(app: &mut App, columns: usize) {
+        use deckard_mk3::Event;
+        let mut req = Vec::new();
+        let before = all_routes(app);
+        let depth = |app: &App, col: usize| app.mod_slot_views().get(col).map(|v| v.rows[5].clone()).unwrap_or_default();
+        app.mk3_events(
+            vec![
+                Event::Button("BUTTON_SHIFT", true),
+                Event::Button("BUTTON_SOLO", true),
+                Event::Button("BUTTON_SOLO", false),
+                Event::Button("BUTTON_SHIFT", false),
+            ],
+            &mut req,
+        );
+        for col in 0..columns {
+            let name: &'static str = Box::leak(format!("BUTTON_SCREEN_{}", col + 1).into_boxed_str());
+            for _ in 0..5 {
+                app.mk3_events(vec![Event::Button(name, true), Event::Button(name, false)], &mut req);
+            }
+        }
+        let mut moved = false;
+        for col in 0..columns {
+            let was = depth(app, col);
+            for (k, inc) in (0..80).map(|k| (k, 0.03)).chain((0..160).map(|k| (80 + k, -0.03))).chain((0..80).map(|k| (240 + k, 0.5))) {
+                app.mk3_events(vec![Event::Knob(col, inc)], &mut req);
+                assert_eq!(all_routes(app), before, "column {col}, turn {k} ({inc:+}): Depth {} ({})", depth(app, col), app.status);
+            }
+            moved |= depth(app, col) != was;
+        }
+        assert!(moved, "the knobs reached the matrix ({:?})", app.mod_slot_views().iter().map(|v| v.rows.clone()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn mk3_depth_turns_keep_every_route() {
+        let mut app = full_app();
+        app.settings.controller = crate::settings::ControllerChoice::Deckard;
+        app.mk3_events(Vec::new(), &mut Vec::new());
+        mk3_depth_turns(&mut app, 6);
+    }
+
+    #[test]
+    #[ignore]
+    fn mk3_depth_turns_keep_the_test_projects_routes() {
+        let Ok(path) = std::env::var("DECKARD_TEST_PROJECT") else { return };
+        let mut app = App::default();
+        app.settings.controller = crate::settings::ControllerChoice::Deckard;
+        app.open(std::path::Path::new(&path));
+        app.mk3_events(Vec::new(), &mut Vec::new());
+        mk3_depth_turns(&mut app, 2);
+    }
+    /// `DECKARD_TEST_PROJECT`: its chains and routes, printed.
+    #[test]
+    #[ignore]
+    fn print_the_test_project() {
+        let Ok(path) = std::env::var("DECKARD_TEST_PROJECT") else { return };
+        let mut app = App::default();
+        app.open(std::path::Path::new(&path));
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        for (g, grp) in d.project().groups.iter().enumerate() {
+            for (s, snd) in grp.sounds.iter().enumerate() {
+                if snd.slots.is_empty() && snd.mod_routes.is_empty() {
+                    continue;
+                }
+                let slots: Vec<String> = snd
+                    .slots
+                    .iter()
+                    .map(|x| x.plugin.as_ref().map_or_else(|| x.module.clone(), |pr| format!("{}={}", x.module, pr.id)))
+                    .collect();
+                eprintln!("G{g} S{s} {:?}: {slots:?} routes {}", snd.name, snd.mod_routes.len());
+            }
+        }
+        eprintln!("undo steps: {}", d.undo_labels().len());
+    }
+    /// `DECKARD_TEST_PROJECT`, with audio: the project plays, the routed sounds hold a
+    /// note, and Depth is turned on each column frame by frame through the app's own
+    /// engine refresh. No route goes.
+    #[test]
+    #[ignore]
+    fn depth_turns_while_the_test_project_plays() {
+        let Ok(path) = std::env::var("DECKARD_TEST_PROJECT") else { return };
+        let mut app = App::default();
+        app.settings.controller = crate::settings::ControllerChoice::Deckard;
+        app.open(std::path::Path::new(&path));
+        app.transport_play();
+        if !matches!(app.output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let ctx = eframe::egui::Context::default();
+        let before = all_routes(&app);
+        let routed: Vec<(usize, usize)> = {
+            let d = app.doc.as_ref().unwrap().borrow();
+            d.project()
+                .groups
+                .iter()
+                .enumerate()
+                .flat_map(|(g, grp)| grp.sounds.iter().enumerate().filter(|(_, s)| !s.mod_routes.is_empty()).map(move |(s, _)| (g, s)))
+                .collect()
+        };
+        for (g, s) in &routed {
+            if let Some(Ok(out)) = &app.output {
+                out.live(deckard_engine::Live::NoteOn { group: *g, sound: *s, pitch: 60, velocity: 100, length: i64::MAX });
+            }
+        }
+        let n = app.mod_slot_views().len();
+        for col in 0..n {
+            for (k, steps) in (0..40).map(|k| (k, 1)).chain((0..80).map(|k| (40 + k, -1))).chain((0..40).map(|k| (120 + k, 1))) {
+                app.surface_act(A::ModSlot(col, 5, steps));
+                app.background(&ctx);
+                app.mk3_events(Vec::new(), &mut Vec::new());
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                assert_eq!(
+                    all_routes(&app),
+                    before,
+                    "column {col}, turn {k}: {:?} ({})",
+                    app.mod_slot_views().iter().map(|v| v.rows[5].clone()).collect::<Vec<_>>(),
+                    app.status
+                );
+            }
+        }
+        app.stop();
+        eprintln!("status: {}", app.status);
     }
 }

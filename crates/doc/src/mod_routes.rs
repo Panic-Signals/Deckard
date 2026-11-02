@@ -6,12 +6,21 @@ use super::{Chain, Document, Op, Target};
 use deckard_model::mod_matrix::{FIELD, ModRoute, to_text};
 use mxprj::decode::Value;
 
+/// `DECKARD_LOG_ROUTES` set: every change to a sound's routes is printed (to find what
+/// loses one).
+pub(crate) fn log_routes() -> bool {
+    std::env::var_os("DECKARD_LOG_ROUTES").is_some()
+}
+
 impl Document {
     /// Give sound (`g`, `s`) these routes, one undo step (none: the field goes). Quick
     /// changes to a route (a slider dragged) make one step; adding or removing one is a
     /// step of its own.
     pub fn set_mod_routes(&mut self, g: usize, s: usize, routes: Vec<ModRoute>) -> Result<(), String> {
         let had = self.project.groups.get(g).and_then(|x| x.sounds.get(s)).map_or(0, |x| x.mod_routes.len());
+        if log_routes() {
+            eprintln!("routes: sound {g}/{s} {had} -> {}: {}", routes.len(), to_text(&routes).replace('\n', "; "));
+        }
         let ops = self.mod_route_ops(g, s, &routes)?;
         let label = match routes.len().cmp(&had) {
             std::cmp::Ordering::Greater => "Add Modulation",
@@ -38,6 +47,9 @@ impl Document {
         let moved: Vec<ModRoute> = routes.iter().filter_map(|r| remap(r.slot).map(|slot| ModRoute { slot, ..r.clone() })).collect();
         if moved == *routes {
             return None;
+        }
+        if log_routes() {
+            eprintln!("routes: sound {g}/{s} rekeyed {} -> {}: {}", routes.len(), moved.len(), to_text(&moved).replace('\n', "; "));
         }
         self.mod_route_ops(g, s, &moved).ok()?.pop()
     }

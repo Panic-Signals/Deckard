@@ -2515,24 +2515,55 @@ fn mod_matrix_buttons_move_rows_and_knobs_step() {
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     press(&mut s, &v, "BUTTON_SOLO");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 5, 1)], "opens on Depth");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty());
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 0, 1)], "wrapped to Source");
+    press(&mut s, &v, "BUTTON_SCREEN_1");
     press(&mut s, &v, "BUTTON_SCREEN_1");
     assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 2, 1)], "slot 1's Sound");
-    for _ in 0..4 {
+    for _ in 0..3 {
         press(&mut s, &v, "BUTTON_SCREEN_1");
     }
-    assert_eq!(s.event(&Event::Knob(0, -0.1), &v, now), [Action::ModSlot(0, 0, -1)], "wrapped to Source");
+    assert_eq!(s.event(&Event::Knob(0, -0.1), &v, now), [Action::ModSlot(0, 5, -1)], "Depth again");
     assert!(s.event(&Event::Knob(4, 0.1), &v, now).is_empty(), "no slot 5");
     assert!(press(&mut s, &v, "BUTTON_RIGHT").is_empty());
-    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 0, 1)], "no more slots: the same eight");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 5, 1)], "no more slots: the same eight");
     v.mod_slots = vec![v.mod_slots[0].clone(); 10];
     assert!(press(&mut s, &v, "BUTTON_RIGHT").is_empty());
-    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(8, 0, 1)], "slot 9");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(8, 5, 1)], "slot 9");
     press(&mut s, &v, "BUTTON_LEFT");
     hold(&mut s, &v, "BUTTON_TRANSPORT_ERASE", true);
     assert_eq!(s.event(&Event::Knob(1, 0.01), &v, now), [Action::ModSlot(1, 0, 0)], "ERASE + a knob");
     assert!(s.event(&Event::Knob(1, 0.01), &v, now).is_empty(), "once a press");
     hold(&mut s, &v, "BUTTON_TRANSPORT_ERASE", false);
+    assert_eq!(s.error(), None);
+}
+
+/// The user's report: the matrix left on Source and come back to, a fast turn ran the
+/// source down to None, removing the route, then the next route that moved into the
+/// column. Every column is back on Depth whenever the page opens.
+#[test]
+fn mod_matrix_comes_back_on_depth() {
+    let (mut s, v) = (Surface::new(), view());
+    let now = Instant::now();
+    let open = |s: &mut Surface| {
+        hold(s, &v, "BUTTON_SHIFT", true);
+        press(s, &v, "BUTTON_SOLO");
+        hold(s, &v, "BUTTON_SHIFT", false);
+    };
+    open(&mut s);
+    press(&mut s, &v, "BUTTON_SCREEN_1");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    assert_eq!(s.event(&Event::Knob(0, -0.1), &v, now), [Action::ModSlot(0, 0, -1)], "Source");
+    assert_eq!(s.event(&Event::Knob(1, 0.1), &v, now), [Action::ModSlot(1, 1, 1)], "Group");
+    // SHIFT + SOLO closes it, and again opens it.
+    open(&mut s);
+    assert_eq!(s.page(), FIRST_PAGE);
+    open(&mut s);
+    assert_eq!(s.page(), "mod_matrix");
+    assert_eq!(s.event(&Event::Knob(0, -0.1), &v, now), [Action::ModSlot(0, 5, -1)], "Depth");
+    assert_eq!(s.event(&Event::Knob(1, 0.1), &v, now), [Action::ModSlot(1, 5, 1)], "Depth");
     assert_eq!(s.error(), None);
 }
 
@@ -2561,7 +2592,8 @@ fn mod_matrix_names_a_cc_slots_rows() {
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     press(&mut s, &v, "BUTTON_SOLO");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
-    for _ in 0..2 {
+    // (From Depth: Source, Group, Port.)
+    for _ in 0..3 {
         press(&mut s, &v, "BUTTON_SCREEN_2");
     }
     let text = s.screen_text(&v);

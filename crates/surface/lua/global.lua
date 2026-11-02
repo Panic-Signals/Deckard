@@ -55,6 +55,7 @@ local function toggle_page(page)
   else
     if not mode_page(deckard.page()) then mode_back = deckard.page() end
     deckard.show_page(page)
+    if page == "mod_matrix" then require("pages.mod_matrix").shown() end
   end
 end
 
