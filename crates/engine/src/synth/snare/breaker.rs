@@ -10,7 +10,7 @@
 //!   with Spectra at 0;
 //! - Spectra: noise ringing resonators at their own pitches, coming in about 15 ms later.
 
-use super::modal::{Kind, ModalSnare};
+use super::modal::{Kind, ModalSnare, hardness};
 use crate::synth::modal_lite::{Noise, Patch, Source, expmap, lin};
 
 pub(crate) struct Breaker;
@@ -77,18 +77,6 @@ const SPECTRA_B: [(f32, f32); 7] = [(529.0, 1.2), (575.0, 1.4), (811.0, 1.2), (9
 
 fn db(x: f32) -> f32 {
     10f32.powf(x / 20.0)
-}
-
-/// How hard the strike is, 0..1, from the velocity under the Velocity setting (−1..1): at 1
-/// it follows the velocity, at 0 it's full, at −1 it's inverted. The velocity reaches its
-/// top at 0.88 and bends a little.
-fn hardness(vel: f32, setting: f32) -> f32 {
-    let x = (vel.clamp(0.0, 1.0) / 0.88).min(1.0);
-    let x = x * (0.6 + 0.4 * x);
-    let s = setting.clamp(-1.0, 1.0) + 1.0;
-    let a = s.min(1.0);
-    let y = 1.0 - x + a * x;
-    (y + (s - a) * (x - y)).clamp(0.0, 1.0)
 }
 
 /// `p` by meaning: tune, decay, skin tune, impact, body, spectra mode, spectra tune, spectra

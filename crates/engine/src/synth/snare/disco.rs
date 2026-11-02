@@ -7,6 +7,9 @@
 //! [`attached`]), mixed by three gains. `DiscoSDRealTimeMod` maps the user parameters
 //! and the velocity onto the sub-cores' modulation inputs.
 //!
+//! Only the attack is ported. The body and attached bodies are silent stubs, and a measured
+//! design of DECKARD's plays their part (`Disco::own`).
+//!
 //! Member offsets in comments are `DiscoSDCore` offsets (the core sits at
 //! `SnareProcessor` +0x18a600).
 
@@ -17,6 +20,7 @@ mod kit;
 
 use super::Core;
 use crate::fx::exp_e;
+use crate::synth::modal_lite::Voice;
 
 /// The core's level lookup: `ExpTable` at `x·9.965784 + 1200` (fused): 2^(x/6.02) ≈
 /// `x` dB as an amplitude.
@@ -193,6 +197,9 @@ pub(crate) struct Disco {
     att: attack::Attack,
     body: Box<body::Body>,
     bodies: attached::Attached,
+    /// The body and wires, until they're ported: DECKARD's own design, measured in Maschine
+    /// by what's left of its renders without the attack (`super::designs::SHARP`).
+    own: Voice,
     rt: RealTimeMod,
     /// +0x42810: 0 idle, 1 playing, 2 fading out (choke / engine change).
     fade_state: u32,
@@ -248,6 +255,7 @@ impl Disco {
             att: attack::Attack::new(),
             body: body::Body::new(),
             bodies: attached::Attached::new(),
+            own: Voice::new(sr),
             rt: RealTimeMod::new(),
             fade_state: 0,
             fade_time: 0.005,
@@ -294,6 +302,7 @@ impl Disco {
         self.att.set_sample_rate(sr, block, n, self.sm_inv);
         self.body.set_sample_rate(sr, block);
         self.bodies.set_sample_rate(sr, block);
+        self.own.set_sample_rate(sr);
         let inv = 1.0 / sr;
         self.fade_state = 0;
         self.fade_gain = 0.0;
@@ -452,6 +461,16 @@ impl Disco {
         self.att.note_on(self.vel);
         self.body.note_on(self.vel);
         self.bodies.note_on(self.vel);
+        let [skin, _, decay, _, body, noise, velocity] = self.param;
+        self.own.strike(super::modal::sharp_strike(
+            &super::designs::SHARP,
+            t,
+            decay,
+            skin,
+            body,
+            noise,
+            super::modal::hardness(vel, velocity),
+        ));
         self.fade_state = 1;
         self.fade_gain = 0.0;
         self.played = true;
@@ -460,7 +479,7 @@ impl Disco {
     }
 
     fn sources_active(&self) -> bool {
-        self.att.active() || self.body.active() || self.bodies.active()
+        self.att.active() || self.body.active() || self.bodies.active() || self.own.active()
     }
 
     /// The smoother's control-rate step (first part of `processControlRate`).
@@ -543,6 +562,8 @@ impl Core for Disco {
             }
             return;
         }
+        // The buffers carry the voice into the mix below.
+        self.own.process(l, r);
         let ramp = self.sm_active;
         // `processAudioImpl`: the declick gain lives in a register that starts at 1
         // in every call.
@@ -570,6 +591,7 @@ impl Core for Disco {
                     gain = self.sm_val[4];
                 }
             }
+            let (own_l, own_r) = (*ol, *or);
             let a = self.att.process();
             let (bl, br) = self.body.process();
             let n = self.bodies.process();
@@ -604,8 +626,8 @@ impl Core for Disco {
             }
             let sl = n.mul_add(self.noise_gain, self.impact_gain.mul_add(a, self.body_gain * bl));
             let sr = n.mul_add(self.noise_gain, self.impact_gain.mul_add(a, self.body_gain * br));
-            *ol = fade * (gain * (sl * mix_gain)) * dc;
-            *or = fade * (gain * (sr * mix_gain)) * dc;
+            *ol = fade * (gain * (sl * mix_gain) + own_l) * dc;
+            *or = fade * (gain * (sr * mix_gain) + own_r) * dc;
         }
     }
 

@@ -3,7 +3,7 @@
 Sixteen drum engines are DECKARD's own designs, not ports of Maschine's DSP:
 
 - **Kick:** Rasper, Snappy, Bold, Maple, Push (`synth/kick/bd.rs`)
-- **Snare:** Airy, Vintage, Chrome, Iron (`synth/snare/modal.rs`), Breaker (`synth/snare/breaker.rs`)
+- **Snare:** Airy, Vintage, Chrome, Iron (`synth/snare/modal.rs`), Breaker (`synth/snare/breaker.rs`); also Sharp's body and wires, under its ported attack (`synth/snare/disco.rs`)
 - **Tom:** Floor, High (`synth/tom/modal.rs`)
 - **Perc:** Kettle (`synth/perc/kettle.rs`)
 - **Cymbal:** Crash, Ride (`synth/cymbal/metal.rs`)
@@ -41,7 +41,7 @@ to set the ranges. Some behaviour found this way:
 
 - The modal Kicks treat Tune and the note as one control: Tune 0 plays as note 48 and 1 as
   note 72, rising ×1.69 per 12 steps.
-- The modal Snares span an octave each way over Tune. Spectra adds resonances at its own pitch.
+- The modal Snares treat Tune and the note as one control (Vintage 9 semitones each way, the others an octave), though a mode can follow it only partly: Chrome's and Iron's main modes hardly move. Spectra rings resonators at its own pitches.
 - Kettle moves about an octave per 20 semitones of note.
 
 | engine | RMS (Maschine / DECKARD) | −60 dB (ms) | late pitch (Hz) | early brightness (Hz) |
@@ -50,10 +50,6 @@ to set the ranges. Some behaviour found this way:
 | kick-bold | -30.6 / -31.4 dB | 385 / 385 | 67 / 67 | 181 / 102 |
 | kick-maple | -26.7 / -27.3 dB | 380 / 335 | 45 / 45 | 111 / 112 |
 | kick-push | -26.1 / -24.9 dB | 470 / 485 | 53 / 53 | 144 / 125 |
-| snare-airy | -29.4 / -28.8 dB | 405 / 480 | 165 / 185 | 246 / 196 |
-| snare-vintage | -30.7 / -31.8 dB | 245 / 305 | 316 / 231 | 257 / 281 |
-| snare-chrome | -34.2 / -33.0 dB | 360 / 405 | 268 / 270 | 564 / 387 |
-| snare-iron | -34.2 / -34.0 dB | 260 / 280 | 230 / 231 | 600 / 287 |
 | tom-floor | -33.1 / -32.7 dB | 865 / 805 | 67 / 70 | 111 / 103 |
 | tom-high | -29.1 / -30.6 dB | 635 / 650 | 124 / 122 | 225 / 198 |
 | perc-kettle | -29.6 / -30.2 dB | 1630 / 1440 | 160 / 161 | 137 / 161 |
@@ -78,6 +74,27 @@ a snare: above 1.2 kHz it was 20 to 45 dB short after the first 5 ms. It now has
 control. Fixed resonances at 1.3 to 4.3 kHz make the crack, and wires run under the whole
 strike even with Spectra at 0. Spectra is noise ringing resonators at their own pitches, a few
 milliseconds after the strike. Each part follows velocity on its own curve, so a soft strike is
-mostly wires. Scored by the same half-octave spectra over 20 renders (each knob's extremes,
+mostly wires. Scored by octave-band spectra in six time windows over 20 renders (each knob's extremes,
 velocities 30 and 127, notes 48 and 72), the mean difference went from 13.5 dB to about 3 dB.
 It isn't a port, so it doesn't null against Maschine.
+
+The other modal Snares were rebuilt the same way on 2026-11-02, for the same reason. Airy,
+Vintage, Chrome and Iron now share one `Design` (`synth/snare/modal.rs`), with their measured
+data in `synth/snare/designs.rs`: decaying modes recovered from Maschine's renders, sorted into
+those that follow the tuning (and how far) and those that stay put, Spectra's resonators, and
+each part's response to velocity, Impact, Decay and Tune fitted to the renders. Sharp keeps its
+ported attack and gains a measured body and wires in place of the silent stubs under it, found
+in what's left of Maschine's renders once the attack is taken away.
+
+Mean difference by the same score over each engine's renders (17 to 20, each knob's extremes,
+velocities 30 and 127, notes 48 and 72):
+
+| engine | before (dB) | now (dB) |
+|---|---|---|
+| Sharp | 11.6 | 2.1 |
+| Airy | 13.6 | 3.0 |
+| Vintage | 8.5 | 2.8 |
+| Chrome | 11.6 | 3.3 |
+| Iron | 13.5 | 2.9 |
+
+Velocity 30 is the weakest setting or close to it on all of them. None of them null against Maschine.
