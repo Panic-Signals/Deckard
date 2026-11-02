@@ -109,25 +109,6 @@ const IRON: Profile = Profile {
     width: 0.0,
 };
 
-const BREAKER: Profile = Profile {
-    f0: 272.0,
-    modes: &[
-        (1.0, 0.0, 1.0, false),
-        (1.423, -4.0, 0.8, true),
-        (0.915, -4.0, 0.9, true),
-        (2.35, -10.0, 0.7, true),
-        (2.97, -14.0, 0.7, true),
-        (2.31, -14.0, 0.7, true),
-        (2.9, -14.0, 0.7, true),
-    ],
-    decay: (0.03, 0.065, 0.09),
-    spectra: &[(240.0, -24.0)],
-    wires: (21, 3000.0),
-    click: 1.2,
-    gain: 0.15,
-    width: 0.0,
-};
-
 /// One modal Snare engine.
 pub(crate) struct ModalSnare {
     kind: Kind,
@@ -149,11 +130,14 @@ impl ModalSnare {
             Kind::Vintage => &VINTAGE,
             Kind::Chrome => &CHROME,
             Kind::Iron => &IRON,
-            Kind::Breaker => &BREAKER,
+            Kind::Breaker => unreachable!("Breaker has its own patch"),
         }
     }
 
     fn patch(&self, vel: f32, note: u32) -> Patch {
+        if self.kind == Kind::Breaker {
+            return super::breaker::patch(&self.p, vel, note);
+        }
         let pr = self.profile();
         let [tune, decay, skin, impact, body, smode, stune, samount, sdecay, velocity] = self.p;
         let f0 = pr.f0 * ((tune - 0.5) * 2.0 + (note as f32 - 60.0) / 12.0).exp2();

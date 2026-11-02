@@ -3,7 +3,7 @@
 Sixteen drum engines are DECKARD's own designs, not ports of Maschine's DSP:
 
 - **Kick:** Rasper, Snappy, Bold, Maple, Push (`synth/kick/bd.rs`)
-- **Snare:** Airy, Vintage, Chrome, Iron, Breaker (`synth/snare/modal.rs`)
+- **Snare:** Airy, Vintage, Chrome, Iron (`synth/snare/modal.rs`), Breaker (`synth/snare/breaker.rs`)
 - **Tom:** Floor, High (`synth/tom/modal.rs`)
 - **Perc:** Kettle (`synth/perc/kettle.rs`)
 - **Cymbal:** Crash, Ride (`synth/cymbal/metal.rs`)
@@ -54,7 +54,6 @@ to set the ranges. Some behaviour found this way:
 | snare-vintage | -30.7 / -31.8 dB | 245 / 305 | 316 / 231 | 257 / 281 |
 | snare-chrome | -34.2 / -33.0 dB | 360 / 405 | 268 / 270 | 564 / 387 |
 | snare-iron | -34.2 / -34.0 dB | 260 / 280 | 230 / 231 | 600 / 287 |
-| snare-breaker | -38.6 / -38.4 dB | 350 / 410 | 273 / 272 | 812 / 375 |
 | tom-floor | -33.1 / -32.7 dB | 865 / 805 | 67 / 70 | 111 / 103 |
 | tom-high | -29.1 / -30.6 dB | 635 / 650 | 124 / 122 | 225 / 198 |
 | perc-kettle | -29.6 / -30.2 dB | 1630 / 1440 | 160 / 161 | 137 / 161 |
@@ -72,3 +71,13 @@ in (`modal_lite::Patch::swell`) instead of starting on a click. The table's figu
 that. "Late pitch" is the
 strongest frequency 0.2–0.5 s in, which picks different partials of the metal engines. They
 sound close, not identical: there is no sample-level null with Maschine.
+
+The Snare's Breaker was rebuilt on 2026-11-02, because it sounded like a tuned drum rather than
+a snare: above 1.2 kHz it was 20 to 45 dB short after the first 5 ms. It now has its own
+`patch` in `synth/snare/breaker.rs`. Its low modes follow Tune and the note, which are one
+control. Fixed resonances at 1.3 to 4.3 kHz make the crack, and wires run under the whole
+strike even with Spectra at 0. Spectra is noise ringing resonators at their own pitches, a few
+milliseconds after the strike. Each part follows velocity on its own curve, so a soft strike is
+mostly wires. Scored by the same half-octave spectra over 20 renders (each knob's extremes,
+velocities 30 and 127, notes 48 and 72), the mean difference went from 13.5 dB to about 3 dB.
+It isn't a port, so it doesn't null against Maschine.

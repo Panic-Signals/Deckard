@@ -328,6 +328,6 @@ Source Lightspeed 0/1 with the fields set as listed. Residual = RMS of the diffe
 | Clap: same matrix | mode=8 | −240 dB (≤ 1.1e-36 denormal diffs) |
 | engine switch Pow → Clap between notes | | −240 dB |
 | Sharp defaults / noise 0 | mode=3 | −43.6 dB (body not ported) |
-| Airy, Vintage, Chrome, Iron, Breaker | | DECKARD's own designs, not null-tested (docs/drum-engines-own.md) |
+| Airy, Vintage, Chrome, Iron, Breaker | | DECKARD's own designs, not null-tested (docs/drum-engines-own.md; Breaker matched by spectra over 20 renders, about 3 dB mean) |
 
 Pitch: the Classic and Clap engines follow the MIDI note (tested 36–96).
