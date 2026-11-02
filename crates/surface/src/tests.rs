@@ -366,6 +366,46 @@ fn wheel_modes_toggle() {
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::FocusSound(1)], "pressed again: back to the sound");
 }
 
+/// On the Mixer the jog wheel turns the focused strip's level; pressed, its pan; pressed
+/// again, its level.
+#[test]
+fn the_mixer_wheel_turns_level_and_pan() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    let g = v.group;
+    let snd = Some(v.sound);
+    let wheel = |s: &mut Surface, v: &View, steps| s.event(&Event::Wheel(steps), v, now);
+    press(&mut s, &v, "BUTTON_MIX");
+    let db0 = v.groups[g].sounds[v.sound].mix.level;
+    assert_eq!(wheel(&mut s, &v, 2), [Action::ChannelLevel { group: g, sound: snd, db: db0 + 1.0 }]);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(wheel(&mut s, &v, -1), [Action::ChannelLevel { group: g, sound: snd, db: db0 - 0.05 }], "finely");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+
+    assert!(press(&mut s, &v, "BUTTON_WHEEL").is_empty());
+    assert_eq!(s.page(), "mixer", "the press stays on the page");
+    assert_eq!(wheel(&mut s, &v, 5), [Action::ChannelPan { group: g, sound: snd, pan: 0.1 }]);
+    assert_eq!(wheel(&mut s, &v, -80), [Action::ChannelPan { group: g, sound: snd, pan: -1.0 }], "as far as it goes");
+    assert!(s.screens(&v).is_some() && s.error().is_none(), "{:?}", s.error());
+
+    press(&mut s, &v, "BUTTON_WHEEL");
+    assert_eq!(wheel(&mut s, &v, 2), [Action::ChannelLevel { group: g, sound: snd, db: db0 + 1.0 }]);
+
+    // Silence: further down stays there, and up comes back from the meters' foot.
+    v.groups[g].sounds[v.sound].mix.level = f64::NEG_INFINITY;
+    assert_eq!(wheel(&mut s, &v, -1), [Action::ChannelLevel { group: g, sound: snd, db: f64::NEG_INFINITY }]);
+    assert_eq!(wheel(&mut s, &v, 1), [Action::ChannelLevel { group: g, sound: snd, db: -59.5 }]);
+
+    // The groups' strips: the focused group's own.
+    press(&mut s, &v, "BUTTON_WHEEL_UP");
+    v.groups[g].mix.level = 0.0;
+    assert_eq!(wheel(&mut s, &v, 1), [Action::ChannelLevel { group: g, sound: None, db: 0.5 }]);
+
+    // TEMPO keeps the wheel while it's on.
+    press(&mut s, &v, "BUTTON_TEMPO");
+    assert!(matches!(wheel(&mut s, &v, 1)[..], [Action::Tempo(_)]));
+}
+
 #[test]
 fn fixed_velocity_toggles() {
     let (mut s, mut v) = (Surface::new(), view());
