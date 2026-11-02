@@ -2393,7 +2393,7 @@ impl App {
                     ui.checkbox(&mut self.settings.use_au, "Use Audio Units");
                 });
                 ui.checkbox(&mut self.settings.scan_on_start, "Rescan plug-ins at start-up");
-                ui.label(egui::RichText::new("VST2 and Audio Unit plug-ins are listed but can't be hosted yet.").weak());
+                ui.label(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak());
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;

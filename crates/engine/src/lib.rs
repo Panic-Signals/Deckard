@@ -1065,7 +1065,7 @@ impl FxChain {
 
 /// Whether a plug-in (Maschine's id) is an effect.
 pub fn is_effect(plugin_id: &str) -> bool {
-    plugin_id.contains(":FX:") || plugin_id.contains(":Fx:")
+    plugin_id.contains(":FX:") || plugin_id.contains(":Fx:") || plugin_id.contains(":MF:")
 }
 
 /// The effects of a sound's chain: slots after the first that are effects (plug-ins,

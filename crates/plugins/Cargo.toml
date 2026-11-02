@@ -34,3 +34,8 @@ mxprj = { path = "../mxprj" }
 [[test]]
 name = "vst3_state"
 harness = false
+
+# Audio Units load on the main thread too.
+[[test]]
+name = "au_host"
+harness = false

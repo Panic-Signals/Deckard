@@ -161,6 +161,12 @@ Chunk types per technology:
   `aufx` / `+012` / `SHDK` (SoundHack) stored little-endian. That matches 4-byte OSTypes.
   **[exact]**
 
+**In DECKARD** (macOS only: `crates/plugins/src/au.rs`): AUs load and save as above, with a
+chunk of type 3, or type 1 for NI's. A type 6 or 7 chunk is kept but not loaded, so the plug-in
+starts at its defaults. An `aumf` runs as an effect but gets no notes yet, and only the main
+output is heard. `cargo run -p deckard-plugins --example au-check aufx PRTL Output 5` tries an
+installed AU, and `tests/au_host.rs` covers Apple's own.
+
 ---
 
 ## 2. Plug-in parameter pages

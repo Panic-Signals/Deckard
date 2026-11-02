@@ -26,9 +26,9 @@ pub enum Format {
 pub struct PluginId {
     pub vendor: String,
     pub format: Format,
-    /// "INSTR" or "FX".
+    /// "INSTR" or "FX" ("MF" for an AU's MIDI-controlled effect).
     pub kind: String,
-    /// The VST3 class to host.
+    /// The VST3 class to host. An AU has none: see [`au_cid`].
     pub cid: [u8; 16],
 }
 
@@ -40,11 +40,56 @@ impl PluginId {
         let (format, cid) = match format {
             "VST3" => (Format::Vst3, hex16(rest)?),
             "VST" => (Format::Vst2, vst2_cid(rest.parse::<u32>().ok()?, name)),
-            "AU" => return None,
+            "AU" => (Format::AudioUnit, au_cid(au_kind(kind)?, rest.parse::<i32>().ok()? as u32, vendor)),
             _ => return None,
         };
         Some(PluginId { vendor: vendor.to_string(), format, kind: kind.to_string(), cid })
     }
+}
+
+/// The component type an AU's role in its id means.
+fn au_kind(role: &str) -> Option<u32> {
+    Some(u32::from_be_bytes(match role {
+        "INSTR" => *b"aumu",
+        "FX" => *b"aufx",
+        "MF" => *b"aumf",
+        _ => return None,
+    }))
+}
+
+/// The role in an AU's id of a component type.
+pub fn au_role(kind: u32) -> Option<&'static str> {
+    match &kind.to_be_bytes() {
+        b"aumu" => Some("INSTR"),
+        b"aufx" => Some("FX"),
+        b"aumf" => Some("MF"),
+        _ => None,
+    }
+}
+
+/// Maschine's id for an AU: `<vendor>:AU:<role>:<uid>`, the uid being the subtype's
+/// four characters read as a signed integer.
+pub fn au_id(vendor: &str, kind: u32, sub: u32) -> Option<String> {
+    Some(format!("{vendor}:AU:{}:{}", au_role(kind)?, sub as i32))
+}
+
+/// What stands for an AU's class id: `"AU\0\0"`, type, subtype, and a hash of the vendor
+/// (the id has no manufacturer code, and two vendors may use the same subtype).
+fn au_cid(kind: u32, sub: u32, vendor: &str) -> [u8; 16] {
+    let hash = vendor.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    let mut cid = [0u8; 16];
+    cid[..2].copy_from_slice(b"AU");
+    cid[4..8].copy_from_slice(&kind.to_be_bytes());
+    cid[8..12].copy_from_slice(&sub.to_be_bytes());
+    cid[12..].copy_from_slice(&hash.to_be_bytes());
+    cid
+}
+
+/// The component type and subtype in what [`au_cid`] made.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn au_codes(cid: &[u8; 16]) -> (u32, u32) {
+    let code = |at: usize| u32::from_be_bytes(cid[at..at + 4].try_into().unwrap());
+    (code(4), code(8))
 }
 
 /// The VST3 class id of the VST3 version of a VST2 plug-in.
@@ -74,6 +119,28 @@ fn hex16(s: &str) -> Option<[u8; 16]> {
 pub struct State {
     pub component: Vec<u8>,
     pub controller: Vec<u8>,
+}
+
+/// A `PluginHost` chunk's type and data (nothing for an empty chunk).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn chunk_parts(chunk: &[u8]) -> Result<(u32, &[u8]), String> {
+    if chunk.is_empty() {
+        return Ok((0, &[]));
+    }
+    let u32_at = |at: usize| chunk.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let kind = u32_at(4).ok_or("plug-in state too short")?;
+    let n = u32_at(8).ok_or("plug-in state too short")? as usize;
+    Ok((kind, chunk.get(12..12 + n).ok_or("plug-in state is truncated")?))
+}
+
+/// A `PluginHost` chunk of the given type (the inverse of [`chunk_parts`]).
+pub fn wrap_typed(kind: u32, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + data.len());
+    out.extend(1u32.to_le_bytes());
+    out.extend(kind.to_le_bytes());
+    out.extend((data.len() as u32).to_le_bytes());
+    out.extend(data);
+    out
 }
 
 /// Unwrap a `PluginHost` chunk saved for a plug-in of `format`.
@@ -162,6 +229,33 @@ pub fn parse_vstpreset(data: &[u8]) -> Result<State, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_unit_ids() {
+        let code = |c: &[u8; 4]| u32::from_be_bytes(*c);
+        // The subtype's characters as a signed integer.
+        let id = au_id("Output", code(b"aufx"), code(b"PRTL")).unwrap();
+        assert_eq!(id, "Output:AU:FX:1347572812");
+        let p = PluginId::parse(&id, "Portal").unwrap();
+        assert_eq!((p.format, p.vendor.as_str(), p.kind.as_str()), (Format::AudioUnit, "Output", "FX"));
+        assert_eq!(au_codes(&p.cid), (code(b"aufx"), code(b"PRTL")));
+        // A subtype with the top bit set is negative.
+        let high = au_id("V", code(b"aumu"), 0xA900_0001).unwrap();
+        assert!(high.ends_with(":INSTR:-1459617791"), "{high}");
+        assert_eq!(au_codes(&PluginId::parse(&high, "x").unwrap().cid).1, 0xA900_0001);
+        // Two vendors with one subtype are different plug-ins.
+        let other = PluginId::parse("Other:AU:FX:1347572812", "Portal").unwrap();
+        assert_ne!(other.cid, p.cid);
+        assert!(au_id("V", code(b"auou"), 1).is_none());
+    }
+
+    #[test]
+    fn chunks_of_a_type() {
+        let chunk = wrap_typed(3, b"<plist/>");
+        assert_eq!(chunk_parts(&chunk).unwrap(), (3, &b"<plist/>"[..]));
+        assert_eq!(chunk_parts(&[]).unwrap(), (0, &[][..]));
+        assert!(chunk_parts(&chunk[..14]).is_err());
+    }
 
     #[test]
     fn vst2_ids_map_to_vst3_classes() {

@@ -95,7 +95,73 @@ impl Linux::IRunLoopTrait for Frame {
 }
 
 /// An open editor window. Closing the window (or dropping this) closes the editor.
-pub struct Editor {
+pub enum Editor {
+    Vst3(Vst3Editor),
+    #[cfg(target_os = "macos")]
+    AudioUnit(crate::au::Editor),
+}
+
+impl Editor {
+    /// Open `plugin`'s editor in a window titled `title`. Must be called on the main
+    /// thread.
+    pub fn open(plugin: &Shared, title: &str) -> Result<Editor, String> {
+        #[cfg(target_os = "macos")]
+        {
+            let au = plugin.lock().map_err(|_| "the plug-in is unavailable")?.audio_unit_shared();
+            if let Some(au) = au {
+                return crate::au::Editor::open(plugin, au, title).map(Editor::AudioUnit);
+            }
+        }
+        Vst3Editor::open(plugin, title).map(Editor::Vst3)
+    }
+
+    /// Dispatch the window's pending messages. Only for programs without a message loop
+    /// of their own (the app's loop dispatches them itself).
+    #[cfg(windows)]
+    pub fn pump_messages(&self) {
+        let Editor::Vst3(e) = self;
+        e.pump_messages();
+    }
+
+    /// Serve the plug-in's editor, and apply what it asked for since the last tick (a new
+    /// size). Call it from the app's frame, outside any call into the plug-in.
+    pub fn tick(&self) {
+        match self {
+            Editor::Vst3(e) => e.tick(),
+            #[cfg(target_os = "macos")]
+            Editor::AudioUnit(e) => e.tick(),
+        }
+    }
+
+    /// The window is still open.
+    pub fn is_open(&self) -> bool {
+        match self {
+            Editor::Vst3(e) => e.is_open(),
+            #[cfg(target_os = "macos")]
+            Editor::AudioUnit(e) => e.is_open(),
+        }
+    }
+
+    /// Bring the window to the front.
+    pub fn raise(&self) {
+        match self {
+            Editor::Vst3(e) => e.raise(),
+            #[cfg(target_os = "macos")]
+            Editor::AudioUnit(e) => e.raise(),
+        }
+    }
+
+    pub fn plugin(&self) -> &Shared {
+        match self {
+            Editor::Vst3(e) => e.plugin(),
+            #[cfg(target_os = "macos")]
+            Editor::AudioUnit(e) => e.plugin(),
+        }
+    }
+}
+
+/// A VST3's editor window.
+pub struct Vst3Editor {
     plugin: Shared,
     view: ComPtr<IPlugView>,
     frame: ComWrapper<Frame>,
@@ -123,11 +189,11 @@ fn create_view(plugin: &Shared, platform: FIDString, platform_name: &str) -> Res
     Ok((view, (size.right - size.left).max(100), (size.bottom - size.top).max(60)))
 }
 
-impl Editor {
+impl Vst3Editor {
     /// Open `plugin`'s editor in a window titled `title`. Must be called on the main
     /// thread.
     #[cfg(target_os = "macos")]
-    pub fn open(plugin: &Shared, title: &str) -> Result<Editor, String> {
+    pub fn open(plugin: &Shared, title: &str) -> Result<Vst3Editor, String> {
         let mtm = MainThreadMarker::new().ok_or("plug-in windows can only be opened on the main thread")?;
         let (view, w, h) = create_view(plugin, kPlatformTypeNSView, "macOS")?;
         let (w, h) = (w as f64, h as f64);
@@ -153,13 +219,13 @@ impl Editor {
             return Err(format!("the plug-in's editor could not be opened ({r})"));
         }
         window.makeKeyAndOrderFront(None);
-        Ok(Editor { plugin: plugin.clone(), view, frame, window })
+        Ok(Vst3Editor { plugin: plugin.clone(), view, frame, window })
     }
 
     /// Open `plugin`'s editor in an X11 window (through XWayland on a Wayland desktop).
     /// Must be called on the main thread.
     #[cfg(target_os = "linux")]
-    pub fn open(plugin: &Shared, title: &str) -> Result<Editor, String> {
+    pub fn open(plugin: &Shared, title: &str) -> Result<Vst3Editor, String> {
         if !crate::on_main_thread() {
             return Err("plug-in windows can only be opened on the main thread".into());
         }
@@ -175,14 +241,14 @@ impl Editor {
             window.close();
             return Err(format!("the plug-in's editor could not be opened ({r})"));
         }
-        Ok(Editor { plugin: plugin.clone(), view, frame, window })
+        Ok(Vst3Editor { plugin: plugin.clone(), view, frame, window })
     }
 
     /// Open `plugin`'s editor in a window of its own. Must be called on the main thread
     /// (the one that runs the app's message loop, which dispatches the window's
     /// messages).
     #[cfg(windows)]
-    pub fn open(plugin: &Shared, title: &str) -> Result<Editor, String> {
+    pub fn open(plugin: &Shared, title: &str) -> Result<Vst3Editor, String> {
         if !crate::on_main_thread() {
             return Err("plug-in windows can only be opened on the main thread".into());
         }
@@ -199,11 +265,11 @@ impl Editor {
             return Err(format!("the plug-in's editor could not be opened ({r})"));
         }
         window.show();
-        Ok(Editor { plugin: plugin.clone(), view, frame, window })
+        Ok(Vst3Editor { plugin: plugin.clone(), view, frame, window })
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    pub fn open(_plugin: &Shared, _title: &str) -> Result<Editor, String> {
+    pub fn open(_plugin: &Shared, _title: &str) -> Result<Vst3Editor, String> {
         Err("plug-in windows are not implemented on this system yet".into())
     }
 
@@ -273,7 +339,7 @@ impl Editor {
     }
 }
 
-impl Drop for Editor {
+impl Drop for Vst3Editor {
     fn drop(&mut self) {
         unsafe {
             self.view.removed();
