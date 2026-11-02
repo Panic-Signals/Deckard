@@ -8823,7 +8823,7 @@ mod tests {
         let bar = doc.borrow().project().bar_length();
         {
             let mut d = doc.borrow_mut();
-            d.set_tempo(480.0).unwrap();
+            d.set_tempo(240.0).unwrap();
             d.add_pattern(0, 0, "Pattern 1").unwrap();
             d.assign_pattern(0, 0, Some(0)).unwrap();
             d.set_pattern_length(0, 0, 4 * bar).unwrap();
@@ -8841,9 +8841,13 @@ mod tests {
         }
         let ctx = egui::Context::default();
         let len = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[1].length;
-        // A note every beat (480 BPM: a bar is half a second) for 7 bars' time.
-        let beat = std::time::Duration::from_millis(125);
+        // A note every beat (240 BPM: a bar is a second) for 7 bars' time. The pattern
+        // grows a bar ahead when a poll sees the song in its last bar, so the polls (one a
+        // beat here; one a frame in the app) have to come round within that bar; the
+        // longest gap between them is measured, for a CI runner that oversleeps.
+        let beat = std::time::Duration::from_millis(250);
         let wait = std::time::Instant::now();
+        let (mut polled, mut gap) = (std::time::Instant::now(), std::time::Duration::ZERO);
         while wait.elapsed() < beat * 4 * 7 {
             if let Some(Ok(out)) = &app.output {
                 out.live(deckard_engine::Live::NoteIn { group: 0, sound: 0, pitch: 60, velocity: 100, thru: false });
@@ -8855,11 +8859,17 @@ mod tests {
             std::thread::sleep(beat / 2);
             app.background(&ctx);
             app.poll_recorded();
+            gap = gap.max(polled.elapsed());
+            polled = std::time::Instant::now();
         }
         app.set_recording(false, false);
         app.stop();
+        if gap > beat * 2 {
+            eprintln!("this machine oversleeps ({gap:?} between polls, for a bar of {:?}); skipping", beat * 4);
+            return;
+        }
         // About 7 bars played (less what starting takes): kept, past the other's 4.
-        assert!(len(&app) >= 6 * bar, "{} bars ({})", len(&app) as f64 / bar as f64, app.status);
+        assert!(len(&app) >= 6 * bar, "{} bars ({}; longest gap between polls {gap:?})", len(&app) as f64 / bar as f64, app.status);
     }
 
     /// BUGS #6: a project reopens where it was saved: the focused sound and slot, the
