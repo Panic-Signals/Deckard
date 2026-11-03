@@ -230,7 +230,9 @@ fn modifiers_act_silently_in_keyboard_mode() {
     let (mut s, mut v) = (Surface::new(), view());
     v.sound = 2;
     press(&mut s, &v, "BUTTON_KEYBOARD");
-    for (button, want) in [("BUTTON_MUTE", Some(Action::MuteSound(4))), ("BUTTON_SOLO", Some(Action::SoloSound(4))), ("BUTTON_TRANSPORT_ERASE", None)] {
+    for (button, want) in
+        [("BUTTON_MUTE", Some(Action::MuteSound(4))), ("BUTTON_SOLO", Some(Action::SoloSound(4))), ("BUTTON_TRANSPORT_ERASE", None)]
+    {
         hold(&mut s, &v, button, true);
         assert!(!s.pads(&v).play, "{button}");
         let acts = s.event(&Event::PadOn(5, 0.5), &v, Instant::now());
@@ -2939,6 +2941,9 @@ fn the_step_grid_places_a_pads_chord_in_chords_mode() {
     s.event(&Event::PadOff(2), &v, now);
     let mut sorted = played.clone();
     sorted.sort_unstable();
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::StepNotes { at: 720, length: 240, velocity: 100, pitches: step_pitches(&sorted) }]);
+    assert_eq!(
+        press(&mut s, &v, "BUTTON_SCREEN_4"),
+        [Action::StepNotes { at: 720, length: 240, velocity: 100, pitches: step_pitches(&sorted) }]
+    );
     assert!(s.screen_text(&v).join("|").contains("CHORD"));
 }

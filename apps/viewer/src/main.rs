@@ -81,16 +81,14 @@ mod midi_monitor;
 mod mk3_io;
 mod mod_slots;
 mod modulation;
-mod ni_agent;
 mod module_ui;
+mod ni_agent;
 #[cfg(test)]
 mod pad_blink_tests;
 #[cfg(test)]
 mod pad_light_tests;
 #[cfg(test)]
 mod parity_tests;
-#[cfg(test)]
-mod scene_tempo_tests;
 mod plugin_macros;
 mod plugin_pictures;
 #[cfg(test)]
@@ -103,6 +101,8 @@ mod recorder;
 mod remote;
 mod sampler_ui;
 mod sampling_hw;
+#[cfg(test)]
+mod scene_tempo_tests;
 mod settings;
 mod splice;
 mod stems;

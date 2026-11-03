@@ -1497,8 +1497,8 @@ mod fuzz_tests {
     }
 
     /// On the MK3 (DECKARD's layer, events as the hardware sends them): SHIFT + SOLO
-    /// opens the mod matrix, each column's display button is pressed down to Depth,
-    /// then each knob is turned far up and far down. No route goes.
+    /// opens the mod matrix on Depth, then each knob is turned far up and far down. No
+    /// route goes.
     fn mk3_depth_turns(app: &mut App, columns: usize) {
         use deckard_mk3::Event;
         let mut req = Vec::new();
@@ -1513,12 +1513,6 @@ mod fuzz_tests {
             ],
             &mut req,
         );
-        for col in 0..columns {
-            let name: &'static str = Box::leak(format!("BUTTON_SCREEN_{}", col + 1).into_boxed_str());
-            for _ in 0..5 {
-                app.mk3_events(vec![Event::Button(name, true), Event::Button(name, false)], &mut req);
-            }
-        }
         let mut moved = false;
         for col in 0..columns {
             let was = depth(app, col);

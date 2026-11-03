@@ -1689,17 +1689,7 @@ mod tests {
     fn stream(play: (i64, i64), looped: (i64, i64), x_fade: i64, forward: bool) -> (super::Stream, Vec<[f32; 2]>) {
         let data = (0..1000).map(|i| [i as f32, i as f32]).collect();
         let pos = if forward { play.0 } else { play.1 - 1 };
-        let st = super::Stream {
-            pos,
-            forward,
-            play,
-            looped: Some(looped),
-            x_fade,
-            fade_in: 0,
-            fade_out: 0,
-            fading: 0,
-            done: false,
-        };
+        let st = super::Stream { pos, forward, play, looped: Some(looped), x_fade, fade_in: 0, fade_out: 0, fading: 0, done: false };
         (st, data)
     }
 
