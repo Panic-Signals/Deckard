@@ -12,9 +12,9 @@ pub(crate) const DOMAIN: [u8; 4] = *b"DKRD";
 pub(crate) const ITEM: [u8; 4] = *b"EXPR";
 pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
-/// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs) and 6 (before
-/// CC routes) still read.
-const VERSION: u32 = 7;
+/// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
+/// CC routes) and 7 (before scene settings) still read.
+const VERSION: u32 = 8;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -70,6 +70,10 @@ pub(crate) struct Block {
     pub lfos: String,
     /// The project's CC routes as [`deckard_model::mod_matrix::cc_to_text`] (version 7).
     pub cc_routes: String,
+    /// Scene Tempo and Edit ▸ MIDI Change in a project too old to hold them itself, as
+    /// lines of text (version 8): `tempo <scene> <bpm>`, `<block> <trigger> <channel>
+    /// <source>`.
+    pub scene_settings: String,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -265,7 +269,7 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
             }
         }
     }
-    for text in [&b.lfos, &b.cc_routes] {
+    for text in [&b.lfos, &b.cc_routes, &b.scene_settings] {
         w.u32(text.len());
         for &c in text.as_bytes() {
             w.u8(c);
@@ -363,6 +367,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             text.push(r.u8()?);
         }
         b.cc_routes = String::from_utf8_lossy(&text).into_owned();
+    }
+    if version >= 8 {
+        let mut text = Vec::new();
+        for _ in 0..r.count(1)? {
+            text.push(r.u8()?);
+        }
+        b.scene_settings = String::from_utf8_lossy(&text).into_owned();
     }
     Ok(b)
 }
@@ -508,6 +519,7 @@ impl Document {
         b.screen = self.screen.clone();
         b.lfos = deckard_model::lfo::to_text(&self.project.lfos);
         b.cc_routes = deckard_model::mod_matrix::cc_to_text(&self.project.cc_routes);
+        b.scene_settings = self.scene_settings_text();
         let payload = (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
@@ -515,7 +527,8 @@ impl Document {
             || !b.prob_locked.is_empty()
             || b.screen.is_some()
             || !b.lfos.is_empty()
-            || !b.cc_routes.is_empty())
+            || !b.cc_routes.is_empty()
+            || !b.scene_settings.is_empty())
         .then(|| encode(&b));
         mxprj::container::set_root_child(archived, DOMAIN, ITEM, FRAME, payload.as_deref())
     }
@@ -595,6 +608,7 @@ impl Document {
         let _ = self.run(&ops);
         let ops = self.cc_route_ops(&deckard_model::mod_matrix::cc_from_text(&b.cc_routes));
         let _ = self.run(&ops);
+        self.read_scene_settings(&b.scene_settings);
         self.screen = b.screen;
         self.refresh();
         self.revision = 0;

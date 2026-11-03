@@ -327,6 +327,9 @@ pub struct GroupView {
     pub scene_pattern: Option<usize>,
     /// How far through its pattern in the scene the song is (0..1), while it plays.
     pub progress: Option<f64>,
+    /// As `progress`, in the scene playing rather than the one focused (which, launched,
+    /// is focused before it plays).
+    pub playing_progress: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -575,6 +578,12 @@ pub enum Action {
     /// Launch scene `.0`: as clicking it in the Ideas view (focused; while a scene
     /// plays, it starts when the playing one ends).
     LaunchScene(usize),
+    /// A new pattern in this group, in the focused scene. The focused group stays; in
+    /// that group, the new pattern is focused.
+    NewPatternIn(usize),
+    /// The Ideas view's scene tabs scroll to start at this scene (a controller's own
+    /// scenes scrolled).
+    ShowScenes(usize),
     /// The focused group plays its pattern `.0` in the focused scene, focused.
     PickPattern(usize),
     /// Group `group` plays pattern `pattern` in the focused scene, or none (both from 0).
@@ -687,6 +696,16 @@ pub enum Action {
         at: i64,
         length: i64,
         velocity: i64,
+    },
+    /// The step grid in Keyboard and Chords mode: `pitches` of the focused sound in the
+    /// step at tick `at`, `length` long: all there already, they go; else the missing
+    /// ones go in at `velocity` (and all of them are selected). 128 is no pitch, as in
+    /// [`PadSetup::chords`].
+    StepNotes {
+        at: i64,
+        length: i64,
+        velocity: i64,
+        pitches: [i64; 16],
     },
     /// The Step Mod page shows the modulation of the step at `.0` (`.1` long), or is
     /// gone (`None`).

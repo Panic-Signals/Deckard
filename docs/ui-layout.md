@@ -41,6 +41,7 @@ LP = 32px left icon strip. Column manager | editor are separated by a 1px #00000
 
   Rows are 2px apart (`m_pLowerArea` spacing 2, `$spacingPanel` 2). The header has 2px of `outer-margin-bottom`. The work-area min width is 256. The mixer (`m_pMixerVisible`) swaps the work view; it is not stacked. A dev-only footer exists but should be ignored.
 - **Song panel height:** small 167, medium 255, large 343. Min 147, max 600. Its default define is 280 (min 206).
+  DECKARD's divider under the song panel moves it: drag it (147 tall at the least, and at least 260 left for the group panel), double-click it to go back to the window's size. The height is kept in the settings.
 - **Chain panel height:** 140 normal, 192 maximised. Min width is 675 (8 controls).
 - **Group panel:** min 340.
   - The sound list (`m_pSoundManager`) has min height 168. The column manager overrides this to 173.

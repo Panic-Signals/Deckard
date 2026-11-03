@@ -839,6 +839,17 @@ impl Document {
                     None => return false,
                 }
             }
+            // A synth's or effect's knob: turned many times a second, and reading the whole
+            // project back for each turn makes a hardware knob step.
+            (Target::Module(g, s, i), f, Some(n), _) => return patch_slot(p.groups[g].sounds[s].slots.get_mut(i), f, n),
+            (Target::ChainModule(c, i), f, Some(n), _) => {
+                let slots = match c {
+                    chain::Chain::Sound(g, s) => &mut p.groups[g].sounds[s].slots,
+                    chain::Chain::Group(g) => &mut p.groups[g].slots,
+                    chain::Chain::Master => &mut p.master_slots,
+                };
+                return patch_slot(slots.get_mut(i), f, n);
+            }
             _ => return false,
         }
         true
@@ -877,6 +888,19 @@ impl Document {
         self.path = Some(path.to_path_buf());
         self.saved_revision = self.revision;
         Ok(())
+    }
+}
+
+/// A parameter an internal module already shows, copied into its slot. False for what the
+/// model derives more from (the Audio module's loop).
+fn patch_slot(slot: Option<&mut deckard_model::SlotInfo>, field: &str, value: f64) -> bool {
+    let Some(slot) = slot.filter(|x| x.plugin.is_none() && x.module != "AudioModule") else { return false };
+    match slot.params.iter_mut().find(|(k, _)| k == field) {
+        Some(param) => {
+            param.1 = value;
+            true
+        }
+        None => false,
     }
 }
 
@@ -1231,5 +1255,75 @@ mod tests {
         let back = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
         let p = back.project();
         assert_eq!((p.groups[0].name.as_str(), p.groups[0].sounds[0].name.as_str(), p.scenes[0].name.as_str()), (group, sound, scene));
+    }
+}
+
+#[cfg(test)]
+mod knob_patch_tests {
+    use super::*;
+    use chain::{Chain, NewModule};
+
+    /// Turning any parameter of any internal module leaves the model just as reading the
+    /// whole project back would, without reading it back.
+    #[test]
+    fn a_turned_module_parameter_matches_a_full_read() {
+        let mut d = Document::new_project().unwrap();
+        let classes = deckard_engine::synth::CLASSES;
+        for (s, class) in classes.iter().enumerate() {
+            let params = deckard_engine::synth::defaults(class).unwrap().into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            d.add_slot(0, s, 0, &NewModule::Instrument { class: class.to_string(), params }).unwrap();
+        }
+        for (class, _) in deckard_model::INTERNAL_EFFECTS {
+            d.add_slot_in(Chain::Sound(0, 0), 1, &NewModule::Effect(class)).unwrap();
+            d.add_slot_in(Chain::Group(0), 0, &NewModule::Effect(class)).unwrap();
+            d.add_slot_in(Chain::Master, 0, &NewModule::Effect(class)).unwrap();
+        }
+        let mut turned = 0;
+        for chain in [Chain::Sound(0, 0), Chain::Group(0), Chain::Master].into_iter().chain((1..classes.len()).map(|s| Chain::Sound(0, s)))
+        {
+            for i in 0..d.chain_slots(chain).unwrap().len() {
+                let slot = d.chain_slots(chain).unwrap()[i].clone();
+                for (field, was) in slot.params {
+                    let t = match chain {
+                        Chain::Sound(g, s) => Target::Module(g, s, i),
+                        c => Target::ChainModule(c, i),
+                    };
+                    let path = d.param_path(t, &field);
+                    if path.is_err() {
+                        continue;
+                    }
+                    let revision = d.revision();
+                    d.set("Effect Parameter", t, &field, Value::Float(was + 1.0)).unwrap();
+                    assert_eq!(d.revision(), revision + 1, "{t:?}.{field}");
+                    assert!(d.patch(t, &field), "{t:?}.{field} takes the short way");
+                    let (read, _) = Project::read(d.root());
+                    assert!(
+                        *d.project() == Project { expressions: d.expressions.clone(), ..read },
+                        "{t:?}.{field} differs from a full read"
+                    );
+                    d.undo();
+                    turned += 1;
+                }
+            }
+        }
+        assert!(turned > 200, "{turned}");
+    }
+
+    /// The Audio module's loop comes from its parameters: it's read in full.
+    #[test]
+    fn the_audio_module_is_read_in_full() {
+        let mut slot = deckard_model::SlotInfo {
+            module: "AudioModule".into(),
+            name: String::new(),
+            active: true,
+            plugin: None,
+            params: vec![("gain".into(), 0.5)],
+        };
+        assert!(!patch_slot(Some(&mut slot), "gain", 0.7));
+        slot.module = "Filter".into();
+        assert!(patch_slot(Some(&mut slot), "gain", 0.7));
+        assert_eq!(slot.param("gain"), Some(0.7));
+        assert!(!patch_slot(Some(&mut slot), "unknown", 0.7), "not one it shows");
+        assert!(!patch_slot(None, "gain", 0.7));
     }
 }

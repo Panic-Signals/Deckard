@@ -268,6 +268,9 @@ The Sampler's `takes`: `ObjectVector<Take>`. Each `Take` (v2) holds:
 - **Footer groups** [manual]:
   - **PLAY RANGE:** Start, End.
   - **SELECTION RANGE:** Start, End.
+  - **LOOP:** Active, Start, End, XFade.
+  - All of them are always shown, in samples. Drag a value (Shift: a sample at a time) or
+    double-click it to type one.
   - In stretch mode, a **STRETCH** group: Tune, Formant C, Mode, Auto Dtct, Src BPM, New
     BPM, Length, Speed.
 
@@ -277,8 +280,8 @@ The Sampler's `takes`: `ObjectVector<Take>`. Each `Take` (v2) holds:
   `play_range`.
 - **Loop:** drag its borders or title bar. It is the zone's `loop_range` and
   `loop_active`.
-- **Selection:** drag on the waveform (it is the zone's `selection_range`), or set
-  SELECTION RANGE. Double-clicking the waveform selects the play range.
+- **Selection:** a sample that comes up has the saved `selection_range` selected, else
+  its play range. Drag on the waveform, or set SELECTION RANGE. Double-clicking the waveform selects the play range.
 - **Context menu:** "Deselect", "Select All", "Select Play Range", "Select Loop", "Find in
   Explorer/Finder", "Save Sample As…".
 

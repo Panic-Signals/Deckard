@@ -1,13 +1,16 @@
 //! The Sampling view (docs/sampling-layout.md): RECORD, EDIT, SLICE and ZONE tabs over
 //! the focused sound's Sampler, in place of the pattern editor. A stereo (or mixed)
 //! waveform with the zone's play range (S/E markers), loop frame, selection, slices
-//! and the playhead; zoom with the wheel, scroll with the bar.
+//! and the playhead; zoom with the wheel or the bar under it, scroll with the bar.
 
 use super::*;
 use deckard_engine::sample::Sample;
 use std::sync::Arc;
 
 pub const TABS: [&str; 4] = ["RECORD", "EDIT", "SLICE", "ZONE"];
+
+/// The fewest frames the waveform zooms in to.
+const MIN_VIEW: f64 = 64.0;
 const EDIT_BUTTONS: [(&str, EditOp); 14] = [
     ("TRUNCATE", EditOp::Truncate),
     ("NORM.", EditOp::Normalize),
@@ -620,35 +623,26 @@ fn wave(
         if (z - 1.0).abs() > 1e-4 || pan.x.abs() > 0.5 {
             let at = ui.input(|i| i.pointer.hover_pos()).map_or(w.center().x, |p| p.x);
             let pivot = xf(at);
-            let span = ((v1 - v0) / z as f64).clamp(64.0, len as f64);
+            let span = ((v1 - v0) / z as f64).clamp(MIN_VIEW, len as f64);
             let mut a = pivot - (pivot - v0) * span / (v1 - v0);
             a -= pan.x as f64 * span / w.width() as f64;
             let a = a.clamp(0.0, len as f64 - span);
             acts.push(sact(SamplingAct::View(Some((a, a + span)))));
         }
     }
-    // Zoom bar: the visible part of the sample; drag it to scroll, double-click: all.
-    painter.rect_filled(bar, 2.0, Color32::BLACK);
-    let th = Rect::from_x_y_ranges(
-        (bar.left() + bar.width() * (v0 / len as f64) as f32)
-            ..=(bar.left() + bar.width() * (v1 / len as f64) as f32).max(bar.left() + bar.width() * (v0 / len as f64) as f32 + 8.0),
-        bar.shrink(3.0).y_range(),
-    );
-    painter.rect_filled(th, 3.0, S03);
-    let br = ui.interact(bar, ui.id().with("sample-zoombar"), Sense::click_and_drag());
-    if br.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if br.hover_pos().is_some_and(|p| th.contains(p)) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    }
-    if br.dragged() {
-        let d = br.drag_delta().x as f64 / bar.width() as f64 * len as f64;
-        let span = v1 - v0;
-        let a = (v0 + d).clamp(0.0, len as f64 - span);
-        acts.push(sact(SamplingAct::View(Some((a, a + span)))));
-    }
-    if br.double_clicked() {
-        acts.push(sact(SamplingAct::View(None)));
+    // The Pattern Editor's zooming scroll bar over the visible part of the sample: along
+    // scrolls, up and down zoom round where it was grabbed, its ends zoom with the other
+    // end held, double-click shows it all.
+    let total = len as f64;
+    let shown = ((v0 / total) as f32, ((v1 - v0) / total) as f32);
+    if let Some((from, part)) =
+        zoom_bar(ui, &painter, ui.id().with("sample-zoombar"), bar, true, 1.0, shown, (MIN_VIEW / total) as f32, true)
+    {
+        let view = (part < 1.0).then(|| {
+            let a = from as f64 * total;
+            (a, a + part as f64 * total)
+        });
+        acts.push(sact(SamplingAct::View(view)));
     }
     w
 }
@@ -677,6 +671,10 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         let value = elide(painter, &f.value, 12.0, fr.width() - 4.0 - if f.choice.is_some() { 10.0 } else { 0.0 });
         let mut resp = ui.interact(fr, ui.id().with(("field", title, i)), Sense::click_and_drag());
         resp = if value != f.value { resp.on_hover_text(format!("{}\n{}", f.value, f.tip)) } else { resp.on_hover_text(f.tip) };
+        ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sample-field", title.to_string(), f.label.to_string())), fr));
+        if let Some(what) = f.typed {
+            value_entry::gestures(ui, &resp, what, &f.value, acts);
+        }
         if resp.hovered() || resp.dragged() {
             painter.rect_filled(fr, 2.0, white(8));
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
@@ -760,10 +758,71 @@ struct Field<'a> {
     step: Box<dyn Fn(f64) -> Act + 'a>,
     click: Option<Box<dyn Fn() -> Act + 'a>>,
     choice: Option<Choice<'a>>,
+    /// A double-click types it (value_entry).
+    typed: Option<value_entry::What>,
 }
 
 fn field<'a>(label: &'a str, value: String, step: impl Fn(f64) -> Act + 'a) -> Field<'a> {
-    Field { label, value, tip: "Drag up or down (Shift: fine)", step: Box::new(step), click: None, choice: None }
+    Field { label, value, tip: "Drag up or down (Shift: fine)", step: Box::new(step), click: None, choice: None, typed: None }
+}
+
+/// A position in the sample, in samples: dragged, or typed with a double-click. Shift
+/// moves it a sample at a time.
+fn frame_field<'a>(
+    label: &'a str,
+    at: i64,
+    (lo, hi): (i64, i64),
+    per_step: f64,
+    what: value_entry::What,
+    set: impl Fn(f64) -> Act + 'a,
+) -> Field<'a> {
+    let (lo, hi) = (lo as f64, (hi.max(lo)) as f64);
+    let mut f = field(label, at.to_string(), move |n| set((at as f64 + n * per_step).clamp(lo, hi).round()));
+    f.tip = "Drag up or down (Shift: sample by sample), or double-click to type";
+    f.typed = Some(what);
+    f
+}
+
+/// A zone's position in samples, set through its parameter `path`.
+fn zone_frame<'a>(label: &'a str, t: Target, path: &'static str, at: i64, range: (i64, i64), default: i64, per_step: f64) -> Field<'a> {
+    let what = value_entry::What::Edit(Edit::Int(t, path, range.0 as f64, range.1.max(range.0) as f64, default as f64));
+    frame_field(label, at, range, per_step, what, move |v| Act::SetParam(t, path, v))
+}
+
+/// The Edit and Zone tabs' PLAY RANGE and LOOP fields, in samples.
+fn play_fields<'a>(t: Target, z: &deckard_model::Zone, last: i64, per_step: f64) -> [Field<'a>; 2] {
+    let (lo, hi) = shown_play(z, last);
+    [
+        zone_frame("START", t, "play_range/low", lo, (0, hi - 1), 0, per_step),
+        zone_frame("END", t, "play_range/high", hi, (lo + 1, last), last, per_step),
+    ]
+}
+
+fn loop_fields<'a>(t: Target, z: &deckard_model::Zone, last: i64, per_step: f64) -> [Field<'a>; 4] {
+    let (la, lb) = z.loop_range;
+    let on = z.loop_active;
+    [
+        toggle_field("ACTIVE", on, move || Act::SetParam(t, "loop_active", if on { 0.0 } else { 1.0 })),
+        zone_frame("START", t, "loop_range/low", la, (0, lb - 1), 0, per_step),
+        zone_frame("END", t, "loop_range/high", lb, (la + 1, last), last, per_step),
+        zone_frame("XFADE", t, "x_fade", z.x_fade, (0, lb - la), 0, per_step),
+    ]
+}
+
+/// A zone's play range, both ends in: all of it when it has none.
+fn shown_play(z: &deckard_model::Zone, last: i64) -> (i64, i64) {
+    if z.play_range.1 > z.play_range.0 { z.play_range } else { (0, last) }
+}
+
+/// What the Edit tab selects when a sample comes up: what was saved, else the play range
+/// (half open, as the selection is). A saved one that no longer fits the sample is passed
+/// over.
+pub(crate) fn first_selection(z: &deckard_model::Zone, frames: usize) -> Option<(usize, usize)> {
+    let last = frames.checked_sub(1)? as i64;
+    let (a, b) = z.selection_range;
+    let (a, b) = if 0 <= a && a < b && b <= last { (a, b) } else { shown_play(z, last) };
+    let (a, b) = (a.clamp(0, last), b.clamp(0, last));
+    (a < b).then_some((a as usize, b as usize + 1))
 }
 
 /// One of `options` (now `cur`): a click lists them, dragging steps through them.
@@ -777,6 +836,7 @@ fn choice_field<'a>(label: &'a str, options: Vec<String>, cur: usize, pick: impl
         step: Box::new(move |d| p((cur as f64 + d).clamp(0.0, n.saturating_sub(1) as f64) as usize)),
         click: None,
         choice: Some((options, cur, Box::new(move |k| pick(k)))),
+        typed: None,
     }
 }
 
@@ -790,6 +850,7 @@ fn toggle_field<'a>(label: &'a str, on: bool, act: impl Fn() -> Act + 'a) -> Fie
         step: Box::new(move |_| b()),
         click: Some(Box::new(move || a())),
         choice: None,
+        typed: None,
     }
 }
 
@@ -831,7 +892,6 @@ fn edit_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckard
     wave(ui, app, area, zi, zone, gcol, false, acts);
     let tools = Rect::from_min_max(Pos2::new(body.left(), area.bottom() + 1.0), body.max);
     painter.rect_filled(tools, 0.0, S00);
-    let rate = st.sample.as_ref().map_or(44_100, |s| s.rate);
     let has_sel = st.selection.is_some();
     let y = tools.top() + 6.0;
     if let Some(sx) = st.stretch {
@@ -899,38 +959,37 @@ fn edit_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckard
             x += 8.0;
         }
     }
-    // Footer: play range and selection.
+    // Footer: play range, selection and loop, always there, in samples.
     let zt = Target::Zone(app.group, app.sound, zi);
-    let (lo, hi) = zone.play_range;
-    let len = st.len().max(1) as f64;
-    let step = move |v: i64, n: f64| (v as f64 + n * (len / 2000.0).max(1.0)).clamp(0.0, len - 1.0);
+    let last = st.len().max(1) as i64 - 1;
+    let per_step = frame_step(ui, last);
     let fy = y + 48.0;
-    let nx = group_box(
-        ui,
-        &painter,
-        tools.left() + 12.0,
-        fy,
-        "PLAY RANGE",
-        &[
-            field("START", frames_text(lo as usize, rate), move |n| Act::SetParam(zt, "play_range/low", step(lo, n).min(hi as f64 - 1.0))),
-            field("END", frames_text(hi as usize, rate), move |n| Act::SetParam(zt, "play_range/high", step(hi, n).max(lo as f64 + 1.0))),
-        ],
-        acts,
-    );
-    if let Some((a, b)) = st.selection {
-        group_box(
-            ui,
-            &painter,
-            nx,
-            fy,
-            "SELECTION RANGE",
-            &[
-                field("START", frames_text(a, rate), move |n| sact(SamplingAct::Select(Some((step(a as i64, n) as usize, b))))),
-                field("END", frames_text(b, rate), move |n| sact(SamplingAct::Select(Some((a, step(b as i64, n) as usize))))),
-            ],
-            acts,
-        );
-    }
+    let mut x = tools.left() + 12.0;
+    x = group_box(ui, &painter, x, fy, "PLAY RANGE", &play_fields(zt, zone, last, per_step), acts);
+    x = group_box(ui, &painter, x, fy, "SELECTION RANGE", &selection_fields(st.selection, shown_play(zone, last), last, per_step), acts);
+    group_box(ui, &painter, x, fy, "LOOP", &loop_fields(zt, zone, last, per_step), acts);
+}
+
+/// How many samples a drag step of a footer's position moves: Shift, one.
+fn frame_step(ui: &Ui, last: i64) -> f64 {
+    if ui.input(|i| i.modifiers.shift) { 1.0 } else { ((last + 1) as f64 / 2000.0).max(1.0) }
+}
+
+/// SELECTION RANGE, both ends in as the others read; with nothing selected "-", and moving
+/// an end selects from the play range.
+fn selection_fields<'a>(sel: Option<(usize, usize)>, play: (i64, i64), last: i64, per_step: f64) -> [Field<'a>; 2] {
+    let (a, b) = sel.map_or(play, |(a, b)| (a as i64, b as i64 - 1));
+    let select = |a: i64, b: i64| sact(SamplingAct::Select(Some((a.max(0) as usize, (b + 1).max(a + 1) as usize))));
+    let start =
+        frame_field("START", a, (0, b - 1), per_step, value_entry::What::Selection(false, a, b, last), move |v| select(v as i64, b));
+    let end = frame_field("END", b, (a + 1, last), per_step, value_entry::What::Selection(true, a, b, last), move |v| select(a, v as i64));
+    let shown = |mut f: Field<'a>| {
+        if sel.is_none() {
+            f.value = "-".into();
+        }
+        f
+    };
+    [shown(start), shown(end)]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,40 +1161,15 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
     let footer = Rect::from_min_max(Pos2::new(body.left(), main.bottom() + 1.0), body.max);
     painter.rect_filled(footer, 0.0, S00);
     let zt = Target::Zone(app.group, app.sound, zi);
-    let len = st.len().max(1) as f64;
-    let rate = st.sample.as_ref().map_or(44_100, |s| s.rate);
-    let fr = move |v: i64, n: f64| (v as f64 + n * (len / 2000.0).max(1.0)).clamp(0.0, len - 1.0);
-    let (lo, hi, la, lb) = (z.play_range.0, z.play_range.1, z.loop_range.0, z.loop_range.1);
+    let last = st.len().max(1) as i64 - 1;
+    let per_step = frame_step(ui, last);
     let key = |k: i64, n: f64| (k as f64 + n).clamp(0.0, 127.0);
     let (kl, kh, vl, vh, root) = (z.key_range.0, z.key_range.1, z.velocity_range.0, z.velocity_range.1, z.root_key);
-    let (tune, gain, pan_v, loop_on) = (z.tune, z.gain, z.pan, z.loop_active);
+    let (tune, gain, pan_v) = (z.tune, z.gain, z.pan);
     let y = footer.top() + 4.0;
     let mut x = footer.left() + 8.0;
-    x = group_box(
-        ui,
-        &painter,
-        x,
-        y,
-        "PLAY RANGE",
-        &[
-            field("START", frames_text(lo as usize, rate), move |n| Act::SetParam(zt, "play_range/low", fr(lo, n).min(hi as f64 - 1.0))),
-            field("END", frames_text(hi as usize, rate), move |n| Act::SetParam(zt, "play_range/high", fr(hi, n).max(lo as f64 + 1.0))),
-        ],
-        acts,
-    );
-    x = group_box(
-        ui,
-        &painter,
-        x,
-        y,
-        "LOOP",
-        &[
-            toggle_field("ACTIVE", loop_on, move || Act::SetParam(zt, "loop_active", if loop_on { 0.0 } else { 1.0 })),
-            field("START", frames_text(la as usize, rate), move |n| Act::SetParam(zt, "loop_range/low", fr(la, n).min(lb as f64 - 1.0))),
-            field("END", frames_text(lb as usize, rate), move |n| Act::SetParam(zt, "loop_range/high", fr(lb, n).max(la as f64 + 1.0))),
-        ],
-        acts,
-    );
+    x = group_box(ui, &painter, x, y, "PLAY RANGE", &play_fields(zt, z, last, per_step), acts);
+    x = group_box(ui, &painter, x, y, "LOOP", &loop_fields(zt, z, last, per_step), acts);
     x = group_box(
         ui,
         &painter,
@@ -1758,5 +1792,58 @@ impl RecorderView {
         }
         a.key_stride = a.key_stride.clamp(1, (a.key_hi - a.key_lo).max(1) as u32);
         a.vel_stride = a.vel_stride.clamp(1, (a.vel_hi - a.vel_lo).max(1) as u32);
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    /// A sample comes up selected: what was saved, else its play range; half open, as the
+    /// selection is.
+    #[test]
+    fn a_sample_comes_up_selected() {
+        let mut z = deckard_model::Zone { play_range: (100, 199), ..Default::default() };
+        assert_eq!(first_selection(&z, 1000), Some((100, 200)), "nothing saved: the play range");
+        z.selection_range = (10, 20);
+        assert_eq!(first_selection(&z, 1000), Some((10, 21)), "as saved");
+        z.selection_range = (10, 5000);
+        assert_eq!(first_selection(&z, 1000), Some((100, 200)), "past the end of the sample");
+        z.play_range = (0, 0);
+        assert_eq!(first_selection(&z, 1000), Some((0, 1000)), "no play range: all of it");
+        assert_eq!(first_selection(&z, 0), None, "nothing to select");
+        assert_eq!(first_selection(&z, 1), None);
+    }
+}
+
+/// The zone to show for a note played: `current` if the note plays it (zones can overlap,
+/// and the one in view shouldn't flicker away), else the first it plays; none if it plays
+/// no zone.
+pub fn zone_for_note(zones: &[deckard_model::Zone], current: usize, pitch: i64, velocity: i64) -> Option<usize> {
+    let plays = |z: &deckard_model::Zone| {
+        (z.key_range.0..=z.key_range.1).contains(&pitch) && (z.velocity_range.0..=z.velocity_range.1).contains(&velocity)
+    };
+    if zones.get(current).is_some_and(plays) {
+        return Some(current);
+    }
+    zones.iter().position(plays)
+}
+
+#[cfg(test)]
+mod zone_for_note_tests {
+    use super::zone_for_note;
+    use deckard_model::Zone;
+
+    #[test]
+    fn the_zone_a_note_lands_in_is_shown() {
+        let zone = |keys, vels| Zone { key_range: keys, velocity_range: vels, ..Default::default() };
+        let zones = [zone((0, 59), (0, 127)), zone((60, 71), (0, 63)), zone((60, 71), (64, 127)), zone((60, 127), (0, 127))];
+        assert_eq!(zone_for_note(&zones, 0, 30, 100), Some(0), "stays");
+        assert_eq!(zone_for_note(&zones, 0, 65, 30), Some(1), "by key and velocity");
+        assert_eq!(zone_for_note(&zones, 0, 65, 100), Some(2));
+        assert_eq!(zone_for_note(&zones, 0, 80, 100), Some(3));
+        assert_eq!(zone_for_note(&zones, 3, 65, 100), Some(3), "overlapping: the one in view stays");
+        assert_eq!(zone_for_note(&zones[..3], 1, 100, 100), None, "no zone there: nothing changes");
+        assert_eq!(zone_for_note(&[], 0, 60, 100), None);
     }
 }

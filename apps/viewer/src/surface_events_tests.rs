@@ -166,3 +166,68 @@ fn quantizing_while_recording_is_its_own_undo_step() {
     assert!(doc.borrow_mut().undo());
     assert_eq!(positions(&app), [0], "only the later notes");
 }
+
+#[test]
+fn the_step_grid_puts_picked_pitches_in_and_takes_them_out() {
+    let mut app = app(&[note(0, 240, 60), note(0, 240, 72)]);
+    let step = |pitches: &[i64]| {
+        let mut list = [128; 16];
+        list[..pitches.len()].copy_from_slice(pitches);
+        A::StepNotes { at: 240, length: 240, velocity: 90, pitches: list }
+    };
+    let at = |pitch| Note { velocity: 90, ..note(0, 240, pitch) };
+    let pitches = |app: &crate::App| {
+        let mut p: Vec<i64> = notes(app).iter().map(|n| n.pitch).collect();
+        p.sort_unstable();
+        p
+    };
+    // Only the missing ones go in, the others stay; all selected.
+    app.surface_act(step(&[60, 64, 67]));
+    assert_eq!(pitches(&app), [60, 64, 67, 72]);
+    assert_eq!(selected(&mut app).len(), 3);
+    assert!(notes(&app).contains(&at(64)), "a step long, at its velocity");
+    // All there: only those go.
+    app.surface_act(step(&[60, 64, 67]));
+    assert_eq!(pitches(&app), [72]);
+    // One undo.
+    app.surface_act(step(&[60, 64]));
+    app.surface_act(A::Edit("undo"));
+    assert_eq!(pitches(&app), [72], "added as one undo step");
+    // Nothing picked: nothing.
+    app.surface_act(step(&[]));
+    assert_eq!(pitches(&app), [72]);
+}
+
+#[test]
+fn the_step_grid_makes_a_pattern_when_theres_none() {
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.scene) = (0, 0);
+    app.surface_act(A::StepNotes { at: 0, length: 240, velocity: 100, pitches: {
+        let mut list = [128; 16];
+        (list[0], list[1]) = (60, 64);
+        list
+    } });
+    let p = app.doc.as_ref().unwrap().borrow().project().clone();
+    assert_eq!(p.groups[0].patterns.len(), 1, "{}", app.status);
+    assert_eq!(p.groups[0].patterns[0].notes.len(), 2);
+}
+
+#[test]
+fn a_new_pattern_from_a_controller_leaves_the_focus_alone() {
+    let mut app = crate::App::default();
+    app.new_project();
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::AddGroup]);
+    (app.group, app.sound, app.scene, app.pattern) = (0, 3, 0, 0);
+    app.surface_act(A::NewPatternIn(1));
+    let p = app.doc.as_ref().unwrap().borrow().project().clone();
+    assert_eq!(p.groups[1].patterns.len(), 1, "{}", app.status);
+    assert!(p.scenes[0].patterns.contains(&(1, 0)), "in the scene");
+    assert_eq!((app.group, app.sound, app.pattern), (0, 3, 0), "the focus stays");
+    // In the focused group: the new one is focused.
+    app.surface_act(A::NewPatternIn(0));
+    assert_eq!((app.group, app.sound), (0, 3));
+    assert!(app.doc.as_ref().unwrap().borrow().project().groups[0].patterns.len() > app.pattern);
+    app.surface_act(A::NewPatternIn(9));
+    assert_eq!((app.group, app.sound), (0, 3), "no such group");
+}

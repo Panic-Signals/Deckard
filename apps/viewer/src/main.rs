@@ -81,6 +81,7 @@ mod midi_monitor;
 mod mk3_io;
 mod mod_slots;
 mod modulation;
+mod ni_agent;
 mod module_ui;
 #[cfg(test)]
 mod pad_blink_tests;
@@ -88,6 +89,8 @@ mod pad_blink_tests;
 mod pad_light_tests;
 #[cfg(test)]
 mod parity_tests;
+#[cfg(test)]
+mod scene_tempo_tests;
 mod plugin_macros;
 mod plugin_pictures;
 #[cfg(test)]
@@ -720,6 +723,8 @@ pub struct App {
     /// Notes selected in the pattern editor, and the (group, pattern) they belong to.
     selected: Vec<Note>,
     selected_in: (usize, usize),
+    /// The scene the Ideas view's tabs are to scroll to, when next drawn.
+    pub(crate) show_scenes: Option<usize>,
     /// The pattern editor's grid, in ticks (snapping, drawing, new note length).
     grid: i64,
     /// A group or sound row being renamed in place.
@@ -881,6 +886,8 @@ pub struct App {
     output_fallback: Option<String>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
+    /// Asking to quit NI's agent, which holds the MK3's screens.
+    ni_agent: ni_agent::Ask,
     /// Windows plug-ins through Wine (Preferences ▸ Plug-ins, Linux): what's installed,
     /// the task running (what it is, where its result comes), the last task's message.
     wine_status: Option<wine::Status>,
@@ -910,6 +917,10 @@ pub struct App {
     /// The Sampler page shown in the SOUND tab, the focused zone, and its waveform.
     sampler_page: usize,
     zone: usize,
+    /// The sound `zone` was last opened for: focusing another opens on its saved zone.
+    zone_of: Option<(usize, usize)>,
+    /// How many live notes [`App::follow_played_zone`] has looked at.
+    zone_hit_seen: u64,
     waveform: Option<sampler_ui::Waveform>,
     /// Where the focused zone is playing (frames), while it plays.
     zone_playhead: Option<usize>,
@@ -1146,6 +1157,7 @@ impl App {
 
     /// Make `d` the open document (or show why it couldn't be opened).
     fn show_document(&mut self, d: Result<Document, String>) {
+        self.zone_of = None;
         modulation::register();
         self.stop();
         self.backed_up = false;
@@ -1458,6 +1470,28 @@ impl App {
     fn toggle_waveform(&mut self) {
         self.settings.show_waveform = !self.settings.show_waveform;
         self.settings.save();
+    }
+
+    /// A note played live on the focused sound shows the zone it lands in, on the
+    /// Sampler's pages and the sampling page alike. (Not the sequence's: the page being
+    /// edited shouldn't change under you as the song plays.)
+    fn follow_played_zone(&mut self) {
+        let Some(Ok(out)) = &self.output else { return };
+        let (count, group, sound, pitch, velocity) = out.telemetry(|t| t.live_hit);
+        if count == self.zone_hit_seen {
+            return;
+        }
+        self.zone_hit_seen = count;
+        self.open_saved_zone();
+        if (group, sound) != (self.group, self.sound) {
+            return;
+        }
+        let Some(doc) = &self.doc else { return };
+        let doc = doc.borrow();
+        let smp = doc.project().groups.get(group).and_then(|g| g.sounds.get(sound)).and_then(|s| s.sampler.as_ref());
+        if let Some(zone) = smp.and_then(|smp| layout::sampling::zone_for_note(&smp.zones, self.zone, pitch, velocity)) {
+            self.zone = zone;
+        }
     }
 
     fn update_waveform(&mut self) {
@@ -2639,6 +2673,8 @@ impl App {
             }
         }
         self.stems_offer_dialog(ctx);
+        let holding = self.mk3.as_ref().is_some_and(mk3_io::Mk3Io::agent_holding);
+        ni_agent::dialog(ctx, &mut self.ni_agent, holding, &mut self.status, ni_agent::quit);
         self.preferences(ctx);
         if self.about.is_some() && !about::show(self, ctx) {
             self.about = None;
@@ -2769,6 +2805,39 @@ impl App {
     }
 
     /// Focus a scene; while a scene plays, switch to it when the playing one ends.
+    /// What Edit ▸ MIDI Change picked: as clicking it. Past the last, nothing.
+    pub(crate) fn midi_recall(&mut self, r: midi_io::Recall) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (scenes, sections) = {
+            let d = doc.borrow();
+            (d.project().scenes.len(), d.project().sections.len())
+        };
+        match r {
+            midi_io::Recall::Scene(s) if s < scenes => self.launch_scene(s),
+            midi_io::Recall::Section(s) if s < sections => self.launch_section(s),
+            _ => {}
+        }
+    }
+
+    /// Whether scenes can play at their own tempos: not when a clock sets the tempo.
+    pub(crate) fn scene_tempo_available(&self) -> bool {
+        !self.settings.link && self.settings.midi_sync != settings::MidiSync::Receive
+    }
+
+    /// The scene playing now, if it has its own tempo, and that tempo.
+    pub(crate) fn playing_scene_tempo(&self, p: &deckard_model::Project) -> Option<(usize, f64)> {
+        if !self.scene_tempo_available() {
+            return None;
+        }
+        let head = self.playhead()?;
+        let s = match head.mode {
+            Mode::Scene(s) => s,
+            Mode::Arrangement => p.section_at(head.position as i64).and_then(|i| p.sections[i].scene)?,
+            _ => return None,
+        };
+        Some((s, p.scenes.get(s)?.tempo?))
+    }
+
     fn launch_scene(&mut self, scene: usize) {
         self.focus_scene(scene);
         let Some(doc) = &self.doc else { return };
@@ -3948,7 +4017,7 @@ impl App {
         let d = doc.borrow();
         let p = d.project();
         v.project = p.name.clone();
-        v.tempo = p.tempo;
+        v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         v.swing = p.swing.amount;
         v.master_volume = p.master_level;
         v.master_db = deckard_model::level_db(p.master_level);
@@ -4078,6 +4147,12 @@ impl App {
                         .collect(),
                     scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
                     progress: head.and_then(|_| layout::group_progress(p, head, self.scene, g)).map(|(bars, played)| played / bars as f64),
+                    playing_progress: head
+                        .and_then(|h| {
+                            let scene = if let Mode::Scene(s) = h.mode { s } else { self.scene };
+                            layout::group_progress(p, head, scene, g)
+                        })
+                        .map(|(bars, played)| played / bars as f64),
                     sounds: (0..grp.sounds.len())
                         .map(|s| {
                             let snd = &grp.sounds[s];
@@ -4148,6 +4223,16 @@ impl App {
             A::FocusScene(scene) => {
                 if project.is_some_and(|p| scene < p.scenes.len()) {
                     self.launch_scene(scene);
+                }
+            }
+            A::ShowScenes(first) => self.show_scenes = Some(first),
+            A::NewPatternIn(group) => {
+                if project.is_some_and(|p| group < p.groups.len()) {
+                    let was = (self.group, self.pattern);
+                    layout::apply_acts(self, vec![Act::NewPattern(self.scene, group)]);
+                    if group != was.0 {
+                        (self.group, self.pattern) = was;
+                    }
                 }
             }
             // (A MIDI controller's scene button: stopped, it starts the scene too.)
@@ -4351,6 +4436,7 @@ impl App {
             A::Events(what, n) => self.surface_events(what, n),
             A::EventsRange { start, end, low, high } => self.surface_events_range(start, end, low, high),
             A::StepToggle { at, length, velocity } => self.surface_step(at, length, velocity),
+            A::StepNotes { at, length, velocity, pitches } => self.surface_step_notes(at, length, velocity, &pitches[..]),
             A::SetMacro { knob, level } => {
                 if !self.set_plugin_macro(knob, level) {
                     self.set_macro_for_knob(knob, level);
@@ -4939,6 +5025,21 @@ impl App {
         for slot in self.midi.take_lock() {
             self.lock_midi_recall(slot);
         }
+        // Edit ▸ MIDI Change's scenes and sections, as Lock's.
+        if let Some(doc) = &self.doc {
+            let d = doc.borrow();
+            let cfg = |r: &deckard_model::MidiRecall| {
+                (r.trigger != 0).then(|| midi_io::LockMidi {
+                    source: r.source.clone(),
+                    channel: r.channel.clamp(1, 16) as u8,
+                    trigger: r.trigger,
+                })
+            };
+            self.midi.set_recalls(cfg(&d.project().scene_recall), cfg(&d.project().section_recall));
+        }
+        for r in self.midi.take_recalls() {
+            self.midi_recall(r);
+        }
         self.remote_midi_sync();
         for (g, s, pitch, vel) in self.midi.take_pending() {
             if vel > 0 {
@@ -5370,6 +5471,7 @@ impl App {
     /// Keep the Sampling view on the focused zone's sample, its playhead and the
     /// recorder up to date.
     fn update_sampling(&mut self) {
+        self.open_saved_zone();
         self.poll_stems();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
@@ -5424,7 +5526,17 @@ impl App {
                 let key = (self.group, self.sound, zi, sref.path.clone());
                 if self.sampling.sample_key.as_ref() != Some(&key) {
                     match self.samples.sample(&sref, path.as_deref()) {
-                        Some(s) => self.sampling.set_sample(key, s),
+                        Some(s) => {
+                            let frames = s.frames.len();
+                            self.sampling.set_sample(key, s);
+                            // A sample that comes up has its play range (or what was saved) selected.
+                            if self.sampling.selection.is_none() {
+                                let d = doc.borrow();
+                                let z = d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound));
+                                let z = z.and_then(|x| x.sampler.as_ref()).and_then(|x| x.zones.get(zi));
+                                self.sampling.selection = z.and_then(|z| layout::sampling::first_selection(z, frames));
+                            }
+                        }
                         None => {
                             self.sampling.sample = None;
                             self.sampling.sample_key = None;
@@ -5615,6 +5727,19 @@ impl App {
             }
             Err(e) => self.status = format!("can't make the stems' group: {e}"),
         }
+    }
+
+    /// A sound newly focused opens on the zone it was saved focused on, as Maschine does.
+    fn open_saved_zone(&mut self) {
+        let at = (self.group, self.sound);
+        if self.zone_of == Some(at) {
+            return;
+        }
+        self.zone_of = Some(at);
+        let Some(doc) = &self.doc else { return };
+        let doc = doc.borrow();
+        let saved = doc.project().groups.get(at.0).and_then(|g| g.sounds.get(at.1)).and_then(|x| x.sampler.as_ref());
+        self.zone = saved.map_or(0, |x| x.focused_zone);
     }
 
     /// The focused zone's range to edit: the selection, else the play range [a, b).
@@ -5990,7 +6115,8 @@ impl App {
             Some(Ok(out)) => out.telemetry(|t| (self.playing.is_some() && t.sequencing, t.position, t.length)),
             _ => (false, 0.0, 0.0),
         };
-        recorder::Clock { playing, position, length, tempo: p.tempo, grid, bar }
+        let tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
+        recorder::Clock { playing, position, length, tempo, grid, bar }
     }
 
     /// An engine to record from or play notes into (one that plays nothing if
@@ -8322,6 +8448,7 @@ impl App {
             self.selected.clear();
             self.selected_in = (self.group, self.pattern);
         }
+        self.follow_played_zone();
         self.update_waveform();
         self.update_sampling();
         self.poll_recorded();
@@ -10338,6 +10465,61 @@ mod tests {
     /// The Poly Synth's strip panel: four tabs (Osc A, Osc B, LFO, Mod) laid out as
     /// Maschine's; its switches and knobs edit the synth. `$DECKARD_RENDER_DIR` gets a
     /// picture of each tab.
+    /// A double-click on a knob types its value, as it's shown; ⌘-click sets its default.
+    #[test]
+    fn poly_synth_knob_takes_a_typed_value() {
+        let Some(mut h) = harness(false, false) else { return };
+        layout::style(&h.ctx);
+        let Some(sound) = (0..16).find(|&s| project_of(&h).groups[0].sounds.get(s).is_some_and(|x| x.slots.is_empty())) else { return };
+        h.state_mut().sound = sound;
+        h.run_steps(2);
+        h.state_mut().add_slot(layout::AddWhat::Instrument("PolySynth"));
+        h.state_mut().mixer = true;
+        h.run_steps(5);
+        let panels: Vec<(usize, egui::Rect)> = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-strip-panels"))).unwrap();
+        let r = panels.iter().find(|p| p.0 == 0).unwrap().1;
+        let body = egui::Rect::from_min_max(Pos2::new(r.left() + 4.0, r.top() + 26.0), Pos2::new(r.right() - 4.0, r.bottom()));
+        let k = body.height() / 216.0;
+        let tabs = h.ctx.data(|d| d.get_temp::<Vec<egui::Rect>>(egui::Id::new("deckard-poly-tabs"))).unwrap();
+        click(&mut h, tabs[1].center());
+        h.run_steps(3);
+        let c = body.min + egui::vec2(506.0 + 20.5, 76.0 + 20.5) * k;
+        let cutoff = |h: &Harness<'static, App>| project_of(h).groups[0].sounds[sound].slots[0].param("filter_cutoff").unwrap();
+        let double = |h: &mut Harness<'static, App>, modifiers: egui::Modifiers, times: usize| {
+            // (Long enough after the last click not to count with it.)
+            h.run_steps(40);
+            h.hover_at(c);
+            h.step();
+            for _ in 0..times {
+                for pressed in [true, false] {
+                    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed, modifiers });
+                    h.step();
+                }
+            }
+            h.run_steps(2);
+        };
+        double(&mut h, Default::default(), 2);
+        assert_eq!(cutoff(&h), 1.0, "opening the box changes nothing");
+        // Esc leaves it.
+        h.event(Event::Text("10".into()));
+        h.step();
+        h.event(Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+        h.run_steps(3);
+        assert_eq!(cutoff(&h), 1.0, "Esc cancels");
+        // Enter keeps it, read as the knob shows it (a percentage).
+        double(&mut h, Default::default(), 2);
+        h.event(Event::Text("25".into()));
+        h.step();
+        h.event(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+        h.run_steps(3);
+        assert!((cutoff(&h) - 0.25).abs() < 0.002, "typed 25 %: {}", cutoff(&h));
+        // ⌘-click: its default.
+        h.event(Event::ModifiersChanged(egui::Modifiers::COMMAND));
+        double(&mut h, egui::Modifiers::COMMAND, 1);
+        h.event(Event::ModifiersChanged(Default::default()));
+        assert_eq!(cutoff(&h), 1.0, "its default");
+    }
+
     #[test]
     fn poly_synth_strip_panel_edits() {
         let Some(mut h) = harness(false, false) else { return };
@@ -12063,6 +12245,201 @@ mod tests {
         assert_eq!(got, vec![(48, 0, 53), (60, 54, 127)]);
         assert!(zones.iter().all(|z| z.loop_active && z.loop_range == (4800, 20_000)));
         assert_eq!((h.state().sound, h.state().sampling.tab), (s3, 3));
+    }
+
+    /// The divider above the chain area: dragged, the patterns and scenes take less or more
+    /// of the window and everything under them the rest; double-clicked, back as it was.
+    #[test]
+    fn the_song_divider_resizes_what_is_above_and_below_it() {
+        let Some(mut h) = harness(false, false) else { return };
+        h.run_steps(3);
+        let top = |h: &Harness<'static, App>| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("deckard-grid"))).expect("grid drawn");
+        // (Where the divider is now, across the middle of the window.)
+        let at = |h: &Harness<'static, App>| {
+            h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("deckard-song-divider"))).expect("divider drawn").center()
+        };
+        let grid0 = top(&h);
+        assert_eq!(h.state().settings.song_panel_h, None, "the window's size decides");
+        // Up: less above, and the editor grows by as much.
+        let from = at(&h);
+        drag(&mut h, from, from - egui::vec2(0.0, 100.0));
+        assert_eq!(h.state().settings.song_panel_h, Some(243.0));
+        assert!((at(&h).y - (from.y - 100.0)).abs() < 0.5, "it followed the pointer");
+        assert!((top(&h).top() - (grid0.top() - 100.0)).abs() < 0.5, "{:?}", top(&h));
+        assert!((top(&h).height() - (grid0.height() + 100.0)).abs() < 0.5, "{:?}", top(&h));
+        assert_eq!(top(&h).bottom(), grid0.bottom(), "its foot stays");
+        // As far up as it goes.
+        let from = at(&h);
+        drag(&mut h, from, Pos2::new(from.x, 0.0));
+        assert_eq!(h.state().settings.song_panel_h, Some(147.0));
+        if let Ok(dir) = std::env::var("DECKARD_SHOTS") {
+            h.render().unwrap().save(Path::new(&dir).join("divider-up.png")).unwrap();
+        }
+        // As far down: the editor keeps its room.
+        let from = at(&h);
+        drag(&mut h, from, Pos2::new(from.x, 2000.0));
+        let down = h.state().settings.song_panel_h.unwrap();
+        assert!(down > 343.0, "{down}");
+        assert!(top(&h).height() > 30.0, "{:?}", top(&h));
+        if let Ok(dir) = std::env::var("DECKARD_SHOTS") {
+            h.render().unwrap().save(Path::new(&dir).join("divider-down.png")).unwrap();
+        }
+        // Clicked without moving: stays. Double-clicked: as it was.
+        let from = at(&h);
+        click(&mut h, from);
+        assert_eq!(h.state().settings.song_panel_h, Some(down));
+        click(&mut h, from);
+        assert_eq!(h.state().settings.song_panel_h, None);
+        h.run_steps(2);
+        assert_eq!(top(&h), grid0);
+    }
+
+    /// The Edit tab always shows the play range, the selection and the loop, in samples; a
+    /// sample comes up selected; a value can be typed to the sample.
+    #[test]
+    fn the_edit_tab_shows_and_types_its_ranges_in_samples() {
+        let Some(mut h) = harness(false, true) else { return };
+        (h.state_mut().group, h.state_mut().sound) = (0, 0);
+        h.run_steps(3);
+        let panel_top = 33.0 + 3.0 + 343.0 + 2.0 + 140.0 + 2.0;
+        click(&mut h, Pos2::new(3.0 + 16.0, panel_top + 7.0 + 4.0 * 28.0 + 12.0));
+        h.run_steps(3);
+        let zone = |h: &Harness<'static, App>| project_of(h).groups[0].sounds[0].sampler.clone().unwrap().zones[0].clone();
+        let (lo, hi) = zone(&h).play_range;
+        assert_eq!(h.state().sampling.selection, Some((lo as usize, hi as usize + 1)), "the play range");
+        let at = |h: &Harness<'static, App>, group: &str, label: &str| -> egui::Rect {
+            let id = egui::Id::new(("deckard-sample-field", group.to_string(), label.to_string()));
+            h.ctx.data(|d| d.get_temp(id)).unwrap_or_else(|| panic!("{group} {label} shown"))
+        };
+        for (group, label) in [
+            ("PLAY RANGE", "START"),
+            ("PLAY RANGE", "END"),
+            ("SELECTION RANGE", "START"),
+            ("SELECTION RANGE", "END"),
+            ("LOOP", "ACTIVE"),
+            ("LOOP", "START"),
+            ("LOOP", "END"),
+            ("LOOP", "XFADE"),
+        ] {
+            at(&h, group, label);
+        }
+        let typed = |h: &mut Harness<'static, App>, r: egui::Rect, text: &str| {
+            h.run_steps(40);
+            let c = r.center();
+            h.hover_at(c);
+            h.step();
+            for _ in 0..2 {
+                for pressed in [true, false] {
+                    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+                    h.step();
+                }
+            }
+            h.run_steps(2);
+            h.event(Event::Text(text.into()));
+            h.step();
+            h.event(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+            h.run_steps(3);
+        };
+        // To the sample, however long the sample is.
+        let r = at(&h, "PLAY RANGE", "START");
+        typed(&mut h, r, "1237");
+        assert_eq!(zone(&h).play_range.0, 1237);
+        let r = at(&h, "LOOP", "END");
+        typed(&mut h, r, "9011");
+        assert_eq!(zone(&h).loop_range.1, 9011);
+        let r = at(&h, "LOOP", "START");
+        typed(&mut h, r, "1298");
+        assert_eq!(zone(&h).loop_range.0, 1298);
+        assert_eq!(zone(&h).play_range.0, 1237, "the start stays 61 samples before the loop");
+        let r = at(&h, "LOOP", "XFADE");
+        typed(&mut h, r, "500");
+        assert_eq!(zone(&h).x_fade, 500);
+        let r = at(&h, "SELECTION RANGE", "END");
+        typed(&mut h, r, "5000");
+        assert_eq!(h.state().sampling.selection.map(|s| s.1), Some(5001), "both ends in, as it reads");
+        if let Ok(dir) = std::env::var("DECKARD_SHOTS") {
+            h.render().unwrap().save(Path::new(&dir).join("sample-edit.png")).unwrap();
+        }
+        // Nothing selected: still there, and an end selects from the play range.
+        let wave: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-sample-wave"))).expect("waveform drawn");
+        click(&mut h, Pos2::new(wave.center().x, wave.center().y));
+        assert_eq!(h.state().sampling.selection, None, "deselected");
+        at(&h, "SELECTION RANGE", "START");
+        let r = at(&h, "SELECTION RANGE", "END");
+        typed(&mut h, r, "6000");
+        assert_eq!(h.state().sampling.selection, Some((1237, 6001)));
+    }
+
+    /// A sampled sound opens on the zone it was saved focused on, not always the first.
+    #[test]
+    fn a_sound_opens_on_its_saved_zone() {
+        let Some(mut h) = harness(false, false) else { return };
+        let p = project_of(&h);
+        let found = p.groups.iter().enumerate().find_map(|(g, x)| {
+            x.sounds.iter().enumerate().find_map(|(s, y)| y.sampler.as_ref().filter(|z| z.focused_zone > 0).map(|z| (g, s, z.focused_zone)))
+        });
+        let Some((g, s, saved)) = found else {
+            eprintln!("no sound saved on a later zone; skipping");
+            return;
+        };
+        (h.state_mut().group, h.state_mut().sound) = (g, s);
+        h.run_steps(3);
+        assert_eq!(h.state().zone, saved);
+        // Focused by hand, it stays while the sound is focused.
+        h.state_mut().zone = 0;
+        h.run_steps(3);
+        assert_eq!(h.state().zone, 0);
+    }
+
+    /// The sample's zooming scroll bar, as the Pattern Editor's: up zooms in round where
+    /// it was grabbed, along scrolls, an end moves with the other held, double-click shows
+    /// it all.
+    #[test]
+    fn zoom_bar_zooms_and_scrolls_the_sample() {
+        let Some(mut h) = harness(false, true) else { return };
+        (h.state_mut().group, h.state_mut().sound) = (0, 0);
+        h.run_steps(3);
+        let panel_top = 33.0 + 3.0 + 343.0 + 2.0 + 140.0 + 2.0;
+        click(&mut h, Pos2::new(3.0 + 16.0, panel_top + 7.0 + 4.0 * 28.0 + 12.0));
+        h.run_steps(3);
+        assert!(h.state().sampling.sample.is_some(), "the kick's sample is shown");
+        let wave: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-sample-wave"))).expect("waveform drawn");
+        let bar_y = wave.bottom() + 1.0 + 8.0;
+        let len = h.state().sampling.len() as f64;
+        let window = |h: &Harness<'static, App>| {
+            let (a, b) = h.state().sampling.view();
+            (a / len, (b - a) / len)
+        };
+        assert_eq!(h.state().sampling.view, None, "all of it");
+        // Up from the middle: zoomed in, still round the middle.
+        let mid = Pos2::new(wave.center().x, bar_y);
+        drag(&mut h, mid, mid - egui::vec2(0.0, 60.0));
+        let (from, part) = window(&h);
+        assert!(part < 0.6, "zoomed in: {part}");
+        assert!((from + part / 2.0 - 0.5).abs() < 0.05, "round the middle: {from} {part}");
+        // Along: scrolled right, as far in.
+        let thumb = Pos2::new(wave.left() + ((from + part / 2.0) as f32) * wave.width(), bar_y);
+        drag(&mut h, thumb, thumb + egui::vec2(40.0, 0.0));
+        assert!(window(&h).0 > from, "scrolled");
+        assert!((window(&h).1 - part).abs() < 1e-4, "as far in");
+        // Its right end, in: the left stays.
+        let (from, part) = window(&h);
+        let end = Pos2::new(wave.left() + ((from + part) as f32) * wave.width() - 2.0, bar_y);
+        drag(&mut h, end, end - egui::vec2(30.0, 0.0));
+        assert!((window(&h).0 - from).abs() < 1e-4, "the left end held");
+        assert!(window(&h).1 < part, "shorter");
+        // Double-click: all of it again.
+        let (from, part) = window(&h);
+        let thumb = Pos2::new(wave.left() + ((from + part / 2.0) as f32) * wave.width(), bar_y);
+        for _ in 0..2 {
+            click(&mut h, thumb);
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.view, None, "reset");
+        // Up and up: no further in than the waveform goes.
+        drag(&mut h, mid, mid - egui::vec2(0.0, 900.0));
+        let (a, b) = h.state().sampling.view();
+        assert!(b - a >= 63.0 && b - a < len, "{a} {b}");
     }
 
     #[test]

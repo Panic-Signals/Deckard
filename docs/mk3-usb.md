@@ -117,8 +117,9 @@ driver `crates/mk3/src/display.rs`. A transfer draws one rectangle of one displa
   small changes); `03 00 00 00` blit; `40 00 00 00` end.
 
 NI's NIHostIntegrationAgent claims the interface while it runs; DECKARD gets the displays
-when it isn't running (it isn't installed on a machine without NI software). The driver
-sends only the rows that changed.
+when it isn't running (it isn't installed on a machine without NI software). On macOS,
+when an MK3 is plugged in, its screens won't open and the agent is running, DECKARD asks to
+quit it, and gets the screens on its next try. The driver sends only the rows that changed.
 
 What's shown is drawn by `crates/nwl` from NI's own style sheets, pictures and fonts in
 the install (`MaschineMK3Styles.txt` and its imports) and the scripts' widget tree

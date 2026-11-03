@@ -218,4 +218,37 @@ impl App {
         );
         self.select_events(vec![n]);
     }
+
+    /// The step grid's button in Keyboard and Chords mode
+    /// ([`deckard_surface::Action::StepNotes`]): `pitches` in the step at `at`, or with
+    /// all of them there, out; other pitches stay. With no pattern, a new one first.
+    pub(crate) fn surface_step_notes(&mut self, at: i64, length: i64, velocity: i64, pitches: &[i64]) {
+        let pitches: Vec<i64> = pitches.iter().copied().filter(|p| (0..=127).contains(p)).collect();
+        if pitches.is_empty() {
+            return;
+        }
+        if self.event_notes().is_none() {
+            layout::apply_acts(self, vec![Act::NewPattern(self.scene, self.group)]);
+        }
+        let Some((all, ..)) = self.event_notes() else { return };
+        let there: Vec<Note> = all
+            .iter()
+            .filter(|n| n.sound == self.sound && n.position >= at && n.position < at + length && pitches.contains(&n.pitch))
+            .copied()
+            .collect();
+        let mut missing: Vec<i64> = pitches.iter().filter(|p| !there.iter().any(|n| n.pitch == **p)).copied().collect();
+        missing.sort_unstable();
+        missing.dedup();
+        if missing.is_empty() {
+            self.delete_events("Remove Step", there);
+            return;
+        }
+        let sound = self.sound;
+        let add: Vec<Note> =
+            missing.into_iter().map(|pitch| Note { expr: None, sound, position: at, length, pitch, velocity, probability: 100 }).collect();
+        let mut chosen = there;
+        chosen.extend_from_slice(&add);
+        layout::apply_acts(self, vec![Act::EditNotes { g: self.group, p: self.pattern, label: "Add Step", remove: Vec::new(), add }]);
+        self.select_events(chosen);
+    }
 }

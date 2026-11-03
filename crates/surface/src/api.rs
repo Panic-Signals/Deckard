@@ -463,6 +463,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     indexed!("focus_group", "a group", Action::FocusGroup);
     indexed!("focus_scene", "a scene", Action::FocusScene);
     indexed!("launch_scene", "a scene", Action::LaunchScene);
+    indexed!("show_scenes", "a scene", Action::ShowScenes);
+    indexed!("new_pattern", "a group", Action::NewPatternIn);
     indexed!("focus_section", "a section", Action::FocusSection);
     indexed!("pick_pattern", "a pattern", Action::PickPattern);
     let sh = shared.clone();
@@ -731,6 +733,19 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         "step",
         lua.create_function(move |_, (at, length, velocity): (i64, i64, i64)| {
             act(&sh, Action::StepToggle { at: at.max(0), length: length.max(1), velocity: velocity.clamp(0, 127) });
+            Ok(())
+        })?,
+    )?;
+    let sh = shared.clone();
+    d.set(
+        "step_notes",
+        lua.create_function(move |_, (at, length, velocity, pitches): (i64, i64, i64, Vec<i64>)| {
+            let mut list = [128; 16];
+            for (to, p) in list.iter_mut().zip(pitches) {
+                *to = p.clamp(0, 127);
+            }
+            let pitches = list;
+            act(&sh, Action::StepNotes { at: at.max(0), length: length.max(1), velocity: velocity.clamp(0, 127), pitches });
             Ok(())
         })?,
     )?;
@@ -1133,6 +1148,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         gt.set("patterns", patterns)?;
         gt.set("scene_pattern", g.scene_pattern.map(|i| i + 1))?;
         gt.set("progress", g.progress)?;
+        gt.set("playing_progress", g.playing_progress)?;
         let sounds = lua.create_table()?;
         for (j, s) in g.sounds.iter().enumerate() {
             let st = lua.create_table()?;

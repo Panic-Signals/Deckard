@@ -494,10 +494,26 @@ struct Stream {
     x_fade: i64,
     fade_in: i64,
     fade_out: i64,
+    /// How long the loop crossfade under way runs (frames); 0: none is.
+    fading: i64,
     done: bool,
 }
 
 impl Stream {
+    /// Frame `p` under the zone's fades, by its place in the play range: nothing before it.
+    fn faded(&self, data: &[[f32; 2]], p: i64) -> [f32; 2] {
+        let (start, end) = self.play;
+        let mut g = 1.0;
+        if self.fade_in > 0 && p >= start && p - start < self.fade_in {
+            g *= (p - start) as f32 / self.fade_in as f32;
+        }
+        if self.fade_out > 0 && p < end && end - p <= self.fade_out {
+            g *= (end - p) as f32 / self.fade_out as f32;
+        }
+        let x = data[p as usize];
+        [x[0] * g, x[1] * g]
+    }
+
     fn next(&mut self, data: &[[f32; 2]]) -> [f32; 2] {
         if self.done {
             return [0.0; 2];
@@ -508,30 +524,30 @@ impl Stream {
             self.done = true;
             return [0.0; 2];
         }
-        let mut x = data[p as usize];
-        // Loop crossfade: the tail before the loop end fades into the material before
-        // the loop start (forward playback).
-        if let Some((ls, le)) = self.looped
-            && self.forward
-        {
-            let xf = self.x_fade.min(le - ls).min(ls - start);
-            if xf > 0 && p >= le - xf && p < le {
-                let w = (le - p) as f32 / xf as f32;
-                let q = (ls - (le - p)) as usize;
-                let y = data[q];
-                x = [x[0] * w + y[0] * (1.0 - w), x[1] * w + y[1] * (1.0 - w)];
+        let mut x = self.faded(data, p);
+        // Loop crossfade: the last frames before the jump back fade into what the jump
+        // would otherwise skip, linearly (§6.5). That's in the sample whether or not it's
+        // in the play range.
+        if let Some((ls, le)) = self.looped {
+            let last = data.len() as i64;
+            let (left, room, other) = if self.forward {
+                (le - p, ls, ls - (le - p))
+            } else {
+                let left = p + 1 - ls;
+                (left, last - le + 1, le + left - 2)
+            };
+            let xf = self.x_fade.min(le - ls).min(room);
+            if xf > 0 && left > 0 && left <= xf {
+                // (From where the fade began: a note may start inside it.)
+                if self.fading == 0 {
+                    self.fading = left;
+                }
+                if other >= 0 && other < last {
+                    let w = left as f32 / self.fading as f32;
+                    let y = self.faded(data, other);
+                    x = [x[0] * w + y[0] * (1.0 - w), x[1] * w + y[1] * (1.0 - w)];
+                }
             }
-        }
-        // Zone fades, by position in the play range.
-        let mut g = 1.0;
-        if self.fade_in > 0 && p - start < self.fade_in {
-            g *= (p - start) as f32 / self.fade_in as f32;
-        }
-        if self.fade_out > 0 && end - p <= self.fade_out {
-            g *= (end - p - 1) as f32 / self.fade_out as f32;
-        }
-        if g != 1.0 {
-            x = [x[0] * g, x[1] * g];
         }
         // Advance.
         if self.forward {
@@ -540,6 +556,7 @@ impl Stream {
                 && self.pos >= le
             {
                 self.pos = ls;
+                self.fading = 0;
             }
         } else {
             self.pos -= 1;
@@ -547,6 +564,7 @@ impl Stream {
                 && self.pos < ls
             {
                 self.pos = le - 1;
+                self.fading = 0;
             }
         }
         x
@@ -1181,6 +1199,7 @@ impl SamplerRt {
             x_fade: z.x_fade as i64,
             fade_in: z.fade_in as i64,
             fade_out: z.fade_out as i64,
+            fading: 0,
             done: false,
         };
         // Gain and pan (§6.6).
@@ -1664,6 +1683,131 @@ mod tests {
         assert_eq!(smp.voices.as_ptr(), buffer, "the voice list was not reallocated");
         let sounding = smp.voices.iter().filter(|v| v.fade.is_none()).count();
         assert!(sounding <= limit, "{sounding} notes sound, limit {limit}");
+    }
+
+    /// A stream over frames whose value is their index, so a mix shows what it read.
+    fn stream(play: (i64, i64), looped: (i64, i64), x_fade: i64, forward: bool) -> (super::Stream, Vec<[f32; 2]>) {
+        let data = (0..1000).map(|i| [i as f32, i as f32]).collect();
+        let pos = if forward { play.0 } else { play.1 - 1 };
+        let st = super::Stream {
+            pos,
+            forward,
+            play,
+            looped: Some(looped),
+            x_fade,
+            fade_in: 0,
+            fade_out: 0,
+            fading: 0,
+            done: false,
+        };
+        (st, data)
+    }
+
+    fn near(got: f32, want: f32, at: i64) {
+        assert!((got - want).abs() < 1e-2, "at {at}: {got}, not {want}");
+    }
+
+    /// The fade reaches past the Start marker: Start 10 frames before the loop, fade of 50.
+    #[test]
+    fn a_loop_crossfade_reads_the_audio_before_start() {
+        let (mut st, data) = stream((90, 1000), (100, 200), 50, true);
+        for pass in 0..3 {
+            let first = if pass == 0 { 90 } else { 100 };
+            for p in first..200 {
+                let x = st.next(&data)[0];
+                let left = 200 - p;
+                if left <= 50 {
+                    let w = left as f32 / 50.0;
+                    near(x, p as f32 * w + (100 - left) as f32 * (1.0 - w), p);
+                } else {
+                    near(x, p as f32, p);
+                }
+            }
+        }
+    }
+
+    /// What it may reach: the fade, the loop's length, and the file before the loop.
+    #[test]
+    fn a_loop_crossfade_is_limited_by_the_loop_and_the_file() {
+        let first_faded = |play, looped: (i64, i64), x_fade| {
+            let (mut st, data) = stream(play, looped, x_fade, true);
+            st.pos = looped.0;
+            (looped.0..looped.1).find(|&p| st.next(&data)[0] != p as f32)
+        };
+        // A fade longer than the loop runs for the loop.
+        assert_eq!(first_faded((0, 1000), (500, 600), 400), Some(501), "loop length (500's weight is 1)");
+        // Audio before the loop limits it, wherever Start is.
+        assert_eq!(first_faded((25, 1000), (30, 130), 100), Some(101), "30 frames before the loop");
+        // A loop from the file's first frame has nothing to fade from.
+        assert_eq!(first_faded((0, 1000), (0, 100), 50), None, "none before frame 0");
+        // None asked for.
+        assert_eq!(first_faded((0, 1000), (100, 200), 0), None);
+    }
+
+    /// Reversed, it fades into what comes after the loop's end, and lands on the jump.
+    #[test]
+    fn a_reversed_loop_crossfades_past_its_end() {
+        let (mut st, data) = stream((0, 1000), (100, 200), 50, false);
+        st.pos = 199;
+        for p in (100..200).rev() {
+            let x = st.next(&data)[0];
+            let left = p + 1 - 100;
+            if left <= 50 {
+                let w = left as f32 / 50.0;
+                near(x, p as f32 * w + (200 + left - 2) as f32 * (1.0 - w), p);
+            } else {
+                near(x, p as f32, p);
+            }
+        }
+        assert_eq!(st.pos, 199, "jumped back");
+        // No more than the file holds past the end: its last frame reads inside the data.
+        let (mut st, data) = stream((0, 1000), (900, 1000), 50, false);
+        for _ in 0..500 {
+            st.next(&data);
+        }
+        assert!(!st.done);
+    }
+
+    /// Each side of the fade takes the zone fade by its own place; before Start, none.
+    #[test]
+    fn zone_fades_apply_to_each_side_of_a_crossfade() {
+        let (mut st, data) = stream((95, 1000), (100, 200), 50, true);
+        st.fade_in = 20;
+        let gain = |q: i64| if q < 95 || q - 95 >= 20 { 1.0 } else { (q - 95) as f32 / 20.0 };
+        for p in 95..200 {
+            let x = st.next(&data)[0];
+            let left = 200 - p;
+            let want = if left <= 50 {
+                let w = left as f32 / 50.0;
+                let q = 100 - left;
+                p as f32 * gain(p) * w + q as f32 * gain(q) * (1.0 - w)
+            } else {
+                p as f32 * gain(p)
+            };
+            near(x, want, p);
+        }
+    }
+
+    /// A note begun inside the fade starts on the tail alone and still lands on the jump.
+    #[test]
+    fn a_note_begun_inside_a_crossfade_starts_on_the_tail() {
+        let (mut st, data) = stream((90, 1000), (100, 200), 50, true);
+        st.pos = 190;
+        for p in 190..200 {
+            let x = st.next(&data)[0];
+            let left = 200 - p;
+            let w = left as f32 / 10.0;
+            near(x, p as f32 * w + (100 - left) as f32 * (1.0 - w), p);
+        }
+        // The next pass fades over its whole length.
+        for p in 100..200 {
+            let x = st.next(&data)[0];
+            let left = 200 - p;
+            if left <= 50 {
+                let w = left as f32 / 50.0;
+                near(x, p as f32 * w + (100 - left) as f32 * (1.0 - w), p);
+            }
+        }
     }
 
     #[test]

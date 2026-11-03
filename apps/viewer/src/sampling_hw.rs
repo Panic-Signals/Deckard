@@ -14,7 +14,7 @@
 //!
 //! Frame knobs move across the part of the sample shown in a turn (a hundredth a step).
 
-use crate::layout::sampling::{GRID_DIVS, PATTERN_MODES, SLICE_MODES, SPLIT_COUNTS, SamplingState, frames_text};
+use crate::layout::sampling::{GRID_DIVS, PATTERN_MODES, SLICE_MODES, SPLIT_COUNTS, SamplingState};
 use crate::record_knobs::{self, Knobs};
 use deckard_lua_host::state::{KnobPage, SampleView, SamplingKnob};
 use deckard_model::{Color, Project};
@@ -140,7 +140,7 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     let step = ((v1 - v0) / FRAME_STEPS).max(1.0).round();
     let last = len - 1.0;
     let frames = |key: &str, name: &str, v: i64, apply: Apply| {
-        (knob(key, name, frames_text(v.max(0) as usize, rate), v as f64, (0.0, last), step, 1.0 / FRAME_STEPS), apply)
+        (knob(key, name, v.max(0).to_string(), v as f64, (0.0, last), step, 1.0 / FRAME_STEPS), apply)
     };
     let (lo, hi) = if z.play_range.1 > z.play_range.0 { z.play_range } else { (0, last as i64) };
     let (sa, sb) = st.selection.map_or((lo, hi), |(a, b)| (a as i64, b as i64));
@@ -183,15 +183,7 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             frames("Zone.LoopStart", "START", la, Apply::Zone("loop_range/low")),
             frames("Zone.LoopEnd", "END", lb, Apply::Zone("loop_range/high")),
             (
-                knob(
-                    "Zone.XFade",
-                    "XFADE",
-                    frames_text(z.x_fade.max(0) as usize, rate),
-                    z.x_fade as f64,
-                    (0.0, xfade_max),
-                    step,
-                    1.0 / FRAME_STEPS,
-                ),
+                knob("Zone.XFade", "XFADE", z.x_fade.max(0).to_string(), z.x_fade as f64, (0.0, xfade_max), step, 1.0 / FRAME_STEPS),
                 Apply::Zone("x_fade"),
             ),
         ],

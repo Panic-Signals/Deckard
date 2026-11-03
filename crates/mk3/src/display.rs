@@ -159,13 +159,16 @@ pub struct Displays {
     shown: [Option<Vec<u16>>; 2],
 }
 
+/// What [`Displays::open`] says when no MK3 is plugged in.
+pub const NO_MK3: &str = "no Maschine MK3";
+
 impl Displays {
     pub fn open() -> Result<Displays, String> {
         let info = nusb::list_devices()
             .wait()
             .map_err(|e| e.to_string())?
             .find(|d| d.vendor_id() == crate::VENDOR && d.product_id() == crate::PRODUCT)
-            .ok_or("no Maschine MK3")?;
+            .ok_or(NO_MK3)?;
         let dev = info.open().wait().map_err(|e| e.to_string())?;
         let iface = dev.claim_interface(5).wait().map_err(|e| format!("the displays are in use (NI's agent?): {e}"))?;
         let out = iface.endpoint::<Bulk, Out>(0x04).map_err(|e| e.to_string())?;

@@ -101,7 +101,8 @@ pub fn draw(
 /// A number dragged up and down (Maschine's NumericArea): `label` over `value` text.
 #[allow(clippy::too_many_arguments)]
 fn numeric(ui: &mut Ui, painter: &Painter, r: Rect, label: Option<&str>, size: f32, k: &Knob, id: egui::Id, acts: &mut Vec<Act>) {
-    let resp = ui.interact(r, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: default");
+    let resp =
+        ui.interact(r, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: type a value; ⌘-click: default");
     let mut y = r.top();
     if let Some(label) = label {
         painter.text(Pos2::new(r.center().x, y + 7.0), Align2::CENTER_CENTER, label, font(12.0), white(160));
@@ -110,7 +111,7 @@ fn numeric(ui: &mut Ui, painter: &Painter, r: Rect, label: Option<&str>, size: f
     let ink = if resp.hovered() || resp.dragged() { Color32::WHITE } else { white(230) };
     painter.text(Pos2::new(r.center().x, y + size * 0.6), Align2::CENTER_CENTER, &k.1, font(size), ink);
     if let Some(edit) = k.3 {
-        drag(ui, &resp, id.with("drag"), k.2, 300.0, edit, acts);
+        drag(ui, &resp, id.with("drag"), (k.2, k.1.as_str()), 300.0, edit, acts);
     }
 }
 
@@ -118,7 +119,8 @@ fn numeric(ui: &mut Ui, painter: &Painter, r: Rect, label: Option<&str>, size: f
 #[allow(clippy::too_many_arguments)]
 fn bipolar_slider(ui: &mut Ui, painter: &Painter, r: Rect, label: &str, k: &Knob, id: egui::Id, color: Color32, acts: &mut Vec<Act>) {
     let track = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 6.0), Vec2::new(r.width(), 4.0));
-    let resp = ui.interact(r, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: default");
+    let resp =
+        ui.interact(r, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: type a value; ⌘-click: default");
     painter.rect_filled(track, 2.0, Color32::from_rgb(0x3a, 0x3a, 0x3a));
     let a = k.2.clamp(0.0, 1.0);
     let (x0, x1) = (track.center().x, track.left() + track.width() * a);
@@ -140,9 +142,7 @@ fn bipolar_slider(ui: &mut Ui, painter: &Painter, r: Rect, label: &str, k: &Knob
             ui.data_mut(|d| d.insert_temp(id.with("from"), (from, moved + dx)));
             acts.push(edit.to_act((from + moved + dx).clamp(0.0, 1.0)));
         }
-        if resp.double_clicked() {
-            acts.push(edit.reset());
-        }
+        super::super::value_entry::gestures(ui, &resp, super::super::value_entry::What::Edit(edit), &k.1, acts);
     }
 }
 

@@ -87,6 +87,7 @@ checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
 
 1. **Quit Maschine and NI's hardware agents first** (NIHardwareAgent and
    NIHostIntegrationAgent). While they run, they hold on to the controller's screens.
+   On macOS, DECKARD asks to quit NIHostIntegrationAgent when it finds it holding them.
 2. Plug in the MK3. DECKARD finds it on its own.
 
 DECKARD runs the MK3 with its own controller layer, so you don't need Maschine
@@ -94,6 +95,13 @@ installed. Its screens can be themed (see [Custom themes](#custom-themes-for-the
 can also change what any button or page does: **Controller ▸ Open Controller Scripts
 Folder** opens a folder of editable scripts (see
 [docs/controller-api.md](docs/controller-api.md)).
+
+**SHIFT + STEP** opens the step grid: the eight buttons above the screens are steps,
+and LEFT and RIGHT move through them eight at a time. In Pad mode a pad picks the sound
+and the buttons place it. In Keyboard mode the screen shows the piano roll with the
+scale, and the buttons place the notes you pick on the pads (hold several for more than
+one). Chords mode works the same with a pad's chord. Hold a step's button and turn knobs
+1–4 to edit it. SHIFT + STEP again goes back.
 
 ## A tour
 

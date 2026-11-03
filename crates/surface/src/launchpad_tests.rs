@@ -179,13 +179,16 @@ fn a_pad_turns_its_pattern_on_and_off_in_the_scene() {
     let v = lp_view();
     let now = Instant::now();
     d.open(&v, now);
-    // Drums' second pattern, off in scene 1: on (and focused).
-    assert_eq!(apps(&d.midi("daw", &[0x90, 71, 100], &v, now)), [Action::FocusGroup(0), Action::PickPattern(1)]);
+    // Drums' second pattern, off in scene 1, in the focused group: on, and the pattern
+    // focused.
+    assert_eq!(apps(&d.midi("daw", &[0x90, 71, 100], &v, now)), [Action::PickPattern(1)]);
     // Its first, on: off.
-    assert_eq!(apps(&d.midi("daw", &[0x90, 81, 100], &v, now)), [Action::FocusGroup(0), Action::ScenePattern { group: 0, pattern: None }]);
-    assert_eq!(apps(&d.midi("daw", &[0x90, 82, 100], &v, now)), [Action::FocusGroup(1), Action::ScenePattern { group: 1, pattern: None }]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 81, 100], &v, now)), [Action::ScenePattern { group: 0, pattern: None }]);
+    // Another group's: on and off, with the focus staying where it is.
+    assert_eq!(apps(&d.midi("daw", &[0x90, 72, 100], &v, now)), [Action::ScenePattern { group: 1, pattern: Some(1) }]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 82, 100], &v, now)), [Action::ScenePattern { group: 1, pattern: None }]);
     // A release, a pad under the place for a new pattern and one with no group: nothing.
-    for pad in [[0x90, 72, 0], [0x90, 41, 100], [0x90, 83, 100]] {
+    for pad in [[0x90, 71, 0], [0x90, 41, 100], [0x90, 83, 100]] {
         assert_eq!(apps(&d.midi("daw", &pad, &v, now)), [], "{pad:?}");
     }
 }
@@ -196,7 +199,8 @@ fn the_place_after_a_groups_patterns_makes_one() {
     let v = lp_view();
     let now = Instant::now();
     d.open(&v, now);
-    assert_eq!(apps(&d.midi("daw", &[0x90, 51, 100], &v, now)), [Action::FocusGroup(0), Action::PatternEdit("create")]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 51, 100], &v, now)), [Action::NewPatternIn(0)]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 62, 100], &v, now)), [Action::NewPatternIn(1)], "the focus stays");
 }
 
 #[test]
@@ -259,7 +263,7 @@ fn up_and_down_scroll_the_patterns_seven_at_a_time() {
     // one's place.
     assert_eq!((l[&81], l[&71], l[&61], l[&51], l[&41]), (RED_DIM, RED_DIM, RED_DIM, NEW, OFF));
     assert_eq!((l[&70], l[&80] != OFF), (OFF, true));
-    assert_eq!(apps(&d.midi("daw", &[0x90, 81, 100], &v, now)), [Action::FocusGroup(0), Action::PickPattern(7)]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 81, 100], &v, now)), [Action::PickPattern(7)]);
 }
 
 #[test]
@@ -273,7 +277,7 @@ fn the_groups_shown_are_the_focused_groups_eight() {
     let now = Instant::now();
     let l = lights(&d.open(&v, now));
     assert_eq!((l[&81], l[&82], l[&83]), (RED_DIM, RED_DIM, OFF));
-    assert_eq!(apps(&d.midi("daw", &[0x90, 82, 100], &v, now)), [Action::FocusGroup(9), Action::PickPattern(0)]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 82, 100], &v, now)), [Action::ScenePattern { group: 9, pattern: Some(0) }]);
 }
 
 #[test]
@@ -465,7 +469,7 @@ fn mute_is_a_mode_where_pads_mute_groups() {
     assert_eq!(apps(&d.midi("daw", &[0xB0, 104, 127], &v, now)), []);
     // Mute again: off, and the pads are the patterns again.
     assert_eq!(lights(&d.midi("daw", &[0xB0, 2, 127], &v, now))[&2], [19, 19, 0]);
-    assert_eq!(apps(&d.midi("daw", &[0x90, 71, 100], &v, now)), [Action::FocusGroup(0), Action::PickPattern(1)]);
+    assert_eq!(apps(&d.midi("daw", &[0x90, 71, 100], &v, now)), [Action::PickPattern(1)]);
 }
 
 #[test]
@@ -489,9 +493,9 @@ fn the_grids_bottom_row_spreads_the_longest_pattern_over_eight_pads() {
     let mut v = lp_view();
     v.playing = true;
     v.groups[0].patterns[0].bars = 4.0;
-    v.groups[0].progress = Some(0.5);
+    v.groups[0].playing_progress = Some(0.5);
     v.groups[1].patterns[0].bars = 2.0;
-    v.groups[1].progress = Some(0.9);
+    v.groups[1].playing_progress = Some(0.9);
     let now = Instant::now();
     let l = lights(&d.open(&v, now));
     let row: Vec<[u8; 3]> = (11..=18).map(|b| l[&b]).collect();
@@ -505,8 +509,8 @@ fn the_grids_bottom_row_spreads_the_longest_pattern_over_eight_pads() {
     v.groups[1].patterns[0].bars = 1.0;
     let mut row = l.clone();
     for (progress, pad) in [(0.0, 0), (0.3, 2), (0.99, 7)] {
-        v.groups[0].progress = Some(progress);
-        v.groups[1].progress = Some(progress);
+        v.groups[0].playing_progress = Some(progress);
+        v.groups[1].playing_progress = Some(progress);
         row.extend(lights(&d.tick(&v, now)));
         let lit: Vec<u8> = (11..=18).filter(|b| row[b] == full).map(|b| b - 11).collect();
         assert_eq!(lit, [pad], "at {progress}");
@@ -527,4 +531,55 @@ fn stopped_the_bottom_rows_first_pad_strobes_with_the_tempo() {
     use std::time::Duration;
     assert_eq!(lights(&d.tick(&v, t0 + Duration::from_millis(300)))[&11], OFF);
     assert_eq!(lights(&d.tick(&v, t0 + Duration::from_millis(510)))[&11], [127, 127, 127]);
+}
+
+#[test]
+fn a_queued_scene_flashes_its_patterns_and_the_playhead_goes_on() {
+    let mut d = lp();
+    let mut v = lp_view();
+    v.playing = true;
+    v.tempo = 60.0;
+    // The song plays scene 1, four bars long and halfway; scene 2 was launched, so it's
+    // focused and queued, and hasn't begun.
+    v.groups[0].patterns[0].bars = 4.0;
+    v.groups[0].playing_progress = Some(0.5);
+    focus(&mut v, 1);
+    v.queued_scene = Some(1);
+    let now = Instant::now();
+    let mut leds = lights(&d.open(&v, now));
+    let row: Vec<[u8; 3]> = (11..=18).map(|b| leds[&b]).collect();
+    let (dim, full) = ([19, 19, 19], [127, 127, 127]);
+    assert_eq!(row, [dim, dim, dim, dim, full, NEW, NEW, NEW], "the playhead keeps the playing scene's place");
+    // Drums' second pattern, next, flashes with the beat; what's playing stays lit.
+    let mut seen = std::collections::BTreeSet::new();
+    for beat in 0..2 {
+        leds.extend(lights(&d.tick(&v, now + std::time::Duration::from_secs(beat))));
+        seen.insert(leds[&71]);
+        assert_eq!(leds[&81], [127, 33, 31], "Drums' first, still playing");
+        assert_eq!(leds[&82], [39, 74, 127], "Bass's first, still playing");
+    }
+    assert_eq!(seen, [[0, 19, 0], [0, 127, 0]].into_iter().collect(), "on one beat, off the next");
+    // Once it plays, it's lit like any other.
+    v.queued_scene = None;
+    v.playing_scene = Some(1);
+    leds.extend(lights(&d.tick(&v, now + std::time::Duration::from_secs(2))));
+    leds.extend(lights(&d.tick(&v, now + std::time::Duration::from_secs(3))));
+    assert_eq!(leds[&71], [0, 127, 0]);
+    assert_eq!(leds[&81][0], 19, "no longer playing");
+}
+
+#[test]
+fn left_and_right_scroll_deckards_scene_tabs_too() {
+    let mut d = lp();
+    let mut v = lp_view();
+    v.scenes = (0..20).map(|n| SceneView { name: n.to_string(), rgb: [0, 255, 0], ..Default::default() }).collect();
+    let now = Instant::now();
+    d.open(&v, now);
+    assert_eq!(apps(&d.midi("daw", &[0xB0, 92, 127], &v, now)), [Action::ShowScenes(8)]);
+    assert_eq!(apps(&d.midi("daw", &[0xB0, 92, 127], &v, now)), [Action::ShowScenes(16)]);
+    assert!(apps(&d.midi("daw", &[0xB0, 92, 127], &v, now)).is_empty(), "nowhere further");
+    assert_eq!(apps(&d.midi("daw", &[0xB0, 91, 127], &v, now)), [Action::ShowScenes(8)]);
+    // SHIFT + left: the groups, not the scenes.
+    d.midi("daw", &[0xB0, 90, 127], &v, now);
+    assert!(apps(&d.midi("daw", &[0xB0, 91, 127], &v, now)).is_empty());
 }

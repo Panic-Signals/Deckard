@@ -191,8 +191,11 @@ pub fn render(
     engine.metronome = false;
     engine.song_offset = offset;
     let ticks = engine.timeline().length;
-    let spt = rate as f64 * 60.0 / (engine.tempo() * PPQ as f64);
-    let range = (ticks as f64 * spt).round() as usize;
+    // (From the first scene's own tempo, if it has one; later ones may differ.)
+    engine.follow_scene_tempo();
+    let tempo = engine.tempo();
+    let spt = rate as f64 * 60.0 / (tempo * PPQ as f64);
+    let range = engine.timeline_frames().round() as usize;
     let max = range + (MAX_TAIL * rate as f64) as usize;
     let mut audio: Vec<f32> = Vec::with_capacity(range * 2 + rate as usize);
     let mut block = vec![0f32; 1024];
@@ -244,7 +247,7 @@ pub fn render(
     };
     audio.resize(length * 2, 0.0);
     progress(1.0);
-    Some(Rendered { audio, rate, range_frames: range, ticks, tempo: engine.tempo(), numerator: p.numerator, denominator: p.denominator })
+    Some(Rendered { audio, rate, range_frames: range, ticks, tempo, numerator: p.numerator, denominator: p.denominator })
 }
 
 /// Scale `audio` so its peak is at 0 dBFS (silence stays silent).

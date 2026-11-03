@@ -787,9 +787,19 @@ impl Host {
     pub fn pads_play_sounds(&self) -> bool {
         // (With SHIFT held the pads run the shortcuts printed under them, natively in
         // Maschine: they don't play.)
-        let shift = self.constant("NI.HW.BUTTON_SHIFT").ok();
-        if shift.is_some_and(|b| self.state.borrow().hw.held.contains(&b)) {
-            return false;
+        // (SELECT, MUTE, SOLO and ERASE act on a sound, silently, so it can be edited live.)
+        for button in [
+            "NI.HW.BUTTON_SHIFT",
+            "NI.HW.BUTTON_SELECT",
+            "NI.HW.BUTTON_MUTE",
+            "NI.HW.BUTTON_SOLO",
+            "NI.HW.BUTTON_TRANSPORT_ERASE",
+            "NI.HW.BUTTON_ERASE",
+        ] {
+            let held = self.constant(button).ok();
+            if held.is_some_and(|b| self.state.borrow().hw.held.contains(&b)) {
+                return false;
+            }
         }
         let Ok(mode) = self.lua.load("return NHLController:getPadMode()").eval::<i64>() else { return true };
         ![

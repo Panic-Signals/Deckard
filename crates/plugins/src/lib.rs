@@ -424,7 +424,8 @@ impl Vst3 {
         let host = ComWrapper::new(HostApp);
         let host_ptr = host.as_com_ref::<IHostApplication>().unwrap().as_ptr() as *mut FUnknown;
         let mut obj = std::ptr::null_mut();
-        let cid = id.cid;
+        // (As its factory knows it: the id may have come from another system.)
+        let cid = module.class_id(&id.cid).unwrap_or(id.cid);
         unsafe {
             ok(
                 module.factory.createInstance(cid.as_ptr() as FIDString, IComponent::IID.as_ptr() as FIDString, &mut obj),
@@ -1083,12 +1084,12 @@ impl Host {
         let made = if id.format == state::Format::AudioUnit {
             Plugin::audio_unit(id, name, sample_rate)
         } else {
-            let module = self.module_for(&id.cid, name).ok_or_else(|| format!("{name}: not installed as VST3"))?;
+            let module = self.module_for(&id.cid, name).ok_or_else(|| self.why_not_loaded(&id.cid, name))?;
             Plugin::new(&module, id, name, sample_rate)
         };
         #[cfg(not(target_os = "macos"))]
         let made = {
-            let module = self.module_for(&id.cid, name).ok_or_else(|| format!("{name}: not installed as VST3"))?;
+            let module = self.module_for(&id.cid, name).ok_or_else(|| self.why_not_loaded(&id.cid, name))?;
             Plugin::new(&module, id, name, sample_rate)
         };
         let mut p = made.map_err(|e| format!("{name}: {e}"))?;
@@ -1122,6 +1123,20 @@ impl Host {
         self.broken.iter().map(|(p, e)| (p.as_path(), e.as_str()))
     }
 
+    /// Why no module has class `cid`: a bundle that should have but wouldn't load says
+    /// what went wrong, rather than the plug-in not being there.
+    fn why_not_loaded(&self, cid: &[u8; 16], name: &str) -> String {
+        let lname = name.to_lowercase();
+        let its = |b: &std::path::Path| match module::declared_classes(b) {
+            Some(d) => d.iter().any(|c| module::same_class(c, cid)),
+            None => b.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == lname),
+        };
+        match self.broken.iter().find(|(b, _)| its(b)) {
+            Some((b, e)) => format!("{name}: couldn't load {}: {e}", b.display()),
+            None => format!("{name}: not installed as VST3"),
+        }
+    }
+
     /// The loaded module that has class `cid`, loading it if needed: first bundles that
     /// declare it, then ones named like the plug-in, then any others that don't
     /// declare their classes.
@@ -1137,7 +1152,7 @@ impl Host {
             .filter_map(|b| {
                 let declared = module::declared_classes(&b);
                 let rank = match declared {
-                    Some(d) if d.contains(cid) => 0,
+                    Some(d) if d.iter().any(|c| module::same_class(c, cid)) => 0,
                     Some(_) => return None,
                     None if b.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == lname) => 1,
                     None => 2,

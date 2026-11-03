@@ -81,7 +81,16 @@ impl Engine {
 
     /// Play at `bpm` from here (the song stays where it is).
     pub fn set_tempo(&mut self, bpm: f64) {
-        if bpm.is_nan() || bpm <= 0.0 || bpm == self.tempo {
+        if bpm.is_nan() || bpm <= 0.0 {
+            return;
+        }
+        self.song_tempo = bpm;
+        self.play_at(bpm);
+    }
+
+    /// Play at `bpm` from here, the song's tempo as it is (a scene's own tempo).
+    pub(crate) fn play_at(&mut self, bpm: f64) {
+        if bpm == self.tempo {
             return;
         }
         let ticks = self.position();
@@ -111,6 +120,7 @@ impl Engine {
 
     /// Follow a clock for the block about to be rendered (see the module's comment).
     pub fn follow(&mut self, f: &Follow) {
+        self.followed = true;
         self.set_tempo(f.tempo);
         let spt = self.samples_per_tick();
         let q = self.quantum() * PPQ as f64;

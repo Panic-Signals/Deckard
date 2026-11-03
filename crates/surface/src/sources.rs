@@ -18,6 +18,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("pages/keyboard.lua", include_str!("../lua/pages/keyboard.lua")),
     ("pages/step.lua", include_str!("../lua/pages/step.lua")),
     ("pages/step_mod.lua", include_str!("../lua/pages/step_mod.lua")),
+    ("pages/step_grid.lua", include_str!("../lua/pages/step_grid.lua")),
     ("pages/hold.lua", include_str!("../lua/pages/hold.lua")),
     ("pages/mixer.lua", include_str!("../lua/pages/mixer.lua")),
     ("pages/arrange.lua", include_str!("../lua/pages/arrange.lua")),

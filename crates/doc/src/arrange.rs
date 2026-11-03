@@ -449,6 +449,9 @@ impl Document {
         {
             let s = px_mut(&mut item).ok_or("scene item")?;
             set_param(s, "name", Value::Str(format!("Scene {}", n + 1)));
+            // (Made from the first scene, not with its own tempo.)
+            set_param(s, "scene_tempo_active", Value::Int(0));
+            s.fields.retain(|(f, _)| f != deckard_model::SCENE_TEMPO_FIELD);
             if let Some(Value::Obj(c)) = s.get_mut("color") {
                 for (k, v) in [("color", 0), ("use_default_color", 1)] {
                     if let Some(f) = c.get_mut(k) {

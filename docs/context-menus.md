@@ -137,6 +137,7 @@ The Maschine 2 screenshot matches: `Clear | Rename, Color ▸ | Duplicate, Delet
 - Clear: removes all Pattern references, leaving the Scene empty (undo "Clear Scene").
 - Unique: `makeSceneUnique` gives the Scene its own copies of the Patterns.
 - Scene Tempo: gives the Scene its own BPM, which the header BPM control then edits.
+  In DECKARD the menu stays open for the checkbox and a BPM field, the tab shows a metronome, and while the Scene plays the header shows its tempo beside the Song's under a red line. Off while Link or incoming MIDI clock sets the tempo.
 - Duplicate: `duplicateScene`. Whether the copy references the same Patterns or copies them is set in Preferences › Default › Scene/Section › Duplicate ("Scene Only" / "Scene and Patterns").
 - Delete: `removeScene`, undo "Delete Scene".
 
