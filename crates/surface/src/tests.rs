@@ -193,21 +193,69 @@ fn select_mute_solo_erase_with_pads() {
 }
 
 #[test]
-fn pads_play_with_modifiers_held() {
-    // (As with Maschine's scripts: only picking patterns or scenes, and Step mode,
-    // stop the pads playing.)
+fn modifiers_held_stop_the_pads_playing() {
     let (mut s, v) = (Surface::new(), view());
-    for button in ["BUTTON_SELECT", "BUTTON_MUTE", "BUTTON_SOLO", "BUTTON_TRANSPORT_ERASE"] {
-        hold(&mut s, &v, button, true);
-        assert!(s.pads(&v).play, "{button} held");
-        hold(&mut s, &v, button, false);
-    }
-    for button in ["BUTTON_PATTERN", "BUTTON_SCENE"] {
+    for button in ["BUTTON_SELECT", "BUTTON_MUTE", "BUTTON_SOLO", "BUTTON_TRANSPORT_ERASE", "BUTTON_PATTERN", "BUTTON_SCENE"] {
         hold(&mut s, &v, button, true);
         assert!(!s.pads(&v).play, "{button} held");
         hold(&mut s, &v, button, false);
         assert!(s.pads(&v).play, "{button} let go");
     }
+}
+
+#[test]
+fn select_changes_sounds_without_playing_them() {
+    let (mut s, v) = (Surface::new(), view());
+    hold(&mut s, &v, "BUTTON_SELECT", true);
+    assert!(!s.pads(&v).play);
+    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::FocusSound(4)));
+    s.event(&Event::PadOff(5), &v, Instant::now());
+    hold(&mut s, &v, "BUTTON_SELECT", false);
+    assert!(s.pads(&v).play, "let go, they play");
+    // Pinned, it stays silent with SELECT let go.
+    hold(&mut s, &v, "BUTTON_SELECT", true);
+    press(&mut s, &v, "BUTTON_SCREEN_1");
+    hold(&mut s, &v, "BUTTON_SELECT", false);
+    assert!(!s.pads(&v).play, "pinned");
+    assert!(s.event(&Event::PadOn(6, 0.5), &v, Instant::now()).contains(&Action::FocusSound(5)));
+    s.event(&Event::PadOff(6), &v, Instant::now());
+    hold(&mut s, &v, "BUTTON_SELECT", true);
+    press(&mut s, &v, "BUTTON_SCREEN_1");
+    hold(&mut s, &v, "BUTTON_SELECT", false);
+    assert!(s.pads(&v).play, "unpinned");
+}
+
+#[test]
+fn modifiers_act_silently_in_keyboard_mode() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.sound = 2;
+    press(&mut s, &v, "BUTTON_KEYBOARD");
+    for (button, want) in [("BUTTON_MUTE", Some(Action::MuteSound(4))), ("BUTTON_SOLO", Some(Action::SoloSound(4))), ("BUTTON_TRANSPORT_ERASE", None)] {
+        hold(&mut s, &v, button, true);
+        assert!(!s.pads(&v).play, "{button}");
+        let acts = s.event(&Event::PadOn(5, 0.5), &v, Instant::now());
+        match want {
+            Some(a) => assert!(acts.contains(&a), "{button}: {acts:?}"),
+            // (The pad is a key here: ERASE doesn't take a whole sound's notes for it.)
+            None => assert!(!acts.iter().any(|a| matches!(a, Action::EraseSound(_))), "{acts:?}"),
+        }
+        s.event(&Event::PadOff(5), &v, Instant::now());
+        hold(&mut s, &v, button, false);
+        assert!(s.pads(&v).play, "{button} let go");
+    }
+}
+
+#[test]
+fn select_picks_a_sound_in_keyboard_mode_too() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.sound = 2;
+    press(&mut s, &v, "BUTTON_KEYBOARD");
+    hold(&mut s, &v, "BUTTON_SELECT", true);
+    assert!(!s.pads(&v).play);
+    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::FocusSound(4)));
+    s.event(&Event::PadOff(5), &v, Instant::now());
+    hold(&mut s, &v, "BUTTON_SELECT", false);
+    assert!(s.pads(&v).play, "the keys play again");
 }
 
 #[test]
@@ -364,6 +412,46 @@ fn wheel_modes_toggle() {
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     press(&mut s, &v, "BUTTON_VOLUME");
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::FocusSound(1)], "pressed again: back to the sound");
+}
+
+/// On the Mixer the jog wheel turns the focused strip's level; pressed, its pan; pressed
+/// again, its level.
+#[test]
+fn the_mixer_wheel_turns_level_and_pan() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    let g = v.group;
+    let snd = Some(v.sound);
+    let wheel = |s: &mut Surface, v: &View, steps| s.event(&Event::Wheel(steps), v, now);
+    press(&mut s, &v, "BUTTON_MIX");
+    let db0 = v.groups[g].sounds[v.sound].mix.level;
+    assert_eq!(wheel(&mut s, &v, 2), [Action::ChannelLevel { group: g, sound: snd, db: db0 + 1.0 }]);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(wheel(&mut s, &v, -1), [Action::ChannelLevel { group: g, sound: snd, db: db0 - 0.05 }], "finely");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+
+    assert!(press(&mut s, &v, "BUTTON_WHEEL").is_empty());
+    assert_eq!(s.page(), "mixer", "the press stays on the page");
+    assert_eq!(wheel(&mut s, &v, 5), [Action::ChannelPan { group: g, sound: snd, pan: 0.1 }]);
+    assert_eq!(wheel(&mut s, &v, -80), [Action::ChannelPan { group: g, sound: snd, pan: -1.0 }], "as far as it goes");
+    assert!(s.screens(&v).is_some() && s.error().is_none(), "{:?}", s.error());
+
+    press(&mut s, &v, "BUTTON_WHEEL");
+    assert_eq!(wheel(&mut s, &v, 2), [Action::ChannelLevel { group: g, sound: snd, db: db0 + 1.0 }]);
+
+    // Silence: further down stays there, and up comes back from the meters' foot.
+    v.groups[g].sounds[v.sound].mix.level = f64::NEG_INFINITY;
+    assert_eq!(wheel(&mut s, &v, -1), [Action::ChannelLevel { group: g, sound: snd, db: f64::NEG_INFINITY }]);
+    assert_eq!(wheel(&mut s, &v, 1), [Action::ChannelLevel { group: g, sound: snd, db: -59.5 }]);
+
+    // The groups' strips: the focused group's own.
+    press(&mut s, &v, "BUTTON_WHEEL_UP");
+    v.groups[g].mix.level = 0.0;
+    assert_eq!(wheel(&mut s, &v, 1), [Action::ChannelLevel { group: g, sound: None, db: 0.5 }]);
+
+    // TEMPO keeps the wheel while it's on.
+    press(&mut s, &v, "BUTTON_TEMPO");
+    assert!(matches!(wheel(&mut s, &v, 1)[..], [Action::Tempo(_)]));
 }
 
 #[test]
@@ -760,6 +848,56 @@ fn the_strip_follows_playback() {
     v.position = Some(3 * 3840);
     assert_eq!(lit(&s, &v), 7, "a quarter through the song: round(6) + 1");
     assert_eq!(s.leds(&v).get("LED_TS_01"), Some(deckard_mk3::leds::palette(16, 4)), "white");
+}
+
+/// Notes side by side on the screens stay apart: 2 pixels between them.
+#[test]
+fn notes_side_by_side_are_drawn_apart() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.pattern_length = 3840;
+    press(&mut s, &v, "BUTTON_STEP");
+    let empty = s.picture(&v);
+    v.notes = (0..16)
+        .map(|i| NoteView { sound: v.sound, position: i * 240, length: 240, pitch: 60, velocity: 100, probability: 100, selected: false })
+        .collect();
+    let notes = s.picture(&v);
+    // The row with the most changed runs: the notes.
+    let runs = |y: usize| {
+        let changed: Vec<bool> = (0..960).map(|x| empty[y * 960 + x] != notes[y * 960 + x]).collect();
+        let mut gaps = Vec::new();
+        let (mut count, mut gap, mut inside) = (0, 0, false);
+        for on in changed {
+            if on && !inside {
+                count += 1;
+                if count > 1 {
+                    gaps.push(gap);
+                }
+                gap = 0;
+            }
+            if !on {
+                gap += 1;
+            }
+            inside = on;
+        }
+        (count, gaps)
+    };
+    let (count, gaps) = (0..272).map(runs).max_by_key(|r| r.0).unwrap();
+    assert!(count >= 15, "the notes drawn: {count}");
+    assert!(gaps.iter().all(|&g| g >= 2), "{gaps:?}");
+}
+
+/// A long pattern's screen isn't a wall of grid lines: 64 bars show bars, not beats.
+#[test]
+fn a_long_patterns_grid_thins_out() {
+    let lines = |bars: i64| {
+        let (mut s, mut v) = (Surface::new(), view());
+        v.pattern_length = bars * 3840;
+        press(&mut s, &v, "BUTTON_STEP");
+        let px = s.picture(&v);
+        // Across a row of the lanes' lower half: how often the colour changes.
+        (1..960).filter(|&x| px[200 * 960 + x] != px[200 * 960 + x - 1]).count()
+    };
+    assert!(lines(64) < lines(4) * 2, "64 bars {} against 4 bars {}", lines(64), lines(4));
 }
 
 /// While the song plays, the Song view draws the playhead on both screens (C1).
@@ -2633,4 +2771,174 @@ fn mod_matrix_keeps_its_draft_under_a_hold_page() {
     assert_eq!(s.page(), "mixer");
     assert_eq!(acts.iter().filter(|a| **a == Action::ModSlotsClosed).count(), 1, "{acts:?}");
     assert_eq!(s.error(), None);
+}
+
+// The step grid (SHIFT + STEP): the buttons above the screens are steps.
+fn on_the_step_grid(s: &mut Surface, v: &View) {
+    hold(s, v, "BUTTON_SHIFT", true);
+    press(s, v, "BUTTON_STEP");
+    hold(s, v, "BUTTON_SHIFT", false);
+    assert_eq!(s.page(), "step_grid");
+}
+
+fn step_pitches(pitches: &[i64]) -> [i64; 16] {
+    let mut out = [128; 16];
+    out[..pitches.len()].copy_from_slice(pitches);
+    out
+}
+
+fn the_note(sound: usize, position: i64, pitch: i64) -> NoteView {
+    NoteView { sound, position, length: 240, pitch, velocity: 100, ..Default::default() }
+}
+
+#[test]
+fn shift_step_opens_the_step_grid_and_goes_back() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (3840, 240);
+    let page = s.page().to_string();
+    on_the_step_grid(&mut s, &v);
+    assert_eq!(s.leds(&v).get("LED_STEP"), Some(crate::leds::ON), "lit");
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    press(&mut s, &v, "BUTTON_STEP");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    assert_eq!(s.page(), page, "back where it was");
+    // STEP alone is Step mode, and ends the grid.
+    on_the_step_grid(&mut s, &v);
+    press(&mut s, &v, "BUTTON_STEP");
+    assert_eq!(s.page(), "step");
+    press(&mut s, &v, "BUTTON_PAD_MODE");
+    assert_eq!(s.page(), "pad_mode");
+}
+
+#[test]
+fn the_step_grid_places_the_focused_sound_in_pad_mode() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (2 * 3840, 240);
+    on_the_step_grid(&mut s, &v);
+    let now = Instant::now();
+    // A pad focuses its sound (and still plays), the buttons place it.
+    assert_eq!(s.event(&Event::PadOn(5, 0.5), &v, now), [Action::FocusSound(4)]);
+    s.event(&Event::PadOff(5), &v, now);
+    assert!(s.pads(&v).play, "the pads play");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::StepToggle { at: 480, length: 240, velocity: 100 }]);
+    (v.fixed_velocity, v.velocity) = (true, 77);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::StepToggle { at: 0, length: 240, velocity: 77 }]);
+    // RIGHT: the next eight; never past the pattern's end, nor before its start.
+    press(&mut s, &v, "BUTTON_LEFT");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::StepToggle { at: 0, length: 240, velocity: 77 }]);
+    press(&mut s, &v, "BUTTON_RIGHT");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::StepToggle { at: 8 * 240, length: 240, velocity: 77 }]);
+    for _ in 0..9 {
+        press(&mut s, &v, "BUTTON_RIGHT");
+    }
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::StepToggle { at: 31 * 240, length: 240, velocity: 77 }]);
+    // Lit where the focused sound has a note; steps past the end do nothing.
+    v.pattern_length = 3 * 240;
+    v.notes = vec![the_note(0, 240, 60)];
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::DIM), "empty");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "a note");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::BACKLIGHT), "past the end");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
+}
+
+#[test]
+fn holding_a_step_grid_button_selects_and_doesnt_toggle() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (3840, 240);
+    v.notes = vec![the_note(0, 480, 60)];
+    on_the_step_grid(&mut s, &v);
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    assert!(s.event(&Event::Button("BUTTON_SCREEN_3", true), &v, at(0)).is_empty());
+    assert!(s.tick(&v, at(100)).is_empty(), "not yet");
+    assert_eq!(s.tick(&v, at(500)), [Action::EventsRange { start: 480, end: 719, low: 0, high: 127 }], "there already");
+    assert!(s.tick(&v, at(600)).is_empty(), "once");
+    assert!(s.event(&Event::Button("BUTTON_SCREEN_3", false), &v, at(700)).is_empty(), "no toggle");
+    // An empty step: placed, then selected.
+    s.event(&Event::Button("BUTTON_SCREEN_2", true), &v, at(800));
+    assert_eq!(
+        s.tick(&v, at(1300)),
+        [Action::StepToggle { at: 240, length: 240, velocity: 100 }, Action::EventsRange { start: 240, end: 479, low: 0, high: 127 }],
+    );
+    s.event(&Event::Button("BUTTON_SCREEN_2", false), &v, at(1400));
+    // A knob turned with a button down doesn't wait.
+    s.event(&Event::Button("BUTTON_SCREEN_3", true), &v, at(1500));
+    let edits = s.event(&Event::Knob(2, 0.1), &v, at(1510));
+    assert_eq!(edits, [Action::EventsRange { start: 480, end: 719, low: 0, high: 127 }, Action::Events("velocity", 1)]);
+    assert!(s.event(&Event::Button("BUTTON_SCREEN_3", false), &v, at(1520)).is_empty());
+}
+
+#[test]
+fn the_step_grid_places_picked_notes_in_keyboard_mode() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (3840, 240);
+    v.scale_kind = 1; // Major.
+    on_the_step_grid(&mut s, &v);
+    press(&mut s, &v, "BUTTON_KEYBOARD");
+    assert_eq!(s.page(), "step_grid", "still on the grid");
+    let now = Instant::now();
+    let place = |pitches: &[i64]| vec![Action::StepNotes { at: 240, length: 240, velocity: 100, pitches: step_pitches(pitches) }];
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), place(&[60]), "the root until a pad's picked");
+    // A pad picks its note (and plays it, not focusing a sound).
+    assert!(s.event(&Event::PadOn(3, 0.5), &v, now).is_empty());
+    s.event(&Event::PadOff(3), &v, now);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), place(&[64]));
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(16, 4)), "picked: white");
+    // Held together, several; picking again starts afresh.
+    s.event(&Event::PadOn(1, 0.5), &v, now);
+    s.event(&Event::PadOn(5, 0.5), &v, now);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), place(&[60, 67]));
+    s.event(&Event::PadOff(1), &v, now);
+    s.event(&Event::PadOff(5), &v, now);
+    s.event(&Event::PadOn(2, 0.5), &v, now);
+    s.event(&Event::PadOff(2), &v, now);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), place(&[62]));
+    // Lit only for what's picked; the screen shows it, and the scale's knobs.
+    v.notes = vec![the_note(0, 0, 62), the_note(0, 240, 60)];
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(deckard_mk3::leds::DIM), "another pitch");
+    let text = s.screen_text(&v).join("|");
+    for t in ["D3", "ROOT", "BANK", "TYPE", "PITCHES"] {
+        assert!(text.contains(t), "{t}: {text}");
+    }
+    // Back in Pad mode: the sound again.
+    press(&mut s, &v, "BUTTON_PAD_MODE");
+    assert_eq!(s.page(), "step_grid");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::StepToggle { at: 240, length: 240, velocity: 100 }]);
+}
+
+#[test]
+fn the_step_grid_marks_whats_out_of_the_scale() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (3840, 240);
+    v.scale_kind = 1;
+    on_the_step_grid(&mut s, &v);
+    press(&mut s, &v, "BUTTON_KEYBOARD");
+    let px = s.picture(&v);
+    let red = |p: &&[u8; 4]| p[0] == 58 && p[1] == 22 && p[2] == 22;
+    assert!(px.iter().filter(red).count() > 1000, "out-of-scale rows");
+    v.scale_kind = 0; // Chromatic: nothing's out.
+    let px = s.picture(&v);
+    assert_eq!(px.iter().filter(red).count(), 0);
+}
+
+#[test]
+fn the_step_grid_places_a_pads_chord_in_chords_mode() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (3840, 240);
+    v.scale_kind = 1;
+    on_the_step_grid(&mut s, &v);
+    press(&mut s, &v, "BUTTON_CHORDS");
+    assert_eq!(s.page(), "step_grid");
+    let now = Instant::now();
+    s.event(&Event::PadOn(2, 0.5), &v, now);
+    let played = s.pads(&v).chords.expect("chords")[1].iter().copied().filter(|n| *n < 128).collect::<Vec<_>>();
+    assert!(played.len() >= 3, "a chord: {played:?}");
+    s.event(&Event::PadOff(2), &v, now);
+    let mut sorted = played.clone();
+    sorted.sort_unstable();
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::StepNotes { at: 720, length: 240, velocity: 100, pitches: step_pitches(&sorted) }]);
+    assert!(s.screen_text(&v).join("|").contains("CHORD"));
 }

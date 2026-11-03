@@ -58,16 +58,14 @@ fn bipolar(edit: &Option<Edit>) -> bool {
 }
 
 /// Drag `edit` from `amount` with `resp` (vertical, `px` for the whole range; Shift:
-/// fine), double-click: its default.
-fn drag(ui: &Ui, resp: &Response, id: egui::Id, amount: f32, px: f32, edit: Edit, acts: &mut Vec<Act>) {
+/// fine), double-click: type a value, ⌘-click: its default.
+fn drag(ui: &Ui, resp: &Response, id: egui::Id, (amount, shown): (f32, &str), px: f32, edit: Edit, acts: &mut Vec<Act>) {
     // From its own value when a route moves it on screen.
     let amount = super::mod_routes::ui_edit_from(ui, &edit, amount);
     if let Some(v) = turned(ui, resp, id, amount, px) {
         acts.push(edit.to_act(v));
     }
-    if resp.double_clicked() {
-        acts.push(edit.reset());
-    }
+    super::value_entry::gestures(ui, resp, super::value_entry::What::Edit(edit), shown, acts);
 }
 
 /// The drag half of [`drag`]: the amount (0..1) `resp`'s drag has turned `amount` to.
@@ -99,7 +97,7 @@ fn knob_with(ui: &mut Ui, painter: &Painter, c: Pos2, r: f32, k: &Knob, centred:
     let (label, text, amount, edit) = k;
     let resp = knob_face(ui, painter, c, r, label, text, *amount, centred, id, color);
     if let Some(edit) = edit {
-        drag(ui, &resp, id.with("drag"), *amount, 150.0, *edit, acts);
+        drag(ui, &resp, id.with("drag"), (*amount, text.as_str()), 150.0, *edit, acts);
     }
 }
 
@@ -118,7 +116,8 @@ pub(super) fn knob_face(
     color: Color32,
 ) -> Response {
     let area = Rect::from_center_size(c + Vec2::new(0.0, 6.0), Vec2::new(r * 2.0 + 24.0, r * 2.0 + 26.0));
-    let resp = ui.interact(area, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: default");
+    let resp =
+        ui.interact(area, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: type a value; ⌘-click: default");
     let start = std::f32::consts::PI * 0.75;
     let sweep = std::f32::consts::PI * 1.5;
     let arc = |from: f32, to: f32, col: Color32, w: f32| {
@@ -300,15 +299,18 @@ fn meter_fader(
         Stroke::NONE,
     ));
     let area = Rect::from_min_max(Pos2::new(bar.left() - 4.0, col.top() - 6.0), Pos2::new(hx + 20.0, col.bottom() + 6.0));
-    let resp =
-        ui.interact(area, id, Sense::click_and_drag()).on_hover_text(format!("{} {} (drag; double-click: default)", title_case(&k.0), k.1));
+    let resp = ui.interact(area, id, Sense::click_and_drag()).on_hover_text(format!(
+        "{} {} (drag; double-click: type a value; ⌘-click: default)",
+        title_case(&k.0),
+        k.1
+    ));
     if (resp.hovered() || resp.dragged()) && !k.1.is_empty() {
         painter.text(Pos2::new(hx + 22.0, hy), Align2::LEFT_CENTER, &k.1, font(11.0), white(245));
     }
     if let Some(edit) = k.3 {
         // Dragging down lowers a Gain (up the scale) but raises a Threshold's 0..1.
         let px = if down { -bar.height() } else { bar.height() };
-        drag(ui, &resp, id.with("drag"), k.2, px, edit, acts);
+        drag(ui, &resp, id.with("drag"), (k.2, k.1.as_str()), px, edit, acts);
     }
 }
 

@@ -1,5 +1,5 @@
 //! The header's master fader, at its right end: dragging its level line sets the
-//! master level, a double-click sets 0 dB; undoable.
+//! master level, a ⌘-click sets 0 dB; undoable.
 
 use eframe::egui::{Event, PointerButton, Pos2};
 use egui_kittest::Harness;
@@ -41,16 +41,16 @@ fn the_header_fader_sets_the_master_level() {
     // Undoable, as the Mixer's fader (moves close together are one step).
     h.state().doc.as_ref().unwrap().borrow_mut().undo();
     assert!((level(&h) - start).abs() < 1e-9, "undo takes the drags back");
-    // Double-click: 0 dB.
+    // ⌘-click: 0 dB.
     let at = track(&h, 0.2);
     h.hover_at(at);
     h.step();
-    for _ in 0..2 {
-        for pressed in [true, false] {
-            h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() });
-            h.step();
-        }
+    h.event(Event::ModifiersChanged(eframe::egui::Modifiers::COMMAND));
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: eframe::egui::Modifiers::COMMAND });
+        h.step();
     }
+    h.event(Event::ModifiersChanged(Default::default()));
     h.run_steps(3);
     assert!((level(&h) - 0.75).abs() < 1e-9, "0 dB: {}", level(&h));
 }

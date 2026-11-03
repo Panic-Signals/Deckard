@@ -56,7 +56,7 @@ From `docs/context-menus.md` against the code:
 - **Sound:** missing Find/Purge Missing Samples. (Open, Save, Save As, Save with Samples, Bounce (Ideas view; Allow Once / Always Allow / Don't Allow, progress, Cancel; one undo step), Export MIDI: done.)
 - **Group:** greyed Cut, Copy, Paste, Delete. (Open, Save, Save As, Save with Samples: done.)
 - **Pattern:** missing Clear, Rename, Double; Delete greyed.
-- **Scene:** missing Clear, Rename, Unique, Color, Scene Tempo (the MK3 also stubs `isSceneUnique`, `isSceneTempoAvailable`).
+- **Scene:** missing Clear, Rename, Unique, Color (the MK3 also stubs `isSceneUnique`, `isSceneTempoAvailable`).
 - **Section** (Song view): missing Create, Clear, Rename, Unique, Color, Scene Tempo. Convert to Clip(s): done.
 - **Event area** (pattern editor): done: Select/Draw/Split/Join/Mute, Quantize, Quantize 50%, Cut/Copy/Paste/Delete, Nudge Grid. Takes missing (no takes of notes).
 - **Clips:** Duplicate, Double, Delete (the Song view's clip menu); dragging moves and resizes. Missing: Clear, Rename, Color, editing a clip's notes in the pattern editor.

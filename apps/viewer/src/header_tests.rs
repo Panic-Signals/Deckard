@@ -51,7 +51,8 @@ fn the_header_is_in_maschines_order() {
     assert!(((l + r) / 2.0 - mid).abs() < 2.0, "centred: {l}..{r} about {mid}");
 }
 
-/// SWING shows the master swing; dragging it up raises it, double-click sets 0 %.
+/// SWING shows the master swing; dragging it up raises it, a double-click types it, ⌘-click
+/// sets 0 %. BPM types the same way.
 #[test]
 fn the_header_swing_sets_the_master_swing() {
     let Some(mut h) = crate::tests::harness(false, false) else { return };
@@ -59,9 +60,36 @@ fn the_header_swing_sets_the_master_swing() {
     let r = at(&h, "swing");
     drag(&mut h, r.center(), r.center() - eframe::egui::vec2(0.0, 40.0));
     assert!(swing(&h) > 5.0, "dragged up: {}", swing(&h));
+    let enter = |h: &mut Harness<'static, crate::App>, typed: &str| {
+        h.event(eframe::egui::Event::Text(typed.into()));
+        h.step();
+        h.event(eframe::egui::Event::Key {
+            key: eframe::egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        h.run_steps(3);
+    };
     let r = at(&h, "swing");
+    h.run_steps(40);
     click(&mut h, r.center(), true);
+    h.run_steps(2);
+    enter(&mut h, "12.5");
+    assert_eq!(swing(&h), 12.5);
+    h.run_steps(40);
+    h.event(eframe::egui::Event::ModifiersChanged(eframe::egui::Modifiers::COMMAND));
+    click(&mut h, r.center(), false);
+    h.event(eframe::egui::Event::ModifiersChanged(Default::default()));
+    h.run_steps(2);
     assert_eq!(swing(&h), 0.0);
+    let r = at(&h, "bpm");
+    h.run_steps(40);
+    click(&mut h, r.center(), true);
+    h.run_steps(2);
+    enter(&mut h, "98.5");
+    assert_eq!(h.state().doc.as_ref().unwrap().borrow().project().tempo, 98.5);
 }
 
 /// The keyboard button turns the computer keyboard (⌘K) on and off.

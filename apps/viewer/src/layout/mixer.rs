@@ -600,9 +600,13 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                     acts.push(Act::SetAux(t, k, (v + d).clamp(0.0, 1.0)));
                 }
             }
-            if resp.double_clicked() {
-                acts.push(Act::SetAux(t, k, 0.75));
-            }
+            super::value_entry::gestures(
+                ui,
+                &resp,
+                super::value_entry::What::Aux(t, k),
+                &format!("{:.1}", deckard_model::level_db(v)),
+                acts,
+            );
         }
         bottom = aux_top;
     }
@@ -633,9 +637,13 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             acts.push(Act::SetPan(target, (st.pan + d as f64).clamp(-1.0, 1.0)));
         }
     }
-    if pan_resp.double_clicked() {
-        acts.push(Act::SetPan(target, 0.0));
-    }
+    super::value_entry::gestures(
+        ui,
+        &pan_resp,
+        super::value_entry::What::Edit(super::Edit::Pan(target)),
+        &format!("{:.0}", st.pan * 100.0),
+        acts,
+    );
     // Headroom: the peak since the last click.
     let hr = Rect::from_min_size(Pos2::new(lm.left(), lm.top() + 13.0), Vec2::new(r.width(), 11.0));
     let peak = app.headroom.get(&key).copied().unwrap_or(0.0);
@@ -693,9 +701,13 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             acts.push(Act::SetLevel(target, deckard_model::level_from_db(d as f64)));
         }
     }
-    if fr.double_clicked() {
-        acts.push(Act::SetLevel(target, 0.75));
-    }
+    super::value_entry::gestures(
+        ui,
+        &fr,
+        super::value_entry::What::Edit(super::Edit::Level(target)),
+        &format!("{:.1}", deckard_model::level_db(st.level)),
+        acts,
+    );
     painter.hline(lm.x_range(), lm.top() + 142.5, Stroke::new(1.0, Color32::BLACK));
     // Cue and mute (right-click mute: solo).
     let row = Rect::from_min_size(Pos2::new(lm.left(), lm.top() + 143.0), Vec2::new(r.width(), 20.0));

@@ -26,6 +26,9 @@ pub const PPQ: i64 = 960;
 pub struct Project {
     pub name: String,
     pub tempo: f64,
+    /// Edit ▸ MIDI Change: the MIDI that picks a scene, and a section.
+    pub scene_recall: MidiRecall,
+    pub section_recall: MidiRecall,
     pub numerator: i64,
     pub denominator: i64,
     pub groups: Vec<Group>,
@@ -298,6 +301,8 @@ impl Default for Project {
         Project {
             name: String::new(),
             tempo: 120.0,
+            scene_recall: MidiRecall::default(),
+            section_recall: MidiRecall::default(),
             numerator: 4,
             denominator: 4,
             groups: Vec::new(),
@@ -549,6 +554,8 @@ pub struct PluginKnob {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sampler {
     pub zones: Vec<Zone>,
+    /// The zone it was saved focused on: what its pages open on.
+    pub focused_zone: usize,
     /// Every parameter as stored, by its path from the Sampler (see
     /// [`SAMPLER_PARAMS`]); missing ones are absent.
     pub params: BTreeMap<String, f64>,
@@ -663,6 +670,8 @@ pub struct Zone {
     pub tune: f64,
     /// Sample frames played (start, end).
     pub play_range: (i64, i64),
+    /// The Edit tab's selection, as saved (frames, both ends in; (0, 0): none saved).
+    pub selection_range: (i64, i64),
     pub loop_range: (i64, i64),
     pub loop_active: bool,
     /// Loop crossfade, in sample frames.
@@ -680,6 +689,8 @@ impl Zone {
         match path {
             "play_range/low" => self.play_range.0 = i,
             "play_range/high" => self.play_range.1 = i,
+            "selection_range/low" => self.selection_range.0 = i,
+            "selection_range/high" => self.selection_range.1 = i,
             "loop_range/low" => self.loop_range.0 = i,
             "loop_range/high" => self.loop_range.1 = i,
             "loop_active" => self.loop_active = i != 0,
@@ -855,6 +866,32 @@ pub struct Scene {
     pub color: Color,
     /// (group index, pattern index) for each group that plays a pattern in this scene.
     pub patterns: Vec<(usize, usize)>,
+    /// The scene's own tempo (BPM), if it has one: Scene Tempo.
+    pub tempo: Option<f64>,
+}
+
+/// A scene's own tempo in a project too old to hold one (see `docs/deckard-block.md`).
+pub const SCENE_TEMPO_FIELD: &str = "deckard:scene_tempo";
+
+/// A [`MidiRecall`] in a project too old to hold it: `<trigger> <channel> <source>`.
+pub fn recall_to_text(r: &MidiRecall) -> String {
+    format!("{} {} {}", r.trigger, r.channel, r.source)
+}
+
+/// One block of Edit ▸ MIDI Change: which MIDI picks a scene or a section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiRecall {
+    /// 0 None, 1 MIDI notes, 2 program changes.
+    pub trigger: usize,
+    pub source: String,
+    /// 1–16.
+    pub channel: i64,
+}
+
+impl Default for MidiRecall {
+    fn default() -> Self {
+        MidiRecall { trigger: 0, source: "None".into(), channel: 1 }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1175,6 +1212,25 @@ impl Project {
         if let Some(m) = song.find("parameter_snapshots").and_then(|v| ix.obj(v)) {
             p.lock = Lock::read(&ix, m);
         }
+        let recall = |name: &str| {
+            let mut out = MidiRecall::default();
+            if let Some(r) = song.find(name).and_then(|v| ix.obj(v)) {
+                out.trigger = param_i64(r, "trigger").unwrap_or(0).clamp(0, 2) as usize;
+                if let Some(Value::Str(s)) = param(r, "input") {
+                    out.source = s.clone();
+                }
+                out.channel = param_i64(r, "midi_channel").unwrap_or(1).clamp(1, 16);
+            }
+            if let Some(Value::Str(t)) = r.get(&format!("deckard:{name}")) {
+                let mut parts = t.splitn(3, ' ');
+                out.trigger = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0).min(2);
+                out.channel = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 16);
+                out.source = parts.next().unwrap_or("None").to_string();
+            }
+            out
+        };
+        p.scene_recall = recall("scene_recall");
+        p.section_recall = recall("section_recall");
         if let Some(r) = song.find("snapshot_recall").and_then(|v| ix.obj(v)) {
             // Maschine 3: the trigger; before: on/off and a kind (0 notes, 1 programs).
             p.lock.midi_trigger = match param_i64(r, "trigger") {
@@ -1290,6 +1346,12 @@ impl Project {
         addr.scenes = scenes.iter().map(|s| path_of(s)).collect();
         for s in &scenes {
             let mut scene = Scene { name: param_str(s, "name"), color: color(s), ..Default::default() };
+            if param_i64(s, "scene_tempo_active").unwrap_or(0) != 0 {
+                scene.tempo = param_f64(s, "tempo").filter(|t| *t > 0.0);
+            }
+            if let Some(Value::Float(bpm)) = s.get(SCENE_TEMPO_FIELD) {
+                scene.tempo = Some(*bpm);
+            }
             for entry in map_entries(s.get("patterns")) {
                 let (Some(gv), Some(rv)) = (entry.get("first"), entry.get("second")) else { continue };
                 let Some(pref) = ix.obj(rv) else { continue };
@@ -1519,7 +1581,7 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
             .first()
             .filter(|m| m.type_name == "NI::MASCHINE::DATA::PluginHost")
             .map(|m| plugin_ref(m))
-            .filter(|p| !(p.id.contains(":FX:") || p.id.contains(":Fx:"))),
+            .filter(|p| !(p.id.contains(":FX:") || p.id.contains(":Fx:") || p.id.contains(":MF:"))),
         audio: modules.iter().find(|m| m.type_name == AUDIO_MODULE).map(|m| audio_loop(ix, m)),
         sampler: modules.into_iter().find(|m| m.type_name == "NI::MASCOMMON::DATA::Sampler").map(|m| sampler(ix, m)),
         swing: swing_of(s),
@@ -1669,7 +1731,7 @@ impl SlotInfo {
     pub fn is_instrument(&self) -> bool {
         const SOURCES: [&str; 10] = ["Sampler", "AudioModule", "Kick", "Snare", "Hihat", "Tom", "Perc", "Cymbal", "BassSynth", "PolySynth"];
         match &self.plugin {
-            Some(p) => !(p.id.contains(":FX:") || p.id.contains(":Fx:")),
+            Some(p) => !(p.id.contains(":FX:") || p.id.contains(":Fx:") || p.id.contains(":MF:")),
             None => SOURCES.contains(&self.module.as_str()),
         }
     }
@@ -2090,7 +2152,13 @@ fn sampler(ix: &Index, m: &Obj) -> Sampler {
             params.insert(path.to_string(), v);
         }
     }
-    let mut s = Sampler { zones: ix.elements(m.get("zones")).into_iter().map(zone).collect(), params, ..Sampler::default() };
+    let zones = ix.elements(m.get("zones"));
+    let current = match m.get("zones") {
+        Some(Value::Obj(z)) => z.get("current").and_then(|c| ix.obj(c)),
+        _ => None,
+    };
+    let focused_zone = current.and_then(|c| zones.iter().position(|z| std::ptr::eq(*z, c))).unwrap_or(0);
+    let mut s = Sampler { zones: zones.into_iter().map(zone).collect(), focused_zone, params, ..Sampler::default() };
     s.derive();
     s
 }
@@ -2168,6 +2236,7 @@ fn zone(z: &Obj) -> Zone {
         pan: param_f64(z, "pan").unwrap_or(0.0),
         tune: param_f64(z, "tune").unwrap_or(0.0),
         play_range: range(z, "play_range", (0, 0)),
+        selection_range: range(z, "selection_range", (0, 0)),
         loop_range: range(z, "loop_range", (0, 0)),
         loop_active: param_i64(z, "loop_active").unwrap_or(0) != 0,
         x_fade: param_i64(z, "x_fade").unwrap_or(0),

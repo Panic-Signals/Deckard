@@ -9,7 +9,9 @@
 //!   together by a pitch envelope: drum skins, shells, metal;
 //! - a click: a short burst of filtered noise at the strike;
 //! - a noise layer: white, pink or one of the modal noises (`synth::noise`) through a
-//!   band-pass, under its own attack/decay: snare wires, air, a cymbal's wash.
+//!   band-pass, under its own attack/decay: snare wires, air, a cymbal's wash;
+//! - optionally a second noise layer ([`Patch::wires`]), and a [`Bank`] of resonators rung by
+//!   noise: the Snare's Breaker has steady wires and, later, a rattle at its own pitches.
 //!
 //! The designs are tuned by ear and by measurement against Maschine's renders of the
 //! same settings (level, decay times, pitch over time, spectrum); they are not ports.
@@ -64,7 +66,7 @@ pub enum Source {
 pub struct Noise {
     pub level: f32,
     pub source: Source,
-    /// Band-pass centre (Hz) and Q; `hp` (Hz, 0: none) cuts below.
+    /// Band-pass centre (Hz; 0: no band-pass) and Q; `hp` (Hz, 0: none) cuts below.
     pub freq: f32,
     pub q: f32,
     pub hp: f32,
@@ -73,6 +75,32 @@ pub struct Noise {
     pub decay: f32,
     /// Stereo width: the right channel reads the source this far away (0: mono).
     pub width: f32,
+}
+
+/// Resonators a [`Bank`] can hold.
+pub const BANK: usize = 12;
+
+/// Resonators rung by noise, coming in after the strike.
+#[derive(Clone, Copy, Default)]
+pub struct Bank {
+    pub level: f32,
+    /// Each resonator's frequency (Hz) and gain.
+    pub rings: [(f32, f32); BANK],
+    pub n: usize,
+    pub q: f32,
+    /// Attack and decay time constants (s).
+    pub attack: f32,
+    pub decay: f32,
+}
+
+impl Bank {
+    /// Add a resonator (ignored past [`BANK`]).
+    pub fn ring(&mut self, freq: f32, gain: f32) {
+        if self.n < BANK {
+            self.rings[self.n] = (freq, gain);
+            self.n += 1;
+        }
+    }
 }
 
 /// A whole strike.
@@ -87,10 +115,16 @@ pub struct Patch {
     pub bend_fall: f32,
     pub click: Noise,
     pub noise: Noise,
+    /// A second noise layer.
+    pub wires: Noise,
+    /// Noise ringing resonators.
+    pub bank: Bank,
     /// The whole voice's gain.
     pub gain: f32,
     /// Start the modes at scattered phases (metal) rather than together (skins).
     pub scatter: bool,
+    /// Modes from this one on start scattered, whatever `scatter` says.
+    pub scatter_from: usize,
     /// The modes swell in with this time constant (s; 0: at once), as a struck ride's
     /// wash builds.
     pub swell: f32,
@@ -106,8 +140,11 @@ impl Default for Patch {
             bend_fall: 0.05,
             click: Noise::default(),
             noise: Noise::default(),
+            wires: Noise::default(),
+            bank: Bank::default(),
             gain: 1.0,
             scatter: false,
+            scatter_from: MODES,
             swell: 0.0,
         }
     }
@@ -230,9 +267,53 @@ impl NoiseRt {
         self.rise += (1.0 - self.rise) * self.att;
         let g = self.p.level * self.env * self.rise;
         self.env *= self.dec;
-        let l = self.hp[0].run(self.bp[0].band(a));
-        let r = if self.p.width > 0.0 { self.hp[1].run(self.bp[1].band(b)) } else { l };
+        let (a, b) =
+            if self.p.freq > 0.0 { (self.bp[0].band(a), if self.p.width > 0.0 { self.bp[1].band(b) } else { 0.0 }) } else { (a, b) };
+        let l = self.hp[0].run(a);
+        let r = if self.p.width > 0.0 { self.hp[1].run(b) } else { l };
         (l * g, r * g)
+    }
+}
+
+/// A [`Bank`] while it plays.
+#[derive(Clone, Copy, Default)]
+struct BankRt {
+    p: Bank,
+    svf: [Svf; BANK],
+    env: f32,
+    rise: f32,
+    att: f32,
+    dec: f32,
+}
+
+impl BankRt {
+    fn start(&mut self, p: Bank, sr: f32) {
+        self.p = p;
+        for (svf, &(f, _)) in self.svf.iter_mut().zip(&p.rings[..p.n]) {
+            svf.set(f, p.q, sr);
+            (svf.s1, svf.s2) = (0.0, 0.0);
+        }
+        self.att = if p.attack <= 0.0 { 1.0 } else { 1.0 - (-1.0 / (p.attack * sr)).exp() };
+        self.dec = (-1.0 / (p.decay.max(1e-4) * sr)).exp();
+        self.rise = 0.0;
+        self.env = 1.0;
+    }
+    fn active(&self) -> bool {
+        self.p.level > 0.0 && self.env > 1e-5
+    }
+    fn next(&mut self, rng: &mut u32) -> f32 {
+        if !self.active() {
+            return 0.0;
+        }
+        let x = white(rng);
+        self.rise += (1.0 - self.rise) * self.att;
+        let g = self.p.level * self.env * self.rise;
+        self.env *= self.dec;
+        let mut y = 0.0;
+        for (svf, &(_, gain)) in self.svf.iter_mut().zip(&self.p.rings[..self.p.n]) {
+            y += svf.band(x) * gain;
+        }
+        y * g
     }
 }
 
@@ -264,6 +345,8 @@ pub struct Voice {
     t: f32,
     click: NoiseRt,
     noise: NoiseRt,
+    wires: NoiseRt,
+    bank: BankRt,
     rng: u32,
     pink: [f32; 3],
     /// Samples to the next control update.
@@ -298,6 +381,8 @@ impl Voice {
             t: 0.0,
             click: NoiseRt::default(),
             noise: NoiseRt::default(),
+            wires: NoiseRt::default(),
+            bank: BankRt::default(),
             rng: 0x1234_5678,
             pink: [0.0; 3],
             countdown: 0,
@@ -322,7 +407,7 @@ impl Voice {
             let a = (m.pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
             self.gl[k] = m.level * a.cos() * std::f32::consts::SQRT_2;
             self.gr[k] = m.level * a.sin() * std::f32::consts::SQRT_2;
-            if p.scatter {
+            if p.scatter || k >= p.scatter_from {
                 // A fixed spread per mode, so strikes sound alike.
                 let a = (k as f32 * 2.399_963).rem_euclid(std::f32::consts::TAU);
                 self.re[k] = a.cos();
@@ -342,6 +427,8 @@ impl Voice {
         self.noise_pos = (self.noise_pos + 7919) % noise::LEN;
         self.click.start(p.click, sr, self.noise_pos);
         self.noise.start(p.noise, sr, self.noise_pos);
+        self.wires.start(p.wires, sr, self.noise_pos);
+        self.bank.start(p.bank, sr);
         self.countdown = 0;
         self.fade = 1.0;
         self.fade_k = 1.0;
@@ -429,8 +516,10 @@ impl Voice {
             // Click and noise.
             let (cl, cr) = self.click.next(&mut self.rng, &mut self.pink);
             let (nl, nr) = self.noise.next(&mut self.rng, &mut self.pink);
-            a += cl + nl;
-            b += cr + nr;
+            let (wl, wr) = self.wires.next(&mut self.rng, &mut self.pink);
+            let rung = self.bank.next(&mut self.rng);
+            a += cl + nl + wl + rung;
+            b += cr + nr + wr + rung;
             let g = self.p.gain * self.fade;
             self.fade *= self.fade_k;
             *lo = a * g;
@@ -441,7 +530,15 @@ impl Voice {
         // Silent: the oscillator, every mode and both noise layers have died away.
         let modes_live = (0..self.p.n_modes).any(|k| (self.re[k] * self.re[k] + self.im[k] * self.im[k]) * self.p.modes[k].level > 1e-10);
         let osc_live = o.level > 0.0 && self.osc_level > 1e-6;
-        if self.fade < 1e-5 || (!modes_live && !osc_live && !self.click.active() && !self.noise.active() && energy < 1e-5) {
+        if self.fade < 1e-5
+            || (!modes_live
+                && !osc_live
+                && !self.click.active()
+                && !self.noise.active()
+                && !self.wires.active()
+                && !self.bank.active()
+                && energy < 1e-5)
+        {
             self.sounding = false;
         }
     }

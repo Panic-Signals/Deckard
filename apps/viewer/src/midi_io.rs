@@ -17,6 +17,13 @@ use std::time::Instant;
 /// velocity; 0 = release).
 pub type Pending = (usize, usize, i64, i64);
 
+/// What Edit ▸ MIDI Change's Scene and Section blocks picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recall {
+    Scene(usize),
+    Section(usize),
+}
+
 /// MIDI Lock Change: the input and channel (1–16) Lock listens to, and how (1 notes, 2
 /// program changes; 0 off).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,10 +36,16 @@ pub struct LockMidi {
 /// What a message means to Lock: `None` not Lock's; `Some(Some(slot))` recall the
 /// snapshot in `slot`; `Some(None)` Lock's, nothing to do (a note-off, past slot 64).
 pub fn lock_trigger(l: &LockMidi, port: &str, msg: &InMsg) -> Option<Option<usize>> {
+    recall_trigger(l, port, msg, 64)
+}
+
+/// Edit ▸ MIDI Change's scene or section picked by a message: note or program `n` is
+/// number `n` from the first (`count` of them); `Some(None)` the block's, nothing to do.
+pub fn recall_trigger(l: &LockMidi, port: &str, msg: &InMsg, count: u8) -> Option<Option<usize>> {
     if l.trigger == 0 || l.source == "None" || (l.source != "All" && l.source != port) {
         return None;
     }
-    let slot = |n: u8| (n < 64).then_some(n as usize);
+    let slot = |n: u8| (n < count).then_some(n as usize);
     match (l.trigger, msg) {
         (1, InMsg::NoteOn { ch, note, .. }) if *ch == l.channel => Some(slot(*note)),
         (1, InMsg::NoteOff { ch, .. }) if *ch == l.channel => Some(None),
@@ -67,6 +80,9 @@ pub struct MidiIo {
     /// MIDI Lock Change's setting, and the slots it was asked to recall.
     lock: Arc<Mutex<Option<LockMidi>>>,
     lock_pending: Arc<Mutex<Vec<usize>>>,
+    /// Edit ▸ MIDI Change's Scene and Section blocks, and what they picked.
+    recalls: Arc<Mutex<[Option<LockMidi>; 2]>>,
+    recall_pending: Arc<Mutex<Vec<Recall>>>,
     remote: Arc<Mutex<RemoteIn>>,
     tx: SyncSender<MidiOut>,
     /// Messages in and out since start (for Preferences).
@@ -100,6 +116,8 @@ impl Default for MidiIo {
             pending: Arc::default(),
             lock: Arc::default(),
             lock_pending: Arc::default(),
+            recalls: Arc::default(),
+            recall_pending: Arc::default(),
             remote: Arc::default(),
             tx,
             count: Arc::default(),
@@ -250,6 +268,7 @@ impl MidiIo {
                 (self.table.clone(), self.output.clone(), self.pending.clone(), self.count.clone(), self.repaint.clone());
             let (lock, lock_pending, clock, remote) =
                 (self.lock.clone(), self.lock_pending.clone(), self.clock.clone(), self.remote.clone());
+            let (recalls, recall_pending) = (self.recalls.clone(), self.recall_pending.clone());
             let (mpe, monitor) = (self.mpe.clone(), self.monitor.clone());
             let mut st = PortState::default();
             let port_name: Arc<str> = name.as_str().into();
@@ -280,6 +299,21 @@ impl MidiIo {
                     if let Some(recall) = taken {
                         if let Some(slot) = recall {
                             lock_pending.lock().unwrap().push(slot);
+                            if let Some(ctx) = repaint.lock().unwrap().as_ref() {
+                                ctx.request_repaint();
+                            }
+                        }
+                        return;
+                    }
+                    // Then the scene and section changes: the same, no further.
+                    let picked = {
+                        let [scene, section] = &*recalls.lock().unwrap();
+                        let pick = |l: &Option<LockMidi>| l.as_ref().and_then(|l| recall_trigger(l, &port_name, &msg, 128));
+                        pick(scene).map(|n| n.map(Recall::Scene)).or_else(|| pick(section).map(|n| n.map(Recall::Section)))
+                    };
+                    if let Some(picked) = picked {
+                        if let Some(r) = picked {
+                            recall_pending.lock().unwrap().push(r);
                             if let Some(ctx) = repaint.lock().unwrap().as_ref() {
                                 ctx.request_repaint();
                             }
@@ -346,6 +380,16 @@ impl MidiIo {
             }
         }
         out
+    }
+
+    /// Edit ▸ MIDI Change's Scene and Section blocks (`None`: off).
+    pub fn set_recalls(&self, scene: Option<LockMidi>, section: Option<LockMidi>) {
+        *self.recalls.lock().unwrap() = [scene, section];
+    }
+
+    /// The scenes and sections MIDI picked.
+    pub fn take_recalls(&self) -> Vec<Recall> {
+        std::mem::take(&mut *self.recall_pending.lock().unwrap())
     }
 
     /// The snapshot slots MIDI asked to recall.

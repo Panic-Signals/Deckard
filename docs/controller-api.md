@@ -197,7 +197,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `progress` | How far through its pattern the focused group is (0–1), or `nil` when stopped. |
 | `numerator`, `denominator` | The time signature. |
 | `group`, `sound` | The focused group and sound. |
-| `groups[i]` | `{ name, color, palette, default_color, muted, playing, mix, patterns, scene_pattern, sounds, perform }`: `patterns[k]` is `{ name, color, palette, default_color, bars }`; `scene_pattern` the pattern the focused scene plays, or `nil`; `perform` its Perform FX's strip, `{ touched, pos }` (0..1), or `nil` without one. |
+| `groups[i]` | `{ name, color, palette, default_color, muted, playing, mix, patterns, scene_pattern, progress, playing_progress, sounds, perform }`: `progress` how far through its pattern in the focused scene the song is (0–1), `playing_progress` the same in the scene playing; `patterns[k]` is `{ name, color, palette, default_color, bars }`; `scene_pattern` the pattern the focused scene plays, or `nil`; `perform` its Perform FX's strip, `{ touched, pos }` (0..1), or `nil` without one. |
 | `groups[i].sounds[j]` | `{ name, color, palette, default_color, muted, used, playing, mix, choke_group, choke_mode, link_group, link_mode, base_key, touch, prob_locked }`: `touch` is its Pad Touch, `{ mode (0 Velocity, 1 Poly AT, 2 Aftertouch, 3 CC), cc, curve, min, max }`; `prob_locked` whether PROB LOCK keeps its notes' chances. |
 | `mix` (a group's or a sound's) | `{ level (dB, -inf silent), pan (-1–1), meter = { l_db, r_db }, headroom (dB), plugins = { { instrument, active } … } }`. |
 | `scenes[i]`, `scene`, `scene_name`, `scene_palette` | The scenes (`{ name, color, palette, default_color, patterns }`) and the focused one. `patterns[g]` is the pattern group `g` plays in the scene, or `false`. |
@@ -319,6 +319,7 @@ and `positions`.
 | `deckard.step_mod_at(at, length)` | The Step Mod page shows the step at `at` (`length` long): the knobs' `step_mod` are its modulation. With no arguments, the page is gone; the edits made meanwhile are one undo step. |
 | `deckard.step_mod(from, length, pads, knob, inc)` | The Step Mod page's knob `knob` (1–8) turned by `inc`: its modulation in each step held (`pads`, a list of pads 1–16; pad `n` the step at `from + (n − 1) × length`) moves by `inc` of its range, held over the step alone. |
 | `deckard.step(at, length, velocity)` | Step mode's pad: the focused sound's notes starting from `at` to `at + length` (ticks) go; with none there, a note of its base key goes in at `at`, `length` long, at `velocity` (0–127), and becomes the selection. With no pattern, a new one first. |
+| `deckard.step_notes(at, length, velocity, pitches)` | The step grid's button in Keyboard and Chords mode: `pitches` (a list, at most 16) of the focused sound from `at` to `at + length` (ticks). All there already, they go; else the missing ones go in, a step long at `velocity`, and all of them are selected. Other pitches stay. With no pattern, a new one first. |
 | `deckard.groove_page(n)` | Show the focused sound's Groove properties on the Control page, page `n` (1 Swing, 2 Variation, 3 Generate). |
 | `deckard.set_macro(knob, level)` | Make knob `knob`'s parameter (1–8, as the Control page shows it) a macro of the master (`level` 0), the focused group (1) or sound (2), or stop it being one. |
 | `deckard.velocity(v)` | The velocity the pads play with Fixed Velocity on (0–127). |
@@ -445,6 +446,8 @@ A device gets the whole `deckard` API, so `deckard.state()`, `focus_group`,
 |---|---|
 | `deckard.midi_send(role, bytes)` | Send bytes (0–255 each) on the port of `role`. |
 | `deckard.launch_scene(i)` | Launch scene `i`: as clicking it in the Ideas view, and when stopped it starts playing. |
+| `deckard.new_pattern(group)` | A new pattern in group `group`, in the focused scene. The focused group stays; in that group, the new pattern is focused. |
+| `deckard.show_scenes(i)` | Scroll the Ideas view's scene tabs to start at scene `i`, as far as they go. |
 | `deckard.print_notes{ length = beats, notes = { {pitch, start, length, velocity}, … }, track = n }` | Print to Clip: the notes (times in beats) replace the focused sound's in the focused group's pattern in the focused scene. A pattern is made if there is none, and the pattern takes `length`. It is one undo step. `track` (optional, from 1) is the device's track it came from: a print from the track set as the device's drum track (Preferences ▸ MIDI) plays the focused group's pads from C1 instead, replacing the group's notes. |
 | `deckard.message(text)` | Show a line in the status bar. |
 | `deckard.device()` | The device's id (its folder's name). |

@@ -14,21 +14,27 @@ top. The grid's bottom row is the playhead.
 
 - A pattern is lit in its colour: full where the focused scene plays it, dim where
   not. Focus another scene and the grid shows that scene's patterns.
-- **A pad** turns its pattern on or off in the focused scene. Turning one on also
-  focuses it. A group plays one pattern in a scene, so the one it played goes off.
+- **A pad** turns its pattern on or off in the focused scene. A group plays one pattern
+  in a scene, so the one it played goes off. The focused group and sound stay as they
+  are, so you can change a part from here while playing another on the MK3. In the
+  focused group, a pattern turned on also becomes the focused pattern.
+- **A queued scene:** launched while another plays, its patterns flash with the beat
+  until it starts, and the patterns still playing stay fully lit, so you can see both
+  what's ending and what's next.
 - **The faint white pad** after a group's last pattern makes a new pattern there, in
-  the scene.
+  the scene, also without moving the focus to that group.
 - **The playhead** (the grid's bottom row): while playing, the longest pattern in the
   focused scene spread over the eight pads, however long it is: an eighth each. The
   part played is dim, the pad playing full white, those still to come faint, so you can
-  see how long until it loops round. Stopped, its first pad strobes with the tempo.
+  see how long until it loops round. With a scene queued it keeps following the scene
+  still playing. Stopped, its first pad strobes with the tempo.
   Its pads do nothing.
 - **The row of buttons under the grid** shows the scenes in their colours: dim, the
   focused one full, the playing one pulsing, a queued one flashing. A press launches that
   scene, and when stopped it starts playing. The faint white button after the last
   scene makes a new scene, focused.
 - **Left and right** scroll the scenes eight at a time, always as far as the place for
-  a new one. **Up and down** scroll the patterns seven at a time. **SHIFT + left or
+  a new one, and DECKARD's Ideas view scrolls its scene tabs to match. **Up and down** scroll the patterns seven at a time. **SHIFT + left or
   right** focuses the previous or next eight groups. The arrows are lit when there's
   somewhere to go.
 - **Mute** is a mode (yellow while on; press it again to leave). A pad mutes or

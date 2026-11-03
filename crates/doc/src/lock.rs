@@ -311,6 +311,80 @@ impl Document {
         })
     }
 
+    /// Set Edit ▸ MIDI Change's `block` (`scene_recall`, `section_recall`): `field` is
+    /// `trigger`, `input` or `midi_channel`. A project too old to hold it keeps it in
+    /// the DECKARD block.
+    pub fn set_midi_recall(&mut self, block: &str, field: &str, value: Value) -> Result<(), String> {
+        let path = format!("{block}/{field}");
+        if self.param_path(Target::Song, &path).is_ok() {
+            return self.set("MIDI Change", Target::Song, &path, value);
+        }
+        let p = self.project();
+        let mut r = if block == "scene_recall" { p.scene_recall.clone() } else { p.section_recall.clone() };
+        match (field, value) {
+            ("trigger", Value::Int(t)) => r.trigger = t.clamp(0, 2) as usize,
+            ("midi_channel", Value::Int(c)) => r.channel = c.clamp(1, 16),
+            ("input", Value::Str(s)) => r.source = s,
+            (f, v) => return Err(format!("{block}: can't set {f} to {v:?}")),
+        }
+        let want = Some(Value::Str(deckard_model::recall_to_text(&r)));
+        self.apply("MIDI Change", vec![Op::SetField { path: Vec::new(), field: format!("deckard:{block}"), value: want }])
+    }
+
+    /// What of Scene Tempo and Edit ▸ MIDI Change only the DECKARD block can keep.
+    pub(crate) fn scene_settings_text(&self) -> String {
+        let mut out = String::new();
+        for s in 0..self.project().scenes.len() {
+            let Some(path) = self.owner(Target::Scene(s)) else { continue };
+            if let Some(Value::Obj(o)) = self.tree.at(&path)
+                && let Some(Value::Float(bpm)) = o.get(deckard_model::SCENE_TEMPO_FIELD)
+            {
+                out.push_str(&format!("tempo {s} {bpm}\n"));
+            }
+        }
+        if let Some(Value::Obj(root)) = self.tree.at(&[]) {
+            for block in ["scene_recall", "section_recall"] {
+                if let Some(Value::Str(t)) = root.get(&format!("deckard:{block}")) {
+                    out.push_str(&format!("{block} {t}\n"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Take back what [`Document::scene_settings_text`] kept (a scene that's gone: dropped).
+    pub(crate) fn read_scene_settings(&mut self, text: &str) {
+        for line in text.lines() {
+            let Some((what, rest)) = line.split_once(' ') else { continue };
+            let op = if what == "tempo" {
+                let Some((s, bpm)) = rest.split_once(' ') else { continue };
+                let (Ok(s), Ok(bpm)) = (s.parse::<usize>(), bpm.parse::<f64>()) else { continue };
+                let Some(path) = self.owner(Target::Scene(s)) else { continue };
+                Op::SetField { path, field: deckard_model::SCENE_TEMPO_FIELD.to_string(), value: Some(Value::Float(bpm)) }
+            } else {
+                Op::SetField { path: Vec::new(), field: format!("deckard:{what}"), value: Some(Value::Str(rest.to_string())) }
+            };
+            let _ = self.run(&[op]);
+        }
+    }
+
+    /// Give `scene` its own tempo, or (`None`) back to the song's. One undo step.
+    pub fn set_scene_tempo(&mut self, scene: usize, bpm: Option<f64>) -> Result<(), String> {
+        let bpm = bpm.map(|b| b.clamp(5.0, 999.0));
+        // A project too old to hold it keeps it in the DECKARD block.
+        if self.param_path(Target::Scene(scene), "scene_tempo_active").is_err() {
+            let path = self.owner(Target::Scene(scene)).ok_or_else(|| format!("no scene {}", scene + 1))?;
+            let field = deckard_model::SCENE_TEMPO_FIELD.to_string();
+            return self.apply("Scene Tempo", vec![Op::SetField { path, field, value: bpm.map(Value::Float) }]);
+        }
+        self.transaction("Scene Tempo", |d| {
+            if let Some(bpm) = bpm {
+                d.set("Scene Tempo", Target::Scene(scene), "tempo", Value::Float(bpm))?;
+            }
+            d.set("Scene Tempo", Target::Scene(scene), "scene_tempo_active", Value::Int(i64::from(bpm.is_some())))
+        })
+    }
+
     /// The ops setting `entries` (the parameters that differ), each as its kind.
     pub(crate) fn entry_ops(&self, entries: &[LockEntry]) -> Vec<Op> {
         entries
@@ -443,6 +517,92 @@ mod tests {
 mod midi_tests {
     use crate::{Document, Target};
     use mxprj::decode::Value;
+
+    /// Scene Tempo: stored in the scene, one undo, and kept by a copy of the scene.
+    #[test]
+    fn a_scene_keeps_its_own_tempo() {
+        let mut d = Document::new_project().unwrap();
+        let song = d.project().tempo;
+        assert_eq!(d.project().scenes[0].tempo, None);
+        d.set_scene_tempo(0, Some(90.5)).unwrap();
+        assert_eq!(d.project().scenes[0].tempo, Some(90.5));
+        assert_eq!(d.project().tempo, song, "the song's stays");
+        let copy = d.duplicate_scene(0).unwrap();
+        assert_eq!(d.project().scenes[copy].tempo, Some(90.5));
+        assert!(d.undo());
+        d.set_scene_tempo(0, None).unwrap();
+        assert_eq!(d.project().scenes[0].tempo, None);
+        assert!(d.undo());
+        assert_eq!(d.project().scenes[0].tempo, Some(90.5));
+    }
+
+    /// A new scene starts at the song's tempo, even when it's made from one with its own.
+    #[test]
+    fn a_new_scene_has_no_tempo_of_its_own() {
+        let mut d = Document::new_project().unwrap();
+        d.set_scene_tempo(0, Some(90.5)).unwrap();
+        let new = d.insert_scene(1).unwrap();
+        assert_eq!(d.project().scenes[new].tempo, None);
+        assert_eq!(d.project().scenes[0].tempo, Some(90.5));
+    }
+
+    /// A project from before scenes had tempos, or Scene changes: without those fields.
+    fn an_old_project() -> Document {
+        let mut d = Document::new_project().unwrap();
+        for s in 0..d.project().scenes.len() {
+            let path = d.owner(Target::Scene(s)).unwrap();
+            let Some(Value::Obj(o)) = d.tree.at_mut(&path) else { panic!("scene") };
+            o.fields.retain(|(n, _)| n != "scene_tempo_active" && n != "tempo");
+        }
+        let path = d.owner(Target::Song).unwrap();
+        let Some(Value::Obj(o)) = d.tree.at_mut(&path) else { panic!("song") };
+        o.fields.retain(|(n, _)| n != "scene_recall");
+        d.refresh();
+        d
+    }
+
+    /// An old project keeps them too, undoable, and saved where Maschine won't look.
+    #[test]
+    fn an_old_project_keeps_scene_tempos_and_midi_changes() {
+        let mut d = an_old_project();
+        d.set_scene_tempo(0, Some(88.0)).unwrap();
+        assert_eq!(d.project().scenes[0].tempo, Some(88.0));
+        assert!(d.undo());
+        assert_eq!(d.project().scenes[0].tempo, None);
+        assert!(d.redo());
+        let copy = d.duplicate_scene(0).unwrap();
+        assert_eq!(d.project().scenes[copy].tempo, Some(88.0));
+        let new = d.insert_scene(5).unwrap();
+        assert_eq!(d.project().scenes[new].tempo, None, "a new one starts without");
+        d.set_midi_recall("scene_recall", "trigger", Value::Int(2)).unwrap();
+        d.set_midi_recall("scene_recall", "input", Value::Str("My Keys".into())).unwrap();
+        d.set_midi_recall("scene_recall", "midi_channel", Value::Int(4)).unwrap();
+        let want = deckard_model::MidiRecall { trigger: 2, source: "My Keys".into(), channel: 4 };
+        assert_eq!(d.project().scene_recall, want);
+        assert_eq!(d.scene_settings_text().lines().count(), 3, "{}", d.scene_settings_text());
+        // Saved, and read back through the block alone.
+        let text = d.scene_settings_text();
+        let mut back = an_old_project();
+        back.insert_scene(1).unwrap();
+        back.read_scene_settings(&text);
+        back.refresh();
+        assert_eq!(back.project().scenes[0].tempo, Some(88.0));
+        assert_eq!(back.project().scene_recall, want);
+    }
+
+    /// Edit ▸ MIDI Change's Scene and Section blocks are the song's.
+    #[test]
+    fn scene_and_section_midi_change_are_the_songs() {
+        let mut d = Document::new_project().unwrap();
+        for block in ["scene_recall", "section_recall"] {
+            d.set_midi_recall(block, "trigger", Value::Int(2)).unwrap();
+            d.set_midi_recall(block, "input", Value::Str("Keys".into())).unwrap();
+            d.set_midi_recall(block, "midi_channel", Value::Int(3)).unwrap();
+        }
+        let want = deckard_model::MidiRecall { trigger: 2, source: "Keys".into(), channel: 3 };
+        assert_eq!(d.project().scene_recall, want);
+        assert_eq!(d.project().section_recall, want);
+    }
 
     /// MIDI Lock Change (Edit ▸ MIDI Change ▸ Lock): the song's `snapshot_recall`.
     #[test]

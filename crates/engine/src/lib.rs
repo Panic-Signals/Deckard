@@ -107,9 +107,23 @@ pub struct Timeline {
     /// The sounds (group, sound) with PROB LOCK on: their notes' chances are the first
     /// pass's on every pass.
     pub prob_locked: Vec<(usize, usize)>,
+    /// From each tick on, in order: the scene's own tempo, or `None` for the song's. Empty:
+    /// the song's throughout.
+    pub tempos: Vec<(i64, Option<f64>)>,
 }
 
 impl Timeline {
+    /// The scene tempo in force at `tick`, if any.
+    fn tempo_at(&self, tick: i64) -> Option<f64> {
+        let i = self.tempos.partition_point(|t| t.0 <= tick);
+        i.checked_sub(1).and_then(|i| self.tempos[i].1)
+    }
+
+    /// The tick after `tick` where the tempo may change.
+    fn next_tempo(&self, tick: i64) -> Option<i64> {
+        self.tempos.get(self.tempos.partition_point(|t| t.0 <= tick)).map(|t| t.0)
+    }
+
     /// The pass whose chances event `e` takes on pass `pass`.
     fn chance_pass(&self, e: &NoteEvent, pass: u64) -> u64 {
         if self.prob_locked.contains(&(e.group, e.sound)) { 0 } else { pass }
@@ -302,7 +316,9 @@ pub fn timeline(p: &Project, mode: Mode) -> Timeline {
     match mode {
         Mode::Arrangement if !p.sections.is_empty() => {
             for s in &p.sections {
-                if let Some(scene) = s.scene.filter(|&i| i < p.scenes.len()) {
+                let scene = s.scene.filter(|&i| i < p.scenes.len());
+                t.tempos.push((t.length, scene.and_then(|i| p.scenes[i].tempo)));
+                if let Some(scene) = scene {
                     let at = t.length;
                     add_scene(&mut t, scene, at, s.length);
                 }
@@ -314,6 +330,7 @@ pub fn timeline(p: &Project, mode: Mode) -> Timeline {
             for scene in 0..p.scenes.len() {
                 let len = p.scene_length(scene);
                 let at = t.length;
+                t.tempos.push((at, p.scenes[scene].tempo));
                 add_scene(&mut t, scene, at, len);
                 t.length += len;
             }
@@ -321,6 +338,7 @@ pub fn timeline(p: &Project, mode: Mode) -> Timeline {
         Mode::Scene(scene) if scene < p.scenes.len() => {
             t.length = p.scene_length(scene);
             let len = t.length;
+            t.tempos.push((0, p.scenes[scene].tempo));
             add_scene(&mut t, scene, 0, len);
         }
         Mode::Pattern(g, pi) if g < p.groups.len() && pi < p.groups[g].patterns.len() => {
@@ -1065,7 +1083,7 @@ impl FxChain {
 
 /// Whether a plug-in (Maschine's id) is an effect.
 pub fn is_effect(plugin_id: &str) -> bool {
-    plugin_id.contains(":FX:") || plugin_id.contains(":Fx:")
+    plugin_id.contains(":FX:") || plugin_id.contains(":Fx:") || plugin_id.contains(":MF:")
 }
 
 /// The effects of a sound's chain: slots after the first that are effects (plug-ins,
@@ -1213,6 +1231,9 @@ pub struct Telemetry {
     /// is playing.
     pub watch: Vec<(usize, usize, usize)>,
     pub zones: Vec<Option<usize>>,
+    /// The last note played live: how many so far, then its group, sound, pitch and
+    /// velocity. (The Sampler's pages show the zone it lands in.)
+    pub live_hit: (u64, usize, usize, i64, i64),
     /// How many commands the audio thread had applied when this was published (see
     /// `Output::is_current`).
     pub actions: u64,
@@ -1241,7 +1262,12 @@ const HELD: i64 = i64::MAX;
 
 pub struct Engine {
     sr: f64,
+    /// What it plays at now: the song's tempo, a clock's, or the playing scene's own.
     tempo: f64,
+    /// The song's tempo.
+    song_tempo: f64,
+    /// A clock sets the tempo (see [`Engine::set_followed`]).
+    followed: bool,
     timeline: Timeline,
     mode: Mode,
     /// What to play when the current pass ends (a scene launched while playing).
@@ -1326,6 +1352,8 @@ pub struct Engine {
     tap_pending: Vec<f32>,
     /// Frames the tap has produced since it was set.
     tap_total: u64,
+    /// [`Telemetry::live_hit`].
+    live_hit: (u64, usize, usize, i64, i64),
     /// Scratch for rendering a tapped sound, and the tapped audio of the current block.
     /// Each sound's output buffers, `[group][sound]` (sounds with an instrument).
     bufs: Vec<Vec<Option<Box<SoundBufs>>>>,
@@ -1958,6 +1986,8 @@ impl Engine {
         let engine = Engine {
             sr: sr_f,
             tempo: project.tempo,
+            song_tempo: project.tempo,
+            followed: false,
             timeline,
             mode,
             queued: None,
@@ -2015,6 +2045,7 @@ impl Engine {
             tap: None,
             tap_pending: Vec::new(),
             tap_total: 0,
+            live_hit: (0, 0, 0, 0, 0),
             bufs,
             job_list: Vec::with_capacity(project.groups.iter().map(|g| g.sounds.len()).sum()),
             job_ptrs: Vec::with_capacity(project.groups.iter().map(|g| g.sounds.len()).sum()),
@@ -2198,6 +2229,7 @@ impl Engine {
         fresh.meters = self.sounds.iter().map(|g| vec![(0.0, 0.0); g.len()]).collect();
         std::mem::swap(&mut self.meters, &mut fresh.meters);
         self.tempo = fresh.tempo;
+        self.song_tempo = fresh.song_tempo;
         for u in self.fx.iter_mut().flatten().flatten().flat_map(|c| c.units.iter_mut()) {
             if let FxUnit::Internal { fx, .. } = &mut u.fx {
                 fx.set_tempo(self.tempo);
@@ -2501,9 +2533,39 @@ impl Engine {
         self.time as f64 / self.samples_per_tick()
     }
 
-    /// The song tempo (BPM) it plays at.
+    /// The tempo (BPM) it plays at: the song's, or the playing scene's own.
     pub fn tempo(&self) -> f64 {
         self.tempo
+    }
+
+    /// A clock sets the tempo (Link, incoming MIDI clock): scenes' own tempos don't count.
+    pub(crate) fn set_followed(&mut self, on: bool) {
+        self.followed = on;
+    }
+
+    /// Play at the tempo the timeline wants where it is: true if that changed it. The
+    /// position stays.
+    pub(crate) fn follow_scene_tempo(&mut self) -> bool {
+        if self.followed || !self.sequencing {
+            return false;
+        }
+        let want = self.timeline.tempo_at(self.position() as i64).unwrap_or(self.song_tempo);
+        if want == self.tempo {
+            return false;
+        }
+        self.play_at(want);
+        true
+    }
+
+    /// How many frames the timeline runs, through its tempo changes.
+    pub(crate) fn timeline_frames(&self) -> f64 {
+        let spt = |bpm: f64| self.sr * 60.0 / (bpm * PPQ as f64);
+        let (mut at, mut bpm, mut frames) = (0, self.timeline.tempo_at(0).unwrap_or(self.song_tempo), 0.0);
+        for &(tick, tempo) in self.timeline.tempos.iter().filter(|t| t.0 > 0 && t.0 < self.timeline.length) {
+            frames += (tick - at) as f64 * spt(bpm);
+            (at, bpm) = (tick, tempo.unwrap_or(self.song_tempo));
+        }
+        frames + (self.timeline.length - at) as f64 * spt(bpm)
     }
 
     fn samples_per_tick(&self) -> f64 {
@@ -3426,6 +3488,7 @@ impl Engine {
         }
         match event {
             Live::NoteOn { group, sound, pitch, velocity, length } => {
+                self.live_hit = (self.live_hit.0 + 1, group, sound, pitch, velocity);
                 self.hit_pads(group, sound, pitch, |e, s, p| e.note_on(group, s, p, velocity, length));
             }
             Live::NoteRelease { group, sound, pitch } => {
@@ -3436,6 +3499,7 @@ impl Engine {
                 }
             }
             Live::NoteIn { group, sound, pitch, velocity, thru } => {
+                self.live_hit = (self.live_hit.0 + 1, group, sound, pitch, velocity);
                 self.hit_pads(group, sound, pitch, |e, s, p| e.note_in(group, s, p, velocity, thru));
             }
             Live::ControlIn { group, sound, kind, thru, .. } => self.control_in(group, sound, kind, thru),
@@ -3573,10 +3637,15 @@ impl Engine {
         // Players' notes for the frames ahead of this span.
         self.send_ahead(frames as u64);
         self.repeat_ahead(frames);
-        let tps = 1.0 / self.samples_per_tick();
+        self.follow_scene_tempo();
+        let mut tps = 1.0 / self.samples_per_tick();
         let mut end = self.frame_of(self.timeline.length);
         let mut done = 0;
         while done < frames {
+            if self.follow_scene_tempo() {
+                tps = 1.0 / self.samples_per_tick();
+                end = self.frame_of(self.timeline.length);
+            }
             self.ahead_returns();
             self.fire_note_offs();
             self.play_expression();
@@ -3632,6 +3701,9 @@ impl Engine {
             if self.sequencing {
                 let mut target = self.timeline.events.get(self.next).map_or(end, |e| self.frame_of(e.tick));
                 if let Some((at, _)) = self.jump {
+                    target = target.min(self.frame_of(at));
+                }
+                if let Some(at) = self.timeline.next_tempo(self.position() as i64) {
                     target = target.min(self.frame_of(at));
                 }
                 until = until.min(target.saturating_sub(self.frame).max(1));
@@ -4089,6 +4161,7 @@ impl Engine {
         t.active_voices = self.active_voices();
         t.pending_jump = self.jump;
         t.tap_frames = self.tap_total;
+        t.live_hit = self.live_hit;
         t.tempo = self.tempo;
         t.stale = self.stale;
         t.sounds_ahead = self.sounds_ahead();
@@ -5200,6 +5273,7 @@ mod tests {
             mods: Vec::new(),
             exprs: Vec::new(),
             prob_locked: Vec::new(),
+            tempos: Vec::new(),
         };
         let out = render(&mut e, 1.0);
         let left: Vec<f32> = out.iter().step_by(2).map(|x| x * 100.0).collect();
@@ -5233,6 +5307,7 @@ mod tests {
             mods: Vec::new(),
             exprs: Vec::new(),
             prob_locked: Vec::new(),
+            tempos: Vec::new(),
         };
         let out = render(&mut e, 1.0);
         // The 8-point interpolator follows a ramp once its history is filled.
@@ -5240,6 +5315,20 @@ mod tests {
         for (i, &l) in out.iter().step_by(2).enumerate().skip(4).take(20) {
             assert!((l * 100.0 - i as f32 * ratio).abs() < 0.02, "frame {i}: {l}");
         }
+    }
+
+    #[test]
+    fn a_note_played_live_is_reported_and_a_sequenced_one_isnt() {
+        let mut e = click_engine(1000);
+        let mut out = vec![0f32; 512];
+        e.note_on(0, 1, 60, 100, PPQ);
+        assert_eq!(e.live_hit.0, 0, "the sequence's way in");
+        e.schedule(0, Live::NoteOn { group: 0, sound: 1, pitch: 72, velocity: 90, length: PPQ });
+        e.process(&mut out);
+        assert_eq!(e.live_hit, (1, 0, 1, 72, 90));
+        e.schedule(0, Live::NoteIn { group: 2, sound: 3, pitch: 40, velocity: 30, thru: false });
+        e.process(&mut out);
+        assert_eq!(e.live_hit, (2, 2, 3, 40, 30));
     }
 
     #[test]
@@ -5279,6 +5368,82 @@ mod tests {
                 assert!(got.iter().all(|s| *s == 0.0), "{source:?}: silence");
             }
         }
+    }
+
+    #[test]
+    fn a_scene_plays_at_its_own_tempo_from_when_it_starts() {
+        let mut p = project();
+        // Scene 1, the same quarters, at twice the song's tempo.
+        p.scenes.push(Scene { patterns: vec![(0, 0)], tempo: Some(240.0), ..Default::default() });
+        // 120 BPM at 1 kHz: a quarter is 500 frames, a bar 2000; at 240, 250 and 1000.
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 3500];
+        e.process(&mut out[..2 * 700]);
+        assert_eq!(e.tempo(), 120.0);
+        e.queue(&p, Mode::Scene(1));
+        e.process(&mut out[2 * 700..2 * 2100]);
+        assert_eq!(e.tempo(), 240.0, "the scene's, once it starts");
+        // Back: the song's again, on the bar.
+        e.queue(&p, Mode::Scene(0));
+        e.process(&mut out[2 * 2100..]);
+        let onsets: Vec<usize> = (0..3500).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 2250, 2500, 2750, 3000]);
+        assert_eq!(e.tempo(), 120.0);
+    }
+
+    #[test]
+    fn a_section_plays_at_its_scenes_tempo_and_the_timeline_knows_how_long_that_is() {
+        let mut p = project();
+        p.scenes.push(Scene { patterns: vec![(0, 0)], tempo: Some(240.0), ..Default::default() });
+        let bar = 4 * PPQ;
+        p.sections = vec![
+            Section { scene: Some(0), length: bar, auto: false },
+            Section { scene: Some(1), length: bar, auto: false },
+            Section { scene: Some(0), length: bar, auto: false },
+        ];
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Arrangement);
+        assert_eq!(e.timeline_frames().round() as usize, 2000 + 1000 + 2000);
+        let mut out = vec![0f32; 2 * 3400];
+        e.process(&mut out);
+        let onsets: Vec<usize> = (0..3400).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 2250, 2500, 2750, 3000]);
+        assert_eq!(e.tempo(), 120.0);
+    }
+
+    /// Under a clock (Link, incoming MIDI clock) the clock's tempo is the tempo.
+    #[test]
+    fn a_followed_clock_overrides_a_scenes_tempo() {
+        let mut p = project();
+        p.scenes[0].tempo = Some(240.0);
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.set_followed(true);
+        let mut out = vec![0f32; 2 * 100];
+        e.process(&mut out);
+        assert_eq!(e.tempo(), 120.0);
+        e.set_followed(false);
+        e.process(&mut out);
+        assert_eq!(e.tempo(), 240.0);
+    }
+
+    /// A tempo edit moves what plays at the song's tempo, not a scene with its own.
+    #[test]
+    fn a_song_tempo_edit_leaves_a_scene_with_its_own_alone() {
+        let mut p = project();
+        p.scenes[0].tempo = Some(90.0);
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        let mut out = vec![0f32; 2 * 100];
+        e.process(&mut out);
+        assert_eq!(e.tempo(), 90.0);
+        p.tempo = 200.0;
+        let mut cache = SampleCache::default();
+        e.update(&p, None, &mut cache);
+        e.process(&mut out);
+        assert_eq!(e.tempo(), 90.0);
     }
 
     #[test]

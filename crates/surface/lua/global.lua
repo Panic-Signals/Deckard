@@ -177,7 +177,7 @@ function global.button(name, down)
   elseif name == "CHORDS" then
     pad_mode("chords")
   elseif name == "STEP" then
-    pad_mode("step")
+    if shift then pads.toggle_grid() else pad_mode("step") end
   elseif name == "CHANNEL" then
     deckard.show_plugins(false)
     deckard.show_page("control")
@@ -277,7 +277,9 @@ function global.button(name, down)
 end
 
 function global.pad(n, velocity)
-  if pads.keys() then return true end
+  -- (SELECT, MUTE and SOLO act on a sound, whatever the pads otherwise do.)
+  local acting = pin.active("SELECT") or pin.active("MUTE") or pin.active("SOLO")
+  if pads.keys() and not acting then return true end
   local s = deckard.state()
   local group = s.groups[s.group]
   if not group or n > #group.sounds then return true end
@@ -374,11 +376,13 @@ end
 -- The pages a project reopens on, if it was saved on one (not the dialogs, nor the
 -- pages shown while a button is held).
 local RESTORES = {
-  control = true, pad_mode = true, keyboard = true, step = true, arrange = true, mixer = true, song = true,
+  control = true, pad_mode = true, keyboard = true, step = true, step_grid = true, arrange = true, mixer = true,
+  song = true,
 }
 
 -- A project opened: the pads' mode and the page it was saved on (BUGS #6).
 function global.restore(page, mode)
+  pads.grid = page == "step_grid"
   if mode ~= pads.mode and (mode == "pad" or mode == "keyboard" or mode == "chords" or mode == "step") then
     pads.switch(mode)
   end
@@ -391,8 +395,10 @@ function global.pads()
   -- (Step mode's KEYBOARD maps the pads too, as Maschine's, though they don't play.)
   if pads.keyboard() then keys = { sound = deckard.state().sound, notes = pads.notes(), chords = pads.chords() } end
   -- (Held, PATTERN and SCENE's pads pick patterns and scenes.)
+  -- (SELECT, MUTE, SOLO and ERASE act on a sound, silently, so it can be edited live.)
   local picking = pin.active("PATTERN") or pin.active("SCENE")
-  return { play = pads.mode ~= "step" and not picking, keys = keys }
+  local acting = pin.active("SELECT") or pin.active("MUTE") or pin.active("SOLO") or deckard.held("ERASE")
+  return { play = pads.mode ~= "step" and not picking and not acting, keys = keys }
 end
 
 -- The touch strip's lights.
@@ -438,7 +444,7 @@ function global.leds()
   deckard.led("PAD_MODE", lit(pads.mode == "pad"))
   deckard.led("KEYBOARD", lit(pads.mode == "keyboard"))
   deckard.led("CHORDS", lit(pads.mode == "chords"))
-  deckard.led("STEP", lit(pads.mode == "step"))
+  deckard.led("STEP", lit(pads.mode == "step" or pads.grid))
   deckard.led("SELECT", lit(pin.active("SELECT")))
   deckard.led("MUTE", lit(pin.active("MUTE")))
   deckard.led("SOLO", lit(pin.active("SOLO")))

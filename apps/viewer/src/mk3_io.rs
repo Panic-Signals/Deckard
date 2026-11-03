@@ -226,6 +226,8 @@ struct Shared {
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
     screens: Option<(u64, Arc<Vec<[u8; 4]>>)>,
     display_status: String,
+    /// An MK3 is plugged in, its screens won't open, and NI's agent is running.
+    agent_holding: bool,
     /// The displays' backlight, 0..=100 (`set_display_brightness`).
     display_brightness: Option<u8>,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
@@ -336,6 +338,11 @@ impl Mk3Io {
     /// What the controller did since the last call.
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut self.shared.lock().unwrap().events)
+    }
+
+    /// Whether NI's agent is keeping the MK3's screens from opening.
+    pub fn agent_holding(&self) -> bool {
+        self.shared.lock().unwrap().agent_holding
     }
 
     /// Pad hits for the app to play itself (no engine was running).
@@ -507,6 +514,15 @@ fn run(shared: &Mutex<Shared>) {
     }
 }
 
+fn set_agent_holding(s: &mut Shared, holding: bool) {
+    if s.agent_holding != holding {
+        s.agent_holding = holding;
+        if let Some(ctx) = &s.repaint {
+            ctx.request_repaint();
+        }
+    }
+}
+
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
 fn run_displays(shared: &Mutex<Shared>) {
@@ -515,7 +531,11 @@ fn run_displays(shared: &Mutex<Shared>) {
         let mut d = match Displays::open() {
             Ok(d) => d,
             Err(e) => {
-                shared.lock().unwrap().display_status = e;
+                let holding = e != deckard_mk3::display::NO_MK3 && crate::ni_agent::running();
+                let mut s = shared.lock().unwrap();
+                s.display_status = e;
+                set_agent_holding(&mut s, holding);
+                drop(s);
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
@@ -524,6 +544,7 @@ fn run_displays(shared: &Mutex<Shared>) {
             let mut s = shared.lock().unwrap();
             s.display_status.clear();
             s.displays_connected = true;
+            set_agent_holding(&mut s, false);
         }
         let mut shown = None;
         loop {

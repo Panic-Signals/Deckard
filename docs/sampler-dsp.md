@@ -341,12 +341,22 @@ plays, the loop range follows edits to the zone, clamped into the play range
 `attack` frames of the play range and a linear fade-out over the last `decay` frames.
 **[exact]**
 
-**Loop crossfade** (`AudioStreamCreator::process`). With looping on and `x_fade = X > 0`,
-the last `X' = min(X, loopLength, framesAvailableBeforeLoopStart)` frames before the loop
-end are mixed with the `X'` frames that precede the loop start. The tail fades 1 → 0
-and the pre-start material fades 0 → 1 (`AudioBlockAmplifier`, linear), so the jump back
-to the loop start is seamless. Reverse playback reads the same ranges backward.
-**[inferred]** from the control flow; the amplitude ramps are **[exact]**.
+**Loop crossfade** (`AudioStreamCreator::process`) **[exact]**. With looping on and
+`x_fade = X > 0`, the last frames before the jump back are mixed with the frames the jump
+would otherwise skip. The tail fades 1 → 0 and the other side 0 → 1 (`AudioBlockAmplifier`,
+linear), so the jump is seamless.
+
+| | Fade length | Frame at `remaining` frames before the jump |
+|---|---|---|
+| Forward | `min(X, loopLength, loopStart)` | `loopStart - remaining` |
+| Reverse | `min(X, loopLength, fileFrames - loopEnd + 1)` | `loopEnd + remaining - 2` |
+
+`loopStart` counts from the file's first frame, not the Start marker: the other side of the
+fade is read from the sample whether or not it is in the play range. So a loop that begins
+just after Start still gets its whole fade, and a loop from frame 0 gets none. The zone
+fades above apply to each side separately, by its own position, before the mix; audio
+outside the play range takes none.
+
 
 ### 6.6 Output gain and pan
 

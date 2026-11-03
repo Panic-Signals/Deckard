@@ -82,13 +82,17 @@ local function timeline(screen, theme, s, x, y, w, h, t0, t1)
     t = t + beat
   end
 
-  local steps_drawn = (t1 - t0) // STEP <= 64
+  -- As fine as there's room for: steps, beats, bars, or runs of bars.
+  local every = bar * 16
+  for _, e in ipairs({ bar * 4, bar, beat, STEP }) do
+    if e / span * w >= 6 then every = e end
+  end
   t = (t0 // STEP) * STEP
   while t < t1 do
-    if t > t0 then
+    if t > t0 and t % every == 0 then
       local c = STEP_LINE
       if t % bar == 0 then c = BAR_LINE elseif t % beat == 0 then c = BEAT_LINE end
-      if steps_drawn or c ~= STEP_LINE then screen:rect(at(t), y + HEADER, 1, h - HEADER, c) end
+      screen:rect(at(t), y + HEADER, 1, h - HEADER, c)
     end
     t = t + STEP
   end
@@ -99,7 +103,8 @@ end
 -- A note drawn in its row (`top`, `height`) from `x0` to `x1`: selected, outlined in
 -- white (a sliver of a note all white).
 local function note_box(screen, theme, x0, x1, top, height, palette, n)
-  local w = math.max(1, x1 - x0)
+  -- (A pixel short of `x1`, so notes side by side read as notes: 2 between them.)
+  local w = math.max(1, x1 - x0 - 1)
   if n.selected and w <= 2 then
     screen:rect(x0, top, w, height, "text")
   elseif n.selected then
@@ -210,7 +215,8 @@ end
 
 -- The editor as lanes (the Events page's): ticks `o.from`..`o.to` in the box, `o.rows`
 -- rows of `o.row` pixels; `o.row_of(note)` says which row a note is in (none: not
--- shown), `o.focus` which row is lit; pitch lanes, `o.high` the top one's pitch.
+-- shown), `o.focus` which row is lit; pitch lanes, `o.high` the top one's pitch, and
+-- `o.tint(pitch)` a colour for a row of its own, or none.
 function editor.lanes(screen, theme, s, x, y, w, h, o)
   local t0 = o.from or s.pattern_start
   local t1 = o.to or (s.pattern_start + math.max(1, s.pattern_length))
@@ -219,6 +225,12 @@ function editor.lanes(screen, theme, s, x, y, w, h, o)
   local sounds = group and group.sounds or {}
   if o.focus then screen:rect(x, y + HEADER + (o.focus - 1) * o.row, w, o.row, FOCUS_LANE) end
   if o.high then shade_rows(screen, x, y + HEADER, w, o.row, o.rows, o.high) end
+  if o.high and o.tint then
+    for r = 1, o.rows do
+      local c = o.tint(o.high - r + 1)
+      if c then screen:rect(x, y + HEADER + (r - 1) * o.row, w, o.row - 1, c) end
+    end
+  end
   for _, n in ipairs(s.notes) do
     local r = o.row_of(n)
     if r and r >= 1 and r <= o.rows and n.position < t1 and n.position + n.length > t0 then
@@ -233,14 +245,16 @@ function editor.lanes(screen, theme, s, x, y, w, h, o)
 end
 
 -- Keyboard mode's keys beside pitch lanes: `rows` keys of `row` pixels in the box at
--- (`x`, `y`, `w` wide), `high` the pitch at the top; each C named.
-function editor.keys(screen, theme, x, y, w, row, rows, high, name)
+-- (`x`, `y`, `w` wide), `high` the pitch at the top; each C named; `tint(pitch)` a colour
+-- for a key of its own, or none.
+function editor.keys(screen, theme, x, y, w, row, rows, high, name, tint)
   local font = theme.styles.default.font
   for r = 1, rows do
     local p = high - (r - 1)
     local top = y + (r - 1) * row
     local black = ({ [1] = true, [3] = true, [6] = true, [8] = true, [10] = true })[p % 12]
-    screen:rect(x, top, w, row - 1, black and { 20, 20, 20 } or { 200, 200, 200 })
+    local own = tint and tint(p)
+    screen:rect(x, top, w, row - 1, own or (black and { 20, 20, 20 } or { 200, 200, 200 }))
     if p % 12 == 0 and name then
       screen:label(x + 1, top, w - 1, row, name(p), { font = font, size = 9, color = { 0, 0, 0 } }, "left", "center")
     end

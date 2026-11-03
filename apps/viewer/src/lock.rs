@@ -308,56 +308,80 @@ impl App {
 }
 
 impl App {
-    /// Edit ▸ MIDI Change: Lock's section (Maschine's dialog also has Scene and Section
-    /// changes): which MIDI recalls snapshots (notes 0–63 or programs 1–64), from which
-    /// input and channel. Stored in the project.
+    /// Edit ▸ MIDI Change: which MIDI picks scenes and sections and recalls Lock's
+    /// snapshots, from which input and channel. Stored in the project.
     pub fn midi_change_window(&mut self, ctx: &egui::Context) {
         let (Some(doc), Some(l)) = (self.doc.clone(), self.lock_state()) else { return };
         let ports: Vec<String> = self.midi_ports().0.clone();
         let mut open = true;
         let mut set: Vec<(&'static str, Value)> = Vec::new();
+        let (scene, section) = {
+            let d = doc.borrow();
+            (d.project().scene_recall.clone(), d.project().section_recall.clone())
+        };
+        let mut recall: Vec<(&'static str, &'static str, Value)> = Vec::new();
         egui::Window::new("MIDI Change").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
-            ui.heading("Lock");
-            egui::Grid::new("midi-change-lock").num_columns(2).show(ui, |ui| {
-                ui.label("Trigger");
-                let shown = deckard_model::MIDI_TRIGGERS[l.midi_trigger.min(2)];
-                let r = egui::ComboBox::from_id_salt("lock-trigger").selected_text(shown).show_ui(ui, |ui| {
-                    for (i, name) in deckard_model::MIDI_TRIGGERS.iter().enumerate() {
-                        if ui.selectable_label(i == l.midi_trigger, *name).clicked() {
-                            set.push(("trigger", Value::Int(i as i64)));
-                        }
+            let lock = deckard_model::MidiRecall { trigger: l.midi_trigger, source: l.midi_source.clone(), channel: l.midi_channel };
+            let blocks = [
+                ("Scene", "scene_recall", &scene, "Notes 0–127 (C-2 up) or programs 1–128 pick scenes 1–128."),
+                ("Section", "section_recall", &section, "Notes 0–127 (C-2 up) or programs 1–128 pick sections 1–128."),
+                ("Lock", "snapshot_recall", &lock, "Notes 0–63 (C-2 up) or programs 1–64 recall Lock slots 1–64."),
+            ];
+            for (i, (name, block, r, note)) in blocks.into_iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                ui.heading(name);
+                let mut change = |field: &'static str, v: Value| {
+                    if block == "snapshot_recall" {
+                        set.push((field, v));
+                    } else {
+                        recall.push((block, field, v));
                     }
-                });
-                r.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Lock trigger"));
-                ui.end_row();
-                ui.add_enabled_ui(l.midi_trigger != 0, |ui| {
-                    ui.label("Source");
-                });
-                ui.add_enabled_ui(l.midi_trigger != 0, |ui| {
-                    egui::ComboBox::from_id_salt("lock-source").selected_text(&l.midi_source).show_ui(ui, |ui| {
-                        for name in std::iter::once("None".to_string()).chain(ports.iter().cloned()) {
-                            if ui.selectable_label(name == l.midi_source, &name).clicked() {
-                                set.push(("input", Value::Str(name.clone())));
+                };
+                let salt = name.to_lowercase();
+                egui::Grid::new(format!("midi-change-{salt}")).num_columns(2).show(ui, |ui| {
+                    ui.label("Trigger");
+                    let shown = deckard_model::MIDI_TRIGGERS[r.trigger.min(2)];
+                    let c = egui::ComboBox::from_id_salt(format!("{salt}-trigger")).selected_text(shown).show_ui(ui, |ui| {
+                        for (i, label) in deckard_model::MIDI_TRIGGERS.iter().enumerate() {
+                            if ui.selectable_label(i == r.trigger, *label).clicked() {
+                                change("trigger", Value::Int(i as i64));
                             }
                         }
                     });
-                });
-                ui.end_row();
-                ui.add_enabled_ui(l.midi_trigger != 0, |ui| {
-                    ui.label("Channel");
-                });
-                ui.add_enabled_ui(l.midi_trigger != 0, |ui| {
-                    egui::ComboBox::from_id_salt("lock-channel").selected_text(l.midi_channel.to_string()).show_ui(ui, |ui| {
-                        for ch in 1..=16 {
-                            if ui.selectable_label(ch == l.midi_channel, ch.to_string()).clicked() {
-                                set.push(("midi_channel", Value::Int(ch)));
-                            }
-                        }
+                    let info = format!("{name} trigger");
+                    c.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, info.as_str()));
+                    ui.end_row();
+                    ui.add_enabled_ui(r.trigger != 0, |ui| {
+                        ui.label("Source");
                     });
+                    ui.add_enabled_ui(r.trigger != 0, |ui| {
+                        egui::ComboBox::from_id_salt(format!("{salt}-source")).selected_text(&r.source).show_ui(ui, |ui| {
+                            for port in std::iter::once("None".to_string()).chain(ports.iter().cloned()) {
+                                if ui.selectable_label(port == r.source, &port).clicked() {
+                                    change("input", Value::Str(port.clone()));
+                                }
+                            }
+                        });
+                    });
+                    ui.end_row();
+                    ui.add_enabled_ui(r.trigger != 0, |ui| {
+                        ui.label("Channel");
+                    });
+                    ui.add_enabled_ui(r.trigger != 0, |ui| {
+                        egui::ComboBox::from_id_salt(format!("{salt}-channel")).selected_text(r.channel.to_string()).show_ui(ui, |ui| {
+                            for ch in 1..=16 {
+                                if ui.selectable_label(ch == r.channel, ch.to_string()).clicked() {
+                                    change("midi_channel", Value::Int(ch));
+                                }
+                            }
+                        });
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
-            ui.label(egui::RichText::new("Notes 0–63 (C-2 up) or programs 1–64 recall Lock slots 1–64.").weak());
+                ui.label(egui::RichText::new(note).weak());
+            }
         });
         self.midi_change = open;
         for (field, v) in set {
@@ -365,6 +389,10 @@ impl App {
                 ("trigger", Value::Int(t)) => doc.borrow_mut().set_lock_midi_trigger(*t as usize),
                 _ => doc.borrow_mut().set("MIDI Change", Target::Song, &format!("snapshot_recall/{field}"), v),
             };
+            self.lock_do("change MIDI Change", r);
+        }
+        for (block, field, v) in recall {
+            let r = doc.borrow_mut().set_midi_recall(block, field, v);
             self.lock_do("change MIDI Change", r);
         }
     }

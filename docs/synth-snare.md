@@ -287,11 +287,9 @@ frequency/amplitude/decay tables. A mode switch away from such a core starts a 1
 (state 1 → 2).
 
 Status in DECKARD: Sharp (`snare/disco.rs`) has the attack layer, the realtime mod, the
-smoother and the output mix ported; its body and attached bodies are stubs, so it plays only
-the attack (residual −43.6 dB vs Maschine). Airy, Vintage, Chrome, Iron and Breaker are
-silent stubs. Partial, not yet wired work exists in `snare/oldie/` (BodyCore<Double, …>
-and AttackCore as a byte-image port) and `snare/orange/` (AttackCore, MemoEnvelope); those
-directories are not compiled (their parent files do not declare them).
+smoother and the output mix ported; its body and attached bodies are stubs, and a measured
+design of DECKARD's plays their part (`snare/designs.rs`). Airy, Vintage, Chrome, Iron and
+Breaker are DECKARD's own designs (docs/drum-engines-own.md).
 
 ### 5.1 NI noise data the modal cores play (not reproducible)
 
@@ -327,7 +325,7 @@ Source Lightspeed 0/1 with the fields set as listed. Residual = RMS of the diffe
 | Pow: defaults, tune/decay/room/focus/bend 0/0.5/1, vel 1/64, velocity −1/−0.5/0, notes 36–96, retrigger, choke, 44.1k, 96k | mode=2 | −240 dB |
 | Clap: same matrix | mode=8 | −240 dB (≤ 1.1e-36 denormal diffs) |
 | engine switch Pow → Clap between notes | | −240 dB |
-| Sharp defaults / noise 0 | mode=3 | −43.6 dB (body not ported) |
-| Airy, Vintage, Chrome, Iron, Breaker | | DECKARD's own designs, not null-tested (docs/drum-engines-own.md) |
+| Sharp's attack alone, defaults / noise 0 | mode=3 | −43.6 dB (what's left is the body and wires) |
+| Sharp, Airy, Vintage, Chrome, Iron, Breaker | | not null-tested: matched by spectra over each engine's renders, 2 to 3.3 dB mean (docs/drum-engines-own.md) |
 
 Pitch: the Classic and Clap engines follow the MIDI note (tested 36–96).

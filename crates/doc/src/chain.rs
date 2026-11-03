@@ -59,7 +59,7 @@ impl NewModule {
     /// Whether it makes sound itself (and so goes first in a chain).
     pub fn is_instrument(&self) -> bool {
         match self {
-            NewModule::Plugin { id, .. } => !(id.contains(":FX:") || id.contains(":Fx:")),
+            NewModule::Plugin { id, .. } => !(id.contains(":FX:") || id.contains(":Fx:") || id.contains(":MF:")),
             NewModule::Effect(_) => false,
             _ => true,
         }
@@ -427,6 +427,15 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
+    /// An Audio Unit's id: an instrument, an effect, or a MIDI-controlled effect (`MF`).
+    #[test]
+    fn an_audio_units_role_is_in_its_id() {
+        let plugin = |id: &str| NewModule::Plugin { id: id.into(), name: "x".into(), chunk: Vec::new() };
+        assert!(plugin("V:AU:INSTR:1").is_instrument());
+        assert!(!plugin("V:AU:FX:1").is_instrument());
+        assert!(!plugin("V:AU:MF:1").is_instrument());
+    }
+
     use crate::{Document, NewModule};
 
     /// Sampling into a sound leaves it a lone Sampler, in one undo step; a Sampler

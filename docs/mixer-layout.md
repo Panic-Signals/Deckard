@@ -103,7 +103,7 @@ The background is `MIX_BG_LevelMeter` (72×167): a #000000 1px frame at the top 
    - **Fader** `m_pVolumeSlider`:
      - 28×100, no background.
      - Handle `MIX_MTR_Handle` 20×8: a white (#F2F2F2) arrow pointing left, at the fader value, beside the meters.
-     - Drag vertically. [inferred, usual Maschine behaviour] Shift is fine, and double-click resets to 0 dB.
+     - Drag vertically. [inferred, usual Maschine behaviour] Shift is fine. (Maschine: double-click resets to 0 dB. DECKARD: double-click types a value, ⌘-click resets.)
 4. **Monitor/Mute row** `pMonitorSoloMuteBar`:
    - 71×20, margin-left 1, spacing 16.
    - **Cue** `m_pMonitor`: a headphones icon 20×20 (`MIX_BTN_Monitor`, 7 states).
@@ -269,4 +269,4 @@ The font is Roboto Medium throughout (our UI font):
   That totals about 460 px, so it fits in the song panel plus group panel area. Collapsed is 40 + 19.
 - Reuse the viewer's meters (`App.meters`). There are no master meters yet; the engine would need to report the master peak.
 - Solo: implement as a mute write over the siblings, as one undo step ("Solo").
-- Use the chain-area knob behaviours for drags: Shift is fine, double-click resets (level to 1.0, pan to 0).
+- Use the chain-area knob behaviours for drags: Shift is fine, double-click types a value, ⌘-click resets (level to 1.0, pan to 0).

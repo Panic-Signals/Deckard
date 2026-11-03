@@ -124,6 +124,9 @@ pub struct Settings {
     pub led_brightness: u8,
     pub strip_position: u8,
     pub touch_auto_write: bool,
+    /// How tall the patterns and scenes above the pattern editor were dragged; `None`:
+    /// as tall as the window's size has them.
+    pub song_panel_h: Option<f32>,
     /// Which controller layer runs the MK3 (Preferences > Hardware > Controller).
     pub controller: ControllerChoice,
     /// The MK3 screens' theme under DECKARD's own layer (Preferences > Hardware).
@@ -301,6 +304,7 @@ impl Default for Settings {
             pattern_grow: true,
             velocity_scaling: 0,
             led_brightness: 100,
+            song_panel_h: None,
             strip_position: 2,
             touch_auto_write: false,
             controller: ControllerChoice::default(),
@@ -485,6 +489,7 @@ impl Settings {
                         s.velocity_scaling = n.clamp(-3, 3);
                     }
                 }
+                "song_panel_h" => s.song_panel_h = v.parse::<f32>().ok().filter(|h| h.is_finite() && *h > 0.0),
                 "led_brightness" => {
                     if let Ok(n) = v.parse::<u8>() {
                         s.led_brightness = n.min(100);
@@ -657,6 +662,9 @@ impl Settings {
             "velocity_scaling = {}\nled_brightness = {}\nstrip_position = {}\ntouch_auto_write = {}\n",
             self.velocity_scaling, self.led_brightness, self.strip_position, self.touch_auto_write
         );
+        if let Some(h) = self.song_panel_h {
+            out += &format!("song_panel_h = {h}\n");
+        }
         match self.controller {
             ControllerChoice::Automatic => out += "controller = automatic\n",
             ControllerChoice::Deckard => out += "controller = deckard\n",
@@ -1013,6 +1021,17 @@ mod sync_tests {
         assert_eq!(s.default_project.as_deref(), Some(std::path::Path::new("/Users/me/Template Song.mxprj")));
         assert_eq!(Settings::parse(&s.to_text()).default_project, s.default_project);
         assert_eq!(Settings::parse(&Settings::default().to_text()).default_project, None);
+    }
+
+    /// The divider above the pattern editor stays where it was dragged; never dragged, the
+    /// window's size decides.
+    #[test]
+    fn song_panel_height_round_trips() {
+        assert_eq!(Settings::parse(&Settings::default().to_text()).song_panel_h, None);
+        let s = Settings { song_panel_h: Some(412.5), ..Settings::default() };
+        assert_eq!(Settings::parse(&s.to_text()).song_panel_h, Some(412.5));
+        assert_eq!(Settings::parse("song_panel_h = nonsense\n").song_panel_h, None);
+        assert_eq!(Settings::parse("song_panel_h = inf\n").song_panel_h, None);
     }
 
     /// Render ahead (Preferences ▸ Audio): off unless chosen (every sound plays live,

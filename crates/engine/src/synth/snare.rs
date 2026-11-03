@@ -22,6 +22,7 @@ mod airy;
 mod breaker;
 mod clap;
 mod classic;
+mod designs;
 mod disco;
 mod modal;
 mod oldie;

@@ -4,12 +4,15 @@
 --   display 1-8       focus the strip's sound (or group)
 --   knobs 1-8         the strip's level (SHIFT: finely)
 --   LEFT / RIGHT      the previous / next eight strips
+--   jog wheel turned  the focused strip's level (SHIFT: finely)
+--   jog wheel pressed the wheel turns its pan instead; pressed again: its level
 --   jog wheel up      the groups' strips; down: the sounds' again
 --   jog wheel left / right
 --                     focus the previous / next sound (or group)
 
 local widgets = require("lib.widgets")
 local knobs = require("lib.knobs")
+local util = require("lib.util")
 
 local mixer = {}
 
@@ -18,12 +21,18 @@ local STRIPS = 8
 local DB_PER_TURN = 70
 local FINE = 0.1
 
+-- What a click of the jog wheel moves: a level (dB, as the master's), a pan (of -1..1).
+local WHEEL_DB, WHEEL_PAN = 0.5, 0.02
+
 -- The meters' range (dB): under it is silence.
 local LOW_DB, HIGH_DB = -60, 10
 
 -- Showing the groups' strips (else the focused group's sounds'), and the bank of eight.
 local groups_shown = false
 local bank = 1
+
+-- The jog wheel turns the focused strip's pan (else its level).
+local wheel_pans = false
 
 -- The channels shown: the groups, or the focused group's sounds; and which is focused.
 local function channels(s)
@@ -47,6 +56,18 @@ local function set_level(s, at, db)
   if groups_shown then deckard.set_level(at, nil, db) else deckard.set_level(s.group, at, db) end
 end
 
+-- Strip `at`'s pan set to `pan`.
+local function set_pan(s, at, pan)
+  if groups_shown then deckard.set_pan(at, nil, pan) else deckard.set_pan(s.group, at, pan) end
+end
+
+-- A level turned by `db`: under the meters' range is silence, and it comes back from there.
+local function moved_level(level, db)
+  local to = math.max(level, LOW_DB) + db
+  if to < LOW_DB then return -math.huge end
+  return to
+end
+
 function mixer.button(name, down)
   local tapped = knobs.double_tap(name, down)
   if not down then return end
@@ -62,6 +83,8 @@ function mixer.button(name, down)
     if bank > 1 then bank = bank - 1 end
   elseif name == "RIGHT" then
     if bank * STRIPS < #list then bank = bank + 1 end
+  elseif name == "WHEEL" then
+    wheel_pans = not wheel_pans
   elseif name == "WHEEL_UP" then
     if not groups_shown then
       groups_shown = true
@@ -85,8 +108,18 @@ function mixer.button(name, down)
   return true
 end
 
--- Turning the jog wheel does nothing here.
-function mixer.wheel()
+function mixer.wheel(steps)
+  local s = deckard.state()
+  local list, focused = channels(s)
+  local ch = list[focused]
+  if not ch then return true end
+  local amount = steps * (deckard.held("SHIFT") and FINE or 1)
+  if wheel_pans then
+    set_pan(s, focused, util.clamp(util.round(ch.pan + amount * WHEEL_PAN, 3), -1, 1))
+  else
+    local db = moved_level(ch.level, amount * WHEEL_DB)
+    set_level(s, focused, db == -math.huge and db or util.round(db, 2))
+  end
   return true
 end
 
@@ -96,10 +129,7 @@ function mixer.knob(n, amount)
   local at = (bank - 1) * STRIPS + n
   local ch = list[at]
   if not ch then return true end
-  local db = math.max(ch.level, LOW_DB)
-  db = db + amount * DB_PER_TURN * (deckard.held("SHIFT") and FINE or 1)
-  if db < LOW_DB then db = -math.huge end
-  set_level(s, at, db)
+  set_level(s, at, moved_level(ch.level, amount * DB_PER_TURN * (deckard.held("SHIFT") and FINE or 1)))
   return true
 end
 
@@ -149,6 +179,13 @@ local function db_text(db)
   if db <= LOW_DB then return "-inf" end
   if math.abs(db) < 0.05 then return "0.0" end
   return string.format("%.1f", db)
+end
+
+-- A pan as the strips write it: "C", "L 25", "R 100".
+local function pan_text(pan)
+  local percent = math.floor(math.abs(pan) * 100 + 0.5)
+  if percent == 0 then return "C" end
+  return (pan < 0 and "L " or "R ") .. percent
 end
 
 -- A long name in up to two lines of about `width` characters, broken at a space or
@@ -249,8 +286,10 @@ local function strip(screen, theme, x, top, bottom, ch, short, focused, row, sep
   -- The level.
   local value_c = "text"
   if muted then value_c = focused and "muted" or "mixer_value_muted" end
-  local db = ch.level
-  text(screen, theme, x, bottom - 31, 120, db_text(db) .. " dB", "mixer_value", value_c, true)
+  -- (The focused strip's pan while the jog wheel turns it.)
+  local value = db_text(ch.level) .. " dB"
+  if focused and wheel_pans then value = "PAN " .. pan_text(ch.pan) end
+  text(screen, theme, x, bottom - 31, 120, value, "mixer_value", value_c, true)
 end
 
 -- A group's short name: its letter and bank ("A1").

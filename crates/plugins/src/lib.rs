@@ -1,11 +1,13 @@
 //! Hosting the plug-ins a Maschine project uses (VST3; VST2 plug-ins through their
-//! VST3 versions, see [`state`]).
+//! VST3 versions, see [`state`]; Audio Units on macOS, see [`au`]).
 //!
 //! [`Host`] keeps one [`Plugin`] instance per slot of the project (a sound's
 //! instrument, say), so they survive the engine being rebuilt after every edit.
 //! Instances are created and given their state on the main thread; the audio thread
 //! calls [`Plugin::process`] under the instance's mutex.
 
+#[cfg(target_os = "macos")]
+pub mod au;
 pub mod com;
 pub mod editor;
 pub mod module;
@@ -89,7 +91,7 @@ pub struct Transport {
 }
 
 /// Parameters of one plug-in modulation can drive at once.
-const MODDED: usize = 64;
+pub(crate) const MODDED: usize = 64;
 
 /// A running VST3 plug-in.
 struct Vst3 {
@@ -139,7 +141,8 @@ unsafe impl Send for Vst3 {}
 
 pub type Shared = Arc<Mutex<Plugin>>;
 
-/// One running plug-in: a VST3, or one of DECKARD's own ([`native`]).
+/// One running plug-in: a VST3, one of DECKARD's own ([`native`]) or an Audio Unit
+/// ([`au`]).
 pub struct Plugin {
     pub name: String,
     pub id: PluginId,
@@ -149,6 +152,8 @@ pub struct Plugin {
 enum Kind {
     Vst3(Box<Vst3>),
     Native(Box<native::Instance>),
+    #[cfg(target_os = "macos")]
+    AudioUnit(Box<au::AudioUnit>),
 }
 
 /// Call `$e` on whichever plug-in runs.
@@ -157,12 +162,16 @@ macro_rules! each {
         match &$self.kind {
             Kind::Vst3($p) => $e,
             Kind::Native($p) => $e,
+            #[cfg(target_os = "macos")]
+            Kind::AudioUnit($p) => $e,
         }
     };
     (mut $self:ident, $p:ident => $e:expr) => {
         match &mut $self.kind {
             Kind::Vst3($p) => $e,
             Kind::Native($p) => $e,
+            #[cfg(target_os = "macos")]
+            Kind::AudioUnit($p) => $e,
         }
     };
 }
@@ -178,6 +187,23 @@ impl Plugin {
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
         Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))) }
+    }
+
+    /// An instance of the Audio Unit `id` names, ready to process at `sample_rate`, with
+    /// no state set yet.
+    #[cfg(target_os = "macos")]
+    pub fn audio_unit(id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
+        let au = au::AudioUnit::new(&id, sample_rate)?;
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)) })
+    }
+
+    /// What an Audio Unit shares with its window; none for any other plug-in.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn audio_unit_shared(&self) -> Option<Arc<au::Shared>> {
+        match &self.kind {
+            Kind::AudioUnit(p) => Some(p.shared().clone()),
+            _ => None,
+        }
     }
 
     /// Process a few blocks of silence, here rather than on the audio thread: many
@@ -202,6 +228,12 @@ impl Plugin {
     /// Give the plug-in the state Maschine saved for it (a `PluginHost` chunk), and
     /// start processing.
     pub fn load_chunk(&mut self, chunk: &[u8]) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if let Kind::AudioUnit(p) = &mut self.kind {
+            let r = p.load_chunk(chunk);
+            p.chunk = chunk.to_vec();
+            return r;
+        }
         let state = state::unwrap_chunk(chunk, self.id.format)?;
         let r = self.set_state(&state);
         each!(mut self, p => p.chunk = chunk.to_vec());
@@ -220,6 +252,10 @@ impl Plugin {
 
     /// The plug-in's current state, wrapped as Maschine saves it.
     pub fn save_chunk(&mut self) -> Vec<u8> {
+        #[cfg(target_os = "macos")]
+        if let Kind::AudioUnit(p) = &self.kind {
+            return p.save_chunk();
+        }
         state::wrap_chunk(&self.state(), self.id.format, &self.id.cid)
     }
 
@@ -251,7 +287,7 @@ impl Plugin {
     pub fn pages(&self) -> Vec<(String, Vec<(u32, String)>)> {
         match &self.kind {
             Kind::Native(n) => n.pages(),
-            Kind::Vst3(_) => Vec::new(),
+            _ => Vec::new(),
         }
     }
 
@@ -270,7 +306,7 @@ impl Plugin {
     pub fn param_label(&self, id: u32) -> Option<String> {
         match &self.kind {
             Kind::Native(n) => n.param_label(id),
-            Kind::Vst3(_) => None,
+            _ => None,
         }
     }
 
@@ -343,14 +379,17 @@ impl Plugin {
         each!(mut self, p => p.process_input(frames, transport, input))
     }
 
-    /// A way to read and change a VST3 plug-in's parameters without holding the
-    /// instance (so the audio thread never waits on the UI): VST3 controllers run on
-    /// the UI thread alongside processing. Use it on the thread that made the plug-in.
+    /// A way to read and change a VST3's or an Audio Unit's parameters without holding
+    /// the instance (so the audio thread never waits on the UI): VST3 controllers run on
+    /// the UI thread alongside processing, and an AU's parameters are made for this. Use
+    /// it on the thread that made the plug-in.
     /// None for DECKARD's own plug-ins (reading those under the lock is instant).
     pub fn params(&self) -> Option<Params> {
         match &self.kind {
-            Kind::Vst3(p) => Some(Params { controller: p.controller.clone()?, edits: p.edits.clone() }),
+            Kind::Vst3(p) => Some(Params(ParamsOf::Vst3 { controller: p.controller.clone()?, edits: p.edits.clone() })),
             Kind::Native(_) => None,
+            #[cfg(target_os = "macos")]
+            Kind::AudioUnit(p) => Some(Params(ParamsOf::AudioUnit(p.shared().clone()))),
         }
     }
 
@@ -358,7 +397,7 @@ impl Plugin {
     pub fn controller(&self) -> Option<&ComPtr<IEditController>> {
         match &self.kind {
             Kind::Vst3(p) => p.controller.as_ref(),
-            Kind::Native(_) => None,
+            _ => None,
         }
     }
 
@@ -371,7 +410,7 @@ impl Plugin {
     pub fn component(&self) -> Option<&ComPtr<IComponent>> {
         match &self.kind {
             Kind::Vst3(p) => Some(&p.component),
-            Kind::Native(_) => None,
+            _ => None,
         }
     }
 }
@@ -385,7 +424,8 @@ impl Vst3 {
         let host = ComWrapper::new(HostApp);
         let host_ptr = host.as_com_ref::<IHostApplication>().unwrap().as_ptr() as *mut FUnknown;
         let mut obj = std::ptr::null_mut();
-        let cid = id.cid;
+        // (As its factory knows it: the id may have come from another system.)
+        let cid = module.class_id(&id.cid).unwrap_or(id.cid);
         unsafe {
             ok(
                 module.factory.createInstance(cid.as_ptr() as FIDString, IComponent::IID.as_ptr() as FIDString, &mut obj),
@@ -896,37 +936,59 @@ impl Drop for Vst3 {
     }
 }
 
-/// A VST3 plug-in's parameters, reached through its controller (see
-/// [`Plugin::params`]).
-pub struct Params {
-    controller: ComPtr<IEditController>,
-    edits: Arc<Mutex<Edits>>,
+/// A plug-in's parameters, reached without holding the instance: a VST3's through its
+/// controller (see [`Plugin::params`]).
+pub struct Params(ParamsOf);
+
+enum ParamsOf {
+    Vst3 {
+        controller: ComPtr<IEditController>,
+        edits: Arc<Mutex<Edits>>,
+    },
+    #[cfg(target_os = "macos")]
+    AudioUnit(Arc<au::Shared>),
 }
 
 impl Params {
     /// A parameter's value (normalized 0..1).
     pub fn value(&self, id: u32) -> f64 {
-        unsafe { self.controller.getParamNormalized(id) }
+        match &self.0 {
+            ParamsOf::Vst3 { controller, .. } => unsafe { controller.getParamNormalized(id) },
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(a) => a.value(id),
+        }
     }
 
     /// How the plug-in shows value `v` of parameter `id`.
     pub fn text(&self, id: u32, v: f64) -> String {
-        let mut s: String128 = [0; 128];
-        if unsafe { self.controller.getParamStringByValue(id, v, &mut s) } == kResultOk {
-            string128(&s)
-        } else {
-            format!("{:.0} %", v * 100.0)
+        match &self.0 {
+            ParamsOf::Vst3 { controller, .. } => {
+                let mut s: String128 = [0; 128];
+                if unsafe { controller.getParamStringByValue(id, v, &mut s) } == kResultOk {
+                    string128(&s)
+                } else {
+                    format!("{:.0} %", v * 100.0)
+                }
+            }
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(a) => a.text(id, v),
         }
     }
 
     /// Change a parameter (as [`Plugin::set_param`]): the processor gets it at its
     /// next block.
     pub fn set(&self, id: u32, v: f64) {
-        let v = v.clamp(0.0, 1.0);
-        unsafe { self.controller.setParamNormalized(id, v) };
-        if let Ok(mut e) = self.edits.lock() {
-            e.pending.push((id, v));
-            e.dirty = true;
+        match &self.0 {
+            ParamsOf::Vst3 { controller, edits } => {
+                let v = v.clamp(0.0, 1.0);
+                unsafe { controller.setParamNormalized(id, v) };
+                if let Ok(mut e) = edits.lock() {
+                    e.pending.push((id, v));
+                    e.dirty = true;
+                }
+            }
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(a) => a.set(id, v),
         }
     }
 }
@@ -981,6 +1043,10 @@ impl Host {
     /// same plug-in, and loads the chunk again only if it changed.
     pub fn instance(&mut self, slot: Slot, plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64) -> Result<Shared, String> {
         let id = PluginId::parse(plugin_id, name).ok_or_else(|| format!("{name}: plug-in format not supported ({plugin_id})"))?;
+        // Audio Units are Apple's.
+        if cfg!(not(target_os = "macos")) && id.format == state::Format::AudioUnit {
+            return Err(format!("{name}: plug-in format not supported ({plugin_id})"));
+        }
         // DECKARD's own plug-ins need no module, and may be made on any thread.
         if let Some(class) = native::find(&id.cid) {
             if let Some(shared) = self.instances.get(&slot) {
@@ -1014,8 +1080,19 @@ impl Host {
                 return Ok(shared.clone());
             }
         }
-        let module = self.module_for(&id.cid, name).ok_or_else(|| format!("{name}: not installed as VST3"))?;
-        let mut p = Plugin::new(&module, id, name, sample_rate).map_err(|e| format!("{name}: {e}"))?;
+        #[cfg(target_os = "macos")]
+        let made = if id.format == state::Format::AudioUnit {
+            Plugin::audio_unit(id, name, sample_rate)
+        } else {
+            let module = self.module_for(&id.cid, name).ok_or_else(|| self.why_not_loaded(&id.cid, name))?;
+            Plugin::new(&module, id, name, sample_rate)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let made = {
+            let module = self.module_for(&id.cid, name).ok_or_else(|| self.why_not_loaded(&id.cid, name))?;
+            Plugin::new(&module, id, name, sample_rate)
+        };
+        let mut p = made.map_err(|e| format!("{name}: {e}"))?;
         p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
         p.warm_up();
         let shared = Arc::new(Mutex::new(p));
@@ -1046,6 +1123,20 @@ impl Host {
         self.broken.iter().map(|(p, e)| (p.as_path(), e.as_str()))
     }
 
+    /// Why no module has class `cid`: a bundle that should have but wouldn't load says
+    /// what went wrong, rather than the plug-in not being there.
+    fn why_not_loaded(&self, cid: &[u8; 16], name: &str) -> String {
+        let lname = name.to_lowercase();
+        let its = |b: &std::path::Path| match module::declared_classes(b) {
+            Some(d) => d.iter().any(|c| module::same_class(c, cid)),
+            None => b.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == lname),
+        };
+        match self.broken.iter().find(|(b, _)| its(b)) {
+            Some((b, e)) => format!("{name}: couldn't load {}: {e}", b.display()),
+            None => format!("{name}: not installed as VST3"),
+        }
+    }
+
     /// The loaded module that has class `cid`, loading it if needed: first bundles that
     /// declare it, then ones named like the plug-in, then any others that don't
     /// declare their classes.
@@ -1061,7 +1152,7 @@ impl Host {
             .filter_map(|b| {
                 let declared = module::declared_classes(&b);
                 let rank = match declared {
-                    Some(d) if d.contains(cid) => 0,
+                    Some(d) if d.iter().any(|c| module::same_class(c, cid)) => 0,
                     Some(_) => return None,
                     None if b.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == lname) => 1,
                     None => 2,

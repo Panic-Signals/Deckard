@@ -46,8 +46,29 @@ impl Module {
     }
 
     pub fn has(&self, cid: &[u8; 16]) -> bool {
-        self.classes.iter().any(|c| &c.cid == cid)
+        self.class_id(cid).is_some()
     }
+
+    /// Class `cid` as this module's factory knows it, in whichever byte order it's in.
+    pub fn class_id(&self, cid: &[u8; 16]) -> Option<[u8; 16]> {
+        self.classes.iter().map(|c| c.cid).find(|c| same_class(c, cid))
+    }
+}
+
+/// Whether two class ids are the same class. A plug-in built for Windows keeps the first
+/// eight bytes of its ids in COM's order while a `moduleinfo.json`, and a project saved on
+/// another system, have them in the standard one: the same plug-in reads differently.
+pub fn same_class(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    a == b || com_order(a) == *b
+}
+
+/// A class id with its first eight bytes in COM's order, or back (it's its own inverse).
+fn com_order(cid: &[u8; 16]) -> [u8; 16] {
+    let mut out = *cid;
+    out[..4].reverse();
+    out.swap(4, 5);
+    out.swap(6, 7);
+    out
 }
 
 static SEARCH_PATHS: std::sync::Mutex<Option<Vec<PathBuf>>> = std::sync::Mutex::new(None);
@@ -98,6 +119,11 @@ pub fn set_search_paths(dirs: Vec<PathBuf>) {
     }
 }
 
+/// (However it's written: the scan lists a `Dexed.VST3` too.)
+fn is_vst3(p: &Path) -> bool {
+    p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vst3"))
+}
+
 /// Installed `.vst3` bundles (one level of subfolders is searched too).
 pub fn bundles() -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -105,12 +131,12 @@ pub fn bundles() -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x == "vst3") {
+            if is_vst3(&p) {
                 out.push(p);
             } else if p.is_dir()
                 && let Ok(sub) = std::fs::read_dir(&p)
             {
-                out.extend(sub.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "vst3")));
+                out.extend(sub.flatten().map(|e| e.path()).filter(|p| is_vst3(p)));
             }
         }
     }
@@ -299,5 +325,42 @@ mod platform {
 
     pub unsafe fn load(_path: &Path) -> Result<*mut IPluginFactory, String> {
         Err("plug-in hosting is not implemented on this system".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STANDARD: [u8; 16] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 1, 2, 3, 4, 5, 6, 7, 8];
+    const COM: [u8; 16] = [0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A, 0xF0, 0xDE, 1, 2, 3, 4, 5, 6, 7, 8];
+
+    /// A class is the same class in either byte order, as on Windows.
+    #[test]
+    fn a_class_id_matches_in_either_byte_order() {
+        assert_eq!(com_order(&STANDARD), COM);
+        assert_eq!(com_order(&COM), STANDARD);
+        assert!(same_class(&STANDARD, &STANDARD));
+        assert!(same_class(&STANDARD, &COM));
+        assert!(same_class(&COM, &STANDARD));
+        let mut other = COM;
+        other[15] ^= 1;
+        assert!(!same_class(&STANDARD, &other), "another class");
+    }
+
+    /// A module finds its class in either order, and answers with its own.
+    #[test]
+    fn a_module_answers_with_its_own_class_id() {
+        let Some(bundle) = bundles().into_iter().find(|b| b.file_stem().is_some_and(|s| s == "Dexed")) else {
+            eprintln!("no Dexed here; skipping");
+            return;
+        };
+        let m = Module::load(&bundle).unwrap();
+        let own = m.classes.iter().find(|c| c.category == "Audio Module Class").unwrap().cid;
+        assert_eq!(m.class_id(&own), Some(own));
+        assert_eq!(m.class_id(&com_order(&own)), Some(own));
+        let mut other = own;
+        other[15] ^= 1;
+        assert_eq!(m.class_id(&other), None);
     }
 }

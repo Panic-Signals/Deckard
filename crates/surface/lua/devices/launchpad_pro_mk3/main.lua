@@ -2,11 +2,12 @@
 -- shows it. Each column is a group (the focused group's eight), its patterns down the
 -- top seven rows, lit where the focused scene plays them; a pad turns its pattern on
 -- or off in the scene, and the place after a group's last pattern makes a new one.
+-- With a scene queued, its patterns flash and those still playing stay lit.
 -- The grid's bottom row is the playhead: the longest pattern playing spread over the
 -- eight pads, or, stopped, its first pad strobing with the tempo. The row below
 -- the grid is the scenes: a press launches one, and the place after the last makes a
--- new scene. Left / right scroll the scenes eight at a time, up / down the patterns
--- seven,
+-- new scene. Left / right scroll the scenes eight at a time, here and in DECKARD's
+-- scene tabs, up / down the patterns seven,
 -- SHIFT + left / right focus the previous / next eight groups. Mute is a mode: a pad
 -- mutes its column's group, a scene's button the groups that play in it. Play and
 -- Record start and stop, and Print to Clip writes into the focused sound's
@@ -108,18 +109,22 @@ local function cell(s, row, col)
   return first_group(s) + col, st.patterns + (8 - row) + 1
 end
 
--- The playhead's pad `col` (the grid's bottom row). Playing: the longest pattern the
--- focused scene plays spread over the eight pads, however long it is (an eighth of it
--- each): the part played dim, the pad playing full, those to come faint. Stopped: the
--- first pad strobes with the tempo, lit for the first quarter of each beat.
+-- The playhead's pad `col` (the grid's bottom row). Playing: the longest pattern
+-- playing spread over the eight pads, however long it is (an eighth of it each): the
+-- part played dim, the pad playing full, those to come faint. That's the playing
+-- scene's, whichever is focused or queued (the focused scene's in the song). Stopped:
+-- the first pad strobes with the tempo, lit for the first quarter of each beat.
 local function playhead(s, col)
   if not s.playing then
     return (col == 1 and beat(s) % 1 < 0.25) and scaled(WHITE, FULL) or OFF
   end
   local bars, progress = 0, nil
-  for _, group in ipairs(s.groups) do
-    local p = group.scene_pattern and group.patterns[group.scene_pattern]
-    if p and group.progress and p.bars > bars then bars, progress = p.bars, group.progress end
+  local playing = s.playing_scene and s.scenes[s.playing_scene]
+  for g, group in ipairs(s.groups) do
+    local pattern
+    if playing then pattern = playing.patterns[g] else pattern = group.scene_pattern end
+    local p = pattern and group.patterns[pattern]
+    if p and group.playing_progress and p.bars > bars then bars, progress = p.bars, group.playing_progress end
   end
   if not progress then return OFF end
   local at = math.min(7, math.floor(progress * 8))
@@ -132,6 +137,9 @@ end
 local function wanted(s)
   local leds = {}
   local flashing = flash_on(s)
+  -- A scene queued: what comes next flashes, and what's still playing stays lit.
+  local coming = s.queued_scene and s.scenes[s.queued_scene]
+  local ending = coming and s.playing_scene and s.scenes[s.playing_scene]
   for col = 1, 8 do
     leds[10 + col] = playhead(s, col)
   end
@@ -142,7 +150,12 @@ local function wanted(s)
       local color = OFF
       if group and group.patterns[p] then
         local level = DIM
-        if group.scene_pattern == p then level = group.muted and MUTED or FULL end
+        local full = group.muted and MUTED or FULL
+        if coming and coming.patterns[g] == p then
+          level = flashing and full or DIM
+        elseif group.scene_pattern == p or (ending and ending.patterns[g] == p) then
+          level = full
+        end
         color = scaled(group.patterns[p].color, level)
       elseif group and p == #group.patterns + 1 then
         color = scaled(WHITE, NEW)
@@ -245,8 +258,11 @@ end
 
 local function scroll(dp, ds)
   local s = deckard.state()
+  local scenes = st.scenes
   st.patterns = math.max(0, math.min(st.patterns + dp, last_offset(pattern_places(s), ROWS)))
   st.scenes = math.max(0, math.min(st.scenes + ds, last_offset(#s.scenes + 1)))
+  -- (DECKARD's scene tabs go with it.)
+  if st.scenes ~= scenes then deckard.show_scenes(st.scenes + 1) end
   draw()
 end
 
@@ -274,7 +290,9 @@ local function mute_scene(s, sc)
 end
 
 -- Pad `row`, `col`: its pattern on or off in the focused scene, or a new one; in Mute
--- mode, its group muted or not.
+-- mode, its group muted or not. The focused group and sound stay, so a part can be
+-- changed from here while another is played on the MK3. (In the focused group, the
+-- pattern on is the one focused, as what's edited and recorded should be what plays.)
 local function press(row, col)
   local s = deckard.state()
   local g, p = cell(s, row, col)
@@ -283,11 +301,15 @@ local function press(row, col)
   if st.mute then
     deckard.mute_group(g)
   elseif group.patterns[p] then
-    deckard.focus_group(g)
-    if group.scene_pattern == p then deckard.scene_pattern(g, nil) else deckard.pick_pattern(p) end
+    if group.scene_pattern == p then
+      deckard.scene_pattern(g, nil)
+    elseif g == s.group then
+      deckard.pick_pattern(p)
+    else
+      deckard.scene_pattern(g, p)
+    end
   elseif p == #group.patterns + 1 then
-    deckard.focus_group(g)
-    deckard.pattern_edit("create")
+    deckard.new_pattern(g)
   end
 end
 

@@ -22,6 +22,7 @@ mod mixer;
 pub mod sampling;
 pub mod save_dialog;
 pub(crate) mod strip;
+pub(crate) mod value_entry;
 pub use mixer::{Channel, MixerSection, MixerSections};
 
 // Surfaces (Definitions/Colors.txt).
@@ -45,6 +46,9 @@ const IDEA_W: f32 = 99.0;
 const TILE_H: f32 = 56.0;
 const SCENE_ROW: f32 = 32.0;
 const CHAIN_H: f32 = 140.0;
+/// The shortest the divider leaves the patterns and scenes, and the pattern editor under them.
+const SONG_MIN_H: f32 = 147.0;
+const GROUP_MIN_H: f32 = 260.0;
 /// Height of the lane under the note area (velocity, probability or a MIDI controller).
 const LANE_H: f32 = 145.0;
 /// The Pattern Editor's zooming scroll bars: along the bottom (time) and the right
@@ -465,6 +469,8 @@ pub enum Act {
     FocusSound(usize),
     SongView(bool),
     PianoRoll(bool),
+    /// The Ideas view has scrolled to the scene asked for.
+    ScenesShown,
     ChainTab(ChainTab),
     Play,
     /// REC on or off.
@@ -486,6 +492,8 @@ pub enum Act {
     ToggleKeys,
     ToggleController,
     SetTempo(f64),
+    /// Give a scene its own tempo, or (`None`) back to the song's.
+    SetSceneTempo(usize, Option<f64>),
     SetLevel(Target, f64),
     SetPan(Target, f64),
     ToggleMute(Target),
@@ -582,6 +590,8 @@ pub enum Act {
     SetSwing(Target, Swing),
     /// Set a Sampler or zone parameter (dragging a Sampler knob).
     SetParam(Target, &'static str, f64),
+    /// Set what a knob shows to a value typed: what, what was typed, what it showed.
+    TypeValue(value_entry::What, String, String),
     SamplerPage(usize),
     /// Show a slot's pages (`None`: the sound's channel).
     SelectSlot(Option<usize>),
@@ -777,6 +787,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
         app.macro_learn_saw(&a);
         match a {
             Act::LaunchScene(s) => app.launch_scene(s),
+            Act::SetSceneTempo(s, bpm) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                if let Err(e) = doc.borrow_mut().set_scene_tempo(s, bpm) {
+                    app.status = format!("can't set the scene's tempo: {e}");
+                }
+            }
             Act::LaunchSection(s) => app.launch_section(s),
             Act::FocusGroup(g) => app.focus_group(g),
             Act::FocusPattern(g, p) => {
@@ -789,6 +805,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::FocusSound(s) => app.sound = s,
             Act::SongView(v) => app.song_view = v,
             Act::PianoRoll(v) => app.piano_roll = v,
+            Act::ScenesShown => app.show_scenes = None,
             Act::ChainTab(t) => app.chain_tab = t,
             Act::Play => app.toggle_play(),
             Act::Record => app.set_recording(!app.recording, false),
@@ -1163,6 +1180,10 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.sampler_page = 0;
             }
             // An Audio plug-in take's TEMPO: its length in beats over its frames.
+            Act::TypeValue(what, typed, shown) => match value_entry::resolve(app, what, &typed, &shown) {
+                Some(act) => apply(app, vec![act]),
+                None => app.status = format!("Couldn't read \"{typed}\" as a value here"),
+            },
             Act::SetParam(Target::Take(g, s, k), "tempo", bpm) => {
                 let Some(doc) = app.doc.clone() else { continue };
                 let Some((_, frames, rate)) = app.take_info.filter(|(at, ..)| *at == (g, s, k)) else { continue };
@@ -1230,9 +1251,14 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             Act::SetTempo(_) | Act::SetLevel(..) | Act::SetPan(..) | Act::ToggleMute(_) => {
                 let Some(doc) = app.doc.clone() else { continue };
+                // (A scene playing at its own tempo: that's the tempo changed.)
+                let scene = app.playing_scene_tempo(doc.borrow().project()).map(|t| t.0);
                 let mut d = doc.borrow_mut();
                 let done = match a {
-                    Act::SetTempo(bpm) => d.set_tempo(bpm),
+                    Act::SetTempo(bpm) => match scene {
+                        Some(s) => d.set_scene_tempo(s, Some(bpm)),
+                        None => d.set_tempo(bpm),
+                    },
                     Act::SetLevel(t, v) => d.set_level(t, v),
                     Act::SetPan(t, v) => d.set_pan(t, v),
                     Act::ToggleMute(t) => {
@@ -1293,6 +1319,13 @@ pub fn style(ctx: &egui::Context) {
         ctx.set_fonts(fonts);
         ctx.data_mut(|d| d.insert_temp(egui::Id::new(LOGO_FONT), true));
     }
+    dark_style(ctx);
+}
+
+/// Dark whatever the system's theme: every color here is chosen for it (white text above
+/// all), and a light one has menus and popups white on white.
+fn dark_style(ctx: &egui::Context) {
+    ctx.set_theme(egui::Theme::Dark);
     ctx.set_visuals(egui::Visuals::dark());
     ctx.all_styles_mut(|s| {
         use egui::TextStyle::*;
@@ -1679,9 +1712,14 @@ fn master_fader(ui: &mut Ui, level: f64, meter: (f32, f32), acts: &mut Vec<Act>)
     let lit = resp.hovered() || resp.dragged();
     let line = Rect::from_center_size(Pos2::new(x(level), bars.center().y), Vec2::new(if lit { 3.0 } else { 2.0 }, bars.height() + 8.0));
     p.rect_filled(line, 1.0, if lit { Color32::WHITE } else { white(230) });
-    if resp.double_clicked() {
-        acts.push(Act::SetLevel(Target::Song, 0.75));
-    } else if resp.dragged() {
+    value_entry::gestures(
+        ui,
+        &resp,
+        value_entry::What::Edit(Edit::Level(Target::Song)),
+        &format!("{:.1}", deckard_model::level_db(level)),
+        acts,
+    );
+    if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let dx = resp.drag_delta().x / if fine { 10.0 } else { 1.0 };
         if dx != 0.0 {
@@ -1793,7 +1831,7 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
         let t = painter.text(Pos2::new(r.left() + 8.0, y), Align2::LEFT_CENTER, v, font(12.0), white(245));
         painter.text(Pos2::new(t.right() + 6.0, y), Align2::LEFT_CENTER, caption, font(10.0), white(142));
     };
-    // A value dragged up and down (Shift: fine), double-click: its default.
+    // A value dragged up and down (Shift: fine).
     let drag = |ui: &mut Ui, r: Rect, name: &str, tip: &str| {
         note_rect(ui, name, r);
         let resp = ui.interact(r, ui.id().with(name), Sense::click_and_drag()).on_hover_text(tip);
@@ -1802,19 +1840,37 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
         }
         let fine = ui.input(|i| i.modifiers.shift);
         let dy = if resp.dragged() { -resp.drag_delta().y as f64 } else { 0.0 };
-        (dy, fine, resp.double_clicked())
+        (dy, fine, resp)
     };
-    let (dy, fine, reset) = drag(ui, bpm, "bpm", "Drag to change the tempo (Shift: fine), double-click for 120");
-    if reset {
-        acts.push(Act::SetTempo(120.0));
-    } else if dy != 0.0 {
-        acts.push(Act::SetTempo(((p.tempo + dy * if fine { 0.01 } else { 0.25 }) * 100.0).round() / 100.0));
+    // A scene playing at its own tempo: that's the tempo shown and changed.
+    let tempo = app.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
+    let (dy, fine, resp) = drag(ui, bpm, "bpm", "Drag to change the tempo (Shift: fine); double-click to type it; ⌘-click for 120");
+    value_entry::gestures(ui, &resp, value_entry::What::Tempo, &format!("{tempo:.2}"), acts);
+    if dy != 0.0 {
+        acts.push(Act::SetTempo(((tempo + dy * if fine { 0.01 } else { 0.25 }) * 100.0).round() / 100.0));
     }
-    value(bpm, &format!("{:.2}", p.tempo), "BPM");
-    let (dy, fine, reset) = drag(ui, swing, "swing", "The master swing: drag to change it (Shift: fine), double-click for 0 %");
-    if reset {
-        acts.push(Act::SetSwing(Target::Song, Swing { amount: 0.0, ..p.swing }));
-    } else if dy != 0.0 {
+    if tempo == p.tempo {
+        value(bpm, &format!("{tempo:.2}"), "BPM");
+    } else {
+        // The scene's tempo, then the song's it replaces, under a red line.
+        let t = painter.text(Pos2::new(bpm.left() + 8.0, y), Align2::LEFT_CENTER, format!("{tempo:.2}"), font(12.0), white(245));
+        let song = painter.text(Pos2::new(t.right() + 6.0, y), Align2::LEFT_CENTER, format!("{:.2}", p.tempo), font(10.0), white(142));
+        painter.line_segment(
+            [Pos2::new(song.left() - 1.0, y), Pos2::new(song.right() + 1.0, y)],
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 60, 60)),
+        );
+        note_rect(ui, "bpm-song-struck", song);
+    }
+    let (dy, fine, resp) =
+        drag(ui, swing, "swing", "The master swing: drag to change it (Shift: fine); double-click to type it; ⌘-click for 0 %");
+    value_entry::gestures(
+        ui,
+        &resp,
+        value_entry::What::Edit(Edit::Swing(Target::Song, p.swing, SwingField::Amount)),
+        &format!("{:.1} %", p.swing.amount),
+        acts,
+    );
+    if dy != 0.0 {
         let amount = ((p.swing.amount + dy * if fine { 0.05 } else { 0.5 }) * 10.0).round() / 10.0;
         acts.push(Act::SetSwing(Target::Song, Swing { amount: amount.clamp(0.0, 100.0), ..p.swing }));
     }
@@ -1942,16 +1998,9 @@ pub fn body(app: &mut App, ui: &mut Ui) {
         app.scene = app.scene.min(project.scenes.len().saturating_sub(1));
 
         let all = ui.max_rect();
-        // Song panel heights for the small/medium/large window sizes (TopLevel.txt).
-        let song_h = if all.height() > 850.0 {
-            343.0
-        } else if all.height() > 700.0 {
-            255.0
-        } else {
-            167.0
-        };
-        let song = Rect::from_min_size(all.min, Vec2::new(all.width(), song_h));
         let chain_h = CHAIN_H + if app.remote.assign.is_some() { assign::ASSIGN_H } else { 0.0 };
+        let song_h = song_height(all.height(), chain_h, app.settings.song_panel_h);
+        let song = Rect::from_min_size(all.min, Vec2::new(all.width(), song_h));
         let chain = Rect::from_min_size(Pos2::new(all.left(), song.bottom() + GAP), Vec2::new(all.width(), chain_h));
         let group = Rect::from_min_max(Pos2::new(all.left(), chain.bottom() + GAP), all.max);
         // (Stopped: where STOP left it.)
@@ -1985,9 +2034,57 @@ pub fn body(app: &mut App, ui: &mut Ui) {
         }
         chain_area(ui, app, &d, chain, &mut acts);
         group_panel(ui, app, project, group, head, &mut acts);
+        song_divider(ui, app, all, song, chain_h);
         drop(d);
         apply(app, acts);
     });
+}
+
+/// How tall the patterns and scenes are in a body `all_h` tall: as dragged, with room left
+/// for the chain area and the pattern editor; never dragged, by the window's small, medium
+/// or large size (TopLevel.txt).
+fn song_height(all_h: f32, chain_h: f32, dragged: Option<f32>) -> f32 {
+    match dragged {
+        Some(h) => h.min(song_max_height(all_h, chain_h)).max(SONG_MIN_H),
+        None if all_h > 850.0 => 343.0,
+        None if all_h > 700.0 => 255.0,
+        None => 167.0,
+    }
+}
+
+fn song_max_height(all_h: f32, chain_h: f32) -> f32 {
+    (all_h - chain_h - 2.0 * GAP - GROUP_MIN_H).max(SONG_MIN_H)
+}
+
+/// The divider between the patterns and scenes and everything under them: dragged, it
+/// moves them; double-clicked, it goes back to where the window's size has it.
+fn song_divider(ui: &mut Ui, app: &mut App, all: Rect, song: Rect, chain_h: f32) {
+    let handle = Rect::from_x_y_ranges(all.x_range(), (song.bottom() - 2.0)..=(song.bottom() + GAP + 2.0));
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-song-divider"), handle));
+    let id = ui.id().with("song-divider");
+    let resp = ui.interact(handle, id, Sense::click_and_drag());
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeRow);
+        let line = Rect::from_x_y_ranges(all.x_range(), song.bottom()..=(song.bottom() + GAP));
+        ui.painter().rect_filled(line, 0.0, white(if resp.dragged() { 200 } else { 110 }));
+    }
+    if resp.drag_started() {
+        ui.data_mut(|d| d.insert_temp(id, song.height()));
+    }
+    if resp.dragged()
+        && let Some(from) = ui.data(|d| d.get_temp::<f32>(id))
+        && let (Some(origin), Some(now)) = ui.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()))
+    {
+        let h = from + now.y - origin.y;
+        app.settings.song_panel_h = Some(h.min(song_max_height(all.height(), chain_h)).max(SONG_MIN_H));
+    }
+    if resp.double_clicked() {
+        app.settings.song_panel_h = None;
+    }
+    // (Tests don't write to the user's own settings.)
+    if (resp.drag_stopped() || resp.double_clicked()) && !cfg!(test) {
+        app.settings.save();
+    }
 }
 
 /// The 32-wide icon strip at the left of a panel; returns the clicked button.
@@ -2213,6 +2310,10 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     // Scene tabs.
     let tabs = Rect::from_min_size(area.min, Vec2::new(area.width(), SCENE_ROW));
     painter.rect_filled(tabs, 0.0, S05);
+    if let Some(first) = app.show_scenes {
+        ui.data_mut(|d| d.insert_temp(ui.id().with("scene-tabs"), first as f32 * IDEA_W));
+        acts.push(Act::ScenesShown);
+    }
     let sx = hscroll(ui, "scene-tabs", tabs, p.scenes.len() as f32 * IDEA_W + 27.0);
     for s in 0..p.scenes.len() {
         let r = Rect::from_min_size(Pos2::new(tabs.left() + s as f32 * IDEA_W - sx, tabs.top()), Vec2::new(IDEA_W + 1.0, SCENE_ROW));
@@ -2258,6 +2359,13 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         }
         let text = if focused && !blink { black(245) } else { col };
         let mut text_rect = inner;
+        note_rect(ui, &format!("scene-tab-{s}"), inner);
+        // Its own tempo: a metronome in the corner.
+        if p.scenes[s].tempo.is_some() {
+            metronome(&painter, Pos2::new(inner.right() - 8.0, inner.top() + 8.0), text);
+            note_rect(ui, &format!("scene-metronome-{s}"), Rect::from_center_size(Pos2::new(inner.right() - 8.0, inner.top() + 8.0), Vec2::splat(12.0)));
+            text_rect.max.x -= 12.0;
+        }
         if playing_scene == Some(s) {
             text_rect.max.y -= 4.0;
             triangle(&painter, Pos2::new(inner.left() + 10.0, text_rect.center().y), 4.0, text);
@@ -2288,7 +2396,10 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let resp = resp.on_hover_text(
             "Click to select the scene (while a scene plays, it switches when the playing scene ends); double-click to rename; right-click for more",
         );
-        resp.context_menu(|ui| scene_menu(ui, p, s, acts));
+        // (Stays open for Scene Tempo's checkbox and BPM; its other items close it.)
+        egui::Popup::context_menu(&resp)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| scene_menu(ui, p, s, app.scene_tempo_available(), acts));
     }
     // Focus line.
     painter.rect_filled(Rect::from_min_size(Pos2::new(area.left(), tabs.bottom()), Vec2::new(area.width(), 3.0)), 0.0, S03);
@@ -2478,7 +2589,30 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
 }
 
 /// Right-click menu of a scene (Ideas view tab).
-fn scene_menu(ui: &mut Ui, p: &Project, s: usize, acts: &mut Vec<Act>) {
+/// How far apart the grid lines are drawn at `scale` (points a tick): the finest of a step,
+/// a beat, a bar or a run of bars with room between them, so a long pattern isn't a wall
+/// of lines until it's zoomed in.
+fn grid_every(step: i64, beat: i64, bar: i64, scale: f32) -> i64 {
+    const ROOM: f32 = 8.0;
+    [step, beat, bar, bar * 4, bar * 16].into_iter().find(|&t| t as f32 * scale >= ROOM).unwrap_or(bar * 64)
+}
+
+/// Where a note from `x0` to `x1` is drawn to: short of its end, so notes side by side
+/// read as notes, but never too thin to see.
+fn note_right(x0: f32, x1: f32) -> f32 {
+    (x1 - 2.0).max(x0 + 3.0)
+}
+
+/// A metronome about 11 points tall, centred on `c`: its body and its arm.
+fn metronome(painter: &egui::Painter, c: Pos2, col: egui::Color32) {
+    let at = |x: f32, y: f32| c + Vec2::new(x, y);
+    let body = vec![at(-1.5, -5.5), at(1.5, -5.5), at(4.0, 5.0), at(-4.0, 5.0)];
+    painter.add(egui::Shape::closed_line(body, egui::Stroke::new(1.0, col)));
+    painter.line_segment([at(0.0, 3.0), at(4.5, -4.0)], egui::Stroke::new(1.0, col));
+    painter.circle_filled(at(2.1, -0.2), 1.3, col);
+}
+
+fn scene_menu(ui: &mut Ui, p: &Project, s: usize, tempo_available: bool, acts: &mut Vec<Act>) {
     let id = ui.id().with(("rename-scene", s));
     let mut name: String = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| p.scenes[s].name.clone());
     ui.horizontal(|ui| {
@@ -2491,6 +2625,27 @@ fn scene_menu(ui: &mut Ui, p: &Project, s: usize, acts: &mut Vec<Act>) {
         }
     });
     ui.data_mut(|d| d.insert_temp(id, name));
+    ui.separator();
+    // Scene Tempo: on, from the song's tempo; the scene's own from then on.
+    let tempo = p.scenes[s].tempo;
+    let mut on = tempo.is_some();
+    let r = ui
+        .add_enabled(tempo_available, egui::Checkbox::new(&mut on, "Scene Tempo"))
+        .on_disabled_hover_text("Link or incoming MIDI clock sets the tempo");
+    if r.changed() {
+        acts.push(Act::SetSceneTempo(s, on.then_some(p.tempo)));
+    }
+    if let Some(mut bpm) = tempo {
+        ui.add_enabled_ui(tempo_available, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("BPM");
+                let r = ui.add(egui::DragValue::new(&mut bpm).range(5.0..=999.0).speed(0.25).fixed_decimals(2));
+                if r.changed() {
+                    acts.push(Act::SetSceneTempo(s, Some(bpm)));
+                }
+            });
+        });
+    }
     ui.separator();
     if ui.button("Duplicate").clicked() {
         acts.push(Act::DuplicateScene(s));
@@ -3309,7 +3464,7 @@ pub enum Edit {
     /// One field of a groove (the rest as they are).
     Swing(Target, Swing, SwingField),
     /// A parameter (`Target::Sampler`/`Target::Zone` field) over min..max, with its
-    /// default (double-click).
+    /// default (⌘-click).
     Param(Target, &'static str, f64, f64, f64),
     /// [`Edit::Param`] on a log scale: the knob's travel is `lo·(hi/lo)^amount` (lo > 0).
     Log(Target, &'static str, f64, f64, f64),
@@ -3374,7 +3529,7 @@ impl Edit {
         }
     }
 
-    fn reset(self) -> Act {
+    pub(crate) fn reset(self) -> Act {
         match self {
             Edit::Level(t) => Act::SetLevel(t, 0.75),
             Edit::Pan(t) => Act::SetPan(t, 0.0),
@@ -4250,10 +4405,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         }
         let mut amount = *amount;
         if let Some(edit) = edit {
-            // Drag up/down (Shift: fine); double-click resets.
+            // Drag up/down (Shift: fine); double-click to type; ⌘-click resets.
             let below = Rect::from_min_max(Pos2::new(r.left(), strip.bottom()), r.max);
             let resp = ui.interact(below, ui.id().with(("knob", i)), Sense::click_and_drag()).on_hover_text(
-                "Drag to change (Shift: fine), double-click to reset; right-click to remove its modulation, the name for macros",
+                "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click to remove its modulation, the name for macros",
             );
             if resp.hovered() || resp.dragged() {
                 painter.rect_filled(r, 4.0, white(10));
@@ -4296,9 +4451,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     }
                 });
             }
-            if resp.double_clicked() {
-                acts.push(edit.reset());
-            } else if resp.clicked()
+            value_entry::gestures(ui, &resp, value_entry::What::Edit(*edit), value, acts);
+            if !resp.double_clicked()
+                && resp.clicked()
+                && !ui.input(|i| i.modifiers.command)
                 && let Some(a) = edit.click()
             {
                 acts.push(a);
@@ -5390,7 +5546,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             gp.hline(grid.x_range(), y + row_h - 0.5, Stroke::new(1.0, line));
         }
     }
-    // Grid lines, inside and outside the pattern.
+    // Grid lines, inside and outside the pattern: as fine as the zoom has room for.
+    let every = grid_every(step, beat, bar, scale);
     let mut t = 0;
     while t <= view {
         let inside = (start..=end).contains(&t);
@@ -5401,7 +5558,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         } else {
             (0x21, 0x1C)
         };
-        if step as f32 * scale > 3.0 || t % beat == 0 {
+        if t % every == 0 {
             gp.vline(x_of(t as f64), grid.y_range(), Stroke::new(1.0, Color32::from_gray(if inside { c_in } else { c_out })));
         }
         t += step;
@@ -5487,7 +5644,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         let pos = n.position as f64;
         Some(Rect::from_min_max(
             Pos2::new(x_of(pos), y + top),
-            Pos2::new(x_of(pos + n.length as f64).max(x_of(pos) + 3.0), y + row_h - bottom),
+            Pos2::new(note_right(x_of(pos), x_of(pos + n.length as f64)), y + row_h - bottom),
         ))
     };
     // The grid; Shift snaps a quarter as fine.
@@ -6002,9 +6159,10 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     for f in [0.25, 0.5, 0.75] {
         vp.hline(lane.x_range(), lane_in.bottom() - lane_in.height() * f, Stroke::new(1.0, white(6)));
     }
+    let every = grid_every(beat, beat, bar, scale);
     let mut t = 0;
     while t <= view {
-        if t % beat == 0 {
+        if t % every == 0 {
             vp.vline(x_of(t as f64), lane.y_range(), Stroke::new(1.0, Color32::from_gray(if t % bar == 0 { 0x48 } else { 0x21 })));
         }
         t += beat;
@@ -6710,5 +6868,52 @@ mod group_tab_tests {
         assert_eq!(super::group_tab(0), "A1");
         assert_eq!(super::group_tab(2), "C1");
         assert_eq!(super::group_tab(9), "B2");
+    }
+}
+
+#[cfg(test)]
+mod note_grid_tests {
+    use super::{grid_every, note_right};
+
+    /// 1/16 steps in a 4/4 bar across 1600 points, however many bars show.
+    #[test]
+    fn grid_lines_thin_out_as_a_pattern_gets_longer() {
+        let (step, beat, bar) = (240, 960, 3840);
+        let every = |bars: i64| grid_every(step, beat, bar, 1600.0 / (bars * bar) as f32);
+        assert_eq!(every(4), step, "4 bars: every step");
+        assert_eq!(every(16), beat, "16 bars: every beat");
+        assert_eq!(every(64), bar, "64 bars: every bar");
+        assert_eq!(every(512), bar * 4);
+        assert_eq!(grid_every(step, beat, bar, 8.0 / step as f32), step, "zoomed in, every step again");
+    }
+
+    #[test]
+    fn notes_stop_short_of_their_end_but_stay_visible() {
+        assert_eq!(note_right(10.0, 30.0), 28.0);
+        assert_eq!(note_right(10.0, 11.0), 13.0);
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    /// Menus and popups are readable with the system in light mode (white on white once,
+    /// on Windows): the app is dark whatever the system is.
+    #[test]
+    fn a_light_system_gets_the_dark_style() {
+        let ctx = egui::Context::default();
+        dark_style(&ctx);
+        for _ in 0..2 {
+            let input = egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
+            ctx.run_ui(input, |_| {}).textures_delta.clear();
+        }
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        let visuals = ctx.global_style().visuals.clone();
+        let bright = |c: Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+        assert!(visuals.dark_mode);
+        for fill in [visuals.window_fill, visuals.panel_fill, visuals.extreme_bg_color, visuals.widgets.inactive.weak_bg_fill] {
+            assert!(bright(fill) < 300, "{fill:?} under white text");
+        }
     }
 }

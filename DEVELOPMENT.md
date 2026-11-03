@@ -357,7 +357,8 @@ module) play through the installed VST3, restored to the state Maschine saved.
   - VST2 plug-ins are hosted through their VST3 versions. By Steinberg's convention the
     VST3 class id is `"VST" + <VST2 id> + <name>`, and NI's VST2 and VST3 states are
     the same format.
-  - Audio Units are listed but not hosted yet.
+  - Audio Units are hosted on macOS (`crates/plugins/src/au.rs`). An `aumf` runs as an effect
+    but gets no notes yet.
 - **Where the state is:** a `PluginHost` stores `plugin_id`, `plugin_name` and `chunk`
   (`[u32 1][u32 1][u32 n][n bytes]`: a `.vstpreset` for VST3, the plug-in's own state
   for VST2). See `crates/plugins/src/state.rs`.
@@ -462,7 +463,7 @@ What's still open lives in two lists:
   - Lua MIDI plug-ins;
   - per-note ratchets and parameter locks;
   - multitrack export.
-- **Also missing:** plug-in hosting on Linux and Windows, and Audio Unit hosting.
+- **Also missing:** plug-in hosting on Linux and Windows.
 
 ## `out/`
 

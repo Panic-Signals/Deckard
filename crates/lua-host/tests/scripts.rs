@@ -2735,6 +2735,14 @@ fn mk3_shift_keeps_the_pads_from_playing() {
         assert!(!host.pads_play_sounds(), "keyboard {keyboard}, SHIFT held");
         host.button("BUTTON_SHIFT", false).unwrap();
         host.tick();
+        for button in ["BUTTON_SELECT", "BUTTON_MUTE", "BUTTON_SOLO", "BUTTON_TRANSPORT_ERASE"] {
+            host.button(button, true).unwrap();
+            host.tick();
+            assert!(!host.pads_play_sounds(), "keyboard {keyboard}, {button} held");
+            host.button(button, false).unwrap();
+            host.tick();
+            assert!(host.pads_play_sounds(), "keyboard {keyboard}, {button} let go");
+        }
     }
 }
 

@@ -419,6 +419,7 @@ fn apply(
 /// follow the clock, if any, there.
 fn before_block(engine: &mut Engine, clock: &mut Option<Box<dyn crate::sync::Clock>>, now: Instant, ahead: Duration) {
     engine.heard_at(now + ahead);
+    engine.set_followed(clock.is_some());
     if let Some(c) = clock.as_mut()
         && let Some(f) = c.follow(ahead, engine.quantum())
     {

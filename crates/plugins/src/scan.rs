@@ -36,7 +36,8 @@ pub struct Entry {
     pub instrument: bool,
     /// The bundle (VST3/VST2) or "type subtype manufacturer" four-char codes (AU).
     pub location: String,
-    /// The VST3 class id, upper-case hex (VST3 only).
+    /// The VST3 class id, upper-case hex (VST3), or an AU's type, subtype and
+    /// manufacturer codes, in hex.
     pub cid: String,
 }
 
@@ -46,13 +47,32 @@ impl Entry {
         let role = if self.instrument { "INSTR" } else { "FX" };
         match self.kind {
             Kind::Vst3 => Some(format!("{}:VST3:{role}:{}", self.vendor, self.cid)),
-            _ => None,
+            Kind::AudioUnit => {
+                let (kind, sub) = self.au_codes()?;
+                crate::state::au_id(&self.vendor, kind, sub)
+            }
+            Kind::Vst2 => None,
         }
     }
 
-    /// Whether this build can host it (VST3 for now).
+    /// An AU's component type and subtype. (A cache from before AUs could be hosted has
+    /// only the four-character codes of `location`.)
+    fn au_codes(&self) -> Option<(u32, u32)> {
+        let code = |s: Option<&str>| Some(u32::from_be_bytes(s?.as_bytes().try_into().ok()?));
+        if self.cid.len() == 24 {
+            let hex = |at: usize| u32::from_str_radix(self.cid.get(at..at + 8)?, 16).ok();
+            return Some((hex(0)?, hex(8)?));
+        }
+        Some((code(self.location.get(..4))?, code(self.location.get(5..9))?))
+    }
+
+    /// Whether this build can host it: VST3, and Audio Units on macOS.
     pub fn hostable(&self) -> bool {
-        self.kind == Kind::Vst3
+        match self.kind {
+            Kind::Vst3 => true,
+            Kind::AudioUnit => cfg!(target_os = "macos") && self.maschine_id().is_some(),
+            Kind::Vst2 => false,
+        }
     }
 
     /// One line of the scan cache (tab-separated).
@@ -307,7 +327,7 @@ pub fn audio_units() -> Vec<Entry> {
                 name,
                 instrument: &kind == b"aumu",
                 location: format!("{} {} {}", fourcc(d.kind), fourcc(d.sub), fourcc(d.manufacturer)),
-                cid: String::new(),
+                cid: format!("{:08X}{:08X}{:08X}", d.kind, d.sub, d.manufacturer),
             });
         }
     }
@@ -318,4 +338,37 @@ pub fn audio_units() -> Vec<Entry> {
 #[cfg(not(target_os = "macos"))]
 pub fn audio_units() -> Vec<Entry> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod au_tests {
+    use super::*;
+
+    fn entry(location: &str, cid: &str) -> Entry {
+        Entry {
+            kind: Kind::AudioUnit,
+            vendor: "Output".into(),
+            name: "Portal".into(),
+            instrument: false,
+            location: location.into(),
+            cid: cid.into(),
+        }
+    }
+
+    #[test]
+    fn an_au_has_maschines_id() {
+        // Scanned now, and from a cache from before AUs could be hosted.
+        let id = Some("Output:AU:FX:1347572812".to_string());
+        assert_eq!(entry("aufx PRTL Outp", "").maschine_id(), id);
+        assert_eq!(
+            entry(
+                "?",
+                &format!("{:08X}{:08X}{:08X}", u32::from_be_bytes(*b"aufx"), u32::from_be_bytes(*b"PRTL"), u32::from_be_bytes(*b"Outp"))
+            )
+            .maschine_id(),
+            id
+        );
+        assert_eq!(entry("aumf PRTL Outp", "").maschine_id().as_deref(), Some("Output:AU:MF:1347572812"));
+        assert_eq!(entry("aumf PRTL Outp", "").hostable(), cfg!(target_os = "macos"));
+    }
 }
