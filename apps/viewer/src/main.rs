@@ -6968,6 +6968,18 @@ impl App {
     fn browse(&mut self, a: browser::BrowseAct) {
         use browser::BrowseAct as B;
         self.browser.touch();
+        if matches!(a, B::Rescan) {
+            let roots = self.library_roots();
+            self.browser.rescan(roots);
+            self.status = "Library refreshed".into();
+            return;
+        }
+        if let B::Folder(dir) = &a
+            && !dir.is_dir()
+        {
+            self.status = format!("{} isn't a folder", dir.display());
+            return;
+        }
         let b = &mut self.browser;
         let mut q = b.query.clone();
         match a {
@@ -7078,6 +7090,7 @@ impl App {
                 }
                 return;
             }
+            B::Rescan => return,
             B::LibraryFolder(dir, on) => {
                 let folders = &mut self.settings.library_folders;
                 folders.retain(|d| *d != dir);

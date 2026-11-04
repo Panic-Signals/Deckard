@@ -334,6 +334,8 @@ pub enum BrowseAct {
     LoadFile(PathBuf, Option<(usize, usize)>),
     /// Preferences ▸ Library: a folder of sound packs added (true) or taken out.
     LibraryFolder(PathBuf, bool),
+    /// Scan the library folders again (a newly installed expansion).
+    Rescan,
 }
 
 /// Whether `item` has something to prehear: a sample, or a sound's or group's preview.
