@@ -256,9 +256,18 @@ impl Lfo {
         self.wave_at(cycles) * self.level.clamp(0.0, 1.0) * fade as f32
     }
 
-    /// `n` samples of the output over two cycles, for drawing; a triggered LFO is drawn
-    /// from its trigger (the fade ramp shows), a cycle taken as the rate's beats (a beat
-    /// for Hz).
+    /// How many cycles the picture spans. The width is a fixed stretch of time — two
+    /// quarter notes when synced, two seconds when free — so the rate changes how many
+    /// waves fit. A 1/4 note and 1 Hz still fill it with two cycles.
+    fn picture_cycles(&self) -> f64 {
+        if self.sync { 2.0 / self.beats() } else { 2.0 * f64::from(self.hz).max(0.0) }
+    }
+
+    /// `n` samples of the wave, for drawing.
+    ///
+    /// The fade is a level ramp in beats ([`Self::output`]), not part of the cycle, so
+    /// it is not drawn: folding it in made the first cycle a different shape at every
+    /// rate. The picture is the wave itself, at the level. A trigger does not change it.
     /// An envelope is drawn as its ADSR, not to time ([`Self::picture_note_off`]).
     pub fn picture(&self, n: usize) -> Vec<f32> {
         if self.env {
@@ -280,11 +289,12 @@ impl Lfo {
                 })
                 .collect();
         }
-        let beats = if self.sync { self.beats() } else { 1.0 };
+        let level = self.level.clamp(0.0, 1.0);
+        let cycles = self.picture_cycles();
         (0..n)
             .map(|i| {
-                let c = 2.0 * i as f64 / n.max(1) as f64;
-                self.output(c, self.trigger.map(|_| c * beats))
+                let c = cycles * i as f64 / n.max(1) as f64;
+                self.wave_at(c) * level
             })
             .collect()
     }
@@ -625,9 +635,20 @@ mod tests {
     fn picture_draws_two_cycles() {
         let p = Lfo::new(1).picture(8);
         assert_eq!(p.len(), 8);
-        assert!(close(p[0], 0.5));
-        let t = Lfo { shape: Shape::Square, trigger: Some((0, 0)), ..Lfo::new(1) }.picture(8);
-        assert!(t[0] < t[1], "the fade ramp shows");
+        assert!(close(p[0], 0.5), "a 1/4 sine still starts mid-wave");
+        assert!(close(p[1], 1.0), "two cycles across the picture: the top is the second sample");
+        // A trigger does not reshape the wave. The rate does change how many waves fit.
+        let wave = Lfo { shape: Shape::Square, ..Lfo::new(1) }.picture(8);
+        let triggered = Lfo { shape: Shape::Square, trigger: Some((0, 0)), ..Lfo::new(1) }.picture(8);
+        let eighth = RATES.iter().position(|r| r.0 == "1/8").unwrap();
+        let faster = Lfo { shape: Shape::Square, rate: eighth, ..Lfo::new(1) }.picture(8);
+        let slower = Lfo { shape: Shape::Square, rate: 0, ..Lfo::new(1) }.picture(8);
+        assert_eq!(triggered, wave);
+        assert_ne!(faster, wave, "1/8 draws twice as many waves as 1/4");
+        assert!(slower.iter().all(|v| close(*v, 1.0)), "4 bars barely moves across two beats");
+        assert!(close(wave[0], 1.0));
+        let hz = |h| Lfo { shape: Shape::Square, sync: false, hz: h, ..Lfo::new(1) }.picture(8);
+        assert_ne!(hz(1.0), hz(2.0), "Hz changes the frequency too");
     }
 
     #[test]
