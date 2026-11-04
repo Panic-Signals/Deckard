@@ -203,11 +203,16 @@ fn the_step_grid_makes_a_pattern_when_theres_none() {
     let mut app = crate::App::default();
     app.new_project();
     (app.group, app.scene) = (0, 0);
-    app.surface_act(A::StepNotes { at: 0, length: 240, velocity: 100, pitches: {
-        let mut list = [128; 16];
-        (list[0], list[1]) = (60, 64);
-        list
-    } });
+    app.surface_act(A::StepNotes {
+        at: 0,
+        length: 240,
+        velocity: 100,
+        pitches: {
+            let mut list = [128; 16];
+            (list[0], list[1]) = (60, 64);
+            list
+        },
+    });
     let p = app.doc.as_ref().unwrap().borrow().project().clone();
     assert_eq!(p.groups[0].patterns.len(), 1, "{}", app.status);
     assert_eq!(p.groups[0].patterns[0].notes.len(), 2);

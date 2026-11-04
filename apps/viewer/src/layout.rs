@@ -2363,7 +2363,11 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         // Its own tempo: a metronome in the corner.
         if p.scenes[s].tempo.is_some() {
             metronome(&painter, Pos2::new(inner.right() - 8.0, inner.top() + 8.0), text);
-            note_rect(ui, &format!("scene-metronome-{s}"), Rect::from_center_size(Pos2::new(inner.right() - 8.0, inner.top() + 8.0), Vec2::splat(12.0)));
+            note_rect(
+                ui,
+                &format!("scene-metronome-{s}"),
+                Rect::from_center_size(Pos2::new(inner.right() - 8.0, inner.top() + 8.0), Vec2::splat(12.0)),
+            );
             text_rect.max.x -= 12.0;
         }
         if playing_scene == Some(s) {

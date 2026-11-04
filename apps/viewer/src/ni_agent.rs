@@ -21,11 +21,7 @@ pub fn quit() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn is_running(name: &str) -> bool {
-    std::process::Command::new("/usr/bin/pgrep")
-        .args(["-x", name])
-        .stdout(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    std::process::Command::new("/usr/bin/pgrep").args(["-x", name]).stdout(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 #[cfg(not(target_os = "macos"))]
