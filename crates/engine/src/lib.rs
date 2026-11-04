@@ -1521,6 +1521,8 @@ fn input_routes(p: &Project) -> Vec<InRoute> {
 #[derive(Default)]
 pub struct SampleCache {
     by_path: HashMap<std::path::PathBuf, Option<Arc<Sample>>>,
+    /// Library folders added in Preferences, searched with the installed ones.
+    pub library_dirs: Vec<std::path::PathBuf>,
     /// Where samples were found (by how the project refers to them, and the project's
     /// folder): each edit doesn't search the disk again. Only files found are kept.
     found: HashMap<(i64, String, String, String, Option<std::path::PathBuf>), std::path::PathBuf>,
@@ -1531,7 +1533,9 @@ pub struct SampleCache {
 impl SampleCache {
     /// The sample `sample` (as a project refers to it) decoded, loading it if needed.
     pub fn sample(&mut self, sample: &deckard_model::SampleRef, project_path: Option<&Path>) -> Option<Arc<Sample>> {
-        let path = library::Resolver::new(project_path).resolve(sample)?;
+        let mut resolver = library::Resolver::new(project_path);
+        resolver.set_extra(&self.library_dirs);
+        let path = resolver.resolve(sample)?;
         self.by_path
             .entry(path.clone())
             .or_insert_with(|| Sample::load(&path).ok().filter(|s| !s.frames.is_empty() && s.rate > 0).map(Arc::new))
@@ -1579,6 +1583,7 @@ impl Engine {
     ) -> (Engine, LoadReport) {
         let mut report = LoadReport::default();
         let mut resolver = library::Resolver::new(project_path);
+        resolver.set_extra(&cache.library_dirs);
         let mut samples: Vec<Arc<Sample>> = Vec::new();
         let mut index: HashMap<*const Sample, usize> = HashMap::new();
         let sr_f = sr as f64;

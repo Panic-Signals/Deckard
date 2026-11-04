@@ -1513,6 +1513,7 @@ impl App {
             return;
         }
         let path = d.path().map(Path::to_path_buf);
+        self.remember_libraries();
         if let Some(sample) = self.samples.sample(&z.sample, path.as_deref()) {
             self.waveform = Some(sampler_ui::Waveform::new(key, &sample.frames, sample.rate));
         }
@@ -2699,6 +2700,7 @@ impl App {
         self.headroom.clear();
         let d = doc.borrow();
         let project = d.project();
+        self.remember_libraries();
         let out = match self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) {
             Ok(out) => out,
             Err(e) => {
@@ -2736,6 +2738,9 @@ impl App {
         }
         if !report.no_sampler.is_empty() {
             status += &format!("; not played (drum synths aren't rendered yet): {}", report.no_sampler.join(", "));
+        }
+        if !report.missing.is_empty() {
+            status += &format!("; {} samples not found", report.missing.len());
         }
         self.status = status;
     }
@@ -5137,6 +5142,7 @@ impl App {
     fn note_in(&mut self, group: usize, sound: usize, pitch: i64, velocity: i64) {
         let Some(doc) = self.doc.clone() else { return };
         let d = doc.borrow();
+        self.remember_libraries();
         let Ok(out) = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) else { return };
         if out.has_engine() {
             out.live(deckard_engine::Live::NoteIn { group, sound, pitch, velocity, thru: false });
@@ -5162,6 +5168,7 @@ impl App {
     fn follow_edits(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let d = doc.borrow();
+        self.remember_libraries();
         let Some(Ok(out)) = &self.output else { return };
         // An edit that reached the engine while it switched modes is sent again.
         let (mode, stale) = out.telemetry(|t| (t.mode, t.stale && t.actions >= self.adopt_sent));
@@ -6806,6 +6813,11 @@ impl App {
         self.user_dir_override
             .clone()
             .unwrap_or_else(|| deckard_library::user::documents().unwrap_or_default().join("Native Instruments").join("Maschine 3"))
+    }
+
+    /// The sample search uses the same folders the library browser scans.
+    fn remember_libraries(&mut self) {
+        self.samples.library_dirs = self.library_roots().into_iter().map(|r| r.path).collect();
     }
 
     /// The folders DECKARD's library indexes: Maschine's user folders (Maschine 3's,
