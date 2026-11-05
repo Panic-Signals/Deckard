@@ -1,7 +1,8 @@
 # Tool versions and tasks for building DECKARD (https://mise.jdx.dev).
 #
 #   mise install                      # the pinned Rust (via rustup) and tools, then
-#                                     # the stem separation model (install:demucs)
+#                                     # the stem separation model (install:demucs), and
+#                                     # on Windows the C++ tools and a build (install:windows)
 #   mise run install:demucs           # just the model (Demucs htdemucs, 84 MB)
 #   mise run build                    # debug build
 #   mise run test                     # the workspace's tests
@@ -25,14 +26,26 @@ rust = { version = "1.99.1", profile = "minimal", components = ["rustfmt", "clip
     "x86_64-pc-windows-gnu",
 ] }
 
-# After the tools: the stem separation model, which isn't bundled (an intact copy is kept).
+# After the tools: the stem separation model, which isn't bundled (an intact copy is kept),
+# and on Windows the C++ tools and a build.
 [hooks]
-postinstall = { task = "install:demucs" }
+postinstall = { task = "install:all" }
+
+[tasks."install:all"]
+description = "What `mise install` does after the tools: the model, then the Windows setup"
+run = [{ task = "install:demucs" }, { task = "install:windows" }]
+
+[tasks."install:windows"]
+description = "On Windows, the Visual Studio C++ tools if missing, then a debug build"
+run = "true"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-windows.ps1"
 
 [tasks."install:demucs"]
 description = "The stem separation model (Demucs htdemucs) into DECKARD's settings folder"
 run = "scripts/install-demucs.sh"
-run_windows = "pwsh -NoProfile -File scripts/install-demucs.ps1"
+# Windows PowerShell, not pwsh: it's on every Windows, and PowerShell 7 isn't. Its default
+# policy refuses to run scripts, hence the bypass.
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-demucs.ps1"
 
 [tasks.build]
 description = "Build everything (debug)"
@@ -53,7 +66,7 @@ run = "scripts/build-linux.sh"
 
 [tasks."release:windows"]
 description = "DECKARD.exe for Windows, zipped into dist/ (optional arg: version)"
-run = "pwsh -NoProfile -File scripts/build-windows.ps1"
+run = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1"
 
 [tasks.check-platforms]
 description = "Type-check Linux and Windows from this machine (zig as the C compiler)"

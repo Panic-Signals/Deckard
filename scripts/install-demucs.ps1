@@ -3,7 +3,7 @@
 # $env:DECKARD_SETTINGS\models), checked against their published SHA-256. As
 # scripts/install-demucs.sh:
 #
-#   pwsh -NoProfile -File scripts/install-demucs.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-demucs.ps1
 $ErrorActionPreference = "Stop"
 # Windows PowerShell 5.1: its progress bar slows downloads to a crawl, and older .NET
 # doesn't offer TLS 1.2, which Hugging Face needs.

@@ -17,7 +17,9 @@ cargo build --release --offline -p deckard
 ```
 
 - **Linux:** needs `pkg-config` and the ALSA headers (`libasound2-dev`).
-- **Windows:** needs the Visual Studio Build Tools (C++).
+- **Windows:** needs the Visual Studio Build Tools (C++). `mise install` installs them
+  with winget if they're missing (several GB, with an administrator prompt) and then
+  does a debug build (`scripts/setup-windows.ps1`).
 - **MK3:** with one connected, DECKARD drives it directly. Quit Maschine and NI's
   hardware agents (NIHardwareAgent, NIHostIntegrationAgent) first.
 
