@@ -126,22 +126,42 @@ fn title(px: &mut [[u8; 4]], size: usize, (cx, cy, a, _, _): (f32, f32, f32, f32
     }
 }
 
-/// The icon on Windows: the logo's D, white on a black square, `size` × `size` RGBA.
+/// The icon on Windows: the logo's D, white on a black square, `size` × `size` RGBA. Drawn
+/// larger and scaled down, centred on the letter's ink: placed in whole pixels at the small
+/// sizes Explorer shows, it would sit a pixel or two off.
 pub fn windows_icon(size: usize) -> Vec<[u8; 4]> {
     let mut px = vec![[0, 0, 0, 255]; size * size];
     let logo = crate::layout::logo_font();
     let Ok(font) = fontdue::Font::from_bytes(logo, fontdue::FontSettings::default()) else { return px };
+    let over = (1024 / size.max(1)).clamp(1, 16);
+    let big = size * over;
     // The D's own shape, not its advance, fills the square (the letter leans).
-    let room = size as f32 * 0.72;
+    let room = big as f32 * 0.72;
     let at_100 = font.metrics('d', 100.0);
     let sz = 100.0 * room / at_100.width.max(at_100.height).max(1) as f32;
     let (m, bitmap) = font.rasterize('d', sz);
-    let (left, top) = (size.saturating_sub(m.width) / 2, size.saturating_sub(m.height) / 2);
-    for gy in 0..m.height.min(size - top) {
-        for gx in 0..m.width.min(size - left) {
-            let v = bitmap[gy * m.width + gx];
-            px[(top + gy) * size + left + gx] = [v, v, v, 255];
+    // Where the ink is: a rasterized letter's box can have empty or faint rows at its edges.
+    let ink = |x: usize, y: usize| bitmap[y * m.width + x] >= 128;
+    let rows: Vec<usize> = (0..m.height).filter(|&y| (0..m.width).any(|x| ink(x, y))).collect();
+    let columns: Vec<usize> = (0..m.width).filter(|&x| (0..m.height).any(|y| ink(x, y))).collect();
+    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (rows.first(), rows.last(), columns.first(), columns.last()) else {
+        return px;
+    };
+    let x_at = (big as isize - (right + left + 1) as isize) / 2;
+    let y_at = (big as isize - (bottom + top + 1) as isize) / 2;
+    let mut sum = vec![0u32; size * size];
+    for gy in 0..m.height {
+        for gx in 0..m.width {
+            let (x, y) = (gx as isize + x_at, gy as isize + y_at);
+            if (0..big as isize).contains(&x) && (0..big as isize).contains(&y) {
+                sum[y as usize / over * size + x as usize / over] += u32::from(bitmap[gy * m.width + gx]);
+            }
         }
+    }
+    let samples = (over * over) as u32;
+    for (p, s) in px.iter_mut().zip(sum) {
+        let v = (s / samples) as u8;
+        *p = [v, v, v, 255];
     }
     px
 }
@@ -191,6 +211,21 @@ pub fn write_png(path: &std::path::Path, size: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{WINDOWS_ICON_SIZES, icon, windows_icon};
+
+    /// Explorer shows the small sizes as they are, so each must be centred for itself.
+    #[test]
+    fn the_windows_icon_is_centred_at_every_size() {
+        for n in WINDOWS_ICON_SIZES {
+            let px = windows_icon(n);
+            let lit = |x: usize, y: usize| px[y * n + x][0] >= 128;
+            let rows: Vec<usize> = (0..n).filter(|&y| (0..n).any(|x| lit(x, y))).collect();
+            let columns: Vec<usize> = (0..n).filter(|&x| (0..n).any(|y| lit(x, y))).collect();
+            let (top, bottom) = (rows[0], n - 1 - rows[rows.len() - 1]);
+            let (left, right) = (columns[0], n - 1 - columns[columns.len() - 1]);
+            assert!(top.abs_diff(bottom) <= 1, "{n}: {top} above, {bottom} below");
+            assert!(left.abs_diff(right) <= 1, "{n}: {left} left, {right} right");
+        }
+    }
 
     #[test]
     fn the_windows_icon_is_a_white_d_on_black_at_every_size() {
