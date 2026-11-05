@@ -21,8 +21,9 @@ DECKARD also does a few things Maschine doesn't:
 
 - **A computer** running macOS, Linux or Windows.
 - **Speakers or headphones.** DECKARD uses your system's audio output.
-- **Optional: a Maschine MK3.** DECKARD drives its pads, buttons, knobs, lights and
-  both screens directly.
+- **Optional: a Maschine MK3, or a Maschine+ in controller mode.** DECKARD drives its
+  pads, buttons, knobs, lights and both screens directly. Maschine+ support hasn't been
+  tested on the hardware yet.
 - **Optional: a Novation Launchpad Pro MK3**, connected over USB.
 - **Optional: Maschine and its libraries.** Maschine projects use samples, kits and
   expansions from NI's libraries. DECKARD finds the ones you have installed and plays
@@ -94,7 +95,8 @@ checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
    On Windows, NI's driver has them, so DECKARD asks to switch just the screens to Windows'
    WinUSB driver (with administrator approval). Maschine can't use the screens until you
    give them back in **Preferences ▸ Hardware**.
-2. Plug in the MK3. DECKARD finds it on its own.
+2. Plug in the MK3. DECKARD finds it on its own. A Maschine+ in controller mode is used
+   the same way.
 
 DECKARD runs the MK3 with its own controller layer, so you don't need Maschine
 installed. Its screens can be themed (see [Custom themes](#custom-themes-for-the-mk3s-screens)). You

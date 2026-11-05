@@ -1,8 +1,8 @@
-//! NI's software keeps the MK3's screens from DECKARD, and they stay dark: it looks as if
-//! the controller doesn't work. DECKARD asks to change that.
+//! NI's software keeps the controller's screens from DECKARD, and they stay dark: it looks
+//! as if the controller doesn't work. DECKARD asks to change that.
 //!
 //! - macOS: NIHostIntegrationAgent holds them while it runs, so it asks to quit that.
-//! - Windows: NI's kernel driver (nimc3usb) has their USB interface whether or not NI's
+//! - Windows: NI's kernel driver (`Model::windows_driver`) has their USB interface whether or not NI's
 //!   services run, so quitting wouldn't help. It asks to switch that one interface to
 //!   Windows' WinUSB (`scripts/mk3-driver.ps1`), and Preferences ▸ Hardware gives it back.
 
@@ -15,7 +15,7 @@ const NAME: &str = "NIHostIntegrationAgent";
 #[cfg(not(windows))]
 mod text {
     pub const TITLE: &str = "Quit NIHostIntegrationAgent?";
-    pub const BODY: &str = "Native Instruments' agent is running and holding the Maschine MK3's screens, so the controller can look \
+    pub const BODY: &str = "Native Instruments' agent is running and holding the controller's screens, so the controller can look \
          as if it doesn't work. DECKARD needs it to quit. If Maschine is open, quit that first.";
     pub const BUTTON: &str = "Quit It";
     pub const DONE: &str = "NIHostIntegrationAgent quit";
@@ -23,13 +23,13 @@ mod text {
 
 #[cfg(windows)]
 mod text {
-    pub const TITLE: &str = "Use the MK3's screens in DECKARD?";
-    pub const BODY: &str = "Native Instruments' driver has the Maschine MK3's screens, so they stay dark in DECKARD. DECKARD can switch \
+    pub const TITLE: &str = "Use the controller's screens in DECKARD?";
+    pub const BODY: &str = "Native Instruments' driver has the controller's screens, so they stay dark in DECKARD. DECKARD can switch \
          just the screens to Windows' own WinUSB driver, which asks for administrator approval and briefly stops NI's services. \
          Pads, buttons and audio aren't touched. Maschine can't use the screens until you give them back in Preferences ▸ Hardware. \
          If Maschine is open, quit that first.";
     pub const BUTTON: &str = "Switch Driver";
-    pub const DONE: &str = "switching the MK3's screens to WinUSB";
+    pub const DONE: &str = "switching the controller's screens to WinUSB";
 }
 
 /// How long the change has after being asked for, before asking again. On Windows that
@@ -38,7 +38,7 @@ const QUITTING: Duration = Duration::from_secs(if cfg!(windows) { 120 } else { 5
 
 /// Whether NI's software is why the screens won't open, given the error from opening them.
 pub fn holding(error: &str) -> bool {
-    error != deckard_mk3::display::NO_MK3 && blocked(error)
+    error != deckard_mk3::display::NO_CONTROLLER && blocked(error)
 }
 
 #[cfg(target_os = "macos")]
@@ -108,7 +108,7 @@ fn use_driver(driver: &'static str, after: Duration) {
 fn run_driver_script(driver: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let script = crate::stems::script("mk3-driver.ps1").ok_or("the MK3 driver script isn't with DECKARD")?;
+    let script = crate::stems::script("mk3-driver.ps1").ok_or("the controller driver script isn't with DECKARD")?;
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script)
@@ -124,7 +124,7 @@ fn run_driver_script(driver: &str) -> Result<(), String> {
 fn script_error(stderr: &str) -> String {
     let lines: Vec<&str> = stderr.lines().map(str::trim).take_while(|l| !l.starts_with("At ")).collect();
     let message = lines.join(" ");
-    if message.is_empty() { "changing the MK3's driver failed".into() } else { message }
+    if message.is_empty() { "changing the controller's driver failed".into() } else { message }
 }
 
 #[cfg(target_os = "macos")]
@@ -297,12 +297,12 @@ mod tests {
     fn a_script_error_is_its_message_alone() {
         let stderr = "the MK3's screens use 'nimc3usb',\r\nnot WinUSB\r\nAt C:\\mk3-driver.ps1:166 char:30\r\n+ throw\r\n";
         assert_eq!(script_error(stderr), "the MK3's screens use 'nimc3usb', not WinUSB");
-        assert_eq!(script_error(""), "changing the MK3's driver failed");
+        assert_eq!(script_error(""), "changing the controller's driver failed");
     }
 
     #[test]
-    fn no_mk3_is_never_ni_holding_the_screens() {
-        assert!(!holding(deckard_mk3::display::NO_MK3));
+    fn no_controller_is_never_ni_holding_the_screens() {
+        assert!(!holding(deckard_mk3::display::NO_CONTROLLER));
     }
 
     #[cfg(windows)]

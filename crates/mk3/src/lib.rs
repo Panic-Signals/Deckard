@@ -21,6 +21,26 @@ pub const VENDOR: u16 = 0x17cc;
 /// The Maschine MK3.
 pub const PRODUCT: u16 = 0x1600;
 
+/// A controller DECKARD drives: its controls and screens work the same, on its own USB
+/// product id and interfaces.
+#[derive(Debug, PartialEq)]
+pub struct Model {
+    pub name: &'static str,
+    pub product: u16,
+    /// The USB interface of its screens.
+    pub display_interface: u8,
+    /// The kernel driver NI's installer binds to that interface on Windows
+    /// (`scripts/mk3-driver.ps1` has the same list).
+    pub windows_driver: &'static str,
+}
+
+/// The controllers DECKARD drives, the first found used. A Maschine+ counts in controller
+/// mode; its storage mode (0x1822) is another device.
+pub const MODELS: &[Model] = &[
+    Model { name: "Maschine MK3", product: PRODUCT, display_interface: 5, windows_driver: "nimc3usb" },
+    Model { name: "Maschine+", product: 0x1820, display_interface: 6, windows_driver: "nim3pbd" },
+];
+
 /// Report 0x01's button bits and the scripts' names for them (`NI.HW.<name>`).
 pub const BUTTONS: &[(usize, &str)] = &[
     (0, "BUTTON_WHEEL"),
@@ -305,21 +325,29 @@ impl Decoder {
 /// Where the backlight level sits in a display's settings report.
 const DISPLAY_BRIGHTNESS_BYTE: usize = 8;
 
-/// An open MK3 (its HID interface, shared with NI's agent if that runs).
+/// An open controller (its HID interface, shared with NI's agent if that runs).
 pub struct Device {
     hid: hidapi::HidDevice,
     decoder: Decoder,
+    model: &'static Model,
 }
 
 impl Device {
-    /// The first MK3 connected, if any.
+    /// The first controller connected, if any.
     pub fn open() -> Result<Device, String> {
         let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
         // Shared with NI's agent (macOS; elsewhere HID devices open shared).
         #[cfg(target_os = "macos")]
         api.set_open_exclusive(false);
-        let hid = api.open(VENDOR, PRODUCT).map_err(|e| format!("no Maschine MK3: {e}"))?;
-        Ok(Device { hid, decoder: Decoder::new() })
+        let plugged_in = |m: &&Model| api.device_list().any(|d| d.vendor_id() == VENDOR && d.product_id() == m.product);
+        let model = MODELS.iter().find(plugged_in).ok_or(display::NO_CONTROLLER)?;
+        let hid = api.open(VENDOR, model.product).map_err(|e| format!("couldn't open the {}: {e}", model.name))?;
+        Ok(Device { hid, decoder: Decoder::new(), model })
+    }
+
+    /// Which controller it is.
+    pub fn model(&self) -> &'static Model {
+        self.model
     }
 
     /// Wait up to `timeout_ms` for input; the events of every report that came.
@@ -364,6 +392,41 @@ impl Device {
             self.hid.send_feature_report(&buf[..n]).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn the_maschine_plus_has_its_own_ids_and_the_mk3_keeps_its() {
+        let of = |product| MODELS.iter().find(|m| m.product == product);
+        assert_eq!(of(0x1600).map(|m| (m.name, m.display_interface)), Some(("Maschine MK3", 5)));
+        assert_eq!(of(0x1820).map(|m| (m.name, m.display_interface)), Some(("Maschine+", 6)));
+        assert_eq!(of(0x1822), None, "the Maschine+'s storage mode is another device");
+    }
+
+    /// The Windows script can't read `MODELS`, so it has a list of its own.
+    #[test]
+    fn the_windows_driver_script_lists_the_same_controllers() {
+        let script = include_str!("../../../scripts/mk3-driver.ps1");
+        for m in MODELS {
+            let line = format!(
+                "@{{ Name = \"{}\"; Product = \"{:04x}\"; Interface = \"{:02}\"; Driver = \"{}\" }}",
+                m.name, m.product, m.display_interface, m.windows_driver
+            );
+            assert!(script.contains(&line), "{line}");
+        }
+    }
+
+    #[test]
+    fn linux_lets_the_user_reach_every_controller() {
+        let rules = include_str!("../../../scripts/linux/50-deckard-maschine-mk3.rules");
+        for m in MODELS {
+            let id = format!("ATTRS{{idProduct}}==\"{:04x}\"", m.product);
+            assert_eq!(rules.matches(&id).count(), 2, "{} over USB and hidraw", m.name);
+        }
     }
 }
 

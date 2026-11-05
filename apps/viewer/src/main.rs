@@ -2383,7 +2383,7 @@ impl App {
                     if cfg!(windows)
                         && let Some(mk3) = &self.mk3
                     {
-                        ui.label("MK3 screens");
+                        ui.label("Controller screens");
                         if mk3.displays_released() {
                             if ui.button("Use in DECKARD").clicked() {
                                 mk3.release_displays(false);
@@ -2392,7 +2392,7 @@ impl App {
                             if ui.button("Give Back to NI's Driver").on_hover_text("For Maschine and NI's other software, which can't use the screens while DECKARD's driver has them. Asks for administrator approval.").clicked() {
                                 mk3.release_displays(true);
                                 ni_agent::give_back();
-                                self.status = "giving the MK3's screens back to NI's driver".into();
+                                self.status = "giving the controller's screens back to NI's driver".into();
                             }
                         } else {
                             ui.label(egui::RichText::new("Not open").weak());
