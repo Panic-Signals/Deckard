@@ -78,6 +78,10 @@ pub const RATES: [(&str, f64); 24] = [
 /// The index in [`RATES`] of "1/4".
 pub const DEFAULT_RATE: usize = 12;
 
+/// How far the picture scrolls compared with the LFO. Slow enough to watch; the
+/// rate still shows, because a faster LFO travels further in the same time.
+const PICTURE_SCROLL: f64 = 0.125;
+
 /// One LFO: `pad` (1–16) names it; `rate` indexes [`RATES`] when `sync`, else `hz`
 /// (0.01–20); `phase` in degrees; `level` 0..1; `offset` −1..1 shifts the wave up or
 /// down; `jitter` 0..1 mixes noise into it; `quantize` steps per cycle (0 off, else
@@ -281,8 +285,13 @@ impl Lfo {
     }
 
     /// Cycles elapsed on the display clock: `seconds` of UI time, at `bpm` when synced.
+    ///
+    /// The picture moves at an eighth of the LFO, so the two-beat window takes about
+    /// eight seconds to cross the panel instead of one. A faster rate still travels
+    /// further. The signal itself ([`Self::output`]) is not slowed.
     pub fn display_cycles(&self, seconds: f64, bpm: f64) -> f64 {
-        if self.sync { seconds * (bpm.max(1.0) / 60.0) / self.beats() } else { seconds * f64::from(self.hz).max(0.0) }
+        let real = if self.sync { seconds * (bpm.max(1.0) / 60.0) / self.beats() } else { seconds * f64::from(self.hz).max(0.0) };
+        real * PICTURE_SCROLL
     }
 
     /// Kept so a picture can still ask. The time lines are gone: the wave scrolls instead,
@@ -711,6 +720,19 @@ mod tests {
         assert!(slow.iter().all(|v| (v - 0.5).abs() < 0.45), "that stretch stays near the sine's start");
         let free = |hz| Lfo { sync: false, hz, ..Lfo::new(1) }.picture(8);
         assert_ne!(free(0.01), free(1.0), "a slow free rate shows less of the wave");
+    }
+
+    #[test]
+    fn the_picture_scrolls_slower_than_the_lfo() {
+        let l = Lfo::new(1);
+        // One second at 120 BPM is two quarter notes: two real cycles of a 1/4 LFO.
+        let shown = l.display_cycles(1.0, 120.0);
+        assert!(shown < 0.5, "a second of the picture moves less than half a cycle, got {shown}");
+        let eighth = RATES.iter().position(|r| r.0 == "1/8").unwrap();
+        let faster = Lfo { rate: eighth, ..Lfo::new(1) }.display_cycles(1.0, 120.0);
+        assert!(faster > shown, "a faster rate still travels further");
+        let free = Lfo { sync: false, hz: 1.0, ..Lfo::new(1) };
+        assert!(free.display_cycles(1.0, 120.0) < 0.5);
     }
 
     #[test]
