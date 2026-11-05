@@ -8,6 +8,7 @@
 
 pub mod chords;
 pub mod expression;
+pub mod extra_out;
 pub mod lfo;
 pub mod mod_matrix;
 pub mod pad_touch;
@@ -57,6 +58,8 @@ pub struct Project {
     pub lock: Lock,
     /// The project's LFOs (DECKARD's; [`lfo`]), by pad.
     pub lfos: Vec<lfo::Lfo>,
+    /// The strips of plug-ins' extra outputs (DECKARD's; [`extra_out`]).
+    pub extra_outs: Vec<extra_out::ExtraOut>,
     /// The project's routes from LFOs to MIDI CCs (DECKARD's; [`mod_matrix::CcRoute`]).
     pub cc_routes: Vec<mod_matrix::CcRoute>,
     pub warnings: Vec<String>,
@@ -321,6 +324,7 @@ impl Default for Project {
             cue_pan: 0.0,
             lock: Lock::default(),
             lfos: Vec::new(),
+            extra_outs: Vec::new(),
             cc_routes: Vec::new(),
             warnings: Vec::new(),
             expressions: Vec::new(),
