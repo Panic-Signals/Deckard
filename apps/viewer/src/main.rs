@@ -2380,6 +2380,18 @@ impl App {
                     ui.label("");
                     ui.label(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder.").weak());
                     ui.end_row();
+                    ui.label("Screen brightness");
+                    let mut brightness = self.settings.display_brightness;
+                    if ui.add(egui::Slider::new(&mut brightness, 0..=100).suffix(" %")).changed() {
+                        self.settings.display_brightness = brightness;
+                        if let Some(m) = &self.mk3 {
+                            m.set_display_brightness(brightness);
+                        }
+                    }
+                    ui.end_row();
+                    ui.label("");
+                    ui.label(egui::RichText::new("The backlight of the controller's screens.").weak());
+                    ui.end_row();
                     if cfg!(windows)
                         && let Some(mk3) = &self.mk3
                     {

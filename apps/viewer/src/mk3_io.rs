@@ -8,7 +8,7 @@ use deckard_engine::output::Sender;
 use deckard_mk3::Event;
 use deckard_model::pad_touch::{PadTouch, TouchMode};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where pads play: the scripts' focus, kept up to date by the app.
 #[derive(Clone, Copy)]
@@ -232,6 +232,9 @@ struct Shared {
     displays_released: bool,
     /// The displays' backlight, 0..=100 (`set_display_brightness`).
     display_brightness: Option<u8>,
+    /// Bumped whenever that level must be written again: it changed, or the screens
+    /// came back (a driver change leaves the panels at their own 20%).
+    brightness_stamp: u64,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
     /// (`shut_down`).
     closing: bool,
@@ -296,7 +299,9 @@ impl Mk3Io {
 
     /// Set the displays' backlight (0..=100), now and whenever an MK3 connects.
     pub fn set_display_brightness(&self, level: u8) {
-        self.shared.lock().unwrap().display_brightness = Some(level.min(100));
+        let mut s = self.shared.lock().unwrap();
+        s.display_brightness = Some(level.min(100));
+        s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
     }
 
     pub fn set_context(&self, ctx: &eframe::egui::Context) {
@@ -389,8 +394,10 @@ fn run(shared: &Mutex<Shared>) {
         let mut events = Vec::new();
         // Shown on the LEDs: none yet, so the first state is sent.
         let mut shown = None;
-        // The backlight as last set on this connection.
-        let mut brightness = None;
+        // The backlight write that succeeded, so a failed one is tried again and a
+        // screen reconnect (a new stamp) is sent even when the level did not change.
+        let mut applied_stamp = 0u64;
+        let mut brightness_retry = Instant::now();
         // What each pad started, so it stops the same note however the route changed
         // (a chord's first note; its others in `chord_rest`).
         let mut sounding: [Option<(usize, usize, i64)>; 16] = [None; 16];
@@ -409,14 +416,21 @@ fn run(shared: &Mutex<Shared>) {
                 s.connected = false;
                 break;
             }
-            let wanted = shared.lock().unwrap().display_brightness;
-            if wanted.is_some() && wanted != brightness {
-                if let Some(level) = wanted
-                    && let Err(e) = dev.set_display_brightness(level)
-                {
-                    shared.lock().unwrap().display_status = format!("display brightness: {e}");
+            let (wanted, stamp) = {
+                let s = shared.lock().unwrap();
+                (s.display_brightness, s.brightness_stamp)
+            };
+            if let Some(level) = wanted
+                && stamp != applied_stamp
+                && Instant::now() >= brightness_retry
+            {
+                match dev.set_display_brightness(level) {
+                    Ok(()) => applied_stamp = stamp,
+                    Err(e) => {
+                        shared.lock().unwrap().display_status = format!("display brightness: {e}");
+                        brightness_retry = Instant::now() + Duration::from_secs(1);
+                    }
                 }
-                brightness = wanted;
             }
             let leds = shared.lock().unwrap().leds.clone();
             if leds.is_some() && leds != shown {
@@ -573,6 +587,8 @@ fn run_displays(shared: &Mutex<Shared>) {
             let mut s = shared.lock().unwrap();
             s.display_status.clear();
             s.displays_connected = true;
+            // The panels forget their backlight when the screen driver changes.
+            s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
             set_agent_holding(&mut s, false);
         }
         let mut shown = None;
