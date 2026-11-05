@@ -417,3 +417,69 @@ fn the_view_revision_moves_only_on_change() {
     act(&mut h, BrowseAct::Focus(1));
     assert_ne!(h.state().browser.revision(), r1);
 }
+
+/// On DECKARD's MK3 surface, BROWSE loads via both display button 8 (LOAD) and the 4-D
+/// encoder press (even after moving the wheel bracket to a filter), replacing an
+/// existing Sampler sample with a full-range one-shot and focusing the loaded slot.
+#[test]
+fn mk3_surface_browse_load_button_and_wheel_load_one_shots() {
+    use deckard_mk3::Event;
+    let (_tmp, dir) = temp();
+    let mut app = App::default();
+    app.new_project();
+    let (hit, clap) = (dir.join("Maschine 3/Samples/Hit.wav"), dir.join("Maschine 3/Samples/Clap.wav"));
+    std::fs::create_dir_all(hit.parent().unwrap()).unwrap();
+    wav(&hit, 4410);
+    wav(&clap, 4410);
+    let ni = deckard_library::testing::fixture(&dir);
+    app.browser.start(Some(ni), dir.join("library.db3"), Vec::new());
+    app.browser.add_saved(&hit);
+    app.browser.add_saved(&clap);
+    app.browse(BrowseAct::User(true));
+    app.browse(BrowseAct::Kind(Kind::OneShot));
+    app.browser.wait();
+    let list = |app: &App| -> Vec<String> { app.browser.results.items.iter().map(|i| i.name.clone()).collect() };
+    let hit_i = list(&app).iter().position(|n| n == "Hit").unwrap();
+    let clap_i = list(&app).iter().position(|n| n == "Clap").unwrap();
+    let (g, s) = (0, 0);
+    app.group = g;
+    app.sound = s;
+    let mut reqs = Vec::new();
+    app.mk3_events(vec![Event::Button("BUTTON_BROWSE", true), Event::Button("BUTTON_BROWSE", false)], &mut reqs);
+    assert_eq!(app.surface.page(), "browse");
+
+    // Display button 8 (LOAD) sets up a Sampler with a single full-range zone and focuses slot 0.
+    app.browse(BrowseAct::Focus(hit_i));
+    app.mk3_events(vec![Event::Button("BUTTON_SCREEN_8", true), Event::Button("BUTTON_SCREEN_8", false)], &mut reqs);
+    {
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        let snd = &d.project().groups[g].sounds[s];
+        let zones = &snd.sampler.as_ref().expect("a Sampler").zones;
+        assert_eq!(zones.len(), 1);
+        assert!(zones[0].sample.path.ends_with("Hit.wav"));
+        assert_eq!(zones[0].key_range, (0, 127));
+        assert_eq!(snd.name, "Hit");
+    }
+    assert_eq!(app.slot, Some(0));
+
+    // Move the wheel bracket left onto a filter, then press the 4-D encoder (BUTTON_WHEEL):
+    // it still loads the focused result into the sound, replacing the previous one-shot.
+    app.browse(BrowseAct::Focus(clap_i));
+    app.mk3_events(
+        vec![
+            Event::Button("BUTTON_WHEEL_LEFT", true),
+            Event::Button("BUTTON_WHEEL_LEFT", false),
+            Event::Button("BUTTON_WHEEL", true),
+            Event::Button("BUTTON_WHEEL", false),
+        ],
+        &mut reqs,
+    );
+    let doc = app.doc.clone().unwrap();
+    let d = doc.borrow();
+    let snd = &d.project().groups[g].sounds[s];
+    let zones = &snd.sampler.as_ref().expect("a Sampler").zones;
+    assert_eq!(zones.len(), 1);
+    assert!(zones[0].sample.path.ends_with("Clap.wav"));
+    assert_eq!(snd.name, "Clap");
+}

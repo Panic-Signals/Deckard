@@ -656,6 +656,9 @@ fn browse_wheel_turns_the_bracketed_knob() {
     );
     press(&mut s, &v, "BUTTON_WHEEL_LEFT");
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Product(Some(0)))], "skipping the empty banks");
+    assert_eq!(press(&mut s, &v, "BUTTON_WHEEL"), [Action::Browse(Browse::Load)], "wheel press loads even while a filter is bracketed");
+    assert_eq!(s.event(&Event::Knob(7, 0.1), &v, now), [Action::Browse(Browse::Focus(1))], "knob 8 returns the bracket to results");
+    assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Focus(1))]);
     press(&mut s, &v, "BUTTON_TEMPO");
     assert!(!s.event(&Event::Wheel(1), &v, now).iter().any(|a| matches!(a, Action::Browse(_))), "TEMPO keeps the wheel");
 }
