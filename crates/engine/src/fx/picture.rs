@@ -65,6 +65,7 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
         "Metaverb" => metaverb(params),
         "Iceverb" => ice(params, true),
         "Reflex" => ice(params, false),
+        "PerformanceFX" => perform(params, phase, page),
         _ => return None,
     };
     if matches!(module, "Compressor" | "Limiter" | "Gate" | "Maximizer") {
@@ -82,6 +83,7 @@ pub fn moves(module: &str, params: &[(String, f64)]) -> bool {
         "Phaser" => p(params, "source", 1.0).round() < 1.5 && p(params, "amount", 0.5).abs() > 0.02,
         "FM" => p(params, "amount", 0.75) > 0.02,
         "PlateReverb" => plate_mod(params) > 0.05 && plate_mode(params) != 2,
+        "PerformanceFX" => p(params, "mode", 0.0).round() as i32 == 6 && tremolo_depth(params) > 0.02,
         _ => {
             let _ = params;
             false
@@ -99,6 +101,7 @@ pub fn rate_hz(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
         }
         "FM" => 0.1 * 32.0f32.powf(p(params, "rate", 0.25).clamp(0.0, 1.0)),
         "PlateReverb" => 0.15 + plate_mod(params) * 1.5,
+        "PerformanceFX" => tremolo_hz(params),
         _ => {
             let _ = (params, tempo);
             0.0
@@ -855,6 +858,275 @@ fn ice(params: &[(String, f64)], ice_mode: bool) -> Shot {
     shot
 }
 
+fn perform(params: &[(String, f64)], phase: f32, page: usize) -> Shot {
+    let mode = p(params, "mode", 0.0).round().clamp(0.0, 7.0) as i32;
+    let mut shot = match mode {
+        1 => perform_flanger(params),
+        2 => perform_burst(params),
+        3 => perform_reso(params),
+        4 => perform_ring(params),
+        5 => perform_stutter(params),
+        6 => perform_tremolo(params, phase),
+        7 => perform_scratch(params),
+        _ => perform_filter(params),
+    };
+    let _ = page;
+    shot.dim = !on(params, "touchstrip_on_off", 0.0);
+    shot
+}
+
+fn perform_filter(params: &[(String, f64)]) -> Shot {
+    let min_f = p(params, "filter_min_freq", 0.0).clamp(0.0, 1.0);
+    let max_f = p(params, "filter_max_freq", 1.0).clamp(0.0, 1.0);
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let hz = 20.0 * 1000.0f32.powf(min_f + (max_f - min_f) * pos);
+    let cutoff = ((hz.clamp(46.0, 12_540.0) as f64).log10() - 1.662_757_831_681_574) / 2.435_539_704_813_123;
+    let fake = vec![
+        ("mode".into(), p(params, "filter_type", 0.0).round().clamp(0.0, 2.0) as f64),
+        ("cutoff".into(), cutoff),
+        ("resonance".into(), p(params, "filter_resonance", 1.0 / 3.0).clamp(0.0, 1.0) as f64),
+        ("amount".into(), 0.0),
+    ];
+    let curve = super::filter::response(&fake, N, 0.0);
+    let sat = p(params, "filter_saturation", 0.3).clamp(0.0, 1.0);
+    let shift = (p(params, "filter_out_level", 0.74) - 0.74) * 40.0 / 24.0;
+    let points = curve
+        .points
+        .into_iter()
+        .map(|y| {
+            let d = (y - 0.5) * (1.0 + sat * 1.5);
+            cl(0.5 + d + shift)
+        })
+        .collect();
+    let mut shot = Shot::bare("freq", points);
+    shot.bands = vec![curve.cutoff];
+    shot
+}
+
+fn perform_flanger(params: &[(String, f64)]) -> Shot {
+    let center = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let feedback = p(params, "flanger_decay", 0.65).clamp(0.0, 1.0);
+    let sat = p(params, "flanger_saturation", 0.7).clamp(0.0, 1.0);
+    let stereo = p(params, "flanger_stereo", 1.0).clamp(0.0, 1.0);
+    let wet = p(params, "flanger_wet_level", 0.45).clamp(0.0, 1.0);
+    let invert = on(params, "flanger_polarity", 0.0);
+    let poles = if on(params, "flanger_tone", 0.0) { 4 } else { 1 };
+    let comb = |center: f32| {
+        samples(N)
+            .map(|(_, x)| {
+                let mut acc = 1.0;
+                for k in 0..poles {
+                    let c = (center + k as f32 * 0.06).clamp(0.02, 0.98);
+                    let dip = (1.0 - ((x - c).abs() * 16.0).min(1.0)) * (0.2 + feedback * 0.65);
+                    let v = if invert { 0.4 + dip } else { 0.82 - dip };
+                    acc *= v;
+                }
+                let y = 0.5 + (acc - 0.5) * (1.0 + sat * 0.5);
+                cl(lerp(0.5, y, wet))
+            })
+            .collect()
+    };
+    let mut shot = Shot::bare("freq", comb(center));
+    shot.extent = comb(cl(center + stereo * 0.07));
+    shot
+}
+
+fn perform_burst(params: &[(String, f64)]) -> Shot {
+    let assign_time = on(params, "burst_ts_assign", 0.0);
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let time = if assign_time { pos } else { p(params, "burst_time", 0.5).clamp(0.0, 1.0) };
+    let feedback = if assign_time { p(params, "burst_feedback", 0.95) } else { pos };
+    let mode = p(params, "burst_time_mode", 1.0).round() as i32;
+    let scale = match mode {
+        1 => 1.5,
+        2 => 2.0 / 3.0,
+        3 => 0.4 + time,
+        _ => 1.0,
+    };
+    let step = (0.06 + time * 0.22) * scale;
+    let filter = p(params, "burst_filter", 0.35).clamp(0.0, 1.0);
+    let wet = p(params, "burst_wet_level", 0.6).clamp(0.0, 1.5) / 1.5;
+    let feed = p(params, "burst_feed", 0.3).clamp(0.0, 1.0);
+    let mix_mode = p(params, "burst_mix_mode", 0.0).round() as i32;
+    taps(step, cl(feedback * (0.55 + feed * 0.4)), filter, wet, mix_mode != 1)
+}
+
+fn perform_reso(params: &[(String, f64)]) -> Shot {
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let hz = 40.0 * 100.0f32.powf(pos);
+    let time = p(params, "reso_time", 0.25).clamp(0.0, 1.0);
+    let feedback = p(params, "reso_feedback", 0.75).clamp(0.0, 1.0);
+    let wet = p(params, "reso_wet_level", 0.35).clamp(0.0, 1.0);
+    let x = freq_x(hz);
+    let res = p(params, "reso_resonance", 0.45).clamp(0.0, 1.0);
+    let sat = p(params, "reso_saturation", 0.5).clamp(0.0, 1.0);
+    let pump = p(params, "reso_pump", 0.5).clamp(0.0, 1.0);
+    let points = samples(N)
+        .map(|(_, t)| {
+            let d = (t - x) / (0.08 - res * 0.05).max(0.02);
+            cl(lerp(0.35, 0.35 + (0.45 + sat * 0.2) * (-d * d).exp(), wet))
+        })
+        .collect();
+    let mut shot = Shot::bare("freq", points);
+    if p(params, "reso_mix_mode", 0.0).round() as i32 == 0 {
+        shot.extent = vec![0.42; N];
+    }
+    shot.lfo = samples(48)
+        .map(|(_, t)| {
+            let env = (t * std::f32::consts::TAU * (1.0 + time * 4.0)).sin().abs();
+            cl(env * (0.25 + pump * 0.5) * (0.2 + feedback * 0.8))
+        })
+        .collect();
+    shot
+}
+
+fn taps(step: f32, feedback: f32, darken: f32, wet: f32, dry: bool) -> Shot {
+    let step = step.clamp(0.04, 0.5);
+    let feedback = feedback.clamp(0.0, 0.96);
+    let mut bands = Vec::new();
+    if dry {
+        bands.push((0.03, cl(0.25 + 0.3 * (1.0 - wet))));
+    }
+    let mut level = wet;
+    let mut x = step;
+    let mut k = 0.0;
+    while level > 0.07 && x < 0.98 && bands.len() < 12 {
+        bands.push((x, cl(0.12 + 0.75 * level * (1.0 - darken * 0.5).powf(k))));
+        level *= feedback;
+        x += step;
+        k += 1.0;
+    }
+    let points = samples(N)
+        .map(|(_, t)| {
+            let n = (t / step).floor().max(0.0);
+            cl(wet * feedback.powf(n) * (1.0 - darken * 0.35).powf(n))
+        })
+        .collect();
+    let mut shot = Shot::bare("time", points);
+    shot.bands = bands;
+    shot
+}
+
+fn perform_ring(params: &[(String, f64)]) -> Shot {
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let hz = 30.0 * 100.0f32.powf(pos);
+    let center = freq_x(hz);
+    let spread = p(params, "ring_spread", 0.3).clamp(0.0, 1.0);
+    let glide = p(params, "ring_glide", 0.0).clamp(0.0, 1.0);
+    let wet = p(params, "ring_dry_wet", 0.35).clamp(0.0, 1.0);
+    let width = 0.02 + glide * 0.04;
+    let points = samples(N)
+        .map(|(_, x)| {
+            let carrier = (-((x - center) / width).powi(2)).exp();
+            let side = (-((x - (center - 0.08 - spread * 0.2)) / width).powi(2)).exp()
+                + (-((x - (center + 0.08 + spread * 0.2)) / width).powi(2)).exp();
+            cl(lerp(0.2 + 0.4 * carrier, 0.2 + 0.35 * carrier + 0.4 * side, wet))
+        })
+        .collect();
+    let mut shot = Shot::bare("freq", points);
+    let rt = p(params, "ring_rev_time", 0.1);
+    let rm = p(params, "ring_rev_mix", 0.5);
+    shot.lfo = samples(48).map(|(_, t)| cl(rm * (-t / (0.15 + rt).max(0.05)).exp())).collect();
+    if on(params, "ring_mix_mode", 0.0) {
+        for y in &mut shot.points {
+            *y = cl(0.5 * *y + 0.15);
+        }
+    }
+    shot
+}
+
+fn perform_stutter(params: &[(String, f64)]) -> Shot {
+    let pitch_assign = on(params, "stutter_ts_assign", 0.0);
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let mut length = if pitch_assign { p(params, "stutter_length", 0.4) } else { pos };
+    if on(params, "stutter_quantize", 1.0) {
+        length = (length * 8.0).round() / 8.0;
+    }
+    let length = length.clamp(0.08, 1.0);
+    let pitch = if pitch_assign { pos } else { p(params, "stutter_pitch", 0.5).clamp(0.0, 1.0) };
+    let gate = p(params, "stutter_gate", 1.0).clamp(0.0, 1.0);
+    let dir = p(params, "stutter_direction", 2.0).round() as i32;
+    let points = samples(N)
+        .map(|(_, t)| {
+            if t > length {
+                return 0.08;
+            }
+            let u = t / length;
+            let g = if u > gate { (1.0 - (u - gate) / (1.0 - gate).max(0.05)).max(0.0) } else { 1.0 };
+            let slope = match dir {
+                1 => 1.0 - u,
+                2 => 0.5 + 0.5 * (u * std::f32::consts::TAU).sin(),
+                _ => u,
+            };
+            cl(0.15 + (0.25 + pitch * 0.55) * slope * g)
+        })
+        .collect();
+    let mut shot = Shot::bare("time", points);
+    if on(params, "stutter_retrigger", 1.0) {
+        shot.bands = vec![(0.04, 0.8), (cl(length * 0.5), 0.55)];
+    }
+    shot
+}
+
+fn tremolo_depth(params: &[(String, f64)]) -> f32 {
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    lerp(p(params, "tremolo_depth_min", 0.1), p(params, "tremolo_depth_max", 0.4), pos).clamp(0.0, 1.0)
+}
+
+fn tremolo_hz(params: &[(String, f64)]) -> f32 {
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let rate = lerp(p(params, "tremolo_rate_min", 0.6), p(params, "tremolo_rate_max", 0.4), pos).clamp(0.0, 1.0);
+    0.2 * 40.0f32.powf(rate)
+}
+
+fn perform_tremolo(params: &[(String, f64)], phase: f32) -> Shot {
+    let depth = tremolo_depth(params);
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let rate = lerp(p(params, "tremolo_rate_min", 0.6), p(params, "tremolo_rate_max", 0.4), pos).clamp(0.0, 1.0);
+    let cycles = 0.6 + rate * 5.0;
+    let vibr = p(params, "tremolo_trem_vibr", 0.3).clamp(0.0, 1.0);
+    let sharp = on(params, "tremolo_vibr_mode", 0.0);
+    let atk = p(params, "tremolo_attack_release", 0.5).clamp(0.0, 1.0);
+    let stereo = p(params, "tremolo_stereo", 0.4).clamp(0.0, 1.0);
+    let env = |t: f32| {
+        let e = if t < atk * 0.45 { t / (atk * 0.45).max(0.02) } else { 1.0 - (t - 0.4) * (1.0 - atk) * 0.4 };
+        e.clamp(0.25, 1.0)
+    };
+    let wave = |shift: f32, t: f32| {
+        let u = t * cycles + phase + shift;
+        let s = if sharp { (u * std::f32::consts::TAU).sin().signum() * 0.5 + 0.5 } else { 0.5 + 0.5 * (u * std::f32::consts::TAU).sin() };
+        s
+    };
+    let points = samples(N).map(|(_, t)| cl(0.5 + (wave(0.0, t) - 0.5) * depth * 1.6 * env(t) * (1.0 - vibr * 0.3))).collect();
+    let extent = samples(N).map(|(_, t)| cl(0.5 + (wave(stereo * 0.25, t) - 0.5) * depth * vibr * 1.4 * env(t))).collect();
+    let mut shot = Shot::bare("time", points);
+    shot.extent = extent;
+    shot
+}
+
+fn perform_scratch(params: &[(String, f64)]) -> Shot {
+    let pos = p(params, "touchstrip_pos", 0.5).clamp(0.0, 1.0);
+    let delay = p(params, "scratcher_delay_time", 0.55).clamp(0.0, 1.0);
+    let feedback = p(params, "scratcher_feedback", 0.7).clamp(0.0, 1.0);
+    let shift = p(params, "scratcher_freq_shift", 0.5).clamp(0.0, 1.0);
+    let wet = p(params, "scratcher_wet_level", 0.5).clamp(0.0, 1.0);
+    let width = 0.15 + delay * 0.7;
+    let start = cl(pos * (1.0 - width));
+    let points = samples(N)
+        .map(|(_, t)| {
+            if t < start || t > start + width {
+                return 0.12;
+            }
+            let u = (t - start) / width;
+            let tone = (u * (2.0 + shift * 6.0) * std::f32::consts::TAU).sin();
+            cl(lerp(0.2, 0.45 + 0.35 * tone * (0.4 + feedback * 0.6), wet))
+        })
+        .collect();
+    let mut shot = Shot::bare("time", points);
+    shot.bands = vec![(cl(start + width * pos.min(0.98)), cl(0.3 + wet * 0.5))];
+    shot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +1170,7 @@ mod tests {
             ("Metaverb", "size", 0.05, 0.95),
             ("Iceverb", "size", 0.05, 0.95),
             ("Reflex", "smooth", 0.0, 1.0),
+            ("PerformanceFX", "filter_min_freq", 0.0, 0.8),
         ];
         for (module, field, a, b) in cases {
             let picture = shot(module, &[], 0.0, false, 0).unwrap();
@@ -933,5 +1206,19 @@ mod tests {
         assert_eq!(room.kind, "time");
         assert_eq!(eq.kind, "freq");
         assert_ne!(eq.points[10], eq.points[80]);
+    }
+
+    #[test]
+    fn perform_modes_are_different_pictures() {
+        let mut kinds = Vec::new();
+        for mode in 0..8 {
+            let picture = shot("PerformanceFX", &one("mode", mode as f64), 0.2, false, 0).unwrap();
+            assert!(picture.dim, "engage defaults off");
+            assert!(picture.points.iter().all(|y| y.is_finite()), "mode {mode}");
+            kinds.push((picture.kind, picture.points[N / 2]));
+        }
+        assert!(kinds.windows(2).any(|w| w[0] != w[1]), "two modes must not draw the same thing");
+        let on = shot("PerformanceFX", &[("mode".into(), 0.0), ("touchstrip_on_off".into(), 1.0)], 0.0, false, 0).unwrap();
+        assert!(!on.dim);
     }
 }
