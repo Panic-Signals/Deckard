@@ -50,6 +50,7 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
         "Saturator" => saturator(params),
         "MullhollandDrive" => distortion(params, page),
         "TransientDesigner" => transient(params),
+        "BeatDelay" => beat_delay(params),
         _ => return None,
     };
     if matches!(module, "Compressor" | "Limiter" | "Gate" | "Maximizer") {
@@ -346,6 +347,51 @@ fn transient(params: &[(String, f64)]) -> Shot {
     Shot::bare("time", points)
 }
 
+fn beat_delay(params: &[(String, f64)]) -> Shot {
+    let time = p(params, "time", 3.0).round().clamp(0.0, 16.0);
+    let offset = p(params, "offset", 0.0).round().clamp(0.0, 8.0);
+    let feedback = p(params, "feedback", 0.5).clamp(0.0, 0.95);
+    let color = p(params, "color", 0.5).clamp(0.0, 1.0);
+    let crossover = p(params, "crossover", 0.25).clamp(0.0, 1.0);
+    let split = p(params, "split", 0.25).clamp(0.0, 1.0);
+    let stereo = p(params, "stereo", 0.0).clamp(-1.0, 1.0);
+    let mix = p(params, "mix", 0.5).clamp(0.0, 1.0);
+    let unit = p(params, "unit", 0.0).round() as i32;
+    let unit_scale = match unit {
+        1 => 2.0 / 3.0,
+        2 => 0.5,
+        _ => 1.0,
+    };
+    let step = ((time + 1.0) / 18.0 * unit_scale).clamp(0.04, 0.85);
+    let mut bands = vec![(0.03, cl(0.2 + 0.45 * (1.0 - mix)))];
+    let mut level = mix;
+    let mut x = step;
+    let mut k = 0.0;
+    while level > 0.06 && x < 0.97 && bands.len() < 14 {
+        let fade = (1.0 - color * 0.55).powf(k);
+        bands.push((cl(x), cl(0.12 + 0.8 * level * fade)));
+        let echo_x = cl(x + offset / 8.0 * step + split * 0.06 + stereo * 0.05);
+        if (echo_x - x).abs() > 0.015 {
+            bands.push((echo_x, cl(0.1 + 0.55 * level * fade * (1.0 - crossover * 0.65))));
+        }
+        level *= feedback;
+        x += step;
+        k += 1.0;
+    }
+    let points = samples(N)
+        .map(|(_, t)| {
+            if t < 0.03 {
+                return 0.15;
+            }
+            let n = ((t - 0.02) / step).floor().max(0.0);
+            cl(mix * feedback.powf(n) * (1.0 - color * 0.4).powf(n))
+        })
+        .collect();
+    let mut shot = Shot::bare("time", points);
+    shot.bands = bands;
+    shot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +420,7 @@ mod tests {
             ("Saturator", "classic_drive", 0.0, 1.0),
             ("MullhollandDrive", "drive", 0.0, 1.0),
             ("TransientDesigner", "attack", -1.0, 1.0),
+            ("BeatDelay", "feedback", 0.0, 0.9),
         ];
         for (module, field, a, b) in cases {
             let picture = shot(module, &[], 0.0, false, 0).unwrap();
