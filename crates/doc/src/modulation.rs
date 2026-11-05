@@ -249,6 +249,41 @@ mod tests {
         assert!(d.project().groups[0].sounds[0].modulators.is_empty());
     }
 
+    /// A sound's and a group's level and pan take lanes as a module's parameters do: on
+    /// the channel, with no slot, and read back from the saved file.
+    #[test]
+    fn a_channels_fader_takes_a_lane() {
+        let mut d = project();
+        let target = |field: &str| ModTarget { slot: None, field: field.into() };
+        for field in ["level", "pan"] {
+            d.set_modulation(Chain::Sound(0, 0), &target(field), 0, (0, 960), &[(0, -0.25), (480, 0.25)]).unwrap();
+            d.set_modulation(Chain::Group(0), &target(field), 0, (0, 960), &[(0, 0.5)]).unwrap();
+        }
+        let check = |p: &Project| {
+            let lanes = [target("level"), target("pan")];
+            assert_eq!(p.groups[0].sounds[0].modulators, lanes);
+            assert_eq!(p.groups[0].modulators, lanes);
+            let of = |sound: Option<usize>, field: &str| -> Vec<(i64, f64)> {
+                p.groups[0].patterns[0]
+                    .mods
+                    .iter()
+                    .filter(|m| m.sound == sound && m.slot.is_none() && m.field == field)
+                    .map(|m| (m.position, m.value))
+                    .collect()
+            };
+            for field in ["level", "pan"] {
+                assert_eq!(of(Some(0), field), [(0, -0.25), (480, 0.25)], "the sound's {field}");
+                assert_eq!(of(None, field), [(0, 0.5)], "the group's {field}");
+            }
+        };
+        check(d.project());
+        check(Document::from_bytes(d.to_bytes().unwrap(), None).unwrap().project());
+        // Removed with its points, the channel keeps its other lane.
+        d.clear_modulation(Chain::Sound(0, 0), &target("level")).unwrap();
+        assert_eq!(d.project().groups[0].sounds[0].modulators, [target("pan")]);
+        assert!(d.project().groups[0].patterns[0].mods.iter().all(|m| m.sound != Some(0) || m.field != "level"));
+    }
+
     #[test]
     fn writing_again_replaces_the_span() {
         let mut d = project();

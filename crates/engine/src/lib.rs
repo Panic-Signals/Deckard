@@ -102,6 +102,10 @@ pub struct Timeline {
     pub length: i64,
     /// Modulation, by pass of a pattern.
     pub mods: Vec<modscale::ModLane>,
+    /// Modulation of channels' faders (their `level` and `pan`), by pass of a pattern.
+    /// Unlike [`Timeline::mods`], the points stay deviations: a moved fader needs no new
+    /// timeline.
+    pub faders: Vec<modscale::ModLane>,
     /// The project's per-note expression, which notes' `expr` index.
     pub exprs: Vec<std::sync::Arc<deckard_model::Expression>>,
     /// The sounds (group, sound) with PROB LOCK on: their notes' chances are the first
@@ -366,6 +370,7 @@ fn add_clips(p: &Project, t: &mut Timeline) {
             // (A loop stopping where the clip starts still stops.)
             t.events.retain(|e| e.group != g || !span.contains(&e.tick) || (e.cue == Some(Cue::Off) && e.tick == span.start));
             t.mods.retain(|m| m.group != g || m.to <= span.start || m.from >= span.end);
+            t.faders.retain(|m| m.group != g || m.to <= span.start || m.from >= span.end);
             fill_with(p, g, pat, c.position, c.length, t);
             t.length = t.length.max(span.end);
         }
@@ -420,6 +425,27 @@ fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option
     out
 }
 
+/// A pattern's modulation of channels' faders, as lanes: (sound, `None` for the group;
+/// field; points from the pattern's start, at their deviations).
+fn fader_lanes(p: &Project, pat: &deckard_model::Pattern) -> Vec<(Option<usize>, String, Vec<(i64, f64)>)> {
+    let plen = own_length(p, pat);
+    let mut out: Vec<(Option<usize>, String, Vec<(i64, f64)>)> = Vec::new();
+    for m in pat.mods.iter().filter(|m| m.slot.is_none() && is_fader(&m.field)) {
+        let pos = m.position - pat.start;
+        if !(0..plen).contains(&pos) {
+            continue;
+        }
+        match out.iter_mut().find(|l| l.0 == m.sound && l.1 == m.field) {
+            Some(l) => l.2.push((pos, m.value)),
+            None => out.push((m.sound, m.field.clone(), vec![(pos, m.value)])),
+        }
+    }
+    for l in &mut out {
+        l.2.sort_by_key(|x| x.0);
+    }
+    out
+}
+
 /// Notes of a pattern looped over `[start, start + length)`.
 fn fill_pattern(p: &Project, g: usize, pi: usize, start: i64, length: i64, t: &mut Timeline) {
     fill_with(p, g, &p.groups[g].patterns[pi], start, length, t);
@@ -429,10 +455,25 @@ fn fill_pattern(p: &Project, g: usize, pi: usize, start: i64, length: i64, t: &m
 fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, length: i64, t: &mut Timeline) {
     let plen = own_length(p, pat);
     let lanes = mod_lanes(p, g, pat);
+    let fader_lanes = fader_lanes(p, pat);
     let out = &mut t.events;
     let mut rep = 0;
     while rep < length {
         let pass = (start + rep, start + rep + plen.min(length - rep));
+        for (sound, field, points) in &fader_lanes {
+            let points: Vec<(i64, f64)> = points.iter().map(|&(pos, v)| (pass.0 + pos, v)).filter(|x| x.0 < pass.1).collect();
+            if !points.is_empty() {
+                t.faders.push(modscale::ModLane {
+                    group: g,
+                    sound: *sound,
+                    slot: 0,
+                    field: field.clone(),
+                    from: pass.0,
+                    to: pass.1,
+                    points,
+                });
+            }
+        }
         for (sound, slot, field, points) in &lanes {
             let points: Vec<(i64, f64)> = points.iter().map(|&(pos, v)| (pass.0 + pos, v)).filter(|x| x.0 < pass.1).collect();
             if !points.is_empty() {
@@ -551,7 +592,7 @@ pub fn sound_bus(p: &Project, g: usize, s: usize) -> Option<usize> {
 /// [`sound_gain`] and [`sound_bus`].
 fn sound_route(p: &Project, g: usize, s: usize) -> Route {
     let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return SILENT };
-    let own = channel_gain(snd.level, snd.pan);
+    let own = fader_gain(snd.level, snd.pan, &snd.modulators);
     let (bus, gain) = if snd.cue { cue_route(p) } else { dest_route(p, snd.channel.dest, Some(g), 0) };
     (bus, mul(own, gain))
 }
@@ -571,6 +612,129 @@ fn channel_gain(level: f64, pan: f64) -> (f32, f32) {
     let (l, r) = pan_gains(pan);
     let lvl = deckard_model::level_gain(level) as f32;
     (lvl * l, lvl * r)
+}
+
+/// Whether a channel's property `field` is one of its fader's.
+fn is_fader(field: &str) -> bool {
+    matches!(field, "level" | "pan")
+}
+
+/// Whether a channel's fader has a modulation lane: its gain then isn't in the routes
+/// through it, which [`channel_faders`] lists for the engine to apply at each moment.
+fn moving(modulators: &[deckard_model::ModTarget]) -> bool {
+    modulators.iter().any(|m| m.slot.is_none() && is_fader(&m.field))
+}
+
+/// A channel rendered without its fader goes without the fader's modulation too.
+fn drop_fader_lanes(modulators: &mut Vec<deckard_model::ModTarget>) {
+    modulators.retain(|m| m.slot.is_some() || !is_fader(&m.field));
+}
+
+/// A channel's fader in a route: unity when it's modulated ([`moving`]).
+fn fader_gain(level: f64, pan: f64, modulators: &[deckard_model::ModTarget]) -> (f32, f32) {
+    if moving(modulators) { (1.0, 1.0) } else { channel_gain(level, pan) }
+}
+
+/// A channel whose fader is modulated, as the audio thread has it.
+#[derive(Debug, Clone, PartialEq)]
+struct Fader {
+    group: usize,
+    sound: Option<usize>,
+    /// The fader's own place.
+    level: f64,
+    pan: f64,
+    /// Its gain now.
+    gain: (f32, f32),
+}
+
+/// The gain of the faders on a path.
+fn path_gain(faders: &[Fader], path: &[usize]) -> (f32, f32) {
+    path.iter().filter_map(|&i| faders.get(i)).fold((1.0, 1.0), |gain, f| mul(gain, f.gain))
+}
+
+/// The modulated faders along the routes (what [`sound_route`] and [`group_out_route`]
+/// leave out): the faders, then each sound's path and each group bus's, as places in them.
+fn channel_faders(p: &Project) -> (Vec<Fader>, Vec<Vec<Vec<usize>>>, Vec<Vec<usize>>) {
+    let mut faders = Vec::new();
+    for (g, grp) in p.groups.iter().enumerate() {
+        if moving(&grp.modulators) {
+            faders.push(Fader { group: g, sound: None, level: grp.level, pan: grp.pan, gain: channel_gain(grp.level, grp.pan) });
+        }
+        for (s, snd) in grp.sounds.iter().enumerate().filter(|(_, snd)| moving(&snd.modulators)) {
+            faders.push(Fader { group: g, sound: Some(s), level: snd.level, pan: snd.pan, gain: channel_gain(snd.level, snd.pan) });
+        }
+    }
+    let place = |g: usize, s: Option<usize>| faders.iter().position(|f| (f.group, f.sound) == (g, s));
+    // As `dest_route`, `group_route` and `group_fader_route` walk.
+    fn after_group(p: &Project, g: usize, depth: u8, place: &dyn Fn(usize, Option<usize>) -> Option<usize>, out: &mut Vec<usize>) {
+        let Some(grp) = p.groups.get(g) else { return };
+        out.extend(place(g, None));
+        if !grp.cue {
+            after_dest(p, grp.channel.dest, None, depth, place, out);
+        }
+    }
+    fn after_dest(
+        p: &Project,
+        dest: deckard_model::AudioDest,
+        parent: Option<usize>,
+        depth: u8,
+        place: &dyn Fn(usize, Option<usize>) -> Option<usize>,
+        out: &mut Vec<usize>,
+    ) {
+        use deckard_model::AudioDest as D;
+        if depth > 8 {
+            return;
+        }
+        let into = |g: usize, out: &mut Vec<usize>| {
+            if p.groups.get(g).is_some_and(|grp| !has_bus(grp)) {
+                after_group(p, g, depth + 1, place, out);
+            }
+        };
+        match dest {
+            D::Parent => {
+                if let Some(g) = parent {
+                    into(g, out);
+                }
+            }
+            D::Group(g) => into(g, out),
+            D::Sound(g, s) => {
+                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)) {
+                    out.extend(place(g, Some(s)));
+                    if !bus.cue {
+                        after_dest(p, bus.channel.dest, Some(g), depth + 1, place, out);
+                    }
+                }
+            }
+            D::None | D::Master | D::Ext(_) => {}
+        }
+    }
+    let sounds = p
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(g, grp)| {
+            grp.sounds
+                .iter()
+                .enumerate()
+                .map(|(s, snd)| {
+                    let mut path = Vec::new();
+                    path.extend(place(g, Some(s)));
+                    if !snd.cue {
+                        after_dest(p, snd.channel.dest, Some(g), 0, &place, &mut path);
+                    }
+                    path
+                })
+                .collect()
+        })
+        .collect();
+    let buses = (0..p.groups.len())
+        .map(|g| {
+            let mut path = Vec::new();
+            after_group(p, g, 1, &place, &mut path);
+            path
+        })
+        .collect();
+    (faders, sounds, buses)
 }
 
 /// Undo the master's gain (for what doesn't go through it).
@@ -619,7 +783,7 @@ fn dest_route(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>
         D::Sound(g, s) => match p.groups.get(g).and_then(|x| x.sounds.get(s)) {
             Some(bus) if !(bus.muted && bus.channel.audio_mute) => {
                 let (to, gain) = if bus.cue { cue_route(p) } else { dest_route(p, bus.channel.dest, Some(g), depth + 1) };
-                (to, mul(channel_gain(bus.level, bus.pan), gain))
+                (to, mul(fader_gain(bus.level, bus.pan, &bus.modulators), gain))
             }
             _ => SILENT,
         },
@@ -658,7 +822,7 @@ fn group_out_route(p: &Project, g: usize) -> Route {
 
 fn group_fader_route(p: &Project, g: usize, depth: u8) -> Route {
     let grp = &p.groups[g];
-    let own = channel_gain(grp.level, grp.pan);
+    let own = fader_gain(grp.level, grp.pan, &grp.modulators);
     let (to, gain) = if grp.cue { cue_route(p) } else { dest_route(p, grp.channel.dest, None, depth) };
     (to, mul(own, gain))
 }
@@ -1330,6 +1494,11 @@ pub struct Engine {
     /// [group][sound]: the external output a sound plays on when it isn't the master's
     /// ([`sound_bus`]).
     routes: Vec<Vec<Option<usize>>>,
+    /// The faders with modulation, and which are on each sound's way out ([group][sound])
+    /// and each group bus's ([`channel_faders`]).
+    faders: Vec<Fader>,
+    sound_faders: Vec<Vec<Vec<usize>>>,
+    bus_faders: Vec<Vec<usize>>,
     /// Peak output level (left, right) since the last `take_master_peak`.
     master_peak: (f32, f32),
     /// The last note id given out.
@@ -1867,6 +2036,7 @@ impl Engine {
             instruments.push(row);
         }
         let mod_routes = mod_rt::routes_of(project, &cache.plugins);
+        let (faders, sound_faders, bus_faders) = channel_faders(project);
         // The playing timeline stays when the edit didn't change what makes it.
         let keep_timeline = prev.is_some_and(|(p, _)| same_timelines(p, project));
         let timeline = if keep_timeline { Timeline::default() } else { timeline(project, mode) };
@@ -2040,6 +2210,9 @@ impl Engine {
                 .enumerate()
                 .map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect())
                 .collect(),
+            faders,
+            sound_faders,
+            bus_faders,
             master_peak: (0.0, 0.0),
             clock: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -2244,6 +2417,9 @@ impl Engine {
         self.master_pan = fresh.master_pan;
         self.master_bus = fresh.master_bus;
         std::mem::swap(&mut self.routes, &mut fresh.routes);
+        std::mem::swap(&mut self.faders, &mut fresh.faders);
+        std::mem::swap(&mut self.sound_faders, &mut fresh.sound_faders);
+        std::mem::swap(&mut self.bus_faders, &mut fresh.bus_faders);
         self.stale = false;
         if fresh.keep_timeline {
             // The same timelines: this one's play on.
@@ -3849,6 +4025,7 @@ impl Engine {
         if !self.unrouted.is_empty() {
             self.retry_unroutes();
         }
+        self.apply_faders();
         if !self.modulating && (self.timeline.mods.is_empty() || !self.sequencing) && self.mod_routes.is_empty() {
             return;
         }
@@ -3903,6 +4080,32 @@ impl Engine {
         self.modulating = any;
     }
 
+    /// Modulated faders take their lanes' places at the song's position: their own moved
+    /// by the deviation there, or their own when no lane plays. No allocating (the audio
+    /// thread).
+    fn apply_faders(&mut self) {
+        if self.faders.is_empty() {
+            return;
+        }
+        let tick = self.frame as f64 / self.samples_per_tick();
+        for f in &mut self.faders {
+            let (mut level, mut pan) = (f.level, f.pan);
+            if self.sequencing {
+                let here =
+                    |l: &&modscale::ModLane| l.group == f.group && l.sound == f.sound && ((l.from as f64)..(l.to as f64)).contains(&tick);
+                for lane in self.timeline.faders.iter().filter(here) {
+                    let dev = lane.value_at(tick);
+                    match lane.field.as_str() {
+                        "level" => level = (f.level + dev).clamp(0.0, 1.0),
+                        // Its knob travels over −1..1.
+                        _ => pan = (f.pan + dev * 2.0).clamp(-1.0, 1.0),
+                    }
+                }
+            }
+            f.gain = channel_gain(level, pan);
+        }
+    }
+
     /// The song's position now, `done` frames into the span being rendered.
     fn transport_at(&self, done: usize) -> Transport {
         let spt = self.samples_per_tick();
@@ -3928,7 +4131,8 @@ impl Engine {
             let g = self.bus_order[k];
             let Some(mut bus) = self.buses.get_mut(g).and_then(Option::take) else { continue };
             run_chain(&mut bus.chain, &mut bus.buf[..frames * 2], frames, pos, &self.sc_bufs);
-            bus.ramp.aim(bus.route.1, glide);
+            let fader = self.bus_faders.get(g).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
+            bus.ramp.aim(mul(bus.route.1, fader), glide);
             let dst: Option<&mut [f32]> = match bus.route.0 {
                 None => Some(&mut *out),
                 Some(n) if n >= GROUP_BUS => self.buses.get_mut(n - GROUP_BUS).and_then(Option::as_mut).map(|b| &mut b.buf[..frames * 2]),
@@ -4378,7 +4582,8 @@ impl Engine {
                     (None, None, _) => self.instruments[g][s].as_ref().map_or((0.0, 0.0), |i| i.gain),
                 };
                 let checked = chain.is_some() || link.is_some_and(|l| l.finite);
-                ramp.aim(gain, glide);
+                let fader = self.sound_faders.get(g).and_then(|r| r.get(s)).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
+                ramp.aim(mul(gain, fader), glide);
                 if !chained && let Some(c) = chain {
                     c.record_from(&src[..frames * 2], &mut self.sc_bufs);
                 }
@@ -5276,6 +5481,7 @@ mod tests {
             }],
             length: 1,
             mods: Vec::new(),
+            faders: Vec::new(),
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
@@ -5310,6 +5516,7 @@ mod tests {
             }],
             length: 1,
             mods: Vec::new(),
+            faders: Vec::new(),
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
@@ -8407,6 +8614,183 @@ mod tests {
         e.process(&mut out);
         assert!((out[0] - 0.5).abs() < 1e-4 && (out[1] + 0.25).abs() < 1e-4, "{out:?}");
         assert!(live.lock().unwrap().is_empty());
+    }
+
+    /// A fader's lane: a channel's `field`, with no slot.
+    fn fader_lane(field: &str) -> deckard_model::ModTarget {
+        deckard_model::ModTarget { slot: None, field: field.into() }
+    }
+
+    fn fader_point(sound: Option<usize>, field: &str, position: i64, value: f64) -> deckard_model::ModPoint {
+        deckard_model::ModPoint { sound, slot: None, field: field.into(), position, value }
+    }
+
+    /// A project with no notes whose only sound takes In 1, in a looped bar.
+    fn fader_project() -> Project {
+        let mut p = project();
+        p.groups[0].patterns[0].notes.clear();
+        p.groups[0].sounds[0].channel.audio_in = deckard_model::AudioSource::Ext(0);
+        p
+    }
+
+    fn fader_engine(p: &Project) -> Engine {
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(p, None, 1000, Mode::Arrangement, &mut cache);
+        e.live_in = Some(Default::default());
+        e.looping = true;
+        e
+    }
+
+    /// What a steady 0.5 on In 1 comes out as after `frames`, gains settled.
+    fn steady(e: &mut Engine, frames: usize) -> (f32, f32) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        // In short blocks: gains move at each block's start.
+        let mut out = vec![0f32; frames * 2];
+        for block in out.chunks_mut(16) {
+            e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, block.len() / 2));
+            e.process(block);
+        }
+        (out[frames * 2 - 2], out[frames * 2 - 1])
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// A sound's level follows its lane while the pattern plays, from its fader's place;
+    /// stopped, it's the fader's own again.
+    #[test]
+    fn a_lane_moves_a_sounds_level() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, -0.25)];
+        assert_eq!(sound_gain(&p, 0, 0), (1.0, 1.0), "its fader isn't in the route");
+        let mut e = fader_engine(&p);
+        let want = 0.5 * deckard_model::level_gain(0.5) as f32;
+        assert!(near(steady(&mut e, 100).0, want), "the lane: {want}");
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.5), "stopped: the fader's own");
+    }
+
+    /// Points are joined by lines, and the lane holds only where its pattern plays.
+    #[test]
+    fn a_lane_is_followed_along_the_pattern() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, 0.0), fader_point(Some(0), "level", 2 * PPQ, -0.5)];
+        let t = timeline(&p, Mode::Arrangement);
+        assert_eq!(t.faders.len(), 2, "a pass per bar of the section: {:?}", t.faders);
+        assert_eq!((t.faders[1].from, t.faders[1].to), (4 * PPQ, 8 * PPQ));
+        let mut e = fader_engine(&p);
+        // A quarter is 500 frames at 120 BPM and 1000 Hz: there, half way (a little behind
+        // it, gliding); past the last point, it holds.
+        let halfway = steady(&mut e, 500).0;
+        assert!((halfway - 0.5 * deckard_model::level_gain(0.5) as f32).abs() < 0.02, "{halfway}");
+        let held = steady(&mut e, 600).0;
+        assert!(near(held, 0.5 * deckard_model::level_gain(0.25) as f32), "{held}");
+    }
+
+    /// A fader at the bottom still rises with its lane (no gain to scale from).
+    #[test]
+    fn a_lane_lifts_a_silent_fader() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].level = 0.0;
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, 0.75)];
+        let mut e = fader_engine(&p);
+        assert!(near(steady(&mut e, 100).0, 0.5));
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.0));
+    }
+
+    /// Pan's lane: a deviation of its knob's travel, which covers −1..1.
+    #[test]
+    fn a_lane_moves_a_sounds_pan() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("pan")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "pan", 0, 0.5)];
+        let mut e = fader_engine(&p);
+        let (l, r) = steady(&mut e, 100);
+        assert!(l.abs() < 1e-4 && r > 0.5, "right: {l} {r}");
+        e.sequencing = false;
+        let (l, r) = steady(&mut e, 100);
+        assert!(near(l, r), "the middle again: {l} {r}");
+    }
+
+    /// A group's lane moves the sounds that go through it, and with effects, its bus.
+    #[test]
+    fn a_lane_moves_a_groups_level() {
+        let mut p = fader_project();
+        p.groups[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(None, "level", 0, -0.25)];
+        let mut e = fader_engine(&p);
+        assert_eq!(e.sound_faders[0][0], [0], "no bus: on the sound's way out");
+        let want = 0.5 * deckard_model::level_gain(0.5) as f32;
+        assert!(near(steady(&mut e, 100).0, want));
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.5));
+        // With effects, it's after them.
+        p.groups[0].slots = vec![driven_saturator()];
+        let mut e = fader_engine(&p);
+        assert!(e.sound_faders[0][0].is_empty());
+        assert_eq!(e.bus_faders[0], [0]);
+        let moved = steady(&mut e, 500).0;
+        e.sequencing = false;
+        let own = steady(&mut e, 500).0;
+        assert!((moved / own - deckard_model::level_gain(0.5) as f32).abs() < 1e-3, "{moved} / {own}");
+    }
+
+    /// Only the faders a sound's way out passes through move it.
+    #[test]
+    fn a_fader_off_the_route_leaves_a_sound_alone() {
+        use deckard_model::AudioDest as D;
+        let mut p = fader_project();
+        p.groups[0].modulators = vec![fader_lane("level")];
+        p.groups[0].sounds.push(Sound { modulators: vec![fader_lane("level")], ..Default::default() });
+        // Past its group, to a bus sound with a lane.
+        p.groups[0].sounds[0].channel.dest = D::Sound(0, 1);
+        p.groups[0].sounds[1].channel.dest = D::Master;
+        let (faders, sounds, _) = channel_faders(&p);
+        assert_eq!(faders.iter().map(|f| (f.group, f.sound)).collect::<Vec<_>>(), [(0, None), (0, Some(1))]);
+        assert_eq!(sounds[0][0], [1], "the bus sound's, not the group's");
+        // On the cue bus: none of them.
+        p.groups[0].sounds[0].cue = true;
+        assert!(channel_faders(&p).1[0][0].is_empty());
+    }
+
+    /// With no lane, nothing changes: the fader's in the route as ever.
+    #[test]
+    fn a_fader_with_no_lane_stays_in_the_route() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].level = 0.5;
+        let want = deckard_model::level_gain(0.5) as f32;
+        assert!(near(sound_gain(&p, 0, 0).0, want));
+        let e = fader_engine(&p);
+        assert!(e.faders.is_empty());
+        // Another of the channel's properties modulated isn't its fader.
+        p.groups[0].sounds[0].modulators = vec![fader_lane("aux1_level")];
+        assert!(near(sound_gain(&p, 0, 0).0, want));
+    }
+
+    /// A fader moved during play: the lane plays on from its new place, with the same
+    /// timeline.
+    #[test]
+    fn a_moved_fader_keeps_its_lane() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, -0.25)];
+        let mut cache = SampleCache::default();
+        let (mut e, built) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+        e.live_in = Some(Default::default());
+        e.looping = true;
+        steady(&mut e, 100);
+        let mut moved = p.clone();
+        moved.groups[0].sounds[0].level = 0.5;
+        let (fresh, _) = Engine::new_after(&moved, Some((&p, built.chains.as_slice())), None, 1000, Mode::Arrangement, &mut cache);
+        assert!(fresh.keeps_timelines(), "nothing that makes the timeline changed");
+        drop(e.adopt(fresh, &moved));
+        assert!(near(steady(&mut e, 100).0, 0.5 * deckard_model::level_gain(0.25) as f32));
     }
 
     /// A project whose second sound takes In 2 (with `slots` and to `dest`), and an
