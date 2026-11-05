@@ -1,7 +1,8 @@
 -- The LFOs (SHIFT + SELECT; again, or another page's button, leaves).
 --
 --   left screen       the focused LFO's name, large ("Press a pad" with none)
---   right screen      its wave over two cycles, under its shape, rate and "trig"
+--   right screen      its wave (at least two cycles, time lines for how long they take),
+--                     under its shape, rate and "trig"
 --   display 1-5       the shapes: Sine, Square, Triangle, Saw, Random
 --   display 6 / 8     SYNC (lit: synced, else Hz) / TRIG (the focused sound, or Off);
 --                     with SHIFT held, 8 is DELETE: removes the focused LFO
@@ -159,9 +160,10 @@ local function bar(screen, x, left, right)
   if right then screen:label(x + 170, 32, 300, 20, right, { size = 12, color = "weak" }, "right", "center") end
 end
 
--- The wave (`points`, 0..1 over two cycles) in the box `x, y, w, h`; an envelope's
--- (`note_off` given) with a dashed line where the note ends instead of the middle one.
-local function wave(screen, points, x, y, w, h, note_off)
+-- The wave (`points`, 0..1) in the box `x, y, w, h`, with a line at each of `marks`
+-- (0..1 of the width); an envelope's (`note_off` given) with a dashed line where the
+-- note ends instead.
+local function wave(screen, points, x, y, w, h, marks, note_off)
   screen:rect(x, y, w, 1, "bar")
   screen:rect(x, y + h, w, 1, "bar")
   if note_off then
@@ -170,7 +172,9 @@ local function wave(screen, points, x, y, w, h, note_off)
       screen:rect(nx, y + dy, 1, math.min(4, h - dy), "bar")
     end
   else
-    screen:rect(x + w // 2, y, 1, h, "bar")
+    for _, m in ipairs(marks or {}) do
+      screen:rect(x + math.floor(m * w + 0.5), y, 1, h, "bar")
+    end
   end
   local n = #points
   if n < 2 then return end
@@ -215,7 +219,7 @@ function lfo.draw(screen, theme)
 
   if env then
     bar(screen, 480, "Envelope", l.trigger)
-    wave(screen, l.points or {}, 492, 64, 456, 132, l.note_off or 0.5)
+    wave(screen, l.points or {}, 492, 64, 456, 132, nil, l.note_off or 0.5)
     widgets.params(screen, theme, 0, { { text = "Envelope", at = 1 } }, nil, {
       { name = "ATTACK", value = l.attack },
       { name = "DECAY", value = l.decay },
@@ -232,7 +236,7 @@ function lfo.draw(screen, theme)
   local head = l.shape .. " · " .. l.rate
   if triggered(l) then head = head .. " · trig" end
   bar(screen, 480, head, triggered(l) and l.trigger or nil)
-  wave(screen, l.points or {}, 492, 64, 456, 132)
+  wave(screen, l.points or {}, 492, 64, 456, 132, l.marks)
 
   widgets.params(screen, theme, 0, { { text = "Wave", at = 1 } }, nil, {
     { name = "SHAPE", value = l.shape },

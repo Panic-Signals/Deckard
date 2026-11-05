@@ -75,6 +75,9 @@ pub const RATES: [(&str, f64); 24] = [
     ("1/32T", 0.125 * 2.0 / 3.0),
 ];
 
+/// The most spans the picture's time lines cut it into.
+const MAX_PICTURE_SPANS: f64 = 16.0;
+
 /// The index in [`RATES`] of "1/4".
 pub const DEFAULT_RATE: usize = 12;
 
@@ -256,11 +259,29 @@ impl Lfo {
         self.wave_at(cycles) * self.level.clamp(0.0, 1.0) * fade as f32
     }
 
-    /// How many cycles the picture spans. The width is a fixed stretch of time — two
-    /// quarter notes when synced, two seconds when free — so the rate changes how many
-    /// waves fit. A 1/4 note and 1 Hz still fill it with two cycles.
+    /// How many cycles the picture spans. Its width is two quarter notes when synced and
+    /// two seconds when free, so a faster rate fits more waves. A slower rate than 1/4 or
+    /// 1 Hz would not fit a whole wave, so the width grows to two cycles instead and
+    /// [`Self::picture_marks`] shows the longer time.
     fn picture_cycles(&self) -> f64 {
-        if self.sync { 2.0 / self.beats() } else { 2.0 * f64::from(self.hz).max(0.0) }
+        let cycles = if self.sync { 2.0 / self.beats() } else { 2.0 * f64::from(self.hz).max(0.0) };
+        cycles.max(2.0)
+    }
+
+    /// Where the picture's time lines go (0..1 of its width, the ends left out). Synced,
+    /// on the beats, or on the bars and longer when the beats would crowd it; free, on the
+    /// seconds likewise. An envelope isn't drawn to time, so it has none.
+    pub fn picture_marks(&self) -> Vec<f32> {
+        if self.env {
+            return Vec::new();
+        }
+        let (window, steps): (f64, &[f64]) = if self.sync {
+            (self.picture_cycles() * self.beats(), &[1.0, 4.0, 8.0, 16.0])
+        } else {
+            (self.picture_cycles() / f64::from(self.hz).max(0.01), &[1.0, 2.0, 5.0, 10.0, 30.0, 60.0])
+        };
+        let step = steps.iter().copied().find(|s| window / s <= MAX_PICTURE_SPANS).unwrap_or(steps[steps.len() - 1]);
+        (1..).map(|k| f64::from(k) * step).take_while(|t| *t < window - 1e-6).map(|t| (t / window) as f32).collect()
     }
 
     /// `n` samples of the wave, for drawing.
@@ -642,13 +663,45 @@ mod tests {
         let triggered = Lfo { shape: Shape::Square, trigger: Some((0, 0)), ..Lfo::new(1) }.picture(8);
         let eighth = RATES.iter().position(|r| r.0 == "1/8").unwrap();
         let faster = Lfo { shape: Shape::Square, rate: eighth, ..Lfo::new(1) }.picture(8);
-        let slower = Lfo { shape: Shape::Square, rate: 0, ..Lfo::new(1) }.picture(8);
         assert_eq!(triggered, wave);
         assert_ne!(faster, wave, "1/8 draws twice as many waves as 1/4");
-        assert!(slower.iter().all(|v| close(*v, 1.0)), "4 bars barely moves across two beats");
         assert!(close(wave[0], 1.0));
         let hz = |h| Lfo { shape: Shape::Square, sync: false, hz: h, ..Lfo::new(1) }.picture(8);
         assert_ne!(hz(1.0), hz(2.0), "Hz changes the frequency too");
+    }
+
+    fn at_rate(name: &str) -> Lfo {
+        Lfo { rate: RATES.iter().position(|r| r.0 == name).unwrap(), ..Lfo::new(1) }
+    }
+
+    #[test]
+    fn slower_than_a_quarter_keeps_two_whole_cycles() {
+        let quarter = at_rate("1/4").picture(240);
+        for (rate, _) in RATES.iter().filter(|r| r.1 >= 1.0) {
+            assert_eq!(at_rate(rate).picture(240), quarter, "{rate}");
+        }
+        let free = |hz| Lfo { sync: false, hz, ..Lfo::new(1) };
+        assert_eq!(free(0.01).picture(240), free(1.0).picture(240));
+    }
+
+    #[test]
+    fn the_time_lines_show_what_the_wave_no_longer_does() {
+        let lines = |rate| at_rate(rate).picture_marks().len();
+        assert_eq!(at_rate("1/4").picture_marks(), [0.5], "two beats");
+        assert_eq!(at_rate("1/8").picture_marks(), [0.5], "still two beats, with more waves");
+        assert_eq!(at_rate("1/2").picture_marks(), [0.25, 0.5, 0.75], "four beats");
+        assert_eq!(lines("1/1"), 7, "eight beats");
+        assert_eq!(lines("2 bars"), 15, "sixteen beats");
+        assert_eq!(lines("4 bars"), 7, "eight bars, on the bars");
+        for (rate, _) in RATES {
+            let marks = at_rate(rate).picture_marks();
+            assert!(marks.len() < 16 && marks.iter().all(|m| (0.0..1.0).contains(m) && *m > 0.0), "{rate}: {marks:?}");
+        }
+        let free = |hz| Lfo { sync: false, hz, ..Lfo::new(1) }.picture_marks();
+        assert_eq!(free(1.0), [0.5], "two seconds");
+        assert_eq!(free(0.5).len(), 3, "four seconds");
+        assert!((1..16).contains(&free(0.01).len()), "200 seconds isn't crowded");
+        assert!(Lfo { env: true, ..Lfo::new(1) }.picture_marks().is_empty());
     }
 
     #[test]

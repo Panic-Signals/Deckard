@@ -355,6 +355,10 @@ pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, act
     // The wave.
     painter.rect_filled(pic, 3.0, S01);
     painter.hline(pic.x_range(), pic.center().y, Stroke::new(1.0, white(20)));
+    // Time lines: how long the two cycles take, as the wave's width stays the same.
+    for m in lfo.picture_marks() {
+        painter.vline(pic.left() + 6.0 + (pic.width() - 12.0) * m, pic.y_range(), Stroke::new(1.0, white(20)));
+    }
     let pts: Vec<Pos2> = lfo
         .picture(480)
         .iter()

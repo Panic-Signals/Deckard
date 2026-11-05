@@ -988,6 +988,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         lt.set("retrigger", l.retrigger)?;
         lt.set("name", l.name.as_str())?;
         lt.set("points", lua.create_sequence_from(l.points.iter().copied())?)?;
+        lt.set("marks", lua.create_sequence_from(l.marks.iter().copied())?)?;
         lt.set("note_off", l.note_off)?;
         lfos.set(i + 1, lt)?;
     }

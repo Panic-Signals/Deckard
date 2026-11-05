@@ -2574,6 +2574,27 @@ fn lfo_page_draws_the_name() {
     }
 }
 
+/// The wave's time lines are drawn where `marks` puts them.
+#[test]
+fn lfo_page_draws_the_time_lines() {
+    let (mut s, mut v) = (Surface::new(), view());
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    press(&mut s, &v, "BUTTON_SELECT");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    // (The wave's box starts at 492 and is 456 wide.)
+    let column = |s: &Surface, v: &crate::View, x: usize| -> Vec<[u8; 4]> {
+        let px = s.picture(v);
+        (64..196).map(|y| px[y * 960 + x]).collect()
+    };
+    let (quarter, half) = (492 + 114, 492 + 228);
+    v.lfos[0].marks = vec![];
+    let (bare_quarter, bare_half) = (column(&s, &v, quarter), column(&s, &v, half));
+    v.lfos[0].marks = vec![0.25];
+    assert_ne!(column(&s, &v, quarter), bare_quarter, "a line at a quarter of the width");
+    assert_eq!(column(&s, &v, half), bare_half, "and none at the middle");
+    assert_eq!(s.error(), None);
+}
+
 /// In Envelope mode: ENV lit, the shapes dark and inert, SYNC is RETRIG, the knobs are
 /// Attack, Decay, Sustain, Release, Level, Quantize, Trigger, and TRIG never turns the
 /// trigger off; SHIFT still shows DELETE.
