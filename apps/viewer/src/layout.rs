@@ -503,6 +503,8 @@ pub enum Act {
     AssignPattern(usize, usize, Option<usize>),
     /// A new empty pattern in group `.1`, put in scene `.0` and focused.
     NewPattern(usize, usize),
+    /// [`Act::NewPattern`] in an empty place of the group: scene, group, place from 0.
+    NewPatternAt(usize, usize, usize),
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
@@ -833,6 +835,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ToggleFollow => app.follow = !app.follow,
             Act::AssignPattern(..)
             | Act::NewPattern(..)
+            | Act::NewPatternAt(..)
             | Act::AddScene
             | Act::AddGroup
             | Act::InsertScene(_)

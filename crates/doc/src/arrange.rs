@@ -338,16 +338,7 @@ impl Document {
     pub fn insert_pattern(&mut self, group: usize, from: usize, at: usize, name: &str) -> Result<usize, String> {
         let items_path = self.pattern_items_path(group)?;
         let mut items = self.items(&items_path)?;
-        let mut entry = match items.get(from).cloned() {
-            Some(t) => self.fresh_copy(&t),
-            // The group's first pattern: a bar long, a slot for each sound.
-            None if items.is_empty() => {
-                let sounds = self.addresses.groups[group].sounds.iter().map(|p| self.oid_at(p)).collect::<Result<Vec<_>, _>>()?;
-                let bar = self.project.bar_length();
-                self.build(|b| b.pattern_entry(0, name, bar, &sounds))?
-            }
-            None => return Err("no such pattern".into()),
-        };
+        let mut entry = self.new_pattern_entry(group, from, &items, name)?;
         let at = at.min(items.len());
         // Its id: the next after the pattern before it; later ids move up one.
         let id = if at == 0 {
@@ -363,6 +354,42 @@ impl Document {
             }
         }
         super::sounds::set_entry_id(&mut entry, id);
+        items.insert(at, entry);
+        self.apply("New Pattern", vec![Op::Set { path: items_path, value: Value::List(items) }])?;
+        Ok(at)
+    }
+
+    /// [`Document::add_pattern`] in empty place `slot` of the group (from 0, whether or not
+    /// the places before it have patterns): the other patterns stay where they are. Returns
+    /// its index in the group's list.
+    pub fn add_pattern_in_slot(&mut self, group: usize, from: usize, slot: usize, name: &str) -> Result<usize, String> {
+        let items_path = self.pattern_items_path(group)?;
+        let mut items = self.items(&items_path)?;
+        let id = slot as i64;
+        if items.iter().filter_map(super::sounds::entry_id).any(|i| i == id) {
+            return Err("there's a pattern in that place".into());
+        }
+        let mut entry = self.new_pattern_entry(group, from, &items, name)?;
+        super::sounds::set_entry_id(&mut entry, id);
+        let at = items.iter().position(|e| super::sounds::entry_id(e).is_some_and(|i| i > id)).unwrap_or(items.len());
+        items.insert(at, entry);
+        self.apply("New Pattern", vec![Op::Set { path: items_path, value: Value::List(items) }])?;
+        Ok(at)
+    }
+
+    /// A new pattern's entry for group `group`, whose list is `items`: empty, like pattern
+    /// `from`. Its id is still to be set.
+    fn new_pattern_entry(&mut self, group: usize, from: usize, items: &[Value], name: &str) -> Result<Value, String> {
+        let mut entry = match items.get(from).cloned() {
+            Some(t) => self.fresh_copy(&t),
+            // The group's first pattern: a bar long, a slot for each sound.
+            None if items.is_empty() => {
+                let sounds = self.addresses.groups[group].sounds.iter().map(|p| self.oid_at(p)).collect::<Result<Vec<_>, _>>()?;
+                let bar = self.project.bar_length();
+                self.build(|b| b.pattern_entry(0, name, bar, &sounds))?
+            }
+            None => return Err("no such pattern".into()),
+        };
         let Value::Obj(o) = &mut entry else { return Err("bad pattern entry".into()) };
         let pat = match o.get_mut("second") {
             Some(Value::Obj(sp)) => match sp.get_mut("px") {
@@ -400,29 +427,18 @@ impl Document {
                 }
             }
         }
-        items.insert(at, entry);
-        self.apply("New Pattern", vec![Op::Set { path: items_path, value: Value::List(items) }])?;
-        Ok(at)
+        Ok(entry)
     }
 
-    /// Take pattern `p` out of its group's list (the ones after it move up, their ids
-    /// too). Scenes must not refer to it any more.
+    /// Take pattern `p` out of its group's list. The others keep their places, leaving a gap.
+    /// Scenes must not refer to it any more.
     pub(crate) fn remove_pattern_entry(&mut self, group: usize, p: usize) -> Result<(), String> {
         let items_path = self.pattern_items_path(group)?;
         let mut items = self.items(&items_path)?;
         if p >= items.len() {
             return Err("no such pattern".into());
         }
-        let removed = items.remove(p);
-        if let Some(id) = super::sounds::entry_id(&removed) {
-            for e in items.iter_mut() {
-                if let Some(i) = super::sounds::entry_id(e)
-                    && i > id
-                {
-                    super::sounds::set_entry_id(e, i - 1);
-                }
-            }
-        }
+        items.remove(p);
         self.apply("Delete Pattern", vec![Op::Set { path: items_path, value: Value::List(items) }])
     }
 
@@ -738,5 +754,65 @@ impl Document {
             return Ok(());
         }
         self.apply("Section Length", ops)
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use crate::Document;
+
+    /// A pattern goes in the place asked for, and stays there: a gap is what the file has.
+    #[test]
+    fn a_pattern_can_go_in_any_empty_place() {
+        let mut d = Document::new_project().unwrap();
+        let slots = |d: &Document| d.project().groups[0].patterns.iter().map(|p| p.slot).collect::<Vec<_>>();
+        d.add_pattern(0, 0, "One").unwrap();
+        assert_eq!(slots(&d), [0]);
+        assert_eq!(d.add_pattern_in_slot(0, 0, 7, "Eight").unwrap(), 1, "listed after the first");
+        assert_eq!(slots(&d), [0, 7], "with places left empty before it");
+        assert_eq!(d.add_pattern_in_slot(0, 0, 3, "Four").unwrap(), 1, "listed in order");
+        assert_eq!(slots(&d), [0, 3, 7], "the others stay where they are");
+        assert_eq!(d.project().groups[0].patterns[2].name, "Eight");
+        assert!(d.add_pattern_in_slot(0, 0, 3, "Again").is_err(), "that place is taken");
+        // A scene goes on playing what it played.
+        d.assign_pattern(0, 0, Some(2)).unwrap();
+        d.add_pattern_in_slot(0, 0, 1, "Two").unwrap();
+        assert_eq!(d.project().scenes[0].patterns, [(0, 3)], "\"Eight\", now further down the list");
+        // Saved and opened again, the gaps are still there.
+        let again = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(slots(&again), [0, 1, 3, 7]);
+        assert_eq!(again.project().scenes[0].patterns, [(0, 3)]);
+        // And after them, a pattern added the old way goes after the last.
+        d.add_pattern(0, 0, "Nine").unwrap();
+        assert_eq!(slots(&d), [0, 1, 3, 7, 8]);
+    }
+
+    /// Deleting a pattern leaves a gap: the others stay where they are, and it can be filled.
+    #[test]
+    fn deleting_a_pattern_leaves_its_place_empty() {
+        let mut d = Document::new_project().unwrap();
+        let slots = |d: &Document| d.project().groups[0].patterns.iter().map(|p| p.slot).collect::<Vec<_>>();
+        for name in ["One", "Two", "Three"] {
+            d.add_pattern(0, 0, name).unwrap();
+        }
+        d.assign_pattern(0, 0, Some(2)).unwrap();
+        d.delete_pattern(0, 1).unwrap();
+        assert_eq!(slots(&d), [0, 2]);
+        assert_eq!(d.project().groups[0].patterns[1].name, "Three");
+        assert_eq!(d.project().scenes[0].patterns, [(0, 1)], "the scene plays what it played");
+        assert_eq!(d.add_pattern_in_slot(0, 0, 1, "Again").unwrap(), 1);
+        assert_eq!(slots(&d), [0, 1, 2]);
+        d.undo();
+        d.undo();
+        assert_eq!(slots(&d), [0, 1, 2], "undone, the one deleted is back");
+        assert_eq!(d.project().groups[0].patterns[1].name, "Two");
+    }
+
+    /// The first pattern of an empty group can go anywhere too.
+    #[test]
+    fn a_groups_first_pattern_can_go_in_any_place() {
+        let mut d = Document::new_project().unwrap();
+        assert_eq!(d.add_pattern_in_slot(0, 0, 5, "Six").unwrap(), 0);
+        assert_eq!(d.project().groups[0].patterns[0].slot, 5);
     }
 }

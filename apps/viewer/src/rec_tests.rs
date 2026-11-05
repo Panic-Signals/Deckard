@@ -961,3 +961,20 @@ fn a_held_pad_shows_while_held() {
     assert_eq!(done.len(), 3, "{done:?}");
     assert!(done.iter().all(|n| n.length == len + len / 2), "as long as held: {done:?}");
 }
+
+/// From the controller: a new pattern in an empty place keeps that place, and the rest stay.
+#[test]
+fn a_controller_makes_a_pattern_in_the_place_it_asks_for() {
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.surface_act(A::NewPatternAt { group: 0, slot: 0 });
+    app.surface_act(A::NewPatternAt { group: 0, slot: 7 });
+    let v = app.surface_view();
+    let slots: Vec<usize> = v.groups[0].patterns.iter().map(|p| p.slot).collect();
+    assert_eq!(slots, [0, 7]);
+    assert_eq!(app.pattern, 1, "the new one is focused, by its place in the list");
+    assert_eq!(v.groups[0].patterns[1].name, "Pattern 8");
+    assert_eq!(v.groups[0].scene_pattern, Some(1), "and plays in the scene");
+}
