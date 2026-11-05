@@ -857,7 +857,7 @@ fn unchanged_scan<'a>(known: &'a [(String, u64, Vec<Entry>)], key: &str, mtime: 
 }
 
 /// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
-/// bundle, which starts Wine).
+/// bundle, which starts Wine). What it printed before it hung or crashed still counts.
 fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
     let limit = if bundle.to_string_lossy().contains("yabridge") { 90 } else { 20 };
     let Ok(exe) = std::env::current_exe() else { return Vec::new() };
@@ -877,7 +877,8 @@ fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
             Ok(None) if start.elapsed().as_secs() < limit => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
-                return Vec::new();
+                let _ = child.wait();
+                break;
             }
         }
     }
