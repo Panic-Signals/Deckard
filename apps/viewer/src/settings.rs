@@ -89,6 +89,8 @@ pub struct Settings {
     pub render_ahead_ms: u32,
     /// The MK3 displays' backlight, 0..=100 (Maschine's Hardware settings > Display).
     pub display_brightness: u8,
+    /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
+    pub focus_follows: bool,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware): 0
     /// takes the pressure as it comes; higher, light presses play louder.
     pub pad_sensitivity: u8,
@@ -293,6 +295,7 @@ impl Default for Settings {
             display_brightness: 100,
             pad_sensitivity: 50,
             metronome_volume: 100,
+            focus_follows: true,
             metronome_auto: false,
             metronome_ticks: 4,
             reload_last: true,
@@ -462,6 +465,7 @@ impl Settings {
                         s.metronome_volume = n.min(100);
                     }
                 }
+                "focus_follows" => s.focus_follows = v != "false",
                 "metronome_auto" => s.metronome_auto = v == "true",
                 "metronome_ticks" => {
                     if let Ok(n) = v.parse::<u32>()
@@ -643,6 +647,7 @@ impl Settings {
             "buffer_frames = {}\nmulticore = {}\nexact_timing = {}\nrender_ahead_ms = {}\ndisplay_brightness = {}\npad_sensitivity = {}\n",
             self.buffer_frames, self.multicore, self.exact_timing, self.render_ahead_ms, self.display_brightness, self.pad_sensitivity
         );
+        out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!(
             "metronome_volume = {}\nmetronome_auto = {}\nmetronome_ticks = {}\n",
             self.metronome_volume, self.metronome_auto, self.metronome_ticks
@@ -1110,6 +1115,15 @@ mod wine_tests {
     use super::Settings;
 
     /// Syncing Windows plug-ins before a rescan (Linux) is on unless switched off, and
+    #[test]
+    fn the_focus_follows_unless_switched_off() {
+        let mut s = Settings::default();
+        assert!(s.focus_follows);
+        assert!(Settings::parse("").focus_follows, "a settings file from before");
+        s.focus_follows = false;
+        assert!(!Settings::parse(&s.to_text()).focus_follows);
+    }
+
     /// only "off" is written, so other systems' settings files don't change.
     #[test]
     fn bridging_windows_plugins_is_on_unless_switched_off() {

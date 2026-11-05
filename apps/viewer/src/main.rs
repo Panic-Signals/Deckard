@@ -2131,6 +2131,10 @@ impl App {
     /// switched off), and what sounds set to the Default MIDI source take.
     fn midi_preferences(&mut self, ui: &mut egui::Ui) {
         self.sync_preferences(ui);
+        ui.checkbox(&mut self.settings.focus_follows, "Focus the group MIDI is recorded into").on_hover_text(
+            "While recording, MIDI going into another group makes it the focused group. Off: the focus stays where you put it, and the MIDI still records into its group.",
+        );
+        ui.separator();
         let (ins, outs) = self.midi_ports().clone();
         for (title, ports, prefix) in [("Inputs", &ins, "in:"), ("Outputs", &outs, "out:")] {
             ui.label(egui::RichText::new(title).strong());
@@ -3608,6 +3612,11 @@ impl App {
                     continue;
                 }
             };
+            // MIDI recorded into another group: that group and sound have the focus.
+            if r.midi && r.velocity > 0 && r.group != self.group && self.settings.focus_follows {
+                self.focus_group(r.group);
+                self.sound = r.sound;
+            }
             // A note into a growing pattern's last bar adds the next.
             if r.velocity > 0
                 && let Some(grow) = &mut self.grow
