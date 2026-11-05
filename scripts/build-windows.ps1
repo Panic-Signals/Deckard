@@ -44,6 +44,7 @@ Remove-Item -Recurse -Force $Stage, "dist\$Name.zip" -ErrorAction SilentlyContin
 New-Item -ItemType Directory -Force $Stage | Out-Null
 Copy-Item "target\$Target\release\deckard.exe" "$Stage\DECKARD.exe"
 Copy-Item "scripts\install-demucs.ps1" "$Stage\install-demucs.ps1"
+Copy-Item "scripts\mk3-driver.ps1" "$Stage\mk3-driver.ps1"
 @"
 DECKARD $Version for Windows ($Arch)
 
@@ -53,6 +54,9 @@ Stem separation (Sampling > EDIT > STEMS) needs its model (84 MB), installed onc
 right-click install-demucs.ps1 > Run with PowerShell, or
   powershell -NoProfile -ExecutionPolicy Bypass -File install-demucs.ps1
 (DECKARD also runs it the first time you use STEMS.)
+
+The Maschine MK3's screens need Windows' WinUSB driver in place of NI's: DECKARD asks,
+and Preferences > Hardware gives them back for Maschine (mk3-driver.ps1 does the change).
 "@ | Set-Content -Encoding UTF8 "$Stage\README.txt"
 
 if ($env:WINDOWS_SIGN_CERT) {

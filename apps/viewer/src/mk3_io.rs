@@ -226,8 +226,10 @@ struct Shared {
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
     screens: Option<(u64, Arc<Vec<[u8; 4]>>)>,
     display_status: String,
-    /// An MK3 is plugged in, its screens won't open, and NI's agent is running.
+    /// An MK3 is plugged in, and NI's software is why its screens won't open.
     agent_holding: bool,
+    /// Leave the screens alone, as they're being given back to NI's driver.
+    displays_released: bool,
     /// The displays' backlight, 0..=100 (`set_display_brightness`).
     display_brightness: Option<u8>,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
@@ -340,9 +342,27 @@ impl Mk3Io {
         std::mem::take(&mut self.shared.lock().unwrap().events)
     }
 
-    /// Whether NI's agent is keeping the MK3's screens from opening.
+    /// Whether NI's software is keeping the MK3's screens from opening.
     pub fn agent_holding(&self) -> bool {
         self.shared.lock().unwrap().agent_holding
+    }
+
+    /// Whether the MK3's screens are open.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn displays_connected(&self) -> bool {
+        self.shared.lock().unwrap().displays_connected
+    }
+
+    /// Let go of the screens and leave them alone (they're being given back to NI's
+    /// driver), or take them up again.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn release_displays(&self, released: bool) {
+        self.shared.lock().unwrap().displays_released = released;
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn displays_released(&self) -> bool {
+        self.shared.lock().unwrap().displays_released
     }
 
     /// Pad hits for the app to play itself (no engine was running).
@@ -528,10 +548,19 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 fn run_displays(shared: &Mutex<Shared>) {
     use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
     loop {
+        {
+            let mut s = shared.lock().unwrap();
+            if s.displays_released {
+                set_agent_holding(&mut s, false);
+                drop(s);
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        }
         let mut d = match Displays::open() {
             Ok(d) => d,
             Err(e) => {
-                let holding = e != deckard_mk3::display::NO_MK3 && crate::ni_agent::running();
+                let holding = crate::ni_agent::holding(&e);
                 let mut s = shared.lock().unwrap();
                 s.display_status = e;
                 set_agent_holding(&mut s, holding);
@@ -559,10 +588,14 @@ fn run_displays(shared: &Mutex<Shared>) {
                 }
                 out
             };
-            let closing = {
+            let (closing, released) = {
                 let s = shared.lock().unwrap();
-                s.closing.then(|| s.goodbye.clone())
+                (s.closing.then(|| s.goodbye.clone()), s.displays_released)
             };
+            if released && closing.is_none() {
+                shared.lock().unwrap().displays_connected = false;
+                break;
+            }
             if let Some(goodbye) = closing {
                 let px = goodbye.map_or_else(Vec::new, |p| p.to_vec());
                 let _ = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH)));
@@ -583,6 +616,8 @@ fn run_displays(shared: &Mutex<Shared>) {
                 _ => std::thread::sleep(Duration::from_millis(8)),
             }
         }
+        // Let go now: the screens' driver may be about to change.
+        drop(d);
         std::thread::sleep(Duration::from_secs(1));
     }
 }

@@ -88,6 +88,9 @@ checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
 1. **Quit Maschine and NI's hardware agents first** (NIHardwareAgent and
    NIHostIntegrationAgent). While they run, they hold on to the controller's screens.
    On macOS, DECKARD asks to quit NIHostIntegrationAgent when it finds it holding them.
+   On Windows, NI's driver has them, so DECKARD asks to switch just the screens to Windows'
+   WinUSB driver (with administrator approval). Maschine can't use the screens until you
+   give them back in **Preferences ▸ Hardware**.
 2. Plug in the MK3. DECKARD finds it on its own.
 
 DECKARD runs the MK3 with its own controller layer, so you don't need Maschine
