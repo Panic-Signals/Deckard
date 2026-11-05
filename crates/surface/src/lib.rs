@@ -224,9 +224,10 @@ pub struct LfoView {
     pub retrigger: bool,
     /// "LFO 3", or "ENV 3" in Envelope mode.
     pub name: String,
-    /// Its wave (240 samples): at least two cycles; an envelope's ADSR.
+    /// Its wave (240 samples) across two beats or two seconds, the right edge now;
+    /// an envelope's ADSR.
     pub points: Vec<f32>,
-    /// Where the picture's time lines go (0..1 of its width); none for an envelope.
+    /// Unused. The time lines are gone, so this is empty.
     pub marks: Vec<f32>,
     /// Where an envelope's picture shows the note off (0..1 of its width).
     pub note_off: Option<f32>,
