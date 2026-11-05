@@ -66,6 +66,7 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
         "Iceverb" => ice(params, true),
         "Reflex" => ice(params, false),
         "PerformanceFX" => perform(params, phase, page),
+        "CabinetEmulation" => cabinet(params),
         _ => return None,
     };
     if matches!(module, "Compressor" | "Limiter" | "Gate" | "Maximizer") {
@@ -858,6 +859,32 @@ fn ice(params: &[(String, f64)], ice_mode: bool) -> Shot {
     shot
 }
 
+fn cabinet(params: &[(String, f64)]) -> Shot {
+    let cab = p(params, "cabinet", 0.0).round().clamp(0.0, 3.0) as i32;
+    let mic = p(params, "microphone", 0.0).round().clamp(0.0, 5.0) as i32;
+    let distance = p(params, "distance", 0.0).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 1.0).clamp(0.0, 1.0);
+    // Stylized speaker curves. The engine has no impulse responses, so this is a preview.
+    let (body, presence) = match cab {
+        1 => (0.55, 0.78),
+        2 => (0.32, 0.48),
+        3 => (0.4, 0.85),
+        _ => (0.42, 0.62),
+    };
+    let mic_shift = (mic as f32 - 2.0) * 0.03;
+    let points = samples(N)
+        .map(|(_, x)| {
+            let low = (-((x - body) / 0.16).powi(2)).exp();
+            let air = (-((x - (presence + mic_shift)) / 0.07).powi(2)).exp() * (1.0 - distance * 0.85);
+            let roll = if x > 0.75 { 1.0 - (x - 0.75) * (1.2 + distance * 2.0) } else { 1.0 };
+            cl(lerp(0.5, 0.28 + 0.4 * low + 0.22 * air, mix) * roll.max(0.15))
+        })
+        .collect();
+    let mut shot = Shot::bare("freq", points);
+    shot.preview = true;
+    shot
+}
+
 fn perform(params: &[(String, f64)], phase: f32, page: usize) -> Shot {
     let mode = p(params, "mode", 0.0).round().clamp(0.0, 7.0) as i32;
     let mut shot = match mode {
@@ -1171,6 +1198,7 @@ mod tests {
             ("Iceverb", "size", 0.05, 0.95),
             ("Reflex", "smooth", 0.0, 1.0),
             ("PerformanceFX", "filter_min_freq", 0.0, 0.8),
+            ("CabinetEmulation", "distance", 0.0, 1.0),
         ];
         for (module, field, a, b) in cases {
             let picture = shot(module, &[], 0.0, false, 0).unwrap();
@@ -1220,5 +1248,11 @@ mod tests {
         assert!(kinds.windows(2).any(|w| w[0] != w[1]), "two modes must not draw the same thing");
         let on = shot("PerformanceFX", &[("mode".into(), 0.0), ("touchstrip_on_off".into(), 1.0)], 0.0, false, 0).unwrap();
         assert!(!on.dim);
+    }
+
+    #[test]
+    fn the_cabinet_picture_is_a_preview() {
+        let cab = shot("CabinetEmulation", &[], 0.0, false, 0).unwrap();
+        assert!(cab.preview);
     }
 }
