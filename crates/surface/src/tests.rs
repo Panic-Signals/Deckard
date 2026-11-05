@@ -1601,6 +1601,7 @@ fn the_filter_curve_stays_on_the_right_screen() {
         lfo: vec![0.0, 1.0, 0.0, 1.0],
         side: vec![0.2; 48],
         side_live: true,
+        ..Default::default()
     });
     let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
     let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
@@ -1612,6 +1613,37 @@ fn the_filter_curve_stays_on_the_right_screen() {
         assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
         assert!(dot(&px) > 20, "page {}: the cutoff dot", page + 1);
     }
+    assert_eq!(s.error(), None);
+}
+
+/// A compressor's transfer, a delay's taps, and a grain cloud stay on the right screen.
+#[test]
+fn the_effect_picture_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Compressor".into();
+    v.control.slot = Some("Compressor".into());
+    v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
+    v.control.picture = Some(crate::EqCurveView {
+        kind: "law".into(),
+        points: (0..48).map(|i| i as f32 / 47.0).collect(),
+        side: vec![0.2; 48],
+        side_live: true,
+        lfo: vec![0.0, 1.0, 0.2],
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 80, "page {}: the transfer on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    v.control.picture =
+        Some(crate::EqCurveView { kind: "dots".into(), bands: vec![(0.2, 0.7), (0.5, 0.4), (0.8, 0.6)], ..Default::default() });
+    let px = s.picture(&v);
+    let dots = px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    assert!(dots > 20, "the cloud: {dots}");
     assert_eq!(s.error(), None);
 }
 

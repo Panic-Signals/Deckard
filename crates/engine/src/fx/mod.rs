@@ -20,6 +20,7 @@ pub mod maximizer;
 pub mod metaverb;
 pub mod perform;
 pub mod phaser;
+pub mod picture;
 pub mod plate_reverb;
 pub mod reflex;
 pub mod resochord;
