@@ -126,20 +126,94 @@ fn title(px: &mut [[u8; 4]], size: usize, (cx, cy, a, _, _): (f32, f32, f32, f32
     }
 }
 
-/// `icon(size)` as a PNG file (for the app bundle's icon set and the Linux desktop).
-pub fn write_png(path: &std::path::Path, size: usize) -> Result<(), String> {
-    let px = icon(size);
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), size as u32, size as u32);
+/// The icon on Windows: the logo's D, white on a black square, `size` × `size` RGBA.
+pub fn windows_icon(size: usize) -> Vec<[u8; 4]> {
+    let mut px = vec![[0, 0, 0, 255]; size * size];
+    let logo = crate::layout::logo_font();
+    let Ok(font) = fontdue::Font::from_bytes(logo, fontdue::FontSettings::default()) else { return px };
+    // The D's own shape, not its advance, fills the square (the letter leans).
+    let room = size as f32 * 0.72;
+    let at_100 = font.metrics('d', 100.0);
+    let sz = 100.0 * room / at_100.width.max(at_100.height).max(1) as f32;
+    let (m, bitmap) = font.rasterize('d', sz);
+    let (left, top) = (size.saturating_sub(m.width) / 2, size.saturating_sub(m.height) / 2);
+    for gy in 0..m.height.min(size - top) {
+        for gx in 0..m.width.min(size - left) {
+            let v = bitmap[gy * m.width + gx];
+            px[(top + gy) * size + left + gx] = [v, v, v, 255];
+        }
+    }
+    px
+}
+
+/// The sizes Windows asks a program's icon for, from Explorer's details view up.
+const WINDOWS_ICON_SIZES: [usize; 8] = [16, 20, 24, 32, 40, 48, 64, 256];
+
+/// [`windows_icon`] as an `.ico` file: each size drawn for itself. `assets/deckard.ico` comes
+/// from this, since the build needs the file before there's a program to draw it.
+pub fn write_ico(path: &std::path::Path) -> Result<(), String> {
+    let images = WINDOWS_ICON_SIZES.map(|size| png_bytes(&windows_icon(size), size));
+    let mut out = vec![0, 0, 1, 0];
+    out.extend((images.len() as u16).to_le_bytes());
+    let mut offset = 6 + 16 * images.len();
+    for (image, size) in images.iter().zip(WINDOWS_ICON_SIZES) {
+        let image = image.as_ref().map_err(String::clone)?;
+        // A size of 256 is written as 0: the field is a byte.
+        out.extend([size as u8, size as u8, 0, 0]);
+        out.extend(1u16.to_le_bytes());
+        out.extend(32u16.to_le_bytes());
+        out.extend((image.len() as u32).to_le_bytes());
+        out.extend((offset as u32).to_le_bytes());
+        offset += image.len();
+    }
+    for image in images.iter().flatten() {
+        out.extend(image);
+    }
+    std::fs::write(path, out).map_err(|e| e.to_string())
+}
+
+fn png_bytes(px: &[[u8; 4]], size: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, size as u32, size as u32);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     let mut w = enc.write_header().map_err(|e| e.to_string())?;
-    w.write_image_data(px.as_flattened()).map_err(|e| e.to_string())
+    w.write_image_data(px.as_flattened()).map_err(|e| e.to_string())?;
+    w.finish().map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// `icon(size)` as a PNG file (for the app bundle's icon set and the Linux desktop).
+pub fn write_png(path: &std::path::Path, size: usize) -> Result<(), String> {
+    std::fs::write(path, png_bytes(&icon(size), size)?).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::icon;
+    use super::{WINDOWS_ICON_SIZES, icon, windows_icon};
+
+    #[test]
+    fn the_windows_icon_is_a_white_d_on_black_at_every_size() {
+        for n in WINDOWS_ICON_SIZES {
+            let px = windows_icon(n);
+            assert_eq!(px.len(), n * n);
+            assert!(px.iter().all(|p| p[3] == 255), "{n}: opaque all over");
+            for corner in [0, n - 1, n * n - n, n * n - 1] {
+                assert_eq!(px[corner], [0, 0, 0, 255], "{n}: black in the corners");
+            }
+            assert!(px.iter().any(|p| p[0] > 200 && p[0] == p[1] && p[1] == p[2]), "{n}: the white letter");
+        }
+    }
+
+    #[test]
+    fn the_built_in_ico_has_every_size() {
+        let ico = include_bytes!("../assets/deckard.ico");
+        assert_eq!(ico[..4], [0, 0, 1, 0], "an icon file");
+        assert_eq!(u16::from_le_bytes([ico[4], ico[5]]) as usize, WINDOWS_ICON_SIZES.len());
+        for (i, size) in WINDOWS_ICON_SIZES.iter().enumerate() {
+            assert_eq!(ico[6 + 16 * i] as usize, size % 256, "entry {i}");
+        }
+    }
 
     #[test]
     fn a_rounded_square_with_the_teal_set() {
