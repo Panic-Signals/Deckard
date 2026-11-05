@@ -10,6 +10,15 @@ use crate::module::{com_order, same_class};
 use crate::scan::{Entry, Kind};
 use crate::state::{Format, State, hex16, vst2_cid, wrap_chunk, wrap_typed};
 
+/// One of the eight knob slots of an NKS page (`NICA` › `ni8`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Knob {
+    /// The plug-in's parameter id, or `None` when the knob slot is empty.
+    pub id: Option<u32>,
+    pub name: String,
+    pub section: String,
+}
+
 /// What a preset says.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Preset {
@@ -20,6 +29,8 @@ pub struct Preset {
     pub name: Option<String>,
     /// The plug-in's state.
     pub state: Vec<u8>,
+    /// Controller pages (`NICA` › `ni8`), up to eight knobs each.
+    pub pages: Vec<Vec<Knob>>,
 }
 
 /// A preset as a project stores a plug-in.
@@ -29,6 +40,7 @@ pub struct Resolved {
     pub id: String,
     pub name: String,
     pub chunk: Vec<u8>,
+    pub pages: Vec<Vec<Knob>>,
 }
 
 /// Read a preset file.
@@ -36,7 +48,7 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
     if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"NIKS") {
         return Err("not an NKS preset".into());
     }
-    let (mut plid, mut pchk) = (None, None);
+    let (mut plid, mut pchk, mut nica) = (None, None, None);
     let mut at = 12usize;
     while let Some(head) = bytes.get(at..at + 8) {
         let n = u32::from_le_bytes(head[4..].try_into().unwrap()) as usize;
@@ -44,6 +56,7 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
         match &head[..4] {
             b"PLID" => plid = Some(body),
             b"PCHK" => pchk = Some(body),
+            b"NICA" => nica = Some(body),
             _ => {}
         }
         at += 8 + n + (n & 1);
@@ -57,6 +70,7 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
     };
     let plid = after_version("plug-in id", plid)?;
     let state = after_version("state", pchk)?;
+    let pages = nica.and_then(|b| b.get(4..)).map_or_else(Vec::new, parse_nica);
     let Mp::Map(fields) = (Reader { b: &plid, at: 0 }).value(0)? else { return Err("the preset's plug-in id isn't a map".into()) };
     let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v);
     let vst3 = match field("VST3.uid") {
@@ -78,7 +92,40 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
         Some(Mp::Str(name)) if !name.is_empty() => Some(name.clone()),
         _ => None,
     };
-    Ok(Preset { vst3, vst2, name, state })
+    Ok(Preset { vst3, vst2, name, state, pages })
+}
+
+/// Controller assignments (`NICA` after its version number): `{"ni8": [[knob, ...], ...]}`.
+fn parse_nica(b: &[u8]) -> Vec<Vec<Knob>> {
+    let Ok(Mp::Map(fields)) = (Reader { b, at: 0 }).value(0) else { return Vec::new() };
+    let Some((_, Mp::List(pages))) = fields.into_iter().find(|(k, _)| k == "ni8") else { return Vec::new() };
+    pages
+        .into_iter()
+        .filter_map(|p| match p {
+            Mp::List(knobs) => Some(
+                knobs
+                    .into_iter()
+                    .take(8)
+                    .map(|k| match k {
+                        Mp::Map(m) => {
+                            let mut knob = Knob::default();
+                            for (key, val) in m {
+                                match (key.as_str(), val) {
+                                    ("id", Mp::Int(id)) if (0..u32::MAX as i64).contains(&id) => knob.id = Some(id as u32),
+                                    ("name", Mp::Str(s)) => knob.name = s,
+                                    ("section", Mp::Str(s)) => knob.section = s,
+                                    _ => {}
+                                }
+                            }
+                            knob
+                        }
+                        _ => Knob::default(),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 impl Preset {
@@ -91,35 +138,81 @@ impl Preset {
             let chunk = if self.state.starts_with(b"VST3") {
                 wrap_typed(1, &self.state)
             } else {
-                wrap_chunk(&State { component: self.state.clone(), controller: Vec::new() }, Format::Vst3, &cid)
+                wrap_chunk(&bare_state(&self.state), Format::Vst3, &cid)
             };
             let id = e.maschine_id().ok_or("the plug-in has no id")?;
-            return Ok(Resolved { id, name: e.name.clone(), chunk });
+            return Ok(Resolved { id, name: e.name.clone(), chunk, pages: self.pages.clone() });
         }
         let magic = self.vst2.ok_or("the preset doesn't say which plug-in it is for")?;
-        // The VST3 version: "VST", the VST2 id, the name in lower case.
+        // The VST3 version: Steinberg's ("VST", the VST2 id, the name in lower case) or
+        // Arturia's ("ArtuAVIS", the VST2 id, "Proc"), or by plug-in name.
         let code = magic.to_be_bytes();
         let versions: Vec<_> = classes()
-            .filter(|(_, cid)| {
+            .filter(|(e, cid)| {
                 let standard = if cid[..3] == *b"VST" { *cid } else { com_order(cid) };
-                standard[..3] == *b"VST" && standard[3..7] == code
+                (standard[..3] == *b"VST" && standard[3..7] == code)
+                    || (standard[8..12] == code && &standard[12..16] == b"Proc")
+                    || self.name.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(&e.name))
             })
             .collect();
         let named = versions.iter().find(|(e, _)| self.name.as_ref().is_some_and(|n| n.eq_ignore_ascii_case(&e.name)));
         let (e, cid) = named.or(versions.first()).ok_or_else(|| {
             format!("{} (VST2 id {}) has no VST3 version installed", self.plugin_name(), String::from_utf8_lossy(&code).escape_default())
         })?;
-        if !same_class(&vst2_cid(magic, &e.name), cid) {
-            return Err(format!("{}: its VST3 class doesn't follow its name", e.name));
+        let state = bare_state(&self.state);
+        if same_class(&vst2_cid(magic, &e.name), cid) {
+            let role = if e.instrument { "INSTR" } else { "FX" };
+            return Ok(Resolved {
+                id: format!("{}:VST:{role}:{magic}", e.vendor),
+                name: e.name.clone(),
+                chunk: wrap_chunk(&state, Format::Vst2, cid),
+                pages: self.pages.clone(),
+            });
         }
-        let role = if e.instrument { "INSTR" } else { "FX" };
-        let state = State { component: self.state.clone(), controller: Vec::new() };
-        Ok(Resolved { id: format!("{}:VST:{role}:{magic}", e.vendor), name: e.name.clone(), chunk: wrap_chunk(&state, Format::Vst2, cid) })
+        let chunk = if self.state.starts_with(b"VST3") { wrap_typed(1, &self.state) } else { wrap_chunk(&state, Format::Vst3, cid) };
+        let id = e.maschine_id().ok_or("the plug-in has no id")?;
+        Ok(Resolved { id, name: e.name.clone(), chunk, pages: self.pages.clone() })
     }
 
     fn plugin_name(&self) -> &str {
         self.name.as_deref().unwrap_or("The preset's plug-in")
     }
+}
+
+/// Bare `PCHK` bytes as a [`State`]: either `[u64 component_len][u64 controller_len]`
+/// followed by both streams (Arturia's NKS presets), or the component stream alone.
+fn bare_state(bytes: &[u8]) -> State {
+    if bytes.len() >= 16 {
+        let comp = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let cont = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        if comp > 0 && 16usize.checked_add(comp).and_then(|n| n.checked_add(cont)) == Some(bytes.len()) {
+            return State { component: bytes[16..16 + comp].to_vec(), controller: bytes[16 + comp..].to_vec() };
+        }
+    }
+    State { component: bytes.to_vec(), controller: Vec::new() }
+}
+
+/// A preset in a plug-in's own file format (`.nfm8`, `.nmsv`, `.nrkt`, `.rkplr`,
+/// `.ens`), hosted through its VST3 plug-in.
+pub fn native_preset(ext: &str, bytes: &[u8], installed: &[Entry]) -> Option<Result<Resolved, String>> {
+    let plugin = match ext {
+        "nfm8" => "FM8",
+        "nmsv" => "Massive",
+        "nrkt" | "rkplr" | "ens" => "Reaktor 6",
+        _ => return None,
+    };
+    let resolve = || -> Result<Resolved, String> {
+        let e = installed
+            .iter()
+            .find(|e| e.kind == Kind::Vst3 && e.name.eq_ignore_ascii_case(plugin))
+            .ok_or_else(|| format!("{plugin} isn't installed as VST3"))?;
+        let cid = hex16(&e.cid).ok_or("the plug-in has no class id")?;
+        let id = e.maschine_id().ok_or("the plug-in has no id")?;
+        let state = State { component: bytes.to_vec(), controller: Vec::new() };
+        let chunk = wrap_chunk(&state, Format::Vst3, &cid);
+        Ok(Resolved { id, name: e.name.clone(), chunk, pages: Vec::new() })
+    };
+    Some(resolve())
 }
 
 /// A MessagePack value, as far as `PLID` needs one.
@@ -227,6 +320,12 @@ impl Reader<'_> {
 /// A preset file, for tests.
 #[doc(hidden)]
 pub fn fixture(uid: Option<[u32; 4]>, magic: u32, name: &str, state: &[u8]) -> Vec<u8> {
+    fixture_with_pages(uid, magic, name, state, &[])
+}
+
+/// [`fixture`] with `NICA` controller pages (`pages`: each page's knobs).
+#[doc(hidden)]
+pub fn fixture_with_pages(uid: Option<[u32; 4]>, magic: u32, name: &str, state: &[u8], pages: &[Vec<Knob>]) -> Vec<u8> {
     let key = |out: &mut Vec<u8>, s: &str| {
         out.push(0xa0 | s.len() as u8);
         out.extend(s.as_bytes());
@@ -248,8 +347,32 @@ pub fn fixture(uid: Option<[u32; 4]>, magic: u32, name: &str, state: &[u8]) -> V
     }
     let mut pchk = 1u32.to_le_bytes().to_vec();
     pchk.extend(state);
+    let mut nica = 1u32.to_le_bytes().to_vec();
+    nica.push(0x81);
+    key(&mut nica, "ni8");
+    nica.push(0x90 | pages.len().min(15) as u8);
+    for pg in pages.iter().take(15) {
+        nica.push(0x90 | pg.len().min(8) as u8);
+        for k in pg.iter().take(8) {
+            let fields = k.id.is_some() as u8 + !k.name.is_empty() as u8 + !k.section.is_empty() as u8;
+            nica.push(0x80 | fields);
+            if let Some(id) = k.id {
+                key(&mut nica, "id");
+                nica.push(0xce);
+                nica.extend(id.to_be_bytes());
+            }
+            if !k.name.is_empty() {
+                key(&mut nica, "name");
+                key(&mut nica, &k.name);
+            }
+            if !k.section.is_empty() {
+                key(&mut nica, "section");
+                key(&mut nica, &k.section);
+            }
+        }
+    }
     let mut body = b"NIKS".to_vec();
-    for (id, chunk) in [(b"NISI", &b"\x01\0\0\0\x80"[..]), (b"PLID", &plid[..]), (b"PCHK", &pchk[..])] {
+    for (id, chunk) in [(b"NISI", &b"\x01\0\0\0\x80"[..]), (b"NICA", &nica[..]), (b"PLID", &plid[..]), (b"PCHK", &pchk[..])] {
         body.extend(id);
         body.extend((chunk.len() as u32).to_le_bytes());
         body.extend(chunk);

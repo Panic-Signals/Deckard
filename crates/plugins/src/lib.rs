@@ -283,6 +283,15 @@ impl Plugin {
         each!(self, p => p.parameter_list(automatable))
     }
 
+    /// Whether the plug-in reports any automatable parameters (some VST3 plug-ins,
+    /// such as Omnisphere, expose them only after a preset state is loaded).
+    pub fn has_automatable_params(&self) -> bool {
+        match &self.kind {
+            Kind::Vst3(v) => v.has_automatable_params(),
+            _ => true,
+        }
+    }
+
     /// The plug-in's own pages of parameters (DECKARD's plug-ins have them): a name,
     /// and up to eight knobs (parameter id, the section heading starting there).
     pub fn pages(&self) -> Vec<(String, Vec<(u32, String)>)> {
@@ -660,6 +669,7 @@ impl Vst3 {
         let Some(c) = &self.controller else { return Vec::new() };
         let n = unsafe { c.getParameterCount() };
         let mut out = Vec::new();
+        let mut fallback = Vec::new();
         for i in 0..n {
             let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
             if unsafe { c.getParameterInfo(i, &mut info) } != kResultOk {
@@ -667,19 +677,42 @@ impl Vst3 {
             }
             use ParameterInfo_::ParameterFlags_::*;
             let f = info.flags;
-            if automatable && (f & kCanAutomate == 0 || f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) != 0) {
+            let skip = f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) != 0;
+            if automatable && skip {
                 continue;
             }
-            out.push(ParamInfo {
+            let param = ParamInfo {
                 id: info.id,
                 title: string128(&info.title),
                 short: string128(&info.shortTitle),
                 units: string128(&info.units),
                 steps: info.stepCount,
                 default: info.defaultNormalizedValue,
-            });
+            };
+            if automatable && f & kCanAutomate == 0 {
+                fallback.push(param);
+            } else {
+                out.push(param);
+            }
         }
-        out
+        if out.is_empty() { fallback } else { out }
+    }
+
+    /// Whether the plug-in reports any `kCanAutomate` parameter.
+    pub fn has_automatable_params(&self) -> bool {
+        let Some(c) = &self.controller else { return false };
+        let n = unsafe { c.getParameterCount() };
+        for i in 0..n {
+            let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
+            if unsafe { c.getParameterInfo(i, &mut info) } == kResultOk {
+                use ParameterInfo_::ParameterFlags_::*;
+                let f = info.flags;
+                if f & kCanAutomate != 0 && f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) == 0 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// A parameter's value (normalized 0..1).

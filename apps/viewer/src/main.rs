@@ -411,6 +411,21 @@ impl ViewPage {
     }
 }
 
+/// A saved page's name: its explicit `name`, or its knobs' section headings.
+fn saved_page_name(pg: &deckard_model::PluginPage) -> String {
+    if !pg.name.is_empty() {
+        return pg.name.clone();
+    }
+    let mut sections: Vec<&str> = Vec::new();
+    for k in &pg.params {
+        let s = k.section.trim();
+        if !s.is_empty() && !sections.contains(&s) {
+            sections.push(s);
+        }
+    }
+    sections.join(" / ")
+}
+
 /// The plug-in's own pages (DECKARD's: they follow the plug-in, even once saved for a
 /// macro), the pages saved with it, or Maschine's automatic ones: its first 128
 /// automatable parameters, eight per page.
@@ -432,32 +447,138 @@ fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) 
             })
             .collect();
     }
-    if saved.iter().any(|pg| !pg.params.is_empty()) {
+    let mut pages: Vec<ViewPage> = if saved.iter().any(|pg| !pg.params.is_empty()) {
         let all = p.parameter_list(false);
-        return saved
+        saved
             .iter()
             .map(|pg| {
                 let knobs = pg
                     .params
                     .iter()
                     .filter_map(|k| {
-                        let info = all.iter().find(|i| i.id == k.id)?.clone();
+                        let info = all
+                            .iter()
+                            .find(|i| i.id == k.id)
+                            .or_else(|| (k.id != u32::MAX).then(|| all.get(k.id as usize)).flatten())?
+                            .clone();
                         let label = if k.name.is_empty() { info.title.clone() } else { k.name.clone() };
                         Some((info, label, k.section.clone()))
                     })
                     .collect();
-                ViewPage::new(p, pg.name.clone(), knobs)
+                ViewPage::new(p, saved_page_name(pg), knobs)
             })
             .filter(|pg| !pg.knobs.is_empty())
-            .collect();
+            .collect()
+    } else {
+        p.parameters()
+            .into_iter()
+            .take(128)
+            .collect::<Vec<_>>()
+            .chunks(8)
+            .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
+            .collect()
+    };
+    name_unnamed_pages(&mut pages);
+    pages
+}
+
+/// Give pages that have no explicit section headings (`autoname` NKS presets, or
+/// automatic parameter pages) section headings and page names derived from their knob
+/// labels.
+fn name_unnamed_pages(pages: &mut [ViewPage]) {
+    let mut prev: Option<(String, usize)> = None;
+    for pg in pages.iter_mut() {
+        if !pg.name.is_empty() {
+            prev = Some((pg.name.clone(), 1));
+            continue;
+        }
+        let derived = infer_knob_sections(&mut pg.knobs);
+        if !derived.is_empty() {
+            prev = Some((derived.clone(), 1));
+            pg.name = derived;
+        } else if let Some((base, n)) = &mut prev {
+            *n += 1;
+            pg.name = format!("{base} {n}");
+        } else if let Some((_, first, sec)) = pg.knobs.first_mut() {
+            let fallback = first.split_whitespace().next().unwrap_or(first.as_str()).trim().to_string();
+            let name = if fallback.is_empty() { "Main".to_string() } else { fallback };
+            if sec.is_empty() {
+                *sec = name.clone();
+            }
+            prev = Some((name.clone(), 1));
+            pg.name = name;
+        }
     }
-    p.parameters()
-        .into_iter()
-        .take(128)
-        .collect::<Vec<_>>()
-        .chunks(8)
-        .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
-        .collect()
+}
+
+/// Infer section headings from knob labels when a page has none, and return the page
+/// name (up to two sections joined by `" / "`).
+fn infer_knob_sections(knobs: &mut [(deckard_plugins::ParamInfo, String, String)]) -> String {
+    if knobs.is_empty() || knobs.iter().any(|(_, _, s)| !s.trim().is_empty()) {
+        return String::new();
+    }
+    let labels: Vec<String> = knobs.iter().map(|(_, l, _)| l.trim().to_string()).collect();
+    let two_word = |s: &str| -> Option<String> {
+        let mut w = s.split_whitespace();
+        let (a, b, _) = (w.next()?, w.next()?, w.next()?);
+        let numbered = b.chars().all(|c| c.is_ascii_digit()) || (b.len() <= 3 && b.chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+        numbered.then(|| format!("{a} {b}"))
+    };
+    let mut cands: Vec<Option<String>> = Vec::with_capacity(labels.len());
+    for (i, l) in labels.iter().enumerate() {
+        if let Some((sec, _)) = l.split_once(" - ").or_else(|| l.split_once(": ")).or_else(|| l.split_once(" / ")) {
+            let sec = sec.trim();
+            if !sec.is_empty() {
+                cands.push(Some(sec.to_string()));
+                continue;
+            }
+        }
+        if let Some((sec, _)) = l.split_once('-')
+            && sec.len() >= 3
+            && sec.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && sec.chars().last().is_some_and(|c| c.is_ascii_digit())
+        {
+            cands.push(Some(sec.to_string()));
+            continue;
+        }
+        let words: Vec<&str> = l.split_whitespace().collect();
+        if words.first().is_some_and(|w| w.eq_ignore_ascii_case("macro") || w.eq_ignore_ascii_case("macros")) {
+            cands.push(Some("Macros".into()));
+            continue;
+        }
+        if let Some(tw) = two_word(l)
+            && labels.iter().enumerate().any(|(j, other)| j != i && two_word(other).as_deref() == Some(tw.as_str()))
+        {
+            cands.push(Some(tw));
+            continue;
+        }
+        if words.len() >= 2 && words[0].len() >= 3 {
+            let w0 = words[0];
+            let neighbor_matches = [i.wrapping_sub(1), i + 1]
+                .into_iter()
+                .filter_map(|j| labels.get(j))
+                .any(|other| other.split_whitespace().next().is_some_and(|ow| ow.eq_ignore_ascii_case(w0)));
+            if neighbor_matches {
+                cands.push(Some(w0.to_string()));
+                continue;
+            }
+        }
+        cands.push(None);
+    }
+    let mut sections: Vec<String> = Vec::new();
+    let mut last = String::new();
+    for (k, sec) in cands.into_iter().enumerate() {
+        if let Some(sec) = sec {
+            if !sec.eq_ignore_ascii_case(&last) {
+                knobs[k].2 = sec.clone();
+                last = sec.clone();
+                if !sections.iter().any(|s| s.eq_ignore_ascii_case(&sec)) {
+                    sections.push(sec);
+                }
+            }
+        }
+    }
+    sections.into_iter().take(2).collect::<Vec<_>>().join(" / ")
 }
 
 /// A new zone playing all of `file` over every key and velocity.
@@ -7197,6 +7318,11 @@ impl App {
                 return self.load_nks_preset(&item.name, (g, s), &bytes);
             }
             if !matches!(ext.as_str(), "mxinst" | "mxfx") {
+                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                if let Some(res) = deckard_plugins::nks::native_preset(&ext, &bytes, &self.catalog.entries) {
+                    let plugin = res.map_err(|e| format!("{}: {e}", item.name))?;
+                    return self.load_resolved_preset(&item.name, (g, s), plugin);
+                }
                 return Err(format!("{}: .{ext} presets can't be loaded yet", item.name));
             }
         }
@@ -7204,6 +7330,7 @@ impl App {
             Kind::Group | Kind::Sound | Kind::Instrument | Kind::Effect => {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
                 let mut d = doc.borrow_mut();
+                let mut loaded_slot = None;
                 match item.kind {
                     Kind::Group => d.load_group_file(g, &bytes)?,
                     Kind::Sound => d.load_sound_file(g, s, &bytes)?,
@@ -7212,16 +7339,26 @@ impl App {
                         if slots.first().is_some_and(|x| !x.is_instrument()) {
                             return Err("the sound's chain starts with an effect: an instrument can't go before it".into());
                         }
-                        d.load_slot_file(g, s, 0, &bytes)?
+                        d.load_slot_file(g, s, 0, &bytes)?;
+                        loaded_slot = Some(0);
                     }
                     _ => {
                         let n = d.project().groups[g].sounds[s].slots.len();
-                        d.load_slot_file(g, s, n, &bytes)?
+                        d.load_slot_file(g, s, n, &bytes)?;
+                        loaded_slot = Some(n);
                     }
                 }
                 drop(d);
                 if !matches!(item.kind, Kind::Group) {
                     self.sound = s;
+                }
+                if let Some(slot) = loaded_slot {
+                    self.channel = false;
+                    self.chain_tab = layout::ChainTab::Sound;
+                    self.slot_of = Some(deckard_doc::Chain::Sound(g, s));
+                    self.slot = Some(slot);
+                    self.plugin_page = 0;
+                    self.plugin_view = None;
                 }
                 self.status = format!("{} loaded", item.name);
             }
@@ -7246,27 +7383,70 @@ impl App {
     fn load_nks_preset(&mut self, name: &str, (g, s): (usize, usize), bytes: &[u8]) -> Result<(), String> {
         let plugin =
             deckard_plugins::nks::parse(bytes).and_then(|p| p.resolve(&self.catalog.entries)).map_err(|e| format!("{name}: {e}"))?;
+        self.load_resolved_preset(name, (g, s), plugin)
+    }
+
+    fn load_resolved_preset(&mut self, name: &str, (g, s): (usize, usize), plugin: deckard_plugins::nks::Resolved) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let pages: Vec<deckard_doc::PluginPageSpec> = plugin
+            .pages
+            .iter()
+            .map(|pg| deckard_doc::PluginPageSpec {
+                name: String::new(),
+                knobs: pg.iter().map(|k| (k.id.unwrap_or(u32::MAX), k.section.clone())).collect(),
+                custom_names: pg.iter().map(|k| k.name.clone()).collect(),
+            })
+            .collect();
         let module = deckard_doc::NewModule::Plugin { id: plugin.id, name: plugin.name, chunk: plugin.chunk };
         let mut d = doc.borrow_mut();
         let (count, first_is_instrument) = {
             let slots = &d.project().groups[g].sounds[s].slots;
             (slots.len(), slots.first().map(|x| x.is_instrument()))
         };
-        if module.is_instrument() {
-            match first_is_instrument {
-                Some(false) => return Err("the sound's chain starts with an effect: an instrument can't go before it".into()),
-                Some(true) => d.remove_slot(g, s, 0)?,
-                None => {}
-            }
-            d.add_slot(g, s, 0, &module)?;
-        } else {
-            d.add_slot(g, s, count, &module)?;
+        if module.is_instrument() && first_is_instrument == Some(false) {
+            return Err("the sound's chain starts with an effect: an instrument can't go before it".into());
         }
+        let slot = if module.is_instrument() { 0 } else { count };
+        d.transaction("Load Preset", |d| {
+            if module.is_instrument() && first_is_instrument == Some(true) {
+                d.remove_slot(g, s, 0)?;
+            }
+            d.add_slot(g, s, slot, &module)?;
+            if !pages.is_empty() {
+                d.save_plugin_pages(deckard_doc::Chain::Sound(g, s), slot, &pages)?;
+            }
+            Ok(())
+        })?;
         drop(d);
+        self.editors.retain(|&(c, i, _)| !(c == deckard_doc::Chain::Sound(g, s) && i == slot));
+        self.channel = false;
         self.sound = s;
+        self.chain_tab = layout::ChainTab::Sound;
+        self.slot_of = Some(deckard_doc::Chain::Sound(g, s));
+        self.slot = Some(slot);
+        self.plugin_page = 0;
+        self.plugin_view = None;
         self.status = format!("{name} loaded");
         Ok(())
+    }
+
+    /// Look up a default NKS preset for `plugin_name` in NI's library index, preferring
+    /// one whose `NICA` pages carry section headings.
+    fn default_nks_preset(&self, plugin_name: &str) -> Option<deckard_plugins::nks::Resolved> {
+        let mut best: Option<deckard_plugins::nks::Resolved> = None;
+        for path in deckard_library::ni::nks_presets_for(plugin_name) {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(preset) = deckard_plugins::nks::parse(&bytes) else { continue };
+            let Ok(resolved) = preset.resolve(&self.catalog.entries) else { continue };
+            let has_sections = resolved.pages.iter().any(|pg| pg.iter().any(|k| !k.section.is_empty()));
+            if has_sections {
+                return Some(resolved);
+            }
+            if best.is_none() && !resolved.pages.is_empty() {
+                best = Some(resolved);
+            }
+        }
+        best
     }
 
     fn drop_samples(&mut self, (g, s): (usize, usize), files: &[PathBuf]) {
@@ -7448,10 +7628,47 @@ impl App {
         let key = (chain, i);
         let stale = self.plugin_view.as_ref().is_none_or(|v| v.key != key);
         if stale {
-            let saved = all[i].plugin.as_ref().map(|p| p.pages.clone()).unwrap_or_default();
+            let pr = all[i].plugin.clone().unwrap();
+            let mut saved = pr.pages.clone();
+            let default_nks = if saved.is_empty() && !pr.id.starts_with(deckard_plugins::native::VENDOR) {
+                self.default_nks_preset(&pr.name)
+            } else {
+                None
+            };
+            if saved.is_empty()
+                && let Some(nks) = &default_nks
+            {
+                saved = nks
+                    .pages
+                    .iter()
+                    .map(|pg| deckard_model::PluginPage {
+                        name: String::new(),
+                        params: pg
+                            .iter()
+                            .map(|k| deckard_model::PluginKnob {
+                                id: k.id.unwrap_or(u32::MAX),
+                                name: k.name.clone(),
+                                section: k.section.clone(),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+            }
             let view = match self.slot_plugin_in(key.0, key.1) {
                 Ok(p) => {
-                    let pages = p.lock().map(|p| view_pages(&p, &saved)).unwrap_or_default();
+                    let pages = p
+                        .lock()
+                        .map(|mut p| {
+                            if pr.chunk.is_empty()
+                                && !p.has_automatable_params()
+                                && let Some(nks) = &default_nks
+                            {
+                                let _ = p.load_chunk(&nks.chunk);
+                                p.mark_saved(Vec::new());
+                            }
+                            view_pages(&p, &saved)
+                        })
+                        .unwrap_or_default();
                     PluginView {
                         key,
                         pages,
@@ -8444,6 +8661,15 @@ impl App {
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
+        self.sync_sampling_page();
+        self.sync_browse_page();
+        self.sync_arp();
+        self.sync_auto_write();
+        self.tick_mod_take(self.playhead().map(|h| (h.mode, h.position)), std::time::Instant::now());
+        if self.browser.poll() || self.browser.waiting() {
+            ctx.request_repaint_after(undrawn(ctx, std::time::Duration::from_millis(30)));
+        }
+        self.update_slot_view();
         self.control_bridge();
         self.midi_sync(ctx);
         self.midi_devices_sync(ctx);
@@ -8741,6 +8967,8 @@ impl App {
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
+        self.sync_browse_page();
+        self.update_slot_view();
         self.control_bridge();
         // The scale as the controller has it (its Keyboard page can change it too). Its
         // root is the focused group's, so a new root counts as a change of root only

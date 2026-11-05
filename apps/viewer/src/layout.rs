@@ -4118,12 +4118,13 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
                             heading = pr.name.clone();
-                            // Named pages (DECKARD's plug-ins name theirs) by name, else by number.
-                            let names: Vec<String> = if !v.pages.is_empty() && v.pages.iter().all(|p| !p.name.is_empty()) {
-                                v.pages.iter().map(|p| p.name.clone()).collect()
-                            } else {
-                                (1..=pages).map(|n| n.to_string()).collect()
-                            };
+                            // Named pages (DECKARD's plug-ins and NKS/saved pages with sections) by name, else by number.
+                            let names: Vec<String> = v
+                                .pages
+                                .iter()
+                                .enumerate()
+                                .map(|(n, p)| if p.name.is_empty() { (n + 1).to_string() } else { p.name.clone() })
+                                .collect();
                             tabs = Some((names, page, Act::PluginPage));
                             if let Some(pg) = v.pages.get(page) {
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
