@@ -1626,7 +1626,7 @@ impl Engine {
                 (0..grp.sounds.len())
                     .map(|s| {
                         let (p, _) = prev?;
-                        let mut r = reuse_of(p, project, g, s, sr_f);
+                        let mut r = reuse_of(p, project, g, s, sr_f, &cache.plugins);
                         // A sound whose level feeds a side-chain (its group's sum)
                         // has that in its chain.
                         let (a, b) = (&p.groups[g].sounds[s], &grp.sounds[s]);
@@ -4507,8 +4507,29 @@ fn same_timelines(a: &Project, b: &Project) -> bool {
 
 /// The slots of a sound's chain as its effect chain is built from them, without their
 /// effects' settings: what makes two chains the same but for those.
-fn chain_shape(s: &deckard_model::Sound) -> Vec<(usize, &str, bool, Option<&deckard_model::PluginRef>)> {
-    effect_slots(s).into_iter().map(|(i, x)| (i, x.module.as_str(), x.active, x.plugin.as_ref())).collect()
+fn chain_shape(s: &deckard_model::Sound) -> Vec<(usize, &str, bool, Option<(&str, &str)>)> {
+    effect_slots(s)
+        .into_iter()
+        .map(|(i, x)| (i, x.module.as_str(), x.active, x.plugin.as_ref().map(|p| (p.id.as_str(), p.name.as_str()))))
+        .collect()
+}
+
+/// Whether `slot`'s plug-in can be kept as it plays when `old` becomes `new`: either
+/// the saved chunk is unchanged, or the live instance already holds `new`'s chunk (a
+/// knob turn saved back into the document).
+fn plugin_kept(
+    plugins: &deckard_plugins::Host,
+    slot: Slot,
+    old: &Option<deckard_model::PluginRef>,
+    new: &Option<deckard_model::PluginRef>,
+) -> bool {
+    if old == new {
+        return true;
+    }
+    let (Some(a), Some(b)) = (old, new) else { return false };
+    a.id == b.id
+        && a.name == b.name
+        && plugins.existing(slot).is_some_and(|s| s.lock().ok().is_some_and(|p| p.chunk() == b.chunk.as_slice()))
 }
 
 /// The synth a sound plays (its first slot's module, when on and one of
@@ -4520,7 +4541,7 @@ fn synth_of(s: &deckard_model::Sound) -> Option<(&str, &[(String, f64)])> {
 
 /// What a sound being edited can keep of what plays, comparing it as it was (`old`,
 /// in `prev`) with what it is (`new`).
-fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> Reuse {
+fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64, plugins: &deckard_plugins::Host) -> Reuse {
     let (og, ng) = (&prev.groups[g], &project.groups[g]);
     let (old, new) = (&og.sounds[s], &ng.sounds[s]);
     let silent = |grp: &deckard_model::Group, snd: &deckard_model::Sound| grp.muted || (snd.muted && snd.channel.audio_mute);
@@ -4545,9 +4566,13 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> R
             _ => {}
         }
     }
-    r.instrument = old.plugin == new.plugin;
+    r.instrument = plugin_kept(plugins, Slot::Sound { group: g, sound: s }, &old.plugin, &new.plugin);
     // The chain: the same slots and side-chains (its effects' settings may differ).
-    if chain_shape(old) == chain_shape(new) && old.channel.sidechain == new.channel.sidechain {
+    let same_fx_plugins = effect_slots(old)
+        .into_iter()
+        .zip(effect_slots(new))
+        .all(|((slot, a), (_, b))| plugin_kept(plugins, Slot::Chain { group: g, sound: s, slot }, &a.plugin, &b.plugin));
+    if chain_shape(old) == chain_shape(new) && same_fx_plugins && old.channel.sidechain == new.channel.sidechain {
         r.chain = true;
         for ((i, a), (_, b)) in effect_slots(old).into_iter().zip(effect_slots(new)) {
             if a.plugin.is_none() && a.params != b.params {

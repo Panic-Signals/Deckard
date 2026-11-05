@@ -24,6 +24,7 @@ mod names;
 mod screen;
 mod sources;
 
+pub use screen::Picture;
 pub use sources::SHIPPED;
 
 /// What the layer shows of the app, filled by the app each frame.
@@ -835,6 +836,7 @@ const RELOAD_EVERY: Duration = Duration::from_millis(500);
 /// What the scripts and the engine share while a handler runs.
 pub(crate) struct Shared {
     pub view: View,
+    pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
     /// Buttons held (the scripts' names: `SHIFT`, `PLAY`…), and pads held (0..16).
@@ -862,6 +864,7 @@ pub struct Surface {
     checked: Option<Instant>,
     /// The last picture sent, and how many were sent.
     picture: Option<Vec<[u8; 4]>>,
+    last_ops: Option<([u8; 3], Vec<screen::DrawOp>)>,
     frames: u64,
     /// Pictures the scripts can draw ([`Surface::add_picture`]).
     pictures: screen::Pictures,
@@ -889,6 +892,7 @@ impl Surface {
             epoch: Instant::now(),
             checked: None,
             picture: None,
+            last_ops: None,
             frames: 0,
             pictures: Default::default(),
         };
@@ -939,6 +943,7 @@ impl Surface {
                 self.run = Some(run);
                 *self.error.borrow_mut() = None;
                 self.picture = None;
+                self.last_ops = None;
                 true
             }
             Err(e) => {
@@ -994,7 +999,10 @@ impl Surface {
         let run = self.run.as_ref()?;
         {
             let mut sh = run.shared.borrow_mut();
-            sh.view = v.clone();
+            if sh.view != *v {
+                sh.view = v.clone();
+                sh.view_id = sh.view_id.wrapping_add(1);
+            }
             if let Some(now) = now {
                 sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
             }
@@ -1155,10 +1163,30 @@ impl Surface {
         r.map_or_else(leds::blank, |(l, _)| l)
     }
 
+    /// Both screens' drawing commands, if they changed since the last call: a count that
+    /// goes up with each new picture, and the picture to rasterize off the UI thread.
+    pub fn screen_picture(&mut self, v: &View) -> Option<(u64, screen::Picture)> {
+        let p = self.draw_picture(v);
+        let key = (p.background, p.ops.clone());
+        if self.last_ops.as_ref() == Some(&key) {
+            return None;
+        }
+        self.last_ops = Some(key);
+        self.frames += 1;
+        Some((self.frames, p))
+    }
+
     /// Both screens, if they changed since the last call: a count that goes up with each
     /// new picture, and the picture (960 × 272 RGBA, the left screen first).
     pub fn screens(&mut self, v: &View) -> Option<(u64, Vec<[u8; 4]>)> {
-        let px = self.draw(v);
+        let mut p = self.draw_picture(v);
+        let key = (p.background, p.ops.clone());
+        if self.last_ops.as_ref() == Some(&key) {
+            return None;
+        }
+        self.last_ops = Some(key);
+        p.rasterize();
+        let px = p.px;
         if self.picture.as_ref() == Some(&px) {
             return None;
         }
@@ -1180,14 +1208,17 @@ impl Surface {
 
     /// `global.lua`'s `draw(screen, theme)`, then the page's; a script error over them.
     fn draw(&self, v: &View) -> Vec<[u8; 4]> {
-        self.draw_picture(v).px
+        let mut p = self.draw_picture(v);
+        p.rasterize();
+        p.px
     }
 
     /// Give the scripts picture `key` to draw (`screen:image`): a plug-in's thumbnail
     /// (`thumb`) or its logo, RGBA, `w` × `h`.
     pub fn add_picture(&mut self, key: &str, thumb: bool, w: usize, h: usize, px: Vec<[u8; 4]>) {
         if px.len() == w * h {
-            self.pictures.borrow_mut().insert((key.to_string(), thumb), screen::Image { w, h, px });
+            self.pictures.borrow_mut().insert((key.to_string(), thumb), std::sync::Arc::new(screen::Image { w, h, px }));
+            self.last_ops = None;
         }
     }
 
@@ -1278,6 +1309,7 @@ fn start(sources: &sources::Sources, page: String, theme: &str) -> mlua::Result<
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
         view: View::default(),
+        view_id: 1,
         now: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
