@@ -134,7 +134,7 @@ right-click install-demucs.ps1 > Run with PowerShell, or
   powershell -NoProfile -ExecutionPolicy Bypass -File install-demucs.ps1
 (DECKARD also runs it the first time you use STEMS.)
 
-The Maschine MK3's screens need Windows' WinUSB driver in place of NI's: DECKARD asks,
+The screens of a Maschine MK3 or Maschine+ need Windows' WinUSB driver in place of NI's: DECKARD asks,
 and Preferences > Hardware gives them back for Maschine (mk3-driver.ps1 does the change).
 "@ | Set-Content -Encoding UTF8 "$Stage\README.txt"
 

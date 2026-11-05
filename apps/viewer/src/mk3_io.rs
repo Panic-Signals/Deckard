@@ -383,7 +383,7 @@ fn run(shared: &Mutex<Shared>) {
         };
         {
             let mut s = shared.lock().unwrap();
-            s.status = "Maschine MK3 connected".into();
+            s.status = format!("{} connected", dev.model().name);
             s.connected = true;
         }
         let mut events = Vec::new();

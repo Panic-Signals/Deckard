@@ -1,6 +1,6 @@
-# Which driver the Maschine MK3's screens (USB interface 5, "BD") use on Windows. NI's
-# installer binds it to its own kernel driver (nimc3usb), which only NI's software can
-# talk to. DECKARD needs Windows' own WinUSB there instead, and with it NI's software
+# Which driver the screens of a Maschine MK3 or Maschine+ (their "BD" USB interface) use
+# on Windows. NI's installer binds it to its own kernel driver, which only NI's software
+# can talk to. DECKARD needs Windows' own WinUSB there instead, and with it NI's software
 # loses the screens until the NI driver is restored. Only this one interface changes:
 # pads, buttons, LEDs, audio and MIDI stay as they are. Asks for administrator approval.
 #
@@ -18,8 +18,17 @@ $Services = "NIHostIntegrationAgent", "NIHardwareService"
 # Any fixed GUID: WinUSB publishes the interface under it, and nusb looks it up.
 $InterfaceGuid = "{8e7f2d3a-4b61-4c19-9a55-3d6a1f0c7e21}"
 
-function Get-Screens {
-    Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^USB\\VID_17CC&PID_1600&MI_05\\' } | Select-Object -First 1
+# The controllers, the first found used (the same list as `MODELS` in crates/mk3/src/lib.rs).
+$Models = @(
+    @{ Name = "Maschine MK3"; Product = "1600"; Interface = "05"; Driver = "nimc3usb" },
+    @{ Name = "Maschine+"; Product = "1820"; Interface = "06"; Driver = "nim3pbd" }
+)
+
+function Find-Screens {
+    foreach ($m in $Models) {
+        $d = Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match "^USB\\VID_17CC&PID_$($m.Product)&MI_$($m.Interface)\\" } | Select-Object -First 1
+        if ($d) { return @{ Model = $m; Device = $d } }
+    }
 }
 
 function Get-ScreensDriver($id) {
@@ -33,9 +42,10 @@ function Restore-NI($id) {
     Start-Sleep -Seconds 2
 }
 
-$Dev = Get-Screens
-if (-not $Dev) { throw "no Maschine MK3 is plugged in" }
-$Id = $Dev.InstanceId
+$Found = Find-Screens
+if (-not $Found) { throw "no Maschine MK3 or Maschine+ is plugged in" }
+$Model = $Found.Model
+$Id = $Found.Device.InstanceId
 
 $Admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $Admin) {
@@ -49,7 +59,7 @@ if (-not $Admin) {
     $Message = Get-Content $Err -Raw -ErrorAction SilentlyContinue
     Remove-Item $Err -ErrorAction SilentlyContinue
     if ($P.ExitCode -ne 0) {
-        throw $(if ($Message) { $Message.Trim() } else { "changing the MK3's driver failed (exit $($P.ExitCode))" })
+        throw $(if ($Message) { $Message.Trim() } else { "changing the $($Model.Name)'s driver failed (exit $($P.ExitCode))" })
     }
     if ($Message) { Write-Host $Message.Trim() }
     exit 0
@@ -175,6 +185,13 @@ try {
             New-ItemProperty -Path $Params -Name DeviceInterfaceGUIDs -PropertyType MultiString -Value @($InterfaceGuid) -Force | Out-Null
             try {
                 $Reboot = [Mk3Driver]::Install($Id, (Join-Path $env:WINDIR "INF\winusb.inf"), "WINUSB")
+                # WinUSB can bind and still not start (Code 31): the screens would have no
+                # driver that works, so that counts as failing, and NI's goes back on.
+                if (-not $Reboot) {
+                    Start-Sleep -Seconds 1
+                    $Problem = (Get-PnpDeviceProperty -InstanceId $Id -KeyName DEVPKEY_Device_ProblemCode).Data
+                    if ($Problem) { throw "WinUSB wouldn't start on the $($Model.Name)'s screens (Windows problem code $Problem), so NI's driver is back" }
+                }
             } catch {
                 Restore-NI $Id
                 throw
@@ -185,14 +202,14 @@ try {
     } finally {
         foreach ($s in $Running) { Start-Service $s -ErrorAction SilentlyContinue }
     }
-    $Now = Get-Screens
-    $Driver = if ($Now) { Get-ScreensDriver $Now.InstanceId } else { "" }
-    $Wanted = if ($Use -eq "WinUSB") { "WinUSB" } else { "nimc3usb" }
+    $Now = Find-Screens
+    $Driver = if ($Now) { Get-ScreensDriver $Now.Device.InstanceId } else { "" }
+    $Wanted = if ($Use -eq "WinUSB") { "WinUSB" } else { $Model.Driver }
     if ($Driver -ne $Wanted) {
-        throw "the MK3's screens use '$Driver', not $Wanted$(if ($Reboot) { '; restart Windows to finish' })"
+        throw "the $($Model.Name)'s screens use '$Driver', not $Wanted$(if ($Reboot) { '; restart Windows to finish' })"
     }
-    if ($Reboot -and $ErrorFile) { "restart Windows to finish changing the MK3's driver" | Set-Content $ErrorFile }
-    Write-Host "the MK3's screens use $Driver"
+    if ($Reboot -and $ErrorFile) { "restart Windows to finish changing the $($Model.Name)'s driver" | Set-Content $ErrorFile }
+    Write-Host "the $($Model.Name)'s screens use $Driver"
 } catch {
     if ($ErrorFile) { "$($_.Exception.Message)" | Set-Content $ErrorFile }
     throw

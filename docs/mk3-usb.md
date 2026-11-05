@@ -13,6 +13,11 @@ VID 0x17CC, PID 0x1600. Interfaces: 0–2 USB audio, 3 MIDI, **4 HID** (vendor p
 interface opens shared (`hidapi`, non-exclusive) next to NI's agent; reading it needs the
 terminal/app to have Input Monitoring permission on macOS.
 
+A Maschine+ in controller mode (PID 0x1820) is driven the same way, with its interfaces
+one along: **5 HID**, **6 "BD"** (the displays, bulk OUT 0x04), 7 DFU. Its storage mode
+(PID 0x1822) is another device. As reported on Windows 11; not yet tested here on the
+hardware. `MODELS` in `crates/mk3/src/lib.rs` has each controller's ids.
+
 ## Input report 0x01 (42 bytes)
 
 | bytes | |
@@ -121,15 +126,16 @@ when it isn't running (it isn't installed on a machine without NI software). On 
 when an MK3 is plugged in, its screens won't open and the agent is running, DECKARD asks to
 quit it, and gets the screens on its next try. The driver sends only the rows that changed.
 
-On Windows, NI's installer binds interfaces 0, 5 and 6 to its kernel driver, `nimc3usb`,
-and `nusb` opens only WinUSB, so stopping NI's services (NIHostIntegrationAgent and
+On Windows, NI's installer binds interfaces 0, 5 and 6 to its kernel driver, `nimc3usb`
+(on a Maschine+, the displays' interface 6 to `nim3pbd`), and `nusb` opens only WinUSB, so stopping NI's services (NIHostIntegrationAgent and
 NIHardwareService, which are LocalSystem services) doesn't free the screens. The HID
 interface uses `HidUsb` and opens beside them, so pads, buttons and LEDs work regardless.
 When `Displays::open` reports the wrong driver, DECKARD asks to run
 `scripts/mk3-driver.ps1 -Use WinUSB`. It elevates, stops those services, sets
 `DeviceInterfaceGUIDs` on the interface (`nusb` finds the interface by it), installs the
 `WINUSB` section of Windows' `winusb.inf` on that one interface, and starts the services
-again. `-Use NI` (Preferences ▸ Hardware) removes the device node and rescans, and Windows
+again. If WinUSB binds but won't start (Code 31, reported on a Maschine+), it puts NI's
+driver back and says so. `-Use NI` (Preferences ▸ Hardware) removes the device node and rescans, and Windows
 binds NI's driver again, the best match. A reinstall of NI's driver can also take the
 interface back, and DECKARD then asks again.
 

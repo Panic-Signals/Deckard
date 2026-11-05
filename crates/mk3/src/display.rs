@@ -159,24 +159,23 @@ pub struct Displays {
     shown: [Option<Vec<u16>>; 2],
 }
 
-/// What [`Displays::open`] says when no MK3 is plugged in.
-pub const NO_MK3: &str = "no Maschine MK3";
+/// What opening a controller says when none is plugged in.
+pub const NO_CONTROLLER: &str = "no Maschine MK3 or Maschine+";
 
 /// Whether an error from [`Displays::open`] means a driver other than WinUSB has the
-/// displays' interface (Windows: NI's nimc3usb, see `scripts/mk3-driver.ps1`).
+/// displays' interface (Windows: NI's, see `scripts/mk3-driver.ps1`).
 pub fn wrong_driver(error: &str) -> bool {
     error.contains("incompatible driver")
 }
 
 impl Displays {
     pub fn open() -> Result<Displays, String> {
-        let info = nusb::list_devices()
-            .wait()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.vendor_id() == crate::VENDOR && d.product_id() == crate::PRODUCT)
-            .ok_or(NO_MK3)?;
+        let devices: Vec<_> = nusb::list_devices().wait().map_err(|e| e.to_string())?.filter(|d| d.vendor_id() == crate::VENDOR).collect();
+        let (info, model) =
+            crate::MODELS.iter().find_map(|m| devices.iter().find(|d| d.product_id() == m.product).map(|d| (d, m))).ok_or(NO_CONTROLLER)?;
         let dev = info.open().wait().map_err(|e| e.to_string())?;
-        let iface = dev.claim_interface(5).wait().map_err(|e| format!("the displays are in use (NI's agent?): {e}"))?;
+        let iface =
+            dev.claim_interface(model.display_interface).wait().map_err(|e| format!("the displays are in use (NI's agent?): {e}"))?;
         let out = iface.endpoint::<Bulk, Out>(0x04).map_err(|e| e.to_string())?;
         Ok(Displays { _iface: iface, out, shown: [None, None] })
     }
