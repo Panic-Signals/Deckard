@@ -2,7 +2,8 @@
 # attach the builds to it. The version is the release's tag, without a leading "v" (the
 # title is free prose): a tag "v1.2.0" gives DECKARD 1.2.0 and
 # DECKARD-1.2.0-macos-universal.zip, deckard-1.2.0-linux-x86_64.tar.gz (with
-# deckard_1.2.0-1_amd64.deb and deckard-1.2.0-1.x86_64.rpm) and DECKARD-1.2.0-windows-x64.zip.
+# deckard_1.2.0-1_amd64.deb and deckard-1.2.0-1.x86_64.rpm) and DECKARD-1.2.0-windows-x64.zip
+# (with the installer, DECKARD-1.2.0-windows-x64-setup.exe).
 #
 # "published" covers both creating a release directly and publishing a draft (drafts
 # themselves don't start workflows). Run it by hand (Actions > Release > Run workflow)
@@ -64,6 +65,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
 
+      - name: Windows installer tool
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress -y
+
       - name: Build
         shell: bash
         env:
@@ -79,6 +84,7 @@ jobs:
             dist/*.tar.gz
             dist/*.deb
             dist/*.rpm
+            dist/*.exe
           if-no-files-found: error
 
       - name: Attach to the release
@@ -89,5 +95,5 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           shopt -s nullglob
-          files=(dist/*.zip dist/*.tar.gz dist/*.deb dist/*.rpm)
+          files=(dist/*.zip dist/*.tar.gz dist/*.deb dist/*.rpm dist/*.exe)
           gh release upload "$TAG" "${files[@]}" --clobber

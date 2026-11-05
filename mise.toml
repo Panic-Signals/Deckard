@@ -8,7 +8,7 @@
 #   mise run test                     # the workspace's tests
 #   mise run release:macos [version]  # dist/DECKARD-<version>-macos-universal.zip
 #   mise run release:linux [version]  # dist/deckard-<version>-linux-<arch>.tar.gz, .deb, .rpm
-#   mise run release:windows [version]# dist/DECKARD-<version>-windows-x64.zip
+#   mise run release:windows [version]# dist/DECKARD-<version>-windows-x64.zip, -setup.exe
 #   mise run check-platforms          # type-check Linux and Windows from a Mac
 #   mise run lint                     # rustfmt, the workflows and the scripts
 #
@@ -65,7 +65,7 @@ tools = { nfpm = "2.48.0" }
 run = "scripts/build-linux.sh"
 
 [tasks."release:windows"]
-description = "DECKARD.exe for Windows, zipped into dist/ (optional arg: version)"
+description = "DECKARD.exe for Windows, zipped, and an installer, in dist/ (optional arg: version)"
 run = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1"
 
 [tasks.check-platforms]

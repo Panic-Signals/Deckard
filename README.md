@@ -50,13 +50,16 @@ DECKARD is free and open. If it earns a place in your music, these keep it going
      the udev rule that lets you use the MK3 without root; or
      `deckard-<version>-linux-<arch>.tar.gz`, which holds the same files for you to
      place yourself.
-   - **Windows:** `DECKARD-<version>-windows-x64.zip`.
+   - **Windows:** `DECKARD-<version>-windows-x64-setup.exe`, the installer, which adds
+     DECKARD to the Start menu and search; or `DECKARD-<version>-windows-x64.zip`, which
+     holds the same files for you to place yourself.
 2. Install it.
    - **macOS:** unzip it and move DECKARD.app to Applications.
    - **Linux:** `sudo apt install ./deckard_<version>-1_amd64.deb` or
      `sudo dnf install ./deckard-<version>-1.x86_64.rpm`. With the tarball instead,
      unpack it and copy the udev rule into `/etc/udev/rules.d/` if you use an MK3.
-   - **Windows:** unzip it.
+   - **Windows:** run the installer (it needs no administrator approval; DECKARD isn't
+     signed yet, so SmartScreen may ask you to confirm). With the zip instead, unzip it.
 3. Start DECKARD. It opens the project you had open last, or a new empty one. The
    first time, it offers to download the stem separation model (84 MB); you can also
    leave that until you first use STEMS.

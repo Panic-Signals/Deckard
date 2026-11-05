@@ -120,7 +120,7 @@ to the crate's and is shown in About DECKARD.
 |---|---|---|
 | macOS | `scripts/build-macos.sh [version]` (`mise run release:macos`) | `DECKARD-<version>-macos-universal.zip`: a universal DECKARD.app, signed ad hoc or with `MACOS_SIGN_IDENTITY`, and notarized with `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` |
 | Linux | `scripts/build-linux.sh [version]` (`mise run release:linux`) | `deckard-<version>-linux-<arch>.tar.gz`: the binary, a .desktop entry and the MK3 udev rule (`scripts/linux/`); and a `.deb` and an `.rpm` that install them, with the icon and the `.mxprj` file type (`scripts/linux/nfpm.yaml`, built with [nfpm](https://nfpm.goreleaser.com), which mise fetches) |
-| Windows | `scripts\build-windows.ps1 [-Version <version>]` (`mise run release:windows`) | `DECKARD-<version>-windows-x64.zip`, signed with `WINDOWS_SIGN_CERT` / `WINDOWS_SIGN_PASSWORD` if set |
+| Windows | `scripts\build-windows.ps1 [-Version <version>]` (`mise run release:windows`) | `DECKARD-<version>-windows-x64.zip` and `DECKARD-<version>-windows-x64-setup.exe`, the installer (`scripts/windows/deckard.iss`, built with [Inno Setup 6](https://jrsoftware.org/isinfo.php)), signed with `WINDOWS_SIGN_CERT` / `WINDOWS_SIGN_PASSWORD` if set |
 
 - **Stem model:** the packages carry the Demucs installer (`scripts/install-demucs.sh`
   / `.ps1`), not the model. DECKARD runs the installer the first time STEMS is used.
