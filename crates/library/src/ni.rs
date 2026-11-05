@@ -84,7 +84,7 @@ impl NiIndex {
 
         let sql = format!(
             "SELECT p.id, k.name, k.file_name, k.tempo, coalesce(k.author, ''), p.entry1, p.entry2, p.entry3, \
-             CASE WHEN c.content_type = 2 THEN c.alias END \
+             COALESCE(NULLIF(p.entry1, ''), CASE WHEN c.content_type = 2 THEN c.alias END) \
              FROM {table} p JOIN k_sound_info k ON k.id = p.id LEFT JOIN k_content_path c ON c.id = k.content_path_id \
              WHERE k.hidden_for = 0"
         );

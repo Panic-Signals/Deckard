@@ -1185,10 +1185,15 @@ impl Surface {
 
     /// Give the scripts picture `key` to draw (`screen:image`): a plug-in's thumbnail
     /// (`thumb`) or its logo, RGBA, `w` × `h`.
-    pub fn add_picture(&mut self, key: &str, thumb: bool, w: usize, h: usize, px: Vec<[u8; 4]>) {
+    pub fn add_picture(&self, key: &str, thumb: bool, w: usize, h: usize, px: Vec<[u8; 4]>) {
         if px.len() == w * h {
             self.pictures.borrow_mut().insert((key.to_string(), thumb), screen::Image { w, h, px });
         }
+    }
+
+    /// Whether the surface already has picture `key` (`thumb`: thumbnail, else logo).
+    pub fn has_picture(&self, key: &str, thumb: bool) -> bool {
+        self.pictures.borrow().contains_key(&(key.to_string(), thumb))
     }
 
     fn draw_picture(&self, v: &View) -> screen::Picture {

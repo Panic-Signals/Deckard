@@ -78,7 +78,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             acts.push(Act::Browse(BrowseAct::Favorites(!q.favorites)));
         }
     });
-    if !q.user && !b.results.products.is_empty() {
+    if !b.results.products.is_empty() {
         let shown = q.product.clone().unwrap_or_else(|| "All libraries".into());
         egui::ComboBox::from_id_salt("browser-product").width(WIDTH - 20.0).selected_text(shown).show_ui(ui, |ui| {
             if ui.selectable_label(q.product.is_none(), "All libraries").clicked() {
