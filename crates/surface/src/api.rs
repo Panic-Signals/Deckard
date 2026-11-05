@@ -1202,6 +1202,20 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     ct.set("chain", chain)?;
     ct.set("pages", lua.create_sequence_from(c.pages.iter().map(String::as_str))?)?;
     ct.set("page", c.page + 1)?;
+    // The built-in EQ's curve, for the right screen. The same on both of its pages.
+    if let Some(eq) = &c.eq {
+        let t = lua.create_table()?;
+        t.set("points", lua.create_sequence_from(eq.points.iter().copied())?)?;
+        let bands = lua.create_table()?;
+        for (i, (x, y)) in eq.bands.iter().enumerate() {
+            let b = lua.create_table()?;
+            b.set("x", *x)?;
+            b.set("y", *y)?;
+            bands.set(i + 1, b)?;
+        }
+        t.set("bands", bands)?;
+        ct.set("eq", t)?;
+    }
     let knobs = lua.create_table()?;
     for k in 0..8 {
         let kt = match c.knobs.get(k) {
