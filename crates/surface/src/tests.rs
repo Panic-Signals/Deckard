@@ -1614,6 +1614,36 @@ fn shift_on_the_plugin_page_edits_the_chain() {
     assert_eq!(s.error(), None);
 }
 
+/// SHIFT on Master and Group offers the same slot edits as Sound, and the encoder
+/// still steps that chain's inserts.
+#[test]
+fn shift_on_master_and_group_offers_the_sounds_slot_edits() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let slot = |name: &str| crate::SlotView { name: name.into(), instrument: false, active: true, plugin: true, picture: None };
+    v.control.modules_visible = true;
+    v.control.chain = vec![slot("EQ"), slot("Filter")];
+    (v.control.slot_count, v.control.slot_index) = (2, Some(0));
+    for level in [0, 1, 2] {
+        v.control.level = level;
+        hold(&mut s, &v, "BUTTON_SHIFT", true);
+        let text = s.screen_text(&v).join("|");
+        assert!(
+            text.contains("EDIT") && text.contains("INSERT") && text.contains("MOVE") && text.contains("BYPASS") && text.contains("REMOVE"),
+            "level {level}: {text}"
+        );
+        assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SlotEdit("remove")], "level {level}");
+        assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Slot(1)], "level {level} steps inserts");
+    }
+    // No insert on this chain: right does nothing, so it cannot change tab.
+    v.control.chain.clear();
+    (v.control.slot_count, v.control.slot_index) = (0, None);
+    for level in [0, 1] {
+        v.control.level = level;
+        assert!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT").is_empty(), "level {level}");
+    }
+    assert_eq!(s.error(), None);
+}
+
 #[test]
 fn step_mode_enters_steps_of_the_focused_sound() {
     let (mut s, mut v) = (Surface::new(), view());
