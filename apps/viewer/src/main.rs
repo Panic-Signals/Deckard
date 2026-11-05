@@ -8810,6 +8810,20 @@ mod tests {
 
     const PROJECT: &str = "/Users/Shared/Velvet Lounge Library/Projects/Cloud 9 Vibes.mxprj";
 
+    /// How long a test on the real audio output waits for what it's waiting for. It goes
+    /// on as soon as that happens, so this only has to outlast a busy machine, where the
+    /// song can take seconds to get going.
+    const AUDIO_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Wait for what the audio thread publishes to catch up with what was sent to it:
+    /// until then, the playhead is still the last engine's.
+    fn published(app: &App) {
+        let wait = std::time::Instant::now();
+        while !matches!(&app.output, Some(Ok(out)) if out.is_current()) && wait.elapsed() < AUDIO_PATIENCE {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// A value sent to a plug-in shows until its controller reports it (JUCE's take it
     /// in at the next block), or for SENT_HOLD; then what the plug-in says again.
     #[test]
@@ -8906,7 +8920,7 @@ mod tests {
         // The playhead is what the audio thread published after its next block.
         let wait = std::time::Instant::now();
         let mut head = h.state().playhead();
-        while head.as_ref().is_none_or(|p| p.queued.is_none()) && wait.elapsed() < std::time::Duration::from_millis(500) {
+        while head.as_ref().is_none_or(|p| p.queued.is_none()) && wait.elapsed() < AUDIO_PATIENCE {
             std::thread::sleep(std::time::Duration::from_millis(5));
             head = h.state().playhead();
         }
@@ -8932,7 +8946,7 @@ mod tests {
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
         let mut tempo = 0.0;
-        while tempo != 171.0 && wait.elapsed() < std::time::Duration::from_millis(1000) {
+        while tempo != 171.0 && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
             tempo = app.output.as_ref().unwrap().as_ref().unwrap().telemetry(|t| t.tempo);
@@ -8953,10 +8967,11 @@ mod tests {
             return;
         }
         let ctx = egui::Context::default();
-        let at = |app: &mut App, past: f64| {
+        let at = |app: &mut App, within: std::ops::Range<f64>| {
+            published(app);
             let wait = std::time::Instant::now();
             let mut pos = 0.0;
-            while pos <= past && wait.elapsed() < std::time::Duration::from_millis(2000) {
+            while !within.contains(&pos) && wait.elapsed() < AUDIO_PATIENCE {
                 app.background(&ctx);
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 pos = app.playhead().map_or(0.0, |h| h.position);
@@ -8964,18 +8979,20 @@ mod tests {
             pos
         };
         let quarter = deckard_model::PPQ as f64;
-        assert!(at(&mut app, quarter) > quarter, "playing");
+        // Early in the bar: going on from near its end could come round the loop to the
+        // start before the position is looked at.
+        assert!(at(&mut app, quarter + 1.0..2.0 * quarter) > quarter, "playing");
         app.stop();
         let parked = app.shown_playhead().expect("shown where it stopped").position;
         assert!(parked > quarter, "{parked}");
         // The MK3 (the touch strip's play position) shows it there too.
         assert_eq!(app.surface_view().position, Some(parked as i64));
         app.transport_play();
-        let first = at(&mut app, 0.0);
+        let first = at(&mut app, f64::MIN_POSITIVE..f64::MAX);
         assert!(first >= parked - 1.0, "on from {parked}: {first}");
         app.stop();
         app.restart();
-        let first = at(&mut app, 0.0);
+        let first = at(&mut app, f64::MIN_POSITIVE..f64::MAX);
         app.stop();
         assert!(first < parked, "RESTART: from the start ({first})");
     }
@@ -8994,7 +9011,7 @@ mod tests {
         let ctx = egui::Context::default();
         let quarter = deckard_model::PPQ as f64;
         let wait = std::time::Instant::now();
-        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < std::time::Duration::from_millis(2000) {
+        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9003,6 +9020,7 @@ mod tests {
         assert!(parked > quarter, "{parked}");
         app.set_recording(true, true);
         app.background(&ctx);
+        published(&app);
         let first = app.playhead().map_or(0.0, |h| h.position);
         app.set_recording(false, false);
         app.stop();
@@ -9120,7 +9138,7 @@ mod tests {
         out.queue(app.doc.as_ref().unwrap().borrow().project(), Mode::Scene(1));
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
-        while app.scene != 1 && wait.elapsed() < std::time::Duration::from_secs(6) {
+        while app.scene != 1 && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9145,7 +9163,7 @@ mod tests {
         let log = asked.clone();
         ctx.set_request_repaint_callback(move |info| log.lock().unwrap().push(info.delay));
         let wait = std::time::Instant::now();
-        while app.master_meter == (0.0, 0.0) && wait.elapsed() < std::time::Duration::from_millis(1500) {
+        while app.master_meter == (0.0, 0.0) && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9168,7 +9186,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
-        while app.master_meter == (0.0, 0.0) && wait.elapsed() < std::time::Duration::from_millis(1500) {
+        while app.master_meter == (0.0, 0.0) && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
