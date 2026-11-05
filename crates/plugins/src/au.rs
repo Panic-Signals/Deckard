@@ -215,6 +215,7 @@ const PROP_ELEMENT_COUNT: u32 = 11;
 const PROP_MAX_FRAMES: u32 = 14;
 const PROP_VALUE_STRINGS: u32 = 16;
 const PROP_RENDER_CALLBACK: u32 = 23;
+const PROP_ELEMENT_NAME: u32 = 30;
 const PROP_HOST_CALLBACKS: u32 = 27;
 const PROP_COCOA_UI: u32 = 31;
 const PROP_STRING_FROM_VALUE: u32 = 33;
@@ -597,6 +598,19 @@ fn channels_of(unit: Unit, scope: u32, element: u32) -> Option<usize> {
     (r == 0).then_some(f.channels as usize)
 }
 
+/// The plug-in's name for an element (`kAudioUnitProperty_ElementName`), "" without one.
+fn element_name(unit: Unit, scope: u32, element: u32) -> String {
+    let mut name: Cfref = std::ptr::null();
+    let mut size = std::mem::size_of::<Cfref>() as u32;
+    let r = unsafe { AudioUnitGetProperty(unit, PROP_ELEMENT_NAME, scope, element, (&raw mut name).cast(), &mut size) };
+    if r != 0 || name.is_null() {
+        return String::new();
+    }
+    // The property is returned retained.
+    let cf = Cf(name);
+    string_of(cf.0)
+}
+
 fn unit_label(unit: u32) -> &'static str {
     match unit {
         3 => "%",
@@ -687,6 +701,8 @@ pub struct AudioUnit {
     kind: u32,
     sub: u32,
     outputs: Outputs,
+    /// The plug-in's name for each output element ("" for none).
+    output_names: Vec<String>,
     /// Takes notes (an instrument, or a MIDI-controlled effect).
     takes_midi: bool,
     sample_rate: f64,
@@ -748,6 +764,7 @@ impl AudioUnit {
             }
         };
         unsafe { (*context).input_channels = input_channels };
+        let output_names = (0..outputs.len() as u32).map(|e| element_name(unit, OUTPUT, e)).collect();
         let params = read_params(unit);
         let index = params.iter().enumerate().map(|(i, m)| (m.info.id, i)).collect();
         let shared = Arc::new(Shared {
@@ -767,6 +784,7 @@ impl AudioUnit {
             kind: desc.kind,
             sub: desc.sub,
             outputs,
+            output_names,
             takes_midi: midi.contains(&desc.kind),
             sample_rate,
             clock: 0,
@@ -1131,6 +1149,15 @@ impl AudioUnit {
         let b = self.outputs.get(bus).filter(|b| !b.is_empty())?;
         let n = frames.min(MAX_BLOCK);
         Some((&b[0][..n], &b[b.len() - 1][..n]))
+    }
+
+    /// Elements up to the last one of 1 or 2 channels (the ones `output_bus` returns).
+    pub fn output_count(&self) -> usize {
+        self.outputs.iter().rposition(|b| !b.is_empty()).map_or(0, |i| i + 1)
+    }
+
+    pub fn output_name(&self, bus: usize) -> Option<String> {
+        self.output_names.get(bus).cloned()
     }
 }
 
