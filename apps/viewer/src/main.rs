@@ -3268,7 +3268,11 @@ impl App {
         let (pi, pos, dev) = {
             let d = doc.borrow();
             let p = d.project();
-            let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else { return };
+            let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else {
+                drop(d);
+                self.status = "can't write modulation: no pattern of this group is playing".into();
+                return;
+            };
             let Some(at) = modulation::knob_travel(p, chain, &target) else { return };
             (pi, pos, (amount as f64 - at).clamp(-1.0, 1.0))
         };

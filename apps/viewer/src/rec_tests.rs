@@ -1054,3 +1054,122 @@ fn a_held_pad_shows_while_held() {
     assert_eq!(done.len(), 3, "{done:?}");
     assert!(done.iter().all(|n| n.length == len + len / 2), "as long as held: {done:?}");
 }
+
+/// The MK3's own layer, for the tests below: an app playing with a Filter on sound 1.
+fn mk3_playing() -> Option<crate::App> {
+    use deckard_doc::NewModule;
+    crate::modulation::register();
+    let mut app = crate::App::default();
+    app.new_project();
+    {
+        let mut d = app.doc.as_ref().unwrap().borrow_mut();
+        d.add_pattern(0, 0, "Pattern 1").unwrap();
+        d.assign_pattern(0, 0, Some(0)).unwrap();
+        d.add_slot(0, 0, 0, &NewModule::Effect("Filter")).unwrap();
+    }
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.slot = Some(0);
+    app.transport_play();
+    if !matches!(app.output, Some(Ok(_))) {
+        eprintln!("no audio output; skipping");
+        return None;
+    }
+    let wait = std::time::Instant::now();
+    while app.playhead().is_none_or(|h| h.position <= 0.0) && wait.elapsed() < std::time::Duration::from_secs(60) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Some(app)
+}
+
+fn mk3(app: &mut crate::App, e: deckard_mk3::Event) {
+    let now = std::time::Instant::now();
+    app.update_slot_view();
+    app.refresh_surface_settings();
+    let view = app.surface_view();
+    for a in app.surface.event(&e, &view, now) {
+        app.surface_act(a);
+    }
+}
+
+fn mk3_press(app: &mut crate::App, name: &'static str) {
+    mk3(app, deckard_mk3::Event::Button(name, true));
+    mk3(app, deckard_mk3::Event::Button(name, false));
+}
+
+fn mods_of(app: &crate::App) -> Vec<(Option<usize>, Option<usize>, String)> {
+    let d = app.doc.as_ref().unwrap().borrow();
+    let mut out: Vec<_> = d.project().groups[0].patterns[0].mods.iter().map(|m| (m.sound, m.slot, m.field.clone())).collect();
+    out.dedup();
+    out
+}
+
+/// AUTO on the MK3, then a turn of a Control page knob while the song plays.
+#[test]
+fn mk3_auto_writes_an_effects_knob() {
+    let Some(mut app) = mk3_playing() else { return };
+    mk3_press(&mut app, "BUTTON_AUTO");
+    assert!(app.auto_write, "AUTO");
+    let knobs = app.surface_view().control.knobs.iter().map(|k| k.as_ref().map(|k| (k.name.clone(), k.modulatable))).collect::<Vec<_>>();
+    eprintln!("knobs {knobs:?} page {}", app.surface.page());
+    let k = knobs.iter().position(|k| k.as_ref().is_some_and(|k| k.1)).expect("a modulatable knob");
+    for _ in 0..6 {
+        mk3(&mut app, deckard_mk3::Event::Knob(k, 0.02));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    app.stop();
+    app.tick_mod_take(None, std::time::Instant::now());
+    eprintln!("mods {:?} status {}", mods_of(&app), app.status);
+    assert!(!mods_of(&app).is_empty(), "written");
+}
+
+/// AUTO on the MK3, then a turn of a Mixer page knob while the song plays.
+#[test]
+fn mk3_auto_writes_a_mixer_knob() {
+    let Some(mut app) = mk3_playing() else { return };
+    mk3_press(&mut app, "BUTTON_AUTO");
+    mk3_press(&mut app, "BUTTON_MIX");
+    assert_eq!(app.surface.page(), "mixer");
+    let before = app.doc.as_ref().unwrap().borrow().project().groups[0].level;
+    for _ in 0..6 {
+        mk3(&mut app, deckard_mk3::Event::Knob(0, -0.02));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    app.stop();
+    app.tick_mod_take(None, std::time::Instant::now());
+    eprintln!("mods {:?} status {}", mods_of(&app), app.status);
+    assert_eq!(app.doc.as_ref().unwrap().borrow().project().groups[0].level, before, "the fader stays");
+    assert!(mods_of(&app).iter().any(|m| m.1.is_none() && m.2 == "level"), "written");
+}
+
+/// CHANNEL's Level knob on the MK3, with AUTO on, while the song plays.
+#[test]
+fn mk3_auto_writes_the_channel_pages_level() {
+    let Some(mut app) = mk3_playing() else { return };
+    mk3_press(&mut app, "BUTTON_AUTO");
+    mk3_press(&mut app, "BUTTON_CHANNEL");
+    // (Its Output properties: its Input ones open first, and none of them can be written.)
+    app.prop_set = 1;
+    app.update_slot_view();
+    let knobs = app.surface_view().control.knobs.iter().map(|k| k.as_ref().map(|k| (k.name.clone(), k.modulatable))).collect::<Vec<_>>();
+    eprintln!("channel knobs {knobs:?} page {}", app.surface.page());
+    let k = knobs.iter().position(|k| k.as_ref().is_some_and(|k| k.1)).expect("a modulatable knob");
+    for _ in 0..6 {
+        mk3(&mut app, deckard_mk3::Event::Knob(k, -0.02));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    app.stop();
+    app.tick_mod_take(None, std::time::Instant::now());
+    eprintln!("mods {:?} status {}", mods_of(&app), app.status);
+    assert!(!mods_of(&app).is_empty(), "written");
+}
+
+/// With no pattern of that group playing there's nowhere to write: it says so.
+#[test]
+fn writing_with_no_pattern_to_write_into_says_so() {
+    use crate::layout::Edit;
+    use deckard_doc::Target;
+    let mut app = crate::App::default();
+    app.new_project();
+    app.modulate_at(Edit::Level(Target::Sound(0, 0)), 0.5, false, Some((Mode::Scene(0), 100.0)));
+    assert!(app.status.contains("no pattern"), "{}", app.status);
+}
