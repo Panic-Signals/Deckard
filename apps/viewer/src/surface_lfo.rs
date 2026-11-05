@@ -57,6 +57,7 @@ impl App {
                 retrigger: l.retrigger,
                 name: l.name(),
                 points: if points { l.picture(240) } else { Vec::new() },
+                marks: l.picture_marks(),
                 note_off: l.picture_note_off(),
             })
             .collect()
