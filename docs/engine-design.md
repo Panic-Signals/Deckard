@@ -237,6 +237,12 @@ Measured (audio-stress, alternating level and effect edits):
   (`Project::master_slots`, read from the song's chain) runs on that buffer just before
   them. Channels routed straight to the master's output past the master also pass
   through its effects, a DECKARD simplification.
+- **Master, 2-in 4-out.** A plug-in on the master with a second output bus (Element's
+  Aux 1, say) feeds a second pair of channels: the output after the master's (Out 2, which
+  is channels 3-4, for a master on Out 1). The main pair goes on through the chain as ever.
+  The second pair skips the plug-ins after it, and gets the master's level and pan, so one
+  fader moves both. A plug-in with a main pair alone is 2-in 2-out, as ever. The second pair
+  adds to anything else on that output, the cue bus included.
 - **Edits.** Group and master chains carry their state over on edits
   (`FxChain::adopt`), as sounds' chains do. Plug-ins on them are keyed `Slot::Group` /
   `Slot::Master` in the plug-in host.

@@ -704,7 +704,14 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
         tap: Vec::new(),
         sl: vec![0.0; MAX_BLOCK],
         sr: vec![0.0; MAX_BLOCK],
+        second_pair: Vec::new(),
     }
+}
+
+/// The master's chain of `units`: as any bare chain, and its plug-ins can feed the outputs
+/// after the master's.
+fn master_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
+    FxChain { second_pair: vec![0.0; JOB_FRAMES * 2], ..bare_chain(units, sr_f) }
 }
 
 /// The effects of a group's or the master's chain (all its slots), as a sound's are
@@ -792,6 +799,10 @@ struct FxChain {
     tap: Vec<(usize, (f32, f32))>,
     sl: Vec<f32>,
     sr: Vec<f32>,
+    /// The master's chain: what its plug-ins put on their second output bus over the span
+    /// being rendered (interleaved stereo, [`JOB_FRAMES`] of it), for the outputs after the
+    /// master's. Empty for any other chain.
+    second_pair: Vec<f32>,
 }
 
 /// How long an effect takes to fade in or out when it is switched on or off, added or
@@ -914,6 +925,15 @@ impl FxChain {
                     if ol.len() >= n && or.len() >= n {
                         self.l[..n].copy_from_slice(&ol[..n]);
                         self.r[..n].copy_from_slice(&or[..n]);
+                    }
+                    if !self.second_pair.is_empty()
+                        && let Some((al, ar)) = p.output_bus(1, n)
+                        && let Some(to) = self.second_pair.get_mut(offset * 2..(offset + n) * 2)
+                    {
+                        for (f, frame) in to.chunks_exact_mut(2).enumerate().take(al.len().min(ar.len())) {
+                            frame[0] += al[f] * unit.mix;
+                            frame[1] += ar[f] * unit.mix;
+                        }
                     }
                     drop(p);
                     timed(shared, started);
@@ -1708,6 +1728,7 @@ impl Engine {
                     tap,
                     sl: vec![0.0; MAX_BLOCK],
                     sr: vec![0.0; MAX_BLOCK],
+                    second_pair: Vec::new(),
                 }));
             }
             fx.push(row);
@@ -1983,7 +2004,7 @@ impl Engine {
             })
             .collect();
         let master_fx = (!project.master_slots.is_empty()).then(|| {
-            bare_chain(
+            master_chain(
                 effect_units(&project.master_slots, |slot| Slot::Master { slot }, "Master", project.tempo, sr_f, cache, &mut report),
                 sr_f,
             )
@@ -3947,6 +3968,19 @@ impl Engine {
         }
         if let Some(mut chain) = self.master_fx.take() {
             run_chain(&mut chain, out, frames, pos, &self.sc_bufs);
+            // A plug-in's second pair: the outputs after the master's, under its fader.
+            let gain = (self.master * self.master_pan.0, self.master * self.master_pan.1);
+            let next = self.master_bus.and_then(|n| ext.get_mut(n + 1)).and_then(|b| b.get_mut(at..at + frames * 2));
+            if let (Some(dst), Some(pair)) = (next, chain.second_pair.get(..frames * 2)) {
+                let safe = |v: f32| if v.is_finite() { v.clamp(-4.0, 4.0) } else { 0.0 };
+                for (d, s) in dst.chunks_exact_mut(2).zip(pair.chunks_exact(2)) {
+                    d[0] += safe(s[0] * gain.0);
+                    d[1] += safe(s[1] * gain.1);
+                }
+            }
+            if let Some(pair) = chain.second_pair.get_mut(..frames * 2) {
+                pair.fill(0.0);
+            }
             self.master_fx = Some(chain);
         }
     }
@@ -7918,6 +7952,7 @@ mod tests {
             tap: Vec::new(),
             sl: vec![0.0; MAX_BLOCK],
             sr: vec![0.0; MAX_BLOCK],
+            second_pair: Vec::new(),
         };
         let transport = Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
         chain.set_params(&mut [(1, params(0.8, 2.0))]);
@@ -8407,6 +8442,147 @@ mod tests {
         e.process(&mut out);
         assert!((out[0] - 0.5).abs() < 1e-4 && (out[1] + 0.25).abs() < 1e-4, "{out:?}");
         assert!(live.lock().unwrap().is_empty());
+    }
+
+    /// An effect with two output buses: its input as it is, and half of it on the second.
+    #[derive(Default)]
+    struct Split {
+        second: (Vec<f32>, Vec<f32>),
+    }
+
+    impl deckard_plugins::native::Engine for Split {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn reset(&mut self) {}
+        fn process(&mut self, left: &mut [f32], right: &mut [f32], _: &Transport) {
+            self.second.0 = left.iter().map(|v| v * 0.5).collect();
+            self.second.1 = right.iter().map(|v| v * 0.5).collect();
+        }
+        fn second_output(&self, frames: usize) -> Option<(&[f32], &[f32])> {
+            Some((self.second.0.get(..frames)?, self.second.1.get(..frames)?))
+        }
+    }
+
+    static SPLIT: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: [7; 16],
+        name: "Split",
+        instrument: false,
+        params: &[],
+        pages: &[],
+        make: |_| Box::new(Split::default()),
+    };
+
+    fn split_unit(sr: f64) -> Unit {
+        let id = deckard_plugins::state::PluginId::parse(&SPLIT.plugin_id(), "Split").expect("an id");
+        let plugin = deckard_plugins::Plugin::native(&SPLIT, id, "Split", sr);
+        Unit::new(FxUnit::Plugin(Arc::new(Mutex::new(plugin))), 0, Vec::new(), true)
+    }
+
+    /// A project whose only sound takes In 1, stopped, with [`Split`] on the master.
+    fn split_engine(edit: impl FnOnce(&mut Project)) -> Engine {
+        let mut p = project();
+        p.groups[0].patterns[0].notes.clear();
+        p.groups[0].sounds[0].channel.audio_in = deckard_model::AudioSource::Ext(0);
+        edit(&mut p);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        e.live_in = Some(Default::default());
+        e.master_fx = Some(master_chain(vec![split_unit(1000.0)], 1000.0));
+        e
+    }
+
+    /// A block of a steady 0.5 on In 1: what the master's output and each Out end on.
+    fn split_block(e: &mut Engine) -> ((f32, f32), Vec<(f32, f32)>) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 64));
+        let mut out = vec![0f32; 128];
+        let mut ext = vec![vec![0f32; 128]; OUTPUTS];
+        e.process_outputs(&mut out, &mut ext);
+        ((out[126], out[127]), ext.iter().map(|b| (b[126], b[127])).collect())
+    }
+
+    fn about(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// 2-in 4-out: the plug-in's main pair goes on as the master's output, its second pair
+    /// to the output after it.
+    #[test]
+    fn a_master_plugins_second_pair_is_the_next_output() {
+        let mut e = split_engine(|_| {});
+        split_block(&mut e);
+        let (master, outs) = split_block(&mut e);
+        assert!(about(master.0, 0.5) && about(master.1, 0.5), "the main pair: {master:?}");
+        assert!(about(outs[1].0, 0.25) && about(outs[1].1, 0.25), "Out 2 (channels 3-4): {:?}", outs[1]);
+        assert_eq!(outs[2], (0.0, 0.0));
+    }
+
+    /// The master's fader and pan move both pairs together.
+    #[test]
+    fn the_masters_fader_moves_its_second_pair_too() {
+        let mut e = split_engine(|p| {
+            p.master_level = deckard_model::level_from_db(-6.0);
+            p.master_pan = 1.0;
+        });
+        let g = deckard_model::level_gain(deckard_model::level_from_db(-6.0)) as f32;
+        let (l, r) = pan_gains(1.0);
+        split_block(&mut e);
+        let (master, outs) = split_block(&mut e);
+        assert!(about(master.0, 0.5 * g * l) && about(master.1, 0.5 * g * r), "{master:?}");
+        assert!(about(outs[1].0, 0.25 * g * l) && about(outs[1].1, 0.25 * g * r), "{:?}", outs[1]);
+    }
+
+    /// The next output is the one after wherever the master is; after the last, it's dropped.
+    #[test]
+    fn the_second_pair_follows_the_masters_output() {
+        let mut e = split_engine(|p| p.master_output = deckard_model::AudioDest::Ext(2));
+        split_block(&mut e);
+        let (_, outs) = split_block(&mut e);
+        assert!(about(outs[3].0, 0.25), "after Out 3: {outs:?}");
+        assert_eq!(outs[1], (0.0, 0.0));
+        let mut e = split_engine(|p| p.master_output = deckard_model::AudioDest::Ext(OUTPUTS as i64 - 1));
+        split_block(&mut e);
+        let (_, outs) = split_block(&mut e);
+        assert!(outs.iter().all(|o| *o == (0.0, 0.0)), "no output left: {outs:?}");
+    }
+
+    /// Bypassed, the plug-in's second pair goes quiet, and nothing is left to come out later.
+    #[test]
+    fn a_bypassed_plugin_has_no_second_pair() {
+        let mut e = split_engine(|_| {});
+        split_block(&mut e);
+        e.master_fx.as_mut().unwrap().units[0].mix = 0.0;
+        let (master, outs) = split_block(&mut e);
+        assert!(about(master.0, 0.5), "passed by: {master:?}");
+        assert_eq!(outs[1], (0.0, 0.0));
+    }
+
+    /// A plug-in with only a main pair: 2-in 2-out as ever, with nothing on the next output.
+    #[test]
+    fn a_plugin_with_one_pair_leaves_the_next_output_alone() {
+        let mut e = split_engine(|_| {});
+        let class = deckard_plugins::native::CLASSES[0];
+        let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).expect("an id");
+        let plugin = deckard_plugins::Plugin::native(class, id, class.name, 1000.0);
+        e.master_fx.as_mut().unwrap().units[0] = Unit::new(FxUnit::Plugin(Arc::new(Mutex::new(plugin))), 0, Vec::new(), true);
+        split_block(&mut e);
+        let (_, outs) = split_block(&mut e);
+        assert_eq!(outs[1], (0.0, 0.0));
+    }
+
+    /// Only the master's chain sends a second pair anywhere: on a group, it's just its main.
+    #[test]
+    fn a_groups_plugin_keeps_its_second_pair_to_itself() {
+        let mut chain = bare_chain(vec![split_unit(1000.0)], 1000.0);
+        chain.l[..8].fill(0.5);
+        chain.r[..8].fill(0.5);
+        let transport = Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
+        chain.run(8, &transport, &[], 0);
+        assert!(about(chain.l[7], 0.5));
+        assert!(chain.second_pair.is_empty());
     }
 
     /// A project whose second sound takes In 2 (with `slots` and to `dest`), and an

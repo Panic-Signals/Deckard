@@ -85,6 +85,13 @@ pub trait Engine: Send {
     /// instrument) and get the output.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], transport: &Transport);
 
+    /// A second pair of outputs (left, right), as `process` last left them: its second
+    /// output bus, as a multi-output VST3 has. Most have none.
+    fn second_output(&self, frames: usize) -> Option<(&[f32], &[f32])> {
+        let _ = frames;
+        None
+    }
+
     /// Anything to save besides parameter values (a wavetable, a sequence…).
     fn save(&self) -> Vec<u8> {
         Vec::new()
@@ -376,7 +383,11 @@ impl Instance {
 
     pub(crate) fn output_bus(&self, bus: usize, frames: usize) -> Option<(&[f32], &[f32])> {
         let n = frames.min(crate::MAX_BLOCK);
-        (bus == 0).then(|| (&self.out.0[..n], &self.out.1[..n]))
+        match bus {
+            0 => Some((&self.out.0[..n], &self.out.1[..n])),
+            1 => self.engine.second_output(n),
+            _ => None,
+        }
     }
 }
 
