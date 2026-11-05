@@ -60,6 +60,11 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
         "FM" => fm(params, phase),
         "FreqShifter" => freq_shifter(params),
         "LoFi" => lofi(params),
+        "Reverb" => reverb(params),
+        "PlateReverb" => plate(params, phase, page),
+        "Metaverb" => metaverb(params),
+        "Iceverb" => ice(params, true),
+        "Reflex" => ice(params, false),
         _ => return None,
     };
     if matches!(module, "Compressor" | "Limiter" | "Gate" | "Maximizer") {
@@ -76,6 +81,7 @@ pub fn moves(module: &str, params: &[(String, f64)]) -> bool {
         "Flanger" => p(params, "source", 0.0).round() < 1.5 && p(params, "amount", 0.75).abs() > 0.02,
         "Phaser" => p(params, "source", 1.0).round() < 1.5 && p(params, "amount", 0.5).abs() > 0.02,
         "FM" => p(params, "amount", 0.75) > 0.02,
+        "PlateReverb" => plate_mod(params) > 0.05 && plate_mode(params) != 2,
         _ => {
             let _ = params;
             false
@@ -92,6 +98,7 @@ pub fn rate_hz(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
             mod_hz(p(params, "speed", 0.5), source == 1.0, tempo)
         }
         "FM" => 0.1 * 32.0f32.powf(p(params, "rate", 0.25).clamp(0.0, 1.0)),
+        "PlateReverb" => 0.15 + plate_mod(params) * 1.5,
         _ => {
             let _ = (params, tempo);
             0.0
@@ -706,6 +713,148 @@ fn lofi(params: &[(String, f64)]) -> Shot {
     shot
 }
 
+fn tail(length: f32, low: f32, high: f32, mix: f32, freeze: bool, pre: f32, wobble: f32) -> (Vec<f32>, Vec<f32>) {
+    let len = (0.12 + length.clamp(0.0, 1.0) * 0.9) * (1.0 + wobble);
+    let high_pts = samples(N)
+        .map(|(_, t)| {
+            if freeze {
+                return cl(0.62 * mix);
+            }
+            if t < pre {
+                return 0.04;
+            }
+            let u = (t - pre) / (1.0 - pre).max(0.05);
+            cl(mix * (-u / (len * (0.25 + high.clamp(0.0, 1.0))).max(0.05)).exp())
+        })
+        .collect();
+    let low_pts = samples(N)
+        .map(|(_, t)| {
+            if freeze {
+                return cl(0.5 * mix);
+            }
+            if t < pre {
+                return 0.04;
+            }
+            let u = (t - pre) / (1.0 - pre).max(0.05);
+            cl(mix * (-u / (len * (0.45 + low.clamp(0.0, 1.0)) * 1.35).max(0.05)).exp())
+        })
+        .collect();
+    (high_pts, low_pts)
+}
+
+fn reverb(params: &[(String, f64)]) -> Shot {
+    let room = p(params, "room", 0.0).round().clamp(0.0, 3.0) as i32;
+    let size = p(params, "size", 0.5);
+    let (high, low) = tail(size, p(params, "low", 0.5), p(params, "high", 0.5), p(params, "mix", 0.5), on(params, "freeze", 0.0), 0.0, 0.0);
+    let mut shot = Shot::bare("time", high);
+    shot.extent = low;
+    let early = match room {
+        1 => vec![(0.06, 0.7), (0.1, 0.4)],
+        2 => vec![(0.05, 0.55), (0.14, 0.35)],
+        3 => vec![(0.04, 0.8), (0.08, 0.65), (0.16, 0.3)],
+        _ => vec![(0.07, 0.5), (0.13, 0.32)],
+    };
+    let pan = p(params, "pan", 0.0).clamp(-1.0, 1.0);
+    let stereo = p(params, "stereo", 0.0).clamp(-1.0, 1.0);
+    shot.bands = early.into_iter().map(|(x, y)| (cl(x + pan * 0.04), cl(y + stereo * 0.05))).collect();
+    shot
+}
+
+fn plate_mode(params: &[(String, f64)]) -> i32 {
+    if params.iter().any(|(k, _)| k == "mode") {
+        return p(params, "mode", 0.0).round().clamp(0.0, 2.0) as i32;
+    }
+    if params.iter().any(|(k, _)| k == "wet_gain") { 0 } else { 2 }
+}
+
+fn plate_mod(params: &[(String, f64)]) -> f32 {
+    match plate_mode(params) {
+        1 => p(params, "hall_mod", 0.4),
+        2 => 0.0,
+        _ => p(params, "room_mod", 0.2),
+    }
+}
+
+fn plate(params: &[(String, f64)], phase: f32, page: usize) -> Shot {
+    let mode = plate_mode(params);
+    if page == 1 && mode != 2 {
+        let (low_key, cut_key) = if mode == 1 { ("hall_low_shelf", "hall_high_cut") } else { ("room_low_shelf", "room_high_cut") };
+        let shelf = p(params, low_key, 0.0).clamp(0.0, 1.0);
+        let cut = p(params, cut_key, 0.0).clamp(0.0, 1.0);
+        let cut_hz = 20_000.0 - 18_000.0 * cut;
+        let points = samples(N)
+            .map(|(_, x)| {
+                let hz = 20.0 * 1000.0f32.powf(x);
+                let low = if hz < 200.0 { -12.0 * shelf } else { -12.0 * shelf * (200.0 / hz).min(1.0) * 0.25 };
+                let high = if hz > cut_hz { -18.0 * ((hz / cut_hz).log2().max(0.0)) } else { 0.0 };
+                cl(0.5 + (low + high) / 24.0)
+            })
+            .collect();
+        return Shot::bare("freq", points);
+    }
+    let (length, low, high, pre) = if mode == 2 {
+        (
+            p(params, "plate_decay", 0.3),
+            1.0 - p(params, "plate_low_shelf", 0.0).clamp(0.0, 1.0),
+            1.0 - p(params, "plate_high_damp", 0.0).clamp(0.0, 1.0),
+            p(params, "plate_pre_delay", 0.0).clamp(0.0, 1.0) * 0.35,
+        )
+    } else {
+        let prefix = if mode == 1 { "hall" } else { "room" };
+        let rt = p(params, &format!("{prefix}_rev_time"), if mode == 1 { 0.4 } else { 0.2 });
+        let size = p(params, &format!("{prefix}_size"), if mode == 1 { 0.1 } else { 0.2 }).clamp(0.0, 1.0);
+        let secs = (3.7 * rt).exp() * 0.5;
+        (
+            cl(secs / 12.0) * (0.45 + size),
+            1.0 - p(params, &format!("{prefix}_damp"), 0.5) * 0.3,
+            1.0 - p(params, &format!("{prefix}_damp"), 0.5),
+            p(params, &format!("{prefix}_pre_delay"), 0.0).clamp(0.0, 1.0) * 0.35,
+        )
+    };
+    let wobble = if mode == 2 { 0.0 } else { (phase * std::f32::consts::TAU).sin() * plate_mod(params) * 0.15 };
+    let mix = p(params, "mix", 0.5);
+    let (high_pts, low_pts) = tail(length, low, high, mix, false, pre, wobble);
+    let mut shot = Shot::bare("time", high_pts);
+    shot.extent = low_pts;
+    if mode != 2 {
+        let diff = p(params, if mode == 1 { "hall_diff" } else { "room_diff" }, 0.85);
+        let n = (2.0 + diff * 4.0) as usize;
+        shot.bands = (0..n).map(|i| (0.04 + i as f32 * 0.03, cl(0.35 + diff * 0.3 - i as f32 * 0.05))).collect();
+    }
+    shot
+}
+
+fn metaverb(params: &[(String, f64)]) -> Shot {
+    let (high, low) = tail(p(params, "size", 0.5), p(params, "low", 0.5), p(params, "high", 0.5), p(params, "mix", 0.5), false, 0.0, 0.0);
+    let pan = p(params, "pan", 0.0).clamp(-1.0, 1.0);
+    let mut shot = Shot::bare("time", high);
+    shot.extent = low.into_iter().enumerate().map(|(i, y)| cl(y + pan * 0.04 * ((i as f32 / N as f32) - 0.5))).collect();
+    shot
+}
+
+fn ice(params: &[(String, f64)], ice_mode: bool) -> Shot {
+    let color = p(params, "color", if ice_mode { 0.75 } else { 0.5 });
+    let size = p(params, "size", if ice_mode { 0.5 } else { 0.25 });
+    let mix = p(params, "mix", 0.5);
+    let (high, low) = tail(size, 1.0 - color * 0.5, color, mix, false, 0.0, 0.0);
+    let mut shot = Shot::bare("time", high);
+    shot.extent = low;
+    if ice_mode {
+        let ice = p(params, "ice", 0.75).clamp(0.0, 1.0);
+        if let Some(y) = shot.points.first_mut() {
+            *y = cl(*y + ice * 0.7);
+        }
+        shot.bands = vec![(0.04, cl(0.3 + ice * 0.65))];
+    } else {
+        let smooth = p(params, "smooth", 0.75).clamp(0.0, 1.0);
+        for (i, y) in shot.points.iter_mut().take(12).enumerate() {
+            let t = i as f32 / 12.0;
+            *y *= lerp(t, 1.0, smooth);
+        }
+    }
+    shot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +893,11 @@ mod tests {
             ("FM", "amount", 0.0, 1.0),
             ("FreqShifter", "coarse", 0.1, 0.9),
             ("LoFi", "sample_rate", 0.0, 0.8),
+            ("Reverb", "size", 0.05, 0.95),
+            ("PlateReverb", "plate_decay", 0.05, 0.9),
+            ("Metaverb", "size", 0.05, 0.95),
+            ("Iceverb", "size", 0.05, 0.95),
+            ("Reflex", "smooth", 0.0, 1.0),
         ];
         for (module, field, a, b) in cases {
             let picture = shot(module, &[], 0.0, false, 0).unwrap();
@@ -770,5 +924,14 @@ mod tests {
         let a = shot("Chorus", &one("amount", 0.8), 0.0, false, 0).unwrap();
         let b = shot("Chorus", &one("amount", 0.8), 0.35, false, 0).unwrap();
         assert_ne!(a.extent, b.extent);
+    }
+
+    #[test]
+    fn the_plate_page_swaps_in_the_eq() {
+        let room = shot("PlateReverb", &one("mode", 0.0), 0.0, false, 0).unwrap();
+        let eq = shot("PlateReverb", &[("mode".into(), 0.0), ("room_high_cut".into(), 1.0)], 0.0, false, 1).unwrap();
+        assert_eq!(room.kind, "time");
+        assert_eq!(eq.kind, "freq");
+        assert_ne!(eq.points[10], eq.points[80]);
     }
 }
