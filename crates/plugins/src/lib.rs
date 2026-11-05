@@ -12,6 +12,7 @@ pub mod com;
 pub mod editor;
 pub mod module;
 pub mod native;
+pub mod nks;
 /// Mutable Instruments' licence (Plaits), for the About box.
 pub use deckard_mi::LICENSE as MUTABLE_INSTRUMENTS_LICENSE;
 mod plaits;

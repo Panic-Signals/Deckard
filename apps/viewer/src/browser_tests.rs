@@ -10,6 +10,63 @@ use eframe::egui;
 use egui_kittest::Harness;
 use std::path::{Path, PathBuf};
 
+/// An NKS preset loads as its plug-in, with its state. No window is drawn here, so no
+/// audio or MIDI device is opened.
+#[test]
+fn nks_presets_load_as_their_plugin() {
+    use deckard_plugins::{nks, scan};
+    let (_tmp, dir) = temp();
+    let mut app = App::default();
+    app.new_project();
+    let entry = |name: &str, instrument: bool, cid: &str| scan::Entry {
+        kind: scan::Kind::Vst3,
+        vendor: "Vendor".into(),
+        name: name.into(),
+        instrument,
+        location: String::new(),
+        cid: cid.into(),
+    };
+    let synth = "000102030405060708090A0B0C0D0E0F";
+    let effect = "101112131415161718191A1B1C1D1E1F";
+    app.catalog.entries = vec![entry("Synth", true, synth), entry("Verb", false, effect)];
+    let word = |at: usize, hex: &str| u32::from_str_radix(&hex[at * 8..(at + 1) * 8], 16).unwrap();
+    let uid = |hex: &str| Some([word(0, hex), word(1, hex), word(2, hex), word(3, hex)]);
+    let item = |file: &str, kind: Kind, bytes: &[u8]| {
+        let path = dir.join(file);
+        std::fs::write(&path, bytes).unwrap();
+        deckard_library::Item { kind, name: file.into(), path, ..Default::default() }
+    };
+    let plugins = |app: &App| -> Vec<(String, String)> {
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        d.project().groups[0].sounds[0].slots.iter().filter_map(|x| x.plugin.as_ref().map(|p| (p.name.clone(), p.id.clone()))).collect()
+    };
+
+    let lead = item("Lead.nksf", Kind::Instrument, &nks::fixture(uid(synth), 0, "Synth", b"first"));
+    app.load_item(&lead, Some((0, 0))).unwrap();
+    assert_eq!(plugins(&app), [("Synth".to_string(), format!("Vendor:VST3:INSTR:{synth}"))]);
+    // An effect goes last, and an instrument takes the instrument's place.
+    let hall = item("Hall.nksfx", Kind::Effect, &nks::fixture(uid(effect), 0, "Verb", b"hall"));
+    app.load_item(&hall, Some((0, 0))).unwrap();
+    let bass = item("Bass.nksf", Kind::Instrument, &nks::fixture(uid(synth), 0, "Synth", b"second"));
+    app.load_item(&bass, Some((0, 0))).unwrap();
+    assert_eq!(plugins(&app).iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["Synth", "Verb"]);
+    {
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        let chunk = &d.project().groups[0].sounds[0].slots[0].plugin.as_ref().unwrap().chunk;
+        assert!(chunk.windows(6).any(|w| w == b"second"), "the second preset's state");
+    }
+
+    // What can't load says why, and changes nothing.
+    let before = plugins(&app);
+    let absent = item("Absent.nksf", Kind::Instrument, &nks::fixture(Some([1, 2, 3, 4]), 0, "Omnisphere", b"x"));
+    assert_eq!(app.load_item(&absent, Some((0, 0))), Err("Absent.nksf: Omnisphere isn't installed as VST3".to_string()));
+    let massive = item("Bass.nmsv", Kind::Instrument, b"\x01\0\0\0");
+    assert_eq!(app.load_item(&massive, Some((0, 0))), Err("Bass.nmsv: .nmsv presets can't be loaded yet".to_string()));
+    assert_eq!(plugins(&app), before);
+}
+
 /// A fresh folder, and the guard that removes it.
 fn temp() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();

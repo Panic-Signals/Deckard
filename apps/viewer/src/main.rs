@@ -7189,6 +7189,17 @@ impl App {
             return Ok(());
         }
         let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        // Most of the library's presets are NKS files, or a product's own format.
+        if matches!(item.kind, Kind::Instrument | Kind::Effect) {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if matches!(ext.as_str(), "nksf" | "nksfx") {
+                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                return self.load_nks_preset(&item.name, (g, s), &bytes);
+            }
+            if !matches!(ext.as_str(), "mxinst" | "mxfx") {
+                return Err(format!("{}: .{ext} presets can't be loaded yet", item.name));
+            }
+        }
         match item.kind {
             Kind::Group | Kind::Sound | Kind::Instrument | Kind::Effect => {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -7227,6 +7238,34 @@ impl App {
             }
             Kind::Project => {}
         }
+        Ok(())
+    }
+
+    /// Load an NKS preset as its plug-in, with its state: an instrument in place of the
+    /// sound's, an effect last in its chain.
+    fn load_nks_preset(&mut self, name: &str, (g, s): (usize, usize), bytes: &[u8]) -> Result<(), String> {
+        let plugin =
+            deckard_plugins::nks::parse(bytes).and_then(|p| p.resolve(&self.catalog.entries)).map_err(|e| format!("{name}: {e}"))?;
+        let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let module = deckard_doc::NewModule::Plugin { id: plugin.id, name: plugin.name, chunk: plugin.chunk };
+        let mut d = doc.borrow_mut();
+        let (count, first_is_instrument) = {
+            let slots = &d.project().groups[g].sounds[s].slots;
+            (slots.len(), slots.first().map(|x| x.is_instrument()))
+        };
+        if module.is_instrument() {
+            match first_is_instrument {
+                Some(false) => return Err("the sound's chain starts with an effect: an instrument can't go before it".into()),
+                Some(true) => d.remove_slot(g, s, 0)?,
+                None => {}
+            }
+            d.add_slot(g, s, 0, &module)?;
+        } else {
+            d.add_slot(g, s, count, &module)?;
+        }
+        drop(d);
+        self.sound = s;
+        self.status = format!("{name} loaded");
         Ok(())
     }
 
