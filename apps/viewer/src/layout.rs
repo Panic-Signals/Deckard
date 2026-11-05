@@ -4829,8 +4829,9 @@ fn page_tabs(
     out
 }
 
-/// The sound's chain: one row per slot (click: its pages; right-click: bypass, remove,
-/// plug-in window), then "+" to add an internal module or a plug-in.
+/// The sound's chain: one row per slot (click: its pages; double-click: plug-in window;
+/// right-click: bypass, remove, plug-in window), then "+" to add an internal module or a
+/// plug-in.
 fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[deckard_model::SlotInfo], acts: &mut Vec<Act>) {
     const ROW: f32 = 21.0;
     let off = scroll(ui, "chain-slots", area, (slots.len() + 1) as f32 * ROW + 4.0);
@@ -4910,6 +4911,12 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                     acts.push(Act::SelectSlot(Some(i)));
                 }
                 let plugin = slot.plugin.is_some();
+                if plugin && resp.double_clicked() {
+                    acts.push(Act::OpenSlotEditor(i));
+                }
+                if cfg!(test) {
+                    note_rect(ui, &format!("chain slot {i}"), vis);
+                }
                 let active = slot.active;
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
