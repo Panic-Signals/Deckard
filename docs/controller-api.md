@@ -446,7 +446,7 @@ A device gets the whole `deckard` API, so `deckard.state()`, `focus_group`,
 |---|---|
 | `deckard.midi_send(role, bytes)` | Send bytes (0–255 each) on the port of `role`. |
 | `deckard.launch_scene(i)` | Launch scene `i`: as clicking it in the Ideas view, and when stopped it starts playing. |
-| `deckard.new_pattern(group)` | A new pattern in group `group`, in the focused scene. The focused group stays; in that group, the new pattern is focused. |
+| `deckard.new_pattern(group [, place])` | A new pattern in group `group`, in the focused scene: after its last, or in empty `place`. A group's patterns list says each one's `slot`, as there can be empty places between them. The focused group stays; in that group, the new pattern is focused. |
 | `deckard.show_scenes(i)` | Scroll the Ideas view's scene tabs to start at scene `i`, as far as they go. |
 | `deckard.print_notes{ length = beats, notes = { {pitch, start, length, velocity}, … }, track = n }` | Print to Clip: the notes (times in beats) replace the focused sound's in the focused group's pattern in the focused scene. A pattern is made if there is none, and the pattern takes `length`. It is one undo step. `track` (optional, from 1) is the device's track it came from: a print from the track set as the device's drum track (Preferences ▸ MIDI) plays the focused group's pads from C1 instead, replacing the group's notes. |
 | `deckard.message(text)` | Show a line in the status bar. |

@@ -3119,7 +3119,8 @@ impl App {
                     .map(|_| Some((Some(made), None)))
                 }
                 Act::AssignPattern(s, g, p) => d.assign_pattern(s, g, p).map(|_| None),
-                Act::NewPattern(s, g) => {
+                Act::NewPattern(s, g) | Act::NewPatternAt(s, g, _) => {
+                    let slot = if let Act::NewPatternAt(.., slot) = act { Some(slot) } else { None };
                     let n = d.project().groups.get(g).map_or(0, |x| x.patterns.len());
                     // Like the focused pattern (its colour), or the group's first; the
                     // Settings page's LENGTH long.
@@ -3127,7 +3128,10 @@ impl App {
                     let mut made = 0;
                     let length = self.default_pattern_length(d.project());
                     let r = d.transaction("New Pattern", |d| {
-                        made = d.add_pattern(g, from, &format!("Pattern {}", n + 1))?;
+                        made = match slot {
+                            Some(slot) => d.add_pattern_in_slot(g, from, slot, &format!("Pattern {}", slot + 1))?,
+                            None => d.add_pattern(g, from, &format!("Pattern {}", n + 1))?,
+                        };
                         d.set_pattern_length(g, made, length)?;
                         if s < d.project().scenes.len() {
                             d.assign_pattern(s, g, Some(made))?;
@@ -4272,6 +4276,7 @@ impl App {
                             default_color: pt.color == deckard_model::Color::Default,
                             rgb: layout::pattern_rgb(p, g, pt.color),
                             bars: pt.length as f64 / bar,
+                            slot: pt.slot,
                         })
                         .collect(),
                     scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
@@ -4366,6 +4371,15 @@ impl App {
                 if project.is_some_and(|p| group < p.groups.len()) {
                     let was = (self.group, self.pattern);
                     layout::apply_acts(self, vec![Act::NewPattern(self.scene, group)]);
+                    if group != was.0 {
+                        (self.group, self.pattern) = was;
+                    }
+                }
+            }
+            A::NewPatternAt { group, slot } => {
+                if project.is_some_and(|p| group < p.groups.len()) {
+                    let was = (self.group, self.pattern);
+                    layout::apply_acts(self, vec![Act::NewPatternAt(self.scene, group, slot)]);
                     if group != was.0 {
                         (self.group, self.pattern) = was;
                     }

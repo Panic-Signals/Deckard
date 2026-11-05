@@ -237,7 +237,7 @@ impl Document {
     }
 
     /// Delete pattern `p` of group `g`: scenes that played it play nothing for the
-    /// group, and the patterns after it move up.
+    /// group, and the other patterns keep their places.
     pub fn delete_pattern(&mut self, g: usize, p: usize) -> Result<(), String> {
         let scenes: Vec<usize> =
             self.project.scenes.iter().enumerate().filter(|(_, sc)| sc.patterns.contains(&(g, p))).map(|(i, _)| i).collect();

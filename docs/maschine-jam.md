@@ -31,7 +31,7 @@ seconds. BROWSE opens the library as the main window's own panel, with the same 
 
 | Press | Shows | Pads do |
 |---|---|---|
-| SONG | Project View: each column a group's patterns; bright is what the focused scene plays, half-lit what it doesn't, unlit empty | Pick a pattern, deselect it, or make one |
+| SONG | Project View: each column a group's patterns, each in its own place; bright is what the focused scene plays, half-lit what it doesn't, unlit empty | Pick a pattern, deselect it, or make one in that place |
 | PAD MODE | Sounds 1-16, printed at the bottom right | Play; focus the sound |
 | SHIFT + PAD MODE | Keyboard: the focused sound on all 64, in the scale, roots white | Play; D-pad up and down move octaves |
 | STEP | The focused sound's steps; a light chases the position; scene buttons pick the part | Add or remove a step |
@@ -114,7 +114,6 @@ previous or next.
 | Variation's on-screen settings (SHIFT + E) | The focused sound's Groove ▸ Variation page, on the strips |
 | Plug-in mode, MIDI mode, Controller Editor, SHIFT + F (TS EDIT), SHIFT + H (INSTANCE) | Not here |
 | LOCK again updates the snapshot | LOCK recalls it, as on DECKARD's MK3; in Lock View it updates the one in focus |
-| Pattern slots with gaps | A group's patterns have no gaps: an unlit pad adds after the last |
 
 ## Checking it
 

@@ -24,12 +24,12 @@ fn jam() -> Device {
 /// playing Drums' second pattern and Bass's first; a two-bar pattern focused.
 fn jam_view() -> View {
     let mut v = view();
-    let pattern = |color: usize| PatternView { name: "P".into(), color, bars: 1.0, ..Default::default() };
+    let pattern = |color: usize, slot: usize| PatternView { name: "P".into(), color, bars: 1.0, slot, ..Default::default() };
     v.groups[0].color = 2;
     v.groups[1].color = 9;
-    v.groups[0].patterns = vec![pattern(2), pattern(3), pattern(2)];
+    v.groups[0].patterns = vec![pattern(2, 0), pattern(3, 1), pattern(2, 2)];
     v.groups[0].scene_pattern = Some(1);
-    v.groups[1].patterns = vec![pattern(9)];
+    v.groups[1].patterns = vec![pattern(9, 0)];
     v.groups[1].scene_pattern = Some(0);
     v.scenes = vec![
         SceneView { name: "1".into(), color: 5, patterns: vec![Some(1), Some(0)], ..Default::default() },
@@ -141,8 +141,12 @@ fn a_pad_picks_a_pattern_deselects_it_or_makes_one() {
     let v = jam_view();
     assert_eq!(apps(&pad(&mut d, &v, 1, 1)), [Action::PickPattern(0)], "half-lit: the scene plays it");
     assert_eq!(apps(&pad(&mut d, &v, 1, 2)), [Action::ScenePattern { group: 0, pattern: None }], "bright: deselected");
-    assert_eq!(apps(&pad(&mut d, &v, 1, 8)), [Action::NewPatternIn(0)], "unlit: a new one");
-    assert_eq!(apps(&pad(&mut d, &v, 2, 8)), [Action::FocusGroup(1), Action::NewPatternIn(1)], "another group's: focused too");
+    assert_eq!(apps(&pad(&mut d, &v, 1, 8)), [Action::NewPatternAt { group: 0, slot: 7 }], "unlit: a new one there");
+    assert_eq!(
+        apps(&pad(&mut d, &v, 2, 8)),
+        [Action::FocusGroup(1), Action::NewPatternAt { group: 1, slot: 7 }],
+        "another group's: focused too"
+    );
     assert_eq!(apps(&pad(&mut d, &v, 3, 1)), [], "no group there");
 }
 
@@ -919,13 +923,29 @@ fn group_banks_follow_the_d_pad_and_the_focus() {
 fn picking_another_groups_pattern_can_leave_the_focus() {
     let mut d = jam();
     let mut v = jam_view();
-    v.groups[1].patterns = vec![v.groups[1].patterns[0].clone(); 2];
+    let second = PatternView { slot: 1, ..v.groups[1].patterns[0].clone() };
+    v.groups[1].patterns.push(second);
     assert_eq!(apps(&pad(&mut d, &v, 2, 2)), [Action::FocusGroup(1), Action::PickPattern(1)]);
-    assert_eq!(apps(&pad(&mut d, &v, 2, 3)), [Action::FocusGroup(1), Action::NewPatternIn(1)], "an empty place");
+    assert_eq!(apps(&pad(&mut d, &v, 2, 3)), [Action::FocusGroup(1), Action::NewPatternAt { group: 1, slot: 2 }], "an empty place");
     v.keep_focus = true;
     assert_eq!(apps(&pad(&mut d, &v, 2, 2)), [Action::ScenePattern { group: 1, pattern: Some(1) }]);
-    assert_eq!(apps(&pad(&mut d, &v, 2, 3)), [Action::NewPatternIn(1)]);
+    assert_eq!(apps(&pad(&mut d, &v, 2, 3)), [Action::NewPatternAt { group: 1, slot: 2 }]);
     assert_eq!(apps(&pad(&mut d, &v, 1, 1)), [Action::PickPattern(0)], "its own group's: as ever");
+}
+
+/// The pads are places: a pattern lights where it is, gaps and all, and an unlit pad makes
+/// one there.
+#[test]
+fn project_view_pads_are_places() {
+    let mut d = jam();
+    let mut v = jam_view();
+    let p = v.groups[0].patterns[0].clone();
+    v.groups[0].patterns = vec![PatternView { slot: 0, ..p.clone() }, PatternView { slot: 7, ..p }];
+    v.groups[0].scene_pattern = Some(0);
+    assert_ne!(pad_light(&mut d, &v, 1, 8), 0, "the second of the list, on pad 8");
+    assert_eq!(pad_light(&mut d, &v, 1, 2), 0, "nothing between");
+    assert_eq!(apps(&pad(&mut d, &v, 1, 8)), [Action::PickPattern(1)]);
+    assert_eq!(apps(&pad(&mut d, &v, 1, 4)), [Action::NewPatternAt { group: 0, slot: 3 }]);
 }
 
 #[test]
@@ -933,7 +953,7 @@ fn up_and_down_scroll_patterns_in_project_view() {
     let mut d = jam();
     let mut v = jam_view();
     let p = v.groups[0].patterns[0].clone();
-    v.groups[0].patterns = vec![p; 12];
+    v.groups[0].patterns = (0..12).map(|slot| PatternView { slot, ..p.clone() }).collect();
     v.groups[0].scene_pattern = None;
     press(&mut d, &v, "DOWN");
     assert_eq!(apps(&pad(&mut d, &v, 1, 1)), [Action::PickPattern(1)], "scrolled a row");

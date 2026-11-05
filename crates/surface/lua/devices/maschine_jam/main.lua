@@ -946,25 +946,33 @@ local function sound_action(s, n)
   end
 end
 
+-- Which of a group's patterns is in place `place` of its column (a place can be empty):
+-- its number in the group's list, and the pattern.
+local function pattern_in(group, place)
+  for i, pattern in ipairs(group.patterns) do
+    if pattern.slot == place then return i, pattern end
+  end
+end
+
 local function press_project(s, col, row)
   local g = st.group_bank * 8 + col
   local group = s.groups[g]
   if not group then return end
-  local p = st.pattern_row + row
-  local exists = group.patterns[p] ~= nil
+  local place = st.pattern_row + row
+  local p = pattern_in(group, place)
   if active("CLEAR") then
-    if exists then deckard.delete_pattern(g, p) end
+    if p then deckard.delete_pattern(g, p) end
   elseif active("DUPLICATE") then
-    if exists then
+    if p then
       duplicate("pattern", g, p, function(from, to) deckard.copy_pattern(g, from, to) end)
     elseif st.dup and st.dup.kind == "pattern" and st.dup.group == g then
       -- (An empty place: a new pattern, after the group's last.)
       duplicate("pattern", g, #group.patterns + 1, function(from, to) deckard.copy_pattern(g, from, to) end)
     end
-  elseif not exists then
-    -- An unlit pad makes a pattern (manual 6.1.3).
+  elseif not p then
+    -- An unlit pad makes a pattern there (manual 6.1.3).
     if g ~= s.group and not s.keep_focus then deckard.focus_group(g) end
-    deckard.new_pattern(g)
+    deckard.new_pattern(g, place)
   elseif group.scene_pattern == p then
     deckard.scene_pattern(g, nil)
   elseif g ~= s.group and s.keep_focus then
@@ -1585,8 +1593,8 @@ local function light_project(s)
     local g = st.group_bank * 8 + col
     local group = s.groups[g]
     for row = 1, 8 do
-      local p = st.pattern_row + row
-      local pattern = group and group.patterns[p]
+      local p, pattern
+      if group then p, pattern = pattern_in(group, st.pattern_row + row) end
       if not pattern then
         deckard.pad_led(col, row, "off")
       elseif dup_is("pattern", g, p) then
@@ -1929,7 +1937,8 @@ local function light_buttons(s)
     local most = 0
     for col = 1, 8 do
       local group = s.groups[st.group_bank * 8 + col]
-      if group then most = math.max(most, #group.patterns) end
+      local last = group and group.patterns[#group.patterns]
+      if last then most = math.max(most, last.slot) end
     end
     up, down = st.pattern_row > 0, st.pattern_row + 8 < most + 1
   end

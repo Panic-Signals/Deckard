@@ -79,15 +79,16 @@ fn project_view_makes_picks_and_deletes_patterns_and_scenes() {
     let patterns = project(&app).groups[0].patterns.len();
     pad(&mut app, 1, 8);
     assert_eq!(project(&app).groups[0].patterns.len(), patterns + 1, "an unlit pad makes one");
+    assert_eq!(project(&app).groups[0].patterns[patterns].slot, 7, "in its own place");
     // The scene button past the last makes a scene; then its own press focuses it.
     let n = u8::try_from(scenes + 1).unwrap();
     assert!(n <= 8);
     press(&mut app, ["SCENE_1", "SCENE_2", "SCENE_3", "SCENE_4", "SCENE_5", "SCENE_6", "SCENE_7", "SCENE_8"][usize::from(n - 1)]);
     assert_eq!(project(&app).scenes.len(), scenes + 1);
-    // CLEAR + that scene, CLEAR + the new pattern's pad (it's now first free row - 1).
+    // CLEAR + that scene, CLEAR + the new pattern's pad.
     let at = project(&app).groups[0].patterns.len();
     run(&mut app, vec![Event::Button("CLEAR", true)]);
-    pad(&mut app, 1, u8::try_from(at).unwrap());
+    pad(&mut app, 1, 8);
     assert_eq!(project(&app).groups[0].patterns.len(), at - 1, "CLEAR + pad deletes it");
     press(&mut app, ["SCENE_1", "SCENE_2", "SCENE_3", "SCENE_4", "SCENE_5", "SCENE_6", "SCENE_7", "SCENE_8"][usize::from(n - 1)]);
     run(&mut app, vec![Event::Button("CLEAR", false)]);

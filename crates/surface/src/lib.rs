@@ -415,6 +415,8 @@ pub struct PatternView {
     /// Its colour is the default (its group's).
     pub default_color: bool,
     pub bars: f64,
+    /// Its place among the group's patterns, from 0 (there can be empty places).
+    pub slot: usize,
 }
 
 /// A note of the focused pattern: its sound (from 0), where it starts and how long it
@@ -603,6 +605,11 @@ pub enum Action {
     /// A new pattern in this group, in the focused scene. The focused group stays; in
     /// that group, the new pattern is focused.
     NewPatternIn(usize),
+    /// A new pattern in empty place `slot` (from 0) of group `group`.
+    NewPatternAt {
+        group: usize,
+        slot: usize,
+    },
     /// The Ideas view's scene tabs scroll to start at this scene (a controller's own
     /// scenes scrolled).
     ShowScenes(usize),

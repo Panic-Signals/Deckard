@@ -464,7 +464,13 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     indexed!("focus_scene", "a scene", Action::FocusScene);
     indexed!("launch_scene", "a scene", Action::LaunchScene);
     indexed!("show_scenes", "a scene", Action::ShowScenes);
-    indexed!("new_pattern", "a group", Action::NewPatternIn);
+    request!("new_pattern", (group: usize, place: Option<usize>) => {
+        let group = index(group, "a group")?;
+        match place {
+            Some(place) => Action::NewPatternAt { group, slot: index(place, "a place")? },
+            None => Action::NewPatternIn(group),
+        }
+    });
     indexed!("focus_section", "a section", Action::FocusSection);
     indexed!("pick_pattern", "a pattern", Action::PickPattern);
     let sh = shared.clone();
@@ -1199,6 +1205,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             t.set("color", rgb(pt.rgb)?)?;
             t.set("default_color", pt.default_color)?;
             t.set("bars", pt.bars)?;
+            t.set("slot", pt.slot + 1)?;
             patterns.set(i + 1, t)?;
         }
         gt.set("patterns", patterns)?;
