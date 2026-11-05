@@ -4070,7 +4070,9 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     mod_routes::set_bases(ui, bases);
                     let smp = &*live;
                     let page = app.sampler_page.min(sampler_ui::PAGES.len() - 1);
-                    heading = format!("Sampler: {}", sampler_ui::PAGES[page]);
+                    // The open page is already a tab. Putting it in the title too
+                    // ("Sampler: Pitch / Envelope") shifts the whole tab bar on every click.
+                    heading = "Sampler".into();
                     let pg = sampler_ui::page(smp, app.group, app.sound, page);
                     params = pg.slots.into_iter().collect();
                     sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
@@ -4103,11 +4105,9 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                         Some(v) if v.error.is_none() => {
                             let pages = v.pages.len().max(1);
                             let page = app.plugin_page.min(pages - 1);
-                            let pname = v.pages.get(page).map(|p| p.name.clone()).filter(|n| !n.is_empty());
-                            heading = match pname {
-                                Some(n) => format!("{}: {n}", pr.name),
-                                None => format!("{}: Page {} of {}", pr.name, page + 1, pages),
-                            };
+                            // The page names are the tabs beside this. The title stays the
+                            // plug-in, so the bar doesn't jump when the page changes.
+                            heading = pr.name.clone();
                             // Named pages (DECKARD's plug-ins name theirs) by name, else by number.
                             let names: Vec<String> = if !v.pages.is_empty() && v.pages.iter().all(|p| !p.name.is_empty()) {
                                 v.pages.iter().map(|p| p.name.clone()).collect()
@@ -4164,7 +4164,9 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     // its knobs now.
                     let names = crate::module_ui::pages(&slot.module).unwrap_or(&[]);
                     let page = app.plugin_page.min(names.len().saturating_sub(1));
-                    heading = format!("{}: {}", slot.name, names[page]);
+                    // Several pages become tabs, so the title is only the module.
+                    // One page has no tab, and its name stays in the title.
+                    heading = if names.len() > 1 { slot.name.clone() } else { format!("{}: {}", slot.name, names[page]) };
                     let t = app.module_target(i);
                     let (live, bases) = app.live_slot_bases((app.group, app.sound, i), s, slot, t);
                     mod_routes::set_bases(ui, bases);
