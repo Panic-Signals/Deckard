@@ -631,6 +631,25 @@ impl Document {
         Ok(copy)
     }
 
+    /// Scene `to` plays what scene `from` plays, group by group; past the last scene, a new
+    /// one goes at the end. Returns its index. One undo step.
+    pub fn copy_scene(&mut self, from: usize, to: usize) -> Result<usize, String> {
+        let source = self.project.scenes.get(from).ok_or("no such scene")?.patterns.clone();
+        let groups = self.project.groups.len();
+        let mut at = to;
+        self.transaction("Duplicate Scene", |d| {
+            if to >= d.project.scenes.len() {
+                at = d.add_scene()?;
+            }
+            for g in 0..groups {
+                let pattern = source.iter().find(|(x, _)| *x == g).map(|&(_, p)| p);
+                d.assign_pattern(at, g, pattern)?;
+            }
+            Ok(())
+        })?;
+        Ok(at)
+    }
+
     /// Scene `scene` plays copies of its patterns.
     fn copy_scene_patterns(&mut self, scene: usize) -> Result<(), String> {
         let groups: Vec<usize> = self.project.scenes.get(scene).ok_or("no such scene")?.patterns.iter().map(|&(g, _)| g).collect();

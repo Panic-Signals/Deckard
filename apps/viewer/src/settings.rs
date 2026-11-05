@@ -31,6 +31,9 @@ pub struct Settings {
     /// 32 input channels (In 1 L … In 16 R) reads, or not connected (then it isn't
     /// offered anywhere).
     pub input_routing: Vec<Option<usize>>,
+    /// In 1's and In 2's levels (as a fader's: 0..1, 0.75 = unity), DECKARD's own on the
+    /// way in (a JAM's IN1 and IN2).
+    pub input_levels: [f64; 2],
     /// The output device (Preferences > Audio); `None`: the system's default output.
     pub output_device: Option<String>,
     /// Routing > Output: the interface channel each of the 32 output channels (Out 1 L
@@ -89,6 +92,8 @@ pub struct Settings {
     pub render_ahead_ms: u32,
     /// The MK3 displays' backlight, 0..=100 (Maschine's Hardware settings > Display).
     pub display_brightness: u8,
+    /// DECKARD drives a Maschine JAM plugged in (Preferences > MIDI).
+    pub jam_enabled: bool,
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware): 0
@@ -274,6 +279,7 @@ impl Default for Settings {
             disabled: BTreeSet::new(),
             input_device: None,
             input_routing: default_routing(),
+            input_levels: [0.75; 2],
             output_device: None,
             output_routing: default_routing(),
             input_aliases: vec![String::new(); CHANNELS],
@@ -293,6 +299,7 @@ impl Default for Settings {
             exact_timing: true,
             render_ahead_ms: 0,
             display_brightness: 100,
+            jam_enabled: true,
             pad_sensitivity: 50,
             metronome_volume: 100,
             focus_follows: true,
@@ -378,6 +385,8 @@ impl Settings {
                 "input_quantize" => s.input_quantize = v == "true",
                 "check_updates" => s.check_updates = v != "false",
                 "input_device" => s.input_device = Some(v.to_string()),
+                "input_level_1" => s.input_levels[0] = v.parse().unwrap_or(0.75),
+                "input_level_2" => s.input_levels[1] = v.parse().unwrap_or(0.75),
                 "output_device" => s.output_device = Some(v.to_string()),
                 // A device's routing: `<device>\t<channel>:<route or alias>`.
                 "input_route" if !v.contains('\t') => {
@@ -515,6 +524,7 @@ impl Settings {
                         s.display_brightness = n.min(100);
                     }
                 }
+                "jam_enabled" => s.jam_enabled = v != "false",
                 "render_ahead_ms" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.render_ahead_ms = n.min(200);
@@ -647,6 +657,7 @@ impl Settings {
             "buffer_frames = {}\nmulticore = {}\nexact_timing = {}\nrender_ahead_ms = {}\ndisplay_brightness = {}\npad_sensitivity = {}\n",
             self.buffer_frames, self.multicore, self.exact_timing, self.render_ahead_ms, self.display_brightness, self.pad_sensitivity
         );
+        out += &format!("jam_enabled = {}\n", self.jam_enabled);
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!(
             "metronome_volume = {}\nmetronome_auto = {}\nmetronome_ticks = {}\n",
@@ -663,6 +674,7 @@ impl Settings {
         if self.stems_offered {
             out += "stems_offered = true\n";
         }
+        out += &format!("input_level_1 = {}\ninput_level_2 = {}\n", self.input_levels[0], self.input_levels[1]);
         out += &format!(
             "velocity_scaling = {}\nled_brightness = {}\nstrip_position = {}\ntouch_auto_write = {}\n",
             self.velocity_scaling, self.led_brightness, self.strip_position, self.touch_auto_write

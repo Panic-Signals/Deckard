@@ -62,6 +62,10 @@ mod expression_record_tests;
 mod group_edit_tests;
 #[cfg(test)]
 mod header_tests;
+mod input_levels;
+mod jam_io;
+#[cfg(test)]
+mod jam_tests;
 mod keep_running;
 mod keys;
 mod layout;
@@ -83,6 +87,7 @@ mod mod_slots;
 mod modulation;
 mod module_ui;
 mod ni_agent;
+mod ni_services;
 #[cfg(test)]
 mod pad_blink_tests;
 #[cfg(test)]
@@ -232,6 +237,7 @@ fn main() {
                 scale_group: None,
                 user_chords: user_chords::UserChords::load(),
                 mk3: Some(mk3_io::Mk3Io::start()),
+                jam: Some(jam_io::JamIo::start()),
                 _running: Some(keep_running::begin()),
                 ..Default::default()
             };
@@ -561,6 +567,7 @@ fn open_live_input(
     device: &Option<String>,
     routing: &[Option<usize>],
     live: deckard_engine::LiveIn,
+    inputs: std::sync::Arc<input_levels::InputBus>,
     rate: u32,
 ) -> Result<cpal::Stream, String> {
     use cpal::traits::{DeviceTrait, StreamTrait};
@@ -579,13 +586,7 @@ fn open_live_input(
             move |data: &[f32], _| {
                 if let Ok(mut q) = live.try_lock() {
                     for f in data.chunks(channels) {
-                        let mut frame = [0f32; 32];
-                        for (i, c) in map.iter().enumerate() {
-                            if let Some(c) = c {
-                                frame[i] = f[*c];
-                            }
-                        }
-                        q.push_back(frame);
+                        q.push_back(inputs.frame(f, &map));
                     }
                     // A few blocks at most (nothing may be reading).
                     while q.len() > 8192 {
@@ -842,6 +843,14 @@ pub struct App {
     midi_wired: bool,
     /// The Maschine MK3 over USB (started by `main`, not in tests).
     mk3: Option<mk3_io::Mk3Io>,
+    /// The Maschine JAM over USB (started by `main`, not in tests), and its script while
+    /// it's connected.
+    jam: Option<jam_io::JamIo>,
+    jam_device: Option<deckard_surface::device::Device>,
+    /// The JAM's script wants the Settings page's values (its REC MODE readout).
+    jam_settings_wanted: bool,
+    /// The last JAM script error shown.
+    jam_error: Option<String>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.
     midi_devices: midi_devices::MidiDevices,
     /// The last MIDI controller script error shown.
@@ -870,6 +879,14 @@ pub struct App {
     /// The interface input, open while a sound takes audio from it (Input ▸ Audio),
     /// for (device, routing).
     live_input: Option<(cpal::Stream, InputKey)>,
+    /// The inputs' levels and meters, shared with the input streams; and the meters as
+    /// shown.
+    input_bus: std::sync::Arc<input_levels::InputBus>,
+    input_meters: [(f32, f32); input_levels::PAIRS],
+    /// A controller shows the inputs' meters: the input stays open for them.
+    input_watched: bool,
+    /// The input was opened for the meters alone, with no engine started for it.
+    input_for_meters: bool,
     settings_input_failed: Option<InputKey>,
     /// The page of a plug-in's parameters shown, and what it shows.
     plugin_page: usize,
@@ -888,6 +905,9 @@ pub struct App {
     stems_offer: Option<StemsOffer>,
     /// Asking to quit NI's agent, which holds the MK3's screens.
     ni_agent: ni_agent::Ask,
+    /// Asking to stop NI's services, which fight DECKARD over a JAM's lights.
+    ni_services_ask: ni_agent::Ask,
+    ni_services: ni_services::Watch,
     /// Windows plug-ins through Wine (Preferences ▸ Plug-ins, Linux): what's installed,
     /// the task running (what it is, where its result comes), the last task's message.
     wine_status: Option<wine::Status>,
@@ -987,6 +1007,7 @@ pub struct App {
     peaks: std::collections::HashMap<layout::Channel, [(f32, std::time::Instant); 2]>,
     /// The master's meter (left, right), falling back like the others.
     master_meter: (f32, f32),
+    cue_meter: (f32, f32),
     /// The audio thread's load (0..1) for the header's CPU meter, and the stats it was
     /// last worked out from (busy, audio µs).
     cpu_load: f32,
@@ -2076,6 +2097,22 @@ impl App {
         let (in_channels, out_channels) = (channels_of(&inputs, &in_device), channels_of(&outputs, &out_device));
         ui.separator();
         ui.horizontal(|ui| {
+            ui.strong("Input level").on_hover_text(
+                "In 1's and In 2's levels on the way in: what sounds taking them and the recorder hear (a Maschine JAM's IN1 and IN2)",
+            );
+            for input in 0..input_levels::PAIRS {
+                ui.label(format!("In {}", input + 1));
+                let mut db = deckard_model::level_db(self.settings.input_levels[input]).clamp(-60.0, 10.0);
+                let drag = egui::DragValue::new(&mut db).range(-60.0..=10.0).speed(0.1).fixed_decimals(1).suffix(" dB");
+                if ui.add(drag).changed() {
+                    self.settings.input_levels[input] = deckard_model::level_from_db(db);
+                    self.input_bus.set_levels(&self.settings.input_levels);
+                    self.settings.save();
+                }
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
             ui.strong("Routing");
             ui.selectable_value(&mut self.routing_outputs, false, "Input");
             ui.selectable_value(&mut self.routing_outputs, true, "Output");
@@ -2131,8 +2168,26 @@ impl App {
     /// switched off), and what sounds set to the Default MIDI source take.
     fn midi_preferences(&mut self, ui: &mut egui::Ui) {
         self.sync_preferences(ui);
+        ui.checkbox(&mut self.settings.jam_enabled, "Maschine JAM").on_hover_text(
+            "DECKARD drives a JAM plugged in over USB. Switch it off when Maschine should have the JAM to itself: with both running, each acts on every press and they overwrite each other's lights.",
+        );
+        if ni_services::SUPPORTED {
+            let seen = self.ni_services.seen;
+            ui.horizontal(|ui| {
+                ui.label(if seen.services { "NI's services: running" } else { "NI's services: stopped" }).on_hover_text(
+                    "They light a JAM too, so its pads turn orange and its lights flash while DECKARD drives it. Maschine needs them running.",
+                );
+                if seen.services {
+                    if ui.add_enabled(!seen.maschine, egui::Button::new("Stop")).on_hover_text("Asks for administrator approval. Not while Maschine runs.").clicked() {
+                        ni_services::start_or_stop(false);
+                    }
+                } else if ui.button("Start").on_hover_text("For Maschine. Asks for administrator approval.").clicked() {
+                    ni_services::start_or_stop(true);
+                }
+            });
+        }
         ui.checkbox(&mut self.settings.focus_follows, "Focus the group MIDI is recorded into").on_hover_text(
-            "While recording, MIDI going into another group makes it the focused group. Off: the focus stays where you put it, and the MIDI still records into its group.",
+            "While recording, MIDI going into another group makes it the focused group, and so does picking a pattern on a JAM's Project View. Off: the focus stays where you put it, and the MIDI still records into its group and the pattern still plays.",
         );
         ui.separator();
         let (ins, outs) = self.midi_ports().clone();
@@ -2703,6 +2758,25 @@ impl App {
             self.ni_agent = ni_agent::Ask::Declined;
         }
         ni_agent::dialog(ctx, &mut self.ni_agent, holding, &mut self.status, ni_agent::quit);
+        // A JAM connected with NI's services running: they fight over its lights.
+        if let Some(failure) = ni_services::take_failure() {
+            self.status = failure;
+            self.ni_services_ask = ni_agent::Ask::Declined;
+        }
+        let connected = self.jam_device.is_some();
+        if connected || self.prefs.is_some() {
+            let seen = self.ni_services.look(std::time::Instant::now());
+            let offer = seen.offer(connected);
+            ni_agent::ask_about(
+                "ni-services",
+                &ni_services::WORDS,
+                ctx,
+                &mut self.ni_services_ask,
+                offer,
+                &mut self.status,
+                ni_services::stop,
+            );
+        }
         self.preferences(ctx);
         if self.about.is_some() && !about::show(self, ctx) {
             self.about = None;
@@ -4026,6 +4100,7 @@ impl App {
             auto_write: self.auto_write,
             strip_position: i64::from(self.settings.strip_position),
             touch_auto_write: self.settings.touch_auto_write,
+            keep_focus: !self.settings.focus_follows,
             follow: self.follow,
             position: head.map(|h| h.position as i64),
             progress: self.pattern_at(self.group, head).map(|(at, length)| at as f64 / length as f64),
@@ -4035,8 +4110,8 @@ impl App {
             sampling: self.sampling_surface_view(),
             ..Default::default()
         };
-        // (Only while BROWSE shows: the results can be long.)
-        if self.surface.page() == "browse" {
+        // (Only while BROWSE shows, or the JAM has the panel open: the results can be long.)
+        if self.surface.page() == "browse" || (self.jam_device.is_some() && self.browser.open) {
             let b = self.browser.view();
             v.browser = deckard_surface::BrowserView {
                 kind: b.kind,
@@ -4058,6 +4133,12 @@ impl App {
         v.swing = p.swing.amount;
         v.master_volume = p.master_level;
         v.master_db = deckard_model::level_db(p.master_level);
+        v.master_meter = self.master_meter;
+        v.cue_meter = self.cue_meter;
+        v.input_meters = self.input_meters;
+        v.input_levels = self.settings.input_levels;
+        v.cue_level = p.cue_level;
+        v.scale_root = self.scale.0;
         v.numerator = p.numerator;
         v.denominator = p.denominator;
         v.fixed_velocity = d.num(deckard_doc::Target::Song, "pad_velocity_mode").is_some_and(|m| m as i64 == 1);
@@ -4086,6 +4167,7 @@ impl App {
                 meter,
                 headroom: self.headroom.get(&channel).copied().unwrap_or(0.0),
                 plugins: slots.iter().map(|x| (x.is_instrument(), x.active)).collect(),
+                ..Default::default()
             }
         };
         let meter = |g: usize, s: usize| self.meters.get(g).and_then(|r| r.get(s)).copied().unwrap_or_default();
@@ -4163,10 +4245,20 @@ impl App {
                     muted: grp.muted,
                     default_color: grp.color == deckard_model::Color::Default,
                     playing: self.lit.iter().any(|&(lg, _)| lg == g),
-                    mix: mix(grp.level, grp.pan, loudest, layout::Channel::Group(g), &grp.slots),
+                    mix: deckard_surface::MixView {
+                        aux: grp.aux,
+                        swing: grp.swing.amount,
+                        tune: grp.sounds.iter().find_map(|s| s.sampler.as_ref().map(|x| x.tune)),
+                        ..mix(grp.level, grp.pan, loudest, layout::Channel::Group(g), &grp.slots)
+                    },
                     perform: self.perform_slot(g).map(|i| {
                         let t = || deckard_doc::Target::ChainModule(deckard_doc::Chain::Group(g), i);
                         (d.num(t(), "touchstrip_on_off").unwrap_or(0.0) > 0.5, d.num(t(), "touchstrip_pos").unwrap_or(0.5))
+                    }),
+                    perform_mode: self.perform_slot(g).map(|i| {
+                        let t = deckard_doc::Target::ChainModule(deckard_doc::Chain::Group(g), i);
+                        let mode = (d.num(t, "mode").unwrap_or(0.0).round().max(0.0) as usize).min(7);
+                        (mode, module_ui::PERFORM_MODES[mode].to_string())
                     }),
                     patterns: grp
                         .patterns
@@ -4206,7 +4298,12 @@ impl App {
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
                                     || noted.contains(&s),
                                 playing: self.lit.contains(&(g, s)),
-                                mix: mix(snd.level, snd.pan, meter(g, s), layout::Channel::Sound(g, s), &snd.slots),
+                                mix: deckard_surface::MixView {
+                                    aux: snd.aux,
+                                    swing: snd.swing.amount,
+                                    tune: snd.sampler.as_ref().map(|x| x.tune),
+                                    ..mix(snd.level, snd.pan, meter(g, s), layout::Channel::Sound(g, s), &snd.slots)
+                                },
                                 choke_group: snd.channel.choke_group,
                                 choke_mode: snd.channel.choke_mode,
                                 link_group: snd.channel.link_group,
@@ -4495,13 +4592,105 @@ impl App {
                 }
             }
             A::Repeat("locked", v) => self.arp_locked = v > 0.5,
+            A::Repeat("on", v) => self.repeat_soft = v > 0.5,
             A::Repeat(what, v) => self.arp_edit(&format!("arp/{what}"), v),
+            A::ChokeAll => {
+                if let Some(Ok(out)) = &self.output
+                    && out.has_engine()
+                {
+                    out.live(deckard_engine::Live::ChokeAll);
+                }
+            }
+            A::DeletePattern { group, pattern } => {
+                if project.is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
+                    layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
+                }
+            }
+            A::CopyPattern { group, from, to } => {
+                if let Some(doc) = &self.doc
+                    && let Err(e) = doc.borrow_mut().copy_pattern(group, from, to)
+                {
+                    self.status = format!("can't duplicate the pattern: {e}");
+                }
+            }
+            A::DeleteScene(scene) => {
+                if project.is_some_and(|p| p.scenes.len() > 1 && scene < p.scenes.len()) {
+                    layout::apply_acts(self, vec![Act::DeleteScene(scene)]);
+                }
+            }
+            A::CopyScene { from, to } => {
+                if let Some(doc) = &self.doc
+                    && let Err(e) = doc.borrow_mut().copy_scene(from, to)
+                {
+                    self.status = format!("can't duplicate the scene: {e}");
+                }
+            }
+            A::CopyGroup { from, to } => {
+                let Some(p) = project else { return };
+                if from == to || from >= p.groups.len() || to > p.groups.len() {
+                    return;
+                }
+                let mut acts = vec![Act::CopyGroup(from)];
+                if to == p.groups.len() {
+                    acts.push(Act::AddGroup);
+                }
+                acts.push(Act::PasteGroup(to));
+                layout::apply_acts(self, acts);
+            }
+            A::CopySound { from, to } => {
+                let Some(p) = project else { return };
+                let sounds = p.groups.get(g).map_or(0, |grp| grp.sounds.len());
+                if from != to && from < sounds && to < sounds {
+                    layout::apply_acts(self, vec![Act::CopySound(g, from), Act::PasteSound(g, to)]);
+                }
+            }
+            A::SetSend { group, sound, aux, level } => {
+                let t = match sound {
+                    Some(s) => Target::Sound(group, s),
+                    None => Target::GroupStrip(group),
+                };
+                layout::apply_acts(self, vec![Act::SetParam(t, if aux == 0 { "aux1_level" } else { "aux2_level" }, level)]);
+            }
+            A::SetChannelSwing { group, sound, amount } => {
+                let Some(p) = project else { return };
+                let (t, swing) = match (group, sound) {
+                    (Some(gr), Some(s)) => {
+                        let Some(x) = p.groups.get(gr).and_then(|grp| grp.sounds.get(s)) else { return };
+                        (Target::Sound(gr, s), x.swing)
+                    }
+                    (Some(gr), None) => {
+                        let Some(x) = p.groups.get(gr) else { return };
+                        (Target::Group(gr), x.swing)
+                    }
+                    _ => (Target::Song, p.swing),
+                };
+                layout::apply_acts(self, vec![Act::SetSwing(t, deckard_model::Swing { amount, ..swing })]);
+            }
+            A::SetTune { group, sound, semitones } => self.jam_tune(group, sound, semitones),
+            A::CueDb(db) => layout::apply_acts(self, vec![Act::SetParam(Target::Song, "cue_level", deckard_model::level_from_db(db))]),
+            A::InputDb(input, db) => {
+                if let Some(level) = self.settings.input_levels.get_mut(input) {
+                    *level = deckard_model::level_from_db(db);
+                    self.input_bus.set_levels(&self.settings.input_levels);
+                    self.settings.save();
+                }
+            }
+            A::WatchInput(on) => self.input_watched = on,
+            A::Library(on) => {
+                if self.browser.open != on {
+                    self.browse(browser::BrowseAct::Toggle);
+                }
+            }
+            A::ResetKnob(knob) => self.jam_reset_knob(knob),
+            A::PerformMode { group, mode } => self.jam_perform_mode(group, mode),
+            A::SettingsWanted(on) => self.jam_settings_wanted = on,
             A::Lfo(what, pad, v) => self.surface_lfo(what, pad, v),
             A::ModSlot(slot, row, steps) => mod_slots::step(self, slot, row, steps),
             A::ModSlotsClosed => self.mod_draft = None,
             A::Lock(what, n) => match what {
                 "button" => self.lock_button(),
                 "pad" => self.lock_pad(n),
+                "slot" => self.lock_slot(n),
                 "update" => self.lock_update(),
                 "delete" => self.lock_delete(),
                 "delete_slot" => self.lock_delete_slot(n),
@@ -5035,6 +5224,9 @@ impl App {
             if let Some(m) = &self.mk3 {
                 m.set_output(out.sender());
             }
+            if let Some(j) = &self.jam {
+                j.set_output(out.sender());
+            }
             self.midi_wired = true;
         }
         if let Some(doc) = self.doc.clone() {
@@ -5130,16 +5322,18 @@ impl App {
     }
 
     /// Open the interface input while a sound takes audio from it (and an engine to
-    /// play it through); close it when none does.
-    fn input_sync(&mut self) {
+    /// play it through) or a controller shows its meters; close it when neither does.
+    pub(crate) fn input_sync(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let wants = doc
+        let plays = doc
             .borrow()
             .project()
             .groups
             .iter()
             .flat_map(|g| &g.sounds)
             .any(|s| matches!(s.channel.audio_in, deckard_model::AudioSource::Ext(_)));
+        let wants = plays || self.input_watched;
+        self.input_bus.set_levels(&self.settings.input_levels);
         let key = (self.settings.input_device.clone(), self.settings.input_routing.clone());
         if !wants {
             self.live_input = None;
@@ -5148,20 +5342,32 @@ impl App {
         }
         // Open already, or failed with these settings (no retrying every frame).
         if self.live_input.as_ref().is_some_and(|(_, k)| *k == key) || self.settings_input_failed.as_ref() == Some(&key) {
+            // Open for a meter, and now a sound takes it: it needs an engine to play through.
+            if plays
+                && std::mem::take(&mut self.input_for_meters)
+                && let Some(Ok(out)) = &self.output
+                && !out.has_engine()
+            {
+                let d = doc.borrow();
+                let (mut engine, _) = Engine::new(d.project(), self.path.as_deref(), out.rate, Mode::Arrangement, &mut self.samples);
+                engine.sequencing = false;
+                out.play(engine);
+            }
             return;
         }
         let Ok(out) = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) else { return };
         let live: deckard_engine::LiveIn = Default::default();
-        match open_live_input(&key.0, &key.1, live.clone(), out.rate) {
+        match open_live_input(&key.0, &key.1, live.clone(), self.input_bus.clone(), out.rate) {
             Ok(stream) => {
                 out.set_live_in(live);
-                if !out.has_engine() {
+                if plays && !out.has_engine() {
                     let d = doc.borrow();
                     let (mut engine, _) = Engine::new(d.project(), self.path.as_deref(), out.rate, Mode::Arrangement, &mut self.samples);
                     engine.sequencing = false;
                     out.play(engine);
                 }
                 self.live_input = Some((stream, key));
+                self.input_for_meters = !plays;
                 self.settings_input_failed = None;
             }
             Err(e) => {
@@ -5235,6 +5441,15 @@ impl App {
             Some(Ok(out)) => out.take_meters(),
             _ => (Vec::new(), (0.0, 0.0)),
         };
+        let cue = match &self.output {
+            Some(Ok(out)) => out.take_cue_peak(),
+            _ => (0.0, 0.0),
+        };
+        self.cue_meter = ((self.cue_meter.0 * fall).max(cue.0), (self.cue_meter.1 * fall).max(cue.1));
+        for (pair, shown) in self.input_meters.iter_mut().enumerate() {
+            let peak = self.input_bus.take_peaks(pair);
+            *shown = ((shown.0 * fall).max(peak.0), (shown.1 * fall).max(peak.1));
+        }
         // Headroom: the peak of each channel (sounds, their groups, the master).
         for (g, row) in fresh.iter().enumerate() {
             let mut gp = 0f32;
@@ -5543,6 +5758,7 @@ impl App {
                 output,
                 device: self.settings.input_device.clone(),
                 routing: &self.settings.input_routing,
+                inputs: self.input_bus.clone(),
                 clock,
                 dir: PathBuf::new(),
                 stem: String::new(),
@@ -6578,6 +6794,7 @@ impl App {
             output,
             device: self.settings.input_device.clone(),
             routing: &self.settings.input_routing,
+            inputs: self.input_bus.clone(),
             clock,
             dir,
             stem,
@@ -8411,6 +8628,7 @@ impl App {
             ctx.request_repaint_after(undrawn(ctx, c.interval()));
         }
         self.mk3_sync(ctx, &mut requests, true);
+        self.jam_sync(ctx, true);
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
@@ -8460,6 +8678,9 @@ impl eframe::App for App {
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
             m.shut_down(goodbye::picture());
+        }
+        if let Some(j) = &self.jam {
+            j.shut_down();
         }
     }
 
@@ -8708,6 +8929,7 @@ impl App {
             }
         }
         self.mk3_sync(ui.ctx(), &mut requests, false);
+        self.jam_sync(ui.ctx(), false);
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
