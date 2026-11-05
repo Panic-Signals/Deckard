@@ -51,6 +51,9 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
         "MullhollandDrive" => distortion(params, page),
         "TransientDesigner" => transient(params),
         "BeatDelay" => beat_delay(params),
+        "GrainDelay" => grain_delay(params, phase),
+        "GrainStretch" => grain_stretch(params),
+        "Resochord" => resochord(params),
         _ => return None,
     };
     if matches!(module, "Compressor" | "Limiter" | "Gate" | "Maximizer") {
@@ -62,6 +65,7 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
 
 pub fn moves(module: &str, params: &[(String, f64)]) -> bool {
     match module {
+        "GrainDelay" => p(params, "modulation", 0.0) > 0.02,
         _ => {
             let _ = params;
             false
@@ -71,6 +75,7 @@ pub fn moves(module: &str, params: &[(String, f64)]) -> bool {
 
 pub fn rate_hz(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
     match module {
+        "GrainDelay" => 0.15 + p(params, "modulation", 0.0).clamp(0.0, 1.0) * 3.0,
         _ => {
             let _ = (params, tempo);
             0.0
@@ -121,6 +126,14 @@ fn envelope(attack: f32, hold: f32, release: f32, n: usize) -> Vec<f32> {
             }
         })
         .collect()
+}
+
+fn hash(i: u32) -> f32 {
+    let mut x = i.wrapping_mul(0x9E37_79B1);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 13;
+    (x & 0xFFFF) as f32 / 65535.0
 }
 
 fn side(params: &[(String, f64)], live: bool, shot: &mut Shot) {
@@ -392,6 +405,108 @@ fn beat_delay(params: &[(String, f64)]) -> Shot {
     shot
 }
 
+fn grain_delay(params: &[(String, f64)], phase: f32) -> Shot {
+    let pitch = p(params, "pitch", 0.0).clamp(-1.0, 1.0);
+    let size = p(params, "size", 0.25).clamp(0.0, 1.0);
+    let jitter = p(params, "jitter", 0.0).clamp(0.0, 1.0);
+    let reverse = on(params, "reverse", 0.0);
+    let space = p(params, "space", 0.0).clamp(0.0, 1.0);
+    let density = p(params, "density", 0.25).clamp(0.0, 1.0);
+    let modulation = p(params, "modulation", 0.0).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 0.75).clamp(0.0, 1.0);
+    let stereo = p(params, "stereo", 0.75).clamp(0.0, 1.0);
+    let count = (5.0 + density * 18.0) as u32;
+    let wander = (phase * std::f32::consts::TAU).sin() * modulation * 0.16;
+    let mut bands = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let mut x = (i as f32 + 0.5) / count as f32;
+        x += (hash(i) - 0.5) * jitter * 0.45 + (hash(i + 9) - 0.5) * space * 0.55 + wander;
+        if reverse {
+            x = 1.0 - x;
+        }
+        x = 0.5 + (x.clamp(0.02, 0.98) - 0.5) * (0.35 + 0.65 * stereo);
+        let y = 0.5 + pitch * 0.38 + (hash(i + 3) - 0.5) * size * 0.4;
+        let y = lerp(0.5, cl(y), mix);
+        bands.push((cl(x), y));
+    }
+    let mut shot = Shot::bare("dots", Vec::new());
+    shot.bands = bands;
+    shot
+}
+
+fn grain_stretch(params: &[(String, f64)]) -> Shot {
+    if !on(params, "on", 0.0) {
+        return Shot::bare("dots", vec![0.18; 8]);
+    }
+    let stretch = p(params, "stretch", 0.0).clamp(0.0, 1.0);
+    let loops = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 32.0];
+    let loop_i = p(params, "loop_length", 8.0).round().clamp(0.0, 8.0) as usize;
+    let width = (loops[loop_i] / 32.0 * (0.35 + 0.9 * stretch)).clamp(0.08, 0.96);
+    let mut pitch = p(params, "pitch", 0.5).clamp(0.0, 1.0);
+    if on(params, "link", 0.0) {
+        pitch = cl(pitch + (stretch - 0.15) * 0.35);
+    }
+    let size = p(params, "size", 0.25).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 1.0).clamp(0.0, 1.0);
+    let count = (4.0 + (1.0 - size) * 14.0) as u32;
+    let mut bands = Vec::new();
+    for i in 0..count {
+        let x = 0.04 + width * (i as f32 + 0.5) / count as f32;
+        let y = lerp(0.5, cl(0.18 + pitch * 0.7 + (hash(i + 4) - 0.5) * size * 0.25), mix);
+        bands.push((cl(x), y));
+    }
+    let mut shot = Shot::bare("dots", Vec::new());
+    shot.bands = bands;
+    shot
+}
+
+fn resochord(params: &[(String, f64)]) -> Shot {
+    let string_mode = !on(params, "mode", 1.0);
+    let notes = if string_mode {
+        vec![0.0, p(params, "spread", 0.5).clamp(0.0, 1.0) * 12.0]
+    } else {
+        chord_notes(p(params, "style", 0.0).round() as i32, p(params, "chord", 1.0).round() as i32)
+    };
+    let tune = p(params, "tune", 0.0).clamp(-24.0, 24.0);
+    let bright = p(params, "brightness", 0.75).clamp(0.0, 1.0);
+    let feedback = p(params, "feedback", 0.75).clamp(0.0, 1.0);
+    let decay = p(params, "decay", 0.5).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 0.75).clamp(0.0, 1.0);
+    let repeats = (2.0 + feedback * 3.0 + decay * 4.0) as usize;
+    let step = 0.9 / repeats.max(1) as f32;
+    let mut bands = Vec::new();
+    for r in 0..repeats {
+        let fade = (1.0 - r as f32 / repeats as f32).powf(0.6 + (1.0 - decay));
+        if fade < 0.18 {
+            continue;
+        }
+        for semi in &notes {
+            let y = 0.22 + bright * 0.35 + (semi + tune) / 52.0;
+            bands.push((cl(0.05 + r as f32 * step), lerp(0.12, cl(y * fade + 0.08), mix)));
+        }
+    }
+    let mut shot = Shot::bare("dots", Vec::new());
+    shot.bands = bands;
+    shot
+}
+
+fn chord_notes(style: i32, chord: i32) -> Vec<f32> {
+    let third = match style {
+        1 | 2 => 3.0,
+        3 => 2.0,
+        4 => 1.0,
+        _ => 4.0,
+    };
+    let seventh = if matches!(style, 1 | 2) { 10.0 } else { 11.0 };
+    match chord.clamp(0, 4) {
+        0 => vec![0.0],
+        1 => vec![0.0, 7.0],
+        2 => vec![0.0, third, 7.0, seventh],
+        3 => vec![0.0, third, 7.0, seventh, 14.0],
+        _ => vec![0.0, third, 7.0, seventh, 14.0, 17.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +536,9 @@ mod tests {
             ("MullhollandDrive", "drive", 0.0, 1.0),
             ("TransientDesigner", "attack", -1.0, 1.0),
             ("BeatDelay", "feedback", 0.0, 0.9),
+            ("GrainDelay", "pitch", -1.0, 1.0),
+            ("GrainStretch", "on", 0.0, 1.0),
+            ("Resochord", "tune", -12.0, 12.0),
         ];
         for (module, field, a, b) in cases {
             let picture = shot(module, &[], 0.0, false, 0).unwrap();
