@@ -82,11 +82,18 @@ impl NiIndex {
             characters.entry(r.get(0).map_err(err)?).or_default().push(r.get(1).map_err(err)?);
         }
 
+        // A product Maschine has marked as gone (state 4) keeps its rows, but its files aren't
+        // there to load. An older index may have no state.
+        let has_state: bool = db
+            .query_row("SELECT count(*) FROM pragma_table_info('k_content_path') WHERE name = 'state'", [], |r| r.get::<_, i64>(0))
+            .map_err(err)?
+            > 0;
+        let installed = if has_state { "AND coalesce(c.state, 0) <> 4" } else { "" };
         let sql = format!(
             "SELECT p.id, k.name, k.file_name, k.tempo, coalesce(k.author, ''), p.entry1, p.entry2, p.entry3, \
              CASE WHEN c.content_type = 2 THEN c.alias END \
              FROM {table} p JOIN k_sound_info k ON k.id = p.id LEFT JOIN k_content_path c ON c.id = k.content_path_id \
-             WHERE k.hidden_for = 0"
+             WHERE k.hidden_for = 0 {installed}"
         );
         let mut st = db.prepare(&sql).map_err(err)?;
         let mut rows = st.query([]).map_err(err)?;
