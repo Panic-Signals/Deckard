@@ -150,6 +150,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                 // A plug-in's parameter learns even before it has an object (made as it learns).
                 let plugin = match (mv, edit) {
                     (None, Some(super::Edit::Plugin(s, id, _) | super::Edit::PluginChoice(s, id, ..))) => Some((app.chain(), s, id)),
+                    (None, Some(super::Edit::PluginIn(c, s, id, _))) => Some((c, s, id)),
                     _ => None,
                 };
                 if param.is_none() && (plugin.is_none() || tab != AssignTab::Midi) {

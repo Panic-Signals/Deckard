@@ -394,9 +394,10 @@ fn own_length(p: &Project, pat: &deckard_model::Pattern) -> i64 {
     if pat.length > 0 { pat.length } else { p.bar_length() }
 }
 
-/// A pattern's modulation of Maschine's own effects, as lanes: (sound, `None` for the
-/// group; chain slot; field; points from the pattern's start, at stored values). A
-/// point is a deviation from the knob's value ([`modscale`]).
+/// A pattern's modulation of instruments and effects, as lanes: (sound, `None` for the
+/// group; chain slot; field; points from the pattern's start, at stored values or, for
+/// plug-ins, normalized deviations). A point is a deviation from the knob's value
+/// ([`modscale`]).
 fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option<usize>, usize, String, Vec<(i64, f64)>)> {
     let grp = &p.groups[g];
     let plen = own_length(p, pat);
@@ -407,13 +408,27 @@ fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option
             Some(s) => grp.sounds.get(s).map(|x| &x.slots),
             None => Some(&grp.slots),
         };
-        let Some(info) = slots.and_then(|x| x.get(slot)).filter(|x| x.plugin.is_none()) else { continue };
-        let Some(&(_, base)) = info.params.iter().find(|(k, _)| *k == m.field) else { continue };
+        let Some(info) = slots.and_then(|x| x.get(slot)) else { continue };
         let pos = m.position - pat.start;
         if !(0..plen).contains(&pos) {
             continue;
         }
-        let v = modscale::scale_of(&info.module, &m.field).apply(base, m.value);
+        let v = if info.plugin.is_some() {
+            if m.field.parse::<u32>().is_err() {
+                continue;
+            }
+            m.value
+        } else if slot == 0 && info.module == "Sampler" {
+            let Some(smp) =
+                m.sound.and_then(|s| grp.sounds.get(s)?.sampler.as_ref()).filter(|_| sampler::MODULATED.contains(&m.field.as_str()))
+            else {
+                continue;
+            };
+            modscale::scale_of("Sampler", &m.field).apply(smp.get(&m.field), m.value)
+        } else {
+            let Some(&(_, base)) = info.params.iter().find(|(k, _)| *k == m.field) else { continue };
+            modscale::scale_of(&info.module, &m.field).apply(base, m.value)
+        };
         match out.iter_mut().find(|l| l.0 == m.sound && l.1 == slot && l.2 == m.field) {
             Some(l) => l.3.push((pos, v)),
             None => out.push((m.sound, slot, m.field.clone(), vec![(pos, v)])),
@@ -1577,6 +1592,8 @@ pub struct Engine {
     touch_order: u64,
     /// The sounds' modulation routes ([`mod_rt`]).
     mod_routes: Vec<mod_rt::RouteRt>,
+    /// Plug-in parameters modulated by pattern lanes (`(plugin, id, hit_this_span)`).
+    modded_plugins: Vec<(Shared, u32, bool)>,
     /// Plug-in parameters routes let go of while the plug-in was busy ([`mod_rt`]).
     unrouted: Vec<(Shared, u32)>,
     /// Where the routes' travels are published, for their knobs.
@@ -2257,6 +2274,7 @@ impl Engine {
             held_keys: Vec::with_capacity(mod_rt::KEYS),
             touch_order: 0,
             mod_routes,
+            modded_plugins: Vec::with_capacity(mod_rt::UNROUTED),
             unrouted: Vec::with_capacity(mod_rt::UNROUTED),
             route_board: None,
             live_in: None,
@@ -2350,6 +2368,7 @@ impl Engine {
         std::mem::swap(&mut self.samples, &mut fresh.samples);
         std::mem::swap(&mut self.sounds, &mut fresh.sounds);
         self.adopt_routes(&mut fresh);
+        std::mem::swap(&mut self.modded_plugins, &mut fresh.modded_plugins);
         self.adopt_lfos(&mut fresh);
         self.adopt_ccs(&mut fresh);
         // Notes held by plug-ins that are gone or muted now end.
@@ -4018,37 +4037,71 @@ impl Engine {
         self.repeat_buf = fired;
     }
 
-    /// Modulation: Maschine's effects with a lane playing at the song's position take
-    /// its values; ones whose lanes stopped (or the song) have their own again. No
+    /// Modulation: instruments and effects with a lane playing at the song's position
+    /// take its values; ones whose lanes stopped (or the song) have their own again. No
     /// allocating (the audio thread).
     fn apply_mods(&mut self) {
         if !self.unrouted.is_empty() {
             self.retry_unroutes();
         }
         self.apply_faders();
-        if !self.modulating && (self.timeline.mods.is_empty() || !self.sequencing) && self.mod_routes.is_empty() {
+        if !self.modulating
+            && self.modded_plugins.is_empty()
+            && (self.timeline.mods.is_empty() || !self.sequencing)
+            && self.mod_routes.is_empty()
+        {
             return;
         }
+        let modulate_plugin = |modded_plugins: &mut Vec<(Shared, u32, bool)>, plugin: &Shared, id: u32, dev: f64| {
+            if let Some(m) = modded_plugins.iter_mut().find(|(p, i, _)| *i == id && Arc::ptr_eq(p, plugin)) {
+                m.2 = true;
+            } else if modded_plugins.len() < modded_plugins.capacity() {
+                modded_plugins.push((plugin.clone(), id, true));
+            }
+            if let Ok(mut p) = plugin.try_lock() {
+                let target = (p.knob_value(id) + dev).clamp(0.0, 1.0);
+                p.modulate(id, target);
+            }
+        };
         let tick = self.frame as f64 / self.samples_per_tick();
         if self.sequencing {
             for lane in &self.timeline.mods {
                 if !((lane.from as f64)..(lane.to as f64)).contains(&tick) {
                     continue;
                 }
+                let v = lane.value_at(tick);
+                if let Some(s) = lane.sound
+                    && lane.slot == 0
+                {
+                    if let Some(Some(inst)) = self.instruments.get(lane.group).and_then(|r| r.get(s))
+                        && let Ok(id) = lane.field.parse::<u32>()
+                    {
+                        modulate_plugin(&mut self.modded_plugins, &inst.plugin, id, v);
+                    } else if let Some(Some(smp)) = self.sounds.get_mut(lane.group).and_then(|r| r.get_mut(s)) {
+                        smp.begin_modulation();
+                        smp.modulate(&lane.field, v);
+                    }
+                }
                 let chain = match lane.sound {
                     Some(s) => self.fx.get_mut(lane.group).and_then(|r| r.get_mut(s)).and_then(Option::as_mut),
                     None => self.buses.get_mut(lane.group).and_then(Option::as_mut).map(|b| &mut b.chain),
                 };
                 let Some(chain) = chain else { continue };
-                let v = lane.value_at(tick);
                 for u in chain.units.iter_mut().filter(|u| u.slot == lane.slot && !u.ghost) {
-                    if let FxUnit::Internal { params, modded, hit, .. } = &mut u.fx {
-                        if !*hit {
-                            modded.clone_from(params);
-                            *hit = true;
+                    match &mut u.fx {
+                        FxUnit::Internal { params, modded, hit, .. } => {
+                            if !*hit {
+                                modded.clone_from(params);
+                                *hit = true;
+                            }
+                            if let Some(x) = modded.iter_mut().find(|(k, _)| *k == lane.field) {
+                                x.1 = v;
+                            }
                         }
-                        if let Some(x) = modded.iter_mut().find(|(k, _)| *k == lane.field) {
-                            x.1 = v;
+                        FxUnit::Plugin(plugin) => {
+                            if let Ok(id) = lane.field.parse::<u32>() {
+                                modulate_plugin(&mut self.modded_plugins, plugin, id, v);
+                            }
                         }
                     }
                 }
@@ -4056,6 +4109,9 @@ impl Engine {
         }
         self.apply_routes();
         let mut any = false;
+        for smp in self.sounds.iter_mut().flatten().flatten() {
+            any |= smp.finish_modulation();
+        }
         let chains = self.fx.iter_mut().flatten().flatten().chain(self.buses.iter_mut().flatten().map(|b| &mut b.chain));
         for chain in chains {
             for u in &mut chain.units {
@@ -4077,6 +4133,26 @@ impl Engine {
                 any |= *modulated;
             }
         }
+        let unrouted = &mut self.unrouted;
+        let mod_routes = &self.mod_routes;
+        self.modded_plugins.retain_mut(|(plugin, id, hit)| {
+            if std::mem::take(hit) {
+                return true;
+            }
+            if mod_routes.iter().any(|r| {
+                !r.now.is_nan()
+                    && matches!(&r.target, mod_rt::RouteTarget::Plugin { plugin: q, id: j } if *j == *id && Arc::ptr_eq(q, plugin))
+            }) {
+                return false;
+            }
+            match plugin.try_lock() {
+                Ok(mut p) => p.unmodulate(*id),
+                Err(_) if unrouted.len() < unrouted.capacity() => unrouted.push((plugin.clone(), *id)),
+                Err(_) => {}
+            }
+            false
+        });
+        any |= !self.modded_plugins.is_empty();
         self.modulating = any;
     }
 
@@ -4695,8 +4771,13 @@ struct Reuse {
 }
 
 /// Whether `a` and `b` make the same timelines (the same patterns, scenes, sections,
-/// grooves and bar length): an edit elsewhere keeps the playing timeline.
+/// grooves, bar length and modulated parameters' base values): an edit elsewhere keeps
+/// the playing timeline.
 fn same_timelines(a: &Project, b: &Project) -> bool {
+    let same_slot = |sa: Option<&deckard_model::SlotInfo>, sb: Option<&deckard_model::SlotInfo>| match (sa, sb) {
+        (Some(x), Some(y)) if x.plugin.is_none() && y.plugin.is_none() => x.module == y.module && x.params == y.params,
+        (x, y) => x.map(|s| &s.plugin) == y.map(|s| &s.plugin),
+    };
     a.scenes == b.scenes
         && a.sections == b.sections
         && a.swing == b.swing
@@ -4707,6 +4788,17 @@ fn same_timelines(a: &Project, b: &Project) -> bool {
                 && x.swing == y.swing
                 && x.sounds.len() == y.sounds.len()
                 && x.sounds.iter().zip(&y.sounds).all(|(m, n)| m.swing == n.swing)
+                && x.patterns.iter().flat_map(|p| &p.mods).all(|m| match (m.sound, m.slot) {
+                    (Some(s), Some(i)) => {
+                        let (ma, mb) = (x.sounds.get(s), y.sounds.get(s));
+                        same_slot(ma.and_then(|snd| snd.slots.get(i)), mb.and_then(|snd| snd.slots.get(i)))
+                            && (i != 0
+                                || ma.and_then(|snd| snd.sampler.as_ref()).map(|smp| &smp.params)
+                                    == mb.and_then(|snd| snd.sampler.as_ref()).map(|smp| &smp.params))
+                    }
+                    (None, Some(i)) => same_slot(x.slots.get(i), y.slots.get(i)),
+                    _ => true,
+                })
         })
 }
 
@@ -7767,6 +7859,52 @@ mod tests {
         let FxUnit::Internal { glide, .. } = &bus.chain.units[0].fx else { unreachable!() };
         let v = glide.now().iter().find(|(k, _)| k == "feedback").unwrap().1;
         assert!((v - 0.9).abs() < 1e-6, "0.5 up 0.4: {v}");
+    }
+
+    /// Pattern modulation lanes move the Sampler's parameters and a plug-in's parameters
+    /// while playing, and let go when stopped.
+    #[test]
+    fn modulation_moves_the_sampler_and_a_plugin_while_playing() {
+        let (_tmp, mut p) = eight_project();
+        let len = p.groups[0].patterns[0].length.max(p.bar_length());
+        let base_cutoff = p.groups[0].sounds[1].sampler.as_ref().unwrap().get("cutoff");
+        let class = deckard_plugins::native::CLASSES[0];
+        let param = class.params.iter().find(|x| x.steps == 0).unwrap();
+        let id = param.id;
+        let pr = deckard_model::PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
+        let snd2 = &mut p.groups[0].sounds[2];
+        snd2.sampler = None;
+        snd2.plugin = Some(pr.clone());
+        snd2.slots = vec![deckard_model::SlotInfo {
+            module: "PluginHost".into(),
+            name: class.name.into(),
+            active: true,
+            plugin: Some(pr),
+            params: vec![(id.to_string(), 0.25)],
+        }];
+        let pt = |sound, field: &str, position, value| deckard_model::ModPoint {
+            sound: Some(sound),
+            slot: Some(0),
+            field: field.into(),
+            position,
+            value,
+        };
+        let id_field = id.to_string();
+        p.groups[0].patterns[0].mods =
+            vec![pt(1, "cutoff", 0, -0.5), pt(1, "cutoff", len, -0.5), pt(2, &id_field, 0, 0.5), pt(2, &id_field, len, 0.5)];
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        blocks(&mut e, 2);
+        let cutoff = e.sounds[0][1].as_ref().unwrap().settings_cutoff();
+        assert!((f64::from(cutoff) - (base_cutoff - 0.5).clamp(0.0, 1.0)).abs() < 1e-4, "{cutoff} vs {base_cutoff}");
+        let plugin = e.instruments[0][2].as_ref().unwrap().plugin.clone();
+        let want = (param.default + 0.5).clamp(0.0, 1.0);
+        assert!((plugin.lock().unwrap().modulated(id).unwrap() - want).abs() < 1e-9);
+        e.sequencing = false;
+        blocks(&mut e, 2);
+        let cutoff = e.sounds[0][1].as_ref().unwrap().settings_cutoff();
+        assert!((f64::from(cutoff) - base_cutoff).abs() < 1e-4, "stopped: back to {base_cutoff} ({cutoff})");
+        assert_eq!(plugin.lock().unwrap().modulated(id), None, "stopped: plug-in back to its knob");
     }
 
     /// A group's Perform FX: engaged (Reso Echo, the strip low) it's heard; not engaged,

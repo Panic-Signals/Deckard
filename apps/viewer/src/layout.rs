@@ -3728,8 +3728,7 @@ fn plugin_knob(app: &App, doc: &deckard_doc::Document, chain: deckard_doc::Chain
         Err(_) => (info.default, String::new()),
     };
     let units = if info.units.is_empty() || text.ends_with(&info.units) { String::new() } else { format!(" {}", info.units) };
-    let edit =
-        if chain == app.chain() { Edit::Plugin(slot, param, info.default) } else { Edit::PluginIn(chain, slot, param, info.default) };
+    let edit = Edit::PluginIn(chain, slot, param, info.default);
     Some((knob_label(&info.title).into(), format!("{text}{units}"), value as f32, Some(edit)))
 }
 
@@ -3798,7 +3797,7 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
                         let cur = (value * info.steps as f64).round() as usize;
                         Edit::PluginChoice(i, info.id, info.steps, cur.min(names.len() - 1), info.default)
                     }
-                    None => Edit::Plugin(i, info.id, info.default),
+                    None => Edit::PluginIn(app.chain(), i, info.id, info.default),
                 };
                 knobs.push(Some((knob_label(label).into(), format!("{text}{units}"), value as f32, Some(edit))));
                 if !section.is_empty() {
@@ -4141,7 +4140,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                             let cur = (value * info.steps as f64).round() as usize;
                                             Edit::PluginChoice(i, info.id, info.steps, cur.min(names.len() - 1), info.default)
                                         }
-                                        None => Edit::Plugin(i, info.id, info.default),
+                                        None => Edit::PluginIn(app.chain(), i, info.id, info.default),
                                     };
                                     params.push(Some((name, format!("{text}{units}"), value as f32, Some(edit))));
                                     if !section.is_empty() {
@@ -4364,7 +4363,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             }
         } else if let Some((t, f)) = edit.as_ref().and_then(channel::knob_param) {
             strip_resp.context_menu(|ui| param_macro_menu(ui, doc, t, f, acts));
-        } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
+        } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginIn(_, slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
             strip_resp.context_menu(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
         }
         // A parameter a macro controls: the macro icon at the top right.

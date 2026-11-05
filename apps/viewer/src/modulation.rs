@@ -81,10 +81,14 @@ pub fn mod_target(e: Edit) -> Option<(Chain, ModTarget)> {
     let (t, f) = match e {
         Edit::Level(t) => return fader(t, "level"),
         Edit::Pan(t) => return fader(t, "pan"),
+        Edit::PluginIn(c @ (Chain::Sound(..) | Chain::Group(_)), i, id, _) => {
+            return Some((c, ModTarget { slot: Some(i), field: id.to_string() }));
+        }
         Edit::Param(t, f, ..) | Edit::Log(t, f, ..) | Edit::Int(t, f, ..) => (t, f),
         _ => return None,
     };
     let (c, i) = match t {
+        Target::Sampler(g, s) => (Chain::Sound(g, s), 0),
         Target::Module(g, s, i) => (Chain::Sound(g, s), i),
         Target::ChainModule(c @ (Chain::Sound(..) | Chain::Group(_)), i) => (c, i),
         _ => return None,
@@ -113,7 +117,13 @@ pub fn knob_travel(p: &Project, c: Chain, target: &ModTarget) -> Option<f64> {
         Chain::Master => return None,
     };
     let slot = slots.get(target.slot?)?;
-    let v = slot.param(&target.field)?;
+    let v = if slot.module == "Sampler" {
+        let Chain::Sound(g, s) = c else { return None };
+        deckard_model::SAMPLER_PARAMS.iter().any(|(k, _)| *k == target.field).then_some(())?;
+        p.groups[g].sounds[s].sampler.as_ref()?.get(&target.field)
+    } else {
+        slot.param(&target.field)?
+    };
     Some(deckard_engine::modscale::scale_of(&slot.module, &target.field).travel(v))
 }
 

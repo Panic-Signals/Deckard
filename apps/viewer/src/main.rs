@@ -3273,18 +3273,27 @@ impl App {
                 self.status = "can't write modulation: no pattern of this group is playing".into();
                 return;
             };
-            let Some(at) = modulation::knob_travel(p, chain, &target) else { return };
+            let Some(at) = self.knob_travel(p, chain, &target) else { return };
             (pi, pos, (amount as f64 - at).clamp(-1.0, 1.0))
         };
         // Another knob or pattern: that touch ends.
         if self.mod_take.as_ref().is_some_and(|t| t.chain != chain || t.target != target || t.pattern != pi) {
             self.end_mod_take();
         }
-        let take = self.mod_take.get_or_insert_with(|| {
+        if self.mod_take.is_none() {
             doc.borrow_mut().begin_take("Record Modulation");
-            modulation::ModTake { chain, target: target.clone(), pattern: pi, samples: Vec::new(), moved: std::time::Instant::now() }
-        });
-        take.moved = std::time::Instant::now();
+            self.ensure_mod_param(chain, &target);
+            self.mod_take = Some(modulation::ModTake {
+                chain,
+                target: target.clone(),
+                pattern: pi,
+                samples: Vec::new(),
+                moved: std::time::Instant::now(),
+            });
+        }
+        if let Some(take) = self.mod_take.as_mut() {
+            take.moved = std::time::Instant::now();
+        }
         self.touch_write(pos, dev);
         if done {
             self.end_mod_take();
@@ -3342,6 +3351,23 @@ impl App {
         }
     }
 
+    /// Where the knob of `target` in `c` is (0..1), unmodulated: a module's parameter,
+    /// its channel's fader, or a plug-in's parameter.
+    pub(crate) fn knob_travel(&self, p: &deckard_model::Project, c: deckard_doc::Chain, target: &deckard_model::ModTarget) -> Option<f64> {
+        if let Some(v) = modulation::knob_travel(p, c, target) {
+            return Some(v);
+        }
+        let (slot, id) = (target.slot?, target.field.parse::<u32>().ok()?);
+        if let Some(inst) = self.samples.plugins.existing(self.plugin_slot_key(c, slot))
+            && let Ok(g) = inst.try_lock()
+        {
+            return Some(g.knob_value(id));
+        }
+        let v = self.plugin_view.as_ref().filter(|v| v.key == (c, slot))?;
+        let k = v.pages.get(v.page)?.knobs.iter().position(|(info, ..)| info.id == id)?;
+        v.values.get(k).map(|(val, _)| *val)
+    }
+
     /// Where a knob's modulation has it (0..1): as last written in the touch going on,
     /// else at the play position; `None` when it isn't modulated.
     fn mod_position(&self, edit: layout::Edit) -> Option<f64> {
@@ -3350,7 +3376,7 @@ impl App {
             && let Some(&(_, dev)) = take.samples.last()
         {
             let doc = self.doc.as_ref()?.borrow();
-            return Some((modulation::knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
+            return Some((self.knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
         }
         self.mod_amount(edit).map(f64::from)
     }
@@ -3411,7 +3437,7 @@ impl App {
             return None;
         }
         let lane = deckard_engine::modscale::ModLane { group: g, sound, slot: 0, field: String::new(), from: 0, to: 0, points };
-        let at = modulation::knob_travel(p, chain, &target)?;
+        let at = self.knob_travel(p, chain, &target)?;
         Some((at + lane.value_at(pos as f64)).clamp(0.0, 1.0) as f32)
     }
 
@@ -4255,7 +4281,12 @@ impl App {
             A::Restart => self.restart(),
             A::Loop(on) => self.set_looping(on),
             A::Metronome(on) => self.set_metronome(on),
-            A::AutoWrite(on) => self.auto_write = on,
+            A::AutoWrite(on) => {
+                self.auto_write = on;
+                if !on {
+                    self.end_mod_take();
+                }
+            }
             A::Tempo(bpm) => layout::apply_acts(self, vec![Act::SetTempo(bpm)]),
             A::Swing(amount) => {
                 let Some(p) = project else { return };
@@ -4735,7 +4766,10 @@ impl App {
                 c.knobs[k] = knob.map(|(name, text, value, edit)| {
                     let (live_text, shown_value) = shown.unwrap_or((text.clone(), value));
                     let text = match edit.filter(|e| writing && modulation::mod_target(*e).is_some()) {
-                        Some(e) => format!("{:+.0}%", (self.mod_position(e).unwrap_or(value as f64) - value as f64) * 100.0),
+                        Some(e) => {
+                            let base = modulation::mod_target(e).and_then(|(ch, t)| self.knob_travel(p, ch, &t)).unwrap_or(value as f64);
+                            format!("{:+.0}%", (self.mod_position(e).unwrap_or(base) - base) * 100.0)
+                        }
                         // A routing choice (a side-chain source) whole while touched.
                         None => match edit {
                             Some(layout::Edit::Route(cur)) if touched[k] => {

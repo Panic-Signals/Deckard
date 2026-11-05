@@ -150,7 +150,14 @@ function global.button(name, down)
   end
 
   if name == "AUTO" then
-    if down then deckard.auto_write(not s.auto_write) end
+    if down then
+      global.auto_held = not s.auto_write
+      global.auto_used = false
+      deckard.auto_write(not s.auto_write)
+    elseif global.auto_held then
+      global.auto_held = false
+      if global.auto_used and s.auto_write then deckard.auto_write(false) end
+    end
     return true
   end
   if strip.button(name, down) then return true end
@@ -362,6 +369,10 @@ function global.wheel(steps)
   return true
 end
 
+function global.knob_turned()
+  if global.auto_held then global.auto_used = true end
+end
+
 -- Where the pads play: Step mode enters steps instead.
 -- Touch Auto-write: the Control page's knobs held write their modulation while
 -- Auto-write is on and the song plays.
@@ -369,7 +380,10 @@ function global.tick()
   local s = deckard.state()
   if not (s.touch_auto_write and s.auto_write and s.playing) or deckard.page() ~= "control" then return end
   for k = 1, 8 do
-    if deckard.held("CAP_" .. k) then deckard.touch_write(k) end
+    if deckard.held("CAP_" .. k) then
+      if global.auto_held then global.auto_used = true end
+      deckard.touch_write(k)
+    end
   end
 end
 
