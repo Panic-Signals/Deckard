@@ -792,7 +792,7 @@ impl Catalog {
                     "Scanning {}",
                     b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
                 )));
-                let found = if let Some((_, _, e)) = known.iter().find(|(p, kt, _)| *p == key && *kt == t) {
+                let found = if let Some(e) = unchanged_scan(&known, &key, t) {
                     e.clone()
                 } else if let Some(e) = scan::vst3_from_moduleinfo(&b) {
                     e
@@ -847,6 +847,13 @@ impl Catalog {
         }
         changed
     }
+}
+
+/// What the last scan found in bundle `key`, if it hasn't changed since. A scan that found
+/// nothing doesn't count: the helper was killed or crashed (a plug-in slow to start, say),
+/// and the bundle is scanned again rather than left out for good.
+fn unchanged_scan<'a>(known: &'a [(String, u64, Vec<Entry>)], key: &str, mtime: u64) -> Option<&'a Vec<Entry>> {
+    known.iter().find(|(p, t, e)| p == key && *t == mtime && !e.is_empty()).map(|(_, _, e)| e)
 }
 
 /// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
@@ -968,6 +975,22 @@ mod routing_tests {
         s.output_aliases[1] = "Main".into();
         assert_eq!(s.output_pair_name(0), "Main");
         assert!(s.input_pair_on(0) && !s.input_pair_on(1) && s.output_pair_on(0) && !s.output_pair_on(1));
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::{Entry, Kind, unchanged_scan};
+
+    #[test]
+    fn a_scan_that_found_nothing_is_tried_again() {
+        let entry =
+            Entry { kind: Kind::Vst3, vendor: "V".into(), name: "P".into(), instrument: true, location: "a.vst3".into(), cid: "00".into() };
+        let known = vec![("a.vst3".to_string(), 5, vec![entry.clone()]), ("failed.vst3".to_string(), 5, Vec::new())];
+        assert_eq!(unchanged_scan(&known, "a.vst3", 5), Some(&vec![entry]));
+        assert_eq!(unchanged_scan(&known, "a.vst3", 6), None, "the bundle changed");
+        assert_eq!(unchanged_scan(&known, "failed.vst3", 5), None);
+        assert_eq!(unchanged_scan(&known, "new.vst3", 5), None);
     }
 }
 
