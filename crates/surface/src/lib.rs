@@ -453,15 +453,22 @@ pub struct ControlView {
     pub modules: Vec<ModuleView>,
     /// The focused built-in EQ, drawn on the right screen on both of its pages.
     pub eq: Option<EqCurveView>,
+    /// The focused built-in Filter, drawn the same way. One band: the cutoff.
+    pub filter: Option<EqCurveView>,
 }
 
-/// An EQ curve for the right screen. `points` run from 20 Hz to 20 kHz, log spaced,
-/// each 0..1 over ±12 dB (0.5 is 0 dB). `bands` is Low, Low-Mid, High-Mid, High on
-/// that same axis.
+/// A curve for the right screen. `points` run from 20 Hz to 20 kHz, log spaced, each
+/// 0..1 over ±12 dB (0.5 is 0 dB). `bands` sit on that axis. The Filter also sends where
+/// Amount fully open sits (`extent`), one LFO cycle (`lfo`), and the side-chain filter
+/// (`side`; `side_live` when an input is routed to it).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EqCurveView {
     pub points: Vec<f32>,
     pub bands: Vec<(f32, f32)>,
+    pub extent: Vec<f32>,
+    pub lfo: Vec<f32>,
+    pub side: Vec<f32>,
+    pub side_live: bool,
 }
 
 /// One instrument, effect or plug-in the plug-in browser can load.

@@ -1571,7 +1571,11 @@ fn the_eq_curve_stays_on_the_right_screen() {
     v.control.chain[0].name = "EQ".into();
     v.control.slot = Some("EQ".into());
     v.control.pages = vec!["Freq / Gain".into(), "Width / Output".into()];
-    v.control.eq = Some(crate::EqCurveView { points: vec![0.5; 48], bands: vec![(0.25, 0.5), (0.45, 0.8), (0.65, 0.3), (0.85, 0.5)] });
+    v.control.eq = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.25, 0.5), (0.45, 0.8), (0.65, 0.3), (0.85, 0.5)],
+        ..Default::default()
+    });
     let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
     let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
     for page in [0, 1] {
@@ -1579,6 +1583,34 @@ fn the_eq_curve_stays_on_the_right_screen() {
         let px = s.picture(&v);
         assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
         assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    assert_eq!(s.error(), None);
+}
+
+/// The Filter's curve stays on the right screen on Main and on Side-Chain Input.
+#[test]
+fn the_filter_curve_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Filter".into();
+    v.control.slot = Some("Filter".into());
+    v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
+    v.control.filter = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.55, 0.7)],
+        extent: vec![0.8; 48],
+        lfo: vec![0.0, 1.0, 0.0, 1.0],
+        side: vec![0.2; 48],
+        side_live: true,
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let dot = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+        assert!(dot(&px) > 20, "page {}: the cutoff dot", page + 1);
     }
     assert_eq!(s.error(), None);
 }
