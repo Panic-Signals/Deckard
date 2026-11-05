@@ -12397,6 +12397,43 @@ mod tests {
         assert_eq!(h.state().slot, None);
     }
 
+    /// The Ideas view shows a group's patterns in their places, with the gaps between, and
+    /// a double-click on a gap or below the last makes a pattern there.
+    #[test]
+    fn the_ideas_view_shows_and_fills_gaps() {
+        let mut app = App { show_controller: false, follow: true, grid: PPQ / 4, prop_set: 1, ..Default::default() };
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "One").unwrap();
+            d.add_pattern_in_slot(0, 0, 3, "Four").unwrap();
+        }
+        (app.group, app.pattern, app.scene, app.sound, app.song_view) = (0, 0, 0, 0, false);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(4);
+        let place = |h: &Harness<'static, App>, slot: usize| -> egui::Rect {
+            h.ctx.data(|d| d.get_temp(layout::header_rect(&format!("pattern place 0 {slot}")))).expect("drawn")
+        };
+        let slots = |h: &Harness<'static, App>| project_of(h).groups[0].patterns.iter().map(|p| p.slot).collect::<Vec<_>>();
+        let (first, fourth) = (place(&h, 0), place(&h, 3));
+        assert!((fourth.top() - first.top() - 3.0 * first.height()).abs() < 0.5, "its own row: {first:?} {fourth:?}");
+        // Clicking the second of the list, in the fourth place, picks it.
+        click(&mut h, fourth.center());
+        assert_eq!(h.state().pattern, 1);
+        // A gap.
+        let gap = place(&h, 1).center();
+        double_click(&mut h, gap);
+        assert_eq!(slots(&h), [0, 1, 3], "{}", h.state().status);
+        assert_eq!(project_of(&h).groups[0].patterns[2].name, "Four", "the rest stay");
+        // Below the last, leaving a gap.
+        let below = place(&h, 6).center();
+        double_click(&mut h, below);
+        assert_eq!(slots(&h), [0, 1, 3, 6]);
+    }
+
     /// The Mixer: a strip per group; the fader sets the level, M mutes, right-click on
     /// M solos (again: unsolo), the headphones cue; double-clicking a group header's
     /// background shows its sounds.

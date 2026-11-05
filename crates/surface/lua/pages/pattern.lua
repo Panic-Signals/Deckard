@@ -176,12 +176,12 @@ function pattern.draw(screen, theme)
     })
   end
 
-  local pads = {}
+  local pads, placed = {}, places(s)
   for i = 1, PADS do
-    local at = (bank - 1) * PADS + i
-    local p = list[at]
+    local n = placed[(bank - 1) * PADS + i]
+    local p = n and list[n]
     if p then
-      pads[i] = { name = p.name, palette = p.palette, on = at == s.pattern }
+      pads[i] = { name = p.name, palette = p.palette, on = n == s.pattern }
     else
       pads[i] = { empty = true }
     end

@@ -2419,8 +2419,9 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     painter.rect_filled(tiles, 0.0, S05);
     let columns = Rect::from_min_max(cells.min, tiles.max);
     let gx = hscroll(ui, "idea-columns", columns, p.groups.len() as f32 * IDEA_W + 27.0);
-    let most = p.groups.iter().map(|g| g.patterns.len()).max().unwrap_or(0);
-    let gy = scroll(ui, "idea-cells", cells, most as f32 * ROW + 8.0);
+    // A row per place; one more than the last pattern, for a new one.
+    let most = p.groups.iter().filter_map(|g| g.patterns.last()).map(|x| x.slot + 1).max().unwrap_or(0);
+    let gy = scroll(ui, "idea-cells", cells, (most + 1) as f32 * ROW + 8.0);
     let in_scene = |g: usize, pi: usize| p.scenes.get(app.scene).is_some_and(|s| s.patterns.contains(&(g, pi)));
     let cell_painter = painter.with_clip_rect(cells);
     for (g, group) in p.groups.iter().enumerate() {
@@ -2432,8 +2433,11 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         if g == app.group {
             cell_painter.rect_filled(col_rect, 0.0, white(10));
         }
+        let place =
+            |slot: usize| Rect::from_min_size(Pos2::new(x, cells.top() + 4.0 + slot as f32 * ROW - gy), Vec2::new(IDEA_W - 1.0, ROW));
         for pi in 0..group.patterns.len() {
-            let r = Rect::from_min_size(Pos2::new(x, cells.top() + 4.0 + pi as f32 * ROW - gy), Vec2::new(IDEA_W - 1.0, ROW));
+            let r = place(group.patterns[pi].slot);
+            note_rect(ui, &format!("pattern place {g} {}", group.patterns[pi].slot), r);
             if !r.intersects(cells) {
                 continue;
             }
@@ -2495,17 +2499,23 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             }
             resp.context_menu(|ui| pattern_menu(ui, p, g, pi, acts));
         }
-        // Below the group's patterns: double-click for a new one.
-        let free_top = cells.top() + 4.0 + group.patterns.len() as f32 * ROW - gy;
-        let free = Rect::from_min_max(Pos2::new(x, free_top.max(cells.top())), Pos2::new(x + IDEA_W - 1.0, cells.bottom()));
-        if free.height() > 0.0 {
-            let resp = ui.interact(free, ui.id().with(("new-pattern", g)), Sense::click());
-            if resp.hovered() {
-                let slot = Rect::from_min_size(Pos2::new(x, free_top), Vec2::new(IDEA_W - 1.0, ROW)).shrink2(Vec2::new(3.0, 2.0));
-                cell_painter.rect_stroke(slot, 3.0, Stroke::new(1.0, white(41)), StrokeKind::Inside);
+        // The empty places, between the group's patterns and below them: double-click for
+        // a new one there.
+        let first = ((gy - 4.0) / ROW).floor().max(0.0) as usize;
+        let last = ((gy - 4.0 + cells.height()) / ROW).ceil().max(0.0) as usize;
+        for slot in (first..=last).filter(|s| !group.patterns.iter().any(|x| x.slot == *s)) {
+            let r = place(slot);
+            note_rect(ui, &format!("pattern place {g} {slot}"), r);
+            let area = r.intersect(cells);
+            if area.height() <= 0.0 {
+                continue;
             }
-            if resp.on_hover_text("Double-click for a new pattern in this group").double_clicked() {
-                acts.push(Act::NewPattern(app.scene, g));
+            let resp = ui.interact(area, ui.id().with(("new-pattern", g, slot)), Sense::click());
+            if resp.hovered() {
+                cell_painter.rect_stroke(r.shrink2(Vec2::new(3.0, 2.0)), 3.0, Stroke::new(1.0, white(41)), StrokeKind::Inside);
+            }
+            if resp.on_hover_text("Double-click for a new pattern here").double_clicked() {
+                acts.push(Act::NewPatternAt(app.scene, g, slot));
             }
         }
         // Group tile.
