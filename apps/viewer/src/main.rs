@@ -2379,6 +2379,25 @@ impl App {
                     ui.label("");
                     ui.label(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder.").weak());
                     ui.end_row();
+                    if cfg!(windows)
+                        && let Some(mk3) = &self.mk3
+                    {
+                        ui.label("MK3 screens");
+                        if mk3.displays_released() {
+                            if ui.button("Use in DECKARD").clicked() {
+                                mk3.release_displays(false);
+                            }
+                        } else if mk3.displays_connected() {
+                            if ui.button("Give Back to NI's Driver").on_hover_text("For Maschine and NI's other software, which can't use the screens while DECKARD's driver has them. Asks for administrator approval.").clicked() {
+                                mk3.release_displays(true);
+                                ni_agent::give_back();
+                                self.status = "giving the MK3's screens back to NI's driver".into();
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("Not open").weak());
+                        }
+                        ui.end_row();
+                    }
                     ui.label("Controller");
                     use settings::ControllerChoice as C;
                     let mut choice = self.settings.controller;
@@ -2674,6 +2693,10 @@ impl App {
         }
         self.stems_offer_dialog(ctx);
         let holding = self.mk3.as_ref().is_some_and(mk3_io::Mk3Io::agent_holding);
+        if let Some(failure) = ni_agent::take_failure() {
+            self.status = failure;
+            self.ni_agent = ni_agent::Ask::Declined;
+        }
         ni_agent::dialog(ctx, &mut self.ni_agent, holding, &mut self.status, ni_agent::quit);
         self.preferences(ctx);
         if self.about.is_some() && !about::show(self, ctx) {

@@ -121,6 +121,18 @@ when it isn't running (it isn't installed on a machine without NI software). On 
 when an MK3 is plugged in, its screens won't open and the agent is running, DECKARD asks to
 quit it, and gets the screens on its next try. The driver sends only the rows that changed.
 
+On Windows, NI's installer binds interfaces 0, 5 and 6 to its kernel driver, `nimc3usb`,
+and `nusb` opens only WinUSB, so stopping NI's services (NIHostIntegrationAgent and
+NIHardwareService, which are LocalSystem services) doesn't free the screens. The HID
+interface uses `HidUsb` and opens beside them, so pads, buttons and LEDs work regardless.
+When `Displays::open` reports the wrong driver, DECKARD asks to run
+`scripts/mk3-driver.ps1 -Use WinUSB`. It elevates, stops those services, sets
+`DeviceInterfaceGUIDs` on the interface (`nusb` finds the interface by it), installs the
+`WINUSB` section of Windows' `winusb.inf` on that one interface, and starts the services
+again. `-Use NI` (Preferences ▸ Hardware) removes the device node and rescans, and Windows
+binds NI's driver again, the best match. A reinstall of NI's driver can also take the
+interface back, and DECKARD then asks again.
+
 What's shown is drawn by `crates/nwl` from NI's own style sheets, pictures and fonts in
 the install (`MaschineMK3Styles.txt` and its imports) and the scripts' widget tree
 (`deckard_lua_host::screen`).

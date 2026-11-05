@@ -162,6 +162,12 @@ pub struct Displays {
 /// What [`Displays::open`] says when no MK3 is plugged in.
 pub const NO_MK3: &str = "no Maschine MK3";
 
+/// Whether an error from [`Displays::open`] means a driver other than WinUSB has the
+/// displays' interface (Windows: NI's nimc3usb, see `scripts/mk3-driver.ps1`).
+pub fn wrong_driver(error: &str) -> bool {
+    error.contains("incompatible driver")
+}
+
 impl Displays {
     pub fn open() -> Result<Displays, String> {
         let info = nusb::list_devices()
