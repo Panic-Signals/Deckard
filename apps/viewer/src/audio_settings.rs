@@ -4,6 +4,7 @@
 //! has them) and takes the tab's changes into the settings.
 
 use crate::App;
+use deckard_engine::devices::{self, AudioDriver};
 use deckard_lua_host::state::{AudioEdit, AudioView};
 
 /// How often the view is looked up again (device lists are slow to ask for).
@@ -12,10 +13,11 @@ const REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
 impl App {
     /// The audio interface as the Settings page shows it.
     pub fn audio_view(&mut self) -> AudioView {
-        let outputs = self.outputs.get_or_insert_with(deckard_engine::output::output_devices).clone();
-        let inputs = self.inputs.get_or_insert_with(crate::recorder::input_devices).clone();
-        let device = self.settings.output_device.clone().or_else(deckard_engine::output::default_output).unwrap_or_default();
-        let input = self.settings.input_device.clone().or_else(crate::recorder::default_input).unwrap_or_default();
+        let wanted = self.settings.audio_driver.usable();
+        let outputs = self.outputs.get_or_insert_with(|| devices::output_devices_of(wanted)).clone();
+        let inputs = self.inputs.get_or_insert_with(|| devices::input_devices_of(wanted)).clone();
+        let device = self.settings.output_device_in_use().or_else(deckard_engine::output::default_output).unwrap_or_default();
+        let input = self.settings.input_device_in_use().or_else(crate::recorder::default_input).unwrap_or_default();
         let count = |list: &[(String, usize)], d: &str| list.iter().find(|(n, _)| n == d).map_or(0, |(_, c)| *c);
         // The interface's own name for a channel where it has one (BUGS #9), else its number.
         let mut names = |d: &str, input: bool, n: usize| {
@@ -57,6 +59,12 @@ impl App {
     pub fn audio_edit(&mut self, e: AudioEdit) {
         let mut restart = false;
         match e {
+            AudioEdit::Device(d) if self.settings.audio_driver.usable() == AudioDriver::Asio => {
+                if Some(&d) != self.settings.asio_device.as_ref() {
+                    self.settings.set_asio_device(Some(d));
+                    restart = true;
+                }
+            }
             AudioEdit::Device(d) => {
                 if Some(&d) != self.settings.output_device.as_ref() {
                     self.settings.set_output_device(Some(d));
@@ -85,6 +93,7 @@ impl App {
 
     /// Each frame: the tab's changes in, and (now and then) the interface out.
     pub fn sync_audio_settings(&mut self) {
+        self.watch_audio_driver();
         let Some(Ok(c)) = &self.controller else { return };
         let edits = std::mem::take(&mut c.host.state.borrow_mut().audio_edits);
         let stale = !edits.is_empty() || self.audio_view_at.is_none_or(|t| t.elapsed() >= REFRESH);
@@ -107,13 +116,7 @@ impl App {
 
 /// The audio system DECKARD plays through.
 fn driver_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "CoreAudio"
-    } else if cfg!(windows) {
-        "WASAPI"
-    } else {
-        "ALSA"
-    }
+    devices::driver().name()
 }
 
 #[cfg(test)]

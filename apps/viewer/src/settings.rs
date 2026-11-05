@@ -1,6 +1,7 @@
 //! Preferences (plug-in formats and folders, plug-ins switched off) and the catalogue
 //! of installed plug-ins, as in Maschine's Preferences > Plug-ins (Manager, Locations).
 
+use deckard_engine::devices::AudioDriver;
 use deckard_plugins::scan::{self, Entry, Kind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -43,6 +44,11 @@ pub struct Settings {
     /// Each device's routing and aliases, as last set ("in"/"out", device name; "" for
     /// the system's default): picking a device again brings its own back.
     pub routings: BTreeMap<(String, String), Routing>,
+    /// The audio system asked for (Preferences > Audio; what's in use is
+    /// [`deckard_engine::devices::driver`]), and the ASIO driver, which serves input and
+    /// output together. `input_device` and `output_device` are the system driver's.
+    pub audio_driver: AudioDriver,
+    pub asio_device: Option<String>,
     /// The Sampler pages show the focused zone's waveform (Maschine doesn't).
     pub show_waveform: bool,
     /// The browser's FILES tab: folders pinned to its top.
@@ -277,6 +283,8 @@ impl Default for Settings {
             input_aliases: vec![String::new(); CHANNELS],
             output_aliases: vec![String::new(); CHANNELS],
             routings: BTreeMap::new(),
+            audio_driver: AudioDriver::default(),
+            asio_device: None,
             show_waveform: true,
             midi_off: BTreeSet::new(),
             mpe: Default::default(),
@@ -376,6 +384,8 @@ impl Settings {
                 "check_updates" => s.check_updates = v != "false",
                 "input_device" => s.input_device = Some(v.to_string()),
                 "output_device" => s.output_device = Some(v.to_string()),
+                "audio_driver" => s.audio_driver = if v == "asio" { AudioDriver::Asio } else { AudioDriver::System },
+                "asio_device" => s.asio_device = Some(v.to_string()),
                 // A device's routing: `<device>\t<channel>:<route or alias>`.
                 "input_route" if !v.contains('\t') => {
                     if let Some((i, x)) = v.split_once(':')
@@ -559,8 +569,46 @@ impl Settings {
         self.load_routing("out");
     }
 
+    /// Ask for another audio system: its devices' routings come back.
+    pub fn set_audio_driver(&mut self, driver: AudioDriver) {
+        self.keep_routing("in");
+        self.keep_routing("out");
+        self.audio_driver = driver;
+        self.load_routing("in");
+        self.load_routing("out");
+    }
+
+    /// Pick the ASIO driver, as [`Settings::set_input_device`].
+    pub fn set_asio_device(&mut self, device: Option<String>) {
+        self.keep_routing("in");
+        self.keep_routing("out");
+        self.asio_device = device;
+        self.load_routing("in");
+        self.load_routing("out");
+    }
+
+    /// The input device of the driver in use (it can differ from the one asked for).
+    pub fn input_device_in_use(&self) -> Option<String> {
+        match deckard_engine::devices::driver() {
+            AudioDriver::Asio => self.asio_device.clone(),
+            AudioDriver::System => self.input_device.clone(),
+        }
+    }
+
+    /// The output device of the driver in use.
+    pub fn output_device_in_use(&self) -> Option<String> {
+        match deckard_engine::devices::driver() {
+            AudioDriver::Asio => self.asio_device.clone(),
+            AudioDriver::System => self.output_device.clone(),
+        }
+    }
+
     fn device_key(&self, side: &str) -> (String, String) {
-        let d = if side == "in" { &self.input_device } else { &self.output_device };
+        let d = match self.audio_driver {
+            AudioDriver::Asio => &self.asio_device,
+            AudioDriver::System if side == "in" => &self.input_device,
+            AudioDriver::System => &self.output_device,
+        };
         (side.to_string(), d.clone().unwrap_or_default())
     }
 
@@ -687,6 +735,12 @@ impl Settings {
         }
         if let Some(d) = &self.output_device {
             out += &format!("output_device = {d}\n");
+        }
+        if self.audio_driver == AudioDriver::Asio {
+            out += "audio_driver = asio\n";
+        }
+        if let Some(d) = &self.asio_device {
+            out += &format!("asio_device = {d}\n");
         }
         // Every device's routing, every route (so a later change of the defaults
         // leaves them as they were).
@@ -928,6 +982,49 @@ mod routing_tests {
         let mut back = back;
         back.set_output_device(Some("B".into()));
         assert_eq!(back.output_routing[0], None, "B's own, saved too");
+    }
+
+    /// The driver asked for and the ASIO driver picked come back; settings that never
+    /// asked for ASIO don't mention it.
+    #[test]
+    fn audio_driver_round_trips() {
+        let text = Settings::default().to_text();
+        assert!(!text.contains("audio_driver") && !text.contains("asio_device"), "{text}");
+        assert_eq!(Settings::parse(&text).audio_driver, AudioDriver::System);
+        let mut s = Settings::default();
+        s.set_output_device(Some("Speakers (BEHRINGER UMC 204HD 192k)".into()));
+        s.set_audio_driver(AudioDriver::Asio);
+        s.set_asio_device(Some("UMC ASIO Driver".into()));
+        let back = Settings::parse(&s.to_text());
+        assert_eq!(back.audio_driver, AudioDriver::Asio);
+        assert_eq!(back.asio_device.as_deref(), Some("UMC ASIO Driver"));
+        assert_eq!(back.output_device.as_deref(), Some("Speakers (BEHRINGER UMC 204HD 192k)"), "the system driver's device is kept");
+        // Back to the system's: ASIO's device is kept for next time, and isn't asked for.
+        let mut s = back;
+        s.set_audio_driver(AudioDriver::System);
+        let back = Settings::parse(&s.to_text());
+        assert_eq!(back.audio_driver, AudioDriver::System);
+        assert_eq!(back.asio_device.as_deref(), Some("UMC ASIO Driver"));
+    }
+
+    /// Each driver's devices keep their routing, and the ASIO driver has one routing for
+    /// each side, saved like any other device's.
+    #[test]
+    fn asio_keeps_its_own_routing() {
+        let mut s = Settings::default();
+        s.set_output_device(Some("Speakers".into()));
+        s.output_routing[0] = Some(1);
+        s.set_audio_driver(AudioDriver::Asio);
+        s.set_asio_device(Some("UMC ASIO Driver".into()));
+        assert_eq!(s.output_routing, default_routing(), "the ASIO driver starts from the defaults");
+        s.output_routing[0] = Some(2);
+        s.input_routing[0] = Some(3);
+        let mut back = Settings::parse(&s.to_text());
+        assert_eq!((back.output_routing[0], back.input_routing[0]), (Some(2), Some(3)), "the ASIO driver's own");
+        back.set_audio_driver(AudioDriver::System);
+        assert_eq!(back.output_routing[0], Some(1), "the system driver's device's own");
+        back.set_audio_driver(AudioDriver::Asio);
+        assert_eq!(back.output_routing[0], Some(2));
     }
 
     #[test]
