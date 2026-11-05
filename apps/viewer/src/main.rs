@@ -4189,8 +4189,10 @@ impl App {
                                 rgb: layout::rgb(p, g, Some(s)),
                                 color: layout::colour_index(p, g, Some(s)),
                                 muted: snd.muted,
-                                // (A sound may only play MIDI out, with no plug-ins.)
+                                // (A sound may only play MIDI out, with no plug-ins. A Sampler
+                                // whose module didn't become a slot still has samples.)
                                 used: !snd.slots.is_empty()
+                                    || snd.sampler.as_ref().is_some_and(|sm| sm.zones.iter().any(|z| !z.sample.path.is_empty()))
                                     || !snd.name.is_empty()
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
                                     || noted.contains(&s),
