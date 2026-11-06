@@ -249,6 +249,8 @@ pub struct Output {
     fx_meters: Arc<crate::meters::FxMeters>,
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
+    /// The MIDI input plug-ins' parameters by group, since the plug-ins are on the audio thread.
+    midi_input_params: Mutex<std::collections::BTreeMap<usize, Vec<crate::midi_input::Param>>>,
     _stream: cpal::Stream,
 }
 
@@ -624,6 +626,7 @@ impl Output {
             plays: AtomicU64::new(0),
             fx_meters: Arc::default(),
             route_travels: Arc::default(),
+            midi_input_params: Mutex::default(),
             routing,
             channels,
             _stream: stream,
@@ -753,8 +756,34 @@ impl Output {
     /// Put a MIDI input plug-in on `group`, or take it out with `None`. Whatever comes out
     /// goes back with the command, to be freed here.
     pub fn set_midi_input(&self, group: usize, plugin: Option<Box<dyn crate::midi_input::MidiInput>>) {
+        if group < crate::midi_input::SLOTS {
+            let params = plugin.as_ref().map_or_else(Vec::new, |p| p.params());
+            let mut table = self.midi_input_params.lock().unwrap();
+            table.remove(&group);
+            if !params.is_empty() {
+                table.insert(group, crate::midi_input::fresh_params(params));
+            }
+        }
         let mut plugin = plugin;
         self.run(move |e| plugin = e.set_midi_input(group, plugin.take()));
+    }
+
+    /// The parameters of `group`'s MIDI input plug-in and where they are.
+    pub fn midi_input_params(&self, group: usize) -> Vec<crate::midi_input::Param> {
+        self.midi_input_params.lock().unwrap().get(&group).cloned().unwrap_or_default()
+    }
+
+    /// Move a parameter of `group`'s MIDI input plug-in. Returns the value it took (fitted
+    /// to its range and steps), `None` if there's no such parameter.
+    pub fn set_midi_input_param(&self, group: usize, id: u32, value: f64) -> Option<f64> {
+        let value = {
+            let mut table = self.midi_input_params.lock().unwrap();
+            let param = table.get_mut(&group)?.iter_mut().find(|p| p.desc.id == id)?;
+            param.value = param.desc.fit(value);
+            param.value
+        };
+        self.run(move |e| e.set_midi_input_param(group, id, value));
+        Some(value)
     }
 
     /// Record live notes (REC) or stop.

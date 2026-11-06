@@ -3454,6 +3454,13 @@ impl Engine {
         old
     }
 
+    /// Move a parameter of `group`'s MIDI input plug-in, if it has one there.
+    pub fn set_midi_input_param(&mut self, group: usize, id: u32, value: f64) {
+        if let Some(p) = self.midi_inputs.get_mut(group).and_then(Option::as_mut) {
+            p.set_param(id, value);
+        }
+    }
+
     /// The plug-ins go on with an engine that replaces this one. What they hold has been
     /// ended, as the old engine's notes are.
     #[cfg(any(test, feature = "output"))]
@@ -7060,6 +7067,43 @@ mod tests {
         let n = (960.0 * e.samples_per_tick() / 256.0).ceil() as usize;
         blocks(&mut e, n);
         assert_eq!(midi_notes(&rx), [], "nothing after the stop");
+    }
+
+    /// A parameter reaches the plug-in, and takes effect on the next note.
+    #[test]
+    fn a_midi_input_plugin_hears_its_parameters() {
+        struct Transpose(i64);
+        impl midi_input::MidiInput for Transpose {
+            fn note(&mut self, note: midi_input::NoteIn, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+                match note {
+                    midi_input::NoteIn::On { sound, pitch, velocity, length } => {
+                        out.on(clock.now, sound, pitch + self.0, velocity, length);
+                    }
+                    midi_input::NoteIn::Off { sound, pitch } => {
+                        out.off(clock.now, sound, pitch + self.0);
+                    }
+                }
+            }
+
+            fn set_param(&mut self, id: u32, value: f64) {
+                if id == 1 {
+                    self.0 = value as i64;
+                }
+            }
+        }
+
+        let (mut e, rx, _, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        e.set_midi_input(0, Some(Box::new(Transpose(0))));
+        let _ = midi_notes(&rx);
+
+        e.set_midi_input_param(0, 1, 5.0);
+        // Nothing there to hear it, and no such group: nothing happens.
+        e.set_midi_input_param(1, 1, 7.0);
+        e.set_midi_input_param(midi_input::SLOTS, 1, 7.0);
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        assert_eq!(midi_notes(&rx), [(true, 55)]);
     }
 
     /// Taken out, a plug-in ends what it holds, and notes go straight to the sound again.

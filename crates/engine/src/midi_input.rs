@@ -88,10 +88,68 @@ impl<'a> Outbox<'a> {
     }
 }
 
+/// A parameter of a plug-in: what a knob, a modulation lane or a snapshot needs to know.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamDesc {
+    /// What [`MidiInput::set_param`] is told.
+    pub id: u32,
+    pub name: String,
+    pub min: f64,
+    pub max: f64,
+    /// Where it starts, without a call to [`MidiInput::set_param`].
+    pub default: f64,
+    /// How many values it can take, from `min` to `max` evenly (a switch has 2). `None`: any.
+    pub steps: Option<u32>,
+}
+
+impl ParamDesc {
+    /// `value` as this parameter can hold it: in range, and on a step if it has them.
+    pub fn fit(&self, value: f64) -> f64 {
+        let v = value.clamp(self.min, self.max);
+        match self.steps {
+            Some(n) if n >= 2 => {
+                let step = (self.max - self.min) / (n - 1) as f64;
+                self.min + ((v - self.min) / step).round() * step
+            }
+            Some(_) => self.min,
+            None => v,
+        }
+    }
+}
+
+/// A plug-in's parameter and where it is now, as `Output` keeps them for whoever shows them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    pub desc: ParamDesc,
+    pub value: f64,
+}
+
+/// `params` as they start.
+#[cfg(any(test, feature = "output"))]
+pub(crate) fn fresh_params(params: Vec<ParamDesc>) -> Vec<Param> {
+    params
+        .into_iter()
+        .map(|desc| {
+            let value = desc.fit(desc.default);
+            Param { desc, value }
+        })
+        .collect()
+}
+
 /// A MIDI input plug-in. The engine owns it; put one in with `Output::set_midi_input`.
 pub trait MidiInput: Send {
     /// A note came in. A plug-in that plays nothing for it has silenced it.
     fn note(&mut self, note: NoteIn, clock: Clock, out: &mut Outbox);
+
+    /// Its parameters. Asked once, off the audio thread, as it's put in, so this one may
+    /// allocate.
+    fn params(&self) -> Vec<ParamDesc> {
+        Vec::new()
+    }
+
+    /// A parameter moved: `id` is from [`MidiInput::params`] and `value` is in its range and
+    /// on its steps. On the audio thread, between notes.
+    fn set_param(&mut self, _id: u32, _value: f64) {}
 
     /// Every note due at this instant has been given to [`MidiInput::note`], on every
     /// group; called for the plug-ins that had one. So notes that belong together (a chord
@@ -117,6 +175,38 @@ pub(crate) const SLOTS: usize = 64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn desc(min: f64, max: f64, default: f64, steps: Option<u32>) -> ParamDesc {
+        ParamDesc { id: 7, name: "Test".into(), min, max, default, steps }
+    }
+
+    #[test]
+    fn a_parameter_stays_in_range_and_on_its_steps() {
+        let free = desc(-1.0, 1.0, 0.0, None);
+        assert_eq!(free.fit(0.3), 0.3);
+        assert_eq!(free.fit(5.0), 1.0);
+        assert_eq!(free.fit(-5.0), -1.0);
+
+        let stepped = desc(1.0, 8.0, 3.0, Some(8));
+        assert_eq!(stepped.fit(4.4), 4.0);
+        assert_eq!(stepped.fit(4.6), 5.0);
+        assert_eq!(stepped.fit(99.0), 8.0);
+
+        let switch = desc(0.0, 1.0, 0.0, Some(2));
+        assert_eq!(switch.fit(0.4), 0.0);
+        assert_eq!(switch.fit(0.6), 1.0);
+
+        // Too few steps to mean anything, and a range with no width, don't divide by zero.
+        assert_eq!(desc(2.0, 5.0, 2.0, Some(1)).fit(4.0), 2.0);
+        assert_eq!(desc(2.0, 2.0, 2.0, Some(1)).fit(4.0), 2.0);
+    }
+
+    #[test]
+    fn parameters_start_on_their_defaults_fitted() {
+        let params = fresh_params(vec![desc(0.0, 1.0, 0.25, None), desc(1.0, 8.0, 3.4, Some(8))]);
+        assert_eq!(params[0].value, 0.25);
+        assert_eq!(params[1].value, 3.0, "a default between steps lands on one");
+    }
 
     #[test]
     fn a_full_box_keeps_room_for_notes_to_end_and_never_grows() {

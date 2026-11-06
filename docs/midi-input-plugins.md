@@ -53,7 +53,33 @@ impl MidiInput for OctaveUp {
 - **Note ownership:** a note played with no length is the plug-in's to end. An `Off` may come for a
   key it never saw go down, if it was put in while the key was held.
 
+## Parameters
+
+A plug-in can have parameters, which is how the settings of an arpeggiator would reach knobs, modulation
+and snapshots:
+
+```rust
+fn params(&self) -> Vec<ParamDesc> {
+    vec![ParamDesc { id: 1, name: "Transpose".into(), min: -12.0, max: 12.0, default: 0.0, steps: Some(25) }]
+}
+
+fn set_param(&mut self, id: u32, value: f64) {
+    if id == 1 {
+        self.by = value as i64;
+    }
+}
+```
+
+- `params` is asked once, off the audio thread, as the plug-in goes in. A plug-in starts on its
+  defaults, without a call to `set_param`.
+- `Output::midi_input_params(group)` lists them and where they are, because the plug-in itself is on
+  the audio thread by then. `Output::set_midi_input_param(group, id, value)` moves one, fitted to its
+  range and steps, and returns the value it took.
+- `set_param` runs on the audio thread, like the rest, so it mustn't allocate, wait or panic.
+
 ## What's left for later
+
+- Showing parameters on the knobs, and modulating them. For now only `Output`'s calls reach them.
 
 - Saving a plug-in on a group in the project, and choosing one in the UI and on the MK3.
 - Feature 15's Lua scripts. They run off the audio thread, so they'd be one plug-in here that plays
