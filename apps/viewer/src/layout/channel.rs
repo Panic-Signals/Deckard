@@ -326,6 +326,16 @@ fn destinations(c: &Ctx, level: Level, aux: bool, picked: AudioDest) -> Vec<(Str
         }
     }
     v.extend(ext_outputs(c, Some(picked)));
+    // Nothing that comes back to this channel (through another's output, a send or a
+    // plug-in's strip); what's picked is offered whatever it is.
+    let me = match level {
+        Level::Sound(g, s) => Some(Node::Sound(g, s)),
+        Level::Group(g) => Some(Node::Group(g)),
+        Level::Master => None,
+    };
+    if let Some(me) = me {
+        v.retain(|(_, d)| *d == picked || dest_node(me, *d).is_none_or(|n| !leads_to(c.p, n, me, usize::MAX)));
+    }
     v
 }
 
@@ -896,6 +906,48 @@ mod io_tests {
         assert!(!shown.contains(&"Ext. 3".into()), "not connected: {shown:?}");
         assert!(names(AudioDest::Ext(2)).contains(&"Ext. 3".into()), "kept while picked");
         assert_eq!((io.input_name(0), io.input_pair_name(0)), ("Mic".into(), "Mic / In 1 R".into()));
+    }
+
+    /// A channel's output picker leaves out a group whose plug-in's strip plays back
+    /// into that channel (a loop), unless it's the one picked.
+    #[test]
+    fn output_picker_leaves_out_loops_through_strips() {
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        doc.add_group().unwrap();
+        let x = ExtraOut {
+            owner: Owner::Group(1, 0),
+            bus: 1,
+            plugin: "p".into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: AudioDest::Group(0),
+            channels: Default::default(),
+        };
+        doc.set_extra_outs(vec![x]).unwrap();
+        let io = crate::settings::Settings::default();
+        let groove = |_: usize, _: usize, _: &str| None;
+        let c = Ctx {
+            doc: &doc,
+            has_midi_macro: false,
+            p: doc.project(),
+            midi_ins: &[],
+            midi_outs: &[],
+            polyphonic: false,
+            groove: &groove,
+            io: &io,
+            plugin_knob: &|_| None,
+        };
+        let offered =
+            |level: Level, picked: AudioDest| destinations(&c, level, false, picked).into_iter().any(|(_, d)| d == AudioDest::Group(1));
+        assert!(!offered(Level::Group(0), AudioDest::Parent), "group A into B, back into A");
+        // A sound of A into B comes back into A, but A goes on to the master: no loop.
+        assert!(offered(Level::Sound(0, 0), AudioDest::Parent));
+        assert!(offered(Level::Group(0), AudioDest::Group(1)), "kept while picked");
+        let into_a = destinations(&c, Level::Sound(1, 0), false, AudioDest::Parent).into_iter().any(|(_, d)| d == AudioDest::Group(0));
+        assert!(into_a, "no loop the other way");
     }
 
     /// A picked name shows in 8 characters: a long one's start and end around "..".
