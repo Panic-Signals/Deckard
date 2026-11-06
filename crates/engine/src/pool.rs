@@ -7,8 +7,9 @@
 //! can call it; if no worker wakes in time the caller does every job itself, so the
 //! result never depends on how many threads helped.
 //!
-//! Workers run at real-time priority, and on macOS join the audio device's workgroup
-//! (Apple's way of telling the scheduler they share the audio deadline).
+//! Workers run at real-time priority, on macOS joining the audio device's workgroup
+//! (Apple's way of telling the scheduler they share the audio deadline), and on Windows
+//! through the Multimedia Class Scheduler's "Pro Audio" task. Linux has no such step yet.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -378,7 +379,81 @@ mod rt {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Real-time scheduling for the workers, and for the audio thread (which cpal leaves at
+/// normal priority without its `realtime` feature).
+#[cfg(windows)]
+mod rt {
+    use std::ffi::c_void;
+
+    #[link(name = "avrt")]
+    unsafe extern "system" {
+        fn AvSetMmThreadCharacteristicsW(task: *const u16, index: *mut u32) -> *mut c_void;
+    }
+
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut c_void;
+        fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+    }
+
+    const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
+    /// "Pro Audio", as the wide string Windows asks for.
+    const PRO_AUDIO: [u16; 10] = [80, 114, 111, 32, 65, 117, 100, 105, 111, 0];
+
+    /// For the rest of the thread's life. It doesn't allocate, so the audio thread can call it.
+    pub fn promote(_frames: u32, _rate: u32) {
+        let mut index = 0u32;
+        // SAFETY: the name ends in a zero and `index` is a valid place for the task's number.
+        // Without the service, a time-critical thread is the next best thing.
+        unsafe {
+            if AvSetMmThreadCharacteristicsW(PRO_AUDIO.as_ptr(), &mut index).is_null() {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            }
+        }
+    }
+
+    pub fn audio_workgroup() -> usize {
+        0
+    }
+    pub fn release(_wg: usize) {}
+    pub fn join(_wg: usize) -> Option<()> {
+        None
+    }
+    pub fn workgroup_parallelism() -> Option<usize> {
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::ffi::c_void;
+
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut c_void;
+            fn GetThreadPriority(thread: *mut c_void) -> i32;
+        }
+
+        /// The thread's real priority comes up, seen as Windows reports it.
+        #[test]
+        fn promoting_raises_the_thread() {
+            let (before, after) = std::thread::spawn(|| {
+                // SAFETY: both only look at the calling thread.
+                let now = || unsafe { GetThreadPriority(GetCurrentThread()) };
+                let before = now();
+                super::promote(256, 48_000);
+                // The service raises a thread a moment after it joins.
+                let start = std::time::Instant::now();
+                while now() <= before && start.elapsed() < std::time::Duration::from_secs(2) {
+                    std::thread::yield_now();
+                }
+                (before, now())
+            })
+            .join()
+            .unwrap();
+            assert!(after > before, "{before} -> {after}");
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod rt {
     pub fn promote(_frames: u32, _rate: u32) {}
     pub fn audio_workgroup() -> usize {
