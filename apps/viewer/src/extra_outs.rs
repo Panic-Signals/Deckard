@@ -3,7 +3,7 @@
 //! takes the next free connected output, else plays into its parent.
 
 use deckard_engine::Heard;
-use deckard_model::extra_out::{ExtraOut, Owner, plugin_at};
+use deckard_model::extra_out::{Channels, ExtraOut, Owner, plugin_at, strip_label};
 use deckard_model::{AudioDest, Project};
 
 /// The most output pairs looked at when finding a free one: the engine's.
@@ -34,8 +34,9 @@ pub fn next_free_output(p: &Project, connected: impl Fn(usize) -> bool, taken: &
     (0..MAX_OUTPUTS).find(|&n| free(n)).map_or(AudioDest::Parent, |n| AudioDest::Ext(n as i64))
 }
 
-/// A strip for each newly heard (owner, bus) with none yet, in the order heard: level
-/// unity, centred, on the next free output. `name` gives (owner, bus)'s display name.
+/// A strip for each newly heard (owner, bus) with none yet (stereo, mono or split), in
+/// the order heard: stereo, level unity, centred, on the next free output. `name` gives
+/// what the plug-in calls (owner, bus) (the strip shows it through [`label`]).
 pub fn strips_for(p: &Project, heard: &[Heard], name: impl Fn(Owner, usize) -> String, connected: impl Fn(usize) -> bool) -> Vec<ExtraOut> {
     let mut made: Vec<ExtraOut> = Vec::new();
     let mut taken: Vec<usize> = Vec::new();
@@ -49,9 +50,25 @@ pub fn strips_for(p: &Project, heard: &[Heard], name: impl Fn(Owner, usize) -> S
         if let AudioDest::Ext(n) = dest {
             taken.push(n as usize);
         }
-        made.push(ExtraOut { owner: h.owner, bus: h.bus, plugin: pr.id.clone(), name: name(h.owner, h.bus), level: 1.0, pan: 0.0, muted: false, dest });
+        made.push(ExtraOut {
+            owner: h.owner,
+            bus: h.bus,
+            plugin: pr.id.clone(),
+            name: name(h.owner, h.bus),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest,
+            channels: Channels::Stereo,
+        });
     }
     made
+}
+
+/// What strip `x` is called in the mixer (and its stem): "Out N", the plug-in's name for
+/// the pair when that isn't a generic one, and "L" or "R" for a split half.
+pub fn label(x: &ExtraOut) -> String {
+    strip_label(x.bus, &x.name, x.channels)
 }
 
 /// The plug-in host's slot for a strip owner.
@@ -67,8 +84,8 @@ pub fn slot_of(o: Owner) -> deckard_plugins::Slot {
 
 impl crate::App {
     /// Turn what the engine heard since the last frame into strips: one undoable edit
-    /// for all of them. Names come from the live plug-in when it isn't busy, else
-    /// "Out N".
+    /// for all of them. Names come from the live plug-in when it isn't busy, else none
+    /// (the strip is "Out N" either way, see [`label`]).
     pub(crate) fn add_heard_strips(&mut self) {
         let heard = match &self.output {
             Some(Ok(out)) => out.take_heard(),
@@ -81,11 +98,7 @@ impl crate::App {
         let fresh = {
             let d = doc.borrow();
             let name = |o: Owner, bus: usize| {
-                self.samples
-                    .plugins
-                    .existing(slot_of(o))
-                    .and_then(|pl| pl.try_lock().ok().map(|p| p.output_name(bus)))
-                    .unwrap_or_else(|| format!("Out {}", bus + 1))
+                self.samples.plugins.existing(slot_of(o)).and_then(|pl| pl.try_lock().ok().map(|p| p.output_name(bus))).unwrap_or_default()
             };
             strips_for(d.project(), &heard, name, |n| self.settings.output_pair_on(n))
         };
@@ -119,7 +132,17 @@ mod tests {
         let mut p = Project::default();
         p.master_output = AudioDest::Ext(0);
         p.cue_output = AudioDest::Ext(0);
-        let mut e = ExtraOut { owner: Owner::Sound(0, 0), bus: 1, plugin: "x".into(), name: "".into(), level: 1.0, pan: 0.0, muted: false, dest: AudioDest::Ext(1) };
+        let mut e = ExtraOut {
+            owner: Owner::Sound(0, 0),
+            bus: 1,
+            plugin: "x".into(),
+            name: "".into(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: AudioDest::Ext(1),
+            channels: Channels::Stereo,
+        };
         p.extra_outs.push(e.clone());
         assert_eq!(next_free_output(&p, |_| true, &[]), AudioDest::Ext(2));
         assert_eq!(next_free_output(&p, |n| n != 2, &[]), AudioDest::Ext(3));
@@ -161,5 +184,16 @@ mod tests {
         assert_eq!(strips_for(&p, &[h, h], name, |_| true).len(), 1);
         p.extra_outs = strips_for(&p, &[h], name, |_| true);
         assert!(strips_for(&p, &[h], name, |_| true).is_empty());
+    }
+
+    #[test]
+    fn a_split_bus_makes_no_new_strip() {
+        let mut p = project_with_plugin();
+        let h = Heard { owner: Owner::Sound(0, 0), bus: 1 };
+        p.extra_outs = strips_for(&p, &[h], name, |_| true);
+        assert_eq!(p.extra_outs[0].channels, Channels::Stereo);
+        deckard_model::extra_out::split(&mut p.extra_outs, 0);
+        p.extra_outs.remove(0);
+        assert!(strips_for(&p, &[h], name, |_| true).is_empty(), "its right half is there");
     }
 }

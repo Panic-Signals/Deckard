@@ -11,6 +11,8 @@ const MASTER_W: f32 = 81.0;
 const HEAD: f32 = 40.0;
 const LEVEL_H: f32 = 186.0;
 const SLOT_ROW: f32 = 20.0;
+/// An extra-output strip's mode menu (stereo, mono, split), under its label: its height.
+const MODE_H: f32 = 17.0;
 
 /// A plug-in's extra-output strip: its tint, its dashed edge, and the plug-in's name.
 const EXTRA_BG: Color32 = Color32::from_rgb(0x1F, 0x2A, 0x33);
@@ -61,6 +63,8 @@ struct Strip {
     io: [Option<IoField>; 6],
     /// Aux 1 and 2 send levels.
     aux: [f64; 2],
+    /// An extra output's mode menu (see [`mode_field`]).
+    mode: Option<IoField>,
 }
 
 /// What a pick in a routing list does.
@@ -70,6 +74,42 @@ enum Pick {
     Param(Target, &'static str, f64),
     /// Where an extra output's strip goes.
     Extra(usize, deckard_model::AudioDest),
+    /// An extra output's strip: stereo or mono, split, or joined (a split half).
+    ExtraChannels(usize, deckard_model::extra_out::Channels),
+    Split(usize),
+    Join(usize),
+}
+
+/// What a pick asks for.
+fn pick_act(p: Pick) -> Act {
+    match p {
+        Pick::Route(r) => Act::SetRoute(r),
+        Pick::Param(t, field, v) => Act::SetParam(t, field, v),
+        Pick::Extra(i, d) => Act::SetExtraOut(i, ExtraOutEdit::Dest(d)),
+        Pick::ExtraChannels(i, ch) => Act::SetExtraOut(i, ExtraOutEdit::Channels(ch)),
+        Pick::Split(i) => Act::SplitExtraOut(i),
+        Pick::Join(i) => Act::JoinExtraOut(i),
+    }
+}
+
+/// Extra-output strip `i` (`x`)'s mode menu: Stereo, Mono or Split; on a split half,
+/// Join (back into one stereo strip, with the left half's settings).
+fn mode_field(x: &deckard_model::extra_out::ExtraOut, i: usize) -> IoField {
+    use deckard_model::extra_out::Channels;
+    match x.channels {
+        Channels::Stereo | Channels::Mono => IoField {
+            text: if x.channels == Channels::Mono { "MONO" } else { "STEREO" }.into(),
+            names: vec!["Stereo".into(), "Mono".into(), "Split".into()],
+            picks: vec![Pick::ExtraChannels(i, Channels::Stereo), Pick::ExtraChannels(i, Channels::Mono), Pick::Split(i)],
+            cur: usize::from(x.channels == Channels::Mono),
+        },
+        Channels::Left | Channels::Right => IoField {
+            text: if x.channels == Channels::Left { "SPLIT L" } else { "SPLIT R" }.into(),
+            names: vec!["Join".into()],
+            picks: vec![Pick::Join(i)],
+            cur: usize::MAX,
+        },
+    }
 }
 
 /// A routing selector: what it shows, and its list.
@@ -188,11 +228,7 @@ fn io_button(ui: &Ui, painter: &Painter, b: Rect, id: egui::Id, f: &IoField, act
     if let Some(k) = choice_list(&resp, f.names.iter().map(String::as_str), f.cur)
         && k != f.cur
     {
-        acts.push(match f.picks[k].clone() {
-            Pick::Route(r) => Act::SetRoute(r),
-            Pick::Param(t, field, v) => Act::SetParam(t, field, v),
-            Pick::Extra(i, d) => Act::SetExtraOut(i, ExtraOutEdit::Dest(d)),
-        });
+        acts.push(pick_act(f.picks[k].clone()));
     }
 }
 
@@ -314,8 +350,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
         Strip {
             ch: Channel::Extra(i),
             id: String::new(),
-            // (Task 7b adds the plug-in's bus name when it isn't a generic one.)
-            name: format!("Out {}", x.bus + 1),
+            name: crate::extra_outs::label(x),
             plugin,
             color: EXTRA_EDGE,
             level: if lin > 0.0 { deckard_model::level_from_db(20.0 * lin.log10()) } else { 0.0 },
@@ -328,6 +363,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             slots: Vec::new(),
             io: [None, None, Some(strip_out_field(&ctx, i)), None, None, None],
             aux: [0.0; 2],
+            mode: Some(mode_field(x, i)),
         }
     };
     use deckard_model::extra_out::Owner;
@@ -354,6 +390,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     slots: snd.slots.clone(),
                     io: io_fields(&ctx, Level::Sound(app.group, s)),
                     aux: snd.aux,
+                    mode: None,
                 });
                 let g = app.group;
                 strips.extend(extras_of(&|o| matches!(o, Owner::Sound(a, b) | Owner::Chain(a, b, _) if (a, b) == (g, s))));
@@ -377,6 +414,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 slots: gr.slots.clone(),
                 io: io_fields(&ctx, Level::Group(g)),
                 aux: gr.aux,
+                mode: None,
             });
             strips.extend(extras_of(&|o| matches!(o, Owner::Group(a, _) if a == g)));
         }
@@ -401,6 +439,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             slots: gr.slots.clone(),
             io: io_fields(&ctx, Level::Group(app.group)),
             aux: gr.aux,
+            mode: None,
         }
     } else {
         Strip {
@@ -419,6 +458,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             slots: p.master_slots.clone(),
             io: io_fields(&ctx, Level::Master),
             aux: [0.0; 2],
+            mode: None,
         }
     };
 
@@ -569,6 +609,12 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
 
     // Plug-in slots (sounds only for now: their chains are editable).
     let mut y = bar.bottom() + 4.0;
+    // An extra output's mode menu, under its label.
+    if let Some(f) = &st.mode {
+        let b = Rect::from_min_size(Pos2::new(r.left() + 3.0, head.bottom() + 4.0), Vec2::new(r.width() - 6.0, MODE_H));
+        io_button(ui, painter, b.intersect(clip), id.with("mode"), f, acts);
+        y = b.bottom() + 4.0;
+    }
     // Inputs (IO): audio in (sounds) and MIDI in. Routing isn't editable yet: the
     // projects store the defaults.
     if app.mixer_sections.extended && app.mixer_sections.io && !master {
@@ -966,7 +1012,17 @@ mod tests {
     use deckard_model::extra_out::{ExtraOut, Owner};
 
     fn out(owner: Owner, name: &str, dest: AudioDest) -> ExtraOut {
-        ExtraOut { owner, bus: 1, plugin: "Portal".into(), name: name.into(), level: 1.0, pan: 0.0, muted: false, dest }
+        ExtraOut {
+            owner,
+            bus: 1,
+            plugin: "Portal".into(),
+            name: name.into(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest,
+            channels: Default::default(),
+        }
     }
 
     /// A new project with three groups and the strips `outs`.
@@ -1198,5 +1254,75 @@ mod tests {
         p.extra_outs[2].dest = AudioDest::Ext(i64::MAX);
         let c = channel::Ctx { p: &p, ..c };
         assert_eq!(strip_out_field(&c, 2).text, format!("Out {} (not connected) → Master", i64::MAX));
+    }
+
+    /// Where strip `ch`'s mode menu is (under its label).
+    fn menu_at(h: &egui_kittest::Harness<'static, St>, ch: Channel) -> egui::Pos2 {
+        let r = h.state().strips.iter().find(|(c, _)| *c == ch).unwrap().1;
+        egui::pos2(r.left() + 20.0, r.top() + HEAD + 4.0 + MODE_H / 2.0)
+    }
+
+    #[test]
+    fn splitting_a_strip_shows_two_strips_next_to_each_other() {
+        let mut app =
+            app_with(vec![out(Owner::Group(0, 0), "Kick", AudioDest::Ext(1)), out(Owner::Group(1, 0), "Aux 2", AudioDest::Ext(2))]);
+        app.mixer_sounds = false;
+        let mut h = harness(app);
+        assert!(h.state().text.contains("|Out 2 Kick|") && h.state().text.contains("|STEREO|"), "{}", h.state().text);
+        h.state_mut().apply = true;
+        // The menu under the label: Split.
+        use egui_kittest::kittest::Queryable;
+        let at = menu_at(&h, Channel::Extra(0));
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(2);
+        h.get_by_label("Split").click();
+        h.run_steps(3);
+        let o = order(&h);
+        assert_eq!(&o[..5], &[Channel::Group(0), Channel::Extra(0), Channel::Extra(1), Channel::Group(1), Channel::Extra(2)], "{o:?}");
+        let text = &h.state().text;
+        assert!(text.contains("|Out 2 Kick L|") && text.contains("|Out 2 Kick R|") && text.contains("|Out 2|"), "{text}");
+        let doc = h.state().app.doc.clone().unwrap();
+        let outs = doc.borrow().project().extra_outs.clone();
+        use deckard_model::extra_out::Channels;
+        assert_eq!(outs.iter().map(|x| x.channels).collect::<Vec<_>>(), vec![Channels::Left, Channels::Right, Channels::Stereo]);
+        assert_eq!((outs[1].dest, outs[1].level, outs[1].name.as_str()), (AudioDest::Ext(1), 1.0, "Kick"), "a copy of its settings");
+        // One step: undone, one stereo strip again.
+        doc.borrow_mut().undo();
+        assert_eq!(doc.borrow().project().extra_outs.len(), 2);
+        assert_eq!(doc.borrow().project().extra_outs[0].channels, Channels::Stereo);
+    }
+
+    #[test]
+    fn join_is_offered_only_on_a_split_half() {
+        use deckard_model::extra_out::Channels;
+        let x = out(Owner::Group(0, 0), "Kick", AudioDest::Ext(1));
+        let names = |ch: Channels| mode_field(&ExtraOut { channels: ch, ..x.clone() }, 3).names;
+        assert_eq!(names(Channels::Stereo), vec!["Stereo", "Mono", "Split"]);
+        assert_eq!(names(Channels::Mono), vec!["Stereo", "Mono", "Split"]);
+        assert_eq!(names(Channels::Left), vec!["Join"]);
+        assert_eq!(names(Channels::Right), vec!["Join"]);
+        // What each pick asks for.
+        let acts = |ch: Channels| -> Vec<Act> {
+            mode_field(&ExtraOut { channels: ch, ..x.clone() }, 3).picks.into_iter().map(|p| pick_act(p)).collect()
+        };
+        let a = acts(Channels::Stereo);
+        assert!(matches!(a[1], Act::SetExtraOut(3, ExtraOutEdit::Channels(Channels::Mono))));
+        assert!(matches!(a[2], Act::SplitExtraOut(3)));
+        assert!(matches!(acts(Channels::Right)[0], Act::JoinExtraOut(3)));
+        // Joined from the right half, in the app: the left half's settings, one strip.
+        let mut app = app_with(vec![x.clone()]);
+        apply_acts(&mut app, vec![Act::SplitExtraOut(0), Act::SetExtraOut(0, ExtraOutEdit::Level(0.5))]);
+        apply_acts(&mut app, vec![Act::JoinExtraOut(1)]);
+        let outs = app.doc.clone().unwrap().borrow().project().extra_outs.clone();
+        assert_eq!(outs.len(), 1);
+        assert_eq!((outs[0].channels, outs[0].level), (Channels::Stereo, 0.5));
+        // A half's mode doesn't change but by joining.
+        apply_acts(&mut app, vec![Act::SplitExtraOut(0), Act::SetExtraOut(1, ExtraOutEdit::Channels(Channels::Mono))]);
+        let outs = app.doc.clone().unwrap().borrow().project().extra_outs.clone();
+        assert_eq!(outs[1].channels, Channels::Right);
     }
 }

@@ -811,6 +811,7 @@ mod tests {
             pan: 0.0,
             muted: false,
             dest: deckard_model::AudioDest::Master,
+            channels: Default::default(),
         };
         d.set_extra_outs(vec![strip]).unwrap();
         d

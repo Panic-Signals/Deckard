@@ -25,8 +25,40 @@ pub enum Owner {
     Master(usize),
 }
 
+/// What a strip takes from its pair: both sides (`Stereo`), their sum (`Mono`), or one
+/// side (`Left`, `Right`: the halves of a split strip, each a mono strip of its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Channels {
+    #[default]
+    Stereo,
+    Mono,
+    Left,
+    Right,
+}
+
+impl Channels {
+    fn text(self) -> &'static str {
+        match self {
+            Channels::Stereo => "stereo",
+            Channels::Mono => "mono",
+            Channels::Left => "left",
+            Channels::Right => "right",
+        }
+    }
+
+    fn from(t: &str) -> Option<Channels> {
+        [Channels::Stereo, Channels::Mono, Channels::Left, Channels::Right].into_iter().find(|c| c.text() == t)
+    }
+
+    /// One half of a split strip.
+    pub fn is_half(self) -> bool {
+        matches!(self, Channels::Left | Channels::Right)
+    }
+}
+
 /// One extra output: output pair `bus` of the plug-in `plugin` (its `PluginRef::id`) in
-/// `owner`'s slot, called `name`. `level` is linear (1.0 = 0 dB), `pan` -1..1.
+/// `owner`'s slot, which the plug-in calls `name` (see [`strip_label`]). `level` is linear
+/// (1.0 = 0 dB), `pan` -1..1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtraOut {
     pub owner: Owner,
@@ -37,6 +69,56 @@ pub struct ExtraOut {
     pub pan: f64,
     pub muted: bool,
     pub dest: AudioDest,
+    pub channels: Channels,
+}
+
+/// Split strip `i` (stereo or mono) into two mono strips in its place, `Left` then
+/// `Right`, each with its settings. Anything else: nothing.
+pub fn split(v: &mut Vec<ExtraOut>, i: usize) {
+    let Some(x) = v.get_mut(i).filter(|x| !x.channels.is_half()) else { return };
+    x.channels = Channels::Left;
+    let right = ExtraOut { channels: Channels::Right, ..x.clone() };
+    v.insert(i + 1, right);
+}
+
+/// Join split half `i` with its partner (the other half of the same owner, pair and
+/// plug-in) into one stereo strip with the `Left` half's settings, where that half was;
+/// a half whose partner is missing becomes stereo with its own. Anything else: nothing.
+pub fn join(v: &mut Vec<ExtraOut>, i: usize) {
+    let Some(x) = v.get(i).filter(|x| x.channels.is_half()) else { return };
+    let other = if x.channels == Channels::Left { Channels::Right } else { Channels::Left };
+    let partner = v.iter().position(|y| y.owner == x.owner && y.bus == x.bus && y.plugin == x.plugin && y.channels == other);
+    let keep = match partner {
+        Some(p) => {
+            let keep = if x.channels == Channels::Left { i } else { p };
+            let drop = if keep == i { p } else { i };
+            v.remove(drop);
+            if drop < keep { keep - 1 } else { keep }
+        }
+        None => i,
+    };
+    v[keep].channels = Channels::Stereo;
+}
+
+/// A strip's label: "Out N" for pair `bus` (from 0), then the plug-in's name for it
+/// (`plugin_bus_name`) when that says more than a number would, then "L" or "R" for a
+/// split half. Generic names ("Aux 1", "Output 3/4", "St. 3/4"...) are left out, so no
+/// strip is ever labelled "Aux", which in Maschine means the send effects.
+pub fn strip_label(bus: usize, plugin_bus_name: &str, ch: Channels) -> String {
+    const GENERIC: [&str; 10] = ["aux", "out", "output", "outs", "bus", "st", "stereo", "main", "ch", "channel"];
+    let core: String =
+        plugin_bus_name.to_lowercase().chars().filter(|c| !c.is_ascii_digit() && !c.is_whitespace() && !"./-_:#()".contains(*c)).collect();
+    let mut s = format!("Out {}", bus + 1);
+    if !core.is_empty() && !GENERIC.contains(&core.as_str()) {
+        s.push(' ');
+        s.push_str(plugin_bus_name.trim());
+    }
+    match ch {
+        Channels::Left => s.push_str(" L"),
+        Channels::Right => s.push_str(" R"),
+        Channels::Stereo | Channels::Mono => {}
+    }
+    s
 }
 
 /// The plug-in `o`'s slot holds, if any.
@@ -136,19 +218,21 @@ fn unescape(s: &str) -> Option<String> {
 }
 
 /// The strips as text, one per line:
-/// `owner bus level pan dest [muted] plugin=ID name=NAME` (ID and NAME with whitespace
-/// and `%` written as `%XX`).
+/// `owner bus level pan dest [muted] [ch=mono|left|right] plugin=ID name=NAME` (ID and
+/// NAME with whitespace and `%` written as `%XX`; no `ch=` for a stereo strip, so text
+/// from before strips had channels reads the same).
 pub fn to_text(v: &[ExtraOut]) -> String {
     let mut s = String::new();
     for e in v {
         s.push_str(&format!(
-            "{} {} {} {} {}{} plugin={} name={}\n",
+            "{} {} {} {} {}{}{} plugin={} name={}\n",
             owner_text(e.owner),
             e.bus,
             e.level,
             e.pan,
             dest_text(e.dest),
             if e.muted { " muted" } else { "" },
+            if e.channels == Channels::Stereo { String::new() } else { format!(" ch={}", e.channels.text()) },
             escape(&e.plugin),
             escape(&e.name),
         ));
@@ -157,7 +241,7 @@ pub fn to_text(v: &[ExtraOut]) -> String {
 }
 
 /// Strips from [`to_text`]'s text. Lines that don't read are skipped, and unknown
-/// `key=` words ignored.
+/// `key=` words (and `ch=` values) ignored.
 pub fn from_text(s: &str) -> Vec<ExtraOut> {
     s.lines().filter_map(line).collect()
 }
@@ -169,10 +253,14 @@ fn line(l: &str) -> Option<ExtraOut> {
     let level: f64 = w.next()?.parse().ok().filter(|v: &f64| v.is_finite())?;
     let pan: f64 = w.next()?.parse().ok().filter(|v: &f64| v.is_finite())?;
     let dest = dest_from(w.next()?)?;
-    let mut e = ExtraOut { owner, bus, plugin: String::new(), name: String::new(), level, pan, muted: false, dest };
+    let mut e =
+        ExtraOut { owner, bus, plugin: String::new(), name: String::new(), level, pan, muted: false, dest, channels: Channels::Stereo };
     for word in w {
         if word == "muted" {
             e.muted = true;
+        } else if let Some(v) = word.strip_prefix("ch=") {
+            // (One this version doesn't know: stereo.)
+            e.channels = Channels::from(v).unwrap_or_default();
         } else if let Some(v) = word.strip_prefix("plugin=") {
             e.plugin = unescape(v)?;
         } else if let Some(v) = word.strip_prefix("name=") {
@@ -188,7 +276,17 @@ mod tests {
     use crate::{Group, SlotInfo, Sound};
 
     fn out(owner: Owner, plugin: &str, dest: AudioDest) -> ExtraOut {
-        ExtraOut { owner, bus: 1, plugin: plugin.into(), name: "Out 2".into(), level: 0.5, pan: -0.25, muted: false, dest }
+        ExtraOut {
+            owner,
+            bus: 1,
+            plugin: plugin.into(),
+            name: "Out 2".into(),
+            level: 0.5,
+            pan: -0.25,
+            muted: false,
+            dest,
+            channels: Channels::Stereo,
+        }
     }
 
     fn pr(id: &str) -> Option<PluginRef> {
@@ -213,14 +311,7 @@ mod tests {
     #[test]
     fn extra_outs_round_trip_as_text() {
         let owners = [Owner::Sound(0, 3), Owner::Chain(1, 2, 3), Owner::Group(4, 5), Owner::Master(6)];
-        let dests = [
-            AudioDest::None,
-            AudioDest::Parent,
-            AudioDest::Master,
-            AudioDest::Ext(2),
-            AudioDest::Group(3),
-            AudioDest::Sound(1, 7),
-        ];
+        let dests = [AudioDest::None, AudioDest::Parent, AudioDest::Master, AudioDest::Ext(2), AudioDest::Group(3), AudioDest::Sound(1, 7)];
         let mut v = Vec::new();
         for (i, o) in owners.into_iter().enumerate() {
             for (j, d) in dests.into_iter().enumerate() {
@@ -294,5 +385,83 @@ mod tests {
         assert_eq!(v[1].plugin, "m x");
         assert!(v[1].muted);
         assert_eq!(v[1].dest, AudioDest::Ext(1));
+    }
+
+    #[test]
+    fn channels_round_trip_and_default_to_stereo() {
+        // Old text, with no `ch=`: stereo.
+        let v = from_text("sound:0:1 1 0.5 0 parent plugin=a name=B\n");
+        assert_eq!(v[0].channels, Channels::Stereo);
+        // All-stereo strips write today's text.
+        let e = out(Owner::Sound(0, 1), "a", AudioDest::Parent);
+        assert_eq!(to_text(&[e.clone()]), "sound:0:1 1 0.5 -0.25 parent plugin=a name=Out%202\n");
+        let mut v = Vec::new();
+        for ch in [Channels::Stereo, Channels::Mono, Channels::Left, Channels::Right] {
+            v.push(ExtraOut { channels: ch, ..e.clone() });
+        }
+        let text = to_text(&v);
+        assert!(text.contains(" ch=mono ") && text.contains(" ch=left ") && text.contains(" ch=right "), "{text}");
+        assert!(!text.contains("ch=stereo"), "{text}");
+        assert_eq!(from_text(&text), v);
+    }
+
+    #[test]
+    fn split_makes_left_then_right_with_the_same_settings() {
+        let a = out(Owner::Group(0, 0), "a", AudioDest::Ext(3));
+        let mut b = out(Owner::Sound(0, 0), "b", AudioDest::Master);
+        b.channels = Channels::Mono;
+        b.muted = true;
+        let c = out(Owner::Master(0), "c", AudioDest::Ext(1));
+        let mut v = vec![a.clone(), b.clone(), c.clone()];
+        split(&mut v, 1);
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[0], a);
+        assert_eq!(v[1], ExtraOut { channels: Channels::Left, ..b.clone() });
+        assert_eq!(v[2], ExtraOut { channels: Channels::Right, ..b.clone() });
+        assert_eq!(v[3], c);
+        // A half isn't split again; out of range does nothing.
+        let before = v.clone();
+        split(&mut v, 1);
+        split(&mut v, 9);
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn join_keeps_the_left_settings_and_drops_the_partner() {
+        let a = out(Owner::Group(0, 0), "a", AudioDest::Ext(3));
+        let b = out(Owner::Sound(0, 0), "b", AudioDest::Master);
+        let mut v = vec![a.clone(), b.clone()];
+        split(&mut v, 1);
+        v[1].level = 0.25;
+        v[1].pan = -1.0;
+        v[2].level = 2.0;
+        v[2].pan = 1.0;
+        v[2].muted = true;
+        v[2].dest = AudioDest::Ext(5);
+        let left = v[1].clone();
+        // Joined from the right half: the left half's settings stay.
+        let mut w = v.clone();
+        join(&mut w, 2);
+        assert_eq!(w, vec![a.clone(), ExtraOut { channels: Channels::Stereo, ..left.clone() }]);
+        join(&mut v, 1);
+        assert_eq!(v, w);
+        // A half whose partner is gone becomes stereo with its own settings.
+        let mut v = vec![a.clone(), ExtraOut { channels: Channels::Right, ..b.clone() }];
+        join(&mut v, 1);
+        assert_eq!(v, vec![a.clone(), b.clone()]);
+        // Not a half: nothing.
+        join(&mut v, 0);
+        assert_eq!(v, vec![a, b]);
+    }
+
+    #[test]
+    fn strip_label_hides_generic_names() {
+        for n in ["Aux 1", "Out 3", "Output 3/4", "St. 3/4", ""] {
+            assert_eq!(strip_label(2, n, Channels::Stereo), "Out 3", "{n:?}");
+        }
+        assert_eq!(strip_label(2, "Kick", Channels::Stereo), "Out 3 Kick");
+        assert_eq!(strip_label(2, "Kick", Channels::Mono), "Out 3 Kick");
+        assert_eq!(strip_label(2, "Out 3", Channels::Left), "Out 3 L");
+        assert_eq!(strip_label(2, "Kick", Channels::Right), "Out 3 Kick R");
     }
 }

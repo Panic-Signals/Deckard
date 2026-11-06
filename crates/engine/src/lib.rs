@@ -40,7 +40,7 @@ pub mod synth;
 #[allow(dead_code)]
 mod sampler_tables;
 
-use deckard_model::extra_out::{self, ExtraOut, Owner};
+use deckard_model::extra_out::{self, Channels, ExtraOut, Owner};
 use deckard_model::{Dim, ExprKind, MidiKind, PPQ, Project};
 use deckard_plugins::{MAX_BLOCK, Shared, Slot, Transport};
 use sample::Sample;
@@ -639,6 +639,8 @@ struct StripRoute {
 }
 
 /// A strip's own gain: its level (linear, unlike a channel's fader value) and its pan.
+/// A mono strip (mono, or a split half) feeds its one signal to both sides first, so
+/// this places it as a channel's pan places a sound: the same law ([`pan_gains`]).
 fn strip_gain(level: f64, pan: f64) -> (f32, f32) {
     let lvl = if level.is_finite() { level.clamp(0.0, 4.0) as f32 } else { 0.0 };
     let (l, r) = pan_gains(if pan.is_finite() { pan } else { 0.0 });
@@ -680,7 +682,16 @@ fn strips_of(owner: Owner, plugin_id: &str, project: &Project) -> Vec<ExtraRt> {
         .filter(|(_, x)| x.owner == owner && x.plugin == plugin_id && x.bus >= 1)
         .map(|(index, x)| {
             let StripRoute { route, fallback, ext } = strip_route(project, x);
-            ExtraRt { index, bus: x.bus, buf: vec![0.0; JOB_FRAMES * 2], route, fallback, ext, ramp: GainRamp::default() }
+            ExtraRt {
+                index,
+                bus: x.bus,
+                channels: x.channels,
+                buf: vec![0.0; JOB_FRAMES * 2],
+                route,
+                fallback,
+                ext,
+                ramp: GainRamp::default(),
+            }
         })
         .collect()
 }
@@ -951,6 +962,8 @@ struct ExtraRt {
     /// Its strip's place in `project.extra_outs` (its meter's too).
     index: usize,
     bus: usize,
+    /// What it takes from the pair (a split pair has a strip for each side).
+    channels: Channels,
     buf: Vec<f32>,
     route: Route,
     fallback: Route,
@@ -990,14 +1003,14 @@ fn take_strips(plugin: &deckard_plugins::Plugin, extras: &mut [ExtraRt], n: usiz
 }
 
 /// Take each of `extras`' routes from `routes` (a strip for each of `project.extra_outs`,
-/// with its owner and pair): after an edit kept the part that has them, where they are
-/// and where they go may have changed. No allocating (the audio thread).
-fn refresh_strips(owner: Option<Owner>, extras: &mut [ExtraRt], routes: &[(Owner, usize, StripRoute)]) {
+/// with its owner, pair and channels): after an edit kept the part that has them, where
+/// they are and where they go may have changed. No allocating (the audio thread).
+fn refresh_strips(owner: Option<Owner>, extras: &mut [ExtraRt], routes: &[(Owner, usize, Channels, StripRoute)]) {
     let Some(owner) = owner else { return };
     for x in extras {
-        match routes.iter().position(|(o, bus, _)| *o == owner && *bus == x.bus) {
+        match routes.iter().position(|(o, bus, ch, _)| *o == owner && *bus == x.bus && *ch == x.channels) {
             Some(i) => {
-                let r = routes[i].2;
+                let r = routes[i].3;
                 (x.index, x.route, x.fallback, x.ext) = (i, r.route, r.fallback, r.ext);
             }
             None => (x.index, x.route, x.fallback, x.ext) = (usize::MAX, SILENT, SILENT, None),
@@ -1035,9 +1048,20 @@ fn mix_strip(
     };
     let Some(dst) = dst else { return };
     let mut peak = (0f32, 0f32);
+    let channels = x.channels;
     for (o, i) in dst.as_chunks_mut::<2>().0.iter_mut().zip(x.buf.as_chunks::<2>().0) {
         let gain = x.ramp.next();
-        let (a, z) = (i[0] * gain.0, i[1] * gain.1);
+        // A mono strip's one signal on both sides, before its pan.
+        let (l, r) = match channels {
+            Channels::Stereo => (i[0], i[1]),
+            Channels::Mono => {
+                let m = (i[0] + i[1]) * 0.5;
+                (m, m)
+            }
+            Channels::Left => (i[0], i[0]),
+            Channels::Right => (i[1], i[1]),
+        };
+        let (a, z) = (l * gain.0, r * gain.1);
         let (a, z) = (if a.is_finite() { a } else { 0.0 }, if z.is_finite() { z } else { 0.0 });
         o[0] += a;
         o[1] += z;
@@ -1282,7 +1306,7 @@ impl FxChain {
                 }
                 // Its strips' gains glide on from where they are.
                 for x in &mut u.extras {
-                    if let Some(ox) = o.extras.iter().find(|ox| ox.bus == x.bus) {
+                    if let Some(ox) = o.extras.iter().find(|ox| ox.bus == x.bus && ox.channels == x.channels) {
                         x.ramp = ox.ramp;
                     }
                 }
@@ -1784,7 +1808,7 @@ pub struct Engine {
     /// Each of `project.extra_outs`' strips: its owner, pair and route (the parts an edit
     /// keeps take theirs from here, [`Engine::refresh_strips`]); and its peak since the
     /// last [`Engine::publish`].
-    strips: Vec<(Owner, usize, StripRoute)>,
+    strips: Vec<(Owner, usize, Channels, StripRoute)>,
     meters_extra: Vec<(f32, f32)>,
     /// The external outputs (bits, Out 1 = bit 0) the interface has connected: a strip
     /// onto one that isn't plays through its parent. All, unless told otherwise.
@@ -2504,7 +2528,7 @@ impl Engine {
             heard_board: cache.heard.clone(),
             heard: [Heard { owner: Owner::Master(0), bus: 0 }; HEARD_ROOM],
             heard_len: 0,
-            strips: project.extra_outs.iter().map(|x| (x.owner, x.bus, strip_route(project, x))).collect(),
+            strips: project.extra_outs.iter().map(|x| (x.owner, x.bus, x.channels, strip_route(project, x))).collect(),
             meters_extra: vec![(0.0, 0.0); project.extra_outs.len()],
             connected: u16::MAX,
             in_routes,
@@ -5076,10 +5100,11 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> R
             _ => {}
         }
     }
-    // Its plug-ins' strips (which pairs have one; not their settings): a pair given a
-    // strip or losing one makes the part anew, to listen to the pairs left.
-    fn strips(p: &Project, g: usize, s: usize, chain: bool) -> Vec<(Owner, usize, &str)> {
-        let mut v: Vec<(Owner, usize, &str)> = p
+    // Its plug-ins' strips (which pairs have one, and what each takes from its pair; not
+    // their settings): a pair given a strip or losing one, or one split or joined, makes
+    // the part anew, to listen to the pairs left and take each strip's side.
+    fn strips(p: &Project, g: usize, s: usize, chain: bool) -> Vec<(Owner, usize, &str, Channels)> {
+        let mut v: Vec<(Owner, usize, &str, Channels)> = p
             .extra_outs
             .iter()
             .filter(|x| match x.owner {
@@ -5087,9 +5112,9 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> R
                 Owner::Chain(a, b, _) => chain && (a, b) == (g, s),
                 _ => false,
             })
-            .map(|x| (x.owner, x.bus, x.plugin.as_str()))
+            .map(|x| (x.owner, x.bus, x.plugin.as_str(), x.channels))
             .collect();
-        v.sort_by_key(|&(o, bus, id)| (heard_rank(&Heard { owner: o, bus }), id));
+        v.sort_by_key(|&(o, bus, id, _)| (heard_rank(&Heard { owner: o, bus }), id));
         v
     }
     r.instrument = old.plugin == new.plugin && strips(prev, g, s, false) == strips(project, g, s, false);
@@ -9132,6 +9157,7 @@ mod tests {
             pan: 0.0,
             muted: false,
             dest: deckard_model::AudioDest::Parent,
+            channels: Default::default(),
         };
         let mut e = split_engine(|p| p.extra_outs = vec![strip(1, &SPLIT.plugin_id()), strip(2, "another")]);
         assert_eq!(e.master_fx.as_ref().unwrap().units[0].scan, 1 << 2);
@@ -9160,6 +9186,7 @@ mod tests {
             pan: 0.0,
             muted: false,
             dest: deckard_model::AudioDest::Parent,
+            channels: Default::default(),
         };
         b.extra_outs = vec![strip.clone()];
         let r = reuse_of(&a, &b, 0, 0, 1000.0);
@@ -9247,6 +9274,7 @@ mod tests {
             pan: 0.0,
             muted: false,
             dest,
+            channels: Default::default(),
         }
     }
 
@@ -9415,6 +9443,68 @@ mod tests {
         });
         assert!(x.e.in_routes.is_empty(), "not played");
         assert!(near(x.block(0.5).0, (0.0, 0.0)));
+    }
+
+    /// [`split_block`] with `(l, r)` on In 1.
+    fn stereo_block(e: &mut Engine, l: f32, r: f32) -> ((f32, f32), Vec<(f32, f32)>) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (l, r);
+        e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 64));
+        let mut out = vec![0f32; 128];
+        let mut ext = vec![vec![0f32; 128]; OUTPUTS];
+        e.process_outputs(&mut out, &mut ext);
+        ((out[126], out[127]), ext.iter().map(|b| (b[126], b[127])).collect())
+    }
+
+    /// A mono strip plays (L+R)/2 on both sides, which its pan places as a channel's
+    /// pan places a sound.
+    #[test]
+    fn a_mono_strip_sums_both_sides() {
+        use deckard_model::extra_out::Channels;
+        let mut x = Strips::new(|p| p.extra_outs[0].channels = Channels::Mono);
+        // In 1 (0.8, 0.2): the pair is half of it, (0.4, 0.1); its sum halved, 0.25.
+        let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.25, 0.25)), "Out 3: {:?}", ext[2]);
+        assert!(near(master, (0.8, 0.2)), "the main pair as it is: {master:?}");
+        x.edit(|p| p.extra_outs[0].pan = -1.0);
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.25 * std::f32::consts::SQRT_2, 0.0)), "panned left: {:?}", ext[2]);
+        // Stereo again: each side its own.
+        x.edit(|p| (p.extra_outs[0].pan, p.extra_outs[0].channels) = (0.0, Channels::Stereo));
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.1)), "stereo: {:?}", ext[2]);
+    }
+
+    /// The halves of a split strip each play one side of the pair on both sides, with
+    /// their own level and output, and meter apart; split while playing, too.
+    #[test]
+    fn split_halves_carry_one_side_each_with_their_own_level() {
+        use deckard_model::extra_out::{self, Channels};
+        let mut x = Strips::new(|_| {});
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.1)), "stereo first: {:?}", ext[2]);
+        x.edit(|p| {
+            extra_out::split(&mut p.extra_outs, 0);
+            p.extra_outs[1].level = 0.5;
+            p.extra_outs[1].dest = deckard_model::AudioDest::Ext(3);
+        });
+        assert_eq!(x.p.extra_outs.iter().map(|e| e.channels).collect::<Vec<_>>(), vec![Channels::Left, Channels::Right]);
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.4)), "L on Out 3: {:?}", ext[2]);
+        assert!(near(ext[3], (0.05, 0.05)), "R at half on Out 4: {:?}", ext[3]);
+        assert!(near(master, (0.8, 0.2)), "the main pair: {master:?}");
+        let mut t = Telemetry::default();
+        x.e.publish(&mut t);
+        assert_eq!(t.extra_meters.len(), 2);
+        assert!(near(t.extra_meters[0], (0.4, 0.4)) && near(t.extra_meters[1], (0.05, 0.05)), "{:?}", t.extra_meters);
+        // Joined: stereo again, with the left half's settings.
+        x.edit(|p| extra_out::join(&mut p.extra_outs, 1));
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.1)) && near(ext[3], (0.0, 0.0)), "{:?} {:?}", ext[2], ext[3]);
     }
 
     /// A muted strip is silent; the main pair plays on.

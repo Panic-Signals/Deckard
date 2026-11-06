@@ -993,7 +993,7 @@ pub struct App {
     extra_meters: Vec<(f32, f32)>,
     /// Which strip each of `extra_meters` is (owner, bus, plug-in): when the list changes,
     /// the meters, peaks and headroom held by index start again.
-    extra_meter_keys: Vec<(deckard_model::extra_out::Owner, usize, String)>,
+    extra_meter_keys: Vec<(deckard_model::extra_out::Owner, usize, String, deckard_model::extra_out::Channels)>,
     /// The audio thread's load (0..1) for the header's CPU meter, and the stats it was
     /// last worked out from (busy, audio µs).
     cpu_load: f32,
@@ -7377,13 +7377,13 @@ impl App {
     }
 
     /// Size the extra outputs' meters to the project's strips; when the strips changed
-    /// (one gone, added in between, moved), start every strip's meter, held peak and
-    /// headroom again, as they're held by place in the list.
+    /// (one gone, added in between, moved, split, joined or made mono), start every
+    /// strip's meter, held peak and headroom again, as they're held by place in the list.
     fn sync_extra_meters(&mut self) {
         let keys: Vec<_> = self
             .doc
             .as_ref()
-            .map(|d| d.borrow().project().extra_outs.iter().map(|x| (x.owner, x.bus, x.plugin.clone())).collect())
+            .map(|d| d.borrow().project().extra_outs.iter().map(|x| (x.owner, x.bus, x.plugin.clone(), x.channels)).collect())
             .unwrap_or_default();
         if keys == self.extra_meter_keys {
             return;
@@ -8900,6 +8900,7 @@ mod tests {
             pan: 0.0,
             muted: false,
             dest: AudioDest::Ext(1),
+            channels: Default::default(),
         };
         doc.borrow_mut()
             .set_extra_outs(vec![x(Owner::Group(0, 0), 1), x(Owner::Group(0, 0), 2), x(Owner::Group(1, 0), 1), x(Owner::Sound(2, 0), 1)])
@@ -8957,6 +8958,7 @@ mod tests {
             pan: 0.0,
             muted: false,
             dest: AudioDest::Ext(1),
+            channels: Default::default(),
         };
         doc.borrow_mut().set_extra_outs(vec![x(1), x(2)]).unwrap();
         app.sync_extra_meters();

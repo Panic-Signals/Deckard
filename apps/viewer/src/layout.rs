@@ -446,6 +446,8 @@ pub enum ExtraOutEdit {
     Pan(f64),
     Mute(bool),
     Dest(deckard_model::AudioDest),
+    /// Stereo or mono (a split half's is its side: see [`Act::SplitExtraOut`]).
+    Channels(deckard_model::extra_out::Channels),
 }
 
 /// What clicks in the panels ask for; applied after drawing.
@@ -520,6 +522,10 @@ pub enum Act {
     AddExtraOuts(Vec<deckard_model::extra_out::ExtraOut>),
     /// Change strip `.0` of `project.extra_outs` (a plug-in's extra output).
     SetExtraOut(usize, ExtraOutEdit),
+    /// Split strip `.0` into two mono strips, its left and right sides.
+    SplitExtraOut(usize),
+    /// Join split half `.0` and its partner back into one stereo strip.
+    JoinExtraOut(usize),
     InsertScene(usize),
     DuplicateScene(usize),
     DeleteScene(usize),
@@ -879,8 +885,36 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         x.dest = to;
                         d.set_extra_outs_as("Extra Output Destination", all)
                     }
+                    ExtraOutEdit::Channels(ch) => {
+                        use deckard_model::extra_out::Channels;
+                        // (A split half's side changes only by joining.)
+                        if x.channels.is_half() || ch.is_half() || x.channels == ch {
+                            continue;
+                        }
+                        x.channels = ch;
+                        d.set_extra_outs_as(if ch == Channels::Mono { "Extra Output Mono" } else { "Extra Output Stereo" }, all)
+                    }
                 };
                 if let Err(e) = result {
+                    app.status = format!("can't change the extra output: {e}");
+                }
+            }
+            Act::SplitExtraOut(i) | Act::JoinExtraOut(i) => {
+                use deckard_model::extra_out;
+                let split = matches!(a, Act::SplitExtraOut(_));
+                let Some(doc) = app.doc.clone() else { continue };
+                let mut d = doc.borrow_mut();
+                let before = d.project().extra_outs.clone();
+                let mut all = before.clone();
+                if split {
+                    extra_out::split(&mut all, i);
+                } else {
+                    extra_out::join(&mut all, i);
+                }
+                if all == before {
+                    continue;
+                }
+                if let Err(e) = d.set_extra_outs_as(if split { "Split Extra Output" } else { "Join Extra Output" }, all) {
                     app.status = format!("can't change the extra output: {e}");
                 }
             }
