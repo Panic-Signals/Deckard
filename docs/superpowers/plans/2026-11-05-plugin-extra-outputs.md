@@ -354,6 +354,28 @@ User decision (2026-11-06), replacing Task 7's placement. Spec: "Each extra outp
 - [ ] **Step 3:** Implement. **Step 4:** Tests pass.
 - [ ] **Step 5: Commit** "Show every extra-output strip in the groups mixer, by the Master."
 
+### Task 8f: Single hardware outputs for mono strips
+
+User request (2026-11-06). Spec: "Single hardware outputs for mono strips".
+
+**Representation (controller's ruling):** `AudioDest` is NOT changed (it maps to Maschine's routing and every channel's picker). Add to `ExtraOut` (crates/model/src/extra_out.rs) `pub side: Option<Side>` with `pub enum Side { L, R }`: when `Some` and `dest` is `AudioDest::Ext(n)`, the strip plays only on that side of pair n. Ignored (treated as `None`) for a Stereo strip or a non-`Ext` dest. Saved as the text word `side=l|side=r`, omitted when `None` (old projects and stereo strips save byte-for-byte as before).
+
+**Files:**
+- `crates/model/src/extra_out.rs`: `Side`, the field, save/parse words, `split` (L half gets `side: Some(L)`, R half `Some(R)` when the strip's dest is `Ext`; else `None`), `join` (`side: None`, the L half's dest). Changing a strip to Stereo clears `side`; changing to Mono keeps `None`.
+- `crates/engine/src/lib.rs` `strip_route`: for a non-stereo strip with `side`, multiply the gain by `(1,0)` (L) or `(0,1)` (R). This includes the past-master path when the pair is the master output. Stem rendering (`crates/engine/src/export.rs`) ignores `side`: a stem is mono on both channels.
+- `apps/viewer/src/extra_outs.rs` `next_free_output`: a strip on one side of pair n counts as pair n in use.
+- `apps/viewer/src/layout/mixer.rs`: a non-stereo strip's output picker lists each connected pair, then under each pair its single outputs `settings.output_name(2n)` / `output_name(2n+1)` (offered when that channel is connected, or currently picked). Picking a pair sets `side: None`. The strip's shown destination reads e.g. "Ext. 3 L". Stereo strips' pickers are unchanged. It is one undoable edit through the existing `SetExtraOut` path (add a variant for `side`, or set dest and side together).
+- Doc layer (`crates/doc/src/extra_outs.rs`): whatever edit carries `dest` carries `side` too, so undo restores both.
+
+**Tests:**
+- model: `a_strip_on_one_side_saves_and_reads_back`, `a_stereo_strip_saves_without_side`, `splitting_a_strip_on_a_pair_puts_the_halves_on_its_sides`, `joining_goes_back_to_the_whole_pair`.
+- engine: `a_mono_strip_on_the_left_output_plays_only_left` (the pair's right buffer is silent, the left one carries the signal), `a_stereo_strip_ignores_side`.
+- viewer: `one_side_in_use_counts_as_the_pair`, `a_mono_strips_picker_offers_single_outputs`, `a_stereo_strips_picker_offers_only_pairs`.
+
+- [ ] **Step 1:** Write the tests. **Step 2:** Run them: FAIL.
+- [ ] **Step 3:** Implement. **Step 4:** `cargo test -p deckard-model extra_out`, `cargo test -p deckard-engine strip`, `cargo test -p deckard --bin deckard -- extra_outs mixer`: PASS.
+- [ ] **Step 5: Commit** "A mono or split strip can play on one side of an output pair."
+
 ### Task 9: Branch end
 
 - [ ] Run `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.

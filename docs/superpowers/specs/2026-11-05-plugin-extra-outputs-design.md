@@ -81,6 +81,25 @@ Every strip starts as **stereo**. A menu on the strip changes it (the user decid
 
 Changing the mode is one undoable edit, and it is saved.
 
+**Single hardware outputs for mono strips** (the user asked for this on 2026-11-06). A
+mono strip or a split half can go to **one side of an output pair** as well as to a
+whole pair. Its output picker lists the pairs ("Ext. 3") and, under them, each single
+output ("Ext. 3 L", "Ext. 3 R", using the interface's output names when it has them).
+A stereo strip's picker offers only pairs, as now.
+
+- **Splitting** a strip on a pair sends the L half to that pair's left output and the R
+  half to its right, so splitting doesn't change what you hear or where.
+- **Joining** two halves goes back to the pair the L half was on (whole pair).
+- **Mono:** switching a strip to Mono keeps it on its whole pair (the mono signal on both
+  sides). Pick a single output to put it on one side only. Switching back to Stereo puts
+  it back on the whole pair.
+- **Free outputs:** a single output in use counts as its pair in use when a new strip's
+  output is picked.
+- **Stems:** a strip on a single output still exports its own stem, mono on both
+  channels.
+- Saved in the DECKARD block. Regular sounds and groups keep stereo-pair outputs only
+  (Maschine has no single outputs to save them in).
+
 ### Where an extra output's sound goes
 
 - **Default:** the next hardware output that nothing else is using. With the master on
