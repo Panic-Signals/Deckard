@@ -187,7 +187,7 @@ impl Sender {
                     }
                 }
             }
-            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => {}
+            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::MidiInputOut { .. } => {}
         }
     }
 
@@ -291,6 +291,7 @@ fn apply(
                 old.end_midi();
                 old.release_routes();
                 new.take_unroutes(old);
+                new.take_midi_inputs(old);
             }
             engine.replace(new).map(Command::Play)
         }
@@ -747,6 +748,13 @@ impl Output {
     /// Note Repeat / the Arp on (with its settings) or off.
     pub fn set_repeat(&self, r: Option<(deckard_model::Arp, crate::repeat::RepeatMode)>) {
         self.sender.send(Command::Repeat(r));
+    }
+
+    /// Put a MIDI input plug-in on `group`, or take it out with `None`. Whatever comes out
+    /// goes back with the command, to be freed here.
+    pub fn set_midi_input(&self, group: usize, plugin: Option<Box<dyn crate::midi_input::MidiInput>>) {
+        let mut plugin = plugin;
+        self.run(move |e| plugin = e.set_midi_input(group, plugin.take()));
     }
 
     /// Record live notes (REC) or stop.

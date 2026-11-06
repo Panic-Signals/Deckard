@@ -22,6 +22,7 @@ pub mod library;
 pub mod meters;
 mod metronome;
 pub mod midi;
+pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
 #[cfg(feature = "output")]
@@ -183,6 +184,11 @@ pub enum Live {
         pitch: i64,
         velocity: i64,
         thru: bool,
+    },
+    /// A note a MIDI input plug-in played, come due.
+    MidiInputOut {
+        group: usize,
+        note: midi_input::NoteOut,
     },
     /// A channel-wide controller from MIDI input; `record`: the sound that records it.
     ControlIn {
@@ -1317,6 +1323,11 @@ pub struct Engine {
     /// Note Repeat / Arp: held live notes feed it; it plays on the rate's grid.
     repeater: Option<repeat::Repeater>,
     repeat_buf: Vec<repeat::Fired>,
+    /// MIDI input plug-ins, a slot per group, and what one just played.
+    midi_inputs: Vec<Option<Box<dyn midi_input::MidiInput>>>,
+    midi_input_out: Vec<midi_input::NoteOut>,
+    /// A plug-in's note is playing: it doesn't go back in.
+    from_midi_input: bool,
     /// Recording (REC): live notes are noted with their song position.
     recording: bool,
     recorded: Vec<Recorded>,
@@ -2024,6 +2035,9 @@ impl Engine {
             recording: false,
             repeater: None,
             repeat_buf: Vec::with_capacity(256),
+            midi_inputs: (0..midi_input::SLOTS).map(|_| None).collect(),
+            midi_input_out: Vec::with_capacity(midi_input::OUT_ROOM),
+            from_midi_input: false,
             counting: 0,
             count_frame: 0,
             recorded: Vec::with_capacity(RECORDED_ROOM),
@@ -2646,6 +2660,10 @@ impl Engine {
     pub fn stop(&mut self) {
         self.sequencing = false;
         self.clock_stop();
+        self.live.retain(|(_, e)| !matches!(e, Live::MidiInputOut { .. }));
+        for p in self.midi_inputs.iter_mut().flatten() {
+            p.stopped();
+        }
         if let Some(a) = &self.ahead {
             for l in a.links.iter().flatten().flatten().filter(|l| l.state != LinkState::Live) {
                 let _ = l.inbox.push(ahead::Msg::At(self.time, ahead::Ev::Stop, false));
@@ -2869,6 +2887,10 @@ impl Engine {
     /// End a note started with [`Engine::note_hold`]: its envelope releases (one-shots
     /// play on), and a plug-in gets its note-off.
     pub fn note_release(&mut self, group: usize, sound: usize, pitch: i64) {
+        if self.midi_input_takes(group) {
+            self.midi_input_note(group, midi_input::NoteIn::Off { sound, pitch });
+            return;
+        }
         self.touch_release(group, sound, pitch);
         // Held notes sent out end now (also those passed on to another sound).
         let mut i = 0;
@@ -3261,9 +3283,14 @@ impl Engine {
         a.sent.retain(|x| x.5 >= now);
         let mut ahead = self.ahead.take().unwrap();
         let muted = &self.sound_muted;
+        let inputs = &self.midi_inputs;
         self.foresee(0, window, |seen| match seen {
             Seen::Event { t, e, plays, frame, pass } => {
                 if !plays || note_muted(muted, &e) {
+                    return;
+                }
+                // Its notes go to its MIDI input plug-in, when they're due.
+                if e.cue.is_none() && e.midi.is_none() && inputs.get(e.group).is_some_and(Option::is_some) {
                     return;
                 }
                 let Some(link) = ahead.links.get(e.group).and_then(|r| r.get(e.sound)).and_then(Option::as_ref) else { return };
@@ -3403,6 +3430,102 @@ impl Engine {
         self.repeater.is_some()
     }
 
+    /// Put a MIDI input plug-in on `group`, or take it out with `None`. The notes the old
+    /// one holds end. Returns it, to be freed off the audio thread (`plugin` itself if
+    /// there's no such slot).
+    pub fn set_midi_input(
+        &mut self,
+        group: usize,
+        plugin: Option<Box<dyn midi_input::MidiInput>>,
+    ) -> Option<Box<dyn midi_input::MidiInput>> {
+        let Some(slot) = self.midi_inputs.get_mut(group) else { return plugin };
+        let mut old = std::mem::replace(slot, plugin);
+        if let Some(p) = old.as_mut() {
+            let clock = self.midi_input_clock(0.0);
+            let mut out = std::mem::take(&mut self.midi_input_out);
+            p.finish(clock, &mut midi_input::Outbox::new(&mut out));
+            self.play_midi_input_out(group, clock.now, &out);
+            self.midi_input_out = out;
+        }
+        old
+    }
+
+    /// The plug-ins go on with an engine that replaces this one. What they hold has been
+    /// ended, as the old engine's notes are.
+    #[cfg(any(test, feature = "output"))]
+    pub(crate) fn take_midi_inputs(&mut self, old: &mut Engine) {
+        old.live.retain(|(_, e)| !matches!(e, Live::MidiInputOut { .. }));
+        std::mem::swap(&mut self.midi_inputs, &mut old.midi_inputs);
+        for p in self.midi_inputs.iter_mut().flatten() {
+            p.stopped();
+        }
+    }
+
+    /// Whether `group`'s notes go to a MIDI input plug-in (not one it's playing itself).
+    fn midi_input_takes(&self, group: usize) -> bool {
+        !self.from_midi_input && self.midi_inputs.get(group).is_some_and(Option::is_some)
+    }
+
+    fn midi_input_clock(&self, span: f64) -> midi_input::Clock {
+        let spt = self.samples_per_tick();
+        midi_input::Clock { now: self.time as f64 / spt, span, song: self.sequencing.then(|| self.frame as f64 / spt) }
+    }
+
+    /// A note into `group`'s MIDI input plug-in, and what it plays for it.
+    fn midi_input_note(&mut self, group: usize, note: midi_input::NoteIn) {
+        let Some(mut p) = self.midi_inputs.get_mut(group).and_then(Option::take) else { return };
+        let clock = self.midi_input_clock(0.0);
+        let mut out = std::mem::take(&mut self.midi_input_out);
+        p.note(note, clock, &mut midi_input::Outbox::new(&mut out));
+        self.midi_inputs[group] = Some(p);
+        self.play_midi_input_out(group, clock.now, &out);
+        self.midi_input_out = out;
+    }
+
+    /// What the MIDI input plug-ins play by themselves over the next `frames`.
+    fn midi_inputs_ahead(&mut self, frames: usize) {
+        for group in 0..self.midi_inputs.len() {
+            let Some(mut p) = self.midi_inputs[group].take() else { continue };
+            let clock = self.midi_input_clock(frames as f64 / self.samples_per_tick());
+            let mut out = std::mem::take(&mut self.midi_input_out);
+            p.process(clock, &mut midi_input::Outbox::new(&mut out));
+            self.midi_inputs[group] = Some(p);
+            self.play_midi_input_out(group, clock.now, &out);
+            self.midi_input_out = out;
+        }
+    }
+
+    /// Play notes a plug-in played: at once, or queued for their frames.
+    fn play_midi_input_out(&mut self, group: usize, now: f64, notes: &[midi_input::NoteOut]) {
+        let spt = self.samples_per_tick();
+        for &note in notes {
+            let at = match note {
+                midi_input::NoteOut::On { at, .. } | midi_input::NoteOut::Off { at, .. } => at,
+            };
+            let offset = ((at - now) * spt).round().max(0.0) as u64;
+            if offset == 0 {
+                self.play_midi_input_note(group, note);
+            } else {
+                self.schedule(offset, Live::MidiInputOut { group, note });
+            }
+        }
+    }
+
+    /// A note a plug-in played sounds, as a live note would (a pattern's, if it was one,
+    /// has become one).
+    fn play_midi_input_note(&mut self, group: usize, note: midi_input::NoteOut) {
+        let timeline = std::mem::replace(&mut self.from_timeline, false);
+        self.from_midi_input = true;
+        match note {
+            midi_input::NoteOut::On { sound, pitch, velocity, length, .. } => {
+                self.note_on(group, sound, pitch, velocity, length.unwrap_or(HELD))
+            }
+            midi_input::NoteOut::Off { sound, pitch, .. } => self.note_release(group, sound, pitch),
+        }
+        self.from_midi_input = false;
+        self.from_timeline = timeline;
+    }
+
     /// Record live notes (REC) or stop.
     pub fn set_recording(&mut self, on: bool) {
         self.recording = on;
@@ -3486,7 +3609,7 @@ impl Engine {
                 Live::NoteOn { group, sound, pitch, velocity, length } => Some((group, sound, pitch, velocity, length)),
                 Live::NoteIn { group, sound, pitch, velocity, .. } => Some((group, sound, pitch, velocity, i64::MAX)),
                 Live::NoteRelease { group, sound, pitch } => Some((group, sound, pitch, 0, 0)),
-                Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => None,
+                Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::MidiInputOut { .. } => None,
             };
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
@@ -3511,6 +3634,7 @@ impl Engine {
                 self.hit_pads(group, sound, pitch, |e, s, p| e.note_in(group, s, p, velocity, thru));
             }
             Live::ControlIn { group, sound, kind, thru, .. } => self.control_in(group, sound, kind, thru),
+            Live::MidiInputOut { group, note } => self.play_midi_input_note(group, note),
             // Expression follows its held note out (above, it's recorded): on an MPE
             // port all of it on the note's channel, on a normal port its pressure as poly
             // aftertouch; a release velocity goes on the note-off.
@@ -3645,6 +3769,7 @@ impl Engine {
         // Players' notes for the frames ahead of this span.
         self.send_ahead(frames as u64);
         self.repeat_ahead(frames);
+        self.midi_inputs_ahead(frames);
         self.follow_scene_tempo();
         let mut tps = 1.0 / self.samples_per_tick();
         let mut end = self.frame_of(self.timeline.length);
@@ -3971,6 +4096,12 @@ impl Engine {
             return;
         }
         if note_muted(&self.sound_muted, &e) {
+            return;
+        }
+        // A MIDI input plug-in on the group has its notes, played or from a pattern.
+        if e.midi.is_none() && self.midi_input_takes(e.group) {
+            let length = (e.length != HELD).then_some(e.length);
+            self.midi_input_note(e.group, midi_input::NoteIn::On { sound: e.sound, pitch: e.pitch, velocity: e.velocity, length });
             return;
         }
         let frames = (e.length != HELD).then(|| ((e.length.max(1) as f64) / tps).max(1.0) as u64);
@@ -6784,6 +6915,194 @@ mod tests {
         let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         e.note_on(0, 1, 60, 100, 240);
         assert_eq!(e.lfos[0].trig_at.map(|t| t.1), Some(e.time), "a muted LFO's trigger still counts");
+    }
+
+    /// A MIDI input plug-in for the tests: plays what comes in an octave up, tells what it
+    /// was given, and with `later` plays that many ticks late.
+    struct OctaveUp {
+        seen: Arc<Mutex<Vec<midi_input::NoteIn>>>,
+        stopped: Arc<Mutex<bool>>,
+        later: f64,
+        held: Option<(usize, i64)>,
+    }
+
+    impl midi_input::MidiInput for OctaveUp {
+        fn note(&mut self, note: midi_input::NoteIn, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+            self.seen.lock().unwrap().push(note);
+            let at = clock.now + self.later;
+            match note {
+                midi_input::NoteIn::On { sound, pitch, velocity, length } => {
+                    if length.is_none() {
+                        self.held = Some((sound, pitch + 12));
+                    }
+                    out.on(at, sound, pitch + 12, velocity, length);
+                }
+                midi_input::NoteIn::Off { sound, pitch } => {
+                    self.held = None;
+                    out.off(at, sound, pitch + 12);
+                }
+            }
+        }
+
+        fn stopped(&mut self) {
+            *self.stopped.lock().unwrap() = true;
+        }
+
+        fn finish(&mut self, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+            if let Some((sound, pitch)) = self.held.take() {
+                out.off(clock.now, sound, pitch);
+            }
+        }
+    }
+
+    type NotesIn = Arc<Mutex<Vec<midi_input::NoteIn>>>;
+
+    /// An engine with Group 0's Sound 0 sent out to MIDI, so what it plays can be read, with
+    /// [`OctaveUp`] on the group.
+    fn midi_input_engine(later: f64) -> (Engine, std::sync::mpsc::Receiver<midi::MidiOut>, NotesIn, Arc<Mutex<bool>>) {
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&project(), None, 48_000, Mode::Arrangement, &mut cache);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1024);
+        e.midi_tx = Some(tx);
+        e.midi_routes = vec![vec![Some(midi::OutRoute::Port { port: "Out".into(), channel: 0, transpose: 0 })]];
+        let (seen, stopped) = (NotesIn::default(), Arc::new(Mutex::new(false)));
+        let plugin = OctaveUp { seen: seen.clone(), stopped: stopped.clone(), later, held: None };
+        assert!(e.set_midi_input(0, Some(Box::new(plugin))).is_none());
+        (e, rx, seen, stopped)
+    }
+
+    /// The (status, note) of what went out, and whether each is a note-on.
+    fn midi_notes(rx: &std::sync::mpsc::Receiver<midi::MidiOut>) -> Vec<(bool, u8)> {
+        rx.try_iter()
+            .filter_map(|m| match m.bytes()[0] & 0xf0 {
+                0x90 => Some((true, m.bytes()[1])),
+                0x80 => Some((false, m.bytes()[1])),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A pattern's notes go in with their lengths; only what the plug-in plays is heard.
+    #[test]
+    fn a_midi_input_plugin_takes_a_patterns_notes() {
+        let (mut e, rx, seen, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap()[0], midi_input::NoteIn::On { sound: 0, pitch: 60, velocity: 127, length: Some(240) });
+        assert_eq!(midi_notes(&rx), [(true, 72)], "an octave up, and not as written");
+    }
+
+    /// A key is recorded as played, before the plug-in, and heard as it plays it.
+    #[test]
+    fn a_take_holds_what_was_played_before_a_midi_input_plugin() {
+        let (mut e, rx, seen, _) = midi_input_engine(0.0);
+        e.set_recording(true);
+        blocks(&mut e, 1);
+        seen.lock().unwrap().clear();
+        let _ = midi_notes(&rx);
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap()[0], midi_input::NoteIn::On { sound: 0, pitch: 50, velocity: 90, length: None });
+        assert_eq!(midi_notes(&rx), [(true, 62)]);
+        e.schedule(0, Live::NoteRelease { group: 0, sound: 0, pitch: 50 });
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap()[1], midi_input::NoteIn::Off { sound: 0, pitch: 50 });
+        assert_eq!(midi_notes(&rx), [(false, 62)]);
+        let rec = e.take_recorded();
+        assert_eq!(rec.iter().map(|r| r.pitch).collect::<Vec<_>>(), [50, 50], "{rec:?}");
+    }
+
+    /// What a plug-in plays later plays then, not before.
+    #[test]
+    fn a_midi_input_plugin_plays_at_the_time_it_says() {
+        let (mut e, rx, _, _) = midi_input_engine(120.0);
+        let frames_late = 120.0 * e.samples_per_tick();
+        let early = (frames_late / 256.0).floor() as usize - 1;
+        blocks(&mut e, early);
+        assert_eq!(midi_notes(&rx), [], "120 ticks not gone yet");
+        blocks(&mut e, 3);
+        assert_eq!(midi_notes(&rx), [(true, 72)]);
+    }
+
+    /// Stopping drops what it was still to play and tells it.
+    #[test]
+    fn stopping_ends_what_a_midi_input_plugin_was_to_play() {
+        let (mut e, rx, _, stopped) = midi_input_engine(480.0);
+        blocks(&mut e, 2);
+        e.stop();
+        assert!(*stopped.lock().unwrap());
+        let n = (960.0 * e.samples_per_tick() / 256.0).ceil() as usize;
+        blocks(&mut e, n);
+        assert_eq!(midi_notes(&rx), [], "nothing after the stop");
+    }
+
+    /// Taken out, a plug-in ends what it holds, and notes go straight to the sound again.
+    #[test]
+    fn taking_a_midi_input_plugin_out_ends_its_notes() {
+        let (mut e, rx, seen, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        let _ = midi_notes(&rx);
+        assert!(e.set_midi_input(0, None).is_some(), "it comes back, to be freed");
+        assert_eq!(midi_notes(&rx), [(false, 62)]);
+        let before = seen.lock().unwrap().len();
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 55, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap().len(), before);
+        assert_eq!(midi_notes(&rx), [(true, 55)]);
+    }
+
+    /// A muted sound's notes don't go in, and a slot past the last refuses.
+    #[test]
+    fn a_midi_input_plugin_skips_muted_notes_and_slots_end() {
+        let (mut e, _rx, seen, _) = midi_input_engine(0.0);
+        e.sound_muted = vec![vec![true]];
+        blocks(&mut e, 1);
+        assert!(seen.lock().unwrap().is_empty());
+        let plugin = OctaveUp { seen: NotesIn::default(), stopped: Default::default(), later: 0.0, held: None };
+        assert!(e.set_midi_input(midi_input::SLOTS, Some(Box::new(plugin))).is_some());
+    }
+
+    /// Sounds rendered ahead have their pattern's notes sent in advance. With a plug-in on
+    /// the group they aren't: a plug-in that plays nothing silences them, and one that plays
+    /// its notes is heard.
+    #[test]
+    fn a_midi_input_plugin_takes_notes_from_sounds_rendered_ahead() {
+        struct Silent;
+        impl midi_input::MidiInput for Silent {
+            fn note(&mut self, _: midi_input::NoteIn, _: midi_input::Clock, _: &mut midi_input::Outbox) {}
+        }
+        let (_tmp, p) = eight_project();
+        let loudest = |plugin: Option<Box<dyn midi_input::MidiInput>>| {
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut SampleCache::default());
+            e.looping = true;
+            assert!(e.set_midi_input(0, plugin).is_none());
+            e.render_ahead(700, 2, 256, true);
+            let mut buf = vec![0f32; 512];
+            let mut most = 0f32;
+            for _ in 0..188 {
+                e.process(&mut buf);
+                most = buf.iter().fold(most, |a, s| a.max(s.abs()));
+            }
+            assert_eq!(e.ahead_underruns(), 0);
+            most
+        };
+        assert!(loudest(None) > 0.01, "the project plays");
+        assert_eq!(loudest(Some(Box::new(Silent))), 0.0, "nothing got past it");
+        let plugin = OctaveUp { seen: NotesIn::default(), stopped: Default::default(), later: 0.0, held: None };
+        assert!(loudest(Some(Box::new(plugin))) > 0.01, "what it plays reaches them");
+    }
+
+    /// An engine that replaces this one has its plug-ins, told the song stopped.
+    #[test]
+    fn a_new_engine_keeps_the_midi_input_plugins() {
+        let (mut old, _rx, seen, stopped) = midi_input_engine(0.0);
+        let mut cache = SampleCache::default();
+        let (mut new, _) = Engine::new(&project(), None, 48_000, Mode::Arrangement, &mut cache);
+        new.take_midi_inputs(&mut old);
+        assert!(*stopped.lock().unwrap());
+        blocks(&mut new, 1);
+        assert!(!seen.lock().unwrap().is_empty());
     }
 
     /// A CC route from Square LFO 1 (high 0.5) to CC 74 on channel 3 of "Synth", and what
