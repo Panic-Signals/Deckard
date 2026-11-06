@@ -790,21 +790,30 @@ struct Bus {
 /// The groups' buses in the order they run: one that feeds another first (by its fader,
 /// or by a strip of one of its plug-ins).
 fn bus_order(buses: &[Option<Bus>]) -> Vec<usize> {
-    fn depth(buses: &[Option<Bus>], g: usize, d: usize) -> usize {
+    /// How many buses `g` feeds in a row, each bus worked out once (`memo`): a bus met
+    /// again on its own way (a loop) counts as none there.
+    fn depth(buses: &[Option<Bus>], g: usize, memo: &mut [Option<usize>], busy: &mut [bool]) -> usize {
         let Some(Some(b)) = buses.get(g) else { return 0 };
-        if d >= 8 {
+        if let Some(d) = memo[g] {
+            return d;
+        }
+        if busy[g] {
             return 0;
         }
+        busy[g] = true;
         let strips = b.chain.units.iter().flat_map(|u| &u.extras).flat_map(|x| [x.route.0, x.fallback.0]);
-        std::iter::once(b.route.0)
-            .chain(strips)
-            .filter_map(|n| n.filter(|&n| n >= GROUP_BUS))
-            .map(|n| 1 + depth(buses, n - GROUP_BUS, d + 1))
-            .max()
-            .unwrap_or(0)
+        let next: Vec<usize> =
+            std::iter::once(b.route.0).chain(strips).filter_map(|n| n.filter(|&n| n >= GROUP_BUS)).map(|n| n - GROUP_BUS).collect();
+        let d = next.into_iter().map(|n| 1 + depth(buses, n, memo, busy)).max().unwrap_or(0);
+        busy[g] = false;
+        memo[g] = Some(d);
+        d
     }
+    let mut memo = vec![None; buses.len()];
+    let mut busy = vec![false; buses.len()];
+    let depths: Vec<usize> = (0..buses.len()).map(|g| depth(buses, g, &mut memo, &mut busy)).collect();
     let mut order: Vec<usize> = (0..buses.len()).filter(|&g| buses[g].is_some()).collect();
-    order.sort_by_key(|&g| std::cmp::Reverse(depth(buses, g, 0)));
+    order.sort_by_key(|&g| std::cmp::Reverse(depths[g]));
     order
 }
 
@@ -1582,14 +1591,14 @@ pub const HEARD_ROOM: usize = 32;
 /// A peak above this (-90 dBFS, linear) on either side in a block is sound.
 const HEARD_FLOOR: f32 = 3.1623e-5;
 
-/// Where a [`Heard`] comes in the mixer: by group, sound (a group's own slots after its
-/// sounds, the master's last), slot (a sound's instrument first) and bus.
+/// Where a [`Heard`] comes in the mixer: by group (a group's own slots before its
+/// sounds, the master's last), sound, slot (a sound's instrument first) and bus.
 fn heard_rank(h: &Heard) -> (usize, usize, usize, usize) {
     match h.owner {
-        Owner::Sound(g, s) => (g, s, 0, h.bus),
-        Owner::Chain(g, s, k) => (g, s, k + 1, h.bus),
-        Owner::Group(g, k) => (g, usize::MAX, k, h.bus),
-        Owner::Master(k) => (usize::MAX, usize::MAX, k, h.bus),
+        Owner::Group(g, k) => (g, 0, k, h.bus),
+        Owner::Sound(g, s) => (g, s + 1, 0, h.bus),
+        Owner::Chain(g, s, k) => (g, s + 1, k + 1, h.bus),
+        Owner::Master(k) => (usize::MAX, 0, k, h.bus),
     }
 }
 
@@ -9109,6 +9118,47 @@ mod tests {
 
     fn master_heard(bus: usize) -> Heard {
         Heard { owner: deckard_model::extra_out::Owner::Master(0), bus }
+    }
+
+    /// A bus feeding another runs first; buses feeding each other in a loop (which a
+    /// project can be made to do) still get an order, each worked out once.
+    #[test]
+    fn bus_order_runs_feeders_first_and_survives_loops() {
+        let bus = |to: Option<usize>| Bus {
+            chain: bare_chain(Vec::new(), 48_000.0),
+            buf: Vec::new(),
+            route: (to.map(|g| GROUP_BUS + g), (1.0, 1.0)),
+            ramp: GainRamp::default(),
+        };
+        // 0 → 1 → 2, then a ring 3 → 4 → … → 40 → 3.
+        let mut buses: Vec<Option<Bus>> = vec![Some(bus(Some(1))), Some(bus(Some(2))), Some(bus(None))];
+        buses.extend((3..=40).map(|g| Some(bus(Some(if g == 40 { 3 } else { g + 1 })))));
+        let order = bus_order(&buses);
+        assert_eq!(order.len(), 41);
+        let at = |g: usize| order.iter().position(|&x| x == g).unwrap();
+        assert!(at(0) < at(1) && at(1) < at(2), "{order:?}");
+    }
+
+    /// Heard pairs sort as the mixer shows strips: a group's own slots, then its sounds
+    /// (instrument, then chain), the master's last.
+    #[test]
+    fn heard_pairs_sort_in_mixer_order() {
+        use deckard_model::extra_out::Owner;
+        let h = |owner, bus| Heard { owner, bus };
+        let mut v = [
+            h(Owner::Master(0), 1),
+            h(Owner::Chain(1, 0, 0), 1),
+            h(Owner::Sound(1, 0), 2),
+            h(Owner::Group(1, 1), 1),
+            h(Owner::Sound(0, 3), 1),
+            h(Owner::Group(1, 0), 3),
+        ];
+        v.sort_by_key(heard_rank);
+        let owners: Vec<Owner> = v.iter().map(|h| h.owner).collect();
+        assert_eq!(
+            owners,
+            [Owner::Sound(0, 3), Owner::Group(1, 0), Owner::Group(1, 1), Owner::Sound(1, 0), Owner::Chain(1, 0, 0), Owner::Master(0)]
+        );
     }
 
     /// Silence on a plug-in's extra pairs (just under -90 dBFS, too) isn't sound.

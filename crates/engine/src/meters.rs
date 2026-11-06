@@ -161,7 +161,7 @@ impl HeardBoard {
     }
 
     /// Each (slot, bus) heard since the last call, once, in mixer order: by group, its
-    /// sounds (each one's instrument, then its chain's slots), then its own slots; the
+    /// own slots, then its sounds (each one's instrument, then its chain's slots); the
     /// master's last. No allocating (the audio thread calls it).
     pub fn take(&self, mut f: impl FnMut(Owner, usize)) {
         let mut each = |i: usize, o: Owner| {
@@ -175,14 +175,14 @@ impl HeardBoard {
         while groups != 0 {
             let g = groups.trailing_zeros() as usize;
             groups &= groups - 1;
+            for k in 0..SLOTS {
+                each(GROUP_BASE + g * SLOTS + k, Owner::Group(g, k));
+            }
             for s in 0..SOUNDS {
                 each((g * SOUNDS + s) * SOUND_CELLS, Owner::Sound(g, s));
                 for k in 0..SLOTS {
                     each((g * SOUNDS + s) * SOUND_CELLS + 1 + k, Owner::Chain(g, s, k));
                 }
-            }
-            for k in 0..SLOTS {
-                each(GROUP_BASE + g * SLOTS + k, Owner::Group(g, k));
             }
         }
         if self.master.swap(false, Ordering::Acquire) {
@@ -211,7 +211,7 @@ mod tests {
         b.take(|o, bus| v.push((o, bus)));
         assert_eq!(
             v,
-            [(Owner::Sound(0, 2), 2), (Owner::Sound(1, 0), 1), (Owner::Chain(1, 0, 1), 3), (Owner::Group(1, 0), 2), (Owner::Master(0), 1)]
+            [(Owner::Sound(0, 2), 2), (Owner::Group(1, 0), 2), (Owner::Sound(1, 0), 1), (Owner::Chain(1, 0, 1), 3), (Owner::Master(0), 1)]
         );
         v.clear();
         b.take(|o, bus| v.push((o, bus)));
