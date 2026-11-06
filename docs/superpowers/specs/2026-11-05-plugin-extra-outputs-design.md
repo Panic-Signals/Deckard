@@ -69,11 +69,12 @@ Every strip starts as **stereo**. A menu on the strip changes it (the user decid
 
 - **Stereo:** as described above.
 - **Mono:** left and right are summed into one mono signal, (L+R)/2, played equally on
-  both sides. A mono strip has **no pan** (the user decided this on 2026-11-06); its pan
-  control is hidden and any saved pan is ignored.
+  both sides, and its **pan** places it like a sound's pan. (2026-11-06: the user first
+  removed pan from mono strips, then put it back; panning hard left or right is how a
+  mono strip goes to one side of its output pair.)
 - **Split:** the strip becomes two mono strips, **L** and **R**, labelled
   "Portal · Out 3 L" and "Portal · Out 3 R". Each half is mono (its one side played
-  equally on both sides, with no pan, like a Mono strip) and has its own level, mute, solo,
+  on both sides and placed by its own pan, like a Mono strip) and has its own level, mute, solo,
   meter and output, so a drum plug-in with the kick on the left and the snare on the right
   of one pair can be mixed as two channels. Both halves start with the split strip's
   settings. On a split half, the menu offers **Join**, which turns the pair back into one
@@ -81,24 +82,8 @@ Every strip starts as **stereo**. A menu on the strip changes it (the user decid
 
 Changing the mode is one undoable edit, and it is saved.
 
-**Single hardware outputs for mono strips** (the user asked for this on 2026-11-06). A
-mono strip or a split half can go to **one side of an output pair** as well as to a
-whole pair. Its output picker lists the pairs ("Ext. 3") and, under them, each single
-output ("Ext. 3 L", "Ext. 3 R", using the interface's output names when it has them).
-A stereo strip's picker offers only pairs, as now.
-
-- **Splitting** a strip on a pair sends the L half to that pair's left output and the R
-  half to its right, so splitting doesn't change what you hear or where.
-- **Joining** two halves goes back to the pair the L half was on (whole pair).
-- **Mono:** switching a strip to Mono keeps it on its whole pair (the mono signal on both
-  sides). Pick a single output to put it on one side only. Switching back to Stereo puts
-  it back on the whole pair.
-- **Free outputs:** a single output in use counts as its pair in use when a new strip's
-  output is picked.
-- **Stems:** a strip on a single output still exports its own stem, mono on both
-  channels.
-- Saved in the DECKARD block. Regular sounds and groups keep stereo-pair outputs only
-  (Maschine has no single outputs to save them in).
+Outputs are always stereo pairs; there is no single-output ("Ext. 3 L") choice. (The
+user tried single outputs on 2026-11-06 and dropped them: pan does the same job.)
 
 ### Where an extra output's sound goes
 
@@ -162,6 +147,7 @@ These were decided by the user (Josh) in the 2026-11-05 brainstorm:
 - On export, an extra output on its own hardware output becomes a separate stem.
 - (2026-11-06) A strip can be stereo, mono, or split into two mono strips (L and R).
 - (2026-11-06) Don't call them "Aux"; that name already belongs to the send effects.
+- (2026-11-06) Mono strips and split halves have a pan; outputs stay stereo pairs (no single "Ext. 3 L" outputs).
 
 These are Claude's calls, which the user hasn't confirmed separately:
 

@@ -307,8 +307,8 @@ A plug-in with more than one output pair (Kontakt, a drum plug-in with separate 
   - **Stereo** or **Mono** (the pair's sum).
   - **Split** turns the strip into two mono strips, its left and right sides, each with the strip's settings.
   - On a split half the menu offers **Join**. The two halves become one stereo strip again, with the left half's settings.
-- **Controls:** level, a mute (right-click it to solo), a meter with peak, and an output.
-  - Mono strips and split halves have **no pan**: they play centred, and the pan control is hidden.
+- **Controls:** level, pan, a mute (right-click it to solo), a meter with peak, and an output.
+  - On a mono strip or a split half, pan places the mono signal; pan it hard left or right to send it to one side of its output pair.
   - The output picker offers what the owner's own output does, less anything that would loop back into the owner. A master plug-in's strip can only go to a hardware output or None.
 - **New strips:** a new strip takes the next free connected hardware output. When none is free, it plays into its owner's parent.
   - A strip appearing is not an edit, so it adds no undo step.
