@@ -52,6 +52,8 @@ struct Strip {
     name: String,
     /// The plug-in's name, over `name` (an extra output's strip; else empty).
     plugin: String,
+    /// The owner's full name (an extra output's strip; else empty): its ID is `id`.
+    owner: String,
     color: Color32,
     level: f64,
     pan: f64,
@@ -362,17 +364,30 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
     let gmeter = |g: usize| app.meters.get(g).map_or((0.0, 0.0), |row| row.iter().fold((0f32, 0f32), |m, v| (m.0.max(v.0), m.1.max(v.1))));
     // A plug-in's extra outputs: each strip after its channel's (the master's before the
     // master), shown where that channel is.
+    use deckard_model::extra_out::Owner;
     let extra_strip = |i: usize| -> Strip {
         let x = &p.extra_outs[i];
         let plugin = deckard_model::extra_out::plugin_at(p, x.owner)
             .filter(|pr| pr.id == x.plugin && !pr.name.is_empty())
             .map_or_else(|| x.plugin.clone(), |pr| pr.name.clone());
         let lin = if x.level.is_finite() { x.level.clamp(0.0, 4.0) } else { 0.0 };
+        // Its owner: the group's letter (A), a sound's (A3), or M for the master.
+        let letter = |g: usize| ((b'A' + (g % 8) as u8) as char).to_string();
+        let sound = |g: usize, s: usize| {
+            let n = p.groups.get(g).and_then(|gr| gr.sounds.get(s)).map(|sn| sn.name.clone()).filter(|n| !n.is_empty());
+            n.unwrap_or_else(|| format!("Sound {}", s + 1))
+        };
+        let (oid, oname) = match x.owner {
+            Owner::Group(g, _) => (letter(g), if g < p.groups.len() { group_name(p, g) } else { letter(g) }),
+            Owner::Sound(g, s) | Owner::Chain(g, s, _) => (format!("{}{}", letter(g), s + 1), sound(g, s)),
+            Owner::Master(_) => ("M".to_string(), "Master".to_string()),
+        };
         Strip {
             ch: Channel::Extra(i),
-            id: String::new(),
+            id: oid,
             name: crate::extra_outs::label(x),
             plugin,
+            owner: oname,
             color: EXTRA_EDGE,
             level: if lin > 0.0 { deckard_model::level_from_db(20.0 * lin.log10()) } else { 0.0 },
             pan: if x.pan.is_finite() { x.pan.clamp(-1.0, 1.0) } else { 0.0 },
@@ -388,7 +403,6 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             mode: Some(mode_field(x, i)),
         }
     };
-    use deckard_model::extra_out::Owner;
     let extras_of = |f: &dyn Fn(Owner) -> bool| -> Vec<Strip> {
         p.extra_outs.iter().enumerate().filter(|(_, x)| f(x.owner)).map(|(i, _)| extra_strip(i)).collect()
     };
@@ -401,6 +415,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     id: (s + 1).to_string(),
                     name: if snd.name.is_empty() { format!("Sound {}", s + 1) } else { snd.name.clone() },
                     plugin: String::new(),
+                    owner: String::new(),
                     color: sound_color(p, app.group, s),
                     level: snd.level,
                     pan: snd.pan,
@@ -415,8 +430,6 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     aux: snd.aux,
                     mode: None,
                 });
-                let g = app.group;
-                strips.extend(extras_of(&|o| matches!(o, Owner::Sound(a, b) | Owner::Chain(a, b, _) if (a, b) == (g, s))));
             }
         }
     } else {
@@ -426,6 +439,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 id: group_id(g),
                 name: group_name(p, g),
                 plugin: String::new(),
+                owner: String::new(),
                 color: group_color(p, g),
                 level: gr.level,
                 pan: gr.pan,
@@ -440,10 +454,20 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 aux: gr.aux,
                 mode: None,
             });
-            strips.extend(extras_of(&|o| matches!(o, Owner::Group(a, _) if a == g)));
         }
     }
-    strips.extend(extras_of(&|o| matches!(o, Owner::Master(_))));
+    if !sounds {
+        // Every extra output, just left of the master: by owner in mixer order (a group's,
+        // then its sounds'; the master's last), each owner's in `extra_outs` order.
+        let rank = |o: Owner| match o {
+            Owner::Group(g, _) => (g, 0),
+            Owner::Sound(g, s) | Owner::Chain(g, s, _) => (g, s.saturating_add(1)),
+            Owner::Master(_) => (usize::MAX, 0),
+        };
+        let mut all: Vec<usize> = (0..p.extra_outs.len()).collect();
+        all.sort_by_key(|&i| rank(p.extra_outs[i].owner));
+        strips.extend(all.into_iter().map(extra_strip));
+    }
     // The fixed right column: the master, or the focused group at sound level.
     let right = Rect::from_min_max(Pos2::new(rect.right() - MASTER_W, rect.top()), rect.max);
     let fixed = if sounds && let Some(gr) = p.groups.get(app.group) {
@@ -452,6 +476,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             id: group_id(app.group),
             name: group_name(p, app.group),
             plugin: String::new(),
+            owner: String::new(),
             color: group_color(p, app.group),
             level: gr.level,
             pan: gr.pan,
@@ -472,6 +497,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             id: String::new(),
             name: "Master".into(),
             plugin: String::new(),
+            owner: String::new(),
             color: Color32::WHITE,
             level: p.master_level,
             pan: p.master_pan,
@@ -617,7 +643,8 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     } else if extra.is_some() {
         // The plug-in's name, small, over the output's.
         let pr = Rect::from_min_size(row1.min, Vec2::new(r.width() - 14.0, row1.height()));
-        painter.with_clip_rect(vis(pr)).text(pr.left_center(), Align2::LEFT_CENTER, &st.plugin, font(9.0), id_ink);
+        let top = elide_middle(painter, &format!("{}\u{b7}{}", st.id, st.plugin), 9.0, pr.width());
+        painter.with_clip_rect(vis(pr)).text(pr.left_center(), Align2::LEFT_CENTER, &top, font(9.0), id_ink);
     } else {
         painter.text(row1.left_center(), Align2::LEFT_CENTER, &st.id, font(14.0), id_ink);
     }
@@ -654,7 +681,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     }
     if extra.is_some() {
         ui.interact(vis(head), id.with("head"), Sense::hover())
-            .on_hover_text(format!("{}: {} (an extra output of the plug-in)", st.plugin, st.name));
+            .on_hover_text(format!("{}: {}, {} (an extra output of the plug-in)", st.owner, st.plugin, st.name));
     }
     // Header clicks: focus; double-click the ID: mute; the name: rename; elsewhere:
     // switch between groups and sounds.
@@ -1192,55 +1219,51 @@ mod tests {
     }
 
     #[test]
-    fn a_strip_is_drawn_after_its_group() {
-        let mut app = app_with(vec![out(Owner::Group(0, 0), "Bus 1", AudioDest::Ext(1))]);
+    fn all_strips_sit_before_the_master_in_group_order() {
+        let mut app = app_with(vec![
+            out(Owner::Master(0), "Bus 0", AudioDest::Ext(1)),
+            out(Owner::Chain(1, 0, 0), "Bus 1", AudioDest::Parent),
+            out(Owner::Sound(0, 1), "Bus 2", AudioDest::Parent),
+            out(Owner::Group(1, 0), "Bus 3", AudioDest::Parent),
+            out(Owner::Group(0, 0), "Bus 4", AudioDest::Parent),
+            out(Owner::Group(0, 0), "Bus 5", AudioDest::Parent),
+            out(Owner::Sound(0, 0), "Bus 6", AudioDest::Parent),
+        ]);
         app.mixer_sounds = false;
         let h = harness(app);
         let o = order(&h);
-        assert_eq!(&o[..4], &[Channel::Group(0), Channel::Extra(0), Channel::Group(1), Channel::Group(2)], "{o:?}");
-        assert_eq!(o.last(), Some(&Channel::Master));
+        let e = |i| Channel::Extra(i);
+        assert_eq!(
+            o,
+            vec![Channel::Group(0), Channel::Group(1), Channel::Group(2), e(4), e(5), e(6), e(2), e(3), e(1), e(0), Channel::Master],
+            "{o:?}"
+        );
     }
 
     #[test]
-    fn a_sound_strip_is_drawn_after_its_sound() {
+    fn no_strips_in_the_sounds_mixer() {
         let mut app = app_with(vec![
             out(Owner::Chain(0, 1, 0), "Bus 1", AudioDest::Parent),
             out(Owner::Group(0, 0), "Bus 2", AudioDest::Parent),
-            out(Owner::Sound(1, 0), "Bus 3", AudioDest::Parent),
+            out(Owner::Master(0), "Bus 3", AudioDest::Parent),
         ]);
         (app.mixer_sounds, app.group) = (true, 0);
         let h = harness(app);
         let o = order(&h);
-        let at = |c| o.iter().position(|x| *x == c);
-        assert_eq!(at(Channel::Extra(0)), at(Channel::Sound(0, 1)).map(|i| i + 1), "{o:?}");
-        assert_eq!(at(Channel::Sound(0, 2)), at(Channel::Extra(0)).map(|i| i + 1), "{o:?}");
-        assert_eq!(at(Channel::Extra(1)), None, "a group's strip shows with the groups");
-        assert_eq!(at(Channel::Extra(2)), None, "another group's sound's strip shows with its sounds");
+        assert!(o.iter().all(|c| !matches!(c, Channel::Extra(_))), "{o:?}");
     }
 
     #[test]
-    fn master_owned_strips_sit_before_the_master() {
-        let mut app = app_with(vec![out(Owner::Master(0), "Bus 1", AudioDest::Ext(1))]);
-        app.mixer_sounds = false;
-        let mut h = harness(app);
-        let o = order(&h);
-        assert_eq!(&o[o.len() - 3..], &[Channel::Group(2), Channel::Extra(0), Channel::Master], "{o:?}");
-        (h.state_mut().app.mixer_sounds, h.state_mut().app.group) = (true, 0);
-        h.run_steps(2);
-        let o = order(&h);
-        assert_eq!(&o[o.len() - 2..], &[Channel::Extra(0), Channel::Group(0)], "the sounds view too: {o:?}");
-    }
-
-    #[test]
-    fn the_strip_shows_plugin_and_output_names() {
-        let mut app = app_with(vec![out(Owner::Group(1, 0), "Aux 1", AudioDest::Ext(1))]);
+    fn the_strip_names_its_owner() {
+        let mut app = app_with(vec![
+            out(Owner::Group(1, 0), "Bus 1", AudioDest::Parent),
+            out(Owner::Sound(0, 2), "Bus 2", AudioDest::Parent),
+            out(Owner::Master(0), "Bus 3", AudioDest::Parent),
+        ]);
         app.mixer_sounds = false;
         let h = harness(app);
         let text = &h.state().text;
-        // The plug-in's name, then its output pair (bus 1: "Out 2"); never "Aux", which
-        // means the send effects here, even when the plug-in calls its bus that.
-        assert!(text.contains("|Portal|") && text.contains("|Out 2|"), "{text}");
-        assert!(!text.contains("|Aux 1|"), "{text}");
+        assert!(text.contains("|B\u{b7}Portal|") && text.contains("|A3\u{b7}Portal|") && text.contains("|M\u{b7}Portal|"), "{text}");
     }
 
     #[test]
@@ -1388,7 +1411,11 @@ mod tests {
         h.get_by_label("Split").click();
         h.run_steps(3);
         let o = order(&h);
-        assert_eq!(&o[..5], &[Channel::Group(0), Channel::Extra(0), Channel::Extra(1), Channel::Group(1), Channel::Extra(2)], "{o:?}");
+        assert_eq!(
+            &o[..6],
+            &[Channel::Group(0), Channel::Group(1), Channel::Group(2), Channel::Extra(0), Channel::Extra(1), Channel::Extra(2)],
+            "{o:?}"
+        );
         let text = &h.state().text;
         assert!(text.contains("|Out 2 Kick L|") && text.contains("|Out 2 Kick R|") && text.contains("|Out 2|"), "{text}");
         let doc = h.state().app.doc.clone().unwrap();
