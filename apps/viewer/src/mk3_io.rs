@@ -211,6 +211,21 @@ impl Touching {
     }
 }
 
+#[derive(Clone)]
+pub enum ScreenFrame {
+    Picture(deckard_surface::Picture),
+    Pixels(Arc<Vec<[u8; 4]>>),
+}
+
+impl ScreenFrame {
+    pub fn into_pixels(self) -> Vec<[u8; 4]> {
+        match self {
+            ScreenFrame::Picture(p) => p.into_pixels(),
+            ScreenFrame::Pixels(px) => Arc::unwrap_or_clone(px),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     events: Vec<Event>,
@@ -224,7 +239,7 @@ struct Shared {
     /// What the LEDs should show.
     leds: Option<deckard_mk3::leds::Leds>,
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
-    screens: Option<(u64, Arc<Vec<[u8; 4]>>)>,
+    screens: Option<(u64, ScreenFrame)>,
     display_status: String,
     /// An MK3 is plugged in, and NI's software is why its screens won't open.
     agent_holding: bool,
@@ -335,10 +350,10 @@ impl Mk3Io {
 
     /// Show these on the displays (both side by side, 960 × 272); `n` changes when
     /// the picture does.
-    pub fn set_screens(&self, n: u64, px: &[[u8; 4]]) {
+    pub fn set_screens(&self, n: u64, frame: ScreenFrame) {
         let mut s = self.shared.lock().unwrap();
         if s.screens.as_ref().is_none_or(|(m, _)| *m != n) {
-            s.screens = Some((n, Arc::new(px.to_vec())));
+            s.screens = Some((n, frame));
         }
     }
 
@@ -592,6 +607,7 @@ fn run_displays(shared: &Mutex<Shared>) {
             set_agent_holding(&mut s, false);
         }
         let mut shown = None;
+        let mut last_px: Vec<[u8; 4]> = Vec::new();
         loop {
             // One display's half of a 960-wide picture, as the display takes it.
             let half = |px: &[[u8; 4]], x0: usize| -> Vec<u16> {
@@ -620,12 +636,16 @@ fn run_displays(shared: &Mutex<Shared>) {
             }
             let latest = shared.lock().unwrap().screens.clone();
             match latest {
-                Some((n, px)) if shown != Some(n) => {
-                    if let Err(e) = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH))) {
-                        let mut s = shared.lock().unwrap();
-                        s.display_status = e;
-                        s.displays_connected = false;
-                        break;
+                Some((n, frame)) if shown != Some(n) => {
+                    let px = frame.into_pixels();
+                    if px != last_px {
+                        if let Err(e) = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH))) {
+                            let mut s = shared.lock().unwrap();
+                            s.display_status = e;
+                            s.displays_connected = false;
+                            break;
+                        }
+                        last_px = px;
                     }
                     shown = Some(n);
                 }

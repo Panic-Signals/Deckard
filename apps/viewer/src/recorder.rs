@@ -21,6 +21,7 @@ use deckard_engine::sample::Sample;
 use deckard_engine::{Tap, TapSource};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -148,6 +149,9 @@ type MeterKey = (usize, usize, usize, Option<usize>, Option<String>, bool, bool)
 pub struct Recorder {
     pub view: RecorderView,
     incoming: Arc<Mutex<Vec<[f32; 2]>>>,
+    peaks: Arc<[AtomicU32; 2]>,
+    recording: Arc<AtomicBool>,
+    polled_at: Option<Instant>,
     stream: Option<cpal::Stream>,
     tap: Option<Arc<Mutex<Vec<f32>>>>,
     run: Option<Run>,
@@ -181,6 +185,11 @@ impl Recorder {
     /// Armed or recording: the parameters can't change.
     pub fn busy(&self) -> bool {
         self.run.is_some()
+    }
+
+    /// Listening to the chosen source for the RECORD tab's input meter.
+    pub fn is_metering(&self) -> bool {
+        self.meter_key.is_some()
     }
 
     /// Whether START can be pressed: Auto needs something to play.
@@ -232,16 +241,19 @@ impl Recorder {
             self.close_with(with.output);
         }
         self.view.error = None;
+        self.recording.store(true, Relaxed);
         let internal = self.view.source == 2;
         let rate = match (internal, with.output) {
             (true, Some(out)) => out.rate,
             (true, None) => {
+                self.recording.store(false, Relaxed);
                 self.view.error = Some("no audio output to record from".into());
                 return;
             }
             (false, _) => match self.open_input(&with) {
                 Ok(rate) => rate,
                 Err(e) => {
+                    self.recording.store(false, Relaxed);
                     self.view.error = Some(e);
                     return;
                 }
@@ -261,6 +273,7 @@ impl Recorder {
             match with.output.filter(|o| o.has_engine()) {
                 Some(o) => o.set_tap(Some(Tap { source, buffer: buffer.clone() })),
                 None => {
+                    self.recording.store(false, Relaxed);
                     self.view.error = Some("nothing is playing to record from".into());
                     return;
                 }
@@ -346,16 +359,33 @@ impl Recorder {
         }
         let incoming = self.incoming.clone();
         incoming.lock().unwrap().clear();
+        let peaks = self.peaks.clone();
+        peaks[0].store(0, Relaxed);
+        peaks[1].store(0, Relaxed);
+        let recording = self.recording.clone();
         let monitor = self.view.monitor.then(|| with.output.map(Output::monitor)).flatten();
         let rate = config.sample_rate();
+        let mut stream_config: cpal::StreamConfig = config.clone().into();
+        if let cpal::SupportedBufferSize::Range { min, max } = config.buffer_size() {
+            stream_config.buffer_size = cpal::BufferSize::Fixed(256.clamp(*min, *max));
+        }
         let stream = device
             .build_input_stream(
-                config.into(),
+                stream_config,
                 move |data: &[f32], _| {
                     let at = |f: &[f32], c: Option<usize>| c.map_or(0.0, |c| f[c]);
-                    if let Ok(mut inc) = incoming.try_lock() {
-                        inc.extend(data.chunks(channels).map(|f| [at(f, l), at(f, r)]));
+                    let mut pk = [f32::from_bits(peaks[0].load(Relaxed)), f32::from_bits(peaks[1].load(Relaxed))];
+                    let mut inc = if recording.load(Relaxed) { incoming.try_lock().ok() } else { None };
+                    for f in data.chunks(channels) {
+                        let (fl, fr) = (at(f, l), at(f, r));
+                        pk[0] = pk[0].max(fl.abs());
+                        pk[1] = pk[1].max(fr.abs());
+                        if let Some(inc) = inc.as_mut() {
+                            inc.push([fl, fr]);
+                        }
                     }
+                    peaks[0].store(pk[0].to_bits(), Relaxed);
+                    peaks[1].store(pk[1].to_bits(), Relaxed);
                     if let Some(m) = &monitor
                         && let Ok(mut m) = m.try_lock()
                     {
@@ -424,6 +454,10 @@ impl Recorder {
         {
             o.set_tap(None);
         }
+        self.recording.store(false, Relaxed);
+        self.peaks[0].store(0, Relaxed);
+        self.peaks[1].store(0, Relaxed);
+        self.polled_at = None;
         self.stream = None;
         self.run = None;
         self.midi = None;
@@ -433,21 +467,33 @@ impl Recorder {
 
     /// Take up what arrived (call every frame). Returns a finished recording.
     pub fn poll(&mut self, output: Option<&Output>, clock: Clock) -> Option<Finished> {
-        let new: Vec<[f32; 2]> = if let Some(tap) = &self.tap {
+        let now = Instant::now();
+        let dt = self.polled_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        self.polled_at = Some(now);
+        let fall = if dt >= 0.001 { 0.5f32.powf(dt / 0.15) } else { 0.8 };
+        let (new, peak): (Vec<[f32; 2]>, (f32, f32)) = if let Some(tap) = &self.tap {
             let raw = std::mem::take(&mut *tap.lock().unwrap());
-            raw.as_chunks::<2>().0.to_vec()
+            let frames = raw.as_chunks::<2>().0;
+            let peak = frames.iter().fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
+            let new = if self.run.is_some() { frames.to_vec() } else { Vec::new() };
+            (new, peak)
         } else if self.stream.is_some() {
-            std::mem::take(&mut *self.incoming.lock().unwrap())
+            let new = if self.run.is_some() { std::mem::take(&mut *self.incoming.lock().unwrap()) } else { Vec::new() };
+            let mut peak = (f32::from_bits(self.peaks[0].swap(0, Relaxed)), f32::from_bits(self.peaks[1].swap(0, Relaxed)));
+            for f in &new {
+                peak = (peak.0.max(f[0].abs()), peak.1.max(f[1].abs()));
+            }
+            (new, peak)
         } else {
-            self.view.meter = (self.view.meter.0 * 0.8, self.view.meter.1 * 0.8);
+            self.view.meter = (self.view.meter.0 * fall, self.view.meter.1 * fall);
             return None;
         };
-        let peak = new.iter().fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
-        self.view.meter = ((self.view.meter.0 * 0.8).max(peak.0), (self.view.meter.1 * 0.8).max(peak.1));
+        self.view.meter = ((self.view.meter.0 * fall).max(peak.0), (self.view.meter.1 * fall).max(peak.1));
         if self.run.is_none() {
             // Only metering.
             return None;
         }
+        let got_frames = !new.is_empty();
         let done = match self.view.mode {
             3 => self.poll_auto(output, new),
             0 => self.poll_detect(new),
@@ -455,12 +501,16 @@ impl Recorder {
         };
         if let Some(run) = &self.run {
             self.view.recorded_frames = if run.auto.is_some() { run.pending.len() } else { run.frames.len() };
-            let shown: Vec<[f32; 2]> = match self.view.status {
-                RecStatus::Waiting => run.ring.iter().copied().collect(),
-                _ if run.auto.is_some() => run.pending.clone(),
-                _ => run.frames[run.frames.len().saturating_sub(run.rate as usize * 5)..].to_vec(),
-            };
-            self.view.preview = preview(&shown);
+            if got_frames {
+                self.view.preview = match self.view.status {
+                    RecStatus::Waiting => {
+                        let shown: Vec<[f32; 2]> = run.ring.iter().copied().collect();
+                        preview(&shown)
+                    }
+                    _ if run.auto.is_some() => preview(&run.pending),
+                    _ => preview(&run.frames[run.frames.len().saturating_sub(run.rate as usize * 5)..]),
+                };
+            }
         }
         self.view.info = self.info(&clock);
         match done {
@@ -536,12 +586,12 @@ impl Recorder {
                 run.arm_line = Some((before / grid - 1e-6).ceil().max(0.0) * grid);
             }
             let line = run.arm_line.unwrap_or(0.0);
-            let mut all: Vec<[f32; 2]> = run.ring.drain(..).collect();
-            all.extend(new);
             if abs < line {
-                keep_recent(&mut run.ring, all, run.rate as usize * 2);
+                keep_recent(&mut run.ring, new, run.rate as usize * 2);
                 return None;
             }
+            let mut all: Vec<[f32; 2]> = run.ring.drain(..).collect();
+            all.extend(new);
             let over = (clock.frames(abs - line, run.rate).round() as usize).min(all.len());
             run.frames = all[all.len() - over..].to_vec();
             run.started = line;

@@ -225,7 +225,10 @@ impl Device {
         let Some(run) = &self.run else { return Vec::new() };
         {
             let mut sh = run.shared.borrow_mut();
-            sh.view = v.clone();
+            if sh.view != *v {
+                sh.view = v.clone();
+                sh.view_id = sh.view_id.wrapping_add(1);
+            }
             sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
         }
         if let Ok(Some(f)) = run.handlers.get::<Option<Function>>(name)
@@ -244,6 +247,7 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
         view: View::default(),
+        view_id: 1,
         now: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
