@@ -785,6 +785,45 @@ mod tests {
     }
 
     #[test]
+    fn extra_out_edits_on_different_strips_are_separate_undo_steps() {
+        use deckard_model::AudioDest;
+        use deckard_model::extra_out::Owner;
+        let mut d = with_plugin("V:AU:INSTR:1");
+        let mut outs = vec![strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1"), strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1")];
+        outs[1].bus = 2;
+        d.set_extra_outs(outs.clone()).unwrap();
+        // A mute on one, then (within the merge window) another's output: two steps.
+        outs[0].muted = false;
+        d.set_extra_outs_as("Unmute Extra Output", outs.clone()).unwrap();
+        outs[1].dest = AudioDest::Ext(3);
+        d.set_extra_outs_as("Extra Output Destination", outs.clone()).unwrap();
+        assert!(d.undo());
+        let p = d.project().extra_outs.clone();
+        assert_eq!((p[0].muted, p[1].dest), (false, AudioDest::Master), "only the output went back");
+        // A drag merges with itself, but not with another strip's drag.
+        outs[1].dest = AudioDest::Master;
+        for v in [0.4, 0.3, 0.2] {
+            outs[0].level = v;
+            d.set_extra_outs_merging("Extra Output 1 Level", outs.clone()).unwrap();
+        }
+        outs[1].level = 0.9;
+        d.set_extra_outs_merging("Extra Output 2 Level", outs.clone()).unwrap();
+        // Strips found during the drag: their own step too.
+        let mut more = outs.clone();
+        more.push(strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1"));
+        more[2].bus = 3;
+        d.set_extra_outs(more).unwrap();
+        assert!(d.undo());
+        assert_eq!(d.project().extra_outs.len(), 2);
+        assert!(d.undo());
+        assert_eq!(d.project().extra_outs[1].level, 0.5);
+        assert_eq!(d.project().extra_outs[0].level, 0.2);
+        assert!(d.undo());
+        assert_eq!(d.project().extra_outs[0].level, 0.5, "the drag is one step");
+        assert!(!d.project().extra_outs[0].muted);
+    }
+
+    #[test]
     fn extra_outs_survive_save_and_reopen() {
         use deckard_model::extra_out::Owner;
         let b = Block { extra_outs: "x".into(), ..Block::default() };

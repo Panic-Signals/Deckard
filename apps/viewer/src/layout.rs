@@ -859,13 +859,28 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 let mut d = doc.borrow_mut();
                 let mut all = d.project().extra_outs.clone();
                 let Some(x) = all.get_mut(i) else { continue };
-                match edit {
-                    ExtraOutEdit::Level(v) => x.level = if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 },
-                    ExtraOutEdit::Pan(v) => x.pan = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 },
-                    ExtraOutEdit::Mute(m) => x.muted = m,
-                    ExtraOutEdit::Dest(to) => x.dest = to,
-                }
-                if let Err(e) = d.set_extra_outs(all) {
+                // A drag of a strip's level or pan merges with itself only; a mute or an
+                // output picked is a step of its own.
+                let n = i + 1;
+                let result = match edit {
+                    ExtraOutEdit::Level(v) => {
+                        x.level = if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 };
+                        d.set_extra_outs_merging(&format!("Extra Output {n} Level"), all)
+                    }
+                    ExtraOutEdit::Pan(v) => {
+                        x.pan = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+                        d.set_extra_outs_merging(&format!("Extra Output {n} Pan"), all)
+                    }
+                    ExtraOutEdit::Mute(m) => {
+                        x.muted = m;
+                        d.set_extra_outs_as(if m { "Mute Extra Output" } else { "Unmute Extra Output" }, all)
+                    }
+                    ExtraOutEdit::Dest(to) => {
+                        x.dest = to;
+                        d.set_extra_outs_as("Extra Output Destination", all)
+                    }
+                };
+                if let Err(e) = result {
                     app.status = format!("can't change the extra output: {e}");
                 }
             }

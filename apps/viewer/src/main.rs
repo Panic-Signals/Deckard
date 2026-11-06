@@ -991,6 +991,9 @@ pub struct App {
     /// Each plug-in extra output's strip's meter (as `project.extra_outs` lists them),
     /// falling back like the others.
     extra_meters: Vec<(f32, f32)>,
+    /// Which strip each of `extra_meters` is (owner, bus, plug-in): when the list changes,
+    /// the meters, peaks and headroom held by index start again.
+    extra_meter_keys: Vec<(deckard_model::extra_out::Owner, usize, String)>,
     /// The audio thread's load (0..1) for the header's CPU meter, and the stats it was
     /// last worked out from (busy, audio µs).
     cpu_load: f32,
@@ -5260,8 +5263,7 @@ impl App {
             Some(Ok(out)) => out.take_extra_meters(),
             _ => Vec::new(),
         };
-        let strips = self.doc.as_ref().map_or(0, |d| d.borrow().project().extra_outs.len());
-        self.extra_meters.resize(strips, (0.0, 0.0));
+        self.sync_extra_meters();
         for (i, m) in self.extra_meters.iter_mut().enumerate() {
             let v = extra.get(i).copied().unwrap_or((0.0, 0.0));
             *m = ((m.0 * fall).max(v.0), (m.1 * fall).max(v.1));
@@ -7374,44 +7376,78 @@ impl App {
         self.load_take(g, snd, path, s.frames.len());
     }
 
+    /// Size the extra outputs' meters to the project's strips; when the strips changed
+    /// (one gone, added in between, moved), start every strip's meter, held peak and
+    /// headroom again, as they're held by place in the list.
+    fn sync_extra_meters(&mut self) {
+        let keys: Vec<_> = self
+            .doc
+            .as_ref()
+            .map(|d| d.borrow().project().extra_outs.iter().map(|x| (x.owner, x.bus, x.plugin.clone())).collect())
+            .unwrap_or_default();
+        if keys == self.extra_meter_keys {
+            return;
+        }
+        // Strips added at the end keep the others' readings.
+        let appended = keys.len() >= self.extra_meter_keys.len() && keys[..self.extra_meter_keys.len()] == self.extra_meter_keys[..];
+        if !appended {
+            self.extra_meters.clear();
+            self.peaks.retain(|ch, _| !matches!(ch, layout::Channel::Extra(_)));
+            self.headroom.retain(|ch, _| !matches!(ch, layout::Channel::Extra(_)));
+        }
+        self.extra_meters.resize(keys.len(), (0.0, 0.0));
+        self.extra_meter_keys = keys;
+    }
+
     /// Solo channel `ch`: mute the other channels of its level and unmute it, as one
-    /// step; soloing it again (the others all muted) unmutes them all. A level's strips
-    /// (plug-ins' extra outputs: the groups' and the master's with the groups, a group's
-    /// sounds' with them) are among the others, but a channel's own stay as they are. A
-    /// strip soloed mutes its channel too (its main pair: the plug-in plays on for it).
+    /// step; soloing it again (the others all muted) unmutes them all. Plug-ins' extra
+    /// outputs play on whatever their channel's mute (the engine keeps the plug-in
+    /// running for them), so their strips are muted too: soloing a group mutes every
+    /// strip but its own and its sounds'; soloing a sound, its group's other sounds'
+    /// strips. A strip soloed mutes every other strip and every channel but the group
+    /// its plug-in plays in: its own channel's main pair too (the plug-in plays on for
+    /// the strip).
     fn solo(&mut self, ch: layout::Channel) {
         use deckard_doc::Target;
         use deckard_model::extra_out::Owner;
         let Some(doc) = self.doc.clone() else { return };
-        let p = doc.borrow().project().clone();
-        // Some(g): group g's sounds; None: the groups.
-        let sounds_of = |o: Owner| match o {
-            Owner::Sound(g, _) | Owner::Chain(g, _, _) => Some(g),
-            Owner::Group(..) | Owner::Master(_) => None,
+        let project = doc.borrow().project().clone();
+        let p = &project;
+        // The group a strip's plug-in plays in (none: the master's).
+        let group_of = |o: Owner| match o {
+            Owner::Sound(g, _) | Owner::Chain(g, _, _) | Owner::Group(g, _) => Some(g),
+            Owner::Master(_) => None,
         };
-        let (level, me, mine): (Option<usize>, Option<Target>, Option<usize>) = match ch {
-            layout::Channel::Group(g) => (None, Some(Target::Group(g)), None),
-            layout::Channel::Sound(g, s) => (Some(g), Some(Target::Sound(g, s)), None),
+        let groups = || (0..p.groups.len()).map(|g| (Target::Group(g), p.groups[g].muted));
+        let sounds = |g: usize| {
+            (0..p.groups.get(g).map_or(0, |x| x.sounds.len())).map(move |s| (Target::Sound(g, s), p.groups[g].sounds[s].muted))
+        };
+        // The channels and strips solo mutes (and unmutes again), and the one of each
+        // it leaves heard.
+        let every: Vec<usize> = (0..p.extra_outs.len()).collect();
+        let (all, me, strips, mine): (Vec<(Target, bool)>, Option<Target>, Vec<usize>, Option<usize>) = match ch {
+            layout::Channel::Group(g) => {
+                let strips = every.into_iter().filter(|&i| group_of(p.extra_outs[i].owner) != Some(g)).collect();
+                (groups().collect(), Some(Target::Group(g)), strips, None)
+            }
+            layout::Channel::Sound(g, s) => {
+                let strips = every
+                    .into_iter()
+                    .filter(|&i| matches!(p.extra_outs[i].owner, Owner::Sound(a, b) | Owner::Chain(a, b, _) if a == g && b != s))
+                    .collect();
+                (sounds(g).collect(), Some(Target::Sound(g, s)), strips, None)
+            }
             layout::Channel::Master => return,
-            layout::Channel::Extra(i) => match p.extra_outs.get(i) {
-                Some(x) => (sounds_of(x.owner), None, Some(i)),
+            layout::Channel::Extra(i) => match p.extra_outs.get(i).map(|x| x.owner) {
+                // A sound's plug-in: its group stays heard (the strip may play into it);
+                // the other groups and that group's sounds are muted.
+                Some(Owner::Sound(g, _) | Owner::Chain(g, _, _)) => {
+                    (groups().filter(|(t, _)| *t != Target::Group(g)).chain(sounds(g)).collect(), None, every, Some(i))
+                }
+                Some(Owner::Group(..) | Owner::Master(_)) => (groups().collect(), None, every, Some(i)),
                 None => return,
             },
         };
-        let all: Vec<(Target, bool)> = match level {
-            None => (0..p.groups.len()).map(|g| (Target::Group(g), p.groups[g].muted)).collect(),
-            Some(g) => {
-                (0..p.groups.get(g).map_or(0, |x| x.sounds.len())).map(|s| (Target::Sound(g, s), p.groups[g].sounds[s].muted)).collect()
-            }
-        };
-        // The level's strips, but those of the channel soloed (left as they are).
-        let own = |o: Owner| match (ch, o) {
-            (layout::Channel::Group(g), Owner::Group(a, _)) => a == g,
-            (layout::Channel::Sound(g, s), Owner::Sound(a, b) | Owner::Chain(a, b, _)) => (a, b) == (g, s),
-            _ => false,
-        };
-        let strips: Vec<usize> =
-            (0..p.extra_outs.len()).filter(|&i| sounds_of(p.extra_outs[i].owner) == level && !own(p.extra_outs[i].owner)).collect();
         let soloed = all.iter().all(|(t, m)| if Some(*t) == me { !m } else { *m })
             && strips.iter().all(|&i| if Some(i) == mine { !p.extra_outs[i].muted } else { p.extra_outs[i].muted });
         let mutes: Vec<(Target, bool)> = all.iter().map(|(t, _)| (*t, !soloed && Some(*t) != me)).collect();
@@ -8873,19 +8909,73 @@ mod tests {
             let p = d.project();
             (p.groups.iter().map(|g| g.muted).collect::<Vec<_>>(), p.extra_outs.iter().map(|x| x.muted).collect::<Vec<_>>())
         };
+        let sound_20 = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[2].sounds[0].muted;
         app.solo(layout::Channel::Extra(0));
         assert_eq!(
             state(&app),
-            (vec![true, true, true], vec![false, true, true, false]),
-            "the owner's main pair too; a sound's strip is another level"
+            (vec![true, true, true], vec![false, true, true, true]),
+            "the owner's main pair and every other strip, a sound's in another group too"
         );
         doc.borrow_mut().undo();
         assert_eq!(state(&app), (vec![false; 3], vec![false; 4]), "one step");
         app.solo(layout::Channel::Extra(0));
         app.solo(layout::Channel::Extra(0));
         assert_eq!(state(&app), (vec![false; 3], vec![false; 4]), "again: unsolo");
+        // A group soloed: the other groups' strips go quiet, its sounds' strips in other
+        // groups too (they play whatever their group's mute); its own stay heard.
         app.solo(layout::Channel::Group(0));
-        assert_eq!(state(&app), (vec![false, true, true], vec![false, false, true, false]), "the owner's strips stay heard");
+        assert_eq!(state(&app), (vec![false, true, true], vec![false, false, true, true]), "the owner's strips stay heard");
+        app.solo(layout::Channel::Group(0));
+        app.solo(layout::Channel::Group(2));
+        assert_eq!(state(&app), (vec![true, true, false], vec![true, true, true, false]), "its sounds' strips stay heard");
+        app.solo(layout::Channel::Group(2));
+        // A sound's strip soloed: the other groups and that group's sounds (its own too)
+        // muted, the group it plays into heard.
+        app.solo(layout::Channel::Extra(3));
+        assert_eq!(state(&app), (vec![true, true, false], vec![true, true, true, false]));
+        assert!(sound_20(&app), "its sound's main pair");
+        app.solo(layout::Channel::Extra(3));
+        assert_eq!(state(&app), (vec![false; 3], vec![false; 4]));
+        assert!(!sound_20(&app));
+    }
+
+    /// The extra outputs' meters, peaks and headroom are held by place in the list: a
+    /// strip added at the end keeps the others', one taken away starts them all again.
+    #[test]
+    fn extra_meters_start_again_when_the_strips_change() {
+        use deckard_model::AudioDest;
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let mut app = App { settings: settings::Settings::default(), ..App::default() };
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        let x = |bus| ExtraOut {
+            owner: Owner::Group(0, 0),
+            bus,
+            plugin: "p".into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: AudioDest::Ext(1),
+        };
+        doc.borrow_mut().set_extra_outs(vec![x(1), x(2)]).unwrap();
+        app.sync_extra_meters();
+        let now = std::time::Instant::now();
+        app.extra_meters = vec![(0.5, 0.5), (0.25, 0.25)];
+        for i in 0..2 {
+            app.peaks.insert(layout::Channel::Extra(i), [(0.5, now); 2]);
+            app.headroom.insert(layout::Channel::Extra(i), 0.5);
+        }
+        app.headroom.insert(layout::Channel::Master, 0.7);
+        doc.borrow_mut().set_extra_outs(vec![x(1), x(2), x(3)]).unwrap();
+        app.sync_extra_meters();
+        assert_eq!(app.extra_meters, vec![(0.5, 0.5), (0.25, 0.25), (0.0, 0.0)], "added at the end");
+        assert_eq!(app.headroom.len(), 3);
+        doc.borrow_mut().set_extra_outs(vec![x(2), x(3)]).unwrap();
+        app.sync_extra_meters();
+        assert_eq!(app.extra_meters, vec![(0.0, 0.0); 2]);
+        assert!(!app.peaks.keys().any(|c| matches!(c, layout::Channel::Extra(_))));
+        assert_eq!(app.headroom.keys().collect::<Vec<_>>(), vec![&layout::Channel::Master], "the channels' are kept");
     }
 
     /// A value sent to a plug-in shows until its controller reports it (JUCE's take it

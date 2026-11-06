@@ -16,10 +16,25 @@ impl Document {
         vec![Op::SetField { path: Vec::new(), field: FIELD.to_string(), value: want }]
     }
 
-    /// Replace the project's extra-output strips (one undo step).
+    /// Replace the project's extra-output strips (one undo step of its own).
     pub fn set_extra_outs(&mut self, outs: Vec<ExtraOut>) -> Result<(), String> {
+        self.set_extra_outs_as("Extra Outputs", outs)
+    }
+
+    /// Replace the project's extra-output strips as an undo step labelled `label`, of
+    /// its own: never merged with the edits around it (a mute, an output picked, strips
+    /// added).
+    pub fn set_extra_outs_as(&mut self, label: &str, outs: Vec<ExtraOut>) -> Result<(), String> {
         let ops = self.extra_out_ops(&outs);
-        if ops.is_empty() { Ok(()) } else { self.apply("Extra Outputs", ops) }
+        if ops.is_empty() { Ok(()) } else { self.transaction(label, |d| d.apply(label, ops)) }
+    }
+
+    /// Replace the project's extra-output strips, merging with the step before when it
+    /// has the same `label` and is recent (a fader drag): give each strip and control its
+    /// own label so only a drag merges with itself.
+    pub fn set_extra_outs_merging(&mut self, label: &str, outs: Vec<ExtraOut>) -> Result<(), String> {
+        let ops = self.extra_out_ops(&outs);
+        if ops.is_empty() { Ok(()) } else { self.apply(label, ops) }
     }
 
     /// Drop the strips whose plug-in is gone from their slot, after an edit that removed,

@@ -139,12 +139,14 @@ fn strip_out_field(c: &channel::Ctx, i: usize) -> IoField {
     let mut options = channel::strip_destinations(c, i);
     let cur = options.iter().position(|(_, d)| *d == x.dest);
     let fallback = match x.dest {
-        AudioDest::Ext(n) if n < 0 || !c.io.output_pair_on(n as usize) => {
+        // (Past the engine's outputs is never connected, nor asked about: a huge pair
+        // would overflow the routing's sums.)
+        AudioDest::Ext(n) if n < 0 || n as usize >= deckard_engine::OUTPUTS || !c.io.output_pair_on(n as usize) => {
             let parent = match x.owner {
                 Owner::Sound(g, _) | Owner::Chain(g, _, _) if g < c.p.groups.len() => group_name(c.p, g),
                 _ => "Master".to_string(),
             };
-            Some(format!("Out {} (not connected) → {parent}", n + 1))
+            Some(format!("Out {} (not connected) → {parent}", n.saturating_add(1)))
         }
         _ => None,
     };
@@ -1191,5 +1193,10 @@ mod tests {
         let group = group_name(d.project(), 1);
         assert_eq!(strip_out_field(&c, 1).text, format!("Out 8 (not connected) → {group}"));
         assert_eq!(strip_out_field(&c, 2).text, "Ext. 1");
+        // An output past any there is (a damaged file): not connected, no overflow.
+        let mut p = d.project().clone();
+        p.extra_outs[2].dest = AudioDest::Ext(i64::MAX);
+        let c = channel::Ctx { p: &p, ..c };
+        assert_eq!(strip_out_field(&c, 2).text, format!("Out {} (not connected) → Master", i64::MAX));
     }
 }
