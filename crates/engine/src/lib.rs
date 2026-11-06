@@ -9480,7 +9480,7 @@ mod tests {
     /// The halves of a split strip each play one side of the pair on both sides, with
     /// their own level and output, and meter apart; split while playing, too.
     #[test]
-    fn split_halves_carry_one_side_each_with_their_own_level() {
+    fn split_strip_halves_carry_one_side_each() {
         use deckard_model::extra_out::{self, Channels};
         let mut x = Strips::new(|_| {});
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);

@@ -102,14 +102,20 @@ pub fn join(v: &mut Vec<ExtraOut>, i: usize) {
 
 /// A strip's label: "Out N" for pair `bus` (from 0), then the plug-in's name for it
 /// (`plugin_bus_name`) when that says more than a number would, then "L" or "R" for a
-/// split half. Generic names ("Aux 1", "Output 3/4", "St. 3/4"...) are left out, so no
+/// split half. Generic names, whose every word is a number, a side or one of a few words
+/// for an output ("Aux 1+2", "Output 3/4", "Stereo Out 2", "Main Out"...), are left out, so no
 /// strip is ever labelled "Aux", which in Maschine means the send effects.
 pub fn strip_label(bus: usize, plugin_bus_name: &str, ch: Channels) -> String {
     const GENERIC: [&str; 10] = ["aux", "out", "output", "outs", "bus", "st", "stereo", "main", "ch", "channel"];
-    let core: String =
-        plugin_bus_name.to_lowercase().chars().filter(|c| !c.is_ascii_digit() && !c.is_whitespace() && !"./-_:#()".contains(*c)).collect();
+    // Its words, lower case, without digits; a lone "l" or "r" (a side) says nothing.
+    let lower = plugin_bus_name.to_lowercase();
+    let generic = lower
+        .split(|c: char| c.is_whitespace() || "./-_:#()+&,".contains(c))
+        .map(|w| w.chars().filter(|c| !c.is_ascii_digit()).collect::<String>())
+        .filter(|w| !w.is_empty() && w != "l" && w != "r")
+        .all(|w| GENERIC.contains(&w.as_str()));
     let mut s = format!("Out {}", bus + 1);
-    if !core.is_empty() && !GENERIC.contains(&core.as_str()) {
+    if !generic {
         s.push(' ');
         s.push_str(plugin_bus_name.trim());
     }
@@ -456,10 +462,15 @@ mod tests {
 
     #[test]
     fn strip_label_hides_generic_names() {
-        for n in ["Aux 1", "Out 3", "Output 3/4", "St. 3/4", ""] {
+        for n in
+            ["Aux 1", "Out 3", "Output 3/4", "St. 3/4", "", "Aux 1+2", "Aux L/R", "Out 3+4", "Stereo Out 2", "Main Out", "Out 3 & 4, L"]
+        {
             assert_eq!(strip_label(2, n, Channels::Stereo), "Out 3", "{n:?}");
         }
         assert_eq!(strip_label(2, "Kick", Channels::Stereo), "Out 3 Kick");
+        assert_eq!(strip_label(2, "Snare Top", Channels::Stereo), "Out 3 Snare Top");
+        assert_eq!(strip_label(2, "Hats 1", Channels::Stereo), "Out 3 Hats 1");
+        assert_eq!(strip_label(2, "Kick L/R", Channels::Stereo), "Out 3 Kick L/R");
         assert_eq!(strip_label(2, "Kick", Channels::Mono), "Out 3 Kick");
         assert_eq!(strip_label(2, "Out 3", Channels::Left), "Out 3 L");
         assert_eq!(strip_label(2, "Kick", Channels::Right), "Out 3 Kick R");

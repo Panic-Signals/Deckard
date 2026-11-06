@@ -609,11 +609,11 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
 
     // Plug-in slots (sounds only for now: their chains are editable).
     let mut y = bar.bottom() + 4.0;
-    // An extra output's mode menu, under its label.
+    // An extra output's mode menu, under its label: in the row its neighbours' MIDI in
+    // takes (it has none), so the rows below stay level with theirs.
     if let Some(f) = &st.mode {
-        let b = Rect::from_min_size(Pos2::new(r.left() + 3.0, head.bottom() + 4.0), Vec2::new(r.width() - 6.0, MODE_H));
+        let b = Rect::from_min_size(Pos2::new(r.left() + 3.0, y + 2.0), Vec2::new(r.width() - 6.0, MODE_H));
         io_button(ui, painter, b.intersect(clip), id.with("mode"), f, acts);
-        y = b.bottom() + 4.0;
     }
     // Inputs (IO): audio in (sounds) and MIDI in. Routing isn't editable yet: the
     // projects store the defaults.
@@ -1259,7 +1259,7 @@ mod tests {
     /// Where strip `ch`'s mode menu is (under its label).
     fn menu_at(h: &egui_kittest::Harness<'static, St>, ch: Channel) -> egui::Pos2 {
         let r = h.state().strips.iter().find(|(c, _)| *c == ch).unwrap().1;
-        egui::pos2(r.left() + 20.0, r.top() + HEAD + 4.0 + MODE_H / 2.0)
+        egui::pos2(r.left() + 20.0, r.top() + HEAD + 3.0 + 4.0 + 2.0 + MODE_H / 2.0)
     }
 
     #[test]
