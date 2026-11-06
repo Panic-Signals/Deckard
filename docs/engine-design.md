@@ -281,5 +281,12 @@ with its own level, pan, route and meter.
   because their strips are mixed where they play.
 - **Meters.** `Telemetry::extra_meters`, indexed like `Project::extra_outs`, read with
   `Output::take_extra_meters`.
-- **Unchanged.** Plug-ins with one pair, and projects without strips, take none of
-  these paths.
+- **Finding them.** A plug-in with more than one pair is listened to on each extra
+  pair that has no strip yet (`Unit::listen`, `scan_of`): after each block, a peak
+  above −90 dBFS on either side marks that (slot, pair) on the `HeardBoard`, a fixed
+  table of atomic bits (no allocating or locking on the audio thread). `publish` takes
+  what was marked, each once, in mixer order (`heard_rank`), into `Telemetry::heard`;
+  the app turns it into strips. A pair with a strip isn't listened to.
+- **Unchanged.** A plug-in with one pair has no extra pairs to listen to and no strips,
+  and a project without strips mixes as before; the only cost left is the per-block
+  peak check on unclaimed extra pairs of plug-ins that have them.

@@ -278,3 +278,38 @@ The font is Roboto Medium throughout (our UI font):
 - Reuse the viewer's meters (`App.meters`). There are no master meters yet; the engine would need to report the master peak.
 - Solo: implement as a mute write over the siblings, as one undo step ("Solo").
 - Use the chain-area knob behaviours for drags: Shift is fine, double-click types a value, ⌘-click resets (level to 1.0, pan to 0).
+
+## 12. DECKARD's additions
+
+### Effects on group and master strips
+
+- At group level, each group strip's plug-in list and the Master's end in a **"+"** row, as a sound strip's does.
+- A click on it focuses that chain and opens the add menu. The menu offers the effects the chain takes and adds the pick at the end of it.
+- Click an effect's name to show its pages in the chain area. Click its square to bypass it.
+
+### Group tabs
+
+The tab row is described in §7. Click a tab to see that group's sounds. Double-click it to go back to the groups.
+
+### A plug-in's extra outputs (Outs strips)
+
+A plug-in with more than one output pair (Kontakt, a drum plug-in with separate outs, …) gets a strip for each extra pair the first time sound comes out of it. The spec is `docs/superpowers/specs/2026-11-05-plugin-extra-outputs-design.md`.
+
+- **Where they are:** every Outs strip sits in the **groups mixer**, just left of the Master, whoever owns it.
+  - They come in mixer order: a group's own plug-ins' strips, then its sounds'; the master's plug-ins' last.
+  - The sounds mixer doesn't show them.
+- **How they look:**
+  - Each has a tinted (blue) dashed outline, so it can't be mistaken for a channel.
+  - The top line names its owner by mixer ID (`A1`, `A1/3` for sound 3 of A1, `M` for the master), then the plug-in's name.
+  - The name line is the strip's label: "Out N" (N counts from 1) and the plug-in's name for the pair, unless that name is a generic one such as "Aux 1+2". A split half adds "L" or "R".
+  - Hover the header for the owner's full name.
+- **Mode menu:** under the label, in the row where other strips show their MIDI input.
+  - **Stereo** or **Mono** (the pair's sum).
+  - **Split** turns the strip into two mono strips, its left and right sides, each with the strip's settings.
+  - On a split half the menu offers **Join**. The two halves become one stereo strip again, with the left half's settings.
+- **Controls:** level, a mute (right-click it to solo), a meter with peak, and an output.
+  - Mono strips and split halves have **no pan**: they play centred, and the pan control is hidden.
+  - The output picker offers what the owner's own output does, less anything that would loop back into the owner. A master plug-in's strip can only go to a hardware output or None.
+- **New strips:** a new strip takes the next free connected hardware output. When none is free, it plays into its owner's parent.
+  - A strip appearing is not an edit, so it adds no undo step.
+- **Stems:** each strip on a hardware output also exports as a stem of its own (File ▸ Export Audio), with its own checkbox.

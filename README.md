@@ -85,7 +85,9 @@ checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
 - **If DECKARD closes with unsaved changes**, it brings them back from a backup the next
   time it starts.
 - **Exporting:** **File ▸ Export Audio…** renders the song, or stems per group or per
-  sound, to WAV files. **File ▸ Export MIDI…** writes a MIDI file.
+  sound, to WAV files. A plug-in's extra-output strip on a hardware output gets a stem
+  of its own too, whichever Source is picked, each with its own checkbox.
+  **File ▸ Export MIDI…** writes a MIDI file.
 
 ### Using a Maschine MK3
 

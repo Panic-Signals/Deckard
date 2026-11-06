@@ -104,7 +104,7 @@ pub fn join(v: &mut Vec<ExtraOut>, i: usize) {
 /// (`plugin_bus_name`) when that says more than a number would, then "L" or "R" for a
 /// split half. Generic names, whose every word is a number, a side or one of a few words
 /// for an output ("Aux 1+2", "Output 3/4", "Stereo Out 2", "Main Out"...), are left out, so no
-/// strip is ever labelled "Aux", which in Maschine means the send effects.
+/// strip is ever labelled "Aux", which in Deckard means the send effects.
 pub fn strip_label(bus: usize, plugin_bus_name: &str, ch: Channels) -> String {
     const GENERIC: [&str; 10] = ["aux", "out", "output", "outs", "bus", "st", "stereo", "main", "ch", "channel"];
     // Its words, lower case, without digits; a lone "l" or "r" (a side) says nothing.
