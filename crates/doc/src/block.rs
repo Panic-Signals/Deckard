@@ -799,16 +799,31 @@ mod tests {
         assert!(d.project().extra_outs.is_empty());
     }
 
+    /// "Byte for byte as before": no DECKARD block is written for this feature alone, so a
+    /// project without extra outputs (and nothing else of DECKARD's) saves with no block at
+    /// all, exactly the archive the writer made before; one that has other sections writes
+    /// them as it did, then only the version number and a zero length at the end.
     #[test]
     fn a_project_without_extra_outs_saves_unchanged() {
-        // A project with and without a strip set then undone: the same bytes, and no block.
         let mut d = Document::new_project().unwrap();
         let before = d.to_bytes().unwrap();
+        assert_eq!(root_child(&before, DOMAIN, ITEM), None, "no block for a project with nothing of DECKARD's");
+        // Open and save again: the same bytes.
+        assert_eq!(reopen(&d).to_bytes().unwrap(), before);
+        // A strip written and then taken back leaves the same bytes too.
         d.set_extra_outs(vec![strip(deckard_model::extra_out::Owner::Master(0), "x")]).unwrap();
-        assert_ne!(d.to_bytes().unwrap(), before);
+        assert!(root_child(&d.to_bytes().unwrap(), DOMAIN, ITEM).is_some());
         assert!(d.undo());
         assert_eq!(d.to_bytes().unwrap(), before);
-        assert_eq!(Block { extra_outs: String::new(), ..Block::default() }, Block::default());
+        // A block with other sections: the version 8 bytes, with only the version and a
+        // zero-length text added.
+        let b = Block { lfos: "lfo".into(), prob_locked: vec![(0, 1)], ..Block::default() };
+        let now = encode(&b);
+        let mut v8 = now.clone();
+        v8[..4].copy_from_slice(&8u32.to_le_bytes());
+        v8.truncate(v8.len() - 4);
+        assert_eq!(now[now.len() - 4..], [0, 0, 0, 0]);
+        assert_eq!(decode(&v8).unwrap(), b);
     }
 
     #[test]
@@ -828,12 +843,12 @@ mod tests {
         use deckard_model::extra_out::Owner;
         let mut d = with_plugin("V:AU:INSTR:1");
         d.set_extra_outs(vec![strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1")]).unwrap();
-        // The same plug-in elsewhere in the chain keeps nothing it shouldn't; removing it drops the strip.
+        // Removing the plug-in drops its strip, in the same undo step.
         d.remove_slot(0, 0, 0).unwrap();
         assert!(d.project().extra_outs.is_empty());
         assert!(d.undo(), "one step");
         assert_eq!(d.project().extra_outs.len(), 1, "undo brings the plug-in and its strip back");
-        // Another plug-in in its place: the strip goes.
+        // Removed again, a different plug-in put in its place: no strip, saved or reopened.
         d.remove_slot(0, 0, 0).unwrap();
         d.add_slot(0, 0, 0, &crate::NewModule::Plugin { id: "V:AU:INSTR:2".into(), name: "Q".into(), chunk: Vec::new() }).unwrap();
         assert!(d.project().extra_outs.is_empty());
