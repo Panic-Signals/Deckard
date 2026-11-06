@@ -193,6 +193,11 @@ fn font(size: f32) -> FontId {
     FontId::proportional(size)
 }
 
+fn bold_font(ctx: &egui::Context, size: f32) -> FontId {
+    let bold = egui::FontFamily::Name("bold".into());
+    if ctx.fonts(|f| f.families().contains(&bold)) { FontId::new(size, bold) } else { font(size) }
+}
+
 /// Text clipped to `rect`, left-aligned at `indent`, vertically centred.
 fn label(painter: &Painter, rect: Rect, indent: f32, text: &str, size: f32, color: Color32) {
     painter.with_clip_rect(rect.intersect(painter.clip_rect())).text(
@@ -1297,19 +1302,32 @@ pub fn logo_font() -> Vec<u8> {
     crate::menu::settings_dir().and_then(|d| std::fs::read(d.join("logo.ttf")).ok()).unwrap_or_else(|| BUILT_IN_LOGO_FONT.to_vec())
 }
 
-/// The app's fonts: egui's, the logo's, and the emoji font for names.
+/// The app's fonts: IBM Plex Sans (regular, bold) and IBM Plex Mono, egui's fallbacks,
+/// the logo's, and the emoji font for names.
 fn font_definitions() -> egui::FontDefinitions {
     let bytes = logo_font();
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
     fonts.families.insert(egui::FontFamily::Name(LOGO_FONT.into()), vec![LOGO_FONT.into()]);
-    // Emoji in names: the full Noto Emoji (egui's has only the older ones), after
-    // the text fonts and before egui's.
-    fonts.font_data.insert(EMOJI_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(deckard_nwl::draw::EMOJI_FONT)));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        let list = fonts.families.entry(family).or_default();
-        list.insert(1.min(list.len()), EMOJI_FONT.into());
+    for name in ["plex", "plex-bold", "plex-mono"] {
+        if let Some((_, data)) = deckard_surface::FONTS.iter().find(|(n, _)| *n == name) {
+            fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_static(data)));
+        }
     }
+    // Emoji in names: the full Noto Emoji (egui's has only the older ones), after
+    // the primary text font and before egui's fallbacks.
+    fonts.font_data.insert(EMOJI_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(deckard_nwl::draw::EMOJI_FONT)));
+    let prop_fallbacks = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    let mono_fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    let mut prop = vec!["plex".into(), EMOJI_FONT.into()];
+    prop.extend(prop_fallbacks);
+    fonts.families.insert(egui::FontFamily::Proportional, prop.clone());
+    let mut mono = vec!["plex-mono".into(), EMOJI_FONT.into()];
+    mono.extend(mono_fallbacks);
+    fonts.families.insert(egui::FontFamily::Monospace, mono);
+    let mut bold = vec!["plex-bold".into(), EMOJI_FONT.into()];
+    bold.extend(prop);
+    fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
     fonts
 }
 
@@ -2524,8 +2542,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let ink = if focused { black(245) } else { gcol };
         let letter = Pos2::new(tile.center().x, tile.top() + 12.0);
         let id = group_tab(g);
-        tp.text(letter, Align2::CENTER_CENTER, &id, FontId::proportional(16.0), ink);
-        tp.text(letter + Vec2::new(0.4, 0.0), Align2::CENTER_CENTER, &id, FontId::proportional(16.0), ink);
+        tp.text(letter, Align2::CENTER_CENTER, &id, bold_font(ui.ctx(), 16.0), ink);
         let name_rect = Rect::from_min_size(Pos2::new(tile.left() + 6.0, tile.top() + 20.0), Vec2::new(86.0, 20.0));
         let name_ink = if focused {
             black(245)
@@ -6871,7 +6888,10 @@ mod emoji_tests {
     fn the_apps_text_falls_back_to_the_emoji_font() {
         use eframe::egui::FontFamily;
         let f = super::font_definitions();
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        assert_eq!(f.families[&FontFamily::Proportional][0], "plex");
+        assert_eq!(f.families[&FontFamily::Monospace][0], "plex-mono");
+        assert_eq!(f.families[&FontFamily::Name("bold".into())][0], "plex-bold");
+        for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("bold".into())] {
             let list = &f.families[&family];
             assert_eq!(list[1], super::EMOJI_FONT, "{family:?}: {list:?}");
         }
