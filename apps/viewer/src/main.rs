@@ -170,6 +170,14 @@ fn main() {
         }
         return;
     }
+    // --write-ico OUT.ico: draw the Windows icon (see assets/deckard.ico), and stop.
+    if let Some(out) = flag("--write-ico") {
+        if let Err(e) = icon::write_ico(Path::new(&out)) {
+            eprintln!("{out}: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // --goodbye OUT.png: draw what the MK3's displays show after closing, and stop.
     if let Some(out) = flag("--goodbye") {
         let px: Vec<u8> = goodbye::picture().into_iter().flatten().collect();
@@ -208,7 +216,11 @@ fn main() {
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([width, 930.0]).with_drag_and_drop(true).with_icon(std::sync::Arc::new(
-            egui::IconData { rgba: icon::icon(256).into_iter().flatten().collect(), width: 256, height: 256 },
+            egui::IconData {
+                rgba: if cfg!(windows) { icon::windows_icon(256) } else { icon::icon(256) }.into_iter().flatten().collect(),
+                width: 256,
+                height: 256,
+            },
         )),
         ..Default::default()
     };

@@ -154,6 +154,7 @@ deckard [file.mxprj] [--screenshot out.png] [--view ideas|song|mix|lfos]
         [--lanes-dialog] [--plugin-window] [--input FILE]
         [--scripts DIR] [--controller M3] [--press BUTTON_X]... [--hold BUTTON_X]... [--pad N]...
 deckard --write-icon OUT.png [SIZE]     # draw the app icon and exit
+deckard --write-ico OUT.ico             # draw the Windows icon (apps/viewer/assets/deckard.ico) and exit
 deckard --goodbye OUT.png               # draw what the MK3's screens show after closing
 ```
 
