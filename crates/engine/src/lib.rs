@@ -1180,6 +1180,8 @@ pub struct Recorded {
     /// Ticks on a clock that never wraps (loops and jumps don't move it back): what a
     /// held note's length is measured by.
     pub played: f64,
+    /// It came in over MIDI (not from a pad, Note Repeat or the Arp).
+    pub midi: bool,
 }
 
 /// Per-note expression played while recording, at the song position it came.
@@ -3479,6 +3481,7 @@ impl Engine {
                 }
                 _ => {}
             }
+            let midi = matches!(event, Live::NoteIn { .. });
             let note = match event {
                 Live::NoteOn { group, sound, pitch, velocity, length } => Some((group, sound, pitch, velocity, length)),
                 Live::NoteIn { group, sound, pitch, velocity, .. } => Some((group, sound, pitch, velocity, i64::MAX)),
@@ -3488,7 +3491,7 @@ impl Engine {
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
             {
-                self.recorded.push(Recorded { group, sound, pitch, velocity, length, tick, mode, seq, played });
+                self.recorded.push(Recorded { group, sound, pitch, velocity, length, tick, mode, seq, played, midi });
             }
         }
         match event {
@@ -5334,6 +5337,20 @@ mod tests {
         e.schedule(0, Live::NoteIn { group: 2, sound: 3, pitch: 40, velocity: 30, thru: false });
         e.process(&mut out);
         assert_eq!(e.live_hit, (2, 2, 3, 40, 30));
+    }
+
+    /// What's recorded says whether it came in over MIDI.
+    #[test]
+    fn a_recorded_note_says_if_it_was_midi() {
+        let mut e = click_engine(1000);
+        e.set_recording(true);
+        let mut out = vec![0f32; 512];
+        e.schedule(0, Live::NoteOn { group: 0, sound: 1, pitch: 72, velocity: 90, length: PPQ });
+        e.schedule(0, Live::NoteIn { group: 0, sound: 0, pitch: 40, velocity: 30, thru: false });
+        e.process(&mut out);
+        let by_pitch = |p: i64| e.recorded.iter().find(|r| r.pitch == p).expect("recorded");
+        assert!(!by_pitch(72).midi, "a pad");
+        assert!(by_pitch(40).midi);
     }
 
     #[test]

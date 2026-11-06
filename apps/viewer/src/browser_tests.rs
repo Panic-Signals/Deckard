@@ -483,3 +483,33 @@ fn mk3_surface_browse_load_button_and_wheel_load_one_shots() {
     assert!(zones[0].sample.path.ends_with("Clap.wav"));
     assert_eq!(snd.name, "Clap");
 }
+
+#[test]
+fn many_types_and_characters_keep_results_on_screen() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = App::default();
+    app.browser.open = true;
+    app.browser.results.types = (0..60).map(|i| (format!("Type {i:02}"), 10)).collect();
+    app.browser.results.characters = (0..60).map(|i| (format!("Character {i:02}"), 5)).collect();
+    app.browser.results.items = (0..20)
+        .map(|i| deckard_library::Item {
+            kind: Kind::Instrument,
+            name: format!("Preset {i:02}"),
+            path: PathBuf::from(format!("preset-{i:02}.mxinst")),
+            ..Default::default()
+        })
+        .collect();
+    let height = 720.0;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(600.0, height))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut App| layout::browser::panel(app, ui), app);
+    h.run_steps(3);
+    let count_rect = h.get_by_label("20 results").rect();
+    let prehear_rect = h.get_by_label("▶ Prehear").rect();
+    assert!(
+        count_rect.max.y + 120.0 < prehear_rect.min.y,
+        "results list has vertical room: count={count_rect:?}, prehear={prehear_rect:?}"
+    );
+    assert!(prehear_rect.max.y <= height, "prehear row stays inside the window: {prehear_rect:?}");
+}
