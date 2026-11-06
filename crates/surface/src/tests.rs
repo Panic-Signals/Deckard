@@ -55,12 +55,19 @@ fn taps_set_the_tempo() {
 
 #[test]
 fn auto_is_a_toggle() {
-    // (C38: a press on, the next off; DECKARD's, not Maschine's hold-to-write.)
+    // A tap without turning a knob latches AUTO on; the next press turns it off.
+    // Holding AUTO and turning a knob writes only while AUTO is held.
     let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
     assert_eq!(hold(&mut s, &v, "BUTTON_AUTO", true), [Action::AutoWrite(true)]);
     v.auto_write = true;
     assert!(hold(&mut s, &v, "BUTTON_AUTO", false).is_empty(), "stays on once let go");
     assert_eq!(press(&mut s, &v, "BUTTON_AUTO"), [Action::AutoWrite(false)], "the next press: off");
+    v.auto_write = false;
+    assert_eq!(hold(&mut s, &v, "BUTTON_AUTO", true), [Action::AutoWrite(true)]);
+    v.auto_write = true;
+    assert_eq!(s.event(&Event::Knob(0, 0.05), &v, now), [Action::Turn { knob: 0, inc: 0.05, fine: false }]);
+    assert_eq!(hold(&mut s, &v, "BUTTON_AUTO", false), [Action::AutoWrite(false)], "turned while held: off on release");
     v.auto_write = false;
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     assert_eq!(press(&mut s, &v, "BUTTON_AUTO"), [Action::AutoWrite(true)], "SHIFT + AUTO as well");

@@ -67,13 +67,28 @@ pub fn register() {
 }
 
 /// The channel and parameter a knob changes, when its movements can be written as
-/// modulation: a continuous knob of a module in a sound's or a group's chain.
+/// modulation: a continuous knob of a module in a sound's or a group's chain, or a
+/// sound's or group's fader (the master's isn't modulated).
 pub fn mod_target(e: Edit) -> Option<(Chain, ModTarget)> {
+    let fader = |t: Target, field: &str| {
+        let chain = match t {
+            Target::Sound(g, s) => Chain::Sound(g, s),
+            Target::Group(g) | Target::GroupStrip(g) => Chain::Group(g),
+            _ => return None,
+        };
+        Some((chain, ModTarget { slot: None, field: field.into() }))
+    };
     let (t, f) = match e {
+        Edit::Level(t) => return fader(t, "level"),
+        Edit::Pan(t) => return fader(t, "pan"),
+        Edit::PluginIn(c @ (Chain::Sound(..) | Chain::Group(_)), i, id, _) => {
+            return Some((c, ModTarget { slot: Some(i), field: id.to_string() }));
+        }
         Edit::Param(t, f, ..) | Edit::Log(t, f, ..) | Edit::Int(t, f, ..) => (t, f),
         _ => return None,
     };
     let (c, i) = match t {
+        Target::Sampler(g, s) => (Chain::Sound(g, s), 0),
         Target::Module(g, s, i) => (Chain::Sound(g, s), i),
         Target::ChainModule(c @ (Chain::Sound(..) | Chain::Group(_)), i) => (c, i),
         _ => return None,
@@ -81,15 +96,34 @@ pub fn mod_target(e: Edit) -> Option<(Chain, ModTarget)> {
     Some((c, ModTarget { slot: Some(i), field: f.into() }))
 }
 
-/// Where the knob of `target` (a module's parameter in chain `c`) is, 0..1.
+/// Where the knob of `target` (a module's parameter in chain `c`, or its channel's
+/// fader) is, 0..1.
 pub fn knob_travel(p: &Project, c: Chain, target: &ModTarget) -> Option<f64> {
+    if target.slot.is_none() {
+        let (level, pan) = match c {
+            Chain::Sound(g, s) => p.groups.get(g)?.sounds.get(s).map(|x| (x.level, x.pan))?,
+            Chain::Group(g) => p.groups.get(g).map(|x| (x.level, x.pan))?,
+            Chain::Master => return None,
+        };
+        return match target.field.as_str() {
+            "level" => Some(level),
+            "pan" => Some((pan + 1.0) / 2.0),
+            _ => None,
+        };
+    }
     let slots = match c {
         Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.slots,
         Chain::Group(g) => &p.groups.get(g)?.slots,
         Chain::Master => return None,
     };
     let slot = slots.get(target.slot?)?;
-    let v = slot.param(&target.field)?;
+    let v = if slot.module == "Sampler" {
+        let Chain::Sound(g, s) = c else { return None };
+        deckard_model::SAMPLER_PARAMS.iter().any(|(k, _)| *k == target.field).then_some(())?;
+        p.groups[g].sounds[s].sampler.as_ref()?.get(&target.field)
+    } else {
+        slot.param(&target.field)?
+    };
     Some(deckard_engine::modscale::scale_of(&slot.module, &target.field).travel(v))
 }
 

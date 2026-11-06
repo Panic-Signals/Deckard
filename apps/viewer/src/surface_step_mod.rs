@@ -117,7 +117,11 @@ impl App {
             (pi, pos, (pat.start, pat.start + pat.length))
         };
         let points = self.mod_points(chain, &target, pi);
-        let dev = if points.is_empty() {
+        let dev = if let Some(&(_, dev)) =
+            self.mod_take.as_ref().filter(|t| t.chain == chain && t.target == target && t.pattern == pi).and_then(|t| t.samples.last())
+        {
+            dev
+        } else if points.is_empty() {
             0.0
         } else {
             ModLane { group: g, sound: None, slot: 0, field: String::new(), from, to, points }.value_at(pos as f64)
@@ -144,6 +148,7 @@ impl App {
     pub(crate) fn surface_step_mod(&mut self, from: i64, length: i64, pads: u16, knob: usize, inc: f64) {
         let Some(doc) = self.doc.clone() else { return };
         let Some((chain, target)) = self.knob_edit(knob).and_then(modulation::mod_target) else { return };
+        self.ensure_mod_param(chain, &target);
         let g = match chain {
             Chain::Sound(g, _) | Chain::Group(g) => g,
             Chain::Master => return,

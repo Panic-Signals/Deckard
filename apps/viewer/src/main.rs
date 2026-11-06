@@ -3284,19 +3284,32 @@ impl App {
         let (pi, pos, dev) = {
             let d = doc.borrow();
             let p = d.project();
-            let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else { return };
-            let Some(at) = modulation::knob_travel(p, chain, &target) else { return };
+            let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else {
+                drop(d);
+                self.status = "can't write modulation: no pattern of this group is playing".into();
+                return;
+            };
+            let Some(at) = self.knob_travel(p, chain, &target) else { return };
             (pi, pos, (amount as f64 - at).clamp(-1.0, 1.0))
         };
         // Another knob or pattern: that touch ends.
         if self.mod_take.as_ref().is_some_and(|t| t.chain != chain || t.target != target || t.pattern != pi) {
             self.end_mod_take();
         }
-        let take = self.mod_take.get_or_insert_with(|| {
+        if self.mod_take.is_none() {
             doc.borrow_mut().begin_take("Record Modulation");
-            modulation::ModTake { chain, target: target.clone(), pattern: pi, samples: Vec::new(), moved: std::time::Instant::now() }
-        });
-        take.moved = std::time::Instant::now();
+            self.ensure_mod_param(chain, &target);
+            self.mod_take = Some(modulation::ModTake {
+                chain,
+                target: target.clone(),
+                pattern: pi,
+                samples: Vec::new(),
+                moved: std::time::Instant::now(),
+            });
+        }
+        if let Some(take) = self.mod_take.as_mut() {
+            take.moved = std::time::Instant::now();
+        }
         self.touch_write(pos, dev);
         if done {
             self.end_mod_take();
@@ -3354,6 +3367,23 @@ impl App {
         }
     }
 
+    /// Where the knob of `target` in `c` is (0..1), unmodulated: a module's parameter,
+    /// its channel's fader, or a plug-in's parameter.
+    pub(crate) fn knob_travel(&self, p: &deckard_model::Project, c: deckard_doc::Chain, target: &deckard_model::ModTarget) -> Option<f64> {
+        if let Some(v) = modulation::knob_travel(p, c, target) {
+            return Some(v);
+        }
+        let (slot, id) = (target.slot?, target.field.parse::<u32>().ok()?);
+        if let Some(inst) = self.samples.plugins.existing(self.plugin_slot_key(c, slot))
+            && let Ok(g) = inst.try_lock()
+        {
+            return Some(g.knob_value(id));
+        }
+        let v = self.plugin_view.as_ref().filter(|v| v.key == (c, slot))?;
+        let k = v.pages.get(v.page)?.knobs.iter().position(|(info, ..)| info.id == id)?;
+        v.values.get(k).map(|(val, _)| *val)
+    }
+
     /// Where a knob's modulation has it (0..1): as last written in the touch going on,
     /// else at the play position; `None` when it isn't modulated.
     fn mod_position(&self, edit: layout::Edit) -> Option<f64> {
@@ -3362,7 +3392,7 @@ impl App {
             && let Some(&(_, dev)) = take.samples.last()
         {
             let doc = self.doc.as_ref()?.borrow();
-            return Some((modulation::knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
+            return Some((self.knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
         }
         self.mod_amount(edit).map(f64::from)
     }
@@ -3423,7 +3453,7 @@ impl App {
             return None;
         }
         let lane = deckard_engine::modscale::ModLane { group: g, sound, slot: 0, field: String::new(), from: 0, to: 0, points };
-        let at = modulation::knob_travel(p, chain, &target)?;
+        let at = self.knob_travel(p, chain, &target)?;
         Some((at + lane.value_at(pos as f64)).clamp(0.0, 1.0) as f32)
     }
 
@@ -4092,6 +4122,17 @@ impl App {
             v.scene_color = layout::scene_index(p, self.scene);
         }
         let mix = |level: f64, pan: f64, meter: (f32, f32), channel: layout::Channel, slots: &[deckard_model::SlotInfo]| {
+            // While modulation is written, where it has the fader: a turn goes on from there.
+            let t = match channel {
+                layout::Channel::Sound(g, s) => Some(deckard_doc::Target::Sound(g, s)),
+                layout::Channel::Group(g) => Some(deckard_doc::Target::GroupStrip(g)),
+                _ => None,
+            };
+            let written = |edit: fn(deckard_doc::Target) -> layout::Edit| {
+                t.map(edit).filter(|e| layout::knob_drag_writes(self, *e)).and_then(|e| self.mod_position(e))
+            };
+            let level = written(layout::Edit::Level).unwrap_or(level);
+            let pan = written(layout::Edit::Pan).map_or(pan, |a| a * 2.0 - 1.0);
             deckard_surface::MixView {
                 level: deckard_model::level_db(level),
                 pan,
@@ -4261,7 +4302,12 @@ impl App {
             A::Restart => self.restart(),
             A::Loop(on) => self.set_looping(on),
             A::Metronome(on) => self.set_metronome(on),
-            A::AutoWrite(on) => self.auto_write = on,
+            A::AutoWrite(on) => {
+                self.auto_write = on;
+                if !on {
+                    self.end_mod_take();
+                }
+            }
             A::Tempo(bpm) => layout::apply_acts(self, vec![Act::SetTempo(bpm)]),
             A::Swing(amount) => {
                 let Some(p) = project else { return };
@@ -4428,14 +4474,23 @@ impl App {
                     Some(s) => Target::Sound(group, s),
                     None => Target::GroupStrip(group),
                 };
-                layout::apply_acts(self, vec![Act::SetLevel(t, deckard_model::level_from_db(db))]);
+                let level = deckard_model::level_from_db(db);
+                if layout::knob_drag_writes(self, layout::Edit::Level(t)) {
+                    self.modulate(layout::Edit::Level(t), level as f32, false);
+                } else {
+                    layout::apply_acts(self, vec![Act::SetLevel(t, level)]);
+                }
             }
             A::ChannelPan { group, sound, pan } => {
                 let t = match sound {
                     Some(s) => Target::Sound(group, s),
                     None => Target::GroupStrip(group),
                 };
-                layout::apply_acts(self, vec![Act::SetPan(t, pan)]);
+                if layout::knob_drag_writes(self, layout::Edit::Pan(t)) {
+                    self.modulate(layout::Edit::Pan(t), ((pan + 1.0) / 2.0) as f32, false);
+                } else {
+                    layout::apply_acts(self, vec![Act::SetPan(t, pan)]);
+                }
             }
             A::MuteGroup(group) => layout::apply_acts(self, vec![Act::ToggleMute(Target::Group(group))]),
             A::SoloGroup(group) => self.solo(layout::Channel::Group(group)),
@@ -4732,7 +4787,10 @@ impl App {
                 c.knobs[k] = knob.map(|(name, text, value, edit)| {
                     let (live_text, shown_value) = shown.unwrap_or((text.clone(), value));
                     let text = match edit.filter(|e| writing && modulation::mod_target(*e).is_some()) {
-                        Some(e) => format!("{:+.0}%", (self.mod_position(e).unwrap_or(value as f64) - value as f64) * 100.0),
+                        Some(e) => {
+                            let base = modulation::mod_target(e).and_then(|(ch, t)| self.knob_travel(p, ch, &t)).unwrap_or(value as f64);
+                            format!("{:+.0}%", (self.mod_position(e).unwrap_or(base) - base) * 100.0)
+                        }
                         // A routing choice (a side-chain source) whole while touched.
                         None => match edit {
                             Some(layout::Edit::Route(cur)) if touched[k] => {
@@ -8811,6 +8869,20 @@ mod tests {
 
     const PROJECT: &str = "/Users/Shared/Velvet Lounge Library/Projects/Cloud 9 Vibes.mxprj";
 
+    /// How long a test on the real audio output waits for what it's waiting for. It goes
+    /// on as soon as that happens, so this only has to outlast a busy machine, where the
+    /// song can take seconds to get going.
+    const AUDIO_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Wait for what the audio thread publishes to catch up with what was sent to it:
+    /// until then, the playhead is still the last engine's.
+    fn published(app: &App) {
+        let wait = std::time::Instant::now();
+        while !matches!(&app.output, Some(Ok(out)) if out.is_current()) && wait.elapsed() < AUDIO_PATIENCE {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// A value sent to a plug-in shows until its controller reports it (JUCE's take it
     /// in at the next block), or for SENT_HOLD; then what the plug-in says again.
     #[test]
@@ -8907,7 +8979,7 @@ mod tests {
         // The playhead is what the audio thread published after its next block.
         let wait = std::time::Instant::now();
         let mut head = h.state().playhead();
-        while head.as_ref().is_none_or(|p| p.queued.is_none()) && wait.elapsed() < std::time::Duration::from_millis(500) {
+        while head.as_ref().is_none_or(|p| p.queued.is_none()) && wait.elapsed() < AUDIO_PATIENCE {
             std::thread::sleep(std::time::Duration::from_millis(5));
             head = h.state().playhead();
         }
@@ -8933,7 +9005,7 @@ mod tests {
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
         let mut tempo = 0.0;
-        while tempo != 171.0 && wait.elapsed() < std::time::Duration::from_millis(1000) {
+        while tempo != 171.0 && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
             tempo = app.output.as_ref().unwrap().as_ref().unwrap().telemetry(|t| t.tempo);
@@ -8954,10 +9026,11 @@ mod tests {
             return;
         }
         let ctx = egui::Context::default();
-        let at = |app: &mut App, past: f64| {
+        let at = |app: &mut App, within: std::ops::Range<f64>| {
+            published(app);
             let wait = std::time::Instant::now();
             let mut pos = 0.0;
-            while pos <= past && wait.elapsed() < std::time::Duration::from_millis(2000) {
+            while !within.contains(&pos) && wait.elapsed() < AUDIO_PATIENCE {
                 app.background(&ctx);
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 pos = app.playhead().map_or(0.0, |h| h.position);
@@ -8965,18 +9038,20 @@ mod tests {
             pos
         };
         let quarter = deckard_model::PPQ as f64;
-        assert!(at(&mut app, quarter) > quarter, "playing");
+        // Early in the bar: going on from near its end could come round the loop to the
+        // start before the position is looked at.
+        assert!(at(&mut app, quarter + 1.0..2.0 * quarter) > quarter, "playing");
         app.stop();
         let parked = app.shown_playhead().expect("shown where it stopped").position;
         assert!(parked > quarter, "{parked}");
         // The MK3 (the touch strip's play position) shows it there too.
         assert_eq!(app.surface_view().position, Some(parked as i64));
         app.transport_play();
-        let first = at(&mut app, 0.0);
+        let first = at(&mut app, f64::MIN_POSITIVE..f64::MAX);
         assert!(first >= parked - 1.0, "on from {parked}: {first}");
         app.stop();
         app.restart();
-        let first = at(&mut app, 0.0);
+        let first = at(&mut app, f64::MIN_POSITIVE..f64::MAX);
         app.stop();
         assert!(first < parked, "RESTART: from the start ({first})");
     }
@@ -8995,7 +9070,7 @@ mod tests {
         let ctx = egui::Context::default();
         let quarter = deckard_model::PPQ as f64;
         let wait = std::time::Instant::now();
-        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < std::time::Duration::from_millis(2000) {
+        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9004,6 +9079,7 @@ mod tests {
         assert!(parked > quarter, "{parked}");
         app.set_recording(true, true);
         app.background(&ctx);
+        published(&app);
         let first = app.playhead().map_or(0.0, |h| h.position);
         app.set_recording(false, false);
         app.stop();
@@ -9121,7 +9197,7 @@ mod tests {
         out.queue(app.doc.as_ref().unwrap().borrow().project(), Mode::Scene(1));
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
-        while app.scene != 1 && wait.elapsed() < std::time::Duration::from_secs(6) {
+        while app.scene != 1 && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9146,7 +9222,7 @@ mod tests {
         let log = asked.clone();
         ctx.set_request_repaint_callback(move |info| log.lock().unwrap().push(info.delay));
         let wait = std::time::Instant::now();
-        while app.master_meter == (0.0, 0.0) && wait.elapsed() < std::time::Duration::from_millis(1500) {
+        while app.master_meter == (0.0, 0.0) && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -9169,7 +9245,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
-        while app.master_meter == (0.0, 0.0) && wait.elapsed() < std::time::Duration::from_millis(1500) {
+        while app.master_meter == (0.0, 0.0) && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -12171,6 +12247,63 @@ mod tests {
         h.run_steps(4);
         assert!(slots(&h).is_empty());
         assert_eq!(h.state().slot, None);
+    }
+
+    /// Auto-write on while the song plays: dragging a mixer strip's fader or pan writes
+    /// modulation and leaves them where they are. Otherwise it moves them.
+    #[test]
+    fn dragging_a_mixer_fader_writes_with_auto_write_on() {
+        let mut app = App { show_controller: false, follow: true, grid: PPQ / 4, prop_set: 1, ..Default::default() };
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "Pattern 1").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+        }
+        (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+        (app.mixer, app.mixer_sounds) = (true, false);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(4);
+        let strips: Vec<(layout::Channel, egui::Rect)> =
+            h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-mixer-strips"))).expect("mixer drawn");
+        let r = strips.iter().find(|(c, _)| *c == layout::Channel::Group(0)).unwrap().1;
+        let x = r.left() + 48.0;
+        let zero_db = r.bottom() - 186.0 + 26.0 + 25.0;
+        let pan = egui::pos2(r.left() + 5.0 + 30.5, r.bottom() - 186.0 + 8.0);
+        let level = |h: &Harness<'static, App>| project_of(h).groups[0].level;
+        let pan_now = |h: &Harness<'static, App>| project_of(h).groups[0].pan;
+        // Stopped: it moves.
+        let before = level(&h);
+        drag(&mut h, egui::pos2(x, zero_db), egui::pos2(x, zero_db + 22.0));
+        assert!(level(&h) < before * 0.8, "about -10 dB: {}", level(&h));
+        // Playing with Auto-write on: written.
+        let before = level(&h);
+        h.state_mut().auto_write = true;
+        h.state_mut().transport_play();
+        if !matches!(h.state().output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let wait = std::time::Instant::now();
+        while h.state().playhead().is_none() && wait.elapsed() < std::time::Duration::from_secs(60) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let at = zero_db + 22.0;
+        drag(&mut h, egui::pos2(x, at), egui::pos2(x, at + 15.0));
+        drag(&mut h, pan, pan + egui::vec2(10.0, 0.0));
+        h.state_mut().stop();
+        h.run_steps(2);
+        let p = project_of(&h);
+        assert_eq!(level(&h), before, "the fader stays");
+        assert_eq!(pan_now(&h), 0.0, "and the pan");
+        let points =
+            |field: &str| p.groups[0].patterns[0].mods.iter().filter(|m| m.sound.is_none() && m.slot.is_none() && m.field == field).count();
+        assert!(points("level") > 0, "the level written");
+        assert!(points("pan") > 0, "the pan written");
+        assert!(p.groups[0].patterns[0].mods.iter().filter(|m| m.field == "level").all(|m| m.value < 0.0), "down from the fader's place");
     }
 
     /// The Mixer: a strip per group; the fader sets the level, M mutes, right-click on

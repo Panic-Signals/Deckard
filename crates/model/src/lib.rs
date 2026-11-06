@@ -2412,6 +2412,17 @@ fn channel_params(ix: &Index, ch: &Obj, sound: Option<usize>, out: &mut ModParam
         for (i, slot) in ix.elements(chain.get("slots")).into_iter().enumerate() {
             if let Some(m) = slot.get("module").and_then(|m| ix.obj(m)) {
                 walk(m, "", Some(i), sound, 2, out);
+                if m.type_name == "NI::MASCHINE::DATA::PluginHost" {
+                    let pages = m.get("parameters").and_then(|v| ix.obj(v)).and_then(|o| o.get("unknown_48"));
+                    for page in ix.elements(pages) {
+                        let Some(Value::Obj(arr)) = page.get("parameters") else { continue };
+                        for p in arr.fields.iter().filter(|(n, _)| n == "item").filter_map(|(_, v)| ix.obj(v)) {
+                            if let Some(id) = p.get("index").and_then(Value::as_int).filter(|&id| (0..i64::from(u32::MAX)).contains(&id)) {
+                                out.insert(p as *const Obj, (sound, ModTarget { slot: Some(i), field: id.to_string() }));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
