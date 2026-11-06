@@ -404,9 +404,6 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             mode: Some(mode_field(x, i)),
         }
     };
-    let extras_of = |f: &dyn Fn(Owner) -> bool| -> Vec<Strip> {
-        p.extra_outs.iter().enumerate().filter(|(_, x)| f(x.owner)).map(|(i, _)| extra_strip(i)).collect()
-    };
     let mut strips: Vec<Strip> = Vec::new();
     if sounds {
         if let Some(gr) = p.groups.get(app.group) {
@@ -819,6 +816,16 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             }
             y += SLOT_ROW;
         }
+        // "+": add an effect at the end of this chain (the "+" menu, with this chain
+        // focused, so the menu offers what it takes and adds to it).
+        let add = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
+        let resp = ui.interact(vis(add), id.with("cadd"), Sense::click()).on_hover_text("Add an effect");
+        painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
+        painter.text(add.center(), Align2::CENTER_CENTER, "+", font(13.0), white(142));
+        if resp.clicked() && app.chain() != chain {
+            acts.push(Act::FocusChainSlot(chain, usize::MAX));
+        }
+        egui::Popup::menu(&resp).show(|ui| super::add_menu(ui, app, false, acts));
     }
     let _ = y;
     if !app.mixer_sections.extended {
