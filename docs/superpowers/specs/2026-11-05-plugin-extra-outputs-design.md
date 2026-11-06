@@ -48,8 +48,8 @@ Group A with two extra pairs and Kontakt on sound A3 with one:
 ```
 
 - Because a strip no longer sits by its owner, its top line names the owner too: the
-  owner's ID (group letter, "A3" for a sound, "M" for the master) and the plug-in's name,
-  e.g. "A3·Kontakt". Hovering shows the owner's full name.
+  owner's ID as the mixer header shows it ("A1" for a group, "A1/3" for its sound 3, "M" for the master) and the plug-in's name,
+  e.g. "A1/3·Kontakt". Hovering shows the owner's full name.
 
 - These strips are called **Outs**, never "Aux": in Deckard, Aux already means the send
   effects.

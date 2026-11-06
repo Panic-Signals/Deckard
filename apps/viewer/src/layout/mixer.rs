@@ -371,15 +371,16 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             .filter(|pr| pr.id == x.plugin && !pr.name.is_empty())
             .map_or_else(|| x.plugin.clone(), |pr| pr.name.clone());
         let lin = if x.level.is_finite() { x.level.clamp(0.0, 4.0) } else { 0.0 };
-        // Its owner: the group's letter (A), a sound's (A3), or M for the master.
-        let letter = |g: usize| ((b'A' + (g % 8) as u8) as char).to_string();
+        // Its owner: the group's ID as its header shows it (A1), a sound's (A1/3), or M
+        // for the master.
+        let letter = group_id;
         let sound = |g: usize, s: usize| {
             let n = p.groups.get(g).and_then(|gr| gr.sounds.get(s)).map(|sn| sn.name.clone()).filter(|n| !n.is_empty());
             n.unwrap_or_else(|| format!("Sound {}", s + 1))
         };
         let (oid, oname) = match x.owner {
             Owner::Group(g, _) => (letter(g), if g < p.groups.len() { group_name(p, g) } else { letter(g) }),
-            Owner::Sound(g, s) | Owner::Chain(g, s, _) => (format!("{}{}", letter(g), s + 1), sound(g, s)),
+            Owner::Sound(g, s) | Owner::Chain(g, s, _) => (format!("{}/{}", letter(g), s + 1), sound(g, s)),
             Owner::Master(_) => ("M".to_string(), "Master".to_string()),
         };
         Strip {
@@ -1263,7 +1264,7 @@ mod tests {
         app.mixer_sounds = false;
         let h = harness(app);
         let text = &h.state().text;
-        assert!(text.contains("|B\u{b7}Portal|") && text.contains("|A3\u{b7}Portal|") && text.contains("|M\u{b7}Portal|"), "{text}");
+        assert!(text.contains("|B1\u{b7}Portal|") && text.contains("|A1/3\u{b7}Portal|") && text.contains("|M\u{b7}Portal|"), "{text}");
     }
 
     #[test]
