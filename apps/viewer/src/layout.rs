@@ -506,6 +506,8 @@ pub enum Act {
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
+    /// Strips for plug-in extra outputs just heard, added as one edit.
+    AddExtraOuts(Vec<deckard_model::extra_out::ExtraOut>),
     InsertScene(usize),
     DuplicateScene(usize),
     DeleteScene(usize),
@@ -831,6 +833,15 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ToggleController => app.show_controller = !app.show_controller,
             Act::Save => app.save(),
             Act::ToggleFollow => app.follow = !app.follow,
+            Act::AddExtraOuts(fresh) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                let mut d = doc.borrow_mut();
+                let mut all = d.project().extra_outs.clone();
+                all.extend(fresh);
+                if let Err(e) = d.set_extra_outs(all) {
+                    app.status = format!("can't add the extra output: {e}");
+                }
+            }
             Act::AssignPattern(..)
             | Act::NewPattern(..)
             | Act::AddScene

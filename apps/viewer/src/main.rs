@@ -40,6 +40,7 @@ mod controller;
 mod drop_pos;
 mod drum_ui;
 mod export;
+mod extra_outs;
 mod github;
 mod goodbye;
 mod icon;
@@ -5221,6 +5222,7 @@ impl App {
         let now = std::time::Instant::now();
         let dt = self.meters_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
         self.meters_at = Some(now);
+        self.add_heard_strips();
         let fall = 0.5f32.powf(dt / 0.15);
         let (fresh, master) = match &self.output {
             Some(Ok(out)) => out.take_meters(),
