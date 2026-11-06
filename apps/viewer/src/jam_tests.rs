@@ -193,6 +193,10 @@ fn channel_values_are_set_and_shown() {
     app.settings.focus_follows = false;
     assert!(app.surface_view().keep_focus);
     app.settings.focus_follows = true;
+    assert!(!app.surface_view().relative_strips, "strips set the value by default");
+    app.settings.relative_strips = true;
+    assert!(app.surface_view().relative_strips);
+    app.settings.relative_strips = false;
     app.surface_act(A::CueDb(0.0));
     assert!((app.surface_view().cue_level - 0.75).abs() < 1e-3, "unity");
     assert_eq!(app.surface_view().input_levels, [0.75, 0.75], "unity to start with");

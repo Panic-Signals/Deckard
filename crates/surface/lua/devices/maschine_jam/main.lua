@@ -1482,6 +1482,11 @@ function M.encoder(steps)
   end
 end
 
+-- Relative touchstrips: how far a value moves for the finger's travel along the strip.
+-- Tune spans 72 semitones, so it takes less.
+local RELATIVE_RATE = { tune = 0.25 }
+local RELATIVE_RATE_DEFAULT = 0.35
+
 function M.strip(n, finger, kind, pos)
   local s = deckard.state()
   local mode = st.strip
@@ -1518,10 +1523,21 @@ function M.strip(n, finger, kind, pos)
       strip_reset(s, n)
       return
     end
-    if not shift() then strip_set(s, n, pos) end
+    if s.relative_strips then
+      -- A touch only picks the value up; the travel moves it.
+      rec.value = strip_value(s, n)
+    elseif not shift() then
+      strip_set(s, n, pos)
+    end
   elseif kind == "move" then
     if rec.tapped then return end
-    if shift() then
+    if s.relative_strips then
+      if rec.value then
+        local rate = RELATIVE_RATE[mode] or RELATIVE_RATE_DEFAULT
+        rec.value = clamp(rec.value + (pos - (rec.pos or pos)) * rate * (shift() and 0.1 or 1), 0, 1)
+        strip_set(s, n, rec.value)
+      end
+    elseif shift() then
       -- SHIFT: the same travel moves it a tenth as far.
       local v = strip_value(s, n)
       if v then strip_set(s, n, clamp(v + (pos - (rec.pos or pos)) * 0.1, 0, 1)) end

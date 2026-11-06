@@ -91,6 +91,12 @@ CUE shows the cue bus: the channels with their headphones on, the metronome and 
 
 Held, a mode's button plus a group makes the strips groups, plus a pad makes them that sound's eight,
 plus MST (CONTROL and MACRO) the master. A double tap resets a strip. SHIFT moves a tenth as far.
+
+A touch sets the value where the finger lands. Switch on Relative touchstrips (Preferences > MIDI)
+and it no longer does: the touch picks the value up and moving the finger changes it by the distance
+moved, from where it was, stopping at the ends. Level, pan, AUX, swing, CONTROL and MACRO move 0.35 as
+far as the finger, TUNE 0.25; SHIFT a tenth of that. Lifting does nothing, a double tap still resets,
+and only the first finger counts, so a second can't make it jump.
 Hold AUTO and move a strip to write modulation while playing.
 
 ## The library

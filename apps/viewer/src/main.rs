@@ -2171,6 +2171,9 @@ impl App {
         ui.checkbox(&mut self.settings.jam_enabled, "Maschine JAM").on_hover_text(
             "DECKARD drives a JAM plugged in over USB. Switch it off when Maschine should have the JAM to itself: with both running, each acts on every press and they overwrite each other's lights.",
         );
+        ui.checkbox(&mut self.settings.relative_strips, "Relative touchstrips").on_hover_text(
+            "A JAM strip's touch no longer sets the value where the finger lands: moving the finger changes it by the distance moved, from where it was. Off: a touch sets the value.",
+        );
         if ni_services::SUPPORTED {
             let seen = self.ni_services.seen;
             ui.horizontal(|ui| {
@@ -4105,6 +4108,7 @@ impl App {
             strip_position: i64::from(self.settings.strip_position),
             touch_auto_write: self.settings.touch_auto_write,
             keep_focus: !self.settings.focus_follows,
+            relative_strips: self.settings.relative_strips,
             follow: self.follow,
             position: head.map(|h| h.position as i64),
             progress: self.pattern_at(self.group, head).map(|(at, length)| at as f64 / length as f64),

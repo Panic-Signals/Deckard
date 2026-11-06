@@ -49,6 +49,8 @@ pub struct View {
     pub touch_auto_write: bool,
     /// The focus stays where it's put: picking another group's pattern doesn't move it.
     pub keep_focus: bool,
+    /// A touchstrip moves its value by the finger's travel instead of setting it where it lands.
+    pub relative_strips: bool,
     pub fixed_velocity: bool,
     /// The velocity the pads play with Fixed Velocity on (0–127).
     pub velocity: i64,

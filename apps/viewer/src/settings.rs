@@ -96,6 +96,9 @@ pub struct Settings {
     pub jam_enabled: bool,
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
+    /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
+    /// to where the finger lands (Preferences > MIDI).
+    pub relative_strips: bool,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware): 0
     /// takes the pressure as it comes; higher, light presses play louder.
     pub pad_sensitivity: u8,
@@ -303,6 +306,7 @@ impl Default for Settings {
             pad_sensitivity: 50,
             metronome_volume: 100,
             focus_follows: true,
+            relative_strips: false,
             metronome_auto: false,
             metronome_ticks: 4,
             reload_last: true,
@@ -475,6 +479,7 @@ impl Settings {
                     }
                 }
                 "focus_follows" => s.focus_follows = v != "false",
+                "relative_strips" => s.relative_strips = v == "true",
                 "metronome_auto" => s.metronome_auto = v == "true",
                 "metronome_ticks" => {
                     if let Ok(n) = v.parse::<u32>()
@@ -659,6 +664,7 @@ impl Settings {
         );
         out += &format!("jam_enabled = {}\n", self.jam_enabled);
         out += &format!("focus_follows = {}\n", self.focus_follows);
+        out += &format!("relative_strips = {}\n", self.relative_strips);
         out += &format!(
             "metronome_volume = {}\nmetronome_auto = {}\nmetronome_ticks = {}\n",
             self.metronome_volume, self.metronome_auto, self.metronome_ticks
@@ -1134,6 +1140,15 @@ mod wine_tests {
         assert!(Settings::parse("").focus_follows, "a settings file from before");
         s.focus_follows = false;
         assert!(!Settings::parse(&s.to_text()).focus_follows);
+    }
+
+    #[test]
+    fn touchstrips_are_absolute_unless_switched_on() {
+        let mut s = Settings::default();
+        assert!(!s.relative_strips);
+        assert!(!Settings::parse("").relative_strips, "a settings file from before");
+        s.relative_strips = true;
+        assert!(Settings::parse(&s.to_text()).relative_strips);
     }
 
     /// only "off" is written, so other systems' settings files don't change.

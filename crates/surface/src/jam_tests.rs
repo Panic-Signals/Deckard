@@ -1006,3 +1006,136 @@ fn a_broken_lights_call_reports_rather_than_panics() {
     let _ = d.leds(&view(), Instant::now());
     assert!(d.error().is_some_and(|e| e.contains("no light NOPE")), "{:?}", d.error());
 }
+
+/// Group 1's Swing strip (0..100 is the whole strip), with Relative touchstrips as asked.
+fn swing_view(relative: bool, swing: f64) -> (Device, View) {
+    let mut d = jam();
+    let mut v = jam_view();
+    v.relative_strips = relative;
+    v.groups[0].mix.swing = swing;
+    press(&mut d, &v, "SWING");
+    (d, v)
+}
+
+fn swing_of(out: &[Out]) -> f64 {
+    let [Action::SetChannelSwing { group: Some(0), sound: None, amount }] = apps(out)[..] else { panic!("{out:?}") };
+    amount
+}
+
+/// Relative touchstrips: a touch picks the value up, the travel moves it by 0.35 of itself.
+#[test]
+fn relative_strips_move_by_the_travel_and_do_not_jump() {
+    let (mut d, v) = swing_view(true, 50.0);
+    let t = Instant::now();
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.9, t)), [], "a touch sets nothing");
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.7, t));
+    assert!((amount - (50.0 - 0.2 * 0.35 * 100.0)).abs() < 1e-6, "{amount}");
+    // The next move goes on from there, not from where the touch began.
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.9, t));
+    assert!((amount - 50.0).abs() < 1e-6, "{amount}");
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "up", 0.9, t)), [], "lifting does nothing");
+    // A new touch somewhere else picks up the value as it is then, not the finger's place.
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.1, t + Duration::from_secs(2))), []);
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.2, t + Duration::from_secs(2)));
+    assert!((amount - (50.0 + 0.1 * 0.35 * 100.0)).abs() < 1e-6, "{amount}");
+}
+
+#[test]
+fn relative_strips_stop_at_both_ends() {
+    let (mut d, v) = swing_view(true, 95.0);
+    let t = Instant::now();
+    strip_touch(&mut d, &v, 1, "down", 0.0, t);
+    assert_eq!(swing_of(&strip_touch(&mut d, &v, 1, "move", 1.0, t)), 100.0);
+    // Travel past the end is lost: coming back moves it at once.
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.9, t));
+    assert!((amount - 96.5).abs() < 1e-6, "{amount}");
+    let (mut d, v) = swing_view(true, 5.0);
+    strip_touch(&mut d, &v, 1, "down", 1.0, t);
+    assert_eq!(swing_of(&strip_touch(&mut d, &v, 1, "move", 0.0, t)), 0.0);
+}
+
+#[test]
+fn relative_strips_take_a_tenth_with_shift() {
+    let (mut d, v) = swing_view(true, 50.0);
+    let t = Instant::now();
+    strip_touch(&mut d, &v, 1, "down", 0.5, t);
+    hold(&mut d, &v, "SHIFT");
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.7, t));
+    release(&mut d, &v, "SHIFT");
+    assert!((amount - (50.0 + 0.2 * 0.035 * 100.0)).abs() < 1e-6, "{amount}");
+    // SHIFT down at the touch doesn't set it either.
+    hold(&mut d, &v, "SHIFT");
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.9, t + Duration::from_secs(2))), []);
+    release(&mut d, &v, "SHIFT");
+}
+
+#[test]
+fn relative_strips_still_reset_on_a_double_tap_and_ignore_a_second_finger() {
+    let (mut d, v) = swing_view(true, 50.0);
+    let t = Instant::now();
+    strip_touch(&mut d, &v, 1, "down", 0.2, t);
+    strip_touch(&mut d, &v, 1, "up", 0.2, t + Duration::from_millis(50));
+    let out = strip_touch(&mut d, &v, 1, "down", 0.2, t + Duration::from_millis(150));
+    assert_eq!(apps(&out), [Action::SetChannelSwing { group: Some(0), sound: None, amount: 0.0 }]);
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "move", 0.6, t + Duration::from_millis(170))), [], "the rest of the touch does nothing");
+    strip_touch(&mut d, &v, 1, "up", 0.6, t + Duration::from_millis(200));
+    // A second finger neither moves nor jumps the value.
+    let t = t + Duration::from_secs(2);
+    strip_touch(&mut d, &v, 1, "down", 0.2, t);
+    for kind in ["down", "move", "up"] {
+        assert_eq!(apps(&d.strip(0, 1, kind, 0.9, &v, t)), [], "finger 2 {kind}");
+    }
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.3, t));
+    assert!((amount - (50.0 + 0.1 * 0.35 * 100.0)).abs() < 1e-6, "{amount}");
+}
+
+/// The other value strips: Tune takes 0.25 of the travel, Control and Macro are deltas on the knob.
+#[test]
+fn relative_strips_in_tune_and_control() {
+    let (mut d, mut v) = swing_view(true, 0.0);
+    let t = Instant::now();
+    v.groups[0].mix.tune = Some(0.0);
+    press(&mut d, &v, "TUNE");
+    strip_touch(&mut d, &v, 1, "down", 0.5, t);
+    let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
+    let [Action::SetTune { group: 0, sound: None, semitones }] = apps(&out)[..] else { panic!("{out:?}") };
+    assert_eq!(semitones, 4.0, "0.2 x 0.25 x 72 = 3.6, to a semitone");
+    for (i, mode) in ["CONTROL", "MACRO"].into_iter().enumerate() {
+        let t = t + Duration::from_secs(2 * (i as u64 + 1));
+        press(&mut d, &v, mode);
+        v.control.knobs[0] = Some(crate::KnobView { value: 0.5, ..Default::default() });
+        assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.9, t)), [], "{mode}");
+        let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
+        let [Action::Turn { knob: 0, inc, fine: false }] = apps(&out)[..] else { panic!("{out:?}") };
+        assert!((inc - -0.2 * 0.35).abs() < 1e-9, "{mode}: {inc}");
+        strip_touch(&mut d, &v, 1, "up", 0.7, t);
+    }
+}
+
+/// AUTO held writes the move as ever: the same Turn, and the touch is written from the timer.
+#[test]
+fn relative_strips_still_write_modulation_with_auto() {
+    let (mut d, mut v) = swing_view(true, 0.0);
+    let t = Instant::now();
+    v.playing = true;
+    v.auto_write = true;
+    v.control.knobs[0] = Some(crate::KnobView { value: 0.5, modulatable: true, ..Default::default() });
+    hold(&mut d, &v, "AUTO");
+    press(&mut d, &v, "CONTROL");
+    strip_touch(&mut d, &v, 1, "down", 0.5, t);
+    assert!(apps(&d.tick(&v, t)).contains(&Action::TouchWrite(0)), "written while touched");
+    let out = strip_touch(&mut d, &v, 1, "move", 0.9, t);
+    assert!(matches!(apps(&out)[..], [Action::Turn { knob: 0, .. }]), "{out:?}");
+    strip_touch(&mut d, &v, 1, "up", 0.9, t);
+    assert!(apps(&d.tick(&v, t)).is_empty(), "let go");
+}
+
+/// Off (the default), a touch still sets the value where the finger lands.
+#[test]
+fn strips_are_absolute_unless_relative_is_on() {
+    let (mut d, v) = swing_view(false, 50.0);
+    let t = Instant::now();
+    assert!((swing_of(&strip_touch(&mut d, &v, 1, "down", 0.9, t)) - 90.0).abs() < 1e-6);
+    assert!((swing_of(&strip_touch(&mut d, &v, 1, "move", 0.2, t)) - 20.0).abs() < 1e-6);
+    assert!(!View::default().relative_strips);
+}
