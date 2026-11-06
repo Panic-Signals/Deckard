@@ -2131,6 +2131,10 @@ impl App {
     /// switched off), and what sounds set to the Default MIDI source take.
     fn midi_preferences(&mut self, ui: &mut egui::Ui) {
         self.sync_preferences(ui);
+        ui.checkbox(&mut self.settings.focus_follows, "Focus the group MIDI is recorded into").on_hover_text(
+            "While recording, MIDI going into another group makes it the focused group. Off: the focus stays where you put it, and the MIDI still records into its group.",
+        );
+        ui.separator();
         let (ins, outs) = self.midi_ports().clone();
         for (title, ports, prefix) in [("Inputs", &ins, "in:"), ("Outputs", &outs, "out:")] {
             ui.label(egui::RichText::new(title).strong());
@@ -2379,6 +2383,18 @@ impl App {
                     ui.end_row();
                     ui.label("");
                     ui.label(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder.").weak());
+                    ui.end_row();
+                    ui.label("Screen brightness");
+                    let mut brightness = self.settings.display_brightness;
+                    if ui.add(egui::Slider::new(&mut brightness, 0..=100).suffix(" %")).changed() {
+                        self.settings.display_brightness = brightness;
+                        if let Some(m) = &self.mk3 {
+                            m.set_display_brightness(brightness);
+                        }
+                    }
+                    ui.end_row();
+                    ui.label("");
+                    ui.label(egui::RichText::new("The backlight of the controller's screens.").weak());
                     ui.end_row();
                     if cfg!(windows)
                         && let Some(mk3) = &self.mk3
@@ -3612,6 +3628,11 @@ impl App {
                     continue;
                 }
             };
+            // MIDI recorded into another group: that group and sound have the focus.
+            if r.midi && r.velocity > 0 && r.group != self.group && self.settings.focus_follows {
+                self.focus_group(r.group);
+                self.sound = r.sound;
+            }
             // A note into a growing pattern's last bar adds the next.
             if r.velocity > 0
                 && let Some(grow) = &mut self.grow
