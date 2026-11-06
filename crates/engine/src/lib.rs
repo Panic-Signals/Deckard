@@ -1326,6 +1326,8 @@ pub struct Engine {
     /// MIDI input plug-ins, a slot per group, and what one just played.
     midi_inputs: Vec<Option<Box<dyn midi_input::MidiInput>>>,
     midi_input_out: Vec<midi_input::NoteOut>,
+    /// The slots that had a note since they last settled (a bit each).
+    midi_inputs_unsettled: u64,
     /// A plug-in's note is playing: it doesn't go back in.
     from_midi_input: bool,
     /// Recording (REC): live notes are noted with their song position.
@@ -2037,6 +2039,7 @@ impl Engine {
             repeat_buf: Vec::with_capacity(256),
             midi_inputs: (0..midi_input::SLOTS).map(|_| None).collect(),
             midi_input_out: Vec::with_capacity(midi_input::OUT_ROOM),
+            midi_inputs_unsettled: 0,
             from_midi_input: false,
             counting: 0,
             count_frame: 0,
@@ -2661,6 +2664,7 @@ impl Engine {
         self.sequencing = false;
         self.clock_stop();
         self.live.retain(|(_, e)| !matches!(e, Live::MidiInputOut { .. }));
+        self.midi_inputs_unsettled = 0;
         for p in self.midi_inputs.iter_mut().flatten() {
             p.stopped();
         }
@@ -3468,7 +3472,12 @@ impl Engine {
 
     fn midi_input_clock(&self, span: f64) -> midi_input::Clock {
         let spt = self.samples_per_tick();
-        midi_input::Clock { now: self.time as f64 / spt, span, song: self.sequencing.then(|| self.frame as f64 / spt) }
+        midi_input::Clock {
+            now: self.time as f64 / spt,
+            span,
+            song: self.sequencing.then(|| self.frame as f64 / spt),
+            seconds: self.time as f64 / self.sr,
+        }
     }
 
     /// A note into `group`'s MIDI input plug-in, and what it plays for it.
@@ -3478,8 +3487,25 @@ impl Engine {
         let mut out = std::mem::take(&mut self.midi_input_out);
         p.note(note, clock, &mut midi_input::Outbox::new(&mut out));
         self.midi_inputs[group] = Some(p);
+        self.midi_inputs_unsettled |= 1 << group;
         self.play_midi_input_out(group, clock.now, &out);
         self.midi_input_out = out;
+    }
+
+    /// Every note due at this instant is in: the plug-ins that had one work on them.
+    fn midi_inputs_settle(&mut self) {
+        let mut slots = std::mem::take(&mut self.midi_inputs_unsettled);
+        while slots != 0 {
+            let group = slots.trailing_zeros() as usize;
+            slots &= slots - 1;
+            let Some(mut p) = self.midi_inputs.get_mut(group).and_then(Option::take) else { continue };
+            let clock = self.midi_input_clock(0.0);
+            let mut out = std::mem::take(&mut self.midi_input_out);
+            p.settle(clock, &mut midi_input::Outbox::new(&mut out));
+            self.midi_inputs[group] = Some(p);
+            self.play_midi_input_out(group, clock.now, &out);
+            self.midi_input_out = out;
+        }
     }
 
     /// What the MIDI input plug-ins play by themselves over the next `frames`.
@@ -3824,6 +3850,7 @@ impl Engine {
                     self.sequencing = false;
                 }
             }
+            self.midi_inputs_settle();
             self.lfo_tick();
             self.apply_mods();
             if !self.cc_routes.is_empty() {
@@ -7091,6 +7118,59 @@ mod tests {
         assert_eq!(loudest(Some(Box::new(Silent))), 0.0, "nothing got past it");
         let plugin = OctaveUp { seen: NotesIn::default(), stopped: Default::default(), later: 0.0, held: None };
         assert!(loudest(Some(Box::new(plugin))) > 0.01, "what it plays reaches them");
+    }
+
+    /// A plug-in that holds what comes in until the notes are settled, and says what it
+    /// was called with.
+    struct Settling {
+        group: usize,
+        log: Arc<Mutex<Vec<(&'static str, usize, f64)>>>,
+        held: Vec<i64>,
+    }
+
+    impl midi_input::MidiInput for Settling {
+        fn note(&mut self, note: midi_input::NoteIn, clock: midi_input::Clock, _: &mut midi_input::Outbox) {
+            self.log.lock().unwrap().push(("note", self.group, clock.seconds));
+            if let midi_input::NoteIn::On { pitch, .. } = note {
+                self.held.push(pitch);
+            }
+        }
+
+        fn settle(&mut self, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+            self.log.lock().unwrap().push(("settle", self.group, clock.seconds));
+            for pitch in self.held.drain(..) {
+                out.on(clock.now, 0, pitch, 100, Some(120));
+            }
+        }
+    }
+
+    /// Notes due at one instant all go in before any plug-in settles, in whatever order
+    /// the groups came; each plug-in settles once, and a later instant is another.
+    #[test]
+    fn midi_input_plugins_settle_once_every_note_is_in() {
+        let (mut e, rx, _, _) = midi_input_engine(0.0);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        for group in [0, 1] {
+            let plugin = Settling { group, log: log.clone(), held: Vec::with_capacity(8) };
+            e.set_midi_input(group, Some(Box::new(plugin)));
+        }
+        e.next = e.timeline.events.len();
+        blocks(&mut e, 4);
+        assert!(log.lock().unwrap().is_empty(), "no notes, nothing to settle");
+        let _ = midi_notes(&rx);
+        // Group 1's first: the later group's chord has to be in before group 0 settles.
+        for (group, pitch) in [(1, 50), (0, 60), (0, 64)] {
+            e.schedule(0, Live::NoteOn { group, sound: 0, pitch, velocity: 100, length: HELD });
+        }
+        blocks(&mut e, 1);
+        let seen: Vec<(&str, usize)> = log.lock().unwrap().iter().map(|&(what, g, _)| (what, g)).collect();
+        assert_eq!(seen, [("note", 1), ("note", 0), ("note", 0), ("settle", 0), ("settle", 1)]);
+        assert_eq!(midi_notes(&rx), [(true, 60), (true, 64)], "what group 0 played, together, once settled");
+        let now = log.lock().unwrap()[0].2;
+        assert!((now - 4.0 * 256.0 / 48_000.0).abs() < 1e-9, "seconds run with the clock: {now}");
+        log.lock().unwrap().clear();
+        blocks(&mut e, 2);
+        assert!(log.lock().unwrap().is_empty(), "settled once");
     }
 
     /// An engine that replaces this one has its plug-ins, told the song stopped.

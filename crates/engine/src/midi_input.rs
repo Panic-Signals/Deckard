@@ -15,6 +15,9 @@ pub struct Clock {
     pub span: f64,
     /// Where the song is at `now`, `None` when it's stopped.
     pub song: Option<f64>,
+    /// The same moment as `now`, in seconds, for what doesn't follow the tempo (a window
+    /// for keys struck together, say). It runs on as `now` does.
+    pub seconds: f64,
 }
 
 /// A note going into a plug-in.
@@ -89,6 +92,12 @@ impl<'a> Outbox<'a> {
 pub trait MidiInput: Send {
     /// A note came in. A plug-in that plays nothing for it has silenced it.
     fn note(&mut self, note: NoteIn, clock: Clock, out: &mut Outbox);
+
+    /// Every note due at this instant has been given to [`MidiInput::note`], on every
+    /// group; called for the plug-ins that had one. So notes that belong together (a chord
+    /// in a pattern, a chord on another group) can be worked on as one, whatever order the
+    /// groups came in.
+    fn settle(&mut self, _clock: Clock, _out: &mut Outbox) {}
 
     /// Called once per block, for what the plug-in plays by itself: play what's due
     /// before `clock.now + clock.span`, at its time.

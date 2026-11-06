@@ -40,13 +40,14 @@ impl MidiInput for OctaveUp {
 | Method | When |
 |---|---|
 | `note` | A note came in. A note with a `length` gets no `Off` |
+| `settle` | Every note due at this instant has reached `note`, on every group, called for the plug-ins that had one. It's where to work on notes together: a pattern's chord arrives one note at a time, and another group's notes may come after this one's |
 | `process` | Once per block: play what's due before `clock.now + clock.span`, as `Repeater::due_into` does |
 | `stopped` | The transport stopped: the engine has ended every note, and dropped what was still to play |
 | `finish` | It's being taken out: end what it holds |
 
 - **Time:** `Clock::now` is in ticks on a clock that runs on when the song stops, and notes are
   played at times on it. `Clock::song` is where the song is, `None` when stopped, for lining up with
-  its grid.
+  its grid. `Clock::seconds` is the same moment in seconds, for what doesn't follow the tempo.
 - **The audio thread:** nothing here may allocate, wait or panic. `Outbox` holds 256 notes per call,
   and keeps 64 of those for note-offs so a full box can't leave a note stuck.
 - **Note ownership:** a note played with no length is the plug-in's to end. An `Off` may come for a
