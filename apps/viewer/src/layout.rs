@@ -296,17 +296,36 @@ fn pattern_span_handles(
     ];
     // The span as the drag began (the view moves under the pointer as it changes).
     let key = egui::Id::new(("pattern-span-drag", g, pi));
+    let free = ui.input(|i| i.modifiers.shift);
+    let snap = |t: i64| if free { t } else { (t as f64 / app.grid.max(1) as f64).round() as i64 * app.grid.max(1) };
+    let seek_at = |x: f32, acts: &mut Vec<Act>| {
+        if app.playing.is_none() {
+            let rel = ((x - x0) / scale).round() as i64;
+            acts.push(Act::SeekPattern(snap(rel).clamp(0, len.saturating_sub(1))));
+        }
+    };
+    let tl_resp = ui.interact(tl, key.with("tl"), Sense::click());
+    if tl_resp.clicked()
+        && let Some(pos) = tl_resp.interact_pointer_pos()
+    {
+        seek_at(pos.x, acts);
+    }
     for (part, r) in parts {
         if r.width() <= 0.0 {
             continue;
         }
-        let resp = ui.interact(r, key.with(part as u8), Sense::drag());
+        let resp = ui.interact(r, key.with(part as u8), Sense::click_and_drag());
         let hovered = resp.hovered() || resp.dragged();
         if hovered {
             ui.ctx().set_cursor_icon(match part {
                 Part::Body => egui::CursorIcon::Grab,
                 _ => egui::CursorIcon::ResizeHorizontal,
             });
+        }
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            seek_at(pos.x, acts);
         }
         if resp.drag_started() {
             ui.data_mut(|d| d.insert_temp(key, (start, len, scale)));
@@ -315,8 +334,6 @@ fn pattern_span_handles(
             && let Some((s0, l0, sc)) = ui.data(|d| d.get_temp::<(i64, i64, f32)>(key))
             && let (Some(from), Some(now)) = ui.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()))
         {
-            let free = ui.input(|i| i.modifiers.shift);
-            let snap = |t: i64| if free { t } else { (t as f64 / app.grid.max(1) as f64).round() as i64 * app.grid.max(1) };
             let delta = ((now.x - from.x) / sc) as i64;
             let min_len = if free { PPQ / 4 } else { app.grid.max(PPQ / 4) };
             let (s, l) = match part {
@@ -586,6 +603,10 @@ pub enum Act {
     PatternLengthAuto(usize, usize),
     /// A pattern's start and length (dragging its ends or its body on the timeline).
     PatternSpan(usize, usize, i64, i64),
+    /// Move the playhead to tick `.0` of the focused pattern's loop.
+    SeekPattern(i64),
+    /// Move the playhead to tick `.0` of the arrangement.
+    SeekArrangement(i64),
     TimeSignature(i64, i64),
     SetSwing(Target, Swing),
     /// Set a Sampler or zone parameter (dragging a Sampler knob).
@@ -831,6 +852,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ToggleController => app.show_controller = !app.show_controller,
             Act::Save => app.save(),
             Act::ToggleFollow => app.follow = !app.follow,
+            Act::SeekPattern(t) => app.seek_pattern(t),
+            Act::SeekArrangement(t) => app.seek_arrangement(t),
             Act::AssignPattern(..)
             | Act::NewPattern(..)
             | Act::AddScene
@@ -3142,6 +3165,17 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
     let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
+    let tl_resp = ui.interact(timeline, ui.id().with("song-timeline"), Sense::click());
+    if app.playing.is_none()
+        && tl_resp.clicked()
+        && let Some(pos) = tl_resp.interact_pointer_pos()
+    {
+        let free = ui.input(|i| i.modifiers.shift);
+        let raw = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+        let snap = app.grid.max(1);
+        let tick = if free { raw } else { (raw as f64 / snap as f64).round() as i64 * snap };
+        acts.push(Act::SeekArrangement(tick.max(0)));
+    }
     let tracks = Rect::from_min_max(Pos2::new(ed.left(), rows_top), ed.max);
     let ep = painter.with_clip_rect(ed);
     ep.hline(timeline.x_range(), timeline.top(), Stroke::new(1.0, Color32::BLACK));
@@ -5437,6 +5471,16 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     }
     if pat.is_some() {
         pattern_span_handles(ui, app, &painter, tl, start, plen, scale, x_of(start as f64), acts);
+    } else if app.playing.is_none() {
+        let tl_resp = ui.interact(tl, ui.id().with("pattern-timeline"), Sense::click());
+        if tl_resp.clicked()
+            && let Some(pos) = tl_resp.interact_pointer_pos()
+        {
+            let free = ui.input(|i| i.modifiers.shift);
+            let rel = ((pos.x - x_of(start as f64)) / scale).round() as i64;
+            let t = if free { rel } else { (rel as f64 / step as f64).round() as i64 * step };
+            acts.push(Act::SeekPattern(t.clamp(0, plen.saturating_sub(1))));
+        }
     }
 
     // Rows of the note area: 16 sound slots (24 each), or in the piano roll every
@@ -6539,7 +6583,10 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     });
 
     // Playhead.
-    if let Some(t) = pat.and_then(|_| pattern_position(p, head, app.group, app.pattern)) {
+    let playhead_pos = pat
+        .and_then(|_| pattern_position(p, head, app.group, app.pattern))
+        .or_else(|| head.filter(|_| app.playing.is_none()).map(|h| h.position.rem_euclid(plen as f64)));
+    if let Some(t) = playhead_pos {
         let x = x_of(start as f64 + t);
         painter.vline(x, Rect::from_min_max(tl.min, rect.max).y_range(), Stroke::new(1.0, Color32::WHITE));
     }
