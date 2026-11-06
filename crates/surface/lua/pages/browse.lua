@@ -193,7 +193,7 @@ function browse.button(name, down)
     return true
   end
   if name == "WHEEL" then
-    if focus == RESULTS and #b.results > 0 then
+    if #b.results > 0 then
       if shift then deckard.browse_set_favorite() else deckard.browse_load() end
     end
   elseif name == "WHEEL_LEFT" then
@@ -212,7 +212,10 @@ end
 
 function browse.knob(n, amount)
   local steps = knobs.gather(n, amount)
-  if steps ~= 0 then step(lib(deckard.state()), n, steps) end
+  if steps ~= 0 then
+    if n == RESULTS then focus = RESULTS end
+    step(lib(deckard.state()), n, steps)
+  end
   return true
 end
 
