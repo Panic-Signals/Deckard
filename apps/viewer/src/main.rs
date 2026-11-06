@@ -9053,6 +9053,7 @@ mod tests {
             muted: false,
             dest: AudioDest::Ext(1),
             channels: Default::default(),
+            side: None,
         };
         doc.borrow_mut()
             .set_extra_outs(vec![x(Owner::Group(0, 0), 1), x(Owner::Group(0, 0), 2), x(Owner::Group(1, 0), 1), x(Owner::Sound(2, 0), 1)])
@@ -9120,6 +9121,7 @@ mod tests {
             muted: false,
             dest: AudioDest::Ext(1),
             channels: Default::default(),
+            side: None,
         };
         doc.borrow_mut().set_extra_outs(vec![x(1), x(2)]).unwrap();
         app.sync_extra_meters();

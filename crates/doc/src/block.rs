@@ -785,6 +785,7 @@ mod tests {
             muted: true,
             dest: deckard_model::AudioDest::Master,
             channels: Default::default(),
+            side: None,
         }
     }
 

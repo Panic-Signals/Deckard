@@ -232,7 +232,18 @@ impl Settings {
 
     /// Whether external output `pair` is offered: either side connected.
     pub fn output_pair_on(&self, pair: usize) -> bool {
-        (0..2).any(|k| self.output_routing.get(pair * 2 + k).is_some_and(Option::is_some))
+        (0..2).any(|k| self.output_on(pair * 2 + k))
+    }
+
+    /// Whether output channel `i` (Out 1 L = 0) is connected.
+    pub fn output_on(&self, i: usize) -> bool {
+        self.output_routing.get(i).is_some_and(Option::is_some)
+    }
+
+    /// One side of an external output pair, output channel `i` (Ext. 1 L = 0), as a
+    /// strip's output picker shows it: its alias, else "Ext. 3 L".
+    pub fn output_side_name(&self, i: usize) -> String {
+        alias_or(&self.output_aliases, i, || format!("Ext. {} {}", i / 2 + 1, if i.is_multiple_of(2) { "L" } else { "R" }))
     }
 }
 

@@ -56,6 +56,27 @@ impl Channels {
     }
 }
 
+/// One side of an output pair: where a mono strip (mono, or a split half) plays when it
+/// plays on a single output ([`ExtraOut::side`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    L,
+    R,
+}
+
+impl Side {
+    fn text(self) -> &'static str {
+        match self {
+            Side::L => "l",
+            Side::R => "r",
+        }
+    }
+
+    fn from(t: &str) -> Option<Side> {
+        [Side::L, Side::R].into_iter().find(|s| s.text() == t)
+    }
+}
+
 /// One extra output: output pair `bus` of the plug-in `plugin` (its `PluginRef::id`) in
 /// `owner`'s slot, which the plug-in calls `name` (see [`strip_label`]). `level` is linear
 /// (1.0 = 0 dB), `pan` -1..1.
@@ -70,20 +91,40 @@ pub struct ExtraOut {
     pub muted: bool,
     pub dest: AudioDest,
     pub channels: Channels,
+    /// For a mono strip (or a split half) on a hardware output (`dest` an `Ext` pair):
+    /// the one side of that pair it plays on; `None`, both. See [`ExtraOut::side_on`].
+    pub side: Option<Side>,
+}
+
+impl ExtraOut {
+    /// The side it plays on: [`ExtraOut::side`], but only for a strip that isn't stereo
+    /// going to a hardware output (anything else plays on both).
+    pub fn side_on(&self) -> Option<Side> {
+        match (self.channels, self.dest) {
+            (Channels::Stereo, _) => None,
+            (_, AudioDest::Ext(_)) => self.side,
+            _ => None,
+        }
+    }
 }
 
 /// Split strip `i` (stereo or mono) into two mono strips in its place, `Left` then
-/// `Right`, each with its settings. Anything else: nothing.
+/// `Right`, each with its settings. On a hardware output pair, the `Left` half plays on
+/// its left side and the `Right` on its right, so nothing heard moves. Anything else:
+/// nothing.
 pub fn split(v: &mut Vec<ExtraOut>, i: usize) {
     let Some(x) = v.get_mut(i).filter(|x| !x.channels.is_half()) else { return };
+    let on_pair = matches!(x.dest, AudioDest::Ext(_));
     x.channels = Channels::Left;
-    let right = ExtraOut { channels: Channels::Right, ..x.clone() };
+    x.side = on_pair.then_some(Side::L);
+    let right = ExtraOut { channels: Channels::Right, side: on_pair.then_some(Side::R), ..x.clone() };
     v.insert(i + 1, right);
 }
 
 /// Join split half `i` with its partner (the other half of the same owner, pair and
-/// plug-in) into one stereo strip with the `Left` half's settings, where that half was;
-/// a half whose partner is missing becomes stereo with its own. Anything else: nothing.
+/// plug-in) into one stereo strip with the `Left` half's settings, where that half was,
+/// on the whole of its pair; a half whose partner is missing becomes stereo with its own.
+/// Anything else: nothing.
 pub fn join(v: &mut Vec<ExtraOut>, i: usize) {
     let Some(x) = v.get(i).filter(|x| x.channels.is_half()) else { return };
     let other = if x.channels == Channels::Left { Channels::Right } else { Channels::Left };
@@ -98,6 +139,7 @@ pub fn join(v: &mut Vec<ExtraOut>, i: usize) {
         None => i,
     };
     v[keep].channels = Channels::Stereo;
+    v[keep].side = None;
 }
 
 /// A strip's label: "Out N" for pair `bus` (from 0), then the plug-in's name for it
@@ -224,14 +266,15 @@ fn unescape(s: &str) -> Option<String> {
 }
 
 /// The strips as text, one per line:
-/// `owner bus level pan dest [muted] [ch=mono|left|right] plugin=ID name=NAME` (ID and
-/// NAME with whitespace and `%` written as `%XX`; no `ch=` for a stereo strip, so text
-/// from before strips had channels reads the same).
+/// `owner bus level pan dest [muted] [ch=mono|left|right] [side=l|r] plugin=ID name=NAME`
+/// (ID and NAME with whitespace and `%` written as `%XX`; no `ch=` for a stereo strip,
+/// and no `side=` for one on both sides, so text from before strips had channels or
+/// sides reads the same).
 pub fn to_text(v: &[ExtraOut]) -> String {
     let mut s = String::new();
     for e in v {
         s.push_str(&format!(
-            "{} {} {} {} {}{}{} plugin={} name={}\n",
+            "{} {} {} {} {}{}{}{} plugin={} name={}\n",
             owner_text(e.owner),
             e.bus,
             e.level,
@@ -239,6 +282,10 @@ pub fn to_text(v: &[ExtraOut]) -> String {
             dest_text(e.dest),
             if e.muted { " muted" } else { "" },
             if e.channels == Channels::Stereo { String::new() } else { format!(" ch={}", e.channels.text()) },
+            match e.side {
+                Some(s) if e.channels != Channels::Stereo => format!(" side={}", s.text()),
+                _ => String::new(),
+            },
             escape(&e.plugin),
             escape(&e.name),
         ));
@@ -259,14 +306,27 @@ fn line(l: &str) -> Option<ExtraOut> {
     let level: f64 = w.next()?.parse().ok().filter(|v: &f64| v.is_finite())?;
     let pan: f64 = w.next()?.parse().ok().filter(|v: &f64| v.is_finite())?;
     let dest = dest_from(w.next()?)?;
-    let mut e =
-        ExtraOut { owner, bus, plugin: String::new(), name: String::new(), level, pan, muted: false, dest, channels: Channels::Stereo };
+    let mut e = ExtraOut {
+        owner,
+        bus,
+        plugin: String::new(),
+        name: String::new(),
+        level,
+        pan,
+        muted: false,
+        dest,
+        channels: Channels::Stereo,
+        side: None,
+    };
     for word in w {
         if word == "muted" {
             e.muted = true;
         } else if let Some(v) = word.strip_prefix("ch=") {
             // (One this version doesn't know: stereo.)
             e.channels = Channels::from(v).unwrap_or_default();
+        } else if let Some(v) = word.strip_prefix("side=") {
+            // (One this version doesn't know: both sides.)
+            e.side = Side::from(v);
         } else if let Some(v) = word.strip_prefix("plugin=") {
             e.plugin = unescape(v)?;
         } else if let Some(v) = word.strip_prefix("name=") {
@@ -292,6 +352,7 @@ mod tests {
             muted: false,
             dest,
             channels: Channels::Stereo,
+            side: None,
         }
     }
 
@@ -458,6 +519,63 @@ mod tests {
         // Not a half: nothing.
         join(&mut v, 0);
         assert_eq!(v, vec![a, b]);
+    }
+
+    #[test]
+    fn a_strip_on_one_side_saves_and_reads_back() {
+        let mut v = Vec::new();
+        for (ch, side) in [(Channels::Mono, Side::L), (Channels::Mono, Side::R), (Channels::Left, Side::L), (Channels::Right, Side::R)] {
+            v.push(ExtraOut { channels: ch, side: Some(side), ..out(Owner::Sound(0, 1), "a", AudioDest::Ext(2)) });
+        }
+        let text = to_text(&v);
+        assert!(text.lines().next().unwrap().contains(" ch=mono side=l plugin="), "{text}");
+        assert!(text.contains(" side=r "), "{text}");
+        assert_eq!(from_text(&text), v);
+        assert_eq!(v[0].side_on(), Some(Side::L));
+        // Not on a hardware output: it plays on both.
+        assert_eq!(ExtraOut { dest: AudioDest::Master, ..v[0].clone() }.side_on(), None);
+        // A side this version doesn't know: both.
+        assert_eq!(from_text("sound:0:1 1 0.5 0 ext:2 ch=mono side=x plugin=a name=B\n")[0].side, None);
+    }
+
+    #[test]
+    fn a_stereo_strip_saves_without_side() {
+        let e = out(Owner::Sound(0, 1), "a", AudioDest::Ext(2));
+        let before = to_text(std::slice::from_ref(&e));
+        assert_eq!(before, "sound:0:1 1 0.5 -0.25 ext:2 plugin=a name=Out%202\n");
+        // A side left on a stereo strip is ignored, so it saves as before.
+        let sided = ExtraOut { side: Some(Side::R), ..e.clone() };
+        assert_eq!(to_text(std::slice::from_ref(&sided)), before);
+        assert_eq!(sided.side_on(), None);
+        // A mono strip on both sides: no `side=` either.
+        let mono = ExtraOut { channels: Channels::Mono, ..e };
+        assert!(!to_text(&[mono]).contains("side="));
+    }
+
+    #[test]
+    fn splitting_a_strip_on_a_pair_puts_the_halves_on_its_sides() {
+        let mut v = vec![out(Owner::Group(0, 0), "a", AudioDest::Ext(3))];
+        split(&mut v, 0);
+        assert_eq!((v[0].channels, v[0].side, v[0].dest), (Channels::Left, Some(Side::L), AudioDest::Ext(3)));
+        assert_eq!((v[1].channels, v[1].side, v[1].dest), (Channels::Right, Some(Side::R), AudioDest::Ext(3)));
+        // Not on a hardware output: no sides.
+        let mut v = vec![out(Owner::Group(0, 0), "a", AudioDest::Master)];
+        split(&mut v, 0);
+        assert_eq!((v[0].side, v[1].side), (None, None));
+    }
+
+    #[test]
+    fn joining_goes_back_to_the_whole_pair() {
+        let a = out(Owner::Group(0, 0), "a", AudioDest::Ext(3));
+        let mut v = vec![a.clone()];
+        split(&mut v, 0);
+        v[1].dest = AudioDest::Ext(5);
+        join(&mut v, 1);
+        assert_eq!(v, vec![a.clone()], "the left half's pair, both sides");
+        // A lone half too.
+        let mut v = vec![ExtraOut { channels: Channels::Right, side: Some(Side::R), ..a.clone() }];
+        join(&mut v, 0);
+        assert_eq!(v, vec![a]);
     }
 
     #[test]

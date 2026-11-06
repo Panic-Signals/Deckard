@@ -925,6 +925,7 @@ mod io_tests {
             muted: false,
             dest: AudioDest::Group(0),
             channels: Default::default(),
+            side: None,
         };
         doc.set_extra_outs(vec![x]).unwrap();
         let io = crate::settings::Settings::default();

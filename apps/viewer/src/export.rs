@@ -602,6 +602,7 @@ mod tests {
             muted: false,
             dest,
             channels: Channels::Stereo,
+            side: None,
         };
         p.master_output = AudioDest::Ext(0);
         p.extra_outs = vec![

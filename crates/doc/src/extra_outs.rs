@@ -276,6 +276,7 @@ mod tests {
             muted: false,
             dest: AudioDest::Parent,
             channels: Default::default(),
+            side: None,
         }
     }
 

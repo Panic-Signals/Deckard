@@ -85,8 +85,10 @@ fn has_pan(c: deckard_model::extra_out::Channels) -> bool {
 enum Pick {
     Route(RouteSet),
     Param(Target, &'static str, f64),
-    /// Where an extra output's strip goes.
+    /// Where an extra output's strip goes (on the whole of a pair).
     Extra(usize, deckard_model::AudioDest),
+    /// An extra output's mono strip onto one side of hardware output pair `.1`.
+    ExtraSide(usize, i64, deckard_model::extra_out::Side),
     /// An extra output's strip: stereo or mono, split, or joined (a split half).
     ExtraChannels(usize, deckard_model::extra_out::Channels),
     Split(usize),
@@ -99,6 +101,7 @@ fn pick_act(p: Pick) -> Act {
         Pick::Route(r) => Act::SetRoute(r),
         Pick::Param(t, field, v) => Act::SetParam(t, field, v),
         Pick::Extra(i, d) => Act::SetExtraOut(i, ExtraOutEdit::Dest(d)),
+        Pick::ExtraSide(i, n, side) => Act::SetExtraOut(i, ExtraOutEdit::OneSide(n, side)),
         Pick::ExtraChannels(i, ch) => Act::SetExtraOut(i, ExtraOutEdit::Channels(ch)),
         Pick::Split(i) => Act::SplitExtraOut(i),
         Pick::Join(i) => Act::JoinExtraOut(i),
@@ -183,14 +186,33 @@ fn io_fields(c: &channel::Ctx, level: Level) -> [Option<IoField>; 6] {
 
 /// Extra-output strip `i`'s output selector. One on an output that isn't connected
 /// says where it plays instead: its parent (a sound's plug-in's, the group; else the
-/// master).
+/// master). A mono strip (mono, or a split half) is offered, under each hardware pair,
+/// that pair's single outputs too (each connected one, and the one it's on).
 fn strip_out_field(c: &channel::Ctx, i: usize) -> IoField {
     use deckard_model::AudioDest;
-    use deckard_model::extra_out::Owner;
+    use deckard_model::extra_out::{Channels, Owner, Side};
     let x = &c.p.extra_outs[i];
     let short = |n: &str| channel::abbrev(n.split(" - ").next().unwrap_or(n));
-    let mut options = channel::strip_destinations(c, i);
-    let cur = options.iter().position(|(_, d)| *d == x.dest);
+    let mut options: Vec<(String, Pick)> = Vec::new();
+    for (name, d) in channel::strip_destinations(c, i) {
+        options.push((name, Pick::Extra(i, d)));
+        let AudioDest::Ext(n) = d else { continue };
+        if x.channels == Channels::Stereo || !(0..deckard_engine::OUTPUTS as i64).contains(&n) {
+            continue;
+        }
+        for (k, side) in [Side::L, Side::R].into_iter().enumerate() {
+            let ch = n as usize * 2 + k;
+            if c.io.output_on(ch) || (x.dest == d && x.side == Some(side)) {
+                options.push((c.io.output_side_name(ch), Pick::ExtraSide(i, n, side)));
+            }
+        }
+    }
+    let picked = |p: &Pick| match (p, x.side_on()) {
+        (Pick::Extra(_, d), None) => *d == x.dest,
+        (Pick::ExtraSide(_, n, s), Some(side)) => AudioDest::Ext(*n) == x.dest && *s == side,
+        _ => false,
+    };
+    let cur = options.iter().position(|(_, p)| picked(p));
     let fallback = match x.dest {
         // (Past the engine's outputs is never connected, nor asked about: a huge pair
         // would overflow the routing's sums.)
@@ -212,8 +234,8 @@ fn strip_out_field(c: &channel::Ctx, i: usize) -> IoField {
     if let (Some(f), Some(k)) = (fallback, cur) {
         options[k].0 = f;
     }
-    let (names, dests): (Vec<String>, Vec<AudioDest>) = options.into_iter().unzip();
-    IoField { text, names, picks: dests.into_iter().map(|d| Pick::Extra(i, d)).collect(), cur: cur.unwrap_or(usize::MAX) }
+    let (names, picks): (Vec<String>, Vec<Pick>) = options.into_iter().unzip();
+    IoField { text, names, picks, cur: cur.unwrap_or(usize::MAX) }
 }
 
 /// A routing selector: a click lists the choices.
@@ -1151,6 +1173,7 @@ mod tests {
             muted: false,
             dest,
             channels: Default::default(),
+            side: None,
         }
     }
 
@@ -1391,6 +1414,98 @@ mod tests {
         p.extra_outs[2].dest = AudioDest::Ext(i64::MAX);
         let c = channel::Ctx { p: &p, ..c };
         assert_eq!(strip_out_field(&c, 2).text, format!("Out {} (not connected) → Master", i64::MAX));
+    }
+
+    /// Strip `i`'s output picker, with `io`'s outputs.
+    fn out_field(doc: &deckard_doc::Document, io: &crate::settings::Settings, i: usize) -> IoField {
+        let groove = |_: usize, _: usize, _: &str| None;
+        let c = channel::Ctx {
+            doc,
+            has_midi_macro: false,
+            p: doc.project(),
+            midi_ins: &[],
+            midi_outs: &[],
+            polyphonic: false,
+            groove: &groove,
+            io,
+            plugin_knob: &|_| None,
+        };
+        strip_out_field(&c, i)
+    }
+
+    /// The hardware outputs among a picker's names.
+    fn ext_names(f: &IoField) -> Vec<&str> {
+        f.names.iter().map(String::as_str).filter(|n| ["Ext.", "Out ", "Synth"].iter().any(|p| n.starts_with(p))).collect()
+    }
+
+    /// Outputs connected: Out 1 and 2 whole, and only the right of Out 3.
+    fn three_outputs() -> crate::settings::Settings {
+        let mut io = crate::settings::Settings::default();
+        io.output_routing[2..4].copy_from_slice(&[Some(2), Some(3)]);
+        io.output_routing[5] = Some(5);
+        io
+    }
+
+    #[test]
+    fn a_mono_strips_picker_offers_single_outputs() {
+        use deckard_model::extra_out::{Channels, Side};
+        // A real plug-in in the owner's slot: undo drops strips whose plug-in isn't there.
+        const FX: &str = "T:VST3:FX:Portal";
+        let mut app = app_with(Vec::new());
+        let doc = app.doc.clone().unwrap();
+        let fx = deckard_doc::NewModule::Plugin { id: FX.into(), name: "Portal".into(), chunk: Vec::new() };
+        doc.borrow_mut().add_slot_in(deckard_doc::Chain::Group(0), 0, &fx).unwrap();
+        let x = ExtraOut { channels: Channels::Mono, plugin: FX.into(), ..out(Owner::Group(0, 0), "Kick", AudioDest::Ext(1)) };
+        doc.borrow_mut().set_extra_outs(vec![x]).unwrap();
+        let mut io = three_outputs();
+        let f = out_field(&doc.borrow(), &io, 0);
+        assert_eq!(
+            ext_names(&f),
+            vec!["Ext. 1", "Ext. 1 L", "Ext. 1 R", "Ext. 2", "Ext. 2 L", "Ext. 2 R", "Ext. 3", "Ext. 3 R"],
+            "each pair, then its connected single outputs"
+        );
+        assert_eq!((f.text.as_str(), f.names[f.cur].as_str()), ("Ext. 2", "Ext. 2"), "on the whole pair");
+        // Picking "Ext. 2 L": one undoable edit onto that side.
+        let k = f.names.iter().position(|n| n == "Ext. 2 L").unwrap();
+        let act = pick_act(f.picks[k].clone());
+        assert!(matches!(act, Act::SetExtraOut(0, ExtraOutEdit::OneSide(1, Side::L))));
+        apply_acts(&mut app, vec![act]);
+        let x = doc.borrow().project().extra_outs[0].clone();
+        assert_eq!((x.dest, x.side), (AudioDest::Ext(1), Some(Side::L)));
+        let f = out_field(&doc.borrow(), &io, 0);
+        assert_eq!((f.text.as_str(), f.names[f.cur].as_str()), ("Ext. 2 L", "Ext. 2 L"), "shows the side");
+        doc.borrow_mut().undo();
+        assert_eq!(doc.borrow().project().extra_outs[0].side, None, "undone: both sides");
+        doc.borrow_mut().redo();
+        assert_eq!(doc.borrow().project().extra_outs[0].side, Some(Side::L));
+        // Picking a pair: its whole.
+        let k = f.names.iter().position(|n| n == "Ext. 3").unwrap();
+        apply_acts(&mut app, vec![pick_act(f.picks[k].clone())]);
+        let x = doc.borrow().project().extra_outs[0].clone();
+        assert_eq!((x.dest, x.side), (AudioDest::Ext(2), None));
+        // The side it's on is offered though not connected; the interface's names are used.
+        apply_acts(&mut app, vec![Act::SetExtraOut(0, ExtraOutEdit::OneSide(2, Side::L))]);
+        io.output_aliases[5] = "Synth R".into();
+        let f = out_field(&doc.borrow(), &io, 0);
+        assert_eq!(&ext_names(&f)[6..], ["Out 3 L / Synth R", "Ext. 3 L", "Synth R"]);
+        assert_eq!(f.text, "Ext. 3 L");
+        // Stereo again: on the whole pair.
+        apply_acts(&mut app, vec![Act::SetExtraOut(0, ExtraOutEdit::Channels(Channels::Stereo))]);
+        let x = doc.borrow().project().extra_outs[0].clone();
+        assert_eq!((x.channels, x.dest, x.side), (Channels::Stereo, AudioDest::Ext(2), None));
+    }
+
+    #[test]
+    fn a_stereo_strips_picker_offers_only_pairs() {
+        use deckard_model::extra_out::Side;
+        let mut app = app_with(vec![out(Owner::Group(0, 0), "Kick", AudioDest::Ext(1))]);
+        let doc = app.doc.clone().unwrap();
+        let f = out_field(&doc.borrow(), &three_outputs(), 0);
+        assert_eq!(ext_names(&f), vec!["Ext. 1", "Ext. 2", "Ext. 3"]);
+        // Nor does one side take.
+        apply_acts(&mut app, vec![Act::SetExtraOut(0, ExtraOutEdit::OneSide(2, Side::L))]);
+        let x = doc.borrow().project().extra_outs[0].clone();
+        assert_eq!((x.dest, x.side), (AudioDest::Ext(1), None));
     }
 
     /// Where strip `ch`'s mode menu is (under its label).
