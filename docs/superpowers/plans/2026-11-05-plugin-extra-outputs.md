@@ -214,7 +214,7 @@
     - In the groups view, a group's strips (owner `Group(g, _)`) go after that group.
     - In a group's sounds view, a sound's strips (`Sound(g, s)` and `Chain(g, s, _)`) go after that sound.
     - Master-owned strips go immediately before the master column, in both views.
-  - Label: the top line is the plug-in name (small, accent colour) and the second line is the output name. The strip background is tinted (blue, dashed border, as in the mockup).
+  - Label: the top line is the plug-in name (small, accent colour) and the second line is `"Out {bus+1}"`, followed by the plug-in's bus name only when that name isn't generic (see Task 7b's `strip_label`; until 7b lands, `"Out {bus+1}"` alone is fine). Never the word "Aux": that means the send effects in Deckard. The strip background is tinted (blue, dashed border, as in the mockup).
   - Level, pan, mute and solo emit new acts on the strip: `Act::SetExtraOut(usize, ExtraOutEdit)` with `ExtraOutEdit::{Level(f64), Pan(f64), Mute(bool), Dest(AudioDest)}`.
   - The meter comes from the extra meters (Task 5), with the same decay as `update_meters`.
 - Modify: `apps/viewer/src/layout/channel.rs`. The output picker reuses `destinations` and `ext_outputs`.
@@ -241,6 +241,34 @@
 - [ ] **Step 4:** Run the tests again. Expected: PASS.
 - [ ] **Step 5: Commit** with the message "Show a plug-in's extra outputs as strips next to their channel."
 
+### Task 7b: Stereo, mono or split, and the strip's label
+
+Spec: "Stereo, mono or split" and the naming bullets under "Each extra output is its own mixer strip".
+
+**Files:**
+- Modify: `crates/model/src/extra_out.rs`:
+  - `pub enum Channels { Stereo, Mono, Left, Right }`, default `Stereo`; new field `ExtraOut.channels: Channels`.
+  - Text: a `ch=` word with `stereo|mono|left|right`. It is written only when not `Stereo`, and a missing `ch=` parses as `Stereo`, so existing text is unchanged. No block version bump.
+  - `pub fn split(v: &mut Vec<ExtraOut>, i: usize)`: replaces a `Stereo` or `Mono` strip at `i` with two strips, `Left` then `Right`, in that place, both copying its other fields.
+  - `pub fn join(v: &mut Vec<ExtraOut>, i: usize)`: given a `Left` or `Right` strip, removes its partner (same owner, bus, plugin) and turns the `Left` one (or `i` if the partner is missing) into `Stereo`, keeping the L half's settings.
+  - `pub fn strip_label(bus: usize, plugin_bus_name: &str, ch: Channels) -> String`: `"Out {bus+1}"`, then `" {name}"` only when the name is not generic, then `" L"` / `" R"` for split halves. Generic means: after lower-casing and removing digits, spaces and `./-_:#()`, what's left is empty or one of `aux`, `out`, `output`, `outs`, `bus`, `st`, `stereo`, `main`, `ch`, `channel`.
+- Modify: the engine (`crates/engine/src/lib.rs`, `ExtraRt`, `refresh_strips`, `mix_strip`, and the route list it's built from): a strip is now keyed by (owner, bus, channels), so two halves of one bus are two `ExtraRt`s. `Mono` feeds `(L+R)/2` to both sides before pan; `Left`/`Right` feed that side alone to both sides before pan. Pan on a mono-fed strip uses the same pan law as a channel's mono pan. Still no allocation on the audio thread. Detection (Task 4) is unchanged: one heard bus still makes one `Stereo` strip.
+- Modify: `apps/viewer/src/extra_outs.rs`: `strips_for` skips a bus that already has any strip, whatever its channels. Names use `strip_label`.
+- Modify: `apps/viewer/src/layout/mixer.rs`: a small menu on the strip (a button under the label): `Stereo`, `Mono`, `Split` on a stereo or mono strip; `Join` on a split half. Each emits `Act::SetExtraOut(i, ExtraOutEdit::Channels(..))`, `Act::SplitExtraOut(i)` or `Act::JoinExtraOut(i)`, each one undoable edit through `Document::set_extra_outs`. Split halves stay next to each other in the mixer. Fix indices held elsewhere (selection, meters) after a split or join changes the list length.
+
+**Interfaces:**
+- Consumes: Tasks 2, 5, 6 and 7.
+- Produces: `Channels`, `ExtraOut.channels`, `split`, `join`, `strip_label` for Task 8.
+
+- [ ] **Step 1: Write the failing tests:**
+  - model: `channels_round_trip_and_default_to_stereo` (old text with no `ch=` parses as `Stereo`; `to_text` of all-stereo strips equals today's output), `split_makes_left_then_right_with_the_same_settings`, `join_keeps_the_left_settings_and_drops_the_partner`, `strip_label_hides_generic_names` (`"Aux 1"`, `"Out 3"`, `"Output 3/4"`, `"St. 3/4"`, `""` → `"Out 3"` for bus 2; `"Kick"` → `"Out 3 Kick"`; `Left` → `"Out 3 L"`).
+  - engine: `a_mono_strip_sums_both_sides`, `split_halves_carry_one_side_each_with_their_own_level`.
+  - viewer: `splitting_a_strip_shows_two_strips_next_to_each_other`, `join_is_offered_only_on_a_split_half`.
+- [ ] **Step 2:** `cargo test -p deckard-model extra_out`, `cargo test -p deckard-engine strip`, `cargo test -p deckard mixer`. Expected: FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests again. Expected: PASS.
+- [ ] **Step 5: Commit** with the message "Let an extra-output strip be stereo, mono, or split into two mono strips."
+
 ### Task 8: Export each strip on a hardware output as its own stem
 
 **Files:**
@@ -248,7 +276,7 @@
   - Add `Stem::Extra(usize)`.
   - In `stem_project`, keep the owner's plug-in running, mute everything else and the owner's main pair, and set the strip's `dest` to `Ext(15)`. That gives it a private output.
   - Add a render path that collects `ext[15]` through `process_outputs` instead of `out`.
-  - In `file_stem`, name it `"{name} - {owner channel name} - {plugin} {output name} - {bpm} BPM"`.
+  - In `file_stem`, name it `"{name} - {owner channel name} - {plugin} {strip_label} - {bpm} BPM"` (Task 7b's label, e.g. "Portal Out 3 L"). A mono or split-half strip renders the same mono signal on both channels of its stem.
 - Modify: `apps/viewer/src/export.rs`. `stems()` and `output_list` (around lines 95 and 408) add a `Stem::Extra(i)` for every strip whose dest is `Ext`. A strip routed into Deckard gets no stem.
 
 **Interfaces:**
@@ -272,4 +300,5 @@
   - Portal (AU) on a group.
   - A master plug-in with an extra pair on a 2-output interface: it plays through the master, and the picker says so.
   - Save, reopen, and export stems.
+  - Split a drum plug-in's pair into L and R, set different levels, then Join it back.
 - [ ] Report to the user. Don't push.

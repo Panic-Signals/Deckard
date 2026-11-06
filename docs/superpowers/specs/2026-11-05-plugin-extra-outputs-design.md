@@ -39,17 +39,38 @@ In the mixer, each extra output gets a strip **right next to the channel that ha
 plug-in** (Option A in the brainstorm mockup). For Portal on Group A with two extra pairs:
 
 ```text
-| Group A | Portal·Aux 1 | Portal·Aux 2 | Group B | Group C | ... | Master |
+| Group A | Portal·Out 2 | Portal·Out 3 | Group B | Group C | ... | Master |
 | Portal  |              |              |         |         |     |        |
 | Out 1   | Out 2 ▾      | Out 3 ▾      | Out 1   | Out 1   |     | Out 1  |
 ```
 
-- The strip is labelled with the plug-in's name and the output's name. It uses the name
-  the plug-in gives the bus, such as "Aux 1" or "Kick", or "Out 2" when it gives none.
+- These strips are called **Outs**, never "Aux": in Deckard, Aux already means the send
+  effects.
+- The strip is labelled with the plug-in's name and the output's number, "Out {bus+1}"
+  (the main pair is Out 1). When the plug-in gives the bus a real name, such as "Kick",
+  that name is shown as well. Generic names such as "Aux 1", "Out 3", "Output 3/4" or
+  "St. 3/4" are hidden, since the number already says the same thing.
 - It is marked as belonging to that channel and looks a little different, so it reads as
   part of that channel and not as another group.
 - It has its own **level, pan, mute, solo and meter**, independent of the channel that has
   the plug-in. In particular, the master's fader no longer moves it, unlike #23.
+
+### Stereo, mono or split
+
+Every strip starts as **stereo**. A menu on the strip changes it (the user decided this on
+2026-11-06):
+
+- **Stereo:** as described above.
+- **Mono:** left and right are summed into one mono signal, (L+R)/2, and the strip's pan
+  places it.
+- **Split:** the strip becomes two mono strips, **L** and **R**, labelled
+  "Portal · Out 3 L" and "Portal · Out 3 R". Each has its own level, pan, mute, solo,
+  meter and output, so a drum plug-in with the kick on the left and the snare on the right
+  of one pair can be mixed as two channels. Both halves start with the split strip's
+  settings. On a split half, the menu offers **Join**, which turns the pair back into one
+  stereo strip with the L half's settings.
+
+Changing the mode is one undoable edit, and it is saved.
 
 ### Where an extra output's sound goes
 
@@ -65,7 +86,8 @@ plug-in** (Option A in the brainstorm mockup). For Portal on Group A with two ex
 ### Exports
 
 When the song is exported, each extra output that goes to its own hardware output is
-**saved as a separate stem**, named after its strip (for example "Group A - Portal Aux 1").
+**saved as a separate stem**, named after its strip (for example "Group A - Portal Out 2").
+A mono or split-half strip exports as a mono signal on both channels of its stem.
 The master file stays what comes out of the master. An extra output routed back into
 Deckard (to the master, a group or a sound) is already part of whatever it feeds, so it
 gets no stem of its own. (The user decided this on 2026-11-05.)
@@ -109,6 +131,8 @@ These were decided by the user (Josh) in the 2026-11-05 brainstorm:
 - By default route it to the next free hardware output, changeable in the mixer, including
   back into Deckard's own channels.
 - On export, an extra output on its own hardware output becomes a separate stem.
+- (2026-11-06) A strip can be stereo, mono, or split into two mono strips (L and R).
+- (2026-11-06) Don't call them "Aux"; that name already belongs to the send effects.
 
 These are Claude's calls, which the user hasn't confirmed separately:
 
