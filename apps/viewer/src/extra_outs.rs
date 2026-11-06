@@ -11,8 +11,7 @@ const MAX_OUTPUTS: usize = deckard_engine::OUTPUTS;
 
 /// The lowest connected external output pair no channel plays into (not the master or
 /// cue output, a sound's or group's destination or aux send, an extra-output strip, or
-/// one in `taken`, handed out earlier in the same batch); `Parent` when none is free. A
-/// strip on one side of a pair takes the whole pair.
+/// one in `taken`, handed out earlier in the same batch); `Parent` when none is free.
 pub fn next_free_output(p: &Project, connected: impl Fn(usize) -> bool, taken: &[usize]) -> AudioDest {
     let mut used: Vec<i64> = vec![];
     let mut note = |d: AudioDest| {
@@ -63,7 +62,6 @@ pub fn strips_for(p: &Project, heard: &[Heard], name: impl Fn(Owner, usize) -> S
             muted: false,
             dest,
             channels: Channels::Stereo,
-            side: None,
         });
     }
     made
@@ -140,7 +138,6 @@ mod tests {
             muted: false,
             dest: AudioDest::Ext(1),
             channels: Channels::Stereo,
-            side: None,
         };
         p.extra_outs.push(e.clone());
         assert_eq!(next_free_output(&p, |_| true, &[]), AudioDest::Ext(2));
@@ -149,27 +146,6 @@ mod tests {
         e.dest = AudioDest::Master;
         p.extra_outs = vec![e];
         assert_eq!(next_free_output(&p, |_| true, &[]), AudioDest::Ext(1));
-    }
-
-    #[test]
-    fn one_side_in_use_counts_as_the_pair() {
-        use deckard_model::extra_out::Side;
-        let mut p = Project { master_output: AudioDest::Ext(0), ..Default::default() };
-        for side in [Side::L, Side::R] {
-            p.extra_outs = vec![ExtraOut {
-                owner: Owner::Sound(0, 0),
-                bus: 1,
-                plugin: "x".into(),
-                name: "".into(),
-                level: 1.0,
-                pan: 0.0,
-                muted: false,
-                dest: AudioDest::Ext(1),
-                channels: Channels::Mono,
-                side: Some(side),
-            }];
-            assert_eq!(next_free_output(&p, |_| true, &[]), AudioDest::Ext(2), "{side:?}");
-        }
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub mod synth;
 #[allow(dead_code)]
 mod sampler_tables;
 
-use deckard_model::extra_out::{self, Channels, ExtraOut, Owner, Side};
+use deckard_model::extra_out::{self, Channels, ExtraOut, Owner};
 use deckard_model::{Dim, ExprKind, MidiKind, PPQ, Project};
 use deckard_plugins::{MAX_BLOCK, Shared, Slot, Transport};
 use sample::Sample;
@@ -664,14 +664,7 @@ fn strip_route(p: &Project, x: &ExtraOut) -> StripRoute {
         let (to, g) = dest_route(p, d, parent, 0);
         (to, mul(gain, g))
     };
-    let mut route = to(x.dest);
-    // A mono strip on one side of its pair (both of its sides carry the same signal):
-    // only that side, the master's pair too.
-    match x.side_on() {
-        Some(Side::L) => route.1 = mul(route.1, (1.0, 0.0)),
-        Some(Side::R) => route.1 = mul(route.1, (0.0, 1.0)),
-        None => {}
-    }
+    let route = to(x.dest);
     let ext = match (x.dest, route.0) {
         (D::Ext(_), Some(n)) if n < OUTPUTS => Some(n),
         _ => None,
@@ -9216,7 +9209,6 @@ mod tests {
             muted: false,
             dest: deckard_model::AudioDest::Parent,
             channels: Default::default(),
-            side: None,
         };
         let mut e = split_engine(|p| p.extra_outs = vec![strip(1, &SPLIT.plugin_id()), strip(2, "another")]);
         assert_eq!(e.master_fx.as_ref().unwrap().units[0].scan, 1 << 2);
@@ -9246,7 +9238,6 @@ mod tests {
             muted: false,
             dest: deckard_model::AudioDest::Parent,
             channels: Default::default(),
-            side: None,
         };
         b.extra_outs = vec![strip.clone()];
         let r = reuse_of(&a, &b, 0, 0, 1000.0);
@@ -9335,7 +9326,6 @@ mod tests {
             muted: false,
             dest,
             channels: Default::default(),
-            side: None,
         }
     }
 
@@ -9561,13 +9551,11 @@ mod tests {
         });
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        // (Split on Out 3, each half kept its side of the pair, the right one moved too.)
-        assert!(near(ext[2], (0.4, 0.0)) && near(ext[3], (0.0, 0.1)), "{:?} {:?}", ext[2], ext[3]);
+        assert!(near(ext[2], (0.4, 0.4)) && near(ext[3], (0.1, 0.1)), "{:?} {:?}", ext[2], ext[3]);
     }
 
-    /// The halves of a split strip each play one side of the pair, with their own level
-    /// and output, and meter apart; split while playing, too. Split on a hardware pair,
-    /// each half stays on its side of it; on a whole pair, a half plays on both sides.
+    /// The halves of a split strip each play one side of the pair on both sides, with
+    /// their own level and output, and meter apart; split while playing, too.
     #[test]
     fn split_strip_halves_carry_one_side_each() {
         use deckard_model::extra_out::{self, Channels};
@@ -9582,66 +9570,18 @@ mod tests {
         assert_eq!(x.p.extra_outs.iter().map(|e| e.channels).collect::<Vec<_>>(), vec![Channels::Left, Channels::Right]);
         stereo_block(&mut x.e, 0.8, 0.2);
         let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.4, 0.0)), "L on Out 3 L: {:?}", ext[2]);
-        assert!(near(ext[3], (0.0, 0.05)), "R at half on Out 4 R: {:?}", ext[3]);
+        assert!(near(ext[2], (0.4, 0.4)), "L on Out 3: {:?}", ext[2]);
+        assert!(near(ext[3], (0.05, 0.05)), "R at half on Out 4: {:?}", ext[3]);
         assert!(near(master, (0.8, 0.2)), "the main pair: {master:?}");
         let mut t = Telemetry::default();
         x.e.publish(&mut t);
         assert_eq!(t.extra_meters.len(), 2);
-        // (Metered as played, on its side.)
-        assert!(near(t.extra_meters[0], (0.4, 0.0)) && near(t.extra_meters[1], (0.0, 0.05)), "{:?}", t.extra_meters);
-        // On the whole of Out 4: the right half on both its sides.
-        x.edit(|p| p.extra_outs[1].side = None);
-        stereo_block(&mut x.e, 0.8, 0.2);
-        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[3], (0.05, 0.05)), "R at half on Out 4: {:?}", ext[3]);
+        assert!(near(t.extra_meters[0], (0.4, 0.4)) && near(t.extra_meters[1], (0.05, 0.05)), "{:?}", t.extra_meters);
         // Joined: stereo again, with the left half's settings.
         x.edit(|p| extra_out::join(&mut p.extra_outs, 1));
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
         assert!(near(ext[2], (0.4, 0.1)) && near(ext[3], (0.0, 0.0)), "{:?} {:?}", ext[2], ext[3]);
-    }
-
-    /// A mono strip on the left of its pair: that side carries it, the right is silent.
-    /// Onto the master's own pair too (past the master's fader).
-    #[test]
-    fn a_mono_strip_on_the_left_output_plays_only_left() {
-        use deckard_model::extra_out::{Channels, Side};
-        let mut x = Strips::new(|p| (p.extra_outs[0].channels, p.extra_outs[0].side) = (Channels::Mono, Some(Side::L)));
-        stereo_block(&mut x.e, 0.8, 0.2);
-        let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.25, 0.0)), "Out 3: {:?}", ext[2]);
-        assert!(near(master, (0.8, 0.2)), "the main pair as it is: {master:?}");
-        // The right side instead.
-        x.edit(|p| p.extra_outs[0].side = Some(Side::R));
-        stereo_block(&mut x.e, 0.8, 0.2);
-        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.0, 0.25)), "Out 3: {:?}", ext[2]);
-        // On the master's output, left: only the master's left gets it.
-        x.edit(|p| (p.extra_outs[0].dest, p.extra_outs[0].side) = (p.master_output, Some(Side::L)));
-        stereo_block(&mut x.e, 0.8, 0.2);
-        let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(master, (0.8 + 0.25, 0.2)), "the master: {master:?}");
-        assert!(near(ext[2], (0.0, 0.0)), "Out 3: {:?}", ext[2]);
-        // A split half on one side.
-        x.edit(|p| {
-            p.extra_outs[0] = split_strip(deckard_model::extra_out::Owner::Chain(0, 0, 0), 1, deckard_model::AudioDest::Ext(2));
-            p.extra_outs[0].channels = Channels::Right;
-            p.extra_outs[0].side = Some(Side::L);
-        });
-        stereo_block(&mut x.e, 0.8, 0.2);
-        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.1, 0.0)), "the right half on the left: {:?}", ext[2]);
-    }
-
-    /// A stereo strip plays on both sides of its pair whatever side is saved.
-    #[test]
-    fn a_stereo_strip_ignores_side() {
-        use deckard_model::extra_out::Side;
-        let mut x = Strips::new(|p| p.extra_outs[0].side = Some(Side::L));
-        stereo_block(&mut x.e, 0.8, 0.2);
-        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.4, 0.1)), "Out 3: {:?}", ext[2]);
     }
 
     /// A muted strip is silent; the main pair plays on.

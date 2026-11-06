@@ -189,8 +189,6 @@ fn extra_stem_project(mut q: Project, i: usize) -> Project {
         if k == i {
             x.muted = false;
             x.dest = stem;
-            // A stem is mono on both its channels, whatever side the strip is on.
-            x.side = None;
         } else if matches!(x.dest, D::Ext(_)) {
             off(&mut x.dest);
             x.muted |= x.dest == D::None;
@@ -952,11 +950,9 @@ mod tests {
             let worst = again.audio.iter().zip(&extra.audio).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
             assert!(worst < 1e-6 && again.frames() == extra.frames(), "off by {worst}");
         }
-        // A split half: its one side on both channels of its stem, even on one side of
-        // its output.
+        // A split half: its one side on both channels of its stem.
         let mut q = p.clone();
         q.extra_outs[0].channels = Channels::Left;
-        q.extra_outs[0].side = Some(deckard_model::extra_out::Side::R);
         let half = go_split(&q, Range::Song, Stem::Extra(0), &f);
         assert!(energy(&half.audio) > 0.1);
         assert!(half.audio.as_chunks::<2>().0.iter().all(|[l, r]| (l - r).abs() < 1e-6), "both channels");

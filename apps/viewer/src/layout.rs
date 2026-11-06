@@ -469,10 +469,7 @@ pub enum ExtraOutEdit {
     Level(f64),
     Pan(f64),
     Mute(bool),
-    /// Onto the whole of `.0` (both sides of a hardware pair).
     Dest(deckard_model::AudioDest),
-    /// A mono strip (mono, or a split half) onto one side of hardware output pair `.0`.
-    OneSide(i64, deckard_model::extra_out::Side),
     /// Stereo or mono (a split half's is its side: see [`Act::SplitExtraOut`]).
     Channels(deckard_model::extra_out::Channels),
 }
@@ -912,15 +909,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         d.set_extra_outs_as(if m { "Mute Extra Output" } else { "Unmute Extra Output" }, all)
                     }
                     ExtraOutEdit::Dest(to) => {
-                        (x.dest, x.side) = (to, None);
-                        d.set_extra_outs_as("Extra Output Destination", all)
-                    }
-                    ExtraOutEdit::OneSide(n, side) => {
-                        // (A stereo strip plays on whole pairs only.)
-                        if x.channels == deckard_model::extra_out::Channels::Stereo {
-                            continue;
-                        }
-                        (x.dest, x.side) = (deckard_model::AudioDest::Ext(n), Some(side));
+                        x.dest = to;
                         d.set_extra_outs_as("Extra Output Destination", all)
                     }
                     ExtraOutEdit::Channels(ch) => {
@@ -930,10 +919,6 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                             continue;
                         }
                         x.channels = ch;
-                        // Stereo again: on the whole of its pair.
-                        if ch == Channels::Stereo {
-                            x.side = None;
-                        }
                         d.set_extra_outs_as(if ch == Channels::Mono { "Extra Output Mono" } else { "Extra Output Stereo" }, all)
                     }
                 };
