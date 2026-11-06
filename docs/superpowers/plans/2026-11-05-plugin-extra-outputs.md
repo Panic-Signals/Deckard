@@ -338,6 +338,22 @@ User request (2026-11-06): in the chain area (the Mixer shows a whole chain side
 - [ ] **Step 3:** Implement. **Step 4:** Tests pass.
 - [ ] **Step 5: Commit** "Show every plug-in panel's parameters, not just the focused one's."
 
+### Task 8e: All strips in the groups mixer, by the Master
+
+User decision (2026-11-06), replacing Task 7's placement. Spec: "Each extra output is its own mixer strip".
+
+**Files:**
+- Modify: `apps/viewer/src/layout/mixer.rs` (`mixer`, the strip ordering from Task 7):
+  - Groups mixer: every `Channel::Extra(i)` goes after the last group (and the "+" header, if any), immediately before the Master column, ordered by owner in mixer order: for each group g in order, its own `Group(g, _)` strips, then its sounds' `Sound(g, s)`/`Chain(g, s, _)` strips in sound order; then `Master(_)` strips. Within one owner, keep `project.extra_outs` order (split halves stay adjacent).
+  - Sounds mixer: no extra strips at all.
+  - Top label line: `"{owner id}·{plugin}"` with owner id = group letter (`A`), sound `A3`, master `M`; use the same ID text the mixer headers use. Middle-elide (`elide_middle`) if long. Hover: owner's full name, plug-in, output.
+  - Solo, meters and pickers are unchanged (they're keyed by index, not position).
+- Update the Task 7 placement tests to the new rule: `all_strips_sit_before_the_master_in_group_order`, `no_strips_in_the_sounds_mixer`, `the_strip_names_its_owner`.
+
+- [ ] **Step 1:** Change/add the tests above. **Step 2:** `cargo test -p deckard --bin deckard mixer`: FAIL.
+- [ ] **Step 3:** Implement. **Step 4:** Tests pass.
+- [ ] **Step 5: Commit** "Show every extra-output strip in the groups mixer, by the Master."
+
 ### Task 9: Branch end
 
 - [ ] Run `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.

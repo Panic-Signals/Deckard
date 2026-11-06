@@ -35,14 +35,21 @@ The goal is a feature people can find just by using a plug-in that has extra out
 
 ### Each extra output is its own mixer strip
 
-In the mixer, each extra output gets a strip **right next to the channel that has the
-plug-in** (Option A in the brainstorm mockup). For Portal on Group A with two extra pairs:
+In the mixer, each extra output gets a strip **in the groups mixer, just left of the
+Master**, whoever owns the plug-in: a sound, a group or the master. They never show in a
+group's sounds mixer. (The user moved them here on 2026-11-06; the first design put each
+strip next to its owner.) They are ordered by owner in mixer order: groups A, B, …
+(a group's own plug-ins, then its sounds' in sound order), then the master's. For Portal on
+Group A with two extra pairs and Kontakt on sound A3 with one:
 
 ```text
-| Group A | Portal·Out 2 | Portal·Out 3 | Group B | Group C | ... | Master |
-| Portal  |              |              |         |         |     |        |
-| Out 1   | Out 2 ▾      | Out 3 ▾      | Out 1   | Out 1   |     | Out 1  |
+| Group A | Group B | ... | A·Portal | A·Portal | A3·Kontakt | Master |
+|         |         |     | Out 2 ▾  | Out 3 ▾  | Out 2 ▾    |        |
 ```
+
+- Because a strip no longer sits by its owner, its top line names the owner too: the
+  owner's ID (group letter, "A3" for a sound, "M" for the master) and the plug-in's name,
+  e.g. "A3·Kontakt". Hovering shows the owner's full name.
 
 - These strips are called **Outs**, never "Aux": in Deckard, Aux already means the send
   effects.
@@ -50,8 +57,8 @@ plug-in** (Option A in the brainstorm mockup). For Portal on Group A with two ex
   (the main pair is Out 1). When the plug-in gives the bus a real name, such as "Kick",
   that name is shown as well. Generic names such as "Aux 1", "Out 3", "Output 3/4" or
   "St. 3/4" are hidden, since the number already says the same thing.
-- It is marked as belonging to that channel and looks a little different, so it reads as
-  part of that channel and not as another group.
+- It looks a little different (tinted), so it reads as a plug-in's output and not as
+  another group.
 - It has its own **level, pan, mute, solo and meter**, independent of the channel that has
   the plug-in. In particular, the master's fader no longer moves it, unlike #23.
 
@@ -128,7 +135,8 @@ These were decided by the user (Josh) in the 2026-11-05 brainstorm:
 
 - Detect extra outputs automatically, with no setup and no hidden behavior.
 - Show a strip only once sound comes out of that output.
-- Put the strip next to the channel that has the plug-in.
+- Put the strip next to the channel that has the plug-in. (Changed 2026-11-06: all strips
+  sit in the groups mixer, left of the Master; none in a group's sounds mixer.)
 - Give it its own fader, independent of the master's.
 - By default route it to the next free hardware output, changeable in the mixer, including
   back into Deckard's own channels.
@@ -157,8 +165,8 @@ These are Claude's calls, which the user hasn't confirmed separately:
   including its owner's main pair, while the plug-in keeps running. Soloing something
   else silences it, unless that something is its owner, because soloing a channel keeps
   everything that comes from it.
-- **A sound's plug-in:** its extra strips sit next to the sound, inside its group's part of
-  the mixer, and its parent is that group.
+- **A sound's plug-in:** its extra strips' parent is that sound's group (for the fallback
+  route). They show in the groups mixer like every other strip.
 - **PR #23** isn't merged, so no project depends on it. Nothing needs migrating. This
   design replaces it.
 
