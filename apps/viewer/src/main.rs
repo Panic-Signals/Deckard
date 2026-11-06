@@ -7633,6 +7633,21 @@ impl App {
         }
     }
 
+    /// Load the project's state for slot `key` into its instance `p` if it differs from
+    /// what the instance was loaded from or last saved (as [`deckard_plugins::Host::instance`]
+    /// does, so it's no edit); not while the audio thread holds it (again next time).
+    fn follow_plugin_chunk(&mut self, key: (deckard_doc::Chain, usize), p: &deckard_plugins::Shared) {
+        let Some(doc) = self.doc.clone() else { return };
+        let d = doc.borrow();
+        let Some(pr) = d.chain_slots(key.0).and_then(|s| s.get(key.1)).and_then(|s| s.plugin.as_ref()) else { return };
+        let Ok(mut g) = p.try_lock() else { return };
+        if g.chunk() != pr.chunk.as_slice()
+            && let Err(e) = g.load_chunk(&pr.chunk)
+        {
+            self.status = format!("{}: {e}", pr.name);
+        }
+    }
+
     /// Read view `key`'s shown page's values again (false: the plug-in was busy, or
     /// another is in the slot now, its view rebuilt).
     fn refresh_view(&mut self, key: (deckard_doc::Chain, usize), now: std::time::Instant) -> bool {
@@ -7649,6 +7664,11 @@ impl App {
                 self.plugin_views.insert(key, v);
             }
             return false;
+        }
+        // The focused plug-in takes the project's state when it changed there (an undo):
+        // the engine does that once it runs, and nothing else did before.
+        if self.plugin_focus == Some(key) {
+            self.follow_plugin_chunk(key, &p);
         }
         let v = self.plugin_views.get_mut(&key).unwrap();
         let page = v.shown;

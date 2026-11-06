@@ -674,7 +674,7 @@ fn panel(
                     ui.ctx().request_repaint_after(crate::VIEW_REFRESH)
                 }
                 None => {
-                    painter.text(body.center(), Align2::CENTER_CENTER, "Not loaded: click its name", font(12.0), white(120));
+                    painter.text(body.center(), Align2::CENTER_CENTER, "Not loaded: click its name for details", font(12.0), white(120));
                 }
             }
         }

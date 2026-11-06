@@ -161,3 +161,35 @@ fn a_plugin_replaced_in_a_slot_gets_its_own_view() {
     assert_eq!(names(&h, 1), replicant);
     assert_eq!(shown(&h).iter().find(|x| x.0 == 1).map(|x| x.2.clone()), Some(labels(&h, 1, 0)));
 }
+
+/// Before any engine runs (nothing played yet), an undo of a plug-in's state reaches
+/// the focused plug-in: its view refreshes it from the project, so it shows (and later
+/// saves) the state undone to.
+#[test]
+fn undo_reloads_the_focused_plugins_state_before_any_engine() {
+    let mut h = strip_with_two_plugins();
+    assert!(!h.state().output.as_ref().is_some_and(|o| o.as_ref().is_ok_and(|o| o.has_engine())), "no engine");
+    let key = h.state().plugin_slot_key(CHAIN, 0);
+    let inst = h.state().samples.plugins.existing(key).expect("the focused plug-in runs");
+    let (id, before) = {
+        let v = h.state().plugin_views.get(&(CHAIN, 0)).unwrap();
+        let id = v.pages[0].knobs.iter().find(|(i, ..)| i.steps == 0).expect("a continuous knob").0.id;
+        (id, inst.lock().unwrap().param_value(id))
+    };
+    let to = if before > 0.5 { 0.1 } else { 0.9 };
+    // Turned: DECKARD's own plug-ins save into the project as they change (an undo step).
+    layout::apply_acts(h.state_mut(), vec![Act::PluginParam(0, id, to)]);
+    h.run_steps(2);
+    assert!((inst.lock().unwrap().param_value(id) - to).abs() < 1e-6);
+    let doc = h.state().doc.clone().unwrap();
+    assert!(doc.borrow_mut().undo());
+    // (Its next refresh.)
+    for v in h.state_mut().plugin_views.values_mut() {
+        v.refreshed -= crate::VIEW_REFRESH;
+    }
+    h.run_steps(2);
+    assert!((inst.lock().unwrap().param_value(id) - before).abs() < 1e-6, "the instance took the undone state");
+    let v = h.state().plugin_views.get(&(CHAIN, 0)).unwrap();
+    let k = v.pages[0].knobs.iter().position(|(i, ..)| i.id == id).unwrap();
+    assert!((v.values[k].0 - before).abs() < 1e-6, "and its panel shows it");
+}
