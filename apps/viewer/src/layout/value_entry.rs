@@ -191,6 +191,7 @@ pub fn resolve(app: &crate::App, what: What, typed: &str, shown: &str) -> Option
         }
         Edit::Swing(_, _, SwingField::Cycle) => plain().map(|v| edit.to_act((v / 7.0).clamp(0.0, 1.0) as f32)),
         Edit::Swing(..) | Edit::Toggle(..) | Edit::Route(_) => None,
+        Edit::MidiInputParam(g, id, ..) => plain().map(|v| Act::MidiInputParam(g, id, v)),
         Edit::Param(t, f, ..) | Edit::Log(t, f, ..) | Edit::Int(t, f, ..) | Edit::Choice(t, f, ..) => {
             let stored = |a: f32| match edit.to_act(a) {
                 Act::SetParam(_, _, v) => v,

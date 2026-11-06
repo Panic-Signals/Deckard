@@ -187,7 +187,7 @@ impl Sender {
                     }
                 }
             }
-            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => {}
+            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::MidiInputOut { .. } => {}
         }
     }
 
@@ -249,6 +249,10 @@ pub struct Output {
     fx_meters: Arc<crate::meters::FxMeters>,
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
+    /// The MIDI input plug-ins by group, since the plug-ins are on the audio thread.
+    midi_inputs: Mutex<std::collections::BTreeMap<usize, crate::midi_input::Info>>,
+    /// Plug-ins put in with no engine playing, for the next one played.
+    midi_inputs_waiting: Mutex<std::collections::BTreeMap<usize, Box<dyn crate::midi_input::MidiInput>>>,
     _stream: cpal::Stream,
 }
 
@@ -291,6 +295,7 @@ fn apply(
                 old.end_midi();
                 old.release_routes();
                 new.take_unroutes(old);
+                new.take_midi_inputs(old);
             }
             engine.replace(new).map(Command::Play)
         }
@@ -623,6 +628,8 @@ impl Output {
             plays: AtomicU64::new(0),
             fx_meters: Arc::default(),
             route_travels: Arc::default(),
+            midi_inputs: Mutex::default(),
+            midi_inputs_waiting: Mutex::default(),
             routing,
             channels,
             _stream: stream,
@@ -663,6 +670,9 @@ impl Output {
         engine.pool = self.pool.clone();
         engine.set_fx_meters(&self.fx_meters);
         engine.set_route_travels(&self.route_travels);
+        for (group, plugin) in std::mem::take(&mut *self.midi_inputs_waiting.lock().unwrap()) {
+            engine.set_midi_input(group, Some(plugin));
+        }
         // Sounds that can't get live input render ahead, on a thread of their own.
         let ahead = self.ahead_frames.load(Ordering::Relaxed);
         if ahead > 0 {
@@ -747,6 +757,50 @@ impl Output {
     /// Note Repeat / the Arp on (with its settings) or off.
     pub fn set_repeat(&self, r: Option<(deckard_model::Arp, crate::repeat::RepeatMode)>) {
         self.sender.send(Command::Repeat(r));
+    }
+
+    /// Put a MIDI input plug-in on `group`, or take it out with `None`. Whatever comes out
+    /// goes back with the command, to be freed here.
+    pub fn set_midi_input(&self, group: usize, plugin: Option<Box<dyn crate::midi_input::MidiInput>>) {
+        if group < crate::midi_input::SLOTS {
+            let mut table = self.midi_inputs.lock().unwrap();
+            match plugin.as_deref() {
+                Some(p) => table.insert(group, crate::midi_input::Info::of(p)),
+                None => table.remove(&group),
+            };
+        }
+        if !self.has_engine() {
+            let mut waiting = self.midi_inputs_waiting.lock().unwrap();
+            match plugin {
+                Some(p) if group < crate::midi_input::SLOTS => waiting.insert(group, p),
+                _ => waiting.remove(&group),
+            };
+            return;
+        }
+        let mut plugin = plugin;
+        self.run(move |e| plugin = e.set_midi_input(group, plugin.take()));
+    }
+
+    /// `group`'s MIDI input plug-in, and where its parameters are.
+    pub fn midi_input(&self, group: usize) -> Option<crate::midi_input::Info> {
+        self.midi_inputs.lock().unwrap().get(&group).cloned()
+    }
+
+    /// Move a parameter of `group`'s MIDI input plug-in. Returns the value it took (fitted
+    /// to its range and steps), `None` if there's no such parameter.
+    pub fn set_midi_input_param(&self, group: usize, id: u32, value: f64) -> Option<f64> {
+        let value = {
+            let mut table = self.midi_inputs.lock().unwrap();
+            let param = table.get_mut(&group)?.params.iter_mut().find(|p| p.desc.id == id)?;
+            param.value = param.desc.fit(value);
+            param.value
+        };
+        if let Some(p) = self.midi_inputs_waiting.lock().unwrap().get_mut(&group) {
+            p.set_param(id, value);
+        } else {
+            self.run(move |e| e.set_midi_input_param(group, id, value));
+        }
+        Some(value)
     }
 
     /// Record live notes (REC) or stop.
