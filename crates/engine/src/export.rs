@@ -126,6 +126,19 @@ pub fn stem_project(p: &Project, stem: Stem) -> Project {
         Stem::Group(g) | Stem::Sound(g, _) => g,
     };
     q.master_slots.clear();
+    // Other channels' strips too: a muted owner still plays for a strip that can be
+    // heard, so one playing into Deckard would reach this stem.
+    {
+        use deckard_model::extra_out::Owner;
+        let kept = |o: Owner| match (stem, o) {
+            (Stem::Group(g), Owner::Sound(a, _) | Owner::Chain(a, _, _) | Owner::Group(a, _)) => a == g,
+            (Stem::Sound(g, s), Owner::Sound(a, b) | Owner::Chain(a, b, _)) => (a, b) == (g, s),
+            _ => false,
+        };
+        for x in q.extra_outs.iter_mut().filter(|x| !kept(x.owner)) {
+            x.muted = true;
+        }
+    }
     let unity = deckard_model::level_from_db(0.0);
     q.master_level = unity;
     q.master_pan = 0.0;
@@ -943,6 +956,31 @@ mod tests {
         let half = go_split(&q, Range::Song, Stem::Extra(0), &f);
         assert!(energy(&half.audio) > 0.1);
         assert!(half.audio.as_chunks::<2>().0.iter().all(|[l, r]| (l - r).abs() < 1e-6), "both channels");
+    }
+
+    /// Another channel's strip playing into Deckard stays out of a stem: the kick's
+    /// strip into its group stays out of the other sound's stem (its owner is muted
+    /// there, but plays on for a strip), and one into the master out of group B's.
+    #[test]
+    fn a_stem_holds_no_other_channels_strips() {
+        use deckard_model::AudioDest;
+        let (_tmp, mut p) = project();
+        let f = fmt(true);
+        for (dest, stem) in [(AudioDest::Parent, Stem::Sound(0, 1)), (AudioDest::Master, Stem::Group(1))] {
+            let (_, q) = with_strip();
+            p.groups[0].sounds[0].slots = q.groups[0].sounds[0].slots.clone();
+            p.extra_outs = q.extra_outs.clone();
+            p.extra_outs[0].dest = dest;
+            let mut without = p.clone();
+            without.extra_outs.clear();
+            let off = worst(&go_split(&without, Range::Song, stem, &f), &go_split(&p, Range::Song, stem, &f), 1.0);
+            assert!(off < 1e-6, "{stem:?} holds the kick's strip: off by {off}");
+            assert!(stem_project(&p, stem).extra_outs[0].muted);
+        }
+        // The kick's own stem, and its group's, keep it.
+        for stem in [Stem::Sound(0, 0), Stem::Group(0)] {
+            assert!(!stem_project(&p, stem).extra_outs[0].muted, "{stem:?}");
+        }
     }
 
     fn worst(a: &Rendered, b: &Rendered, k: f32) -> f32 {
