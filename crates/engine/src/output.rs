@@ -495,11 +495,19 @@ impl Output {
             let mut engine: Option<Box<Engine>> = None;
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
+            #[cfg(windows)]
+            let mut promoted = false;
             device.build_output_stream(
                 stream_config,
                 move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     let started = Instant::now();
                     let frames = out.len() / channels;
+                    // The audio thread is cpal's, so this is the first chance to raise it.
+                    #[cfg(windows)]
+                    if !promoted {
+                        promoted = true;
+                        crate::pool::promote_current(frames as u32, rate);
+                    }
                     block.store(frames, std::sync::atomic::Ordering::Relaxed);
                     if stereo.len() < frames * 2 {
                         stereo.resize(frames * 2, 0.0); // only for unusually large host blocks
