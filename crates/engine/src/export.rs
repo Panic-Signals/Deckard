@@ -147,34 +147,40 @@ pub fn stem_project(p: &Project, stem: Stem) -> Project {
     q
 }
 
-/// The project that plays only strip `i` of `q.extra_outs`, onto [`STEM_OUTPUT`] (see
-/// [`stem_output`]): the strip unmuted, the other strips muted. Its owner's plug-in runs
-/// (the engine keeps a muted owner playing for a strip that can be heard) but the owner's
-/// main pair is silent: a sound's or group's own channel is muted, everything else in the
-/// project too. The master's plug-in hears the mix as ever (its own output, the master's,
-/// isn't this file). Nothing else can reach the stem's output: no channel or send goes
-/// to an external output, the cue is off, and the master's output is moved off it (the
-/// engine plays onto the master's output whatever is sent to it).
+/// The project that plays only strip `i` of `q.extra_outs` onto [`STEM_OUTPUT`] (see
+/// [`stem_output`]). The render keeps that output alone, so the rest of the project plays
+/// as it does live: whatever feeds the strip's plug-in still does, and the owner's own
+/// pair goes on to the master (not this file). What could reach the stem's output is
+/// kept off it: the strip is unmuted and moved there, the other strips on an external
+/// output are muted (those routed into Deckard play, as they may feed the plug-in), no
+/// channel, send or the cue goes to an external output, and the master's output is moved
+/// off it. What goes to the master's output (the engine mixes that into the master) still
+/// does.
 fn extra_stem_project(mut q: Project, i: usize) -> Project {
     use deckard_model::AudioDest as D;
-    use deckard_model::extra_out::Owner;
-    let Some(owner) = q.extra_outs.get(i).map(|x| x.owner) else {
-        // No such strip: silence.
+    if i >= q.extra_outs.len() {
+        // No such strip: nothing reaches the output.
         q.extra_outs.clear();
-        q.groups.iter_mut().for_each(|g| g.muted = true);
         return q;
+    }
+    let stem = D::Ext(STEM_OUTPUT as i64);
+    let master = q.master_output;
+    let moved = if master == stem { D::Ext(0) } else { master };
+    // A way to an external output: the master's stays the master's; others go nowhere.
+    let off = |d: &mut D| {
+        if let D::Ext(_) = *d {
+            *d = if *d == master { moved } else { D::None };
+        }
     };
     for (k, x) in q.extra_outs.iter_mut().enumerate() {
-        x.muted = k != i;
         if k == i {
-            x.dest = D::Ext(STEM_OUTPUT as i64);
+            x.muted = false;
+            x.dest = stem;
+        } else if matches!(x.dest, D::Ext(_)) {
+            off(&mut x.dest);
+            x.muted |= x.dest == D::None;
         }
     }
-    let off = |d: &mut D| {
-        if matches!(d, D::Ext(_)) {
-            *d = D::None;
-        }
-    };
     for grp in &mut q.groups {
         off(&mut grp.channel.dest);
         grp.channel.aux_dest.iter_mut().for_each(off);
@@ -183,21 +189,11 @@ fn extra_stem_project(mut q: Project, i: usize) -> Project {
             snd.channel.aux_dest.iter_mut().for_each(off);
         }
     }
-    q.cue_output = D::None;
-    if q.master_output == D::Ext(STEM_OUTPUT as i64) {
-        q.master_output = D::Ext(0);
+    off(&mut q.cue_output);
+    if !matches!(q.cue_output, D::Ext(_)) {
+        q.cue_output = D::None;
     }
-    match owner {
-        Owner::Sound(g, s) | Owner::Chain(g, s, _) => {
-            q.groups.iter_mut().for_each(|x| x.muted = true);
-            if let Some(snd) = q.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) {
-                snd.muted = true;
-            }
-        }
-        // Its own sounds still go into it: the group is muted, the others too.
-        Owner::Group(..) => q.groups.iter_mut().for_each(|x| x.muted = true),
-        Owner::Master(_) => {}
-    }
+    q.master_output = moved;
     q
 }
 
@@ -259,8 +255,8 @@ pub fn render(
 }
 
 /// [`render`], keeping external output `output` (Out n, from 0; see [`stem_output`])
-/// rather than the master's output (`None`). That output counts as connected, so what
-/// is sent there plays there.
+/// rather than the master's output (`None`). Every output counts as connected, as in a
+/// render of the master: a strip sent to one plays there, not through its parent.
 #[allow(clippy::too_many_arguments)]
 pub fn render_output(
     p: &Project,
@@ -276,9 +272,7 @@ pub fn render_output(
     let rate = fmt.rate.max(1);
     let (mut engine, _) = Engine::new(p, project_path, rate, mode, cache);
     let output = output.filter(|&n| n < crate::OUTPUTS);
-    if let Some(n) = output {
-        engine.set_connected_outputs(1 << n);
-    }
+    engine.set_connected_outputs(u16::MAX);
     let mut ext: Vec<Vec<f32>> = if output.is_some() { vec![vec![0f32; 1024]; crate::OUTPUTS] } else { Vec::new() };
     let mut main = vec![0f32; 1024];
     engine.looping = false;
@@ -889,11 +883,14 @@ mod tests {
         (tmp, p)
     }
 
-    /// [`go`], with Split playing the kick's chain's first slot.
+    /// [`go`], with Split playing the kick's chain's first slot, group B's first and the
+    /// master's first, when the project puts a plug-in there.
     fn go_split(p: &Project, range: Range, stem: Stem, f: &Format) -> Rendered {
+        use deckard_plugins::Slot;
         let mut cache = SampleCache::default();
-        let slot = deckard_plugins::Slot::Chain { group: 0, sound: 0, slot: 0 };
-        cache.test_plugins.push((slot, crate::tests::split_plugin(&crate::tests::SPLIT)));
+        for slot in [Slot::Chain { group: 0, sound: 0, slot: 0 }, Slot::Group { group: 1, slot: 0 }, Slot::Master { slot: 0 }] {
+            cache.test_plugins.push((slot, crate::tests::split_plugin(&crate::tests::SPLIT)));
+        }
         let (q, mode, offset) = playing(&stem_project(p, stem), range);
         render_output(&q, None, mode, offset, f, &mut cache, &AtomicBool::new(false), &mut |_| {}, stem_output(stem)).unwrap()
     }
@@ -924,6 +921,7 @@ mod tests {
         for edit in [
             |q: &mut Project| q.master_output = deckard_model::AudioDest::Ext(15),
             |q: &mut Project| q.cue_output = deckard_model::AudioDest::Ext(15),
+            // (Group B plays: only its way to Out 16 is cut.)
             |q: &mut Project| q.groups[1].channel.dest = deckard_model::AudioDest::Ext(15),
             |q: &mut Project| q.extra_outs[0].dest = deckard_model::AudioDest::Ext(15),
             |q: &mut Project| {
@@ -945,6 +943,67 @@ mod tests {
         let half = go_split(&q, Range::Song, Stem::Extra(0), &f);
         assert!(energy(&half.audio) > 0.1);
         assert!(half.audio.as_chunks::<2>().0.iter().all(|[l, r]| (l - r).abs() < 1e-6), "both channels");
+    }
+
+    fn worst(a: &Rendered, b: &Rendered, k: f32) -> f32 {
+        assert_eq!(a.frames(), b.frames());
+        a.audio.iter().zip(&b.audio).map(|(a, b)| (a * k - b).abs()).fold(0f32, f32::max)
+    }
+
+    /// The first bar of a render (the kick alone plays there).
+    fn first_bar(r: &Rendered) -> &[f32] {
+        &r.audio[..BAR * 2]
+    }
+
+    /// A group's plug-in's strip: what goes into the group, from its own sounds or
+    /// another group's (the kick, sent to group B), half of it on the strip's stem. The
+    /// master's file is the group's main pair alone.
+    #[test]
+    fn a_group_plugins_strip_hears_what_feeds_the_group() {
+        use deckard_model::extra_out::Owner;
+        let (_tmp, mut p) = project();
+        p.groups[1].slots = vec![crate::tests::plugin_slot(&crate::tests::SPLIT)];
+        p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::Group(1);
+        p.extra_outs = vec![crate::tests::split_strip(Owner::Group(1, 0), 1, deckard_model::AudioDest::Ext(2))];
+        let f = fmt(true);
+        let master = go_split(&p, Range::Song, Stem::Master, &f);
+        let extra = go_split(&p, Range::Song, Stem::Extra(0), &f);
+        assert!(energy(first_bar(&extra)) > 0.1, "the kick, from group A, reaches it");
+        let off = worst(&master, &extra, 0.5);
+        assert!(off < 1e-4, "the stem is half of what enters the group: off by {off}");
+        let mut without = p.clone();
+        without.extra_outs.clear();
+        let off = worst(&master, &go_split(&without, Range::Song, Stem::Master, &f), 1.0);
+        assert!(off < 1e-6, "the master holds the strip: off by {off}");
+    }
+
+    /// The master's plug-in's strip: the whole mix (with what goes straight to the
+    /// master's output), half of it on the strip's stem; the master's file without it.
+    #[test]
+    fn a_master_plugins_strip_hears_the_mix() {
+        use deckard_model::extra_out::Owner;
+        let (_tmp, mut p) = project();
+        p.master_slots = vec![crate::tests::plugin_slot(&crate::tests::SPLIT)];
+        p.master_output = deckard_model::AudioDest::Ext(0);
+        // The kick straight onto the master's output (the engine mixes it into the master).
+        p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::Ext(0);
+        p.extra_outs = vec![crate::tests::split_strip(Owner::Master(0), 1, deckard_model::AudioDest::Ext(2))];
+        let f = fmt(true);
+        let master = go_split(&p, Range::Song, Stem::Master, &f);
+        let extra = go_split(&p, Range::Song, Stem::Extra(0), &f);
+        assert!(energy(first_bar(&extra)) > 0.1, "the kick, on the master's output, reaches it");
+        let off = worst(&master, &extra, 0.5);
+        assert!(off < 1e-4, "the stem is half the mix: off by {off}");
+        let mut without = p.clone();
+        without.extra_outs.clear();
+        let off = worst(&master, &go_split(&without, Range::Song, Stem::Master, &f), 1.0);
+        assert!(off < 1e-6, "the master holds the strip: off by {off}");
+        // The master's output on Out 16 itself: the same.
+        let mut q = p.clone();
+        q.master_output = deckard_model::AudioDest::Ext(15);
+        q.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::Ext(15);
+        let off = worst(&extra, &go_split(&q, Range::Song, Stem::Extra(0), &f), 1.0);
+        assert!(off < 1e-6, "off by {off}");
     }
 
     #[test]

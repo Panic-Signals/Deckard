@@ -102,10 +102,11 @@ pub fn strip_key(x: &ExtraOut) -> StripKey {
     (x.owner, x.bus, x.channels)
 }
 
-/// The extra-output strips that get a stem: those on a hardware output (one routed into
-/// Deckard is part of what it feeds). With their places in `project.extra_outs`.
+/// The extra-output strips that get a stem: those on a hardware output other than the
+/// master's (one routed into Deckard, or onto the master's output, is part of what it
+/// feeds). With their places in `project.extra_outs`.
 fn extra_stems(p: &Project) -> impl Iterator<Item = (usize, &ExtraOut)> {
-    p.extra_outs.iter().enumerate().filter(|(_, x)| matches!(x.dest, AudioDest::Ext(_)))
+    p.extra_outs.iter().enumerate().filter(|(_, x)| matches!(x.dest, AudioDest::Ext(_)) && x.dest != p.master_output)
 }
 
 /// The outputs checked in the panel's list: the Source's, then each checked strip on a
@@ -584,7 +585,8 @@ mod tests {
     }
 
     /// Each strip on a hardware output is a stem of its own, whatever the Source; a
-    /// strip routed into Deckard (a group, the master, a sound) is part of what it feeds.
+    /// strip routed into Deckard (a group, the master, a sound) or onto the master's
+    /// output is part of what it feeds.
     #[test]
     fn a_strip_routed_into_a_group_gets_no_stem() {
         use deckard_model::AudioDest;
@@ -601,7 +603,14 @@ mod tests {
             dest,
             channels: Channels::Stereo,
         };
-        p.extra_outs = vec![strip(AudioDest::Group(2)), strip(AudioDest::Ext(3)), strip(AudioDest::Master), strip(AudioDest::Ext(4))];
+        p.master_output = AudioDest::Ext(0);
+        p.extra_outs = vec![
+            strip(AudioDest::Group(2)),
+            strip(AudioDest::Ext(3)),
+            strip(AudioDest::Master),
+            strip(AudioDest::Ext(4)),
+            strip(AudioDest::Ext(0)),
+        ];
         let mut s = Settings::default();
         assert_eq!(stems(&p, &s), [Stem::Master, Stem::Extra(1), Stem::Extra(3)]);
         s.source = Source::Group;
