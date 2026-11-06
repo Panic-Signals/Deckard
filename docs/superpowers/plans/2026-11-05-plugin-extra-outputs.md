@@ -324,6 +324,20 @@ User request (2026-11-06), Maschine's behaviour: the Mixer has a tab per group. 
 - [ ] **Step 3:** Implement. **Step 4:** Tests pass.
 - [ ] **Step 5: Commit** "Add group tabs to the Mixer, and a way back to the groups."
 
+### Task 8d: Every plug-in panel shows its parameters
+
+User request (2026-11-06): in the chain area (the Mixer shows a whole chain side by side), a hosted VST/AU panel that isn't the focused slot shows a "Show parameters" button (`apps/viewer/src/layout/strip.rs` ~647) instead of its knobs, because `App.plugin_view` (`apps/viewer/src/main.rs` ~877, filled ~7475-7560) holds one live view: the focused slot's.
+
+**Files:**
+- Modify: `apps/viewer/src/main.rs`: replace the single `plugin_view: Option<PluginView>` with live views for every hosted plug-in panel drawn this frame (e.g. a map keyed by `(Chain, slot)`). Each refreshes its shown page's values every 100 ms with the same non-blocking read (`try_lock`, VST3 controller values without holding the instance), and keeps its own page (today `plugin_page` is one number for all). Views of slots not drawn for a while are dropped, so the cost follows what's on screen. Keep `hold_sent` behaviour per view.
+- Modify: `apps/viewer/src/layout/strip.rs`: every hosted plug-in panel draws its pages and knobs; the "Show parameters" button goes. A plug-in that failed to load still shows its error.
+- Keep the focused slot's behaviour (MK3 hardware pages, `Act::PluginPage`) working; it reads the focused slot's view.
+
+- [ ] **Step 1: Write the failing tests:** `every_plugin_panel_shows_its_knobs` (two native test plug-ins in one chain, the unfocused one draws knobs, no "Show parameters"), `each_plugin_panel_keeps_its_own_page`, `views_of_slots_no_longer_drawn_are_dropped`.
+- [ ] **Step 2:** `cargo test -p deckard --bin deckard plugin`. Expected: FAIL.
+- [ ] **Step 3:** Implement. **Step 4:** Tests pass.
+- [ ] **Step 5: Commit** "Show every plug-in panel's parameters, not just the focused one's."
+
 ### Task 9: Branch end
 
 - [ ] Run `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
