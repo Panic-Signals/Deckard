@@ -83,8 +83,8 @@ pub fn slot_of(o: Owner) -> deckard_plugins::Slot {
 }
 
 impl crate::App {
-    /// Turn what the engine heard since the last frame into strips: one undoable edit
-    /// for all of them. Names come from the live plug-in when it isn't busy, else none
+    /// Turn what the engine heard since the last frame into strips: no undo step (they
+    /// come from sound, not an edit). Names come from the live plug-in when it isn't busy, else none
     /// (the strip is "Out N" either way, see [`label`]).
     pub(crate) fn add_heard_strips(&mut self) {
         let heard = match &self.output {

@@ -542,7 +542,7 @@ pub enum Act {
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
-    /// Strips for plug-in extra outputs just heard, added as one edit.
+    /// Strips for plug-in extra outputs just heard: added outside the undo history.
     AddExtraOuts(Vec<deckard_model::extra_out::ExtraOut>),
     /// Change strip `.0` of `project.extra_outs` (a plug-in's extra output).
     SetExtraOut(usize, ExtraOutEdit),
@@ -880,10 +880,10 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ToggleFollow => app.follow = !app.follow,
             Act::AddExtraOuts(fresh) => {
                 let Some(doc) = app.doc.clone() else { continue };
-                let mut d = doc.borrow_mut();
-                let mut all = d.project().extra_outs.clone();
-                all.extend(fresh);
-                if let Err(e) = d.set_extra_outs(all) {
+                // Strips appear from sound, not an edit: no undo step (see
+                // `Document::add_heard_extra_outs`).
+                let result = doc.borrow_mut().add_heard_extra_outs(&fresh);
+                if let Err(e) = result {
                     app.status = format!("can't add the extra output: {e}");
                 }
             }

@@ -267,6 +267,8 @@ impl Document {
         ops.extend(self.sidechain_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
         // So do its modulation routes.
         ops.extend(self.mod_routes_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
+        // And its plug-ins' strips.
+        ops.extend(self.extra_outs_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
         self.apply(label, ops)?;
         self.prune_extra_outs()
     }
@@ -318,6 +320,12 @@ impl Document {
         }));
         // Its routes go too; those after it move down one.
         ops.extend(self.mod_routes_rekey(c, |k| match k.cmp(&at) {
+            std::cmp::Ordering::Less => Some(k),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(k - 1),
+        }));
+        // Its strips too; those after it move down one.
+        ops.extend(self.extra_outs_rekey(c, |k| match k.cmp(&at) {
             std::cmp::Ordering::Less => Some(k),
             std::cmp::Ordering::Equal => None,
             std::cmp::Ordering::Greater => Some(k - 1),
@@ -398,6 +406,7 @@ impl Document {
         order.insert(to, k);
         ops.extend(self.sidechain_rekey(c, |old| order.iter().position(|&o| o == old)));
         ops.extend(self.mod_routes_rekey(c, |old| order.iter().position(|&o| o == old)));
+        ops.extend(self.extra_outs_rekey(c, |old| order.iter().position(|&o| o == old)));
         self.apply("Move Module", ops)?;
         self.prune_extra_outs()
     }

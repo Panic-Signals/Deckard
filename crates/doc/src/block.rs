@@ -624,6 +624,15 @@ impl Document {
         let _ = self.run(&ops);
         self.screen = b.screen;
         self.refresh();
+        // Strips whose slot holds another plug-in, or none (the file changed elsewhere).
+        if !self.project.extra_outs.is_empty() {
+            let mut p = self.project.clone();
+            deckard_model::extra_out::prune(&mut p);
+            let ops = self.extra_out_ops(&p.extra_outs);
+            if !ops.is_empty() && self.run(&ops).is_ok() {
+                self.refresh();
+            }
+        }
         self.revision = 0;
     }
 
@@ -893,6 +902,19 @@ mod tests {
         d.add_slot(0, 0, 0, &crate::NewModule::Plugin { id: "V:AU:INSTR:2".into(), name: "Q".into(), chunk: Vec::new() }).unwrap();
         assert!(d.project().extra_outs.is_empty());
         assert!(reopen(&d).project().extra_outs.is_empty());
+    }
+
+    /// A saved strip whose slot holds another plug-in when the project is read (or none)
+    /// is dropped; one whose plug-in is there is kept.
+    #[test]
+    fn strips_without_their_plugin_are_dropped_on_reading() {
+        use deckard_model::extra_out::Owner;
+        let mut d = with_plugin("V:AU:INSTR:1");
+        let ok = strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1");
+        d.set_extra_outs(vec![ok.clone(), strip(Owner::Chain(0, 0, 0), "another"), strip(Owner::Master(0), "x")]).unwrap();
+        let back = reopen(&d);
+        assert_eq!(back.project().extra_outs, [ok]);
+        assert!(!back.is_dirty());
     }
 
     #[test]

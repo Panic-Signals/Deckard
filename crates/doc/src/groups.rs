@@ -86,6 +86,11 @@ impl Document {
                 return d.fix_lfo_triggers(|_, _| None);
             }
             d.unroute_group(g)?;
+            // The strips follow their groups (before pruning, which looks them up there).
+            let strips: Vec<Op> = d.extra_outs_group_deleted(g).into_iter().collect();
+            if !strips.is_empty() {
+                d.apply("Delete Group", strips)?;
+            }
             d.remove_group(g)?;
             d.prune_extra_outs()?;
             d.fix_lfo_triggers(|x, s| match x.cmp(&g) {
