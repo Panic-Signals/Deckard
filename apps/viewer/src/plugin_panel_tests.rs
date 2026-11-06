@@ -1,0 +1,102 @@
+//! The plug-in strip's panels: every hosted plug-in shows its own pages and knobs, not
+//! just the focused one's, each on a page of its own; views of panels gone are dropped.
+
+use crate::App;
+use crate::layout::{self, Act, ChainTab};
+use deckard_doc::Chain;
+use eframe::egui;
+use egui_kittest::Harness;
+
+const CHAIN: Chain = Chain::Sound(0, 0);
+
+/// A new project, its first sound holding DECKARD's two plug-ins (slots 0 and 1), the
+/// first focused, in the Mixer (the strip below shows the sound's chain).
+fn strip_with_two_plugins() -> Harness<'static, App> {
+    use deckard_plugins::native::CLASSES;
+    let mut app = App { settings: crate::settings::Settings::default(), model: "M3".into(), ..App::default() };
+    app.new_project();
+    let doc = app.doc.clone().unwrap();
+    for (i, class) in CLASSES.iter().take(2).enumerate() {
+        let new = deckard_doc::NewModule::Plugin { id: class.plugin_id(), name: class.name.into(), chunk: Vec::new() };
+        doc.borrow_mut().add_slot(0, 0, i, &new).unwrap();
+    }
+    (app.group, app.sound, app.chain_tab, app.channel, app.slot) = (0, 0, ChainTab::Sound, false, Some(0));
+    app.mixer = true;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1500.0 + layout::CONTROLLER_WIDTH, 930.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+    h.run_steps(4);
+    h
+}
+
+/// What the strip's hosted plug-in panels show: (slot, page, knob labels).
+fn shown(h: &Harness<'static, App>) -> Vec<(usize, usize, Vec<String>)> {
+    h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-strip-plugins"))).unwrap_or_default()
+}
+
+/// The labels of page `page` of slot `slot`'s view, as the strip draws them.
+fn labels(h: &Harness<'static, App>, slot: usize, page: usize) -> Vec<String> {
+    let v = h.state().plugin_views.get(&(CHAIN, slot)).expect("a view of the slot");
+    v.pages[page].knobs.iter().map(|(_, l, _)| l.to_uppercase()).collect()
+}
+
+#[test]
+fn every_plugin_panel_shows_its_knobs() {
+    let h = strip_with_two_plugins();
+    let shown = shown(&h);
+    let one = shown.iter().find(|x| x.0 == 1).expect("the unfocused plug-in's panel shows its knobs");
+    assert!(!one.2.is_empty(), "{shown:?}");
+    assert_eq!(one.2, labels(&h, 1, 0));
+    let zero = shown.iter().find(|x| x.0 == 0).expect("the focused one's too");
+    assert_eq!(zero.2, labels(&h, 0, 0));
+}
+
+#[test]
+fn each_plugin_panel_keeps_its_own_page() {
+    let mut h = strip_with_two_plugins();
+    let at = |h: &Harness<'static, App>, slot: usize| shown(h).into_iter().find(|x| x.0 == slot).map(|x| (x.1, x.2));
+    // The unfocused one's page turns; the focused one's stays.
+    layout::apply_acts(h.state_mut(), vec![Act::PluginPageOf(CHAIN, 1, 1)]);
+    h.run_steps(3);
+    assert_eq!(at(&h, 1), Some((1, labels(&h, 1, 1))));
+    assert_eq!(at(&h, 0), Some((0, labels(&h, 0, 0))));
+    assert_eq!(h.state().plugin_page, 0, "the focused slot's page");
+    // The focused one's (as the SOUND tab and the controller turn it); the other stays.
+    layout::apply_acts(h.state_mut(), vec![Act::PluginPage(2)]);
+    h.run_steps(3);
+    assert_eq!(at(&h, 0), Some((2, labels(&h, 0, 2))));
+    assert_eq!(at(&h, 1), Some((1, labels(&h, 1, 1))));
+    // Focused, a slot shows the page it was on.
+    layout::apply_acts(h.state_mut(), vec![Act::FocusSlot(0, 0, 1)]);
+    h.run_steps(3);
+    assert_eq!(h.state().plugin_page, 1, "slot 1's own page");
+    assert_eq!(at(&h, 0), Some((2, labels(&h, 0, 2))));
+    layout::apply_acts(h.state_mut(), vec![Act::FocusSlot(0, 0, 0)]);
+    h.run_steps(3);
+    assert_eq!(h.state().plugin_page, 2, "slot 0's own page");
+    assert_eq!(h.state().plugin_view().map(|v| v.key), Some((CHAIN, 0)), "the focused slot's view drives the controller");
+}
+
+#[test]
+fn views_of_slots_no_longer_drawn_are_dropped() {
+    let mut h = strip_with_two_plugins();
+    let keys = |h: &Harness<'static, App>| {
+        let mut k: Vec<_> = h.state().plugin_views.keys().copied().collect();
+        k.sort_by_key(|k| k.1);
+        k
+    };
+    assert_eq!(keys(&h), [(CHAIN, 0), (CHAIN, 1)]);
+    // The Mixer closes: the strip isn't drawn; only the focused slot's view stays.
+    h.state_mut().mixer = false;
+    h.run_steps(2);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    h.run_steps(2);
+    assert_eq!(keys(&h), [(CHAIN, 0)]);
+    // Another sound, no plug-ins: none.
+    h.state_mut().sound = 1;
+    h.run_steps(2);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    h.run_steps(2);
+    assert_eq!(keys(&h), []);
+}

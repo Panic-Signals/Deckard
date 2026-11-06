@@ -43,7 +43,7 @@ impl crate::App {
                 })
                 .collect()
         };
-        match self.plugin_view.as_ref().filter(|v| v.key == (chain, slot)) {
+        match self.plugin_views.get(&(chain, slot)) {
             Some(v) => spec(&v.pages),
             None => spec(&self.view_pages_of(chain, slot)),
         }
@@ -92,7 +92,7 @@ impl crate::App {
                 let Some(plugin) = &slot.plugin else { continue };
                 // (The pages shown, if it's the one shown: its values may be newer.)
                 let owned;
-                let pages: &[crate::ViewPage] = match self.plugin_view.as_ref().filter(|v| v.key == (chain, i)) {
+                let pages: &[crate::ViewPage] = match self.plugin_views.get(&(chain, i)) {
                     Some(v) => &v.pages,
                     None => {
                         owned = self.view_pages_of(chain, i);

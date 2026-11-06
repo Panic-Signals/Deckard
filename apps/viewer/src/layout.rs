@@ -650,7 +650,10 @@ pub enum Act {
     /// [`Act::PluginParam`] of the plug-in in slot `.1` of chain `.0` (a macro's: any
     /// chain).
     PluginParamIn(deckard_doc::Chain, usize, u32, f64),
+    /// The focused slot's page of parameters.
     PluginPage(usize),
+    /// The page of parameters slot `.1` of chain `.0` shows (its strip panel's own).
+    PluginPageOf(deckard_doc::Chain, usize, usize),
     Preferences,
     /// The Sampling view.
     Sampling(sampling::SamplingAct),
@@ -1149,7 +1152,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 {
                     app.status = format!("can't remove it: {e}");
                 }
-                app.plugin_view = None;
+                app.plugin_views.clear();
             }
             Act::SlotActive(i, on) => {
                 if let Some(doc) = app.doc.clone()
@@ -1162,6 +1165,14 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
             Act::PluginPage(n) => app.plugin_page = n,
+            Act::PluginPageOf(c, i, n) => {
+                if app.plugin_focus == Some((c, i)) {
+                    app.plugin_page = n;
+                }
+                if let Some(v) = app.plugin_views.get_mut(&(c, i)) {
+                    v.shown = n;
+                }
+            }
             Act::Preferences => app.prefs = Some(app.prefs.unwrap_or(0)),
             Act::ToggleMixer => {
                 app.mixer = !app.mixer;
@@ -3779,7 +3790,7 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
-    if let Some(view) = app.plugin_view.as_mut().filter(|v| v.key == (chain, i)) {
+    if let Some(view) = app.plugin_views.get_mut(&(chain, i)) {
         view.page = usize::MAX;
         // (Shown until the plug-in reports it: the next turn goes on from it.)
         view.sent.retain(|(x, ..)| *x != id);
@@ -3895,7 +3906,7 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
         });
     }
     if let Some(pr) = &slot.plugin {
-        let v = app.plugin_view.as_ref().filter(|v| v.key == (app.chain(), i) && v.error.is_none())?;
+        let v = app.plugin_views.get(&(app.chain(), i)).filter(|v| v.error.is_none())?;
         let pages = v.pages.len().max(1);
         let page = app.plugin_page.min(pages - 1);
         let mut knobs = Vec::new();
@@ -4222,7 +4233,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     if !pr.id.starts_with(deckard_plugins::native::VENDOR) {
                         window_button = Some(i);
                     }
-                    match app.plugin_view.as_ref().filter(|v| v.key == (app.chain(), i)) {
+                    match app.plugin_views.get(&(app.chain(), i)) {
                         Some(v) if v.error.is_none() => {
                             let pages = v.pages.len().max(1);
                             let page = app.plugin_page.min(pages - 1);
