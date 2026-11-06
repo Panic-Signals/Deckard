@@ -638,10 +638,11 @@ struct StripRoute {
     ext: Option<usize>,
 }
 
-/// A strip's own gain: its level (linear, unlike a channel's fader value) and its pan.
-/// A mono strip (mono, or a split half) feeds its one signal to both sides first, so
-/// this places it as a channel's pan places a sound: the same law ([`pan_gains`]).
-fn strip_gain(level: f64, pan: f64) -> (f32, f32) {
+/// A strip's own gain: its level (linear, unlike a channel's fader value) and its pan
+/// ([`pan_gains`]). A mono strip (mono, or a split half) has no pan: its stored value
+/// is kept but plays as centre.
+fn strip_gain(level: f64, pan: f64, channels: Channels) -> (f32, f32) {
+    let pan = if channels == Channels::Stereo { pan } else { 0.0 };
     let lvl = if level.is_finite() { level.clamp(0.0, 4.0) as f32 } else { 0.0 };
     let (l, r) = pan_gains(if pan.is_finite() { pan } else { 0.0 });
     (lvl * l, lvl * r)
@@ -658,7 +659,7 @@ fn strip_route(p: &Project, x: &ExtraOut) -> StripRoute {
         Owner::Sound(g, _) | Owner::Chain(g, _, _) => Some(g),
         Owner::Group(..) | Owner::Master(_) => None,
     };
-    let gain = strip_gain(x.level, x.pan);
+    let gain = strip_gain(x.level, x.pan, x.channels);
     let to = |d: D| {
         let (to, g) = dest_route(p, d, parent, 0);
         (to, mul(gain, g))
@@ -9456,8 +9457,7 @@ mod tests {
         ((out[126], out[127]), ext.iter().map(|b| (b[126], b[127])).collect())
     }
 
-    /// A mono strip plays (L+R)/2 on both sides, which its pan places as a channel's
-    /// pan places a sound.
+    /// A mono strip plays (L+R)/2 on both sides; it has no pan.
     #[test]
     fn a_mono_strip_sums_both_sides() {
         use deckard_model::extra_out::Channels;
@@ -9469,12 +9469,39 @@ mod tests {
         x.edit(|p| p.extra_outs[0].pan = -1.0);
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.25 * std::f32::consts::SQRT_2, 0.0)), "panned left: {:?}", ext[2]);
+        assert!(near(ext[2], (0.25, 0.25)), "pan ignored: {:?}", ext[2]);
         // Stereo again: each side its own.
         x.edit(|p| (p.extra_outs[0].pan, p.extra_outs[0].channels) = (0.0, Channels::Stereo));
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
         assert!(near(ext[2], (0.4, 0.1)), "stereo: {:?}", ext[2]);
+    }
+
+    /// A mono strip ignores its stored pan.
+    #[test]
+    fn a_mono_strip_ignores_its_pan() {
+        use deckard_model::extra_out::Channels;
+        let mut x = Strips::new(|p| (p.extra_outs[0].channels, p.extra_outs[0].pan) = (Channels::Mono, -1.0));
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.25, 0.25)), "{:?}", ext[2]);
+        assert_eq!(x.p.extra_outs[0].pan, -1.0, "the saved pan stays");
+    }
+
+    /// A split half ignores its stored pan.
+    #[test]
+    fn a_split_strip_half_ignores_its_pan() {
+        use deckard_model::extra_out;
+        let mut x = Strips::new(|_| {});
+        x.edit(|p| {
+            extra_out::split(&mut p.extra_outs, 0);
+            p.extra_outs[0].pan = -1.0;
+            p.extra_outs[1].pan = 1.0;
+            p.extra_outs[1].dest = deckard_model::AudioDest::Ext(3);
+        });
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.4)) && near(ext[3], (0.1, 0.1)), "{:?} {:?}", ext[2], ext[3]);
     }
 
     /// The halves of a split strip each play one side of the pair on both sides, with

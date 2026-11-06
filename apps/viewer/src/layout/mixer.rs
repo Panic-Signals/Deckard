@@ -52,6 +52,8 @@ struct Strip {
     color: Color32,
     level: f64,
     pan: f64,
+    /// Whether it has a pan (not a mono strip, nor a split half: see [`has_pan`]).
+    pannable: bool,
     muted: bool,
     cue: bool,
     focused: bool,
@@ -65,6 +67,12 @@ struct Strip {
     aux: [f64; 2],
     /// An extra output's mode menu (see [`mode_field`]).
     mode: Option<IoField>,
+}
+
+/// Whether a strip of these channels has a pan: only a stereo one (a mono strip, or a
+/// split half, plays centred whatever pan is saved).
+fn has_pan(c: deckard_model::extra_out::Channels) -> bool {
+    c == deckard_model::extra_out::Channels::Stereo
 }
 
 /// What a pick in a routing list does.
@@ -355,6 +363,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             color: EXTRA_EDGE,
             level: if lin > 0.0 { deckard_model::level_from_db(20.0 * lin.log10()) } else { 0.0 },
             pan: if x.pan.is_finite() { x.pan.clamp(-1.0, 1.0) } else { 0.0 },
+            pannable: has_pan(x.channels),
             muted: x.muted,
             cue: false,
             focused: false,
@@ -382,6 +391,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     color: sound_color(p, app.group, s),
                     level: snd.level,
                     pan: snd.pan,
+                    pannable: true,
                     muted: snd.muted,
                     cue: snd.cue,
                     focused: app.sound == s,
@@ -406,6 +416,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 color: group_color(p, g),
                 level: gr.level,
                 pan: gr.pan,
+                pannable: true,
                 muted: gr.muted,
                 cue: gr.cue,
                 focused: app.group == g,
@@ -431,6 +442,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             color: group_color(p, app.group),
             level: gr.level,
             pan: gr.pan,
+            pannable: true,
             muted: gr.muted,
             cue: gr.cue,
             focused: true,
@@ -450,6 +462,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             color: Color32::WHITE,
             level: p.master_level,
             pan: p.master_pan,
+            pannable: true,
             muted: false,
             cue: false,
             focused: false,
@@ -775,46 +788,48 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let lm = Rect::from_min_size(Pos2::new(r.left(), bottom - LEVEL_H), Vec2::new(r.width(), LEVEL_H));
     painter.hline(lm.x_range(), lm.top() + 0.5, Stroke::new(1.0, Color32::BLACK));
     let target = st.ch.target();
-    // Pan: a bipolar bar.
-    let pan_r = Rect::from_min_size(Pos2::new(lm.left() + 5.0, lm.top() + 6.0), Vec2::new(61.0, 5.0));
-    painter.rect_filled(pan_r, 0.0, S01);
-    let cx = pan_r.center().x;
-    let px = cx + st.pan as f32 * pan_r.width() / 2.0;
-    painter.rect_filled(
-        Rect::from_min_max(Pos2::new(cx.min(px), pan_r.top()), Pos2::new(cx.max(px).max(cx.min(px) + 1.0), pan_r.bottom())),
-        0.0,
-        st.color,
-    );
-    painter.vline(cx, pan_r.y_range(), Stroke::new(1.0, S00));
-    let pan_resp = ui
-        .interact(vis(pan_r.expand2(Vec2::new(0.0, 4.0))), id.with("pan"), Sense::click_and_drag())
-        .on_hover_text(format!("Pan {} (drag; double-click: centre)", pan(st.pan)));
-    if pan_resp.hovered() || pan_resp.dragged() {
-        painter.rect_filled(pan_r, 0.0, white(20));
-    }
-    if pan_resp.dragged() {
-        let fine = ui.input(|i| i.modifiers.shift);
-        let d = pan_resp.drag_delta().x / if fine { 300.0 } else { 30.5 };
-        if d != 0.0 {
-            let to = (st.pan + d as f64).clamp(-1.0, 1.0);
-            acts.push(match extra {
-                Some(i) => Act::SetExtraOut(i, ExtraOutEdit::Pan(to)),
-                None => Act::SetPan(target, to),
-            });
-        }
-    }
-    if let Some(i) = extra {
-        if pan_resp.double_clicked() || (pan_resp.clicked() && ui.input(|i| i.modifiers.command)) {
-            acts.push(Act::SetExtraOut(i, ExtraOutEdit::Pan(0.0)));
-        }
-    } else {
-        super::value_entry::gestures(
-            ui,
-            &pan_resp,
-            super::value_entry::What::Edit(super::Edit::Pan(target)),
-            &format!("{:.0}", st.pan * 100.0),
-            acts,
+    // Pan: a bipolar bar (none on a mono strip or a split half: the space stays empty).
+    if st.pannable {
+        let pan_r = Rect::from_min_size(Pos2::new(lm.left() + 5.0, lm.top() + 6.0), Vec2::new(61.0, 5.0));
+        painter.rect_filled(pan_r, 0.0, S01);
+        let cx = pan_r.center().x;
+        let px = cx + st.pan as f32 * pan_r.width() / 2.0;
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(cx.min(px), pan_r.top()), Pos2::new(cx.max(px).max(cx.min(px) + 1.0), pan_r.bottom())),
+            0.0,
+            st.color,
         );
+        painter.vline(cx, pan_r.y_range(), Stroke::new(1.0, S00));
+        let pan_resp = ui
+            .interact(vis(pan_r.expand2(Vec2::new(0.0, 4.0))), id.with("pan"), Sense::click_and_drag())
+            .on_hover_text(format!("Pan {} (drag; double-click: centre)", pan(st.pan)));
+        if pan_resp.hovered() || pan_resp.dragged() {
+            painter.rect_filled(pan_r, 0.0, white(20));
+        }
+        if pan_resp.dragged() {
+            let fine = ui.input(|i| i.modifiers.shift);
+            let d = pan_resp.drag_delta().x / if fine { 300.0 } else { 30.5 };
+            if d != 0.0 {
+                let to = (st.pan + d as f64).clamp(-1.0, 1.0);
+                acts.push(match extra {
+                    Some(i) => Act::SetExtraOut(i, ExtraOutEdit::Pan(to)),
+                    None => Act::SetPan(target, to),
+                });
+            }
+        }
+        if let Some(i) = extra {
+            if pan_resp.double_clicked() || (pan_resp.clicked() && ui.input(|i| i.modifiers.command)) {
+                acts.push(Act::SetExtraOut(i, ExtraOutEdit::Pan(0.0)));
+            }
+        } else {
+            super::value_entry::gestures(
+                ui,
+                &pan_resp,
+                super::value_entry::What::Edit(super::Edit::Pan(target)),
+                &format!("{:.0}", st.pan * 100.0),
+                acts,
+            );
+        }
     }
     // Headroom: the peak since the last click.
     let hr = Rect::from_min_size(Pos2::new(lm.left(), lm.top() + 13.0), Vec2::new(r.width(), 11.0));
@@ -1294,6 +1309,13 @@ mod tests {
         doc.borrow_mut().undo();
         assert_eq!(doc.borrow().project().extra_outs.len(), 2);
         assert_eq!(doc.borrow().project().extra_outs[0].channels, Channels::Stereo);
+    }
+
+    #[test]
+    fn mono_and_split_strips_have_no_pan() {
+        use deckard_model::extra_out::Channels::{Left, Mono, Right, Stereo};
+        assert!(has_pan(Stereo));
+        assert!(!has_pan(Mono) && !has_pan(Left) && !has_pan(Right));
     }
 
     #[test]
