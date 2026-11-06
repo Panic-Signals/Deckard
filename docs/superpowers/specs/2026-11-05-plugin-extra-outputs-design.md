@@ -61,10 +61,12 @@ Every strip starts as **stereo**. A menu on the strip changes it (the user decid
 2026-11-06):
 
 - **Stereo:** as described above.
-- **Mono:** left and right are summed into one mono signal, (L+R)/2, and the strip's pan
-  places it.
+- **Mono:** left and right are summed into one mono signal, (L+R)/2, played equally on
+  both sides. A mono strip has **no pan** (the user decided this on 2026-11-06); its pan
+  control is hidden and any saved pan is ignored.
 - **Split:** the strip becomes two mono strips, **L** and **R**, labelled
-  "Portal · Out 3 L" and "Portal · Out 3 R". Each has its own level, pan, mute, solo,
+  "Portal · Out 3 L" and "Portal · Out 3 R". Each half is mono (its one side played
+  equally on both sides, with no pan, like a Mono strip) and has its own level, mute, solo,
   meter and output, so a drum plug-in with the kick on the left and the snare on the right
   of one pair can be mixed as two channels. Both halves start with the split strip's
   settings. On a split half, the menu offers **Join**, which turns the pair back into one

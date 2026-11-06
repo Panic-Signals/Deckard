@@ -291,6 +291,39 @@ Spec: "Stereo, mono or split" and the naming bullets under "Each extra output is
 - [ ] **Step 4:** Run the tests again. Expected: PASS.
 - [ ] **Step 5: Commit** with the message "Export a plug-in's extra outputs as their own stems."
 
+### Task 8b: Mono and split strips have no pan
+
+Spec: "Stereo, mono or split" (2026-11-06: no pan on a mono strip or a split half).
+
+**Files:**
+- Modify: `crates/engine/src/lib.rs` (`strip_route`/`strip_gain`): for `Channels::Mono | Left | Right` the pan is ignored and treated as centre (`pan_gains(0.0)`, unity on both sides). Stereo is unchanged.
+- Modify: `apps/viewer/src/layout/mixer.rs`: on a mono strip or split half, the pan bar isn't drawn or interactive. Leave the space empty so the level module lines up.
+- Saved pan values stay in the file untouched; switching back to Stereo or joining uses the stored pan again.
+
+- [ ] **Step 1: Write the failing tests:** engine `a_mono_strip_ignores_its_pan` and `a_split_strip_half_ignores_its_pan` (pan -1.0 plays equally on both sides); viewer `mono_and_split_strips_have_no_pan`.
+- [ ] **Step 2:** `cargo test -p deckard-engine --lib strip`, `cargo test -p deckard --bin deckard mixer`. Expected: FAIL.
+- [ ] **Step 3:** Implement. **Step 4:** Tests pass.
+- [ ] **Step 5: Commit** "Mono and split extra-output strips have no pan."
+
+### Task 8c: Group tabs in the mixer
+
+User request (2026-11-06), Maschine's behaviour: the Mixer has a tab per group. Today the mixer can't get back to group level: at sound level the fixed right column (the focused group) ignores double-clicks, so `Act::MixerSounds(false)` is unreachable.
+
+**Files:**
+- Modify: `apps/viewer/src/layout/mixer.rs` (and `docs/mixer-layout.md` §7):
+  - A tab row across the top of the strip area, always shown in the Mixer: one tab per group (its ID letter and name, in its colour), like the group tabs Maschine shows over its mixer. At sound level the focused group's tab is selected; at group level none is.
+  - **Click a tab:** focus that group and show its sounds (`Act::FocusGroup(g)` + `Act::MixerSounds(true)`).
+  - **Double-click a tab:** show the groups mixer (`Act::MixerSounds(false)`).
+  - **Double-click a group strip's header in the groups mixer:** show that group's sounds. This exists; keep it.
+  - **Double-click the fixed group column at sound level:** back to the groups mixer.
+  - Too many groups for the width: the row scrolls with the strips' horizontal scroll, or clips with the focused tab kept in view (builder's call).
+  - The strips move down by the tab row's height; the sidebar toggles and master column line up with them.
+
+- [ ] **Step 1: Write the failing tests** (egui harness): `clicking_a_group_tab_shows_its_sounds`, `double_clicking_a_tab_shows_the_groups`, `double_clicking_the_fixed_group_column_shows_the_groups`, `the_focused_groups_tab_is_selected_at_sound_level`.
+- [ ] **Step 2:** `cargo test -p deckard --bin deckard mixer`. Expected: FAIL.
+- [ ] **Step 3:** Implement. **Step 4:** Tests pass.
+- [ ] **Step 5: Commit** "Add group tabs to the Mixer, and a way back to the groups."
+
 ### Task 9: Branch end
 
 - [ ] Run `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
