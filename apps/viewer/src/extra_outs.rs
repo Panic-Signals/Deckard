@@ -114,13 +114,9 @@ mod tests {
     use deckard_model::PluginRef;
 
     fn project_with_plugin() -> Project {
-        let mut p = Project::default();
-        let mut g = deckard_model::Group::default();
-        let mut s = deckard_model::Sound::default();
-        s.plugin = Some(PluginRef { id: "synth".into(), ..PluginRef::default() });
-        g.sounds.push(s);
-        p.groups.push(g);
-        p
+        let s = deckard_model::Sound { plugin: Some(PluginRef { id: "synth".into(), ..PluginRef::default() }), ..Default::default() };
+        let g = deckard_model::Group { sounds: vec![s], ..Default::default() };
+        Project { groups: vec![g], ..Default::default() }
     }
 
     fn name(_: Owner, bus: usize) -> String {
@@ -129,9 +125,7 @@ mod tests {
 
     #[test]
     fn next_free_skips_the_master_and_used_outputs() {
-        let mut p = Project::default();
-        p.master_output = AudioDest::Ext(0);
-        p.cue_output = AudioDest::Ext(0);
+        let mut p = Project { master_output: AudioDest::Ext(0), cue_output: AudioDest::Ext(0), ..Default::default() };
         let mut e = ExtraOut {
             owner: Owner::Sound(0, 0),
             bus: 1,
@@ -154,8 +148,7 @@ mod tests {
 
     #[test]
     fn next_free_falls_back_to_parent_when_none_free() {
-        let mut p = Project::default();
-        p.master_output = AudioDest::Ext(0);
+        let p = Project { master_output: AudioDest::Ext(0), ..Default::default() };
         assert_eq!(next_free_output(&p, |n| n < 2, &[1]), AudioDest::Parent);
     }
 

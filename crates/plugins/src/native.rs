@@ -476,8 +476,7 @@ mod tests {
         make: |_| Box::new(Multi { aux: (vec![0.25; crate::MAX_BLOCK], vec![0.5; crate::MAX_BLOCK]) }),
     };
 
-    static PLAIN: Class =
-        Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain) };
+    static PLAIN: Class = Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain) };
 
     /// A native plug-in says how many output buses it has and what they're called.
     #[test]

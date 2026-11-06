@@ -1454,9 +1454,8 @@ mod tests {
         assert_eq!(names(Channels::Left), vec!["Join"]);
         assert_eq!(names(Channels::Right), vec!["Join"]);
         // What each pick asks for.
-        let acts = |ch: Channels| -> Vec<Act> {
-            mode_field(&ExtraOut { channels: ch, ..x.clone() }, 3).picks.into_iter().map(|p| pick_act(p)).collect()
-        };
+        let acts =
+            |ch: Channels| -> Vec<Act> { mode_field(&ExtraOut { channels: ch, ..x.clone() }, 3).picks.into_iter().map(pick_act).collect() };
         let a = acts(Channels::Stereo);
         assert!(matches!(a[1], Act::SetExtraOut(3, ExtraOutEdit::Channels(Channels::Mono))));
         assert!(matches!(a[2], Act::SplitExtraOut(3)));

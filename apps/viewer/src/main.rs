@@ -7452,7 +7452,8 @@ impl App {
         // The channels and strips solo mutes (and unmutes again), and the one of each
         // it leaves heard.
         let every: Vec<usize> = (0..p.extra_outs.len()).collect();
-        let (all, me, strips, mine): (Vec<(Target, bool)>, Option<Target>, Vec<usize>, Option<usize>) = match ch {
+        type Solo = (Vec<(Target, bool)>, Option<Target>, Vec<usize>, Option<usize>);
+        let (all, me, strips, mine): Solo = match ch {
             layout::Channel::Group(g) => {
                 let strips = every.into_iter().filter(|&i| group_of(p.extra_outs[i].owner) != Some(g)).collect();
                 (groups().collect(), Some(Target::Group(g)), strips, None)

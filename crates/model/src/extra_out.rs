@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(v[0].channels, Channels::Stereo);
         // All-stereo strips write today's text.
         let e = out(Owner::Sound(0, 1), "a", AudioDest::Parent);
-        assert_eq!(to_text(&[e.clone()]), "sound:0:1 1 0.5 -0.25 parent plugin=a name=Out%202\n");
+        assert_eq!(to_text(std::slice::from_ref(&e)), "sound:0:1 1 0.5 -0.25 parent plugin=a name=Out%202\n");
         let mut v = Vec::new();
         for ch in [Channels::Stereo, Channels::Mono, Channels::Left, Channels::Right] {
             v.push(ExtraOut { channels: ch, ..e.clone() });
