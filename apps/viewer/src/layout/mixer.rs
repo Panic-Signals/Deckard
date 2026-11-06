@@ -209,6 +209,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|_| None,
+        midi_input: &|g| app.midi_input(g),
     };
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, S00);

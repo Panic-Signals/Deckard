@@ -25,6 +25,7 @@ pub mod midi;
 pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
+pub mod note_echo;
 #[cfg(feature = "output")]
 pub mod output;
 pub mod pads;
@@ -3470,6 +3471,11 @@ impl Engine {
         for p in self.midi_inputs.iter_mut().flatten() {
             p.stopped();
         }
+    }
+
+    /// Whether `group` has a MIDI input plug-in.
+    pub fn has_midi_input(&self, group: usize) -> bool {
+        self.midi_inputs.get(group).is_some_and(Option::is_some)
     }
 
     /// Whether `group`'s notes go to a MIDI input plug-in (not one it's playing itself).
@@ -7067,6 +7073,31 @@ mod tests {
         let n = (960.0 * e.samples_per_tick() / 256.0).ceil() as usize;
         blocks(&mut e, n);
         assert_eq!(midi_notes(&rx), [], "nothing after the stop");
+    }
+
+    /// Note Echo's echoes come out at their times, and stopping ends those still to come.
+    #[test]
+    fn note_echo_plays_later_and_stops_with_the_song() {
+        let (mut e, rx, _, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        e.set_midi_input(0, Some(Box::new(note_echo::NoteEcho::new())));
+        let _ = midi_notes(&rx);
+
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: 60 });
+        blocks(&mut e, 1);
+        assert_eq!(midi_notes(&rx), [(true, 50)], "the note itself, at once");
+
+        // At its defaults, the first echo is 360 ticks on.
+        let block = 256.0 / e.samples_per_tick();
+        blocks(&mut e, (340.0 / block).floor() as usize);
+        assert!(!midi_notes(&rx).contains(&(true, 50)), "not yet");
+        blocks(&mut e, (40.0 / block).ceil() as usize);
+        assert!(midi_notes(&rx).contains(&(true, 50)), "the first echo");
+
+        e.stop();
+        let _ = midi_notes(&rx);
+        blocks(&mut e, (1200.0 / block).ceil() as usize);
+        assert!(!midi_notes(&rx).contains(&(true, 50)), "the rest are gone");
     }
 
     /// A parameter reaches the plug-in, and takes effect on the next note.

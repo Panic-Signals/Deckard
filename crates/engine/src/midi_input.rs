@@ -100,6 +100,10 @@ pub struct ParamDesc {
     pub default: f64,
     /// How many values it can take, from `min` to `max` evenly (a switch has 2). `None`: any.
     pub steps: Option<u32>,
+    /// What each step is called (empty: its number).
+    pub labels: Vec<String>,
+    /// After a number shown.
+    pub unit: String,
 }
 
 impl ParamDesc {
@@ -115,6 +119,20 @@ impl ParamDesc {
             None => v,
         }
     }
+
+    /// `value` as it's shown.
+    pub fn text(&self, value: f64) -> String {
+        let v = self.fit(value);
+        if let Some(n) = self.steps.filter(|n| *n >= 2) {
+            let step = ((v - self.min) * (n - 1) as f64 / (self.max - self.min)).round() as usize;
+            if let Some(label) = self.labels.get(step) {
+                return label.clone();
+            }
+            return format!("{v:.0}{}", self.unit);
+        }
+        let places = if self.max - self.min > 10.0 { 0 } else { 2 };
+        format!("{v:.places$}{}", self.unit)
+    }
 }
 
 /// A plug-in's parameter and where it is now, as `Output` keeps them for whoever shows them.
@@ -124,22 +142,45 @@ pub struct Param {
     pub value: f64,
 }
 
-/// `params` as they start.
-#[cfg(any(test, feature = "output"))]
-pub(crate) fn fresh_params(params: Vec<ParamDesc>) -> Vec<Param> {
-    params
-        .into_iter()
-        .map(|desc| {
-            let value = desc.fit(desc.default);
-            Param { desc, value }
-        })
-        .collect()
+/// A plug-in on a group, as `Output` keeps it for whoever shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Info {
+    pub name: String,
+    pub params: Vec<Param>,
+}
+
+impl Info {
+    /// `plugin`, its parameters as they start.
+    pub fn of(plugin: &dyn MidiInput) -> Info {
+        let params = plugin
+            .params()
+            .into_iter()
+            .map(|desc| {
+                let value = desc.fit(desc.default);
+                Param { desc, value }
+            })
+            .collect();
+        Info { name: plugin.name(), params }
+    }
+}
+
+/// The plug-ins Deckard comes with, by name.
+pub const BUILT_IN: [&str; 1] = [crate::note_echo::NAME];
+
+/// A new plug-in of the one called `name`.
+pub fn built_in(name: &str) -> Option<Box<dyn MidiInput>> {
+    (name == crate::note_echo::NAME).then(|| Box::new(crate::note_echo::NoteEcho::new()) as Box<dyn MidiInput>)
 }
 
 /// A MIDI input plug-in. The engine owns it; put one in with `Output::set_midi_input`.
 pub trait MidiInput: Send {
     /// A note came in. A plug-in that plays nothing for it has silenced it.
     fn note(&mut self, note: NoteIn, clock: Clock, out: &mut Outbox);
+
+    /// What it's called. Asked once, off the audio thread, as it's put in.
+    fn name(&self) -> String {
+        "MIDI Plug-in".into()
+    }
 
     /// Its parameters. Asked once, off the audio thread, as it's put in, so this one may
     /// allocate.
@@ -170,14 +211,14 @@ pub trait MidiInput: Send {
 }
 
 /// Slots, one per group: all a project can have (eight banks of eight).
-pub(crate) const SLOTS: usize = 64;
+pub const SLOTS: usize = 64;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn desc(min: f64, max: f64, default: f64, steps: Option<u32>) -> ParamDesc {
-        ParamDesc { id: 7, name: "Test".into(), min, max, default, steps }
+        ParamDesc { id: 7, name: "Test".into(), min, max, default, steps, labels: Vec::new(), unit: "%".into() }
     }
 
     #[test]
@@ -203,9 +244,34 @@ mod tests {
 
     #[test]
     fn parameters_start_on_their_defaults_fitted() {
-        let params = fresh_params(vec![desc(0.0, 1.0, 0.25, None), desc(1.0, 8.0, 3.4, Some(8))]);
+        struct Two;
+        impl MidiInput for Two {
+            fn note(&mut self, _: NoteIn, _: Clock, _: &mut Outbox) {}
+            fn params(&self) -> Vec<ParamDesc> {
+                vec![desc(0.0, 1.0, 0.25, None), desc(1.0, 8.0, 3.4, Some(8))]
+            }
+        }
+        let params = Info::of(&Two).params;
         assert_eq!(params[0].value, 0.25);
         assert_eq!(params[1].value, 3.0, "a default between steps lands on one");
+    }
+
+    #[test]
+    fn a_parameter_shows_its_label_or_its_number() {
+        let mut named = desc(0.0, 2.0, 0.0, Some(3));
+        named.labels = vec!["Low".into(), "Mid".into(), "High".into()];
+        assert_eq!(named.text(1.2), "Mid");
+        assert_eq!(desc(1.0, 8.0, 3.0, Some(8)).text(4.4), "4%");
+        assert_eq!(desc(0.0, 100.0, 3.0, None).text(35.4), "35%");
+        assert_eq!(desc(0.0, 1.0, 0.0, None).text(0.256), "0.26%");
+    }
+
+    #[test]
+    fn built_in_plug_ins_are_found_by_name() {
+        for name in BUILT_IN {
+            assert_eq!(built_in(name).unwrap().name(), name);
+        }
+        assert!(built_in("Nothing").is_none());
     }
 
     #[test]
