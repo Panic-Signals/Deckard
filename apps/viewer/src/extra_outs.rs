@@ -6,8 +6,8 @@ use deckard_engine::Heard;
 use deckard_model::extra_out::{ExtraOut, Owner, plugin_at};
 use deckard_model::{AudioDest, Project};
 
-/// The most output pairs looked at when finding a free one.
-const MAX_OUTPUTS: usize = 64;
+/// The most output pairs looked at when finding a free one: the engine's.
+const MAX_OUTPUTS: usize = deckard_engine::OUTPUTS;
 
 /// The lowest connected external output pair no channel plays into (not the master or
 /// cue output, a sound's or group's destination or aux send, an extra-output strip, or
@@ -134,6 +134,13 @@ mod tests {
         let mut p = Project::default();
         p.master_output = AudioDest::Ext(0);
         assert_eq!(next_free_output(&p, |n| n < 2, &[1]), AudioDest::Parent);
+    }
+
+    #[test]
+    fn next_free_never_goes_past_the_engines_outputs() {
+        let p = Project::default();
+        let taken: Vec<usize> = (0..deckard_engine::OUTPUTS).collect();
+        assert_eq!(next_free_output(&p, |_| true, &taken), AudioDest::Parent);
     }
 
     #[test]

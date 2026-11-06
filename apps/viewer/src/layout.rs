@@ -438,6 +438,16 @@ impl MouseMode {
     }
 }
 
+/// A change to a plug-in's extra-output strip ([`Act::SetExtraOut`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExtraOutEdit {
+    /// Linear (1.0 = 0 dB), up to +12 dB.
+    Level(f64),
+    Pan(f64),
+    Mute(bool),
+    Dest(deckard_model::AudioDest),
+}
+
 /// What clicks in the panels ask for; applied after drawing.
 pub enum Act {
     /// (For edits that do nothing.)
@@ -508,6 +518,8 @@ pub enum Act {
     AddGroup,
     /// Strips for plug-in extra outputs just heard, added as one edit.
     AddExtraOuts(Vec<deckard_model::extra_out::ExtraOut>),
+    /// Change strip `.0` of `project.extra_outs` (a plug-in's extra output).
+    SetExtraOut(usize, ExtraOutEdit),
     InsertScene(usize),
     DuplicateScene(usize),
     DeleteScene(usize),
@@ -840,6 +852,21 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 all.extend(fresh);
                 if let Err(e) = d.set_extra_outs(all) {
                     app.status = format!("can't add the extra output: {e}");
+                }
+            }
+            Act::SetExtraOut(i, edit) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                let mut d = doc.borrow_mut();
+                let mut all = d.project().extra_outs.clone();
+                let Some(x) = all.get_mut(i) else { continue };
+                match edit {
+                    ExtraOutEdit::Level(v) => x.level = if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 },
+                    ExtraOutEdit::Pan(v) => x.pan = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 },
+                    ExtraOutEdit::Mute(m) => x.muted = m,
+                    ExtraOutEdit::Dest(to) => x.dest = to,
+                }
+                if let Err(e) = d.set_extra_outs(all) {
+                    app.status = format!("can't change the extra output: {e}");
                 }
             }
             Act::AssignPattern(..)
