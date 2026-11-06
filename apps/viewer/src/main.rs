@@ -9035,10 +9035,18 @@ mod tests {
         while doc.borrow().project().groups.len() < 3 {
             doc.borrow_mut().add_group().unwrap();
         }
-        let x = |owner, bus| ExtraOut {
+        // Real plug-ins in the strips' slots (undo drops strips whose plug-in isn't there).
+        const FX: &str = "T:VST3:FX:p";
+        const INSTR: &str = "T:VST3:INSTR:p";
+        let plugin = |id: &str| deckard_doc::NewModule::Plugin { id: id.into(), name: "P".into(), chunk: Vec::new() };
+        for c in [deckard_doc::Chain::Group(0), deckard_doc::Chain::Group(1), deckard_doc::Chain::Master] {
+            doc.borrow_mut().add_slot_in(c, 0, &plugin(FX)).unwrap();
+        }
+        doc.borrow_mut().add_slot(2, 0, 0, &plugin(INSTR)).unwrap();
+        let x = |owner: Owner, bus: usize| ExtraOut {
             owner,
             bus,
-            plugin: "p".into(),
+            plugin: (if matches!(owner, Owner::Sound(..)) { INSTR } else { FX }).into(),
             name: "Bus".into(),
             level: 1.0,
             pan: 0.0,

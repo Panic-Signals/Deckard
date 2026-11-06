@@ -34,18 +34,20 @@ pub fn next_free_output(p: &Project, connected: impl Fn(usize) -> bool, taken: &
     (0..MAX_OUTPUTS).find(|&n| free(n)).map_or(AudioDest::Parent, |n| AudioDest::Ext(n as i64))
 }
 
-/// A strip for each newly heard (owner, bus) with none yet (stereo, mono or split), in
-/// the order heard: stereo, level unity, centred, on the next free output. `name` gives
-/// what the plug-in calls (owner, bus) (the strip shows it through [`label`]).
+/// A strip for each newly heard (owner, bus) with none yet for the plug-in there (stereo,
+/// mono or split), in the order heard: stereo, level unity, centred, on the next free
+/// output. `name` gives what the plug-in calls (owner, bus) (the strip shows it through
+/// [`label`]).
 pub fn strips_for(p: &Project, heard: &[Heard], name: impl Fn(Owner, usize) -> String, connected: impl Fn(usize) -> bool) -> Vec<ExtraOut> {
     let mut made: Vec<ExtraOut> = Vec::new();
     let mut taken: Vec<usize> = Vec::new();
     for h in heard {
-        let has = |e: &ExtraOut| e.owner == h.owner && e.bus == h.bus;
+        let Some(pr) = plugin_at(p, h.owner) else { continue };
+        // (A strip left for another plug-in in that slot doesn't count.)
+        let has = |e: &ExtraOut| e.owner == h.owner && e.bus == h.bus && e.plugin == pr.id;
         if p.extra_outs.iter().chain(&made).any(has) {
             continue;
         }
-        let Some(pr) = plugin_at(p, h.owner) else { continue };
         let dest = next_free_output(p, &connected, &taken);
         if let AudioDest::Ext(n) = dest {
             taken.push(n as usize);
@@ -188,5 +190,18 @@ mod tests {
         deckard_model::extra_out::split(&mut p.extra_outs, 0);
         p.extra_outs.remove(0);
         assert!(strips_for(&p, &[h], name, |_| true).is_empty(), "its right half is there");
+    }
+
+    /// A strip left for another plug-in in the slot (a stale one) doesn't stop the one
+    /// there now getting its own.
+    #[test]
+    fn a_strip_for_another_plugin_does_not_count() {
+        let mut p = project_with_plugin();
+        let h = Heard { owner: Owner::Sound(0, 0), bus: 1 };
+        p.extra_outs = strips_for(&p, &[h], name, |_| true);
+        p.extra_outs[0].plugin = "gone".into();
+        let made = strips_for(&p, &[h], name, |_| true);
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].plugin, "synth");
     }
 }

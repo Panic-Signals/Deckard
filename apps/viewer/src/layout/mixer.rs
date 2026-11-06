@@ -1401,8 +1401,17 @@ mod tests {
 
     #[test]
     fn splitting_a_strip_shows_two_strips_next_to_each_other() {
-        let mut app =
-            app_with(vec![out(Owner::Group(0, 0), "Kick", AudioDest::Ext(1)), out(Owner::Group(1, 0), "Aux 2", AudioDest::Ext(2))]);
+        // Real plug-ins in the owners' slots: undo drops strips whose plug-in isn't there.
+        const FX: &str = "T:VST3:FX:Portal";
+        let mut app = app_with(Vec::new());
+        let doc = app.doc.clone().unwrap();
+        for g in [0, 1] {
+            let fx = deckard_doc::NewModule::Plugin { id: FX.into(), name: "Portal".into(), chunk: Vec::new() };
+            doc.borrow_mut().add_slot_in(deckard_doc::Chain::Group(g), 0, &fx).unwrap();
+        }
+        let mut outs = vec![out(Owner::Group(0, 0), "Kick", AudioDest::Ext(1)), out(Owner::Group(1, 0), "Aux 2", AudioDest::Ext(2))];
+        outs.iter_mut().for_each(|x| x.plugin = FX.into());
+        doc.borrow_mut().set_extra_outs(outs).unwrap();
         app.mixer_sounds = false;
         let mut h = harness(app);
         assert!(h.state().text.contains("|Out 2 Kick|") && h.state().text.contains("|STEREO|"), "{}", h.state().text);
