@@ -769,6 +769,16 @@ impl Output {
         self.telemetry(|t| std::mem::take(&mut t.recorded_controls))
     }
 
+    /// Plug-ins' extra output pairs with no strip yet heard since last asked (see
+    /// [`crate::Telemetry::heard`]). The buffer stays with the audio thread.
+    pub fn take_heard(&self) -> Vec<crate::Heard> {
+        self.telemetry(|t| {
+            let v = t.heard.clone();
+            t.heard.clear();
+            v
+        })
+    }
+
     /// The metronome's volume (0..1), whether it clicks while recording (AUTOENABLE),
     /// and the note value it clicks on (TIMESIGNATURE; 0: the song's beats).
     pub fn set_metronome_settings(&self, volume: f32, auto: bool, ticks: u32) {
