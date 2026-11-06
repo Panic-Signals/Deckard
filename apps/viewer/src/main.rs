@@ -2171,9 +2171,6 @@ impl App {
         ui.checkbox(&mut self.settings.jam_enabled, "Maschine JAM").on_hover_text(
             "DECKARD drives a JAM plugged in over USB. Switch it off when Maschine should have the JAM to itself: with both running, each acts on every press and they overwrite each other's lights.",
         );
-        ui.checkbox(&mut self.settings.relative_strips, "Relative touchstrips").on_hover_text(
-            "A JAM strip's touch no longer sets the value where the finger lands: moving the finger changes it by the distance moved, from where it was. Off: a touch sets the value.",
-        );
         if ni_services::SUPPORTED {
             let seen = self.ni_services.seen;
             ui.horizontal(|ui| {
@@ -2491,6 +2488,11 @@ impl App {
                         self.surface.set_theme(&theme);
                         self.settings.controller_theme = self.surface.theme().to_string();
                     }
+                    ui.end_row();
+                    ui.label("Maschine JAM");
+                    ui.checkbox(&mut self.settings.relative_strips, "Relative touchstrips").on_hover_text(
+                        "A strip's touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. Off: a touch sets the value.",
+                    );
                     ui.end_row();
                     ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };

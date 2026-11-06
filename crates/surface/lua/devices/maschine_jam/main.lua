@@ -1482,10 +1482,45 @@ function M.encoder(steps)
   end
 end
 
--- Relative touchstrips: how far a value moves for the finger's travel along the strip.
--- Tune spans 72 semitones, so it takes less.
-local RELATIVE_RATE = { tune = 0.25 }
-local RELATIVE_RATE_DEFAULT = 0.35
+-- Relative touchstrips: how far a value moves for the finger's travel along the whole strip,
+-- as a fraction of its range, or for level and aux of a knob's turn of fader (the Mixer page's
+-- 70 dB). Tune spans 72 semitones, so it takes less. A touch on CONTROL or MACRO has a whole
+-- strip for the whole knob.
+local RELATIVE_RATE = { level = 0.35, pan = 0.35, aux = 0.35, swing = 0.35, tune = 0.25, control = 1, macro = 1 }
+local FADER_DB_PER_TURN, FADER_LOW_DB, FADER_HIGH_DB = 70, -60, 10
+
+-- What a relative touch moves for strip `n`: dB for level and aux, else its place 0..1.
+local function relative_pick(s, n)
+  local mode = st.strip
+  if mode == "level" or mode == "aux" then
+    local _, _, c = strip_channel(s, n)
+    if not c then return nil end
+    local db = mode == "level" and c.level or deckard.level_to_db(c.aux[st.aux])
+    return math.max(db, FADER_LOW_DB)
+  end
+  return (strip_value(s, n))
+end
+
+-- A relative touch on strip `n` has travelled `travel` of the strip: `value` (as
+-- `relative_pick` gives it) moved, and what it is now.
+local function relative_move(s, n, value, travel)
+  local mode = st.strip
+  local fine = shift() and 0.1 or 1
+  if mode == "level" or mode == "aux" then
+    value = clamp(value + travel * RELATIVE_RATE[mode] * FADER_DB_PER_TURN * fine, FADER_LOW_DB, FADER_HIGH_DB)
+    local db = value <= FADER_LOW_DB and -math.huge or value
+    local group, sound = strip_channel(s, n)
+    if mode == "level" then
+      deckard.set_level(group, sound, db)
+    else
+      deckard.set_send(group, sound, st.aux, deckard.db_to_level(db))
+    end
+    return value
+  end
+  value = clamp(value + travel * (RELATIVE_RATE[mode] or 0.35) * fine, 0, 1)
+  strip_set(s, n, value)
+  return value
+end
 
 function M.strip(n, finger, kind, pos)
   local s = deckard.state()
@@ -1515,7 +1550,8 @@ function M.strip(n, finger, kind, pos)
   end
   if kind == "down" then
     local now = deckard.now()
-    rec.tapped = rec.last_down ~= nil and now - rec.last_down < DOUBLE_TAP
+    -- (Relative: no reset. Strokes follow each other fast, and none of them may jump.)
+    rec.tapped = not s.relative_strips and rec.last_down ~= nil and now - rec.last_down < DOUBLE_TAP
     rec.last_down = now
     rec.touched = true
     rec.pos = pos
@@ -1525,18 +1561,14 @@ function M.strip(n, finger, kind, pos)
     end
     if s.relative_strips then
       -- A touch only picks the value up; the travel moves it.
-      rec.value = strip_value(s, n)
+      rec.value = relative_pick(s, n)
     elseif not shift() then
       strip_set(s, n, pos)
     end
   elseif kind == "move" then
     if rec.tapped then return end
     if s.relative_strips then
-      if rec.value then
-        local rate = RELATIVE_RATE[mode] or RELATIVE_RATE_DEFAULT
-        rec.value = clamp(rec.value + (pos - (rec.pos or pos)) * rate * (shift() and 0.1 or 1), 0, 1)
-        strip_set(s, n, rec.value)
-      end
+      if rec.value then rec.value = relative_move(s, n, rec.value, pos - (rec.pos or pos)) end
     elseif shift() then
       -- SHIFT: the same travel moves it a tenth as far.
       local v = strip_value(s, n)

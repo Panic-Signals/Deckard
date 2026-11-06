@@ -1070,15 +1070,16 @@ fn relative_strips_take_a_tenth_with_shift() {
 }
 
 #[test]
-fn relative_strips_still_reset_on_a_double_tap_and_ignore_a_second_finger() {
+fn relative_strips_never_reset_on_a_double_tap_and_ignore_a_second_finger() {
     let (mut d, v) = swing_view(true, 50.0);
     let t = Instant::now();
     strip_touch(&mut d, &v, 1, "down", 0.2, t);
     strip_touch(&mut d, &v, 1, "up", 0.2, t + Duration::from_millis(50));
-    let out = strip_touch(&mut d, &v, 1, "down", 0.2, t + Duration::from_millis(150));
-    assert_eq!(apps(&out), [Action::SetChannelSwing { group: Some(0), sound: None, amount: 0.0 }]);
-    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "move", 0.6, t + Duration::from_millis(170))), [], "the rest of the touch does nothing");
-    strip_touch(&mut d, &v, 1, "up", 0.6, t + Duration::from_millis(200));
+    // A second stroke straight after the first: it moves on, as any other touch.
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.2, t + Duration::from_millis(150))), []);
+    let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.3, t + Duration::from_millis(170)));
+    assert!((amount - (50.0 + 0.1 * 0.35 * 100.0)).abs() < 1e-6, "{amount}");
+    strip_touch(&mut d, &v, 1, "up", 0.3, t + Duration::from_millis(200));
     // A second finger neither moves nor jumps the value.
     let t = t + Duration::from_secs(2);
     strip_touch(&mut d, &v, 1, "down", 0.2, t);
@@ -1087,6 +1088,36 @@ fn relative_strips_still_reset_on_a_double_tap_and_ignore_a_second_finger() {
     }
     let amount = swing_of(&strip_touch(&mut d, &v, 1, "move", 0.3, t));
     assert!((amount - (50.0 + 0.1 * 0.35 * 100.0)).abs() < 1e-6, "{amount}");
+}
+
+/// Faders move in dB: a whole strip is 0.35 of a turn of the Mixer's fader knob.
+#[test]
+fn relative_strips_move_faders_in_db() {
+    let (mut d, mut v) = (jam(), jam_view());
+    let t = Instant::now();
+    v.relative_strips = true;
+    v.groups[0].mix.level = -10.0;
+    v.groups[1].mix.level = f64::NEG_INFINITY;
+    v.groups[0].mix.aux = [deckard_model::level_from_db(-10.0), deckard_model::level_from_db(-10.0)];
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.5, t)), []);
+    let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
+    let [Action::ChannelLevel { group: 0, sound: None, db }] = apps(&out)[..] else { panic!("{out:?}") };
+    assert!((db - (-10.0 + 0.2 * 0.35 * 70.0)).abs() < 1e-6, "{db}");
+    strip_touch(&mut d, &v, 1, "up", 0.7, t);
+    // Silence comes back from the foot of the scale, and going under it is silence again.
+    strip_touch(&mut d, &v, 2, "down", 0.1, t);
+    let out = strip_touch(&mut d, &v, 2, "move", 0.2, t);
+    let [Action::ChannelLevel { group: 1, sound: None, db }] = apps(&out)[..] else { panic!("{out:?}") };
+    assert!((db - (-60.0 + 0.1 * 0.35 * 70.0)).abs() < 1e-6, "{db}");
+    let out = strip_touch(&mut d, &v, 2, "move", 0.0, t);
+    assert_eq!(apps(&out), [Action::ChannelLevel { group: 1, sound: None, db: f64::NEG_INFINITY }]);
+    strip_touch(&mut d, &v, 2, "up", 0.0, t);
+    press(&mut d, &v, "AUX");
+    strip_touch(&mut d, &v, 1, "down", 0.5, t);
+    let out = strip_touch(&mut d, &v, 1, "move", 0.6, t);
+    let [Action::SetSend { group: 0, sound: None, aux: 0, level }] = apps(&out)[..] else { panic!("{out:?}") };
+    let want = deckard_model::level_from_db(-10.0 + 0.1 * 0.35 * 70.0);
+    assert!((level - want).abs() < 1e-6, "{level} {want}");
 }
 
 /// The other value strips: Tune takes 0.25 of the travel, Control and Macro are deltas on the knob.
@@ -1107,7 +1138,7 @@ fn relative_strips_in_tune_and_control() {
         assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.9, t)), [], "{mode}");
         let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
         let [Action::Turn { knob: 0, inc, fine: false }] = apps(&out)[..] else { panic!("{out:?}") };
-        assert!((inc - -0.2 * 0.35).abs() < 1e-9, "{mode}: {inc}");
+        assert!((inc - -0.2).abs() < 1e-9, "{mode}: {inc}");
         strip_touch(&mut d, &v, 1, "up", 0.7, t);
     }
 }

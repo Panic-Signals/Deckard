@@ -97,7 +97,7 @@ pub struct Settings {
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
-    /// to where the finger lands (Preferences > MIDI).
+    /// to where the finger lands (Preferences > Hardware).
     pub relative_strips: bool,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware): 0
     /// takes the pressure as it comes; higher, light presses play louder.
