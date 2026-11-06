@@ -1669,7 +1669,7 @@ fn plugin_pages(m: &Obj) -> Vec<PluginPage> {
                         Value::Obj(ptr) => match ptr.get("px") {
                             Some(Value::Obj(p)) => Some(PluginKnob {
                                 id: p.get("index").and_then(Value::as_int).unwrap_or(0) as u32,
-                                name: str_of(p.get("custom_name")),
+                                name: str_of(p.get("custom_name").or_else(|| p.get("custom_name_nis_mapping"))),
                                 section: str_of(p.get("section_name")),
                             }),
                             _ => None,

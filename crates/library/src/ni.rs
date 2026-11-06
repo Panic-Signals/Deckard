@@ -33,6 +33,35 @@ pub fn default_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// Up to a few `.nksf` / `.nksfx` / `.nfm8` / `.nmsv` preset files for `plugin` (one
+/// per bank/folder), from NI's library index if present.
+pub fn nks_presets_for(plugin: &str) -> Vec<PathBuf> {
+    let Some(path) = default_path() else { return Vec::new() };
+    let Ok((db, _)) = connect(&path) else { return Vec::new() };
+    let mut out = Vec::new();
+    for table in ["p_sound_info_Instrument_1", "p_sound_info_Instrument_2", "p_sound_info_Effect_1", "p_sound_info_Effect_2"] {
+        let sql = format!(
+            "SELECT k.file_name FROM {table} p JOIN k_sound_info k ON k.id = p.id \
+             WHERE (lower(p.entry1) = lower(?1) OR lower(p.entry1) LIKE lower(?1) || ' %') \
+             AND lower(k.file_ext) IN ('nksf', 'nksfx', 'nfm8', 'nmsv') \
+             GROUP BY coalesce(p.entry2, ''), coalesce(k.sub_path, '') \
+             ORDER BY CASE WHEN p.entry2 IS NULL OR p.entry2 = 'Factory' THEN 0 ELSE 1 END, k.id \
+             LIMIT 10"
+        );
+        let Ok(mut st) = db.prepare(&sql) else { continue };
+        let Ok(mut rows) = st.query([plugin]) else { continue };
+        while let Ok(Some(r)) = rows.next() {
+            if let Ok(file) = r.get::<_, String>(0) {
+                let p = PathBuf::from(file);
+                if p.is_file() && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
 impl NiIndex {
     /// Open it read-only (see [`connect`]).
     pub fn open(path: &Path) -> Result<NiIndex, String> {
