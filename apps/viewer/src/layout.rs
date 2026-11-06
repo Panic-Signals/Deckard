@@ -220,7 +220,7 @@ pub(crate) fn elide_middle(painter: &Painter, text: &str, size: f32, width: f32)
         format!("{}…{}", h.trim_end(), t.trim_start())
     };
     // The most characters kept that still fit.
-    let (mut lo, mut hi) = (0, chars.len() - 1);
+    let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
