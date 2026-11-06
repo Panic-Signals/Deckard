@@ -9037,7 +9037,7 @@ mod tests {
         }
     }
 
-    static SPLIT: deckard_plugins::native::Class = deckard_plugins::native::Class {
+    pub(crate) static SPLIT: deckard_plugins::native::Class = deckard_plugins::native::Class {
         cid: [7; 16],
         name: "Split",
         instrument: false,
@@ -9055,7 +9055,7 @@ mod tests {
         make: |_| Box::new(Split { instrument: true, ..Default::default() }),
     };
 
-    fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
+    pub(crate) fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
         let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).expect("an id");
         Arc::new(Mutex::new(deckard_plugins::Plugin::native(class, id, class.name, 1000.0)))
     }
@@ -9249,7 +9249,7 @@ mod tests {
     }
 
     /// A slot playing the native plug-in `class`.
-    fn plugin_slot(class: &deckard_plugins::native::Class) -> deckard_model::SlotInfo {
+    pub(crate) fn plugin_slot(class: &deckard_plugins::native::Class) -> deckard_model::SlotInfo {
         deckard_model::SlotInfo {
             module: "PluginHost".into(),
             name: class.name.into(),
@@ -9260,7 +9260,7 @@ mod tests {
     }
 
     /// A strip for [`Split`]'s pair `bus` in `owner`'s slot, at unity, onto `dest`.
-    fn split_strip(
+    pub(crate) fn split_strip(
         owner: deckard_model::extra_out::Owner,
         bus: usize,
         dest: deckard_model::AudioDest,

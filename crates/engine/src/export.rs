@@ -28,6 +28,21 @@ pub enum Stem {
     Master,
     Group(usize),
     Sound(usize, usize),
+    /// The extra-output strip at this place in `project.extra_outs` (one on a hardware
+    /// output): its pair alone, after its level and pan.
+    Extra(usize),
+}
+
+/// The external output (Out 16, from 0) an extra-output strip's stem is rendered on:
+/// [`stem_project`] sends the strip there and silences everything else that could.
+pub const STEM_OUTPUT: usize = crate::OUTPUTS - 1;
+
+/// Which external output holds `stem`'s file: none for the master's output.
+pub fn stem_output(stem: Stem) -> Option<usize> {
+    match stem {
+        Stem::Extra(_) => Some(STEM_OUTPUT),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,6 +122,7 @@ pub fn stem_project(p: &Project, stem: Stem) -> Project {
     let mut q = p.clone();
     let keep_group = match stem {
         Stem::Master => return q,
+        Stem::Extra(i) => return extra_stem_project(q, i),
         Stem::Group(g) | Stem::Sound(g, _) => g,
     };
     q.master_slots.clear();
@@ -127,6 +143,60 @@ pub fn stem_project(p: &Project, stem: Stem) -> Project {
                 snd.muted = k != s;
             }
         }
+    }
+    q
+}
+
+/// The project that plays only strip `i` of `q.extra_outs`, onto [`STEM_OUTPUT`] (see
+/// [`stem_output`]): the strip unmuted, the other strips muted. Its owner's plug-in runs
+/// (the engine keeps a muted owner playing for a strip that can be heard) but the owner's
+/// main pair is silent: a sound's or group's own channel is muted, everything else in the
+/// project too. The master's plug-in hears the mix as ever (its own output, the master's,
+/// isn't this file). Nothing else can reach the stem's output: no channel or send goes
+/// to an external output, the cue is off, and the master's output is moved off it (the
+/// engine plays onto the master's output whatever is sent to it).
+fn extra_stem_project(mut q: Project, i: usize) -> Project {
+    use deckard_model::AudioDest as D;
+    use deckard_model::extra_out::Owner;
+    let Some(owner) = q.extra_outs.get(i).map(|x| x.owner) else {
+        // No such strip: silence.
+        q.extra_outs.clear();
+        q.groups.iter_mut().for_each(|g| g.muted = true);
+        return q;
+    };
+    for (k, x) in q.extra_outs.iter_mut().enumerate() {
+        x.muted = k != i;
+        if k == i {
+            x.dest = D::Ext(STEM_OUTPUT as i64);
+        }
+    }
+    let off = |d: &mut D| {
+        if matches!(d, D::Ext(_)) {
+            *d = D::None;
+        }
+    };
+    for grp in &mut q.groups {
+        off(&mut grp.channel.dest);
+        grp.channel.aux_dest.iter_mut().for_each(off);
+        for snd in &mut grp.sounds {
+            off(&mut snd.channel.dest);
+            snd.channel.aux_dest.iter_mut().for_each(off);
+        }
+    }
+    q.cue_output = D::None;
+    if q.master_output == D::Ext(STEM_OUTPUT as i64) {
+        q.master_output = D::Ext(0);
+    }
+    match owner {
+        Owner::Sound(g, s) | Owner::Chain(g, s, _) => {
+            q.groups.iter_mut().for_each(|x| x.muted = true);
+            if let Some(snd) = q.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) {
+                snd.muted = true;
+            }
+        }
+        // Its own sounds still go into it: the group is muted, the others too.
+        Owner::Group(..) => q.groups.iter_mut().for_each(|x| x.muted = true),
+        Owner::Master(_) => {}
     }
     q
 }
@@ -185,8 +255,32 @@ pub fn render(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),
 ) -> Option<Rendered> {
+    render_output(p, project_path, mode, offset, fmt, cache, cancel, progress, None)
+}
+
+/// [`render`], keeping external output `output` (Out n, from 0; see [`stem_output`])
+/// rather than the master's output (`None`). That output counts as connected, so what
+/// is sent there plays there.
+#[allow(clippy::too_many_arguments)]
+pub fn render_output(
+    p: &Project,
+    project_path: Option<&Path>,
+    mode: Mode,
+    offset: f64,
+    fmt: &Format,
+    cache: &mut SampleCache,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(f64),
+    output: Option<usize>,
+) -> Option<Rendered> {
     let rate = fmt.rate.max(1);
     let (mut engine, _) = Engine::new(p, project_path, rate, mode, cache);
+    let output = output.filter(|&n| n < crate::OUTPUTS);
+    if let Some(n) = output {
+        engine.set_connected_outputs(1 << n);
+    }
+    let mut ext: Vec<Vec<f32>> = if output.is_some() { vec![vec![0f32; 1024]; crate::OUTPUTS] } else { Vec::new() };
+    let mut main = vec![0f32; 1024];
     engine.looping = false;
     engine.metronome = false;
     engine.song_offset = offset;
@@ -198,7 +292,6 @@ pub fn render(
     let range = engine.timeline_frames().round() as usize;
     let max = range + (MAX_TAIL * rate as f64) as usize;
     let mut audio: Vec<f32> = Vec::with_capacity(range * 2 + rate as usize);
-    let mut block = vec![0f32; 1024];
     // The last loud frame, and how long it has been quiet since.
     let mut last_loud = 0usize;
     let mut done = 0usize;
@@ -207,7 +300,17 @@ pub fn render(
             return None;
         }
         let n = if done < range { (range - done).min(512) } else { 512 };
-        engine.process(&mut block[..n * 2]);
+        let block = match output {
+            Some(o) => {
+                ext.iter_mut().for_each(|b| b.fill(0.0));
+                engine.process_outputs(&mut main[..n * 2], &mut ext);
+                &ext[o]
+            }
+            None => {
+                engine.process(&mut main[..n * 2]);
+                &main
+            }
+        };
         for (i, f) in block[..n * 2].as_chunks::<2>().0.iter().enumerate() {
             if f[0].abs().max(f[1].abs()) > QUIET {
                 last_loud = done + i + 1;
@@ -411,18 +514,38 @@ pub fn group_index(g: usize) -> String {
 pub fn file_stem(p: &Project, name: &str, stem: Stem) -> String {
     let middle = match stem {
         Stem::Master => String::new(),
-        Stem::Group(g) => {
-            let grp = p.groups.get(g).map(|x| x.name.clone()).unwrap_or_default();
-            let grp = if grp.is_empty() { format!("Group {}", group_index(g)) } else { grp };
-            format!(" - {:02} {} {grp}", g + 1, group_index(g))
-        }
-        Stem::Sound(g, s) => {
-            let snd = p.groups.get(g).and_then(|x| x.sounds.get(s)).map(|x| x.name.clone()).unwrap_or_default();
-            let snd = if snd.is_empty() { format!("Sound {}", s + 1) } else { snd };
-            format!(" - {snd}")
-        }
+        Stem::Group(g) => format!(" - {:02} {} {}", g + 1, group_index(g), group_name(p, g)),
+        Stem::Sound(g, s) => format!(" - {}", sound_name(p, g, s)),
+        Stem::Extra(i) => extra_stem_name(p, i).map(|n| format!(" - {n}")).unwrap_or_default(),
     };
     safe_name(&format!("{name}{middle} - {}", bpm_text(p.tempo)))
+}
+
+/// Extra-output strip `i`'s part of its stem's name: its owner's channel, then the
+/// plug-in's name and the strip's label ("Kick - Portal Out 3 L").
+pub fn extra_stem_name(p: &Project, i: usize) -> Option<String> {
+    use deckard_model::extra_out::{Owner, plugin_at, strip_label};
+    let x = p.extra_outs.get(i)?;
+    let owner = match x.owner {
+        Owner::Sound(g, s) | Owner::Chain(g, s, _) => sound_name(p, g, s),
+        Owner::Group(g, _) => group_name(p, g),
+        Owner::Master(_) => "Master".into(),
+    };
+    let plugin = plugin_at(p, x.owner).map(|r| r.name.trim().to_string()).unwrap_or_default();
+    let label = strip_label(x.bus, &x.name, x.channels);
+    Some(format!("{owner} - {}", format!("{plugin} {label}").trim()))
+}
+
+/// A group's name, or "Group A1" when it has none.
+fn group_name(p: &Project, g: usize) -> String {
+    let grp = p.groups.get(g).map(|x| x.name.clone()).unwrap_or_default();
+    if grp.is_empty() { format!("Group {}", group_index(g)) } else { grp }
+}
+
+/// A sound's name, or "Sound 1" when it has none.
+fn sound_name(p: &Project, g: usize, s: usize) -> String {
+    let snd = p.groups.get(g).and_then(|x| x.sounds.get(s)).map(|x| x.name.clone()).unwrap_or_default();
+    if snd.is_empty() { format!("Sound {}", s + 1) } else { snd }
 }
 
 /// A pattern's audio file (the pattern editor's): `[Group] - [Pattern] - [BPM]`, or in
@@ -499,7 +622,8 @@ pub fn export(
     let mut written: Vec<PathBuf> = Vec::new();
     for (k, job) in jobs.iter().enumerate() {
         let (q, mode, offset) = playing(&stem_project(p, job.stem), job.range);
-        let Some(mut r) = render(&q, project_path, mode, offset, fmt, &mut cache, cancel, &mut |f| progress(k, f)) else {
+        let out = stem_output(job.stem);
+        let Some(mut r) = render_output(&q, project_path, mode, offset, fmt, &mut cache, cancel, &mut |f| progress(k, f), out) else {
             return Ok(written);
         };
         if fmt.normalize {
@@ -752,6 +876,92 @@ mod tests {
         // The pattern editor's: the group's, or (Keyboard view) the sound's.
         assert_eq!(pattern_file_stem(&p, 1, 0, None), "Keys - Pattern 1 - 120 BPM");
         assert_eq!(pattern_file_stem(&p, 1, 0, Some(0)), "Keys - Pattern 1 Pad - 120 BPM");
+    }
+
+    /// [`project`] with the test plug-in Split as the kick's effect (its chain's slot 0,
+    /// passing its input on and half of it on its second pair), and a strip for that
+    /// pair on Out 3.
+    fn with_strip() -> (tempfile::TempDir, Project) {
+        use deckard_model::extra_out::Owner;
+        let (tmp, mut p) = project();
+        p.groups[0].sounds[0].slots = vec![crate::tests::plugin_slot(&crate::tests::SPLIT)];
+        p.extra_outs = vec![crate::tests::split_strip(Owner::Chain(0, 0, 0), 1, deckard_model::AudioDest::Ext(2))];
+        (tmp, p)
+    }
+
+    /// [`go`], with Split playing the kick's chain's first slot.
+    fn go_split(p: &Project, range: Range, stem: Stem, f: &Format) -> Rendered {
+        let mut cache = SampleCache::default();
+        let slot = deckard_plugins::Slot::Chain { group: 0, sound: 0, slot: 0 };
+        cache.test_plugins.push((slot, crate::tests::split_plugin(&crate::tests::SPLIT)));
+        let (q, mode, offset) = playing(&stem_project(p, stem), range);
+        render_output(&q, None, mode, offset, f, &mut cache, &AtomicBool::new(false), &mut |_| {}, stem_output(stem)).unwrap()
+    }
+
+    /// A strip on a hardware output is a stem of its own: its pair alone (half the
+    /// kick here), on both channels; the master's file is what comes out of the master,
+    /// without it. However the project's own outputs are set.
+    #[test]
+    fn a_strip_on_an_output_exports_as_its_own_stem() {
+        use deckard_model::extra_out::Channels;
+        let (_tmp, p) = with_strip();
+        let f = fmt(true);
+        let kick = go_split(&p, Range::Song, Stem::Sound(0, 0), &f);
+        let extra = go_split(&p, Range::Song, Stem::Extra(0), &f);
+        assert!(energy(&kick.audio) > 1.0, "the kick plays");
+        assert_eq!(extra.frames(), kick.frames());
+        let worst = kick.audio.iter().zip(&extra.audio).map(|(k, x)| (k * 0.5 - x).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-4, "the stem is the pair: off by {worst}");
+        // The master's file doesn't hold it.
+        let master = go_split(&p, Range::Song, Stem::Master, &f);
+        let mut without = p.clone();
+        without.extra_outs.clear();
+        let plain = go_split(&without, Range::Song, Stem::Master, &f);
+        let worst = master.audio.iter().zip(&plain.audio).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-6, "the master holds the strip: off by {worst}");
+        // The stem's private output is the master's, or another strip's, in the project:
+        // still the strip alone.
+        for edit in [
+            |q: &mut Project| q.master_output = deckard_model::AudioDest::Ext(15),
+            |q: &mut Project| q.cue_output = deckard_model::AudioDest::Ext(15),
+            |q: &mut Project| q.groups[1].channel.dest = deckard_model::AudioDest::Ext(15),
+            |q: &mut Project| q.extra_outs[0].dest = deckard_model::AudioDest::Ext(15),
+            |q: &mut Project| {
+                let mut other = q.extra_outs[0].clone();
+                other.bus = 2;
+                other.dest = deckard_model::AudioDest::Ext(15);
+                q.extra_outs.push(other);
+            },
+        ] {
+            let mut q = p.clone();
+            edit(&mut q);
+            let again = go_split(&q, Range::Song, Stem::Extra(0), &f);
+            let worst = again.audio.iter().zip(&extra.audio).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(worst < 1e-6 && again.frames() == extra.frames(), "off by {worst}");
+        }
+        // A split half: its one side on both channels of its stem.
+        let mut q = p.clone();
+        q.extra_outs[0].channels = Channels::Left;
+        let half = go_split(&q, Range::Song, Stem::Extra(0), &f);
+        assert!(energy(&half.audio) > 0.1);
+        assert!(half.audio.as_chunks::<2>().0.iter().all(|[l, r]| (l - r).abs() < 1e-6), "both channels");
+    }
+
+    #[test]
+    fn the_extra_stem_is_named_after_its_strip() {
+        use deckard_model::extra_out::{Channels, Owner};
+        let (_tmp, mut p) = with_strip();
+        assert_eq!(file_stem(&p, "Song", Stem::Extra(0)), "Song - Kick - Split Out 2 - 120 BPM");
+        p.extra_outs[0].name = "Bass".into();
+        p.extra_outs[0].channels = Channels::Left;
+        assert_eq!(file_stem(&p, "Song", Stem::Extra(0)), "Song - Kick - Split Out 2 Bass L - 120 BPM");
+        // A group's plug-in, the master's.
+        p.groups[1].slots = vec![crate::tests::plugin_slot(&crate::tests::SPLIT)];
+        p.extra_outs[0].owner = Owner::Group(1, 0);
+        assert_eq!(file_stem(&p, "Song", Stem::Extra(0)), "Song - Keys - Split Out 2 Bass L - 120 BPM");
+        p.master_slots = vec![crate::tests::plugin_slot(&crate::tests::SPLIT)];
+        p.extra_outs[0].owner = Owner::Master(0);
+        assert_eq!(file_stem(&p, "Song", Stem::Extra(0)), "Song - Master - Split Out 2 Bass L - 120 BPM");
     }
 
     #[test]
