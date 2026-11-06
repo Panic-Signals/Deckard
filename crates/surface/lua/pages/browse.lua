@@ -285,9 +285,11 @@ local function products(screen, theme, b)
     local chosen = p == b.product
     if chosen then
       screen:rect(x, y, TILE_W - 1, TILE_H - 1, "text")
+      screen:rect(x + 1, y + 1, TILE_W - 3, 65, "on_colour")
     else
       screen:frame(x, y, TILE_W + 1, TILE_H, "browse_tile")
     end
+    screen:image(x + 1, y + 1, TILE_W - 1, 66, "artwork:" .. name:lower(), true)
     screen:label(x + 6, y + 67, TILE_W - 12, 22, name, style(theme, "default", chosen and "on_colour" or "text"), "left")
   end
   -- The scrollbar, with more than a page of products.
@@ -303,7 +305,9 @@ local ROW_X, ROW_Y, ROW_W, ROW_H, ROW_STEP, ROWS = 721, 44, 231, 21, 26, 7
 local function results(screen, theme, b)
   local product = b.product and b.products[b.product]
   if product then
-    screen:label(500, 36, 200, 196, product, style(theme, "browse_logo"))
+    if not screen:image(480, 36, 240, 196, "artwork:" .. product:lower(), false) then
+      screen:label(500, 36, 200, 196, product, style(theme, "browse_logo"))
+    end
   end
   local n = #b.results
   local top = util.clamp(b.focus - ROWS // 2, 1, math.max(1, n - ROWS + 1))

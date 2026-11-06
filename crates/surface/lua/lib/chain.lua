@@ -67,7 +67,10 @@ end
 -- the chain's (else the right display's logo).
 function chain.thumbnail(screen, x, y, w, h, slot, thumb)
   local instrument = slot.instrument
-  if slot.picture and screen:image(x, y, w, h, slot.picture, thumb ~= false) then return end
+  if slot.picture then
+    if screen:image(x, y, w, h, slot.picture, thumb ~= false) then return end
+    if screen:image(x, y, w, h, slot.picture, thumb == false) then return end
+  end
   if slot.plugin then return generic(screen, x, y, w, h, instrument) end
   screen:rect(x, y, w, h, { 0x1e, 0x1e, 0x1e })
   screen:frame(x, y, w, h, { 0x3a, 0x3a, 0x3a })
