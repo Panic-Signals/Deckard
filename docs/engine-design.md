@@ -246,3 +246,40 @@ Measured (audio-stress, alternating level and effect edits):
   `Target::ChainModule(chain, slot)`. The chain area's MASTER / GROUP / SOUND tabs
   and the MK3's PLUG-IN page edit whichever chain is shown (`App::chain`). The Mix
   view's group and master strips list, bypass and show their effects.
+
+## A plug-in's extra outputs
+
+A plug-in output pair beyond its first that has a strip (`Project::extra_outs`; see
+`docs/superpowers/specs/2026-11-05-plugin-extra-outputs-design.md`) is mixed on its own,
+with its own level, pan, route and meter.
+
+- **Where it lives.** The unit (`Unit::extras`) or instrument (`InstrumentRt::extras`)
+  that plays the plug-in keeps an `ExtraRt` per strip: a span-long buffer made when the
+  engine is built, the strip's route and a gain glide. The chain run (`FxChain::run`,
+  `render_sound`) adds what the plug-in played on that pair, times how much of the
+  unit is heard (`mix`, so a bypassed plug-in's strip is silent too).
+- **Mixing.** A sound's strips are mixed in `render_pass` after its main pair; a
+  group's after its bus's chain in `run_buses`; the master's after the master's chain
+  (before the master's fader). Each goes where its route says, the same three ways as
+  a sound: the master's input, a group's bus, or an external output. A group that
+  feeds another group's bus through a strip runs first (`bus_order`). A master strip
+  sent to a group's bus is heard there one span later, since the buses have run.
+- **Routes.** `strip_route`: the strip's own level (linear) and pan, then its Dest.
+  (`dest_route`, with the sound's group as its parent for a sound's plug-in, and the
+  master for a group's or the master's). The master's fader doesn't move a strip on
+  an output of its own. A muted strip is silent. A strip onto an output the interface
+  doesn't have connected (`Engine::set_connected_outputs`, which the output sets
+  from its routing each block) plays through its parent instead.
+- **Muted owners.** A muted sound or group whose plug-ins feed a strip that can be
+  heard still plays, for that strip (`muting`): its notes play and its plug-ins run,
+  and only its main pair is silent. A muted group with such a strip still takes its
+  sounds into its bus. Solo uses mutes, so soloing a strip works the same way.
+- **Edits.** A change to strips' levels, pans, mutes or routes keeps the chains. The
+  new engine lists every strip's route (`Engine::strips`), and the parts it kept take
+  theirs from there on adopt (`refresh_strips`), as level edits do. A strip added or
+  removed makes its part anew (`reuse_of`). Sounds with strips play live, not ahead,
+  because their strips are mixed where they play.
+- **Meters.** `Telemetry::extra_meters`, indexed like `Project::extra_outs`, read with
+  `Output::take_extra_meters`.
+- **Unchanged.** Plug-ins with one pair, and projects without strips, take none of
+  these paths.

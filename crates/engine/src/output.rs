@@ -15,7 +15,7 @@
 use crate::queue::Queue;
 use crate::{Engine, Live, Mode, Tap, Timeline, Timelines};
 use cpal::traits::{DeviceTrait, StreamTrait};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -244,6 +244,9 @@ pub struct Output {
     plays: AtomicU64,
     /// [`Output::set_routing`], as the audio thread reads it (-1: not connected).
     routing: Arc<[AtomicI32; OUT_CHANNELS]>,
+    /// [`connected_outputs`] of the routing, handed to the engine each block
+    /// ([`Engine::set_connected_outputs`]).
+    connected: Arc<AtomicU16>,
     channels: usize,
     /// Effects' meters for their panels (the Compressor's).
     fx_meters: Arc<crate::meters::FxMeters>,
@@ -430,6 +433,19 @@ fn before_block(engine: &mut Engine, clock: &mut Option<Box<dyn crate::sync::Clo
 /// DECKARD's output channels: Out 1 L … Out 16 R.
 pub const OUT_CHANNELS: usize = crate::OUTPUTS * 2;
 
+/// Which of DECKARD's outputs (bits: Out 1 is bit 0) `routing` (as
+/// [`Output::set_routing`] takes it) connects to one of an interface's `channels`: either
+/// side on a channel it has.
+pub fn connected_outputs(routing: &[Option<usize>], channels: usize) -> u16 {
+    let mut mask = 0u16;
+    for (i, to) in routing.iter().enumerate().take(OUT_CHANNELS) {
+        if to.is_some_and(|c| c < channels) {
+            mask |= 1 << (i / 2);
+        }
+    }
+    mask
+}
+
 /// Out 1 L and R on the interface's first two channels; the rest not connected.
 pub fn default_route(i: usize) -> i32 {
     if i < 2 { i as i32 } else { -1 }
@@ -461,7 +477,8 @@ impl Output {
         let block = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let monitor: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Stats::default());
-        let telemetry: Arc<Mutex<crate::Telemetry>> = Arc::default();
+        // (Room made here, so publishing doesn't allocate on the audio thread.)
+        let telemetry: Arc<Mutex<crate::Telemetry>> = Arc::new(Mutex::new(crate::Telemetry::with_room()));
         let sender = Sender {
             commands: Arc::new(Queue::new(QUEUE_ROOM)),
             garbage: Arc::new(Queue::new(QUEUE_ROOM)),
@@ -472,6 +489,8 @@ impl Output {
         };
         let sample_accurate = Arc::new(AtomicBool::new(true));
         let routing: Arc<[AtomicI32; OUT_CHANNELS]> = Arc::new(std::array::from_fn(|i| AtomicI32::new(default_route(i))));
+        let defaults: Vec<Option<usize>> = (0..OUT_CHANNELS).map(|i| usize::try_from(default_route(i)).ok()).collect();
+        let connected = Arc::new(AtomicU16::new(connected_outputs(&defaults, channels)));
         // Small buffers keep pads and keys immediate (256 frames is ~5.3 ms at 48 kHz);
         // fall back to the device's default if the size is refused.
         let wanted = match config.buffer_size() {
@@ -487,6 +506,7 @@ impl Output {
             let (commands, garbage) = (sender.commands.clone(), sender.garbage.clone());
             let exact = sample_accurate.clone();
             let routing = routing.clone();
+            let connected = connected.clone();
             // Out 1–16 (other than the master's), as the engine fills them.
             let mut ext = vec![vec![0f32; 16_384]; crate::OUTPUTS];
             let mut stream_config: cpal::StreamConfig = config.into();
@@ -532,6 +552,7 @@ impl Output {
                         let ts = info.timestamp();
                         let ahead = ts.playback.duration_since(ts.callback);
                         before_block(engine, &mut clock, started, if ahead.is_zero() { period } else { ahead });
+                        engine.set_connected_outputs(connected.load(Ordering::Relaxed));
                         engine.process_outputs(buf, &mut ext);
                         // What its players sent back is freed off this thread.
                         while let Some(j) = engine.take_junk() {
@@ -624,6 +645,7 @@ impl Output {
             fx_meters: Arc::default(),
             route_travels: Arc::default(),
             routing,
+            connected,
             channels,
             _stream: stream,
         })
@@ -631,11 +653,14 @@ impl Output {
 
     /// Preferences > Audio > Routing > Output: the interface channel (from 0) each of
     /// DECKARD's output channels (Out 1 L, Out 1 R, … Out 16 R) plays on, or none.
+    /// The engine hears which of its outputs that leaves connected (a strip onto one that
+    /// isn't plays through its parent), from the next block.
     pub fn set_routing(&self, routing: &[Option<usize>]) {
         for (i, r) in self.routing.iter().enumerate() {
             let to = routing.get(i).copied().unwrap_or(None).map_or(-1, |c| c as i32);
             r.store(to, Ordering::Relaxed);
         }
+        self.connected.store(connected_outputs(routing, self.channels), Ordering::Relaxed);
     }
 
     /// The interface's output channels.
@@ -898,6 +923,16 @@ impl Output {
         f(&mut self.telemetry.lock().unwrap())
     }
 
+    /// The peaks of each extra output's strip (as `project.extra_outs` lists them) since
+    /// the last call (reset).
+    pub fn take_extra_meters(&self) -> Vec<(f32, f32)> {
+        self.telemetry(|t| {
+            let meters = t.extra_meters.clone();
+            t.extra_meters.fill((0.0, 0.0));
+            meters
+        })
+    }
+
     /// The peaks of each sound (`[group][sound]`) and of the master since the last
     /// call (reset).
     pub fn take_meters(&self) -> (Meters, (f32, f32)) {
@@ -1009,6 +1044,20 @@ mod tests {
 
     fn engine() -> Box<Engine> {
         Box::new(crate::tests::click_engine_for(&crate::tests::project(), 48_000))
+    }
+
+    /// An output is connected when either side is routed to a channel the interface has.
+    #[test]
+    fn connected_outputs_follow_the_routing() {
+        let defaults: Vec<Option<usize>> = (0..OUT_CHANNELS).map(|i| usize::try_from(default_route(i)).ok()).collect();
+        assert_eq!(connected_outputs(&defaults, 2), 0b1, "Out 1 only");
+        assert_eq!(connected_outputs(&defaults, 1), 0b1, "one side is enough");
+        assert_eq!(connected_outputs(&defaults, 0), 0, "no channels");
+        let mut r = defaults.clone();
+        r[5] = Some(3);
+        r[30] = Some(9);
+        assert_eq!(connected_outputs(&r, 4), 0b101, "Out 3 on channel 4; Out 16's channel isn't there");
+        assert_eq!(connected_outputs(&r, 10), 0b1000_0000_0000_0101);
     }
 
     /// Each block, the clock is asked where it is when the block is heard (on the song's
