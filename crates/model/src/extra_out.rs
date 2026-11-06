@@ -5,6 +5,10 @@
 
 use crate::{AudioDest, PluginRef, Project};
 
+/// The field on the project's root object holding [`to_text`]'s text (DECKARD's own, so
+/// undo carries it and it's saved only in the DECKARD block).
+pub const FIELD: &str = "deckard:extra_outs";
+
 /// Which plug-in slot a strip belongs to. Mirrors `deckard_plugins::Slot`, and indexes
 /// the same way: `Sound` is a sound's instrument (`Sound::plugin`); `Chain`'s slot is the
 /// position in the sound's `slots` (instrument first, so effects start at 1); `Group`'s

@@ -82,10 +82,12 @@ impl Document {
                 d.remove_group(0)?;
                 // (Unnamed, as a new project's: shown by its place.)
                 d.rename(Target::Group(0), "")?;
+                d.prune_extra_outs()?;
                 return d.fix_lfo_triggers(|_, _| None);
             }
             d.unroute_group(g)?;
             d.remove_group(g)?;
+            d.prune_extra_outs()?;
             d.fix_lfo_triggers(|x, s| match x.cmp(&g) {
                 std::cmp::Ordering::Less => Some((x, s)),
                 std::cmp::Ordering::Equal => None,

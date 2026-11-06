@@ -1185,6 +1185,9 @@ impl Project {
         if let Some(Value::Str(t)) = r.get(lfo::FIELD) {
             p.lfos = lfo::from_text(t);
         }
+        if let Some(Value::Str(t)) = r.get(extra_out::FIELD) {
+            p.extra_outs = extra_out::from_text(t);
+        }
         if let Some(Value::Str(t)) = r.get(mod_matrix::CC_FIELD) {
             p.cc_routes = mod_matrix::cc_from_text(t);
         }
