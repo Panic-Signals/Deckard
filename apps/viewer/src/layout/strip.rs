@@ -668,7 +668,14 @@ fn panel(
                         });
                     }
                 }
-                None => ui.ctx().request_repaint(),
+                // Running: its view comes next frame. Not loaded yet (drawing doesn't load
+                // it): focusing it does.
+                None if app.samples.plugins.existing(app.plugin_slot_key(key.0, i)).is_some() => {
+                    ui.ctx().request_repaint_after(crate::VIEW_REFRESH)
+                }
+                None => {
+                    painter.text(body.center(), Align2::CENTER_CENTER, "Not loaded: click its name", font(12.0), white(120));
+                }
             }
         }
         _ => {

@@ -9,9 +9,15 @@ use egui_kittest::Harness;
 
 const CHAIN: Chain = Chain::Sound(0, 0);
 
-/// A new project, its first sound holding DECKARD's two plug-ins (slots 0 and 1), the
-/// first focused, in the Mixer (the strip below shows the sound's chain).
+/// A new project, its first sound holding DECKARD's two plug-ins (slots 0 and 1), both
+/// running (as playing loads them), the first focused, in the Mixer (the strip below
+/// shows the sound's chain).
 fn strip_with_two_plugins() -> Harness<'static, App> {
+    strip_with(true)
+}
+
+/// [`strip_with_two_plugins`], the second running if `running`.
+fn strip_with(running: bool) -> Harness<'static, App> {
     use deckard_plugins::native::CLASSES;
     let mut app = App { settings: crate::settings::Settings::default(), model: "M3".into(), ..App::default() };
     app.new_project();
@@ -22,6 +28,9 @@ fn strip_with_two_plugins() -> Harness<'static, App> {
     }
     (app.group, app.sound, app.chain_tab, app.channel, app.slot) = (0, 0, ChainTab::Sound, false, Some(0));
     app.mixer = true;
+    if running {
+        app.slot_plugin_in(CHAIN, 1).unwrap();
+    }
     let mut h = Harness::builder()
         .with_size(egui::vec2(1500.0 + layout::CONTROLLER_WIDTH, 930.0))
         .with_step_dt(1.0 / 60.0)
@@ -87,16 +96,68 @@ fn views_of_slots_no_longer_drawn_are_dropped() {
         k
     };
     assert_eq!(keys(&h), [(CHAIN, 0), (CHAIN, 1)]);
+    // (Their last sight a while ago.)
+    let age = |h: &mut Harness<'static, App>| {
+        for v in h.state_mut().plugin_views.values_mut() {
+            v.seen -= crate::VIEW_KEEP;
+        }
+    };
+    // Still drawn: kept.
+    age(&mut h);
+    h.run_steps(2);
+    assert_eq!(keys(&h), [(CHAIN, 0), (CHAIN, 1)]);
     // The Mixer closes: the strip isn't drawn; only the focused slot's view stays.
     h.state_mut().mixer = false;
     h.run_steps(2);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    age(&mut h);
     h.run_steps(2);
     assert_eq!(keys(&h), [(CHAIN, 0)]);
     // Another sound, no plug-ins: none.
     h.state_mut().sound = 1;
     h.run_steps(2);
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    age(&mut h);
     h.run_steps(2);
     assert_eq!(keys(&h), []);
+}
+
+/// Drawing a panel never loads its plug-in (that waits on the audio thread, and may
+/// take seconds): a plug-in not running yet shows no view until it's focused.
+#[test]
+fn a_panel_drawn_never_loads_its_plugin() {
+    let mut h = strip_with(false);
+    let key = h.state().plugin_slot_key(CHAIN, 1);
+    assert!(h.state().samples.plugins.existing(key).is_none(), "not loaded by drawing");
+    assert!(!h.state().plugin_views.contains_key(&(CHAIN, 1)));
+    assert!(shown(&h).iter().all(|x| x.0 != 1));
+    // Focused, it loads and shows its knobs.
+    layout::apply_acts(h.state_mut(), vec![Act::FocusSlot(0, 0, 1)]);
+    h.run_steps(3);
+    assert!(h.state().samples.plugins.existing(key).is_some());
+    assert_eq!(shown(&h).iter().find(|x| x.0 == 1).map(|x| x.2.clone()), Some(labels(&h, 1, 0)));
+}
+
+/// Another plug-in in a slot (an undo, a replace) gets a view of its own, not the old
+/// one's pages.
+#[test]
+fn a_plugin_replaced_in_a_slot_gets_its_own_view() {
+    use deckard_plugins::native::CLASSES;
+    let mut h = strip_with_two_plugins();
+    let names = |h: &Harness<'static, App>, slot: usize| -> Vec<String> {
+        h.state().plugin_views.get(&(CHAIN, slot)).map_or(Vec::new(), |v| v.pages.iter().map(|p| p.name.clone()).collect())
+    };
+    let plaits = names(&h, 1);
+    let replicant = names(&h, 0);
+    assert_ne!(plaits, replicant);
+    // Slot 1 becomes a Replicant (behind the views' back, as an undo would).
+    let doc = h.state().doc.clone().unwrap();
+    doc.borrow_mut().remove_slot_in(CHAIN, 1).unwrap();
+    let new = deckard_doc::NewModule::Plugin { id: CLASSES[0].plugin_id(), name: CLASSES[0].name.into(), chunk: Vec::new() };
+    doc.borrow_mut().add_slot(0, 0, 1, &new).unwrap();
+    h.run_steps(1);
+    assert_ne!(names(&h, 1), plaits, "the old view went");
+    // Running (as playing loads it): its own pages.
+    h.state_mut().slot_plugin_in(CHAIN, 1).unwrap();
+    h.run_steps(3);
+    assert_eq!(names(&h, 1), replicant);
+    assert_eq!(shown(&h).iter().find(|x| x.0 == 1).map(|x| x.2.clone()), Some(labels(&h, 1, 0)));
 }

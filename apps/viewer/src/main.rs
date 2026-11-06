@@ -359,7 +359,9 @@ pub struct PluginView {
     pub values: Vec<(f64, String)>,
     refreshed: std::time::Instant,
     /// When it was last drawn (or focused): views not seen for [`VIEW_KEEP`] go.
-    seen: std::time::Instant,
+    pub(crate) seen: std::time::Instant,
+    /// The slot's plug-in (its id in the project) when made: another there drops it.
+    plugin_id: String,
     /// The instance it reads (another in the slot rebuilds the view).
     instance: std::sync::Weak<std::sync::Mutex<deckard_plugins::Plugin>>,
     pub error: Option<String>,
@@ -368,12 +370,12 @@ pub struct PluginView {
 }
 
 /// How often a view's values are read again, and the longest one waits when many are due.
-const VIEW_REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
+pub(crate) const VIEW_REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
 const VIEW_OVERDUE: std::time::Duration = std::time::Duration::from_millis(200);
 /// How many due views are read in one update, past those overdue.
 const VIEW_READS: usize = 4;
 /// How long a view of a slot no longer drawn (nor focused) is kept.
-const VIEW_KEEP: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const VIEW_KEEP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a value sent to a plug-in shows while its controller still reports the
 /// old one (JUCE's take it in at the processor's next block).
@@ -1198,6 +1200,9 @@ impl App {
         // Where this project's sounds and groups were saved (Save asks again).
         self.saved.clear();
         self.editors.clear();
+        // (The plug-in views were the old project's instances.)
+        self.plugin_views.clear();
+        self.plugin_focus = None;
         self.samples = SampleCache::default();
         self.preload_plugins = deckard_plugins::on_main_thread();
         self.frames_drawn = 0;
@@ -7510,11 +7515,11 @@ impl App {
         }
         let now = std::time::Instant::now();
         let focused = self.slot.filter(|&i| all[i].plugin.is_some()).map(|i| (chain, i));
-        // Focused anew, a slot shows the page it was on.
+        // Focused anew, a plug-in shows the page it was on (the first if it had none).
         if focused != self.plugin_focus {
             self.plugin_focus = focused;
-            if let Some(v) = focused.and_then(|k| self.plugin_views.get(&k)) {
-                self.plugin_page = v.shown;
+            if let Some(k) = focused {
+                self.plugin_page = self.plugin_views.get(&k).map_or(0, |v| v.shown);
             }
         }
         // The views wanted: the focused slot's and the panels drawn since (still
@@ -7523,7 +7528,8 @@ impl App {
         let mut wanted = Vec::new();
         {
             let d = doc.borrow();
-            let holds = |k: &(deckard_doc::Chain, usize)| d.chain_slots(k.0).and_then(|s| s.get(k.1)).is_some_and(|s| s.plugin.is_some());
+            let id = |k: &(deckard_doc::Chain, usize)| Some(d.chain_slots(k.0)?.get(k.1)?.plugin.as_ref()?.id.as_str());
+            let holds = |k: &(deckard_doc::Chain, usize)| id(k).is_some();
             for k in focused.into_iter().chain(drawn) {
                 if !wanted.contains(&k) && holds(&k) {
                     wanted.push(k);
@@ -7534,7 +7540,8 @@ impl App {
                     v.seen = now;
                 }
             }
-            self.plugin_views.retain(|k, v| holds(k) && now.duration_since(v.seen) < VIEW_KEEP);
+            // (Another plug-in in the slot, an undo's say: its own view, made again.)
+            self.plugin_views.retain(|k, v| id(k) == Some(v.plugin_id.as_str()) && now.duration_since(v.seen) < VIEW_KEEP);
         }
         // New ones: the focused slot's at once (as the controller wants it), the others
         // a few at a time.
@@ -7587,11 +7594,12 @@ impl App {
         if self.plugin_focus == Some(key) { self.plugin_page } else { self.plugin_views.get(&key).map_or(0, |v| v.shown) }
     }
 
-    /// A view of the plug-in in slot `key` (its pages, no values yet; its error if it
-    /// can't load). `wait`: for the instance's lock, else none while the audio thread
-    /// has it (again next time).
-    fn build_view(&mut self, key: (deckard_doc::Chain, usize), wait: bool, now: std::time::Instant) -> Option<PluginView> {
-        let saved = self.doc.as_ref()?.borrow().chain_slots(key.0)?.get(key.1)?.plugin.as_ref()?.pages.clone();
+    /// A view of the plug-in in slot `key` (its pages, no values yet). `focused`: loaded
+    /// if need be and waited for (its error if it can't load), as the controller wants
+    /// it; else only an instance already running, and none while the audio thread holds
+    /// it (again next time): drawing a panel never loads a plug-in.
+    fn build_view(&mut self, key: (deckard_doc::Chain, usize), focused: bool, now: std::time::Instant) -> Option<PluginView> {
+        let pr = self.doc.as_ref()?.borrow().chain_slots(key.0)?.get(key.1)?.plugin.clone()?;
         let view = |pages, instance, error| PluginView {
             key,
             pages,
@@ -7600,21 +7608,25 @@ impl App {
             values: Vec::new(),
             refreshed: now,
             seen: now,
+            plugin_id: pr.id.clone(),
             instance,
             error,
             sent: Vec::new(),
         };
+        if !focused {
+            let p = self.samples.plugins.existing(self.plugin_slot_key(key.0, key.1))?;
+            let cid = deckard_plugins::state::PluginId::parse(&pr.id, &pr.name).map(|i| i.cid);
+            let pages = match p.try_lock() {
+                // (Still the slot's old plug-in: once it's replaced.)
+                Ok(g) if Some(g.id.cid) == cid => view_pages(&g, &pr.pages),
+                Ok(_) | Err(std::sync::TryLockError::WouldBlock) => return None,
+                Err(_) => Vec::new(),
+            };
+            return Some(view(pages, std::sync::Arc::downgrade(&p), None));
+        }
         match self.slot_plugin_in(key.0, key.1) {
             Ok(p) => {
-                let pages = if wait {
-                    p.lock().map(|g| view_pages(&g, &saved)).unwrap_or_default()
-                } else {
-                    match p.try_lock() {
-                        Ok(g) => view_pages(&g, &saved),
-                        Err(std::sync::TryLockError::WouldBlock) => return None,
-                        Err(_) => Vec::new(),
-                    }
-                };
+                let pages = p.lock().map(|g| view_pages(&g, &pr.pages)).unwrap_or_default();
                 Some(view(pages, std::sync::Arc::downgrade(&p), None))
             }
             Err(e) => Some(view(Vec::new(), std::sync::Weak::new(), Some(e))),
@@ -7624,7 +7636,8 @@ impl App {
     /// Read view `key`'s shown page's values again (false: the plug-in was busy, or
     /// another is in the slot now, its view rebuilt).
     fn refresh_view(&mut self, key: (deckard_doc::Chain, usize), now: std::time::Instant) -> bool {
-        let Ok(p) = self.slot_plugin_in(key.0, key.1) else { return false };
+        // (The instance running, never loaded nor waited for here.)
+        let Some(p) = self.samples.plugins.existing(self.plugin_slot_key(key.0, key.1)) else { return false };
         let Some(v) = self.plugin_views.get(&key) else { return false };
         // Another instance in the slot (an undo, a reload): its pages again, on the page
         // shown.
