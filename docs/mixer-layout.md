@@ -161,7 +161,15 @@ The background is `MIX_BG_LevelMeter` (72×167): a #000000 1px frame at the top 
 
 - **Group level:** one strip per group, then the "+" add-group header. The master is on the right.
 - **Sound level:** one strip per sound slot of the focused group (16). The group is on the right.
-- **Switching:** **double-click the background of a group header**. The level is `Song.sounds_visible_mixer`. [exact field]
+- **Group tabs:** a row of tabs runs across the top of the strip area, one per group, as in Maschine. Each tab shows the group's ID (A1, B1, ...) in its colour, then its name. The row is always shown. At sound level the focused group's tab is selected (filled with its colour, dark text). At group level no tab is selected.
+  - The strips, the sidebar toggles and the fixed right column all start under the row.
+  - A group name too long for its tab or header is shortened in the middle, so its start and end both stay visible ("Drums Acoustic Kit 2" becomes "Drums A…Kit 2"). Hover to see the whole name.
+  - With more groups than fit, the row scrolls on its own (horizontal wheel or trackpad over it), separately from the strips. When the focus moves, the focused group's tab scrolls into view.
+- **Switching:**
+  - **Click a tab:** focus that group and show its sounds.
+  - **Double-click a tab:** show the groups.
+  - **Double-click the background of a group header** (between the ID and the mini meter): at group level, show that group's sounds. At sound level, doing this on the fixed group column on the right goes back to the groups.
+  - The level is `Song.sounds_visible_mixer`. [exact field]
 - **Clicking:**
   - Clicking a header background **focuses** that group or sound. This is our `app.group` / `app.sound`.
   - At sound level, clicking another group's header shows that group's sounds.

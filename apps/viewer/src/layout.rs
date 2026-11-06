@@ -204,6 +204,30 @@ fn label(painter: &Painter, rect: Rect, indent: f32, text: &str, size: f32, colo
     );
 }
 
+/// `text` shortened with "…" in the middle to fit `width` at `size`, keeping its start
+/// and its end ("Drums Acoustic Kit 2" → "Drums A…Kit 2"): as many characters as fit,
+/// split evenly (the start gets the odd one), with no spaces next to the "…".
+pub(crate) fn elide_middle(painter: &Painter, text: &str, size: f32, width: f32) -> String {
+    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font(size), Color32::WHITE).size().x <= width;
+    if fits(text) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let cut = |k: usize| -> String {
+        let (head, tail) = (k.div_ceil(2), k / 2);
+        let h: String = chars[..head].iter().collect();
+        let t: String = chars[chars.len() - tail..].iter().collect();
+        format!("{}…{}", h.trim_end(), t.trim_start())
+    };
+    // The most characters kept that still fit.
+    let (mut lo, mut hi) = (0, chars.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
 /// Bar.beat.sixteenth, 1-based, as Maschine's position display.
 fn position_string(p: &Project, ticks: f64) -> String {
     let t = ticks.max(0.0) as i64;
@@ -6959,6 +6983,47 @@ mod emoji_tests {
             assert_eq!(list[1], super::EMOJI_FONT, "{family:?}: {list:?}");
         }
         assert_eq!(&f.font_data[super::EMOJI_FONT].font[..], deckard_nwl::draw::EMOJI_FONT);
+    }
+}
+
+#[cfg(test)]
+mod elide_middle_tests {
+    use super::*;
+
+    /// `f` with a painter (fonts loaded).
+    fn with_painter(f: impl FnOnce(&Painter)) {
+        let ctx = egui::Context::default();
+        let mut f = Some(f);
+        ctx.run_ui(Default::default(), |ui| {
+            if let Some(f) = f.take() {
+                f(ui.painter());
+            }
+        })
+        .textures_delta
+        .clear();
+        assert!(f.is_none(), "ran");
+    }
+
+    #[test]
+    fn a_long_name_keeps_its_start_and_end() {
+        with_painter(|p| {
+            let w = |t: &str| p.layout_no_wrap(t.to_string(), font(12.0), Color32::WHITE).size().x;
+            assert_eq!(elide_middle(p, "Drums", 12.0, 200.0), "Drums", "short: unchanged");
+            let long = "Drums Acoustic Kit 2";
+            let width = w(long) * 0.6;
+            let e = elide_middle(p, long, 12.0, width);
+            assert!(e.starts_with('D') && e.ends_with('2'), "{e}");
+            assert_eq!(e.matches('…').count(), 1, "{e}");
+            let (head, tail) = e.split_once('…').unwrap();
+            assert!(!head.is_empty() && !tail.is_empty(), "in the middle: {e}");
+            assert!(!head.ends_with(' ') && !tail.starts_with(' '), "no spaces by the …: {e}");
+            assert!(w(&e) <= width, "fits: {e} {} > {width}", w(&e));
+            assert!(e.chars().count() < long.chars().count());
+            assert!(long.starts_with(head) && long.ends_with(tail), "{e}");
+            // Balanced: the start gets the odd character (13 kept: 7 and 6, then trimmed).
+            let wide = w("Drums A…Kit 2");
+            assert_eq!(elide_middle(p, long, 12.0, wide), "Drums A…Kit 2");
+        });
     }
 }
 

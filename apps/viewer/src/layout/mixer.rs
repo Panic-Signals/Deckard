@@ -11,6 +11,9 @@ const MASTER_W: f32 = 81.0;
 const HEAD: f32 = 40.0;
 const LEVEL_H: f32 = 186.0;
 const SLOT_ROW: f32 = 20.0;
+/// The group tabs over the strips: the row's height and a tab's width.
+const TABS_H: f32 = 28.0;
+const TAB_W: f32 = 96.0;
 /// An extra-output strip's mode menu (stereo, mono, split), under its label: its height.
 const MODE_H: f32 = 17.0;
 
@@ -317,7 +320,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
         (app.mixer_sections.aux, "AUX", "Aux sends", MixerSection::Aux),
     ];
     for (i, (on, text, tip, sec)) in toggles.into_iter().enumerate() {
-        let y = rect.top() + 25.0 + i as f32 * 24.0 + if i > 0 { 8.0 } else { 0.0 };
+        let y = rect.top() + TABS_H + 25.0 + i as f32 * 24.0 + if i > 0 { 8.0 } else { 0.0 };
         let r = Rect::from_min_size(Pos2::new(side.left() + 3.0, y), Vec2::new(STRIP - 6.0, 20.0));
         let resp = ui.interact(r, ui.id().with(("mix-side", i)), Sense::click()).on_hover_text(tip);
         if on {
@@ -345,6 +348,16 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
 
     // The strips: groups, or the focused group's sounds.
     let sounds = app.mixer_sounds;
+    group_tabs(
+        ui,
+        app,
+        p,
+        &painter,
+        Rect::from_min_max(Pos2::new(side.right(), rect.top()), Pos2::new(rect.right(), rect.top() + TABS_H)),
+        acts,
+    );
+    // Under the tabs: the strips and the fixed column.
+    let rect = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + TABS_H), rect.max);
     let held = |ch: Channel| app.peaks.get(&ch).map_or((0.0, 0.0), |p| (p[0].0, p[1].0));
     let gmeter = |g: usize| app.meters.get(g).map_or((0.0, 0.0), |row| row.iter().fold((0f32, 0f32), |m, v| (m.0.max(v.0), m.1.max(v.1))));
     // A plug-in's extra outputs: each strip after its channel's (the master's before the
@@ -506,6 +519,65 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-mixer-strips"), rects));
 }
 
+/// The group tabs, in `row`: a tab per group (its ID and name, in its colour), the
+/// focused group's selected at sound level. Click: that group's sounds; double-click:
+/// the groups. The row scrolls on its own (wheel over it) and brings the focused tab
+/// into view when the focus moves.
+fn group_tabs(ui: &mut Ui, app: &App, p: &deckard_model::Project, painter: &Painter, row: Rect, acts: &mut Vec<Act>) {
+    painter.rect_filled(row, 0.0, S05);
+    painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, Color32::BLACK));
+    let n = p.groups.len();
+    let tabs = row.shrink2(Vec2::new(4.0, 0.0));
+    let mut off = hscroll(ui, "mixer-tabs", tabs, n as f32 * TAB_W);
+    // The focus moved (or the level did): its tab into view.
+    let seen_id = ui.id().with("mixer-tabs-seen");
+    let now = (app.group, app.mixer_sounds);
+    if ui.data(|d| d.get_temp::<(usize, bool)>(seen_id)) != Some(now) && app.group < n {
+        let (l, r) = (app.group as f32 * TAB_W, (app.group + 1) as f32 * TAB_W);
+        off = off.min(l).max(r - tabs.width()).clamp(0.0, (n as f32 * TAB_W - tabs.width()).max(0.0));
+        ui.data_mut(|d| {
+            d.insert_temp(ui.id().with("mixer-tabs"), off);
+            d.insert_temp(seen_id, now);
+        });
+    }
+    let clip = painter.with_clip_rect(tabs.intersect(painter.clip_rect()));
+    let mut drawn = Vec::new();
+    for g in 0..n {
+        let r = Rect::from_min_size(Pos2::new(tabs.left() + g as f32 * TAB_W - off, row.top()), Vec2::new(TAB_W, TABS_H));
+        if r.right() < tabs.left() || r.left() > tabs.right() {
+            continue;
+        }
+        let selected = app.mixer_sounds && g == app.group;
+        let resp = ui
+            .interact(r.intersect(tabs), ui.id().with(("mixer-tab", g)), Sense::click())
+            .on_hover_text(format!("{}\nClick: show the group's sounds. Double-click: show the groups", group_name(p, g)));
+        let col = group_color(p, g);
+        let inner = r.shrink2(Vec2::new(1.0, 4.0));
+        let fill = if selected {
+            col
+        } else if resp.hovered() {
+            S03
+        } else {
+            S01
+        };
+        clip.rect_filled(inner, 2.0, fill);
+        let (id_ink, name_ink) = if selected { (black(245), black(245)) } else { (col, white(200)) };
+        let text = clip.with_clip_rect(inner.intersect(tabs));
+        text.text(Pos2::new(inner.left() + 6.0, inner.center().y), Align2::LEFT_CENTER, group_id(g), font(12.0), id_ink);
+        let full = group_name(p, g);
+        let name = elide_middle(painter, &full, 11.0, inner.right() - 4.0 - (inner.left() + 28.0));
+        text.text(Pos2::new(inner.left() + 28.0, inner.center().y), Align2::LEFT_CENTER, &name, font(11.0), name_ink);
+        if resp.double_clicked() {
+            acts.push(Act::MixerSounds(false));
+        } else if resp.clicked() {
+            acts.push(Act::FocusGroup(g));
+            acts.push(Act::MixerSounds(true));
+        }
+        drawn.push((g, r, selected));
+    }
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-mixer-tabs"), drawn));
+}
+
 /// One channel strip in `r` (clipped to `clip`).
 #[allow(clippy::too_many_arguments)]
 fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &Strip, sounds: bool, acts: &mut Vec<Act>) {
@@ -570,8 +642,15 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         };
         rename_editor(ui, name_r, rt, &st.name, acts);
     } else {
+        // A group's name: shortened in the middle (its start and end stay), whole on
+        // hover.
+        let name =
+            if matches!(st.ch, Channel::Group(_)) { elide_middle(painter, &st.name, 12.0, name_r.width() - 2.0) } else { st.name.clone() };
         let p = painter.with_clip_rect(vis(name_r));
-        p.text(name_r.left_center(), Align2::LEFT_CENTER, &st.name, font(12.0), name_ink);
+        p.text(name_r.left_center(), Align2::LEFT_CENTER, &name, font(12.0), name_ink);
+        if name != st.name {
+            ui.interact(vis(name_r), id.with("full-name"), Sense::hover()).on_hover_text(&st.name);
+        }
     }
     if extra.is_some() {
         ui.interact(vis(head), id.with("head"), Sense::hover())
@@ -1058,6 +1137,8 @@ mod tests {
         app: crate::App,
         acts: Vec<Act>,
         strips: Vec<(Channel, Rect)>,
+        /// The group tabs: group, where, whether selected.
+        tabs: Vec<(usize, Rect, bool)>,
         text: String,
         /// Apply what it asks for after each frame (as the app does), noting whether all
         /// of it only set strip 0's level.
@@ -1067,8 +1148,17 @@ mod tests {
     }
 
     fn harness(app: crate::App) -> egui_kittest::Harness<'static, St> {
-        let st = St { app, acts: Vec::new(), strips: Vec::new(), text: String::new(), apply: false, applied: 0, only_level: true };
-        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(2200.0, 760.0)).build_ui_state(
+        let st = St {
+            app,
+            acts: Vec::new(),
+            strips: Vec::new(),
+            tabs: Vec::new(),
+            text: String::new(),
+            apply: false,
+            applied: 0,
+            only_level: true,
+        };
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(2200.0, 760.0)).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, st: &mut St| {
                 let doc = st.app.doc.clone().unwrap();
                 let rect = ui.max_rect();
@@ -1080,6 +1170,7 @@ mod tests {
                     apply_acts(&mut st.app, acts);
                 }
                 st.strips = ui.data(|d| d.get_temp(egui::Id::new("deckard-mixer-strips"))).unwrap_or_default();
+                st.tabs = ui.data(|d| d.get_temp(egui::Id::new("deckard-mixer-tabs"))).unwrap_or_default();
                 st.text = ui.ctx().graphics(|g| {
                     let mut all = String::new();
                     for c in g.get(ui.layer_id()).into_iter().flat_map(|l| l.all_entries()) {
@@ -1346,5 +1437,105 @@ mod tests {
         apply_acts(&mut app, vec![Act::SplitExtraOut(0), Act::SetExtraOut(1, ExtraOutEdit::Channels(Channels::Mono))]);
         let outs = app.doc.clone().unwrap().borrow().project().extra_outs.clone();
         assert_eq!(outs[1].channels, Channels::Right);
+    }
+
+    /// `n` clicks at `pos` (2: a double-click), after a pause (not part of the clicks
+    /// before), then what they ask for applied.
+    fn clicks(h: &mut egui_kittest::Harness<'static, St>, pos: egui::Pos2, n: usize) {
+        use egui::{Event, PointerButton};
+        h.state_mut().apply = true;
+        h.run_steps(40);
+        h.hover_at(pos);
+        h.step();
+        for _ in 0..n {
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.step();
+            }
+        }
+        h.run_steps(2);
+    }
+
+    fn tab(h: &egui_kittest::Harness<'static, St>, g: usize) -> Rect {
+        h.state().tabs.iter().find(|t| t.0 == g).unwrap_or_else(|| panic!("tab {g} drawn")).1
+    }
+
+    #[test]
+    fn clicking_a_group_tab_shows_its_sounds() {
+        let mut app = app_with(Vec::new());
+        (app.mixer_sounds, app.group) = (false, 0);
+        let mut h = harness(app);
+        let at = tab(&h, 2).center();
+        clicks(&mut h, at, 1);
+        assert!(h.state().app.mixer_sounds, "its sounds");
+        assert_eq!(h.state().app.group, 2);
+        assert!(order(&h).contains(&Channel::Sound(2, 0)), "{:?}", order(&h));
+        // Another group's tab, at sound level: that group's sounds.
+        let at = tab(&h, 1).center();
+        clicks(&mut h, at, 1);
+        assert!(h.state().app.mixer_sounds);
+        assert_eq!(h.state().app.group, 1);
+    }
+
+    #[test]
+    fn double_clicking_a_tab_shows_the_groups() {
+        let mut app = app_with(Vec::new());
+        (app.mixer_sounds, app.group) = (true, 1);
+        let mut h = harness(app);
+        let at = tab(&h, 2).center();
+        clicks(&mut h, at, 2);
+        assert!(!h.state().app.mixer_sounds, "the groups");
+        assert!(order(&h).contains(&Channel::Master), "{:?}", order(&h));
+    }
+
+    #[test]
+    fn double_clicking_the_fixed_group_column_shows_the_groups() {
+        let mut app = app_with(Vec::new());
+        (app.mixer_sounds, app.group) = (true, 1);
+        let mut h = harness(app);
+        let r = h.state().strips.last().filter(|(c, _)| *c == Channel::Group(1)).expect("the group on the right").1;
+        // Its header's background (right of the ID).
+        clicks(&mut h, egui::pos2(r.left() + 52.0, r.top() + 10.0), 2);
+        assert!(!h.state().app.mixer_sounds, "the groups");
+        assert_eq!(h.state().app.group, 1, "still focused");
+        assert!(!h.state().app.doc.clone().unwrap().borrow().project().groups[1].muted, "not muted");
+    }
+
+    #[test]
+    fn the_focused_groups_tab_is_selected_at_sound_level() {
+        let mut app = app_with(Vec::new());
+        (app.mixer_sounds, app.group) = (true, 2);
+        let mut h = harness(app);
+        let tabs = h.state().tabs.clone();
+        assert_eq!(tabs.iter().map(|t| t.0).collect::<Vec<_>>(), vec![0, 1, 2], "a tab per group");
+        assert_eq!(tabs.iter().filter(|t| t.2).map(|t| t.0).collect::<Vec<_>>(), vec![2]);
+        let text = &h.state().text;
+        assert!(text.contains("|A1|") && text.contains("|C1|"), "{text}");
+        // The strips start under the tabs.
+        let row = tabs[0].1;
+        assert!(h.state().strips.iter().all(|(_, r)| r.top() >= row.bottom()), "{:?} under {row:?}", h.state().strips);
+        // At group level, none.
+        h.state_mut().app.mixer_sounds = false;
+        h.run_steps(2);
+        assert!(h.state().tabs.iter().all(|t| !t.2), "{:?}", h.state().tabs);
+    }
+
+    #[test]
+    fn a_long_group_name_is_shortened_in_the_middle() {
+        let long = "Drums Acoustic Kit Number 2";
+        for sounds in [false, true] {
+            let mut app = app_with(Vec::new());
+            apply_acts(&mut app, vec![Act::Rename(Target::Group(1), long.into())]);
+            (app.mixer_sounds, app.group) = (sounds, 1);
+            let h = harness(app);
+            let text = &h.state().text;
+            assert!(!text.contains(long), "{text}");
+            // In the tab, and in the strip's header (the groups) or the fixed column.
+            let short: Vec<&str> = text.split('|').filter(|t| t.contains('…')).collect();
+            assert!(short.len() >= 2, "{text}");
+            for t in short {
+                assert!(t.starts_with('D') && t.ends_with('2') && t.matches('…').count() == 1, "{t}");
+            }
+        }
     }
 }
