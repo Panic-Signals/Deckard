@@ -92,12 +92,12 @@ CUE shows the cue bus: the channels with their headphones on, the metronome and 
 Held, a mode's button plus a group makes the strips groups, plus a pad makes them that sound's eight,
 plus MST (CONTROL and MACRO) the master. A double tap resets a strip. SHIFT moves a tenth as far.
 
-A touch sets the value where the finger lands. Switch on Relative touchstrips (Preferences > Hardware)
-and it no longer does: the touch picks the value up and moving the finger changes it by the distance
-moved, from where it was, stopping at the ends. A whole strip's travel moves level and AUX about 25 dB,
-pan and swing 0.35 of their range, TUNE 0.25 of its range, and CONTROL and MACRO all
-of theirs; SHIFT a tenth of that. Lifting does nothing, a double tap doesn't reset, since strokes follow
-each other fast and none may jump, and only the first finger counts, so a second can't make it jump.
+A touch sets the value where the finger lands. Switch on Relative level touchstrips (Preferences > Hardware)
+and on the mixer strips it no longer does: the touch picks the value up and moving the finger changes it by
+the distance moved, from where it was, stopping at the ends. A whole strip's travel moves level and AUX about
+25 dB, pan and swing 0.35 of their range, TUNE 0.25 of its range, and MACRO all of its; SHIFT a tenth of that.
+Lifting does nothing, a double tap doesn't reset, since strokes follow each other fast and none may jump, and
+only the first finger counts, so a second can't make it jump. CONTROL stays an absolute fader.
 Hold AUTO and move a strip to write modulation while playing.
 
 ## The library

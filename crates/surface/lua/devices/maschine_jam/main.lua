@@ -1484,9 +1484,9 @@ end
 
 -- Relative touchstrips: how far a value moves for the finger's travel along the whole strip,
 -- as a fraction of its range, or for level and aux of a knob's turn of fader (the Mixer page's
--- 70 dB). Tune spans 72 semitones, so it takes less. A touch on CONTROL or MACRO has a whole
--- strip for the whole knob.
-local RELATIVE_RATE = { level = 0.35, pan = 0.35, aux = 0.35, swing = 0.35, tune = 0.25, control = 1, macro = 1 }
+-- 70 dB). Tune spans 72 semitones, so it takes less. MACRO has a whole strip for the whole
+-- knob; CONTROL stays an absolute fader.
+local RELATIVE_RATE = { level = 0.35, pan = 0.35, aux = 0.35, swing = 0.35, tune = 0.25, macro = 1 }
 local FADER_DB_PER_TURN, FADER_LOW_DB, FADER_HIGH_DB = 70, -60, 10
 
 -- What a relative touch moves for strip `n`: dB for level and aux, else its place 0..1.
@@ -1548,10 +1548,11 @@ function M.strip(n, finger, kind, pos)
     end
     return
   end
+  local relative = s.relative_strips and mode ~= "control"
   if kind == "down" then
     local now = deckard.now()
     -- (Relative: no reset. Strokes follow each other fast, and none of them may jump.)
-    rec.tapped = not s.relative_strips and rec.last_down ~= nil and now - rec.last_down < DOUBLE_TAP
+    rec.tapped = not relative and rec.last_down ~= nil and now - rec.last_down < DOUBLE_TAP
     rec.last_down = now
     rec.touched = true
     rec.pos = pos
@@ -1559,7 +1560,7 @@ function M.strip(n, finger, kind, pos)
       strip_reset(s, n)
       return
     end
-    if s.relative_strips then
+    if relative then
       -- A touch only picks the value up; the travel moves it.
       rec.value = relative_pick(s, n)
     elseif not shift() then
@@ -1567,7 +1568,7 @@ function M.strip(n, finger, kind, pos)
     end
   elseif kind == "move" then
     if rec.tapped then return end
-    if s.relative_strips then
+    if relative then
       if rec.value then rec.value = relative_move(s, n, rec.value, pos - (rec.pos or pos)) end
     elseif shift() then
       -- SHIFT: the same travel moves it a tenth as far.

@@ -1120,7 +1120,8 @@ fn relative_strips_move_faders_in_db() {
     assert!((level - want).abs() < 1e-6, "{level} {want}");
 }
 
-/// The other value strips: Tune takes 0.25 of the travel, Control and Macro are deltas on the knob.
+/// The other value strips: Tune takes 0.25 of the travel, Macro is a delta on the knob, while
+/// Control keeps absolute-fader behaviour (touch sets the value, double-tap resets).
 #[test]
 fn relative_strips_in_tune_and_control() {
     let (mut d, mut v) = swing_view(true, 0.0);
@@ -1131,16 +1132,32 @@ fn relative_strips_in_tune_and_control() {
     let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
     let [Action::SetTune { group: 0, sound: None, semitones }] = apps(&out)[..] else { panic!("{out:?}") };
     assert_eq!(semitones, 4.0, "0.2 x 0.25 x 72 = 3.6, to a semitone");
-    for (i, mode) in ["CONTROL", "MACRO"].into_iter().enumerate() {
-        let t = t + Duration::from_secs(2 * (i as u64 + 1));
-        press(&mut d, &v, mode);
-        v.control.knobs[0] = Some(crate::KnobView { value: 0.5, ..Default::default() });
-        assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.9, t)), [], "{mode}");
-        let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
-        let [Action::Turn { knob: 0, inc, fine: false }] = apps(&out)[..] else { panic!("{out:?}") };
-        assert!((inc - -0.2).abs() < 1e-9, "{mode}: {inc}");
-        strip_touch(&mut d, &v, 1, "up", 0.7, t);
-    }
+
+    let t = t + Duration::from_secs(2);
+    press(&mut d, &v, "MACRO");
+    v.control.knobs[0] = Some(crate::KnobView { value: 0.5, ..Default::default() });
+    assert_eq!(apps(&strip_touch(&mut d, &v, 1, "down", 0.9, t)), [], "MACRO");
+    let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
+    let [Action::Turn { knob: 0, inc, fine: false }] = apps(&out)[..] else { panic!("{out:?}") };
+    assert!((inc - -0.2).abs() < 1e-9, "MACRO: {inc}");
+    strip_touch(&mut d, &v, 1, "up", 0.7, t);
+
+    // CONTROL stays an absolute fader even with relative_strips on.
+    let t = t + Duration::from_secs(2);
+    press(&mut d, &v, "CONTROL");
+    v.control.knobs[0] = Some(crate::KnobView { value: 0.5, ..Default::default() });
+    let out = strip_touch(&mut d, &v, 1, "down", 0.9, t);
+    let [Action::Turn { knob: 0, inc, fine: false }] = apps(&out)[..] else { panic!("{out:?}") };
+    assert!((inc - 0.4).abs() < 1e-9, "CONTROL down jumps to touch position: {inc}");
+    v.control.knobs[0].as_mut().unwrap().value = 0.9;
+    let out = strip_touch(&mut d, &v, 1, "move", 0.7, t);
+    let [Action::Turn { knob: 0, inc, fine: false }] = apps(&out)[..] else { panic!("{out:?}") };
+    assert!((inc - -0.2).abs() < 1e-9, "CONTROL move tracks finger position: {inc}");
+    strip_touch(&mut d, &v, 1, "up", 0.7, t);
+    // Double-tap resets in CONTROL mode.
+    let out = strip_touch(&mut d, &v, 1, "down", 0.7, t + Duration::from_millis(100));
+    assert_eq!(apps(&out), [Action::ResetKnob(0)]);
+    strip_touch(&mut d, &v, 1, "up", 0.7, t + Duration::from_millis(150));
 }
 
 /// AUTO held writes the move as ever: the same Turn, and the touch is written from the timer.
@@ -1152,7 +1169,7 @@ fn relative_strips_still_write_modulation_with_auto() {
     v.auto_write = true;
     v.control.knobs[0] = Some(crate::KnobView { value: 0.5, modulatable: true, ..Default::default() });
     hold(&mut d, &v, "AUTO");
-    press(&mut d, &v, "CONTROL");
+    press(&mut d, &v, "MACRO");
     strip_touch(&mut d, &v, 1, "down", 0.5, t);
     assert!(apps(&d.tick(&v, t)).contains(&Action::TouchWrite(0)), "written while touched");
     let out = strip_touch(&mut d, &v, 1, "move", 0.9, t);

@@ -2490,8 +2490,8 @@ impl App {
                     }
                     ui.end_row();
                     ui.label("Maschine JAM");
-                    ui.checkbox(&mut self.settings.relative_strips, "Relative touchstrips").on_hover_text(
-                        "A strip's touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. Off: a touch sets the value.",
+                    ui.checkbox(&mut self.settings.relative_strips, "Relative level touchstrips").on_hover_text(
+                        "On the mixer strips (LEVEL, AUX, SWING, TUNE, MACRO), a touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. CONTROL mode keeps absolute-fader behaviour. Off: a touch sets the value.",
                     );
                     ui.end_row();
                     ui.label("");
