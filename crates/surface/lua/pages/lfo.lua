@@ -1,7 +1,7 @@
 -- The LFOs (SHIFT + SELECT; again, or another page's button, leaves).
 --
 --   left screen       the focused LFO's name, large ("Press a pad" with none)
---   right screen      its wave (at least two cycles, time lines for how long they take),
+--   right screen      its wave (two beats or two seconds, scrolling; no time lines),
 --                     under its shape, rate and "trig"
 --   display 1-5       the shapes: Sine, Square, Triangle, Saw, Random
 --   display 6 / 8     SYNC (lit: synced, else Hz) / TRIG (the focused sound, or Off);
