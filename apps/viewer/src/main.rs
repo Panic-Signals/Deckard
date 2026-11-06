@@ -7472,7 +7472,10 @@ impl App {
                 Some(Owner::Sound(g, _) | Owner::Chain(g, _, _)) => {
                     (groups().filter(|(t, _)| *t != Target::Group(g)).chain(sounds(g)).collect(), None, every, Some(i))
                 }
-                Some(Owner::Group(..) | Owner::Master(_)) => (groups().collect(), None, every, Some(i)),
+                Some(Owner::Group(..)) => (groups().collect(), None, every, Some(i)),
+                // The master's plug-in hears the whole mix: the groups stay heard (so
+                // does the master's main pair), only the other strips are muted.
+                Some(Owner::Master(_)) => (Vec::new(), None, every, Some(i)),
                 None => return,
             },
         };
@@ -9079,6 +9082,15 @@ mod tests {
         app.solo(layout::Channel::Extra(3));
         assert_eq!(state(&app), (vec![false; 3], vec![false; 4]));
         assert!(!sound_20(&app));
+        // A master's plug-in's strip: its plug-in hears the mix, so no group is muted;
+        // only the other strips are.
+        let mut outs = doc.borrow().project().extra_outs.clone();
+        outs.push(x(Owner::Master(0), 1));
+        doc.borrow_mut().set_extra_outs(outs).unwrap();
+        app.solo(layout::Channel::Extra(4));
+        assert_eq!(state(&app), (vec![false; 3], vec![true, true, true, true, false]), "the groups feed the master");
+        app.solo(layout::Channel::Extra(4));
+        assert_eq!(state(&app), (vec![false; 3], vec![false; 5]), "unsolo");
     }
 
     /// The extra outputs' meters, peaks and headroom are held by place in the list: a
