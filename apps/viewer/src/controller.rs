@@ -192,7 +192,8 @@ impl Controller {
 
     /// How soon the app timer is due again (for the app to wake then).
     pub fn interval(&self) -> Duration {
-        tick_every(self.host.state.borrow().transport.what.is_some())
+        let st = self.host.state.borrow();
+        tick_every(st.transport.what.is_some() || (self.sampling && st.sampling_tab == 0))
     }
 
     /// Run the app timer if it's due; report transport changes.

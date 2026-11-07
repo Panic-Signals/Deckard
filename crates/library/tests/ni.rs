@@ -53,6 +53,21 @@ fn text_search_matches_name() {
 }
 
 #[test]
+fn a_product_maschine_marks_as_gone_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = testing::fixture(tmp.path());
+    assert_eq!(NiIndex::open(&path).unwrap().query(&loops(&[])).unwrap().products, ["Deep Matter"]);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("UPDATE k_content_path SET state = 4 WHERE alias = 'Deep Matter'", []).unwrap();
+    drop(db);
+    let r = NiIndex::open(&path).unwrap().query(&loops(&[])).unwrap();
+    assert!(r.items.is_empty() && r.products.is_empty(), "{:?}", r.items);
+    // The user's own content isn't part of it.
+    let own = NiIndex::open(&path).unwrap().query(&Query { kind: Kind::OneShot, user: true, ..Query::default() }).unwrap();
+    assert_eq!(own.items.len(), 1);
+}
+
+#[test]
 fn hidden_items_are_skipped() {
     let tmp = tempfile::tempdir().unwrap();
     let ni = NiIndex::open(&testing::fixture(tmp.path())).unwrap();
