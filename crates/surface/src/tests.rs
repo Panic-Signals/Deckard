@@ -621,6 +621,13 @@ fn browse_buttons() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "nothing to load");
     v.browser.busy = true;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty(), "not while searching");
+    v.browser.busy = false;
+    v.browser.kind = 1;
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    let text = s.screen_text(&v);
+    assert!(text.contains(&"+ ROUTING".to_string()) && text.contains(&"+ PATTERNS".to_string()), "{text:?}");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Browse(Browse::Routing(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::Browse(Browse::Patterns(false))]);
 }
 
 #[test]
@@ -1564,6 +1571,89 @@ fn the_events_select_mode_selects_with_the_pads() {
     assert_eq!(s.error(), None);
 }
 
+/// The built-in EQ's curve is on the right screen, and stays there on both pages.
+#[test]
+fn the_eq_curve_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "EQ".into();
+    v.control.slot = Some("EQ".into());
+    v.control.pages = vec!["Freq / Gain".into(), "Width / Output".into()];
+    v.control.eq = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.25, 0.5), (0.45, 0.8), (0.65, 0.3), (0.85, 0.5)],
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    assert_eq!(s.error(), None);
+}
+
+/// The Filter's curve stays on the right screen on Main and on Side-Chain Input.
+#[test]
+fn the_filter_curve_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Filter".into();
+    v.control.slot = Some("Filter".into());
+    v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
+    v.control.filter = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.55, 0.7)],
+        extent: vec![0.8; 48],
+        lfo: vec![0.0, 1.0, 0.0, 1.0],
+        side: vec![0.2; 48],
+        side_live: true,
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let dot = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+        assert!(dot(&px) > 20, "page {}: the cutoff dot", page + 1);
+    }
+    assert_eq!(s.error(), None);
+}
+
+/// A compressor's transfer, a delay's taps, and a grain cloud stay on the right screen.
+#[test]
+fn the_effect_picture_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Compressor".into();
+    v.control.slot = Some("Compressor".into());
+    v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
+    v.control.picture = Some(crate::EqCurveView {
+        kind: "law".into(),
+        points: (0..48).map(|i| i as f32 / 47.0).collect(),
+        side: vec![0.2; 48],
+        side_live: true,
+        lfo: vec![0.0, 1.0, 0.2],
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 80, "page {}: the transfer on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    v.control.picture =
+        Some(crate::EqCurveView { kind: "dots".into(), bands: vec![(0.2, 0.7), (0.5, 0.4), (0.8, 0.6)], ..Default::default() });
+    let px = s.picture(&v);
+    let dots = px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    assert!(dots > 20, "the cloud: {dots}");
+    assert_eq!(s.error(), None);
+}
+
 /// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it in the chain (its
 /// thumbnail) and on the right display (its logo); one without shows a drawing.
 #[test]
@@ -1611,6 +1701,36 @@ fn shift_on_the_plugin_page_edits_the_chain() {
     // INSERT: the plug-in browser, for a new slot after the last.
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Slot(1)]);
     assert_eq!(s.page(), "module");
+    assert_eq!(s.error(), None);
+}
+
+/// SHIFT on Master and Group offers the same slot edits as Sound, and the encoder
+/// still steps that chain's inserts.
+#[test]
+fn shift_on_master_and_group_offers_the_sounds_slot_edits() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let slot = |name: &str| crate::SlotView { name: name.into(), instrument: false, active: true, plugin: true, picture: None };
+    v.control.modules_visible = true;
+    v.control.chain = vec![slot("EQ"), slot("Filter")];
+    (v.control.slot_count, v.control.slot_index) = (2, Some(0));
+    for level in [0, 1, 2] {
+        v.control.level = level;
+        hold(&mut s, &v, "BUTTON_SHIFT", true);
+        let text = s.screen_text(&v).join("|");
+        assert!(
+            text.contains("EDIT") && text.contains("INSERT") && text.contains("MOVE") && text.contains("BYPASS") && text.contains("REMOVE"),
+            "level {level}: {text}"
+        );
+        assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SlotEdit("remove")], "level {level}");
+        assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Slot(1)], "level {level} steps inserts");
+    }
+    // No insert on this chain: right does nothing, so it cannot change tab.
+    v.control.chain.clear();
+    (v.control.slot_count, v.control.slot_index) = (0, None);
+    for level in [0, 1] {
+        v.control.level = level;
+        assert!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT").is_empty(), "level {level}");
+    }
     assert_eq!(s.error(), None);
 }
 
@@ -2055,6 +2175,20 @@ fn a_knob_tapped_twice_resets_it() {
         tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)),
         [Action::ChannelLevel { group: v.group, sound: Some(1), db: 0.0 }]
     );
+}
+
+/// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
+/// and an empty one makes a pattern there.
+#[test]
+fn pattern_pads_are_places_with_gaps() {
+    let mut s = Surface::new();
+    let mut v = view();
+    let at = |slot: usize| PatternView { color: 1, slot, ..Default::default() };
+    v.groups[0].patterns = vec![at(0), at(7)];
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    let pad = |s: &mut Surface, v: &View, n: usize| s.event(&Event::PadOn(n, 1.0), v, Instant::now());
+    assert_eq!(pad(&mut s, &v, 8), [Action::PickPattern(1)], "pad 8 holds the list's second");
+    assert_eq!(pad(&mut s, &v, 4), [Action::NewPatternAt { group: 0, slot: 3 }], "an empty place");
 }
 
 /// The Ideas view's knobs: the group above each steps through its patterns in the

@@ -49,7 +49,10 @@ fn palenights_border_moves_in_the_app() {
     let mut requests = Vec::new();
     let mut frame = || {
         let out = app.mk3_events(Vec::new(), &mut requests);
-        out.screens.map(|(_, px)| (4..357).map(|x| px[4 * 960 + x]).collect::<Vec<_>>())
+        out.screens.map(|(_, f)| {
+            let px = f.into_pixels();
+            (4..357).map(|x| px[4 * 960 + x]).collect::<Vec<_>>()
+        })
     };
     let a = frame().expect("a picture");
     std::thread::sleep(std::time::Duration::from_millis(400));
