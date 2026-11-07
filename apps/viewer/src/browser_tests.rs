@@ -583,3 +583,51 @@ fn many_types_and_characters_keep_results_on_screen() {
     );
     assert!(prehear_rect.max.y <= height, "prehear row stays inside the window: {prehear_rect:?}");
 }
+
+#[test]
+fn group_browser_toggles_routing_and_patterns_on_load() {
+    use deckard_doc::{SoundRoute, Target};
+    use deckard_model::{AudioDest, Note};
+    use egui_kittest::kittest::Queryable;
+    let Some((_tmp, mut h, _dir)) = saving() else { return };
+    act(&mut h, BrowseAct::Toggle);
+    // Source group saved to User library with its own pattern and routing.
+    {
+        let doc = h.state().doc.clone().unwrap();
+        let mut d = doc.borrow_mut();
+        d.rename(Target::Group(0), "Saved Kit").unwrap();
+        d.rename(Target::Sound(0, 0), "Kit Kick").unwrap();
+        d.add_pattern(0, 0, "Kit Pattern").unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Output(AudioDest::Master)).unwrap();
+    }
+    save_as(&mut h, deckard_doc::FileItem::Group(0), false, "Saved Kit");
+    // Now set the current group's own pattern and routing that we want to keep.
+    let note = Note { expr: None, sound: 0, position: 480, length: 240, pitch: 72, velocity: 90, probability: 100 };
+    {
+        let doc = h.state().doc.clone().unwrap();
+        let mut d = doc.borrow_mut();
+        d.rename(Target::Sound(0, 0), "Old Sound").unwrap();
+        d.clear_pattern(0, 0).unwrap();
+        d.rename(Target::Pattern(0, 0), "Kept Groove").unwrap();
+        d.add_note(0, 0, note).unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Output(AudioDest::None)).unwrap();
+        d.set_sound_route(0, 0, SoundRoute::MidiSource("All".into())).unwrap();
+    }
+    act(&mut h, BrowseAct::User(true));
+    act(&mut h, BrowseAct::Kind(Kind::Group));
+    assert!(h.query_by_label("+ ROUTING").is_some());
+    assert!(h.query_by_label("+ PATTERNS").is_some());
+    act(&mut h, BrowseAct::Routing(false));
+    act(&mut h, BrowseAct::Patterns(false));
+    let i = names(&h).iter().position(|n| n == "Saved Kit").expect("saved group is listed");
+    act(&mut h, BrowseAct::Load(i, None));
+    let doc = h.state().doc.clone().unwrap();
+    let d = doc.borrow();
+    let g = &d.project().groups[0];
+    assert_eq!(g.name, "Saved Kit");
+    assert_eq!(g.sounds[0].name, "Kit Kick");
+    assert_eq!(g.sounds[0].channel.dest, AudioDest::None);
+    assert_eq!(g.sounds[0].channel.midi_source, "All");
+    assert_eq!(g.patterns[0].name, "Kept Groove");
+    assert_eq!(g.patterns[0].notes, vec![note]);
+}
