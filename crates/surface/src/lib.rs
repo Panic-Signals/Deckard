@@ -151,7 +151,7 @@ pub struct SamplingView {
 /// Sounds, Instruments, Effects, Loops, One-shots), user content (else factory), the
 /// products and the one chosen, the three attributes (Type, Sub-type, Character: the
 /// values and the one chosen), the results (name, a favourite) and the one focused.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BrowserView {
     pub kind: usize,
     pub user: bool,
@@ -164,6 +164,28 @@ pub struct BrowserView {
     pub busy: bool,
     /// Only favourites are shown.
     pub favorites: bool,
+    /// Load a group with its sound routing (`+ ROUTING`).
+    pub routing: bool,
+    /// Load a group with its patterns (`+ PATTERNS`).
+    pub patterns: bool,
+}
+
+impl Default for BrowserView {
+    fn default() -> BrowserView {
+        BrowserView {
+            kind: 0,
+            user: false,
+            products: Vec::new(),
+            product: None,
+            attributes: Default::default(),
+            results: Vec::new(),
+            focus: 0,
+            busy: false,
+            favorites: false,
+            routing: true,
+            patterns: true,
+        }
+    }
 }
 
 /// What BROWSE asks of the library.
@@ -183,6 +205,10 @@ pub enum Browse {
     SetFavorite,
     /// Prehear the focused result.
     Prehear,
+    /// Load a group with (`true`) or without (`false`) its routing (`+ ROUTING`).
+    Routing(bool),
+    /// Load a group with (`true`) or without (`false`) its patterns (`+ PATTERNS`).
+    Patterns(bool),
 }
 
 /// The song's grids, as Maschine's Grid page lists them (each value its place in the

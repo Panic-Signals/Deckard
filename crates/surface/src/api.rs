@@ -469,6 +469,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("browse_favorites", () => Action::Browse(Browse::Favorites));
     request!("browse_set_favorite", () => Action::Browse(Browse::SetFavorite));
     request!("browse_prehear", () => Action::Browse(Browse::Prehear));
+    request!("browse_routing", (on: bool) => Action::Browse(Browse::Routing(on)));
+    request!("browse_patterns", (on: bool) => Action::Browse(Browse::Patterns(on)));
     request!("song_view", (on: bool) => Action::SongView(on));
     request!("move_section", (next: bool) => Action::SectionMove(next));
     request!("section_scene", (next: bool) => Action::SectionScene(next));
@@ -968,6 +970,8 @@ fn browser(lua: &Lua, b: &crate::BrowserView) -> mlua::Result<Table> {
     t.set("focus", b.focus + 1)?;
     t.set("busy", b.busy)?;
     t.set("favorites", b.favorites)?;
+    t.set("routing", b.routing)?;
+    t.set("patterns", b.patterns)?;
     Ok(t)
 }
 
