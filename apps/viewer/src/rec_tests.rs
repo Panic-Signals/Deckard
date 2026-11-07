@@ -975,12 +975,14 @@ fn the_mk3_knob_reaches_every_choice() {
     app.slot = Some(0);
     app.channel = false;
     let dir = || doc.borrow().project().groups[0].slots[0].param("stutter_direction");
-    // DIRECTION is the seventh knob.
-    app.control_request(R::Turn { pos: 6, inc: 0.5, fine: false });
+    // DIRECTION is the seventh knob. With three choices a step is half the range, and
+    // the knob moves one every quarter of that.
+    let step = 0.5 * 0.25;
+    app.control_request(R::Turn { pos: 6, inc: step, fine: false });
     assert_eq!(dir(), Some(1.0), "Reverse");
-    app.control_request(R::Turn { pos: 6, inc: 0.5, fine: false });
+    app.control_request(R::Turn { pos: 6, inc: step, fine: false });
     assert_eq!(dir(), Some(2.0), "Both");
-    app.control_request(R::Turn { pos: 6, inc: -0.5, fine: false });
+    app.control_request(R::Turn { pos: 6, inc: -step, fine: false });
     assert_eq!(dir(), Some(1.0), "back to Reverse");
 }
 
@@ -1064,6 +1066,23 @@ fn a_held_pad_shows_while_held() {
     let done: Vec<_> = notes(&doc).into_iter().filter(|n| n.sound == 5 && n.position == start).collect();
     assert_eq!(done.len(), 3, "{done:?}");
     assert!(done.iter().all(|n| n.length == len + len / 2), "as long as held: {done:?}");
+}
+
+/// From the controller: a new pattern in an empty place keeps that place, and the rest stay.
+#[test]
+fn a_controller_makes_a_pattern_in_the_place_it_asks_for() {
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.surface_act(A::NewPatternAt { group: 0, slot: 0 });
+    app.surface_act(A::NewPatternAt { group: 0, slot: 7 });
+    let v = app.surface_view();
+    let slots: Vec<usize> = v.groups[0].patterns.iter().map(|p| p.slot).collect();
+    assert_eq!(slots, [0, 7]);
+    assert_eq!(app.pattern, 1, "the new one is focused, by its place in the list");
+    assert_eq!(v.groups[0].patterns[1].name, "Pattern 8");
+    assert_eq!(v.groups[0].scene_pattern, Some(1), "and plays in the scene");
 }
 
 /// The MK3's own layer, for the tests below: an app playing with a Filter on sound 1.

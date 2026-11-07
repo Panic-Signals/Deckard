@@ -297,7 +297,7 @@ mod tests {
         let mut d = project();
         let plugin = NewModule::Plugin { id: "V:VST3:INSTR:1".into(), name: "Synth".into(), chunk: Vec::new() };
         d.add_slot(0, 1, 0, &plugin).unwrap();
-        let pages = vec![crate::PluginPageSpec { name: "Main".into(), knobs: vec![(42, "Filter".into())] }];
+        let pages = vec![crate::PluginPageSpec { name: "Main".into(), knobs: vec![(42, "Filter".into())], custom_names: Vec::new() }];
         d.save_plugin_pages(Chain::Sound(0, 1), 0, &pages).unwrap();
         let target = ModTarget { slot: Some(0), field: "42".into() };
         d.set_modulation(Chain::Sound(0, 1), &target, 0, (0, 960), &[(0, 0.25), (480, -0.5)]).unwrap();

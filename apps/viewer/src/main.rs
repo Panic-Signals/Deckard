@@ -62,6 +62,10 @@ mod expression_record_tests;
 mod group_edit_tests;
 #[cfg(test)]
 mod header_tests;
+mod input_levels;
+mod jam_io;
+#[cfg(test)]
+mod jam_tests;
 mod keep_running;
 mod keys;
 mod layout;
@@ -83,6 +87,7 @@ mod mod_slots;
 mod modulation;
 mod module_ui;
 mod ni_agent;
+mod ni_services;
 #[cfg(test)]
 mod pad_blink_tests;
 #[cfg(test)]
@@ -232,11 +237,16 @@ fn main() {
                 scale_group: None,
                 user_chords: user_chords::UserChords::load(),
                 mk3: Some(mk3_io::Mk3Io::start()),
+                jam: Some(jam_io::JamIo::start()),
                 _running: Some(keep_running::begin()),
                 ..Default::default()
             };
             app.recent = menu::load_recent();
             app.settings = settings::Settings::load();
+            // (Nothing to open through ASIO before a driver is picked.)
+            if app.settings.asio_device.is_some() {
+                deckard_engine::devices::set_driver(app.settings.audio_driver);
+            }
             app.update = update::Notice::start(app.settings.check_updates);
             app.surface = app.new_surface();
             if let Some(m) = &app.mk3 {
@@ -411,6 +421,21 @@ impl ViewPage {
     }
 }
 
+/// A saved page's name: its explicit `name`, or its knobs' section headings.
+fn saved_page_name(pg: &deckard_model::PluginPage) -> String {
+    if !pg.name.is_empty() {
+        return pg.name.clone();
+    }
+    let mut sections: Vec<&str> = Vec::new();
+    for k in &pg.params {
+        let s = k.section.trim();
+        if !s.is_empty() && !sections.contains(&s) {
+            sections.push(s);
+        }
+    }
+    sections.join(" / ")
+}
+
 /// The plug-in's own pages (DECKARD's: they follow the plug-in, even once saved for a
 /// macro), the pages saved with it, or Maschine's automatic ones: its first 128
 /// automatable parameters, eight per page.
@@ -432,32 +457,138 @@ fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) 
             })
             .collect();
     }
-    if saved.iter().any(|pg| !pg.params.is_empty()) {
+    let mut pages: Vec<ViewPage> = if saved.iter().any(|pg| !pg.params.is_empty()) {
         let all = p.parameter_list(false);
-        return saved
+        saved
             .iter()
             .map(|pg| {
                 let knobs = pg
                     .params
                     .iter()
                     .filter_map(|k| {
-                        let info = all.iter().find(|i| i.id == k.id)?.clone();
+                        let info = all
+                            .iter()
+                            .find(|i| i.id == k.id)
+                            .or_else(|| (k.id != u32::MAX).then(|| all.get(k.id as usize)).flatten())?
+                            .clone();
                         let label = if k.name.is_empty() { info.title.clone() } else { k.name.clone() };
                         Some((info, label, k.section.clone()))
                     })
                     .collect();
-                ViewPage::new(p, pg.name.clone(), knobs)
+                ViewPage::new(p, saved_page_name(pg), knobs)
             })
             .filter(|pg| !pg.knobs.is_empty())
-            .collect();
+            .collect()
+    } else {
+        p.parameters()
+            .into_iter()
+            .take(128)
+            .collect::<Vec<_>>()
+            .chunks(8)
+            .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
+            .collect()
+    };
+    name_unnamed_pages(&mut pages);
+    pages
+}
+
+/// Give pages that have no explicit section headings (`autoname` NKS presets, or
+/// automatic parameter pages) section headings and page names derived from their knob
+/// labels.
+fn name_unnamed_pages(pages: &mut [ViewPage]) {
+    let mut prev: Option<(String, usize)> = None;
+    for pg in pages.iter_mut() {
+        if !pg.name.is_empty() {
+            prev = Some((pg.name.clone(), 1));
+            continue;
+        }
+        let derived = infer_knob_sections(&mut pg.knobs);
+        if !derived.is_empty() {
+            prev = Some((derived.clone(), 1));
+            pg.name = derived;
+        } else if let Some((base, n)) = &mut prev {
+            *n += 1;
+            pg.name = format!("{base} {n}");
+        } else if let Some((_, first, sec)) = pg.knobs.first_mut() {
+            let fallback = first.split_whitespace().next().unwrap_or(first.as_str()).trim().to_string();
+            let name = if fallback.is_empty() { "Main".to_string() } else { fallback };
+            if sec.is_empty() {
+                *sec = name.clone();
+            }
+            prev = Some((name.clone(), 1));
+            pg.name = name;
+        }
     }
-    p.parameters()
-        .into_iter()
-        .take(128)
-        .collect::<Vec<_>>()
-        .chunks(8)
-        .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
-        .collect()
+}
+
+/// Infer section headings from knob labels when a page has none, and return the page
+/// name (up to two sections joined by `" / "`).
+fn infer_knob_sections(knobs: &mut [(deckard_plugins::ParamInfo, String, String)]) -> String {
+    if knobs.is_empty() || knobs.iter().any(|(_, _, s)| !s.trim().is_empty()) {
+        return String::new();
+    }
+    let labels: Vec<String> = knobs.iter().map(|(_, l, _)| l.trim().to_string()).collect();
+    let two_word = |s: &str| -> Option<String> {
+        let mut w = s.split_whitespace();
+        let (a, b, _) = (w.next()?, w.next()?, w.next()?);
+        let numbered = b.chars().all(|c| c.is_ascii_digit()) || (b.len() <= 3 && b.chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+        numbered.then(|| format!("{a} {b}"))
+    };
+    let mut cands: Vec<Option<String>> = Vec::with_capacity(labels.len());
+    for (i, l) in labels.iter().enumerate() {
+        if let Some((sec, _)) = l.split_once(" - ").or_else(|| l.split_once(": ")).or_else(|| l.split_once(" / ")) {
+            let sec = sec.trim();
+            if !sec.is_empty() {
+                cands.push(Some(sec.to_string()));
+                continue;
+            }
+        }
+        if let Some((sec, _)) = l.split_once('-')
+            && sec.len() >= 3
+            && sec.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && sec.chars().last().is_some_and(|c| c.is_ascii_digit())
+        {
+            cands.push(Some(sec.to_string()));
+            continue;
+        }
+        let words: Vec<&str> = l.split_whitespace().collect();
+        if words.first().is_some_and(|w| w.eq_ignore_ascii_case("macro") || w.eq_ignore_ascii_case("macros")) {
+            cands.push(Some("Macros".into()));
+            continue;
+        }
+        if let Some(tw) = two_word(l)
+            && labels.iter().enumerate().any(|(j, other)| j != i && two_word(other).as_deref() == Some(tw.as_str()))
+        {
+            cands.push(Some(tw));
+            continue;
+        }
+        if words.len() >= 2 && words[0].len() >= 3 {
+            let w0 = words[0];
+            let neighbor_matches = [i.wrapping_sub(1), i + 1]
+                .into_iter()
+                .filter_map(|j| labels.get(j))
+                .any(|other| other.split_whitespace().next().is_some_and(|ow| ow.eq_ignore_ascii_case(w0)));
+            if neighbor_matches {
+                cands.push(Some(w0.to_string()));
+                continue;
+            }
+        }
+        cands.push(None);
+    }
+    let mut sections: Vec<String> = Vec::new();
+    let mut last = String::new();
+    for (k, sec) in cands.into_iter().enumerate() {
+        if let Some(sec) = sec {
+            if !sec.eq_ignore_ascii_case(&last) {
+                knobs[k].2 = sec.clone();
+                last = sec.clone();
+                if !sections.iter().any(|s| s.eq_ignore_ascii_case(&sec)) {
+                    sections.push(sec);
+                }
+            }
+        }
+    }
+    sections.into_iter().take(2).collect::<Vec<_>>().join(" / ")
 }
 
 /// A new zone playing all of `file` over every key and velocity.
@@ -540,15 +671,25 @@ fn new_zone(file: &Path, frames: usize, from: deckard_doc::ZoneFrom) -> deckard_
 /// device last picked; the system's default while that can't be opened, with why in
 /// `fallback` (Preferences ▸ Audio shows it).
 fn open_output(settings: &settings::Settings, fallback: &mut Option<String>) -> Result<Output, String> {
+    use deckard_engine::devices::{self, AudioDriver};
     *fallback = None;
-    let out = Output::with_device(settings.output_device.as_deref(), settings.buffer_frames, settings.multicore).or_else(|e| {
-        if settings.output_device.is_some() {
-            *fallback = Some(e);
-            Output::with_options(settings.buffer_frames, settings.multicore)
-        } else {
-            Err(e)
+    let (out, no_asio) = devices::open_preferring(settings.audio_driver, |driver| {
+        devices::set_driver(driver);
+        if driver == AudioDriver::Asio {
+            return Output::with_device(settings.asio_device.as_deref(), settings.buffer_frames, settings.multicore);
         }
-    })?;
+        Output::with_device(settings.output_device.as_deref(), settings.buffer_frames, settings.multicore).or_else(|e| {
+            if settings.output_device.is_some() {
+                *fallback = Some(e);
+                Output::with_options(settings.buffer_frames, settings.multicore)
+            } else {
+                Err(e)
+            }
+        })
+    });
+    // ASIO not being in use says more than which system device stood in.
+    *fallback = no_asio.or(fallback.take());
+    let out = out?;
     out.set_routing(&settings.output_routing);
     out.set_sample_accurate(settings.exact_timing);
     out.set_render_ahead(settings.render_ahead_ms as f64 / 1000.0);
@@ -561,11 +702,12 @@ fn open_live_input(
     device: &Option<String>,
     routing: &[Option<usize>],
     live: deckard_engine::LiveIn,
+    inputs: std::sync::Arc<input_levels::InputBus>,
     rate: u32,
 ) -> Result<cpal::Stream, String> {
-    use cpal::traits::{DeviceTrait, StreamTrait};
+    use cpal::traits::StreamTrait;
     let (dev, config) = deckard_engine::devices::open_input(device.as_deref())?;
-    if config.sample_format() != cpal::SampleFormat::F32 {
+    if !deckard_engine::devices::format_ok(config.sample_format()) {
         return Err(format!("input format {:?} is not supported", config.sample_format()));
     }
     if config.sample_rate() != rate {
@@ -573,30 +715,25 @@ fn open_live_input(
     }
     let channels = config.channels() as usize;
     let map: Vec<Option<usize>> = (0..32).map(|i| routing.get(i).copied().unwrap_or(Some(i)).filter(|&c| c < channels)).collect();
-    let stream = dev
-        .build_input_stream(
-            config.into(),
-            move |data: &[f32], _| {
-                if let Ok(mut q) = live.try_lock() {
-                    for f in data.chunks(channels) {
-                        let mut frame = [0f32; 32];
-                        for (i, c) in map.iter().enumerate() {
-                            if let Some(c) = c {
-                                frame[i] = f[*c];
-                            }
-                        }
-                        q.push_back(frame);
-                    }
-                    // A few blocks at most (nothing may be reading).
-                    while q.len() > 8192 {
-                        q.pop_front();
-                    }
+    // Room up front: on ASIO this callback runs on the output's thread.
+    live.lock().unwrap().reserve(2 * 8192);
+    let stream = deckard_engine::devices::build_input(
+        &dev,
+        config,
+        move |data: &[f32]| {
+            if let Ok(mut q) = live.try_lock() {
+                for f in data.chunks(channels) {
+                    q.push_back(inputs.frame(f, &map));
                 }
-            },
-            |e| eprintln!("audio input error: {e}"),
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+                // A few blocks at most (nothing may be reading).
+                while q.len() > 8192 {
+                    q.pop_front();
+                }
+            }
+        },
+        |e| eprintln!("audio input error: {e}"),
+    )
+    .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
     Ok(stream)
 }
@@ -842,6 +979,14 @@ pub struct App {
     midi_wired: bool,
     /// The Maschine MK3 over USB (started by `main`, not in tests).
     mk3: Option<mk3_io::Mk3Io>,
+    /// The Maschine JAM over USB (started by `main`, not in tests), and its script while
+    /// it's connected.
+    jam: Option<jam_io::JamIo>,
+    jam_device: Option<deckard_surface::device::Device>,
+    /// The JAM's script wants the Settings page's values (its REC MODE readout).
+    jam_settings_wanted: bool,
+    /// The last JAM script error shown.
+    jam_error: Option<String>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.
     midi_devices: midi_devices::MidiDevices,
     /// The last MIDI controller script error shown.
@@ -870,6 +1015,14 @@ pub struct App {
     /// The interface input, open while a sound takes audio from it (Input ▸ Audio),
     /// for (device, routing).
     live_input: Option<(cpal::Stream, InputKey)>,
+    /// The inputs' levels and meters, shared with the input streams; and the meters as
+    /// shown.
+    input_bus: std::sync::Arc<input_levels::InputBus>,
+    input_meters: [(f32, f32); input_levels::PAIRS],
+    /// A controller shows the inputs' meters: the input stays open for them.
+    input_watched: bool,
+    /// The input was opened for the meters alone, with no engine started for it.
+    input_for_meters: bool,
     settings_input_failed: Option<InputKey>,
     /// The page of a plug-in's parameters shown, and what it shows.
     plugin_page: usize,
@@ -882,12 +1035,21 @@ pub struct App {
     pending_editor: bool,
     /// Audio output, opened on first Play.
     output: Option<Result<Output, String>>,
-    /// Why the output device picked couldn't be opened (the default plays instead).
+    /// Why the output device picked couldn't be opened (the default plays instead), or
+    /// why ASIO couldn't be had (the system's driver plays instead).
     output_fallback: Option<String>,
+    /// The ASIO fallback the status line last told of; whether the driver asked for its
+    /// streams to be opened afresh, and when they last were.
+    fallback_told: Option<String>,
+    asio_reopen_due: bool,
+    asio_reopened: Option<std::time::Instant>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
     /// Asking to quit NI's agent, which holds the MK3's screens.
     ni_agent: ni_agent::Ask,
+    /// Asking to stop NI's services, which fight DECKARD over a JAM's lights.
+    ni_services_ask: ni_agent::Ask,
+    ni_services: ni_services::Watch,
     /// Windows plug-ins through Wine (Preferences ▸ Plug-ins, Linux): what's installed,
     /// the task running (what it is, where its result comes), the last task's message.
     wine_status: Option<wine::Status>,
@@ -960,6 +1122,7 @@ pub struct App {
     /// The focused sound's Audio plug-in take in focus (group, sound, take): its frames
     /// and rate (for its tempo).
     take_info: Option<((usize, usize, usize), usize, u32)>,
+    take_info_key: Option<(usize, usize, usize, deckard_model::SampleRef)>,
     /// The focused group's Audio plug-in takes as the pattern editor draws them, by
     /// (group, sound, take): the file and frames they're of, and peaks (min, max) across
     /// the played frames.
@@ -987,6 +1150,7 @@ pub struct App {
     peaks: std::collections::HashMap<layout::Channel, [(f32, std::time::Instant); 2]>,
     /// The master's meter (left, right), falling back like the others.
     master_meter: (f32, f32),
+    cue_meter: (f32, f32),
     /// The audio thread's load (0..1) for the header's CPU meter, and the stats it was
     /// last worked out from (busy, audio µs).
     cpu_load: f32,
@@ -1010,8 +1174,13 @@ pub struct App {
     /// when the next edit is due to be kept.
     session_kept: (u64, u64),
     session_due: Option<std::time::Instant>,
+    session_due_for: (u64, u64),
+    /// The backup being written in the background, if any (see [`App::session_written`]).
+    session_writing: Option<std::thread::JoinHandle<()>>,
     /// Goes up with each project opened or made.
     doc_generation: u64,
+    /// Cached `(doc_generation, revision, macro_targets, group_noted)` for `surface_view`.
+    surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
 }
 
 /// Launch time (a newtype so `App` can derive `Default`).
@@ -1043,8 +1212,8 @@ fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
 pub(crate) struct Mk3Out {
     pub route: mk3_io::PadRoute,
     pub leds: deckard_mk3::leds::Leds,
-    /// New screens, if they changed: their count and 960 × 272 RGBA pixels.
-    pub screens: Option<(u64, Vec<[u8; 4]>)>,
+    /// New screens, if they changed: their count and frame to rasterize on the display thread.
+    pub screens: Option<(u64, mk3_io::ScreenFrame)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1085,6 +1254,40 @@ const ROUTE_STEP: f64 = 1.0 / 32.0;
 fn log_knobs() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("DECKARD_LOG_MK3").is_some() || std::env::var_os("DECKARD_LOG_KNOBS").is_some())
+}
+
+/// Coalesce a frame's 500 Hz MK3 reports so consecutive turns of the same knob add up
+/// and intermediate touch-strip moves don't lag behind the finger.
+fn coalesce_mk3_events(events: Vec<deckard_mk3::Event>) -> Vec<deckard_mk3::Event> {
+    use deckard_mk3::Event;
+    let mut out: Vec<Event> = Vec::with_capacity(events.len());
+    for (i, e) in events.iter().enumerate() {
+        match *e {
+            Event::Knob(k, inc) => {
+                if let Some(prev_inc) = out.iter_mut().rev().take_while(|x| matches!(x, Event::Knob(..))).find_map(|x| match x {
+                    Event::Knob(pk, pi) if *pk == k => Some(pi),
+                    _ => None,
+                }) {
+                    *prev_inc += inc;
+                    continue;
+                }
+                out.push(Event::Knob(k, inc));
+            }
+            Event::Touch(f, 1, _) => {
+                let superseded = events[i + 1..].iter().find_map(|next| match *next {
+                    Event::Touch(nf, 1, _) if nf == f => Some(true),
+                    Event::Touch(nf, 0 | 2, _) if nf == f => Some(false),
+                    _ => None,
+                });
+                if superseded == Some(true) {
+                    continue;
+                }
+                out.push(*e);
+            }
+            _ => out.push(*e),
+        }
+    }
+    out
 }
 
 impl App {
@@ -1554,12 +1757,29 @@ impl App {
         if let Some(p) = d.path() {
             info += &format!("path = {}\n", p.display());
         }
-        let _ = std::fs::create_dir_all(&dir);
-        for (name, data) in [("session.mxprj", bytes), ("session.txt", info.into_bytes())] {
-            let tmp = dir.join(format!("{name}.saving"));
-            if std::fs::write(&tmp, data).is_ok() {
-                let _ = std::fs::rename(&tmp, dir.join(name));
+        drop(d);
+        // One at a time, in order: an older backup never lands over a newer one.
+        self.session_written();
+        let write = move || {
+            let _ = std::fs::create_dir_all(&dir);
+            for (name, data) in [("session.mxprj", bytes), ("session.txt", info.into_bytes())] {
+                let tmp = dir.join(format!("{name}.saving"));
+                if std::fs::write(&tmp, data).is_ok() {
+                    let _ = std::fs::rename(&tmp, dir.join(name));
+                }
             }
+        };
+        if clean {
+            write();
+        } else {
+            self.session_writing = Some(std::thread::spawn(write));
+        }
+    }
+
+    /// Wait for the backup being written in the background, if there is one.
+    fn session_written(&mut self) {
+        if let Some(w) = self.session_writing.take() {
+            let _ = w.join();
         }
     }
 
@@ -1574,7 +1794,18 @@ impl App {
         if self.session_dir.is_none() || now == self.session_kept {
             return;
         }
-        let at = *self.session_due.get_or_insert_with(|| std::time::Instant::now() + SESSION_DELAY);
+        let at = match self.session_due {
+            Some(at) if self.session_due_for == now || self.session_due_for == (0, 0) => {
+                self.session_due_for = now;
+                at
+            }
+            _ => {
+                let at = std::time::Instant::now() + SESSION_DELAY;
+                self.session_due = Some(at);
+                self.session_due_for = now;
+                at
+            }
+        };
         if std::time::Instant::now() >= at {
             self.keep_session();
         }
@@ -1833,7 +2064,9 @@ impl App {
                 Err(e) => self.status = format!("can't make the controller scripts folder: {e}"),
             },
             C::Manual => {
-                let url = "https://docs.native-instruments.com/ni-tech-manuals/maschine-software-manual/en/welcome-to-maschine-software";
+                // The ni-tech-manuals copy is a private bucket, so the browser shows an XML
+                // access error. This is the manual Native Instruments still publishes.
+                let url = "https://docs.native-instruments.com/online-guides/maschine-software-manual/en/index-en";
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
             C::Splice => splice::open(ctx, None),
@@ -1921,6 +2154,7 @@ impl App {
     /// Preferences > Audio: the buffer size, and how the audio is keeping up.
     fn audio_engine_preferences(&mut self, ui: &mut egui::Ui) {
         use deckard_engine::output::BUFFER_SIZES;
+        self.audio_driver_preferences(ui);
         let rate = match &self.output {
             Some(Ok(o)) => o.rate as f64,
             _ => 48_000.0,
@@ -2010,30 +2244,149 @@ impl App {
         }
     }
 
-    /// Close the audio output and open it again (with the current settings): playback
-    /// stops; MIDI and the live input are wired to the new one.
-    fn restart_output(&mut self) {
+    /// Preferences > Audio on Windows: the audio system to play through, and what it's
+    /// doing. A build without ASIO just says which it is.
+    fn audio_driver_preferences(&mut self, ui: &mut egui::Ui) {
+        use deckard_engine::devices::{ASIO_BUILT, AudioDriver};
+        if !cfg!(windows) {
+            return;
+        }
+        let wanted = self.settings.audio_driver;
+        let mut pick = wanted;
+        egui::Grid::new("audio-driver").num_columns(2).show(ui, |ui| {
+            ui.label("Driver");
+            if ASIO_BUILT {
+                egui::ComboBox::from_id_salt("audio-driver-pick").selected_text(pick.name()).show_ui(ui, |ui| {
+                    for d in [AudioDriver::System, AudioDriver::Asio] {
+                        ui.selectable_value(&mut pick, d, d.name());
+                    }
+                });
+            } else {
+                ui.label(AudioDriver::System.name());
+            }
+            ui.end_row();
+            if let Some(Ok(out)) = &self.output
+                && out.driver == AudioDriver::Asio
+            {
+                let latency = out.latency().as_secs_f64() * 1000.0;
+                ui.label("");
+                ui.label(format!("{}: {} Hz, {:?}, {latency:.1} ms from a block's start to the outputs, as the driver says", out.device, out.rate, out.format));
+                ui.end_row();
+                ui.label("");
+                ui.label(
+                    egui::RichText::new(
+                        "The driver has the last word on the buffer size and the rate. If it won't take the size below, set it in its own control panel: DECKARD follows.",
+                    )
+                    .weak(),
+                );
+                ui.end_row();
+            }
+        });
+        if pick != wanted {
+            self.settings.set_audio_driver(pick);
+            (self.inputs, self.outputs) = (None, None);
+            self.channel_names.clear();
+            self.close_output();
+            if pick == AudioDriver::Asio {
+                deckard_engine::devices::rescan();
+            }
+            self.open_output_now();
+        }
+        ui.separator();
+    }
+
+    /// Close the audio output and whatever else holds the driver: playback stops.
+    fn close_output(&mut self) {
         self.stop();
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
+        if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
+            self.recorder.release_input();
+        }
+    }
+
+    /// Open the audio output (with the current settings), saying so.
+    fn open_output_now(&mut self) {
         let _ = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback));
-        self.status =
-            format!("audio: {} samples, {}", self.settings.buffer_frames, if self.settings.multicore { "multi-core" } else { "one core" });
+        self.status = match &self.output {
+            Some(Ok(out)) if out.driver == deckard_engine::devices::AudioDriver::Asio => {
+                format!("audio: ASIO, {}, {}", out.device, if self.settings.multicore { "multi-core" } else { "one core" })
+            }
+            _ => format!(
+                "audio: {} samples, {}",
+                self.settings.buffer_frames,
+                if self.settings.multicore { "multi-core" } else { "one core" }
+            ),
+        };
+    }
+
+    /// Close the audio output and open it again (with the current settings): playback
+    /// stops; MIDI and the live input are wired to the new one.
+    fn restart_output(&mut self) {
+        self.close_output();
+        self.open_output_now();
+    }
+
+    /// What ASIO asks of the app, off its callbacks, each pass: to have its absence told,
+    /// and to be opened afresh with what the driver is set to now (its control panel is
+    /// the usual reason). A driver that keeps asking is only obeyed now and then, so it
+    /// gets to play in between.
+    fn watch_audio_driver(&mut self) {
+        use deckard_engine::devices::{self, AudioDriver};
+        let asio_wanted = self.settings.audio_driver == AudioDriver::Asio;
+        if asio_wanted && self.output_fallback != self.fallback_told {
+            self.fallback_told = self.output_fallback.clone();
+            if let Some(why) = &self.fallback_told {
+                self.status = format!("audio: ASIO isn't in use ({why}); playing through {}", AudioDriver::System.name());
+            }
+        }
+        if let Some(Ok(out)) = &self.output
+            && out.take_invalidated()
+        {
+            self.asio_reopen_due = true;
+        }
+        let now = std::time::Instant::now();
+        if !self.asio_reopen_due || self.asio_reopened.is_some_and(|t| now.duration_since(t) < ASIO_REOPEN_GAP) {
+            return;
+        }
+        self.asio_reopen_due = false;
+        self.asio_reopened = Some(now);
+        self.close_output();
+        devices::rescan();
+        self.open_output_now();
     }
 
     fn audio_preferences(&mut self, ui: &mut egui::Ui) {
+        use deckard_engine::devices::{self, ASIO_BUILT, AudioDriver};
         self.audio_engine_preferences(ui);
         ui.separator();
-        let inputs = self.inputs.get_or_insert_with(recorder::input_devices).clone();
-        let outputs = self.outputs.get_or_insert_with(deckard_engine::output::output_devices).clone();
-        let (default_in, default_out) = (recorder::default_input(), deckard_engine::output::default_output());
-        let default_label = |d: &Option<String>| format!("System default ({})", d.as_deref().unwrap_or("none"));
-        let (mut input, mut output) = (self.settings.input_device.clone(), self.settings.output_device.clone());
+        let wanted = self.settings.audio_driver.usable();
+        let asio = wanted == AudioDriver::Asio;
+        let inputs = self.inputs.get_or_insert_with(|| devices::input_devices_of(wanted)).clone();
+        let outputs = self.outputs.get_or_insert_with(|| devices::output_devices_of(wanted)).clone();
+        // (ASIO has no default, and listing what plays when it's away isn't what's asked.)
+        let (default_in, default_out) =
+            if asio { (None, None) } else { (recorder::default_input(), deckard_engine::output::default_output()) };
+        let default_label = |d: &Option<String>| {
+            if asio { "None picked".to_string() } else { format!("System default ({})", d.as_deref().unwrap_or("none")) }
+        };
+        let (mut input, mut output) = if asio {
+            (self.settings.asio_device.clone(), self.settings.asio_device.clone())
+        } else {
+            (self.settings.input_device.clone(), self.settings.output_device.clone())
+        };
         egui::Grid::new("audio-interface").num_columns(3).show(ui, |ui| {
-            for (label, pick, devices, default, kind) in
-                [("Output device", &mut output, &outputs, &default_out, "out"), ("Input device", &mut input, &inputs, &default_in, "in")]
-            {
+            // The same ASIO driver serves input and output.
+            let rows = if asio {
+                vec![("ASIO driver", &mut output, &outputs, &default_out, "out")]
+            } else {
+                vec![
+                    ("Output device", &mut output, &outputs, &default_out, "out"),
+                    ("Input device", &mut input, &inputs, &default_in, "in"),
+                ]
+            };
+            for (label, pick, devices, default, kind) in rows {
                 ui.label(label);
                 let shown = pick.clone().unwrap_or_else(|| default_label(default));
                 egui::ComboBox::from_id_salt(label).selected_text(shown).width(320.0).show_ui(ui, |ui| {
@@ -2048,7 +2401,12 @@ impl App {
                 } else if kind == "out"
                     && let Some(why) = &self.output_fallback
                 {
-                    ui.label(egui::RichText::new(format!("can't be opened: {why}. Playing through the system default.")).color(trouble));
+                    let text = if self.settings.audio_driver == AudioDriver::Asio {
+                        format!("ASIO isn't in use: {why}. Playing through {}.", AudioDriver::System.name())
+                    } else {
+                        format!("can't be opened: {why}. Playing through the system default.")
+                    };
+                    ui.label(egui::RichText::new(text).color(trouble));
                 } else {
                     ui.label("");
                 }
@@ -2058,22 +2416,58 @@ impl App {
             if ui.button("Rescan").clicked() {
                 (self.inputs, self.outputs) = (None, None);
                 self.channel_names.clear();
+                if asio {
+                    devices::rescan();
+                    // Asked for, and not what plays (the driver may be free now): try again.
+                    if matches!(&self.output, Some(Ok(o)) if o.driver != AudioDriver::Asio) {
+                        self.restart_output();
+                    }
+                }
             }
             ui.end_row();
         });
         // Another device: its own routing comes back.
-        if input != self.settings.input_device {
-            self.settings.set_input_device(input);
+        if asio {
+            if output != self.settings.asio_device {
+                self.settings.set_asio_device(output);
+                self.restart_output();
+            }
+        } else {
+            if input != self.settings.input_device {
+                self.settings.set_input_device(input);
+            }
+            if output != self.settings.output_device {
+                self.settings.set_output_device(output);
+                self.restart_output();
+            }
         }
-        if output != self.settings.output_device {
-            self.settings.set_output_device(output);
-            self.restart_output();
+        if ASIO_BUILT && self.settings.audio_driver == AudioDriver::Asio && self.settings.asio_device.is_none() {
+            ui.label(egui::RichText::new("Pick the ASIO driver of your interface.").weak());
         }
         let channels_of =
             |devices: &[(String, usize)], d: &Option<String>| devices.iter().find(|(n, _)| Some(n) == d.as_ref()).map_or(0, |(_, c)| *c);
-        let (in_device, out_device) =
-            (self.settings.input_device.clone().or(default_in), self.settings.output_device.clone().or(default_out));
+        let (in_device, out_device) = if asio {
+            (self.settings.asio_device.clone(), self.settings.asio_device.clone())
+        } else {
+            (self.settings.input_device.clone().or(default_in), self.settings.output_device.clone().or(default_out))
+        };
         let (in_channels, out_channels) = (channels_of(&inputs, &in_device), channels_of(&outputs, &out_device));
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("Input level").on_hover_text(
+                "In 1's and In 2's levels on the way in: what sounds taking them and the recorder hear (a Maschine JAM's IN1 and IN2)",
+            );
+            for input in 0..input_levels::PAIRS {
+                ui.label(format!("In {}", input + 1));
+                let mut db = deckard_model::level_db(self.settings.input_levels[input]).clamp(-60.0, 10.0);
+                let drag = egui::DragValue::new(&mut db).range(-60.0..=10.0).speed(0.1).fixed_decimals(1).suffix(" dB");
+                if ui.add(drag).changed() {
+                    self.settings.input_levels[input] = deckard_model::level_from_db(db);
+                    self.input_bus.set_levels(&self.settings.input_levels);
+                    self.settings.save();
+                }
+            }
+        });
         ui.separator();
         ui.horizontal(|ui| {
             ui.strong("Routing");
@@ -2131,8 +2525,26 @@ impl App {
     /// switched off), and what sounds set to the Default MIDI source take.
     fn midi_preferences(&mut self, ui: &mut egui::Ui) {
         self.sync_preferences(ui);
+        ui.checkbox(&mut self.settings.jam_enabled, "Maschine JAM").on_hover_text(
+            "DECKARD drives a JAM plugged in over USB. Switch it off when Maschine should have the JAM to itself: with both running, each acts on every press and they overwrite each other's lights.",
+        );
+        if ni_services::SUPPORTED {
+            let seen = self.ni_services.seen;
+            ui.horizontal(|ui| {
+                ui.label(if seen.services { "NI's services: running" } else { "NI's services: stopped" }).on_hover_text(
+                    "They light a JAM too, so its pads turn orange and its lights flash while DECKARD drives it. Maschine needs them running.",
+                );
+                if seen.services {
+                    if ui.add_enabled(!seen.maschine, egui::Button::new("Stop")).on_hover_text("Asks for administrator approval. Not while Maschine runs.").clicked() {
+                        ni_services::start_or_stop(false);
+                    }
+                } else if ui.button("Start").on_hover_text("For Maschine. Asks for administrator approval.").clicked() {
+                    ni_services::start_or_stop(true);
+                }
+            });
+        }
         ui.checkbox(&mut self.settings.focus_follows, "Focus the group MIDI is recorded into").on_hover_text(
-            "While recording, MIDI going into another group makes it the focused group. Off: the focus stays where you put it, and the MIDI still records into its group.",
+            "While recording, MIDI going into another group makes it the focused group, and so does picking a pattern on a JAM's Project View. Off: the focus stays where you put it, and the MIDI still records into its group and the pattern still plays.",
         );
         ui.separator();
         let (ins, outs) = self.midi_ports().clone();
@@ -2384,35 +2796,43 @@ impl App {
                     ui.label("");
                     ui.label(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder.").weak());
                     ui.end_row();
-                    ui.label("Screen brightness");
-                    let mut brightness = self.settings.display_brightness;
-                    if ui.add(egui::Slider::new(&mut brightness, 0..=100).suffix(" %")).changed() {
-                        self.settings.display_brightness = brightness;
-                        if let Some(m) = &self.mk3 {
-                            m.set_display_brightness(brightness);
-                        }
-                    }
-                    ui.end_row();
-                    ui.label("");
-                    ui.label(egui::RichText::new("The backlight of the controller's screens.").weak());
-                    ui.end_row();
                     if cfg!(windows)
                         && let Some(mk3) = &self.mk3
                     {
                         ui.label("Controller screens");
-                        if mk3.displays_released() {
-                            if ui.button("Use in DECKARD").clicked() {
-                                mk3.release_displays(false);
+                        // Both drivers stay in the list. Hiding the one that is not open
+                        // left no way back, and a restart did not put it back either.
+                        let switching = matches!(self.ni_agent, ni_agent::Ask::Quitting(_));
+                        let in_use = ni_agent::screen_driver_in_use(mk3.displays_released(), mk3.displays_connected(), switching);
+                        let selected = in_use.map(ni_agent::ScreenDriver::label).unwrap_or("Not open");
+                        let mut picked = None;
+                        egui::ComboBox::from_id_salt("screen-driver").selected_text(selected).show_ui(ui, |ui| {
+                            for driver in [ni_agent::ScreenDriver::Windows, ni_agent::ScreenDriver::Maschine] {
+                                let hover = match driver {
+                                    ni_agent::ScreenDriver::Windows => "DECKARD draws the screens, using Windows' WinUSB driver. Asks for administrator approval.",
+                                    ni_agent::ScreenDriver::Maschine => "Clears the screens and gives them to Maschine. Asks for administrator approval.",
+                                };
+                                if ui.selectable_label(in_use == Some(driver), driver.label()).on_hover_text(hover).clicked() {
+                                    picked = Some(driver);
+                                }
                             }
-                        } else if mk3.displays_connected() {
-                            if ui.button("Give Back to NI's Driver").on_hover_text("For Maschine and NI's other software, which can't use the screens while DECKARD's driver has them. Asks for administrator approval.").clicked() {
-                                mk3.release_displays(true);
-                                ni_agent::give_back();
-                                self.status = "giving the controller's screens back to NI's driver".into();
+                        });
+                        if let Some(driver) = picked {
+                            match driver {
+                                ni_agent::ScreenDriver::Windows if in_use != Some(driver) => {
+                                    mk3.release_displays(false);
+                                    ni_agent::use_windows(&mut self.ni_agent, &mut self.status);
+                                }
+                                ni_agent::ScreenDriver::Maschine if in_use != Some(driver) => {
+                                    mk3.release_displays(true);
+                                    ni_agent::use_maschine(&mut self.ni_agent, &mut self.status);
+                                }
+                                _ => {}
                             }
-                        } else {
-                            ui.label(egui::RichText::new("Not open").weak());
                         }
+                        ui.end_row();
+                        ui.label("");
+                        ui.label(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak());
                         ui.end_row();
                     }
                     ui.label("Controller");
@@ -2445,6 +2865,11 @@ impl App {
                         self.surface.set_theme(&theme);
                         self.settings.controller_theme = self.surface.theme().to_string();
                     }
+                    ui.end_row();
+                    ui.label("Maschine JAM");
+                    ui.checkbox(&mut self.settings.relative_strips, "Relative level touchstrips").on_hover_text(
+                        "On the mixer strips (LEVEL, AUX, SWING, TUNE, MACRO), a touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. CONTROL mode keeps absolute-fader behaviour. Off: a touch sets the value.",
+                    );
                     ui.end_row();
                     ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };
@@ -2715,6 +3140,25 @@ impl App {
             self.ni_agent = ni_agent::Ask::Declined;
         }
         ni_agent::dialog(ctx, &mut self.ni_agent, holding, &mut self.status, ni_agent::quit);
+        // A JAM connected with NI's services running: they fight over its lights.
+        if let Some(failure) = ni_services::take_failure() {
+            self.status = failure;
+            self.ni_services_ask = ni_agent::Ask::Declined;
+        }
+        let connected = self.jam_device.is_some();
+        if connected || self.prefs.is_some() {
+            let seen = self.ni_services.look(std::time::Instant::now());
+            let offer = seen.offer(connected);
+            ni_agent::ask_about(
+                "ni-services",
+                &ni_services::WORDS,
+                ctx,
+                &mut self.ni_services_ask,
+                offer,
+                &mut self.status,
+                ni_services::stop,
+            );
+        }
         self.preferences(ctx);
         if self.about.is_some() && !about::show(self, ctx) {
             self.about = None;
@@ -3057,7 +3501,8 @@ impl App {
                     .map(|_| Some((Some(made), None)))
                 }
                 Act::AssignPattern(s, g, p) => d.assign_pattern(s, g, p).map(|_| None),
-                Act::NewPattern(s, g) => {
+                Act::NewPattern(s, g) | Act::NewPatternAt(s, g, _) => {
+                    let slot = if let Act::NewPatternAt(.., slot) = act { Some(slot) } else { None };
                     let n = d.project().groups.get(g).map_or(0, |x| x.patterns.len());
                     // Like the focused pattern (its colour), or the group's first; the
                     // Settings page's LENGTH long.
@@ -3065,7 +3510,10 @@ impl App {
                     let mut made = 0;
                     let length = self.default_pattern_length(d.project());
                     let r = d.transaction("New Pattern", |d| {
-                        made = d.add_pattern(g, from, &format!("Pattern {}", n + 1))?;
+                        made = match slot {
+                            Some(slot) => d.add_pattern_in_slot(g, from, slot, &format!("Pattern {}", slot + 1))?,
+                            None => d.add_pattern(g, from, &format!("Pattern {}", n + 1))?,
+                        };
                         d.set_pattern_length(g, made, length)?;
                         if s < d.project().scenes.len() {
                             d.assign_pattern(s, g, Some(made))?;
@@ -3261,6 +3709,49 @@ impl App {
             out.stop();
         }
         self.playing = None;
+    }
+
+    /// Move the playhead to tick `tick` of the focused pattern's loop when stopped.
+    fn seek_pattern(&mut self, tick: i64) {
+        if self.playing.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let d = doc.borrow();
+        let p = d.project();
+        let Some(grp) = p.groups.get(self.group) else { return };
+        let plen = if self.pattern < grp.patterns.len() { layout::pattern_len(p, self.group, self.pattern) } else { p.bar_length() }.max(1);
+        let t = tick.clamp(0, plen - 1);
+        let mode = if self.song_view { Mode::Arrangement } else { Mode::Scene(self.scene) };
+        let cur = self.shown_playhead().filter(|h| h.mode == mode).map_or(0, |h| h.position.max(0.0) as i64);
+        let to = match mode {
+            Mode::Arrangement => {
+                let mut sec_start = 0i64;
+                for sec in &p.sections {
+                    if cur < sec_start + sec.length {
+                        break;
+                    }
+                    sec_start += sec.length;
+                }
+                let in_sec = (cur - sec_start).max(0);
+                sec_start + (in_sec / plen) * plen + t
+            }
+            _ => (cur / plen) * plen + t,
+        };
+        drop(d);
+        self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.sync_transport();
+    }
+
+    /// Move the playhead to tick `tick` of the arrangement when stopped.
+    fn seek_arrangement(&mut self, tick: i64) {
+        if self.playing.is_some() {
+            return;
+        }
+        let to = tick.max(0);
+        let mode = Mode::Arrangement;
+        self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.sync_transport();
     }
 
     /// A knob moved while writing modulation (docs/superpowers/plans/
@@ -3852,10 +4343,69 @@ impl App {
         if matches!(self.controller, Some(Ok(_))) {
             return None;
         }
-        Some(if self.surface.holding() || self.surface.animates() {
+        Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             std::time::Duration::from_millis(30)
         } else {
-            controller::tick_every(self.playing.is_some())
+            controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering())
+        })
+    }
+
+    /// The focused Filter's Amount is driving its LFO, so the right screen has to keep
+    /// redrawing.
+    fn filter_modulates(&self) -> bool {
+        if self.channel {
+            return false;
+        }
+        let Some(doc) = &self.doc else { return false };
+        let Ok(d) = doc.try_borrow() else { return false };
+        d.chain_slots(self.chain())
+            .and_then(|slots| self.slot.and_then(|i| slots.get(i)))
+            .is_some_and(|s| s.module == "Filter" && deckard_engine::fx::filter::modulates(&s.params))
+    }
+
+    /// The focused effect's picture is moving (a chorus, a tremolo, a modulated tail).
+    fn picture_moves(&self) -> bool {
+        if self.channel {
+            return false;
+        }
+        let Some(doc) = &self.doc else { return false };
+        let Ok(d) = doc.try_borrow() else { return false };
+        d.chain_slots(self.chain())
+            .and_then(|slots| self.slot.and_then(|i| slots.get(i)))
+            .is_some_and(|s| deckard_engine::fx::picture::moves(&s.module, &s.params))
+    }
+
+    /// Where a moving picture is in its cycle. The rate is added on, so turning Speed
+    /// does not jump the drawing.
+    fn picture_phase(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
+        use std::sync::Mutex;
+        static CLOCK: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+        if !deckard_engine::fx::picture::moves(module, params) {
+            return 0.0;
+        }
+        let now = Self::filter_seconds();
+        let hz = deckard_engine::fx::picture::rate_hz(module, params, tempo);
+        let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, phase) = *clock;
+        let phase = deckard_engine::fx::filter::advance_phase(phase, if at == 0.0 { 0.0 } else { now - at }, hz);
+        *clock = (now, phase);
+        phase as f32
+    }
+
+    /// The focused built-in effect, other than the EQ and the Filter, as the right
+    /// screen draws it. The same on every page.
+    fn effect_picture(slot: &deckard_model::SlotInfo, phase: f32, side_live: bool, page: usize) -> Option<deckard_surface::EqCurveView> {
+        let shot = deckard_engine::fx::picture::shot(&slot.module, &slot.params, phase, side_live, page)?;
+        Some(deckard_surface::EqCurveView {
+            kind: shot.kind.to_string(),
+            points: shot.points,
+            bands: shot.bands,
+            extent: shot.extent,
+            lfo: shot.lfo,
+            side: shot.side,
+            side_live: shot.side_live,
+            dim: shot.dim,
+            preview: shot.preview,
         })
     }
 
@@ -3874,8 +4424,8 @@ impl App {
         if let Some(m) = &self.mk3 {
             m.set_route(out.route);
             m.set_leds(out.leds.scaled(self.settings.led_brightness));
-            if let Some((n, px)) = out.screens {
-                m.set_screens(n, &px);
+            if let Some((n, frame)) = out.screens {
+                m.set_screens(n, frame);
             }
         }
         // Pad hits that came while no engine ran (it starts with the first): each at its
@@ -3893,6 +4443,7 @@ impl App {
     /// Hardware-free, so tests drive it with made-up events.
     pub(crate) fn mk3_events(&mut self, events: Vec<deckard_mk3::Event>, requests: &mut Vec<controller::Request>) -> Mk3Out {
         use deckard_mk3::Event;
+        let events = coalesce_mk3_events(events);
         // The plug-in knobs of the slot focused since the frame began (a sound picked
         // by the scripts, say), for what the scripts see.
         self.update_slot_view();
@@ -3945,7 +4496,7 @@ impl App {
             let mut screens = None;
             if c.screens().is_some() && c.screens_drawn != self.mk3_screens_sent {
                 self.mk3_screens_sent = c.screens_drawn;
-                screens = c.screens().map(|s| (self.mk3_screens_sent, s.px.clone()));
+                screens = c.screens().map(|s| (self.mk3_screens_sent, mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(s.px.clone()))));
             }
             let scaling = self.settings.velocity_scaling;
             let route =
@@ -3971,19 +4522,21 @@ impl App {
                 self.browse(browser::BrowseAct::Toggle);
             }
             self.refresh_surface_settings();
-            let view = self.surface_view();
+            let mut view = self.surface_view();
             let mut actions = Vec::new();
             for e in &events {
                 actions.extend(self.surface.event(e, &view, now));
             }
             actions.extend(self.surface.tick(&view, now));
-            for a in actions {
-                self.surface_act(a);
+            if !actions.is_empty() {
+                for a in actions {
+                    self.surface_act(a);
+                }
+                // (A slot or sound the buttons just focused shows its plug-in's knobs.)
+                self.update_slot_view();
+                self.refresh_surface_settings();
+                view = self.surface_view();
             }
-            // (A slot or sound the buttons just focused shows its plug-in's knobs.)
-            self.update_slot_view();
-            self.refresh_surface_settings();
-            let view = self.surface_view();
             let fixed =
                 self.doc.as_ref().and_then(|d| d.borrow().num(deckard_doc::Target::Song, "fixed_velocity")).map_or(100, |v| v as i64);
             let pads = self.surface.pads(&view);
@@ -3998,8 +4551,70 @@ impl App {
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
             };
-            Mk3Out { route, leds: self.surface.leds(&view), screens: self.surface.screens(&view) }
+            Mk3Out {
+                route,
+                leds: self.surface.leds(&view),
+                screens: self.surface.screen_picture(&view).map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))),
+            }
         }
+    }
+
+    /// The focused built-in EQ, as the right screen draws it.
+    fn eq_curve(slot: &deckard_model::SlotInfo) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "EQ" {
+            return None;
+        }
+        let curve = deckard_engine::fx::eq::response(&slot.params, 48_000.0, 120);
+        Some(deckard_surface::EqCurveView { points: curve.points, bands: curve.bands.into_iter().collect(), ..Default::default() })
+    }
+
+    /// Seconds since the first filter picture, so its LFO keeps moving.
+    fn filter_seconds() -> f64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    }
+
+    /// Where the LFO is in its cycle. The rate is added on, so turning Speed does not
+    /// jump the picture to another point.
+    fn filter_depth(params: &[(String, f64)], tempo: f64) -> f32 {
+        use std::sync::Mutex;
+        static CLOCK: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+        let now = Self::filter_seconds();
+        let hz = deckard_engine::fx::filter::lfo_rate(params, tempo);
+        let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, phase) = *clock;
+        let phase = deckard_engine::fx::filter::advance_phase(phase, if at == 0.0 { 0.0 } else { now - at }, hz);
+        *clock = (now, phase);
+        if !deckard_engine::fx::filter::modulates(params) {
+            return 0.0;
+        }
+        deckard_engine::fx::filter::lfo_sample(params, phase)
+    }
+
+    /// Whether a side-chain input is routed into this effect.
+    fn sidechain_routed(p: &deckard_model::Project, chain: deckard_doc::Chain, slot: usize) -> bool {
+        let deckard_doc::Chain::Sound(g, s) = chain else { return false };
+        p.groups.get(g).and_then(|g| g.sounds.get(s)).is_some_and(|snd| snd.channel.sidechain.iter().any(|(k, _)| *k == slot))
+    }
+
+    /// The focused built-in Filter, as the right screen draws it.
+    fn filter_curve(slot: &deckard_model::SlotInfo, tempo: f64, side_live: bool) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "Filter" {
+            return None;
+        }
+        let depth = Self::filter_depth(&slot.params, tempo);
+        let curve = deckard_engine::fx::filter::response(&slot.params, 120, depth);
+        let amount = slot.params.iter().find(|(k, _)| k == "amount").map_or(0.0, |(_, v)| *v);
+        let extent = if amount.abs() > 1e-4 { deckard_engine::fx::filter::response(&slot.params, 120, 1.0).points } else { Vec::new() };
+        Some(deckard_surface::EqCurveView {
+            points: curve.points,
+            bands: vec![curve.cutoff],
+            extent,
+            lfo: deckard_engine::fx::filter::lfo_picture(&slot.params, 48),
+            side: deckard_engine::fx::sidechain::response(&slot.params, 120),
+            side_live,
+            ..Default::default()
+        })
     }
 
     /// What DECKARD's own MK3 layer shows of the app now.
@@ -4010,7 +4625,21 @@ impl App {
         let edits = self.knob_edits();
         // (Not on the Macro page: its knobs are all macros.)
         let on_macros = self.channel && self.prop_set == 3;
-        let macro_targets = self.doc.as_ref().filter(|_| !on_macros).map(|d| d.borrow().macro_targets()).unwrap_or_default();
+        if let Some(doc) = &self.doc {
+            let d = doc.borrow();
+            let rev = d.revision();
+            let mut cache = self.surface_doc_cache.borrow_mut();
+            if (cache.0, cache.1) != (self.doc_generation, rev) {
+                let noted = d
+                    .project()
+                    .groups
+                    .iter()
+                    .map(|grp| grp.patterns.iter().flat_map(|pt| pt.notes.iter().map(|n| n.sound)).collect())
+                    .collect();
+                *cache = (self.doc_generation, rev, d.macro_targets(), noted);
+            }
+        }
+        let doc_cache = self.surface_doc_cache.borrow();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -4045,12 +4674,15 @@ impl App {
                         modulatable: edits.get(i).copied().flatten().and_then(modulation::mod_target).is_some(),
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
                         auto_mod: self.auto_mod_text(edits.get(i).copied().flatten()),
-                        in_macro: k.param.is_some_and(|p| macro_targets.contains(&p)),
+                        in_macro: !on_macros && k.param.is_some_and(|p| doc_cache.2.contains(&p)),
                     })
                 })
                 .collect(),
             // (Only while the plug-in browser shows: the list is long.)
             modules: if self.surface.page() == "module" { self.module_views() } else { Vec::new() },
+            eq: None,
+            filter: None,
+            picture: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -4068,6 +4700,8 @@ impl App {
             auto_write: self.auto_write,
             strip_position: i64::from(self.settings.strip_position),
             touch_auto_write: self.settings.touch_auto_write,
+            keep_focus: !self.settings.focus_follows,
+            relative_strips: self.settings.relative_strips,
             follow: self.follow,
             position: head.map(|h| h.position as i64),
             progress: self.pattern_at(self.group, head).map(|(at, length)| at as f64 / length as f64),
@@ -4077,8 +4711,8 @@ impl App {
             sampling: self.sampling_surface_view(),
             ..Default::default()
         };
-        // (Only while BROWSE shows: the results can be long.)
-        if self.surface.page() == "browse" {
+        // (Only while BROWSE shows, or the JAM has the panel open: the results can be long.)
+        if self.surface.page() == "browse" || (self.jam_device.is_some() && self.browser.open) {
             let b = self.browser.view();
             v.browser = deckard_surface::BrowserView {
                 kind: b.kind,
@@ -4090,16 +4724,34 @@ impl App {
                 focus: b.focus,
                 busy: b.busy,
                 favorites: b.favorites,
+                routing: b.routing,
+                patterns: b.patterns,
             };
         }
         let Some(doc) = &self.doc else { return v };
         let d = doc.borrow();
         let p = d.project();
-        v.project = p.name.clone();
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
+        // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
+        if !self.channel {
+            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+            v.control.eq = slot.and_then(Self::eq_curve);
+            let tempo = v.tempo;
+            let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
+            v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
+            let page = c.page;
+            v.control.picture = slot.and_then(|s| Self::effect_picture(s, Self::picture_phase(&s.module, &s.params, tempo), live, page));
+        }
+        v.project = p.name.clone();
         v.swing = p.swing.amount;
         v.master_volume = p.master_level;
         v.master_db = deckard_model::level_db(p.master_level);
+        v.master_meter = self.master_meter;
+        v.cue_meter = self.cue_meter;
+        v.input_meters = self.input_meters;
+        v.input_levels = self.settings.input_levels;
+        v.cue_level = p.cue_level;
+        v.scale_root = self.scale.0;
         v.numerator = p.numerator;
         v.denominator = p.denominator;
         v.fixed_velocity = d.num(deckard_doc::Target::Song, "pad_velocity_mode").is_some_and(|m| m as i64 == 1);
@@ -4139,6 +4791,7 @@ impl App {
                 meter,
                 headroom: self.headroom.get(&channel).copied().unwrap_or(0.0),
                 plugins: slots.iter().map(|x| (x.is_instrument(), x.active)).collect(),
+                ..Default::default()
             }
         };
         let meter = |g: usize, s: usize| self.meters.get(g).and_then(|r| r.get(s)).copied().unwrap_or_default();
@@ -4208,7 +4861,7 @@ impl App {
                 let grp = &p.groups[g];
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
-                let noted: std::collections::HashSet<usize> = grp.patterns.iter().flat_map(|pt| pt.notes.iter().map(|n| n.sound)).collect();
+                let noted = doc_cache.3.get(g);
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -4216,10 +4869,20 @@ impl App {
                     muted: grp.muted,
                     default_color: grp.color == deckard_model::Color::Default,
                     playing: self.lit.iter().any(|&(lg, _)| lg == g),
-                    mix: mix(grp.level, grp.pan, loudest, layout::Channel::Group(g), &grp.slots),
+                    mix: deckard_surface::MixView {
+                        aux: grp.aux,
+                        swing: grp.swing.amount,
+                        tune: grp.sounds.iter().find_map(|s| s.sampler.as_ref().map(|x| x.tune)),
+                        ..mix(grp.level, grp.pan, loudest, layout::Channel::Group(g), &grp.slots)
+                    },
                     perform: self.perform_slot(g).map(|i| {
                         let t = || deckard_doc::Target::ChainModule(deckard_doc::Chain::Group(g), i);
                         (d.num(t(), "touchstrip_on_off").unwrap_or(0.0) > 0.5, d.num(t(), "touchstrip_pos").unwrap_or(0.5))
+                    }),
+                    perform_mode: self.perform_slot(g).map(|i| {
+                        let t = deckard_doc::Target::ChainModule(deckard_doc::Chain::Group(g), i);
+                        let mode = (d.num(t, "mode").unwrap_or(0.0).round().max(0.0) as usize).min(7);
+                        (mode, module_ui::PERFORM_MODES[mode].to_string())
                     }),
                     patterns: grp
                         .patterns
@@ -4233,6 +4896,7 @@ impl App {
                             default_color: pt.color == deckard_model::Color::Default,
                             rgb: layout::pattern_rgb(p, g, pt.color),
                             bars: pt.length as f64 / bar,
+                            slot: pt.slot,
                         })
                         .collect(),
                     scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
@@ -4257,9 +4921,14 @@ impl App {
                                     || snd.sampler.as_ref().is_some_and(|sm| sm.zones.iter().any(|z| !z.sample.path.is_empty()))
                                     || !snd.name.is_empty()
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
-                                    || noted.contains(&s),
+                                    || noted.is_some_and(|n| n.contains(&s)),
                                 playing: self.lit.contains(&(g, s)),
-                                mix: mix(snd.level, snd.pan, meter(g, s), layout::Channel::Sound(g, s), &snd.slots),
+                                mix: deckard_surface::MixView {
+                                    aux: snd.aux,
+                                    swing: snd.swing.amount,
+                                    tune: snd.sampler.as_ref().map(|x| x.tune),
+                                    ..mix(snd.level, snd.pan, meter(g, s), layout::Channel::Sound(g, s), &snd.slots)
+                                },
                                 choke_group: snd.channel.choke_group,
                                 choke_mode: snd.channel.choke_mode,
                                 link_group: snd.channel.link_group,
@@ -4294,7 +4963,8 @@ impl App {
         use deckard_lua_host::state::ControlRequest as R;
         use deckard_surface::Action as A;
         use layout::Act;
-        let (g, project) = (self.group, self.doc.as_ref().map(|d| d.borrow().project().clone()));
+        let g = self.group;
+        let project = |app: &App| app.doc.as_ref().map(|d| d.borrow().project().clone());
         match a {
             A::Play => self.transport_play(),
             A::Stop => self.stop(),
@@ -4310,7 +4980,7 @@ impl App {
             }
             A::Tempo(bpm) => layout::apply_acts(self, vec![Act::SetTempo(bpm)]),
             A::Swing(amount) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 layout::apply_acts(self, vec![Act::SetSwing(Target::Song, deckard_model::Swing { amount, ..p.swing })]);
             }
             A::Volume(level) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, level)]),
@@ -4318,13 +4988,13 @@ impl App {
             A::FocusGroup(group) => self.focus_group(group),
             A::FocusSound(s) => self.sound = s,
             A::FocusScene(scene) => {
-                if project.is_some_and(|p| scene < p.scenes.len()) {
+                if project(self).is_some_and(|p| scene < p.scenes.len()) {
                     self.launch_scene(scene);
                 }
             }
             A::ShowScenes(first) => self.show_scenes = Some(first),
             A::NewPatternIn(group) => {
-                if project.is_some_and(|p| group < p.groups.len()) {
+                if project(self).is_some_and(|p| group < p.groups.len()) {
                     let was = (self.group, self.pattern);
                     layout::apply_acts(self, vec![Act::NewPattern(self.scene, group)]);
                     if group != was.0 {
@@ -4332,9 +5002,18 @@ impl App {
                     }
                 }
             }
+            A::NewPatternAt { group, slot } => {
+                if project(self).is_some_and(|p| group < p.groups.len()) {
+                    let was = (self.group, self.pattern);
+                    layout::apply_acts(self, vec![Act::NewPatternAt(self.scene, group, slot)]);
+                    if group != was.0 {
+                        (self.group, self.pattern) = was;
+                    }
+                }
+            }
             // (A MIDI controller's scene button: stopped, it starts the scene too.)
             A::LaunchScene(scene) => {
-                if project.is_some_and(|p| scene < p.scenes.len()) {
+                if project(self).is_some_and(|p| scene < p.scenes.len()) {
                     self.launch_scene(scene);
                     if self.playing.is_none() && !self.receiving_clock() {
                         self.parked = None;
@@ -4344,7 +5023,7 @@ impl App {
                 }
             }
             A::PickPattern(pi) => {
-                if project.is_some_and(|p| p.groups.get(g).is_some_and(|grp| pi < grp.patterns.len())) {
+                if project(self).is_some_and(|p| p.groups.get(g).is_some_and(|grp| pi < grp.patterns.len())) {
                     layout::apply_acts(self, vec![Act::AssignPattern(self.scene, g, Some(pi)), Act::FocusPattern(g, pi)]);
                 }
             }
@@ -4353,7 +5032,7 @@ impl App {
                 self.surface_sampling(a)
             }
             A::ScenePattern { group, pattern } => {
-                if project.is_some_and(|p| {
+                if project(self).is_some_and(|p| {
                     self.scene < p.scenes.len() && p.groups.get(group).is_some_and(|grp| pattern.is_none_or(|pi| pi < grp.patterns.len()))
                 }) {
                     layout::apply_acts(self, vec![Act::AssignPattern(self.scene, group, pattern)]);
@@ -4380,7 +5059,7 @@ impl App {
                 layout::apply_acts(self, vec![a]);
             }
             A::SceneEdit(what) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let a = match what {
                     "create" => Act::AddScene,
                     "duplicate" => Act::DuplicateScene(self.scene),
@@ -4399,12 +5078,12 @@ impl App {
             }
             A::SongView(on) => self.song_view = on,
             A::FocusSection(i) => {
-                if project.is_some_and(|p| i < p.sections.len()) {
+                if project(self).is_some_and(|p| i < p.sections.len()) {
                     self.launch_section(i);
                 }
             }
             A::SectionEdit(what) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let focus = self.focused_section(&p);
                 let acts = match (what, focus) {
                     // A new section after the focused one, playing its scene.
@@ -4425,7 +5104,7 @@ impl App {
                 layout::apply_acts(self, acts);
             }
             A::SectionMove(next) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let Some(i) = self.focused_section(&p) else { return };
                 let to = if next { i + 1 } else { i.wrapping_sub(1) };
                 if to < p.sections.len() {
@@ -4433,7 +5112,7 @@ impl App {
                 }
             }
             A::SectionScene(next) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let Some(i) = self.focused_section(&p) else { return };
                 let Some(at) = p.sections[i].scene else { return };
                 let to = if next { at + 1 } else { at.wrapping_sub(1) };
@@ -4442,7 +5121,7 @@ impl App {
                 }
             }
             A::SectionLength(ticks) => {
-                let Some(i) = project.as_ref().and_then(|p| self.focused_section(p)) else { return };
+                let Some(i) = project(self).as_ref().and_then(|p| self.focused_section(p)) else { return };
                 layout::apply_acts(self, vec![Act::SectionLength(i, Some(ticks))]);
             }
             A::Browse(b) => {
@@ -4457,6 +5136,8 @@ impl App {
                     B::Load => C::Load,
                     B::Favorites => C::ToggleFavorites,
                     B::Prehear => C::Prehear,
+                    B::Routing(on) => C::Routing(on),
+                    B::Patterns(on) => C::Patterns(on),
                     B::SetFavorite => {
                         let i = self.browser.selected.unwrap_or(0);
                         let Some(on) = self.browser.results.items.get(i).map(|r| !r.favorite) else { return };
@@ -4497,7 +5178,7 @@ impl App {
             A::MuteSound(s) => layout::apply_acts(self, vec![Act::ToggleMute(Target::Sound(g, s))]),
             A::SoloSound(s) => self.solo(layout::Channel::Sound(g, s)),
             A::EraseSound(s) => {
-                let Some(pat) = project.as_ref().and_then(|p| p.groups.get(g)?.patterns.get(self.pattern)) else { return };
+                let Some(pat) = project(self).as_ref().and_then(|p| p.groups.get(g)?.patterns.get(self.pattern).cloned()) else { return };
                 let remove: Vec<_> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
                 if !remove.is_empty() {
                     layout::apply_acts(self, vec![Act::EditNotes { g, p: self.pattern, label: "Erase", remove, add: Vec::new() }]);
@@ -4562,13 +5243,105 @@ impl App {
                 }
             }
             A::Repeat("locked", v) => self.arp_locked = v > 0.5,
+            A::Repeat("on", v) => self.repeat_soft = v > 0.5,
             A::Repeat(what, v) => self.arp_edit(&format!("arp/{what}"), v),
+            A::ChokeAll => {
+                if let Some(Ok(out)) = &self.output
+                    && out.has_engine()
+                {
+                    out.live(deckard_engine::Live::ChokeAll);
+                }
+            }
+            A::DeletePattern { group, pattern } => {
+                if project(self).is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
+                    layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
+                }
+            }
+            A::CopyPattern { group, from, to } => {
+                if let Some(doc) = &self.doc
+                    && let Err(e) = doc.borrow_mut().copy_pattern(group, from, to)
+                {
+                    self.status = format!("can't duplicate the pattern: {e}");
+                }
+            }
+            A::DeleteScene(scene) => {
+                if project(self).is_some_and(|p| p.scenes.len() > 1 && scene < p.scenes.len()) {
+                    layout::apply_acts(self, vec![Act::DeleteScene(scene)]);
+                }
+            }
+            A::CopyScene { from, to } => {
+                if let Some(doc) = &self.doc
+                    && let Err(e) = doc.borrow_mut().copy_scene(from, to)
+                {
+                    self.status = format!("can't duplicate the scene: {e}");
+                }
+            }
+            A::CopyGroup { from, to } => {
+                let Some(p) = project(self) else { return };
+                if from == to || from >= p.groups.len() || to > p.groups.len() {
+                    return;
+                }
+                let mut acts = vec![Act::CopyGroup(from)];
+                if to == p.groups.len() {
+                    acts.push(Act::AddGroup);
+                }
+                acts.push(Act::PasteGroup(to));
+                layout::apply_acts(self, acts);
+            }
+            A::CopySound { from, to } => {
+                let Some(p) = project(self) else { return };
+                let sounds = p.groups.get(g).map_or(0, |grp| grp.sounds.len());
+                if from != to && from < sounds && to < sounds {
+                    layout::apply_acts(self, vec![Act::CopySound(g, from), Act::PasteSound(g, to)]);
+                }
+            }
+            A::SetSend { group, sound, aux, level } => {
+                let t = match sound {
+                    Some(s) => Target::Sound(group, s),
+                    None => Target::GroupStrip(group),
+                };
+                layout::apply_acts(self, vec![Act::SetParam(t, if aux == 0 { "aux1_level" } else { "aux2_level" }, level)]);
+            }
+            A::SetChannelSwing { group, sound, amount } => {
+                let Some(p) = project(self) else { return };
+                let (t, swing) = match (group, sound) {
+                    (Some(gr), Some(s)) => {
+                        let Some(x) = p.groups.get(gr).and_then(|grp| grp.sounds.get(s)) else { return };
+                        (Target::Sound(gr, s), x.swing)
+                    }
+                    (Some(gr), None) => {
+                        let Some(x) = p.groups.get(gr) else { return };
+                        (Target::Group(gr), x.swing)
+                    }
+                    _ => (Target::Song, p.swing),
+                };
+                layout::apply_acts(self, vec![Act::SetSwing(t, deckard_model::Swing { amount, ..swing })]);
+            }
+            A::SetTune { group, sound, semitones } => self.jam_tune(group, sound, semitones),
+            A::CueDb(db) => layout::apply_acts(self, vec![Act::SetParam(Target::Song, "cue_level", deckard_model::level_from_db(db))]),
+            A::InputDb(input, db) => {
+                if let Some(level) = self.settings.input_levels.get_mut(input) {
+                    *level = deckard_model::level_from_db(db);
+                    self.input_bus.set_levels(&self.settings.input_levels);
+                    self.settings.save();
+                }
+            }
+            A::WatchInput(on) => self.input_watched = on,
+            A::Library(on) => {
+                if self.browser.open != on {
+                    self.browse(browser::BrowseAct::Toggle);
+                }
+            }
+            A::ResetKnob(knob) => self.jam_reset_knob(knob),
+            A::PerformMode { group, mode } => self.jam_perform_mode(group, mode),
+            A::SettingsWanted(on) => self.jam_settings_wanted = on,
             A::Lfo(what, pad, v) => self.surface_lfo(what, pad, v),
             A::ModSlot(slot, row, steps) => mod_slots::step(self, slot, row, steps),
             A::ModSlotsClosed => self.mod_draft = None,
             A::Lock(what, n) => match what {
                 "button" => self.lock_button(),
                 "pad" => self.lock_pad(n),
+                "slot" => self.lock_slot(n),
                 "update" => self.lock_update(),
                 "delete" => self.lock_delete(),
                 "delete_slot" => self.lock_delete_slot(n),
@@ -4641,7 +5414,7 @@ impl App {
                 }
             }
             A::PadTouch(field, v) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(self.sound)) else { return };
                 let mut t = snd.pad_touch;
                 let byte = v.clamp(0, 127) as u8;
@@ -4862,15 +5635,16 @@ impl App {
                 // A routing choice: the next or previous one, a step every ROUTE_STEP.
                 if let Edit::Route(cur) = edit {
                     let Some((_, _, sets)) = routes.iter().find(|(i, ..)| *i == pos) else { return };
-                    if self.knob_acc[pos].abs() < ROUTE_STEP || sets.is_empty() {
+                    let n = (self.knob_acc[pos].abs() / ROUTE_STEP).floor() as usize;
+                    if n == 0 || sets.is_empty() {
                         return;
                     }
                     let up = self.knob_acc[pos] > 0.0;
-                    self.knob_acc[pos] = 0.0;
+                    self.knob_acc[pos] -= (n as f64) * ROUTE_STEP * self.knob_acc[pos].signum();
                     let to = match cur {
                         usize::MAX => 0,
-                        c if up => (c + 1).min(sets.len() - 1),
-                        c => c.saturating_sub(1),
+                        c if up => (c + n).min(sets.len() - 1),
+                        c => c.saturating_sub(n),
                     };
                     if to == cur {
                         return;
@@ -4889,13 +5663,14 @@ impl App {
                 };
                 let to = match step {
                     Some(q) => {
-                        let n = (self.knob_acc[pos].abs() / (q * 0.25).max(1e-9)).floor();
+                        let unit = (q * 0.25).max(1e-9);
+                        let n = (self.knob_acc[pos].abs() / unit).floor();
                         if n < 1.0 {
                             return;
                         }
-                        let moved = q * self.knob_acc[pos].signum();
-                        self.knob_acc[pos] = 0.0;
-                        value as f64 + moved
+                        let sign = self.knob_acc[pos].signum();
+                        self.knob_acc[pos] -= n * unit * sign;
+                        value as f64 + n * q * sign
                     }
                     None => {
                         let to = value as f64 + self.knob_acc[pos];
@@ -4917,22 +5692,28 @@ impl App {
                 let n = if next { (pg.page + 1).min(pg.names.len().saturating_sub(1)) } else { pg.page.saturating_sub(1) };
                 (pg.show)(n)
             }
-            // On to the next slot, or past the last one to the "+" (an empty slot to load
-            // a plug-in into).
+            // On to the next insert of the chain shown (Master, Group or Sound), or past
+            // the last one to the "+". An empty chain, or a step past the "+", stays on
+            // this tab.
             R::Slot(d) => {
-                let n = doc.borrow().project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).map_or(0, |s| s.slots.len());
+                let n = self.chain_slots().len();
                 let cur = self.slot.filter(|&i| i < n).unwrap_or(n) as i64;
                 let to = (cur + d).clamp(0, n as i64) as usize;
                 if to == n {
-                    // The "+": no slot focused, plug-ins shown.
-                    (self.slot, self.channel) = (None, false);
+                    // The "+": no slot focused, plug-ins shown, this tab kept.
+                    self.slot = None;
+                    self.slot_of = Some(self.chain());
+                    self.channel = false;
                     return;
                 }
-                Act::FocusSlot(self.group, self.sound, to)
+                match self.chain() {
+                    deckard_doc::Chain::Sound(g, s) => Act::FocusSlot(g, s, to),
+                    c => Act::FocusChainSlot(c, to),
+                }
             }
             R::Load { entry, replace } => {
                 let Some((_, what)) = self.plugin_choices().into_iter().nth(entry) else { return };
-                let n = doc.borrow().project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).map_or(0, |s| s.slots.len());
+                let n = self.chain_slots().len();
                 match replace.filter(|&i| i < n) {
                     Some(i) => self.replace_slot(i, what),
                     None => {
@@ -5105,6 +5886,9 @@ impl App {
             if let Some(m) = &self.mk3 {
                 m.set_output(out.sender());
             }
+            if let Some(j) = &self.jam {
+                j.set_output(out.sender());
+            }
             self.midi_wired = true;
         }
         if let Some(doc) = self.doc.clone() {
@@ -5200,17 +5984,19 @@ impl App {
     }
 
     /// Open the interface input while a sound takes audio from it (and an engine to
-    /// play it through); close it when none does.
-    fn input_sync(&mut self) {
+    /// play it through) or a controller shows its meters; close it when neither does.
+    pub(crate) fn input_sync(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let wants = doc
+        let plays = doc
             .borrow()
             .project()
             .groups
             .iter()
             .flat_map(|g| &g.sounds)
             .any(|s| matches!(s.channel.audio_in, deckard_model::AudioSource::Ext(_)));
-        let key = (self.settings.input_device.clone(), self.settings.input_routing.clone());
+        let wants = plays || self.input_watched;
+        self.input_bus.set_levels(&self.settings.input_levels);
+        let key = (self.settings.input_device_in_use(), self.settings.input_routing.clone());
         if !wants {
             self.live_input = None;
             self.settings_input_failed = None;
@@ -5218,20 +6004,32 @@ impl App {
         }
         // Open already, or failed with these settings (no retrying every frame).
         if self.live_input.as_ref().is_some_and(|(_, k)| *k == key) || self.settings_input_failed.as_ref() == Some(&key) {
+            // Open for a meter, and now a sound takes it: it needs an engine to play through.
+            if plays
+                && std::mem::take(&mut self.input_for_meters)
+                && let Some(Ok(out)) = &self.output
+                && !out.has_engine()
+            {
+                let d = doc.borrow();
+                let (mut engine, _) = Engine::new(d.project(), self.path.as_deref(), out.rate, Mode::Arrangement, &mut self.samples);
+                engine.sequencing = false;
+                out.play(engine);
+            }
             return;
         }
         let Ok(out) = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) else { return };
         let live: deckard_engine::LiveIn = Default::default();
-        match open_live_input(&key.0, &key.1, live.clone(), out.rate) {
+        match open_live_input(&key.0, &key.1, live.clone(), self.input_bus.clone(), out.rate) {
             Ok(stream) => {
                 out.set_live_in(live);
-                if !out.has_engine() {
+                if plays && !out.has_engine() {
                     let d = doc.borrow();
                     let (mut engine, _) = Engine::new(d.project(), self.path.as_deref(), out.rate, Mode::Arrangement, &mut self.samples);
                     engine.sequencing = false;
                     out.play(engine);
                 }
                 self.live_input = Some((stream, key));
+                self.input_for_meters = !plays;
                 self.settings_input_failed = None;
             }
             Err(e) => {
@@ -5272,13 +6070,14 @@ impl App {
     fn follow_edits(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let d = doc.borrow();
-        self.remember_libraries();
         let Some(Ok(out)) = &self.output else { return };
         // An edit that reached the engine while it switched modes is sent again.
         let (mode, stale) = out.telemetry(|t| (t.mode, t.stale && t.actions >= self.adopt_sent));
         if d.revision() == self.seen_revision && !stale {
             return;
         }
+        self.remember_libraries();
+        let Some(Ok(out)) = &self.output else { return };
         // The mode it plays, once it has published one.
         let Some(mode) = mode.filter(|_| out.has_engine()) else { return };
         self.seen_revision = d.revision();
@@ -5305,6 +6104,15 @@ impl App {
             Some(Ok(out)) => out.take_meters(),
             _ => (Vec::new(), (0.0, 0.0)),
         };
+        let cue = match &self.output {
+            Some(Ok(out)) => out.take_cue_peak(),
+            _ => (0.0, 0.0),
+        };
+        self.cue_meter = ((self.cue_meter.0 * fall).max(cue.0), (self.cue_meter.1 * fall).max(cue.1));
+        for (pair, shown) in self.input_meters.iter_mut().enumerate() {
+            let peak = self.input_bus.take_peaks(pair);
+            *shown = ((shown.0 * fall).max(peak.0), (shown.1 * fall).max(peak.1));
+        }
         // Headroom: the peak of each channel (sounds, their groups, the master).
         for (g, row) in fresh.iter().enumerate() {
             let mut gp = 0f32;
@@ -5429,6 +6237,8 @@ impl App {
         };
         active |= travels != self.route_seen;
         self.route_seen = travels;
+        active |=
+            self.recorder.busy() || self.recorder.is_metering() || self.recorder.view.meter.0 > 0.001 || self.recorder.view.meter.1 > 0.001;
         if lfo_live {
             ctx.request_repaint_after(if again.is_zero() { std::time::Duration::from_millis(30) } else { again });
         }
@@ -5586,16 +6396,23 @@ impl App {
         self.poll_stems();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
-        self.take_info = None;
-        if let Some(doc) = self.doc.clone() {
+        let take_key = self.doc.as_ref().and_then(|doc| {
             let d = doc.borrow();
-            let a = d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|s| s.audio.as_ref());
-            if let Some((k, t)) = a.and_then(|a| a.takes.get(a.focused).map(|t| (a.focused, t.sample.clone()))) {
-                let path = d.path().map(Path::to_path_buf);
-                drop(d);
-                if let Some(smp) = self.samples.sample(&t, path.as_deref()) {
-                    self.take_info = Some(((self.group, self.sound, k), smp.frames.len(), smp.rate));
+            let a = d.project().groups.get(self.group)?.sounds.get(self.sound)?.audio.as_ref()?;
+            let t = a.takes.get(a.focused)?;
+            Some(((self.group, self.sound, a.focused, t.sample.clone()), d.path().map(Path::to_path_buf)))
+        });
+        match take_key {
+            Some((key, path)) => {
+                if self.take_info_key.as_ref() != Some(&key) {
+                    let (g, s, k, ref smp_ref) = key;
+                    self.take_info = self.samples.sample(smp_ref, path.as_deref()).map(|smp| ((g, s, k), smp.frames.len(), smp.rate));
+                    self.take_info_key = Some(key);
                 }
+            }
+            None => {
+                self.take_info = None;
+                self.take_info_key = None;
             }
         }
         let clock = self.record_clock();
@@ -5605,14 +6422,16 @@ impl App {
         };
         // The input meter moves while a RECORD tab shows (the app's, or the controller's
         // Sampling page), before recording too.
-        let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0);
+        let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0)
+            || (self.mk3.is_some() && self.surface.page() == "sampling" && self.sampling.tab == 0);
         let listen = self.meter_inputs && ((self.sampling_open && self.sampling.tab == 0) || hw_record);
         self.recorder.meter(
             listen,
             recorder::StartWith {
                 output,
-                device: self.settings.input_device.clone(),
+                device: self.settings.input_device_in_use(),
                 routing: &self.settings.input_routing,
+                inputs: self.input_bus.clone(),
                 clock,
                 dir: PathBuf::new(),
                 stem: String::new(),
@@ -6646,8 +7465,9 @@ impl App {
         };
         self.recorder.start(recorder::StartWith {
             output,
-            device: self.settings.input_device.clone(),
+            device: self.settings.input_device_in_use(),
             routing: &self.settings.input_routing,
+            inputs: self.input_bus.clone(),
             clock,
             dir,
             stem,
@@ -7176,6 +7996,14 @@ impl App {
                 b.prehear_gain = g;
                 return;
             }
+            B::Routing(on) => {
+                b.routing = on;
+                return;
+            }
+            B::Patterns(on) => {
+                b.patterns = on;
+                return;
+            }
             B::Folder(dir) => {
                 b.files = browser::list_folder(&dir);
                 b.files_dir = dir;
@@ -7268,28 +8096,55 @@ impl App {
             return Ok(());
         }
         let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        // Most of the library's presets are NKS files, or a product's own format.
+        if matches!(item.kind, Kind::Instrument | Kind::Effect) {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if matches!(ext.as_str(), "nksf" | "nksfx") {
+                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                return self.load_nks_preset(&item.name, (g, s), &bytes);
+            }
+            if !matches!(ext.as_str(), "mxinst" | "mxfx") {
+                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                if let Some(res) = deckard_plugins::nks::native_preset(&ext, &bytes, &self.catalog.entries) {
+                    let plugin = res.map_err(|e| format!("{}: {e}", item.name))?;
+                    return self.load_resolved_preset(&item.name, (g, s), plugin);
+                }
+                return Err(format!("{}: .{ext} presets can't be loaded yet", item.name));
+            }
+        }
         match item.kind {
             Kind::Group | Kind::Sound | Kind::Instrument | Kind::Effect => {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
                 let mut d = doc.borrow_mut();
+                let mut loaded_slot = None;
                 match item.kind {
-                    Kind::Group => d.load_group_file(g, &bytes)?,
+                    Kind::Group => d.load_group_file_with(g, &bytes, self.browser.routing, self.browser.patterns)?,
                     Kind::Sound => d.load_sound_file(g, s, &bytes)?,
                     Kind::Instrument => {
                         let slots = &d.project().groups[g].sounds[s].slots;
                         if slots.first().is_some_and(|x| !x.is_instrument()) {
                             return Err("the sound's chain starts with an effect: an instrument can't go before it".into());
                         }
-                        d.load_slot_file(g, s, 0, &bytes)?
+                        d.load_slot_file(g, s, 0, &bytes)?;
+                        loaded_slot = Some(0);
                     }
                     _ => {
                         let n = d.project().groups[g].sounds[s].slots.len();
-                        d.load_slot_file(g, s, n, &bytes)?
+                        d.load_slot_file(g, s, n, &bytes)?;
+                        loaded_slot = Some(n);
                     }
                 }
                 drop(d);
                 if !matches!(item.kind, Kind::Group) {
                     self.sound = s;
+                }
+                if let Some(slot) = loaded_slot {
+                    self.channel = false;
+                    self.chain_tab = layout::ChainTab::Sound;
+                    self.slot_of = Some(deckard_doc::Chain::Sound(g, s));
+                    self.slot = Some(slot);
+                    self.plugin_page = 0;
+                    self.plugin_view = None;
                 }
                 self.status = format!("{} loaded", item.name);
             }
@@ -7307,6 +8162,77 @@ impl App {
             Kind::Project => {}
         }
         Ok(())
+    }
+
+    /// Load an NKS preset as its plug-in, with its state: an instrument in place of the
+    /// sound's, an effect last in its chain.
+    fn load_nks_preset(&mut self, name: &str, (g, s): (usize, usize), bytes: &[u8]) -> Result<(), String> {
+        let plugin =
+            deckard_plugins::nks::parse(bytes).and_then(|p| p.resolve(&self.catalog.entries)).map_err(|e| format!("{name}: {e}"))?;
+        self.load_resolved_preset(name, (g, s), plugin)
+    }
+
+    fn load_resolved_preset(&mut self, name: &str, (g, s): (usize, usize), plugin: deckard_plugins::nks::Resolved) -> Result<(), String> {
+        let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let pages: Vec<deckard_doc::PluginPageSpec> = plugin
+            .pages
+            .iter()
+            .map(|pg| deckard_doc::PluginPageSpec {
+                name: String::new(),
+                knobs: pg.iter().map(|k| (k.id.unwrap_or(u32::MAX), k.section.clone())).collect(),
+                custom_names: pg.iter().map(|k| k.name.clone()).collect(),
+            })
+            .collect();
+        let module = deckard_doc::NewModule::Plugin { id: plugin.id, name: plugin.name, chunk: plugin.chunk };
+        let mut d = doc.borrow_mut();
+        let (count, first_is_instrument) = {
+            let slots = &d.project().groups[g].sounds[s].slots;
+            (slots.len(), slots.first().map(|x| x.is_instrument()))
+        };
+        if module.is_instrument() && first_is_instrument == Some(false) {
+            return Err("the sound's chain starts with an effect: an instrument can't go before it".into());
+        }
+        let slot = if module.is_instrument() { 0 } else { count };
+        d.transaction("Load Preset", |d| {
+            if module.is_instrument() && first_is_instrument == Some(true) {
+                d.remove_slot(g, s, 0)?;
+            }
+            d.add_slot(g, s, slot, &module)?;
+            if !pages.is_empty() {
+                d.save_plugin_pages(deckard_doc::Chain::Sound(g, s), slot, &pages)?;
+            }
+            Ok(())
+        })?;
+        drop(d);
+        self.editors.retain(|&(c, i, _)| !(c == deckard_doc::Chain::Sound(g, s) && i == slot));
+        self.channel = false;
+        self.sound = s;
+        self.chain_tab = layout::ChainTab::Sound;
+        self.slot_of = Some(deckard_doc::Chain::Sound(g, s));
+        self.slot = Some(slot);
+        self.plugin_page = 0;
+        self.plugin_view = None;
+        self.status = format!("{name} loaded");
+        Ok(())
+    }
+
+    /// Look up a default NKS preset for `plugin_name` in NI's library index, preferring
+    /// one whose `NICA` pages carry section headings.
+    fn default_nks_preset(&self, plugin_name: &str) -> Option<deckard_plugins::nks::Resolved> {
+        let mut best: Option<deckard_plugins::nks::Resolved> = None;
+        for path in deckard_library::ni::nks_presets_for(plugin_name) {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(preset) = deckard_plugins::nks::parse(&bytes) else { continue };
+            let Ok(resolved) = preset.resolve(&self.catalog.entries) else { continue };
+            let has_sections = resolved.pages.iter().any(|pg| pg.iter().any(|k| !k.section.is_empty()));
+            if has_sections {
+                return Some(resolved);
+            }
+            if best.is_none() && !resolved.pages.is_empty() {
+                best = Some(resolved);
+            }
+        }
+        best
     }
 
     fn drop_samples(&mut self, (g, s): (usize, usize), files: &[PathBuf]) {
@@ -7488,10 +8414,47 @@ impl App {
         let key = (chain, i);
         let stale = self.plugin_view.as_ref().is_none_or(|v| v.key != key);
         if stale {
-            let saved = all[i].plugin.as_ref().map(|p| p.pages.clone()).unwrap_or_default();
+            let pr = all[i].plugin.clone().unwrap();
+            let mut saved = pr.pages.clone();
+            let default_nks = if saved.is_empty() && !pr.id.starts_with(deckard_plugins::native::VENDOR) {
+                self.default_nks_preset(&pr.name)
+            } else {
+                None
+            };
+            if saved.is_empty()
+                && let Some(nks) = &default_nks
+            {
+                saved = nks
+                    .pages
+                    .iter()
+                    .map(|pg| deckard_model::PluginPage {
+                        name: String::new(),
+                        params: pg
+                            .iter()
+                            .map(|k| deckard_model::PluginKnob {
+                                id: k.id.unwrap_or(u32::MAX),
+                                name: k.name.clone(),
+                                section: k.section.clone(),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+            }
             let view = match self.slot_plugin_in(key.0, key.1) {
                 Ok(p) => {
-                    let pages = p.lock().map(|p| view_pages(&p, &saved)).unwrap_or_default();
+                    let pages = p
+                        .lock()
+                        .map(|mut p| {
+                            if pr.chunk.is_empty()
+                                && !p.has_automatable_params()
+                                && let Some(nks) = &default_nks
+                            {
+                                let _ = p.load_chunk(&nks.chunk);
+                                p.mark_saved(Vec::new());
+                            }
+                            view_pages(&p, &saved)
+                        })
+                        .unwrap_or_default();
                     PluginView {
                         key,
                         pages,
@@ -8481,9 +9444,20 @@ impl App {
             ctx.request_repaint_after(undrawn(ctx, c.interval()));
         }
         self.mk3_sync(ctx, &mut requests, true);
+        self.jam_sync(ctx, true);
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
+        self.update_sampling();
+        self.sync_sampling_page();
+        self.sync_browse_page();
+        self.sync_arp();
+        self.sync_auto_write();
+        self.tick_mod_take(self.playhead().map(|h| (h.mode, h.position)), std::time::Instant::now());
+        if self.browser.poll() || self.browser.waiting() {
+            ctx.request_repaint_after(undrawn(ctx, std::time::Duration::from_millis(30)));
+        }
+        self.update_slot_view();
         self.control_bridge();
         self.midi_sync(ctx);
         self.midi_devices_sync(ctx);
@@ -8495,6 +9469,9 @@ impl App {
         self.update_meters(ctx, undrawn(ctx, BACKGROUND_PACE));
     }
 }
+
+/// The least time between opening an ASIO driver afresh at its request and the next.
+const ASIO_REOPEN_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A repaint delay for a pass that draws nothing (the window covered): egui takes a
 /// frame's predicted time off every delay, which a drawn frame spends, but here that
@@ -8530,6 +9507,13 @@ impl eframe::App for App {
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
             m.shut_down(goodbye::picture());
+        }
+        if let Some(j) = &self.jam {
+            j.shut_down();
+        }
+        // The app leaves without running destructors: an ASIO driver is let go of here.
+        if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
+            self.close_output();
         }
     }
 
@@ -8592,8 +9576,8 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed or recording.
-        if self.recorder.busy() {
+        // The recorder takes up its audio every frame while armed, recording, or metering.
+        if self.recorder.busy() || self.recorder.is_metering() {
             ctx.request_repaint();
         }
         self.update_slot_view();
@@ -8778,9 +9762,12 @@ impl App {
             }
         }
         self.mk3_sync(ui.ctx(), &mut requests, false);
+        self.jam_sync(ui.ctx(), false);
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
+        self.sync_browse_page();
+        self.update_slot_view();
         self.control_bridge();
         // The scale as the controller has it (its Keyboard page can change it too). Its
         // root is the focused group's, so a new root counts as a change of root only
@@ -8801,6 +9788,8 @@ impl App {
         self.sync_clocks(ui.ctx());
         self.input_sync();
         layout::body(self, ui);
+        self.update_slot_view();
+        self.follow_edits();
         if !self.dropped_samples.is_empty() {
             let files = std::mem::take(&mut self.dropped_samples);
             let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
@@ -12249,6 +13238,43 @@ mod tests {
         assert_eq!(h.state().slot, None);
     }
 
+    /// The Ideas view shows a group's patterns in their places, with the gaps between, and
+    /// a double-click on a gap or below the last makes a pattern there.
+    #[test]
+    fn the_ideas_view_shows_and_fills_gaps() {
+        let mut app = App { show_controller: false, follow: true, grid: PPQ / 4, prop_set: 1, ..Default::default() };
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "One").unwrap();
+            d.add_pattern_in_slot(0, 0, 3, "Four").unwrap();
+        }
+        (app.group, app.pattern, app.scene, app.sound, app.song_view) = (0, 0, 0, 0, false);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(4);
+        let place = |h: &Harness<'static, App>, slot: usize| -> egui::Rect {
+            h.ctx.data(|d| d.get_temp(layout::header_rect(&format!("pattern place 0 {slot}")))).expect("drawn")
+        };
+        let slots = |h: &Harness<'static, App>| project_of(h).groups[0].patterns.iter().map(|p| p.slot).collect::<Vec<_>>();
+        let (first, fourth) = (place(&h, 0), place(&h, 3));
+        assert!((fourth.top() - first.top() - 3.0 * first.height()).abs() < 0.5, "its own row: {first:?} {fourth:?}");
+        // Clicking the second of the list, in the fourth place, picks it.
+        click(&mut h, fourth.center());
+        assert_eq!(h.state().pattern, 1);
+        // A gap.
+        let gap = place(&h, 1).center();
+        double_click(&mut h, gap);
+        assert_eq!(slots(&h), [0, 1, 3], "{}", h.state().status);
+        assert_eq!(project_of(&h).groups[0].patterns[2].name, "Four", "the rest stay");
+        // Below the last, leaving a gap.
+        let below = place(&h, 6).center();
+        double_click(&mut h, below);
+        assert_eq!(slots(&h), [0, 1, 3, 6]);
+    }
+
     /// Auto-write on while the song plays: dragging a mixer strip's fader or pan writes
     /// modulation and leaves them where they are. Otherwise it moves them.
     #[test]
@@ -13285,6 +14311,7 @@ mod tests {
         app.new_project();
         app.doc.as_ref().unwrap().borrow_mut().set_tempo(97.0).unwrap();
         app.keep_session();
+        app.session_written();
         let mut next = App { session_dir: Some(dir.clone()), ..Default::default() };
         next.start_project();
         let d = next.doc.as_ref().unwrap().borrow();
@@ -13798,6 +14825,84 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert!(voices > 0, "the kick sounds on press, before the button is released");
         h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
         h.step();
+    }
+
+    #[test]
+    fn mk3_knob_burst_keeps_full_travel() {
+        use deckard_mk3::Event as E;
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        let mut req = Vec::new();
+        // On the Mixer page (`knob` reads `deckard.state()` directly), a burst of 10
+        // 500 Hz reports in one frame (+0.10 turn = +7 dB) must move by the full sum.
+        app.mk3_events(vec![E::Button("BUTTON_MIX", true), E::Button("BUTTON_MIX", false)], &mut req);
+        let before = app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].level;
+        app.mk3_events(vec![E::Knob(0, 0.01); 10], &mut req);
+        let after = app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].level;
+        let db = deckard_model::level_db(after) - deckard_model::level_db(before);
+        assert!((db - 7.0).abs() < 0.05, "mixer knob moved by full +7 dB burst: {before} -> {after} ({db:+.2} dB)");
+
+        // On the Control page with a native plug-in (Replicant), a burst of 10 reports
+        // in one frame on knob 4 (Detune, continuous) must move by the full +0.20.
+        app.mk3_events(vec![E::Button("BUTTON_PLUGIN", true), E::Button("BUTTON_PLUGIN", false)], &mut req);
+        let cls = deckard_plugins::native::CLASSES[0];
+        app.doc
+            .as_ref()
+            .unwrap()
+            .borrow_mut()
+            .add_slot(0, 0, 0, &deckard_doc::NewModule::Plugin { id: cls.plugin_id(), name: cls.name.into(), chunk: Vec::new() })
+            .unwrap();
+        app.slot = Some(0);
+        app.mk3_events(Vec::new(), &mut req);
+        let p0 = app.plugin_view.as_ref().unwrap().values[3].0;
+        app.mk3_events(vec![E::Knob(3, 0.02); 10], &mut req);
+        let p1 = app.plugin_view.as_ref().unwrap().values[3].0;
+        let want = (p0 + 0.20).clamp(0.0, 1.0);
+        assert!((p1 - want).abs() < 1e-4, "plug-in knob moved by full burst: {p0} -> {p1} (want {want})");
+    }
+
+    #[test]
+    fn mk3_touchstrip_move_burst_lights_pitch_and_mod_without_redrawing_screens() {
+        use deckard_mk3::Event as E;
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        let mut req = Vec::new();
+        let (_, frame) = app.mk3_events(Vec::new(), &mut req).screens.expect("initial screen draw");
+        assert!(matches!(&frame, mk3_io::ScreenFrame::Picture(p) if p.px.is_empty()), "UI thread records DrawOps without rasterizing");
+        assert_eq!(frame.into_pixels().len(), 960 * 272, "display thread rasterizes the 960x272 frame");
+
+        // Pitch mode: select PITCH, flush the screen update, then slide to 0.9 in a burst.
+        app.mk3_events(vec![E::Button("BUTTON_PITCH", true), E::Button("BUTTON_PITCH", false)], &mut req);
+        app.mk3_events(Vec::new(), &mut req);
+        let out = app.mk3_events(vec![E::Touch(0, 0, 0.5), E::Touch(0, 1, 0.65), E::Touch(0, 1, 0.9)], &mut req);
+        assert!(out.screens.is_none(), "touchstrip pitch move does not re-rasterize the 960x272 screens");
+        // Upper half of the strip (dots 13..=23) is lit, lower half (dots 1..=12) is dark.
+        assert_eq!(out.leds.get("LED_TS_12"), Some(0), "dot 12 stays dark on upward bend");
+        assert!(out.leds.get("LED_TS_13").unwrap() > 0 && out.leds.get("LED_TS_23").unwrap() > 0, "dots 13..23 light up on upward bend");
+
+        // Mod mode: select MOD, flush the screen update, then slide to 0.8 in a burst.
+        app.mk3_events(vec![E::Button("BUTTON_MOD", true), E::Button("BUTTON_MOD", false)], &mut req);
+        app.mk3_events(Vec::new(), &mut req);
+        let out = app.mk3_events(vec![E::Touch(0, 0, 0.2), E::Touch(0, 1, 0.5), E::Touch(0, 1, 0.8)], &mut req);
+        assert!(out.screens.is_none(), "touchstrip mod move does not re-rasterize the 960x272 screens");
+        assert!(out.leds.get("LED_TS_01").unwrap() > 0 && out.leds.get("LED_TS_20").unwrap() > 0, "mod bar lights up to dot 20");
+        assert_eq!(out.leds.get("LED_TS_25"), Some(0), "top dot stays dark at 0.8");
+    }
+
+    #[test]
+    fn seek_pattern_moves_playhead_only_when_stopped() {
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        app.seek_pattern(2 * PPQ);
+        let head = app.shown_playhead().expect("parked playhead set while stopped");
+        assert_eq!(head.position as i64, 2 * PPQ);
+        // While playing, clicking the timeline must not move the playhead.
+        app.playing = Some(Mode::Scene(0));
+        app.seek_pattern(3 * PPQ);
+        assert_eq!(app.parked.expect("parked unchanged").position as i64, 2 * PPQ);
     }
 }
 

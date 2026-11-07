@@ -1234,6 +1234,8 @@ fn live_param(st: &State, owner: &ObjRef, name: &str) -> Option<Prop> {
         (ObjRef::Workspace, "Playing") => return Some(Prop::Bool(t.playing)),
         (ObjRef::Workspace, "Recording") => return Some(Prop::Bool(t.recording)),
         (ObjRef::Workspace, "ArpActive") => return Some(Prop::Bool(st.arp.active)),
+        (ObjRef::Workspace, "LoadGroupWithSoundRouting") => return Some(Prop::Bool(st.browser.routing)),
+        (ObjRef::Workspace, "LoadGroupWithPattern") => return Some(Prop::Bool(st.browser.patterns)),
         (ObjRef::Metronome, "Enabled") => return Some(Prop::Bool(t.metronome)),
         (ObjRef::Song, "Loop") => return Some(Prop::Bool(t.looping)),
         _ => {}
@@ -1335,6 +1337,14 @@ pub(super) fn set_live_param(st: &mut State, owner: &ObjRef, name: &str, v: &Pro
     match (owner, name) {
         (ObjRef::Workspace, "Playing") => st.transport.playing = b,
         (ObjRef::Workspace, "Recording") => st.transport.recording = b,
+        (ObjRef::Workspace, "LoadGroupWithSoundRouting") => {
+            st.browser.routing = b;
+            st.browse_calls.push(crate::state::BrowseCall::Routing(b));
+        }
+        (ObjRef::Workspace, "LoadGroupWithPattern") => {
+            st.browser.patterns = b;
+            st.browse_calls.push(crate::state::BrowseCall::Patterns(b));
+        }
         (ObjRef::Metronome, "Enabled") => st.transport.metronome = b,
         (ObjRef::Song, "Loop") => st.transport.looping = b,
         _ => {

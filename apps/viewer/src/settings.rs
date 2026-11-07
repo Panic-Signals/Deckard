@@ -1,6 +1,7 @@
 //! Preferences (plug-in formats and folders, plug-ins switched off) and the catalogue
 //! of installed plug-ins, as in Maschine's Preferences > Plug-ins (Manager, Locations).
 
+use deckard_engine::devices::AudioDriver;
 use deckard_plugins::scan::{self, Entry, Kind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,9 @@ pub struct Settings {
     /// 32 input channels (In 1 L … In 16 R) reads, or not connected (then it isn't
     /// offered anywhere).
     pub input_routing: Vec<Option<usize>>,
+    /// In 1's and In 2's levels (as a fader's: 0..1, 0.75 = unity), DECKARD's own on the
+    /// way in (a JAM's IN1 and IN2).
+    pub input_levels: [f64; 2],
     /// The output device (Preferences > Audio); `None`: the system's default output.
     pub output_device: Option<String>,
     /// Routing > Output: the interface channel each of the 32 output channels (Out 1 L
@@ -43,6 +47,11 @@ pub struct Settings {
     /// Each device's routing and aliases, as last set ("in"/"out", device name; "" for
     /// the system's default): picking a device again brings its own back.
     pub routings: BTreeMap<(String, String), Routing>,
+    /// The audio system asked for (Preferences > Audio; what's in use is
+    /// [`deckard_engine::devices::driver`]), and the ASIO driver, which serves input and
+    /// output together. `input_device` and `output_device` are the system driver's.
+    pub audio_driver: AudioDriver,
+    pub asio_device: Option<String>,
     /// The Sampler pages show the focused zone's waveform (Maschine doesn't).
     pub show_waveform: bool,
     /// The browser's FILES tab: folders pinned to its top.
@@ -89,8 +98,13 @@ pub struct Settings {
     pub render_ahead_ms: u32,
     /// The MK3 displays' backlight, 0..=100 (Maschine's Hardware settings > Display).
     pub display_brightness: u8,
+    /// DECKARD drives a Maschine JAM plugged in (Preferences > MIDI).
+    pub jam_enabled: bool,
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
+    /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
+    /// to where the finger lands (Preferences > Hardware).
+    pub relative_strips: bool,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware): 0
     /// takes the pressure as it comes; higher, light presses play louder.
     pub pad_sensitivity: u8,
@@ -274,11 +288,14 @@ impl Default for Settings {
             disabled: BTreeSet::new(),
             input_device: None,
             input_routing: default_routing(),
+            input_levels: [0.75; 2],
             output_device: None,
             output_routing: default_routing(),
             input_aliases: vec![String::new(); CHANNELS],
             output_aliases: vec![String::new(); CHANNELS],
             routings: BTreeMap::new(),
+            audio_driver: AudioDriver::default(),
+            asio_device: None,
             show_waveform: true,
             midi_off: BTreeSet::new(),
             mpe: Default::default(),
@@ -293,9 +310,11 @@ impl Default for Settings {
             exact_timing: true,
             render_ahead_ms: 0,
             display_brightness: 100,
+            jam_enabled: true,
             pad_sensitivity: 50,
             metronome_volume: 100,
             focus_follows: true,
+            relative_strips: false,
             metronome_auto: false,
             metronome_ticks: 4,
             reload_last: true,
@@ -378,7 +397,11 @@ impl Settings {
                 "input_quantize" => s.input_quantize = v == "true",
                 "check_updates" => s.check_updates = v != "false",
                 "input_device" => s.input_device = Some(v.to_string()),
+                "input_level_1" => s.input_levels[0] = v.parse().unwrap_or(0.75),
+                "input_level_2" => s.input_levels[1] = v.parse().unwrap_or(0.75),
                 "output_device" => s.output_device = Some(v.to_string()),
+                "audio_driver" => s.audio_driver = if v == "asio" { AudioDriver::Asio } else { AudioDriver::System },
+                "asio_device" => s.asio_device = Some(v.to_string()),
                 // A device's routing: `<device>\t<channel>:<route or alias>`.
                 "input_route" if !v.contains('\t') => {
                     if let Some((i, x)) = v.split_once(':')
@@ -466,6 +489,7 @@ impl Settings {
                     }
                 }
                 "focus_follows" => s.focus_follows = v != "false",
+                "relative_strips" => s.relative_strips = v == "true",
                 "metronome_auto" => s.metronome_auto = v == "true",
                 "metronome_ticks" => {
                     if let Ok(n) = v.parse::<u32>()
@@ -515,6 +539,7 @@ impl Settings {
                         s.display_brightness = n.min(100);
                     }
                 }
+                "jam_enabled" => s.jam_enabled = v != "false",
                 "render_ahead_ms" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.render_ahead_ms = n.min(200);
@@ -563,8 +588,46 @@ impl Settings {
         self.load_routing("out");
     }
 
+    /// Ask for another audio system: its devices' routings come back.
+    pub fn set_audio_driver(&mut self, driver: AudioDriver) {
+        self.keep_routing("in");
+        self.keep_routing("out");
+        self.audio_driver = driver;
+        self.load_routing("in");
+        self.load_routing("out");
+    }
+
+    /// Pick the ASIO driver, as [`Settings::set_input_device`].
+    pub fn set_asio_device(&mut self, device: Option<String>) {
+        self.keep_routing("in");
+        self.keep_routing("out");
+        self.asio_device = device;
+        self.load_routing("in");
+        self.load_routing("out");
+    }
+
+    /// The input device of the driver in use (it can differ from the one asked for).
+    pub fn input_device_in_use(&self) -> Option<String> {
+        match deckard_engine::devices::driver() {
+            AudioDriver::Asio => self.asio_device.clone(),
+            AudioDriver::System => self.input_device.clone(),
+        }
+    }
+
+    /// The output device of the driver in use.
+    pub fn output_device_in_use(&self) -> Option<String> {
+        match deckard_engine::devices::driver() {
+            AudioDriver::Asio => self.asio_device.clone(),
+            AudioDriver::System => self.output_device.clone(),
+        }
+    }
+
     fn device_key(&self, side: &str) -> (String, String) {
-        let d = if side == "in" { &self.input_device } else { &self.output_device };
+        let d = match self.audio_driver {
+            AudioDriver::Asio => &self.asio_device,
+            AudioDriver::System if side == "in" => &self.input_device,
+            AudioDriver::System => &self.output_device,
+        };
         (side.to_string(), d.clone().unwrap_or_default())
     }
 
@@ -647,7 +710,9 @@ impl Settings {
             "buffer_frames = {}\nmulticore = {}\nexact_timing = {}\nrender_ahead_ms = {}\ndisplay_brightness = {}\npad_sensitivity = {}\n",
             self.buffer_frames, self.multicore, self.exact_timing, self.render_ahead_ms, self.display_brightness, self.pad_sensitivity
         );
+        out += &format!("jam_enabled = {}\n", self.jam_enabled);
         out += &format!("focus_follows = {}\n", self.focus_follows);
+        out += &format!("relative_strips = {}\n", self.relative_strips);
         out += &format!(
             "metronome_volume = {}\nmetronome_auto = {}\nmetronome_ticks = {}\n",
             self.metronome_volume, self.metronome_auto, self.metronome_ticks
@@ -663,6 +728,7 @@ impl Settings {
         if self.stems_offered {
             out += "stems_offered = true\n";
         }
+        out += &format!("input_level_1 = {}\ninput_level_2 = {}\n", self.input_levels[0], self.input_levels[1]);
         out += &format!(
             "velocity_scaling = {}\nled_brightness = {}\nstrip_position = {}\ntouch_auto_write = {}\n",
             self.velocity_scaling, self.led_brightness, self.strip_position, self.touch_auto_write
@@ -692,6 +758,12 @@ impl Settings {
         }
         if let Some(d) = &self.output_device {
             out += &format!("output_device = {d}\n");
+        }
+        if self.audio_driver == AudioDriver::Asio {
+            out += "audio_driver = asio\n";
+        }
+        if let Some(d) = &self.asio_device {
+            out += &format!("asio_device = {d}\n");
         }
         // Every device's routing, every route (so a later change of the defaults
         // leaves them as they were).
@@ -797,7 +869,7 @@ impl Catalog {
                     "Scanning {}",
                     b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
                 )));
-                let found = if let Some((_, _, e)) = known.iter().find(|(p, kt, _)| *p == key && *kt == t) {
+                let found = if let Some(e) = unchanged_scan(&known, &key, t) {
                     e.clone()
                 } else if let Some(e) = scan::vst3_from_moduleinfo(&b) {
                     e
@@ -854,8 +926,15 @@ impl Catalog {
     }
 }
 
+/// What the last scan found in bundle `key`, if it hasn't changed since. A scan that found
+/// nothing doesn't count: the helper was killed or crashed (a plug-in slow to start, say),
+/// and the bundle is scanned again rather than left out for good.
+fn unchanged_scan<'a>(known: &'a [(String, u64, Vec<Entry>)], key: &str, mtime: u64) -> Option<&'a Vec<Entry>> {
+    known.iter().find(|(p, t, e)| p == key && *t == mtime && !e.is_empty()).map(|(_, _, e)| e)
+}
+
 /// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
-/// bundle, which starts Wine).
+/// bundle, which starts Wine). What it printed before it hung or crashed still counts.
 fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
     let limit = if bundle.to_string_lossy().contains("yabridge") { 90 } else { 20 };
     let Ok(exe) = std::env::current_exe() else { return Vec::new() };
@@ -875,7 +954,8 @@ fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
             Ok(None) if start.elapsed().as_secs() < limit => std::thread::sleep(std::time::Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
-                return Vec::new();
+                let _ = child.wait();
+                break;
             }
         }
     }
@@ -935,6 +1015,49 @@ mod routing_tests {
         assert_eq!(back.output_routing[0], None, "B's own, saved too");
     }
 
+    /// The driver asked for and the ASIO driver picked come back; settings that never
+    /// asked for ASIO don't mention it.
+    #[test]
+    fn audio_driver_round_trips() {
+        let text = Settings::default().to_text();
+        assert!(!text.contains("audio_driver") && !text.contains("asio_device"), "{text}");
+        assert_eq!(Settings::parse(&text).audio_driver, AudioDriver::System);
+        let mut s = Settings::default();
+        s.set_output_device(Some("Speakers (BEHRINGER UMC 204HD 192k)".into()));
+        s.set_audio_driver(AudioDriver::Asio);
+        s.set_asio_device(Some("UMC ASIO Driver".into()));
+        let back = Settings::parse(&s.to_text());
+        assert_eq!(back.audio_driver, AudioDriver::Asio);
+        assert_eq!(back.asio_device.as_deref(), Some("UMC ASIO Driver"));
+        assert_eq!(back.output_device.as_deref(), Some("Speakers (BEHRINGER UMC 204HD 192k)"), "the system driver's device is kept");
+        // Back to the system's: ASIO's device is kept for next time, and isn't asked for.
+        let mut s = back;
+        s.set_audio_driver(AudioDriver::System);
+        let back = Settings::parse(&s.to_text());
+        assert_eq!(back.audio_driver, AudioDriver::System);
+        assert_eq!(back.asio_device.as_deref(), Some("UMC ASIO Driver"));
+    }
+
+    /// Each driver's devices keep their routing, and the ASIO driver has one routing for
+    /// each side, saved like any other device's.
+    #[test]
+    fn asio_keeps_its_own_routing() {
+        let mut s = Settings::default();
+        s.set_output_device(Some("Speakers".into()));
+        s.output_routing[0] = Some(1);
+        s.set_audio_driver(AudioDriver::Asio);
+        s.set_asio_device(Some("UMC ASIO Driver".into()));
+        assert_eq!(s.output_routing, default_routing(), "the ASIO driver starts from the defaults");
+        s.output_routing[0] = Some(2);
+        s.input_routing[0] = Some(3);
+        let mut back = Settings::parse(&s.to_text());
+        assert_eq!((back.output_routing[0], back.input_routing[0]), (Some(2), Some(3)), "the ASIO driver's own");
+        back.set_audio_driver(AudioDriver::System);
+        assert_eq!(back.output_routing[0], Some(1), "the system driver's device's own");
+        back.set_audio_driver(AudioDriver::Asio);
+        assert_eq!(back.output_routing[0], Some(2));
+    }
+
     #[test]
     fn controller_setting_round_trips() {
         // A new install: DECKARD's own layer, in Palenight.
@@ -973,6 +1096,22 @@ mod routing_tests {
         s.output_aliases[1] = "Main".into();
         assert_eq!(s.output_pair_name(0), "Main");
         assert!(s.input_pair_on(0) && !s.input_pair_on(1) && s.output_pair_on(0) && !s.output_pair_on(1));
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::{Entry, Kind, unchanged_scan};
+
+    #[test]
+    fn a_scan_that_found_nothing_is_tried_again() {
+        let entry =
+            Entry { kind: Kind::Vst3, vendor: "V".into(), name: "P".into(), instrument: true, location: "a.vst3".into(), cid: "00".into() };
+        let known = vec![("a.vst3".to_string(), 5, vec![entry.clone()]), ("failed.vst3".to_string(), 5, Vec::new())];
+        assert_eq!(unchanged_scan(&known, "a.vst3", 5), Some(&vec![entry]));
+        assert_eq!(unchanged_scan(&known, "a.vst3", 6), None, "the bundle changed");
+        assert_eq!(unchanged_scan(&known, "failed.vst3", 5), None);
+        assert_eq!(unchanged_scan(&known, "new.vst3", 5), None);
     }
 }
 
@@ -1122,6 +1261,15 @@ mod wine_tests {
         assert!(Settings::parse("").focus_follows, "a settings file from before");
         s.focus_follows = false;
         assert!(!Settings::parse(&s.to_text()).focus_follows);
+    }
+
+    #[test]
+    fn touchstrips_are_absolute_unless_switched_on() {
+        let mut s = Settings::default();
+        assert!(!s.relative_strips);
+        assert!(!Settings::parse("").relative_strips, "a settings file from before");
+        s.relative_strips = true;
+        assert!(Settings::parse(&s.to_text()).relative_strips);
     }
 
     /// only "off" is written, so other systems' settings files don't change.

@@ -451,7 +451,7 @@ pub struct ArpView {
 /// `deckard_library::Kind::ALL`), Factory or User, the products and the one chosen,
 /// the three attributes (Type, Sub-type, Character: the values and the one chosen),
 /// the results (name, favourite) and the one in focus.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BrowserView {
     pub kind: usize,
     pub user: bool,
@@ -463,6 +463,28 @@ pub struct BrowserView {
     /// A query is running.
     pub busy: bool,
     pub favorites: bool,
+    /// Load a group with its sound routing (`+ ROUTING`).
+    pub routing: bool,
+    /// Load a group with its patterns (`+ PATTERNS`).
+    pub patterns: bool,
+}
+
+impl Default for BrowserView {
+    fn default() -> BrowserView {
+        BrowserView {
+            kind: 0,
+            user: false,
+            products: Vec::new(),
+            product: None,
+            attributes: Default::default(),
+            results: Vec::new(),
+            focus: 0,
+            busy: false,
+            favorites: false,
+            routing: true,
+            patterns: true,
+        }
+    }
 }
 
 /// What BROWSE asks of the app.
@@ -479,6 +501,10 @@ pub enum BrowseCall {
     ToggleFavorites,
     /// Prehear the focused result.
     Prehear,
+    /// Load a group with (`true`) or without (`false`) its routing (`+ ROUTING`).
+    Routing(bool),
+    /// Load a group with (`true`) or without (`false`) its patterns (`+ PATTERNS`).
+    Patterns(bool),
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
