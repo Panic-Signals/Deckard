@@ -5,8 +5,18 @@ use crate::tests::harness;
 use deckard_engine::{Mode, Recorded};
 
 fn rec(h: &mut egui_kittest::Harness<'static, crate::App>, g: usize, s: usize, tick: f64, len: f64, scene: usize) {
-    let on =
-        Recorded { group: g, sound: s, pitch: 60, velocity: 100, length: i64::MAX, tick, mode: Mode::Scene(scene), seq: 0, played: tick };
+    let on = Recorded {
+        midi: false,
+        group: g,
+        sound: s,
+        pitch: 60,
+        velocity: 100,
+        length: i64::MAX,
+        tick,
+        mode: Mode::Scene(scene),
+        seq: 0,
+        played: tick,
+    };
     h.state_mut().take_in_recorded(vec![on, Recorded { velocity: 0, tick: tick + len, played: tick + len, ..on }]);
 }
 
@@ -940,6 +950,7 @@ fn a_held_pad_shows_while_held() {
     let notes = |doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>| doc.borrow().project().groups[g].patterns[pi].notes.clone();
     h.state_mut().set_recording(true, false);
     let on = |pitch: i64| Recorded {
+        midi: false,
         group: g,
         sound: 5,
         pitch,
@@ -960,4 +971,96 @@ fn a_held_pad_shows_while_held() {
     let done: Vec<_> = notes(&doc).into_iter().filter(|n| n.sound == 5 && n.position == start).collect();
     assert_eq!(done.len(), 3, "{done:?}");
     assert!(done.iter().all(|n| n.length == len + len / 2), "as long as held: {done:?}");
+}
+
+/// From the controller: a new pattern in an empty place keeps that place, and the rest stay.
+#[test]
+fn a_controller_makes_a_pattern_in_the_place_it_asks_for() {
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.surface_act(A::NewPatternAt { group: 0, slot: 0 });
+    app.surface_act(A::NewPatternAt { group: 0, slot: 7 });
+    let v = app.surface_view();
+    let slots: Vec<usize> = v.groups[0].patterns.iter().map(|p| p.slot).collect();
+    assert_eq!(slots, [0, 7]);
+    assert_eq!(app.pattern, 1, "the new one is focused, by its place in the list");
+    assert_eq!(v.groups[0].patterns[1].name, "Pattern 8");
+    assert_eq!(v.groups[0].scene_pattern, Some(1), "and plays in the scene");
+}
+
+/// A new project with two groups, each with a pattern on in scene 1, recording.
+fn two_group_app() -> crate::App {
+    let mut app = crate::App::default();
+    app.new_project();
+    {
+        let mut d = app.doc.as_ref().unwrap().borrow_mut();
+        while d.project().groups.len() < 2 {
+            d.add_group().unwrap();
+        }
+        for g in 0..2 {
+            d.add_pattern(g, 0, "Pattern 1").unwrap();
+            d.assign_pattern(0, g, Some(0)).unwrap();
+        }
+    }
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app
+}
+
+fn played_into(group: usize, sound: usize, midi: bool) -> Recorded {
+    Recorded { midi, group, sound, pitch: 60, velocity: 100, length: i64::MAX, tick: 0.0, mode: Mode::Scene(0), seq: 0, played: 0.0 }
+}
+
+/// MIDI recorded into another group gives it the focus, and the note lands there.
+#[test]
+fn midi_recorded_into_another_group_focuses_it() {
+    let mut app = two_group_app();
+    app.take_in_recorded(vec![played_into(1, 3, true)]);
+    assert_eq!((app.group, app.sound), (1, 3));
+    let notes = app.doc.as_ref().unwrap().borrow().project().groups[1].patterns[0].notes.len();
+    assert_eq!(notes, 1, "recorded");
+}
+
+/// A release doesn't move the focus: it may come after the focus moved on.
+#[test]
+fn a_midi_release_leaves_the_focus() {
+    let mut app = two_group_app();
+    app.take_in_recorded(vec![Recorded { velocity: 0, length: 0, ..played_into(1, 0, true) }]);
+    assert_eq!(app.group, 0);
+}
+
+/// What isn't MIDI (Note Repeat or the Arp still playing a group left behind) doesn't.
+#[test]
+fn notes_from_elsewhere_leave_the_focus() {
+    let mut app = two_group_app();
+    app.take_in_recorded(vec![played_into(1, 0, false)]);
+    assert_eq!(app.group, 0);
+}
+
+/// Switched off, MIDI still records into its group, with the focus where it was.
+#[test]
+fn the_focus_can_be_kept_from_following_midi() {
+    let mut app = two_group_app();
+    app.settings.focus_follows = false;
+    app.take_in_recorded(vec![played_into(1, 3, true)]);
+    assert_eq!((app.group, app.sound), (0, 0));
+    assert_eq!(app.doc.as_ref().unwrap().borrow().project().groups[1].patterns[0].notes.len(), 1, "recorded all the same");
+}
+
+/// From the controller: a new pattern in an empty place keeps that place, and the rest stay.
+#[test]
+fn a_controller_makes_a_pattern_in_the_place_it_asks_for() {
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.surface_act(A::NewPatternAt { group: 0, slot: 0 });
+    app.surface_act(A::NewPatternAt { group: 0, slot: 7 });
+    let v = app.surface_view();
+    let slots: Vec<usize> = v.groups[0].patterns.iter().map(|p| p.slot).collect();
+    assert_eq!(slots, [0, 7]);
+    assert_eq!(app.pattern, 1, "the new one is focused, by its place in the list");
+    assert_eq!(v.groups[0].patterns[1].name, "Pattern 8");
+    assert_eq!(v.groups[0].scene_pattern, Some(1), "and plays in the scene");
 }
