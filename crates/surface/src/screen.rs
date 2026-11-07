@@ -19,14 +19,17 @@ pub struct Image {
 }
 
 /// The pictures given to the surface, by (key, thumbnail), and handed to each draw.
-pub type Pictures = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<(String, bool), Image>>>;
+pub type Pictures = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<(String, bool), std::sync::Arc<Image>>>>;
 
-/// DECKARD's fonts, by the name scripts and themes use: egui's Ubuntu Light and Hack,
-/// and Google's Roboto (Apache 2.0) and Roboto Mono (SIL OFL 1.1), as Maschine's screens
-/// use (`fonts/`, with their licences).
-pub const FONTS: [(&str, &[u8]); 9] = [
+/// DECKARD's fonts, by the name scripts and themes use: IBM Plex Sans and IBM Plex Mono
+/// (SIL OFL 1.1), egui's Ubuntu Light and Hack, and Google's Roboto (Apache 2.0) and
+/// Roboto Mono (SIL OFL 1.1), as Maschine's screens use (`fonts/`, with their licences).
+pub const FONTS: [(&str, &[u8]); 12] = [
     ("ubuntu", epaint_default_fonts::UBUNTU_LIGHT),
     ("hack", epaint_default_fonts::HACK_REGULAR),
+    ("plex", include_bytes!("../fonts/IBMPlexSans-Regular.ttf")),
+    ("plex-bold", include_bytes!("../fonts/IBMPlexSans-Bold.ttf")),
+    ("plex-mono", include_bytes!("../fonts/IBMPlexMono-Regular.ttf")),
     ("roboto", include_bytes!("../fonts/Roboto-Regular.ttf")),
     ("roboto-light", include_bytes!("../fonts/Roboto-Light.ttf")),
     ("roboto-medium", include_bytes!("../fonts/Roboto-Medium.ttf")),
@@ -35,18 +38,6 @@ pub const FONTS: [(&str, &[u8]); 9] = [
     ("roboto-mono-medium", include_bytes!("../fonts/RobotoMono-Medium.ttf")),
     ("roboto-mono-bold", include_bytes!("../fonts/RobotoMono-Bold.ttf")),
 ];
-
-fn font(name: &str) -> mlua::Result<&'static Font> {
-    static LOADED: OnceLock<Vec<Font>> = OnceLock::new();
-    let all = LOADED.get_or_init(|| FONTS.iter().map(|(n, bytes)| Font::from_bytes(*bytes, FontSettings::default()).expect(n)).collect());
-    match FONTS.iter().position(|(n, _)| *n == name) {
-        Some(i) => Ok(&all[i]),
-        None => {
-            let names: Vec<&str> = FONTS.iter().map(|(n, _)| *n).collect();
-            Err(mlua::Error::runtime(format!("no font \"{name}\" ({})", names.join(", "))))
-        }
-    }
-}
 
 /// A colour as the scripts write it: `{r, g, b}` (0..255) or `{r = , g = , b = }`.
 pub fn rgb(t: &Table) -> mlua::Result<[u8; 3]> {
@@ -58,7 +49,7 @@ pub fn rgb(t: &Table) -> mlua::Result<[u8; 3]> {
 }
 
 /// A colour with its opacity (0..1): `{r, g, b, a}`, `a` 0..255 and 255 if left out.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Paint {
     pub rgb: [u8; 3],
     pub alpha: f32,
@@ -94,10 +85,28 @@ pub fn paint(lua: &Lua, v: &Value) -> mlua::Result<Paint> {
 /// A text style: a table, or the name of one of the theme's `styles`. Its `font`
 /// (a font, or the name of one of the theme's `fonts`), `size` and `color`; missing ones
 /// come from the theme's `styles.default`.
+#[derive(Clone, Copy)]
 struct Style {
+    font_idx: usize,
     font: &'static Font,
     size: f32,
     colour: Paint,
+}
+
+fn font_index(name: &str) -> mlua::Result<usize> {
+    match FONTS.iter().position(|(n, _)| *n == name) {
+        Some(i) => Ok(i),
+        None => {
+            let names: Vec<&str> = FONTS.iter().map(|(n, _)| *n).collect();
+            Err(mlua::Error::runtime(format!("no font \"{name}\" ({})", names.join(", "))))
+        }
+    }
+}
+
+fn font_at(i: usize) -> &'static Font {
+    static LOADED: OnceLock<Vec<Font>> = OnceLock::new();
+    let all = LOADED.get_or_init(|| FONTS.iter().map(|(n, bytes)| Font::from_bytes(*bytes, FontSettings::default()).expect(n)).collect());
+    &all[i]
 }
 
 fn style(lua: &Lua, v: &Value) -> mlua::Result<Style> {
@@ -144,11 +153,28 @@ fn style(lua: &Lua, v: &Value) -> mlua::Result<Style> {
         Value::Nil => Paint { rgb: [255; 3], alpha: 1.0 },
         c => paint(lua, &c)?,
     };
-    Ok(Style { font: font(&font_name)?, size: size.clamp(4.0, 200.0), colour })
+    let font_idx = font_index(&font_name)?;
+    Ok(Style { font_idx, font: font_at(font_idx), size: size.clamp(4.0, 200.0), colour })
+}
+
+/// One drawing command recorded by `draw(screen, theme)`.
+#[derive(Clone, PartialEq)]
+pub enum DrawOp {
+    Fill { x: i32, y: i32, w: i32, h: i32, c: Paint, corner: f32 },
+    Frame { x: i32, y: i32, w: i32, h: i32, c: Paint, corner: f32 },
+    Triangle { x: i32, y: i32, w: i32, h: i32, dir: String, c: Paint },
+    Circle { cx: f32, cy: f32, r: f32, width: Option<f32>, c: Paint, arc: Option<(f32, f32)> },
+    Line { p0: (f32, f32), p1: (f32, f32), width: f32, c: Paint },
+    Text { font_idx: usize, size: f32, colour: Paint, x: i32, y: i32, max_w: i32, text: String },
+    Image { x: i32, y: i32, w: i32, h: i32, key: String, thumb: bool },
 }
 
 /// What the scripts draw into.
+#[derive(Clone)]
 pub struct Picture {
+    pub background: [u8; 3],
+    pub ops: Vec<DrawOp>,
+    pub images: std::collections::HashMap<(String, bool), std::sync::Arc<Image>>,
     pub px: Vec<[u8; 4]>,
     /// The text drawn, in order (for tests).
     pub texts: Vec<String>,
@@ -156,22 +182,51 @@ pub struct Picture {
 
 impl Picture {
     pub fn new(background: [u8; 3]) -> Picture {
-        let [r, g, b] = background;
-        Picture { px: vec![[r, g, b, 255]; WIDTH * HEIGHT], texts: Vec::new() }
+        Picture { background, ops: Vec::new(), images: std::collections::HashMap::new(), px: Vec::new(), texts: Vec::new() }
+    }
+
+    pub fn rasterize(&mut self) {
+        let [r, g, b] = self.background;
+        self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
+        let ops = std::mem::take(&mut self.ops);
+        for op in &ops {
+            match op {
+                DrawOp::Fill { x, y, w, h, c, corner } => self.fill(*x, *y, *w, *h, *c, *corner),
+                DrawOp::Frame { x, y, w, h, c, corner } => self.frame(*x, *y, *w, *h, *c, *corner),
+                DrawOp::Triangle { x, y, w, h, dir, c } => self.triangle(*x, *y, *w, *h, dir, *c),
+                DrawOp::Circle { cx, cy, r, width, c, arc } => self.circle(*cx, *cy, *r, *width, *c, *arc),
+                DrawOp::Line { p0, p1, width, c } => self.line(*p0, *p1, *width, *c),
+                DrawOp::Text { font_idx, size, colour, x, y, max_w, text } => {
+                    let s = Style { font_idx: *font_idx, font: font_at(*font_idx), size: *size, colour: *colour };
+                    self.text(&s, *x, *y, *max_w, text);
+                }
+                DrawOp::Image { x, y, w, h, key, thumb } => {
+                    if let Some(img) = self.images.get(&(key.clone(), *thumb)).cloned() {
+                        self.image(*x, *y, *w, *h, &img);
+                    }
+                }
+            }
+        }
+        self.ops = ops;
+    }
+
+    pub fn into_pixels(mut self) -> Vec<[u8; 4]> {
+        self.rasterize();
+        self.px
     }
 
     fn blend(&mut self, x: i32, y: i32, c: [u8; 3], a: f32) {
         if x < 0 || y < 0 || x as usize >= WIDTH || y as usize >= HEIGHT || a <= 0.0 {
             return;
         }
+        if self.px.is_empty() {
+            let [r, g, b] = self.background;
+            self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
+        }
         let d = &mut self.px[y as usize * WIDTH + x as usize];
         for k in 0..3 {
             d[k] = (d[k] as f32 * (1.0 - a) + c[k] as f32 * a).round() as u8;
         }
-    }
-
-    fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: [u8; 3]) {
-        self.fill(x, y, w, h, Paint { rgb: c, alpha: 1.0 }, 1.0);
     }
 
     /// A filled rectangle; its four corner pixels at `corner` of its opacity (a little
@@ -245,14 +300,43 @@ impl Picture {
     /// another if given (degrees, 0 to the right, clockwise).
     fn circle(&mut self, cx: f32, cy: f32, r: f32, width: Option<f32>, c: Paint, arc: Option<(f32, f32)>) {
         let inner = width.map_or(-1.0, |w| r - w);
-        self.shape((cx - r, cy - r, cx + r, cy + r), c, |x, y| {
-            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-            let along = arc.is_none_or(|(from, to)| {
-                let a = (y - cy).atan2(x - cx).to_degrees();
-                (a - from).rem_euclid(360.0) <= (to - from).rem_euclid(360.0)
-            });
-            d <= r && d >= inner && along
-        });
+        let (x0, y0, x1, y1) = ((cx - r).floor() as i32, (cy - r).floor() as i32, (cx + r).ceil() as i32, (cy + r).ceil() as i32);
+        let outer_out = (r + 0.75) * (r + 0.75);
+        let outer_in = (r - 0.75).max(0.0) * (r - 0.75).max(0.0);
+        let inner_in = if inner > 0.75 { (inner - 0.75) * (inner - 0.75) } else { -1.0 };
+        let inner_out = if inner > 0.0 { (inner + 0.75) * (inner + 0.75) } else { -1.0 };
+        let r_sq = r * r;
+        let inner_sq = if inner > 0.0 { inner * inner } else { -1.0 };
+        let span = arc.map(|(from, to)| (from, (to - from).rem_euclid(360.0)));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let d2 = dx * dx + dy * dy;
+                if d2 > outer_out || (inner_in >= 0.0 && d2 < inner_in) {
+                    continue;
+                }
+                if span.is_none() && r > 0.75 && d2 <= outer_in && d2 >= inner_out {
+                    self.blend(x, y, c.rgb, c.alpha);
+                    continue;
+                }
+                let mut n = 0;
+                for sy in 0..4 {
+                    let py = y as f32 + (sy as f32 + 0.5) / 4.0 - cy;
+                    for sx in 0..4 {
+                        let px = x as f32 + (sx as f32 + 0.5) / 4.0 - cx;
+                        let sd2 = px * px + py * py;
+                        if sd2 <= r_sq && sd2 >= inner_sq {
+                            let along = span.is_none_or(|(from, sweep)| {
+                                let a = py.atan2(px).to_degrees();
+                                (a - from).rem_euclid(360.0) <= sweep
+                            });
+                            n += along as i32;
+                        }
+                    }
+                }
+                self.blend(x, y, c.rgb, c.alpha * n as f32 / 16.0);
+            }
+        }
     }
 
     /// A line `width` thick from (x0, y0) to (x1, y1).
@@ -272,8 +356,8 @@ impl Picture {
     /// `valign` "top", "center" or "bottom" (the font's ascent to descent). Returns its
     /// width.
     #[allow(clippy::too_many_arguments)]
-    fn label(&mut self, s: &Style, x: i32, y: i32, w: i32, h: i32, text: &str, align: &str, valign: &str) -> i32 {
-        let width = Self::width(s, text).min(w);
+    fn record_label(&mut self, s: &Style, x: i32, y: i32, w: i32, h: i32, text: String, align: &str, valign: &str) -> i32 {
+        let width = Self::width(s, &text).min(w);
         let x0 = match align {
             "left" => x,
             "right" => x + w - width,
@@ -286,32 +370,59 @@ impl Picture {
             "bottom" => y + h - text_h,
             _ => y + (h - text_h) / 2,
         };
-        self.text(s, x0, top + ascent.round() as i32, x + w - x0, text)
+        self.record_text(s, x0, top + ascent.round() as i32, x + w - x0, text)
+    }
+
+    fn record_text(&mut self, s: &Style, x: i32, y: i32, max_w: i32, text: String) -> i32 {
+        let mut pen = 0.0f32;
+        for ch in text.chars() {
+            let m = s.font.metrics(ch, s.size);
+            if (pen + m.advance_width) as i32 > max_w {
+                break;
+            }
+            pen += m.advance_width;
+        }
+        self.ops.push(DrawOp::Text { font_idx: s.font_idx, size: s.size, colour: s.colour, x, y, max_w, text });
+        pen.round() as i32
     }
 
     /// Text with its baseline at `y`, cut at `max_w` pixels; returns its width.
     fn text(&mut self, s: &Style, x: i32, y: i32, max_w: i32, text: &str) -> i32 {
         let mut pen = 0.0f32;
+        let mut prev = None;
         for ch in text.chars() {
+            let kern = prev.and_then(|p| s.font.horizontal_kern(p, ch, s.size)).unwrap_or(0.0);
             let (m, bitmap) = s.font.rasterize(ch, s.size);
-            if (pen + m.advance_width) as i32 > max_w {
+            if (pen + kern + m.advance_width) as i32 > max_w {
                 break;
             }
+            pen += kern;
             let x0 = x + (pen + m.xmin as f32).round() as i32;
             let y0 = y - m.height as i32 - m.ymin;
             for row in 0..m.height {
                 for col in 0..m.width {
-                    let a = bitmap[row * m.width + col] as f32 / 255.0;
+                    let cov = bitmap[row * m.width + col] as f32 / 255.0;
+                    let a = if cov > 0.0 { cov.powf(1.0 / 1.45) } else { 0.0 };
                     self.blend(x0 + col as i32, y0 + row as i32, s.colour.rgb, a * s.colour.alpha);
                 }
             }
             pen += m.advance_width;
+            prev = Some(ch);
         }
         pen.round() as i32
     }
 
     fn width(s: &Style, text: &str) -> i32 {
-        text.chars().map(|ch| s.font.metrics(ch, s.size).advance_width).sum::<f32>().round() as i32
+        let mut w = 0.0f32;
+        let mut prev = None;
+        for ch in text.chars() {
+            if let Some(p) = prev {
+                w += s.font.horizontal_kern(p, ch, s.size).unwrap_or(0.0);
+            }
+            w += s.font.metrics(ch, s.size).advance_width;
+            prev = Some(ch);
+        }
+        w.round() as i32
     }
 
     /// `img` scaled to fit `w` × `h` at (x, y), centred, keeping its shape (each pixel
@@ -345,9 +456,17 @@ impl Picture {
 
     /// A script error, over the bottom of the left screen.
     pub fn error(&mut self, message: &str) {
-        self.rect(0, HEIGHT as i32 - 30, 480, 30, [0x8c, 0x1e, 0x1e]);
-        let s = Style { font: font("ubuntu").expect("built in"), size: 14.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
-        self.text(&s, 8, HEIGHT as i32 - 10, 464, message);
+        self.ops.push(DrawOp::Fill {
+            x: 0,
+            y: HEIGHT as i32 - 30,
+            w: 480,
+            h: 30,
+            c: Paint { rgb: [0x8c, 0x1e, 0x1e], alpha: 1.0 },
+            corner: 1.0,
+        });
+        let font_idx = font_index("ubuntu").expect("built in");
+        let s = Style { font_idx, font: font_at(font_idx), size: 14.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
+        self.record_text(&s, 8, HEIGHT as i32 - 10, 464, message.to_string());
     }
 }
 
@@ -356,30 +475,30 @@ impl UserData for Picture {
         m.add_method("size", |_, _, ()| Ok((WIDTH, HEIGHT)));
         m.add_method_mut("rect", |lua, p, (x, y, w, h, c, corner): (i32, i32, i32, i32, Value, Option<f32>)| {
             let c = paint(lua, &c)?;
-            p.fill(x, y, w, h, c, corner.unwrap_or(1.0));
+            p.ops.push(DrawOp::Fill { x, y, w, h, c, corner: corner.unwrap_or(1.0) });
             Ok(())
         });
         m.add_method_mut("frame", |lua, p, (x, y, w, h, c, corner): (i32, i32, i32, i32, Value, Option<f32>)| {
             let c = paint(lua, &c)?;
-            p.frame(x, y, w, h, c, corner.unwrap_or(1.0));
+            p.ops.push(DrawOp::Frame { x, y, w, h, c, corner: corner.unwrap_or(1.0) });
             Ok(())
         });
         m.add_method_mut("triangle", |lua, p, (x, y, w, h, dir, c): (i32, i32, i32, i32, String, Value)| {
             let c = paint(lua, &c)?;
-            p.triangle(x, y, w, h, &dir, c);
+            p.ops.push(DrawOp::Triangle { x, y, w, h, dir, c });
             Ok(())
         });
         m.add_method_mut(
             "circle",
             |lua, p, (cx, cy, r, c, width, from, to): (f32, f32, f32, Value, Option<f32>, Option<f32>, Option<f32>)| {
                 let c = paint(lua, &c)?;
-                p.circle(cx, cy, r, width, c, from.zip(to));
+                p.ops.push(DrawOp::Circle { cx, cy, r, width, c, arc: from.zip(to) });
                 Ok(())
             },
         );
         m.add_method_mut("line", |lua, p, (x0, y0, x1, y1, width, c): (f32, f32, f32, f32, f32, Value)| {
             let c = paint(lua, &c)?;
-            p.line((x0, y0), (x1, y1), width, c);
+            p.ops.push(DrawOp::Line { p0: (x0, y0), p1: (x1, y1), width, c });
             Ok(())
         });
         m.add_method_mut(
@@ -387,21 +506,25 @@ impl UserData for Picture {
             |lua, p, (x, y, w, h, text, st, align, valign): (i32, i32, i32, i32, String, Value, Option<String>, Option<String>)| {
                 let s = style(lua, &st)?;
                 p.texts.push(text.clone());
-                Ok(p.label(&s, x, y, w, h, &text, align.as_deref().unwrap_or("center"), valign.as_deref().unwrap_or("center")))
+                Ok(p.record_label(&s, x, y, w, h, text, align.as_deref().unwrap_or("center"), valign.as_deref().unwrap_or("center")))
             },
         );
         m.add_method_mut("text", |lua, p, (x, y, text, st, max_w): (i32, i32, String, Value, Option<i32>)| {
             let s = style(lua, &st)?;
             p.texts.push(text.clone());
-            Ok(p.text(&s, x, y, max_w.unwrap_or(WIDTH as i32), &text))
+            Ok(p.record_text(&s, x, y, max_w.unwrap_or(WIDTH as i32), text))
         });
         // image(x, y, w, h, key, thumb): a picture given to the surface, fitted into the
         // box; false if there's none by that key.
         m.add_method_mut("image", |lua, p, (x, y, w, h, key, thumb): (i32, i32, i32, i32, String, Option<bool>)| {
             let Some(pictures) = lua.app_data_ref::<Pictures>().map(|p| p.clone()) else { return Ok(false) };
             let pictures = pictures.borrow();
-            let Some(img) = pictures.get(&(key, thumb.unwrap_or(true))) else { return Ok(false) };
-            p.image(x, y, w, h, img);
+            let thumb = thumb.unwrap_or(true);
+            let Some(img) = pictures.get(&(key.clone(), thumb)).cloned() else {
+                return Ok(false);
+            };
+            p.images.insert((key.clone(), thumb), img);
+            p.ops.push(DrawOp::Image { x, y, w, h, key, thumb });
             Ok(true)
         });
         m.add_method("text_width", |lua, _, (text, st): (String, Value)| Ok(Picture::width(&style(lua, &st)?, &text)));
@@ -474,6 +597,21 @@ mod tests {
         assert_eq!(bb(0, 4, 4), "1.1.1");
         assert_eq!(bb(960 * 4 + 960 + 240, 4, 4), "2.2.2");
         assert_eq!(bb(480 * 7, 7, 8), "2.1.1");
+    }
+
+    #[test]
+    fn text_gamma_boosts_antialiased_edges() {
+        let font_idx = font_index("roboto-medium").unwrap();
+        let f = font_at(font_idx);
+        let s = Style { font_idx, font: f, size: 14.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
+        let (_, bitmap) = f.rasterize('O', s.size);
+        let mid = *bitmap.iter().find(|&&b| b > 32 && b < 200).expect("an antialiased edge pixel");
+        let mut p = Picture::new([0; 3]);
+        assert_eq!(p.record_text(&s, 10, 24, 200, "O".into()), Picture::width(&s, "O"));
+        p.rasterize();
+        let expected = ((mid as f32 / 255.0).powf(1.0 / 1.45) * 255.0).round() as u8;
+        assert!(expected > mid, "gamma-corrected edge pixel ({expected}) is brighter than raw linear coverage ({mid})");
+        assert!(p.px.iter().any(|px| px[0] == expected), "drawn with gamma-corrected coverage");
     }
 
     /// Writes both screens to the temporary folder to look at (`--ignored`); with

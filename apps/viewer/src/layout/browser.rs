@@ -204,7 +204,8 @@ fn splice_line(ui: &mut Ui, text: &str, search: Option<&str>) {
 
 fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let b = &app.browser;
-    let height = (ui.available_height() - 34.0).max(60.0);
+    let footer = if b.query.kind == Kind::Group { 58.0 } else { 34.0 };
+    let height = (ui.available_height() - footer).max(60.0);
     egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show_rows(
         ui,
         RESULT_ROW,
@@ -264,6 +265,9 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             }
         },
     );
+    if b.query.kind == Kind::Group {
+        group_load_row(app, ui, acts);
+    }
     prehear_row(app, ui, acts);
 }
 
@@ -350,6 +354,20 @@ fn files(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             if !e.dir && resp.drag_started() {
                 resp.dnd_set_drag_payload(DraggedFile(e.path.clone()));
             }
+        }
+    });
+    group_load_row(app, ui, acts);
+}
+
+/// `+ ROUTING` and `+ PATTERNS`: whether loading a group loads its routing and patterns.
+fn group_load_row(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
+    let b = &app.browser;
+    ui.horizontal(|ui| {
+        if chip(ui, "+ ROUTING", b.routing, 10.0).on_hover_text("Load the group's sound and group routing").clicked() {
+            acts.push(Act::Browse(BrowseAct::Routing(!b.routing)));
+        }
+        if chip(ui, "+ PATTERNS", b.patterns, 10.0).on_hover_text("Load the group's patterns").clicked() {
+            acts.push(Act::Browse(BrowseAct::Patterns(!b.patterns)));
         }
     });
 }

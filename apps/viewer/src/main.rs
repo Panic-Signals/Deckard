@@ -1122,6 +1122,7 @@ pub struct App {
     /// The focused sound's Audio plug-in take in focus (group, sound, take): its frames
     /// and rate (for its tempo).
     take_info: Option<((usize, usize, usize), usize, u32)>,
+    take_info_key: Option<(usize, usize, usize, deckard_model::SampleRef)>,
     /// The focused group's Audio plug-in takes as the pattern editor draws them, by
     /// (group, sound, take): the file and frames they're of, and peaks (min, max) across
     /// the played frames.
@@ -1173,8 +1174,13 @@ pub struct App {
     /// when the next edit is due to be kept.
     session_kept: (u64, u64),
     session_due: Option<std::time::Instant>,
+    session_due_for: (u64, u64),
+    /// The backup being written in the background, if any (see [`App::session_written`]).
+    session_writing: Option<std::thread::JoinHandle<()>>,
     /// Goes up with each project opened or made.
     doc_generation: u64,
+    /// Cached `(doc_generation, revision, macro_targets, group_noted)` for `surface_view`.
+    surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
 }
 
 /// Launch time (a newtype so `App` can derive `Default`).
@@ -1206,8 +1212,8 @@ fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
 pub(crate) struct Mk3Out {
     pub route: mk3_io::PadRoute,
     pub leds: deckard_mk3::leds::Leds,
-    /// New screens, if they changed: their count and 960 × 272 RGBA pixels.
-    pub screens: Option<(u64, Vec<[u8; 4]>)>,
+    /// New screens, if they changed: their count and frame to rasterize on the display thread.
+    pub screens: Option<(u64, mk3_io::ScreenFrame)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1248,6 +1254,40 @@ const ROUTE_STEP: f64 = 1.0 / 32.0;
 fn log_knobs() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("DECKARD_LOG_MK3").is_some() || std::env::var_os("DECKARD_LOG_KNOBS").is_some())
+}
+
+/// Coalesce a frame's 500 Hz MK3 reports so consecutive turns of the same knob add up
+/// and intermediate touch-strip moves don't lag behind the finger.
+fn coalesce_mk3_events(events: Vec<deckard_mk3::Event>) -> Vec<deckard_mk3::Event> {
+    use deckard_mk3::Event;
+    let mut out: Vec<Event> = Vec::with_capacity(events.len());
+    for (i, e) in events.iter().enumerate() {
+        match *e {
+            Event::Knob(k, inc) => {
+                if let Some(prev_inc) = out.iter_mut().rev().take_while(|x| matches!(x, Event::Knob(..))).find_map(|x| match x {
+                    Event::Knob(pk, pi) if *pk == k => Some(pi),
+                    _ => None,
+                }) {
+                    *prev_inc += inc;
+                    continue;
+                }
+                out.push(Event::Knob(k, inc));
+            }
+            Event::Touch(f, 1, _) => {
+                let superseded = events[i + 1..].iter().find_map(|next| match *next {
+                    Event::Touch(nf, 1, _) if nf == f => Some(true),
+                    Event::Touch(nf, 0 | 2, _) if nf == f => Some(false),
+                    _ => None,
+                });
+                if superseded == Some(true) {
+                    continue;
+                }
+                out.push(*e);
+            }
+            _ => out.push(*e),
+        }
+    }
+    out
 }
 
 impl App {
@@ -1717,12 +1757,29 @@ impl App {
         if let Some(p) = d.path() {
             info += &format!("path = {}\n", p.display());
         }
-        let _ = std::fs::create_dir_all(&dir);
-        for (name, data) in [("session.mxprj", bytes), ("session.txt", info.into_bytes())] {
-            let tmp = dir.join(format!("{name}.saving"));
-            if std::fs::write(&tmp, data).is_ok() {
-                let _ = std::fs::rename(&tmp, dir.join(name));
+        drop(d);
+        // One at a time, in order: an older backup never lands over a newer one.
+        self.session_written();
+        let write = move || {
+            let _ = std::fs::create_dir_all(&dir);
+            for (name, data) in [("session.mxprj", bytes), ("session.txt", info.into_bytes())] {
+                let tmp = dir.join(format!("{name}.saving"));
+                if std::fs::write(&tmp, data).is_ok() {
+                    let _ = std::fs::rename(&tmp, dir.join(name));
+                }
             }
+        };
+        if clean {
+            write();
+        } else {
+            self.session_writing = Some(std::thread::spawn(write));
+        }
+    }
+
+    /// Wait for the backup being written in the background, if there is one.
+    fn session_written(&mut self) {
+        if let Some(w) = self.session_writing.take() {
+            let _ = w.join();
         }
     }
 
@@ -1737,7 +1794,18 @@ impl App {
         if self.session_dir.is_none() || now == self.session_kept {
             return;
         }
-        let at = *self.session_due.get_or_insert_with(|| std::time::Instant::now() + SESSION_DELAY);
+        let at = match self.session_due {
+            Some(at) if self.session_due_for == now || self.session_due_for == (0, 0) => {
+                self.session_due_for = now;
+                at
+            }
+            _ => {
+                let at = std::time::Instant::now() + SESSION_DELAY;
+                self.session_due = Some(at);
+                self.session_due_for = now;
+                at
+            }
+        };
         if std::time::Instant::now() >= at {
             self.keep_session();
         }
@@ -4248,7 +4316,7 @@ impl App {
         Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             std::time::Duration::from_millis(30)
         } else {
-            controller::tick_every(self.playing.is_some())
+            controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering())
         })
     }
 
@@ -4326,8 +4394,8 @@ impl App {
         if let Some(m) = &self.mk3 {
             m.set_route(out.route);
             m.set_leds(out.leds.scaled(self.settings.led_brightness));
-            if let Some((n, px)) = out.screens {
-                m.set_screens(n, &px);
+            if let Some((n, frame)) = out.screens {
+                m.set_screens(n, frame);
             }
         }
         // Pad hits that came while no engine ran (it starts with the first): each at its
@@ -4345,6 +4413,7 @@ impl App {
     /// Hardware-free, so tests drive it with made-up events.
     pub(crate) fn mk3_events(&mut self, events: Vec<deckard_mk3::Event>, requests: &mut Vec<controller::Request>) -> Mk3Out {
         use deckard_mk3::Event;
+        let events = coalesce_mk3_events(events);
         // The plug-in knobs of the slot focused since the frame began (a sound picked
         // by the scripts, say), for what the scripts see.
         self.update_slot_view();
@@ -4397,7 +4466,7 @@ impl App {
             let mut screens = None;
             if c.screens().is_some() && c.screens_drawn != self.mk3_screens_sent {
                 self.mk3_screens_sent = c.screens_drawn;
-                screens = c.screens().map(|s| (self.mk3_screens_sent, s.px.clone()));
+                screens = c.screens().map(|s| (self.mk3_screens_sent, mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(s.px.clone()))));
             }
             let scaling = self.settings.velocity_scaling;
             let route =
@@ -4424,24 +4493,29 @@ impl App {
             }
             self.browser.poll();
             self.refresh_surface_settings();
-            let view = self.surface_view();
+            let mut view = self.surface_view();
             let mut actions = Vec::new();
             for e in &events {
                 actions.extend(self.surface.event(e, &view, now));
             }
             actions.extend(self.surface.tick(&view, now));
-            for a in actions {
-                self.surface_act(a);
+            if !actions.is_empty() {
+                for a in actions {
+                    self.surface_act(a);
+                }
+                // (A slot or sound the buttons just focused shows its plug-in's knobs.)
+                self.update_slot_view();
+                self.refresh_surface_settings();
+                view = self.surface_view();
             }
+            // On the Browse page, the browser has its results to show.
             if self.surface.page() == "browse" && !self.browser.started() {
                 self.browse(browser::BrowseAct::Toggle);
                 self.browse(browser::BrowseAct::Toggle);
+                self.browser.poll();
+                self.refresh_surface_settings();
+                view = self.surface_view();
             }
-            self.browser.poll();
-            // (A slot or sound the buttons just focused shows its plug-in's knobs.)
-            self.update_slot_view();
-            self.refresh_surface_settings();
-            let view = self.surface_view();
             let fixed =
                 self.doc.as_ref().and_then(|d| d.borrow().num(deckard_doc::Target::Song, "fixed_velocity")).map_or(100, |v| v as i64);
             let pads = self.surface.pads(&view);
@@ -4456,7 +4530,11 @@ impl App {
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
             };
-            Mk3Out { route, leds: self.surface.leds(&view), screens: self.surface.screens(&view) }
+            Mk3Out {
+                route,
+                leds: self.surface.leds(&view),
+                screens: self.surface.screen_picture(&view).map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))),
+            }
         }
     }
 
@@ -4526,7 +4604,21 @@ impl App {
         let edits = self.knob_edits();
         // (Not on the Macro page: its knobs are all macros.)
         let on_macros = self.channel && self.prop_set == 3;
-        let macro_targets = self.doc.as_ref().filter(|_| !on_macros).map(|d| d.borrow().macro_targets()).unwrap_or_default();
+        if let Some(doc) = &self.doc {
+            let d = doc.borrow();
+            let rev = d.revision();
+            let mut cache = self.surface_doc_cache.borrow_mut();
+            if (cache.0, cache.1) != (self.doc_generation, rev) {
+                let noted = d
+                    .project()
+                    .groups
+                    .iter()
+                    .map(|grp| grp.patterns.iter().flat_map(|pt| pt.notes.iter().map(|n| n.sound)).collect())
+                    .collect();
+                *cache = (self.doc_generation, rev, d.macro_targets(), noted);
+            }
+        }
+        let doc_cache = self.surface_doc_cache.borrow();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -4561,7 +4653,7 @@ impl App {
                         modulatable: edits.get(i).copied().flatten().and_then(modulation::mod_target).is_some(),
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
                         auto_mod: self.auto_mod_text(edits.get(i).copied().flatten()),
-                        in_macro: k.param.is_some_and(|p| macro_targets.contains(&p)),
+                        in_macro: !on_macros && k.param.is_some_and(|p| doc_cache.2.contains(&p)),
                     })
                 })
                 .collect(),
@@ -4611,6 +4703,8 @@ impl App {
                 focus: b.focus,
                 busy: b.busy,
                 favorites: b.favorites,
+                routing: b.routing,
+                patterns: b.patterns,
             };
         }
         let Some(doc) = &self.doc else { return v };
@@ -4735,7 +4829,7 @@ impl App {
                 let grp = &p.groups[g];
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
-                let noted: std::collections::HashSet<usize> = grp.patterns.iter().flat_map(|pt| pt.notes.iter().map(|n| n.sound)).collect();
+                let noted = doc_cache.3.get(g);
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -4795,7 +4889,7 @@ impl App {
                                     || snd.sampler.as_ref().is_some_and(|sm| sm.zones.iter().any(|z| !z.sample.path.is_empty()))
                                     || !snd.name.is_empty()
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
-                                    || noted.contains(&s),
+                                    || noted.is_some_and(|n| n.contains(&s)),
                                 playing: self.lit.contains(&(g, s)),
                                 mix: deckard_surface::MixView {
                                     aux: snd.aux,
@@ -4837,7 +4931,8 @@ impl App {
         use deckard_lua_host::state::ControlRequest as R;
         use deckard_surface::Action as A;
         use layout::Act;
-        let (g, project) = (self.group, self.doc.as_ref().map(|d| d.borrow().project().clone()));
+        let g = self.group;
+        let project = |app: &App| app.doc.as_ref().map(|d| d.borrow().project().clone());
         match a {
             A::Play => self.transport_play(),
             A::Stop => self.stop(),
@@ -4848,7 +4943,7 @@ impl App {
             A::AutoWrite(on) => self.auto_write = on,
             A::Tempo(bpm) => layout::apply_acts(self, vec![Act::SetTempo(bpm)]),
             A::Swing(amount) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 layout::apply_acts(self, vec![Act::SetSwing(Target::Song, deckard_model::Swing { amount, ..p.swing })]);
             }
             A::Volume(level) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, level)]),
@@ -4856,13 +4951,13 @@ impl App {
             A::FocusGroup(group) => self.focus_group(group),
             A::FocusSound(s) => self.sound = s,
             A::FocusScene(scene) => {
-                if project.is_some_and(|p| scene < p.scenes.len()) {
+                if project(self).is_some_and(|p| scene < p.scenes.len()) {
                     self.launch_scene(scene);
                 }
             }
             A::ShowScenes(first) => self.show_scenes = Some(first),
             A::NewPatternIn(group) => {
-                if project.is_some_and(|p| group < p.groups.len()) {
+                if project(self).is_some_and(|p| group < p.groups.len()) {
                     let was = (self.group, self.pattern);
                     layout::apply_acts(self, vec![Act::NewPattern(self.scene, group)]);
                     if group != was.0 {
@@ -4871,7 +4966,7 @@ impl App {
                 }
             }
             A::NewPatternAt { group, slot } => {
-                if project.is_some_and(|p| group < p.groups.len()) {
+                if project(self).is_some_and(|p| group < p.groups.len()) {
                     let was = (self.group, self.pattern);
                     layout::apply_acts(self, vec![Act::NewPatternAt(self.scene, group, slot)]);
                     if group != was.0 {
@@ -4881,7 +4976,7 @@ impl App {
             }
             // (A MIDI controller's scene button: stopped, it starts the scene too.)
             A::LaunchScene(scene) => {
-                if project.is_some_and(|p| scene < p.scenes.len()) {
+                if project(self).is_some_and(|p| scene < p.scenes.len()) {
                     self.launch_scene(scene);
                     if self.playing.is_none() && !self.receiving_clock() {
                         self.parked = None;
@@ -4891,7 +4986,7 @@ impl App {
                 }
             }
             A::PickPattern(pi) => {
-                if project.is_some_and(|p| p.groups.get(g).is_some_and(|grp| pi < grp.patterns.len())) {
+                if project(self).is_some_and(|p| p.groups.get(g).is_some_and(|grp| pi < grp.patterns.len())) {
                     layout::apply_acts(self, vec![Act::AssignPattern(self.scene, g, Some(pi)), Act::FocusPattern(g, pi)]);
                 }
             }
@@ -4900,7 +4995,7 @@ impl App {
                 self.surface_sampling(a)
             }
             A::ScenePattern { group, pattern } => {
-                if project.is_some_and(|p| {
+                if project(self).is_some_and(|p| {
                     self.scene < p.scenes.len() && p.groups.get(group).is_some_and(|grp| pattern.is_none_or(|pi| pi < grp.patterns.len()))
                 }) {
                     layout::apply_acts(self, vec![Act::AssignPattern(self.scene, group, pattern)]);
@@ -4927,7 +5022,7 @@ impl App {
                 layout::apply_acts(self, vec![a]);
             }
             A::SceneEdit(what) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let a = match what {
                     "create" => Act::AddScene,
                     "duplicate" => Act::DuplicateScene(self.scene),
@@ -4946,12 +5041,12 @@ impl App {
             }
             A::SongView(on) => self.song_view = on,
             A::FocusSection(i) => {
-                if project.is_some_and(|p| i < p.sections.len()) {
+                if project(self).is_some_and(|p| i < p.sections.len()) {
                     self.launch_section(i);
                 }
             }
             A::SectionEdit(what) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let focus = self.focused_section(&p);
                 let acts = match (what, focus) {
                     // A new section after the focused one, playing its scene.
@@ -4972,7 +5067,7 @@ impl App {
                 layout::apply_acts(self, acts);
             }
             A::SectionMove(next) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let Some(i) = self.focused_section(&p) else { return };
                 let to = if next { i + 1 } else { i.wrapping_sub(1) };
                 if to < p.sections.len() {
@@ -4980,7 +5075,7 @@ impl App {
                 }
             }
             A::SectionScene(next) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let Some(i) = self.focused_section(&p) else { return };
                 let Some(at) = p.sections[i].scene else { return };
                 let to = if next { at + 1 } else { at.wrapping_sub(1) };
@@ -4989,7 +5084,7 @@ impl App {
                 }
             }
             A::SectionLength(ticks) => {
-                let Some(i) = project.as_ref().and_then(|p| self.focused_section(p)) else { return };
+                let Some(i) = project(self).as_ref().and_then(|p| self.focused_section(p)) else { return };
                 layout::apply_acts(self, vec![Act::SectionLength(i, Some(ticks))]);
             }
             A::Browse(b) => {
@@ -5004,6 +5099,8 @@ impl App {
                     B::Load => C::Load,
                     B::Favorites => C::ToggleFavorites,
                     B::Prehear => C::Prehear,
+                    B::Routing(on) => C::Routing(on),
+                    B::Patterns(on) => C::Patterns(on),
                     B::SetFavorite => {
                         let i = self.browser.selected.unwrap_or(0);
                         let Some(on) = self.browser.results.items.get(i).map(|r| !r.favorite) else { return };
@@ -5035,7 +5132,7 @@ impl App {
             A::MuteSound(s) => layout::apply_acts(self, vec![Act::ToggleMute(Target::Sound(g, s))]),
             A::SoloSound(s) => self.solo(layout::Channel::Sound(g, s)),
             A::EraseSound(s) => {
-                let Some(pat) = project.as_ref().and_then(|p| p.groups.get(g)?.patterns.get(self.pattern)) else { return };
+                let Some(pat) = project(self).as_ref().and_then(|p| p.groups.get(g)?.patterns.get(self.pattern).cloned()) else { return };
                 let remove: Vec<_> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
                 if !remove.is_empty() {
                     layout::apply_acts(self, vec![Act::EditNotes { g, p: self.pattern, label: "Erase", remove, add: Vec::new() }]);
@@ -5110,7 +5207,7 @@ impl App {
                 }
             }
             A::DeletePattern { group, pattern } => {
-                if project.is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
+                if project(self).is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
                     layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
                 }
             }
@@ -5122,7 +5219,7 @@ impl App {
                 }
             }
             A::DeleteScene(scene) => {
-                if project.is_some_and(|p| p.scenes.len() > 1 && scene < p.scenes.len()) {
+                if project(self).is_some_and(|p| p.scenes.len() > 1 && scene < p.scenes.len()) {
                     layout::apply_acts(self, vec![Act::DeleteScene(scene)]);
                 }
             }
@@ -5134,7 +5231,7 @@ impl App {
                 }
             }
             A::CopyGroup { from, to } => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 if from == to || from >= p.groups.len() || to > p.groups.len() {
                     return;
                 }
@@ -5146,7 +5243,7 @@ impl App {
                 layout::apply_acts(self, acts);
             }
             A::CopySound { from, to } => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let sounds = p.groups.get(g).map_or(0, |grp| grp.sounds.len());
                 if from != to && from < sounds && to < sounds {
                     layout::apply_acts(self, vec![Act::CopySound(g, from), Act::PasteSound(g, to)]);
@@ -5160,7 +5257,7 @@ impl App {
                 layout::apply_acts(self, vec![Act::SetParam(t, if aux == 0 { "aux1_level" } else { "aux2_level" }, level)]);
             }
             A::SetChannelSwing { group, sound, amount } => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let (t, swing) = match (group, sound) {
                     (Some(gr), Some(s)) => {
                         let Some(x) = p.groups.get(gr).and_then(|grp| grp.sounds.get(s)) else { return };
@@ -5271,7 +5368,7 @@ impl App {
                 }
             }
             A::PadTouch(field, v) => {
-                let Some(p) = project else { return };
+                let Some(p) = project(self) else { return };
                 let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(self.sound)) else { return };
                 let mut t = snd.pad_touch;
                 let byte = v.clamp(0, 127) as u8;
@@ -5489,15 +5586,16 @@ impl App {
                 // A routing choice: the next or previous one, a step every ROUTE_STEP.
                 if let Edit::Route(cur) = edit {
                     let Some((_, _, sets)) = routes.iter().find(|(i, ..)| *i == pos) else { return };
-                    if self.knob_acc[pos].abs() < ROUTE_STEP || sets.is_empty() {
+                    let n = (self.knob_acc[pos].abs() / ROUTE_STEP).floor() as usize;
+                    if n == 0 || sets.is_empty() {
                         return;
                     }
                     let up = self.knob_acc[pos] > 0.0;
-                    self.knob_acc[pos] = 0.0;
+                    self.knob_acc[pos] -= (n as f64) * ROUTE_STEP * self.knob_acc[pos].signum();
                     let to = match cur {
                         usize::MAX => 0,
-                        c if up => (c + 1).min(sets.len() - 1),
-                        c => c.saturating_sub(1),
+                        c if up => (c + n).min(sets.len() - 1),
+                        c => c.saturating_sub(n),
                     };
                     if to == cur {
                         return;
@@ -5516,13 +5614,14 @@ impl App {
                 };
                 let to = match step {
                     Some(q) => {
-                        let n = (self.knob_acc[pos].abs() / (q * 0.25).max(1e-9)).floor();
+                        let unit = (q * 0.25).max(1e-9);
+                        let n = (self.knob_acc[pos].abs() / unit).floor();
                         if n < 1.0 {
                             return;
                         }
-                        let moved = q * self.knob_acc[pos].signum();
-                        self.knob_acc[pos] = 0.0;
-                        value as f64 + moved
+                        let sign = self.knob_acc[pos].signum();
+                        self.knob_acc[pos] -= n * unit * sign;
+                        value as f64 + n * q * sign
                     }
                     None => {
                         let to = value as f64 + self.knob_acc[pos];
@@ -5922,13 +6021,14 @@ impl App {
     fn follow_edits(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let d = doc.borrow();
-        self.remember_libraries();
         let Some(Ok(out)) = &self.output else { return };
         // An edit that reached the engine while it switched modes is sent again.
         let (mode, stale) = out.telemetry(|t| (t.mode, t.stale && t.actions >= self.adopt_sent));
         if d.revision() == self.seen_revision && !stale {
             return;
         }
+        self.remember_libraries();
+        let Some(Ok(out)) = &self.output else { return };
         // The mode it plays, once it has published one.
         let Some(mode) = mode.filter(|_| out.has_engine()) else { return };
         self.seen_revision = d.revision();
@@ -6088,6 +6188,8 @@ impl App {
         };
         active |= travels != self.route_seen;
         self.route_seen = travels;
+        active |=
+            self.recorder.busy() || self.recorder.is_metering() || self.recorder.view.meter.0 > 0.001 || self.recorder.view.meter.1 > 0.001;
         if lfo_live {
             ctx.request_repaint_after(if again.is_zero() { std::time::Duration::from_millis(30) } else { again });
         }
@@ -6245,16 +6347,23 @@ impl App {
         self.poll_stems();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
-        self.take_info = None;
-        if let Some(doc) = self.doc.clone() {
+        let take_key = self.doc.as_ref().and_then(|doc| {
             let d = doc.borrow();
-            let a = d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|s| s.audio.as_ref());
-            if let Some((k, t)) = a.and_then(|a| a.takes.get(a.focused).map(|t| (a.focused, t.sample.clone()))) {
-                let path = d.path().map(Path::to_path_buf);
-                drop(d);
-                if let Some(smp) = self.samples.sample(&t, path.as_deref()) {
-                    self.take_info = Some(((self.group, self.sound, k), smp.frames.len(), smp.rate));
+            let a = d.project().groups.get(self.group)?.sounds.get(self.sound)?.audio.as_ref()?;
+            let t = a.takes.get(a.focused)?;
+            Some(((self.group, self.sound, a.focused, t.sample.clone()), d.path().map(Path::to_path_buf)))
+        });
+        match take_key {
+            Some((key, path)) => {
+                if self.take_info_key.as_ref() != Some(&key) {
+                    let (g, s, k, ref smp_ref) = key;
+                    self.take_info = self.samples.sample(smp_ref, path.as_deref()).map(|smp| ((g, s, k), smp.frames.len(), smp.rate));
+                    self.take_info_key = Some(key);
                 }
+            }
+            None => {
+                self.take_info = None;
+                self.take_info_key = None;
             }
         }
         let clock = self.record_clock();
@@ -6264,7 +6373,8 @@ impl App {
         };
         // The input meter moves while a RECORD tab shows (the app's, or the controller's
         // Sampling page), before recording too.
-        let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0);
+        let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0)
+            || (self.mk3.is_some() && self.surface.page() == "sampling" && self.sampling.tab == 0);
         let listen = self.meter_inputs && ((self.sampling_open && self.sampling.tab == 0) || hw_record);
         self.recorder.meter(
             listen,
@@ -7837,6 +7947,14 @@ impl App {
                 b.prehear_gain = g;
                 return;
             }
+            B::Routing(on) => {
+                b.routing = on;
+                return;
+            }
+            B::Patterns(on) => {
+                b.patterns = on;
+                return;
+            }
             B::Folder(dir) => {
                 b.files = browser::list_folder(&dir);
                 b.files_dir = dir;
@@ -7951,7 +8069,7 @@ impl App {
                 let mut d = doc.borrow_mut();
                 let slot = match item.kind {
                     Kind::Group => {
-                        d.load_group_file(g, &bytes)?;
+                        d.load_group_file_with(g, &bytes, self.browser.routing, self.browser.patterns)?;
                         None
                     }
                     Kind::Sound => {
@@ -9324,6 +9442,7 @@ impl App {
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
+        self.update_sampling();
         self.sync_sampling_page();
         self.sync_browse_page();
         self.sync_arp();
@@ -9451,8 +9570,8 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed or recording.
-        if self.recorder.busy() {
+        // The recorder takes up its audio every frame while armed, recording, or metering.
+        if self.recorder.busy() || self.recorder.is_metering() {
             ctx.request_repaint();
         }
         self.update_slot_view();
@@ -9663,6 +9782,8 @@ impl App {
         self.sync_clocks(ui.ctx());
         self.input_sync();
         layout::body(self, ui);
+        self.update_slot_view();
+        self.follow_edits();
         if !self.dropped_samples.is_empty() {
             let files = std::mem::take(&mut self.dropped_samples);
             let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
@@ -14109,6 +14230,7 @@ mod tests {
         app.new_project();
         app.doc.as_ref().unwrap().borrow_mut().set_tempo(97.0).unwrap();
         app.keep_session();
+        app.session_written();
         let mut next = App { session_dir: Some(dir.clone()), ..Default::default() };
         next.start_project();
         let d = next.doc.as_ref().unwrap().borrow();
@@ -14622,6 +14744,70 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert!(voices > 0, "the kick sounds on press, before the button is released");
         h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
         h.step();
+    }
+
+    #[test]
+    fn mk3_knob_burst_keeps_full_travel() {
+        use deckard_mk3::Event as E;
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        let mut req = Vec::new();
+        // On the Mixer page (`knob` reads `deckard.state()` directly), a burst of 10
+        // 500 Hz reports in one frame (+0.10 turn = +7 dB) must move by the full sum.
+        app.mk3_events(vec![E::Button("BUTTON_MIX", true), E::Button("BUTTON_MIX", false)], &mut req);
+        let before = app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].level;
+        app.mk3_events(vec![E::Knob(0, 0.01); 10], &mut req);
+        let after = app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].level;
+        let db = deckard_model::level_db(after) - deckard_model::level_db(before);
+        assert!((db - 7.0).abs() < 0.05, "mixer knob moved by full +7 dB burst: {before} -> {after} ({db:+.2} dB)");
+
+        // On the Control page with a native plug-in (Replicant), a burst of 10 reports
+        // in one frame on knob 4 (Detune, continuous) must move by the full +0.20.
+        app.mk3_events(vec![E::Button("BUTTON_PLUGIN", true), E::Button("BUTTON_PLUGIN", false)], &mut req);
+        let cls = deckard_plugins::native::CLASSES[0];
+        app.doc
+            .as_ref()
+            .unwrap()
+            .borrow_mut()
+            .add_slot(0, 0, 0, &deckard_doc::NewModule::Plugin { id: cls.plugin_id(), name: cls.name.into(), chunk: Vec::new() })
+            .unwrap();
+        app.slot = Some(0);
+        app.mk3_events(Vec::new(), &mut req);
+        let p0 = app.plugin_view.as_ref().unwrap().values[3].0;
+        app.mk3_events(vec![E::Knob(3, 0.02); 10], &mut req);
+        let p1 = app.plugin_view.as_ref().unwrap().values[3].0;
+        let want = (p0 + 0.20).clamp(0.0, 1.0);
+        assert!((p1 - want).abs() < 1e-4, "plug-in knob moved by full burst: {p0} -> {p1} (want {want})");
+    }
+
+    #[test]
+    fn mk3_touchstrip_move_burst_lights_pitch_and_mod_without_redrawing_screens() {
+        use deckard_mk3::Event as E;
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        let mut req = Vec::new();
+        let (_, frame) = app.mk3_events(Vec::new(), &mut req).screens.expect("initial screen draw");
+        assert!(matches!(&frame, mk3_io::ScreenFrame::Picture(p) if p.px.is_empty()), "UI thread records DrawOps without rasterizing");
+        assert_eq!(frame.into_pixels().len(), 960 * 272, "display thread rasterizes the 960x272 frame");
+
+        // Pitch mode: select PITCH, flush the screen update, then slide to 0.9 in a burst.
+        app.mk3_events(vec![E::Button("BUTTON_PITCH", true), E::Button("BUTTON_PITCH", false)], &mut req);
+        app.mk3_events(Vec::new(), &mut req);
+        let out = app.mk3_events(vec![E::Touch(0, 0, 0.5), E::Touch(0, 1, 0.65), E::Touch(0, 1, 0.9)], &mut req);
+        assert!(out.screens.is_none(), "touchstrip pitch move does not re-rasterize the 960x272 screens");
+        // Upper half of the strip (dots 13..=23) is lit, lower half (dots 1..=12) is dark.
+        assert_eq!(out.leds.get("LED_TS_12"), Some(0), "dot 12 stays dark on upward bend");
+        assert!(out.leds.get("LED_TS_13").unwrap() > 0 && out.leds.get("LED_TS_23").unwrap() > 0, "dots 13..23 light up on upward bend");
+
+        // Mod mode: select MOD, flush the screen update, then slide to 0.8 in a burst.
+        app.mk3_events(vec![E::Button("BUTTON_MOD", true), E::Button("BUTTON_MOD", false)], &mut req);
+        app.mk3_events(Vec::new(), &mut req);
+        let out = app.mk3_events(vec![E::Touch(0, 0, 0.2), E::Touch(0, 1, 0.5), E::Touch(0, 1, 0.8)], &mut req);
+        assert!(out.screens.is_none(), "touchstrip mod move does not re-rasterize the 960x272 screens");
+        assert!(out.leds.get("LED_TS_01").unwrap() > 0 && out.leds.get("LED_TS_20").unwrap() > 0, "mod bar lights up to dot 20");
+        assert_eq!(out.leds.get("LED_TS_25"), Some(0), "top dot stays dark at 0.8");
     }
 
     #[test]

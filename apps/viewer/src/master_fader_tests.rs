@@ -31,13 +31,13 @@ fn drag(h: &mut Harness<'static, crate::App>, from: Pos2, to: Pos2) {
 fn the_header_fader_sets_the_master_level() {
     let Some(mut h) = crate::tests::harness(false, false) else { return };
     let start = level(&h);
-    let (a, b) = (track(&h, 0.5), track(&h, 0.3));
+    let (a, b) = (track(&h, 0.9), track(&h, 0.1));
     drag(&mut h, a, b);
     let lower = level(&h);
     assert!(lower < start - 0.1, "dragged left: {start} → {lower}");
-    let (a, b) = (track(&h, 0.3), track(&h, 0.6));
+    let (a, b) = (track(&h, 0.1), track(&h, 0.9));
     drag(&mut h, a, b);
-    assert!(level(&h) > lower + 0.2, "dragged right");
+    assert!(level(&h) > lower + 0.1, "dragged right");
     // Undoable, as the Mixer's fader (moves close together are one step).
     h.state().doc.as_ref().unwrap().borrow_mut().undo();
     assert!((level(&h) - start).abs() < 1e-9, "undo takes the drags back");

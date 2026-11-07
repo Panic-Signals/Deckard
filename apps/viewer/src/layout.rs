@@ -193,6 +193,11 @@ fn font(size: f32) -> FontId {
     FontId::proportional(size)
 }
 
+fn bold_font(ctx: &egui::Context, size: f32) -> FontId {
+    let bold = egui::FontFamily::Name("bold".into());
+    if ctx.fonts(|f| f.families().contains(&bold)) { FontId::new(size, bold) } else { font(size) }
+}
+
 /// Text clipped to `rect`, left-aligned at `indent`, vertically centred.
 fn label(painter: &Painter, rect: Rect, indent: f32, text: &str, size: f32, color: Color32) {
     painter.with_clip_rect(rect.intersect(painter.clip_rect())).text(
@@ -1323,19 +1328,32 @@ pub fn logo_font() -> Vec<u8> {
     crate::menu::settings_dir().and_then(|d| std::fs::read(d.join("logo.ttf")).ok()).unwrap_or_else(|| BUILT_IN_LOGO_FONT.to_vec())
 }
 
-/// The app's fonts: egui's, the logo's, and the emoji font for names.
+/// The app's fonts: IBM Plex Sans (regular, bold) and IBM Plex Mono, egui's fallbacks,
+/// the logo's, and the emoji font for names.
 fn font_definitions() -> egui::FontDefinitions {
     let bytes = logo_font();
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
     fonts.families.insert(egui::FontFamily::Name(LOGO_FONT.into()), vec![LOGO_FONT.into()]);
-    // Emoji in names: the full Noto Emoji (egui's has only the older ones), after
-    // the text fonts and before egui's.
-    fonts.font_data.insert(EMOJI_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(deckard_nwl::draw::EMOJI_FONT)));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        let list = fonts.families.entry(family).or_default();
-        list.insert(1.min(list.len()), EMOJI_FONT.into());
+    for name in ["plex", "plex-bold", "plex-mono"] {
+        if let Some((_, data)) = deckard_surface::FONTS.iter().find(|(n, _)| *n == name) {
+            fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_static(data)));
+        }
     }
+    // Emoji in names: the full Noto Emoji (egui's has only the older ones), after
+    // the primary text font and before egui's fallbacks.
+    fonts.font_data.insert(EMOJI_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(deckard_nwl::draw::EMOJI_FONT)));
+    let prop_fallbacks = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    let mono_fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    let mut prop = vec!["plex".into(), EMOJI_FONT.into()];
+    prop.extend(prop_fallbacks);
+    fonts.families.insert(egui::FontFamily::Proportional, prop.clone());
+    let mut mono = vec!["plex-mono".into(), EMOJI_FONT.into()];
+    mono.extend(mono_fallbacks);
+    fonts.families.insert(egui::FontFamily::Monospace, mono);
+    let mut bold = vec!["plex-bold".into(), EMOJI_FONT.into()];
+    bold.extend(prop);
+    fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
     fonts
 }
 
@@ -1751,7 +1769,7 @@ fn master_fader(ui: &mut Ui, level: f64, meter: (f32, f32), acts: &mut Vec<Act>)
     );
     if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
-        let dx = resp.drag_delta().x / if fine { 10.0 } else { 1.0 };
+        let dx = resp.drag_delta().x / if fine { 40.0 } else { 4.0 };
         if dx != 0.0 {
             acts.push(Act::SetLevel(Target::Song, (level + f64::from(dx / bars.width())).clamp(0.0, 1.0)));
         }
@@ -2560,8 +2578,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let ink = if focused { black(245) } else { gcol };
         let letter = Pos2::new(tile.center().x, tile.top() + 12.0);
         let id = group_tab(g);
-        tp.text(letter, Align2::CENTER_CENTER, &id, FontId::proportional(16.0), ink);
-        tp.text(letter + Vec2::new(0.4, 0.0), Align2::CENTER_CENTER, &id, FontId::proportional(16.0), ink);
+        tp.text(letter, Align2::CENTER_CENTER, &id, bold_font(ui.ctx(), 16.0), ink);
         let name_rect = Rect::from_min_size(Pos2::new(tile.left() + 6.0, tile.top() + 20.0), Vec2::new(86.0, 20.0));
         let name_ink = if focused {
             black(245)
@@ -3697,6 +3714,7 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
 /// Set parameter `id` of the plug-in in slot `i` of chain `c` (normalized).
 fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64) {
     let mut native = false;
+    let mut new_text = None;
     if let Ok(p) = app.slot_plugin_in(chain, i)
         && let Ok(mut g) = p.lock()
     {
@@ -3706,9 +3724,11 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
             Some(h) => {
                 drop(g);
                 h.set(id, v);
+                new_text = Some(h.text(id, v));
             }
             None => {
                 g.set_param(id, v);
+                new_text = Some(g.param_text(id, v));
                 native = g.is_native();
             }
         }
@@ -3719,7 +3739,20 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
+    let page = app.plugin_page;
     if let Some(view) = app.plugin_view.as_mut().filter(|v| v.key == (chain, i)) {
+        if let Some(pg) = view.pages.get(page) {
+            for (k, (info, ..)) in pg.knobs.iter().enumerate() {
+                if info.id == id
+                    && let Some(slot) = view.values.get_mut(k)
+                {
+                    slot.0 = v;
+                    if let Some(t) = &new_text {
+                        slot.1 = t.clone();
+                    }
+                }
+            }
+        }
         view.page = usize::MAX;
         // (Shown until the plug-in reports it: the next turn goes on from it.)
         view.sent.retain(|(x, ..)| *x != id);
@@ -4492,16 +4525,22 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 ui.data_mut(|d| d.insert_temp(start_id, (base, 0f32)));
             }
             let dy = -resp.drag_delta().y / if fine { 1000.0 } else { 200.0 };
-            if resp.dragged() && dy != 0.0 {
+            if resp.dragged() {
                 let (from, moved) = ui.data(|d| d.get_temp::<(f32, f32)>(start_id)).unwrap_or((base, 0.0));
                 let moved = moved + dy;
-                ui.data_mut(|d| d.insert_temp(start_id, (from, moved)));
+                if dy != 0.0 {
+                    ui.data_mut(|d| d.insert_temp(start_id, (from, moved)));
+                }
                 let to = (from + moved).clamp(0.0, 1.0);
                 if ring {
-                    acts.push(Act::Modulate(*edit, to, false));
+                    if dy != 0.0 {
+                        acts.push(Act::Modulate(*edit, to, false));
+                    }
                 } else {
                     amount = to;
-                    acts.push(edit.to_act(amount));
+                    if dy != 0.0 {
+                        acts.push(edit.to_act(amount));
+                    }
                 }
             }
             if resp.drag_stopped() && ring {
@@ -6939,7 +6978,10 @@ mod emoji_tests {
     fn the_apps_text_falls_back_to_the_emoji_font() {
         use eframe::egui::FontFamily;
         let f = super::font_definitions();
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        assert_eq!(f.families[&FontFamily::Proportional][0], "plex");
+        assert_eq!(f.families[&FontFamily::Monospace][0], "plex-mono");
+        assert_eq!(f.families[&FontFamily::Name("bold".into())][0], "plex-bold");
+        for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("bold".into())] {
             let list = &f.families[&family];
             assert_eq!(list[1], super::EMOJI_FONT, "{family:?}: {list:?}");
         }
