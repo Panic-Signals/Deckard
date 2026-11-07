@@ -1,0 +1,18 @@
+[package]
+name = "deckard-jam"
+version = "0.1.0"
+edition = "2024"
+description = "Direct USB driver for the Maschine JAM controller: pads, buttons, Smart Strips, LEDs"
+
+[dependencies]
+hidapi = { version = "2.6.7", default-features = false }
+
+# The HID backend for each system, as deckard-mk3 has them.
+[target.'cfg(target_os = "macos")'.dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["macos-shared-device"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["linux-native-basic-udev"] }
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }

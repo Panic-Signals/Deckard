@@ -10,6 +10,119 @@ use eframe::egui;
 use egui_kittest::Harness;
 use std::path::{Path, PathBuf};
 
+/// An NKS preset loads as its plug-in, with its state. No window is drawn here, so no
+/// audio or MIDI device is opened.
+#[test]
+fn nks_presets_load_as_their_plugin() {
+    use deckard_plugins::{nks, scan};
+    let (_tmp, dir) = temp();
+    let mut app = App::default();
+    app.new_project();
+    let entry = |name: &str, instrument: bool, cid: &str| scan::Entry {
+        kind: scan::Kind::Vst3,
+        vendor: "Vendor".into(),
+        name: name.into(),
+        instrument,
+        location: String::new(),
+        cid: cid.into(),
+    };
+    let synth = "000102030405060708090A0B0C0D0E0F";
+    let effect = "101112131415161718191A1B1C1D1E1F";
+    app.catalog.entries = vec![entry("Synth", true, synth), entry("Verb", false, effect)];
+    let word = |at: usize, hex: &str| u32::from_str_radix(&hex[at * 8..(at + 1) * 8], 16).unwrap();
+    let uid = |hex: &str| Some([word(0, hex), word(1, hex), word(2, hex), word(3, hex)]);
+    let item = |file: &str, kind: Kind, bytes: &[u8]| {
+        let path = dir.join(file);
+        std::fs::write(&path, bytes).unwrap();
+        deckard_library::Item { kind, name: file.into(), path, ..Default::default() }
+    };
+    let plugins = |app: &App| -> Vec<(String, String)> {
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        d.project().groups[0].sounds[0].slots.iter().filter_map(|x| x.plugin.as_ref().map(|p| (p.name.clone(), p.id.clone()))).collect()
+    };
+
+    let lead = item("Lead.nksf", Kind::Instrument, &nks::fixture(uid(synth), 0, "Synth", b"first"));
+    app.load_item(&lead, Some((0, 0))).unwrap();
+    assert_eq!(plugins(&app), [("Synth".to_string(), format!("Vendor:VST3:INSTR:{synth}"))]);
+    assert_eq!((app.slot_of, app.slot, app.plugin_page), (Some(deckard_doc::Chain::Sound(0, 0)), Some(0), 0));
+    assert!(app.plugin_view.is_none());
+    // An effect goes last, and an instrument takes the instrument's place.
+    let hall = item("Hall.nksfx", Kind::Effect, &nks::fixture(uid(effect), 0, "Verb", b"hall"));
+    app.load_item(&hall, Some((0, 0))).unwrap();
+    assert_eq!(app.slot, Some(1));
+    let nica = vec![
+        vec![
+            nks::Knob { id: Some(0), name: "Spread".into(), section: "Performance".into() },
+            nks::Knob { id: Some(1), name: "Cutoff".into(), section: String::new() },
+        ],
+        vec![
+            nks::Knob { id: Some(10), name: "Drive".into(), section: "Filter 1".into() },
+            nks::Knob { id: Some(11), name: "Reso".into(), section: "Filter 2".into() },
+        ],
+    ];
+    let bass = item("Bass.nksf", Kind::Instrument, &nks::fixture_with_pages(uid(synth), 0, "Synth", b"second", &nica));
+    app.load_item(&bass, Some((0, 0))).unwrap();
+    assert_eq!(plugins(&app).iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["Synth", "Verb"]);
+    {
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        let pr = d.project().groups[0].sounds[0].slots[0].plugin.as_ref().unwrap();
+        assert!(pr.chunk.windows(6).any(|w| w == b"second"), "the second preset's state");
+        assert_eq!(pr.pages.len(), 2, "NICA pages saved with the plug-in");
+        assert_eq!(
+            (pr.pages[0].params[0].id, pr.pages[0].params[0].name.as_str(), pr.pages[0].params[0].section.as_str()),
+            (0, "Spread", "Performance")
+        );
+        assert_eq!(crate::saved_page_name(&pr.pages[0]), "Performance");
+        assert_eq!(crate::saved_page_name(&pr.pages[1]), "Filter 1 / Filter 2");
+    }
+
+    // What can't load says why, and changes nothing.
+    let before = plugins(&app);
+    let absent = item("Absent.nksf", Kind::Instrument, &nks::fixture(Some([1, 2, 3, 4]), 0, "Omnisphere", b"x"));
+    assert_eq!(app.load_item(&absent, Some((0, 0))), Err("Absent.nksf: Omnisphere isn't installed as VST3".to_string()));
+    let massive = item("Bass.nmsv", Kind::Instrument, b"\x01\0\0\0");
+    assert_eq!(app.load_item(&massive, Some((0, 0))), Err("Bass.nmsv: Massive isn't installed as VST3".to_string()));
+    let unknown = item("Old.fxp", Kind::Instrument, b"\x01\0\0\0");
+    assert_eq!(app.load_item(&unknown, Some((0, 0))), Err("Old.fxp: .fxp presets can't be loaded yet".to_string()));
+    assert_eq!(plugins(&app), before);
+
+    // Native product presets (.nmsv, .nfm8, .nrkt, .rkplr, .ens) load into their VST3.
+    app.catalog.entries.push(entry("Massive", true, "202122232425262728292A2B2C2D2E2F"));
+    app.load_item(&massive, Some((0, 0))).unwrap();
+    assert_eq!(plugins(&app)[0].0, "Massive");
+}
+
+#[test]
+fn unnamed_plugin_pages_derive_category_names_from_knobs() {
+    let info = |id: u32, title: &str| deckard_plugins::ParamInfo {
+        id,
+        title: title.into(),
+        short: title.into(),
+        units: String::new(),
+        steps: 0,
+        default: 0.5,
+    };
+    let page = |labels: &[&str]| crate::ViewPage {
+        name: String::new(),
+        knobs: labels.iter().enumerate().map(|(i, l)| (info(i as u32, l), (*l).into(), String::new())).collect(),
+        choices: Vec::new(),
+        own: false,
+    };
+    let mut pages = vec![
+        page(&["Macro 1", "Macro 2", "Macro 3", "Macro 4", "Engine 1 Vol", "Engine 2 Vol"]),
+        page(&["Filter 1 Cutoff", "Filter 1 Resonance", "Filter 1 Drive", "Filter 2 Cutoff", "Filter 2 Resonance"]),
+        page(&["Pitch Tracking - Enable", "Pitch Tracking - Smooth", "Pitch Shift - Enable", "Pitch Shift - Shift"]),
+    ];
+    crate::name_unnamed_pages(&mut pages);
+    assert_eq!(pages[0].name, "Macros / Engine");
+    assert_eq!(pages[1].name, "Filter 1 / Filter 2");
+    assert_eq!(pages[1].knobs[0].2, "Filter 1");
+    assert_eq!(pages[1].knobs[3].2, "Filter 2");
+    assert_eq!(pages[2].name, "Pitch Tracking / Pitch Shift");
+}
+
 /// A fresh folder, and the guard that removes it.
 fn temp() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
@@ -416,4 +529,34 @@ fn the_view_revision_moves_only_on_change() {
     let r1 = h.state().browser.revision();
     act(&mut h, BrowseAct::Focus(1));
     assert_ne!(h.state().browser.revision(), r1);
+}
+
+#[test]
+fn many_types_and_characters_keep_results_on_screen() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = App::default();
+    app.browser.open = true;
+    app.browser.results.types = (0..60).map(|i| (format!("Type {i:02}"), 10)).collect();
+    app.browser.results.characters = (0..60).map(|i| (format!("Character {i:02}"), 5)).collect();
+    app.browser.results.items = (0..20)
+        .map(|i| deckard_library::Item {
+            kind: Kind::Instrument,
+            name: format!("Preset {i:02}"),
+            path: PathBuf::from(format!("preset-{i:02}.mxinst")),
+            ..Default::default()
+        })
+        .collect();
+    let height = 720.0;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(600.0, height))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut App| layout::browser::panel(app, ui), app);
+    h.run_steps(3);
+    let count_rect = h.get_by_label("20 results").rect();
+    let prehear_rect = h.get_by_label("▶ Prehear").rect();
+    assert!(
+        count_rect.max.y + 120.0 < prehear_rect.min.y,
+        "results list has vertical room: count={count_rect:?}, prehear={prehear_rect:?}"
+    );
+    assert!(prehear_rect.max.y <= height, "prehear row stays inside the window: {prehear_rect:?}");
 }
