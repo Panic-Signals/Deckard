@@ -4060,6 +4060,8 @@ impl App {
                 focus: b.focus,
                 busy: b.busy,
                 favorites: b.favorites,
+                routing: b.routing,
+                patterns: b.patterns,
             };
         }
         let Some(doc) = &self.doc else { return v };
@@ -4411,6 +4413,8 @@ impl App {
                     B::Load => C::Load,
                     B::Favorites => C::ToggleFavorites,
                     B::Prehear => C::Prehear,
+                    B::Routing(on) => C::Routing(on),
+                    B::Patterns(on) => C::Patterns(on),
                     B::SetFavorite => {
                         let i = self.browser.selected.unwrap_or(0);
                         let Some(on) = self.browser.results.items.get(i).map(|r| !r.favorite) else { return };
@@ -7118,6 +7122,14 @@ impl App {
                 b.prehear_gain = g;
                 return;
             }
+            B::Routing(on) => {
+                b.routing = on;
+                return;
+            }
+            B::Patterns(on) => {
+                b.patterns = on;
+                return;
+            }
             B::Folder(dir) => {
                 b.files = browser::list_folder(&dir);
                 b.files_dir = dir;
@@ -7215,7 +7227,7 @@ impl App {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
                 let mut d = doc.borrow_mut();
                 match item.kind {
-                    Kind::Group => d.load_group_file(g, &bytes)?,
+                    Kind::Group => d.load_group_file_with(g, &bytes, self.browser.routing, self.browser.patterns)?,
                     Kind::Sound => d.load_sound_file(g, s, &bytes)?,
                     Kind::Instrument => {
                         let slots = &d.project().groups[g].sounds[s].slots;

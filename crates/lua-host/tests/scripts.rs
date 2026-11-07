@@ -1659,6 +1659,18 @@ fn mk3_browse_lists_the_library_and_loads() {
     host.press("BUTTON_WHEEL").unwrap();
     host.tick();
     assert!(host.state.borrow().browse_calls.contains(&BrowseCall::Load), "{:?}", host.state.borrow().browse_calls);
+    // On Groups (FILE_TYPE_GROUP = 2), buttons 5 and 6 toggle + PATTERNS and + ROUTING.
+    host.set_browser(BrowserView { kind: 2, ..BrowserView::default() });
+    host.tick();
+    let btns = host.screen_buttons();
+    assert_eq!((btns[4].label.as_str(), btns[4].selected), ("+ PATTERNS", true));
+    assert_eq!((btns[5].label.as_str(), btns[5].selected), ("+ ROUTING", true));
+    host.state.borrow_mut().browse_calls.clear();
+    host.press("BUTTON_SCREEN_5").unwrap();
+    host.press("BUTTON_SCREEN_6").unwrap();
+    host.tick();
+    assert!(host.state.borrow().browse_calls.contains(&BrowseCall::Patterns(false)), "{:?}", host.state.borrow().browse_calls);
+    assert!(host.state.borrow().browse_calls.contains(&BrowseCall::Routing(false)), "{:?}", host.state.borrow().browse_calls);
     assert!(host.errors.is_empty(), "{:?}", host.errors);
 }
 
