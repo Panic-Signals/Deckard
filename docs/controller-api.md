@@ -189,7 +189,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `settings` | What the Settings page shows: `values` (each setting's value as shown, by the name `deckard.setting` takes: `count_in`, `quantize`, `driver`, `device`, `sample_rate`, `buffer_size`, `in_route_1` … `in_route_32`, `out_route_1` …, `midi_sync`, `clock_offset`, `default_input`, `link_start_stop`, `sensitivity`, `display_brightness`, `metronome_volume`, `metronome_auto`), `midi_inputs` and `midi_outputs` (`{ name, on }`), `audio_status` (the device's status line, its three latencies, their total), `link` and `link_peers`. Filled only while the `settings` page shows. |
 | `lock` | Lock: `active` (LOCK took a snapshot to recall), `slots` (`slots[n]` is `true` when slot `n` holds one, from 1; 16 a bank), `focus` (the focused slot, or `nil`), `bank` (shown, from 1) and `banks` (1-4), `morph`, and `mode` (0 Travel, 1 Target), `time` (1/2 Bar, 1 Bar, 2, 4, 8, 16 Bars) and `grid` (1/8, 1/4, 1/2, Bar) as places in those lists from 0. |
 | `note_repeat` | Note Repeat and the Arp: `settings` by name (`type`, `rate`, `rate_unit`, `sequence`, `octaves`, `dynamic`, `gate`, `retrigger`, `repeat`, `offset`, `inversion`, `min_key`, `max_key`), each `{ name, text, value, min, max, step, turn }` (`turn`: how far a knob turns for a step); `presets` (the four rates' names, display buttons 5-8) and `preset` (the one chosen, from 1); `hold`; `locked` (LOCK: on off the page too); `active` (on now). |
-| `lfos` | The project's LFOs by pad, each `{ pad, shape, sync, rate, phase, level, quantize, trigger, fade, muted, points }`: `shape` its name (Sine, Square, Triangle, Saw, Random), `rate` as written ("1/4", "2.50 Hz"), `phase` in degrees (0-360), `level` 0-1, `quantize` steps per cycle (0 Off), `trigger` "Off" or "A1 / S3" (groups named as Maschine's: A1 … H1, then A2 …), `fade` in beats (0-16), `muted` (its routes leave their targets alone), `points` its wave (240 samples, 0-1) over at least two cycles: two beats or two seconds, longer for a rate slower than 1/4 or 1 Hz, `marks` where the time lines go across them (beats or bars when synced, seconds when free; 0-1 of the width, none for an envelope); and its envelope: `env` (Envelope mode: an ADSR its trigger's notes play), `attack`, `decay`, `release` as written ("12 ms", "1.20 s"), `sustain` 0-1, `retrigger`, `name` ("LFO 3", or "ENV 3" in Envelope mode), `note_off` (where an envelope's `points` show the note's end, 0-1 of their width; nil for an LFO). An envelope with no trigger shows `trigger` "None". |
+| `lfos` | The project's LFOs by pad, each `{ pad, shape, sync, rate, phase, level, quantize, trigger, fade, muted, points }`: `shape` its name (Sine, Square, Triangle, Saw, Random), `rate` as written ("1/4", "2.50 Hz"), `phase` in degrees (0-360), `level` 0-1, `quantize` steps per cycle (0 Off), `trigger` "Off" or "A1 / S3" (groups named as Maschine's: A1 … H1, then A2 …), `fade` in beats (0-16), `muted` (its routes leave their targets alone), `points` its wave (240 samples, 0-1) across a fixed window of two beats when synced or two seconds when free, scrolling so the right edge is now, `marks` empty (the time lines are gone); and its envelope: `env` (Envelope mode: an ADSR its trigger's notes play), `attack`, `decay`, `release` as written ("12 ms", "1.20 s"), `sustain` 0-1, `retrigger`, `name` ("LFO 3", or "ENV 3" in Envelope mode), `note_off` (where an envelope's `points` show the note's end, 0-1 of their width; nil for an LFO). An envelope with no trigger shows `trigger` "None". |
 | `lfo_focus` | The pad of the LFO the software panel and the MK3 show (0 with none). |
 | `mod_slots` | The mod matrix page's slots: every route in the project, each in the column it had (an edit never moves a slot to another column; erasing one closes the later ones up; routes new to the page come after, by group, then sound, then their place on the sound), then the slot being made (a source and a target chosen, no destination yet; it isn't saved) or an empty one. `mod_slots[n]` is its six rows as shown, from 1: Source ("LFO 3", "LFO 3 (none)" when that LFO is gone), Group ("A1 – name", or "A1" when it has none of its own: none, or "Group A1"; as Maschine's: A1 … H1, then A2 …), Sound ("S3 – name"), Module (the slot's name), Destination (the parameter's name) and Depth ("+15%", "−40%", "0%"); "—" where unset. The sounds' routes come first, then the CC routes. A CC route (or a slot being made into one) has `mod_slots[n].midi` true: its Group reads "MIDI" and rows 3–5 are Port (the output port's name), Channel ("1"–"16") and CC ("0"–"119"); the page names those rows PORT, CHANNEL and CC. |
 | `sampling` | What the Sampling page (SAMPLE) shows, while it's open: `tab` (1 RECORD, 2 EDIT, 3 SLICE, 4 ZONE); `pages[tab]`, that tab's knob pages, each `{ name, knobs }`, a knob `{ key, name, text, value, min, max, step, turn }` (`step` how far a step moves it, `turn` how far the knob turns for one); `slice`, the slicer's knobs by key (`Slice.Mode`, `Slice.Split`, `Slice.Grid`, `Slice.Density`, `Slice.ZeroX`, `Slice.Apply`, `Slice.BpmMode`, `Slice.Bpm`), each with its `index` for `deckard.sampling_knob`; `sample`, the focused zone's sample or `nil`: `{ name, frames, rate, view = { from, to }, play = { from, to }, looped, selection, slices (their starts), focus_slice, playhead, zones (each `{ key lo, key hi, vel lo, vel hi }`), focus_zone, palette }` (frames from 0; its peaks from `deckard.peaks`); `record`, the recorder: `{ levels = { l, r } (linear), mode (0 Detect, 1 Sync, 2 Loop, 3 Auto), threshold (dB), waiting, recording }`; `takes` (how many recordings) and `take` (the one focused, from 1); `stems`, a stem separation running: `{ focused, progress }` (0–1), or `nil`. |
@@ -219,6 +219,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `chain[i]` | Each slot: `{ name, instrument, active, plugin, picture }` (`plugin`: a hosted plug-in, with an editor window; `picture`: the key of DECKARD's picture of one of its own plug-ins, for `screen:image`). |
 | `pages`, `page` | The page names, and the page shown. |
 | `knobs[1..8]` | `{ name, section, text, value, modulatable, step_mod, auto_mod, macro }` (`value` 0–1; `modulatable` whether its movements can be written as modulation; `step_mod` the Step Mod page's text for the step shown, "+25%", or `nil`; `auto_mod` with Auto-write on, its modulation where the song is, "+25%" or "0%", else `nil`; `macro` whether some channel's macro controls its parameter: the Control page draws the macro icon at the top right of its name, but not on the Macro page itself), or `false` where the page has no knob. |
+| `eq` | The focused built-in EQ, or `nil`. `{ points, bands }`: `points` its curve from 20 Hz to 20 kHz (each 0–1 over ±12 dB, 0.5 at 0 dB), `bands` Low, Low-Mid, High-Mid and High as `{ x, y }` on that axis. The same on both of its pages, drawn on the right screen. |
 | `modules[i]` | What the plug-in browser can load, while the `module` page shows (else empty): `{ name, instrument, format, vendor }`. `format` is `"Internal"`, `"Audio Units"`, `"VST3"` or `"VST"`; Maschine's own vendor is `"Native Instruments"`. |
 
 `state().browser` holds:
@@ -446,13 +447,65 @@ A device gets the whole `deckard` API, so `deckard.state()`, `focus_group`,
 |---|---|
 | `deckard.midi_send(role, bytes)` | Send bytes (0–255 each) on the port of `role`. |
 | `deckard.launch_scene(i)` | Launch scene `i`: as clicking it in the Ideas view, and when stopped it starts playing. |
-| `deckard.new_pattern(group)` | A new pattern in group `group`, in the focused scene. The focused group stays; in that group, the new pattern is focused. |
+| `deckard.new_pattern(group [, place])` | A new pattern in group `group`, in the focused scene: after its last, or in empty `place`. A group's patterns list says each one's `slot`, as there can be empty places between them. The focused group stays; in that group, the new pattern is focused. |
 | `deckard.show_scenes(i)` | Scroll the Ideas view's scene tabs to start at scene `i`, as far as they go. |
 | `deckard.print_notes{ length = beats, notes = { {pitch, start, length, velocity}, … }, track = n }` | Print to Clip: the notes (times in beats) replace the focused sound's in the focused group's pattern in the focused scene. A pattern is made if there is none, and the pattern takes `length`. It is one undo step. `track` (optional, from 1) is the device's track it came from: a print from the track set as the device's drum track (Preferences ▸ MIDI) plays the focused group's pads from C1 instead, replacing the group's notes. |
 | `deckard.message(text)` | Show a line in the status bar. |
 | `deckard.device()` | The device's id (its folder's name). |
 
 `deckard.state()` also has `playing_scene` and `queued_scene` (from 1, or nil).
+
+### USB HID controllers
+
+A device spoken to over USB HID says so in `device.lua`, with no `ports`:
+
+```lua
+return { name = "Maschine JAM", hid = { vendor = 0x17CC, product = 0x1500 } }
+```
+
+The Maschine JAM (`devices/maschine_jam/`, see `maschine-jam.md`) is the only one DECKARD has a driver
+for. Its driver hands the script decoded events, beside `open`, `close` and `tick`:
+
+| Handler | When |
+|---|---|
+| `button(name, down)` | A button, as named in `crates/jam/src/map.rs`. `deckard.held(name)` follows it. |
+| `pad(column, row, down)` | A pad, from 1, the top left first. |
+| `strip(n, finger, kind, pos)` | A Smart Strip: finger 1 or 2 went `"down"`, `"move"`d or came `"up"` at `pos` (0..1). |
+| `encoder(steps)` | The encoder turned. |
+| `pads()` | Where the pads play, asked each frame and read by the driver's thread, so a note never waits for a frame: `{ velocity = n, [column + (row − 1) × 8] = { group, sound, pitch, pitch … } }`, or `nil` for none. A release stops what the press started, however the route has changed. |
+| `leds()` | The lights; set them with these. |
+
+| Function | Sets |
+|---|---|
+| `deckard.led(name, "off" \| "dim" \| "on")` | A one-colour button. `"off"` keeps a faint backlight; `"dark"` is none. |
+| `deckard.led(name, palette, bright)` | A `SCENE_n` or `GROUP_x` button's colour. `bright`: `true`, `false` (half-lit), or `"faint"`, `"dim"`, `"bright"`, `"pale"`. |
+| `deckard.pad_led(column, row, palette, bright)`, `deckard.strip_led(n, led, palette, bright)` | The same for a pad and a strip's LED (1–11, from the bottom). |
+| `deckard.meter(column, led, level)` | A meter LED (columns 1–2; LEDs 1–8, from the bottom), level 0..1. |
+
+### What a controller without pages adds
+
+These work for any script, and exist because a device has no page on screen to go by:
+
+| Function | Does |
+|---|---|
+| `deckard.delete_pattern(group, n)`, `deckard.delete_scene(n)` | Delete it (a scene's patterns stay; a project keeps its last scene). |
+| `deckard.copy_pattern(group, from, to)`, `deckard.copy_scene(from, to)`, `deckard.copy_group(from, to)`, `deckard.copy_sound(from, to)` | Replace `to` with a copy. Past the last (a sound: not for those), a new one goes there. `copy_sound` is in the focused group. |
+| `deckard.set_send(group, sound, aux, level)`, `deckard.set_swing(group, sound, amount)`, `deckard.set_tune(group, sound, semitones)` | A channel's aux send (1 or 2; level 0..1, 0.75 unity), swing (0–100; no group: the song's) and Sampler tune (no sound: the group's Samplers move together). `sound` may be `nil`. |
+| `deckard.choke_all()` | Every voice ends. Nothing else changes. |
+| `deckard.cue_db(db)` | The cue channel's level. |
+| `deckard.input_db(input, db)` | In 1's or In 2's level, on the way in. |
+| `deckard.watch_input(on)` | Keep the interface input open for `input_meters`, with no sound taking it. |
+| `deckard.library(open)` | The main window's library panel; `state().browser` fills while it's open. |
+| `deckard.settings_wanted(on)` | `state().settings` fills with no Settings page showing. |
+| `deckard.reset_knob(n)` | Control knob `n` back to its default. |
+| `deckard.perform_mode(group, n)` | Its Perform FX's mode (1 Filter … 8 Scratcher), one added if it has none. |
+| `deckard.note_repeat("on", on)` | Note Repeat on or off, with no page. |
+| `deckard.lock("slot", n)` | Snapshot `n` (from 1) recalled or taken, whatever bank shows. |
+| `deckard.level_to_db(level)`, `deckard.db_to_level(db)` | A level as stored (0..1, 0.75 unity) and in dB. |
+
+`deckard.state()` also has `master_meter`, `cue_meter` and `input_meters[1..2]` (`{ left, right }` in dB), `cue_level`, `input_levels[1..2]` (as stored),
+and `scale.root`; a group's or sound's table has `aux` (its sends' levels), `swing` and `tune` (`nil`
+with no Sampler), and `perform` has `mode` and `name`.
 
 `require("lib.x")` looks in the device's own folder first (`devices/<id>/lib/x.lua`),
 then the shared `lib/`. A device never loads the MK3's pages. Each device runs in its own

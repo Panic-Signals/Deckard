@@ -1564,6 +1564,25 @@ fn the_events_select_mode_selects_with_the_pads() {
     assert_eq!(s.error(), None);
 }
 
+/// The built-in EQ's curve is on the right screen, and stays there on both pages.
+#[test]
+fn the_eq_curve_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "EQ".into();
+    v.control.slot = Some("EQ".into());
+    v.control.pages = vec!["Freq / Gain".into(), "Width / Output".into()];
+    v.control.eq = Some(crate::EqCurveView { points: vec![0.5; 48], bands: vec![(0.25, 0.5), (0.45, 0.8), (0.65, 0.3), (0.85, 0.5)] });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    assert_eq!(s.error(), None);
+}
+
 /// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it in the chain (its
 /// thumbnail) and on the right display (its logo); one without shows a drawing.
 #[test]
@@ -2055,6 +2074,20 @@ fn a_knob_tapped_twice_resets_it() {
         tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)),
         [Action::ChannelLevel { group: v.group, sound: Some(1), db: 0.0 }]
     );
+}
+
+/// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
+/// and an empty one makes a pattern there.
+#[test]
+fn pattern_pads_are_places_with_gaps() {
+    let mut s = Surface::new();
+    let mut v = view();
+    let at = |slot: usize| PatternView { color: 1, slot, ..Default::default() };
+    v.groups[0].patterns = vec![at(0), at(7)];
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    let pad = |s: &mut Surface, v: &View, n: usize| s.event(&Event::PadOn(n, 1.0), v, Instant::now());
+    assert_eq!(pad(&mut s, &v, 8), [Action::PickPattern(1)], "pad 8 holds the list's second");
+    assert_eq!(pad(&mut s, &v, 4), [Action::NewPatternAt { group: 0, slot: 3 }], "an empty place");
 }
 
 /// The Ideas view's knobs: the group above each steps through its patterns in the

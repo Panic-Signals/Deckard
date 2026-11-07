@@ -11,7 +11,7 @@
 
 use crate::{Item, Query, Results};
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -31,6 +31,53 @@ pub fn default_path() -> Option<PathBuf> {
         return None;
     };
     p.is_file().then_some(p)
+}
+
+/// The favourites NI's products share, beside the products' own folders
+/// (`Shared/favorites.db3`): a table of ids, which the index's items carry.
+fn favorites_of(index: &Path) -> Option<PathBuf> {
+    Some(index.parent()?.parent()?.join("Shared").join("favorites.db3"))
+}
+
+/// Maschine's favourites, read afresh (it may have changed them). None without the file.
+fn favorite_ids(index: &Path) -> HashSet<String> {
+    let read = || -> Option<HashSet<String>> {
+        let file = favorites_of(index).filter(|f| f.is_file())?;
+        let (db, _) = connect(&file).ok()?;
+        let mut st = db.prepare("SELECT id FROM favorites").ok()?;
+        let ids = st.query_map([], |r| r.get::<_, String>(0)).ok()?.flatten().collect();
+        Some(ids)
+    };
+    read().unwrap_or_default()
+}
+
+/// Up to a few `.nksf` / `.nksfx` preset files for `plugin` (one per bank/folder), from
+/// NI's library index if present.
+pub fn nks_presets_for(plugin: &str) -> Vec<PathBuf> {
+    let Some(path) = default_path() else { return Vec::new() };
+    let Ok((db, _)) = connect(&path) else { return Vec::new() };
+    let mut out = Vec::new();
+    for table in ["p_sound_info_Instrument_1", "p_sound_info_Instrument_2", "p_sound_info_Effect_1", "p_sound_info_Effect_2"] {
+        let sql = format!(
+            "SELECT k.file_name FROM {table} p JOIN k_sound_info k ON k.id = p.id \
+             WHERE (lower(p.entry1) = lower(?1) OR lower(p.entry1) LIKE lower(?1) || ' %') \
+             AND lower(k.file_ext) IN ('nksf', 'nksfx') \
+             GROUP BY coalesce(p.entry2, ''), coalesce(k.sub_path, '') \
+             ORDER BY CASE WHEN p.entry2 IS NULL OR p.entry2 = 'Factory' THEN 0 ELSE 1 END, k.id \
+             LIMIT 10"
+        );
+        let Ok(mut st) = db.prepare(&sql) else { continue };
+        let Ok(mut rows) = st.query([plugin]) else { continue };
+        while let Ok(Some(r)) = rows.next() {
+            if let Ok(file) = r.get::<_, String>(0) {
+                let p = PathBuf::from(file);
+                if p.is_file() && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
 }
 
 impl NiIndex {
@@ -89,9 +136,16 @@ impl NiIndex {
             .map_err(err)?
             > 0;
         let installed = if has_state { "AND coalesce(c.state, 0) <> 4" } else { "" };
+        let favorites = favorite_ids(&self.path);
+        // The section's table has the id (`k_sound_info`'s may be empty); an older index may not.
+        let has_id: bool = db
+            .query_row("SELECT count(*) FROM pragma_table_info(?1) WHERE name = 'favorite_id'", [&table], |r| r.get::<_, i64>(0))
+            .map_err(err)?
+            > 0;
+        let favorite_id = if has_id { "p.favorite_id" } else { "NULL" };
         let sql = format!(
             "SELECT p.id, k.name, k.file_name, k.tempo, coalesce(k.author, ''), p.entry1, p.entry2, p.entry3, \
-             CASE WHEN c.content_type = 2 THEN c.alias END \
+             CASE WHEN c.content_type = 2 THEN c.alias END, {favorite_id} \
              FROM {table} p JOIN k_sound_info k ON k.id = p.id LEFT JOIN k_content_path c ON c.id = k.content_path_id \
              WHERE k.hidden_for = 0 {installed}"
         );
@@ -120,7 +174,7 @@ impl NiIndex {
                 characters: characters.remove(&id).unwrap_or_default(),
                 tempo,
                 author: r.get(4).map_err(err)?,
-                favorite: false,
+                favorite: r.get::<_, Option<String>>(9).map_err(err)?.is_some_and(|id| favorites.contains(&id)),
                 name,
             };
             if q.admits(&item) {

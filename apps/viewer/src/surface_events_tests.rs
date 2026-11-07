@@ -134,6 +134,7 @@ fn recording_makes_a_pattern_when_theres_none() {
     assert_eq!(doc.borrow().project().scenes[0].patterns, [(0, 0)]);
     assert_eq!(app.pattern, 0);
     let on = deckard_engine::Recorded {
+        midi: false,
         group: 0,
         sound: 0,
         pitch: 60,

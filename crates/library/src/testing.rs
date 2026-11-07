@@ -37,14 +37,14 @@ pub fn fixture(dir: &Path) -> PathBuf {
         for n in [1, 2] {
             sql += &format!(
                 "CREATE TABLE p_sound_info_{}_{n} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, entry1 TEXT, entry2 TEXT, entry3 TEXT, \
-                 content_path_id INTEGER NOT NULL);\n",
+                 content_path_id INTEGER NOT NULL, favorite_id TEXT);\n",
                 kind.table()
             );
         }
     }
-    sql += "INSERT INTO p_sound_info_Loop_2 SELECT id, name, 'Deep Matter', 'Loops', NULL, content_path_id FROM k_sound_info WHERE id IN (10, 11, 12);
-            INSERT INTO p_sound_info_Oneshot_1 SELECT id, name, NULL, NULL, NULL, content_path_id FROM k_sound_info WHERE id = 20;
-            INSERT INTO p_sound_info_Sound_2 SELECT id, name, 'Deep Matter', NULL, NULL, content_path_id FROM k_sound_info WHERE id IN (30, 31);";
+    sql += "INSERT INTO p_sound_info_Loop_2 SELECT id, name, 'Deep Matter', 'Loops', NULL, content_path_id, 'id-' || id FROM k_sound_info WHERE id IN (10, 11, 12);
+            INSERT INTO p_sound_info_Oneshot_1 SELECT id, name, NULL, NULL, NULL, content_path_id, NULL FROM k_sound_info WHERE id = 20;
+            INSERT INTO p_sound_info_Sound_2 SELECT id, name, 'Deep Matter', NULL, NULL, content_path_id, NULL FROM k_sound_info WHERE id IN (30, 31);";
     db.execute_batch(&sql).expect("fixture tables");
     path
 }

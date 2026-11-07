@@ -7,6 +7,7 @@
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
 --   LEFT / RIGHT      the previous / next page
+--   right screen      the focused plug-in's picture; the built-in EQ's curve, on both pages
 --
 -- With SHIFT held on PLUG-IN, the focused slot's edits: EDIT (a plug-in's window),
 -- INSERT (the plug-in browser for a new slot after the last), SAVE (not yet), MOVE
@@ -230,6 +231,43 @@ local function auto_knob(knob)
   return { name = knob.name, section = knob.section, value = knob.value, text = knob.auto_mod or knob.text }
 end
 
+-- The built-in EQ on the right screen: 20 Hz to 20 kHz, ±12 dB, the same on both pages.
+local function eq_curve(screen, eq)
+  local x0, y0, w, h = 488, 66, 456, 132
+  screen:rect(x0, y0, w, h, { 0x12, 0x12, 0x14 })
+  local function px(t) return x0 + t * (w - 1) end
+  local function py(v) return y0 + (1 - v) * (h - 1) end
+  local function freq_x(hz)
+    return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
+  end
+  local grid = { 0x2c, 0x2c, 0x30 }
+  for _, hz in ipairs({ 100, 1000, 10000 }) do
+    local x = px(freq_x(hz))
+    screen:line(x, y0 + 1, x, y0 + h - 1, 1, grid)
+  end
+  for _, db in ipairs({ -6, 0, 6 }) do
+    local y = py(db / 24 + 0.5)
+    screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and { 0x48, 0x48, 0x4e } or grid)
+  end
+  local pts = eq.points or {}
+  local n = #pts
+  local ink = { 0x3d, 0xc8, 0xe6 }
+  if n >= 2 then
+    for i = 1, n - 1 do
+      screen:line(px((i - 1) / (n - 1)), py(pts[i]), px(i / (n - 1)), py(pts[i + 1]), 2, ink)
+    end
+  end
+  for i, b in ipairs(eq.bands or {}) do
+    local cx, cy = px(b.x), py(b.y)
+    screen:circle(cx, cy, 7, { 0xff, 0xc2, 0x3a })
+    screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = { 0x14, 0x14, 0x16 } })
+  end
+  for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
+    local x = px(freq_x(hz[1]))
+    screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+  end
+end
+
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -275,7 +313,7 @@ function control.draw(screen, theme, opts)
     screen:rect(480, 35, 480, 25, "bar")
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
-      chain.thumbnail(screen, 480, 68, 240, 136, slot, false)
+      if c.eq then eq_curve(screen, c.eq) else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end
     end
     chain.draw(screen, c)
   else
