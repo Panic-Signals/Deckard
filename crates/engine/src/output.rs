@@ -14,7 +14,7 @@
 
 use crate::queue::Queue;
 use crate::{Engine, Live, Mode, Tap, Timeline, Timelines};
-use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::traits::StreamTrait;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -187,7 +187,7 @@ impl Sender {
                     }
                 }
             }
-            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => {}
+            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::ChokeAll => {}
         }
     }
 
@@ -216,8 +216,15 @@ pub struct Output {
     /// Device sample rate; create engines at this rate.
     pub rate: u32,
     pub device: String,
+    /// The audio system it plays through, and the sample format it takes there.
+    pub driver: crate::devices::AudioDriver,
+    pub format: cpal::SampleFormat,
     /// Frames per audio callback, as last seen.
     block: Arc<std::sync::atomic::AtomicUsize>,
+    /// From a block's start to when it's heard, as the driver last said (µs).
+    latency_us: Arc<AtomicU64>,
+    /// ASIO: the driver wants its streams opened afresh (see [`Output::take_invalidated`]).
+    invalidated: Arc<AtomicBool>,
     /// Audio to play through as it comes (interleaved stereo; an input being
     /// monitored while recording).
     monitor: Arc<Mutex<Vec<f32>>>,
@@ -250,6 +257,8 @@ pub struct Output {
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
     _stream: cpal::Stream,
+    /// ASIO: see [`crate::devices::hold_asio_inputs`].
+    _inputs: Option<cpal::Stream>,
 }
 
 /// Peak (left, right) of each sound, `[group][sound]`.
@@ -453,12 +462,16 @@ impl Output {
     /// [`output_devices`]); `None`: the system's default.
     pub fn with_device(device: Option<&str>, frames: u32, multicore: bool) -> Result<Output, String> {
         let (device, config) = crate::devices::open_output(device)?;
-        if config.sample_format() != cpal::SampleFormat::F32 {
+        let driver = crate::devices::driver();
+        let asio = driver == crate::devices::AudioDriver::Asio;
+        if !crate::devices::format_ok(config.sample_format()) {
             return Err(format!("output sample format {:?} is not supported (need f32)", config.sample_format()));
         }
         let rate = config.sample_rate();
         let channels = config.channels() as usize;
         let block = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let latency_us: Arc<AtomicU64> = Arc::default();
+        let invalidated: Arc<AtomicBool> = Arc::default();
         let monitor: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Stats::default());
         let telemetry: Arc<Mutex<crate::Telemetry>> = Arc::default();
@@ -478,8 +491,12 @@ impl Output {
             cpal::SupportedBufferSize::Range { min, max } => Some(frames.clamp(*min, *max)),
             cpal::SupportedBufferSize::Unknown => None,
         };
+        crate::devices::note_asio_buffer(wanted.map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed));
+        let inputs = if asio { crate::devices::hold_asio_inputs(&device) } else { None };
         let build = |size: cpal::BufferSize| {
             let block = block.clone();
+            let latency_us = latency_us.clone();
+            let invalidated = invalidated.clone();
             let monitor = monitor.clone();
             let stats = stats.clone();
             let err_stats = stats.clone();
@@ -495,8 +512,10 @@ impl Output {
             let mut engine: Option<Box<Engine>> = None;
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
-            device.build_output_stream(
+            crate::devices::build_output(
+                &device,
                 stream_config,
+                config.sample_format(),
                 move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     let started = Instant::now();
                     let frames = out.len() / channels;
@@ -527,10 +546,11 @@ impl Output {
                         b[..ext_len].fill(0.0);
                     }
                     let master_bus = engine.as_ref().map_or(Some(0), |e| e.master_bus());
+                    // When this block is heard: as the device says, else a block on.
+                    let ts = info.timestamp();
+                    let ahead = ts.playback.duration_since(ts.callback);
+                    latency_us.store(ahead.as_micros() as u64, Ordering::Relaxed);
                     if let Some(engine) = engine.as_mut() {
-                        // When this block is heard: as the device says, else a block on.
-                        let ts = info.timestamp();
-                        let ahead = ts.playback.duration_since(ts.callback);
                         before_block(engine, &mut clock, started, if ahead.is_zero() { period } else { ahead });
                         engine.process_outputs(buf, &mut ext);
                         // What its players sent back is freed off this thread.
@@ -592,22 +612,39 @@ impl Output {
                         stats.peak_load.fetch_max(load, Ordering::Relaxed);
                     }
                 },
-                move |e| {
+                move |e: cpal::Error| {
                     err_stats.device_errors.fetch_add(1, Ordering::Relaxed);
+                    if asio {
+                        // An overload arrives on the driver's thread: nothing there that can wait.
+                        if e.kind() == cpal::ErrorKind::Xrun {
+                            return;
+                        }
+                        // The driver reset, changed its rate or went away (the rest of the
+                        // app reopens it, off this thread).
+                        if matches!(e.kind(), cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable) {
+                            invalidated.store(true, Ordering::Relaxed);
+                        }
+                    }
                     eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
                 },
-                None,
             )
         };
         let stream = match wanted.map(|n| build(cpal::BufferSize::Fixed(n))) {
             Some(Ok(s)) => s,
-            _ => build(cpal::BufferSize::Default).map_err(|e| e.to_string())?,
+            _ => {
+                crate::devices::note_asio_buffer(cpal::BufferSize::Default);
+                build(cpal::BufferSize::Default).map_err(|e| e.to_string())?
+            }
         };
         stream.play().map_err(|e| e.to_string())?;
         Ok(Output {
             rate,
             device: device_name(&device),
+            driver,
+            format: config.sample_format(),
             block,
+            latency_us,
+            invalidated,
             monitor,
             midi_tx: Mutex::new(None),
             mpe_out: Mutex::default(),
@@ -626,7 +663,20 @@ impl Output {
             routing,
             channels,
             _stream: stream,
+            _inputs: inputs,
         })
+    }
+
+    /// From a block's start to when it's heard, as the driver last said.
+    pub fn latency(&self) -> Duration {
+        Duration::from_micros(self.latency_us.load(Ordering::Relaxed))
+    }
+
+    /// ASIO: whether the driver has asked since last time for its streams to be opened
+    /// afresh (a new buffer size or rate from its control panel, a reset, the interface
+    /// gone).
+    pub fn take_invalidated(&self) -> bool {
+        self.invalidated.swap(false, Ordering::Relaxed)
     }
 
     /// Preferences > Audio > Routing > Output: the interface channel (from 0) each of
@@ -898,6 +948,11 @@ impl Output {
             }
             (meters, std::mem::take(&mut t.master_peak))
         })
+    }
+
+    /// The cue bus's peaks since the last call (reset).
+    pub fn take_cue_peak(&self) -> (f32, f32) {
+        self.telemetry(|t| std::mem::take(&mut t.cue_peak))
     }
 
     /// Where zone `zone` of a sound plays, as last published; it is watched from now

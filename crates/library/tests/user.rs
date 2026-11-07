@@ -94,6 +94,36 @@ fn merged_results_prefer_own_entry() {
     assert_eq!(r.items.len(), 3);
 }
 
+/// Maschine's favourites show as favourites, and its file is only ever read: one taken
+/// off here stays off here, and stays in Maschine's.
+#[test]
+fn maschines_favorites_are_read_and_never_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let product = tmp.path().join("Maschine 3");
+    std::fs::create_dir_all(&product).unwrap();
+    let ni = testing::fixture(&product);
+    let shared = tmp.path().join("Shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let file = shared.join("favorites.db3");
+    {
+        let db = rusqlite::Connection::open(&file).unwrap();
+        db.execute_batch("CREATE TABLE favorites (id TEXT PRIMARY KEY); INSERT INTO favorites VALUES ('id-10'), ('id-unrelated');")
+            .unwrap();
+    }
+    let before = std::fs::read(&file).unwrap();
+    let mut lib = Library::new(Some(ni), &tmp.path().join("library.db3")).unwrap();
+    let favorites = |lib: &mut Library| -> Vec<String> {
+        lib.query(&Query { kind: Kind::Loop, favorites: true, ..Query::default() }).items.into_iter().map(|i| i.name).collect()
+    };
+    assert_eq!(favorites(&mut lib), ["Kick[120] Lagoon"]);
+    let kick = PathBuf::from("/Users/Shared/Deep Matter Library/Samples/Loops/Kick[120] Lagoon.wav");
+    lib.set_favorite(&kick, false);
+    assert!(favorites(&mut lib).is_empty(), "taken off here");
+    lib.set_favorite(&kick, true);
+    assert_eq!(favorites(&mut lib), ["Kick[120] Lagoon"], "put back");
+    assert_eq!(std::fs::read(&file).unwrap(), before, "Maschine's file is untouched");
+}
+
 #[test]
 fn favorites_filter() {
     let tmp = tempfile::tempdir().unwrap();
