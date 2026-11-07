@@ -34,6 +34,7 @@ impl Feed {
     fn on(&mut self, pitch: i64, tick: f64) {
         let seq = self.seq();
         self.notes.push(Recorded {
+            midi: false,
             group: 0,
             sound: 0,
             pitch,
@@ -47,7 +48,18 @@ impl Feed {
     }
     fn off(&mut self, pitch: i64, tick: f64) {
         let seq = self.seq();
-        self.notes.push(Recorded { group: 0, sound: 0, pitch, velocity: 0, length: 0, tick, mode: Mode::Scene(0), seq, played: tick });
+        self.notes.push(Recorded {
+            midi: false,
+            group: 0,
+            sound: 0,
+            pitch,
+            velocity: 0,
+            length: 0,
+            tick,
+            mode: Mode::Scene(0),
+            seq,
+            played: tick,
+        });
     }
     fn expr(&mut self, pitch: i64, kind: ExprKind, value: f32, tick: f64) {
         let seq = self.seq();

@@ -5,6 +5,42 @@ use crate::layout::{self, Act, AddWhat, ChainTab};
 use crate::tests::harness;
 use deckard_doc::{Chain, Target};
 
+/// A double-click on a plug-in's row asks for its window. This plug-in isn't installed, so
+/// the answer is in the status line, and no window opens; no audio device opens either.
+#[test]
+fn double_clicking_a_plugins_row_asks_for_its_window() {
+    use eframe::egui::{self, Event, PointerButton};
+    let mut app = crate::App::default();
+    app.new_project();
+    app.output = Some(Err("no audio in this test".into()));
+    let new = deckard_doc::NewModule::Plugin { id: "Native Instruments:VST3:FX:00000000".into(), name: "Absent".into(), chunk: Vec::new() };
+    app.doc.as_ref().unwrap().borrow_mut().add_slot(0, 0, 0, &new).unwrap();
+    (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, ChainTab::Sound, false);
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1500.0 + layout::CONTROLLER_WIDTH, 930.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+    h.run_steps(3);
+    let at = h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect("chain slot 0"))).expect("the plug-in's row is drawn").center();
+    let click = |h: &mut egui_kittest::Harness<'static, crate::App>, times: usize| {
+        h.run_steps(40);
+        h.hover_at(at);
+        h.step();
+        for _ in 0..times {
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.step();
+            }
+        }
+        h.run_steps(2);
+    };
+    click(&mut h, 1);
+    assert!(!h.state().status.starts_with("plug-in window"), "one click only selects it: {}", h.state().status);
+    assert_eq!(h.state().slot, Some(0));
+    click(&mut h, 2);
+    assert!(h.state().status.starts_with("plug-in window"), "{}", h.state().status);
+}
+
 fn slots(h: &egui_kittest::Harness<'static, crate::App>, c: Chain) -> Vec<(String, bool)> {
     let doc = h.state().doc.clone().unwrap();
     let d = doc.borrow();
