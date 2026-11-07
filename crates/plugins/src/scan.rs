@@ -103,15 +103,16 @@ fn text(b: &[c_char]) -> String {
     unsafe { CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned()
 }
 
-/// VST3 bundles in `dirs` (and one level of subfolders).
+/// VST3 bundles in `dirs` and their subfolders (vendors nest them:
+/// `VST3/MeldaProduction/EQ/MEqualizer.vst3`), but not inside a bundle.
 pub fn vst3_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    bundles_with(dirs, "vst3")
+    bundles_with(dirs, "vst3", 6)
 }
 
-/// VST2 plug-ins in `dirs`: `.vst` bundles on macOS, `.so` files on Linux, `.dll`s on
-/// Windows.
+/// VST2 plug-ins in `dirs` and one level of subfolders: `.vst` bundles on macOS, `.so`
+/// files on Linux, `.dll`s on Windows. (Deeper, any library a plug-in ships would count.)
 pub fn vst2_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
-    bundles_with(dirs, VST2_EXTENSION)
+    bundles_with(dirs, VST2_EXTENSION, 1)
 }
 
 #[cfg(target_os = "linux")]
@@ -121,21 +122,22 @@ const VST2_EXTENSION: &str = "dll";
 #[cfg(not(any(target_os = "linux", windows)))]
 const VST2_EXTENSION: &str = "vst";
 
-fn bundles_with(dirs: &[PathBuf], ext: &str) -> Vec<PathBuf> {
-    let is = |p: &Path| p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext));
-    let mut out = Vec::new();
-    for dir in dirs {
-        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+/// Files or bundles named `*.ext` in `dirs`, looking `depth` levels of subfolders down.
+fn bundles_with(dirs: &[PathBuf], ext: &str, depth: usize) -> Vec<PathBuf> {
+    fn walk(dir: &Path, ext: &str, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let p = e.path();
-            if is(&p) {
+            if p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext)) {
                 out.push(p);
-            } else if p.is_dir()
-                && let Ok(sub) = std::fs::read_dir(&p)
-            {
-                out.extend(sub.flatten().map(|e| e.path()).filter(|p| is(p)));
+            } else if depth > 0 && p.is_dir() {
+                walk(&p, ext, depth - 1, out);
             }
         }
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        walk(dir, ext, depth, &mut out);
     }
     out.sort();
     out.dedup();
@@ -353,6 +355,35 @@ mod au_tests {
             location: location.into(),
             cid: cid.into(),
         }
+    }
+
+    #[test]
+    fn nested_vst3_bundles_are_found_but_not_inside_a_bundle() {
+        let root = std::env::temp_dir().join(format!("deckard-scan-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let make = |path: &str| {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+        };
+        make("Top.vst3");
+        make("Vendor/One.VST3");
+        make("Melda/EQ/Deep.vst3");
+        // A bundle is a folder on macOS and Linux: what it holds isn't another plug-in.
+        make("Bundle.vst3/Contents/Inner.vst3");
+        // VST2 stays one level down, where its libraries aren't mistaken for plug-ins.
+        make("Top.dll");
+        make("Vendor/One.dll");
+        make("Vendor/Support/Library.dll");
+        let names = |found: Vec<PathBuf>| -> Vec<String> {
+            found.iter().map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect()
+        };
+        let dirs = [root.clone()];
+        let vst3 = names(vst3_bundles(&dirs));
+        let vst2 = names(bundles_with(&dirs, "dll", 1));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(vst3, ["Bundle.vst3", "Melda/EQ/Deep.vst3", "Top.vst3", "Vendor/One.VST3"]);
+        assert_eq!(vst2, ["Top.dll", "Vendor/One.dll"]);
     }
 
     #[test]

@@ -23,3 +23,6 @@ tempfile = "3.27.0"
 [features]
 # Real-time output through the default audio device (`output` module).
 output = ["dep:cpal", "dep:alsa"]
+# Windows: ASIO as well as WASAPI. Building it needs the ASIO SDK and libclang (see
+# DEVELOPMENT.md).
+asio = ["output", "cpal/asio"]

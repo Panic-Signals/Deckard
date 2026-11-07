@@ -460,7 +460,7 @@ mod tests {
     }
 
     fn on(sound: usize, pitch: i64, tick: f64, played: f64) -> Recorded {
-        Recorded { group: 0, sound, pitch, velocity: 90, length: i64::MAX, tick, mode: Mode::Scene(0), seq: 0, played }
+        Recorded { midi: false, group: 0, sound, pitch, velocity: 90, length: i64::MAX, tick, mode: Mode::Scene(0), seq: 0, played }
     }
 
     fn off(sound: usize, pitch: i64, tick: f64, played: f64) -> Recorded {

@@ -478,7 +478,13 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     indexed!("focus_scene", "a scene", Action::FocusScene);
     indexed!("launch_scene", "a scene", Action::LaunchScene);
     indexed!("show_scenes", "a scene", Action::ShowScenes);
-    indexed!("new_pattern", "a group", Action::NewPatternIn);
+    request!("new_pattern", (group: usize, place: Option<usize>) => {
+        let group = index(group, "a group")?;
+        match place {
+            Some(place) => Action::NewPatternAt { group, slot: index(place, "a place")? },
+            None => Action::NewPatternIn(group),
+        }
+    });
     indexed!("focus_section", "a section", Action::FocusSection);
     indexed!("pick_pattern", "a pattern", Action::PickPattern);
     let sh = shared.clone();
@@ -590,15 +596,15 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         d.set(
             "lock",
             lua.create_function(move |_, (what, n): (String, Option<mlua::Value>)| {
-                const WHAT: [&str; 10] =
-                    ["button", "pad", "update", "delete", "delete_slot", "bank", "morph", "morph_mode", "morph_time", "morph_grid"];
+                const WHAT: [&str; 11] =
+                    ["button", "pad", "slot", "update", "delete", "delete_slot", "bank", "morph", "morph_mode", "morph_time", "morph_grid"];
                 let Some(&what) = WHAT.iter().find(|w| **w == what) else {
                     return Err(mlua::Error::runtime(format!("no lock command \"{what}\" ({})", WHAT.join(", "))));
                 };
                 let n = match (what, n) {
                     // (Pads and slots count from 1, as the pages count.)
-                    ("pad" | "delete_slot", Some(mlua::Value::Integer(n))) if n >= 1 => n as usize - 1,
-                    ("pad" | "delete_slot", _) => return Err(mlua::Error::runtime(format!("lock(\"{what}\", n): n from 1"))),
+                    ("pad" | "slot" | "delete_slot", Some(mlua::Value::Integer(n))) if n >= 1 => n as usize - 1,
+                    ("pad" | "slot" | "delete_slot", _) => return Err(mlua::Error::runtime(format!("lock(\"{what}\", n): n from 1"))),
                     ("bank", Some(mlua::Value::Integer(n))) => usize::from(n > 0),
                     (_, Some(mlua::Value::Boolean(on))) => usize::from(on),
                     (_, Some(mlua::Value::Integer(n))) if n >= 0 => n as usize,
@@ -657,7 +663,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set(
         "note_repeat",
         lua.create_function(move |_, (what, value): (String, mlua::Value)| {
-            const WHAT: [&str; 16] = [
+            const WHAT: [&str; 17] = [
+                "on",
                 "type",
                 "rate",
                 "rate_unit",
@@ -856,6 +863,42 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // What a controller with no screens needs: edits by target rather than by focus, and
+    // the values it shows on its strips.
+    request!("choke_all", () => Action::ChokeAll);
+    request!("delete_pattern", (group: usize, pattern: usize) => Action::DeletePattern { group: index(group, "a group")?, pattern: index(pattern, "a pattern")? });
+    request!("copy_pattern", (group: usize, from: usize, to: usize) => Action::CopyPattern {
+        group: index(group, "a group")?,
+        from: index(from, "a pattern")?,
+        to: index(to, "a pattern")?,
+    });
+    indexed!("delete_scene", "a scene", Action::DeleteScene);
+    request!("copy_scene", (from: usize, to: usize) => Action::CopyScene { from: index(from, "a scene")?, to: index(to, "a scene")? });
+    request!("copy_group", (from: usize, to: usize) => Action::CopyGroup { from: index(from, "a group")?, to: index(to, "a group")? });
+    request!("copy_sound", (from: usize, to: usize) => Action::CopySound { from: index(from, "a sound")?, to: index(to, "a sound")? });
+    request!("set_send", (group: usize, sound: Option<usize>, aux: usize, level: f64) => {
+        let (group, sound) = channel(group, sound)?;
+        Action::SetSend { group, sound, aux: index(aux, "an aux send")?.min(1), level: level.clamp(0.0, 1.0) }
+    });
+    request!("set_swing", (group: Option<usize>, sound: Option<usize>, amount: f64) => Action::SetChannelSwing {
+        group: group.map(|g| index(g, "a group")).transpose()?,
+        sound: sound.map(|s| index(s, "a sound")).transpose()?,
+        amount: amount.clamp(0.0, 100.0),
+    });
+    request!("set_tune", (group: usize, sound: Option<usize>, semitones: f64) => {
+        let (group, sound) = channel(group, sound)?;
+        Action::SetTune { group, sound, semitones: semitones.clamp(-36.0, 36.0) }
+    });
+    request!("cue_db", (db: f64) => Action::CueDb(db.min(MAX_DB)));
+    request!("input_db", (input: usize, db: f64) => Action::InputDb(index(input, "an input")?.min(1), db.min(MAX_DB)));
+    request!("watch_input", (on: bool) => Action::WatchInput(on));
+    request!("library", (open: bool) => Action::Library(open));
+    indexed!("reset_knob", "a knob", Action::ResetKnob);
+    request!("perform_mode", (group: usize, mode: usize) => Action::PerformMode { group: index(group, "a group")?, mode: index(mode, "a mode")?.min(7) });
+    request!("settings_wanted", (on: bool) => Action::SettingsWanted(on));
+    // A level as stored (0..1, 0.75 unity) in dB, and back: strips work in travel.
+    d.set("level_to_db", lua.create_function(|_, level: f64| Ok(deckard_model::level_db(level.clamp(0.0, 1.0))))?)?;
+    d.set("db_to_level", lua.create_function(|_, db: f64| Ok(deckard_model::level_from_db(db)))?)?;
     let sh = shared.clone();
     d.set(
         "turn_knob",
@@ -885,6 +928,9 @@ fn mix(lua: &Lua, t: &Table, m: &crate::MixView) -> mlua::Result<()> {
     t.set("pan", m.pan)?;
     t.set("meter", lua.create_sequence_from([db(m.meter.0), db(m.meter.1)])?)?;
     t.set("headroom", db(m.headroom))?;
+    t.set("aux", lua.create_sequence_from(m.aux)?)?;
+    t.set("swing", m.swing)?;
+    t.set("tune", m.tune)?;
     let plugins = lua.create_table()?;
     for (i, &(instrument, active)) in m.plugins.iter().enumerate() {
         let p = lua.create_table()?;
@@ -1053,6 +1099,15 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     t.set("swing", v.swing)?;
     t.set("volume", v.master_volume)?;
     t.set("volume_db", v.master_db)?;
+    t.set("master_meter", lua.create_sequence_from([db(v.master_meter.0), db(v.master_meter.1)])?)?;
+    t.set("cue_meter", lua.create_sequence_from([db(v.cue_meter.0), db(v.cue_meter.1)])?)?;
+    t.set("cue_level", v.cue_level)?;
+    let inputs = lua.create_table()?;
+    for m in v.input_meters {
+        inputs.push(lua.create_sequence_from([db(m.0), db(m.1)])?)?;
+    }
+    t.set("input_meters", inputs)?;
+    t.set("input_levels", lua.create_sequence_from(v.input_levels)?)?;
     t.set("playing", v.playing)?;
     t.set("recording", v.recording)?;
     t.set("looping", v.looping)?;
@@ -1060,11 +1115,14 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     t.set("auto_write", v.auto_write)?;
     t.set("strip_position", v.strip_position)?;
     t.set("touch_auto_write", v.touch_auto_write)?;
+    t.set("keep_focus", v.keep_focus)?;
+    t.set("relative_strips", v.relative_strips)?;
     t.set("fixed_velocity", v.fixed_velocity)?;
     t.set("velocity", v.velocity)?;
     let scale = lua.create_table()?;
     scale.set("bank", v.scale_bank + 1)?;
     scale.set("kind", v.scale_kind + 1)?;
+    scale.set("root", v.scale_root)?;
     t.set("scale", scale)?;
     t.set("follow", v.follow)?;
     t.set("recent", lua.create_sequence_from(v.recent.iter().map(String::as_str))?)?;
@@ -1147,6 +1205,10 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             let pt = lua.create_table()?;
             pt.set("touched", touched)?;
             pt.set("pos", pos)?;
+            if let Some((mode, name)) = &g.perform_mode {
+                pt.set("mode", mode + 1)?;
+                pt.set("name", name.as_str())?;
+            }
             gt.set("perform", pt)?;
         }
         mix(lua, &gt, &g.mix)?;
@@ -1158,6 +1220,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             t.set("color", rgb(pt.rgb)?)?;
             t.set("default_color", pt.default_color)?;
             t.set("bars", pt.bars)?;
+            t.set("slot", pt.slot + 1)?;
             patterns.set(i + 1, t)?;
         }
         gt.set("patterns", patterns)?;
@@ -1216,6 +1279,40 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     ct.set("chain", chain)?;
     ct.set("pages", lua.create_sequence_from(c.pages.iter().map(String::as_str))?)?;
     ct.set("page", c.page + 1)?;
+    // The built-in EQ's or Filter's curve, for the right screen. The same on both pages.
+    for (name, curve) in [("eq", &c.eq), ("filter", &c.filter), ("picture", &c.picture)] {
+        let Some(curve) = curve else { continue };
+        let t = lua.create_table()?;
+        t.set("points", lua.create_sequence_from(curve.points.iter().copied())?)?;
+        let bands = lua.create_table()?;
+        for (i, (x, y)) in curve.bands.iter().enumerate() {
+            let b = lua.create_table()?;
+            b.set("x", *x)?;
+            b.set("y", *y)?;
+            bands.set(i + 1, b)?;
+        }
+        t.set("bands", bands)?;
+        if !curve.extent.is_empty() {
+            t.set("extent", lua.create_sequence_from(curve.extent.iter().copied())?)?;
+        }
+        if !curve.lfo.is_empty() {
+            t.set("lfo", lua.create_sequence_from(curve.lfo.iter().copied())?)?;
+        }
+        if !curve.side.is_empty() {
+            t.set("side", lua.create_sequence_from(curve.side.iter().copied())?)?;
+            t.set("side_live", curve.side_live)?;
+        }
+        if !curve.kind.is_empty() {
+            t.set("kind", curve.kind.as_str())?;
+        }
+        if curve.dim {
+            t.set("dim", true)?;
+        }
+        if curve.preview {
+            t.set("preview", true)?;
+        }
+        ct.set(name, t)?;
+    }
     let knobs = lua.create_table()?;
     for k in 0..8 {
         let kt = match c.knobs.get(k) {
