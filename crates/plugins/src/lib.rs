@@ -31,19 +31,31 @@ use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{ComPtr, ComWrapper, Interface};
 
+#[cfg(not(windows))]
 unsafe extern "C" {
     fn _exit(code: i32) -> !;
 }
 
 /// End the process now. Unlike `std::process::exit`, this skips the exit-time
 /// destructors of loaded plug-ins: some (NI's, whose editors use their own Qt) crash
-/// in them once the host has started tearing down. Call it instead of returning from
-/// `main` in programs that may have loaded plug-ins.
+/// or hang in them once the host has started tearing down. Call it instead of returning
+/// from `main` in programs that may have loaded plug-ins.
 pub fn exit(code: i32) -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    unsafe { _exit(code) }
+    // Windows' `_exit` is `ExitProcess`, which still detaches every DLL, running those
+    // destructors; only `TerminateProcess` doesn't.
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        TerminateProcess(GetCurrentProcess(), code as u32);
+        std::process::abort()
+    }
+    #[cfg(not(windows))]
+    unsafe {
+        _exit(code)
+    }
 }
 
 /// Whether this is the process's main thread (where plug-ins must be created).

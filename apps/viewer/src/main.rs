@@ -243,6 +243,10 @@ fn main() {
             };
             app.recent = menu::load_recent();
             app.settings = settings::Settings::load();
+            // (Nothing to open through ASIO before a driver is picked.)
+            if app.settings.asio_device.is_some() {
+                deckard_engine::devices::set_driver(app.settings.audio_driver);
+            }
             app.update = update::Notice::start(app.settings.check_updates);
             app.surface = app.new_surface();
             if let Some(m) = &app.mk3 {
@@ -667,15 +671,25 @@ fn new_zone(file: &Path, frames: usize, from: deckard_doc::ZoneFrom) -> deckard_
 /// device last picked; the system's default while that can't be opened, with why in
 /// `fallback` (Preferences ▸ Audio shows it).
 fn open_output(settings: &settings::Settings, fallback: &mut Option<String>) -> Result<Output, String> {
+    use deckard_engine::devices::{self, AudioDriver};
     *fallback = None;
-    let out = Output::with_device(settings.output_device.as_deref(), settings.buffer_frames, settings.multicore).or_else(|e| {
-        if settings.output_device.is_some() {
-            *fallback = Some(e);
-            Output::with_options(settings.buffer_frames, settings.multicore)
-        } else {
-            Err(e)
+    let (out, no_asio) = devices::open_preferring(settings.audio_driver, |driver| {
+        devices::set_driver(driver);
+        if driver == AudioDriver::Asio {
+            return Output::with_device(settings.asio_device.as_deref(), settings.buffer_frames, settings.multicore);
         }
-    })?;
+        Output::with_device(settings.output_device.as_deref(), settings.buffer_frames, settings.multicore).or_else(|e| {
+            if settings.output_device.is_some() {
+                *fallback = Some(e);
+                Output::with_options(settings.buffer_frames, settings.multicore)
+            } else {
+                Err(e)
+            }
+        })
+    });
+    // ASIO not being in use says more than which system device stood in.
+    *fallback = no_asio.or(fallback.take());
+    let out = out?;
     out.set_routing(&settings.output_routing);
     out.set_sample_accurate(settings.exact_timing);
     out.set_render_ahead(settings.render_ahead_ms as f64 / 1000.0);
@@ -691,9 +705,9 @@ fn open_live_input(
     inputs: std::sync::Arc<input_levels::InputBus>,
     rate: u32,
 ) -> Result<cpal::Stream, String> {
-    use cpal::traits::{DeviceTrait, StreamTrait};
+    use cpal::traits::StreamTrait;
     let (dev, config) = deckard_engine::devices::open_input(device.as_deref())?;
-    if config.sample_format() != cpal::SampleFormat::F32 {
+    if !deckard_engine::devices::format_ok(config.sample_format()) {
         return Err(format!("input format {:?} is not supported", config.sample_format()));
     }
     if config.sample_rate() != rate {
@@ -701,24 +715,25 @@ fn open_live_input(
     }
     let channels = config.channels() as usize;
     let map: Vec<Option<usize>> = (0..32).map(|i| routing.get(i).copied().unwrap_or(Some(i)).filter(|&c| c < channels)).collect();
-    let stream = dev
-        .build_input_stream(
-            config.into(),
-            move |data: &[f32], _| {
-                if let Ok(mut q) = live.try_lock() {
-                    for f in data.chunks(channels) {
-                        q.push_back(inputs.frame(f, &map));
-                    }
-                    // A few blocks at most (nothing may be reading).
-                    while q.len() > 8192 {
-                        q.pop_front();
-                    }
+    // Room up front: on ASIO this callback runs on the output's thread.
+    live.lock().unwrap().reserve(2 * 8192);
+    let stream = deckard_engine::devices::build_input(
+        &dev,
+        config,
+        move |data: &[f32]| {
+            if let Ok(mut q) = live.try_lock() {
+                for f in data.chunks(channels) {
+                    q.push_back(inputs.frame(f, &map));
                 }
-            },
-            |e| eprintln!("audio input error: {e}"),
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+                // A few blocks at most (nothing may be reading).
+                while q.len() > 8192 {
+                    q.pop_front();
+                }
+            }
+        },
+        |e| eprintln!("audio input error: {e}"),
+    )
+    .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
     Ok(stream)
 }
@@ -1020,8 +1035,14 @@ pub struct App {
     pending_editor: bool,
     /// Audio output, opened on first Play.
     output: Option<Result<Output, String>>,
-    /// Why the output device picked couldn't be opened (the default plays instead).
+    /// Why the output device picked couldn't be opened (the default plays instead), or
+    /// why ASIO couldn't be had (the system's driver plays instead).
     output_fallback: Option<String>,
+    /// The ASIO fallback the status line last told of; whether the driver asked for its
+    /// streams to be opened afresh, and when they last were.
+    fallback_told: Option<String>,
+    asio_reopen_due: bool,
+    asio_reopened: Option<std::time::Instant>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
     /// Asking to quit NI's agent, which holds the MK3's screens.
@@ -2065,6 +2086,7 @@ impl App {
     /// Preferences > Audio: the buffer size, and how the audio is keeping up.
     fn audio_engine_preferences(&mut self, ui: &mut egui::Ui) {
         use deckard_engine::output::BUFFER_SIZES;
+        self.audio_driver_preferences(ui);
         let rate = match &self.output {
             Some(Ok(o)) => o.rate as f64,
             _ => 48_000.0,
@@ -2154,30 +2176,149 @@ impl App {
         }
     }
 
-    /// Close the audio output and open it again (with the current settings): playback
-    /// stops; MIDI and the live input are wired to the new one.
-    fn restart_output(&mut self) {
+    /// Preferences > Audio on Windows: the audio system to play through, and what it's
+    /// doing. A build without ASIO just says which it is.
+    fn audio_driver_preferences(&mut self, ui: &mut egui::Ui) {
+        use deckard_engine::devices::{ASIO_BUILT, AudioDriver};
+        if !cfg!(windows) {
+            return;
+        }
+        let wanted = self.settings.audio_driver;
+        let mut pick = wanted;
+        egui::Grid::new("audio-driver").num_columns(2).show(ui, |ui| {
+            ui.label("Driver");
+            if ASIO_BUILT {
+                egui::ComboBox::from_id_salt("audio-driver-pick").selected_text(pick.name()).show_ui(ui, |ui| {
+                    for d in [AudioDriver::System, AudioDriver::Asio] {
+                        ui.selectable_value(&mut pick, d, d.name());
+                    }
+                });
+            } else {
+                ui.label(AudioDriver::System.name());
+            }
+            ui.end_row();
+            if let Some(Ok(out)) = &self.output
+                && out.driver == AudioDriver::Asio
+            {
+                let latency = out.latency().as_secs_f64() * 1000.0;
+                ui.label("");
+                ui.label(format!("{}: {} Hz, {:?}, {latency:.1} ms from a block's start to the outputs, as the driver says", out.device, out.rate, out.format));
+                ui.end_row();
+                ui.label("");
+                ui.label(
+                    egui::RichText::new(
+                        "The driver has the last word on the buffer size and the rate. If it won't take the size below, set it in its own control panel: DECKARD follows.",
+                    )
+                    .weak(),
+                );
+                ui.end_row();
+            }
+        });
+        if pick != wanted {
+            self.settings.set_audio_driver(pick);
+            (self.inputs, self.outputs) = (None, None);
+            self.channel_names.clear();
+            self.close_output();
+            if pick == AudioDriver::Asio {
+                deckard_engine::devices::rescan();
+            }
+            self.open_output_now();
+        }
+        ui.separator();
+    }
+
+    /// Close the audio output and whatever else holds the driver: playback stops.
+    fn close_output(&mut self) {
         self.stop();
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
+        if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
+            self.recorder.release_input();
+        }
+    }
+
+    /// Open the audio output (with the current settings), saying so.
+    fn open_output_now(&mut self) {
         let _ = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback));
-        self.status =
-            format!("audio: {} samples, {}", self.settings.buffer_frames, if self.settings.multicore { "multi-core" } else { "one core" });
+        self.status = match &self.output {
+            Some(Ok(out)) if out.driver == deckard_engine::devices::AudioDriver::Asio => {
+                format!("audio: ASIO, {}, {}", out.device, if self.settings.multicore { "multi-core" } else { "one core" })
+            }
+            _ => format!(
+                "audio: {} samples, {}",
+                self.settings.buffer_frames,
+                if self.settings.multicore { "multi-core" } else { "one core" }
+            ),
+        };
+    }
+
+    /// Close the audio output and open it again (with the current settings): playback
+    /// stops; MIDI and the live input are wired to the new one.
+    fn restart_output(&mut self) {
+        self.close_output();
+        self.open_output_now();
+    }
+
+    /// What ASIO asks of the app, off its callbacks, each pass: to have its absence told,
+    /// and to be opened afresh with what the driver is set to now (its control panel is
+    /// the usual reason). A driver that keeps asking is only obeyed now and then, so it
+    /// gets to play in between.
+    fn watch_audio_driver(&mut self) {
+        use deckard_engine::devices::{self, AudioDriver};
+        let asio_wanted = self.settings.audio_driver == AudioDriver::Asio;
+        if asio_wanted && self.output_fallback != self.fallback_told {
+            self.fallback_told = self.output_fallback.clone();
+            if let Some(why) = &self.fallback_told {
+                self.status = format!("audio: ASIO isn't in use ({why}); playing through {}", AudioDriver::System.name());
+            }
+        }
+        if let Some(Ok(out)) = &self.output
+            && out.take_invalidated()
+        {
+            self.asio_reopen_due = true;
+        }
+        let now = std::time::Instant::now();
+        if !self.asio_reopen_due || self.asio_reopened.is_some_and(|t| now.duration_since(t) < ASIO_REOPEN_GAP) {
+            return;
+        }
+        self.asio_reopen_due = false;
+        self.asio_reopened = Some(now);
+        self.close_output();
+        devices::rescan();
+        self.open_output_now();
     }
 
     fn audio_preferences(&mut self, ui: &mut egui::Ui) {
+        use deckard_engine::devices::{self, ASIO_BUILT, AudioDriver};
         self.audio_engine_preferences(ui);
         ui.separator();
-        let inputs = self.inputs.get_or_insert_with(recorder::input_devices).clone();
-        let outputs = self.outputs.get_or_insert_with(deckard_engine::output::output_devices).clone();
-        let (default_in, default_out) = (recorder::default_input(), deckard_engine::output::default_output());
-        let default_label = |d: &Option<String>| format!("System default ({})", d.as_deref().unwrap_or("none"));
-        let (mut input, mut output) = (self.settings.input_device.clone(), self.settings.output_device.clone());
+        let wanted = self.settings.audio_driver.usable();
+        let asio = wanted == AudioDriver::Asio;
+        let inputs = self.inputs.get_or_insert_with(|| devices::input_devices_of(wanted)).clone();
+        let outputs = self.outputs.get_or_insert_with(|| devices::output_devices_of(wanted)).clone();
+        // (ASIO has no default, and listing what plays when it's away isn't what's asked.)
+        let (default_in, default_out) =
+            if asio { (None, None) } else { (recorder::default_input(), deckard_engine::output::default_output()) };
+        let default_label = |d: &Option<String>| {
+            if asio { "None picked".to_string() } else { format!("System default ({})", d.as_deref().unwrap_or("none")) }
+        };
+        let (mut input, mut output) = if asio {
+            (self.settings.asio_device.clone(), self.settings.asio_device.clone())
+        } else {
+            (self.settings.input_device.clone(), self.settings.output_device.clone())
+        };
         egui::Grid::new("audio-interface").num_columns(3).show(ui, |ui| {
-            for (label, pick, devices, default, kind) in
-                [("Output device", &mut output, &outputs, &default_out, "out"), ("Input device", &mut input, &inputs, &default_in, "in")]
-            {
+            // The same ASIO driver serves input and output.
+            let rows = if asio {
+                vec![("ASIO driver", &mut output, &outputs, &default_out, "out")]
+            } else {
+                vec![
+                    ("Output device", &mut output, &outputs, &default_out, "out"),
+                    ("Input device", &mut input, &inputs, &default_in, "in"),
+                ]
+            };
+            for (label, pick, devices, default, kind) in rows {
                 ui.label(label);
                 let shown = pick.clone().unwrap_or_else(|| default_label(default));
                 egui::ComboBox::from_id_salt(label).selected_text(shown).width(320.0).show_ui(ui, |ui| {
@@ -2192,7 +2333,12 @@ impl App {
                 } else if kind == "out"
                     && let Some(why) = &self.output_fallback
                 {
-                    ui.label(egui::RichText::new(format!("can't be opened: {why}. Playing through the system default.")).color(trouble));
+                    let text = if self.settings.audio_driver == AudioDriver::Asio {
+                        format!("ASIO isn't in use: {why}. Playing through {}.", AudioDriver::System.name())
+                    } else {
+                        format!("can't be opened: {why}. Playing through the system default.")
+                    };
+                    ui.label(egui::RichText::new(text).color(trouble));
                 } else {
                     ui.label("");
                 }
@@ -2202,21 +2348,41 @@ impl App {
             if ui.button("Rescan").clicked() {
                 (self.inputs, self.outputs) = (None, None);
                 self.channel_names.clear();
+                if asio {
+                    devices::rescan();
+                    // Asked for, and not what plays (the driver may be free now): try again.
+                    if matches!(&self.output, Some(Ok(o)) if o.driver != AudioDriver::Asio) {
+                        self.restart_output();
+                    }
+                }
             }
             ui.end_row();
         });
         // Another device: its own routing comes back.
-        if input != self.settings.input_device {
-            self.settings.set_input_device(input);
+        if asio {
+            if output != self.settings.asio_device {
+                self.settings.set_asio_device(output);
+                self.restart_output();
+            }
+        } else {
+            if input != self.settings.input_device {
+                self.settings.set_input_device(input);
+            }
+            if output != self.settings.output_device {
+                self.settings.set_output_device(output);
+                self.restart_output();
+            }
         }
-        if output != self.settings.output_device {
-            self.settings.set_output_device(output);
-            self.restart_output();
+        if ASIO_BUILT && self.settings.audio_driver == AudioDriver::Asio && self.settings.asio_device.is_none() {
+            ui.label(egui::RichText::new("Pick the ASIO driver of your interface.").weak());
         }
         let channels_of =
             |devices: &[(String, usize)], d: &Option<String>| devices.iter().find(|(n, _)| Some(n) == d.as_ref()).map_or(0, |(_, c)| *c);
-        let (in_device, out_device) =
-            (self.settings.input_device.clone().or(default_in), self.settings.output_device.clone().or(default_out));
+        let (in_device, out_device) = if asio {
+            (self.settings.asio_device.clone(), self.settings.asio_device.clone())
+        } else {
+            (self.settings.input_device.clone().or(default_in), self.settings.output_device.clone().or(default_out))
+        };
         let (in_channels, out_channels) = (channels_of(&inputs, &in_device), channels_of(&outputs, &out_device));
         ui.separator();
         ui.horizontal(|ui| {
@@ -3477,6 +3643,49 @@ impl App {
         self.playing = None;
     }
 
+    /// Move the playhead to tick `tick` of the focused pattern's loop when stopped.
+    fn seek_pattern(&mut self, tick: i64) {
+        if self.playing.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let d = doc.borrow();
+        let p = d.project();
+        let Some(grp) = p.groups.get(self.group) else { return };
+        let plen = if self.pattern < grp.patterns.len() { layout::pattern_len(p, self.group, self.pattern) } else { p.bar_length() }.max(1);
+        let t = tick.clamp(0, plen - 1);
+        let mode = if self.song_view { Mode::Arrangement } else { Mode::Scene(self.scene) };
+        let cur = self.shown_playhead().filter(|h| h.mode == mode).map_or(0, |h| h.position.max(0.0) as i64);
+        let to = match mode {
+            Mode::Arrangement => {
+                let mut sec_start = 0i64;
+                for sec in &p.sections {
+                    if cur < sec_start + sec.length {
+                        break;
+                    }
+                    sec_start += sec.length;
+                }
+                let in_sec = (cur - sec_start).max(0);
+                sec_start + (in_sec / plen) * plen + t
+            }
+            _ => (cur / plen) * plen + t,
+        };
+        drop(d);
+        self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.sync_transport();
+    }
+
+    /// Move the playhead to tick `tick` of the arrangement when stopped.
+    fn seek_arrangement(&mut self, tick: i64) {
+        if self.playing.is_some() {
+            return;
+        }
+        let to = tick.max(0);
+        let mode = Mode::Arrangement;
+        self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.sync_transport();
+    }
+
     /// A knob moved while writing modulation (docs/superpowers/plans/
     /// 2026-10-22-phase2c-modulation.md): with the song at `head` (mode, tick), its
     /// deviation from the knob's own value goes into the playing pattern of its
@@ -4036,10 +4245,69 @@ impl App {
         if matches!(self.controller, Some(Ok(_))) {
             return None;
         }
-        Some(if self.surface.holding() || self.surface.animates() {
+        Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             std::time::Duration::from_millis(30)
         } else {
             controller::tick_every(self.playing.is_some())
+        })
+    }
+
+    /// The focused Filter's Amount is driving its LFO, so the right screen has to keep
+    /// redrawing.
+    fn filter_modulates(&self) -> bool {
+        if self.channel {
+            return false;
+        }
+        let Some(doc) = &self.doc else { return false };
+        let Ok(d) = doc.try_borrow() else { return false };
+        d.chain_slots(self.chain())
+            .and_then(|slots| self.slot.and_then(|i| slots.get(i)))
+            .is_some_and(|s| s.module == "Filter" && deckard_engine::fx::filter::modulates(&s.params))
+    }
+
+    /// The focused effect's picture is moving (a chorus, a tremolo, a modulated tail).
+    fn picture_moves(&self) -> bool {
+        if self.channel {
+            return false;
+        }
+        let Some(doc) = &self.doc else { return false };
+        let Ok(d) = doc.try_borrow() else { return false };
+        d.chain_slots(self.chain())
+            .and_then(|slots| self.slot.and_then(|i| slots.get(i)))
+            .is_some_and(|s| deckard_engine::fx::picture::moves(&s.module, &s.params))
+    }
+
+    /// Where a moving picture is in its cycle. The rate is added on, so turning Speed
+    /// does not jump the drawing.
+    fn picture_phase(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
+        use std::sync::Mutex;
+        static CLOCK: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+        if !deckard_engine::fx::picture::moves(module, params) {
+            return 0.0;
+        }
+        let now = Self::filter_seconds();
+        let hz = deckard_engine::fx::picture::rate_hz(module, params, tempo);
+        let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, phase) = *clock;
+        let phase = deckard_engine::fx::filter::advance_phase(phase, if at == 0.0 { 0.0 } else { now - at }, hz);
+        *clock = (now, phase);
+        phase as f32
+    }
+
+    /// The focused built-in effect, other than the EQ and the Filter, as the right
+    /// screen draws it. The same on every page.
+    fn effect_picture(slot: &deckard_model::SlotInfo, phase: f32, side_live: bool, page: usize) -> Option<deckard_surface::EqCurveView> {
+        let shot = deckard_engine::fx::picture::shot(&slot.module, &slot.params, phase, side_live, page)?;
+        Some(deckard_surface::EqCurveView {
+            kind: shot.kind.to_string(),
+            points: shot.points,
+            bands: shot.bands,
+            extent: shot.extent,
+            lfo: shot.lfo,
+            side: shot.side,
+            side_live: shot.side_live,
+            dim: shot.dim,
+            preview: shot.preview,
         })
     }
 
@@ -4186,6 +4454,64 @@ impl App {
         }
     }
 
+    /// The focused built-in EQ, as the right screen draws it.
+    fn eq_curve(slot: &deckard_model::SlotInfo) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "EQ" {
+            return None;
+        }
+        let curve = deckard_engine::fx::eq::response(&slot.params, 48_000.0, 120);
+        Some(deckard_surface::EqCurveView { points: curve.points, bands: curve.bands.into_iter().collect(), ..Default::default() })
+    }
+
+    /// Seconds since the first filter picture, so its LFO keeps moving.
+    fn filter_seconds() -> f64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    }
+
+    /// Where the LFO is in its cycle. The rate is added on, so turning Speed does not
+    /// jump the picture to another point.
+    fn filter_depth(params: &[(String, f64)], tempo: f64) -> f32 {
+        use std::sync::Mutex;
+        static CLOCK: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+        let now = Self::filter_seconds();
+        let hz = deckard_engine::fx::filter::lfo_rate(params, tempo);
+        let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, phase) = *clock;
+        let phase = deckard_engine::fx::filter::advance_phase(phase, if at == 0.0 { 0.0 } else { now - at }, hz);
+        *clock = (now, phase);
+        if !deckard_engine::fx::filter::modulates(params) {
+            return 0.0;
+        }
+        deckard_engine::fx::filter::lfo_sample(params, phase)
+    }
+
+    /// Whether a side-chain input is routed into this effect.
+    fn sidechain_routed(p: &deckard_model::Project, chain: deckard_doc::Chain, slot: usize) -> bool {
+        let deckard_doc::Chain::Sound(g, s) = chain else { return false };
+        p.groups.get(g).and_then(|g| g.sounds.get(s)).is_some_and(|snd| snd.channel.sidechain.iter().any(|(k, _)| *k == slot))
+    }
+
+    /// The focused built-in Filter, as the right screen draws it.
+    fn filter_curve(slot: &deckard_model::SlotInfo, tempo: f64, side_live: bool) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "Filter" {
+            return None;
+        }
+        let depth = Self::filter_depth(&slot.params, tempo);
+        let curve = deckard_engine::fx::filter::response(&slot.params, 120, depth);
+        let amount = slot.params.iter().find(|(k, _)| k == "amount").map_or(0.0, |(_, v)| *v);
+        let extent = if amount.abs() > 1e-4 { deckard_engine::fx::filter::response(&slot.params, 120, 1.0).points } else { Vec::new() };
+        Some(deckard_surface::EqCurveView {
+            points: curve.points,
+            bands: vec![curve.cutoff],
+            extent,
+            lfo: deckard_engine::fx::filter::lfo_picture(&slot.params, 48),
+            side: deckard_engine::fx::sidechain::response(&slot.params, 120),
+            side_live,
+            ..Default::default()
+        })
+    }
+
     /// What DECKARD's own MK3 layer shows of the app now.
     fn surface_view(&self) -> deckard_surface::View {
         use deckard_surface::{ControlView, GroupView, KnobView, SoundView, View};
@@ -4235,6 +4561,9 @@ impl App {
                 .collect(),
             // (Only while the plug-in browser shows: the list is long.)
             modules: if self.surface.page() == "module" { self.module_views() } else { Vec::new() },
+            eq: None,
+            filter: None,
+            picture: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -4281,8 +4610,18 @@ impl App {
         let Some(doc) = &self.doc else { return v };
         let d = doc.borrow();
         let p = d.project();
-        v.project = p.name.clone();
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
+        // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
+        if !self.channel {
+            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+            v.control.eq = slot.and_then(Self::eq_curve);
+            let tempo = v.tempo;
+            let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
+            v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
+            let page = c.page;
+            v.control.picture = slot.and_then(|s| Self::effect_picture(s, Self::picture_phase(&s.module, &s.params, tempo), live, page));
+        }
+        v.project = p.name.clone();
         v.swing = p.swing.amount;
         v.master_volume = p.master_level;
         v.master_db = deckard_model::level_db(p.master_level);
@@ -5497,7 +5836,7 @@ impl App {
             .any(|s| matches!(s.channel.audio_in, deckard_model::AudioSource::Ext(_)));
         let wants = plays || self.input_watched;
         self.input_bus.set_levels(&self.settings.input_levels);
-        let key = (self.settings.input_device.clone(), self.settings.input_routing.clone());
+        let key = (self.settings.input_device_in_use(), self.settings.input_routing.clone());
         if !wants {
             self.live_input = None;
             self.settings_input_failed = None;
@@ -5919,7 +6258,7 @@ impl App {
             listen,
             recorder::StartWith {
                 output,
-                device: self.settings.input_device.clone(),
+                device: self.settings.input_device_in_use(),
                 routing: &self.settings.input_routing,
                 inputs: self.input_bus.clone(),
                 clock,
@@ -6955,7 +7294,7 @@ impl App {
         };
         self.recorder.start(recorder::StartWith {
             output,
-            device: self.settings.input_device.clone(),
+            device: self.settings.input_device_in_use(),
             routing: &self.settings.input_routing,
             inputs: self.input_bus.clone(),
             clock,
@@ -8951,6 +9290,9 @@ impl App {
     }
 }
 
+/// The least time between opening an ASIO driver afresh at its request and the next.
+const ASIO_REOPEN_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A repaint delay for a pass that draws nothing (the window covered): egui takes a
 /// frame's predicted time off every delay, which a drawn frame spends, but here that
 /// would make 16 ms come back at once and spin (C46).
@@ -8988,6 +9330,10 @@ impl eframe::App for App {
         }
         if let Some(j) = &self.jam {
             j.shut_down();
+        }
+        // The app leaves without running destructors: an ASIO driver is let go of here.
+        if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
+            self.close_output();
         }
     }
 
@@ -14221,6 +14567,20 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert!(voices > 0, "the kick sounds on press, before the button is released");
         h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
         h.step();
+    }
+
+    #[test]
+    fn seek_pattern_moves_playhead_only_when_stopped() {
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        app.seek_pattern(2 * PPQ);
+        let head = app.shown_playhead().expect("parked playhead set while stopped");
+        assert_eq!(head.position as i64, 2 * PPQ);
+        // While playing, clicking the timeline must not move the playhead.
+        app.playing = Some(Mode::Scene(0));
+        app.seek_pattern(3 * PPQ);
+        assert_eq!(app.parked.expect("parked unchanged").position as i64, 2 * PPQ);
     }
 }
 

@@ -476,6 +476,35 @@ pub struct ControlView {
     /// What the plug-in browser (the Module page) lists, in order (only while it
     /// shows).
     pub modules: Vec<ModuleView>,
+    /// The focused built-in EQ, drawn on the right screen on both of its pages.
+    pub eq: Option<EqCurveView>,
+    /// The focused built-in Filter, drawn the same way. One band: the cutoff.
+    pub filter: Option<EqCurveView>,
+    /// Any other focused built-in effect, drawn on the right screen on every page.
+    pub picture: Option<EqCurveView>,
+}
+
+/// A curve for the right screen. `points` run across the plot, each 0..1 (0.5 is the
+/// middle). For a frequency picture they are 20 Hz to 20 kHz over ±12 dB. `bands` sit on
+/// that axis. The Filter also sends where Amount fully open sits (`extent`), one LFO
+/// cycle (`lfo`), and the side-chain filter (`side`; `side_live` when an input is routed
+/// to it).
+///
+/// `kind` is empty for that frequency plot. `"law"` is an input-to-output transfer,
+/// `"time"` is level over time, and `"dots"` is a cloud of marks. `dim` draws the curve
+/// quiet (Perform FX with Engage off). `preview` marks a picture the engine does not
+/// actually apply yet (the Cabinet).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EqCurveView {
+    pub points: Vec<f32>,
+    pub bands: Vec<(f32, f32)>,
+    pub extent: Vec<f32>,
+    pub lfo: Vec<f32>,
+    pub side: Vec<f32>,
+    pub side_live: bool,
+    pub kind: String,
+    pub dim: bool,
+    pub preview: bool,
 }
 
 /// One instrument, effect or plug-in the plug-in browser can load.
