@@ -3643,6 +3643,49 @@ impl App {
         self.playing = None;
     }
 
+    /// Move the playhead to tick `tick` of the focused pattern's loop when stopped.
+    fn seek_pattern(&mut self, tick: i64) {
+        if self.playing.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let d = doc.borrow();
+        let p = d.project();
+        let Some(grp) = p.groups.get(self.group) else { return };
+        let plen = if self.pattern < grp.patterns.len() { layout::pattern_len(p, self.group, self.pattern) } else { p.bar_length() }.max(1);
+        let t = tick.clamp(0, plen - 1);
+        let mode = if self.song_view { Mode::Arrangement } else { Mode::Scene(self.scene) };
+        let cur = self.shown_playhead().filter(|h| h.mode == mode).map_or(0, |h| h.position.max(0.0) as i64);
+        let to = match mode {
+            Mode::Arrangement => {
+                let mut sec_start = 0i64;
+                for sec in &p.sections {
+                    if cur < sec_start + sec.length {
+                        break;
+                    }
+                    sec_start += sec.length;
+                }
+                let in_sec = (cur - sec_start).max(0);
+                sec_start + (in_sec / plen) * plen + t
+            }
+            _ => (cur / plen) * plen + t,
+        };
+        drop(d);
+        self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.sync_transport();
+    }
+
+    /// Move the playhead to tick `tick` of the arrangement when stopped.
+    fn seek_arrangement(&mut self, tick: i64) {
+        if self.playing.is_some() {
+            return;
+        }
+        let to = tick.max(0);
+        let mode = Mode::Arrangement;
+        self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.sync_transport();
+    }
+
     /// A knob moved while writing modulation (docs/superpowers/plans/
     /// 2026-10-22-phase2c-modulation.md): with the song at `head` (mode, tick), its
     /// deviation from the knob's own value goes into the playing pattern of its
@@ -14408,6 +14451,20 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert!(voices > 0, "the kick sounds on press, before the button is released");
         h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
         h.step();
+    }
+
+    #[test]
+    fn seek_pattern_moves_playhead_only_when_stopped() {
+        let mut app = App::default();
+        app.new_project();
+        app.controller = None;
+        app.seek_pattern(2 * PPQ);
+        let head = app.shown_playhead().expect("parked playhead set while stopped");
+        assert_eq!(head.position as i64, 2 * PPQ);
+        // While playing, clicking the timeline must not move the playhead.
+        app.playing = Some(Mode::Scene(0));
+        app.seek_pattern(3 * PPQ);
+        assert_eq!(app.parked.expect("parked unchanged").position as i64, 2 * PPQ);
     }
 }
 
