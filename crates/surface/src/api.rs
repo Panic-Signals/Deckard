@@ -18,7 +18,21 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
 
     // Reading.
     let sh = shared.clone();
-    d.set("state", lua.create_function(move |lua, ()| state(lua, &sh.borrow().view))?)?;
+    d.set(
+        "state",
+        lua.create_function(move |lua, ()| {
+            let id = sh.borrow().view_id;
+            if lua.named_registry_value::<Option<u64>>("deckard.state_id").ok().flatten() == Some(id)
+                && let Ok(Some(t)) = lua.named_registry_value::<Option<Table>>("deckard.state_cache")
+            {
+                return Ok(t);
+            }
+            let t = state(lua, &sh.borrow().view)?;
+            lua.set_named_registry_value("deckard.state_id", id)?;
+            lua.set_named_registry_value("deckard.state_cache", t.clone())?;
+            Ok(t)
+        })?,
+    )?;
     d.set("scales", scales(lua)?)?;
     {
         // User chord `slot` of set `set` (from 1): the semitones above the root.
@@ -455,6 +469,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("browse_favorites", () => Action::Browse(Browse::Favorites));
     request!("browse_set_favorite", () => Action::Browse(Browse::SetFavorite));
     request!("browse_prehear", () => Action::Browse(Browse::Prehear));
+    request!("browse_routing", (on: bool) => Action::Browse(Browse::Routing(on)));
+    request!("browse_patterns", (on: bool) => Action::Browse(Browse::Patterns(on)));
     request!("song_view", (on: bool) => Action::SongView(on));
     request!("move_section", (next: bool) => Action::SectionMove(next));
     request!("section_scene", (next: bool) => Action::SectionScene(next));
@@ -954,6 +970,8 @@ fn browser(lua: &Lua, b: &crate::BrowserView) -> mlua::Result<Table> {
     t.set("focus", b.focus + 1)?;
     t.set("busy", b.busy)?;
     t.set("favorites", b.favorites)?;
+    t.set("routing", b.routing)?;
+    t.set("patterns", b.patterns)?;
     Ok(t)
 }
 

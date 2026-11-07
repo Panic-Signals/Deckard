@@ -882,12 +882,14 @@ fn the_mk3_knob_reaches_every_choice() {
     app.slot = Some(0);
     app.channel = false;
     let dir = || doc.borrow().project().groups[0].slots[0].param("stutter_direction");
-    // DIRECTION is the seventh knob.
-    app.control_request(R::Turn { pos: 6, inc: 0.5, fine: false });
+    // DIRECTION is the seventh knob. With three choices a step is half the range, and
+    // the knob moves one every quarter of that.
+    let step = 0.5 * 0.25;
+    app.control_request(R::Turn { pos: 6, inc: step, fine: false });
     assert_eq!(dir(), Some(1.0), "Reverse");
-    app.control_request(R::Turn { pos: 6, inc: 0.5, fine: false });
+    app.control_request(R::Turn { pos: 6, inc: step, fine: false });
     assert_eq!(dir(), Some(2.0), "Both");
-    app.control_request(R::Turn { pos: 6, inc: -0.5, fine: false });
+    app.control_request(R::Turn { pos: 6, inc: -step, fine: false });
     assert_eq!(dir(), Some(1.0), "back to Reverse");
 }
 
