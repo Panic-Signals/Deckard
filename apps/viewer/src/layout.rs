@@ -3697,6 +3697,7 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
 /// Set parameter `id` of the plug-in in slot `i` of chain `c` (normalized).
 fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64) {
     let mut native = false;
+    let mut new_text = None;
     if let Ok(p) = app.slot_plugin_in(chain, i)
         && let Ok(mut g) = p.lock()
     {
@@ -3706,9 +3707,11 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
             Some(h) => {
                 drop(g);
                 h.set(id, v);
+                new_text = Some(h.text(id, v));
             }
             None => {
                 g.set_param(id, v);
+                new_text = Some(g.param_text(id, v));
                 native = g.is_native();
             }
         }
@@ -3719,7 +3722,20 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
+    let page = app.plugin_page;
     if let Some(view) = app.plugin_view.as_mut().filter(|v| v.key == (chain, i)) {
+        if let Some(pg) = view.pages.get(page) {
+            for (k, (info, ..)) in pg.knobs.iter().enumerate() {
+                if info.id == id
+                    && let Some(slot) = view.values.get_mut(k)
+                {
+                    slot.0 = v;
+                    if let Some(t) = &new_text {
+                        slot.1 = t.clone();
+                    }
+                }
+            }
+        }
         view.page = usize::MAX;
         // (Shown until the plug-in reports it: the next turn goes on from it.)
         view.sent.retain(|(x, ..)| *x != id);
@@ -4492,16 +4508,22 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 ui.data_mut(|d| d.insert_temp(start_id, (base, 0f32)));
             }
             let dy = -resp.drag_delta().y / if fine { 1000.0 } else { 200.0 };
-            if resp.dragged() && dy != 0.0 {
+            if resp.dragged() {
                 let (from, moved) = ui.data(|d| d.get_temp::<(f32, f32)>(start_id)).unwrap_or((base, 0.0));
                 let moved = moved + dy;
-                ui.data_mut(|d| d.insert_temp(start_id, (from, moved)));
+                if dy != 0.0 {
+                    ui.data_mut(|d| d.insert_temp(start_id, (from, moved)));
+                }
                 let to = (from + moved).clamp(0.0, 1.0);
                 if ring {
-                    acts.push(Act::Modulate(*edit, to, false));
+                    if dy != 0.0 {
+                        acts.push(Act::Modulate(*edit, to, false));
+                    }
                 } else {
                     amount = to;
-                    acts.push(edit.to_act(amount));
+                    if dy != 0.0 {
+                        acts.push(edit.to_act(amount));
+                    }
                 }
             }
             if resp.drag_stopped() && ring {
