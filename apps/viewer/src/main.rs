@@ -3822,10 +3822,69 @@ impl App {
         if matches!(self.controller, Some(Ok(_))) {
             return None;
         }
-        Some(if self.surface.holding() || self.surface.animates() {
+        Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             std::time::Duration::from_millis(30)
         } else {
             controller::tick_every(self.playing.is_some())
+        })
+    }
+
+    /// The focused Filter's Amount is driving its LFO, so the right screen has to keep
+    /// redrawing.
+    fn filter_modulates(&self) -> bool {
+        if self.channel {
+            return false;
+        }
+        let Some(doc) = &self.doc else { return false };
+        let Ok(d) = doc.try_borrow() else { return false };
+        d.chain_slots(self.chain())
+            .and_then(|slots| self.slot.and_then(|i| slots.get(i)))
+            .is_some_and(|s| s.module == "Filter" && deckard_engine::fx::filter::modulates(&s.params))
+    }
+
+    /// The focused effect's picture is moving (a chorus, a tremolo, a modulated tail).
+    fn picture_moves(&self) -> bool {
+        if self.channel {
+            return false;
+        }
+        let Some(doc) = &self.doc else { return false };
+        let Ok(d) = doc.try_borrow() else { return false };
+        d.chain_slots(self.chain())
+            .and_then(|slots| self.slot.and_then(|i| slots.get(i)))
+            .is_some_and(|s| deckard_engine::fx::picture::moves(&s.module, &s.params))
+    }
+
+    /// Where a moving picture is in its cycle. The rate is added on, so turning Speed
+    /// does not jump the drawing.
+    fn picture_phase(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
+        use std::sync::Mutex;
+        static CLOCK: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+        if !deckard_engine::fx::picture::moves(module, params) {
+            return 0.0;
+        }
+        let now = Self::filter_seconds();
+        let hz = deckard_engine::fx::picture::rate_hz(module, params, tempo);
+        let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, phase) = *clock;
+        let phase = deckard_engine::fx::filter::advance_phase(phase, if at == 0.0 { 0.0 } else { now - at }, hz);
+        *clock = (now, phase);
+        phase as f32
+    }
+
+    /// The focused built-in effect, other than the EQ and the Filter, as the right
+    /// screen draws it. The same on every page.
+    fn effect_picture(slot: &deckard_model::SlotInfo, phase: f32, side_live: bool, page: usize) -> Option<deckard_surface::EqCurveView> {
+        let shot = deckard_engine::fx::picture::shot(&slot.module, &slot.params, phase, side_live, page)?;
+        Some(deckard_surface::EqCurveView {
+            kind: shot.kind.to_string(),
+            points: shot.points,
+            bands: shot.bands,
+            extent: shot.extent,
+            lfo: shot.lfo,
+            side: shot.side,
+            side_live: shot.side_live,
+            dim: shot.dim,
+            preview: shot.preview,
         })
     }
 
@@ -3972,6 +4031,64 @@ impl App {
         }
     }
 
+    /// The focused built-in EQ, as the right screen draws it.
+    fn eq_curve(slot: &deckard_model::SlotInfo) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "EQ" {
+            return None;
+        }
+        let curve = deckard_engine::fx::eq::response(&slot.params, 48_000.0, 120);
+        Some(deckard_surface::EqCurveView { points: curve.points, bands: curve.bands.into_iter().collect(), ..Default::default() })
+    }
+
+    /// Seconds since the first filter picture, so its LFO keeps moving.
+    fn filter_seconds() -> f64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    }
+
+    /// Where the LFO is in its cycle. The rate is added on, so turning Speed does not
+    /// jump the picture to another point.
+    fn filter_depth(params: &[(String, f64)], tempo: f64) -> f32 {
+        use std::sync::Mutex;
+        static CLOCK: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+        let now = Self::filter_seconds();
+        let hz = deckard_engine::fx::filter::lfo_rate(params, tempo);
+        let mut clock = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, phase) = *clock;
+        let phase = deckard_engine::fx::filter::advance_phase(phase, if at == 0.0 { 0.0 } else { now - at }, hz);
+        *clock = (now, phase);
+        if !deckard_engine::fx::filter::modulates(params) {
+            return 0.0;
+        }
+        deckard_engine::fx::filter::lfo_sample(params, phase)
+    }
+
+    /// Whether a side-chain input is routed into this effect.
+    fn sidechain_routed(p: &deckard_model::Project, chain: deckard_doc::Chain, slot: usize) -> bool {
+        let deckard_doc::Chain::Sound(g, s) = chain else { return false };
+        p.groups.get(g).and_then(|g| g.sounds.get(s)).is_some_and(|snd| snd.channel.sidechain.iter().any(|(k, _)| *k == slot))
+    }
+
+    /// The focused built-in Filter, as the right screen draws it.
+    fn filter_curve(slot: &deckard_model::SlotInfo, tempo: f64, side_live: bool) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "Filter" {
+            return None;
+        }
+        let depth = Self::filter_depth(&slot.params, tempo);
+        let curve = deckard_engine::fx::filter::response(&slot.params, 120, depth);
+        let amount = slot.params.iter().find(|(k, _)| k == "amount").map_or(0.0, |(_, v)| *v);
+        let extent = if amount.abs() > 1e-4 { deckard_engine::fx::filter::response(&slot.params, 120, 1.0).points } else { Vec::new() };
+        Some(deckard_surface::EqCurveView {
+            points: curve.points,
+            bands: vec![curve.cutoff],
+            extent,
+            lfo: deckard_engine::fx::filter::lfo_picture(&slot.params, 48),
+            side: deckard_engine::fx::sidechain::response(&slot.params, 120),
+            side_live,
+            ..Default::default()
+        })
+    }
+
     /// What DECKARD's own MK3 layer shows of the app now.
     fn surface_view(&self) -> deckard_surface::View {
         use deckard_surface::{ControlView, GroupView, KnobView, SoundView, View};
@@ -4021,6 +4138,9 @@ impl App {
                 .collect(),
             // (Only while the plug-in browser shows: the list is long.)
             modules: if self.surface.page() == "module" { self.module_views() } else { Vec::new() },
+            eq: None,
+            filter: None,
+            picture: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -4065,8 +4185,18 @@ impl App {
         let Some(doc) = &self.doc else { return v };
         let d = doc.borrow();
         let p = d.project();
-        v.project = p.name.clone();
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
+        // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
+        if !self.channel {
+            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+            v.control.eq = slot.and_then(Self::eq_curve);
+            let tempo = v.tempo;
+            let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
+            v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
+            let page = c.page;
+            v.control.picture = slot.and_then(|s| Self::effect_picture(s, Self::picture_phase(&s.module, &s.params, tempo), live, page));
+        }
+        v.project = p.name.clone();
         v.swing = p.swing.amount;
         v.master_volume = p.master_level;
         v.master_db = deckard_model::level_db(p.master_level);
