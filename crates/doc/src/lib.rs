@@ -535,13 +535,21 @@ impl Document {
     /// The groove of a sound (`Target::Sound`), group (`Target::Group`) or the master
     /// (`Target::Song`).
     pub fn set_swing(&mut self, target: Target, swing: deckard_model::Swing) -> Result<(), String> {
-        let mut ops = self.param_ops(target, "swing_amount", Value::Float(swing.amount.clamp(0.0, 100.0)))?;
-        ops.extend(self.param_ops(target, "swing_cycle", Value::Int(swing.cycle.clamp(0, 7)))?);
-        ops.extend(self.param_ops(target, "swing_invert", Value::Int(swing.invert as i64))?);
+        let mut ops = Vec::new();
+        let mut params = Vec::new();
+        for (f, v) in [
+            ("swing_amount", Value::Float(swing.amount.clamp(0.0, 100.0))),
+            ("swing_cycle", Value::Int(swing.cycle.clamp(0, 7))),
+            ("swing_invert", Value::Int(swing.invert as i64)),
+        ] {
+            let o = self.param_ops(target, f, v)?;
+            params.extend(std::iter::repeat_n(Some((target, f.to_string())), o.len()));
+            ops.extend(o);
+        }
         if ops.is_empty() {
             return Ok(());
         }
-        self.apply("Swing", ops)
+        self.apply_with("Swing", ops, params)
     }
 
     pub fn rename(&mut self, target: Target, name: &str) -> Result<(), String> {
@@ -790,6 +798,9 @@ impl Document {
     /// Copy a parameter's value from the tree into the model, for parameters that
     /// nothing else in the model derives from. False if it has to be rebuilt.
     fn patch(&mut self, target: Target, field: &str) -> bool {
+        if field == "plugin_chunk" {
+            return self.patch_plugin_chunk(target);
+        }
         let Ok(path) = self.param_path(target, field) else { return false };
         let value = match self.tree.at(&path) {
             Some(v) => v.clone(),
@@ -810,6 +821,19 @@ impl Document {
             (Target::Song, "level", Some(n), _) => p.master_level = n,
             (Target::Song, "pan", Some(n), _) => p.master_pan = n,
             (Target::Song, "sounds_visible_mixer", Some(n), _) => p.mixer_sounds = n != 0.0,
+            (Target::Song | Target::Group(_) | Target::Sound(..), "swing_amount" | "swing_cycle" | "swing_invert", Some(n), _) => {
+                let sw = match target {
+                    Target::Song => &mut p.swing,
+                    Target::Group(g) => &mut p.groups[g].swing,
+                    Target::Sound(g, s) => &mut p.groups[g].sounds[s].swing,
+                    _ => unreachable!(),
+                };
+                match field {
+                    "swing_amount" => sw.amount = n,
+                    "swing_cycle" => sw.cycle = n as i64,
+                    _ => sw.invert = n != 0.0,
+                }
+            }
             (Target::GroupStrip(g), "cue_enabled", Some(n), _) => p.groups[g].cue = n != 0.0,
             (Target::Sound(g, s), "cue_enabled", Some(n), _) => p.groups[g].sounds[s].cue = n != 0.0,
             (Target::GroupStrip(g), "aux1_level", Some(n), _) => p.groups[g].aux[0] = n,
@@ -818,6 +842,9 @@ impl Document {
             (Target::Sound(g, s), "aux2_level", Some(n), _) => p.groups[g].sounds[s].aux[1] = n,
             (Target::Project, "name", _, Some(t)) => p.name = t,
             (Target::Group(g), "name", _, Some(t)) => p.groups[g].name = t,
+            (Target::Group(g), "key_mode", Some(n), _) => p.groups[g].channel.key_mode = n as i64,
+            (Target::Group(g), "midi_channel", Some(n), _) => p.groups[g].channel.midi_channel = n as i64,
+            (Target::Group(g), "start_note", Some(n), _) => p.groups[g].channel.start_note = n as i64,
             (Target::GroupStrip(g), "level", Some(n), _) => p.groups[g].level = n,
             (Target::GroupStrip(g), "pan", Some(n), _) => p.groups[g].pan = n,
             (Target::GroupStrip(g), "mute", Some(n), _) => p.groups[g].muted = n != 0.0,
@@ -825,6 +852,14 @@ impl Document {
             (Target::Sound(g, s), "level", Some(n), _) => p.groups[g].sounds[s].level = n,
             (Target::Sound(g, s), "pan", Some(n), _) => p.groups[g].sounds[s].pan = n,
             (Target::Sound(g, s), "mute", Some(n), _) => p.groups[g].sounds[s].muted = n != 0.0,
+            (Target::Sound(g, s), "midi_channel", Some(n), _) => p.groups[g].sounds[s].channel.midi_channel = n as i64,
+            (Target::Sound(g, s), "base_key", Some(n), _) => p.groups[g].sounds[s].channel.base_key = n as i64,
+            (Target::Sound(g, s), "choke_group", Some(n), _) => p.groups[g].sounds[s].channel.choke_group = n as i64,
+            (Target::Sound(g, s), "choke_mode", Some(n), _) => p.groups[g].sounds[s].channel.choke_mode = n as i64,
+            (Target::Sound(g, s), "link_group", Some(n), _) => p.groups[g].sounds[s].channel.link_group = n as i64,
+            (Target::Sound(g, s), "link_mode", Some(n), _) => p.groups[g].sounds[s].channel.link_mode = n as i64,
+            (Target::Sound(g, s), "input_gain", Some(n), _) => p.groups[g].sounds[s].channel.input_gain = n,
+            (Target::Sound(g, s), "transpose", Some(n), _) => p.groups[g].sounds[s].channel.transpose = n as i64,
             (Target::Pattern(g, i), "name", _, Some(t)) if i < clips::CLIP => p.groups[g].patterns[i].name = t,
             (Target::Scene(s), "name", _, Some(t)) => p.scenes[s].name = t,
             (Target::Zone(g, s, z), f, Some(n), _) => {
