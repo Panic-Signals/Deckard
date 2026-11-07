@@ -1,8 +1,16 @@
 //! Print the audio interfaces as Preferences ▸ Audio lists them, and how each (or the
-//! one named on the command line) would be opened: `audio-info [device name]`.
+//! one named on the command line) would be opened: `audio-info [--asio] [device name]`.
+//! `--asio` (a build with the `asio` feature) lists the ASIO drivers. That loads each of
+//! them in turn, though it opens no stream.
 use deckard_engine::devices;
 fn main() {
-    let name = std::env::args().nth(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--asio") {
+        args.remove(0);
+        devices::set_driver(devices::AudioDriver::Asio);
+        println!("through {}", devices::driver().name());
+    }
+    let name = args.first().cloned();
     for (dir, list) in [("out", devices::output_devices()), ("in", devices::input_devices())] {
         println!("--- {dir}puts ---");
         for (n, ch) in &list {

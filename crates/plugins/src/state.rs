@@ -103,7 +103,7 @@ pub fn vst2_cid(unique_id: u32, name: &str) -> [u8; 16] {
     cid
 }
 
-fn hex16(s: &str) -> Option<[u8; 16]> {
+pub(crate) fn hex16(s: &str) -> Option<[u8; 16]> {
     if s.len() != 32 {
         return None;
     }

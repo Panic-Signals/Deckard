@@ -13,6 +13,7 @@ use eframe::egui::{self, Align2, Color32, ColorImage, Id, Rect, RichText, Sense,
 pub const WIDTH: f32 = 300.0;
 const ACCENT: Color32 = Color32::from_rgb(0xF3, 0x9C, 0x12);
 const RESULT_ROW: f32 = 20.0;
+const CHIPS_MAX_HEIGHT: f32 = 88.0;
 /// Splice's lockup (symbol and wordmark), black on transparent, 944 × 288.
 const SPLICE_LOGO: &[u8] = include_bytes!("../../assets/splice-logo.png");
 const SPLICE_BUTTON_HEIGHT: f32 = 36.0;
@@ -93,7 +94,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     }
     // Types: the chosen path (click a level to go back to it), then the next level.
     label(ui, "TYPES");
-    ui.horizontal_wrapped(|ui| {
+    chip_scroll(ui, "browser-types", |ui| {
         if !q.types.is_empty() && chip(ui, "All", false, 11.0).clicked() {
             acts.push(Act::Browse(BrowseAct::Types(Vec::new())));
         }
@@ -113,7 +114,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         }
     });
     label(ui, "CHARACTERS");
-    ui.horizontal_wrapped(|ui| {
+    chip_scroll(ui, "browser-characters", |ui| {
         let mut shown: Vec<(String, Option<usize>)> = b.results.characters.iter().map(|(c, n)| (c.clone(), Some(*n))).collect();
         // A chosen character stays shown even when nothing left has it.
         for c in &q.characters {
@@ -378,6 +379,12 @@ pub(super) fn chip(ui: &mut Ui, text: &str, on: bool, size: f32) -> egui::Respon
     ui.painter().rect_filled(r, 9.0, fill);
     ui.painter().galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
     resp
+}
+
+fn chip_scroll(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
+    egui::ScrollArea::vertical().id_salt(id).max_height(CHIPS_MAX_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+        ui.horizontal_wrapped(add);
+    });
 }
 
 fn label(ui: &mut Ui, text: &str) {

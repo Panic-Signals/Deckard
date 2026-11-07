@@ -63,7 +63,7 @@ pub fn same_class(a: &[u8; 16], b: &[u8; 16]) -> bool {
 }
 
 /// A class id with its first eight bytes in COM's order, or back (it's its own inverse).
-fn com_order(cid: &[u8; 16]) -> [u8; 16] {
+pub(crate) fn com_order(cid: &[u8; 16]) -> [u8; 16] {
     let mut out = *cid;
     out[..4].reverse();
     out.swap(4, 5);
