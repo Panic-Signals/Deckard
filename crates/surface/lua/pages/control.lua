@@ -7,6 +7,7 @@
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
 --   LEFT / RIGHT      the previous / next page
+--   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages
 --
 -- With SHIFT held on PLUG-IN, the focused slot's edits: EDIT (a plug-in's window),
 -- INSERT (the plug-in browser for a new slot after the last), SAVE (not yet), MOVE
@@ -230,6 +231,68 @@ local function auto_knob(knob)
   return { name = knob.name, section = knob.section, value = knob.value, text = knob.auto_mod or knob.text }
 end
 
+-- The built-in EQ or Filter on the right screen: 20 Hz to 20 kHz, ±12 dB, the same on
+-- both pages. Several bands are numbered (the EQ); one band is the cutoff dot. The
+-- Filter also draws where Amount reaches, the side-chain filter, and the LFO or
+-- envelope in the bottom right, beside the curve.
+local function eq_curve(screen, eq)
+  local wave = eq.lfo or {}
+  local show_lfo = #wave >= 2
+  -- With the modulator shape in the bottom right, the plot stops short of it.
+  local x0, y0, w, h = 488, 66, show_lfo and 336 or 456, 132
+  screen:rect(x0, y0, w, h, { 0x12, 0x12, 0x14 })
+  local function px(t) return x0 + t * (w - 1) end
+  local function py(v) return y0 + (1 - v) * (h - 1) end
+  local function freq_x(hz)
+    return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
+  end
+  local grid = { 0x2c, 0x2c, 0x30 }
+  for _, hz in ipairs({ 100, 1000, 10000 }) do
+    local x = px(freq_x(hz))
+    screen:line(x, y0 + 1, x, y0 + h - 1, 1, grid)
+  end
+  for _, db in ipairs({ -6, 0, 6 }) do
+    local y = py(db / 24 + 0.5)
+    screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and { 0x48, 0x48, 0x4e } or grid)
+  end
+  local function stroke(pts, width, ink)
+    local n = pts and #pts or 0
+    if n < 2 then return end
+    for i = 1, n - 1 do
+      screen:line(px((i - 1) / (n - 1)), py(pts[i]), px(i / (n - 1)), py(pts[i + 1]), width, ink)
+    end
+  end
+  stroke(eq.extent, 1, { 0x2a, 0x6a, 0x78 })
+  stroke(eq.side, 1.5, eq.side_live and { 0xe6, 0xc2, 0x6a } or { 0x5c, 0x50, 0x3a })
+  stroke(eq.points, 2, { 0x3d, 0xc8, 0xe6 })
+  local bands = eq.bands or {}
+  for i, b in ipairs(bands) do
+    local cx, cy = px(b.x), py(b.y)
+    screen:circle(cx, cy, 7, { 0xff, 0xc2, 0x3a })
+    if #bands > 1 then
+      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = { 0x14, 0x14, 0x16 } })
+    end
+  end
+  for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
+    local x = px(freq_x(hz[1]))
+    screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+  end
+  if show_lfo then
+    -- Bottom right of the right screen, beside the curve.
+    local bx, by, bw, bh = 832, y0 + h - 40, 112, 40
+    screen:rect(bx, by, bw, bh, { 0x0c, 0x0c, 0x0e })
+    screen:frame(bx, by, bw, bh, { 0x3a, 0x3a, 0x40 })
+    local m = #wave
+    for i = 1, m - 1 do
+      local x1 = bx + 4 + (i - 1) / (m - 1) * (bw - 8)
+      local x2 = bx + 4 + i / (m - 1) * (bw - 8)
+      local y1 = by + 4 + (1 - wave[i]) * (bh - 8)
+      local y2 = by + 4 + (1 - wave[i + 1]) * (bh - 8)
+      screen:line(x1, y1, x2, y2, 1.5, { 0xff, 0xc2, 0x3a })
+    end
+  end
+end
+
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -275,7 +338,9 @@ function control.draw(screen, theme, opts)
     screen:rect(480, 35, 480, 25, "bar")
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
-      chain.thumbnail(screen, 480, 68, 240, 136, slot, false)
+      if c.eq then eq_curve(screen, c.eq)
+      elseif c.filter then eq_curve(screen, c.filter)
+      else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end
     end
     chain.draw(screen, c)
   else
