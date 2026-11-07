@@ -2402,19 +2402,39 @@ impl App {
                         && let Some(mk3) = &self.mk3
                     {
                         ui.label("Controller screens");
-                        if mk3.displays_released() {
-                            if ui.button("Use in DECKARD").clicked() {
-                                mk3.release_displays(false);
+                        // Both drivers stay in the list. Hiding the one that is not open
+                        // left no way back, and a restart did not put it back either.
+                        let switching = matches!(self.ni_agent, ni_agent::Ask::Quitting(_));
+                        let in_use = ni_agent::screen_driver_in_use(mk3.displays_released(), mk3.displays_connected(), switching);
+                        let selected = in_use.map(ni_agent::ScreenDriver::label).unwrap_or("Not open");
+                        let mut picked = None;
+                        egui::ComboBox::from_id_salt("screen-driver").selected_text(selected).show_ui(ui, |ui| {
+                            for driver in [ni_agent::ScreenDriver::Windows, ni_agent::ScreenDriver::Maschine] {
+                                let hover = match driver {
+                                    ni_agent::ScreenDriver::Windows => "DECKARD draws the screens, using Windows' WinUSB driver. Asks for administrator approval.",
+                                    ni_agent::ScreenDriver::Maschine => "Clears the screens and gives them to Maschine. Asks for administrator approval.",
+                                };
+                                if ui.selectable_label(in_use == Some(driver), driver.label()).on_hover_text(hover).clicked() {
+                                    picked = Some(driver);
+                                }
                             }
-                        } else if mk3.displays_connected() {
-                            if ui.button("Give Back to NI's Driver").on_hover_text("For Maschine and NI's other software, which can't use the screens while DECKARD's driver has them. Asks for administrator approval.").clicked() {
-                                mk3.release_displays(true);
-                                ni_agent::give_back();
-                                self.status = "giving the controller's screens back to NI's driver".into();
+                        });
+                        if let Some(driver) = picked {
+                            match driver {
+                                ni_agent::ScreenDriver::Windows if in_use != Some(driver) => {
+                                    mk3.release_displays(false);
+                                    ni_agent::use_windows(&mut self.ni_agent, &mut self.status);
+                                }
+                                ni_agent::ScreenDriver::Maschine if in_use != Some(driver) => {
+                                    mk3.release_displays(true);
+                                    ni_agent::use_maschine(&mut self.ni_agent, &mut self.status);
+                                }
+                                _ => {}
                             }
-                        } else {
-                            ui.label(egui::RichText::new("Not open").weak());
                         }
+                        ui.end_row();
+                        ui.label("");
+                        ui.label(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak());
                         ui.end_row();
                     }
                     ui.label("Controller");

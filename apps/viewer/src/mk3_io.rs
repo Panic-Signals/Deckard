@@ -609,6 +609,10 @@ fn run_displays(shared: &Mutex<Shared>) {
                 (s.closing.then(|| s.goodbye.clone()), s.displays_released)
             };
             if released && closing.is_none() {
+                // Clear both screens before letting go. Otherwise the panels keep the
+                // last picture after the driver changes.
+                let black = vec![0u16; WIDTH * HEIGHT];
+                let _ = d.show(0, &black).and_then(|_| d.show(1, &black));
                 shared.lock().unwrap().displays_connected = false;
                 break;
             }
