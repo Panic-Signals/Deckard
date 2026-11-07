@@ -217,7 +217,7 @@ fn first_usable<D, C>(devices: impl IntoIterator<Item = D>, config: impl Fn(&D) 
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
-mod tests {
+mod first_usable_tests {
     use super::first_usable;
 
     #[test]
