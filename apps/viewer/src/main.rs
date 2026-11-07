@@ -14166,6 +14166,7 @@ mod tests {
         app.new_project();
         app.doc.as_ref().unwrap().borrow_mut().set_tempo(97.0).unwrap();
         app.keep_session();
+        app.session_written();
         let mut next = App { session_dir: Some(dir.clone()), ..Default::default() };
         next.start_project();
         let d = next.doc.as_ref().unwrap().borrow();
