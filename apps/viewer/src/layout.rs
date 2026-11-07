@@ -1751,7 +1751,7 @@ fn master_fader(ui: &mut Ui, level: f64, meter: (f32, f32), acts: &mut Vec<Act>)
     );
     if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
-        let dx = resp.drag_delta().x / if fine { 10.0 } else { 1.0 };
+        let dx = resp.drag_delta().x / if fine { 40.0 } else { 4.0 };
         if dx != 0.0 {
             acts.push(Act::SetLevel(Target::Song, (level + f64::from(dx / bars.width())).clamp(0.0, 1.0)));
         }
