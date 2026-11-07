@@ -702,13 +702,8 @@ fn browse_and_chain_draw_product_and_hosted_plugin_pictures() {
     v.control.modules_visible = true;
     v.control.slot_count = 1;
     v.control.slot_index = Some(0);
-    v.control.chain = vec![SlotView {
-        name: "Massive X".into(),
-        instrument: true,
-        active: true,
-        plugin: true,
-        picture: Some("massivex".into()),
-    }];
+    v.control.chain =
+        vec![SlotView { name: "Massive X".into(), instrument: true, active: true, plugin: true, picture: Some("massivex".into()) }];
     let generic_px = s.picture(&v);
     s.add_picture("massivex", true, 16, 16, vec![[200, 120, 30, 255]; 256]);
     s.add_picture("massivex", false, 16, 16, vec![[30, 200, 120, 255]; 256]);
