@@ -601,12 +601,14 @@ mod tests {
 
     #[test]
     fn text_gamma_boosts_antialiased_edges() {
-        let f = font("roboto-medium").unwrap();
-        let s = Style { font: f, size: 14.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
+        let font_idx = font_index("roboto-medium").unwrap();
+        let f = font_at(font_idx);
+        let s = Style { font_idx, font: f, size: 14.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
         let (_, bitmap) = f.rasterize('O', s.size);
         let mid = *bitmap.iter().find(|&&b| b > 32 && b < 200).expect("an antialiased edge pixel");
         let mut p = Picture::new([0; 3]);
-        assert_eq!(p.text(&s, 10, 24, 200, "O"), Picture::width(&s, "O"));
+        assert_eq!(p.record_text(&s, 10, 24, 200, "O".into()), Picture::width(&s, "O"));
+        p.rasterize();
         let expected = ((mid as f32 / 255.0).powf(1.0 / 1.45) * 255.0).round() as u8;
         assert!(expected > mid, "gamma-corrected edge pixel ({expected}) is brighter than raw linear coverage ({mid})");
         assert!(p.px.iter().any(|px| px[0] == expected), "drawn with gamma-corrected coverage");
