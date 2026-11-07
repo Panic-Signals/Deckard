@@ -131,10 +131,8 @@ fn ni_image_root() -> Option<PathBuf> {
         let p = PathBuf::from(dir);
         return p.is_dir().then_some(p);
     }
-    let mut candidates = vec![
-        PathBuf::from(r"C:\Users\Public\Documents\NI Resources\image"),
-        PathBuf::from("/Users/Shared/NI Resources/image"),
-    ];
+    let mut candidates =
+        vec![PathBuf::from(r"C:\Users\Public\Documents\NI Resources\image"), PathBuf::from("/Users/Shared/NI Resources/image")];
     if let Some(pub_dir) = std::env::var_os("PUBLIC") {
         candidates.insert(0, PathBuf::from(pub_dir).join(r"Documents\NI Resources\image"));
     }
