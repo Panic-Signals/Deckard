@@ -621,6 +621,13 @@ fn browse_buttons() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "nothing to load");
     v.browser.busy = true;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty(), "not while searching");
+    v.browser.busy = false;
+    v.browser.kind = 1;
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    let text = s.screen_text(&v);
+    assert!(text.contains(&"+ ROUTING".to_string()) && text.contains(&"+ PATTERNS".to_string()), "{text:?}");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Browse(Browse::Routing(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::Browse(Browse::Patterns(false))]);
 }
 
 #[test]
