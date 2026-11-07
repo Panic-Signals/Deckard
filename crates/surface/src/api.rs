@@ -1266,7 +1266,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     ct.set("pages", lua.create_sequence_from(c.pages.iter().map(String::as_str))?)?;
     ct.set("page", c.page + 1)?;
     // The built-in EQ's or Filter's curve, for the right screen. The same on both pages.
-    for (name, curve) in [("eq", &c.eq), ("filter", &c.filter)] {
+    for (name, curve) in [("eq", &c.eq), ("filter", &c.filter), ("picture", &c.picture)] {
         let Some(curve) = curve else { continue };
         let t = lua.create_table()?;
         t.set("points", lua.create_sequence_from(curve.points.iter().copied())?)?;
@@ -1287,6 +1287,15 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         if !curve.side.is_empty() {
             t.set("side", lua.create_sequence_from(curve.side.iter().copied())?)?;
             t.set("side_live", curve.side_live)?;
+        }
+        if !curve.kind.is_empty() {
+            t.set("kind", curve.kind.as_str())?;
+        }
+        if curve.dim {
+            t.set("dim", true)?;
+        }
+        if curve.preview {
+            t.set("preview", true)?;
         }
         ct.set(name, t)?;
     }

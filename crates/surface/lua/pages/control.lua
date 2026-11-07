@@ -231,13 +231,15 @@ local function auto_knob(knob)
   return { name = knob.name, section = knob.section, value = knob.value, text = knob.auto_mod or knob.text }
 end
 
--- The built-in EQ or Filter on the right screen: 20 Hz to 20 kHz, ±12 dB, the same on
--- both pages. Several bands are numbered (the EQ); one band is the cutoff dot. The
--- Filter also draws where Amount reaches, the side-chain filter, and the LFO or
--- envelope in the bottom right, beside the curve.
+-- The built-in effect on the right screen, the same on every page. `kind` is freq
+-- (20 Hz to 20 kHz, ±12 dB; the EQ and the Filter), law (input along the bottom,
+-- output up the side), time (level over time), or dots (a cloud). Several freq bands
+-- are numbered. The corner holds an LFO or envelope when one is sent.
 local function eq_curve(screen, eq)
   local wave = eq.lfo or {}
   local show_lfo = #wave >= 2
+  local kind = eq.kind or "freq"
+  if kind == "" then kind = "freq" end
   -- With the modulator shape in the bottom right, the plot stops short of it.
   local x0, y0, w, h = 488, 66, show_lfo and 336 or 456, 132
   screen:rect(x0, y0, w, h, { 0x12, 0x12, 0x14 })
@@ -247,13 +249,26 @@ local function eq_curve(screen, eq)
     return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
   end
   local grid = { 0x2c, 0x2c, 0x30 }
-  for _, hz in ipairs({ 100, 1000, 10000 }) do
-    local x = px(freq_x(hz))
-    screen:line(x, y0 + 1, x, y0 + h - 1, 1, grid)
-  end
-  for _, db in ipairs({ -6, 0, 6 }) do
-    local y = py(db / 24 + 0.5)
-    screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and { 0x48, 0x48, 0x4e } or grid)
+  if kind == "freq" then
+    for _, hz in ipairs({ 100, 1000, 10000 }) do
+      local x = px(freq_x(hz))
+      screen:line(x, y0 + 1, x, y0 + h - 1, 1, grid)
+    end
+    for _, db in ipairs({ -6, 0, 6 }) do
+      local y = py(db / 24 + 0.5)
+      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and { 0x48, 0x48, 0x4e } or grid)
+    end
+  elseif kind == "law" then
+    screen:line(px(0), py(0), px(1), py(1), 1, { 0x48, 0x48, 0x4e })
+    for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
+      screen:line(x0 + 1, py(t), x0 + w - 1, py(t), 1, grid)
+      screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
+    end
+  else
+    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, { 0x48, 0x48, 0x4e })
+    for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
+      screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
+    end
   end
   local function stroke(pts, width, ink)
     local n = pts and #pts or 0
@@ -264,18 +279,28 @@ local function eq_curve(screen, eq)
   end
   stroke(eq.extent, 1, { 0x2a, 0x6a, 0x78 })
   stroke(eq.side, 1.5, eq.side_live and { 0xe6, 0xc2, 0x6a } or { 0x5c, 0x50, 0x3a })
-  stroke(eq.points, 2, { 0x3d, 0xc8, 0xe6 })
+  local curve_ink = eq.dim and { 0x2a, 0x6a, 0x78 } or { 0x3d, 0xc8, 0xe6 }
+  stroke(eq.points, 2, curve_ink)
   local bands = eq.bands or {}
+  local radius = kind == "freq" and 7 or 4
   for i, b in ipairs(bands) do
     local cx, cy = px(b.x), py(b.y)
-    screen:circle(cx, cy, 7, { 0xff, 0xc2, 0x3a })
-    if #bands > 1 then
+    if kind == "time" then
+      screen:line(cx, py(0), cx, cy, 1.5, { 0xff, 0xc2, 0x3a })
+    end
+    screen:circle(cx, cy, radius, { 0xff, 0xc2, 0x3a })
+    if kind == "freq" and #bands > 1 then
       screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = { 0x14, 0x14, 0x16 } })
     end
   end
-  for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
-    local x = px(freq_x(hz[1]))
-    screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+  if kind == "freq" then
+    for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
+      local x = px(freq_x(hz[1]))
+      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+    end
+  end
+  if eq.preview then
+    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = { 0x8a, 0x8a, 0x90 } })
   end
   if show_lfo then
     -- Bottom right of the right screen, beside the curve.
@@ -340,6 +365,7 @@ function control.draw(screen, theme, opts)
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
       if c.eq then eq_curve(screen, c.eq)
       elseif c.filter then eq_curve(screen, c.filter)
+      elseif c.picture then eq_curve(screen, c.picture)
       else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end
     end
     chain.draw(screen, c)
