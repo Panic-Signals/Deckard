@@ -24,7 +24,7 @@ mod names;
 mod screen;
 mod sources;
 
-pub use screen::Picture;
+pub use screen::{FONTS, Picture};
 pub use sources::SHIPPED;
 
 /// What the layer shows of the app, filled by the app each frame.
