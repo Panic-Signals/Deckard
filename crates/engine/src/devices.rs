@@ -216,19 +216,6 @@ fn first_usable<D, C>(devices: impl IntoIterator<Item = D>, config: impl Fn(&D) 
     devices.into_iter().find_map(|d| config(&d).ok().map(|c| (d, c)))
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
-mod tests {
-    use super::first_usable;
-
-    #[test]
-    fn a_device_that_wont_answer_is_passed_over() {
-        let answer = |d: &&str| if *d == "broken" { Err("no format".to_string()) } else { Ok(d.len()) };
-        assert_eq!(first_usable(["broken", "usb", "line"], answer), Some(("usb", 3)));
-        assert_eq!(first_usable(["broken"], answer), None);
-        assert_eq!(first_usable(Vec::<&str>::new(), answer), None);
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn devices(dir: Dir) -> Vec<(String, usize)> {
     linux::cards(dir).into_iter().map(|c| (c.name, linux::hw_caps(&c.hw, dir).map_or(0, |(_, ch)| ch as usize))).collect()
@@ -576,6 +563,15 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_device_that_wont_answer_is_passed_over() {
+        let answer = |d: &&str| if *d == "broken" { Err("no format".to_string()) } else { Ok(d.len()) };
+        assert_eq!(first_usable(["broken", "usb", "line"], answer), Some(("usb", 3)));
+        assert_eq!(first_usable(["broken"], answer), None);
+        assert_eq!(first_usable(Vec::<&str>::new(), answer), None);
+    }
 
     /// Nothing here loads a driver: choosing a host only makes cpal's handle.
     #[test]
