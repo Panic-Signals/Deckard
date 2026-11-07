@@ -301,17 +301,36 @@ fn pattern_span_handles(
     ];
     // The span as the drag began (the view moves under the pointer as it changes).
     let key = egui::Id::new(("pattern-span-drag", g, pi));
+    let free = ui.input(|i| i.modifiers.shift);
+    let snap = |t: i64| if free { t } else { (t as f64 / app.grid.max(1) as f64).round() as i64 * app.grid.max(1) };
+    let seek_at = |x: f32, acts: &mut Vec<Act>| {
+        if app.playing.is_none() {
+            let rel = ((x - x0) / scale).round() as i64;
+            acts.push(Act::SeekPattern(snap(rel).clamp(0, len.saturating_sub(1))));
+        }
+    };
+    let tl_resp = ui.interact(tl, key.with("tl"), Sense::click());
+    if tl_resp.clicked()
+        && let Some(pos) = tl_resp.interact_pointer_pos()
+    {
+        seek_at(pos.x, acts);
+    }
     for (part, r) in parts {
         if r.width() <= 0.0 {
             continue;
         }
-        let resp = ui.interact(r, key.with(part as u8), Sense::drag());
+        let resp = ui.interact(r, key.with(part as u8), Sense::click_and_drag());
         let hovered = resp.hovered() || resp.dragged();
         if hovered {
             ui.ctx().set_cursor_icon(match part {
                 Part::Body => egui::CursorIcon::Grab,
                 _ => egui::CursorIcon::ResizeHorizontal,
             });
+        }
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            seek_at(pos.x, acts);
         }
         if resp.drag_started() {
             ui.data_mut(|d| d.insert_temp(key, (start, len, scale)));
@@ -320,8 +339,6 @@ fn pattern_span_handles(
             && let Some((s0, l0, sc)) = ui.data(|d| d.get_temp::<(i64, i64, f32)>(key))
             && let (Some(from), Some(now)) = ui.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()))
         {
-            let free = ui.input(|i| i.modifiers.shift);
-            let snap = |t: i64| if free { t } else { (t as f64 / app.grid.max(1) as f64).round() as i64 * app.grid.max(1) };
             let delta = ((now.x - from.x) / sc) as i64;
             let min_len = if free { PPQ / 4 } else { app.grid.max(PPQ / 4) };
             let (s, l) = match part {
@@ -508,6 +525,8 @@ pub enum Act {
     AssignPattern(usize, usize, Option<usize>),
     /// A new empty pattern in group `.1`, put in scene `.0` and focused.
     NewPattern(usize, usize),
+    /// [`Act::NewPattern`] in an empty place of the group: scene, group, place from 0.
+    NewPatternAt(usize, usize, usize),
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
@@ -591,6 +610,10 @@ pub enum Act {
     PatternLengthAuto(usize, usize),
     /// A pattern's start and length (dragging its ends or its body on the timeline).
     PatternSpan(usize, usize, i64, i64),
+    /// Move the playhead to tick `.0` of the focused pattern's loop.
+    SeekPattern(i64),
+    /// Move the playhead to tick `.0` of the arrangement.
+    SeekArrangement(i64),
     TimeSignature(i64, i64),
     SetSwing(Target, Swing),
     /// Set a Sampler or zone parameter (dragging a Sampler knob).
@@ -836,8 +859,11 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ToggleController => app.show_controller = !app.show_controller,
             Act::Save => app.save(),
             Act::ToggleFollow => app.follow = !app.follow,
+            Act::SeekPattern(t) => app.seek_pattern(t),
+            Act::SeekArrangement(t) => app.seek_arrangement(t),
             Act::AssignPattern(..)
             | Act::NewPattern(..)
+            | Act::NewPatternAt(..)
             | Act::AddScene
             | Act::AddGroup
             | Act::InsertScene(_)
@@ -2438,8 +2464,9 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     painter.rect_filled(tiles, 0.0, S05);
     let columns = Rect::from_min_max(cells.min, tiles.max);
     let gx = hscroll(ui, "idea-columns", columns, p.groups.len() as f32 * IDEA_W + 27.0);
-    let most = p.groups.iter().map(|g| g.patterns.len()).max().unwrap_or(0);
-    let gy = scroll(ui, "idea-cells", cells, most as f32 * ROW + 8.0);
+    // A row per place; one more than the last pattern, for a new one.
+    let most = p.groups.iter().filter_map(|g| g.patterns.last()).map(|x| x.slot + 1).max().unwrap_or(0);
+    let gy = scroll(ui, "idea-cells", cells, (most + 1) as f32 * ROW + 8.0);
     let in_scene = |g: usize, pi: usize| p.scenes.get(app.scene).is_some_and(|s| s.patterns.contains(&(g, pi)));
     let cell_painter = painter.with_clip_rect(cells);
     for (g, group) in p.groups.iter().enumerate() {
@@ -2451,8 +2478,11 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         if g == app.group {
             cell_painter.rect_filled(col_rect, 0.0, white(10));
         }
+        let place =
+            |slot: usize| Rect::from_min_size(Pos2::new(x, cells.top() + 4.0 + slot as f32 * ROW - gy), Vec2::new(IDEA_W - 1.0, ROW));
         for pi in 0..group.patterns.len() {
-            let r = Rect::from_min_size(Pos2::new(x, cells.top() + 4.0 + pi as f32 * ROW - gy), Vec2::new(IDEA_W - 1.0, ROW));
+            let r = place(group.patterns[pi].slot);
+            note_rect(ui, &format!("pattern place {g} {}", group.patterns[pi].slot), r);
             if !r.intersects(cells) {
                 continue;
             }
@@ -2514,17 +2544,23 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             }
             resp.context_menu(|ui| pattern_menu(ui, p, g, pi, acts));
         }
-        // Below the group's patterns: double-click for a new one.
-        let free_top = cells.top() + 4.0 + group.patterns.len() as f32 * ROW - gy;
-        let free = Rect::from_min_max(Pos2::new(x, free_top.max(cells.top())), Pos2::new(x + IDEA_W - 1.0, cells.bottom()));
-        if free.height() > 0.0 {
-            let resp = ui.interact(free, ui.id().with(("new-pattern", g)), Sense::click());
-            if resp.hovered() {
-                let slot = Rect::from_min_size(Pos2::new(x, free_top), Vec2::new(IDEA_W - 1.0, ROW)).shrink2(Vec2::new(3.0, 2.0));
-                cell_painter.rect_stroke(slot, 3.0, Stroke::new(1.0, white(41)), StrokeKind::Inside);
+        // The empty places, between the group's patterns and below them: double-click for
+        // a new one there.
+        let first = ((gy - 4.0) / ROW).floor().max(0.0) as usize;
+        let last = ((gy - 4.0 + cells.height()) / ROW).ceil().max(0.0) as usize;
+        for slot in (first..=last).filter(|s| !group.patterns.iter().any(|x| x.slot == *s)) {
+            let r = place(slot);
+            note_rect(ui, &format!("pattern place {g} {slot}"), r);
+            let area = r.intersect(cells);
+            if area.height() <= 0.0 {
+                continue;
             }
-            if resp.on_hover_text("Double-click for a new pattern in this group").double_clicked() {
-                acts.push(Act::NewPattern(app.scene, g));
+            let resp = ui.interact(area, ui.id().with(("new-pattern", g, slot)), Sense::click());
+            if resp.hovered() {
+                cell_painter.rect_stroke(r.shrink2(Vec2::new(3.0, 2.0)), 3.0, Stroke::new(1.0, white(41)), StrokeKind::Inside);
+            }
+            if resp.on_hover_text("Double-click for a new pattern here").double_clicked() {
+                acts.push(Act::NewPatternAt(app.scene, g, slot));
             }
         }
         // Group tile.
@@ -3159,6 +3195,17 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
     let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
+    let tl_resp = ui.interact(timeline, ui.id().with("song-timeline"), Sense::click());
+    if app.playing.is_none()
+        && tl_resp.clicked()
+        && let Some(pos) = tl_resp.interact_pointer_pos()
+    {
+        let free = ui.input(|i| i.modifiers.shift);
+        let raw = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+        let snap = app.grid.max(1);
+        let tick = if free { raw } else { (raw as f64 / snap as f64).round() as i64 * snap };
+        acts.push(Act::SeekArrangement(tick.max(0)));
+    }
     let tracks = Rect::from_min_max(Pos2::new(ed.left(), rows_top), ed.max);
     let ep = painter.with_clip_rect(ed);
     ep.hline(timeline.x_range(), timeline.top(), Stroke::new(1.0, Color32::BLACK));
@@ -4139,12 +4186,13 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
                             heading = pr.name.clone();
-                            // Named pages (DECKARD's plug-ins name theirs) by name, else by number.
-                            let names: Vec<String> = if !v.pages.is_empty() && v.pages.iter().all(|p| !p.name.is_empty()) {
-                                v.pages.iter().map(|p| p.name.clone()).collect()
-                            } else {
-                                (1..=pages).map(|n| n.to_string()).collect()
-                            };
+                            // Named pages (DECKARD's plug-ins and NKS/saved pages with sections) by name, else by number.
+                            let names: Vec<String> = v
+                                .pages
+                                .iter()
+                                .enumerate()
+                                .map(|(n, p)| if p.name.is_empty() { (n + 1).to_string() } else { p.name.clone() })
+                                .collect();
                             tabs = Some((names, page, Act::PluginPage));
                             if let Some(pg) = v.pages.get(page) {
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
@@ -4850,8 +4898,9 @@ fn page_tabs(
     out
 }
 
-/// The sound's chain: one row per slot (click: its pages; right-click: bypass, remove,
-/// plug-in window), then "+" to add an internal module or a plug-in.
+/// The sound's chain: one row per slot (click: its pages; double-click: plug-in window;
+/// right-click: bypass, remove, plug-in window), then "+" to add an internal module or a
+/// plug-in.
 fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[deckard_model::SlotInfo], acts: &mut Vec<Act>) {
     const ROW: f32 = 21.0;
     let off = scroll(ui, "chain-slots", area, (slots.len() + 1) as f32 * ROW + 4.0);
@@ -4931,6 +4980,12 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                     acts.push(Act::SelectSlot(Some(i)));
                 }
                 let plugin = slot.plugin.is_some();
+                if plugin && resp.double_clicked() {
+                    acts.push(Act::OpenSlotEditor(i));
+                }
+                if cfg!(test) {
+                    note_rect(ui, &format!("chain slot {i}"), vis);
+                }
                 let active = slot.active;
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
@@ -5454,6 +5509,16 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     }
     if pat.is_some() {
         pattern_span_handles(ui, app, &painter, tl, start, plen, scale, x_of(start as f64), acts);
+    } else if app.playing.is_none() {
+        let tl_resp = ui.interact(tl, ui.id().with("pattern-timeline"), Sense::click());
+        if tl_resp.clicked()
+            && let Some(pos) = tl_resp.interact_pointer_pos()
+        {
+            let free = ui.input(|i| i.modifiers.shift);
+            let rel = ((pos.x - x_of(start as f64)) / scale).round() as i64;
+            let t = if free { rel } else { (rel as f64 / step as f64).round() as i64 * step };
+            acts.push(Act::SeekPattern(t.clamp(0, plen.saturating_sub(1))));
+        }
     }
 
     // Rows of the note area: 16 sound slots (24 each), or in the piano roll every
@@ -6556,7 +6621,10 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     });
 
     // Playhead.
-    if let Some(t) = pat.and_then(|_| pattern_position(p, head, app.group, app.pattern)) {
+    let playhead_pos = pat
+        .and_then(|_| pattern_position(p, head, app.group, app.pattern))
+        .or_else(|| head.filter(|_| app.playing.is_none()).map(|h| h.position.rem_euclid(plen as f64)));
+    if let Some(t) = playhead_pos {
         let x = x_of(start as f64 + t);
         painter.vline(x, Rect::from_min_max(tl.min, rect.max).y_range(), Stroke::new(1.0, Color32::WHITE));
     }

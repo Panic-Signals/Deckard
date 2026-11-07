@@ -5,6 +5,42 @@ use crate::layout::{self, Act, AddWhat, ChainTab};
 use crate::tests::harness;
 use deckard_doc::{Chain, Target};
 
+/// A double-click on a plug-in's row asks for its window. This plug-in isn't installed, so
+/// the answer is in the status line, and no window opens; no audio device opens either.
+#[test]
+fn double_clicking_a_plugins_row_asks_for_its_window() {
+    use eframe::egui::{self, Event, PointerButton};
+    let mut app = crate::App::default();
+    app.new_project();
+    app.output = Some(Err("no audio in this test".into()));
+    let new = deckard_doc::NewModule::Plugin { id: "Native Instruments:VST3:FX:00000000".into(), name: "Absent".into(), chunk: Vec::new() };
+    app.doc.as_ref().unwrap().borrow_mut().add_slot(0, 0, 0, &new).unwrap();
+    (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, ChainTab::Sound, false);
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1500.0 + layout::CONTROLLER_WIDTH, 930.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+    h.run_steps(3);
+    let at = h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect("chain slot 0"))).expect("the plug-in's row is drawn").center();
+    let click = |h: &mut egui_kittest::Harness<'static, crate::App>, times: usize| {
+        h.run_steps(40);
+        h.hover_at(at);
+        h.step();
+        for _ in 0..times {
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.step();
+            }
+        }
+        h.run_steps(2);
+    };
+    click(&mut h, 1);
+    assert!(!h.state().status.starts_with("plug-in window"), "one click only selects it: {}", h.state().status);
+    assert_eq!(h.state().slot, Some(0));
+    click(&mut h, 2);
+    assert!(h.state().status.starts_with("plug-in window"), "{}", h.state().status);
+}
+
 fn slots(h: &egui_kittest::Harness<'static, crate::App>, c: Chain) -> Vec<(String, bool)> {
     let doc = h.state().doc.clone().unwrap();
     let d = doc.borrow();
@@ -156,6 +192,68 @@ fn only_a_sounds_effects_take_side_chains() {
     assert!(sidechain_choices(p, Chain::Sound(0, 0), 0).is_some());
     assert!(sidechain_choices(p, Chain::Group(0), 0).is_none());
     assert!(sidechain_choices(p, Chain::Master, 0).is_none());
+}
+
+/// The 4-D encoder's left and right, and SHIFT's slot edits, stay on the chain
+/// shown. Master does not become Group, and Group does not become Sound. An empty
+/// chain does not change tab even when the sound has inserts.
+#[test]
+fn the_controller_stays_on_the_master_and_group_chains() {
+    use deckard_lua_host::state::ControlRequest as R;
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    let doc = app.doc.clone().unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Master, 0, &deckard_doc::NewModule::Effect("EQ")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Master, 1, &deckard_doc::NewModule::Effect("Filter")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Group(0), 0, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Group(0), 1, &deckard_doc::NewModule::Effect("Reverb")).unwrap();
+    doc.borrow_mut().add_slot(0, 0, 0, &deckard_doc::NewModule::Effect("Saturator")).unwrap();
+    doc.borrow_mut().add_slot(0, 0, 1, &deckard_doc::NewModule::Effect("Limiter")).unwrap();
+    let names = |c: Chain| doc.borrow().chain_slots(c).unwrap_or(&[]).iter().map(|s| (s.module.clone(), s.active)).collect::<Vec<_>>();
+
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Master, Some(0), Some(Chain::Master));
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, Some(1)), "right moves to the next master insert");
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, None), "past the last is the +, still on Master");
+    app.control_request(R::Slot(1));
+    assert_eq!(app.chain_tab, ChainTab::Master, "nothing past the +, so the tab stays");
+    app.control_request(R::Slot(-1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, Some(1)), "left comes back onto the last insert");
+
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Group, Some(1), Some(Chain::Group(0)));
+    app.control_request(R::Slot(-1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Group, Some(0)), "left stays on Group");
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Group, Some(1)));
+    app.surface_act(A::SlotEdit("bypass"));
+    assert!(!names(Chain::Group(0))[1].1, "SHIFT bypasses the group's insert: {}", app.status);
+    assert!(names(Chain::Sound(0, 0)).iter().all(|s| s.1), "the sound's inserts stay on");
+    app.surface_act(A::SlotEdit("move_left"));
+    assert_eq!(names(Chain::Group(0))[0].0, "Reverb");
+    assert_eq!(app.chain_tab, ChainTab::Group);
+    app.surface_act(A::SlotEdit("remove"));
+    assert_eq!(names(Chain::Group(0)).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["Compressor"]);
+    assert_eq!(names(Chain::Sound(0, 0)).len(), 2, "remove doesn't take a sound insert");
+
+    let eq = app.plugin_choices().iter().position(|(_, w)| matches!(w, AddWhat::Effect("EQ"))).expect("EQ offered");
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Group, None, Some(Chain::Group(0)));
+    app.control_request(R::Load { entry: eq, replace: None });
+    assert_eq!(app.chain_tab, ChainTab::Group, "inserting stays on Group");
+    assert!(names(Chain::Group(0)).iter().any(|s| s.0 == "EQ"), "the effect lands on the group");
+    assert_eq!(names(Chain::Sound(0, 0)).len(), 2);
+
+    doc.borrow_mut().remove_slot_in(Chain::Master, 0).unwrap();
+    doc.borrow_mut().remove_slot_in(Chain::Master, 0).unwrap();
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Master, None, Some(Chain::Master));
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, None), "an empty chain does not change tab");
+    assert_eq!(names(Chain::Sound(0, 0)).len(), 2);
+
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Sound, Some(0), Some(Chain::Sound(0, 0)));
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Sound, Some(1)), "Sound still steps its own inserts");
 }
 
 /// The MK3's move (SHIFT + << >>) reaches the chain shown.

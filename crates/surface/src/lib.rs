@@ -48,9 +48,23 @@ pub struct View {
     pub strip_position: i64,
     /// Touch Auto-write: a knob touched with Auto-write on writes its modulation.
     pub touch_auto_write: bool,
+    /// The focus stays where it's put: picking another group's pattern doesn't move it.
+    pub keep_focus: bool,
+    /// A touchstrip moves its value by the finger's travel instead of setting it where it lands.
+    pub relative_strips: bool,
     pub fixed_velocity: bool,
     /// The velocity the pads play with Fixed Velocity on (0–127).
     pub velocity: i64,
+    /// The master channel's and cue bus's meters (left, right; amplitude), the cue's level
+    /// as stored, and the first two stereo inputs' meters and levels as stored, for a
+    /// controller with meters of its own.
+    pub master_meter: (f32, f32),
+    pub cue_meter: (f32, f32),
+    pub cue_level: f64,
+    pub input_meters: [(f32, f32); 2],
+    pub input_levels: [f64; 2],
+    /// Keyboard and Chords mode's root (MIDI note).
+    pub scale_root: i64,
     /// Keyboard and Chords mode's scale: its bank (0 Main … 7 Minor) and its place in
     /// the bank (0..15), as `deckard_model::scale_tables` lists them.
     pub scale_bank: i64,
@@ -323,6 +337,8 @@ pub struct GroupView {
     pub mix: MixView,
     /// Its Perform FX, if it has one: the strip on it (touched), and where (0..1).
     pub perform: Option<(bool, f64)>,
+    /// Its Perform FX's mode, and that mode's name.
+    pub perform_mode: Option<(usize, String)>,
     pub sounds: Vec<SoundView>,
     /// It has no colour of its own.
     pub default_color: bool,
@@ -403,6 +419,8 @@ pub struct PatternView {
     /// Its colour is the default (its group's).
     pub default_color: bool,
     pub bars: f64,
+    /// Its place among the group's patterns, from 0 (there can be empty places).
+    pub slot: usize,
 }
 
 /// A note of the focused pattern: its sound (from 0), where it starts and how long it
@@ -428,6 +446,12 @@ pub struct MixView {
     pub headroom: f32,
     /// Its plug-ins in order: (an instrument, on).
     pub plugins: Vec<(bool, bool)>,
+    /// Its aux sends' levels as stored (0..1, 0.75 unity).
+    pub aux: [f64; 2],
+    /// Its swing amount, 0–100 %.
+    pub swing: f64,
+    /// Its Sampler's tune in semitones (a group: its first Sampler's), if it has one.
+    pub tune: Option<f64>,
 }
 
 /// The app's Control area: what the eight knobs turn.
@@ -453,6 +477,35 @@ pub struct ControlView {
     /// What the plug-in browser (the Module page) lists, in order (only while it
     /// shows).
     pub modules: Vec<ModuleView>,
+    /// The focused built-in EQ, drawn on the right screen on both of its pages.
+    pub eq: Option<EqCurveView>,
+    /// The focused built-in Filter, drawn the same way. One band: the cutoff.
+    pub filter: Option<EqCurveView>,
+    /// Any other focused built-in effect, drawn on the right screen on every page.
+    pub picture: Option<EqCurveView>,
+}
+
+/// A curve for the right screen. `points` run across the plot, each 0..1 (0.5 is the
+/// middle). For a frequency picture they are 20 Hz to 20 kHz over ±12 dB. `bands` sit on
+/// that axis. The Filter also sends where Amount fully open sits (`extent`), one LFO
+/// cycle (`lfo`), and the side-chain filter (`side`; `side_live` when an input is routed
+/// to it).
+///
+/// `kind` is empty for that frequency plot. `"law"` is an input-to-output transfer,
+/// `"time"` is level over time, and `"dots"` is a cloud of marks. `dim` draws the curve
+/// quiet (Perform FX with Engage off). `preview` marks a picture the engine does not
+/// actually apply yet (the Cabinet).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EqCurveView {
+    pub points: Vec<f32>,
+    pub bands: Vec<(f32, f32)>,
+    pub extent: Vec<f32>,
+    pub lfo: Vec<f32>,
+    pub side: Vec<f32>,
+    pub side_live: bool,
+    pub kind: String,
+    pub dim: bool,
+    pub preview: bool,
 }
 
 /// One instrument, effect or plug-in the plug-in browser can load.
@@ -585,6 +638,11 @@ pub enum Action {
     /// A new pattern in this group, in the focused scene. The focused group stays; in
     /// that group, the new pattern is focused.
     NewPatternIn(usize),
+    /// A new pattern in empty place `slot` (from 0) of group `group`.
+    NewPatternAt {
+        group: usize,
+        slot: usize,
+    },
     /// The Ideas view's scene tabs scroll to start at this scene (a controller's own
     /// scenes scrolled).
     ShowScenes(usize),
@@ -812,6 +870,76 @@ pub enum Action {
     /// The plug-in browser's LOAD: entry `.0` of [`ControlView::modules`] (from 0) in
     /// place of the focused slot, or into the "+"; `None` takes the focused slot out.
     LoadModule(Option<usize>),
+    /// Every voice that's sounding ends at once (Maschine's Choke All Notes). Nothing changes
+    /// state: the next notes play as usual.
+    ChokeAll,
+    /// Pattern `pattern` of group `group` deleted (both from 0).
+    DeletePattern {
+        group: usize,
+        pattern: usize,
+    },
+    /// Group `group`'s pattern `to` becomes a copy of its pattern `from`; past the last, a
+    /// new pattern goes there.
+    CopyPattern {
+        group: usize,
+        from: usize,
+        to: usize,
+    },
+    /// Scene `.0` deleted (not the last one); its patterns stay.
+    DeleteScene(usize),
+    /// Scene `to` plays what scene `from` plays; past the last, a new scene goes there.
+    CopyScene {
+        from: usize,
+        to: usize,
+    },
+    /// Group `to` is replaced by a copy of group `from`; past the last, a new group.
+    CopyGroup {
+        from: usize,
+        to: usize,
+    },
+    /// Sound `to` of the focused group is replaced by a copy of its sound `from`, with its
+    /// notes.
+    CopySound {
+        from: usize,
+        to: usize,
+    },
+    /// Channel's aux send `aux` (0 or 1): its level as stored, 0..1 (0.75 unity).
+    SetSend {
+        group: usize,
+        sound: Option<usize>,
+        aux: usize,
+        level: f64,
+    },
+    /// Channel's swing amount, 0–100 %: a sound's, a group's, or with no group the song's.
+    SetChannelSwing {
+        group: Option<usize>,
+        sound: Option<usize>,
+        amount: f64,
+    },
+    /// A sound's Sampler's tune to `semitones`; with no sound, every Sampler in the group
+    /// moved by the same amount so that its first is at `semitones`.
+    SetTune {
+        group: usize,
+        sound: Option<usize>,
+        semitones: f64,
+    },
+    /// The cue channel's level in dB.
+    CueDb(f64),
+    /// Stereo input `.0`'s level in dB (the first two have one).
+    InputDb(usize, f64),
+    /// The inputs' meters wanted: the input stays open for them, with no sound taking it.
+    WatchInput(bool),
+    /// The library panel of the main window shown or not, for a controller with no screens.
+    Library(bool),
+    /// Control knob `.0` (from 0) back to its default.
+    ResetKnob(usize),
+    /// Group `group`'s Perform FX's mode (0 Filter … 7 Scratcher; `View::perform_modes`).
+    PerformMode {
+        group: usize,
+        mode: usize,
+    },
+    /// The Settings page's values kept filled while a controller without that page wants them.
+    SettingsWanted(bool),
 }
 
 /// Where the pads play.
@@ -1352,6 +1480,8 @@ fn pad_setup(t: &Table) -> mlua::Result<PadSetup> {
 mod chord_tests;
 #[cfg(test)]
 mod device_tests;
+#[cfg(test)]
+mod jam_tests;
 #[cfg(test)]
 mod launchpad_tests;
 #[cfg(test)]
