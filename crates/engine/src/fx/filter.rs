@@ -15,7 +15,6 @@ const fn c(bits: u32) -> f32 {
 const D: f32 = c(0x2193_92ef); // 1e-18, the core's denormal offset
 const LN2: f32 = c(0x3f31_7215); // 0.693147
 const PI: f32 = c(0x4049_0fd0); // 3.14159 (not quite π)
-const TINY: f32 = c(0x2edb_e6ff); // 1e-10
 
 /// The LFO rates as `(numerator, denominator)` bars, slowest first (§4).
 const RATES: [(i32, i32); 12] = [(16, 1), (8, 1), (4, 1), (2, 1), (1, 1), (1, 2), (3, 8), (1, 4), (3, 16), (1, 8), (1, 16), (1, 32)];
@@ -204,17 +203,10 @@ struct Core {
     last_res: f32,
     gain: f32,
     out_idx: usize,
-    // LFO (§5.3).
+    // LFO (§5.3). The shape dial is triangle → sine → square ([`lfo_pos`]).
     env_mode: bool,
-    shape_n: u32,
     inc: f32,
     phase: f32,
-    l134: f32,
-    l138: f32,
-    l13c: f32,
-    l140: f32,
-    l144: f32,
-    l148: f32,
     lfo: f32,
     lfo_slew: f32,
     // Envelope follower (§5.3).
@@ -303,16 +295,6 @@ impl Core {
 
     fn set_lfo_shape(&mut self, v: f32) {
         self.lfo_shape_in = v;
-        let a = 1.0 - (v + -0.75) * 4.0;
-        let b = 1.0 - (v + v);
-        self.l140 = (v + -0.5) * 4.0;
-        self.l144 = if a > TINY { a } else { TINY };
-        self.l148 = 1.0 / self.l144;
-        let n = ((v > 0.5) as u8 as f32 + (v > 0.75) as u8 as f32) as f64 + 0.5;
-        self.shape_n = (n as i32 as u32) & 3;
-        self.l134 = if b > TINY { b * 0.5 } else { c(0x2e5b_e6ff) };
-        self.l138 = 1.0 / self.l134;
-        self.l13c = 1.0 / (1.0 - self.l134);
     }
 
     /// Decay: the follower's hold and release.
@@ -398,26 +380,7 @@ impl Core {
         let mut m = 0.0;
         if !self.env_mode {
             let next = self.phase + self.inc;
-            let p = self.phase + 0.5;
-            let q = 1.0 - p;
-            let v = match self.shape_n {
-                // Saw ↔ triangle.
-                0 => 1.0 - if q.abs() >= self.l134 { p * self.l13c } else { q * self.l138 },
-                // → parabolic sine.
-                1 => {
-                    let u = (0.5 - p) + (0.5 - p);
-                    q + ((u * (2.0 - u.abs()) + 1.0) * 0.5 - q) * self.l140
-                }
-                // → square.
-                _ => {
-                    let a = ((0.5 - p) + (0.5 - p)).abs();
-                    let s = a * self.l148;
-                    let w = 2.0 - s.abs();
-                    let sign = if p > 0.5 { -1.0 } else { 1.0 };
-                    let y = if a < self.l144 { sign * s * w } else { sign };
-                    (y + 1.0) * 0.5
-                }
-            };
+            let v = lfo_pos(self.lfo_shape_in, self.phase);
             self.lfo += self.lfo_slew * ((v - self.lfo) + D);
             m = self.lfo;
             self.phase = next - round(next) as f32;
@@ -722,9 +685,226 @@ impl Effect for Filter {
     }
 }
 
+/// The frequency picture. `points` run from 20 Hz to 20 kHz, each 0..1 over ±12 dB
+/// (0.5 is 0 dB). `cutoff` is the cutoff on that same axis, including where Amount has
+/// moved it.
+pub struct Curve {
+    pub points: Vec<f32>,
+    pub cutoff: (f32, f32),
+}
+
+/// Whether Amount is set on an LFO source, so the picture is moving.
+pub fn modulates(params: &[(String, f64)]) -> bool {
+    param(params, "amount", 0.0).abs() > 1e-4 && param(params, "source", 0.0).round() as i32 != 2
+}
+
+/// The LFO rate (Hz). Zero when Source is the envelope.
+pub fn lfo_rate(params: &[(String, f64)], tempo: f64) -> f32 {
+    let source = param(params, "source", 0.0).round() as i32;
+    if source == 2 {
+        return 0.0;
+    }
+    let speed = param(params, "speed", PARAMS[3].1 as f64).clamp(0.0, 1.0) as f32;
+    lfo_hz(speed, source == 1, tempo)
+}
+
+/// Carry a cycle forward by `dt` seconds at `hz`. Adding the rate, rather than taking
+/// `time · rate`, so turning Speed does not jump to another point in the cycle.
+pub fn advance_phase(phase: f64, dt: f64, hz: f32) -> f64 {
+    (phase + dt.max(0.0) * hz as f64).rem_euclid(1.0)
+}
+
+/// The LFO at `phase` cycles (0..1), including the synced Phase offset. Zero for the
+/// envelope, which follows the audio.
+pub fn lfo_sample(params: &[(String, f64)], phase: f64) -> f32 {
+    let source = param(params, "source", 0.0).round() as i32;
+    if source == 2 {
+        return 0.0;
+    }
+    let mut phase = phase;
+    if source == 1 {
+        phase += (param(params, "phase", 0.0) + 1.0) * 0.5;
+    }
+    let shape = param(params, "lfo_shape", PARAMS[4].1 as f64).clamp(0.0, 1.0) as f32;
+    lfo_pos(shape, (phase.rem_euclid(1.0) - 0.5) as f32)
+}
+
+/// One cycle of the modulator, for the picture in the corner: the LFO shape, or the
+/// envelope (attack, hold, release) when Source is Env.
+pub fn lfo_picture(params: &[(String, f64)], n: usize) -> Vec<f32> {
+    if param(params, "source", 0.0).round() as i32 == 2 {
+        return env_picture(params, n);
+    }
+    let n = n.max(2);
+    let shape = param(params, "lfo_shape", PARAMS[4].1 as f64).clamp(0.0, 1.0) as f32;
+    (0..n).map(|i| lfo_pos(shape, (i as f32 / (n - 1) as f32) - 0.5)).collect()
+}
+
+/// The envelope as the corner draws it. Attack is instant. Decay lengthens the open part,
+/// Shape picks a gate (flat) or a follower (bowed), and Smooth rounds the corners.
+fn env_picture(params: &[(String, f64)], n: usize) -> Vec<f32> {
+    let n = n.max(2);
+    let decay = param(params, "decay", PARAMS[6].1 as f64).clamp(0.0, 1.0) as f32;
+    let smooth = param(params, "smooth", PARAMS[7].1 as f64).clamp(0.0, 1.0) as f32;
+    let u = (param(params, "env_shape", PARAMS[8].1 as f64) as f32 + 1.0) * 0.5;
+    let gate = u <= 0.4;
+    let rise = 0.03 + 0.22 * smooth;
+    let open = if gate { 0.12 + 0.55 * decay } else { 0.04 + 0.2 * decay };
+    let follow = (1.0 - smooth * 0.9).max(0.08);
+    let mut acc = 0.0f32;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let x = if t < rise {
+                t / rise
+            } else if t < rise + open {
+                1.0
+            } else {
+                let rel = (1.0 - rise - open).max(0.05);
+                1.0 - ((t - rise - open) / rel).clamp(0.0, 1.0)
+            };
+            let shaped = if gate { x } else { x * (2.0 - x) };
+            acc += follow * (shaped - acc);
+            acc.clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+/// The free or synced LFO rate (Hz), as `SyncableLFOHelper`.
+fn lfo_hz(speed: f32, synced: bool, tempo: f64) -> f32 {
+    let ratio = |i: i32| RATES[i as usize].0 as f32 / RATES[i as usize].1 as f32;
+    if synced {
+        let beats = 4.0 * ratio(round(11.0 * speed).clamp(0, 11));
+        tempo as f32 * c(0x3c88_8889) / beats
+    } else {
+        let pos = 11.0 * speed;
+        let i = round(pos - 0.5).clamp(0, 10);
+        let s = (1.0 - (pos - i as f32)).mul_add(ratio(i), (pos - i as f32) * ratio(i + 1));
+        1.0 / (s + s)
+    }
+}
+
+/// One LFO sample, 0..1, at `phase` in −0.5..0.5. The knob runs triangle (0), sine (0.5),
+/// square (1), crossfading between them. The same sample drives the picture and the filter.
+fn lfo_pos(shape: f32, phase: f32) -> f32 {
+    let p = (phase + 0.5).clamp(0.0, 1.0);
+    let shape = shape.clamp(0.0, 1.0);
+    let tri = if p < 0.5 { 1.0 - p * 2.0 } else { (p - 0.5) * 2.0 };
+    let sine = (p * std::f32::consts::TAU).cos().mul_add(0.5, 0.5);
+    let square = if p <= 0.5 { 1.0 } else { 0.0 };
+    let y = if shape <= 0.5 {
+        let t = shape * 2.0;
+        tri.mul_add(1.0 - t, sine * t)
+    } else {
+        let t = (shape - 0.5) * 2.0;
+        sine.mul_add(1.0 - t, square * t)
+    };
+    y.clamp(0.0, 1.0)
+}
+
+/// The core's cutoff pitch, so Amount's span matches the filter.
+fn cut_pitch(v: f64) -> f32 {
+    let hz = exp10(v.mul_add(2.435_539_704_813_123, 1.662_757_831_681_574)).clamp(46.0, 12_540.0);
+    let note = (hz as f32).ln().mul_add(c(0x418a_7fac), c(0xc211_815a));
+    let p = (note + -30.0) * c(0x3c28_e83f);
+    p * (2.0 - p) * 139.0 + -12.0
+}
+
+/// Low-pass, band-pass (the core's `2·bp`), high-pass, or notch, from the linear part of
+/// the state-variable filter. `depth` is the modulator, 0..1 ([`lfo_sample`]): Amount
+/// sweeps the cutoff up (positive) or down (negative) by that much of its span. Source
+/// Env reaches further (pitch 240 / 24) than the LFO (127 / −12).
+pub fn response(params: &[(String, f64)], n: usize, depth: f32) -> Curve {
+    let mode = param(params, "mode", 0.0).round().clamp(0.0, 3.0) as usize;
+    let cut = param(params, "cutoff", PARAMS[0].1 as f64);
+    let res_v = param(params, "resonance", PARAMS[1].1 as f64).clamp(0.0, 1.0) as f32;
+    let base = exp10(cut.mul_add(2.435_539_704_813_123, 1.662_757_831_681_574)).clamp(46.0, 12_540.0) as f32;
+    let amount = param(params, "amount", 0.0) as f32;
+    let env = param(params, "source", 0.0).round() as i32 == 2;
+    let (lo, hi) = if env { (24.0, 240.0) } else { (-12.0, 127.0) };
+    let pitch = cut_pitch(cut);
+    let span = if amount > 0.0 { hi - pitch } else { pitch - lo };
+    let hz = (base * (depth.clamp(0.0, 1.0) * span * amount / 12.0).exp2()).clamp(1.0, 40_000.0);
+    let res = (2.0 - res_v) * res_v;
+    let damp = ((1.0 - RES_SCALE[mode] * res) * 2.0).max(1e-3);
+    let knee = GAIN_KNEE[mode];
+    let gain = if knee < res { 1.0 - (res - knee) / (1.0 - knee) * GAIN_DROP[mode] } else { 1.0 };
+    let n = n.max(2);
+    let mut points = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / (n - 1) as f32;
+        let f = 20.0 * 1000.0f32.powf(t);
+        let u = f / hz;
+        let u2 = u * u;
+        let den = ((1.0 - u2).powi(2) + (damp * u).powi(2)).sqrt().max(1e-8);
+        let mag = gain
+            * match mode {
+                1 => damp * u * 2.0 / den,
+                2 => u2 / den,
+                3 => (1.0 - u2).abs() / den,
+                _ => 1.0 / den,
+            };
+        let db = if mag > 1e-8 { 20.0 * mag.log10() } else { -120.0 };
+        points.push((db / 24.0 + 0.5).clamp(0.0, 1.0));
+    }
+    let x = ((hz / 20.0).ln() / 1000.0f32.ln()).clamp(0.0, 1.0);
+    let idx = x * (n - 1) as f32;
+    let i = (idx.floor() as usize).min(n - 1);
+    let frac = idx - i as f32;
+    let y = if i + 1 < n { points[i].mul_add(1.0 - frac, points[i + 1] * frac) } else { points[n - 1] };
+    Curve { points, cutoff: (x, y) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_curve_follows_the_cutoff() {
+        let lp = super::response(&[], 64, 0.0);
+        assert!(lp.points[4] > lp.points[60] + 0.15, "a low-pass falls: {} {}", lp.points[4], lp.points[60]);
+        assert!(lp.cutoff.1 > 0.55, "resonance lifts the cutoff: {}", lp.cutoff.1);
+        let higher = super::response(&params(&[("cutoff", 0.9)]), 64, 0.0);
+        assert!(higher.cutoff.0 > lp.cutoff.0 + 0.15, "{} {}", higher.cutoff.0, lp.cutoff.0);
+        let louder = super::response(&params(&[("resonance", 0.95)]), 64, 0.0);
+        assert!(louder.cutoff.1 > lp.cutoff.1, "{} {}", louder.cutoff.1, lp.cutoff.1);
+        let hp = super::response(&params(&[("mode", 2.0)]), 64, 0.0);
+        assert!(hp.points[60] > hp.points[4] + 0.15, "a high-pass rises: {} {}", hp.points[60], hp.points[4]);
+        let notch = super::response(&params(&[("mode", 3.0)]), 64, 0.0);
+        assert!(notch.cutoff.1 < 0.15, "a notch bottoms at the cutoff: {}", notch.cutoff.1);
+    }
+
+    #[test]
+    fn the_amount_moves_the_cutoff() {
+        let up = params(&[("amount", 1.0)]);
+        let rest = super::response(&up, 64, 0.0);
+        let high = super::response(&up, 64, 1.0);
+        assert!(high.cutoff.0 > rest.cutoff.0 + 0.05, "{} {}", high.cutoff.0, rest.cutoff.0);
+        let down = super::response(&params(&[("amount", -1.0)]), 64, 1.0);
+        assert!(down.cutoff.0 < rest.cutoff.0 - 0.05, "{} {}", down.cutoff.0, rest.cutoff.0);
+        assert!(!super::modulates(&[]));
+        assert_eq!(super::lfo_sample(&params(&[("source", 2.0)]), 0.3), 0.0);
+        let a = super::lfo_sample(&up, 0.0);
+        let b = super::lfo_sample(&up, 0.25);
+        assert!((a - b).abs() > 0.05, "{a} {b}");
+        // A new rate carries the cycle on. `time · rate` would land somewhere else.
+        let carried = super::advance_phase(super::advance_phase(0.4, 0.01, 1.0), 0.01, 8.0);
+        assert!((carried - 0.4).abs() < 0.15, "{carried}");
+        let env = super::response(&params(&[("amount", 1.0), ("source", 2.0)]), 64, 1.0);
+        assert!(env.cutoff.0 > high.cutoff.0, "the envelope reaches further: {} {}", env.cutoff.0, high.cutoff.0);
+        let sine = super::lfo_picture(&params(&[("lfo_shape", 0.5)]), 9);
+        assert!((sine[1] - 0.853).abs() < 0.02, "the middle of the dial is a sine: {}", sine[1]);
+        let tri = super::lfo_picture(&params(&[("lfo_shape", 0.0)]), 9);
+        assert!((tri[1] - 0.75).abs() < 0.02, "the start is a triangle: {}", tri[1]);
+        let square = super::lfo_picture(&params(&[("lfo_shape", 1.0)]), 9);
+        assert!(square[1] > 0.95 && square[6] < 0.05, "the end is a square: {} {}", square[1], square[6]);
+        let env = super::lfo_picture(&params(&[("source", 2.0), ("decay", 0.0), ("smooth", 0.0), ("env_shape", -1.0)]), 32);
+        let held = super::lfo_picture(&params(&[("source", 2.0), ("decay", 1.0), ("smooth", 0.0), ("env_shape", -1.0)]), 32);
+        assert!(env.iter().any(|y| *y > 0.8) && held.iter().filter(|y| **y > 0.9).count() > env.iter().filter(|y| **y > 0.9).count());
+        let follower = super::lfo_picture(&params(&[("source", 2.0), ("decay", 0.0), ("smooth", 0.0), ("env_shape", 1.0)]), 32);
+        assert!(follower[20] > env[20], "a follower bows where a gate has fallen: {} {}", follower[20], env[20]);
+        assert!(super::lfo_rate(&params(&[("source", 1.0)]), 120.0) != super::lfo_rate(&up, 120.0));
+    }
 
     fn params(kv: &[(&str, f64)]) -> Vec<(String, f64)> {
         kv.iter().map(|(k, v)| (k.to_string(), *v)).collect()
