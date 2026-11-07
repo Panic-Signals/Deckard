@@ -15,7 +15,7 @@
 //! open only while armed.
 
 use crate::layout::sampling::{AutoParams, RecStatus, RecorderView};
-use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::traits::StreamTrait;
 use deckard_engine::output::Output;
 use deckard_engine::sample::Sample;
 use deckard_engine::{Tap, TapSource};
@@ -32,6 +32,9 @@ pub const TARGETS: [&str; 3] = ["Take", "Sound", "Pattern"];
 pub const INPUT_PAIRS: usize = 16;
 /// The threshold at or below which Detect is OFF (starts at once).
 pub const THRESHOLD_OFF: f64 = -59.99;
+/// Frames of input the input's callback can add between two polls without allocating
+/// (0.34 s at 48 kHz; polls come at least a few times a second).
+const INCOMING_ROOM: usize = 16_384;
 
 /// `In k L+R`.
 pub fn stereo_input_name(i: usize) -> String {
@@ -97,6 +100,8 @@ pub struct StartWith<'a> {
     /// of its channels each of Maschine's 32 input channels reads.
     pub device: Option<String>,
     pub routing: &'a [Option<usize>],
+    /// The inputs' levels, which what's recorded is after.
+    pub inputs: Arc<crate::input_levels::InputBus>,
     pub clock: Clock,
     /// Auto: the folder and name stem of its files.
     pub dir: PathBuf,
@@ -329,49 +334,59 @@ impl Recorder {
     /// Open the interface input for the chosen Ext. input; returns its rate.
     fn open_input(&mut self, with: &StartWith) -> Result<u32, String> {
         let (device, config) = deckard_engine::devices::open_input(with.device.as_deref())?;
-        if config.sample_format() != cpal::SampleFormat::F32 {
+        if !deckard_engine::devices::format_ok(config.sample_format()) {
             return Err(format!("input format {:?} is not supported", config.sample_format()));
         }
         let channels = config.channels() as usize;
         let route = |i: usize| with.routing.get(i).copied().unwrap_or(Some(i)).filter(|&c| c < channels);
-        let (l, r) = if self.view.source == 1 {
-            let c = route(self.view.ext_mono);
-            (c, c)
+        // Maschine's input channels, and the interface's they read.
+        let (in_l, in_r) = if self.view.source == 1 {
+            (self.view.ext_mono, self.view.ext_mono)
         } else {
-            (route(self.view.ext_stereo * 2), route(self.view.ext_stereo * 2 + 1))
+            (self.view.ext_stereo * 2, self.view.ext_stereo * 2 + 1)
         };
+        let (l, r) = (route(in_l), route(in_r));
+        let inputs = with.inputs.clone();
         if l.is_none() && r.is_none() {
             let name = if self.view.source == 1 { mono_input_name(self.view.ext_mono) } else { stereo_input_name(self.view.ext_stereo) };
             return Err(format!("{name} isn't connected to a channel of {} (Preferences > Audio > Routing)", device_name(&device)));
         }
         let incoming = self.incoming.clone();
-        incoming.lock().unwrap().clear();
+        *incoming.lock().unwrap() = Vec::with_capacity(INCOMING_ROOM);
         let monitor = self.view.monitor.then(|| with.output.map(Output::monitor)).flatten();
         let rate = config.sample_rate();
-        let stream = device
-            .build_input_stream(
-                config.into(),
-                move |data: &[f32], _| {
-                    let at = |f: &[f32], c: Option<usize>| c.map_or(0.0, |c| f[c]);
-                    if let Ok(mut inc) = incoming.try_lock() {
-                        inc.extend(data.chunks(channels).map(|f| [at(f, l), at(f, r)]));
+        let stream = deckard_engine::devices::build_input(
+            &device,
+            config,
+            move |data: &[f32]| {
+                let at = |f: &[f32], input: usize, c: Option<usize>| c.map_or(0.0, |c| f[c] * inputs.gain(input));
+                if let Ok(mut inc) = incoming.try_lock() {
+                    inc.extend(data.chunks(channels).map(|f| [at(f, in_l, l), at(f, in_r, r)]));
+                }
+                if let Some(m) = &monitor
+                    && let Ok(mut m) = m.try_lock()
+                {
+                    for f in data.chunks(channels) {
+                        m.push(at(f, in_l, l));
+                        m.push(at(f, in_r, r));
                     }
-                    if let Some(m) = &monitor
-                        && let Ok(mut m) = m.try_lock()
-                    {
-                        for f in data.chunks(channels) {
-                            m.push(at(f, l));
-                            m.push(at(f, r));
-                        }
-                    }
-                },
-                |e| eprintln!("audio input error: {e}"),
-                None,
-            )
-            .map_err(|e| format!("audio input: {e}"))?;
+                }
+            },
+            |e| eprintln!("audio input error: {e}"),
+        )
+        .map_err(|e| format!("audio input: {e}"))?;
         stream.play().map_err(|e| format!("audio input: {e}"))?;
         self.stream = Some(stream);
         Ok(rate)
+    }
+
+    /// Let go of the interface's input, ending what it records. An ASIO driver can't take
+    /// another buffer size while anything holds it. The meter opens it again by itself.
+    pub fn release_input(&mut self) {
+        if self.stream.is_some() {
+            self.meter_key = None;
+            self.cancel(None);
+        }
     }
 
     /// Stop: Detect ends now; Sync and Loop at the next bar line (FREE) or their end;
@@ -437,7 +452,10 @@ impl Recorder {
             let raw = std::mem::take(&mut *tap.lock().unwrap());
             raw.as_chunks::<2>().0.to_vec()
         } else if self.stream.is_some() {
-            std::mem::take(&mut *self.incoming.lock().unwrap())
+            // The next lot's room is made here. On ASIO the input's callback runs on the
+            // output's thread, which shouldn't have to allocate.
+            let room = Vec::with_capacity(INCOMING_ROOM);
+            std::mem::replace(&mut *self.incoming.lock().unwrap(), room)
         } else {
             self.view.meter = (self.view.meter.0 * 0.8, self.view.meter.1 * 0.8);
             return None;
@@ -708,7 +726,7 @@ fn connect_midi(name: &str) -> Result<midir::MidiOutputConnection, String> {
     out.connect(&port, "DECKARD Auto Sampler").map_err(|e| e.to_string())
 }
 
-pub use deckard_engine::devices::{default_input, device_name, input_devices};
+pub use deckard_engine::devices::{default_input, device_name};
 
 /// A note's name as Maschine shows it: C3 = 60, C-2 = 0.
 pub fn note_name(n: u8) -> String {
@@ -902,6 +920,7 @@ mod tests {
             output: Some(&out),
             device: None,
             routing: &[],
+            inputs: Default::default(),
             clock: clock_of(&out, &p),
             dir: dir.clone(),
             stem: "Kick".into(),
@@ -942,6 +961,7 @@ mod tests {
             output: Some(out),
             device: None,
             routing: &[],
+            inputs: Default::default(),
             clock: clock_of(out, &p),
             dir: PathBuf::new(),
             stem: String::new(),
@@ -971,6 +991,7 @@ mod tests {
             output: Some(&out),
             device: None,
             routing: &[],
+            inputs: Default::default(),
             clock: clock_of(&out, &p),
             dir: std::env::temp_dir(),
             stem: String::new(),

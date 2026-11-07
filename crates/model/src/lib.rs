@@ -810,6 +810,9 @@ pub struct ModPoint {
 pub struct Pattern {
     pub name: String,
     pub color: Color,
+    /// Its place among the group's patterns, from 0: its `patterns_by_id` id. Patterns are
+    /// listed in this order, and there can be empty places between them.
+    pub slot: usize,
     /// Ticks.
     pub start: i64,
     /// Ticks.
@@ -1315,9 +1318,13 @@ impl Project {
                 patterns: Vec::new(),
                 clip_patterns: Vec::new(),
             };
+            let ids = map_entries(g.get("patterns_by_id"));
             for (pi, pat) in ix.elements(g.get("patterns_by_id")).into_iter().enumerate() {
                 pattern_ix.insert(pat as *const Obj, (gi, pi));
-                group.patterns.push(pattern(&ix, pat, &sound_ix, &take_ix, &params, &mut p.warnings));
+                let mut pt = pattern(&ix, pat, &sound_ix, &take_ix, &params, &mut p.warnings);
+                pt.slot =
+                    ids.get(pi).and_then(|e| e.get("first")).and_then(Value::as_int).and_then(|i| usize::try_from(i).ok()).unwrap_or(pi);
+                group.patterns.push(pt);
                 ga.patterns.push(path_of(pat));
             }
             // Clips: their patterns, and the clip events that place them.
@@ -1669,7 +1676,7 @@ fn plugin_pages(m: &Obj) -> Vec<PluginPage> {
                         Value::Obj(ptr) => match ptr.get("px") {
                             Some(Value::Obj(p)) => Some(PluginKnob {
                                 id: p.get("index").and_then(Value::as_int).unwrap_or(0) as u32,
-                                name: str_of(p.get("custom_name")),
+                                name: str_of(p.get("custom_name").or_else(|| p.get("custom_name_nis_mapping"))),
                                 section: str_of(p.get("section_name")),
                             }),
                             _ => None,
@@ -2262,6 +2269,7 @@ fn pattern(
     warnings: &mut Vec<String>,
 ) -> Pattern {
     let mut out = Pattern {
+        slot: 0,
         name: param_str(pat, "name"),
         color: color(pat),
         start: param_i64(pat, "start").unwrap_or(0),

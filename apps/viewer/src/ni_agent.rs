@@ -74,6 +74,61 @@ pub fn quit() -> Result<(), String> {
     Ok(())
 }
 
+/// The screen drivers Preferences offers. Both stay in the list; [`screen_driver_in_use`]
+/// only says which one has the screens now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenDriver {
+    /// Windows' WinUSB driver. DECKARD draws the screens.
+    Windows,
+    /// NI's driver. Maschine draws the screens, and DECKARD clears them first.
+    Maschine,
+}
+
+impl ScreenDriver {
+    pub fn label(self) -> &'static str {
+        match self {
+            ScreenDriver::Windows => "Windows screen driver",
+            ScreenDriver::Maschine => "Maschine screen driver",
+        }
+    }
+}
+
+/// Which driver has the screens. `None` when they are not open: the list still has
+/// both choices, and this only says neither is in use. A switch to the Windows driver
+/// counts as that choice while it is still finishing.
+pub fn screen_driver_in_use(released: bool, connected: bool, switching_to_windows: bool) -> Option<ScreenDriver> {
+    if released {
+        Some(ScreenDriver::Maschine)
+    } else if connected || switching_to_windows {
+        Some(ScreenDriver::Windows)
+    } else {
+        None
+    }
+}
+
+/// Switch the screens to the Windows driver, and don't ask again until that has had
+/// time to finish (it asks for administrator approval).
+pub fn use_windows(ask: &mut Ask, status: &mut String) {
+    match quit() {
+        Ok(()) => {
+            *status = "switching to the Windows screen driver".into();
+            *ask = Ask::Quitting(Instant::now() + QUITTING);
+        }
+        Err(e) => {
+            *status = e;
+            *ask = Ask::Declined;
+        }
+    }
+}
+
+/// Give the screens back to Maschine's driver. The caller lets go of them first, so
+/// they can be cleared; the driver change waits for that.
+pub fn use_maschine(ask: &mut Ask, status: &mut String) {
+    *ask = Ask::Idle;
+    *status = "clearing the screens and giving them to Maschine".into();
+    give_back();
+}
+
 /// Give the screens back to NI's driver, once DECKARD has let go of them.
 #[cfg(windows)]
 pub fn give_back() {
@@ -150,8 +205,30 @@ pub enum Ask {
     Declined,
 }
 
+/// What a dialog says.
+pub struct Words {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub button: &'static str,
+    pub done: &'static str,
+}
+
 /// Ask to quit the agent if it's `holding` the screens. Says what came of it in `status`.
 pub fn dialog(ctx: &egui::Context, ask: &mut Ask, holding: bool, status: &mut String, quit: impl FnOnce() -> Result<(), String>) {
+    let words = Words { title: text::TITLE, body: text::BODY, button: text::BUTTON, done: text::DONE };
+    ask_about("ni-agent", &words, ctx, ask, holding, status, quit);
+}
+
+/// Ask `words`' question while `holding`, and `quit` if told to.
+pub fn ask_about(
+    id: &str,
+    words: &Words,
+    ctx: &egui::Context,
+    ask: &mut Ask,
+    holding: bool,
+    status: &mut String,
+    quit: impl FnOnce() -> Result<(), String>,
+) {
     if let Ask::Quitting(until) = *ask {
         let now = Instant::now();
         if now >= until {
@@ -170,21 +247,21 @@ pub fn dialog(ctx: &egui::Context, ask: &mut Ask, holding: bool, status: &mut St
         return;
     }
     let (mut quitting, mut declined) = (false, false);
-    egui::Modal::new(egui::Id::new("ni-agent")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
         ui.set_width(420.0);
-        ui.label(egui::RichText::new(text::TITLE).strong());
+        ui.label(egui::RichText::new(words.title).strong());
         ui.add_space(4.0);
-        ui.label(text::BODY);
+        ui.label(words.body);
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            quitting = ui.button(text::BUTTON).clicked();
+            quitting = ui.button(words.button).clicked();
             declined = ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
         });
     });
     if quitting {
         match quit() {
             Ok(()) => {
-                *status = text::DONE.into();
+                *status = words.done.into();
                 *ask = Ask::Quitting(Instant::now() + QUITTING);
             }
             Err(e) => {
@@ -200,6 +277,21 @@ pub fn dialog(ctx: &egui::Context, ask: &mut Ask, holding: bool, status: &mut St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_screen_driver_list_keeps_both_choices_when_none_is_open() {
+        assert_eq!(screen_driver_in_use(false, false, false), None, "not open is not a missing list");
+        assert_eq!(screen_driver_in_use(false, true, false), Some(ScreenDriver::Windows));
+        assert_eq!(
+            screen_driver_in_use(true, false, true),
+            Some(ScreenDriver::Maschine),
+            "giving them back wins over a switch still finishing"
+        );
+        assert_eq!(screen_driver_in_use(false, false, true), Some(ScreenDriver::Windows));
+        assert_eq!(ScreenDriver::Windows.label(), "Windows screen driver");
+        assert_eq!(ScreenDriver::Maschine.label(), "Maschine screen driver");
+    }
+
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use std::cell::Cell;

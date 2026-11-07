@@ -33,6 +33,14 @@ local function pick(s, n)
   if patterns(s)[n] then deckard.pick_pattern(n) end
 end
 
+-- Which of the group's patterns is in each place (a place can be empty): place to its
+-- number in the list.
+local function places(s)
+  local out = {}
+  for i, p in ipairs(patterns(s)) do out[p.slot] = i end
+  return out
+end
+
 function pattern.button(name, down)
   if not down then return end
   local s = deckard.state()
@@ -66,11 +74,11 @@ end
 function pattern.pad(n)
   local s = deckard.state()
   local at = (bank - 1) * PADS + n
-  local list = patterns(s)
-  if list[at] then
-    deckard.pick_pattern(at)
-  elseif at == #list + 1 then
-    deckard.pattern_edit("create")
+  local i = places(s)[at]
+  if i then
+    deckard.pick_pattern(i)
+  elseif s.groups[s.group] then
+    deckard.new_pattern(s.group, at)
   end
   return true
 end
@@ -126,11 +134,12 @@ function pattern.leds()
   deckard.led("LEFT", page > 1 and "dim" or "off")
   deckard.led("RIGHT", page < PAGES and "dim" or "off")
   for _, arrow in ipairs({ "UP", "LEFT", "RIGHT", "DOWN" }) do deckard.led("WHEEL_" .. arrow, 16, false) end
-  local list = patterns(s)
+  local list, at = patterns(s), places(s)
   for i = 1, PADS do
-    local p = list[(bank - 1) * PADS + i]
+    local n = at[(bank - 1) * PADS + i]
+    local p = n and list[n]
     if p then
-      deckard.led("PAD_" .. i, p.palette, (bank - 1) * PADS + i == s.pattern)
+      deckard.led("PAD_" .. i, p.palette, n == s.pattern)
     else
       deckard.led("PAD_" .. i, "off")
     end
@@ -167,12 +176,12 @@ function pattern.draw(screen, theme)
     })
   end
 
-  local pads = {}
+  local pads, placed = {}, places(s)
   for i = 1, PADS do
-    local at = (bank - 1) * PADS + i
-    local p = list[at]
+    local n = placed[(bank - 1) * PADS + i]
+    local p = n and list[n]
     if p then
-      pads[i] = { name = p.name, palette = p.palette, on = at == s.pattern }
+      pads[i] = { name = p.name, palette = p.palette, on = n == s.pattern }
     else
       pads[i] = { empty = true }
     end

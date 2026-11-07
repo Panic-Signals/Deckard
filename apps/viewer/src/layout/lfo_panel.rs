@@ -99,17 +99,22 @@ fn controls(ui: &mut Ui, painter: &Painter, p: &Project, lfo: &Lfo, ctl: Rect, f
             n.sync = i == 1;
         }
         caption(c, "Sync");
+        // Rate stays a dial with Sync on (the note division) and off (Hz).
         if n.sync {
+            let at = n.rate.min(RATES.len() - 1);
+            let amount = at as f32 / (RATES.len() - 1) as f32;
             let c = cell(130.0);
-            let names: Vec<&str> = RATES.iter().map(|(name, _)| *name).collect();
-            if let Some(i) = strip::choice_pick(ui, painter, c, 70.0, &names, n.rate.min(RATES.len() - 1), id.with("rate")) {
-                n.rate = i;
+            let resp = strip::knob_face(ui, painter, c, 16.0, "Rate", RATES[at].0, amount, false, id.with("rate"), PLAY_ON);
+            if let Some(v) = strip::turned(ui, &resp, id.with("rate-drag"), amount, 150.0) {
+                n.rate = ((v * (RATES.len() - 1) as f32).round() as usize).min(RATES.len() - 1);
             }
-            caption(c, "Rate");
+            if resp.double_clicked() {
+                n.rate = fresh.rate;
+            }
         } else {
             // Hz: 0.01-20 on a log scale, so each octave takes the same turn.
             let span = (20.0f32 / 0.01).ln();
-            let c = cell(90.0);
+            let c = cell(130.0);
             let amount = (n.hz / 0.01).ln() / span;
             let resp = strip::knob_face(ui, painter, c, 16.0, "Rate", &format!("{:.2} Hz", n.hz), amount, false, id.with("hz"), PLAY_ON);
             if let Some(v) = strip::turned(ui, &resp, id.with("hz-drag"), amount, 150.0) {
@@ -125,6 +130,20 @@ fn controls(ui: &mut Ui, painter: &Painter, p: &Project, lfo: &Lfo, ctl: Rect, f
         }
         if reset {
             n.phase = fresh.phase;
+        }
+        let (v, reset) = turn(ui, 90.0, "Offset", format!("{:.0} %", n.offset * 100.0), (n.offset + 1.0) / 2.0, "offset");
+        if let Some(v) = v {
+            n.offset = (((v * 2.0 - 1.0) * 100.0).round() / 100.0).clamp(-1.0, 1.0);
+        }
+        if reset {
+            n.offset = fresh.offset;
+        }
+        let (v, reset) = turn(ui, 90.0, "Jitter", format!("{:.0} %", n.jitter * 100.0), n.jitter, "jitter");
+        if let Some(v) = v {
+            n.jitter = ((v * 100.0).round() / 100.0).clamp(0.0, 1.0);
+        }
+        if reset {
+            n.jitter = fresh.jitter;
         }
     }
     let (v, reset) = turn(ui, 90.0, "Level", format!("{:.0} %", n.level * 100.0), n.level, "level");
@@ -355,12 +374,12 @@ pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, act
     // The wave.
     painter.rect_filled(pic, 3.0, S01);
     painter.hline(pic.x_range(), pic.center().y, Stroke::new(1.0, white(20)));
-    // Time lines: how long the two cycles take, as the wave's width stays the same.
-    for m in lfo.picture_marks() {
-        painter.vline(pic.left() + 6.0 + (pic.width() - 12.0) * m, pic.y_range(), Stroke::new(1.0, white(20)));
+    // The window stays two beats (or two seconds). The wave travels so the rate shows.
+    if !lfo.env {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
-    let pts: Vec<Pos2> = lfo
-        .picture(480)
+    let samples = if lfo.env { lfo.picture(480) } else { lfo.picture_at(480, lfo.display_cycles(ui.input(|i| i.time), p.tempo)) };
+    let pts: Vec<Pos2> = samples
         .iter()
         .enumerate()
         .map(|(i, v)| {
@@ -520,7 +539,7 @@ mod tests {
             st,
         );
         h.run_steps(2);
-        for name in ["Shape", "Sync", "Rate", "Phase", "Level", "Quantize", "Trigger", "Fade"] {
+        for name in ["Shape", "Sync", "Rate", "Phase", "Offset", "Jitter", "Level", "Quantize", "Trigger", "Fade"] {
             assert!(h.state().text.to_lowercase().contains(&name.to_lowercase()), "{name} in {}", h.state().text);
         }
         h.state_mut().lfo.trigger = None;

@@ -12,9 +12,13 @@ The workspace targets the latest stable Rust (pinned in `mise.toml`: 1.99.1, edi
 the stem separation model.
 
 ```sh
-cargo build --release --offline -p deckard
-./target/release/deckard ["path/to/project.mxprj"]   # or drop a file on the window
+mise run build
+./target/debug/deckard ["path/to/project.mxprj"]   # or drop a file on the window
 ```
+
+The build and the other tasks (tests, releases, lint) are defined in `mise.toml`, with
+usage at its top. Use `mise run` rather than calling `cargo` directly: `cargo` comes from
+mise's pinned Rust, so it isn't on `PATH` in a plain shell.
 
 - **Linux:** needs `pkg-config` and the ALSA headers (`libasound2-dev`).
 - **Windows:** needs the Visual Studio Build Tools (C++). `mise install` installs them
@@ -23,8 +27,42 @@ cargo build --release --offline -p deckard
 - **MK3:** with one connected, DECKARD drives it directly. Quit Maschine and NI's
   hardware agents (NIHardwareAgent, NIHostIntegrationAgent) first.
 
-`mise run build` builds the whole workspace (debug). The other mise tasks are listed at
-the top of `mise.toml`.
+
+### ASIO (Windows, optional)
+
+WASAPI's shared mode can't go below the system's audio period, so low latency on Windows
+takes ASIO. It's the `asio` feature of `deckard` (and `deckard-engine`), off by default:
+default builds, CI and the release packages don't have it and need nothing for it.
+
+```powershell
+$env:CPAL_ASIO_DIR = "C:\path\to\ASIOSDK"            # Steinberg's ASIO SDK, unpacked
+$env:LIBCLANG_PATH = "C:\path\to\llvm\bin"           # the folder with libclang.dll
+cargo build --release -p deckard --features asio
+```
+
+- **What it needs:** [Steinberg's ASIO SDK](https://www.steinberg.net/asiosdk) and
+  libclang (LLVM's `clang+llvm-*-x86_64-pc-windows-msvc` release; only `bin\libclang.dll`
+  and `lib\clang\*\include` are used), besides the Visual Studio Build Tools. Without
+  `CPAL_ASIO_DIR`, `asio-sys`'s build script downloads the SDK into the temp folder by
+  itself, so set it.
+- **Don't commit or package the SDK.** It may be distributed only under Steinberg's
+  licence agreement, or under the GPL v3; see its `LICENSE.txt`. DECKARD's packages leave
+  the feature off until that's settled.
+- **Using it:** Preferences ▸ Audio ▸ Driver, then ASIO driver. The buffer size and rate
+  are the driver's: DECKARD asks for its buffer size and takes what it's given.
+  `cargo run -p deckard-engine --features asio --example audio-info -- --asio` prints what
+  each driver reports.
+- **Falling back:** if ASIO can't be opened, WASAPI plays and the status line and
+  Preferences say why. A driver that crashes the process can't be caught: remove the
+  `audio_driver = asio` line from `settings.txt` to start without it.
+- **How it works:** `crates/engine/src/devices.rs`.
+  - cpal lists ASIO drivers by loading each in turn, including ones that aren't the one
+    wanted, so the list is kept and read again only when asked (Rescan, or the driver
+    asking to be reopened).
+  - Output and input streams share the loaded driver. The output holds the inputs open
+    from the start, as adding them later stops the driver for a moment.
+  - Drivers' I32, I24 and I16 are converted to and from the engine's f32 around the
+    callbacks, with buffers made up front.
 
 ## Testing
 
