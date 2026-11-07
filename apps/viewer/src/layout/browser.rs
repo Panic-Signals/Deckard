@@ -13,6 +13,8 @@ use eframe::egui::{self, Align2, Color32, ColorImage, Id, Rect, RichText, Sense,
 pub const WIDTH: f32 = 300.0;
 const ACCENT: Color32 = Color32::from_rgb(0xF3, 0x9C, 0x12);
 const RESULT_ROW: f32 = 20.0;
+/// A favorite's heart in the results.
+const FAVORITE: Color32 = Color32::from_rgb(0xE8, 0x5A, 0x6E);
 const CHIPS_MAX_HEIGHT: f32 = 88.0;
 /// Splice's lockup (symbol and wordmark), black on transparent, 944 × 288.
 const SPLICE_LOGO: &[u8] = include_bytes!("../../assets/splice-logo.png");
@@ -223,14 +225,22 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                     S00
                 };
                 ui.painter().rect_filled(r, 0.0, fill);
-                let fav = if item.favorite { "♥ " } else { "" };
-                ui.painter().text(
-                    r.left_center() + Vec2::new(6.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    format!("{fav}{}", item.name),
-                    font(11.0),
-                    white(230),
-                );
+                // The heart: a click adds or removes the favorite (as the right-click menu does).
+                let heart = Rect::from_center_size(r.left_center() + Vec2::new(12.0, 0.0), Vec2::splat(RESULT_ROW));
+                let tip = if item.favorite { "Remove from Favorites" } else { "Add to Favorites" };
+                let hr = ui.interact(heart, Id::new(("browser-favorite", &item.path)), Sense::click()).on_hover_text(tip);
+                hr.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+                let (glyph, color) = match (item.favorite, hr.hovered(), resp.hovered()) {
+                    (true, _, _) => ("♥", FAVORITE),
+                    (false, true, _) => ("♡", white(220)),
+                    (false, false, true) => ("♡", white(110)),
+                    (false, false, false) => ("♡", white(45)),
+                };
+                ui.painter().text(heart.center(), Align2::CENTER_CENTER, glyph, font(11.0), color);
+                if hr.clicked() {
+                    acts.push(Act::Browse(BrowseAct::Favorite(i, !item.favorite)));
+                }
+                ui.painter().text(r.left_center() + Vec2::new(24.0, 0.0), Align2::LEFT_CENTER, &item.name, font(11.0), white(230));
                 let detail = match (item.tempo, &item.product) {
                     (Some(t), _) if matches!(item.kind, Kind::Loop) => format!("{t:.0} BPM"),
                     (_, Some(p)) => p.clone(),

@@ -11,14 +11,14 @@ pub fn fixture(dir: &Path) -> PathBuf {
     let _ = std::fs::remove_file(&path);
     let db = Connection::open(&path).expect("fixture database");
     let mut sql = String::from(
-        "CREATE TABLE k_content_path (id INTEGER PRIMARY KEY, path TEXT NOT NULL, content_type INTEGER NOT NULL DEFAULT 0, alias TEXT);
+        "CREATE TABLE k_content_path (id INTEGER PRIMARY KEY, path TEXT NOT NULL, content_type INTEGER NOT NULL DEFAULT 0, alias TEXT, state INTEGER NOT NULL DEFAULT 1);
          CREATE TABLE k_sound_info (id INTEGER PRIMARY KEY, name TEXT NOT NULL, author TEXT, tempo REAL NOT NULL DEFAULT 0,
             content_path_id INTEGER NOT NULL, file_name TEXT NOT NULL, hidden_for INTEGER NOT NULL DEFAULT 0);
          CREATE TABLE k_category (id INTEGER PRIMARY KEY, category TEXT, subcategory TEXT, subsubcategory TEXT);
          CREATE TABLE k_mode (id INTEGER PRIMARY KEY, name TEXT);
          CREATE TABLE k_sound_info_category (sound_info_id INTEGER NOT NULL, category_id INTEGER NOT NULL);
          CREATE TABLE k_sound_info_mode (sound_info_id INTEGER NOT NULL, mode_id INTEGER NOT NULL);
-         INSERT INTO k_content_path VALUES (1, '/Users/Shared/Deep Matter Library', 2, 'Deep Matter'),
+         INSERT INTO k_content_path (id, path, content_type, alias) VALUES (1, '/Users/Shared/Deep Matter Library', 2, 'Deep Matter'),
             (2, '/Users/me/Documents/Native Instruments/Maschine 3', 1, 'Standard User Directory');
          INSERT INTO k_category VALUES (1, 'Drums', NULL, NULL), (2, 'Drums', 'Kick', NULL), (3, 'Drums', 'Snare', NULL), (4, 'Bass', '', NULL);
          INSERT INTO k_mode VALUES (1, 'Clean');
@@ -37,14 +37,14 @@ pub fn fixture(dir: &Path) -> PathBuf {
         for n in [1, 2] {
             sql += &format!(
                 "CREATE TABLE p_sound_info_{}_{n} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, entry1 TEXT, entry2 TEXT, entry3 TEXT, \
-                 content_path_id INTEGER NOT NULL);\n",
+                 content_path_id INTEGER NOT NULL, favorite_id TEXT);\n",
                 kind.table()
             );
         }
     }
-    sql += "INSERT INTO p_sound_info_Loop_2 SELECT id, name, 'Deep Matter', 'Loops', NULL, content_path_id FROM k_sound_info WHERE id IN (10, 11, 12);
-            INSERT INTO p_sound_info_Oneshot_1 SELECT id, name, NULL, NULL, NULL, content_path_id FROM k_sound_info WHERE id = 20;
-            INSERT INTO p_sound_info_Sound_2 SELECT id, name, 'Deep Matter', NULL, NULL, content_path_id FROM k_sound_info WHERE id IN (30, 31);";
+    sql += "INSERT INTO p_sound_info_Loop_2 SELECT id, name, 'Deep Matter', 'Loops', NULL, content_path_id, 'id-' || id FROM k_sound_info WHERE id IN (10, 11, 12);
+            INSERT INTO p_sound_info_Oneshot_1 SELECT id, name, NULL, NULL, NULL, content_path_id, NULL FROM k_sound_info WHERE id = 20;
+            INSERT INTO p_sound_info_Sound_2 SELECT id, name, 'Deep Matter', NULL, NULL, content_path_id, NULL FROM k_sound_info WHERE id IN (30, 31);";
     db.execute_batch(&sql).expect("fixture tables");
     path
 }

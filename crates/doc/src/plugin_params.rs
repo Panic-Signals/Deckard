@@ -17,6 +17,7 @@ const UNUSED: i64 = u32::MAX as i64;
 pub struct PluginPageSpec {
     pub name: String,
     pub knobs: Vec<(u32, String)>,
+    pub custom_names: Vec<String>,
 }
 
 /// The object a list item (`shared_ptr`) holds.
@@ -112,7 +113,10 @@ impl Document {
                 let mut p = self.build(|b| b.item(PARAM))?;
                 let o = px_mut(&mut p)?;
                 let (index, section) = spec.knobs.get(k).map_or((UNUSED, ""), |(id, s)| (*id as i64, s.as_str()));
+                let custom = spec.custom_names.get(k).map_or("", String::as_str);
+                let custom_field = if o.get("custom_name").is_some() { "custom_name" } else { "custom_name_nis_mapping" };
                 *o.get_mut("index").ok_or("bad plug-in parameter")? = Value::Int(index);
+                *o.get_mut(custom_field).ok_or("bad plug-in parameter")? = Value::Str(custom.to_string());
                 *o.get_mut("section_name").ok_or("bad plug-in parameter")? = Value::Str(section.to_string());
                 params.push(("item".to_string(), p));
             }
@@ -140,8 +144,8 @@ mod tests {
 
     fn pages() -> Vec<PluginPageSpec> {
         vec![
-            PluginPageSpec { name: "Filter".into(), knobs: vec![(7, "Filter".into()), (8, String::new())] },
-            PluginPageSpec { name: String::new(), knobs: (100..108).map(|i| (i, String::new())).collect() },
+            PluginPageSpec { name: "Filter".into(), knobs: vec![(7, "Filter".into()), (8, String::new())], custom_names: Vec::new() },
+            PluginPageSpec { name: String::new(), knobs: (100..108).map(|i| (i, String::new())).collect(), custom_names: Vec::new() },
         ]
     }
 
@@ -177,7 +181,8 @@ mod tests {
         let c = Chain::Sound(0, 0);
         d.save_plugin_pages(c, 0, &pages()).unwrap();
         let before = d.plugin_param_oid(c, 0, 7);
-        d.save_plugin_pages(c, 0, &[PluginPageSpec { name: "Other".into(), knobs: vec![(1, String::new())] }]).unwrap();
+        d.save_plugin_pages(c, 0, &[PluginPageSpec { name: "Other".into(), knobs: vec![(1, String::new())], custom_names: Vec::new() }])
+            .unwrap();
         assert_eq!(d.plugin_param_oid(c, 0, 7), before);
         assert_eq!(d.plugin_param_oid(c, 0, 1), None);
     }

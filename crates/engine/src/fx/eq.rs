@@ -336,6 +336,71 @@ impl Eq {
     }
 }
 
+/// The EQ as drawn: samples from 20 Hz to 20 kHz, and its four bands on that axis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Curve {
+    /// 0..1, 0.5 at 0 dB, over ±12 dB. Log-spaced from 20 Hz to 20 kHz.
+    pub points: Vec<f32>,
+    /// Low, Low-Mid, High-Mid, High: (x, y) on the same axis.
+    pub bands: [(f32, f32); 4],
+}
+
+const CURVE_DB: f32 = 12.0;
+const F_MIN: f32 = 20.0;
+const F_MAX: f32 = 20_000.0;
+
+fn unit_db(db: f32) -> f32 {
+    (db / (CURVE_DB * 2.0) + 0.5).clamp(0.0, 1.0)
+}
+
+/// |H(e^jw)| of one biquad, from the coefficients [`biquad4`] runs.
+fn biquad_mag(c: &Coefs, w: f32) -> f32 {
+    let (s, co) = (w.sin(), w.cos());
+    let (z1r, z1i) = (co, -s);
+    let (z2r, z2i) = (co * co - s * s, -2.0 * s * co);
+    let (inv, a1, a2, b0, b1, b2) = (c[0], c[1], c[2], c[3], c[4], c[5]);
+    let nr = b0 + b1 * z1r + b2 * z2r;
+    let ni = b1 * z1i + b2 * z2i;
+    let dr = 1.0 + a1 * z1r + a2 * z2r;
+    let di = a1 * z1i + a2 * z2i;
+    let n2 = nr * nr + ni * ni;
+    let d2 = (dr * dr + di * di).max(1e-12);
+    inv.abs() * (n2 / d2).sqrt()
+}
+
+/// The focused EQ's picture, from its stored parameters, at `sr`. `n` samples.
+/// The same curve on both of its pages: every band, not only the knobs showing.
+pub fn response(params: &[(String, f64)], sr: f64, n: usize) -> Curve {
+    let n = n.max(2);
+    let mut eq = Eq::new(sr);
+    eq.set(params);
+    let _ = eq.frame(0.0, 0.0);
+    let coefs = [eq.lo, eq.hi, eq.m1, eq.m2];
+    let g = eq.cur[G_OUT];
+    let sr_f = eq.sr;
+    let (log_lo, log_hi) = (F_MIN.ln(), F_MAX.ln());
+    let db_at = |f: f32| {
+        let w = (f * TWO_PI / sr_f).clamp(0.0, std::f32::consts::PI * 0.99);
+        let mut lin = g;
+        for c in &coefs {
+            lin *= biquad_mag(c, w);
+        }
+        20.0 * lin.max(1e-8).log10()
+    };
+    let points = (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            unit_db(db_at((log_lo + (log_hi - log_lo) * t).exp()))
+        })
+        .collect();
+    let freqs = [eq.lf.to(eq.vals[0]), eq.mf.to(eq.vals[2]), eq.mf.to(eq.vals[4]), eq.hf.to(eq.vals[6])];
+    let bands = freqs.map(|f| {
+        let x = ((f.ln() - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0);
+        (x, unit_db(db_at(f)))
+    });
+    Curve { points, bands }
+}
+
 /// Four TDF-II lanes with unnormalized b and the state scaled by a0 (§2.3).
 #[inline]
 fn biquad4(c: &[[f32; 4]; 6], s: &mut [[f32; 4]; 2], x: [f32; 4]) -> [f32; 4] {
@@ -430,6 +495,16 @@ mod tests {
         let cut = level(&[("output_gain".into(), -0.3)]);
         let db = 20.0 * (cut / flat).log10();
         assert!((db + 6.0).abs() < 0.01, "−6 dB output gave {db} dB");
+    }
+
+    #[test]
+    fn the_curve_follows_the_bands() {
+        let flat = response(&[], 48_000.0, 64);
+        assert!(flat.points.iter().all(|y| (y - 0.5).abs() < 0.02), "flat sits on 0 dB");
+        let boost = response(&[("low_mid_gain".into(), 0.5)], 48_000.0, 96);
+        assert!(boost.bands[1].1 > 0.85, "a +10 dB peak lifts the low-mid dot: {}", boost.bands[1].1);
+        let shelf = response(&[("low_gain".into(), 0.5)], 48_000.0, 64);
+        assert!(shelf.points[0] > shelf.points[63] + 0.2, "a low shelf lifts the left of the curve");
     }
 
     #[test]
