@@ -21,12 +21,15 @@ pub struct Image {
 /// The pictures given to the surface, by (key, thumbnail), and handed to each draw.
 pub type Pictures = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<(String, bool), std::sync::Arc<Image>>>>;
 
-/// DECKARD's fonts, by the name scripts and themes use: egui's Ubuntu Light and Hack,
-/// and Google's Roboto (Apache 2.0) and Roboto Mono (SIL OFL 1.1), as Maschine's screens
-/// use (`fonts/`, with their licences).
-pub const FONTS: [(&str, &[u8]); 9] = [
+/// DECKARD's fonts, by the name scripts and themes use: IBM Plex Sans and IBM Plex Mono
+/// (SIL OFL 1.1), egui's Ubuntu Light and Hack, and Google's Roboto (Apache 2.0) and
+/// Roboto Mono (SIL OFL 1.1), as Maschine's screens use (`fonts/`, with their licences).
+pub const FONTS: [(&str, &[u8]); 12] = [
     ("ubuntu", epaint_default_fonts::UBUNTU_LIGHT),
     ("hack", epaint_default_fonts::HACK_REGULAR),
+    ("plex", include_bytes!("../fonts/IBMPlexSans-Regular.ttf")),
+    ("plex-bold", include_bytes!("../fonts/IBMPlexSans-Bold.ttf")),
+    ("plex-mono", include_bytes!("../fonts/IBMPlexMono-Regular.ttf")),
     ("roboto", include_bytes!("../fonts/Roboto-Regular.ttf")),
     ("roboto-light", include_bytes!("../fonts/Roboto-Light.ttf")),
     ("roboto-medium", include_bytes!("../fonts/Roboto-Medium.ttf")),
@@ -386,26 +389,40 @@ impl Picture {
     /// Text with its baseline at `y`, cut at `max_w` pixels; returns its width.
     fn text(&mut self, s: &Style, x: i32, y: i32, max_w: i32, text: &str) -> i32 {
         let mut pen = 0.0f32;
+        let mut prev = None;
         for ch in text.chars() {
+            let kern = prev.and_then(|p| s.font.horizontal_kern(p, ch, s.size)).unwrap_or(0.0);
             let (m, bitmap) = s.font.rasterize(ch, s.size);
-            if (pen + m.advance_width) as i32 > max_w {
+            if (pen + kern + m.advance_width) as i32 > max_w {
                 break;
             }
+            pen += kern;
             let x0 = x + (pen + m.xmin as f32).round() as i32;
             let y0 = y - m.height as i32 - m.ymin;
             for row in 0..m.height {
                 for col in 0..m.width {
-                    let a = bitmap[row * m.width + col] as f32 / 255.0;
+                    let cov = bitmap[row * m.width + col] as f32 / 255.0;
+                    let a = if cov > 0.0 { cov.powf(1.0 / 1.45) } else { 0.0 };
                     self.blend(x0 + col as i32, y0 + row as i32, s.colour.rgb, a * s.colour.alpha);
                 }
             }
             pen += m.advance_width;
+            prev = Some(ch);
         }
         pen.round() as i32
     }
 
     fn width(s: &Style, text: &str) -> i32 {
-        text.chars().map(|ch| s.font.metrics(ch, s.size).advance_width).sum::<f32>().round() as i32
+        let mut w = 0.0f32;
+        let mut prev = None;
+        for ch in text.chars() {
+            if let Some(p) = prev {
+                w += s.font.horizontal_kern(p, ch, s.size).unwrap_or(0.0);
+            }
+            w += s.font.metrics(ch, s.size).advance_width;
+            prev = Some(ch);
+        }
+        w.round() as i32
     }
 
     /// `img` scaled to fit `w` × `h` at (x, y), centred, keeping its shape (each pixel
@@ -580,6 +597,21 @@ mod tests {
         assert_eq!(bb(0, 4, 4), "1.1.1");
         assert_eq!(bb(960 * 4 + 960 + 240, 4, 4), "2.2.2");
         assert_eq!(bb(480 * 7, 7, 8), "2.1.1");
+    }
+
+    #[test]
+    fn text_gamma_boosts_antialiased_edges() {
+        let font_idx = font_index("roboto-medium").unwrap();
+        let f = font_at(font_idx);
+        let s = Style { font_idx, font: f, size: 14.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
+        let (_, bitmap) = f.rasterize('O', s.size);
+        let mid = *bitmap.iter().find(|&&b| b > 32 && b < 200).expect("an antialiased edge pixel");
+        let mut p = Picture::new([0; 3]);
+        assert_eq!(p.record_text(&s, 10, 24, 200, "O".into()), Picture::width(&s, "O"));
+        p.rasterize();
+        let expected = ((mid as f32 / 255.0).powf(1.0 / 1.45) * 255.0).round() as u8;
+        assert!(expected > mid, "gamma-corrected edge pixel ({expected}) is brighter than raw linear coverage ({mid})");
+        assert!(p.px.iter().any(|px| px[0] == expected), "drawn with gamma-corrected coverage");
     }
 
     /// Writes both screens to the temporary folder to look at (`--ignored`); with
