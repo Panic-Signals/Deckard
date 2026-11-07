@@ -79,8 +79,14 @@ impl App {
     /// Extended Lock's pad `pad` (0–15) of the focused bank: recalls its snapshot (and
     /// focuses it), or takes one there.
     pub fn lock_pad(&mut self, pad: usize) {
+        let Some(l) = self.lock_state() else { return };
+        self.lock_slot(l.focus_bank * 16 + pad.min(15));
+    }
+
+    /// Slot `slot`, whatever bank shows (the JAM has all 64 on its pads): recalls its
+    /// snapshot (and focuses it), or takes one there.
+    pub fn lock_slot(&mut self, slot: usize) {
         let (Some(doc), Some(l)) = (self.doc.clone(), self.lock_state()) else { return };
-        let slot = l.focus_bank * 16 + pad.min(15);
         if l.slots.contains(&slot) {
             let r = doc.borrow_mut().focus_snapshot(slot);
             self.lock_do("focus the snapshot", r);

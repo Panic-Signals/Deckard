@@ -293,6 +293,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asio-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "477f1cf5b65679fc2e5422af426f87becba79d1cfa2cd77eff3433e36c8021b9"
+dependencies = [
+ "bindgen 0.72.1",
+ "cc",
+ "num-derive",
+ "num-traits",
+ "walkdir",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -526,6 +539,26 @@ name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
+dependencies = [
+ "bitflags 2.13.2",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.3",
+ "shlex 1.3.0",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags 2.13.2",
  "cexpr",
@@ -1458,6 +1491,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
 dependencies = [
  "alsa",
+ "asio-sys",
  "block2 0.6.2",
  "coreaudio-rs",
  "dasp_sample",
@@ -2104,6 +2138,7 @@ dependencies = [
  "cpal",
  "deckard-doc",
  "deckard-engine",
+ "deckard-jam",
  "deckard-library",
  "deckard-link",
  "deckard-lua-host",
@@ -2157,6 +2192,13 @@ dependencies = [
  "lewton",
  "plist",
  "tempfile",
+]
+
+[[package]]
+name = "deckard-jam"
+version = "0.1.0"
+dependencies = [
+ "hidapi",
 ]
 
 [[package]]
@@ -2271,6 +2313,7 @@ dependencies = [
 name = "deckard-surface"
 version = "0.1.0"
 dependencies = [
+ "deckard-jam",
  "deckard-mk3",
  "deckard-model",
  "epaint_default_fonts",
@@ -7167,7 +7210,7 @@ version = "20.1.4-7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d2581070380418ccc33b500f3739e4d4869421fdb477fcea51ff97c6253a52"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
  "cc",
  "paste",
  "thiserror 2.0.21",

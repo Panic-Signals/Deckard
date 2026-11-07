@@ -273,9 +273,55 @@ impl SidechainFilter {
     }
 }
 
+/// The side-chain filter on the same ±12 dB axis as the Filter picture: a flat gain, or
+/// the band between Center Freq ± Width/2 when Filter is on.
+pub fn response(params: &[(String, f64)], n: usize) -> Vec<f32> {
+    let gain_v = param(params, "side_chain_filter/gain", PARAMS[0].1 as f64) as f32;
+    let center = param(params, "side_chain_filter/center_freq", PARAMS[1].1 as f64).clamp(0.0, 1.0) as f32;
+    let width = param(params, "side_chain_filter/width", PARAMS[2].1 as f64).clamp(0.0, 1.0) as f32;
+    let on = param(params, "side_chain_filter/filter", PARAMS[3].1 as f64) > 0.5;
+    let gain = 10f32.powf((gain_v * 40.0 - 20.0) / 20.0);
+    let f_hi = cutoff((center + width * 0.5).clamp(0.0, 1.0)).max(1.0);
+    let f_lo = cutoff((center - width * 0.5).clamp(0.0, 1.0)).max(1.0);
+    let n = n.max(2);
+    (0..n)
+        .map(|i| {
+            let f = 20.0 * 1000.0f32.powf(i as f32 / (n - 1) as f32);
+            let mag = if on {
+                let u_hi = f / f_hi;
+                let u_lo = f / f_lo;
+                let u2 = u_lo * u_lo;
+                let lp = 1.0 / (1.0 + u_hi.powi(4)).sqrt();
+                let hp = u2 / (1.0 + u2 * u2).sqrt();
+                gain * lp * hp
+            } else {
+                gain
+            };
+            let db = if mag > 1e-8 { 20.0 * mag.log10() } else { -120.0 };
+            (db / 24.0 + 0.5).clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_picture_follows_the_side_chain() {
+        let flat = super::response(&params(0.5, 0.5, 0.5, 0.0), 32);
+        assert!(flat.iter().all(|y| (y - 0.5).abs() < 0.02), "0 dB is the middle: {}", flat[0]);
+        let loud = super::response(&params(1.0, 0.5, 0.5, 0.0), 8);
+        assert!(loud[0] > flat[0] + 0.3, "gain lifts it: {}", loud[0]);
+        let band = super::response(&params(0.5, 0.7, 0.15, 1.0), 64);
+        let mid = (0.7 * 63.0) as usize;
+        assert!(band[mid] > band[2] + 0.15, "the band passes its center: {} {}", band[mid], band[2]);
+        let wider = super::response(&params(0.5, 0.7, 0.6, 1.0), 64);
+        assert!(wider[mid - 15] > band[mid - 15], "width opens the band");
+        let higher = super::response(&params(0.5, 0.85, 0.1, 1.0), 64);
+        let peak = |xs: &[f32]| xs.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        assert!(peak(&higher) > peak(&band), "center freq moves the band");
+    }
 
     fn params(gain: f64, center: f64, width: f64, filter: f64) -> Vec<(String, f64)> {
         [("gain", gain), ("center_freq", center), ("width", width), ("filter", filter)]

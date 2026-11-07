@@ -34,7 +34,7 @@ impl App {
     /// While the Settings page shows: its view, looked up again now and then (and
     /// after a change).
     pub(crate) fn refresh_surface_settings(&mut self) {
-        if self.surface.page() != "settings" {
+        if self.surface.page() != "settings" && !self.jam_settings_wanted {
             self.surface_settings_at = None;
             return;
         }
