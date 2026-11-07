@@ -26,7 +26,18 @@ fn bar(app: &crate::App) -> i64 {
 
 /// A note played at song position `tick` (scene 0), held `len`.
 fn play(app: &mut crate::App, tick: f64, len: f64) {
-    let on = Recorded { group: 0, sound: 0, pitch: 60, velocity: 100, length: i64::MAX, tick, mode: Mode::Scene(0), seq: 0, played: tick };
+    let on = Recorded {
+        midi: false,
+        group: 0,
+        sound: 0,
+        pitch: 60,
+        velocity: 100,
+        length: i64::MAX,
+        tick,
+        mode: Mode::Scene(0),
+        seq: 0,
+        played: tick,
+    };
     app.take_in_recorded(vec![on]);
     app.take_in_recorded(vec![Recorded { velocity: 0, tick: tick + len, played: tick + len, ..on }]);
 }
