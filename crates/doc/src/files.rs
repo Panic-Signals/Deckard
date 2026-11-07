@@ -201,6 +201,7 @@ impl Document {
             new.fields[i].1 = seq.clone();
         }
         self.apply("Load Sound", vec![Op::Set { path, value: Value::Obj(new) }])?;
+        self.prune_extra_outs()?;
         self.check_reopens()
     }
 
@@ -249,6 +250,7 @@ impl Document {
             ops.push(Op::Set { path: entries_path, value: Value::List(entries) });
         }
         self.apply("Load Group", ops)?;
+        self.prune_extra_outs()?;
         self.check_reopens()
     }
 
@@ -275,6 +277,7 @@ impl Document {
             chain.fields.insert(first_qb + at, ("quick_browse".into(), qb));
         }
         self.apply("Load Preset", vec![Op::Set { path: chain_path, value: Value::Obj(chain) }])?;
+        self.prune_extra_outs()?;
         self.check_reopens()
     }
 }
@@ -793,6 +796,55 @@ mod tests {
         assert_eq!(d.project().groups[0].sounds[0].slots[n].module, module);
         let back = reload(&d);
         assert_eq!(back.project().groups[0].sounds[0].slots[n].module, module);
+    }
+
+    fn with_strip_on_sound_0() -> Document {
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let mut d = Document::new_project().unwrap();
+        d.add_slot(0, 0, 0, &crate::NewModule::Plugin { id: "V:AU:INSTR:1".into(), name: "P".into(), chunk: Vec::new() }).unwrap();
+        let strip = ExtraOut {
+            owner: Owner::Chain(0, 0, 0),
+            bus: 1,
+            plugin: "V:AU:INSTR:1".into(),
+            name: "Out 2".into(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: deckard_model::AudioDest::Master,
+            channels: Default::default(),
+        };
+        d.set_extra_outs(vec![strip]).unwrap();
+        d
+    }
+
+    #[test]
+    fn loading_a_sound_file_drops_the_replaced_plugins_extra_outs() {
+        let mut d = with_strip_on_sound_0();
+        let bytes = d.file_bytes(FileItem::Sound(0, 1), &tagged("K")).unwrap();
+        d.load_sound_file(0, 0, &bytes).unwrap();
+        assert!(d.project().extra_outs.is_empty());
+        assert!(d.undo(), "one step");
+        assert_eq!(d.project().extra_outs.len(), 1);
+    }
+
+    #[test]
+    fn loading_a_preset_over_a_plugin_drops_its_extra_outs() {
+        let mut d = with_strip_on_sound_0();
+        d.add_slot(0, 1, 0, &crate::NewModule::Sampler).unwrap();
+        let bytes = d.file_bytes(FileItem::Slot(0, 1, 0), &tagged("S")).unwrap();
+        d.load_slot_file(0, 0, 0, &bytes).unwrap();
+        assert!(d.project().extra_outs.is_empty());
+        assert!(d.undo(), "one step");
+        assert_eq!(d.project().extra_outs.len(), 1);
+    }
+
+    #[test]
+    fn loading_a_group_file_drops_the_replaced_plugins_extra_outs() {
+        let mut d = with_strip_on_sound_0();
+        d.add_group().unwrap();
+        let bytes = d.file_bytes(FileItem::Group(1), &tagged("G")).unwrap();
+        d.load_group_file(0, &bytes).unwrap();
+        assert!(d.project().extra_outs.is_empty());
     }
 
     #[test]

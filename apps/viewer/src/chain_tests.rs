@@ -195,7 +195,7 @@ fn the_controller_shows_the_knobs_of_the_plugin_it_moves_to() {
     app.mk3_events(Vec::new(), &mut Vec::new());
     let names = shown(&app);
     assert!(!names.is_empty(), "the second sound's plug-in shows its knobs");
-    assert_eq!(app.plugin_view.as_ref().map(|v| v.key), Some((Chain::Sound(0, 1), 0)));
+    assert_eq!(app.plugin_view().map(|v| v.key), Some((Chain::Sound(0, 1), 0)));
 }
 
 /// The controller reaches an effect's Side-Chain Input page (RIGHT), its SOURCE a

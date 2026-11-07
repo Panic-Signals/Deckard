@@ -212,9 +212,11 @@ const PROP_PARAMETER_LIST: u32 = 3;
 const PROP_PARAMETER_INFO: u32 = 4;
 const PROP_STREAM_FORMAT: u32 = 8;
 const PROP_ELEMENT_COUNT: u32 = 11;
+const PROP_SUPPORTED_NUM_CHANNELS: u32 = 13;
 const PROP_MAX_FRAMES: u32 = 14;
 const PROP_VALUE_STRINGS: u32 = 16;
 const PROP_RENDER_CALLBACK: u32 = 23;
+const PROP_ELEMENT_NAME: u32 = 30;
 const PROP_HOST_CALLBACKS: u32 = 27;
 const PROP_COCOA_UI: u32 = 31;
 const PROP_STRING_FROM_VALUE: u32 = 33;
@@ -590,11 +592,65 @@ fn get_u32(unit: Unit, id: u32, scope: u32, element: u32) -> Option<u32> {
     (r == 0).then_some(v)
 }
 
+/// The most output pairs asked of an instrument that lets the host set how many it
+/// has (Logic's "Multi-Output (16xStereo)" asks Kontakt for 16).
+const WANTED_OUTPUTS: u32 = 16;
+
+/// The most output channels `unit` takes across all its outputs, from its channel
+/// capabilities (`kAudioUnitProperty_SupportedNumChannels`): an entry of `-N` (N > 2)
+/// means up to N in all. None when it doesn't say (or gives only per-output counts).
+fn total_output_channels(unit: Unit) -> Option<u32> {
+    let mut size = 0u32;
+    let r = unsafe { AudioUnitGetPropertyInfo(unit, PROP_SUPPORTED_NUM_CHANNELS, GLOBAL, 0, &mut size, std::ptr::null_mut()) };
+    if r != 0 || size == 0 {
+        return None;
+    }
+    let mut infos = vec![[0i16; 2]; size as usize / 4];
+    let r = unsafe { AudioUnitGetProperty(unit, PROP_SUPPORTED_NUM_CHANNELS, GLOBAL, 0, infos.as_mut_ptr().cast(), &mut size) };
+    if r != 0 {
+        return None;
+    }
+    infos.iter().filter(|[_, out]| *out < -2).map(|[_, out]| u32::from(out.unsigned_abs())).max()
+}
+
+/// Give instrument `unit` more stereo output elements when it starts with fewer than it
+/// can have and lets the host change the count (`kAudioUnitProperty_ElementCount`
+/// writable on the output scope): as many pairs as its channel total allows, up to
+/// [`WANTED_OUTPUTS`]. Kontakt's Audio Unit starts with one and takes up to 64 channels.
+/// One that refuses, or doesn't give a total, keeps its own count.
+fn ask_for_outputs(unit: Unit) {
+    let mut size = 0u32;
+    let mut writable = 0u8;
+    let r = unsafe { AudioUnitGetPropertyInfo(unit, PROP_ELEMENT_COUNT, OUTPUT, 0, &mut size, &mut writable) };
+    if r != 0 || writable == 0 {
+        return;
+    }
+    let Some(total) = total_output_channels(unit) else { return };
+    let n = (total / 2).min(WANTED_OUTPUTS);
+    if get_u32(unit, PROP_ELEMENT_COUNT, OUTPUT, 0).is_some_and(|have| have >= n) {
+        return;
+    }
+    unsafe { AudioUnitSetProperty(unit, PROP_ELEMENT_COUNT, OUTPUT, 0, (&raw const n).cast(), 4) };
+}
+
 fn channels_of(unit: Unit, scope: u32, element: u32) -> Option<usize> {
     let mut f = Asbd::default();
     let mut size = std::mem::size_of::<Asbd>() as u32;
     let r = unsafe { AudioUnitGetProperty(unit, PROP_STREAM_FORMAT, scope, element, (&raw mut f).cast(), &mut size) };
     (r == 0).then_some(f.channels as usize)
+}
+
+/// The plug-in's name for an element (`kAudioUnitProperty_ElementName`), "" without one.
+fn element_name(unit: Unit, scope: u32, element: u32) -> String {
+    let mut name: Cfref = std::ptr::null();
+    let mut size = std::mem::size_of::<Cfref>() as u32;
+    let r = unsafe { AudioUnitGetProperty(unit, PROP_ELEMENT_NAME, scope, element, (&raw mut name).cast(), &mut size) };
+    if r != 0 || name.is_null() {
+        return String::new();
+    }
+    // The property is returned retained.
+    let cf = Cf(name);
+    string_of(cf.0)
 }
 
 fn unit_label(unit: u32) -> &'static str {
@@ -687,6 +743,8 @@ pub struct AudioUnit {
     kind: u32,
     sub: u32,
     outputs: Outputs,
+    /// The plug-in's name for each output element ("" for none).
+    output_names: Vec<String>,
     /// Takes notes (an instrument, or a MIDI-controlled effect).
     takes_midi: bool,
     sample_rate: f64,
@@ -748,6 +806,7 @@ impl AudioUnit {
             }
         };
         unsafe { (*context).input_channels = input_channels };
+        let output_names = (0..outputs.len() as u32).map(|e| element_name(unit, OUTPUT, e)).collect();
         let params = read_params(unit);
         let index = params.iter().enumerate().map(|(i, m)| (m.info.id, i)).collect();
         let shared = Arc::new(Shared {
@@ -767,6 +826,7 @@ impl AudioUnit {
             kind: desc.kind,
             sub: desc.sub,
             outputs,
+            output_names,
             takes_midi: midi.contains(&desc.kind),
             sample_rate,
             clock: 0,
@@ -784,6 +844,9 @@ impl AudioUnit {
     fn negotiate(unit: Unit, desc: Desc, rate: f64, context: *mut RenderContext) -> Result<(usize, Outputs), String> {
         let is_effect = desc.kind != u32::from_be_bytes(*b"aumu");
         let inputs = get_u32(unit, PROP_ELEMENT_COUNT, INPUT, 0).unwrap_or(0);
+        if !is_effect {
+            ask_for_outputs(unit);
+        }
         let elements = get_u32(unit, PROP_ELEMENT_COUNT, OUTPUT, 0).unwrap_or(1).max(1);
         let takes_input = is_effect && inputs > 0;
         if takes_input {
@@ -1131,6 +1194,15 @@ impl AudioUnit {
         let b = self.outputs.get(bus).filter(|b| !b.is_empty())?;
         let n = frames.min(MAX_BLOCK);
         Some((&b[0][..n], &b[b.len() - 1][..n]))
+    }
+
+    /// Elements up to the last one of 1 or 2 channels (the ones `output_bus` returns).
+    pub fn output_count(&self) -> usize {
+        self.outputs.iter().rposition(|b| !b.is_empty()).map_or(0, |i| i + 1)
+    }
+
+    pub fn output_name(&self, bus: usize) -> Option<String> {
+        self.output_names.get(bus).cloned()
     }
 }
 

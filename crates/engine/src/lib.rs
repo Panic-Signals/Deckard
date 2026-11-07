@@ -40,6 +40,7 @@ pub mod synth;
 #[allow(dead_code)]
 mod sampler_tables;
 
+use deckard_model::extra_out::{self, Channels, ExtraOut, Owner};
 use deckard_model::{Dim, ExprKind, MidiKind, PPQ, Project};
 use deckard_plugins::{MAX_BLOCK, Shared, Slot, Transport};
 use sample::Sample;
@@ -626,6 +627,117 @@ fn dest_route(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>
     }
 }
 
+/// Where a plug-in's extra output pair with a strip goes: its route (its own level and
+/// pan, then its Dest.), and, for one onto an external output (`ext`), the route through
+/// its parent, taken while that output isn't connected ([`Engine::set_connected_outputs`]).
+/// A muted strip is silent.
+#[derive(Debug, Clone, Copy)]
+struct StripRoute {
+    route: Route,
+    fallback: Route,
+    ext: Option<usize>,
+}
+
+/// A strip's own gain: its level (linear, unlike a channel's fader value) and its pan.
+/// A mono strip (mono, or a split half) feeds its one signal to both sides first, so
+/// this places it as a channel's pan places a sound: the same law ([`pan_gains`]).
+fn strip_gain(level: f64, pan: f64) -> (f32, f32) {
+    let lvl = if level.is_finite() { level.clamp(0.0, 4.0) as f32 } else { 0.0 };
+    let (l, r) = pan_gains(if pan.is_finite() { pan } else { 0.0 });
+    (lvl * l, lvl * r)
+}
+
+/// Where strip `x` goes. Its parent: a sound's plug-in's, the sound's group; a group's
+/// or the master's, the master.
+fn strip_route(p: &Project, x: &ExtraOut) -> StripRoute {
+    use deckard_model::AudioDest as D;
+    if x.muted {
+        return StripRoute { route: SILENT, fallback: SILENT, ext: None };
+    }
+    let parent = match x.owner {
+        Owner::Sound(g, _) | Owner::Chain(g, _, _) => Some(g),
+        Owner::Group(..) | Owner::Master(_) => None,
+    };
+    let gain = strip_gain(x.level, x.pan);
+    let to = |d: D| {
+        let (to, g) = dest_route(p, d, parent, 0);
+        (to, mul(gain, g))
+    };
+    let route = to(x.dest);
+    let ext = match (x.dest, route.0) {
+        (D::Ext(_), Some(n)) if n < OUTPUTS => Some(n),
+        _ => None,
+    };
+    StripRoute { route, fallback: if ext.is_some() { to(D::Parent) } else { route }, ext }
+}
+
+/// The strips of `owner`'s slot playing `plugin_id`, each with its place in
+/// `project.extra_outs` (a pair beyond the plug-in's first; one it doesn't have stays
+/// silent).
+fn strips_of(owner: Owner, plugin_id: &str, project: &Project) -> Vec<ExtraRt> {
+    project
+        .extra_outs
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.owner == owner && x.plugin == plugin_id && x.bus >= 1)
+        .map(|(index, x)| {
+            let StripRoute { route, fallback, ext } = strip_route(project, x);
+            ExtraRt {
+                index,
+                bus: x.bus,
+                channels: x.channels,
+                buf: vec![0.0; JOB_FRAMES * 2],
+                route,
+                fallback,
+                ext,
+                ramp: GainRamp::default(),
+            }
+        })
+        .collect()
+}
+
+/// A strip that can be heard: unmuted, going somewhere, and its slot still holds its
+/// plug-in.
+fn strip_sounds(p: &Project, x: &ExtraOut) -> bool {
+    !x.muted && x.dest != deckard_model::AudioDest::None && extra_out::plugin_at(p, x.owner).is_some_and(|pr| pr.id == x.plugin)
+}
+
+/// Sound (`g`, `s`)'s plug-ins feed a strip that can be heard.
+fn sound_feeds_strip(p: &Project, g: usize, s: usize) -> bool {
+    p.extra_outs.iter().any(|x| matches!(x.owner, Owner::Sound(a, b) | Owner::Chain(a, b, _) if (a, b) == (g, s)) && strip_sounds(p, x))
+}
+
+/// Group `g`'s own plug-ins feed a strip that can be heard.
+fn group_feeds_strip(p: &Project, g: usize) -> bool {
+    p.extra_outs.iter().any(|x| matches!(x.owner, Owner::Group(a, _) if a == g) && strip_sounds(p, x))
+}
+
+/// Sound (`g`, `s`) has a strip (heard or not): it plays live, where its strips are mixed.
+fn sound_has_strip(p: &Project, g: usize, s: usize) -> bool {
+    p.extra_outs.iter().any(|x| matches!(x.owner, Owner::Sound(a, b) | Owner::Chain(a, b, _) if (a, b) == (g, s)))
+}
+
+/// How mutes leave a sound. A muted sound (or one in a muted group) whose plug-ins feed a
+/// strip that can be heard, or in a muted group whose own plug-ins do, still plays, for
+/// those strips: only its main pair is silent (`hushed`; a muted group's is silent at
+/// the group). Without such strips, as ever.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Muting {
+    /// It plays no new notes (notes ring out).
+    muted: bool,
+    /// It isn't played at all (Audio Mute, or a muted group).
+    silent: bool,
+    /// It plays, but its main pair is silent.
+    hushed: bool,
+}
+
+fn muting(p: &Project, g: usize, s: usize) -> Muting {
+    let (grp, snd) = (&p.groups[g], &p.groups[g].sounds[s]);
+    let own = sound_feeds_strip(p, g, s);
+    let plays = (!snd.muted || own) && (!grp.muted || own || group_feeds_strip(p, g));
+    Muting { muted: !plays, silent: !plays && (grp.muted || (snd.muted && snd.channel.audio_mute)), hushed: plays && snd.muted }
+}
+
 /// A route's output for group `g`'s bus (`GROUP_BUS + g`): a group with effects takes
 /// its sounds in there, runs its effects, then its fader (see [`group_out_route`]).
 const GROUP_BUS: usize = 1 << 20;
@@ -636,10 +748,12 @@ fn has_bus(grp: &deckard_model::Group) -> bool {
 }
 
 /// A group channel's route (silent when muted): its bus, if it has effects; else its
-/// fader and where it goes, folded into what enters it.
+/// fader and where it goes, folded into what enters it. (A muted group whose plug-ins
+/// feed a strip that can be heard still takes its sounds in, for them: its bus's own
+/// way on is silent, see [`group_out_route`].)
 fn group_route(p: &Project, g: usize, depth: u8) -> Route {
     let Some(grp) = p.groups.get(g) else { return SILENT };
-    if grp.muted {
+    if grp.muted && !(has_bus(grp) && group_feeds_strip(p, g)) {
         return SILENT;
     }
     if has_bus(grp) {
@@ -672,21 +786,33 @@ struct Bus {
     ramp: GainRamp,
 }
 
-/// The groups' buses in the order they run: one that feeds another first.
+/// The groups' buses in the order they run: one that feeds another first (by its fader,
+/// or by a strip of one of its plug-ins).
 fn bus_order(buses: &[Option<Bus>]) -> Vec<usize> {
-    let depth = |mut g: usize| {
-        let mut d = 0;
-        while let Some(Some(b)) = buses.get(g)
-            && let Some(n) = b.route.0.filter(|&n| n >= GROUP_BUS)
-            && d < 8
-        {
-            g = n - GROUP_BUS;
-            d += 1;
+    /// How many buses `g` feeds in a row, each bus worked out once (`memo`): a bus met
+    /// again on its own way (a loop) counts as none there.
+    fn depth(buses: &[Option<Bus>], g: usize, memo: &mut [Option<usize>], busy: &mut [bool]) -> usize {
+        let Some(Some(b)) = buses.get(g) else { return 0 };
+        if let Some(d) = memo[g] {
+            return d;
         }
+        if busy[g] {
+            return 0;
+        }
+        busy[g] = true;
+        let strips = b.chain.units.iter().flat_map(|u| &u.extras).flat_map(|x| [x.route.0, x.fallback.0]);
+        let next: Vec<usize> =
+            std::iter::once(b.route.0).chain(strips).filter_map(|n| n.filter(|&n| n >= GROUP_BUS)).map(|n| n - GROUP_BUS).collect();
+        let d = next.into_iter().map(|n| 1 + depth(buses, n, memo, busy)).max().unwrap_or(0);
+        busy[g] = false;
+        memo[g] = Some(d);
         d
-    };
+    }
+    let mut memo = vec![None; buses.len()];
+    let mut busy = vec![false; buses.len()];
+    let depths: Vec<usize> = (0..buses.len()).map(|g| depth(buses, g, &mut memo, &mut busy)).collect();
     let mut order: Vec<usize> = (0..buses.len()).filter(|&g| buses[g].is_some()).collect();
-    order.sort_by_key(|&g| std::cmp::Reverse(depth(g)));
+    order.sort_by_key(|&g| std::cmp::Reverse(depths[g]));
     order
 }
 
@@ -704,12 +830,15 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
         tap: Vec::new(),
         sl: vec![0.0; MAX_BLOCK],
         sr: vec![0.0; MAX_BLOCK],
+        heard: None,
     }
 }
 
 /// The effects of a group's or the master's chain (all its slots), as a sound's are
 /// made: plug-ins (`key` names their slot), Maschine's own effects DECKARD renders.
+#[allow(clippy::too_many_arguments)]
 fn effect_units(
+    project: &Project,
     slots: &[deckard_model::SlotInfo],
     key: impl Fn(usize) -> Slot,
     owner: &str,
@@ -722,14 +851,18 @@ fn effect_units(
     for (slot, info) in slots.iter().enumerate() {
         match &info.plugin {
             Some(pr) if !info.active => {
-                if let Some(p) = cache.plugins.loaded(key(slot), &pr.id, &pr.name) {
-                    units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), false));
+                if let Some(p) = cache.loaded_plugin(key(slot), &pr.id, &pr.name) {
+                    let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), false);
+                    u.listen(owner_of(key(slot)), &p, &pr.id, project);
+                    units.push(u);
                 }
             }
-            Some(pr) => match cache.plugins.instance(key(slot), &pr.id, &pr.name, &pr.chunk, sr_f) {
+            Some(pr) => match cache.plugin(key(slot), &pr.id, &pr.name, &pr.chunk, sr_f) {
                 Ok(p) => {
                     report.plugins.push(format!("{owner}: {}", pr.name));
-                    units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), true));
+                    let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), true);
+                    u.listen(owner_of(key(slot)), &p, &pr.id, project);
+                    units.push(u);
                 }
                 Err(e) => report.plugin_errors.push(e),
             },
@@ -792,6 +925,9 @@ struct FxChain {
     tap: Vec<(usize, (f32, f32))>,
     sl: Vec<f32>,
     sr: Vec<f32>,
+    /// Where its plug-ins' extra output pairs that have no strip yet are noted when they
+    /// make sound (see [`Unit::scan`]).
+    heard: Option<Arc<meters::HeardBoard>>,
 }
 
 /// How long an effect takes to fade in or out when it is switched on or off, added or
@@ -818,12 +954,145 @@ struct Unit {
     /// Removed from the chain: it plays out its fade, then stays silent until the next
     /// edit drops it.
     ghost: bool,
+    /// A plug-in's: its slot as the project's extra outputs name it.
+    owner: Option<Owner>,
+    /// A plug-in's output pairs (bits, bus 1 and up) with no strip yet, checked for
+    /// sound after each block it processes (set when it's made: see [`scan_of`]).
+    scan: u64,
+    /// A plug-in's pairs that have a strip: what each played over the span, times
+    /// `mix`, to be mixed where its strip goes.
+    extras: Vec<ExtraRt>,
+}
+
+/// A plug-in's extra output pair that has a strip: what it played over the span being
+/// rendered (interleaved stereo, `JOB_FRAMES` long; summed, as a chain may run twice in
+/// a span), and where it goes (see [`StripRoute`]), gliding.
+struct ExtraRt {
+    /// Its strip's place in `project.extra_outs` (its meter's too).
+    index: usize,
+    bus: usize,
+    /// What it takes from the pair (a split pair has a strip for each side).
+    channels: Channels,
+    buf: Vec<f32>,
+    route: Route,
+    fallback: Route,
+    ext: Option<usize>,
+    ramp: GainRamp,
+}
+
+/// Silence `extras`' first `n2` samples (before a span is rendered into them).
+fn clear_strips(extras: &mut [ExtraRt], n2: usize) {
+    for x in extras {
+        if let Some(b) = x.buf.get_mut(..n2) {
+            b.fill(0.0);
+        }
+    }
+}
+
+/// Add what `plugin` just played on each of `extras`' pairs (`n` frames) at `offset`
+/// frames into their buffers, times `mix` (`left` frames still moving by `step` to
+/// `target`, as [`Unit::fade_to`] moves it).
+fn take_strips(plugin: &deckard_plugins::Plugin, extras: &mut [ExtraRt], n: usize, offset: usize, fade: (f32, f32, u32, f32)) {
+    for x in extras {
+        let Some((l, r)) = plugin.output_bus(x.bus, n) else { continue };
+        let (mut mix, step, mut left, target) = fade;
+        let Some(buf) = x.buf.get_mut(offset * 2..) else { continue };
+        for ((o, a), b) in buf.as_chunks_mut::<2>().0.iter_mut().zip(l).zip(r) {
+            if left > 0 {
+                mix += step;
+                left -= 1;
+                if left == 0 {
+                    mix = target;
+                }
+            }
+            o[0] += a * mix;
+            o[1] += b * mix;
+        }
+    }
+}
+
+/// Take each of `extras`' routes from `routes` (a strip for each of `project.extra_outs`,
+/// with its owner, pair and channels): after an edit kept the part that has them, where
+/// they are and where they go may have changed. No allocating (the audio thread).
+fn refresh_strips(owner: Option<Owner>, extras: &mut [ExtraRt], routes: &[(Owner, usize, Channels, StripRoute)]) {
+    let Some(owner) = owner else { return };
+    for x in extras {
+        match routes.iter().position(|(o, bus, ch, _)| *o == owner && *bus == x.bus && *ch == x.channels) {
+            Some(i) => {
+                let r = routes[i].3;
+                (x.index, x.route, x.fallback, x.ext) = (i, r.route, r.fallback, r.ext);
+            }
+            None => (x.index, x.route, x.fallback, x.ext) = (usize::MAX, SILENT, SILENT, None),
+        }
+    }
+}
+
+/// Mix strip `x`'s span (`frames`) onto where it goes (`out`: the master's input; `ext`
+/// from `at`: the other outputs; `buses`: the groups'), gliding to its route, and note
+/// its peak in `meters`. `connected`: the outputs (bits) that are connected.
+#[allow(clippy::too_many_arguments)]
+fn mix_strip(
+    x: &mut ExtraRt,
+    frames: usize,
+    glide: u32,
+    connected: u16,
+    out: &mut [f32],
+    ext: &mut [Vec<f32>],
+    at: usize,
+    buses: &mut [Option<Bus>],
+    meters: &mut [(f32, f32)],
+) {
+    let route = match x.ext {
+        Some(n) if connected & (1 << n) == 0 => x.fallback,
+        _ => x.route,
+    };
+    x.ramp.aim(route.1, glide);
+    if x.ramp.left == 0 && x.ramp.now == (0.0, 0.0) {
+        return;
+    }
+    let dst: Option<&mut [f32]> = match route.0 {
+        None => out.get_mut(..frames * 2),
+        Some(n) if n >= GROUP_BUS => buses.get_mut(n - GROUP_BUS).and_then(Option::as_mut).and_then(|b| b.buf.get_mut(..frames * 2)),
+        Some(n) => ext.get_mut(n).and_then(|b| b.get_mut(at..at + frames * 2)),
+    };
+    let Some(dst) = dst else { return };
+    let mut peak = (0f32, 0f32);
+    let channels = x.channels;
+    for (o, i) in dst.as_chunks_mut::<2>().0.iter_mut().zip(x.buf.as_chunks::<2>().0) {
+        let gain = x.ramp.next();
+        // A mono strip's one signal on both sides, before its pan.
+        let (l, r) = match channels {
+            Channels::Stereo => (i[0], i[1]),
+            Channels::Mono => {
+                let m = (i[0] + i[1]) * 0.5;
+                (m, m)
+            }
+            Channels::Left => (i[0], i[0]),
+            Channels::Right => (i[1], i[1]),
+        };
+        let (a, z) = (l * gain.0, r * gain.1);
+        let (a, z) = (if a.is_finite() { a } else { 0.0 }, if z.is_finite() { z } else { 0.0 });
+        o[0] += a;
+        o[1] += z;
+        peak = (peak.0.max(a.abs()), peak.1.max(z.abs()));
+    }
+    if let Some(m) = meters.get_mut(x.index) {
+        *m = (m.0.max(peak.0), m.1.max(peak.1));
+    }
 }
 
 impl Unit {
     fn new(fx: FxUnit, slot: usize, listen: Vec<usize>, on: bool) -> Unit {
         let m = if on { 1.0 } else { 0.0 };
-        Unit { fx, slot, listen, mix: m, target: m, step: 0.0, left: 0, ghost: false }
+        Unit { fx, slot, listen, mix: m, target: m, step: 0.0, left: 0, ghost: false, owner: None, scan: 0, extras: Vec::new() }
+    }
+
+    /// Listen for sound on `plugin`'s extra pairs that have no strip in `project`, as the
+    /// plug-in `plugin_id` in `owner`'s slot; take what those that have one play.
+    fn listen(&mut self, owner: Owner, plugin: &Shared, plugin_id: &str, project: &Project) {
+        self.owner = Some(owner);
+        self.scan = scan_of(plugin, owner, plugin_id, project);
+        self.extras = strips_of(owner, plugin_id, project);
     }
 
     /// Move to `target` (on 1, off 0) over `frames`, from where it is.
@@ -914,6 +1183,12 @@ impl FxChain {
                     if ol.len() >= n && or.len() >= n {
                         self.l[..n].copy_from_slice(&ol[..n]);
                         self.r[..n].copy_from_slice(&or[..n]);
+                    }
+                    if !unit.extras.is_empty() {
+                        take_strips(&p, &mut unit.extras, n, offset, (unit.mix, unit.step, unit.left, unit.target));
+                    }
+                    if let (Some(owner), Some(board)) = (unit.owner, &self.heard) {
+                        hear(&p, owner, unit.scan, n, board);
                     }
                     drop(p);
                     timed(shared, started);
@@ -1038,6 +1313,12 @@ impl FxChain {
                         fx.set(if glide.retarget(params) { glide.now() } else { params });
                     }
                 }
+                // Its strips' gains glide on from where they are.
+                for x in &mut u.extras {
+                    if let Some(ox) = o.extras.iter().find(|ox| ox.bus == x.bus && ox.channels == x.channels) {
+                        x.ramp = ox.ramp;
+                    }
+                }
                 // Carry on from how far it was faded, toward its new state.
                 let target = u.target;
                 (u.mix, u.target, u.step, u.left) = (o.mix, o.target, o.step, o.left);
@@ -1100,6 +1381,27 @@ struct InstrumentRt {
     /// Sound and group level/pan combined (0 when muted).
     gain: (f32, f32),
     muted: bool,
+    /// Its slot as the project's extra outputs name it, its output pairs with no strip
+    /// yet and where they're noted when they make sound (as [`Unit::owner`],
+    /// [`Unit::scan`] and [`FxChain::heard`]).
+    owner: Option<Owner>,
+    scan: u64,
+    heard: Option<Arc<meters::HeardBoard>>,
+    /// Its pairs that have a strip (as [`Unit::extras`]).
+    extras: Vec<ExtraRt>,
+}
+
+impl InstrumentRt {
+    fn new(plugin: Shared, gain: (f32, f32), muted: bool) -> InstrumentRt {
+        InstrumentRt { plugin, gain, muted, owner: None, scan: 0, heard: None, extras: Vec::new() }
+    }
+
+    /// As [`Unit::listen`].
+    fn listen(&mut self, owner: Owner, plugin: &Shared, plugin_id: &str, project: &Project) {
+        self.owner = Some(owner);
+        self.scan = scan_of(plugin, owner, plugin_id, project);
+        self.extras = strips_of(owner, plugin_id, project);
+    }
 }
 
 /// What an internal recording takes its audio from.
@@ -1257,6 +1559,85 @@ pub struct Telemetry {
     /// Sounds rendered ahead now, and blocks where one wasn't ready in time.
     pub sounds_ahead: usize,
     pub ahead_underruns: u64,
+    /// Plug-ins' extra output pairs with no strip yet that made sound since the UI last
+    /// took them: each once, in mixer order (see [`heard_rank`]), at most [`HEARD_ROOM`].
+    pub heard: Vec<Heard>,
+    /// Peak (left, right) of each extra output's strip since the UI last took them, as
+    /// `project.extra_outs` lists them (after the strip's level and pan).
+    pub extra_meters: Vec<(f32, f32)>,
+}
+
+/// Strips whose meters [`Engine::publish`] hands over without allocating (more: once,
+/// when there come to be more).
+pub const EXTRA_METERS_ROOM: usize = 64;
+
+impl Telemetry {
+    /// Telemetry with room made up front for what the audio thread hands over, so
+    /// [`Engine::publish`] doesn't allocate for it.
+    pub fn with_room() -> Telemetry {
+        Telemetry { heard: Vec::with_capacity(HEARD_ROOM), extra_meters: Vec::with_capacity(EXTRA_METERS_ROOM), ..Default::default() }
+    }
+}
+
+/// A plug-in's extra output pair (`bus`, 1 and up) that made sound, in `owner`'s slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Heard {
+    pub owner: Owner,
+    pub bus: usize,
+}
+
+/// The most [`Heard`] pairs handed over at once (more wait until they play again).
+pub const HEARD_ROOM: usize = 32;
+
+/// A peak above this (-90 dBFS, linear) on either side in a block is sound.
+const HEARD_FLOOR: f32 = 3.1623e-5;
+
+/// Where a [`Heard`] comes in the mixer: by group (a group's own slots before its
+/// sounds, the master's last), sound, slot (a sound's instrument first) and bus.
+fn heard_rank(h: &Heard) -> (usize, usize, usize, usize) {
+    match h.owner {
+        Owner::Group(g, k) => (g, 0, k, h.bus),
+        Owner::Sound(g, s) => (g, s + 1, 0, h.bus),
+        Owner::Chain(g, s, k) => (g, s + 1, k + 1, h.bus),
+        Owner::Master(k) => (usize::MAX, 0, k, h.bus),
+    }
+}
+
+/// The slot an extra output's owner names for a plug-in slot.
+fn owner_of(slot: Slot) -> Owner {
+    match slot {
+        Slot::Sound { group, sound } => Owner::Sound(group, sound),
+        Slot::Chain { group, sound, slot } => Owner::Chain(group, sound, slot),
+        Slot::Group { group, slot } => Owner::Group(group, slot),
+        Slot::Master { slot } => Owner::Master(slot),
+    }
+}
+
+/// The output pairs (bits, bus 1 and up, below 64) of `plugin`, as the plug-in
+/// `plugin_id` in `owner`'s slot, that have no strip in `project`: the ones to listen
+/// to. 0 for a plug-in with one pair. (Off the audio thread: it locks the plug-in.)
+fn scan_of(plugin: &Shared, owner: Owner, plugin_id: &str, project: &Project) -> u64 {
+    let count = plugin.lock().map_or(1, |p| p.output_count()).min(64);
+    let mut bits = (1..count).fold(0u64, |b, bus| b | 1 << bus);
+    for x in project.extra_outs.iter().filter(|x| x.owner == owner && x.plugin == plugin_id && x.bus < 64) {
+        bits &= !(1 << x.bus);
+    }
+    bits
+}
+
+/// Note on `board` each of `plugin`'s pairs in `scan` that made sound over its last
+/// `n` frames. No allocating or locking (the audio thread, or a sound's renderer).
+fn hear(plugin: &deckard_plugins::Plugin, owner: Owner, scan: u64, n: usize, board: &meters::HeardBoard) {
+    let mut bits = scan;
+    while bits != 0 {
+        let bus = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        if let Some((l, r)) = plugin.output_bus(bus, n)
+            && l.iter().chain(r).any(|x| x.abs() > HEARD_FLOOR)
+        {
+            board.hit(owner, bus);
+        }
+    }
 }
 
 /// A note length meaning "until released" (see [`Engine::note_hold`]).
@@ -1430,6 +1811,19 @@ pub struct Engine {
     /// and the sounds that take it: (group, sound, left and right input channel,
     /// gain).
     pub live_in: Option<LiveIn>,
+    /// Where plug-ins note their extra pairs making sound (its [`SampleCache`]'s), and
+    /// what [`Engine::publish`] took from it last (`heard_len` of them).
+    heard_board: Arc<meters::HeardBoard>,
+    heard: [Heard; HEARD_ROOM],
+    heard_len: usize,
+    /// Each of `project.extra_outs`' strips: its owner, pair and route (the parts an edit
+    /// keeps take theirs from here, [`Engine::refresh_strips`]); and its peak since the
+    /// last [`Engine::publish`].
+    strips: Vec<(Owner, usize, Channels, StripRoute)>,
+    meters_extra: Vec<(f32, f32)>,
+    /// The external outputs (bits, Out 1 = bit 0) the interface has connected: a strip
+    /// onto one that isn't plays through its parent. All, unless told otherwise.
+    connected: u16,
     in_routes: Vec<InRoute>,
     /// Where in the span the sub-span being rendered starts (frames): where its sounds'
     /// input is.
@@ -1504,7 +1898,7 @@ fn input_routes(p: &Project) -> Vec<InRoute> {
         for (s, snd) in grp.sounds.iter().enumerate() {
             let deckard_model::AudioSource::Ext(n) = snd.channel.audio_in else { continue };
             // A chain starting with an instrument plays that, not the input.
-            if grp.muted || (snd.muted && snd.channel.audio_mute) || snd.slots.first().is_some_and(|x| x.is_instrument()) {
+            if muting(p, g, s).silent || snd.slots.first().is_some_and(|x| x.is_instrument()) {
                 continue;
             }
             let n = n.max(0) as usize;
@@ -1530,9 +1924,34 @@ pub struct SampleCache {
     found: HashMap<(i64, String, String, String, Option<std::path::PathBuf>), std::path::PathBuf>,
     /// Plug-in instances, kept across engines (they are slow to load and hold state).
     pub plugins: deckard_plugins::Host,
+    /// Where the engines made with it note plug-ins' extra pairs making sound (one board,
+    /// so parts an edit keeps and parts it makes anew note on the same).
+    heard: Arc<meters::HeardBoard>,
+    /// Tests: plug-ins (made by the test) that play these slots, whatever the project
+    /// names.
+    #[cfg(test)]
+    test_plugins: Vec<(Slot, Shared)>,
 }
 
 impl SampleCache {
+    /// The instance for `slot` (see [`deckard_plugins::Host::instance`]).
+    fn plugin(&mut self, slot: Slot, plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64) -> Result<Shared, String> {
+        #[cfg(test)]
+        if let Some((_, p)) = self.test_plugins.iter().find(|(s, _)| *s == slot) {
+            return Ok(p.clone());
+        }
+        self.plugins.instance(slot, plugin_id, name, chunk, sample_rate)
+    }
+
+    /// The instance already playing `slot` (see [`deckard_plugins::Host::loaded`]).
+    fn loaded_plugin(&self, slot: Slot, plugin_id: &str, name: &str) -> Option<Shared> {
+        #[cfg(test)]
+        if let Some((_, p)) = self.test_plugins.iter().find(|(s, _)| *s == slot) {
+            return Some(p.clone());
+        }
+        self.plugins.loaded(slot, plugin_id, name)
+    }
+
     /// The sample `sample` (as a project refers to it) decoded, loading it if needed.
     pub fn sample(&mut self, sample: &deckard_model::SampleRef, project_path: Option<&Path>) -> Option<Arc<Sample>> {
         let mut resolver = library::Resolver::new(project_path);
@@ -1660,14 +2079,18 @@ impl Engine {
                         // A bypassed plug-in stays only if it is loaded already (to
                         // fade back in); none is loaded just to sit bypassed.
                         Some(pr) if !info.active => {
-                            if let Some(p) = cache.plugins.loaded(key, &pr.id, &pr.name) {
-                                units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), false));
+                            if let Some(p) = cache.loaded_plugin(key, &pr.id, &pr.name) {
+                                let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), false);
+                                u.listen(owner_of(key), &p, &pr.id, project);
+                                units.push(u);
                             }
                         }
-                        Some(pr) => match cache.plugins.instance(key, &pr.id, &pr.name, &pr.chunk, sr_f) {
+                        Some(pr) => match cache.plugin(key, &pr.id, &pr.name, &pr.chunk, sr_f) {
                             Ok(p) => {
                                 report.plugins.push(format!("{} / {}: {}", g.name, s.name, pr.name));
-                                units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), true));
+                                let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), true);
+                                u.listen(owner_of(key), &p, &pr.id, project);
+                                units.push(u);
                             }
                             Err(e) => report.plugin_errors.push(e),
                         },
@@ -1690,7 +2113,7 @@ impl Engine {
                         }
                     }
                 }
-                let silent = g.muted || (s.muted && s.channel.audio_mute);
+                let m = muting(project, gi, si);
                 let mut tap = Vec::new();
                 if let Some(&b) = sc_index.get(&(gi, si, false)) {
                     tap.push((b, (1.0, 1.0)));
@@ -1700,7 +2123,7 @@ impl Engine {
                 }
                 row.push((!units.is_empty() || !tap.is_empty()).then(|| FxChain {
                     units,
-                    gain: if silent { (0.0, 0.0) } else { sound_gain(project, gi, si) },
+                    gain: if m.silent || m.hushed { (0.0, 0.0) } else { sound_gain(project, gi, si) },
                     l: vec![0.0; MAX_BLOCK],
                     r: vec![0.0; MAX_BLOCK],
                     dl: vec![0.0; MAX_BLOCK],
@@ -1710,6 +2133,7 @@ impl Engine {
                     tap,
                     sl: vec![0.0; MAX_BLOCK],
                     sr: vec![0.0; MAX_BLOCK],
+                    heard: Some(cache.heard.clone()),
                 }));
             }
             fx.push(row);
@@ -1761,8 +2185,8 @@ impl Engine {
                         }
                         // A muted sound plays no new notes but lets its notes ring out
                         // (a trigger mute), unless it's an audio mute (Audio Mute, or a
-                        // muted group).
-                        if g.muted || (s.muted && s.channel.audio_mute) {
+                        // muted group); unless it plays on for its strips ([`muting`]).
+                        if muting(project, gi, si).silent {
                             return None;
                         }
                         if let Some((class, params)) = synth_of(s) {
@@ -1846,19 +2270,21 @@ impl Engine {
                     row.push(None);
                     continue;
                 }
-                match cache.plugins.instance(Slot::Sound { group: gi, sound: si }, &pr.id, &pr.name, &pr.chunk, sr_f) {
+                match cache.plugin(Slot::Sound { group: gi, sound: si }, &pr.id, &pr.name, &pr.chunk, sr_f) {
                     Ok(plugin) => {
                         report.plugins.push(format!("{} / {}: {}", g.name, s.name, pr.name));
-                        let muted = s.muted || g.muted;
-                        let silent = g.muted || (s.muted && s.channel.audio_mute);
+                        let m = muting(project, gi, si);
                         let gain = if has_fx(gi, si) {
                             (1.0, 1.0)
-                        } else if silent {
+                        } else if m.silent || m.hushed {
                             (0.0, 0.0)
                         } else {
                             sound_gain(project, gi, si)
                         };
-                        row.push(Some(InstrumentRt { plugin, gain, muted }));
+                        let mut inst = InstrumentRt::new(plugin.clone(), gain, m.muted);
+                        inst.listen(Owner::Sound(gi, si), &plugin, &pr.id, project);
+                        inst.heard = Some(cache.heard.clone());
+                        row.push(Some(inst));
                     }
                     Err(e) => {
                         report.plugin_errors.push(e);
@@ -1915,6 +2341,8 @@ impl Engine {
                             // Its routes follow its notes' expression here.
                             || !snd.mod_routes.is_empty()
                             || (gr.channel.key_mode == 2 && explicit(&gr.channel.midi_source))
+                            // Its strips are mixed where it plays.
+                            || sound_has_strip(project, g, s)
                     })
                     .collect()
             })
@@ -1933,7 +2361,13 @@ impl Engine {
                         let has = sounds.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || instruments.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || in_routes.iter().any(|r| (r.0, r.1) == (g, s));
-                        let smp_gain = if has_fx(g, s) { (1.0, 1.0) } else { sound_gain(project, g, s) };
+                        let smp_gain = if has_fx(g, s) {
+                            (1.0, 1.0)
+                        } else if muting(project, g, s).hushed {
+                            (0.0, 0.0)
+                        } else {
+                            sound_gain(project, g, s)
+                        };
                         has.then(|| Box::new(SoundBufs::new(smp_gain)))
                     })
                     .collect()
@@ -1941,20 +2375,20 @@ impl Engine {
             .collect();
         // The gains kept parts play at now.
         for (g, grp) in project.groups.iter().enumerate() {
-            for (s, snd) in grp.sounds.iter().enumerate() {
+            for s in 0..grp.sounds.len() {
                 let fx_here = chains[g][s];
                 let Some(r) = reuse[g][s].as_mut() else { continue };
-                let silent = grp.muted || (snd.muted && snd.channel.audio_mute);
-                let gain = sound_gain(project, g, s);
-                r.chain_gain = if silent { (0.0, 0.0) } else { gain };
+                let m = muting(project, g, s);
+                let gain = if m.hushed { (0.0, 0.0) } else { sound_gain(project, g, s) };
+                r.chain_gain = if m.silent { (0.0, 0.0) } else { gain };
                 r.inst_gain = if fx_here {
                     (1.0, 1.0)
-                } else if silent {
+                } else if m.silent {
                     (0.0, 0.0)
                 } else {
                     gain
                 };
-                r.inst_muted = snd.muted || grp.muted;
+                r.inst_muted = m.muted;
                 r.smp_gain = if fx_here { (1.0, 1.0) } else { gain };
             }
         }
@@ -1967,6 +2401,7 @@ impl Engine {
             .map(|(gi, grp)| {
                 has_bus(grp).then(|| {
                     let units = effect_units(
+                        project,
                         &grp.slots,
                         |slot| Slot::Group { group: gi, slot },
                         &grp.name,
@@ -1976,7 +2411,7 @@ impl Engine {
                         &mut report,
                     );
                     Bus {
-                        chain: bare_chain(units, sr_f),
+                        chain: FxChain { heard: Some(cache.heard.clone()), ..bare_chain(units, sr_f) },
                         buf: vec![0.0; JOB_FRAMES * 2],
                         route: group_out_route(project, gi),
                         ramp: GainRamp::default(),
@@ -1985,10 +2420,17 @@ impl Engine {
             })
             .collect();
         let master_fx = (!project.master_slots.is_empty()).then(|| {
-            bare_chain(
-                effect_units(&project.master_slots, |slot| Slot::Master { slot }, "Master", project.tempo, sr_f, cache, &mut report),
+            let units = effect_units(
+                project,
+                &project.master_slots,
+                |slot| Slot::Master { slot },
+                "Master",
+                project.tempo,
                 sr_f,
-            )
+                cache,
+                &mut report,
+            );
+            FxChain { heard: Some(cache.heard.clone()), ..bare_chain(units, sr_f) }
         });
         let engine = Engine {
             sr: sr_f,
@@ -2071,7 +2513,12 @@ impl Engine {
             master_fx,
             sc_bufs: vec![Vec::new(); sc_index.len()],
             midi_routes: midi::out_routes(project),
-            sound_muted: project.groups.iter().map(|g| g.sounds.iter().map(|s| s.muted || g.muted).collect()).collect(),
+            sound_muted: project
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(g, grp)| (0..grp.sounds.len()).map(|s| muting(project, g, s).muted).collect())
+                .collect(),
             lfos: lfo_rt::lfos_of(project),
             cc_routes: lfo_rt::ccs_of(project),
             song_offset: 0.0,
@@ -2089,6 +2536,12 @@ impl Engine {
             unrouted: Vec::with_capacity(mod_rt::UNROUTED),
             route_board: None,
             live_in: None,
+            heard_board: cache.heard.clone(),
+            heard: [Heard { owner: Owner::Master(0), bus: 0 }; HEARD_ROOM],
+            heard_len: 0,
+            strips: project.extra_outs.iter().map(|x| (x.owner, x.bus, x.channels, strip_route(project, x))).collect(),
+            meters_extra: vec![(0.0, 0.0); project.extra_outs.len()],
+            connected: u16::MAX,
             in_routes,
             inp_at: 0,
             audio_sounds: project
@@ -2215,6 +2668,11 @@ impl Engine {
         }
         std::mem::swap(&mut self.master_fx, &mut fresh.master_fx);
         std::mem::swap(&mut self.sc_bufs, &mut fresh.sc_bufs);
+        std::mem::swap(&mut self.heard_board, &mut fresh.heard_board);
+        // Strips: where each goes now (parts kept take theirs), and meters of the new list.
+        std::mem::swap(&mut self.strips, &mut fresh.strips);
+        std::mem::swap(&mut self.meters_extra, &mut fresh.meters_extra);
+        self.refresh_strips();
         std::mem::swap(&mut self.in_routes, &mut fresh.in_routes);
         std::mem::swap(&mut self.sound_muted, &mut fresh.sound_muted);
         std::mem::swap(&mut self.silent, &mut fresh.silent);
@@ -2270,6 +2728,42 @@ impl Engine {
             self.next = 0;
         }
         fresh
+    }
+
+    /// Every strip of the sounds playing here, and of the groups' and the master's
+    /// chains, takes where it is and where it goes from [`Engine::strips`] (after an
+    /// edit, which may keep the parts that have them). No allocating.
+    fn refresh_strips(&mut self) {
+        for g in 0..self.fx.len().max(self.instruments.len()) {
+            for s in 0..self.fx.get(g).map_or(0, Vec::len).max(self.instruments.get(g).map_or(0, Vec::len)) {
+                self.refresh_sound_strips(g, s);
+            }
+        }
+        let routes = &self.strips;
+        let chains = self.buses.iter_mut().flatten().map(|b| &mut b.chain).chain(self.master_fx.as_mut());
+        for u in chains.flat_map(|c| c.units.iter_mut()) {
+            refresh_strips(u.owner, &mut u.extras, routes);
+        }
+    }
+
+    /// [`Engine::refresh_strips`] for sound (`g`, `s`)'s parts here.
+    fn refresh_sound_strips(&mut self, g: usize, s: usize) {
+        let routes = &self.strips;
+        if let Some(Some(i)) = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)) {
+            refresh_strips(i.owner, &mut i.extras, routes);
+        }
+        if let Some(Some(c)) = self.fx.get_mut(g).and_then(|r| r.get_mut(s)) {
+            for u in &mut c.units {
+                refresh_strips(u.owner, &mut u.extras, routes);
+            }
+        }
+    }
+
+    /// The external outputs (bits: Out 1 is bit 0) the interface has connected (see
+    /// `output::connected_outputs`): a strip onto one that isn't plays through its
+    /// parent. All are, until this says otherwise.
+    pub fn set_connected_outputs(&mut self, mask: u16) {
+        self.connected = mask;
     }
 
     /// For an edit built with [`Engine::new_after`]: move the parts it keeps into it (so
@@ -3205,6 +3699,8 @@ impl Engine {
                 a.junk.push(Junk(ahead::JunkKind::Parts(parts)));
             }
             link.state = LinkState::Live;
+            // (Edits while it was away may have moved its strips.)
+            self.refresh_sound_strips(g, s);
             // Live input its player hadn't played yet plays now.
             for &(_, ev) in &live {
                 match ev {
@@ -3930,7 +4426,14 @@ impl Engine {
         for k in 0..self.bus_order.len() {
             let g = self.bus_order[k];
             let Some(mut bus) = self.buses.get_mut(g).and_then(Option::take) else { continue };
+            for u in &mut bus.chain.units {
+                clear_strips(&mut u.extras, frames * 2);
+            }
             run_chain(&mut bus.chain, &mut bus.buf[..frames * 2], frames, pos, &self.sc_bufs);
+            // Its plug-ins' strips.
+            for x in bus.chain.units.iter_mut().flat_map(|u| &mut u.extras) {
+                mix_strip(x, frames, glide, self.connected, out, ext, at, &mut self.buses, &mut self.meters_extra);
+            }
             bus.ramp.aim(bus.route.1, glide);
             let dst: Option<&mut [f32]> = match bus.route.0 {
                 None => Some(&mut *out),
@@ -3949,7 +4452,15 @@ impl Engine {
             self.buses[g] = Some(bus);
         }
         if let Some(mut chain) = self.master_fx.take() {
+            for u in &mut chain.units {
+                clear_strips(&mut u.extras, frames * 2);
+            }
             run_chain(&mut chain, out, frames, pos, &self.sc_bufs);
+            // Its plug-ins' strips (one onto a group's bus plays there next span: the
+            // buses have run).
+            for x in chain.units.iter_mut().flat_map(|u| &mut u.extras) {
+                mix_strip(x, frames, glide, self.connected, out, ext, at, &mut self.buses, &mut self.meters_extra);
+            }
             self.master_fx = Some(chain);
         }
     }
@@ -4136,12 +4647,40 @@ impl Engine {
         out
     }
 
+    /// Extra pairs heard since the last look, merged into `t.heard` (each once, in mixer
+    /// order). Room is made only when the UI took `t.heard`'s buffer away.
+    fn publish_heard(&mut self, t: &mut Telemetry) {
+        self.heard_len = 0;
+        let (heard, len) = (&mut self.heard, &mut self.heard_len);
+        self.heard_board.take(|owner, bus| {
+            if *len < HEARD_ROOM {
+                heard[*len] = Heard { owner, bus };
+                *len += 1;
+            }
+        });
+        if self.heard_len == 0 {
+            return;
+        }
+        // (Only for a `t` not made with [`Telemetry::with_room`], once.)
+        if t.heard.capacity() < HEARD_ROOM {
+            t.heard.reserve_exact(HEARD_ROOM - t.heard.len());
+        }
+        for h in &self.heard[..self.heard_len] {
+            if let Err(i) = t.heard.binary_search_by_key(&heard_rank(h), heard_rank)
+                && t.heard.len() < HEARD_ROOM
+            {
+                t.heard.insert(i, *h);
+            }
+        }
+    }
+
     /// Hand what the UI shows to `t` (from the audio thread, after a block): peaks
     /// since the UI last took them (merged in, and reset here without allocating),
     /// where playback is, and the zones `t.watch` asks about.
     pub fn publish(&mut self, t: &mut Telemetry) {
+        // Allocation here happens only when the project's shape or its list of strips
+        // changed (rare), or the first time for `t`s not made with [`Telemetry::with_room`].
         if t.meters.len() != self.meters.len() || t.meters.iter().zip(&self.meters).any(|(a, b)| a.len() != b.len()) {
-            // The project's shape changed (rare): the only allocation here.
             t.meters = self.meters.iter().map(|r| vec![(0.0, 0.0); r.len()]).collect();
         }
         for (trow, row) in t.meters.iter_mut().zip(self.meters.iter_mut()) {
@@ -4149,6 +4688,15 @@ impl Engine {
                 *tm = (tm.0.max(m.0), tm.1.max(m.1));
                 *m = (0.0, 0.0);
             }
+        }
+        if t.extra_meters.len() != self.meters_extra.len() {
+            // (Strips came or went: what was there is another strip's now.)
+            t.extra_meters.clear();
+            t.extra_meters.resize(self.meters_extra.len(), (0.0, 0.0));
+        }
+        for (tm, m) in t.extra_meters.iter_mut().zip(self.meters_extra.iter_mut()) {
+            *tm = (tm.0.max(m.0), tm.1.max(m.1));
+            *m = (0.0, 0.0);
         }
         let mp = std::mem::take(&mut self.master_peak);
         t.master_peak = (t.master_peak.0.max(mp.0), t.master_peak.1.max(mp.1));
@@ -4174,6 +4722,7 @@ impl Engine {
         t.stale = self.stale;
         t.sounds_ahead = self.sounds_ahead();
         t.ahead_underruns = self.ahead_underruns();
+        self.publish_heard(t);
         t.zones.resize(t.watch.len(), None);
         for (pos, &(g, s, z)) in t.zones.iter_mut().zip(&t.watch) {
             *pos = self.zone_position(g, s, z);
@@ -4301,7 +4850,7 @@ impl Engine {
                 }
                 let Some(bufs) = self.bufs[g][s].as_deref_mut() else { continue };
                 let smp = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut);
-                let inst = self.instruments.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref);
+                let inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut);
                 if smp.is_none() && inst.is_none() && !bufs.inp_on {
                     continue;
                 }
@@ -4312,7 +4861,7 @@ impl Engine {
                 self.job_list.push((g, s));
                 self.job_ptrs.push(JobPtrs {
                     smp: smp.map_or(std::ptr::null_mut(), |x| x as *mut SamplerRt),
-                    inst: inst.map_or(std::ptr::null(), |x| x as *const InstrumentRt),
+                    inst: inst.map_or(std::ptr::null_mut(), |x| x as *mut InstrumentRt),
                     chain: chain.map_or(std::ptr::null_mut(), |x| x as *mut FxChain),
                     bufs: bufs as *mut SoundBufs,
                 });
@@ -4325,7 +4874,7 @@ impl Engine {
         // Each job has its own sound's parts (distinct sounds, see above).
         let inp_at = self.inp_at;
         let run = |j: &JobPtrs, sc: &[Vec<f32>]| unsafe {
-            render_sound(j.smp.as_mut(), j.inst.as_ref(), j.chain.as_mut(), &mut *j.bufs, (frames, inp_at), frame, &base, spt, sc)
+            render_sound(j.smp.as_mut(), j.inst.as_mut(), j.chain.as_mut(), &mut *j.bufs, (frames, inp_at), frame, &base, spt, sc)
         };
         if chained {
             for i in 0..self.job_ptrs.len() {
@@ -4418,6 +4967,22 @@ impl Engine {
                     m.0 = m.0.max(peak.0);
                     m.1 = m.1.max(peak.1);
                 }
+            }
+        }
+        // Their plug-ins' strips, each onto where it goes (sounds with strips play here,
+        // not ahead: see `live_hint`).
+        let connected = self.connected;
+        for i in 0..self.job_list.len() {
+            let (g, s) = self.job_list[i];
+            if self.link_ahead(g, s).is_some() {
+                continue;
+            }
+            let (buses, meters) = (&mut self.buses, &mut self.meters_extra);
+            let inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut).map(|i| &mut i.extras);
+            let chain = self.fx.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut).map(|c| &mut c.units);
+            let units = chain.into_iter().flatten().map(|u| &mut u.extras);
+            for x in inst.into_iter().chain(units).flatten() {
+                mix_strip(x, frames, glide, connected, out, ext, at, buses, meters);
             }
         }
         // Counted once per span (pass 0); the listening sounds (pass 1) can only make it
@@ -4526,8 +5091,7 @@ fn synth_of(s: &deckard_model::Sound) -> Option<(&str, &[(String, f64)])> {
 fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> Reuse {
     let (og, ng) = (&prev.groups[g], &project.groups[g]);
     let (old, new) = (&og.sounds[s], &ng.sounds[s]);
-    let silent = |grp: &deckard_model::Group, snd: &deckard_model::Sound| grp.muted || (snd.muted && snd.channel.audio_mute);
-    let same_silence = silent(og, old) == silent(ng, new);
+    let same_silence = muting(prev, g, s).silent == muting(project, g, s).silent;
     let mut r = Reuse::default();
     // The Sampler: the same, or the same zones (new settings).
     if same_silence {
@@ -4548,9 +5112,29 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> R
             _ => {}
         }
     }
-    r.instrument = old.plugin == new.plugin;
+    // Its plug-ins' strips (which pairs have one, and what each takes from its pair; not
+    // their settings): a pair given a strip or losing one, or one split or joined, makes
+    // the part anew, to listen to the pairs left and take each strip's side.
+    fn strips(p: &Project, g: usize, s: usize, chain: bool) -> Vec<(Owner, usize, &str, Channels)> {
+        let mut v: Vec<(Owner, usize, &str, Channels)> = p
+            .extra_outs
+            .iter()
+            .filter(|x| match x.owner {
+                Owner::Sound(a, b) => !chain && (a, b) == (g, s),
+                Owner::Chain(a, b, _) => chain && (a, b) == (g, s),
+                _ => false,
+            })
+            .map(|x| (x.owner, x.bus, x.plugin.as_str(), x.channels))
+            .collect();
+        v.sort_by_key(|&(o, bus, id, _)| (heard_rank(&Heard { owner: o, bus }), id));
+        v
+    }
+    r.instrument = old.plugin == new.plugin && strips(prev, g, s, false) == strips(project, g, s, false);
     // The chain: the same slots and side-chains (its effects' settings may differ).
-    if chain_shape(old) == chain_shape(new) && old.channel.sidechain == new.channel.sidechain {
+    if chain_shape(old) == chain_shape(new)
+        && old.channel.sidechain == new.channel.sidechain
+        && strips(prev, g, s, true) == strips(project, g, s, true)
+    {
         r.chain = true;
         for ((i, a), (_, b)) in effect_slots(old).into_iter().zip(effect_slots(new)) {
             if a.plugin.is_none() && a.params != b.params {
@@ -4641,7 +5225,7 @@ impl GainRamp {
 #[derive(Clone, Copy)]
 struct JobPtrs {
     smp: *mut SamplerRt,
-    inst: *const InstrumentRt,
+    inst: *mut InstrumentRt,
     chain: *mut FxChain,
     bufs: *mut SoundBufs,
 }
@@ -4655,7 +5239,7 @@ unsafe impl Sync for JobPtrs {}
 #[allow(clippy::too_many_arguments)]
 fn render_sound(
     smp: Option<&mut SamplerRt>,
-    inst: Option<&InstrumentRt>,
+    mut inst: Option<&mut InstrumentRt>,
     mut chain: Option<&mut FxChain>,
     b: &mut SoundBufs,
     (frames, inp_at): (usize, usize),
@@ -4671,6 +5255,15 @@ fn render_sound(
     let at_frame = |done: usize| Transport { quarters: (frame as f64 + done as f64) / spt / PPQ as f64, ..*base };
     b.smp_out = false;
     b.inst_out = false;
+    // Its plug-ins' strips take what they play over the span (the chain may run twice).
+    if let Some(i) = inst.as_deref_mut() {
+        clear_strips(&mut i.extras, n2);
+    }
+    if let Some(c) = chain.as_deref_mut() {
+        for u in &mut c.units {
+            clear_strips(&mut u.extras, n2);
+        }
+    }
     if smp.is_some() || b.inp_on {
         let buf = &mut b.smp[..n2];
         buf.fill(0.0);
@@ -4734,6 +5327,10 @@ fn render_sound(
                     c.r[..m].copy_from_slice(&r[..m]);
                     c.l[m..n].fill(0.0);
                     c.r[m..n].fill(0.0);
+                    take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
+                    if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
+                        hear(&p, owner, inst.scan, n, board);
+                    }
                     drop(p);
                     c.run(n, &t, sc, done);
                     for f in 0..n {
@@ -4745,6 +5342,10 @@ fn render_sound(
                     for f in 0..m {
                         buf[(done + f) * 2] = l[f];
                         buf[(done + f) * 2 + 1] = r[f];
+                    }
+                    take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
+                    if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
+                        hear(&p, owner, inst.scan, n, board);
                     }
                 }
             }
@@ -7935,6 +8536,7 @@ mod tests {
             tap: Vec::new(),
             sl: vec![0.0; MAX_BLOCK],
             sr: vec![0.0; MAX_BLOCK],
+            heard: None,
         };
         let transport = Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
         chain.set_params(&mut [(1, params(0.8, 2.0))]);
@@ -8424,6 +9026,620 @@ mod tests {
         e.process(&mut out);
         assert!((out[0] - 0.5).abs() < 1e-4 && (out[1] + 0.25).abs() < 1e-4, "{out:?}");
         assert!(live.lock().unwrap().is_empty());
+    }
+
+    /// A plug-in with three output pairs: as an effect, its input as it is, half of it on
+    /// its second pair and a quarter on its third; as an instrument, silence on its first
+    /// two and a steady 0.25 on its third.
+    #[derive(Default)]
+    struct Split {
+        instrument: bool,
+        buses: [(Vec<f32>, Vec<f32>); 2],
+    }
+
+    impl deckard_plugins::native::Engine for Split {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn reset(&mut self) {}
+        fn process(&mut self, left: &mut [f32], right: &mut [f32], _: &Transport) {
+            if self.instrument {
+                left.fill(0.0);
+                right.fill(0.0);
+                self.buses[0] = (vec![0.0; left.len()], vec![0.0; right.len()]);
+                self.buses[1] = (vec![0.25; left.len()], vec![0.25; right.len()]);
+            } else {
+                for (bus, k) in self.buses.iter_mut().zip([0.5, 0.25]) {
+                    *bus = (left.iter().map(|v| v * k).collect(), right.iter().map(|v| v * k).collect());
+                }
+            }
+        }
+        fn outputs(&self) -> usize {
+            3
+        }
+        fn output(&self, bus: usize, frames: usize) -> Option<(&[f32], &[f32])> {
+            let (l, r) = self.buses.get(bus.checked_sub(1)?)?;
+            Some((l.get(..frames)?, r.get(..frames)?))
+        }
+    }
+
+    pub(crate) static SPLIT: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: [7; 16],
+        name: "Split",
+        instrument: false,
+        params: &[],
+        pages: &[],
+        make: |_| Box::new(Split::default()),
+    };
+
+    static SPLIT_INSTRUMENT: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: [8; 16],
+        name: "Split Instrument",
+        instrument: true,
+        params: &[],
+        pages: &[],
+        make: |_| Box::new(Split { instrument: true, ..Default::default() }),
+    };
+
+    pub(crate) fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
+        let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).expect("an id");
+        Arc::new(Mutex::new(deckard_plugins::Plugin::native(class, id, class.name, 1000.0)))
+    }
+
+    /// [`Split`] as an effect in `owner`'s slot of `p`, listening as the engine sets it.
+    fn split_unit(owner: deckard_model::extra_out::Owner, p: &Project) -> Unit {
+        let plugin = split_plugin(&SPLIT);
+        let mut u = Unit::new(FxUnit::Plugin(plugin.clone()), 0, Vec::new(), true);
+        u.listen(owner, &plugin, &SPLIT.plugin_id(), p);
+        u
+    }
+
+    /// A project whose only sound takes In 1, stopped, and an engine for it, with
+    /// [`Split`] on the master (its first slot).
+    fn split_engine(edit: impl FnOnce(&mut Project)) -> Engine {
+        let mut p = project();
+        p.groups[0].patterns[0].notes.clear();
+        p.groups[0].sounds[0].channel.audio_in = deckard_model::AudioSource::Ext(0);
+        edit(&mut p);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        e.live_in = Some(Default::default());
+        let mut chain = bare_chain(vec![split_unit(deckard_model::extra_out::Owner::Master(0), &p)], 1000.0);
+        chain.heard = Some(e.heard_board.clone());
+        e.master_fx = Some(chain);
+        e
+    }
+
+    /// A block of a steady `level` on In 1 (silence for 0): what the master's output and
+    /// each Out end on.
+    fn split_block(e: &mut Engine, level: f32) -> ((f32, f32), Vec<(f32, f32)>) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (level, level);
+        e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 64));
+        let mut out = vec![0f32; 128];
+        let mut ext = vec![vec![0f32; 128]; OUTPUTS];
+        e.process_outputs(&mut out, &mut ext);
+        ((out[126], out[127]), ext.iter().map(|b| (b[126], b[127])).collect())
+    }
+
+    fn about(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    fn heard_now(e: &mut Engine, t: &mut Telemetry) -> Vec<Heard> {
+        e.publish(t);
+        t.heard.clone()
+    }
+
+    fn master_heard(bus: usize) -> Heard {
+        Heard { owner: deckard_model::extra_out::Owner::Master(0), bus }
+    }
+
+    /// A bus feeding another runs first; buses feeding each other in a loop (which a
+    /// project can be made to do) still get an order, each worked out once.
+    #[test]
+    fn bus_order_runs_feeders_first_and_survives_loops() {
+        let bus = |to: Option<usize>| Bus {
+            chain: bare_chain(Vec::new(), 48_000.0),
+            buf: Vec::new(),
+            route: (to.map(|g| GROUP_BUS + g), (1.0, 1.0)),
+            ramp: GainRamp::default(),
+        };
+        // 0 → 1 → 2, then a ring 3 → 4 → … → 40 → 3.
+        let mut buses: Vec<Option<Bus>> = vec![Some(bus(Some(1))), Some(bus(Some(2))), Some(bus(None))];
+        buses.extend((3..=40).map(|g| Some(bus(Some(if g == 40 { 3 } else { g + 1 })))));
+        let order = bus_order(&buses);
+        assert_eq!(order.len(), 41);
+        let at = |g: usize| order.iter().position(|&x| x == g).unwrap();
+        assert!(at(0) < at(1) && at(1) < at(2), "{order:?}");
+    }
+
+    /// Heard pairs sort as the mixer shows strips: a group's own slots, then its sounds
+    /// (instrument, then chain), the master's last.
+    #[test]
+    fn heard_pairs_sort_in_mixer_order() {
+        use deckard_model::extra_out::Owner;
+        let h = |owner, bus| Heard { owner, bus };
+        let mut v = [
+            h(Owner::Master(0), 1),
+            h(Owner::Chain(1, 0, 0), 1),
+            h(Owner::Sound(1, 0), 2),
+            h(Owner::Group(1, 1), 1),
+            h(Owner::Sound(0, 3), 1),
+            h(Owner::Group(1, 0), 3),
+        ];
+        v.sort_by_key(heard_rank);
+        let owners: Vec<Owner> = v.iter().map(|h| h.owner).collect();
+        assert_eq!(
+            owners,
+            [Owner::Sound(0, 3), Owner::Group(1, 0), Owner::Group(1, 1), Owner::Sound(1, 0), Owner::Chain(1, 0, 0), Owner::Master(0)]
+        );
+    }
+
+    /// Silence on a plug-in's extra pairs (just under -90 dBFS, too) isn't sound.
+    #[test]
+    fn a_silent_extra_bus_is_not_heard() {
+        let mut e = split_engine(|_| {});
+        let mut t = Telemetry::default();
+        split_block(&mut e, 0.0);
+        assert!(heard_now(&mut e, &mut t).is_empty());
+        // A quarter of it on the third pair stays under the floor; half of it on the
+        // second doesn't.
+        split_block(&mut e, 1.2e-4);
+        assert_eq!(heard_now(&mut e, &mut t), vec![master_heard(1)]);
+    }
+
+    /// Sound on two extra pairs: each is heard once, in order, however many blocks it
+    /// plays before the UI takes them; then not again until it plays again.
+    #[test]
+    fn sound_on_an_extra_bus_is_heard_once() {
+        let mut e = split_engine(|_| {});
+        let mut t = Telemetry::default();
+        split_block(&mut e, 0.5);
+        split_block(&mut e, 0.5);
+        assert_eq!(heard_now(&mut e, &mut t), vec![master_heard(1), master_heard(2)]);
+        split_block(&mut e, 0.5);
+        assert_eq!(heard_now(&mut e, &mut t), vec![master_heard(1), master_heard(2)], "still once each");
+        assert!(t.heard.capacity() >= HEARD_ROOM, "room made once: the audio thread keeps it");
+        t.heard.clear();
+        split_block(&mut e, 0.0);
+        assert!(heard_now(&mut e, &mut t).is_empty(), "taken, and quiet since");
+        // The main pair goes on as ever.
+        let (master, _) = split_block(&mut e, 0.5);
+        assert!(about(master.0, 0.5) && about(master.1, 0.5), "{master:?}");
+    }
+
+    /// A pair that has a strip already isn't listened to; one with a strip for another
+    /// plug-in (the slot's has changed) is.
+    #[test]
+    fn a_bus_with_a_strip_is_not_scanned() {
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let strip = |bus: usize, plugin: &str| ExtraOut {
+            owner: Owner::Master(0),
+            bus,
+            plugin: plugin.into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: deckard_model::AudioDest::Parent,
+            channels: Default::default(),
+        };
+        let mut e = split_engine(|p| p.extra_outs = vec![strip(1, &SPLIT.plugin_id()), strip(2, "another")]);
+        assert_eq!(e.master_fx.as_ref().unwrap().units[0].scan, 1 << 2);
+        let mut t = Telemetry::default();
+        split_block(&mut e, 0.5);
+        assert_eq!(heard_now(&mut e, &mut t), vec![master_heard(2)]);
+        let mut p = project();
+        p.extra_outs = vec![strip(1, &SPLIT.plugin_id()), strip(2, &SPLIT.plugin_id())];
+        assert_eq!(split_unit(Owner::Master(0), &p).scan, 0);
+        assert_eq!(split_unit(Owner::Master(1), &p).scan, 0b110, "another slot's strips");
+    }
+
+    /// A strip added or removed for a sound's slot (not one moved) makes its parts anew
+    /// on an edit, so they listen to the pairs left.
+    #[test]
+    fn a_new_strip_remakes_what_is_heard() {
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let a = project();
+        let mut b = a.clone();
+        let strip = ExtraOut {
+            owner: Owner::Chain(0, 0, 1),
+            bus: 1,
+            plugin: "x".into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: deckard_model::AudioDest::Parent,
+            channels: Default::default(),
+        };
+        b.extra_outs = vec![strip.clone()];
+        let r = reuse_of(&a, &b, 0, 0, 1000.0);
+        assert!(!r.chain && r.instrument);
+        b.extra_outs[0].owner = Owner::Sound(0, 0);
+        let r = reuse_of(&a, &b, 0, 0, 1000.0);
+        assert!(r.chain && !r.instrument);
+        let mut c = b.clone();
+        c.extra_outs[0].level = 0.5;
+        let r = reuse_of(&b, &c, 0, 0, 1000.0);
+        assert!(r.chain && r.instrument, "a level is no new strip");
+    }
+
+    /// A bypassed plug-in makes no sound, so none is heard.
+    #[test]
+    fn a_bypassed_slot_is_not_heard() {
+        let mut e = split_engine(|_| {});
+        e.master_fx.as_mut().unwrap().units[0].mix = 0.0;
+        let mut t = Telemetry::default();
+        split_block(&mut e, 0.5);
+        split_block(&mut e, 0.5);
+        assert!(heard_now(&mut e, &mut t).is_empty());
+    }
+
+    /// An instrument's extra pair is heard as its sound's; its silent one isn't.
+    #[test]
+    fn an_instruments_extra_bus_is_heard() {
+        use deckard_model::extra_out::Owner;
+        let mut e = split_engine(|_| {});
+        let p = project();
+        let plugin = split_plugin(&SPLIT_INSTRUMENT);
+        let mut inst = InstrumentRt::new(plugin.clone(), (1.0, 1.0), false);
+        inst.listen(Owner::Sound(0, 0), &plugin, &SPLIT_INSTRUMENT.plugin_id(), &p);
+        inst.heard = Some(e.heard_board.clone());
+        e.instruments[0][0] = Some(inst);
+        e.master_fx = None;
+        let mut t = Telemetry::default();
+        split_block(&mut e, 0.0);
+        assert_eq!(heard_now(&mut e, &mut t), vec![Heard { owner: Owner::Sound(0, 0), bus: 2 }]);
+    }
+
+    /// A plug-in with one output pair has nothing to listen to, and nothing is heard.
+    #[test]
+    fn a_one_pair_plugin_reports_nothing() {
+        use deckard_model::extra_out::Owner;
+        let mut e = split_engine(|_| {});
+        let class = deckard_plugins::native::CLASSES[0];
+        let plugin = split_plugin(class);
+        let p = project();
+        let mut u = Unit::new(FxUnit::Plugin(plugin.clone()), 0, Vec::new(), true);
+        u.listen(Owner::Master(0), &plugin, &class.plugin_id(), &p);
+        assert_eq!(u.scan, 0);
+        e.master_fx.as_mut().unwrap().units[0] = u;
+        let mut inst = InstrumentRt::new(plugin.clone(), (1.0, 1.0), false);
+        inst.listen(Owner::Sound(0, 0), &plugin, &class.plugin_id(), &p);
+        assert_eq!(inst.scan, 0);
+        let mut t = Telemetry::default();
+        split_block(&mut e, 0.5);
+        assert!(heard_now(&mut e, &mut t).is_empty());
+    }
+
+    /// A slot playing the native plug-in `class`.
+    pub(crate) fn plugin_slot(class: &deckard_plugins::native::Class) -> deckard_model::SlotInfo {
+        deckard_model::SlotInfo {
+            module: "PluginHost".into(),
+            name: class.name.into(),
+            active: true,
+            plugin: Some(deckard_model::PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() }),
+            params: Vec::new(),
+        }
+    }
+
+    /// A strip for [`Split`]'s pair `bus` in `owner`'s slot, at unity, onto `dest`.
+    pub(crate) fn split_strip(
+        owner: deckard_model::extra_out::Owner,
+        bus: usize,
+        dest: deckard_model::AudioDest,
+    ) -> deckard_model::extra_out::ExtraOut {
+        deckard_model::extra_out::ExtraOut {
+            owner,
+            bus,
+            plugin: SPLIT.plugin_id(),
+            name: format!("Out {}", bus + 1),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest,
+            channels: Default::default(),
+        }
+    }
+
+    /// A playing setup for strips: the project, its engine, the cache and its chains.
+    struct Strips {
+        p: Project,
+        e: Engine,
+        cache: SampleCache,
+        chains: Vec<Vec<bool>>,
+    }
+
+    impl Strips {
+        /// Group 0's sound 0 takes In 1 through [`Split`] (its chain's slot 0), at unity,
+        /// with one strip: Split's second pair onto Out 3. `edit` changes that. Stopped,
+        /// at 1 kHz. Split also plays in group 0's first slot and the master's when a
+        /// project puts it there.
+        fn new(edit: impl FnOnce(&mut Project)) -> Strips {
+            use deckard_model::extra_out::Owner;
+            let mut p = project();
+            p.groups[0].patterns[0].notes.clear();
+            let snd = &mut p.groups[0].sounds[0];
+            snd.sampler = None;
+            snd.channel.audio_in = deckard_model::AudioSource::Ext(0);
+            snd.slots = vec![plugin_slot(&SPLIT)];
+            p.extra_outs = vec![split_strip(Owner::Chain(0, 0, 0), 1, deckard_model::AudioDest::Ext(2))];
+            edit(&mut p);
+            let mut cache = SampleCache::default();
+            for slot in [Slot::Chain { group: 0, sound: 0, slot: 0 }, Slot::Group { group: 0, slot: 0 }, Slot::Master { slot: 0 }] {
+                cache.test_plugins.push((slot, split_plugin(&SPLIT)));
+            }
+            let (mut e, report) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+            e.sequencing = false;
+            e.live_in = Some(Default::default());
+            Strips { p, e, cache, chains: report.chains }
+        }
+
+        /// Take up `edit` to the project, as an edit while playing does.
+        fn edit(&mut self, edit: impl FnOnce(&mut Project)) {
+            let mut to = self.p.clone();
+            edit(&mut to);
+            let (fresh, report) = Engine::new_after(&to, Some((&self.p, &self.chains)), None, 1000, self.e.mode(), &mut self.cache);
+            drop(self.e.adopt(fresh, &to));
+            (self.p, self.chains) = (to, report.chains);
+        }
+
+        /// A block of a steady `level` on In 1: the master's output and Out 3's, at its end.
+        fn block(&mut self, level: f32) -> ((f32, f32), (f32, f32)) {
+            let (master, ext) = split_block(&mut self.e, level);
+            (master, ext[2])
+        }
+    }
+
+    fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+        about(a.0, b.0) && about(a.1, b.1)
+    }
+
+    /// A strip onto Out 3: its pair plays there (a quarter of the input: half of it at
+    /// unity), metered; the master has only the main pair.
+    #[test]
+    fn a_strip_on_ext_reaches_that_output() {
+        let mut x = Strips::new(|_| {});
+        let (master, out3) = x.block(0.5);
+        assert!(near(out3, (0.25, 0.25)), "Out 3: {out3:?}");
+        assert!(near(master, (0.5, 0.5)), "the master: {master:?}");
+        let mut t = Telemetry::default();
+        x.e.publish(&mut t);
+        assert_eq!(t.extra_meters.len(), 1);
+        assert!(near(t.extra_meters[0], (0.25, 0.25)), "{:?}", t.extra_meters);
+    }
+
+    /// A strip's level and pan are its own: the owner's fader and the master's don't
+    /// move it, and changing them doesn't make the chain anew.
+    #[test]
+    fn a_strips_level_and_pan_are_its_own() {
+        let mut x = Strips::new(|p| (p.extra_outs[0].level, p.extra_outs[0].pan) = (0.5, -1.0));
+        let left = 0.25 * 0.5 * std::f32::consts::SQRT_2;
+        assert!(near(x.block(0.5).1, (left, 0.0)), "{:?}", x.block(0.5));
+        let buf = x.e.fx[0][0].as_ref().unwrap().units[0].extras[0].buf.as_ptr();
+        x.edit(|p| (p.groups[0].sounds[0].level, p.groups[0].level, p.master_level) = (0.3, 0.4, 0.2));
+        x.block(0.5);
+        let (master, out3) = x.block(0.5);
+        assert!(near(out3, (left, 0.0)), "the faders above don't move it: {out3:?}");
+        assert!(master.0 < 0.1, "they move the main pair: {master:?}");
+        x.edit(|p| (p.extra_outs[0].level, p.extra_outs[0].pan) = (1.0, 0.0));
+        x.block(0.5);
+        assert!(near(x.block(0.5).1, (0.25, 0.25)), "its own do");
+        assert_eq!(x.e.fx[0][0].as_ref().unwrap().units[0].extras[0].buf.as_ptr(), buf, "the chain was kept");
+    }
+
+    /// A strip into another group goes through that group's fader (and on to where it
+    /// goes: the master).
+    #[test]
+    fn a_strip_into_a_group_goes_through_that_group() {
+        let mut x = Strips::new(|p| {
+            p.groups.push(Group { level: 0.5, ..Default::default() });
+            p.extra_outs[0].dest = deckard_model::AudioDest::Group(1);
+        });
+        let (master, out3) = x.block(0.5);
+        let g = deckard_model::level_gain(0.5) as f32;
+        assert!(near(out3, (0.0, 0.0)));
+        assert!(near(master, (0.5 + 0.25 * g, 0.5 + 0.25 * g)), "{master:?}");
+    }
+
+    /// A strip into a sound goes through that sound's fader, then where it goes.
+    #[test]
+    fn a_strip_into_a_sound_goes_through_that_sound() {
+        let mut x = Strips::new(|p| {
+            p.groups[0].sounds.push(Sound { level: 0.5, ..Default::default() });
+            p.extra_outs[0].dest = deckard_model::AudioDest::Sound(0, 1);
+        });
+        let (master, out3) = x.block(0.5);
+        let s = deckard_model::level_gain(0.5) as f32;
+        assert!(near(out3, (0.0, 0.0)));
+        assert!(near(master, (0.5 + 0.25 * s, 0.5 + 0.25 * s)), "{master:?}");
+    }
+
+    /// A strip on an output the interface doesn't have connected plays through its
+    /// parent (here its group, onto the master), until the output is connected.
+    #[test]
+    fn an_unconnected_ext_falls_back_to_the_parent() {
+        let mut x = Strips::new(|_| {});
+        x.e.set_connected_outputs(0b1);
+        let (master, out3) = x.block(0.5);
+        assert!(near(out3, (0.0, 0.0)), "{out3:?}");
+        assert!(near(master, (0.75, 0.75)), "{master:?}");
+        x.e.set_connected_outputs(0b101);
+        let (master, out3) = x.block(0.5);
+        assert!(near(out3, (0.25, 0.25)) && near(master, (0.5, 0.5)), "{master:?} {out3:?}");
+    }
+
+    /// A muted sound, or a muted group, keeps its plug-in running for an audible strip:
+    /// only its main pair goes silent. The same for a group's own plug-in.
+    #[test]
+    fn a_muted_owner_keeps_its_plugin_running_for_its_strip() {
+        use deckard_model::extra_out::Owner;
+        for audio_mute in [false, true] {
+            let mut x = Strips::new(|p| {
+                p.groups[0].sounds[0].muted = true;
+                p.groups[0].sounds[0].channel.audio_mute = audio_mute;
+            });
+            let (master, out3) = x.block(0.5);
+            assert!(near(master, (0.0, 0.0)) && near(out3, (0.25, 0.25)), "sound (audio mute {audio_mute}): {master:?} {out3:?}");
+        }
+        let mut x = Strips::new(|p| p.groups[0].muted = true);
+        let (master, out3) = x.block(0.5);
+        assert!(near(master, (0.0, 0.0)) && near(out3, (0.25, 0.25)), "its group muted: {master:?} {out3:?}");
+        // The group's own plug-in (its sounds go into it as ever).
+        let mut x = Strips::new(|p| {
+            p.groups[0].sounds[0].slots.clear();
+            p.groups[0].slots = vec![plugin_slot(&SPLIT)];
+            p.extra_outs = vec![split_strip(Owner::Group(0, 0), 1, deckard_model::AudioDest::Ext(2))];
+            p.groups[0].muted = true;
+        });
+        let (master, out3) = x.block(0.5);
+        assert!(near(master, (0.0, 0.0)) && near(out3, (0.25, 0.25)), "the group's plug-in: {master:?} {out3:?}");
+        // Unmuted again: as before.
+        x.edit(|p| p.groups[0].muted = false);
+        x.block(0.5);
+        let (master, out3) = x.block(0.5);
+        assert!(near(master, (0.5, 0.5)) && near(out3, (0.25, 0.25)), "unmuted: {master:?} {out3:?}");
+        // Without a strip that sounds, a muted owner is silent as ever.
+        let mut x = Strips::new(|p| {
+            p.groups[0].sounds[0].muted = true;
+            p.groups[0].sounds[0].channel.audio_mute = true;
+            p.extra_outs[0].muted = true;
+        });
+        assert!(x.e.in_routes.is_empty(), "not played");
+        assert!(near(x.block(0.5).0, (0.0, 0.0)));
+    }
+
+    /// [`split_block`] with `(l, r)` on In 1.
+    fn stereo_block(e: &mut Engine, l: f32, r: f32) -> ((f32, f32), Vec<(f32, f32)>) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (l, r);
+        e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 64));
+        let mut out = vec![0f32; 128];
+        let mut ext = vec![vec![0f32; 128]; OUTPUTS];
+        e.process_outputs(&mut out, &mut ext);
+        ((out[126], out[127]), ext.iter().map(|b| (b[126], b[127])).collect())
+    }
+
+    /// A mono strip plays (L+R)/2 on both sides, which its pan places as a channel's
+    /// pan places a sound.
+    #[test]
+    fn a_mono_strip_sums_both_sides() {
+        use deckard_model::extra_out::Channels;
+        let mut x = Strips::new(|p| p.extra_outs[0].channels = Channels::Mono);
+        // In 1 (0.8, 0.2): the pair is half of it, (0.4, 0.1); its sum halved, 0.25.
+        let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.25, 0.25)), "Out 3: {:?}", ext[2]);
+        assert!(near(master, (0.8, 0.2)), "the main pair as it is: {master:?}");
+        x.edit(|p| p.extra_outs[0].pan = -1.0);
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.25 * std::f32::consts::SQRT_2, 0.0)), "panned left: {:?}", ext[2]);
+        // Stereo again: each side its own.
+        x.edit(|p| (p.extra_outs[0].pan, p.extra_outs[0].channels) = (0.0, Channels::Stereo));
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.1)), "stereo: {:?}", ext[2]);
+    }
+
+    /// The halves of a split strip each play one side of the pair on both sides, with
+    /// their own level and output, and meter apart; split while playing, too.
+    #[test]
+    fn split_strip_halves_carry_one_side_each() {
+        use deckard_model::extra_out::{self, Channels};
+        let mut x = Strips::new(|_| {});
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.1)), "stereo first: {:?}", ext[2]);
+        x.edit(|p| {
+            extra_out::split(&mut p.extra_outs, 0);
+            p.extra_outs[1].level = 0.5;
+            p.extra_outs[1].dest = deckard_model::AudioDest::Ext(3);
+        });
+        assert_eq!(x.p.extra_outs.iter().map(|e| e.channels).collect::<Vec<_>>(), vec![Channels::Left, Channels::Right]);
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.4)), "L on Out 3: {:?}", ext[2]);
+        assert!(near(ext[3], (0.05, 0.05)), "R at half on Out 4: {:?}", ext[3]);
+        assert!(near(master, (0.8, 0.2)), "the main pair: {master:?}");
+        let mut t = Telemetry::default();
+        x.e.publish(&mut t);
+        assert_eq!(t.extra_meters.len(), 2);
+        assert!(near(t.extra_meters[0], (0.4, 0.4)) && near(t.extra_meters[1], (0.05, 0.05)), "{:?}", t.extra_meters);
+        // Joined: stereo again, with the left half's settings.
+        x.edit(|p| extra_out::join(&mut p.extra_outs, 1));
+        stereo_block(&mut x.e, 0.8, 0.2);
+        let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
+        assert!(near(ext[2], (0.4, 0.1)) && near(ext[3], (0.0, 0.0)), "{:?} {:?}", ext[2], ext[3]);
+    }
+
+    /// A muted strip is silent; the main pair plays on.
+    #[test]
+    fn a_muted_strip_is_silent() {
+        let mut x = Strips::new(|p| p.extra_outs[0].muted = true);
+        let (master, out3) = x.block(0.5);
+        assert!(near(out3, (0.0, 0.0)) && near(master, (0.5, 0.5)), "{master:?} {out3:?}");
+    }
+
+    /// Taking the plug-in away (its strip with it, or left behind) while playing: no
+    /// panic, nothing more on its output, and the meters follow.
+    #[test]
+    fn removing_the_plugin_drops_its_strip_without_panic() {
+        for keep_strip in [false, true] {
+            let mut x = Strips::new(|_| {});
+            x.block(0.5);
+            x.edit(|p| {
+                p.groups[0].sounds[0].slots.clear();
+                if !keep_strip {
+                    p.extra_outs.clear();
+                }
+            });
+            x.block(0.5);
+            let (master, out3) = x.block(0.5);
+            assert!(near(out3, (0.0, 0.0)) && near(master, (0.5, 0.5)), "{master:?} {out3:?}");
+            let mut t = Telemetry::default();
+            x.e.publish(&mut t);
+            assert_eq!(t.extra_meters.len(), x.p.extra_outs.len());
+            assert!(t.extra_meters.iter().all(|m| *m == (0.0, 0.0)), "{:?}", t.extra_meters);
+        }
+    }
+
+    /// A plug-in with one output pair plays exactly as it did, with or without a strip
+    /// claiming a pair it doesn't have.
+    #[test]
+    fn a_one_pair_plugin_sounds_unchanged() {
+        use deckard_model::extra_out::Owner;
+        let class = deckard_plugins::native::CLASSES[0];
+        let render = |strip: bool| {
+            let mut p = project();
+            let snd = &mut p.groups[0].sounds[0];
+            snd.sampler = None;
+            snd.plugin = plugin_slot(class).plugin;
+            snd.slots = vec![plugin_slot(class)];
+            if strip {
+                let mut x = split_strip(Owner::Sound(0, 0), 1, deckard_model::AudioDest::Ext(2));
+                x.plugin = class.plugin_id();
+                p.extra_outs = vec![x];
+            }
+            let mut cache = SampleCache::default();
+            cache.test_plugins.push((Slot::Sound { group: 0, sound: 0 }, split_plugin(class)));
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            let (mut all, mut others) = (Vec::new(), 0f32);
+            for _ in 0..40 {
+                let mut out = vec![0f32; 512];
+                let mut ext = vec![vec![0f32; 512]; OUTPUTS];
+                e.process_outputs(&mut out, &mut ext);
+                all.extend_from_slice(&out);
+                others = ext.iter().flatten().fold(others, |m, v| m.max(v.abs()));
+            }
+            (all, others)
+        };
+        let (plain, _) = render(false);
+        let (with, others) = render(true);
+        assert!(plain.iter().any(|v| v.abs() > 1e-3), "it plays");
+        assert_eq!(plain, with);
+        assert_eq!(others, 0.0);
     }
 
     /// A project whose second sound takes In 2 (with `slots` and to `dest`), and an

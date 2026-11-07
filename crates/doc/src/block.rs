@@ -14,7 +14,7 @@ pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
 /// CC routes) and 7 (before scene settings) still read.
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -74,6 +74,8 @@ pub(crate) struct Block {
     /// lines of text (version 8): `tempo <scene> <bpm>`, `<block> <trigger> <channel>
     /// <source>`.
     pub scene_settings: String,
+    /// A plug-in's extra-output strips as [`deckard_model::extra_out::to_text`] (version 9).
+    pub extra_outs: String,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -269,7 +271,7 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
             }
         }
     }
-    for text in [&b.lfos, &b.cc_routes, &b.scene_settings] {
+    for text in [&b.lfos, &b.cc_routes, &b.scene_settings, &b.extra_outs] {
         w.u32(text.len());
         for &c in text.as_bytes() {
             w.u8(c);
@@ -374,6 +376,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             text.push(r.u8()?);
         }
         b.scene_settings = String::from_utf8_lossy(&text).into_owned();
+    }
+    if version >= 9 {
+        let mut text = Vec::new();
+        for _ in 0..r.count(1)? {
+            text.push(r.u8()?);
+        }
+        b.extra_outs = String::from_utf8_lossy(&text).into_owned();
     }
     Ok(b)
 }
@@ -520,6 +529,7 @@ impl Document {
         b.lfos = deckard_model::lfo::to_text(&self.project.lfos);
         b.cc_routes = deckard_model::mod_matrix::cc_to_text(&self.project.cc_routes);
         b.scene_settings = self.scene_settings_text();
+        b.extra_outs = deckard_model::extra_out::to_text(&self.project.extra_outs);
         let payload = (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
@@ -528,7 +538,8 @@ impl Document {
             || b.screen.is_some()
             || !b.lfos.is_empty()
             || !b.cc_routes.is_empty()
-            || !b.scene_settings.is_empty())
+            || !b.scene_settings.is_empty()
+            || !b.extra_outs.is_empty())
         .then(|| encode(&b));
         mxprj::container::set_root_child(archived, DOMAIN, ITEM, FRAME, payload.as_deref())
     }
@@ -609,8 +620,19 @@ impl Document {
         let ops = self.cc_route_ops(&deckard_model::mod_matrix::cc_from_text(&b.cc_routes));
         let _ = self.run(&ops);
         self.read_scene_settings(&b.scene_settings);
+        let ops = self.extra_out_ops(&deckard_model::extra_out::from_text(&b.extra_outs));
+        let _ = self.run(&ops);
         self.screen = b.screen;
         self.refresh();
+        // Strips whose slot holds another plug-in, or none (the file changed elsewhere).
+        if !self.project.extra_outs.is_empty() {
+            let mut p = self.project.clone();
+            deckard_model::extra_out::prune(&mut p);
+            let ops = self.extra_out_ops(&p.extra_outs);
+            if !ops.is_empty() && self.run(&ops).is_ok() {
+                self.refresh();
+            }
+        }
         self.revision = 0;
     }
 
@@ -750,6 +772,149 @@ mod tests {
         bytes.truncate(bytes.len() - 6);
         assert_eq!(decode(&bytes).unwrap(), b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
+    }
+
+    fn strip(owner: deckard_model::extra_out::Owner, plugin: &str) -> deckard_model::extra_out::ExtraOut {
+        deckard_model::extra_out::ExtraOut {
+            owner,
+            bus: 1,
+            plugin: plugin.into(),
+            name: "Out 2".into(),
+            level: 0.5,
+            pan: -0.25,
+            muted: true,
+            dest: deckard_model::AudioDest::Master,
+            channels: Default::default(),
+        }
+    }
+
+    fn with_plugin(id: &str) -> Document {
+        let mut d = Document::new_project().unwrap();
+        d.add_slot(0, 0, 0, &crate::NewModule::Plugin { id: id.into(), name: "P".into(), chunk: Vec::new() }).unwrap();
+        d
+    }
+
+    #[test]
+    fn extra_out_edits_on_different_strips_are_separate_undo_steps() {
+        use deckard_model::AudioDest;
+        use deckard_model::extra_out::Owner;
+        let mut d = with_plugin("V:AU:INSTR:1");
+        let mut outs = vec![strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1"), strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1")];
+        outs[1].bus = 2;
+        d.set_extra_outs(outs.clone()).unwrap();
+        // A mute on one, then (within the merge window) another's output: two steps.
+        outs[0].muted = false;
+        d.set_extra_outs_as("Unmute Extra Output", outs.clone()).unwrap();
+        outs[1].dest = AudioDest::Ext(3);
+        d.set_extra_outs_as("Extra Output Destination", outs.clone()).unwrap();
+        assert!(d.undo());
+        let p = d.project().extra_outs.clone();
+        assert_eq!((p[0].muted, p[1].dest), (false, AudioDest::Master), "only the output went back");
+        // A drag merges with itself, but not with another strip's drag.
+        outs[1].dest = AudioDest::Master;
+        for v in [0.4, 0.3, 0.2] {
+            outs[0].level = v;
+            d.set_extra_outs_merging("Extra Output 1 Level", outs.clone()).unwrap();
+        }
+        outs[1].level = 0.9;
+        d.set_extra_outs_merging("Extra Output 2 Level", outs.clone()).unwrap();
+        // Strips found during the drag: their own step too.
+        let mut more = outs.clone();
+        more.push(strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1"));
+        more[2].bus = 3;
+        d.set_extra_outs(more).unwrap();
+        assert!(d.undo());
+        assert_eq!(d.project().extra_outs.len(), 2);
+        assert!(d.undo());
+        assert_eq!(d.project().extra_outs[1].level, 0.5);
+        assert_eq!(d.project().extra_outs[0].level, 0.2);
+        assert!(d.undo());
+        assert_eq!(d.project().extra_outs[0].level, 0.5, "the drag is one step");
+        assert!(!d.project().extra_outs[0].muted);
+    }
+
+    #[test]
+    fn extra_outs_survive_save_and_reopen() {
+        use deckard_model::extra_out::Owner;
+        let b = Block { extra_outs: "x".into(), ..Block::default() };
+        assert_eq!(decode(&encode(&b)).unwrap(), b);
+        let mut d = with_plugin("V:AU:INSTR:1");
+        d.set_extra_outs(vec![strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1")]).unwrap();
+        let back = reopen(&d);
+        assert_eq!(back.project().extra_outs, d.project().extra_outs);
+        assert_eq!(back.project().extra_outs.len(), 1);
+        assert!(!back.is_dirty());
+        assert!(d.undo());
+        assert!(d.project().extra_outs.is_empty());
+    }
+
+    /// "Byte for byte as before": no DECKARD block is written for this feature alone, so a
+    /// project without extra outputs (and nothing else of DECKARD's) saves with no block at
+    /// all, exactly the archive the writer made before; one that has other sections writes
+    /// them as it did, then only the version number and a zero length at the end.
+    #[test]
+    fn a_project_without_extra_outs_saves_unchanged() {
+        let mut d = Document::new_project().unwrap();
+        let before = d.to_bytes().unwrap();
+        assert_eq!(root_child(&before, DOMAIN, ITEM), None, "no block for a project with nothing of DECKARD's");
+        // Open and save again: the same bytes.
+        assert_eq!(reopen(&d).to_bytes().unwrap(), before);
+        // A strip written and then taken back leaves the same bytes too.
+        d.set_extra_outs(vec![strip(deckard_model::extra_out::Owner::Master(0), "x")]).unwrap();
+        assert!(root_child(&d.to_bytes().unwrap(), DOMAIN, ITEM).is_some());
+        assert!(d.undo());
+        assert_eq!(d.to_bytes().unwrap(), before);
+        // A block with other sections: the version 8 bytes, with only the version and a
+        // zero-length text added.
+        let b = Block { lfos: "lfo".into(), prob_locked: vec![(0, 1)], ..Block::default() };
+        let now = encode(&b);
+        let mut v8 = now.clone();
+        v8[..4].copy_from_slice(&8u32.to_le_bytes());
+        v8.truncate(v8.len() - 4);
+        assert_eq!(now[now.len() - 4..], [0, 0, 0, 0]);
+        assert_eq!(decode(&v8).unwrap(), b);
+    }
+
+    #[test]
+    fn version_8_blocks_still_read() {
+        let b = Block { scene_settings: "tempo 1 120".into(), ..Block::default() };
+        let full = Block { extra_outs: "ex".into(), ..b.clone() };
+        let mut bytes = encode(&full);
+        // Version 8: no extra-output text (a length and 2 bytes) at the end.
+        bytes[..4].copy_from_slice(&8u32.to_le_bytes());
+        bytes.truncate(bytes.len() - 6);
+        assert_eq!(decode(&bytes).unwrap(), b);
+        assert_eq!(decode(&encode(&full)).unwrap(), full);
+    }
+
+    #[test]
+    fn replacing_a_plugin_drops_its_extra_outs() {
+        use deckard_model::extra_out::Owner;
+        let mut d = with_plugin("V:AU:INSTR:1");
+        d.set_extra_outs(vec![strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1")]).unwrap();
+        // Removing the plug-in drops its strip, in the same undo step.
+        d.remove_slot(0, 0, 0).unwrap();
+        assert!(d.project().extra_outs.is_empty());
+        assert!(d.undo(), "one step");
+        assert_eq!(d.project().extra_outs.len(), 1, "undo brings the plug-in and its strip back");
+        // Removed again, a different plug-in put in its place: no strip, saved or reopened.
+        d.remove_slot(0, 0, 0).unwrap();
+        d.add_slot(0, 0, 0, &crate::NewModule::Plugin { id: "V:AU:INSTR:2".into(), name: "Q".into(), chunk: Vec::new() }).unwrap();
+        assert!(d.project().extra_outs.is_empty());
+        assert!(reopen(&d).project().extra_outs.is_empty());
+    }
+
+    /// A saved strip whose slot holds another plug-in when the project is read (or none)
+    /// is dropped; one whose plug-in is there is kept.
+    #[test]
+    fn strips_without_their_plugin_are_dropped_on_reading() {
+        use deckard_model::extra_out::Owner;
+        let mut d = with_plugin("V:AU:INSTR:1");
+        let ok = strip(Owner::Chain(0, 0, 0), "V:AU:INSTR:1");
+        d.set_extra_outs(vec![ok.clone(), strip(Owner::Chain(0, 0, 0), "another"), strip(Owner::Master(0), "x")]).unwrap();
+        let back = reopen(&d);
+        assert_eq!(back.project().extra_outs, [ok]);
+        assert!(!back.is_dirty());
     }
 
     #[test]

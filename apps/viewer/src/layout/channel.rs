@@ -3,6 +3,7 @@
 
 use super::*;
 use deckard_doc::SoundRoute;
+use deckard_model::extra_out::Owner;
 use deckard_model::{AudioDest, AudioSource, MidiDest};
 
 /// The four sets of properties, in the order of their tiles.
@@ -146,6 +147,8 @@ pub const DIVISIONS: [&str; 11] = ["Grid", "1/4", "1/8", "1/16", "1/32", "1/8 T"
 
 /// Maschine's external outputs and inputs (stereo pairs).
 const EXT: usize = 16;
+// Every output offered is one the engine plays.
+const _: () = assert!(EXT <= deckard_engine::OUTPUTS);
 
 /// What the Control area needs to build a page.
 pub struct Ctx<'a> {
@@ -323,7 +326,120 @@ fn destinations(c: &Ctx, level: Level, aux: bool, picked: AudioDest) -> Vec<(Str
         }
     }
     v.extend(ext_outputs(c, Some(picked)));
+    // Nothing that comes back to this channel (through another's output, a send or a
+    // plug-in's strip); what's picked is offered whatever it is.
+    let me = match level {
+        Level::Sound(g, s) => Some(Node::Sound(g, s)),
+        Level::Group(g) => Some(Node::Group(g)),
+        Level::Master => None,
+    };
+    if let Some(me) = me {
+        v.retain(|(_, d)| *d == picked || dest_node(me, *d).is_none_or(|n| !leads_to(c.p, n, me, usize::MAX)));
+    }
     v
+}
+
+/// A place audio is mixed into inside Deckard (for following routes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Node {
+    Sound(usize, usize),
+    Group(usize),
+    Master,
+}
+
+/// Where `d`, picked on `from` (a channel, or a strip of one of its plug-ins), leads
+/// inside Deckard: none for an output or None.
+fn dest_node(from: Node, d: AudioDest) -> Option<Node> {
+    match d {
+        AudioDest::None | AudioDest::Ext(_) => None,
+        AudioDest::Parent => match from {
+            Node::Sound(g, _) => Some(Node::Group(g)),
+            Node::Group(_) => Some(Node::Master),
+            Node::Master => None,
+        },
+        AudioDest::Master => Some(Node::Master),
+        AudioDest::Group(g) => Some(Node::Group(g)),
+        AudioDest::Sound(g, s) => Some(Node::Sound(g, s)),
+    }
+}
+
+/// The channel a strip's owner's plug-in plays in.
+fn owner_node(o: Owner) -> Node {
+    match o {
+        Owner::Sound(g, s) | Owner::Chain(g, s, _) => Node::Sound(g, s),
+        Owner::Group(g, _) => Node::Group(g),
+        Owner::Master(_) => Node::Master,
+    }
+}
+
+/// Where `n`'s audio goes on inside Deckard: its output, its aux sends, and its
+/// plug-ins' extra-output strips (but strip `skip`).
+fn next_nodes(p: &Project, n: Node, skip: usize) -> Vec<Node> {
+    let mut dests: Vec<AudioDest> = match n {
+        Node::Sound(g, s) => p.groups.get(g).and_then(|x| x.sounds.get(s)).map_or(vec![], |x| {
+            let mut v = vec![x.channel.dest];
+            v.extend(x.channel.aux_dest);
+            v
+        }),
+        Node::Group(g) => p.groups.get(g).map_or(vec![], |x| {
+            let mut v = vec![x.channel.dest];
+            v.extend(x.channel.aux_dest);
+            v
+        }),
+        Node::Master => vec![],
+    };
+    dests.extend(p.extra_outs.iter().enumerate().filter(|(i, x)| *i != skip && owner_node(x.owner) == n).map(|(_, x)| x.dest));
+    dests.into_iter().filter_map(|d| dest_node(n, d)).collect()
+}
+
+/// Whether audio entering `from` can come back to `to` (or is `to`), following outputs,
+/// aux sends and strips (but strip `skip`).
+fn leads_to(p: &Project, from: Node, to: Node, skip: usize) -> bool {
+    let mut seen = vec![from];
+    let mut todo = vec![from];
+    while let Some(n) = todo.pop() {
+        if n == to {
+            return true;
+        }
+        for m in next_nodes(p, n, skip) {
+            if !seen.contains(&m) {
+                seen.push(m);
+                todo.push(m);
+            }
+        }
+    }
+    false
+}
+
+/// Where strip `i` of `project.extra_outs` (a plug-in's extra output) can go: what its
+/// channel's output can, but nothing leading back into that channel; for one of the
+/// master's plug-ins, only the outputs (anything inside Deckard feeds the master). Its
+/// pick is offered whatever it is.
+pub fn strip_destinations(c: &Ctx, i: usize) -> Vec<(String, AudioDest)> {
+    let Some(x) = c.p.extra_outs.get(i) else { return Vec::new() };
+    let level = match x.owner {
+        Owner::Sound(g, s) | Owner::Chain(g, s, _) => Level::Sound(g, s),
+        Owner::Group(g, _) => Level::Group(g),
+        Owner::Master(_) => {
+            let mut v = vec![("None".to_string(), AudioDest::None)];
+            v.extend(ext_outputs(c, Some(x.dest)));
+            return v;
+        }
+    };
+    let me = owner_node(x.owner);
+    destinations(c, level, false, x.dest).into_iter().filter(|(_, d)| dest_node(me, *d).is_none_or(|n| !leads_to(c.p, n, me, i))).collect()
+}
+
+/// The name of `d` among the places strip `i`'s channel could send it (even one not
+/// offered now, as it leads back).
+pub fn strip_dest_name(c: &Ctx, i: usize, d: AudioDest) -> Option<String> {
+    let x = c.p.extra_outs.get(i)?;
+    let level = match x.owner {
+        Owner::Sound(g, s) | Owner::Chain(g, s, _) => Level::Sound(g, s),
+        Owner::Group(g, _) => Level::Group(g),
+        Owner::Master(_) => Level::Master,
+    };
+    destinations(c, level, false, d).into_iter().find(|(_, x)| *x == d).map(|(n, _)| n)
 }
 
 /// The connected external outputs (and `picked`), by their aliases.
@@ -790,6 +906,48 @@ mod io_tests {
         assert!(!shown.contains(&"Ext. 3".into()), "not connected: {shown:?}");
         assert!(names(AudioDest::Ext(2)).contains(&"Ext. 3".into()), "kept while picked");
         assert_eq!((io.input_name(0), io.input_pair_name(0)), ("Mic".into(), "Mic / In 1 R".into()));
+    }
+
+    /// A channel's output picker leaves out a group whose plug-in's strip plays back
+    /// into that channel (a loop), unless it's the one picked.
+    #[test]
+    fn output_picker_leaves_out_loops_through_strips() {
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        doc.add_group().unwrap();
+        let x = ExtraOut {
+            owner: Owner::Group(1, 0),
+            bus: 1,
+            plugin: "p".into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: AudioDest::Group(0),
+            channels: Default::default(),
+        };
+        doc.set_extra_outs(vec![x]).unwrap();
+        let io = crate::settings::Settings::default();
+        let groove = |_: usize, _: usize, _: &str| None;
+        let c = Ctx {
+            doc: &doc,
+            has_midi_macro: false,
+            p: doc.project(),
+            midi_ins: &[],
+            midi_outs: &[],
+            polyphonic: false,
+            groove: &groove,
+            io: &io,
+            plugin_knob: &|_| None,
+        };
+        let offered =
+            |level: Level, picked: AudioDest| destinations(&c, level, false, picked).into_iter().any(|(_, d)| d == AudioDest::Group(1));
+        assert!(!offered(Level::Group(0), AudioDest::Parent), "group A into B, back into A");
+        // A sound of A into B comes back into A, but A goes on to the master: no loop.
+        assert!(offered(Level::Sound(0, 0), AudioDest::Parent));
+        assert!(offered(Level::Group(0), AudioDest::Group(1)), "kept while picked");
+        let into_a = destinations(&c, Level::Sound(1, 0), false, AudioDest::Parent).into_iter().any(|(_, d)| d == AudioDest::Group(0));
+        assert!(into_a, "no loop the other way");
     }
 
     /// A picked name shows in 8 characters: a long one's start and end around "..".

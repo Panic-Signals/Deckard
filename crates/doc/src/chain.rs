@@ -267,7 +267,10 @@ impl Document {
         ops.extend(self.sidechain_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
         // So do its modulation routes.
         ops.extend(self.mod_routes_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
-        self.apply(label, ops)
+        // And its plug-ins' strips.
+        ops.extend(self.extra_outs_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
+        self.apply(label, ops)?;
+        self.prune_extra_outs()
     }
 
     /// Remove slot `at` of sound `s`'s chain (one undo step).
@@ -321,7 +324,14 @@ impl Document {
             std::cmp::Ordering::Equal => None,
             std::cmp::Ordering::Greater => Some(k - 1),
         }));
-        self.apply("Remove Module", ops)
+        // Its strips too; those after it move down one.
+        ops.extend(self.extra_outs_rekey(c, |k| match k.cmp(&at) {
+            std::cmp::Ordering::Less => Some(k),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(k - 1),
+        }));
+        self.apply("Remove Module", ops)?;
+        self.prune_extra_outs()
     }
 
     /// Make sound `s`'s chain a lone Sampler, as for sampling into it (one undo step):
@@ -396,7 +406,9 @@ impl Document {
         order.insert(to, k);
         ops.extend(self.sidechain_rekey(c, |old| order.iter().position(|&o| o == old)));
         ops.extend(self.mod_routes_rekey(c, |old| order.iter().position(|&o| o == old)));
-        self.apply("Move Module", ops)
+        ops.extend(self.extra_outs_rekey(c, |old| order.iter().position(|&o| o == old)));
+        self.apply("Move Module", ops)?;
+        self.prune_extra_outs()
     }
 
     /// Bypass (`active` false) or enable slot `at` of sound `s`.

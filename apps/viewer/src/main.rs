@@ -40,6 +40,7 @@ mod controller;
 mod drop_pos;
 mod drum_ui;
 mod export;
+mod extra_outs;
 mod github;
 mod goodbye;
 mod icon;
@@ -90,6 +91,8 @@ mod pad_light_tests;
 #[cfg(test)]
 mod parity_tests;
 mod plugin_macros;
+#[cfg(test)]
+mod plugin_panel_tests;
 mod plugin_pictures;
 #[cfg(test)]
 mod print_tests;
@@ -343,19 +346,36 @@ fn main() {
     deckard_plugins::exit(result.is_err() as i32)
 }
 
-/// A plug-in's parameter pages as the SOUND tab shows them, and the values of the page
-/// shown (value, text).
+/// A plug-in's parameter pages as the SOUND tab (or its strip panel) shows them, and the
+/// values of the page shown (value, text).
 pub struct PluginView {
     /// The chain and slot it shows.
     pub key: (deckard_doc::Chain, usize),
     pub pages: Vec<ViewPage>,
+    /// The page whose values `values` holds (`usize::MAX`: none yet).
     pub page: usize,
+    /// The page the slot shows (its own; the focused slot's follows `App::plugin_page`).
+    pub shown: usize,
     pub values: Vec<(f64, String)>,
     refreshed: std::time::Instant,
+    /// When it was last drawn (or focused): views not seen for [`VIEW_KEEP`] go.
+    pub(crate) seen: std::time::Instant,
+    /// The slot's plug-in (its id in the project) when made: another there drops it.
+    plugin_id: String,
+    /// The instance it reads (another in the slot rebuilds the view).
+    instance: std::sync::Weak<std::sync::Mutex<deckard_plugins::Plugin>>,
     pub error: Option<String>,
     /// Values DECKARD sent (parameter, value, when) the plug-in may not report yet.
     pub sent: Vec<(u32, f64, std::time::Instant)>,
 }
+
+/// How often a view's values are read again, and the longest one waits when many are due.
+pub(crate) const VIEW_REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
+const VIEW_OVERDUE: std::time::Duration = std::time::Duration::from_millis(200);
+/// How many due views are read in one update, past those overdue.
+const VIEW_READS: usize = 4;
+/// How long a view of a slot no longer drawn (nor focused) is kept.
+pub(crate) const VIEW_KEEP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a value sent to a plug-in shows while its controller still reports the
 /// old one (JUCE's take it in at the processor's next block).
@@ -871,9 +891,15 @@ pub struct App {
     /// for (device, routing).
     live_input: Option<(cpal::Stream, InputKey)>,
     settings_input_failed: Option<InputKey>,
-    /// The page of a plug-in's parameters shown, and what it shows.
+    /// The page of the focused slot's parameters shown.
     plugin_page: usize,
-    plugin_view: Option<PluginView>,
+    /// The live views of the hosted plug-ins shown (the focused slot's, and each strip
+    /// panel drawn lately), by chain and slot.
+    plugin_views: std::collections::HashMap<(deckard_doc::Chain, usize), PluginView>,
+    /// The focused slot whose view `plugin_page` drives (as last updated).
+    plugin_focus: Option<(deckard_doc::Chain, usize)>,
+    /// The hosted plug-in panels drawn since the last update (drawing only reads `App`).
+    plugin_drawn: std::cell::RefCell<Vec<(deckard_doc::Chain, usize)>>,
     /// Each plug-in's parameters (by chain and slot, with the plug-in's id), for the
     /// macros that control them.
     plugin_params: std::cell::RefCell<std::collections::HashMap<(deckard_doc::Chain, usize), (String, Vec<deckard_plugins::ParamInfo>)>>,
@@ -987,6 +1013,12 @@ pub struct App {
     peaks: std::collections::HashMap<layout::Channel, [(f32, std::time::Instant); 2]>,
     /// The master's meter (left, right), falling back like the others.
     master_meter: (f32, f32),
+    /// Each plug-in extra output's strip's meter (as `project.extra_outs` lists them),
+    /// falling back like the others.
+    extra_meters: Vec<(f32, f32)>,
+    /// Which strip each of `extra_meters` is (owner, bus, plug-in): when the list changes,
+    /// the meters, peaks and headroom held by index start again.
+    extra_meter_keys: Vec<(deckard_model::extra_out::Owner, usize, String, deckard_model::extra_out::Channels)>,
     /// The audio thread's load (0..1) for the header's CPU meter, and the stats it was
     /// last worked out from (busy, audio µs).
     cpu_load: f32,
@@ -1168,6 +1200,9 @@ impl App {
         // Where this project's sounds and groups were saved (Save asks again).
         self.saved.clear();
         self.editors.clear();
+        // (The plug-in views were the old project's instances.)
+        self.plugin_views.clear();
+        self.plugin_focus = None;
         self.samples = SampleCache::default();
         self.preload_plugins = deckard_plugins::on_main_thread();
         self.frames_drawn = 0;
@@ -4638,13 +4673,14 @@ impl App {
             headroom: self
                 .headroom
                 .iter()
-                .map(|(ch, v)| {
+                .filter_map(|(ch, v)| {
                     let key = match *ch {
                         layout::Channel::Sound(g, s) => (Some(g), Some(s)),
                         layout::Channel::Group(g) => (Some(g), None),
                         layout::Channel::Master => (None, None),
+                        layout::Channel::Extra(_) => return None,
                     };
-                    (key, *v)
+                    Some((key, *v))
                 })
                 .collect(),
         };
@@ -5242,6 +5278,7 @@ impl App {
         let now = std::time::Instant::now();
         let dt = self.meters_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
         self.meters_at = Some(now);
+        self.add_heard_strips();
         let fall = 0.5f32.powf(dt / 0.15);
         let (fresh, master) = match &self.output {
             Some(Ok(out)) => out.take_meters(),
@@ -5270,6 +5307,21 @@ impl App {
         }
         self.master_meter = (self.master_meter.0 * fall, self.master_meter.1 * fall);
         self.master_meter = (self.master_meter.0.max(master.0), self.master_meter.1.max(master.1));
+        // The extra outputs' strips, one meter per strip.
+        let extra = match &self.output {
+            Some(Ok(out)) => out.take_extra_meters(),
+            _ => Vec::new(),
+        };
+        self.sync_extra_meters();
+        for (i, m) in self.extra_meters.iter_mut().enumerate() {
+            let v = extra.get(i).copied().unwrap_or((0.0, 0.0));
+            *m = ((m.0 * fall).max(v.0), (m.1 * fall).max(v.1));
+            let p = v.0.max(v.1);
+            if p > 0.0 {
+                let h = self.headroom.entry(layout::Channel::Extra(i)).or_insert(0.0);
+                *h = h.max(p);
+            }
+        }
         // The CPU meter: the audio thread's load since the last look, smoothed.
         if let Some(Ok(out)) = &self.output {
             use std::sync::atomic::Ordering::Relaxed;
@@ -5311,6 +5363,7 @@ impl App {
             levels.push((layout::Channel::Group(g), gm));
         }
         levels.push((layout::Channel::Master, self.master_meter));
+        levels.extend(self.extra_meters.iter().enumerate().map(|(i, m)| (layout::Channel::Extra(i), *m)));
         for (ch, m) in levels {
             let held = self.peaks.entry(ch).or_insert([(0.0, now); 2]);
             for (k, v) in [m.0, m.1].into_iter().enumerate() {
@@ -7372,27 +7425,93 @@ impl App {
         self.load_take(g, snd, path, s.frames.len());
     }
 
+    /// Size the extra outputs' meters to the project's strips; when the strips changed
+    /// (one gone, added in between, moved, split, joined or made mono), start every
+    /// strip's meter, held peak and headroom again, as they're held by place in the list.
+    fn sync_extra_meters(&mut self) {
+        let keys: Vec<_> = self
+            .doc
+            .as_ref()
+            .map(|d| d.borrow().project().extra_outs.iter().map(|x| (x.owner, x.bus, x.plugin.clone(), x.channels)).collect())
+            .unwrap_or_default();
+        if keys == self.extra_meter_keys {
+            return;
+        }
+        // Strips added at the end keep the others' readings.
+        let appended = keys.len() >= self.extra_meter_keys.len() && keys[..self.extra_meter_keys.len()] == self.extra_meter_keys[..];
+        if !appended {
+            self.extra_meters.clear();
+            self.peaks.retain(|ch, _| !matches!(ch, layout::Channel::Extra(_)));
+            self.headroom.retain(|ch, _| !matches!(ch, layout::Channel::Extra(_)));
+        }
+        self.extra_meters.resize(keys.len(), (0.0, 0.0));
+        self.extra_meter_keys = keys;
+    }
+
     /// Solo channel `ch`: mute the other channels of its level and unmute it, as one
-    /// step; soloing it again (the others all muted) unmutes them all.
+    /// step; soloing it again (the others all muted) unmutes them all. Plug-ins' extra
+    /// outputs play on whatever their channel's mute (the engine keeps the plug-in
+    /// running for them), so their strips are muted too: soloing a group mutes every
+    /// strip but its own and its sounds'; soloing a sound, its group's other sounds'
+    /// strips. A strip soloed mutes every other strip and every channel but the group
+    /// its plug-in plays in: its own channel's main pair too (the plug-in plays on for
+    /// the strip).
     fn solo(&mut self, ch: layout::Channel) {
         use deckard_doc::Target;
+        use deckard_model::extra_out::Owner;
         let Some(doc) = self.doc.clone() else { return };
-        let p = doc.borrow().project().clone();
-        let all: Vec<(Target, bool)> = match ch {
-            layout::Channel::Group(_) => (0..p.groups.len()).map(|g| (Target::Group(g), p.groups[g].muted)).collect(),
-            layout::Channel::Sound(g, _) => {
-                (0..p.groups.get(g).map_or(0, |x| x.sounds.len())).map(|s| (Target::Sound(g, s), p.groups[g].sounds[s].muted)).collect()
+        let project = doc.borrow().project().clone();
+        let p = &project;
+        // The group a strip's plug-in plays in (none: the master's).
+        let group_of = |o: Owner| match o {
+            Owner::Sound(g, _) | Owner::Chain(g, _, _) | Owner::Group(g, _) => Some(g),
+            Owner::Master(_) => None,
+        };
+        let groups = || (0..p.groups.len()).map(|g| (Target::Group(g), p.groups[g].muted));
+        let sounds =
+            |g: usize| (0..p.groups.get(g).map_or(0, |x| x.sounds.len())).map(move |s| (Target::Sound(g, s), p.groups[g].sounds[s].muted));
+        // The channels and strips solo mutes (and unmutes again), and the one of each
+        // it leaves heard.
+        let every: Vec<usize> = (0..p.extra_outs.len()).collect();
+        type Solo = (Vec<(Target, bool)>, Option<Target>, Vec<usize>, Option<usize>);
+        let (all, me, strips, mine): Solo = match ch {
+            layout::Channel::Group(g) => {
+                let strips = every.into_iter().filter(|&i| group_of(p.extra_outs[i].owner) != Some(g)).collect();
+                (groups().collect(), Some(Target::Group(g)), strips, None)
+            }
+            layout::Channel::Sound(g, s) => {
+                let strips = every
+                    .into_iter()
+                    .filter(|&i| matches!(p.extra_outs[i].owner, Owner::Sound(a, b) | Owner::Chain(a, b, _) if a == g && b != s))
+                    .collect();
+                (sounds(g).collect(), Some(Target::Sound(g, s)), strips, None)
             }
             layout::Channel::Master => return,
+            layout::Channel::Extra(i) => match p.extra_outs.get(i).map(|x| x.owner) {
+                // A sound's plug-in: its group stays heard (the strip may play into it);
+                // the other groups and that group's sounds are muted.
+                Some(Owner::Sound(g, _) | Owner::Chain(g, _, _)) => {
+                    (groups().filter(|(t, _)| *t != Target::Group(g)).chain(sounds(g)).collect(), None, every, Some(i))
+                }
+                Some(Owner::Group(..)) => (groups().collect(), None, every, Some(i)),
+                // The master's plug-in hears the whole mix: the groups stay heard (so
+                // does the master's main pair), only the other strips are muted.
+                Some(Owner::Master(_)) => (Vec::new(), None, every, Some(i)),
+                None => return,
+            },
         };
-        let me = match ch {
-            layout::Channel::Group(g) => Target::Group(g),
-            layout::Channel::Sound(g, s) => Target::Sound(g, s),
-            layout::Channel::Master => return,
-        };
-        let soloed = all.iter().all(|(t, m)| if *t == me { !m } else { *m });
-        let mutes: Vec<(Target, bool)> = all.iter().map(|(t, _)| (*t, !soloed && *t != me)).collect();
-        if let Err(e) = doc.borrow_mut().set_mutes(if soloed { "Unsolo" } else { "Solo" }, &mutes) {
+        let soloed = all.iter().all(|(t, m)| if Some(*t) == me { !m } else { *m })
+            && strips.iter().all(|&i| if Some(i) == mine { !p.extra_outs[i].muted } else { p.extra_outs[i].muted });
+        let mutes: Vec<(Target, bool)> = all.iter().map(|(t, _)| (*t, !soloed && Some(*t) != me)).collect();
+        let mut outs = p.extra_outs.clone();
+        for &i in &strips {
+            outs[i].muted = !soloed && Some(i) != mine;
+        }
+        let label = if soloed { "Unsolo" } else { "Solo" };
+        if let Err(e) = doc.borrow_mut().transaction(label, |d| {
+            d.set_mutes(label, &mutes)?;
+            d.set_extra_outs(outs)
+        }) {
             self.status = format!("can't solo: {e}");
         }
     }
@@ -7403,7 +7522,9 @@ impl App {
         layout::apply_acts(self, vec![a]);
     }
 
-    /// Keep the shown slot on the chain shown, and the plug-in page up to date.
+    /// Keep the shown slot on the chain shown, and the plug-in views up to date: the
+    /// focused slot's and each strip panel's drawn lately (the others go), their shown
+    /// page's values read every 100 ms without waiting on the audio thread.
     fn update_slot_view(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let chain = self.chain();
@@ -7417,83 +7538,194 @@ impl App {
         if self.slot.is_some_and(|i| i >= slots) {
             self.slot = slots.checked_sub(1);
         }
-        let Some(i) = self.slot else {
-            self.plugin_view = None;
-            return;
-        };
-        let is_plugin = all[i].plugin.is_some();
-        if !is_plugin {
-            self.plugin_view = None;
-            return;
-        }
-        let _ = &doc;
-        let key = (chain, i);
-        let stale = self.plugin_view.as_ref().is_none_or(|v| v.key != key);
-        if stale {
-            let saved = all[i].plugin.as_ref().map(|p| p.pages.clone()).unwrap_or_default();
-            let view = match self.slot_plugin_in(key.0, key.1) {
-                Ok(p) => {
-                    let pages = p.lock().map(|p| view_pages(&p, &saved)).unwrap_or_default();
-                    PluginView {
-                        key,
-                        pages,
-                        page: usize::MAX,
-                        values: Vec::new(),
-                        refreshed: std::time::Instant::now(),
-                        error: None,
-                        sent: Vec::new(),
-                    }
-                }
-                Err(e) => PluginView {
-                    key,
-                    pages: Vec::new(),
-                    page: 0,
-                    values: Vec::new(),
-                    refreshed: std::time::Instant::now(),
-                    error: Some(e),
-                    sent: Vec::new(),
-                },
-            };
-            self.plugin_view = Some(view);
-        }
-        // Values of the page shown, refreshed every 100 ms (the plug-in's window may
-        // move them).
-        let page = self.plugin_page;
-        let due =
-            self.plugin_view.as_ref().is_some_and(|v| v.error.is_none() && (v.page != page || v.refreshed.elapsed().as_millis() >= 100));
-        if due && let Ok(p) = self.slot_plugin_in(key.0, key.1) {
-            let v = self.plugin_view.as_mut().unwrap();
-            let ids: Vec<u32> = v.pages.get(page).map_or(Vec::new(), |pg| pg.knobs.iter().map(|(i, ..)| i.id).collect());
-            // A VST3's values come from its controller without holding the instance
-            // (the audio thread would wait); DECKARD's own read instantly under it.
-            let now = std::time::Instant::now();
-            let sent = &mut v.sent;
-            let values = p.try_lock().ok().map(|g| match g.params() {
-                Some(h) => {
-                    drop(g);
-                    let mut values: Vec<_> = ids.iter().map(|&id| (h.value(id), h.text(id, h.value(id)))).collect();
-                    hold_sent(&mut values, &ids, sent, now, |id, v| h.text(id, v));
-                    (values, Vec::new())
-                }
-                None => {
-                    let mut values: Vec<_> = ids.iter().map(|&id| (g.param_value(id), g.param_text(id, g.param_value(id)))).collect();
-                    hold_sent(&mut values, &ids, sent, now, |id, v| g.param_text(id, v));
-                    (values, ids.iter().map(|&id| g.param_label(id)).collect())
-                }
-            });
-            if let Some((values, labels)) = values {
-                if let Some(pg) = v.pages.get_mut(page).filter(|pg| pg.own) {
-                    for ((_, label, _), new) in pg.knobs.iter_mut().zip(labels) {
-                        if let Some(new) = new {
-                            *label = new;
-                        }
-                    }
-                }
-                v.values = values;
-                v.page = page;
-                v.refreshed = std::time::Instant::now();
+        let now = std::time::Instant::now();
+        let focused = self.slot.filter(|&i| all[i].plugin.is_some()).map(|i| (chain, i));
+        // Focused anew, a plug-in shows the page it was on (the first if it had none).
+        if focused != self.plugin_focus {
+            self.plugin_focus = focused;
+            if let Some(k) = focused {
+                self.plugin_page = self.plugin_views.get(&k).map_or(0, |v| v.shown);
             }
         }
+        // The views wanted: the focused slot's and the panels drawn since (still
+        // plug-ins); the others go once not seen for a while.
+        let drawn = std::mem::take(&mut *self.plugin_drawn.borrow_mut());
+        let mut wanted = Vec::new();
+        {
+            let d = doc.borrow();
+            let id = |k: &(deckard_doc::Chain, usize)| Some(d.chain_slots(k.0)?.get(k.1)?.plugin.as_ref()?.id.as_str());
+            let holds = |k: &(deckard_doc::Chain, usize)| id(k).is_some();
+            for k in focused.into_iter().chain(drawn) {
+                if !wanted.contains(&k) && holds(&k) {
+                    wanted.push(k);
+                }
+            }
+            for k in &wanted {
+                if let Some(v) = self.plugin_views.get_mut(k) {
+                    v.seen = now;
+                }
+            }
+            // (Another plug-in in the slot, an undo's say: its own view, made again.)
+            self.plugin_views.retain(|k, v| id(k) == Some(v.plugin_id.as_str()) && now.duration_since(v.seen) < VIEW_KEEP);
+        }
+        // New ones: the focused slot's at once (as the controller wants it), the others
+        // a few at a time.
+        let mut built = 0;
+        for k in wanted {
+            if self.plugin_views.contains_key(&k) || (Some(k) != focused && built >= VIEW_READS) {
+                continue;
+            }
+            if let Some(v) = self.build_view(k, Some(k) == focused, now) {
+                self.plugin_views.insert(k, v);
+                built += 1;
+            }
+        }
+        for v in self.plugin_views.values_mut() {
+            if Some(v.key) == focused {
+                v.shown = self.plugin_page;
+            }
+            v.shown = v.shown.min(v.pages.len().saturating_sub(1));
+        }
+        // Values of the pages shown, every 100 ms (the plug-in's window may move them):
+        // a page just turned first, then the oldest; a few each time, past the focused
+        // one's and any overdue.
+        let mut due: Vec<(bool, std::time::Instant, (deckard_doc::Chain, usize))> = self
+            .plugin_views
+            .values()
+            .filter(|v| v.error.is_none() && (v.page != v.shown || now.duration_since(v.refreshed) >= VIEW_REFRESH))
+            .map(|v| (v.page == v.shown, v.refreshed, v.key))
+            .collect();
+        due.sort_by_key(|&(loaded, at, _)| (loaded, at));
+        let mut read = 0;
+        for (loaded, at, k) in due {
+            let urgent = !loaded || Some(k) == focused || now.duration_since(at) >= VIEW_OVERDUE;
+            if read >= VIEW_READS && !urgent {
+                continue;
+            }
+            if self.refresh_view(k, now) {
+                read += 1;
+            }
+        }
+    }
+
+    /// The focused slot's plug-in view (what the SOUND tab and the controller show).
+    #[cfg(test)]
+    pub(crate) fn plugin_view(&self) -> Option<&PluginView> {
+        self.plugin_focus.and_then(|k| self.plugin_views.get(&k))
+    }
+
+    /// The page slot `key` shows: the focused slot's [`App::plugin_page`], else its own.
+    pub(crate) fn view_page(&self, key: (deckard_doc::Chain, usize)) -> usize {
+        if self.plugin_focus == Some(key) { self.plugin_page } else { self.plugin_views.get(&key).map_or(0, |v| v.shown) }
+    }
+
+    /// A view of the plug-in in slot `key` (its pages, no values yet). `focused`: loaded
+    /// if need be and waited for (its error if it can't load), as the controller wants
+    /// it; else only an instance already running, and none while the audio thread holds
+    /// it (again next time): drawing a panel never loads a plug-in.
+    fn build_view(&mut self, key: (deckard_doc::Chain, usize), focused: bool, now: std::time::Instant) -> Option<PluginView> {
+        let pr = self.doc.as_ref()?.borrow().chain_slots(key.0)?.get(key.1)?.plugin.clone()?;
+        let view = |pages, instance, error| PluginView {
+            key,
+            pages,
+            page: usize::MAX,
+            shown: 0,
+            values: Vec::new(),
+            refreshed: now,
+            seen: now,
+            plugin_id: pr.id.clone(),
+            instance,
+            error,
+            sent: Vec::new(),
+        };
+        if !focused {
+            let p = self.samples.plugins.existing(self.plugin_slot_key(key.0, key.1))?;
+            let cid = deckard_plugins::state::PluginId::parse(&pr.id, &pr.name).map(|i| i.cid);
+            let pages = match p.try_lock() {
+                // (Still the slot's old plug-in: once it's replaced.)
+                Ok(g) if Some(g.id.cid) == cid => view_pages(&g, &pr.pages),
+                Ok(_) | Err(std::sync::TryLockError::WouldBlock) => return None,
+                Err(_) => Vec::new(),
+            };
+            return Some(view(pages, std::sync::Arc::downgrade(&p), None));
+        }
+        match self.slot_plugin_in(key.0, key.1) {
+            Ok(p) => {
+                let pages = p.lock().map(|g| view_pages(&g, &pr.pages)).unwrap_or_default();
+                Some(view(pages, std::sync::Arc::downgrade(&p), None))
+            }
+            Err(e) => Some(view(Vec::new(), std::sync::Weak::new(), Some(e))),
+        }
+    }
+
+    /// Load the project's state for slot `key` into its instance `p` if it differs from
+    /// what the instance was loaded from or last saved (as [`deckard_plugins::Host::instance`]
+    /// does, so it's no edit); not while the audio thread holds it (again next time).
+    fn follow_plugin_chunk(&mut self, key: (deckard_doc::Chain, usize), p: &deckard_plugins::Shared) {
+        let Some(doc) = self.doc.clone() else { return };
+        let d = doc.borrow();
+        let Some(pr) = d.chain_slots(key.0).and_then(|s| s.get(key.1)).and_then(|s| s.plugin.as_ref()) else { return };
+        let Ok(mut g) = p.try_lock() else { return };
+        if g.chunk() != pr.chunk.as_slice()
+            && let Err(e) = g.load_chunk(&pr.chunk)
+        {
+            self.status = format!("{}: {e}", pr.name);
+        }
+    }
+
+    /// Read view `key`'s shown page's values again (false: the plug-in was busy, or
+    /// another is in the slot now, its view rebuilt).
+    fn refresh_view(&mut self, key: (deckard_doc::Chain, usize), now: std::time::Instant) -> bool {
+        // (The instance running, never loaded nor waited for here.)
+        let Some(p) = self.samples.plugins.existing(self.plugin_slot_key(key.0, key.1)) else { return false };
+        let Some(v) = self.plugin_views.get(&key) else { return false };
+        // Another instance in the slot (an undo, a reload): its pages again, on the page
+        // shown.
+        if !std::ptr::eq(v.instance.as_ptr(), std::sync::Arc::as_ptr(&p)) {
+            let shown = v.shown;
+            self.plugin_views.remove(&key);
+            if let Some(mut v) = self.build_view(key, self.plugin_focus == Some(key), now) {
+                v.shown = shown.min(v.pages.len().saturating_sub(1));
+                self.plugin_views.insert(key, v);
+            }
+            return false;
+        }
+        // The focused plug-in takes the project's state when it changed there (an undo):
+        // the engine does that once it runs, and nothing else did before.
+        if self.plugin_focus == Some(key) {
+            self.follow_plugin_chunk(key, &p);
+        }
+        let v = self.plugin_views.get_mut(&key).unwrap();
+        let page = v.shown;
+        let ids: Vec<u32> = v.pages.get(page).map_or(Vec::new(), |pg| pg.knobs.iter().map(|(i, ..)| i.id).collect());
+        // A VST3's values come from its controller without holding the instance
+        // (the audio thread would wait); DECKARD's own read instantly under it.
+        let sent = &mut v.sent;
+        let values = p.try_lock().ok().map(|g| match g.params() {
+            Some(h) => {
+                drop(g);
+                let mut values: Vec<_> = ids.iter().map(|&id| (h.value(id), h.text(id, h.value(id)))).collect();
+                hold_sent(&mut values, &ids, sent, now, |id, v| h.text(id, v));
+                (values, Vec::new())
+            }
+            None => {
+                let mut values: Vec<_> = ids.iter().map(|&id| (g.param_value(id), g.param_text(id, g.param_value(id)))).collect();
+                hold_sent(&mut values, &ids, sent, now, |id, v| g.param_text(id, v));
+                (values, ids.iter().map(|&id| g.param_label(id)).collect())
+            }
+        });
+        let Some((values, labels)) = values else { return false };
+        if let Some(pg) = v.pages.get_mut(page).filter(|pg| pg.own) {
+            for ((_, label, _), new) in pg.knobs.iter_mut().zip(labels) {
+                if let Some(new) = new {
+                    *label = new;
+                }
+            }
+        }
+        v.values = values;
+        v.page = page;
+        v.refreshed = std::time::Instant::now();
+        true
     }
 
     /// Add a module or plug-in at the end of the focused sound's chain, and show it.
@@ -7861,7 +8093,7 @@ impl App {
                 self.slot = Some(to);
                 self.slot_of = Some(c);
                 self.plugin_page = 0;
-                self.plugin_view = None;
+                self.plugin_views.clear();
             }
             Err(e) => self.status = format!("can't move it: {e}"),
         }
@@ -8013,7 +8245,7 @@ impl App {
                 self.slot = Some(at);
                 self.slot_of = Some(c);
                 self.plugin_page = 0;
-                self.plugin_view = None;
+                self.plugin_views.clear();
             }
             Err(e) => self.status = format!("can't add it: {e}"),
         }
@@ -8810,6 +9042,125 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     const PROJECT: &str = "/Users/Shared/Velvet Lounge Library/Projects/Cloud 9 Vibes.mxprj";
+
+    /// Soloing a plug-in's extra-output strip mutes the other groups and their strips,
+    /// and its owner (its main pair; the plug-in keeps playing for the strip, the engine's
+    /// part), as one step; again, unsolo. Soloing the owner leaves its strips heard.
+    #[test]
+    fn soloing_a_strip_mutes_the_rest_but_not_its_plugin() {
+        use deckard_model::AudioDest;
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let mut app = App { settings: settings::Settings::default(), ..App::default() };
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        while doc.borrow().project().groups.len() < 3 {
+            doc.borrow_mut().add_group().unwrap();
+        }
+        // Real plug-ins in the strips' slots (undo drops strips whose plug-in isn't there).
+        const FX: &str = "T:VST3:FX:p";
+        const INSTR: &str = "T:VST3:INSTR:p";
+        let plugin = |id: &str| deckard_doc::NewModule::Plugin { id: id.into(), name: "P".into(), chunk: Vec::new() };
+        for c in [deckard_doc::Chain::Group(0), deckard_doc::Chain::Group(1), deckard_doc::Chain::Master] {
+            doc.borrow_mut().add_slot_in(c, 0, &plugin(FX)).unwrap();
+        }
+        doc.borrow_mut().add_slot(2, 0, 0, &plugin(INSTR)).unwrap();
+        let x = |owner: Owner, bus: usize| ExtraOut {
+            owner,
+            bus,
+            plugin: (if matches!(owner, Owner::Sound(..)) { INSTR } else { FX }).into(),
+            name: "Bus".into(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: AudioDest::Ext(1),
+            channels: Default::default(),
+        };
+        doc.borrow_mut()
+            .set_extra_outs(vec![x(Owner::Group(0, 0), 1), x(Owner::Group(0, 0), 2), x(Owner::Group(1, 0), 1), x(Owner::Sound(2, 0), 1)])
+            .unwrap();
+        let state = |app: &App| {
+            let d = app.doc.as_ref().unwrap().borrow();
+            let p = d.project();
+            (p.groups.iter().map(|g| g.muted).collect::<Vec<_>>(), p.extra_outs.iter().map(|x| x.muted).collect::<Vec<_>>())
+        };
+        let sound_20 = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[2].sounds[0].muted;
+        app.solo(layout::Channel::Extra(0));
+        assert_eq!(
+            state(&app),
+            (vec![true, true, true], vec![false, true, true, true]),
+            "the owner's main pair and every other strip, a sound's in another group too"
+        );
+        doc.borrow_mut().undo();
+        assert_eq!(state(&app), (vec![false; 3], vec![false; 4]), "one step");
+        app.solo(layout::Channel::Extra(0));
+        app.solo(layout::Channel::Extra(0));
+        assert_eq!(state(&app), (vec![false; 3], vec![false; 4]), "again: unsolo");
+        // A group soloed: the other groups' strips go quiet, its sounds' strips in other
+        // groups too (they play whatever their group's mute); its own stay heard.
+        app.solo(layout::Channel::Group(0));
+        assert_eq!(state(&app), (vec![false, true, true], vec![false, false, true, true]), "the owner's strips stay heard");
+        app.solo(layout::Channel::Group(0));
+        app.solo(layout::Channel::Group(2));
+        assert_eq!(state(&app), (vec![true, true, false], vec![true, true, true, false]), "its sounds' strips stay heard");
+        app.solo(layout::Channel::Group(2));
+        // A sound's strip soloed: the other groups and that group's sounds (its own too)
+        // muted, the group it plays into heard.
+        app.solo(layout::Channel::Extra(3));
+        assert_eq!(state(&app), (vec![true, true, false], vec![true, true, true, false]));
+        assert!(sound_20(&app), "its sound's main pair");
+        app.solo(layout::Channel::Extra(3));
+        assert_eq!(state(&app), (vec![false; 3], vec![false; 4]));
+        assert!(!sound_20(&app));
+        // A master's plug-in's strip: its plug-in hears the mix, so no group is muted;
+        // only the other strips are.
+        let mut outs = doc.borrow().project().extra_outs.clone();
+        outs.push(x(Owner::Master(0), 1));
+        doc.borrow_mut().set_extra_outs(outs).unwrap();
+        app.solo(layout::Channel::Extra(4));
+        assert_eq!(state(&app), (vec![false; 3], vec![true, true, true, true, false]), "the groups feed the master");
+        app.solo(layout::Channel::Extra(4));
+        assert_eq!(state(&app), (vec![false; 3], vec![false; 5]), "unsolo");
+    }
+
+    /// The extra outputs' meters, peaks and headroom are held by place in the list: a
+    /// strip added at the end keeps the others', one taken away starts them all again.
+    #[test]
+    fn extra_meters_start_again_when_the_strips_change() {
+        use deckard_model::AudioDest;
+        use deckard_model::extra_out::{ExtraOut, Owner};
+        let mut app = App { settings: settings::Settings::default(), ..App::default() };
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        let x = |bus| ExtraOut {
+            owner: Owner::Group(0, 0),
+            bus,
+            plugin: "p".into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest: AudioDest::Ext(1),
+            channels: Default::default(),
+        };
+        doc.borrow_mut().set_extra_outs(vec![x(1), x(2)]).unwrap();
+        app.sync_extra_meters();
+        let now = std::time::Instant::now();
+        app.extra_meters = vec![(0.5, 0.5), (0.25, 0.25)];
+        for i in 0..2 {
+            app.peaks.insert(layout::Channel::Extra(i), [(0.5, now); 2]);
+            app.headroom.insert(layout::Channel::Extra(i), 0.5);
+        }
+        app.headroom.insert(layout::Channel::Master, 0.7);
+        doc.borrow_mut().set_extra_outs(vec![x(1), x(2), x(3)]).unwrap();
+        app.sync_extra_meters();
+        assert_eq!(app.extra_meters, vec![(0.5, 0.5), (0.25, 0.25), (0.0, 0.0)], "added at the end");
+        assert_eq!(app.headroom.len(), 3);
+        doc.borrow_mut().set_extra_outs(vec![x(2), x(3)]).unwrap();
+        app.sync_extra_meters();
+        assert_eq!(app.extra_meters, vec![(0.0, 0.0); 2]);
+        assert!(!app.peaks.keys().any(|c| matches!(c, layout::Channel::Extra(_))));
+        assert_eq!(app.headroom.keys().collect::<Vec<_>>(), vec![&layout::Channel::Master], "the channels' are kept");
+    }
 
     /// A value sent to a plug-in shows until its controller reports it (JUCE's take it
     /// in at the next block), or for SENT_HOLD; then what the plug-in says again.
@@ -12053,7 +12404,7 @@ mod tests {
             ["WAVE 1", "WAVE 2", "PITCH 2", "DETUNE", "MIX", "SUB", "NOISE", "PW"],
             "the Oscillators page"
         );
-        let view = h.state().plugin_view.as_ref().expect("pages shown");
+        let view = h.state().plugin_view().expect("pages shown");
         assert_eq!(view.pages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Oscillators", "Filter", "Amp", "Modulation", "Super"]);
         assert_eq!(view.pages[0].choices[0], ["Saw", "Pulse", "Triangle", "Sine"], "a wave is a choice");
         if let Some(dir) = render_dir() {
@@ -12094,7 +12445,7 @@ mod tests {
     }
 
     fn view_cutoff(h: &Harness<'static, App>) -> u32 {
-        let view = h.state().plugin_view.as_ref().unwrap();
+        let view = h.state().plugin_view().unwrap();
         view.pages[1].knobs.iter().find(|(i, ..)| i.short == "CUTOFF").unwrap().0.id
     }
 
