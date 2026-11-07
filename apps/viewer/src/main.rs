@@ -5538,22 +5538,28 @@ impl App {
                 let n = if next { (pg.page + 1).min(pg.names.len().saturating_sub(1)) } else { pg.page.saturating_sub(1) };
                 (pg.show)(n)
             }
-            // On to the next slot, or past the last one to the "+" (an empty slot to load
-            // a plug-in into).
+            // On to the next insert of the chain shown (Master, Group or Sound), or past
+            // the last one to the "+". An empty chain, or a step past the "+", stays on
+            // this tab.
             R::Slot(d) => {
-                let n = doc.borrow().project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).map_or(0, |s| s.slots.len());
+                let n = self.chain_slots().len();
                 let cur = self.slot.filter(|&i| i < n).unwrap_or(n) as i64;
                 let to = (cur + d).clamp(0, n as i64) as usize;
                 if to == n {
-                    // The "+": no slot focused, plug-ins shown.
-                    (self.slot, self.channel) = (None, false);
+                    // The "+": no slot focused, plug-ins shown, this tab kept.
+                    self.slot = None;
+                    self.slot_of = Some(self.chain());
+                    self.channel = false;
                     return;
                 }
-                Act::FocusSlot(self.group, self.sound, to)
+                match self.chain() {
+                    deckard_doc::Chain::Sound(g, s) => Act::FocusSlot(g, s, to),
+                    c => Act::FocusChainSlot(c, to),
+                }
             }
             R::Load { entry, replace } => {
                 let Some((_, what)) = self.plugin_choices().into_iter().nth(entry) else { return };
-                let n = doc.borrow().project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).map_or(0, |s| s.slots.len());
+                let n = self.chain_slots().len();
                 match replace.filter(|&i| i < n) {
                     Some(i) => self.replace_slot(i, what),
                     None => {

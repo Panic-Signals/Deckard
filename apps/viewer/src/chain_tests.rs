@@ -194,6 +194,68 @@ fn only_a_sounds_effects_take_side_chains() {
     assert!(sidechain_choices(p, Chain::Master, 0).is_none());
 }
 
+/// The 4-D encoder's left and right, and SHIFT's slot edits, stay on the chain
+/// shown. Master does not become Group, and Group does not become Sound. An empty
+/// chain does not change tab even when the sound has inserts.
+#[test]
+fn the_controller_stays_on_the_master_and_group_chains() {
+    use deckard_lua_host::state::ControlRequest as R;
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    let doc = app.doc.clone().unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Master, 0, &deckard_doc::NewModule::Effect("EQ")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Master, 1, &deckard_doc::NewModule::Effect("Filter")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Group(0), 0, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Group(0), 1, &deckard_doc::NewModule::Effect("Reverb")).unwrap();
+    doc.borrow_mut().add_slot(0, 0, 0, &deckard_doc::NewModule::Effect("Saturator")).unwrap();
+    doc.borrow_mut().add_slot(0, 0, 1, &deckard_doc::NewModule::Effect("Limiter")).unwrap();
+    let names = |c: Chain| doc.borrow().chain_slots(c).unwrap_or(&[]).iter().map(|s| (s.module.clone(), s.active)).collect::<Vec<_>>();
+
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Master, Some(0), Some(Chain::Master));
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, Some(1)), "right moves to the next master insert");
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, None), "past the last is the +, still on Master");
+    app.control_request(R::Slot(1));
+    assert_eq!(app.chain_tab, ChainTab::Master, "nothing past the +, so the tab stays");
+    app.control_request(R::Slot(-1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, Some(1)), "left comes back onto the last insert");
+
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Group, Some(1), Some(Chain::Group(0)));
+    app.control_request(R::Slot(-1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Group, Some(0)), "left stays on Group");
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Group, Some(1)));
+    app.surface_act(A::SlotEdit("bypass"));
+    assert!(!names(Chain::Group(0))[1].1, "SHIFT bypasses the group's insert: {}", app.status);
+    assert!(names(Chain::Sound(0, 0)).iter().all(|s| s.1), "the sound's inserts stay on");
+    app.surface_act(A::SlotEdit("move_left"));
+    assert_eq!(names(Chain::Group(0))[0].0, "Reverb");
+    assert_eq!(app.chain_tab, ChainTab::Group);
+    app.surface_act(A::SlotEdit("remove"));
+    assert_eq!(names(Chain::Group(0)).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["Compressor"]);
+    assert_eq!(names(Chain::Sound(0, 0)).len(), 2, "remove doesn't take a sound insert");
+
+    let eq = app.plugin_choices().iter().position(|(_, w)| matches!(w, AddWhat::Effect("EQ"))).expect("EQ offered");
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Group, None, Some(Chain::Group(0)));
+    app.control_request(R::Load { entry: eq, replace: None });
+    assert_eq!(app.chain_tab, ChainTab::Group, "inserting stays on Group");
+    assert!(names(Chain::Group(0)).iter().any(|s| s.0 == "EQ"), "the effect lands on the group");
+    assert_eq!(names(Chain::Sound(0, 0)).len(), 2);
+
+    doc.borrow_mut().remove_slot_in(Chain::Master, 0).unwrap();
+    doc.borrow_mut().remove_slot_in(Chain::Master, 0).unwrap();
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Master, None, Some(Chain::Master));
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Master, None), "an empty chain does not change tab");
+    assert_eq!(names(Chain::Sound(0, 0)).len(), 2);
+
+    (app.chain_tab, app.slot, app.slot_of) = (ChainTab::Sound, Some(0), Some(Chain::Sound(0, 0)));
+    app.control_request(R::Slot(1));
+    assert_eq!((app.chain_tab, app.slot), (ChainTab::Sound, Some(1)), "Sound still steps its own inserts");
+}
+
 /// The MK3's move (SHIFT + << >>) reaches the chain shown.
 #[test]
 fn the_mk3_moves_effects() {
