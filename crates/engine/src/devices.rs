@@ -577,6 +577,15 @@ mod linux {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_device_that_wont_answer_is_passed_over() {
+        let answer = |d: &&str| if *d == "broken" { Err("no format".to_string()) } else { Ok(d.len()) };
+        assert_eq!(first_usable(["broken", "usb", "line"], answer), Some(("usb", 3)));
+        assert_eq!(first_usable(["broken"], answer), None);
+        assert_eq!(first_usable(Vec::<&str>::new(), answer), None);
+    }
+
     /// Nothing here loads a driver: choosing a host only makes cpal's handle.
     #[test]
     fn the_host_is_the_one_asked_for() {
