@@ -1833,7 +1833,9 @@ impl App {
                 Err(e) => self.status = format!("can't make the controller scripts folder: {e}"),
             },
             C::Manual => {
-                let url = "https://docs.native-instruments.com/ni-tech-manuals/maschine-software-manual/en/welcome-to-maschine-software";
+                // The ni-tech-manuals copy is a private bucket, so the browser shows an XML
+                // access error. This is the manual Native Instruments still publishes.
+                let url = "https://docs.native-instruments.com/online-guides/maschine-software-manual/en/index-en";
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
             C::Splice => splice::open(ctx, None),
