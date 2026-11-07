@@ -100,6 +100,8 @@ pub struct StartWith<'a> {
     /// of its channels each of Maschine's 32 input channels reads.
     pub device: Option<String>,
     pub routing: &'a [Option<usize>],
+    /// The inputs' levels, which what's recorded is after.
+    pub inputs: Arc<crate::input_levels::InputBus>,
     pub clock: Clock,
     /// Auto: the folder and name stem of its files.
     pub dir: PathBuf,
@@ -337,12 +339,14 @@ impl Recorder {
         }
         let channels = config.channels() as usize;
         let route = |i: usize| with.routing.get(i).copied().unwrap_or(Some(i)).filter(|&c| c < channels);
-        let (l, r) = if self.view.source == 1 {
-            let c = route(self.view.ext_mono);
-            (c, c)
+        // Maschine's input channels, and the interface's they read.
+        let (in_l, in_r) = if self.view.source == 1 {
+            (self.view.ext_mono, self.view.ext_mono)
         } else {
-            (route(self.view.ext_stereo * 2), route(self.view.ext_stereo * 2 + 1))
+            (self.view.ext_stereo * 2, self.view.ext_stereo * 2 + 1)
         };
+        let (l, r) = (route(in_l), route(in_r));
+        let inputs = with.inputs.clone();
         if l.is_none() && r.is_none() {
             let name = if self.view.source == 1 { mono_input_name(self.view.ext_mono) } else { stereo_input_name(self.view.ext_stereo) };
             return Err(format!("{name} isn't connected to a channel of {} (Preferences > Audio > Routing)", device_name(&device)));
@@ -355,16 +359,16 @@ impl Recorder {
             &device,
             config,
             move |data: &[f32]| {
-                let at = |f: &[f32], c: Option<usize>| c.map_or(0.0, |c| f[c]);
+                let at = |f: &[f32], input: usize, c: Option<usize>| c.map_or(0.0, |c| f[c] * inputs.gain(input));
                 if let Ok(mut inc) = incoming.try_lock() {
-                    inc.extend(data.chunks(channels).map(|f| [at(f, l), at(f, r)]));
+                    inc.extend(data.chunks(channels).map(|f| [at(f, in_l, l), at(f, in_r, r)]));
                 }
                 if let Some(m) = &monitor
                     && let Ok(mut m) = m.try_lock()
                 {
                     for f in data.chunks(channels) {
-                        m.push(at(f, l));
-                        m.push(at(f, r));
+                        m.push(at(f, in_l, l));
+                        m.push(at(f, in_r, r));
                     }
                 }
             },
@@ -916,6 +920,7 @@ mod tests {
             output: Some(&out),
             device: None,
             routing: &[],
+            inputs: Default::default(),
             clock: clock_of(&out, &p),
             dir: dir.clone(),
             stem: "Kick".into(),
@@ -956,6 +961,7 @@ mod tests {
             output: Some(out),
             device: None,
             routing: &[],
+            inputs: Default::default(),
             clock: clock_of(out, &p),
             dir: PathBuf::new(),
             stem: String::new(),
@@ -985,6 +991,7 @@ mod tests {
             output: Some(&out),
             device: None,
             routing: &[],
+            inputs: Default::default(),
             clock: clock_of(&out, &p),
             dir: std::env::temp_dir(),
             stem: String::new(),

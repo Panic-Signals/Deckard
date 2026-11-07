@@ -2138,6 +2138,7 @@ dependencies = [
  "cpal",
  "deckard-doc",
  "deckard-engine",
+ "deckard-jam",
  "deckard-library",
  "deckard-link",
  "deckard-lua-host",
@@ -2191,6 +2192,13 @@ dependencies = [
  "lewton",
  "plist",
  "tempfile",
+]
+
+[[package]]
+name = "deckard-jam"
+version = "0.1.0"
+dependencies = [
+ "hidapi",
 ]
 
 [[package]]
@@ -2305,6 +2313,7 @@ dependencies = [
 name = "deckard-surface"
 version = "0.1.0"
 dependencies = [
+ "deckard-jam",
  "deckard-mk3",
  "deckard-model",
  "epaint_default_fonts",

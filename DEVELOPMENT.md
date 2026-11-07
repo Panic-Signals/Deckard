@@ -12,9 +12,13 @@ The workspace targets the latest stable Rust (pinned in `mise.toml`: 1.99.1, edi
 the stem separation model.
 
 ```sh
-cargo build --release --offline -p deckard
-./target/release/deckard ["path/to/project.mxprj"]   # or drop a file on the window
+mise run build
+./target/debug/deckard ["path/to/project.mxprj"]   # or drop a file on the window
 ```
+
+The build and the other tasks (tests, releases, lint) are defined in `mise.toml`, with
+usage at its top. Use `mise run` rather than calling `cargo` directly: `cargo` comes from
+mise's pinned Rust, so it isn't on `PATH` in a plain shell.
 
 - **Linux:** needs `pkg-config` and the ALSA headers (`libasound2-dev`).
 - **Windows:** needs the Visual Studio Build Tools (C++). `mise install` installs them
@@ -23,8 +27,6 @@ cargo build --release --offline -p deckard
 - **MK3:** with one connected, DECKARD drives it directly. Quit Maschine and NI's
   hardware agents (NIHardwareAgent, NIHostIntegrationAgent) first.
 
-`mise run build` builds the whole workspace (debug). The other mise tasks are listed at
-the top of `mise.toml`.
 
 ### ASIO (Windows, optional)
 

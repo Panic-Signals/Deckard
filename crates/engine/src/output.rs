@@ -187,7 +187,7 @@ impl Sender {
                     }
                 }
             }
-            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => {}
+            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::ChokeAll => {}
         }
     }
 
@@ -948,6 +948,11 @@ impl Output {
             }
             (meters, std::mem::take(&mut t.master_peak))
         })
+    }
+
+    /// The cue bus's peaks since the last call (reset).
+    pub fn take_cue_peak(&self) -> (f32, f32) {
+        self.telemetry(|t| std::mem::take(&mut t.cue_peak))
     }
 
     /// Where zone `zone` of a sound plays, as last published; it is watched from now
