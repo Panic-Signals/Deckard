@@ -1265,19 +1265,30 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     ct.set("chain", chain)?;
     ct.set("pages", lua.create_sequence_from(c.pages.iter().map(String::as_str))?)?;
     ct.set("page", c.page + 1)?;
-    // The built-in EQ's curve, for the right screen. The same on both of its pages.
-    if let Some(eq) = &c.eq {
+    // The built-in EQ's or Filter's curve, for the right screen. The same on both pages.
+    for (name, curve) in [("eq", &c.eq), ("filter", &c.filter)] {
+        let Some(curve) = curve else { continue };
         let t = lua.create_table()?;
-        t.set("points", lua.create_sequence_from(eq.points.iter().copied())?)?;
+        t.set("points", lua.create_sequence_from(curve.points.iter().copied())?)?;
         let bands = lua.create_table()?;
-        for (i, (x, y)) in eq.bands.iter().enumerate() {
+        for (i, (x, y)) in curve.bands.iter().enumerate() {
             let b = lua.create_table()?;
             b.set("x", *x)?;
             b.set("y", *y)?;
             bands.set(i + 1, b)?;
         }
         t.set("bands", bands)?;
-        ct.set("eq", t)?;
+        if !curve.extent.is_empty() {
+            t.set("extent", lua.create_sequence_from(curve.extent.iter().copied())?)?;
+        }
+        if !curve.lfo.is_empty() {
+            t.set("lfo", lua.create_sequence_from(curve.lfo.iter().copied())?)?;
+        }
+        if !curve.side.is_empty() {
+            t.set("side", lua.create_sequence_from(curve.side.iter().copied())?)?;
+            t.set("side_live", curve.side_live)?;
+        }
+        ct.set(name, t)?;
     }
     let knobs = lua.create_table()?;
     for k in 0..8 {
