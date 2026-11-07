@@ -54,6 +54,12 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
         "GrainDelay" => grain_delay(params, phase),
         "GrainStretch" => grain_stretch(params),
         "Resochord" => resochord(params),
+        "Chorus" => chorus(params, phase),
+        "Flanger" => flanger(params, phase, false),
+        "Phaser" => flanger(params, phase, true),
+        "FM" => fm(params, phase),
+        "FreqShifter" => freq_shifter(params),
+        "LoFi" => lofi(params),
         _ => return None,
     };
     if matches!(module, "Compressor" | "Limiter" | "Gate" | "Maximizer") {
@@ -66,6 +72,10 @@ pub fn shot(module: &str, params: &[(String, f64)], phase: f32, side_live: bool,
 pub fn moves(module: &str, params: &[(String, f64)]) -> bool {
     match module {
         "GrainDelay" => p(params, "modulation", 0.0) > 0.02,
+        "Chorus" => p(params, "amount", 0.55).abs() > 0.02,
+        "Flanger" => p(params, "source", 0.0).round() < 1.5 && p(params, "amount", 0.75).abs() > 0.02,
+        "Phaser" => p(params, "source", 1.0).round() < 1.5 && p(params, "amount", 0.5).abs() > 0.02,
+        "FM" => p(params, "amount", 0.75) > 0.02,
         _ => {
             let _ = params;
             false
@@ -76,6 +86,12 @@ pub fn moves(module: &str, params: &[(String, f64)]) -> bool {
 pub fn rate_hz(module: &str, params: &[(String, f64)], tempo: f64) -> f32 {
     match module {
         "GrainDelay" => 0.15 + p(params, "modulation", 0.0).clamp(0.0, 1.0) * 3.0,
+        "Chorus" => 0.0639 * 256.0f32.powf(p(params, "rate", 0.5).clamp(0.0, 1.0)),
+        "Flanger" | "Phaser" => {
+            let source = p(params, "source", if module == "Phaser" { 1.0 } else { 0.0 }).round();
+            mod_hz(p(params, "speed", 0.5), source == 1.0, tempo)
+        }
+        "FM" => 0.1 * 32.0f32.powf(p(params, "rate", 0.25).clamp(0.0, 1.0)),
         _ => {
             let _ = (params, tempo);
             0.0
@@ -109,6 +125,11 @@ fn samples(n: usize) -> impl Iterator<Item = (usize, f32)> {
     (0..n).map(move |i| (i, i as f32 / (n - 1) as f32))
 }
 
+fn sine(n: usize) -> Vec<f32> {
+    samples(n).map(|(_, t)| 0.5 + 0.5 * (t * std::f32::consts::TAU).cos()).collect()
+}
+
+/// Attack, a held open part, then release. Each is 0..1 of the window.
 fn envelope(attack: f32, hold: f32, release: f32, n: usize) -> Vec<f32> {
     let rise = 0.04 + 0.5 * attack.clamp(0.0, 1.0);
     let open = 0.06 + 0.45 * hold.clamp(0.0, 1.0);
@@ -136,6 +157,11 @@ fn hash(i: u32) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
+fn freq_x(hz: f32) -> f32 {
+    let hz = hz.clamp(20.0, 20_000.0);
+    cl((hz.ln() - 20f32.ln()) / (20_000f32.ln() - 20f32.ln()))
+}
+
 fn side(params: &[(String, f64)], live: bool, shot: &mut Shot) {
     shot.side = super::sidechain::response(params, N);
     shot.side_live = live;
@@ -143,6 +169,30 @@ fn side(params: &[(String, f64)], live: bool, shot: &mut Shot) {
 
 /// The picture for `module`, or `None` for the EQ, the Filter, and anything else.
 /// `phase` is the modulator's position, 0..1, advanced by [`rate_hz`].
+fn mod_hz(speed: f32, synced: bool, tempo: f64) -> f32 {
+    const RATES: [(f32, f32); 11] = [
+        (16.0, 1.0),
+        (8.0, 1.0),
+        (4.0, 1.0),
+        (2.0, 1.0),
+        (1.0, 1.0),
+        (1.0, 2.0),
+        (3.0, 8.0),
+        (1.0, 4.0),
+        (3.0, 16.0),
+        (1.0, 8.0),
+        (1.0, 16.0),
+    ];
+    if synced {
+        let i = (10.0 * speed.clamp(0.0, 1.0)).round() as usize;
+        let (n, d) = RATES[i.min(10)];
+        let bars = n / d;
+        let period = bars * 4.0 * 60.0 / tempo.max(1.0) as f32;
+        return 1.0 / period.max(0.05);
+    }
+    0.05 * 160.0f32.powf(speed.clamp(0.0, 1.0))
+}
+
 fn compressor(params: &[(String, f64)]) -> Shot {
     let threshold = p(params, "threshold", 1.0 / 6.0).clamp(0.0, 1.0);
     let knee = p(params, "knee", 0.5).clamp(0.0, 1.0);
@@ -507,6 +557,155 @@ fn chord_notes(style: i32, chord: i32) -> Vec<f32> {
     }
 }
 
+fn chorus(params: &[(String, f64)], phase: f32) -> Shot {
+    let amount = p(params, "amount", 0.55).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 0.5).clamp(0.0, 1.0);
+    let wobble = (phase * std::f32::consts::TAU).sin() * amount * 0.12;
+    let lag = 0.06 + amount * 0.28 + wobble;
+    let wave = |shift: f32, t: f32| 0.5 + 0.32 * ((t * 2.0 + shift) * std::f32::consts::TAU).sin();
+    let points = samples(N).map(|(_, t)| cl(wave(0.0, t))).collect();
+    let extent = samples(N).map(|(_, t)| cl(lerp(wave(0.0, t), wave(-lag, t), mix))).collect();
+    let mut shot = Shot::bare("time", points);
+    shot.extent = extent;
+    shot.lfo = sine(48);
+    shot
+}
+
+fn flanger(params: &[(String, f64)], phase: f32, phaser: bool) -> Shot {
+    let frequency = p(params, "frequency", 0.5).clamp(0.0, 1.0);
+    let feedback = p(params, "feedback", 0.5).clamp(0.0, 1.0);
+    let amount = p(params, "amount", if phaser { 0.5 } else { 0.75 }).clamp(-1.0, 1.0);
+    let source = p(params, "source", if phaser { 1.0 } else { 0.0 }).round() as i32;
+    let stereo = p(params, "stereo", 0.5).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 0.5).clamp(0.0, 1.0);
+    let poles = if phaser && on(params, "eight_pole", 0.0) {
+        8
+    } else if phaser {
+        2
+    } else {
+        1
+    };
+    let invert = if phaser { false } else { on(params, "invert", 0.0) };
+    let wobble = if source == 2 { 0.0 } else { (phase * std::f32::consts::TAU).sin() };
+    let live = cl(frequency + amount * wobble * 0.35);
+    let far = cl(frequency + amount * 0.35 + stereo * 0.08);
+    let comb = |center: f32| {
+        samples(N)
+            .map(|(_, x)| {
+                let mut acc = 1.0;
+                for k in 0..poles {
+                    let c = (center + k as f32 * 0.055).clamp(0.02, 0.98);
+                    let d = (x - c).abs().min((x - c).abs() - 0.0);
+                    let dip = (1.0 - (d * (if poles > 2 { 22.0 } else { 14.0 })).min(1.0)) * (0.25 + feedback * 0.7);
+                    let v = if invert { 0.35 + dip } else { 0.85 - dip };
+                    acc *= v.clamp(0.15, 1.0);
+                }
+                cl(lerp(0.5, acc, mix))
+            })
+            .collect()
+    };
+    let mut shot = Shot::bare("freq", comb(live));
+    shot.extent = comb(far);
+    shot.lfo = if source == 2 { envelope(0.05, 0.2 + p(params, "shape", 0.5).clamp(0.0, 1.0) * 0.5, 0.35, 48) } else { sine(48) };
+    shot
+}
+
+fn fm(params: &[(String, f64)], phase: f32) -> Shot {
+    let amount = p(params, "amount", 0.75).clamp(0.0, 1.0);
+    let split = p(params, "split", 0.75).clamp(0.0, 1.0);
+    let contour = p(params, "contour", 0.75).clamp(0.0, 1.0);
+    let wobble = 1.0 + (phase * std::f32::consts::TAU).sin() * 0.12 * (0.2 + contour);
+    let spread = (0.04 + amount * 0.32) * wobble;
+    let right = spread * (0.45 + split);
+    let left = spread * (1.2 - split * 0.4);
+    let amp = 0.15 + contour * 0.55;
+    let bump = |center: f32, height: f32, x: f32| {
+        let d = (x - center) / 0.035;
+        height * (-d * d).exp()
+    };
+    let points = samples(N)
+        .map(|(_, x)| {
+            let y = bump(0.5, 0.7, x)
+                + bump(0.5 - left, amp * amount, x)
+                + bump(0.5 + right, amp * amount, x)
+                + bump(0.5 - left * 2.0, amp * amount * 0.45, x)
+                + bump(0.5 + right * 2.0, amp * amount * 0.45, x);
+            cl(0.18 + y)
+        })
+        .collect();
+    let mut shot = Shot::bare("freq", points);
+    shot.lfo = sine(48);
+    shot
+}
+
+fn freq_shifter(params: &[(String, f64)]) -> Shot {
+    let coarse = p(params, "coarse", 0.5).clamp(0.0, 1.0);
+    let fine = p(params, "fine", 0.0).clamp(0.0, 1.0);
+    let feedback = p(params, "feedback", 0.75).clamp(0.0, 1.0);
+    let stereo = p(params, "stereo", 0.75).clamp(0.0, 1.0);
+    let invert = on(params, "invert", 1.0);
+    let mix = p(params, "mix", 0.75).clamp(0.0, 1.0);
+    let mut shift = (coarse - 0.5) * 0.55 + fine * 0.06;
+    if invert {
+        shift = -shift;
+    }
+    let peaks = [0.22, 0.48, 0.7];
+    let draw = |extra: f32| {
+        samples(N)
+            .map(|(_, x)| {
+                let mut y = 0.16;
+                for (k, c) in peaks.iter().enumerate() {
+                    let at = c + shift + extra;
+                    let d = (x - at) / 0.03;
+                    y += (0.55 - k as f32 * 0.12) * (-d * d).exp();
+                    let ghost = c + shift * (1.6 + feedback);
+                    let g = (x - ghost) / 0.04;
+                    y += feedback * 0.28 * (-g * g).exp();
+                }
+                cl(lerp(0.28, y, mix))
+            })
+            .collect()
+    };
+    let mut shot = Shot::bare("freq", draw(0.0));
+    shot.extent = draw(stereo * 0.06);
+    shot
+}
+
+fn lofi(params: &[(String, f64)]) -> Shot {
+    let sr = p(params, "sample_rate", 0.05).clamp(0.0, 1.0);
+    let hz = 44_100.0 * 2f32.powf(-127.0 * sr / 12.0);
+    let wall = freq_x(hz);
+    let bits = (12.0 - 11.0 * p(params, "bits", 0.185).clamp(0.0, 1.0)).clamp(1.0, 12.0);
+    let smooth = p(params, "smooth", 1.0).clamp(0.0, 1.0);
+    let stereo = p(params, "stereo", 1.0).clamp(0.0, 1.0);
+    let mix = p(params, "mix", 1.0).clamp(0.0, 1.0);
+    let points = samples(N)
+        .map(|(_, x)| {
+            let open = if x <= wall { 0.78 } else { 0.16 };
+            cl(lerp(0.5, open, mix))
+        })
+        .collect();
+    let steps = bits.round().max(1.0);
+    let stair: Vec<f32> = (0..48)
+        .map(|i| {
+            let t = i as f32 / 47.0;
+            let q = (t * steps).floor() / steps;
+            let wave = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
+            cl(lerp(q, wave, smooth))
+        })
+        .collect();
+    let mut shot = Shot::bare("freq", points);
+    shot.extent = samples(N)
+        .map(|(_, x)| {
+            let open = if x <= (wall * (0.55 + 0.45 * stereo)).min(1.0) { 0.62 } else { 0.2 };
+            cl(lerp(0.5, open, mix))
+        })
+        .collect();
+    shot.lfo = stair;
+    shot.bands = vec![(wall, 0.78)];
+    shot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +738,12 @@ mod tests {
             ("GrainDelay", "pitch", -1.0, 1.0),
             ("GrainStretch", "on", 0.0, 1.0),
             ("Resochord", "tune", -12.0, 12.0),
+            ("Chorus", "amount", 0.0, 1.0),
+            ("Flanger", "frequency", 0.1, 0.9),
+            ("Phaser", "eight_pole", 0.0, 1.0),
+            ("FM", "amount", 0.0, 1.0),
+            ("FreqShifter", "coarse", 0.1, 0.9),
+            ("LoFi", "sample_rate", 0.0, 0.8),
         ];
         for (module, field, a, b) in cases {
             let picture = shot(module, &[], 0.0, false, 0).unwrap();
@@ -555,5 +760,15 @@ mod tests {
         assert!(loud.side_live);
         assert!(shot("EQ", &[], 0.0, false, 0).is_none());
         assert!(shot("Filter", &[], 0.0, false, 0).is_none());
+    }
+
+    #[test]
+    fn modulation_scrolls_without_a_jump_from_the_rate_alone() {
+        assert!(rate_hz("Chorus", &one("rate", 0.9), 120.0) > rate_hz("Chorus", &one("rate", 0.1), 120.0) * 4.0);
+        assert!(moves("Chorus", &one("amount", 0.8)));
+        assert!(!moves("Chorus", &one("amount", 0.0)));
+        let a = shot("Chorus", &one("amount", 0.8), 0.0, false, 0).unwrap();
+        let b = shot("Chorus", &one("amount", 0.8), 0.35, false, 0).unwrap();
+        assert_ne!(a.extent, b.extent);
     }
 }
