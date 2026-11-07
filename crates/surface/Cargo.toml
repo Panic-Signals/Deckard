@@ -5,6 +5,7 @@ edition = "2024"
 description = "DECKARD's own MK3 controller layer: runs DECKARD's Lua controller scripts (one file per page) and draws their screens"
 
 [dependencies]
+deckard-jam = { path = "../jam" }
 deckard-mk3 = { path = "../mk3" }
 deckard-model = { path = "../model" }
 mlua = { version = "0.12", features = ["lua54", "vendored"] }

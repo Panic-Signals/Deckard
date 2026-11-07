@@ -446,13 +446,65 @@ A device gets the whole `deckard` API, so `deckard.state()`, `focus_group`,
 |---|---|
 | `deckard.midi_send(role, bytes)` | Send bytes (0–255 each) on the port of `role`. |
 | `deckard.launch_scene(i)` | Launch scene `i`: as clicking it in the Ideas view, and when stopped it starts playing. |
-| `deckard.new_pattern(group)` | A new pattern in group `group`, in the focused scene. The focused group stays; in that group, the new pattern is focused. |
+| `deckard.new_pattern(group [, place])` | A new pattern in group `group`, in the focused scene: after its last, or in empty `place`. A group's patterns list says each one's `slot`, as there can be empty places between them. The focused group stays; in that group, the new pattern is focused. |
 | `deckard.show_scenes(i)` | Scroll the Ideas view's scene tabs to start at scene `i`, as far as they go. |
 | `deckard.print_notes{ length = beats, notes = { {pitch, start, length, velocity}, … }, track = n }` | Print to Clip: the notes (times in beats) replace the focused sound's in the focused group's pattern in the focused scene. A pattern is made if there is none, and the pattern takes `length`. It is one undo step. `track` (optional, from 1) is the device's track it came from: a print from the track set as the device's drum track (Preferences ▸ MIDI) plays the focused group's pads from C1 instead, replacing the group's notes. |
 | `deckard.message(text)` | Show a line in the status bar. |
 | `deckard.device()` | The device's id (its folder's name). |
 
 `deckard.state()` also has `playing_scene` and `queued_scene` (from 1, or nil).
+
+### USB HID controllers
+
+A device spoken to over USB HID says so in `device.lua`, with no `ports`:
+
+```lua
+return { name = "Maschine JAM", hid = { vendor = 0x17CC, product = 0x1500 } }
+```
+
+The Maschine JAM (`devices/maschine_jam/`, see `maschine-jam.md`) is the only one DECKARD has a driver
+for. Its driver hands the script decoded events, beside `open`, `close` and `tick`:
+
+| Handler | When |
+|---|---|
+| `button(name, down)` | A button, as named in `crates/jam/src/map.rs`. `deckard.held(name)` follows it. |
+| `pad(column, row, down)` | A pad, from 1, the top left first. |
+| `strip(n, finger, kind, pos)` | A Smart Strip: finger 1 or 2 went `"down"`, `"move"`d or came `"up"` at `pos` (0..1). |
+| `encoder(steps)` | The encoder turned. |
+| `pads()` | Where the pads play, asked each frame and read by the driver's thread, so a note never waits for a frame: `{ velocity = n, [column + (row − 1) × 8] = { group, sound, pitch, pitch … } }`, or `nil` for none. A release stops what the press started, however the route has changed. |
+| `leds()` | The lights; set them with these. |
+
+| Function | Sets |
+|---|---|
+| `deckard.led(name, "off" \| "dim" \| "on")` | A one-colour button. `"off"` keeps a faint backlight; `"dark"` is none. |
+| `deckard.led(name, palette, bright)` | A `SCENE_n` or `GROUP_x` button's colour. `bright`: `true`, `false` (half-lit), or `"faint"`, `"dim"`, `"bright"`, `"pale"`. |
+| `deckard.pad_led(column, row, palette, bright)`, `deckard.strip_led(n, led, palette, bright)` | The same for a pad and a strip's LED (1–11, from the bottom). |
+| `deckard.meter(column, led, level)` | A meter LED (columns 1–2; LEDs 1–8, from the bottom), level 0..1. |
+
+### What a controller without pages adds
+
+These work for any script, and exist because a device has no page on screen to go by:
+
+| Function | Does |
+|---|---|
+| `deckard.delete_pattern(group, n)`, `deckard.delete_scene(n)` | Delete it (a scene's patterns stay; a project keeps its last scene). |
+| `deckard.copy_pattern(group, from, to)`, `deckard.copy_scene(from, to)`, `deckard.copy_group(from, to)`, `deckard.copy_sound(from, to)` | Replace `to` with a copy. Past the last (a sound: not for those), a new one goes there. `copy_sound` is in the focused group. |
+| `deckard.set_send(group, sound, aux, level)`, `deckard.set_swing(group, sound, amount)`, `deckard.set_tune(group, sound, semitones)` | A channel's aux send (1 or 2; level 0..1, 0.75 unity), swing (0–100; no group: the song's) and Sampler tune (no sound: the group's Samplers move together). `sound` may be `nil`. |
+| `deckard.choke_all()` | Every voice ends. Nothing else changes. |
+| `deckard.cue_db(db)` | The cue channel's level. |
+| `deckard.input_db(input, db)` | In 1's or In 2's level, on the way in. |
+| `deckard.watch_input(on)` | Keep the interface input open for `input_meters`, with no sound taking it. |
+| `deckard.library(open)` | The main window's library panel; `state().browser` fills while it's open. |
+| `deckard.settings_wanted(on)` | `state().settings` fills with no Settings page showing. |
+| `deckard.reset_knob(n)` | Control knob `n` back to its default. |
+| `deckard.perform_mode(group, n)` | Its Perform FX's mode (1 Filter … 8 Scratcher), one added if it has none. |
+| `deckard.note_repeat("on", on)` | Note Repeat on or off, with no page. |
+| `deckard.lock("slot", n)` | Snapshot `n` (from 1) recalled or taken, whatever bank shows. |
+| `deckard.level_to_db(level)`, `deckard.db_to_level(db)` | A level as stored (0..1, 0.75 unity) and in dB. |
+
+`deckard.state()` also has `master_meter`, `cue_meter` and `input_meters[1..2]` (`{ left, right }` in dB), `cue_level`, `input_levels[1..2]` (as stored),
+and `scale.root`; a group's or sound's table has `aux` (its sends' levels), `swing` and `tune` (`nil`
+with no Sampler), and `perform` has `mode` and `name`.
 
 `require("lib.x")` looks in the device's own folder first (`devices/<id>/lib/x.lua`),
 then the shared `lib/`. A device never loads the MK3's pages. Each device runs in its own

@@ -205,8 +205,30 @@ pub enum Ask {
     Declined,
 }
 
+/// What a dialog says.
+pub struct Words {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub button: &'static str,
+    pub done: &'static str,
+}
+
 /// Ask to quit the agent if it's `holding` the screens. Says what came of it in `status`.
 pub fn dialog(ctx: &egui::Context, ask: &mut Ask, holding: bool, status: &mut String, quit: impl FnOnce() -> Result<(), String>) {
+    let words = Words { title: text::TITLE, body: text::BODY, button: text::BUTTON, done: text::DONE };
+    ask_about("ni-agent", &words, ctx, ask, holding, status, quit);
+}
+
+/// Ask `words`' question while `holding`, and `quit` if told to.
+pub fn ask_about(
+    id: &str,
+    words: &Words,
+    ctx: &egui::Context,
+    ask: &mut Ask,
+    holding: bool,
+    status: &mut String,
+    quit: impl FnOnce() -> Result<(), String>,
+) {
     if let Ask::Quitting(until) = *ask {
         let now = Instant::now();
         if now >= until {
@@ -225,21 +247,21 @@ pub fn dialog(ctx: &egui::Context, ask: &mut Ask, holding: bool, status: &mut St
         return;
     }
     let (mut quitting, mut declined) = (false, false);
-    egui::Modal::new(egui::Id::new("ni-agent")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
         ui.set_width(420.0);
-        ui.label(egui::RichText::new(text::TITLE).strong());
+        ui.label(egui::RichText::new(words.title).strong());
         ui.add_space(4.0);
-        ui.label(text::BODY);
+        ui.label(words.body);
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            quitting = ui.button(text::BUTTON).clicked();
+            quitting = ui.button(words.button).clicked();
             declined = ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
         });
     });
     if quitting {
         match quit() {
             Ok(()) => {
-                *status = text::DONE.into();
+                *status = words.done.into();
                 *ask = Ask::Quitting(Instant::now() + QUITTING);
             }
             Err(e) => {
