@@ -3972,6 +3972,15 @@ impl App {
         }
     }
 
+    /// The focused built-in EQ, as the right screen draws it.
+    fn eq_curve(slot: &deckard_model::SlotInfo) -> Option<deckard_surface::EqCurveView> {
+        if slot.module != "EQ" {
+            return None;
+        }
+        let curve = deckard_engine::fx::eq::response(&slot.params, 48_000.0, 120);
+        Some(deckard_surface::EqCurveView { points: curve.points, bands: curve.bands.into_iter().collect() })
+    }
+
     /// What DECKARD's own MK3 layer shows of the app now.
     fn surface_view(&self) -> deckard_surface::View {
         use deckard_surface::{ControlView, GroupView, KnobView, SoundView, View};
@@ -4021,6 +4030,7 @@ impl App {
                 .collect(),
             // (Only while the plug-in browser shows: the list is long.)
             modules: if self.surface.page() == "module" { self.module_views() } else { Vec::new() },
+            eq: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -4065,6 +4075,10 @@ impl App {
         let Some(doc) = &self.doc else { return v };
         let d = doc.borrow();
         let p = d.project();
+        // The built-in EQ's curve, for the right screen. Both of its pages use it.
+        if !self.channel {
+            v.control.eq = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i))).and_then(Self::eq_curve);
+        }
         v.project = p.name.clone();
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         v.swing = p.swing.amount;
