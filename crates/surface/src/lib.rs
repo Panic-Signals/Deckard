@@ -1020,6 +1020,8 @@ pub struct Surface {
     /// The last picture sent, and how many were sent.
     picture: Option<Vec<[u8; 4]>>,
     last_ops: Option<([u8; 3], Vec<screen::DrawOp>)>,
+    /// A picture was added since: the same drawing commands may now look different.
+    pictures_changed: std::cell::Cell<bool>,
     frames: u64,
     /// Pictures the scripts can draw ([`Surface::add_picture`]).
     pictures: screen::Pictures,
@@ -1048,6 +1050,7 @@ impl Surface {
             checked: None,
             picture: None,
             last_ops: None,
+            pictures_changed: std::cell::Cell::new(false),
             frames: 0,
             pictures: Default::default(),
         };
@@ -1323,7 +1326,7 @@ impl Surface {
     pub fn screen_picture(&mut self, v: &View) -> Option<(u64, screen::Picture)> {
         let p = self.draw_picture(v);
         let key = (p.background, p.ops.clone());
-        if self.last_ops.as_ref() == Some(&key) {
+        if !self.pictures_changed.replace(false) && self.last_ops.as_ref() == Some(&key) {
             return None;
         }
         self.last_ops = Some(key);
@@ -1336,7 +1339,7 @@ impl Surface {
     pub fn screens(&mut self, v: &View) -> Option<(u64, Vec<[u8; 4]>)> {
         let mut p = self.draw_picture(v);
         let key = (p.background, p.ops.clone());
-        if self.last_ops.as_ref() == Some(&key) {
+        if !self.pictures_changed.replace(false) && self.last_ops.as_ref() == Some(&key) {
             return None;
         }
         self.last_ops = Some(key);
@@ -1373,7 +1376,7 @@ impl Surface {
     pub fn add_picture(&self, key: &str, thumb: bool, w: usize, h: usize, px: Vec<[u8; 4]>) {
         if px.len() == w * h {
             self.pictures.borrow_mut().insert((key.to_string(), thumb), std::sync::Arc::new(screen::Image { w, h, px }));
-            self.last_ops = None;
+            self.pictures_changed.set(true);
         }
     }
 

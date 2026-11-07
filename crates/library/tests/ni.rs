@@ -94,8 +94,8 @@ fn instrument_products_use_bank_chain_entry1() {
         "INSERT INTO k_sound_info VALUES
             (40, 'Acid Lead', 'Native Instruments', 0, 1, '/Users/Shared/Deep Matter Library/Presets/Acid Lead.nksf', 0),
             (41, 'User Pad', '', 0, 2, '/Users/me/Documents/Native Instruments/User Content/Omnisphere/User Pad.nksf', 0);
-         INSERT INTO p_sound_info_Instrument_2 VALUES (40, 'Acid Lead', 'Massive X', 'Deep Matter', NULL, 1);
-         INSERT INTO p_sound_info_Instrument_1 VALUES (41, 'User Pad', 'Omnisphere', NULL, NULL, 2);",
+         INSERT INTO p_sound_info_Instrument_2 VALUES (40, 'Acid Lead', 'Massive X', 'Deep Matter', NULL, 1, NULL);
+         INSERT INTO p_sound_info_Instrument_1 VALUES (41, 'User Pad', 'Omnisphere', NULL, NULL, 2, NULL);",
     )
     .unwrap();
     drop(db);
