@@ -34,7 +34,10 @@ impl App {
     /// The project's LFOs for the surface; their pictures only with `points`.
     pub(crate) fn lfo_views(&self, points: bool) -> Vec<LfoView> {
         let Some(doc) = &self.doc else { return Vec::new() };
-        doc.borrow()
+        let project = doc.borrow();
+        let tempo = project.project().tempo;
+        let seconds = display_seconds();
+        project
             .project()
             .lfos
             .iter()
@@ -56,7 +59,13 @@ impl App {
                 sustain: l.sustain as f64,
                 retrigger: l.retrigger,
                 name: l.name(),
-                points: if points { l.picture(240) } else { Vec::new() },
+                points: if !points {
+                    Vec::new()
+                } else if l.env {
+                    l.picture(240)
+                } else {
+                    l.picture_at(240, l.display_cycles(seconds, tempo))
+                },
                 marks: l.picture_marks(),
                 note_off: l.picture_note_off(),
             })
@@ -155,6 +164,12 @@ impl App {
         }
         layout::apply_acts(self, vec![Act::SetLfo(l)]);
     }
+}
+
+/// Seconds since the first picture, so the hardware wave scrolls with the panel.
+fn display_seconds() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
 }
 
 fn round2(x: f32) -> f32 {

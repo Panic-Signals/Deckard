@@ -40,6 +40,7 @@ impl crate::App {
                 .map(|pg| PluginPageSpec {
                     name: pg.name.clone(),
                     knobs: pg.knobs.iter().map(|(info, _, section)| (info.id, section.clone())).collect(),
+                    custom_names: pg.knobs.iter().map(|(_, name, _)| name.clone()).collect(),
                 })
                 .collect()
         };
