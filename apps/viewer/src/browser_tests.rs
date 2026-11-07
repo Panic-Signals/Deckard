@@ -252,6 +252,29 @@ fn favorites_mark_and_filter_results() {
     assert_eq!(names(&h), ["Kick[120] Lagoon"]);
 }
 
+/// Each result has a heart: a click adds the favorite, another takes it off, with no
+/// right-click menu.
+#[test]
+fn a_rows_heart_adds_and_removes_a_favorite() {
+    use egui_kittest::kittest::Queryable;
+    let (_tmp, dir) = temp();
+    let Some(mut h) = open_browser(&dir) else { return };
+    act(&mut h, BrowseAct::Kind(Kind::Loop));
+    let favorites = |h: &Harness<'static, App>| h.state().browser.results.items.iter().filter(|i| i.favorite).count();
+    assert_eq!(favorites(&h), 0);
+    h.query_all_by_label("Add to Favorites").next().expect("a heart on each row").click();
+    h.run_steps(2);
+    h.state_mut().browser.wait();
+    h.run_steps(2);
+    assert_eq!(favorites(&h), 1);
+    assert_eq!(h.state().browser.selected, None, "the click didn't select the row");
+    h.query_by_label("Remove from Favorites").expect("the favorite's heart").click();
+    h.run_steps(2);
+    h.state_mut().browser.wait();
+    h.run_steps(2);
+    assert_eq!(favorites(&h), 0);
+}
+
 /// A sound with no plug-ins in the focused group.
 fn empty_sound(h: &Harness<'static, App>) -> (usize, usize) {
     let g = h.state().group;
