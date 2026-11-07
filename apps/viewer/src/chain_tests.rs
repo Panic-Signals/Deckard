@@ -178,20 +178,34 @@ fn effects_move_after_the_instrument_with_their_side_chain() {
     );
 }
 
-/// Side-chain sources are a sound's effects' only: a group's or the master's Compressor
-/// offers none (choosing one used to set the focused sound's slot instead).
+/// Side-chain sources are offered for a sound's and a group's effects (excluding self),
+/// while the master's effects offer none.
 #[test]
-fn only_a_sounds_effects_take_side_chains() {
+fn sounds_and_groups_take_side_chains_not_master() {
     use crate::layout::channel::sidechain_choices;
     use deckard_doc::Chain;
     let mut app = crate::App::default();
     app.new_project();
     let doc = app.doc.clone().unwrap();
-    let d = doc.borrow();
-    let p = d.project();
-    assert!(sidechain_choices(p, Chain::Sound(0, 0), 0).is_some());
-    assert!(sidechain_choices(p, Chain::Group(0), 0).is_none());
-    assert!(sidechain_choices(p, Chain::Master, 0).is_none());
+    let g1 = doc.borrow_mut().add_group().unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Group(0), 0, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Master, 0, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+    {
+        let d = doc.borrow();
+        let p = d.project();
+        assert!(sidechain_choices(p, Chain::Sound(0, 0), 0).is_some());
+        let (choices, _, _) = sidechain_choices(p, Chain::Group(0), 0).expect("group offers side-chain choices");
+        assert!(!choices.iter().any(|c| c.starts_with("A1 ")), "a group cannot side-chain itself: {choices:?}");
+        assert!(choices.iter().any(|c| c.starts_with("B1 ")), "another group is offered: {choices:?}");
+        assert!(sidechain_choices(p, Chain::Master, 0).is_none());
+    }
+    (app.group, app.chain_tab, app.channel, app.slot) = (0, ChainTab::Group, false, Some(0));
+    assert_eq!(app.control_snapshot([false; 8]).pages, ["Main", "Side-Chain Input"]);
+    doc.borrow_mut().set_chain_sidechain(Chain::Group(0), 0, Some(deckard_model::ScSource::Group(g1))).unwrap();
+    assert_eq!(doc.borrow().project().groups[0].channel.sidechain, [(0, deckard_model::ScSource::Group(g1))]);
+
+    (app.chain_tab, app.channel, app.slot) = (ChainTab::Master, false, Some(0));
+    assert_eq!(app.control_snapshot([false; 8]).pages, ["Main"], "master omits Side-Chain Input");
 }
 
 /// The 4-D encoder's left and right, and SHIFT's slot edits, stay on the chain
@@ -369,4 +383,69 @@ fn the_controller_adds_a_groups_perform_fx() {
     app.chain_tab = ChainTab::Sound;
     app.doc.as_ref().unwrap().borrow_mut().remove_slot_in(Chain::Group(0), 0).unwrap();
     assert_eq!(offered(&app), 0, "not for a sound");
+}
+
+#[test]
+fn a_side_chain_plugin_shows_its_side_chain_page_on_sound_and_group() {
+    use deckard_doc::Chain;
+    use deckard_lua_host::state::ControlRequest as R;
+    struct Duck;
+    impl deckard_plugins::native::Engine for Duck {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn reset(&mut self) {}
+        fn has_sidechain(&self) -> bool {
+            true
+        }
+        fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &deckard_plugins::Transport) {}
+    }
+    static PARAMS: [deckard_plugins::native::Param; 1] =
+        [deckard_plugins::native::Param { id: 0, name: "Mix", short: "MIX", default: 1.0, steps: 0 }];
+    static PAGES: [deckard_plugins::native::Page; 1] = [deckard_plugins::native::Page { name: "Main", knobs: &[(0, "")] }];
+    static DUCK_CLASS: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: *b"DKRDVIEWERDUCK01",
+        name: "Duck",
+        instrument: false,
+        params: &PARAMS,
+        pages: &PAGES,
+        make: |_| Box::new(Duck),
+    };
+
+    let mut app = crate::App::default();
+    app.new_project();
+    let doc = app.doc.clone().unwrap();
+    let plugin_id = DUCK_CLASS.plugin_id();
+    let new = deckard_doc::NewModule::Plugin { id: plugin_id.clone(), name: "Duck".into(), chunk: Vec::new() };
+    doc.borrow_mut().add_slot_in(Chain::Sound(0, 0), 0, &new).unwrap();
+    doc.borrow_mut().add_slot_in(Chain::Group(0), 0, &new).unwrap();
+
+    for (tab, chain) in [(ChainTab::Sound, Chain::Sound(0, 0)), (ChainTab::Group, Chain::Group(0))] {
+        let id = deckard_plugins::state::PluginId::parse(&plugin_id, "Duck").unwrap();
+        let host_slot = app.plugin_slot_key(chain, 0);
+        let rate = app.output_rate();
+        app.samples.plugins.insert(host_slot, deckard_plugins::Plugin::native(&DUCK_CLASS, id, "Duck", rate));
+        (app.group, app.sound, app.chain_tab, app.channel, app.slot, app.plugin_page) = (0, 0, tab, false, Some(0), 0);
+        app.update_slot_view();
+        let c = app.control_snapshot([false; 8]);
+        assert_eq!(c.pages, ["Main", "Side-Chain Input"], "{tab:?}");
+        app.control_request(R::Page(true));
+        let c = app.control_snapshot([false; 8]);
+        assert_eq!(c.page, 1, "{tab:?}: RIGHT reaches the side-chain page");
+        let names: Vec<Option<String>> = c.knobs.iter().map(|k| k.as_ref().map(|k| k.name.clone())).collect();
+        assert_eq!(names[0].as_deref(), Some("SOURCE"), "{tab:?}: {names:?}");
+        assert_eq!(names[1].as_deref(), Some("GAIN"));
+        assert_eq!(names[2].as_deref(), Some("FILTER"));
+        assert_eq!(names[3].as_deref(), Some("CENTER FREQ"));
+        assert_eq!(names[4].as_deref(), Some("WIDTH"));
+        for _ in 0..4 {
+            app.control_request(R::Turn { pos: 0, inc: 0.2, fine: false });
+        }
+        let sc = match tab {
+            ChainTab::Sound => doc.borrow().project().groups[0].sounds[0].channel.sidechain.clone(),
+            ChainTab::Group => doc.borrow().project().groups[0].channel.sidechain.clone(),
+            ChainTab::Master => unreachable!(),
+        };
+        assert!(!sc.is_empty(), "{tab:?}: turning SOURCE chooses a side-chain source");
+    }
 }

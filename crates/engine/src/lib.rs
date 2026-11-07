@@ -793,11 +793,19 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
     }
 }
 
+fn plugin_unit(plugin: Shared, params: &[(String, f64)], sr_f: f64) -> FxUnit {
+    let mut sc_filter = fx::sidechain::SidechainFilter::new(sr_f);
+    sc_filter.set(params);
+    FxUnit::Plugin { plugin, params: params.to_vec(), sc_filter }
+}
+
 /// The effects of a group's or the master's chain (all its slots), as a sound's are
 /// made: plug-ins (`key` names their slot), Maschine's own effects DECKARD renders.
+#[allow(clippy::too_many_arguments)]
 fn effect_units(
     slots: &[deckard_model::SlotInfo],
     key: impl Fn(usize) -> Slot,
+    hears: impl Fn(usize) -> Vec<usize>,
     owner: &str,
     tempo: f64,
     sr_f: f64,
@@ -806,16 +814,17 @@ fn effect_units(
 ) -> Vec<Unit> {
     let mut units = Vec::with_capacity(slots.len() + FX_SPARE);
     for (slot, info) in slots.iter().enumerate() {
+        let listen = if info.active { hears(slot) } else { Vec::new() };
         match &info.plugin {
             Some(pr) if !info.active => {
                 if let Some(p) = cache.plugins.loaded(key(slot), &pr.id, &pr.name) {
-                    units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), false));
+                    units.push(Unit::new(plugin_unit(p, &info.params, sr_f), slot, Vec::new(), false));
                 }
             }
             Some(pr) => match cache.plugins.instance(key(slot), &pr.id, &pr.name, &pr.chunk, sr_f) {
                 Ok(p) => {
                     report.plugins.push(format!("{owner}: {}", pr.name));
-                    units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), true));
+                    units.push(Unit::new(plugin_unit(p, &info.params, sr_f), slot, listen, true));
                 }
                 Err(e) => report.plugin_errors.push(e),
             },
@@ -832,7 +841,7 @@ fn effect_units(
                         hit: false,
                         modulated: false,
                     };
-                    units.push(Unit::new(unit, slot, Vec::new(), info.active));
+                    units.push(Unit::new(unit, slot, listen, info.active));
                 }
             }
         }
@@ -928,7 +937,7 @@ impl Unit {
     /// of Maschine's own effects.
     fn same(&self, other: &Unit) -> bool {
         match (&self.fx, &other.fx) {
-            (FxUnit::Plugin(a), FxUnit::Plugin(b)) => Arc::ptr_eq(a, b),
+            (FxUnit::Plugin { plugin: a, .. }, FxUnit::Plugin { plugin: b, .. }) => Arc::ptr_eq(a, b),
             (FxUnit::Internal { class: a, .. }, FxUnit::Internal { class: b, .. }) => a == b,
             _ => false,
         }
@@ -937,7 +946,11 @@ impl Unit {
 
 /// One effect of a chain: a plug-in, or one of Maschine's own (by class).
 enum FxUnit {
-    Plugin(Shared),
+    Plugin {
+        plugin: Shared,
+        params: Vec<(String, f64)>,
+        sc_filter: fx::sidechain::SidechainFilter,
+    },
     /// `params`: the settings `fx` was made with (an adopted effect takes them);
     /// `glide` takes it to new ones.
     Internal {
@@ -990,13 +1003,17 @@ impl FxChain {
                 }
             }
             match u {
-                FxUnit::Plugin(shared) => {
+                FxUnit::Plugin { plugin: shared, sc_filter, .. } => {
+                    if !sources.is_empty() {
+                        sc_filter.process(&mut self.sl[..n], &mut self.sr[..n]);
+                    }
                     let started = std::time::Instant::now();
                     let Ok(mut p) = shared.lock() else {
                         skipped();
                         continue;
                     };
-                    let (ol, or) = p.process_input(n, transport, Some((&self.l[..n], &self.r[..n])));
+                    let sc = (!sources.is_empty()).then_some((&self.sl[..n], &self.sr[..n]));
+                    let (ol, or) = p.process_input_sc(n, transport, Some((&self.l[..n], &self.r[..n])), sc);
                     if ol.len() >= n && or.len() >= n {
                         self.l[..n].copy_from_slice(&ol[..n]);
                         self.r[..n].copy_from_slice(&or[..n]);
@@ -1055,9 +1072,15 @@ impl FxChain {
     fn set_params(&mut self, params: &mut [(usize, Vec<(String, f64)>)]) {
         for (slot, new) in params.iter_mut() {
             for u in self.units.iter_mut().filter(|u| u.slot == *slot && !u.ghost) {
-                if let FxUnit::Internal { params: had, fx, glide, .. } = &mut u.fx {
-                    std::mem::swap(had, new);
-                    fx.set(if glide.retarget(had) { glide.now() } else { had });
+                match &mut u.fx {
+                    FxUnit::Plugin { params: had, sc_filter, .. } => {
+                        std::mem::swap(had, new);
+                        sc_filter.set(had);
+                    }
+                    FxUnit::Internal { params: had, fx, glide, .. } => {
+                        std::mem::swap(had, new);
+                        fx.set(if glide.retarget(had) { glide.now() } else { had });
+                    }
                 }
             }
         }
@@ -1111,18 +1134,26 @@ impl FxChain {
             if self.units[i].same(&old.units[live[j]]) {
                 let o = &mut old.units[live[j]];
                 let u = &mut self.units[i];
-                if let (
-                    FxUnit::Internal { params, fx, glide, modulated, .. },
-                    FxUnit::Internal { params: op, fx: ofx, glide: og, modulated: om, .. },
-                ) = (&mut u.fx, &mut o.fx)
-                {
-                    std::mem::swap(fx, ofx);
-                    std::mem::swap(glide, og);
-                    // Modulated values it plays go back to the knob's when nothing holds them.
-                    *modulated = *om;
-                    if params != op {
-                        fx.set(if glide.retarget(params) { glide.now() } else { params });
+                match (&mut u.fx, &mut o.fx) {
+                    (FxUnit::Plugin { params, sc_filter, .. }, FxUnit::Plugin { params: op, sc_filter: osf, .. }) => {
+                        std::mem::swap(sc_filter, osf);
+                        if params != op {
+                            sc_filter.set(params);
+                        }
                     }
+                    (
+                        FxUnit::Internal { params, fx, glide, modulated, .. },
+                        FxUnit::Internal { params: op, fx: ofx, glide: og, modulated: om, .. },
+                    ) => {
+                        std::mem::swap(fx, ofx);
+                        std::mem::swap(glide, og);
+                        // Modulated values it plays go back to the knob's when nothing holds them.
+                        *modulated = *om;
+                        if params != op {
+                            fx.set(if glide.retarget(params) { glide.now() } else { params });
+                        }
+                    }
+                    _ => {}
                 }
                 // Carry on from how far it was faded, toward its new state.
                 let target = u.target;
@@ -1699,6 +1730,17 @@ impl Engine {
                 .filter_map(|k| sc_index.get(&k).copied())
                 .collect()
         };
+        // The side-chain buffers the effect in chain slot `slot` of group `gi` hears.
+        let hears_group = |gi: usize, slot: usize| -> Vec<usize> {
+            project.groups[gi]
+                .channel
+                .sidechain
+                .iter()
+                .filter(|(k, src)| *k == slot && *src != deckard_model::ScSource::Group(gi))
+                .flat_map(|&(_, src)| source_sounds(src))
+                .filter_map(|k| sc_index.get(&k).copied())
+                .collect()
+        };
         // What the playing engine can keep: only when the project's shape and its
         // side-chains are the same.
         let same_shape = |a: &Project| {
@@ -1751,13 +1793,13 @@ impl Engine {
                         // fade back in); none is loaded just to sit bypassed.
                         Some(pr) if !info.active => {
                             if let Some(p) = cache.plugins.loaded(key, &pr.id, &pr.name) {
-                                units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), false));
+                                units.push(Unit::new(plugin_unit(p, &info.params, sr_f), slot, Vec::new(), false));
                             }
                         }
                         Some(pr) => match cache.plugins.instance(key, &pr.id, &pr.name, &pr.chunk, sr_f) {
                             Ok(p) => {
                                 report.plugins.push(format!("{} / {}: {}", g.name, s.name, pr.name));
-                                units.push(Unit::new(FxUnit::Plugin(p), slot, Vec::new(), true));
+                                units.push(Unit::new(plugin_unit(p, &info.params, sr_f), slot, hears, true));
                             }
                             Err(e) => report.plugin_errors.push(e),
                         },
@@ -1995,7 +2037,7 @@ impl Engine {
                         matches!(snd.channel.audio_in, deckard_model::AudioSource::Ext(_))
                             || sc_index.keys().any(|&(sg, ss, _)| (sg, ss) == (g, s))
                             // (From the project: an edit leaves a kept chain unbuilt here.)
-                            || effect_slots(snd).iter().any(|&(slot, x)| x.active && x.plugin.is_none() && !hears(g, s, slot).is_empty())
+                            || effect_slots(snd).iter().any(|&(slot, x)| x.active && !hears(g, s, slot).is_empty())
                             || matches!(routes.get(g).and_then(|r| r.get(s)), Some(Some(midi::OutRoute::Sound(_))))
                             || routed_to(g, s)
                             || explicit(&snd.channel.midi_source)
@@ -2059,6 +2101,7 @@ impl Engine {
                     let units = effect_units(
                         &grp.slots,
                         |slot| Slot::Group { group: gi, slot },
+                        |slot| hears_group(gi, slot),
                         &grp.name,
                         project.tempo,
                         sr_f,
@@ -2076,7 +2119,16 @@ impl Engine {
             .collect();
         let master_fx = (!project.master_slots.is_empty()).then(|| {
             bare_chain(
-                effect_units(&project.master_slots, |slot| Slot::Master { slot }, "Master", project.tempo, sr_f, cache, &mut report),
+                effect_units(
+                    &project.master_slots,
+                    |slot| Slot::Master { slot },
+                    |_| Vec::new(),
+                    "Master",
+                    project.tempo,
+                    sr_f,
+                    cache,
+                    &mut report,
+                ),
                 sr_f,
             )
         });
@@ -4596,14 +4648,22 @@ fn sidechain_sources(project: &Project, src: deckard_model::ScSource) -> Vec<(us
 /// fader).
 fn sidechain_index(project: &Project) -> HashMap<(usize, usize, bool), usize> {
     let mut sc_index = HashMap::new();
-    for g in &project.groups {
+    let mut add = |src| {
+        for k in sidechain_sources(project, src) {
+            let n = sc_index.len();
+            sc_index.entry(k).or_insert(n);
+        }
+    };
+    for (gi, g) in project.groups.iter().enumerate() {
+        for &(slot, src) in &g.channel.sidechain {
+            if src != deckard_model::ScSource::Group(gi) && g.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                add(src);
+            }
+        }
         for s in &g.sounds {
             for &(slot, src) in &s.channel.sidechain {
-                if s.slots.get(slot).is_some_and(|x| x.active && x.plugin.is_none() && !x.is_instrument()) {
-                    for k in sidechain_sources(project, src) {
-                        let n = sc_index.len();
-                        sc_index.entry(k).or_insert(n);
-                    }
+                if s.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                    add(src);
                 }
             }
         }
@@ -4715,7 +4775,7 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64, plug
     if chain_shape(old) == chain_shape(new) && same_fx_plugins && old.channel.sidechain == new.channel.sidechain {
         r.chain = true;
         for ((i, a), (_, b)) in effect_slots(old).into_iter().zip(effect_slots(new)) {
-            if a.plugin.is_none() && a.params != b.params {
+            if a.params != b.params {
                 r.params.push((i, b.params.clone()));
             }
         }
@@ -8316,6 +8376,141 @@ mod tests {
         let (alone, ducked) = (peak(false), peak(true));
         assert!(alone > 0.5, "sound 0 alone passes: {alone}");
         assert!(ducked < alone * 0.1, "held down by sound 1's side-chain: {ducked} vs {alone}");
+    }
+
+    /// Group routing: a Limiter on group 0 side-chained from sound 1 (routed to None)
+    /// ducks group 0's output when sound 1 plays.
+    #[test]
+    fn sidechain_ducks_a_group() {
+        let mut p = project();
+        let click = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(click);
+        let lim = vec![("mode".into(), 1.0), ("threshold".into(), -30.0), ("release".into(), 0.5), ("ceiling".into(), 1.0)];
+        p.groups[0].slots =
+            vec![deckard_model::SlotInfo { module: "Limiter".into(), name: "Limiter".into(), active: true, plugin: None, params: lim }];
+        p.groups[0].channel.sidechain = vec![(0, deckard_model::ScSource::Sound(0, 1))];
+        p.groups[0].sounds[1].channel.dest = deckard_model::AudioDest::None;
+        let peak = |with_source: bool| {
+            let mut e = click_engine_for(&p, 48_000);
+            e.sequencing = false;
+            e.note_on(0, 0, 60, 127, 960);
+            if with_source {
+                e.note_on(0, 1, 60, 127, 960);
+            }
+            let mut out = vec![0f32; 2 * 4800];
+            e.process(&mut out);
+            out.iter().fold(0f32, |m, v| m.max(v.abs()))
+        };
+        let (alone, ducked) = (peak(false), peak(true));
+        assert!(alone > 0.5, "group 0 alone passes: {alone}");
+        assert!(ducked < alone * 0.1, "group 0 held down by sound 1's side-chain: {ducked} vs {alone}");
+    }
+
+    /// Plug-in side-chain routing: a plug-in effect with a side-chain input receives the
+    /// routed side-chain audio (filtered through its `SidechainFilter`) on both Sound and
+    /// Group chains.
+    #[test]
+    fn sidechain_ducks_a_plugin_effect() {
+        struct Duck;
+        impl deckard_plugins::native::Engine for Duck {
+            fn set_param(&mut self, _: u32, _: f64) {}
+            fn note_on(&mut self, _: u8, _: u8) {}
+            fn note_off(&mut self, _: u8) {}
+            fn reset(&mut self) {}
+            fn has_sidechain(&self) -> bool {
+                true
+            }
+            fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &deckard_plugins::Transport) {}
+            fn process_sc(
+                &mut self,
+                left: &mut [f32],
+                right: &mut [f32],
+                sidechain: Option<(&[f32], &[f32])>,
+                _: &deckard_plugins::Transport,
+            ) {
+                if let Some((sl, sr)) = sidechain {
+                    for i in 0..left.len() {
+                        let sc = sl[i].abs().max(sr[i].abs());
+                        let g = (1.0 - sc * 4.0).max(0.0);
+                        left[i] *= g;
+                        right[i] *= g;
+                    }
+                }
+            }
+        }
+        static DUCK_CLASS: deckard_plugins::native::Class = deckard_plugins::native::Class {
+            cid: *b"DKRDTESTDUCKFX01",
+            name: "Duck",
+            instrument: false,
+            params: &[],
+            pages: &[],
+            make: |_| Box::new(Duck),
+        };
+
+        let run = |on_group: bool, with_source: bool, sc_gain: f64| {
+            let mut p = project();
+            let click = p.groups[0].sounds[0].clone();
+            p.groups[0].sounds.push(click);
+            p.groups[0].sounds[1].channel.dest = deckard_model::AudioDest::None;
+            let plugin_id = DUCK_CLASS.plugin_id();
+            let plug_slot = deckard_model::SlotInfo {
+                module: "PluginHost".into(),
+                name: "Duck".into(),
+                active: true,
+                plugin: Some(deckard_model::PluginRef { id: plugin_id.clone(), name: "Duck".into(), chunk: Vec::new(), pages: Vec::new() }),
+                params: vec![
+                    ("side_chain_filter/gain".into(), sc_gain),
+                    ("side_chain_filter/center_freq".into(), 0.5),
+                    ("side_chain_filter/width".into(), 0.5),
+                ],
+            };
+            let host_slot = if on_group {
+                p.groups[0].slots = vec![plug_slot];
+                p.groups[0].channel.sidechain = vec![(0, deckard_model::ScSource::Sound(0, 1))];
+                deckard_plugins::Slot::Group { group: 0, slot: 0 }
+            } else {
+                p.groups[0].sounds[0].slots = vec![
+                    deckard_model::SlotInfo {
+                        module: "Sampler".into(),
+                        name: "Sampler".into(),
+                        active: true,
+                        plugin: None,
+                        params: Vec::new(),
+                    },
+                    plug_slot,
+                ];
+                p.groups[0].sounds[0].channel.sidechain = vec![(1, deckard_model::ScSource::Sound(0, 1))];
+                deckard_plugins::Slot::Chain { group: 0, sound: 0, slot: 1 }
+            };
+            let mut cache = SampleCache::default();
+            let id = deckard_plugins::state::PluginId::parse(&plugin_id, "Duck").unwrap();
+            cache.plugins.insert(host_slot, deckard_plugins::Plugin::native(&DUCK_CLASS, id, "Duck", 48_000.0));
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            let mut frames = vec![[0f32; 2]; 100];
+            frames[0] = [1.0, 1.0];
+            set_sample(&mut e, frames, &[], false);
+            e.sequencing = false;
+            e.note_on(0, 0, 60, 127, 960);
+            if with_source {
+                e.note_on(0, 1, 60, 127, 960);
+            }
+            let mut out = vec![0f32; 2 * 480];
+            e.process(&mut out);
+            out.iter().fold(0f32, |m, v| m.max(v.abs()))
+        };
+
+        for on_group in [false, true] {
+            let alone = run(on_group, false, 0.5);
+            let ducked = run(on_group, true, 0.5);
+            let attenuated_sc = run(on_group, true, 0.0);
+            assert!(alone > 0.5, "on_group={on_group}: passes without side-chain: {alone}");
+            assert!(ducked < 0.01, "on_group={on_group}: ducked by side-chain: {ducked}");
+            assert!(
+                (attenuated_sc - alone * 0.6).abs() < 1e-3,
+                "on_group={on_group}: side_chain_filter/gain=0 (-20 dB) scales side-chain by 0.1: {attenuated_sc} vs {}",
+                alone * 0.6
+            );
+        }
     }
 
     /// Playing patterns, rendering ahead, updated as the app updates (incrementally): a

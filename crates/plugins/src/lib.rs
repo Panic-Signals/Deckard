@@ -389,6 +389,11 @@ impl Plugin {
         each!(mut self, p => p.pitch_bend(value))
     }
 
+    /// Whether this plug-in has a side-chain audio input bus.
+    pub fn has_sidechain(&self) -> bool {
+        each!(self, p => p.has_sidechain())
+    }
+
     /// Run the plug-in for `frames` frames (at most [`MAX_BLOCK`]); returns its main
     /// output (left, right).
     pub fn process(&mut self, frames: usize, transport: &Transport) -> (&[f32], &[f32]) {
@@ -398,7 +403,19 @@ impl Plugin {
     /// [`Plugin::process`] with `input` (left, right) on the plug-in's main input: an
     /// effect.
     pub fn process_input(&mut self, frames: usize, transport: &Transport, input: Option<(&[f32], &[f32])>) -> (&[f32], &[f32]) {
-        each!(mut self, p => p.process_input(frames, transport, input))
+        self.process_input_sc(frames, transport, input, None)
+    }
+
+    /// [`Plugin::process_input`] with `sidechain` (left, right) on the plug-in's
+    /// side-chain input bus, when it has one.
+    pub fn process_input_sc(
+        &mut self,
+        frames: usize,
+        transport: &Transport,
+        input: Option<(&[f32], &[f32])>,
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> (&[f32], &[f32]) {
+        each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain))
     }
 
     /// A way to read and change a VST3's or an Audio Unit's parameters without holding
@@ -858,9 +875,20 @@ impl Vst3 {
         }
     }
 
-    /// [`Plugin::process`] with `input` (left, right) on the plug-in's main input: an
-    /// effect.
-    pub fn process_input(&mut self, frames: usize, transport: &Transport, input: Option<(&[f32], &[f32])>) -> (&[f32], &[f32]) {
+    /// Whether the plug-in has a second audio input bus (its side-chain input).
+    pub fn has_sidechain(&self) -> bool {
+        self.inputs.get(1).is_some_and(|b| !b.is_empty())
+    }
+
+    /// [`Plugin::process`] with `input` (left, right) on the plug-in's main input and
+    /// `sidechain` on the second audio input bus.
+    pub fn process_input_sc(
+        &mut self,
+        frames: usize,
+        transport: &Transport,
+        input: Option<(&[f32], &[f32])>,
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> (&[f32], &[f32]) {
         let frames = frames.min(MAX_BLOCK);
         if !self.active || frames == 0 || self.outputs.first().is_none_or(|b| b.is_empty()) {
             self.events.events.borrow_mut().clear();
@@ -882,24 +910,26 @@ impl Vst3 {
         for b in &mut self.in_buses {
             b.silenceFlags = u64::MAX;
         }
-        if let Some((l, r)) = input
-            && let Some(main) = self.inputs.first_mut()
-        {
-            let n = frames.min(l.len()).min(r.len());
-            match main.len() {
-                0 => {}
-                1 => {
-                    for (o, (a, b)) in main[0][..n].iter_mut().zip(l.iter().zip(r)) {
-                        *o = (a + b) * 0.5;
+        for (bus, src) in [(0usize, input), (1usize, sidechain)] {
+            if let Some((l, r)) = src
+                && let Some(target) = self.inputs.get_mut(bus)
+            {
+                let n = frames.min(l.len()).min(r.len());
+                match target.len() {
+                    0 => {}
+                    1 => {
+                        for (o, (a, b)) in target[0][..n].iter_mut().zip(l.iter().zip(r)) {
+                            *o = (a + b) * 0.5;
+                        }
+                    }
+                    _ => {
+                        target[0][..n].copy_from_slice(&l[..n]);
+                        target[1][..n].copy_from_slice(&r[..n]);
                     }
                 }
-                _ => {
-                    main[0][..n].copy_from_slice(&l[..n]);
-                    main[1][..n].copy_from_slice(&r[..n]);
+                if let Some(b) = self.in_buses.get_mut(bus) {
+                    b.silenceFlags = 0;
                 }
-            }
-            if let Some(b) = self.in_buses.first_mut() {
-                b.silenceFlags = 0;
             }
         }
         for b in &mut self.out_buses {
@@ -1084,6 +1114,13 @@ impl Host {
         self.instances.get(&slot).cloned()
     }
 
+    /// Put `plugin` in `slot`.
+    pub fn insert(&mut self, slot: Slot, plugin: Plugin) -> Shared {
+        let shared = Arc::new(Mutex::new(plugin));
+        self.instances.insert(slot, shared.clone());
+        shared
+    }
+
     /// The instance for `slot`, playing plug-in `plugin_id` (Maschine's id) named
     /// `name` with Maschine's saved `chunk`. Reuses the slot's instance when it is the
     /// same plug-in, and loads the chunk again only if it changed.
@@ -1092,29 +1129,6 @@ impl Host {
         // Audio Units are Apple's.
         if cfg!(not(target_os = "macos")) && id.format == state::Format::AudioUnit {
             return Err(format!("{name}: plug-in format not supported ({plugin_id})"));
-        }
-        // DECKARD's own plug-ins need no module, and may be made on any thread.
-        if let Some(class) = native::find(&id.cid) {
-            if let Some(shared) = self.instances.get(&slot) {
-                let mut p = shared.lock().unwrap();
-                if p.id.cid == id.cid && p.sample_rate() == sample_rate {
-                    if p.chunk() != chunk {
-                        p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
-                    }
-                    drop(p);
-                    return Ok(shared.clone());
-                }
-            }
-            let mut p = Plugin::native(class, id, name, sample_rate);
-            p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
-            p.warm_up();
-            let shared = Arc::new(Mutex::new(p));
-            self.instances.insert(slot, shared.clone());
-            return Ok(shared);
-        }
-        if !on_main_thread() {
-            // Plug-ins with their own UI toolkit (NI's use Qt) abort if created elsewhere.
-            return Err(format!("{name}: plug-ins can only be loaded on the main thread"));
         }
         if let Some(shared) = self.instances.get(&slot) {
             let mut p = shared.lock().unwrap();
@@ -1125,6 +1139,19 @@ impl Host {
                 drop(p);
                 return Ok(shared.clone());
             }
+        }
+        // DECKARD's own plug-ins need no module, and may be made on any thread.
+        if let Some(class) = native::find(&id.cid) {
+            let mut p = Plugin::native(class, id, name, sample_rate);
+            p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
+            p.warm_up();
+            let shared = Arc::new(Mutex::new(p));
+            self.instances.insert(slot, shared.clone());
+            return Ok(shared);
+        }
+        if !on_main_thread() {
+            // Plug-ins with their own UI toolkit (NI's use Qt) abort if created elsewhere.
+            return Err(format!("{name}: plug-ins can only be loaded on the main thread"));
         }
         #[cfg(target_os = "macos")]
         let made = if id.format == state::Format::AudioUnit {

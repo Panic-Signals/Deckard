@@ -127,6 +127,11 @@ impl Document {
                     self.set_group_route(x, Some(a), AudioDest::None)?;
                 }
             }
+            for (slot, src) in &group.channel.sidechain {
+                if matches!(src, ScSource::Group(y) | ScSource::Sound(y, _) if *y == g) {
+                    self.set_chain_sidechain(crate::Chain::Group(x), *slot, None)?;
+                }
+            }
         }
         for (cue, d) in [(false, p.master_output), (true, p.cue_output)] {
             if dest(d) {

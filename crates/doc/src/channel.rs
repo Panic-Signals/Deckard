@@ -181,14 +181,21 @@ impl Document {
         self.apply(label, ops)
     }
 
+    fn sidechain_holder(&self, c: crate::Chain) -> Option<Path> {
+        match c {
+            crate::Chain::Sound(g, s) => self.sound_config_path(g, s),
+            crate::Chain::Group(g) => self.owner(Target::Group(g)),
+            crate::Chain::Master => None,
+        }
+    }
+
     /// Set (or clear) the side-chain source of the effect in slot `slot` of sound `s`
     /// (group `g`). Maschine keeps it in the group's sound config, by slot.
-    /// The op re-keying the side-chain inputs of chain `c` (a sound's) as its slots
-    /// moved: `remap` gives each slot's new place, `None` if it's gone (its input goes
-    /// too). `None` when nothing changes.
+    /// The op re-keying the side-chain inputs of chain `c` (a sound's or a group's) as
+    /// its slots moved: `remap` gives each slot's new place, `None` if it's gone (its
+    /// input goes too). `None` when nothing changes.
     pub(crate) fn sidechain_rekey(&self, c: crate::Chain, remap: impl Fn(usize) -> Option<usize>) -> Option<Op> {
-        let crate::Chain::Sound(g, s) = c else { return None };
-        let at = self.sound_config_path(g, s)?;
+        let at = self.sidechain_holder(c)?;
         let Some(Value::Obj(cfg)) = self.tree.at(&at) else { return None };
         let mi = cfg.fields.iter().position(|(n, _)| n == "sidechain_inputs")?;
         let Value::Obj(map) = &cfg.fields[mi].1 else { return None };
@@ -221,7 +228,14 @@ impl Document {
     }
 
     pub fn set_sidechain(&mut self, g: usize, s: usize, slot: usize, src: Option<ScSource>) -> Result<(), String> {
-        let at = self.sound_config_path(g, s).ok_or("this sound has no saved routing")?;
+        self.set_chain_sidechain(crate::Chain::Sound(g, s), slot, src)
+    }
+
+    pub fn set_chain_sidechain(&mut self, c: crate::Chain, slot: usize, src: Option<ScSource>) -> Result<(), String> {
+        if matches!(c, crate::Chain::Master) {
+            return Err("the master has no side-chain input".into());
+        }
+        let at = self.sidechain_holder(c).ok_or("this sound has no saved routing")?;
         let Some(Value::Obj(cfg)) = self.tree.at(&at) else { return Err("no sound config".into()) };
         let mi = cfg.fields.iter().position(|(n, _)| n == "sidechain_inputs").ok_or("this project's format has no side-chain inputs")?;
         let Value::Obj(map) = &cfg.fields[mi].1 else { return Err("bad side-chain map".into()) };
@@ -244,9 +258,14 @@ impl Document {
                 return Err("this project's side-chain format is too old to edit".into());
             }
             let (kind, group, sound) = match src {
-                ScSource::Group(x) => (1, Some(Target::Group(x)), None),
+                ScSource::Group(x) => {
+                    if c == crate::Chain::Group(x) {
+                        return Err("a group can't side-chain itself".into());
+                    }
+                    (1, Some(Target::Group(x)), None)
+                }
                 ScSource::Sound(x, y) => {
-                    if (x, y) == (g, s) {
+                    if c == crate::Chain::Sound(x, y) {
                         return Err("a sound can't side-chain itself".into());
                     }
                     (2, Some(Target::Group(x)), Some(Target::Sound(x, y)))
@@ -521,5 +540,68 @@ mod sidechain_follows_tests {
         while d.undo() {}
         let c = &d.project().groups[0].sounds[1].channel;
         assert_eq!((c.choke_group, c.choke_mode, c.link_group, c.link_mode), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn group_side_chains_follow_their_effect_and_save() {
+        use crate::Chain;
+        let mut d = Document::new_project().unwrap();
+        let g1 = d.add_group().unwrap();
+        d.add_slot_in(Chain::Group(0), 0, &NewModule::Effect("Filter")).unwrap();
+        d.add_slot_in(Chain::Group(0), 1, &NewModule::Effect("Compressor")).unwrap();
+        assert!(d.set_chain_sidechain(Chain::Group(0), 1, Some(ScSource::Group(0))).is_err(), "not itself");
+        assert!(d.set_chain_sidechain(Chain::Master, 0, Some(ScSource::Group(0))).is_err(), "not the master");
+        d.set_chain_sidechain(Chain::Group(0), 1, Some(ScSource::Sound(0, 1))).unwrap();
+        assert_eq!(d.project().groups[0].channel.sidechain, [(1, ScSource::Sound(0, 1))]);
+        let back = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(back.project().groups[0].channel.sidechain, [(1, ScSource::Sound(0, 1))], "saved and reopened");
+
+        d.move_slot_in(Chain::Group(0), 1, 0).unwrap();
+        assert_eq!(d.project().groups[0].channel.sidechain, [(0, ScSource::Sound(0, 1))], "moved");
+        d.add_slot_in(Chain::Group(0), 0, &NewModule::Effect("EQ")).unwrap();
+        assert_eq!(d.project().groups[0].channel.sidechain, [(1, ScSource::Sound(0, 1))], "slot added before");
+        d.remove_slot_in(Chain::Group(0), 0).unwrap();
+        assert_eq!(d.project().groups[0].channel.sidechain, [(0, ScSource::Sound(0, 1))], "slot removed before");
+
+        d.set_chain_sidechain(Chain::Group(0), 0, Some(ScSource::Group(g1))).unwrap();
+        assert_eq!(d.project().groups[0].channel.sidechain, [(0, ScSource::Group(g1))]);
+        d.delete_group(g1).unwrap();
+        assert!(d.project().groups[0].channel.sidechain.is_empty(), "cleared when source group is deleted");
+    }
+
+    #[test]
+    fn plugin_slots_keep_side_chain_filter_parameters() {
+        use crate::{Chain, Target};
+        use mxprj::decode::Value;
+        let mut d = Document::new_project().unwrap();
+        let plug =
+            NewModule::Plugin { id: "DECKARD:VST3:FX:00000000000000000000000000000000".into(), name: "Duck".into(), chunk: Vec::new() };
+        for c in [Chain::Sound(0, 0), Chain::Group(0)] {
+            d.add_slot_in(c, 0, &plug).unwrap();
+            let slot = match c {
+                Chain::Sound(g, s) => &d.project().groups[g].sounds[s].slots[0],
+                Chain::Group(g) => &d.project().groups[g].slots[0],
+                Chain::Master => unreachable!(),
+            };
+            assert_eq!(slot.param("side_chain_filter/gain"), Some(1.0));
+            assert_eq!(slot.param("side_chain_filter/center_freq"), Some(0.5));
+            assert_eq!(slot.param("side_chain_filter/width"), Some(0.5));
+            let t = Target::ChainModule(c, 0);
+            d.set("Effect Parameter", t, "side_chain_filter/gain", Value::Float(0.25)).unwrap();
+            d.set("Effect Parameter", t, "side_chain_filter/filter", Value::Int(1)).unwrap();
+            d.set("Effect Parameter", t, "side_chain_filter/center_freq", Value::Float(0.75)).unwrap();
+            d.set("Effect Parameter", t, "side_chain_filter/width", Value::Float(0.125)).unwrap();
+        }
+        let check = |doc: &Document| {
+            for slot in [&doc.project().groups[0].sounds[0].slots[0], &doc.project().groups[0].slots[0]] {
+                assert_eq!(slot.param("side_chain_filter/gain"), Some(0.25));
+                assert_eq!(slot.param("side_chain_filter/filter"), Some(1.0));
+                assert_eq!(slot.param("side_chain_filter/center_freq"), Some(0.75));
+                assert_eq!(slot.param("side_chain_filter/width"), Some(0.125));
+            }
+        };
+        check(&d);
+        let back = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        check(&back);
     }
 }

@@ -359,6 +359,7 @@ pub struct PluginView {
     /// The chain and slot it shows.
     pub key: (deckard_doc::Chain, usize),
     pub pages: Vec<ViewPage>,
+    pub sidechain: bool,
     pub page: usize,
     pub values: Vec<(f64, String)>,
     refreshed: std::time::Instant,
@@ -8384,7 +8385,7 @@ impl App {
             }
             let view = match self.slot_plugin_in(key.0, key.1) {
                 Ok(p) => {
-                    let pages = p
+                    let (pages, sidechain) = p
                         .lock()
                         .map(|mut p| {
                             if pr.chunk.is_empty()
@@ -8394,12 +8395,13 @@ impl App {
                                 let _ = p.load_chunk(&nks.chunk);
                                 p.mark_saved(Vec::new());
                             }
-                            view_pages(&p, &saved)
+                            (view_pages(&p, &saved), !matches!(key.0, deckard_doc::Chain::Master) && p.has_sidechain())
                         })
                         .unwrap_or_default();
                     PluginView {
                         key,
                         pages,
+                        sidechain,
                         page: usize::MAX,
                         values: Vec::new(),
                         refreshed: std::time::Instant::now(),
@@ -8410,6 +8412,7 @@ impl App {
                 Err(e) => PluginView {
                     key,
                     pages: Vec::new(),
+                    sidechain: false,
                     page: 0,
                     values: Vec::new(),
                     refreshed: std::time::Instant::now(),
@@ -8471,7 +8474,7 @@ impl App {
                 d.set("MIDI Source", deckard_doc::Target::Group(g), "event_input", mxprj::decode::Value::Str(port))
             }
             layout::RouteSet::Master(cue, dest) => d.set_master_output(cue, dest),
-            layout::RouteSet::SideChain(g, s, slot, src) => d.set_sidechain(g, s, slot, src),
+            layout::RouteSet::SideChain(c, slot, src) => d.set_chain_sidechain(c, slot, src),
         };
         if let Err(e) = done {
             self.status = format!("can't route that: {e}");
