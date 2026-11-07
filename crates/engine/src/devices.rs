@@ -94,8 +94,35 @@ fn open(name: Option<&str>, dir: Dir) -> Result<Opened, String> {
         Some(name) => all(&host, dir)?.into_iter().find(|d| device_name(d) == name).ok_or_else(|| format!("\"{name}\" isn't connected"))?,
         None => default_device(&host, dir)?,
     };
-    let config = default_config(&device, dir)?;
-    Ok((device, config))
+    match default_config(&device, dir) {
+        Ok(config) => Ok((device, config)),
+        // No input was picked and the system's default won't say what format it runs (a USB
+        // microphone can refuse): any input that answers serves. Only for input: output
+        // moving to another device unasked could play somewhere it shouldn't.
+        Err(e) if name.is_none() && dir == Dir::In => {
+            first_usable(all(&host, dir)?, |d| default_config(d, dir)).ok_or_else(|| format!("{}: {e}", device_name(&device)))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The first of `devices` that `config` answers for, with its answer.
+#[cfg(not(target_os = "linux"))]
+fn first_usable<D, C>(devices: impl IntoIterator<Item = D>, config: impl Fn(&D) -> Result<C, String>) -> Option<(D, C)> {
+    devices.into_iter().find_map(|d| config(&d).ok().map(|c| (d, c)))
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::first_usable;
+
+    #[test]
+    fn a_device_that_wont_answer_is_passed_over() {
+        let answer = |d: &&str| if *d == "broken" { Err("no format".to_string()) } else { Ok(d.len()) };
+        assert_eq!(first_usable(["broken", "usb", "line"], answer), Some(("usb", 3)));
+        assert_eq!(first_usable(["broken"], answer), None);
+        assert_eq!(first_usable(Vec::<&str>::new(), answer), None);
+    }
 }
 
 #[cfg(target_os = "linux")]
