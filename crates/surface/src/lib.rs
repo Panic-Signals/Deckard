@@ -476,6 +476,17 @@ pub struct ControlView {
     /// What the plug-in browser (the Module page) lists, in order (only while it
     /// shows).
     pub modules: Vec<ModuleView>,
+    /// The focused built-in EQ, drawn on the right screen on both of its pages.
+    pub eq: Option<EqCurveView>,
+}
+
+/// An EQ curve for the right screen. `points` run from 20 Hz to 20 kHz, log spaced,
+/// each 0..1 over ±12 dB (0.5 is 0 dB). `bands` is Low, Low-Mid, High-Mid, High on
+/// that same axis.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EqCurveView {
+    pub points: Vec<f32>,
+    pub bands: Vec<(f32, f32)>,
 }
 
 /// One instrument, effect or plug-in the plug-in browser can load.
