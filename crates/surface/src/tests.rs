@@ -2108,6 +2108,20 @@ fn a_knob_tapped_twice_resets_it() {
     );
 }
 
+/// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
+/// and an empty one makes a pattern there.
+#[test]
+fn pattern_pads_are_places_with_gaps() {
+    let mut s = Surface::new();
+    let mut v = view();
+    let at = |slot: usize| PatternView { color: 1, slot, ..Default::default() };
+    v.groups[0].patterns = vec![at(0), at(7)];
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    let pad = |s: &mut Surface, v: &View, n: usize| s.event(&Event::PadOn(n, 1.0), v, Instant::now());
+    assert_eq!(pad(&mut s, &v, 8), [Action::PickPattern(1)], "pad 8 holds the list's second");
+    assert_eq!(pad(&mut s, &v, 4), [Action::NewPatternAt { group: 0, slot: 3 }], "an empty place");
+}
+
 /// The Ideas view's knobs: the group above each steps through its patterns in the
 /// focused scene, round in a circle with none after the last (C36).
 #[test]
