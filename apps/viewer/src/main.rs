@@ -9382,11 +9382,15 @@ impl App {
             self.status = "a sound has one instrument, in its first slot".into();
             return;
         }
+        // The removal and the addition undo as one step.
+        doc.borrow_mut().begin_take("Change Module");
         if let Err(e) = doc.borrow_mut().remove_slot_in(self.chain(), i) {
+            doc.borrow_mut().end_take();
             self.status = format!("can't replace it: {e}");
             return;
         }
         self.add_slot_at(what, i);
+        doc.borrow_mut().end_take();
     }
 
     fn is_instrument(what: &layout::AddWhat) -> bool {

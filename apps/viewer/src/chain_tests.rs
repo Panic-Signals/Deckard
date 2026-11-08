@@ -449,3 +449,110 @@ fn a_side_chain_plugin_shows_its_side_chain_page_on_sound_and_group() {
         assert!(!sc.is_empty(), "{tab:?}: turning SOURCE chooses a side-chain source");
     }
 }
+
+/// The Mixer's bottom strip: its "+" stays in view past a long chain, and adds to the
+/// sound shown even with the master's tab focused.
+#[test]
+fn the_strips_plus_stays_in_view_and_adds_to_the_sound_shown() {
+    use eframe::egui;
+    use egui_kittest::kittest::Queryable;
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    let doc = h.state().doc.clone().unwrap();
+    for at in 3..6 {
+        doc.borrow_mut().add_slot(0, 0, at, &deckard_doc::NewModule::Effect("EQ")).unwrap();
+    }
+    h.state_mut().mixer = true;
+    h.state_mut().group = 0;
+    h.state_mut().sound = 0;
+    h.state_mut().chain_tab = crate::layout::ChainTab::Master;
+    h.run_steps(3);
+    let (add, area): (egui::Rect, egui::Rect) = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-strip-add"))).expect("strip drawn");
+    assert!(add.right() <= area.right() && add.left() >= area.left(), "{add:?} in {area:?}");
+
+    let n = doc.borrow().project().groups[0].sounds[0].slots.len();
+    let masters = doc.borrow().project().master_slots.len();
+    let pos = add.center();
+    h.hover_at(pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(3);
+    h.get_by_label("Internal ⏵").click();
+    h.run_steps(3);
+    h.get_by_label("Compressor").click();
+    h.run_steps(3);
+    assert_eq!(doc.borrow().project().groups[0].sounds[0].slots.len(), n + 1, "{}", h.state().status);
+    assert_eq!(doc.borrow().project().master_slots.len(), masters);
+}
+
+/// The Mixer's bottom strip: right-click a panel's name ▸ Remove takes it out of the
+/// sound shown, even with the master's tab focused.
+#[test]
+fn right_clicking_a_panels_name_removes_it() {
+    use eframe::egui;
+    use egui_kittest::kittest::Queryable;
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    let doc = h.state().doc.clone().unwrap();
+    h.state_mut().mixer = true;
+    (h.state_mut().group, h.state_mut().sound) = (0, 0);
+    h.state_mut().chain_tab = ChainTab::Master;
+    h.run_steps(3);
+    let masters = doc.borrow().project().master_slots.len();
+    let panels: Vec<(usize, egui::Rect)> = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-strip-panels"))).expect("strip drawn");
+    let r = panels.iter().find(|(i, _)| *i == 1).unwrap().1;
+    let pos = egui::pos2(r.center().x, r.top() + 8.0);
+    h.hover_at(pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(3);
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    let d = doc.borrow();
+    let left: Vec<_> = d.project().groups[0].sounds[0].slots.iter().map(|x| x.module.as_str()).collect();
+    assert_eq!(left, ["Sampler", "Compressor"], "{}", h.state().status);
+    assert_eq!(d.project().master_slots.len(), masters);
+}
+
+/// The chain list (outside the Mixer): right-click a row ▸ Change Effect swaps it in
+/// place, on a sound's chain and on the master's.
+#[test]
+fn right_clicking_a_chain_row_changes_its_effect() {
+    use eframe::egui;
+    use egui_kittest::kittest::Queryable;
+    for (tab, row, keep) in [(ChainTab::Sound, 1, 0), (ChainTab::Master, 0, 1)] {
+        let Some(mut h) = crate::tests::harness(false, false) else { return };
+        let doc = h.state().doc.clone().unwrap();
+        (h.state_mut().group, h.state_mut().sound, h.state_mut().chain_tab, h.state_mut().channel) = (0, 0, tab, false);
+        h.run_steps(3);
+        let chain = h.state().chain();
+        let modules = |doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>| -> Vec<String> {
+            doc.borrow().chain_slots(chain).unwrap().iter().map(|x| x.module.clone()).collect()
+        };
+        let before = modules(&doc);
+        let pos = h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(&format!("chain slot {row}")))).expect("row drawn").center();
+        h.hover_at(pos);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        h.run_steps(3);
+        h.get_by_label("Change Effect ⏵").click();
+        h.run_steps(3);
+        h.get_by_label("Internal ⏵").click();
+        h.run_steps(3);
+        h.get_by_label("Compressor").click();
+        h.run_steps(3);
+        let after = modules(&doc);
+        assert_eq!(after.len(), before.len(), "{}", h.state().status);
+        assert_eq!(after[row], "Compressor", "{tab:?}");
+        assert_eq!(after[keep], before[keep], "{tab:?}");
+        doc.borrow_mut().undo();
+        assert_eq!(modules(&doc), before, "{tab:?}: one undo step");
+    }
+}
