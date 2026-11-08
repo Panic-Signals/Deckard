@@ -17,6 +17,8 @@ fn create_then_shape_then_remove() {
     assert_eq!(v.lfo_focus, 2);
     app.surface_act(A::Lfo("shape", 2, 5.0));
     assert_eq!(app.surface_view().lfos[0].shape, "Random");
+    app.surface_act(A::Lfo("shape", 2, 6.0));
+    assert_eq!(app.surface_view().lfos[0].shape, "Wander");
     app.surface_act(A::Lfo("remove", 2, 0.0));
     assert!(app.surface_view().lfos.is_empty());
 }
