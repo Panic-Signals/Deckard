@@ -4452,7 +4452,7 @@ impl Engine {
                                 x.1 = v;
                             }
                         }
-                        FxUnit::Plugin(plugin) => {
+                        FxUnit::Plugin { plugin, .. } => {
                             if let Ok(id) = lane.field.parse::<u32>() {
                                 modulate_plugin(&mut self.modded_plugins, plugin, id, v);
                             }
