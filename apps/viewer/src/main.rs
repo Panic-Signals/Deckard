@@ -8278,13 +8278,18 @@ impl App {
     }
 
     /// Look up a default NKS preset for `plugin_name` in NI's library index, preferring
-    /// one whose `NICA` pages carry section headings.
+    /// one whose `NICA` / `DSINy` pages carry section headings.
     fn default_nks_preset(&self, plugin_name: &str) -> Option<deckard_plugins::nks::Resolved> {
         let mut best: Option<deckard_plugins::nks::Resolved> = None;
         for path in deckard_library::ni::nks_presets_for(plugin_name) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
-            let Ok(preset) = deckard_plugins::nks::parse(&bytes) else { continue };
-            let Ok(resolved) = preset.resolve(&self.catalog.entries) else { continue };
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let resolved = if matches!(ext.to_ascii_lowercase().as_str(), "nksf" | "nksfx") {
+                deckard_plugins::nks::parse(&bytes).and_then(|p| p.resolve(&self.catalog.entries)).ok()
+            } else {
+                deckard_plugins::nks::native_preset(ext, &bytes, &self.catalog.entries).and_then(Result::ok)
+            };
+            let Some(resolved) = resolved else { continue };
             let has_sections = resolved.pages.iter().any(|pg| pg.iter().any(|k| !k.section.is_empty()));
             if has_sections {
                 return Some(resolved);
