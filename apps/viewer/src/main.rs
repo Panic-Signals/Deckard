@@ -3836,9 +3836,30 @@ impl App {
                     r.map(|_| None)
                 }
                 Act::EditNotes { g, p, label, remove, add } => {
+                    if add.is_empty() && d.project().groups.get(g).is_none_or(|gr| p >= gr.patterns.len()) {
+                        return;
+                    }
                     let upgrade = add.iter().any(|n| n.probability != 100) && !d.notes_have_probability();
-                    let r = d.outside_take(|d| d.edit_notes(label, g, p, &remove, &add));
+                    let length = self.default_pattern_length(d.project());
+                    let scene = self.scene;
+                    let mut made = p;
+                    let r = d.outside_take(|d| {
+                        d.transaction(label, |d| {
+                            let n = d.project().groups.get(g).ok_or("no such group")?.patterns.len();
+                            if made >= n {
+                                made = d.add_pattern(g, 0, &format!("Pattern {}", n + 1))?;
+                                d.set_pattern_length(g, made, length)?;
+                                if scene < d.project().scenes.len() {
+                                    d.assign_pattern(scene, g, Some(made))?;
+                                }
+                            }
+                            d.edit_notes(label, g, made, &remove, &add)
+                        })
+                    });
                     if r.is_ok() {
+                        if g == self.group {
+                            self.pattern = made;
+                        }
                         // The selection follows the selected notes that were edited
                         // (moved, nudged, ...); new notes aren't selected, deleted ones
                         // leave it.
@@ -12688,7 +12709,7 @@ mod tests {
     fn grid_pos(h: &Harness<'static, App>, row: usize, t: i64) -> Pos2 {
         let p = project_of(h);
         let (g, pi) = (h.state().group, h.state().pattern);
-        let start = p.groups[g].patterns[pi].start;
+        let start = p.groups[g].patterns.get(pi).map_or(0, |pt| pt.start);
         let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
         let (from, scale): (f64, f32) = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid-time"))).expect("time axis drawn");
         Pos2::new(grid.left() + ((start + t) as f64 - from) as f32 * scale, grid.top() + row as f32 * 24.0 + 12.0)
@@ -16094,6 +16115,110 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         app.playing = Some(Mode::Scene(0));
         app.seek_pattern(3 * PPQ);
         assert_eq!(app.parked.expect("parked unchanged").position as i64, 2 * PPQ);
+    }
+
+    /// Drawing or adding notes in the Pattern Editor when the focused group has no active
+    /// pattern creates `"Pattern 1"` with the default pattern length, assigns it to the
+    /// active scene, and adds the drawn notes in a single undo step.
+    #[test]
+    fn drawing_notes_without_a_pattern_creates_and_assigns_one() {
+        let mut app = App { follow: true, grid: PPQ / 4, prop_set: 1, ..Default::default() };
+        app.new_project();
+        app.controller = None;
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(3);
+
+        assert!(project_of(&h).groups[0].patterns.is_empty());
+        assert_eq!(h.state().scene_pattern(0), None);
+        let default_len = h.state().default_pattern_length(&project_of(&h));
+
+        // 1. Clicking in Draw mode on the Group (pad-step) note grid creates Pattern 1,
+        // assigns it to the active scene, focuses the sound, and places the note in it.
+        h.state_mut().mouse = layout::MouseMode::Draw;
+        h.run_steps(2);
+        let step = PPQ / 4;
+        let at = grid_pos(&h, 2, step + 10);
+        click(&mut h, at);
+        let p = project_of(&h);
+        assert_eq!(p.groups[0].patterns.len(), 1, "a pattern was created");
+        assert_eq!(p.groups[0].patterns[0].name, "Pattern 1");
+        assert_eq!(p.groups[0].patterns[0].length, default_len);
+        assert_eq!(p.scenes[0].patterns, vec![(0, 0)], "assigned to the active scene");
+        assert_eq!(h.state().pattern, 0);
+        assert_eq!(h.state().sound, 2, "the clicked sound row is focused");
+        assert_eq!(p.groups[0].patterns[0].notes.len(), 1);
+        let note = p.groups[0].patterns[0].notes[0];
+        assert_eq!((note.sound, note.position, note.length), (2, step, step));
+
+        // Undo removes both the note and the auto-created pattern in one step.
+        let doc = h.state().doc.clone().unwrap();
+        assert_eq!(doc.borrow().undo_labels(), vec!["Add Note"]);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+        assert!(project_of(&h).groups[0].patterns.is_empty(), "single undo removes pattern and note");
+        assert!(project_of(&h).scenes[0].patterns.is_empty());
+
+        // 2. Click-and-drag painting across steps in Draw mode when there is no pattern
+        // creates Pattern 1 and places all painted steps in one undo step, and dragging
+        // the right edge of a note adjusts its length.
+        let (from, to) = (grid_pos(&h, 1, 10), grid_pos(&h, 1, 2 * step + 10));
+        drag(&mut h, from, to);
+        let p = project_of(&h);
+        assert_eq!(p.groups[0].patterns.len(), 1);
+        assert_eq!(p.scenes[0].patterns, vec![(0, 0)]);
+        let pos: Vec<i64> = p.groups[0].patterns[0].notes.iter().filter(|n| n.sound == 1).map(|n| n.position).collect();
+        assert_eq!(pos, vec![0, step, 2 * step], "three steps painted");
+        assert_eq!(doc.borrow().undo_labels(), vec!["Draw Notes"]);
+
+        // Drag the right edge of the last painted note to resize its length.
+        let edge_from = grid_pos(&h, 1, 3 * step) - egui::vec2(2.0, 0.0);
+        let edge_to = grid_pos(&h, 1, 5 * step) - egui::vec2(2.0, 0.0);
+        drag(&mut h, edge_from, edge_to);
+        let p = project_of(&h);
+        let last = p.groups[0].patterns[0].notes.iter().find(|n| n.sound == 1 && n.position == 2 * step).expect("last note");
+        assert!(last.length > step, "right-edge drag extended the note length: {}", last.length);
+        assert_eq!(doc.borrow().undo_labels(), vec!["Resize Notes", "Draw Notes"]);
+
+        // Undo both steps back to no pattern.
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+        assert!(project_of(&h).groups[0].patterns.is_empty());
+
+        // 3. Keyboard (piano-roll) note grid in Draw mode when there is no pattern creates
+        // Pattern 1, assigns it to the scene, and places the note at the clicked pitch.
+        h.state_mut().piano_roll = true;
+        h.state_mut().sound = 3;
+        h.run_steps(2);
+        let at = grid_pos(&h, 4, step + 10);
+        click(&mut h, at);
+        let p = project_of(&h);
+        assert_eq!(p.groups[0].patterns.len(), 1);
+        assert_eq!(p.scenes[0].patterns, vec![(0, 0)]);
+        assert_eq!(p.groups[0].patterns[0].notes.len(), 1);
+        let pr_note = p.groups[0].patterns[0].notes[0];
+        assert_eq!((pr_note.sound, pr_note.position), (3, step));
+
+        // 4. Double-clicking in Select mode on a newly added Group with no pattern creates
+        // Pattern 1 for that Group, assigns it to the active scene, and adds the note.
+        h.state_mut().piano_roll = false;
+        h.state_mut().mouse = layout::MouseMode::Select;
+        h.state_mut().arrange(layout::Act::AddGroup);
+        h.run_steps(2);
+        assert_eq!(h.state().group, 1);
+        assert!(project_of(&h).groups[1].patterns.is_empty());
+        assert_eq!(h.state().scene_pattern(1), None);
+        let at = grid_pos(&h, 0, 2 * step + 10);
+        double_click(&mut h, at);
+        let p = project_of(&h);
+        assert_eq!(p.groups[1].patterns.len(), 1);
+        assert_eq!(p.groups[1].patterns[0].name, "Pattern 1");
+        assert!(p.scenes[0].patterns.contains(&(1, 0)), "Group B's new pattern is in the scene");
+        assert_eq!(p.groups[1].patterns[0].notes.len(), 1);
+        assert_eq!(p.groups[1].patterns[0].notes[0].position, 2 * step);
     }
 }
 
