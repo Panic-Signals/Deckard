@@ -670,6 +670,9 @@ fn browse_wheel_turns_the_bracketed_knob() {
     );
     press(&mut s, &v, "BUTTON_WHEEL_LEFT");
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Product(Some(0)))], "skipping the empty banks");
+    assert_eq!(press(&mut s, &v, "BUTTON_WHEEL"), [Action::Browse(Browse::Load)], "wheel press loads even while a filter is bracketed");
+    assert_eq!(s.event(&Event::Knob(7, 0.1), &v, now), [Action::Browse(Browse::Focus(1))], "knob 8 returns the bracket to results");
+    assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Focus(1))]);
     press(&mut s, &v, "BUTTON_TEMPO");
     assert!(!s.event(&Event::Wheel(1), &v, now).iter().any(|a| matches!(a, Action::Browse(_))), "TEMPO keeps the wheel");
 }
@@ -685,6 +688,53 @@ fn browse_draws_a_library() {
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     assert!(s.screens(&v).is_some());
     assert_eq!(s.error(), None);
+}
+
+#[test]
+fn new_picture_invalidates_cached_drawing_commands() {
+    for recorded in [false, true] {
+        let (mut surface, mut v) = (Surface::new(), view());
+        v.control.chain[0].picture = Some("late-image".into());
+        surface.add_picture("late-image", true, 16, 16, vec![[10, 200, 30, 255]; 256]);
+        let draw = |s: &mut Surface| if recorded { s.screen_picture(&v).is_some() } else { s.screens(&v).is_some() };
+        assert!(draw(&mut surface));
+        assert!(!draw(&mut surface), "identical commands are cached");
+        let shared = &surface;
+        shared.add_picture("late-image", true, 16, 16, vec![[255; 4]; 256]);
+        assert!(draw(&mut surface), "new image data invalidates the cache through a shared surface");
+        assert!(!draw(&mut surface), "the invalidation is consumed once");
+    }
+}
+
+#[test]
+fn browse_and_chain_draw_product_and_hosted_plugin_pictures() {
+    let (mut s, mut v) = (Surface::new(), view());
+    library(&mut v);
+    v.browser.product = Some(0);
+    press(&mut s, &v, "BUTTON_BROWSE");
+    let before = s.picture(&v);
+    let key = format!("artwork:{}", v.browser.products[0].to_lowercase());
+    s.add_picture(&key, true, 16, 16, vec![[220, 40, 90, 255]; 256]);
+    s.add_picture(&key, false, 16, 16, vec![[40, 180, 220, 255]; 256]);
+    let after = s.picture(&v);
+    let left_changed = (41..107).any(|y| (20..155).any(|x| before[y * 960 + x] != after[y * 960 + x]));
+    let right_changed = (36..232).any(|y| (480..720).any(|x| before[y * 960 + x] != after[y * 960 + x]));
+    assert!(left_changed, "product tile artwork on left screen");
+    assert!(right_changed, "product logo on right screen");
+
+    // A hosted plug-in slot (`plugin: true`) with `picture` set draws its picture on
+    // Control and Module pages instead of the generic synth cartoon.
+    press(&mut s, &v, "BUTTON_PLUGIN");
+    v.control.modules_visible = true;
+    v.control.slot_count = 1;
+    v.control.slot_index = Some(0);
+    v.control.chain =
+        vec![SlotView { name: "Massive X".into(), instrument: true, active: true, plugin: true, picture: Some("massivex".into()) }];
+    let generic_px = s.picture(&v);
+    s.add_picture("massivex", true, 16, 16, vec![[200, 120, 30, 255]; 256]);
+    s.add_picture("massivex", false, 16, 16, vec![[30, 200, 120, 255]; 256]);
+    let pic_px = s.picture(&v);
+    assert!(generic_px != pic_px, "hosted plug-in picture drawn on Control page");
 }
 
 #[test]
@@ -1665,7 +1715,7 @@ fn the_effect_picture_stays_on_the_right_screen() {
 /// thumbnail) and on the right display (its logo); one without shows a drawing.
 #[test]
 fn plugin_pictures_show_on_the_plugin_page() {
-    let (mut s, mut v) = (Surface::new(), view());
+    let (s, mut v) = (Surface::new(), view());
     let (thumb, logo) = ([10, 200, 30, 255], [200, 30, 10, 255]);
     s.add_picture("sampler", true, 160, 90, vec![thumb; 160 * 90]);
     s.add_picture("sampler", false, 240, 196, vec![logo; 240 * 196]);
