@@ -146,7 +146,7 @@ pub struct Document {
     next_oid: u64,
     /// The patterns (group, pattern) a length was chosen for this session; the others'
     /// is Auto (Maschine keeps this outside the project too).
-    chosen_lengths: std::collections::HashSet<(usize, usize)>,
+    chosen_lengths: std::collections::HashSet<u64>,
     /// Notes' expression (MPE), by `ExprId`: only ever added to (see `expression.rs`).
     expressions: Vec<std::sync::Arc<deckard_model::Expression>>,
     /// Channel pressure saved in Maschine's archive (kind 6) instead of the DECKARD
@@ -502,15 +502,27 @@ impl Document {
     /// Whether pattern `p` of group `g` has an Auto length (none chosen for it): recorded
     /// into from empty, it grows (docs/superpowers/plans/2026-10-23-auto-length-recording.md).
     pub fn length_is_auto(&self, g: usize, p: usize) -> bool {
-        !self.chosen_lengths.contains(&(g, p))
+        self.pattern_identity(g, p).is_none_or(|id| !self.chosen_lengths.contains(&id))
     }
 
     /// Auto length on (`true`) or off (a length chosen) for pattern `p` of group `g`.
     pub fn set_length_auto(&mut self, g: usize, p: usize, auto: bool) {
+        let Some(id) = self.pattern_identity(g, p) else {
+            return;
+        };
         if auto {
-            self.chosen_lengths.remove(&(g, p));
+            self.chosen_lengths.remove(&id);
         } else {
-            self.chosen_lengths.insert((g, p));
+            self.chosen_lengths.insert(id);
+        }
+    }
+
+    // Session length policy follows pattern identity through Group MOVE and Undo.
+    fn pattern_identity(&self, g: usize, p: usize) -> Option<u64> {
+        let path = self.addresses.groups.get(g)?.patterns.get(p)?;
+        match self.tree.at(path)? {
+            Value::Obj(o) => o.oid,
+            _ => None,
         }
     }
 

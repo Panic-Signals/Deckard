@@ -73,6 +73,7 @@ mod tests {
         d.set_color(&[Target::Group(0)], Color::Palette(3)).unwrap();
         let pattern = d.add_pattern_in_slot(0, 0, 0, "Beat").unwrap();
         d.assign_pattern(0, 0, Some(pattern)).unwrap();
+        d.set_length_auto(0, pattern, false);
         d.convert_to_clip(0, pattern, 0, 3840).unwrap();
         d.set_sound_route(2, 0, SoundRoute::Output(AudioDest::Group(0))).unwrap();
         d.set_sound_route(2, 1, SoundRoute::AudioIn(AudioSource::Sound(0, 2))).unwrap();
@@ -86,6 +87,7 @@ mod tests {
         d.swap_groups(0, 1).unwrap();
         let p = d.project();
         assert_eq!(p.groups[1].name, "Kick");
+        assert!(!d.length_is_auto(1, pattern));
         assert_eq!(p.groups[1].color, Color::Palette(3));
         assert_eq!(p.groups[1].patterns, original.groups[0].patterns);
         assert_eq!(p.groups[1].clips, original.groups[0].clips);
@@ -103,6 +105,7 @@ mod tests {
         assert_eq!(saved.project(), d.project());
         assert!(d.undo());
         assert_eq!(d.project(), &original);
+        assert!(!d.length_is_auto(0, pattern));
         assert!(d.redo());
         assert_eq!(d.group_ids(), [ids[1], ids[0], ids[2]]);
         d.swap_groups(0, 1).unwrap();
