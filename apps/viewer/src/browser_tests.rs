@@ -48,7 +48,7 @@ fn nks_presets_load_as_their_plugin() {
     assert_eq!(plugins(&app), [("Synth".to_string(), format!("Vendor:VST3:INSTR:{synth}"))]);
     assert_eq!(sound_name(&app, 0), "Lead");
     assert_eq!((app.slot_of, app.slot, app.plugin_page), (Some(deckard_doc::Chain::Sound(0, 0)), Some(0), 0));
-    assert!(app.plugin_view.is_none());
+    assert!(app.plugin_view().is_none());
     // An effect goes last (leaving the sound's name), and an instrument takes the instrument's place and renames the sound.
     let hall = item("Hall.nksfx", Kind::Effect, &nks::fixture(uid(effect), 0, "Verb", b"hall"));
     app.load_item(&hall, Some((0, 0))).unwrap();

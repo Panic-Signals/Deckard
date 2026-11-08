@@ -80,7 +80,7 @@ fn a_plugin_knob_becomes_a_macro() {
     assert_ne!(turned.value, m.value, "the macro turns the plug-in's parameter");
 
     // The plug-in's own parameter (its page reads it again within 100 ms).
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[1].0.id;
     let plugin = app.slot_plugin_in(deckard_doc::Chain::Sound(0, 0), 0).unwrap();
     assert_eq!(plugin.lock().unwrap().param_value(id) as f32, turned.value as f32, "the plug-in's parameter");
     (app.channel, app.slot) = (false, Some(0));
@@ -129,7 +129,7 @@ fn knobs_a_macro_controls_show_the_icon() {
 fn a_group_macro_turns_a_sounds_plugin() {
     let mut app = with_plugin();
     app.control_request(R::SetMacro { pos: 1, level: 1 });
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[1].0.id;
     (app.channel, app.chain_tab, app.prop_set, app.prop_page) = (true, layout::ChainTab::Group, 3, 0);
     let before = app.control_snapshot([false; 8]).knobs[0].clone().expect("the group's macro");
     app.control_request(R::Turn { pos: 0, inc: 0.25, fine: false });
@@ -145,7 +145,7 @@ fn a_group_macro_turns_a_sounds_plugin() {
 fn the_windows_menu_makes_a_plugin_knob_a_macro() {
     use crate::layout::{Act, MacroAct, apply_acts};
     let mut app = with_plugin();
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[2].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[2].0.id;
     let chain = deckard_doc::Chain::Sound(0, 0);
     let toggle = || Act::Macro(MacroAct::Plugin { ch: Target::Group(0), chain, slot: 0, id });
     apply_acts(&mut app, vec![toggle()]);
@@ -164,7 +164,7 @@ fn the_windows_menu_makes_a_plugin_knob_a_macro() {
 fn a_plugin_knob_learns_a_midi_control() {
     let mut app = with_plugin();
     let chain = deckard_doc::Chain::Sound(0, 0);
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[1].0.id;
     let plugin = app.slot_plugin_in(chain, 0).unwrap();
     let before = plugin.lock().unwrap().param_value(id);
     app.toggle_plugin_midi_learn(chain, 0, id);
@@ -189,7 +189,7 @@ fn a_plugin_knob_learns_a_midi_control() {
 fn midi_turns_a_plugin_macro() {
     let mut app = with_plugin();
     let chain = deckard_doc::Chain::Sound(0, 0);
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[1].0.id;
     app.control_request(R::SetMacro { pos: 1, level: 1 });
     let doc = app.doc.clone().unwrap();
     let m = doc.borrow().macro_oid(Target::Group(0), 0, 0).unwrap();
@@ -218,7 +218,7 @@ fn the_assignment_area_learns_a_plugin_knob() {
         app.update_slot_view();
     }
     h.run_steps(3);
-    let id = h.state().plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = h.state().plugin_view().unwrap().pages[0].knobs[1].0.id;
     h.get_by_label("Assignment area").click();
     h.run_steps(3);
     h.get_all_by_label("Learn").nth(1).unwrap().click();
@@ -236,7 +236,7 @@ fn the_assignment_area_learns_a_plugin_knob() {
 fn the_target_menu_lists_plugin_parameters() {
     use layout::channel::Level;
     let app = with_plugin();
-    let page = &app.plugin_view.as_ref().unwrap().pages[0];
+    let page = &app.plugin_view().unwrap().pages[0];
     let (info, name, _) = &page.knobs[1];
     let plugin = app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].slots[0].plugin.as_ref().unwrap().name.clone();
     let sound = app.plugin_targets(Level::Sound(0, 0));
@@ -259,7 +259,7 @@ fn an_empty_macro_picks_a_plugin_parameter() {
     use crate::layout::{Act, MacroAct, apply_acts};
     let mut app = with_plugin();
     let chain = deckard_doc::Chain::Sound(0, 0);
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[1].0.id;
     let ch = Target::Sound(0, 0);
     apply_acts(&mut app, vec![Act::Macro(MacroAct::AssignPlugin { ch, page: 0, slot: 3, chain, plugin_slot: 0, id })]);
     let doc = app.doc.clone().unwrap();
@@ -276,10 +276,10 @@ fn a_plugin_not_shown_is_offered_too() {
     use crate::layout::{Act, MacroAct, apply_acts};
     let mut app = with_plugin();
     let chain = deckard_doc::Chain::Sound(0, 0);
-    let id = app.plugin_view.as_ref().unwrap().pages[0].knobs[1].0.id;
+    let id = app.plugin_view().unwrap().pages[0].knobs[1].0.id;
     // The sound's Macro properties: no plug-in page shown.
     macros(&mut app);
-    app.plugin_view = None;
+    app.plugin_views.clear();
     assert!(app.plugin_targets(layout::channel::Level::Sound(0, 0)).iter().any(|t| t.1 == (chain, 0, id)));
     let ch = Target::Sound(0, 0);
     apply_acts(&mut app, vec![Act::Macro(MacroAct::AssignPlugin { ch, page: 0, slot: 0, chain, plugin_slot: 0, id })]);

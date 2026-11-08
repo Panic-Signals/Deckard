@@ -5,7 +5,8 @@
 
 use crate::App;
 use deckard_engine::export::{self as ex, BitDepth, FileType, Format, Job, Range, Stem};
-use deckard_model::Project;
+use deckard_model::extra_out::{Channels, ExtraOut, Owner};
+use deckard_model::{AudioDest, Project};
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,8 @@ pub struct Settings {
     /// Groups and sounds unchecked in the Output list (all are checked at first).
     pub groups_off: HashSet<usize>,
     pub sounds_off: HashSet<(usize, usize)>,
+    /// Extra-output strips unchecked (see [`strip_key`]).
+    pub extras_off: HashSet<StripKey>,
     pub split_by_section: bool,
     pub format: Format,
     /// The destination folder and file name (none: the project's folder and name).
@@ -91,9 +94,26 @@ pub fn plan(p: &Project, at: Where, s: &Settings, name: &str) -> Vec<Job> {
     parts.iter().flat_map(|(range, name)| stems.iter().map(|&stem| Job { range: *range, stem, name: name.clone(), file: None })).collect()
 }
 
-/// The outputs checked in the panel's list.
+/// An extra-output strip as the panel's checks know it: its owner, pair and side (so a
+/// check stays with its strip when others come and go).
+pub type StripKey = (Owner, usize, Channels);
+
+pub fn strip_key(x: &ExtraOut) -> StripKey {
+    (x.owner, x.bus, x.channels)
+}
+
+/// The extra-output strips that get a stem: those on a hardware output other than the
+/// master's (one routed into Deckard, or onto the master's output, is part of what it
+/// feeds). With their places in `project.extra_outs`.
+fn extra_stems(p: &Project) -> impl Iterator<Item = (usize, &ExtraOut)> {
+    p.extra_outs.iter().enumerate().filter(|(_, x)| matches!(x.dest, AudioDest::Ext(_)) && x.dest != p.master_output)
+}
+
+/// The outputs checked in the panel's list: the Source's, then each checked strip on a
+/// hardware output.
 pub fn stems(p: &Project, s: &Settings) -> Vec<Stem> {
-    match s.source {
+    let extras = extra_stems(p).filter(|(_, x)| !s.extras_off.contains(&strip_key(x))).map(|(i, _)| Stem::Extra(i));
+    let mut stems = match s.source {
         Source::Master => vec![Stem::Master],
         Source::Group => ex::exportable_groups(p).into_iter().filter(|g| !s.groups_off.contains(g)).map(Stem::Group).collect(),
         Source::Sound => ex::exportable_groups(p)
@@ -102,7 +122,9 @@ pub fn stems(p: &Project, s: &Settings) -> Vec<Stem> {
             .filter(|gs| !s.sounds_off.contains(gs))
             .map(|(g, k)| Stem::Sound(g, k))
             .collect(),
-    }
+    };
+    stems.extend(extras);
+    stems
 }
 
 /// Work done off the UI thread (an export, a bounce): its progress, cancelling it, and
@@ -404,9 +426,23 @@ fn combo<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, v: &mut T, choices: &
 }
 
 /// The Output list: Master Output (checked, greyed), the groups, or the groups' sounds
-/// as a tree (a group's box checks all its sounds).
+/// as a tree (a group's box checks all its sounds); then the extra-output strips on a
+/// hardware output, each a stem of its own.
 fn output_list(ui: &mut egui::Ui, p: &Project, s: &mut Settings) {
-    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| match s.source {
+    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+        source_list(ui, p, s);
+        for (i, x) in extra_stems(p) {
+            let key = strip_key(x);
+            let mut on = !s.extras_off.contains(&key);
+            if ui.checkbox(&mut on, ex::extra_stem_name(p, i).unwrap_or_default()).changed() {
+                toggle(&mut s.extras_off, key, on);
+            }
+        }
+    });
+}
+
+fn source_list(ui: &mut egui::Ui, p: &Project, s: &mut Settings) {
+    match s.source {
         Source::Master => {
             ui.add_enabled(false, egui::Checkbox::new(&mut true, "Master Output"));
         }
@@ -443,7 +479,7 @@ fn output_list(ui: &mut egui::Ui, p: &Project, s: &mut Settings) {
                 });
             }
         }
-    });
+    }
 }
 
 fn group_label(p: &Project, g: usize) -> String {
@@ -546,6 +582,42 @@ mod tests {
         s.sounds_off.insert((0, 1));
         assert_eq!(stems(&p, &s), [Stem::Sound(0, 0), Stem::Sound(2, 0)], "empty slots aren't listed");
         assert_eq!(plan(&p, song(None), &s, "Song").len(), 2);
+    }
+
+    /// Each strip on a hardware output is a stem of its own, whatever the Source; a
+    /// strip routed into Deckard (a group, the master, a sound) or onto the master's
+    /// output is part of what it feeds.
+    #[test]
+    fn a_strip_routed_into_a_group_gets_no_stem() {
+        use deckard_model::AudioDest;
+        use deckard_model::extra_out::{Channels, ExtraOut, Owner};
+        let mut p = project();
+        let strip = |dest| ExtraOut {
+            owner: Owner::Sound(0, 0),
+            bus: 1,
+            plugin: "x".into(),
+            name: String::new(),
+            level: 1.0,
+            pan: 0.0,
+            muted: false,
+            dest,
+            channels: Channels::Stereo,
+        };
+        p.master_output = AudioDest::Ext(0);
+        p.extra_outs = vec![
+            strip(AudioDest::Group(2)),
+            strip(AudioDest::Ext(3)),
+            strip(AudioDest::Master),
+            strip(AudioDest::Ext(4)),
+            strip(AudioDest::Ext(0)),
+        ];
+        let mut s = Settings::default();
+        assert_eq!(stems(&p, &s), [Stem::Master, Stem::Extra(1), Stem::Extra(3)]);
+        s.source = Source::Group;
+        assert_eq!(stems(&p, &s), [Stem::Group(0), Stem::Group(2), Stem::Extra(1), Stem::Extra(3)]);
+        p.extra_outs[3].bus = 2;
+        s.extras_off.insert(strip_key(&p.extra_outs[3]));
+        assert_eq!(stems(&p, &s), [Stem::Group(0), Stem::Group(2), Stem::Extra(1)], "unchecked");
     }
 
     /// From the app: File ▸ Export Audio's job writes the files into the panel's folder,

@@ -501,7 +501,7 @@ impl Player {
             let spt = self.sr * 60.0 / (tempo * PPQ as f64);
             let base = Transport { tempo, playing, quarters: song_frame as f64 / spt / PPQ as f64, numerator: num, denominator: den };
             let p = self.parts.as_mut().unwrap();
-            render_sound(p.smp.as_mut(), p.inst.as_ref(), p.chain.as_mut(), &mut p.scratch, (n, 0), song_frame, &base, spt, &[]);
+            render_sound(p.smp.as_mut(), p.inst.as_mut(), p.chain.as_mut(), &mut p.scratch, (n, 0), song_frame, &base, spt, &[]);
             let b = &mut p.scratch;
             if !b.smp_out {
                 b.smp[..n * 2].fill(0.0);

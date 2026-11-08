@@ -96,6 +96,7 @@ impl Document {
             new.fields[i].1 = seq.clone();
         }
         self.apply("Paste Sound", vec![Op::Set { path, value: Value::Obj(new) }])?;
+        self.prune_extra_outs()?;
         // Its notes: the clip's replace the slot's, pattern by pattern.
         let patterns = self.project.groups[g].patterns.clone();
         for (pi, p) in patterns.iter().enumerate() {

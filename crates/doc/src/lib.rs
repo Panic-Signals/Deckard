@@ -31,6 +31,7 @@ pub use audio::TakeSpec;
 pub use zones::{ZoneFrom, ZoneSpec};
 mod cc_routes;
 mod expression;
+mod extra_outs;
 mod files;
 mod lfos;
 mod mod_routes;
@@ -724,6 +725,7 @@ impl Document {
         let params = step.params.clone();
         self.redo.push(step);
         self.update(&params);
+        self.prune_extra_outs_quietly();
         true
     }
 
@@ -746,6 +748,7 @@ impl Document {
             _ => self.undo.push(step),
         }
         self.update(&params);
+        self.prune_extra_outs_quietly();
         true
     }
 
@@ -773,6 +776,7 @@ impl Document {
         let params = part.params.clone();
         self.redo.push(part);
         self.update(&params);
+        self.prune_extra_outs_quietly();
         true
     }
 

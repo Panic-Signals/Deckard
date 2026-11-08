@@ -129,6 +129,8 @@ struct Vst3 {
     /// [bus][channel] buffers of MAX_BLOCK frames, and pointers to them.
     inputs: Vec<Vec<Vec<f32>>>,
     outputs: Vec<Vec<Vec<f32>>>,
+    /// The plug-in's name for each output bus.
+    output_names: Vec<String>,
     in_ptrs: Vec<Vec<*mut f32>>,
     out_ptrs: Vec<Vec<*mut f32>>,
     in_buses: Vec<AudioBusBuffers>,
@@ -453,6 +455,17 @@ impl Plugin {
         each!(self, p => p.output_bus(bus, frames))
     }
 
+    /// How many stereo-capable output buses (1 or 2 channels) the plug-in has, bus 0
+    /// included; 0 for one with no output.
+    pub fn output_count(&self) -> usize {
+        each!(self, p => p.output_count())
+    }
+
+    /// The plug-in's name for output bus `bus`, else "Out N".
+    pub fn output_name(&self, bus: usize) -> String {
+        each!(self, p => p.output_name(bus)).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Out {}", bus + 1))
+    }
+
     /// The VST3 component (to query buses and the like); none for DECKARD's own.
     pub fn component(&self) -> Option<&ComPtr<IComponent>> {
         match &self.kind {
@@ -530,12 +543,12 @@ impl Vst3 {
                         component.getBusInfo(audio, dir, i, &mut info);
                         component.activateBus(audio, dir, i, 1);
                     }
-                    vec![vec![0f32; MAX_BLOCK]; info.channelCount.max(0) as usize]
+                    (string128(&info.name), vec![vec![0f32; MAX_BLOCK]; info.channelCount.max(0) as usize])
                 })
-                .collect::<Vec<_>>()
+                .unzip::<_, _, Vec<_>, Vec<_>>()
         };
-        let inputs = buses(input);
-        let outputs = buses(output);
+        let (_, inputs) = buses(input);
+        let (output_names, outputs) = buses(output);
         if unsafe { component.getBusCount(event, input) } > 0 {
             unsafe { component.activateBus(event, input, 0, 1) };
         }
@@ -572,6 +585,7 @@ impl Vst3 {
             params_out: ComWrapper::new(ParameterChanges::default()),
             inputs,
             outputs,
+            output_names,
             in_ptrs: Vec::new(),
             out_ptrs: Vec::new(),
             in_buses: Vec::new(),
@@ -1005,6 +1019,15 @@ impl Vst3 {
         let b = self.outputs.get(bus).filter(|b| !b.is_empty())?;
         let n = frames.min(MAX_BLOCK);
         Some((&b[0][..n], &b[b.len().min(2) - 1][..n]))
+    }
+
+    /// Buses up to the last one of 1 or 2 channels (the ones `output_bus` returns).
+    fn output_count(&self) -> usize {
+        self.outputs.iter().rposition(|b| (1..=2).contains(&b.len())).map_or(0, |i| i + 1)
+    }
+
+    fn output_name(&self, bus: usize) -> Option<String> {
+        self.output_names.get(bus).cloned()
     }
 }
 

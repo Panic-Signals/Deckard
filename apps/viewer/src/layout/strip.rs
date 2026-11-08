@@ -481,6 +481,11 @@ fn page_stepper(ui: &mut Ui, painter: &Painter, center: Pos2, names: &[String], 
     panel_page(ui, id).min(n - 1)
 }
 
+/// Where the strip notes what its hosted plug-ins' panels show: [`PluginShown`]s.
+const STRIP_PLUGINS: &str = "deckard-strip-plugins";
+/// A hosted plug-in's panel as drawn: (slot, page, its knobs' labels).
+type PluginShown = (usize, usize, Vec<String>);
+
 /// The plug-in strip of the focused sound, in `rect`.
 pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, acts: &mut Vec<Act>) {
     let p = doc.project();
@@ -496,6 +501,7 @@ pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: R
     let clip = painter.with_clip_rect(area);
     let mut x = area.left() + PANEL_GAP - off;
     let mut panels = Vec::new();
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(STRIP_PLUGINS), Vec::<PluginShown>::new()));
     for (i, slot) in snd.slots.iter().enumerate() {
         let r = Rect::from_min_size(Pos2::new(x, area.top() + PANEL_TOP), Vec2::new(widths[i], area.height() - PANEL_TOP - 10.0));
         x += widths[i] + PANEL_GAP;
@@ -610,9 +616,17 @@ fn panel(
             }
         }
         (_, Some(_)) => {
-            // A hosted plug-in: its pages when it's the focused slot (its values come
-            // from the instance), else a click to show them.
-            match app.plugin_view.as_ref().filter(|v| v.key == (deckard_doc::Chain::Sound(g, s), i) && v.error.is_none()) {
+            // A hosted plug-in: its pages, their values read from the instance while the
+            // panel is drawn (the view comes the frame after it's first drawn), or why it
+            // didn't load.
+            let key = (deckard_doc::Chain::Sound(g, s), i);
+            app.plugin_drawn.borrow_mut().push(key);
+            match app.plugin_views.get(&key) {
+                Some(v) if v.error.is_some() => {
+                    let e = v.error.as_deref().unwrap_or_default();
+                    let galley = painter.layout(e.to_string(), font(12.0), white(150), inner.width() - 28.0);
+                    painter.galley(Pos2::new(body.left() + 14.0, body.top() + 40.0), galley, white(150));
+                }
                 Some(v) => {
                     let names: Vec<String> = v
                         .pages
@@ -620,14 +634,14 @@ fn panel(
                         .enumerate()
                         .map(|(k, p)| if p.name.is_empty() { format!("Page {}", k + 1) } else { p.name.clone() })
                         .collect();
-                    let cur = app.plugin_page.min(names.len().saturating_sub(1));
+                    let cur = app.view_page(key).min(names.len().saturating_sub(1));
                     let pid = id.with("page");
                     if panel_page(ui, pid) != cur {
                         ui.data_mut(|d| d.insert_temp(pid, cur));
                     }
                     let page = page_stepper(ui, painter, Pos2::new(body.right() - 100.0, body.top() + 18.0), &names, pid);
                     if page != cur {
-                        acts.push(Act::PluginPage(page));
+                        acts.push(Act::PluginPageOf(key.0, i, page));
                     }
                     if page == v.page
                         && let Some(pg) = v.pages.get(page)
@@ -642,21 +656,25 @@ fn panel(
                                     Cow::Owned(label.to_uppercase()),
                                     text,
                                     value as f32,
-                                    Some(Edit::PluginIn(deckard_doc::Chain::Sound(g, s), i, info.id, info.default)),
+                                    Some(Edit::PluginIn(key.0, i, info.id, info.default)),
                                 ))
                             })
                             .collect();
                         grid(ui, painter, inner, &knobs, id.with(("plugin", page)), color, acts);
+                        // (What each panel shows, for tests.)
+                        let labels = pg.knobs.iter().map(|(_, l, _)| l.to_uppercase()).collect();
+                        ui.data_mut(|d| {
+                            d.get_temp_mut_or_default::<Vec<PluginShown>>(egui::Id::new(STRIP_PLUGINS)).push((i, page, labels))
+                        });
                     }
                 }
+                // Running: its view comes next frame. Not loaded yet (drawing doesn't load
+                // it): focusing it does.
+                None if app.samples.plugins.existing(app.plugin_slot_key(key.0, i)).is_some() => {
+                    ui.ctx().request_repaint_after(crate::VIEW_REFRESH)
+                }
                 None => {
-                    let b = Rect::from_center_size(body.center(), Vec2::new(150.0, 26.0));
-                    let resp = ui.interact(b, id.with("show"), Sense::click());
-                    painter.rect_filled(b, 3.0, if resp.hovered() { S03 } else { S02 });
-                    painter.text(b.center(), Align2::CENTER_CENTER, "Show parameters", font(12.0), white(220));
-                    if resp.clicked() {
-                        acts.push(Act::FocusSlot(g, s, i));
-                    }
+                    painter.text(body.center(), Align2::CENTER_CENTER, "Not loaded: click its name for details", font(12.0), white(120));
                 }
             }
         }

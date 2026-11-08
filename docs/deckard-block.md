@@ -25,18 +25,18 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 8
+## Payload, version 9
 
-Version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 8
-and reads all seven.
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 9
+and reads all eight.
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
 IEEE single.
 
 ```text
-u32 version = 8        (7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
+u32 version = 9        (8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
                        2: without routes either; 1: without Pad Touch either)
 u32 pattern_count
 pattern × pattern_count:
@@ -94,6 +94,8 @@ u32 lfos_len, u8 × lfos_len   version 6: the project's LFOs as UTF-8 text (`lfo
 u32 cc_len, u8 × cc_len       version 7: the project's CC routes as UTF-8 text
 u32 scene_len, u8 × scene_len version 8: scene settings as UTF-8 text
                               (`mod_matrix::cc_to_text`)
+u32 extra_len, u8 × extra_len version 9: a plug-in's extra-output strips as UTF-8 text
+                              (`extra_out::to_text`), one strip per line
 ```
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's

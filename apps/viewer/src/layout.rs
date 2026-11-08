@@ -209,6 +209,30 @@ fn label(painter: &Painter, rect: Rect, indent: f32, text: &str, size: f32, colo
     );
 }
 
+/// `text` shortened with "…" in the middle to fit `width` at `size`, keeping its start
+/// and its end ("Drums Acoustic Kit 2" → "Drums A…Kit 2"): as many characters as fit,
+/// split evenly (the start gets the odd one), with no spaces next to the "…".
+pub(crate) fn elide_middle(painter: &Painter, text: &str, size: f32, width: f32) -> String {
+    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font(size), Color32::WHITE).size().x <= width;
+    if fits(text) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let cut = |k: usize| -> String {
+        let (head, tail) = (k.div_ceil(2), k / 2);
+        let h: String = chars[..head].iter().collect();
+        let t: String = chars[chars.len() - tail..].iter().collect();
+        format!("{}…{}", h.trim_end(), t.trim_start())
+    };
+    // The most characters kept that still fit.
+    let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
 /// Bar.beat.sixteenth, 1-based, as Maschine's position display.
 fn position_string(p: &Project, ticks: f64) -> String {
     let t = ticks.max(0.0) as i64;
@@ -460,6 +484,18 @@ impl MouseMode {
     }
 }
 
+/// A change to a plug-in's extra-output strip ([`Act::SetExtraOut`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExtraOutEdit {
+    /// Linear (1.0 = 0 dB), up to +12 dB.
+    Level(f64),
+    Pan(f64),
+    Mute(bool),
+    Dest(deckard_model::AudioDest),
+    /// Stereo or mono (a split half's is its side: see [`Act::SplitExtraOut`]).
+    Channels(deckard_model::extra_out::Channels),
+}
+
 /// What clicks in the panels ask for; applied after drawing.
 pub enum Act {
     /// (For edits that do nothing.)
@@ -530,6 +566,14 @@ pub enum Act {
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
+    /// Strips for plug-in extra outputs just heard: added outside the undo history.
+    AddExtraOuts(Vec<deckard_model::extra_out::ExtraOut>),
+    /// Change strip `.0` of `project.extra_outs` (a plug-in's extra output).
+    SetExtraOut(usize, ExtraOutEdit),
+    /// Split strip `.0` into two mono strips, its left and right sides.
+    SplitExtraOut(usize),
+    /// Join split half `.0` and its partner back into one stereo strip.
+    JoinExtraOut(usize),
     InsertScene(usize),
     DuplicateScene(usize),
     DeleteScene(usize),
@@ -636,7 +680,10 @@ pub enum Act {
     PluginParamIn(deckard_doc::Chain, usize, u32, f64),
     /// Move parameter `id` of the MIDI input plug-in on group `.0`.
     MidiInputParam(usize, u32, f64),
+    /// The focused slot's page of parameters.
     PluginPage(usize),
+    /// The page of parameters slot `.1` of chain `.0` shows (its strip panel's own).
+    PluginPageOf(deckard_doc::Chain, usize, usize),
     Preferences,
     /// The Sampling view.
     Sampling(sampling::SamplingAct),
@@ -862,6 +909,73 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ToggleController => app.show_controller = !app.show_controller,
             Act::Save => app.save(),
             Act::ToggleFollow => app.follow = !app.follow,
+            Act::AddExtraOuts(fresh) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                // Strips appear from sound, not an edit: no undo step (see
+                // `Document::add_heard_extra_outs`).
+                let result = doc.borrow_mut().add_heard_extra_outs(&fresh);
+                if let Err(e) = result {
+                    app.status = format!("can't add the extra output: {e}");
+                }
+            }
+            Act::SetExtraOut(i, edit) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                let mut d = doc.borrow_mut();
+                let mut all = d.project().extra_outs.clone();
+                let Some(x) = all.get_mut(i) else { continue };
+                // A drag of a strip's level or pan merges with itself only; a mute or an
+                // output picked is a step of its own.
+                let n = i + 1;
+                let result = match edit {
+                    ExtraOutEdit::Level(v) => {
+                        x.level = if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 };
+                        d.set_extra_outs_merging(&format!("Extra Output {n} Level"), all)
+                    }
+                    ExtraOutEdit::Pan(v) => {
+                        x.pan = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+                        d.set_extra_outs_merging(&format!("Extra Output {n} Pan"), all)
+                    }
+                    ExtraOutEdit::Mute(m) => {
+                        x.muted = m;
+                        d.set_extra_outs_as(if m { "Mute Extra Output" } else { "Unmute Extra Output" }, all)
+                    }
+                    ExtraOutEdit::Dest(to) => {
+                        x.dest = to;
+                        d.set_extra_outs_as("Extra Output Destination", all)
+                    }
+                    ExtraOutEdit::Channels(ch) => {
+                        use deckard_model::extra_out::Channels;
+                        // (A split half's side changes only by joining.)
+                        if x.channels.is_half() || ch.is_half() || x.channels == ch {
+                            continue;
+                        }
+                        x.channels = ch;
+                        d.set_extra_outs_as(if ch == Channels::Mono { "Extra Output Mono" } else { "Extra Output Stereo" }, all)
+                    }
+                };
+                if let Err(e) = result {
+                    app.status = format!("can't change the extra output: {e}");
+                }
+            }
+            Act::SplitExtraOut(i) | Act::JoinExtraOut(i) => {
+                use deckard_model::extra_out;
+                let split = matches!(a, Act::SplitExtraOut(_));
+                let Some(doc) = app.doc.clone() else { continue };
+                let mut d = doc.borrow_mut();
+                let before = d.project().extra_outs.clone();
+                let mut all = before.clone();
+                if split {
+                    extra_out::split(&mut all, i);
+                } else {
+                    extra_out::join(&mut all, i);
+                }
+                if all == before {
+                    continue;
+                }
+                if let Err(e) = d.set_extra_outs_as(if split { "Split Extra Output" } else { "Join Extra Output" }, all) {
+                    app.status = format!("can't change the extra output: {e}");
+                }
+            }
             Act::SeekPattern(t) => app.seek_pattern(t),
             Act::SeekArrangement(t) => app.seek_arrangement(t),
             Act::AssignPattern(..)
@@ -1072,7 +1186,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 {
                     app.status = format!("can't remove it: {e}");
                 }
-                app.plugin_view = None;
+                app.plugin_views.clear();
             }
             Act::SlotActive(i, on) => {
                 if let Some(doc) = app.doc.clone()
@@ -1090,6 +1204,14 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::PluginPage(n) => app.plugin_page = n,
+            Act::PluginPageOf(c, i, n) => {
+                if app.plugin_focus == Some((c, i)) {
+                    app.plugin_page = n;
+                }
+                if let Some(v) = app.plugin_views.get_mut(&(c, i)) {
+                    v.shown = n;
+                }
+            }
             Act::Preferences => app.prefs = Some(app.prefs.unwrap_or(0)),
             Act::ToggleMixer => {
                 app.mixer = !app.mixer;
@@ -3757,8 +3879,8 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
-    let page = app.plugin_page;
-    if let Some(view) = app.plugin_view.as_mut().filter(|v| v.key == (chain, i)) {
+    let page = app.view_page((chain, i));
+    if let Some(view) = app.plugin_views.get_mut(&(chain, i)) {
         if let Some(pg) = view.pages.get(page) {
             for (k, (info, ..)) in pg.knobs.iter().enumerate() {
                 if info.id == id
@@ -3885,7 +4007,7 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
         });
     }
     if let Some(pr) = &slot.plugin {
-        let v = app.plugin_view.as_ref().filter(|v| v.key == (app.chain(), i) && v.error.is_none())?;
+        let v = app.plugin_views.get(&(app.chain(), i)).filter(|v| v.error.is_none())?;
         let mut names: Vec<String> = v
             .pages
             .iter()
@@ -4234,7 +4356,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     if !pr.id.starts_with(deckard_plugins::native::VENDOR) {
                         window_button = Some(i);
                     }
-                    match app.plugin_view.as_ref().filter(|v| v.key == (app.chain(), i)) {
+                    match app.plugin_views.get(&(app.chain(), i)) {
                         Some(v) if v.error.is_none() => {
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
@@ -7041,6 +7163,47 @@ mod emoji_tests {
             assert_eq!(list[1], super::EMOJI_FONT, "{family:?}: {list:?}");
         }
         assert_eq!(&f.font_data[super::EMOJI_FONT].font[..], deckard_nwl::draw::EMOJI_FONT);
+    }
+}
+
+#[cfg(test)]
+mod elide_middle_tests {
+    use super::*;
+
+    /// `f` with a painter (fonts loaded).
+    fn with_painter(f: impl FnOnce(&Painter)) {
+        let ctx = egui::Context::default();
+        let mut f = Some(f);
+        ctx.run_ui(Default::default(), |ui| {
+            if let Some(f) = f.take() {
+                f(ui.painter());
+            }
+        })
+        .textures_delta
+        .clear();
+        assert!(f.is_none(), "ran");
+    }
+
+    #[test]
+    fn a_long_name_keeps_its_start_and_end() {
+        with_painter(|p| {
+            let w = |t: &str| p.layout_no_wrap(t.to_string(), font(12.0), Color32::WHITE).size().x;
+            assert_eq!(elide_middle(p, "Drums", 12.0, 200.0), "Drums", "short: unchanged");
+            let long = "Drums Acoustic Kit 2";
+            let width = w(long) * 0.6;
+            let e = elide_middle(p, long, 12.0, width);
+            assert!(e.starts_with('D') && e.ends_with('2'), "{e}");
+            assert_eq!(e.matches('…').count(), 1, "{e}");
+            let (head, tail) = e.split_once('…').unwrap();
+            assert!(!head.is_empty() && !tail.is_empty(), "in the middle: {e}");
+            assert!(!head.ends_with(' ') && !tail.starts_with(' '), "no spaces by the …: {e}");
+            assert!(w(&e) <= width, "fits: {e} {} > {width}", w(&e));
+            assert!(e.chars().count() < long.chars().count());
+            assert!(long.starts_with(head) && long.ends_with(tail), "{e}");
+            // Balanced: the start gets the odd character (13 kept: 7 and 6, then trimmed).
+            let wide = w("Drums A…Kit 2");
+            assert_eq!(elide_middle(p, long, 12.0, wide), "Drums A…Kit 2");
+        });
     }
 }
 

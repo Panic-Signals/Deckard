@@ -126,6 +126,10 @@ mod imp {
         }
         assert!(heard, "a note sounds");
         p.all_notes_off();
+        // It lets the host set how many outputs it has, up to 16 channels in all: it's
+        // given 8 stereo pairs (as Kontakt's is given 16), each one there to read.
+        assert_eq!(p.output_count(), 8);
+        assert!((0..8).all(|b| p.output_bus(b, MAX_BLOCK).is_some_and(|(l, r)| l.len() == MAX_BLOCK && r.len() == MAX_BLOCK)));
     }
 
     pub fn a_missing_one_says_so() {

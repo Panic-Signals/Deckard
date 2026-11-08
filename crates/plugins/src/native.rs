@@ -90,6 +90,23 @@ pub trait Engine: Send {
     /// instrument) and get the output.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], transport: &Transport);
 
+    /// How many stereo output buses the engine has (bus 0 is what `process` fills).
+    fn outputs(&self) -> usize {
+        1
+    }
+
+    /// The name of output bus `bus`; `None` leaves it to the host ("Out 2").
+    fn output_name(&self, bus: usize) -> Option<String> {
+        let _ = bus;
+        None
+    }
+
+    /// Output bus `bus` (1 and up) after the last `process` of `frames` frames.
+    fn output(&self, bus: usize, frames: usize) -> Option<(&[f32], &[f32])> {
+        let _ = (bus, frames);
+        None
+    }
+
     /// Render a block with an optional side-chain input.
     fn process_sc(&mut self, left: &mut [f32], right: &mut [f32], sidechain: Option<(&[f32], &[f32])>, transport: &Transport) {
         let _ = sidechain;
@@ -402,7 +419,18 @@ impl Instance {
 
     pub(crate) fn output_bus(&self, bus: usize, frames: usize) -> Option<(&[f32], &[f32])> {
         let n = frames.min(crate::MAX_BLOCK);
-        (bus == 0).then(|| (&self.out.0[..n], &self.out.1[..n]))
+        if bus == 0 {
+            return Some((&self.out.0[..n], &self.out.1[..n]));
+        }
+        self.engine.output(bus, n)
+    }
+
+    pub(crate) fn output_count(&self) -> usize {
+        self.engine.outputs()
+    }
+
+    pub(crate) fn output_name(&self, bus: usize) -> Option<String> {
+        self.engine.output_name(bus)
     }
 }
 
@@ -428,6 +456,71 @@ mod tests {
     use super::*;
     use crate::{Host, Slot};
     use std::sync::Arc;
+
+    /// A native engine with three output buses (the last two unnamed or named).
+    struct Multi {
+        aux: (Vec<f32>, Vec<f32>),
+    }
+
+    impl Engine for Multi {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn reset(&mut self) {}
+        fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &Transport) {}
+        fn outputs(&self) -> usize {
+            3
+        }
+        fn output_name(&self, bus: usize) -> Option<String> {
+            match bus {
+                0 => Some("Main".into()),
+                2 => Some("Aux 2".into()),
+                _ => None,
+            }
+        }
+        fn output(&self, bus: usize, frames: usize) -> Option<(&[f32], &[f32])> {
+            (bus == 1 || bus == 2).then(|| (&self.aux.0[..frames], &self.aux.1[..frames]))
+        }
+    }
+
+    struct Plain;
+
+    impl Engine for Plain {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn reset(&mut self) {}
+        fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &Transport) {}
+    }
+
+    static MULTI: Class = Class {
+        cid: [7; 16],
+        name: "Multi",
+        instrument: true,
+        params: &[],
+        pages: &[],
+        make: |_| Box::new(Multi { aux: (vec![0.25; crate::MAX_BLOCK], vec![0.5; crate::MAX_BLOCK]) }),
+    };
+
+    static PLAIN: Class = Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain) };
+
+    /// A native plug-in says how many output buses it has and what they're called.
+    #[test]
+    fn native_plugin_reports_extra_buses() {
+        let id = |c: &Class| crate::PluginId::parse(&c.plugin_id(), c.name).unwrap();
+        let p = crate::Plugin::native(&MULTI, id(&MULTI), "Multi", 48_000.0);
+        assert_eq!(p.output_count(), 3);
+        assert_eq!(p.output_name(0), "Main");
+        assert_eq!(p.output_name(1), "Out 2");
+        assert_eq!(p.output_name(2), "Aux 2");
+        let (l, r) = p.output_bus(2, 16).unwrap();
+        assert_eq!((l, r), (&[0.25f32; 16][..], &[0.5f32; 16][..]));
+        assert!(p.output_bus(3, 16).is_none());
+        let q = crate::Plugin::native(&PLAIN, id(&PLAIN), "Plain", 48_000.0);
+        assert_eq!(q.output_count(), 1);
+        assert_eq!(q.output_name(0), "Out 1");
+        assert!(q.output_bus(1, 16).is_none());
+    }
 
     /// A native plug-in's state goes through Maschine's chunk (a `.vstpreset` in the
     /// `PluginHost`) and back; an empty chunk, as Maschine re-saves one it never ran,
