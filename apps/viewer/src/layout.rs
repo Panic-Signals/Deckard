@@ -2075,23 +2075,64 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
     label(&painter, scene_cell, 2.0, &scene, 12.0, scene_col);
 }
 
-/// A menu button in a rectangle of a custom-drawn panel.
+/// A custom-styled pill menu button placed at `rect.min` (height `rect.height()`, width
+/// sized to `text` plus optional dropdown chevron).
+fn pill_menu_at(ui: &mut Ui, rect: Rect, text: String, chevron: bool, stay_open: bool, add: impl FnOnce(&mut Ui)) -> Response {
+    use egui::containers::menu::{MenuButton, MenuConfig};
+    let text_w = ui.painter().layout_no_wrap(text.clone(), font(11.0), Color32::WHITE).size().x;
+    let w = if chevron { (text_w + 26.0).ceil().max(46.0) } else { (text_w + 18.0).ceil() };
+    let pill = Rect::from_min_size(rect.min, Vec2::new(w, rect.height()));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(pill).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    child.spacing_mut().button_padding = Vec2::new(((w - text_w) * 0.5).max(0.0), 2.0);
+    child.spacing_mut().interact_size = pill.size();
+    {
+        let w = &mut child.visuals_mut().widgets;
+        for v in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            v.bg_fill = Color32::TRANSPARENT;
+            v.weak_bg_fill = Color32::TRANSPARENT;
+            v.bg_stroke = Stroke::NONE;
+            v.fg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
+        }
+    }
+    let rt = egui::RichText::new(text.clone()).size(11.0).color(Color32::TRANSPARENT);
+    let mut resp = if stay_open {
+        let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        MenuButton::new(rt).config(config).ui(&mut child, add).0
+    } else {
+        child.menu_button(rt, add).response
+    };
+    resp.rect = pill;
+    let p = ui.painter();
+    let hot = resp.hovered() || resp.has_focus();
+    p.rect_filled(pill, 3.0, if hot { S03 } else { S01 });
+    p.rect_stroke(pill, 3.0, Stroke::new(1.0, if hot { white(80) } else { S03 }), StrokeKind::Inside);
+    let ink = if hot { Color32::WHITE } else { white(215) };
+    if chevron {
+        p.text(Pos2::new(pill.left() + 8.0, pill.center().y), Align2::LEFT_CENTER, &text, font(11.0), ink);
+        let cx = pill.right() - 8.5;
+        let cy = pill.center().y + 0.5;
+        let ccol = if hot { white(215) } else { white(130) };
+        p.line_segment([Pos2::new(cx - 2.5, cy - 1.2), Pos2::new(cx, cy + 1.5)], Stroke::new(1.2, ccol));
+        p.line_segment([Pos2::new(cx, cy + 1.5), Pos2::new(cx + 2.5, cy - 1.2)], Stroke::new(1.2, ccol));
+    } else {
+        p.text(pill.center(), Align2::CENTER_CENTER, &text, font(11.0), ink);
+    }
+    resp
+}
+
+/// A dropdown menu button in a rectangle of a custom-drawn panel.
 fn menu_at(ui: &mut Ui, rect: Rect, text: String, add: impl FnOnce(&mut Ui)) -> Response {
-    // A child placed at `rect` that takes no room in the parent's layout.
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    child.spacing_mut().button_padding = Vec2::new(4.0, 1.0);
-    let text = egui::RichText::new(text).size(12.0).color(Color32::WHITE);
-    child.menu_button(text, add).response
+    pill_menu_at(ui, rect, text, true, false, add)
+}
+
+/// An action menu button (no dropdown chevron) in a rectangle of a custom-drawn panel.
+fn action_menu_at(ui: &mut Ui, rect: Rect, text: String, add: impl FnOnce(&mut Ui)) -> Response {
+    pill_menu_at(ui, rect, text, false, false, add)
 }
 
 /// [`menu_at`] for settings: it stays open while they're changed, until a click outside.
 fn settings_menu_at(ui: &mut Ui, rect: Rect, text: String, add: impl FnOnce(&mut Ui)) -> Response {
-    use egui::containers::menu::{MenuButton, MenuConfig};
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    child.spacing_mut().button_padding = Vec2::new(4.0, 1.0);
-    let text = egui::RichText::new(text).size(12.0).color(Color32::WHITE);
-    let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    MenuButton::new(text).config(config).ui(&mut child, add).0
+    pill_menu_at(ui, rect, text, true, true, add)
 }
 
 /// PAD TOUCH (next to SCALE): what pressing a held MK3 pad does for the focused sound,
@@ -5474,23 +5515,28 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     match pat {
         Some(pt) => {
             let name = if pt.name.is_empty() { "Pattern" } else { &pt.name };
-            let r = painter.text(Pos2::new(header.left() + 8.0, header.center().y), Align2::LEFT_CENTER, name, font(15.0), gcol);
-            let mut x = r.right() + 24.0;
+            let y = header.center().y;
+            let sep = |p: &Painter, x: f32| {
+                p.vline(x, (y - 8.0)..=(y + 8.0), Stroke::new(1.0, S02));
+            };
+            let r = painter.text(Pos2::new(header.left() + 10.0, y), Align2::LEFT_CENTER, name, font(15.0), gcol);
+            let mut x = r.right() + 14.0;
+            sep(&painter, x);
+            x += 14.0;
             let len = pattern_len(p, app.group, app.pattern);
             let beat = PPQ * 4 / p.denominator.max(1);
-            let y = header.center().y;
-            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "START", font(10.0), white(61));
+            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "START", font(10.0), white(120));
             let r = painter.text(
                 Pos2::new(r.right() + 6.0, y),
                 Align2::LEFT_CENTER,
                 position_string(p, pt.start as f64),
-                font(12.0),
-                Color32::WHITE,
+                font(11.0),
+                white(215),
             );
-            x = r.right() + 20.0;
+            x = r.right() + 14.0;
             // Length, grid and quantize: menus.
             let (g, pi) = (app.group, app.pattern);
-            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "LENGTH", font(10.0), white(61));
+            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "LENGTH", font(10.0), white(120));
             let at = Rect::from_min_size(Pos2::new(r.right() + 6.0, y - 10.0), Vec2::new(64.0, 20.0));
             // Auto (no length chosen): an empty pattern grows as it's recorded into.
             let auto = app.doc.as_ref().is_some_and(|d| d.borrow().length_is_auto(g, pi));
@@ -5499,7 +5545,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             } else {
                 format!("{}:{}:{}", len / bar, len % bar / beat, len % beat / (PPQ / 4))
             };
-            menu_at(ui, at, text, |ui| {
+            let len_drawn = menu_at(ui, at, text, |ui| {
                 if ui
                     .selectable_label(auto, "Auto")
                     .on_hover_text("Recorded into from empty, the pattern grows a bar at a time as it's played into")
@@ -5522,10 +5568,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     }
                 }
             });
-            x = at.right() + 16.0;
-            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "GRID", font(10.0), white(61));
+            x = len_drawn.rect.right() + 14.0;
+            sep(&painter, x);
+            x += 14.0;
+            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "GRID", font(10.0), white(120));
             let at = Rect::from_min_size(Pos2::new(r.right() + 6.0, y - 10.0), Vec2::new(52.0, 20.0));
-            menu_at(ui, at, grid_name(app.grid), |ui| {
+            let grid_drawn = menu_at(ui, at, grid_name(app.grid), |ui| {
                 for (name, ticks) in GRIDS {
                     if ui.selectable_label(app.grid == ticks, name).clicked() {
                         acts.push(Act::Grid(ticks));
@@ -5533,7 +5581,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     }
                 }
             });
-            x = at.right() + 16.0;
+            x = grid_drawn.rect.right() + 8.0;
             let at = Rect::from_min_size(Pos2::new(x, y - 10.0), Vec2::new(78.0, 20.0));
             let selected = app.selected.iter().filter(|n| pt.notes.contains(n)).count();
             let what = match selected {
@@ -5541,8 +5589,20 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 1 => "the selected note".to_string(),
                 n => format!("the {n} selected notes"),
             };
+            let quant_drawn = action_menu_at(ui, at, "QUANTIZE".into(), |ui| {
+                ui.label(egui::RichText::new(format!("Snap {what} to the {} grid", grid_name(app.grid))).weak());
+                for pct in [100, 75, 50] {
+                    if ui.button(format!("{pct} %")).clicked() {
+                        acts.push(Act::Quantize(pct));
+                        ui.close();
+                    }
+                }
+            });
+            x = quant_drawn.rect.right() + 14.0;
+            sep(&painter, x);
+            x += 14.0;
             // The scale (Maschine only sets it on the controller): root and scale, by bank.
-            let scale_at = Rect::from_min_size(Pos2::new(at.right() + 16.0, y - 10.0), Vec2::new(150.0, 20.0));
+            let scale_at = Rect::from_min_size(Pos2::new(x, y - 10.0), Vec2::new(150.0, 20.0));
             let (root, bank, kind) = app.scale;
             let chromatic = bank == 0 && kind == 0;
             let names = deckard_lua_host::api::scales::scale_names(bank);
@@ -5575,27 +5635,20 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     });
                 }
             });
-            let pad_at = Rect::from_min_size(Pos2::new(scale_drawn.rect.right() + 16.0, y - 10.0), Vec2::new(130.0, 20.0));
+            let pad_at = Rect::from_min_size(Pos2::new(scale_drawn.rect.right() + 8.0, y - 10.0), Vec2::new(130.0, 20.0));
             let pad_right = pad_touch_menu(ui, pad_at, app.group, app.sound, group.sounds.get(app.sound), acts)
                 .map_or(scale_drawn.rect.right(), |r| r.rect.right());
             if selected > 0 {
+                let sx = pad_right + 14.0;
+                sep(&painter, sx);
                 painter.text(
-                    Pos2::new(pad_right + 16.0, y),
+                    Pos2::new(sx + 14.0, y),
                     Align2::LEFT_CENTER,
                     format!("{selected} selected  (Esc clears)"),
                     font(11.0),
-                    Color32::WHITE,
+                    white(180),
                 );
             }
-            menu_at(ui, at, "QUANTIZE".into(), |ui| {
-                ui.label(egui::RichText::new(format!("Snap {what} to the {} grid", grid_name(app.grid))).weak());
-                for pct in [100, 75, 50] {
-                    if ui.button(format!("{pct} %")).clicked() {
-                        acts.push(Act::Quantize(pct));
-                        ui.close();
-                    }
-                }
-            });
         }
         None => label(&painter, header, 8.0, "No pattern", 12.0, white(142)),
     }
