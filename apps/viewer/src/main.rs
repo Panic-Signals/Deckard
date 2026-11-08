@@ -834,6 +834,9 @@ enum WineAction {
 pub struct App {
     /// The open project, shared with the controller scripts.
     doc: Option<Shared>,
+    /// The project an Open replaced, with its undo history, and its file: Undo with
+    /// nothing of the new one's to undo brings it back ([`App::back_to_replaced`]).
+    replaced: Option<(Shared, Option<PathBuf>)>,
     /// The document revision playback last took up.
     seen_revision: u64,
     group_moves: group_move::State,
@@ -1413,6 +1416,20 @@ impl App {
 
     /// Make `d` the open document (or show why it couldn't be opened).
     fn show_document(&mut self, d: Result<Document, String>) {
+        self.replaced = None;
+        self.leave_document();
+        match d {
+            Ok(mut d) => {
+                // Pads play at the fixed velocity (100) unless FIXED VEL is turned off.
+                let _ = d.set_initial(deckard_doc::Target::Song, "pad_velocity_mode", mxprj::decode::Value::Int(1));
+                self.take_up(d.shared());
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Let go of what belongs to the open document (playback, caches, plug-in views).
+    fn leave_document(&mut self) {
         self.zone_of = None;
         modulation::register();
         self.stop();
@@ -1430,42 +1447,56 @@ impl App {
         self.samples = SampleCache::default();
         self.preload_plugins = deckard_plugins::on_main_thread();
         self.frames_drawn = 0;
-        match d {
-            Ok(mut d) => {
-                self.doc_generation += 1;
-                // Pads play at the fixed velocity (100) unless FIXED VEL is turned off.
-                let _ = d.set_initial(deckard_doc::Target::Song, "pad_velocity_mode", mxprj::decode::Value::Int(1));
-                // What's copied keeps its expression in the new project (ids are the old one's).
-                if let Some(old) = self.doc.clone() {
-                    let old = old.borrow();
-                    if let Some(clip) = &mut self.note_clip {
-                        for n in &mut clip.notes {
-                            *n = d.carry_note(&old, *n);
-                        }
+    }
+
+    /// Make `doc` the open document, where it was last left.
+    fn take_up(&mut self, doc: Shared) {
+        {
+            self.doc_generation += 1;
+            // What's copied keeps its expression in the new project (ids are the old one's).
+            if let Some(old) = self.doc.clone().filter(|old| !std::rc::Rc::ptr_eq(old, &doc)) {
+                let old = old.borrow();
+                let mut d = doc.borrow_mut();
+                if let Some(clip) = &mut self.note_clip {
+                    for n in &mut clip.notes {
+                        *n = d.carry_note(&old, *n);
                     }
-                    self.sound_clipboard = std::mem::take(&mut self.sound_clipboard).into_iter().map(|c| c.carried(&old, &mut d)).collect();
                 }
-                let doc = d.shared();
-                if let Some(dir) = self.controller_scripts() {
-                    self.controller = Some(controller::Controller::new(&dir, &self.model, Some(doc.clone())));
-                }
-                // Projects with an arrangement open in the Song view, others in Ideas.
-                self.song_view = !doc.borrow().project().sections.is_empty();
-                self.mixer_sounds = doc.borrow().project().mixer_sounds;
-                self.headroom.clear();
-                self.seen_revision = doc.borrow().revision();
-                self.clear_midi_inputs();
-                self.midi_input_groups = doc.borrow().project().groups.len();
-                self.doc = Some(doc);
-                self.error = None;
-                (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
-                self.section = None;
-                self.focus_scene(0);
-                self.restore_screen();
-                self.sync_controller();
+                self.sound_clipboard = std::mem::take(&mut self.sound_clipboard).into_iter().map(|c| c.carried(&old, &mut d)).collect();
             }
-            Err(e) => self.error = Some(e),
+            if let Some(dir) = self.controller_scripts() {
+                self.controller = Some(controller::Controller::new(&dir, &self.model, Some(doc.clone())));
+            }
+            // Projects with an arrangement open in the Song view, others in Ideas.
+            self.song_view = !doc.borrow().project().sections.is_empty();
+            self.mixer_sounds = doc.borrow().project().mixer_sounds;
+            self.headroom.clear();
+            self.seen_revision = doc.borrow().revision();
+            self.clear_midi_inputs();
+            self.midi_input_groups = doc.borrow().project().groups.len();
+            self.doc = Some(doc);
+            self.error = None;
+            (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
+            self.section = None;
+            self.focus_scene(0);
+            self.restore_screen();
+            self.sync_controller();
         }
+    }
+
+    /// Undo past the start of the open project's history: the project an Open replaced
+    /// comes back, as it was left (false: none, or the open one has unsaved changes).
+    fn back_to_replaced(&mut self) -> bool {
+        if self.dirty() {
+            return false;
+        }
+        let Some((doc, path)) = self.replaced.take() else { return false };
+        self.leave_document();
+        self.take_up(doc);
+        self.path = path;
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the last project".into(), |n| n.to_string_lossy().to_string());
+        self.status = format!("back to {name}");
+        true
     }
 
     /// Load the focused zone's waveform when the focus moves to another zone.
@@ -1921,10 +1952,20 @@ impl App {
         if self.dirty() {
             self.confirm = Some(Pending::Open(path));
         } else {
-            self.open(&path);
-            if self.error.is_none() {
-                self.remember(&path);
-            }
+            self.open_replacing(&path);
+        }
+    }
+
+    /// Open `path` in place of the open project, which Undo can bring back (see
+    /// [`App::back_to_replaced`]), unsaved changes and all.
+    fn open_replacing(&mut self, path: &Path) {
+        // (It comes back where it was left.)
+        self.store_screen();
+        let old = self.doc.clone().map(|d| (d, self.path.clone()));
+        self.open(path);
+        if self.error.is_none() {
+            self.replaced = old;
+            self.remember(path);
         }
     }
 
@@ -1946,11 +1987,8 @@ impl App {
     fn proceed(&mut self, ctx: &egui::Context, then: Pending) {
         match then {
             Pending::New => self.new_project(),
-            Pending::Open(p) => {
-                // Changes were saved or discarded: open without asking again.
-                self.doc = None;
-                self.open_file(p);
-            }
+            // Changes were saved or discarded: open without asking again.
+            Pending::Open(p) => self.open_replacing(&p),
             Pending::Revert => {
                 if let Some(p) = self.doc.as_ref().and_then(|d| d.borrow().path().map(Path::to_path_buf)) {
                     self.open(&p);
@@ -2060,10 +2098,11 @@ impl App {
                 }
             }
             C::UndoStep => {
-                if let Some(doc) = &self.doc
-                    && !doc.borrow_mut().undo_step()
-                {
-                    self.status = "nothing to undo".into();
+                if let Some(doc) = self.doc.clone() {
+                    let ok = doc.borrow_mut().undo_step();
+                    if !ok && !self.back_to_replaced() {
+                        self.status = "nothing to undo".into();
+                    }
                 }
             }
             C::RedoStep => {
@@ -6408,11 +6447,10 @@ impl App {
     }
 
     fn undo(&mut self) {
-        if let Some(doc) = &self.doc {
-            let ok = doc.borrow_mut().undo();
-            if !ok {
-                self.status = "nothing to undo".into();
-            }
+        let Some(doc) = self.doc.clone() else { return };
+        let ok = doc.borrow_mut().undo();
+        if !ok && !self.back_to_replaced() {
+            self.status = "nothing to undo".into();
         }
     }
 

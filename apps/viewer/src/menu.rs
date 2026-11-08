@@ -137,7 +137,11 @@ pub fn menus(app: &App) -> Vec<(&'static str, Vec<Item>)> {
     let doc = app.doc.as_ref().map(|d| d.borrow());
     let has = doc.is_some();
     let dirty = doc.as_ref().is_some_and(|d| d.is_dirty());
-    let undo: Vec<String> = doc.as_ref().map_or(Vec::new(), |d| d.undo_labels().into_iter().map(String::from).collect());
+    let mut undo: Vec<String> = doc.as_ref().map_or(Vec::new(), |d| d.undo_labels().into_iter().map(String::from).collect());
+    // Past the start of the history: the project an Open replaced (App::back_to_replaced).
+    if !dirty && app.replaced.is_some() {
+        undo.push("Open Project".into());
+    }
     let redo: Vec<String> = doc.as_ref().map_or(Vec::new(), |d| d.redo_labels().into_iter().map(String::from).collect());
     let notes = doc
         .as_ref()
