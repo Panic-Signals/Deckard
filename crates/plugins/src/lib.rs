@@ -12,6 +12,7 @@ pub mod com;
 pub mod editor;
 pub mod module;
 pub mod native;
+pub mod nks;
 /// Mutable Instruments' licence (Plaits), for the About box.
 pub use deckard_mi::LICENSE as MUTABLE_INSTRUMENTS_LICENSE;
 mod plaits;
@@ -30,19 +31,31 @@ use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{ComPtr, ComWrapper, Interface};
 
+#[cfg(not(windows))]
 unsafe extern "C" {
     fn _exit(code: i32) -> !;
 }
 
 /// End the process now. Unlike `std::process::exit`, this skips the exit-time
 /// destructors of loaded plug-ins: some (NI's, whose editors use their own Qt) crash
-/// in them once the host has started tearing down. Call it instead of returning from
-/// `main` in programs that may have loaded plug-ins.
+/// or hang in them once the host has started tearing down. Call it instead of returning
+/// from `main` in programs that may have loaded plug-ins.
 pub fn exit(code: i32) -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    unsafe { _exit(code) }
+    // Windows' `_exit` is `ExitProcess`, which still detaches every DLL, running those
+    // destructors; only `TerminateProcess` doesn't.
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        TerminateProcess(GetCurrentProcess(), code as u32);
+        std::process::abort()
+    }
+    #[cfg(not(windows))]
+    unsafe {
+        _exit(code)
+    }
 }
 
 /// Whether this is the process's main thread (where plug-ins must be created).
@@ -284,6 +297,15 @@ impl Plugin {
         each!(self, p => p.parameter_list(automatable))
     }
 
+    /// Whether the plug-in reports any automatable parameters (some VST3 plug-ins,
+    /// such as Omnisphere, expose them only after a preset state is loaded).
+    pub fn has_automatable_params(&self) -> bool {
+        match &self.kind {
+            Kind::Vst3(v) => v.has_automatable_params(),
+            _ => true,
+        }
+    }
+
     /// The plug-in's own pages of parameters (DECKARD's plug-ins have them): a name,
     /// and up to eight knobs (parameter id, the section heading starting there).
     pub fn pages(&self) -> Vec<(String, Vec<(u32, String)>)> {
@@ -296,6 +318,14 @@ impl Plugin {
     /// A parameter's value (normalized 0..1).
     pub fn param_value(&self, id: u32) -> f64 {
         each!(self, p => p.param_value(id))
+    }
+
+    /// A parameter's unmodulated knob value (normalized 0..1), even while modulated.
+    pub fn knob_value(&self, id: u32) -> f64 {
+        match &self.kind {
+            Kind::Vst3(p) => p.knob_value(id),
+            _ => self.param_value(id),
+        }
     }
 
     /// How the plug-in shows value `v` of parameter `id`.
@@ -369,6 +399,11 @@ impl Plugin {
         each!(mut self, p => p.pitch_bend(value))
     }
 
+    /// Whether this plug-in has a side-chain audio input bus.
+    pub fn has_sidechain(&self) -> bool {
+        each!(self, p => p.has_sidechain())
+    }
+
     /// Run the plug-in for `frames` frames (at most [`MAX_BLOCK`]); returns its main
     /// output (left, right).
     pub fn process(&mut self, frames: usize, transport: &Transport) -> (&[f32], &[f32]) {
@@ -378,7 +413,19 @@ impl Plugin {
     /// [`Plugin::process`] with `input` (left, right) on the plug-in's main input: an
     /// effect.
     pub fn process_input(&mut self, frames: usize, transport: &Transport, input: Option<(&[f32], &[f32])>) -> (&[f32], &[f32]) {
-        each!(mut self, p => p.process_input(frames, transport, input))
+        self.process_input_sc(frames, transport, input, None)
+    }
+
+    /// [`Plugin::process_input`] with `sidechain` (left, right) on the plug-in's
+    /// side-chain input bus, when it has one.
+    pub fn process_input_sc(
+        &mut self,
+        frames: usize,
+        transport: &Transport,
+        input: Option<(&[f32], &[f32])>,
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> (&[f32], &[f32]) {
+        each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain))
     }
 
     /// A way to read and change a VST3's or an Audio Unit's parameters without holding
@@ -673,6 +720,7 @@ impl Vst3 {
         let Some(c) = &self.controller else { return Vec::new() };
         let n = unsafe { c.getParameterCount() };
         let mut out = Vec::new();
+        let mut fallback = Vec::new();
         for i in 0..n {
             let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
             if unsafe { c.getParameterInfo(i, &mut info) } != kResultOk {
@@ -680,19 +728,42 @@ impl Vst3 {
             }
             use ParameterInfo_::ParameterFlags_::*;
             let f = info.flags;
-            if automatable && (f & kCanAutomate == 0 || f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) != 0) {
+            let skip = f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) != 0;
+            if automatable && skip {
                 continue;
             }
-            out.push(ParamInfo {
+            let param = ParamInfo {
                 id: info.id,
                 title: string128(&info.title),
                 short: string128(&info.shortTitle),
                 units: string128(&info.units),
                 steps: info.stepCount,
                 default: info.defaultNormalizedValue,
-            });
+            };
+            if automatable && f & kCanAutomate == 0 {
+                fallback.push(param);
+            } else {
+                out.push(param);
+            }
         }
-        out
+        if out.is_empty() { fallback } else { out }
+    }
+
+    /// Whether the plug-in reports any `kCanAutomate` parameter.
+    pub fn has_automatable_params(&self) -> bool {
+        let Some(c) = &self.controller else { return false };
+        let n = unsafe { c.getParameterCount() };
+        for i in 0..n {
+            let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
+            if unsafe { c.getParameterInfo(i, &mut info) } == kResultOk {
+                use ParameterInfo_::ParameterFlags_::*;
+                let f = info.flags;
+                if f & kCanAutomate != 0 && f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) == 0 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// A parameter's value (normalized 0..1).
@@ -711,6 +782,9 @@ impl Vst3 {
     /// processor gets it at the next `process`. Counts as an edit of the state.
     pub fn set_param(&mut self, id: u32, v: f64) {
         let v = v.clamp(0.0, 1.0);
+        if let Some(m) = self.modded.iter_mut().find(|m| m.0 == id) {
+            m.2 = v;
+        }
         if let Some(c) = &self.controller {
             unsafe { c.setParamNormalized(id, v) };
         }
@@ -809,6 +883,10 @@ impl Vst3 {
         self.modded.iter().find(|m| m.0 == id).map(|m| m.1)
     }
 
+    fn knob_value(&self, id: u32) -> f64 {
+        self.modded.iter().find(|m| m.0 == id).map_or_else(|| self.param_value(id), |m| m.2)
+    }
+
     /// A MIDI control change (value 0..127), at the next `process`.
     pub fn control_change(&mut self, number: u8, value: u8) {
         let n = number.min(127) as usize;
@@ -826,9 +904,20 @@ impl Vst3 {
         }
     }
 
-    /// [`Plugin::process`] with `input` (left, right) on the plug-in's main input: an
-    /// effect.
-    pub fn process_input(&mut self, frames: usize, transport: &Transport, input: Option<(&[f32], &[f32])>) -> (&[f32], &[f32]) {
+    /// Whether the plug-in has a second audio input bus (its side-chain input).
+    pub fn has_sidechain(&self) -> bool {
+        self.inputs.get(1).is_some_and(|b| !b.is_empty())
+    }
+
+    /// [`Plugin::process`] with `input` (left, right) on the plug-in's main input and
+    /// `sidechain` on the second audio input bus.
+    pub fn process_input_sc(
+        &mut self,
+        frames: usize,
+        transport: &Transport,
+        input: Option<(&[f32], &[f32])>,
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> (&[f32], &[f32]) {
         let frames = frames.min(MAX_BLOCK);
         if !self.active || frames == 0 || self.outputs.first().is_none_or(|b| b.is_empty()) {
             self.events.events.borrow_mut().clear();
@@ -850,24 +939,26 @@ impl Vst3 {
         for b in &mut self.in_buses {
             b.silenceFlags = u64::MAX;
         }
-        if let Some((l, r)) = input
-            && let Some(main) = self.inputs.first_mut()
-        {
-            let n = frames.min(l.len()).min(r.len());
-            match main.len() {
-                0 => {}
-                1 => {
-                    for (o, (a, b)) in main[0][..n].iter_mut().zip(l.iter().zip(r)) {
-                        *o = (a + b) * 0.5;
+        for (bus, src) in [(0usize, input), (1usize, sidechain)] {
+            if let Some((l, r)) = src
+                && let Some(target) = self.inputs.get_mut(bus)
+            {
+                let n = frames.min(l.len()).min(r.len());
+                match target.len() {
+                    0 => {}
+                    1 => {
+                        for (o, (a, b)) in target[0][..n].iter_mut().zip(l.iter().zip(r)) {
+                            *o = (a + b) * 0.5;
+                        }
+                    }
+                    _ => {
+                        target[0][..n].copy_from_slice(&l[..n]);
+                        target[1][..n].copy_from_slice(&r[..n]);
                     }
                 }
-                _ => {
-                    main[0][..n].copy_from_slice(&l[..n]);
-                    main[1][..n].copy_from_slice(&r[..n]);
+                if let Some(b) = self.in_buses.get_mut(bus) {
+                    b.silenceFlags = 0;
                 }
-            }
-            if let Some(b) = self.in_buses.first_mut() {
-                b.silenceFlags = 0;
             }
         }
         for b in &mut self.out_buses {
@@ -1061,6 +1152,13 @@ impl Host {
         self.instances.get(&slot).cloned()
     }
 
+    /// Put `plugin` in `slot`.
+    pub fn insert(&mut self, slot: Slot, plugin: Plugin) -> Shared {
+        let shared = Arc::new(Mutex::new(plugin));
+        self.instances.insert(slot, shared.clone());
+        shared
+    }
+
     /// The instance for `slot`, playing plug-in `plugin_id` (Maschine's id) named
     /// `name` with Maschine's saved `chunk`. Reuses the slot's instance when it is the
     /// same plug-in, and loads the chunk again only if it changed.
@@ -1069,29 +1167,6 @@ impl Host {
         // Audio Units are Apple's.
         if cfg!(not(target_os = "macos")) && id.format == state::Format::AudioUnit {
             return Err(format!("{name}: plug-in format not supported ({plugin_id})"));
-        }
-        // DECKARD's own plug-ins need no module, and may be made on any thread.
-        if let Some(class) = native::find(&id.cid) {
-            if let Some(shared) = self.instances.get(&slot) {
-                let mut p = shared.lock().unwrap();
-                if p.id.cid == id.cid && p.sample_rate() == sample_rate {
-                    if p.chunk() != chunk {
-                        p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
-                    }
-                    drop(p);
-                    return Ok(shared.clone());
-                }
-            }
-            let mut p = Plugin::native(class, id, name, sample_rate);
-            p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
-            p.warm_up();
-            let shared = Arc::new(Mutex::new(p));
-            self.instances.insert(slot, shared.clone());
-            return Ok(shared);
-        }
-        if !on_main_thread() {
-            // Plug-ins with their own UI toolkit (NI's use Qt) abort if created elsewhere.
-            return Err(format!("{name}: plug-ins can only be loaded on the main thread"));
         }
         if let Some(shared) = self.instances.get(&slot) {
             let mut p = shared.lock().unwrap();
@@ -1102,6 +1177,19 @@ impl Host {
                 drop(p);
                 return Ok(shared.clone());
             }
+        }
+        // DECKARD's own plug-ins need no module, and may be made on any thread.
+        if let Some(class) = native::find(&id.cid) {
+            let mut p = Plugin::native(class, id, name, sample_rate);
+            p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
+            p.warm_up();
+            let shared = Arc::new(Mutex::new(p));
+            self.instances.insert(slot, shared.clone());
+            return Ok(shared);
+        }
+        if !on_main_thread() {
+            // Plug-ins with their own UI toolkit (NI's use Qt) abort if created elsewhere.
+            return Err(format!("{name}: plug-ins can only be loaded on the main thread"));
         }
         #[cfg(target_os = "macos")]
         let made = if id.format == state::Format::AudioUnit {
@@ -1130,6 +1218,32 @@ impl Host {
         let shared = self.instances.get(&slot)?;
         let same = shared.lock().ok()?.id.cid == id.cid;
         same.then(|| shared.clone())
+    }
+
+    /// Move loaded instances with two Groups without reloading their plug-ins.
+    pub fn swap_groups(&mut self, a: usize, b: usize) {
+        let remap = |g| {
+            if g == a {
+                b
+            } else if g == b {
+                a
+            } else {
+                g
+            }
+        };
+        self.instances = self
+            .instances
+            .drain()
+            .map(|(slot, instance)| {
+                let slot = match slot {
+                    Slot::Sound { group, sound } => Slot::Sound { group: remap(group), sound },
+                    Slot::Chain { group, sound, slot } => Slot::Chain { group: remap(group), sound, slot },
+                    Slot::Group { group, slot } => Slot::Group { group: remap(group), slot },
+                    slot => slot,
+                };
+                (slot, instance)
+            })
+            .collect();
     }
 
     /// Drop instances whose slot `keep` rejects (e.g. sounds that no longer exist).

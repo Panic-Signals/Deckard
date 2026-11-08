@@ -8,7 +8,7 @@ use deckard_engine::output::Sender;
 use deckard_mk3::Event;
 use deckard_model::pad_touch::{PadTouch, TouchMode};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where pads play: the scripts' focus, kept up to date by the app.
 #[derive(Clone, Copy)]
@@ -211,6 +211,21 @@ impl Touching {
     }
 }
 
+#[derive(Clone)]
+pub enum ScreenFrame {
+    Picture(deckard_surface::Picture),
+    Pixels(Arc<Vec<[u8; 4]>>),
+}
+
+impl ScreenFrame {
+    pub fn into_pixels(self) -> Vec<[u8; 4]> {
+        match self {
+            ScreenFrame::Picture(p) => p.into_pixels(),
+            ScreenFrame::Pixels(px) => Arc::unwrap_or_clone(px),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     events: Vec<Event>,
@@ -224,7 +239,7 @@ struct Shared {
     /// What the LEDs should show.
     leds: Option<deckard_mk3::leds::Leds>,
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
-    screens: Option<(u64, Arc<Vec<[u8; 4]>>)>,
+    screens: Option<(u64, ScreenFrame)>,
     display_status: String,
     /// An MK3 is plugged in, and NI's software is why its screens won't open.
     agent_holding: bool,
@@ -232,6 +247,9 @@ struct Shared {
     displays_released: bool,
     /// The displays' backlight, 0..=100 (`set_display_brightness`).
     display_brightness: Option<u8>,
+    /// Bumped whenever that level must be written again: it changed, or the screens
+    /// came back (a driver change leaves the panels at their own 20%).
+    brightness_stamp: u64,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
     /// (`shut_down`).
     closing: bool,
@@ -296,7 +314,9 @@ impl Mk3Io {
 
     /// Set the displays' backlight (0..=100), now and whenever an MK3 connects.
     pub fn set_display_brightness(&self, level: u8) {
-        self.shared.lock().unwrap().display_brightness = Some(level.min(100));
+        let mut s = self.shared.lock().unwrap();
+        s.display_brightness = Some(level.min(100));
+        s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
     }
 
     pub fn set_context(&self, ctx: &eframe::egui::Context) {
@@ -330,10 +350,10 @@ impl Mk3Io {
 
     /// Show these on the displays (both side by side, 960 × 272); `n` changes when
     /// the picture does.
-    pub fn set_screens(&self, n: u64, px: &[[u8; 4]]) {
+    pub fn set_screens(&self, n: u64, frame: ScreenFrame) {
         let mut s = self.shared.lock().unwrap();
         if s.screens.as_ref().is_none_or(|(m, _)| *m != n) {
-            s.screens = Some((n, Arc::new(px.to_vec())));
+            s.screens = Some((n, frame));
         }
     }
 
@@ -389,8 +409,10 @@ fn run(shared: &Mutex<Shared>) {
         let mut events = Vec::new();
         // Shown on the LEDs: none yet, so the first state is sent.
         let mut shown = None;
-        // The backlight as last set on this connection.
-        let mut brightness = None;
+        // The backlight write that succeeded, so a failed one is tried again and a
+        // screen reconnect (a new stamp) is sent even when the level did not change.
+        let mut applied_stamp = 0u64;
+        let mut brightness_retry = Instant::now();
         // What each pad started, so it stops the same note however the route changed
         // (a chord's first note; its others in `chord_rest`).
         let mut sounding: [Option<(usize, usize, i64)>; 16] = [None; 16];
@@ -409,14 +431,21 @@ fn run(shared: &Mutex<Shared>) {
                 s.connected = false;
                 break;
             }
-            let wanted = shared.lock().unwrap().display_brightness;
-            if wanted.is_some() && wanted != brightness {
-                if let Some(level) = wanted
-                    && let Err(e) = dev.set_display_brightness(level)
-                {
-                    shared.lock().unwrap().display_status = format!("display brightness: {e}");
+            let (wanted, stamp) = {
+                let s = shared.lock().unwrap();
+                (s.display_brightness, s.brightness_stamp)
+            };
+            if let Some(level) = wanted
+                && stamp != applied_stamp
+                && Instant::now() >= brightness_retry
+            {
+                match dev.set_display_brightness(level) {
+                    Ok(()) => applied_stamp = stamp,
+                    Err(e) => {
+                        shared.lock().unwrap().display_status = format!("display brightness: {e}");
+                        brightness_retry = Instant::now() + Duration::from_secs(1);
+                    }
                 }
-                brightness = wanted;
             }
             let leds = shared.lock().unwrap().leds.clone();
             if leds.is_some() && leds != shown {
@@ -573,9 +602,12 @@ fn run_displays(shared: &Mutex<Shared>) {
             let mut s = shared.lock().unwrap();
             s.display_status.clear();
             s.displays_connected = true;
+            // The panels forget their backlight when the screen driver changes.
+            s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
             set_agent_holding(&mut s, false);
         }
         let mut shown = None;
+        let mut last_px: Vec<[u8; 4]> = Vec::new();
         loop {
             // One display's half of a 960-wide picture, as the display takes it.
             let half = |px: &[[u8; 4]], x0: usize| -> Vec<u16> {
@@ -593,6 +625,10 @@ fn run_displays(shared: &Mutex<Shared>) {
                 (s.closing.then(|| s.goodbye.clone()), s.displays_released)
             };
             if released && closing.is_none() {
+                // Clear both screens before letting go. Otherwise the panels keep the
+                // last picture after the driver changes.
+                let black = vec![0u16; WIDTH * HEIGHT];
+                let _ = d.show(0, &black).and_then(|_| d.show(1, &black));
                 shared.lock().unwrap().displays_connected = false;
                 break;
             }
@@ -604,12 +640,16 @@ fn run_displays(shared: &Mutex<Shared>) {
             }
             let latest = shared.lock().unwrap().screens.clone();
             match latest {
-                Some((n, px)) if shown != Some(n) => {
-                    if let Err(e) = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH))) {
-                        let mut s = shared.lock().unwrap();
-                        s.display_status = e;
-                        s.displays_connected = false;
-                        break;
+                Some((n, frame)) if shown != Some(n) => {
+                    let px = frame.into_pixels();
+                    if px != last_px {
+                        if let Err(e) = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH))) {
+                            let mut s = shared.lock().unwrap();
+                            s.display_status = e;
+                            s.displays_connected = false;
+                            break;
+                        }
+                        last_px = px;
                     }
                     shown = Some(n);
                 }

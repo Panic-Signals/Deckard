@@ -450,7 +450,19 @@ impl Look {
 
     fn text_width(&self, s: &Style, text: &str) -> i32 {
         let (Some(font), size) = (self.text_font(s), font_size(s)) else { return 0 };
-        text.chars().filter_map(|c| self.glyph_font(&font, c).map(|f| f.metrics(c, size).advance_width)).sum::<f32>().ceil() as i32
+        let mut w = 0.0f32;
+        let mut prev: Option<(char, std::rc::Rc<fontdue::Font>)> = None;
+        for c in text.chars() {
+            let Some(f) = self.glyph_font(&font, c) else { continue };
+            if let Some((pc, pf)) = &prev
+                && std::rc::Rc::ptr_eq(pf, &f)
+            {
+                w += f.horizontal_kern(*pc, c, size).unwrap_or(0.0);
+            }
+            w += f.metrics(c, size).advance_width;
+            prev = Some((c, f));
+        }
+        w.ceil() as i32
     }
 
     fn text_font(&self, s: &Style) -> Option<std::rc::Rc<fontdue::Font>> {
@@ -796,18 +808,31 @@ impl Look {
             _ => r.y + (r.h - text_h) / 2,
         };
         let baseline = top + ascent.round() as i32;
-        // Small sizes are NI's pixel fonts: drawn without smoothing.
-        let crisp = size <= 12.0;
+        // Small non-Roboto sizes are NI's pixel fonts: drawn without smoothing.
+        let is_roboto = matches!(s.get("font-name"), Some(Value::Url(u)) if u.to_ascii_lowercase().contains("roboto"));
+        let crisp = !is_roboto && size <= 12.0;
         let mut pen = x0 as f32;
+        let mut prev: Option<(char, std::rc::Rc<fontdue::Font>)> = None;
         for c in text.chars() {
             let Some(f) = self.glyph_font(&font, c) else { continue };
+            if let Some((pc, pf)) = &prev
+                && std::rc::Rc::ptr_eq(pf, &f)
+            {
+                pen += f.horizontal_kern(*pc, c, size).unwrap_or(0.0);
+            }
             let (m, cov) = f.rasterize(c, size);
             let gx = pen.round() as i32 + m.xmin;
             let gy = baseline - m.height as i32 - m.ymin;
             for row in 0..m.height {
                 for col in 0..m.width {
                     let a = cov[row * m.width + col];
-                    let a = if crisp { if a >= 128 { 255 } else { 0 } } else { a };
+                    let a = if crisp {
+                        if a >= 128 { 255 } else { 0 }
+                    } else if a > 0 {
+                        ((a as f32 / 255.0).powf(1.0 / 1.45) * 255.0).round() as u8
+                    } else {
+                        0
+                    };
                     let (x, y) = (gx + col as i32, gy + row as i32);
                     if a > 0 && x >= clip.x && y >= clip.y && x < clip.x + clip.w && y < clip.y + clip.h {
                         canvas.blend(x, y, [colour[0], colour[1], colour[2], ((a as u32 * colour[3] as u32) / 255) as u8]);
@@ -815,6 +840,7 @@ impl Look {
                 }
             }
             pen += m.advance_width;
+            prev = Some((c, f));
         }
     }
 }

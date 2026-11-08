@@ -117,8 +117,9 @@ sound) indices, moved when a group is deleted and turned off when a sound is res
 A line is `pad shape sync rate hz phase level quantize fade trig`, then optional words:
 `muted`, `env` (Envelope mode, docs/superpowers/specs/2026-10-29-lfo-envelope-design.md)
 and the envelope's `a=` `d=` `s=` `r=` `rt=` (attack, decay, release in seconds 0.001–10,
-sustain 0–1, retrigger 0/1; written in both modes). Older text reads as an LFO with the
-default envelope; older readers skip the words they don't know (`muted` stays first).
+sustain 0–1, retrigger 0/1; written in both modes), then `off=` (−1–1) and `jit=` (0–1).
+Older text reads as an LFO with the default envelope, offset and jitter; older readers
+skip the words they don't know (`muted` stays first).
 
 **The screen** (BUGS #6) is where the project was left: it reopens on the same group,
 sound, scene, pattern and slot, the Channel page or the plug-ins, and on DECKARD's layer

@@ -51,7 +51,8 @@ impl UserIndex {
             "CREATE TABLE IF NOT EXISTS items (path TEXT PRIMARY KEY, kind INTEGER NOT NULL, user INTEGER NOT NULL,
                 name TEXT NOT NULL, product TEXT, bank TEXT NOT NULL, types TEXT NOT NULL, characters TEXT NOT NULL,
                 tempo REAL, author TEXT NOT NULL, mtime INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY);",
+             CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS not_favorites (path TEXT PRIMARY KEY);",
         )
         .map_err(|e| e.to_string())?;
         Ok(UserIndex { db })
@@ -193,12 +194,23 @@ impl UserIndex {
     }
 
     pub fn set_favorite(&mut self, path: &Path, on: bool) -> Result<(), String> {
-        let sql = if on { "INSERT OR IGNORE INTO favorites VALUES (?1)" } else { "DELETE FROM favorites WHERE path = ?1" };
-        self.db.execute(sql, [path_text(path)]).map(|_| ()).map_err(|e| e.to_string())
+        let (add, remove) = if on { ("favorites", "not_favorites") } else { ("not_favorites", "favorites") };
+        let path = path_text(path);
+        self.db.execute(&format!("INSERT OR IGNORE INTO {add} VALUES (?1)"), [&path]).map_err(|e| e.to_string())?;
+        self.db.execute(&format!("DELETE FROM {remove} WHERE path = ?1"), [&path]).map(|_| ()).map_err(|e| e.to_string())
     }
 
     pub fn favorites(&self) -> HashSet<PathBuf> {
-        let Ok(mut st) = self.db.prepare("SELECT path FROM favorites") else { return HashSet::new() };
+        self.paths_in("favorites")
+    }
+
+    /// What was taken off the favourites here, which Maschine's may still list.
+    pub fn not_favorites(&self) -> HashSet<PathBuf> {
+        self.paths_in("not_favorites")
+    }
+
+    fn paths_in(&self, table: &str) -> HashSet<PathBuf> {
+        let Ok(mut st) = self.db.prepare(&format!("SELECT path FROM {table}")) else { return HashSet::new() };
         st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().map(PathBuf::from).collect()).unwrap_or_default()
     }
 }

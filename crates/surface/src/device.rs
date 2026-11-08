@@ -31,6 +31,21 @@ pub struct DeviceManifest {
     /// The fragments of the name of the port its notes come on, for a drum channel
     /// (Preferences ▸ MIDI); none if it has no notes to give pads.
     pub drums: Vec<String>,
+    /// A device spoken to over USB HID rather than MIDI: its vendor and product ids.
+    pub hid: Option<(u16, u16)>,
+}
+
+/// What a pad of a device with its own note path plays: (group, sound, pitch) each, all
+/// from 0 but the pitch.
+pub type PadNotes = Vec<(usize, usize, i64)>;
+
+/// Where a HID device's pads play (the script's `pads()`), read by its thread so that a note
+/// never waits for a frame. By pad, from `column + row × 8`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PadMap {
+    pub pads: Vec<PadNotes>,
+    /// What every hit plays at: click-pads have no pressure.
+    pub velocity: i64,
 }
 
 /// A note of a Print to Clip: its pitch, start and length (beats) and velocity.
@@ -103,7 +118,14 @@ pub fn manifest(user: Option<PathBuf>, id: &str) -> mlua::Result<DeviceManifest>
         ports,
         exclusive: t.get::<Option<Vec<String>>>("exclusive")?.unwrap_or_default(),
         drums: t.get::<Option<Vec<String>>>("drums")?.unwrap_or_default(),
+        hid: hid_of(&t)?,
     })
+}
+
+/// A `device.lua`'s `hid = { vendor = …, product = … }`.
+fn hid_of(t: &Table) -> mlua::Result<Option<(u16, u16)>> {
+    let Some(h) = t.get::<Option<Table>>("hid")? else { return Ok(None) };
+    Ok(Some((h.get("vendor")?, h.get("product")?)))
 }
 
 struct Run {
@@ -112,6 +134,8 @@ struct Run {
     shared: Rc<RefCell<Shared>>,
     outs: Rc<RefCell<Vec<Out>>>,
     handlers: Table,
+    /// What a HID device's `leds()` set.
+    lights: Rc<RefCell<deckard_jam::Leds>>,
 }
 
 /// A MIDI device's loaded scripts.
@@ -197,6 +221,78 @@ impl Device {
         self.call(v, now, "tick", ())
     }
 
+    /// A HID device's button, by its name: `deckard.held` follows it.
+    pub fn button(&mut self, name: &str, down: bool, v: &View, now: Instant) -> Vec<Out> {
+        if let Some(run) = &self.run {
+            let mut sh = run.shared.borrow_mut();
+            if down {
+                sh.held.insert(name.to_string());
+            } else {
+                sh.held.remove(name);
+            }
+        }
+        self.call(v, now, "button", (name.to_string(), down))
+    }
+
+    /// A HID device's pad, from 1: `column` left to right, `row` from the top.
+    pub fn pad(&mut self, column: u8, row: u8, down: bool, v: &View, now: Instant) -> Vec<Out> {
+        self.call(v, now, "pad", (i64::from(column) + 1, i64::from(row) + 1, down))
+    }
+
+    /// A HID device's strip `strip` (from 1): finger `finger` (from 1) went "down", "move"d
+    /// or came "up" at `pos` (0..1).
+    pub fn strip(&mut self, strip: u8, finger: u8, kind: &str, pos: f64, v: &View, now: Instant) -> Vec<Out> {
+        self.call(v, now, "strip", (i64::from(strip) + 1, i64::from(finger) + 1, kind.to_string(), pos))
+    }
+
+    /// A HID device's encoder turned `steps` clicks.
+    pub fn encoder(&mut self, steps: i32, v: &View, now: Instant) -> Vec<Out> {
+        self.call(v, now, "encoder", steps)
+    }
+
+    /// What a HID device's lights should show: its `leds()`, on every button at its
+    /// backlight and the rest dark. What the handler asked of the app is dropped: lights
+    /// only read.
+    pub fn leds(&mut self, v: &View, now: Instant) -> deckard_jam::Leds {
+        if let Some(run) = &self.run {
+            *run.lights.borrow_mut() = deckard_jam::Leds::blank();
+        }
+        let _ = self.call(v, now, "leds", ());
+        self.run.as_ref().map_or_else(deckard_jam::Leds::default, |run| run.lights.borrow().clone())
+    }
+
+    /// Where a HID device's pads play now: its `pads()`, which returns
+    /// `{ velocity = n, [column + (row − 1) × 8] = { group, sound, pitch, pitch … } }`, or
+    /// `nil` for nothing played. Groups and sounds count from 1 in the script.
+    pub fn pad_map(&mut self, v: &View, now: Instant) -> PadMap {
+        let empty = PadMap { pads: vec![Vec::new(); 64], velocity: 100 };
+        if self.run.is_none() {
+            return empty;
+        }
+        {
+            let run = self.run.as_ref().expect("checked");
+            let mut sh = run.shared.borrow_mut();
+            sh.view = v.clone();
+            sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
+        }
+        let run = self.run.as_ref().expect("checked");
+        let Ok(Some(f)) = run.handlers.get::<Option<Function>>("pads") else { return empty };
+        match f.call::<Option<Table>>(()) {
+            Ok(Some(t)) => match pad_map_of(&t) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.set_error(e);
+                    empty
+                }
+            },
+            Ok(None) => empty,
+            Err(e) => {
+                self.set_error(e);
+                empty
+            }
+        }
+    }
+
     /// Load the scripts again if the user's files changed (checked at most twice a
     /// second): what the new scripts' `open` asks, if it was open.
     pub fn poll(&mut self, now: Instant) -> Vec<Out> {
@@ -225,7 +321,10 @@ impl Device {
         let Some(run) = &self.run else { return Vec::new() };
         {
             let mut sh = run.shared.borrow_mut();
-            sh.view = v.clone();
+            if sh.view != *v {
+                sh.view = v.clone();
+                sh.view_id = sh.view_id.wrapping_add(1);
+            }
             sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
         }
         if let Ok(Some(f)) = run.handlers.get::<Option<Function>>(name)
@@ -244,6 +343,7 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
         view: View::default(),
+        view_id: 1,
         now: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
@@ -254,9 +354,129 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
     api::install(&lua, &shared)?;
     let outs = Rc::new(RefCell::new(Vec::new()));
     install(&lua, id, &outs)?;
+    let lights = Rc::new(RefCell::new(deckard_jam::Leds::blank()));
+    // (Only a HID device's: a MIDI device's lights are its own bytes.)
+    let manifest: Option<Table> = sources::run(&lua, sources, "device.lua").ok();
+    if manifest.as_ref().is_some_and(|t| hid_of(t).ok().flatten().is_some()) {
+        install_lights(&lua, &lights)?;
+    }
     sources::install_require(&lua, sources.clone())?;
     let handlers: Table = sources::run(&lua, sources, "main.lua")?;
-    Ok(Run { _lua: lua, shared, outs, handlers })
+    Ok(Run { _lua: lua, shared, outs, handlers, lights })
+}
+
+/// `{ velocity = n, [pad] = { group, sound, pitch … } }` as a [`PadMap`].
+fn pad_map_of(t: &Table) -> mlua::Result<PadMap> {
+    let mut pads = vec![Vec::new(); 64];
+    for (i, notes) in pads.iter_mut().enumerate() {
+        let Some(p) = t.get::<Option<Table>>(i + 1)? else { continue };
+        let group = p.get::<usize>(1)?.max(1) - 1;
+        let sound = p.get::<usize>(2)?.max(1) - 1;
+        for pitch in p.sequence_values::<i64>().skip(2) {
+            let pitch = pitch?;
+            if (0..=127).contains(&pitch) {
+                notes.push((group, sound, pitch));
+            }
+        }
+    }
+    Ok(PadMap { pads, velocity: t.get::<Option<i64>>("velocity")?.unwrap_or(100).clamp(1, 127) })
+}
+
+/// What a colour light's arguments make: `"off"`, `"dim"` or `"on"` (white), or a palette
+/// colour and whether it's bright. `pale` (a third argument of `"pale"`) is the palette's
+/// brightest shade, for what must stand out from what's merely on.
+fn colour_of(name: &str, how: &Value, bright: &Value) -> mlua::Result<u8> {
+    use deckard_jam::leds::{SHADE_BRIGHT, SHADE_DIM, SHADE_FAINT, SHADE_PALE, WHITE, colour};
+    let shade = match bright {
+        Value::Boolean(true) | Value::Nil => SHADE_BRIGHT,
+        Value::Boolean(false) => SHADE_DIM,
+        Value::String(s) => match s.to_str()?.as_ref() {
+            "pale" => SHADE_PALE,
+            "faint" => SHADE_FAINT,
+            "dim" => SHADE_DIM,
+            "bright" => SHADE_BRIGHT,
+            other => return Err(mlua::Error::runtime(format!("light {name}: shade \"{other}\"? (faint, dim, bright, pale)"))),
+        },
+        _ => return Err(mlua::Error::runtime(format!("light {name}: bright is true, false or a shade's name"))),
+    };
+    match how {
+        Value::Nil => Ok(0),
+        Value::Integer(i) => Ok(colour(*i, shade)),
+        Value::Number(n) => Ok(colour(*n as i64, shade)),
+        Value::String(s) => match s.to_str()?.as_ref() {
+            "off" => Ok(0),
+            "dim" => Ok(colour(WHITE, SHADE_DIM)),
+            "on" => Ok(colour(WHITE, SHADE_BRIGHT)),
+            other => Err(mlua::Error::runtime(format!("light {name}: \"{other}\"? (off, dim, on, or a palette colour)"))),
+        },
+        _ => Err(mlua::Error::runtime(format!("light {name}: a level or a palette colour"))),
+    }
+}
+
+/// A HID device's lights, in place of the MK3's `deckard.led`.
+fn install_lights(lua: &Lua, lights: &Rc<RefCell<deckard_jam::Leds>>) -> mlua::Result<()> {
+    use deckard_jam::leds::{BACKLIGHT, DIM, ON};
+    let d: Table = lua.globals().get("deckard")?;
+    let l = lights.clone();
+    d.set(
+        "led",
+        lua.create_function(move |_, (name, how, bright): (String, Value, Value)| {
+            let mut leds = l.borrow_mut();
+            // (Scene and group buttons have colours; the rest a brightness.)
+            if let Some(n) = name.strip_prefix("SCENE_").and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=8).contains(n)) {
+                leds.scene(n - 1, colour_of(&name, &how, &bright)?);
+                return Ok(());
+            }
+            if let Some(g) =
+                name.strip_prefix("GROUP_").filter(|g| g.len() == 1).and_then(|g| g.bytes().next()).filter(|g| (b'A'..=b'H').contains(g))
+            {
+                leds.group(usize::from(g - b'A'), colour_of(&name, &how, &bright)?);
+                return Ok(());
+            }
+            let level = match &how {
+                Value::String(s) => match s.to_str()?.as_ref() {
+                    "off" => BACKLIGHT,
+                    "dark" => 0,
+                    "dim" => DIM,
+                    "on" => ON,
+                    other => return Err(mlua::Error::runtime(format!("light {name}: \"{other}\"? (off, dim, on)"))),
+                },
+                _ => return Err(mlua::Error::runtime(format!("light {name}: off, dim or on"))),
+            };
+            if !leds.button(&name, level) {
+                return Err(mlua::Error::runtime(format!("no light {name}")));
+            }
+            Ok(())
+        })?,
+    )?;
+    let l = lights.clone();
+    d.set(
+        "pad_led",
+        lua.create_function(move |_, (column, row, how, bright): (usize, usize, Value, Value)| {
+            let byte = colour_of("pad", &how, &bright)?;
+            l.borrow_mut().pad(column.wrapping_sub(1), row.wrapping_sub(1), byte);
+            Ok(())
+        })?,
+    )?;
+    let l = lights.clone();
+    d.set(
+        "strip_led",
+        lua.create_function(move |_, (strip, led, how, bright): (usize, usize, Value, Value)| {
+            let byte = colour_of("strip", &how, &bright)?;
+            l.borrow_mut().strip(strip.wrapping_sub(1), led.wrapping_sub(1), byte);
+            Ok(())
+        })?,
+    )?;
+    let l = lights.clone();
+    d.set(
+        "meter",
+        lua.create_function(move |_, (column, led, level): (usize, usize, f64)| {
+            let byte = (level.clamp(0.0, 1.0) * f64::from(ON)).round() as u8;
+            l.borrow_mut().meter(column.wrapping_sub(1), led.wrapping_sub(1), byte);
+            Ok(())
+        })?,
+    )?;
+    Ok(())
 }
 
 /// The device's own part of the `deckard` API.

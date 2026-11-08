@@ -5,8 +5,18 @@ use crate::tests::harness;
 use deckard_engine::{Mode, Recorded};
 
 fn rec(h: &mut egui_kittest::Harness<'static, crate::App>, g: usize, s: usize, tick: f64, len: f64, scene: usize) {
-    let on =
-        Recorded { group: g, sound: s, pitch: 60, velocity: 100, length: i64::MAX, tick, mode: Mode::Scene(scene), seq: 0, played: tick };
+    let on = Recorded {
+        midi: false,
+        group: g,
+        sound: s,
+        pitch: 60,
+        velocity: 100,
+        length: i64::MAX,
+        tick,
+        mode: Mode::Scene(scene),
+        seq: 0,
+        played: tick,
+    };
     h.state_mut().take_in_recorded(vec![on, Recorded { velocity: 0, tick: tick + len, played: tick + len, ..on }]);
 }
 
@@ -233,6 +243,99 @@ fn knob_moves_while_writing_become_modulation() {
     assert_eq!(cutoff(), before, "the knob's own value stays");
     assert_eq!(d.undo_labels().len(), steps + 1);
     assert_eq!(d.undo_label(), Some("Record Modulation"));
+}
+
+/// A new project with a pattern on in scene 1, ready for a fader's modulation.
+fn fader_app() -> crate::App {
+    let mut app = crate::App::default();
+    app.new_project();
+    {
+        let mut d = app.doc.as_ref().unwrap().borrow_mut();
+        d.add_pattern(0, 0, "Pattern 1").unwrap();
+        d.assign_pattern(0, 0, Some(0)).unwrap();
+        d.set_pattern_length(0, 0, 3840).unwrap();
+    }
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app
+}
+
+fn fader_points(app: &crate::App, sound: Option<usize>, field: &str) -> Vec<(i64, f64)> {
+    let d = app.doc.as_ref().unwrap().borrow();
+    d.project().groups[0].patterns[0]
+        .mods
+        .iter()
+        .filter(|m| m.sound == sound && m.slot.is_none() && m.field == field)
+        .map(|m| (m.position, (m.value * 100.0).round() / 100.0))
+        .collect()
+}
+
+/// A sound's fader and a group's write modulation as any knob does: deviations from the
+/// fader's place, which stays. The master's doesn't.
+#[test]
+fn faders_write_modulation() {
+    use crate::layout::Edit;
+    use deckard_doc::Target;
+    crate::modulation::register();
+    let mut app = fader_app();
+    let head = |tick: f64| Some((Mode::Scene(0), tick));
+    let doc = app.doc.clone().unwrap();
+    let (level, group_level) = {
+        let d = doc.borrow();
+        (d.project().groups[0].sounds[0].level, d.project().groups[0].level)
+    };
+    let sound = Edit::Level(Target::Sound(0, 0));
+    app.modulate_at(sound, (level - 0.25) as f32, false, head(100.0));
+    app.modulate_at(sound, (level - 0.25) as f32, false, head(200.0));
+    app.modulate_at(sound, (level - 0.25) as f32, true, head(300.0));
+    assert_eq!(fader_points(&app, Some(0), "level"), [(100, -0.25), (300, -0.25)]);
+    assert_eq!(doc.borrow().project().groups[0].sounds[0].level, level, "the fader stays");
+    let lane = deckard_model::ModTarget { slot: None, field: "level".into() };
+    assert_eq!(doc.borrow().project().groups[0].sounds[0].modulators, [lane.clone()]);
+    // A group's, by either of its targets.
+    for t in [Target::Group(0), Target::GroupStrip(0)] {
+        assert!(crate::modulation::mod_target(Edit::Level(t)).is_some_and(|x| x.0 == deckard_doc::Chain::Group(0)));
+    }
+    let group = Edit::Level(Target::GroupStrip(0));
+    app.modulate_at(group, (group_level + 0.1) as f32, false, head(100.0));
+    app.modulate_at(group, (group_level + 0.1) as f32, true, head(200.0));
+    assert_eq!(fader_points(&app, None, "level"), [(100, 0.1), (200, 0.1)]);
+    assert_eq!(doc.borrow().project().groups[0].modulators, [lane]);
+    assert!(crate::modulation::mod_target(Edit::Level(Target::Song)).is_none(), "not the master's");
+    assert!(crate::modulation::mod_target(Edit::Pan(Target::Song)).is_none());
+}
+
+/// Pan's deviations are of its knob's travel (0..1 over left..right).
+#[test]
+fn pan_writes_modulation() {
+    use crate::layout::Edit;
+    use deckard_doc::Target;
+    let mut app = fader_app();
+    let head = |tick: f64| Some((Mode::Scene(0), tick));
+    let pan = Edit::Pan(Target::Sound(0, 0));
+    app.modulate_at(pan, 1.0, false, head(100.0));
+    app.modulate_at(pan, 1.0, true, head(200.0));
+    assert_eq!(fader_points(&app, Some(0), "pan"), [(100, 0.5), (200, 0.5)], "the middle to the right");
+    assert_eq!(app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].pan, 0.0);
+}
+
+/// Stopped, moving a fader only moves it; playing with Auto-write off too.
+#[test]
+fn a_fader_moved_without_writing_is_an_edit() {
+    use crate::layout::Edit;
+    use deckard_doc::Target;
+    let mut app = fader_app();
+    let sound = Edit::Level(Target::Sound(0, 0));
+    app.modulate_at(sound, 0.5, true, None);
+    let d = app.doc.as_ref().unwrap().borrow();
+    assert!((d.project().groups[0].sounds[0].level - 0.5).abs() < 1e-6);
+    assert!(d.project().groups[0].patterns[0].mods.is_empty());
+    drop(d);
+    app.auto_write = false;
+    assert!(!crate::layout::knob_drag_writes(&app, sound));
+    app.surface_act(deckard_surface::Action::ChannelLevel { group: 0, sound: Some(0), db: -6.0 });
+    let d = app.doc.as_ref().unwrap().borrow();
+    assert!((d.project().groups[0].sounds[0].level - deckard_model::level_from_db(-6.0)).abs() < 1e-6, "the fader itself");
+    assert!(d.project().groups[0].patterns[0].mods.is_empty());
 }
 
 /// A knob dragged in the software while the song plays is written as modulation only
@@ -872,12 +975,14 @@ fn the_mk3_knob_reaches_every_choice() {
     app.slot = Some(0);
     app.channel = false;
     let dir = || doc.borrow().project().groups[0].slots[0].param("stutter_direction");
-    // DIRECTION is the seventh knob.
-    app.control_request(R::Turn { pos: 6, inc: 0.5, fine: false });
+    // DIRECTION is the seventh knob. With three choices a step is half the range, and
+    // the knob moves one every quarter of that.
+    let step = 0.5 * 0.25;
+    app.control_request(R::Turn { pos: 6, inc: step, fine: false });
     assert_eq!(dir(), Some(1.0), "Reverse");
-    app.control_request(R::Turn { pos: 6, inc: 0.5, fine: false });
+    app.control_request(R::Turn { pos: 6, inc: step, fine: false });
     assert_eq!(dir(), Some(2.0), "Both");
-    app.control_request(R::Turn { pos: 6, inc: -0.5, fine: false });
+    app.control_request(R::Turn { pos: 6, inc: -step, fine: false });
     assert_eq!(dir(), Some(1.0), "back to Reverse");
 }
 
@@ -940,6 +1045,7 @@ fn a_held_pad_shows_while_held() {
     let notes = |doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>| doc.borrow().project().groups[g].patterns[pi].notes.clone();
     h.state_mut().set_recording(true, false);
     let on = |pitch: i64| Recorded {
+        midi: false,
         group: g,
         sound: 5,
         pitch,
@@ -960,4 +1066,198 @@ fn a_held_pad_shows_while_held() {
     let done: Vec<_> = notes(&doc).into_iter().filter(|n| n.sound == 5 && n.position == start).collect();
     assert_eq!(done.len(), 3, "{done:?}");
     assert!(done.iter().all(|n| n.length == len + len / 2), "as long as held: {done:?}");
+}
+
+/// From the controller: a new pattern in an empty place keeps that place, and the rest stay.
+#[test]
+fn a_controller_makes_a_pattern_in_the_place_it_asks_for() {
+    use deckard_surface::Action as A;
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.surface_act(A::NewPatternAt { group: 0, slot: 0 });
+    app.surface_act(A::NewPatternAt { group: 0, slot: 7 });
+    let v = app.surface_view();
+    let slots: Vec<usize> = v.groups[0].patterns.iter().map(|p| p.slot).collect();
+    assert_eq!(slots, [0, 7]);
+    assert_eq!(app.pattern, 1, "the new one is focused, by its place in the list");
+    assert_eq!(v.groups[0].patterns[1].name, "Pattern 8");
+    assert_eq!(v.groups[0].scene_pattern, Some(1), "and plays in the scene");
+}
+
+/// The MK3's own layer, for the tests below: an app playing with a Filter on sound 1.
+fn mk3_playing() -> Option<crate::App> {
+    use deckard_doc::NewModule;
+    crate::modulation::register();
+    let mut app = crate::App::default();
+    app.new_project();
+    {
+        let mut d = app.doc.as_ref().unwrap().borrow_mut();
+        d.add_pattern(0, 0, "Pattern 1").unwrap();
+        d.assign_pattern(0, 0, Some(0)).unwrap();
+        d.add_slot(0, 0, 0, &NewModule::Effect("Filter")).unwrap();
+    }
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app.slot = Some(0);
+    app.transport_play();
+    if !matches!(app.output, Some(Ok(_))) {
+        eprintln!("no audio output; skipping");
+        return None;
+    }
+    let wait = std::time::Instant::now();
+    while app.playhead().is_none_or(|h| h.position <= 0.0) && wait.elapsed() < std::time::Duration::from_secs(60) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Some(app)
+}
+
+fn mk3(app: &mut crate::App, e: deckard_mk3::Event) {
+    let now = std::time::Instant::now();
+    app.update_slot_view();
+    app.refresh_surface_settings();
+    let view = app.surface_view();
+    for a in app.surface.event(&e, &view, now) {
+        app.surface_act(a);
+    }
+}
+
+fn mk3_press(app: &mut crate::App, name: &'static str) {
+    mk3(app, deckard_mk3::Event::Button(name, true));
+    mk3(app, deckard_mk3::Event::Button(name, false));
+}
+
+fn mods_of(app: &crate::App) -> Vec<(Option<usize>, Option<usize>, String)> {
+    let d = app.doc.as_ref().unwrap().borrow();
+    let mut out: Vec<_> = d.project().groups[0].patterns[0].mods.iter().map(|m| (m.sound, m.slot, m.field.clone())).collect();
+    out.dedup();
+    out
+}
+
+/// AUTO on the MK3, then a turn of a Control page knob while the song plays.
+#[test]
+fn mk3_auto_writes_an_effects_knob() {
+    let Some(mut app) = mk3_playing() else { return };
+    mk3_press(&mut app, "BUTTON_AUTO");
+    assert!(app.auto_write, "AUTO");
+    let knobs = app.surface_view().control.knobs.iter().map(|k| k.as_ref().map(|k| (k.name.clone(), k.modulatable))).collect::<Vec<_>>();
+    eprintln!("knobs {knobs:?} page {}", app.surface.page());
+    let k = knobs.iter().position(|k| k.as_ref().is_some_and(|k| k.1)).expect("a modulatable knob");
+    for _ in 0..6 {
+        mk3(&mut app, deckard_mk3::Event::Knob(k, 0.02));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    app.stop();
+    app.tick_mod_take(None, std::time::Instant::now());
+    eprintln!("mods {:?} status {}", mods_of(&app), app.status);
+    assert!(!mods_of(&app).is_empty(), "written");
+}
+
+/// AUTO on the MK3, then a turn of a Mixer page knob while the song plays.
+#[test]
+fn mk3_auto_writes_a_mixer_knob() {
+    let Some(mut app) = mk3_playing() else { return };
+    mk3_press(&mut app, "BUTTON_AUTO");
+    mk3_press(&mut app, "BUTTON_MIX");
+    assert_eq!(app.surface.page(), "mixer");
+    let before = app.doc.as_ref().unwrap().borrow().project().groups[0].level;
+    for _ in 0..6 {
+        mk3(&mut app, deckard_mk3::Event::Knob(0, -0.02));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    app.stop();
+    app.tick_mod_take(None, std::time::Instant::now());
+    eprintln!("mods {:?} status {}", mods_of(&app), app.status);
+    assert_eq!(app.doc.as_ref().unwrap().borrow().project().groups[0].level, before, "the fader stays");
+    assert!(mods_of(&app).iter().any(|m| m.1.is_none() && m.2 == "level"), "written");
+}
+
+/// CHANNEL's Level knob on the MK3, with AUTO on, while the song plays.
+#[test]
+fn mk3_auto_writes_the_channel_pages_level() {
+    let Some(mut app) = mk3_playing() else { return };
+    mk3_press(&mut app, "BUTTON_AUTO");
+    mk3_press(&mut app, "BUTTON_CHANNEL");
+    // (Its Output properties: its Input ones open first, and none of them can be written.)
+    app.prop_set = 1;
+    app.update_slot_view();
+    let knobs = app.surface_view().control.knobs.iter().map(|k| k.as_ref().map(|k| (k.name.clone(), k.modulatable))).collect::<Vec<_>>();
+    eprintln!("channel knobs {knobs:?} page {}", app.surface.page());
+    let k = knobs.iter().position(|k| k.as_ref().is_some_and(|k| k.1)).expect("a modulatable knob");
+    for _ in 0..6 {
+        mk3(&mut app, deckard_mk3::Event::Knob(k, -0.02));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    app.stop();
+    app.tick_mod_take(None, std::time::Instant::now());
+    eprintln!("mods {:?} status {}", mods_of(&app), app.status);
+    assert!(!mods_of(&app).is_empty(), "written");
+}
+
+/// With no pattern of that group playing there's nowhere to write: it says so.
+#[test]
+fn writing_with_no_pattern_to_write_into_says_so() {
+    use crate::layout::Edit;
+    use deckard_doc::Target;
+    let mut app = crate::App::default();
+    app.new_project();
+    app.modulate_at(Edit::Level(Target::Sound(0, 0)), 0.5, false, Some((Mode::Scene(0), 100.0)));
+    assert!(app.status.contains("no pattern"), "{}", app.status);
+}
+
+/// A new project with two groups, each with a pattern on in scene 1, recording.
+fn two_group_app() -> crate::App {
+    let mut app = crate::App::default();
+    app.new_project();
+    {
+        let mut d = app.doc.as_ref().unwrap().borrow_mut();
+        while d.project().groups.len() < 2 {
+            d.add_group().unwrap();
+        }
+        for g in 0..2 {
+            d.add_pattern(g, 0, "Pattern 1").unwrap();
+            d.assign_pattern(0, g, Some(0)).unwrap();
+        }
+    }
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    app
+}
+
+fn played_into(group: usize, sound: usize, midi: bool) -> Recorded {
+    Recorded { midi, group, sound, pitch: 60, velocity: 100, length: i64::MAX, tick: 0.0, mode: Mode::Scene(0), seq: 0, played: 0.0 }
+}
+
+/// MIDI recorded into another group gives it the focus, and the note lands there.
+#[test]
+fn midi_recorded_into_another_group_focuses_it() {
+    let mut app = two_group_app();
+    app.take_in_recorded(vec![played_into(1, 3, true)]);
+    assert_eq!((app.group, app.sound), (1, 3));
+    let notes = app.doc.as_ref().unwrap().borrow().project().groups[1].patterns[0].notes.len();
+    assert_eq!(notes, 1, "recorded");
+}
+
+/// A release doesn't move the focus: it may come after the focus moved on.
+#[test]
+fn a_midi_release_leaves_the_focus() {
+    let mut app = two_group_app();
+    app.take_in_recorded(vec![Recorded { velocity: 0, length: 0, ..played_into(1, 0, true) }]);
+    assert_eq!(app.group, 0);
+}
+
+/// What isn't MIDI (Note Repeat or the Arp still playing a group left behind) doesn't.
+#[test]
+fn notes_from_elsewhere_leave_the_focus() {
+    let mut app = two_group_app();
+    app.take_in_recorded(vec![played_into(1, 0, false)]);
+    assert_eq!(app.group, 0);
+}
+
+/// Switched off, MIDI still records into its group, with the focus where it was.
+#[test]
+fn the_focus_can_be_kept_from_following_midi() {
+    let mut app = two_group_app();
+    app.settings.focus_follows = false;
+    app.take_in_recorded(vec![played_into(1, 3, true)]);
+    assert_eq!((app.group, app.sound), (0, 0));
+    assert_eq!(app.doc.as_ref().unwrap().borrow().project().groups[1].patterns[0].notes.len(), 1, "recorded all the same");
 }

@@ -2,6 +2,7 @@
 -- on two pages of knobs, and the focused group's pads.
 --
 --   display 3 / 4     the previous / next bank of groups
+--   SHIFT + 3 / 4     move the Group one slot left / right
 --   display 5 / 6     the base key down / up an octave
 --   display 7 / 8     the base key down / up a semitone
 --   LEFT / RIGHT      the knobs' pages:
@@ -45,6 +46,11 @@ function page.button(name, down)
   elseif paged.button(pages, name) then
     return true
   elseif name == "SCREEN_3" or name == "SCREEN_4" then
+    if deckard.held("SHIFT") then
+      local to = s.group + (name == "SCREEN_3" and -1 or 1)
+      if to >= 1 and to <= #s.groups then deckard.move_group(s.group, to) end
+      return true
+    end
     local bank = (s.group - 1) // 8 + (name == "SCREEN_3" and -1 or 1)
     local g = bank * 8 + 1
     if bank >= 0 and g <= #s.groups then deckard.focus_group(g) end
@@ -100,6 +106,11 @@ function page.leds()
   deckard.led("SCREEN_1", "on")
   for i = 4, 8 do deckard.led("SCREEN_" .. i, "dim") end
   paged.leds(pages)
+  if deckard.held("SHIFT") then
+    local s = deckard.state()
+    deckard.led("SCREEN_3", s.group > 1 and "on" or "off")
+    deckard.led("SCREEN_4", s.group < #s.groups and "on" or "off")
+  end
 end
 
 local function colour_name(of)
@@ -113,7 +124,9 @@ function page.draw(screen, theme)
   widgets.buttons(screen, theme, {
     { text = "PAD MODE", selected = true },
     nil,
-    { arrows = true, text = "BANK " .. bank, left = bank > 1, right = bank <= #s.groups // 8 },
+    { arrows = true, text = deckard.held("SHIFT") and "MOVE" or "BANK " .. bank,
+      left = deckard.held("SHIFT") and s.group > 1 or (not deckard.held("SHIFT") and bank > 1),
+      right = deckard.held("SHIFT") and s.group < #s.groups or (not deckard.held("SHIFT") and bank <= #s.groups // 8) },
     nil,
     { text = "OCTAVE-" },
     { text = "OCTAVE+" },

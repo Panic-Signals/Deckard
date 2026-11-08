@@ -81,6 +81,11 @@ pub trait Engine: Send {
     /// Silence everything now (stop, a new state).
     fn reset(&mut self);
 
+    /// Whether this plug-in takes a side-chain audio input.
+    fn has_sidechain(&self) -> bool {
+        false
+    }
+
     /// Render a block: `left`/`right` hold the input (an effect's; silence for an
     /// instrument) and get the output.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], transport: &Transport);
@@ -100,6 +105,12 @@ pub trait Engine: Send {
     fn output(&self, bus: usize, frames: usize) -> Option<(&[f32], &[f32])> {
         let _ = (bus, frames);
         None
+    }
+
+    /// Render a block with an optional side-chain input.
+    fn process_sc(&mut self, left: &mut [f32], right: &mut [f32], sidechain: Option<(&[f32], &[f32])>, transport: &Transport) {
+        let _ = sidechain;
+        self.process(left, right, transport);
     }
 
     /// Anything to save besides parameter values (a wavetable, a sequence…).
@@ -377,7 +388,22 @@ impl Instance {
         self.engine.pitch_bend((value.min(16383) as f32 - 8192.0) / 8192.0);
     }
 
+    pub(crate) fn has_sidechain(&self) -> bool {
+        self.engine.has_sidechain()
+    }
+
+    #[cfg(test)]
     pub(crate) fn process_input(&mut self, frames: usize, transport: &Transport, input: Option<(&[f32], &[f32])>) -> (&[f32], &[f32]) {
+        self.process_input_sc(frames, transport, input, None)
+    }
+
+    pub(crate) fn process_input_sc(
+        &mut self,
+        frames: usize,
+        transport: &Transport,
+        input: Option<(&[f32], &[f32])>,
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> (&[f32], &[f32]) {
         let n = frames.min(crate::MAX_BLOCK);
         let (l, r) = (&mut self.out.0[..n], &mut self.out.1[..n]);
         l.fill(0.0);
@@ -387,7 +413,7 @@ impl Instance {
             l[..k].copy_from_slice(&il[..k]);
             r[..k].copy_from_slice(&ir[..k]);
         }
-        self.engine.process(l, r, transport);
+        self.engine.process_sc(l, r, sidechain, transport);
         (&self.out.0[..n], &self.out.1[..n])
     }
 

@@ -252,6 +252,8 @@ pub struct GroupChannel {
     pub aux_pre: [bool; 2],
     /// Its MIDI files hold each sound on its own channel (0) or note (1).
     pub midi_batch: i64,
+    /// Side-chain sources of the effects in its chain: (slot, source).
+    pub sidechain: Vec<(usize, ScSource)>,
 }
 
 impl Default for SoundChannel {
@@ -294,6 +296,7 @@ impl Default for GroupChannel {
             aux_dest: [AudioDest::None; 2],
             aux_pre: [false; 2],
             midi_batch: 0,
+            sidechain: Vec::new(),
         }
     }
 }
@@ -814,6 +817,9 @@ pub struct ModPoint {
 pub struct Pattern {
     pub name: String,
     pub color: Color,
+    /// Its place among the group's patterns, from 0: its `patterns_by_id` id. Patterns are
+    /// listed in this order, and there can be empty places between them.
+    pub slot: usize,
     /// Ticks.
     pub start: i64,
     /// Ticks.
@@ -1322,9 +1328,13 @@ impl Project {
                 patterns: Vec::new(),
                 clip_patterns: Vec::new(),
             };
+            let ids = map_entries(g.get("patterns_by_id"));
             for (pi, pat) in ix.elements(g.get("patterns_by_id")).into_iter().enumerate() {
                 pattern_ix.insert(pat as *const Obj, (gi, pi));
-                group.patterns.push(pattern(&ix, pat, &sound_ix, &take_ix, &params, &mut p.warnings));
+                let mut pt = pattern(&ix, pat, &sound_ix, &take_ix, &params, &mut p.warnings);
+                pt.slot =
+                    ids.get(pi).and_then(|e| e.get("first")).and_then(Value::as_int).and_then(|i| usize::try_from(i).ok()).unwrap_or(pi);
+                group.patterns.push(pt);
                 ga.patterns.push(path_of(pat));
             }
             // Clips: their patterns, and the clip events that place them.
@@ -1507,6 +1517,7 @@ fn group_channel(ix: &Index, g: &Obj, strip: &Obj, t: &Targets) -> GroupChannel 
         aux_dest: [dest("aux1_output", AudioDest::None), dest("aux2_output", AudioDest::None)],
         aux_pre: [param_i64(strip, "aux1_order").unwrap_or(0) == 1, param_i64(strip, "aux2_order").unwrap_or(0) == 1],
         midi_batch: param_i64(g, "midi_batch_export").unwrap_or(0),
+        sidechain: sidechain_map(ix, g.get("sidechain_inputs"), t),
     }
 }
 
@@ -1676,7 +1687,7 @@ fn plugin_pages(m: &Obj) -> Vec<PluginPage> {
                         Value::Obj(ptr) => match ptr.get("px") {
                             Some(Value::Obj(p)) => Some(PluginKnob {
                                 id: p.get("index").and_then(Value::as_int).unwrap_or(0) as u32,
-                                name: str_of(p.get("custom_name")),
+                                name: str_of(p.get("custom_name").or_else(|| p.get("custom_name_nis_mapping"))),
                                 section: str_of(p.get("section_name")),
                             }),
                             _ => None,
@@ -1691,6 +1702,10 @@ fn plugin_pages(m: &Obj) -> Vec<PluginPage> {
         .collect()
 }
 
+fn side_chain_params(sc: &Obj) -> Vec<(String, f64)> {
+    sc.fields.iter().filter_map(|(n, _)| param_f64(sc, n).map(|v| (format!("side_chain_filter/{n}"), v))).collect()
+}
+
 /// Every slot of an object's plug-in chain.
 /// The numeric parameters directly in a module object (not its base classes), by
 /// field name: `value` of each `MaschineNumericParameter` / `EnumParameter`.
@@ -1699,11 +1714,7 @@ fn module_params(m: &Obj) -> Vec<(String, f64)> {
         m.fields.iter().filter(|(n, _)| !n.starts_with('<')).filter_map(|(n, _)| param_f64(m, n).map(|v| (n.clone(), v))).collect();
     // The Side-Chain Input page's settings: `side_chain_filter/gain`, …
     if let Some(Value::Obj(sc)) = m.get("side_chain_filter") {
-        for (n, _) in &sc.fields {
-            if let Some(v) = param_f64(sc, n) {
-                out.push((format!("side_chain_filter/{n}"), v));
-            }
-        }
+        out.extend(side_chain_params(sc));
     }
     out
 }
@@ -1720,9 +1731,17 @@ fn chain_slots(ix: &Index, o: &Obj) -> Vec<SlotInfo> {
                 _ => module_label(&module).to_string(),
             };
             let plugin = m.filter(|m| m.type_name == "NI::MASCHINE::DATA::PluginHost").map(plugin_ref);
-            // An internal module's settings: its numeric parameters, by field.
+            // An internal module's settings: its numeric parameters, by field (and a
+            // plug-in host's side-chain filter).
             let params = match m {
                 Some(m) if plugin.is_none() && module != "Sampler" => module_params(m),
+                Some(m) if plugin.is_some() => match m.get("parameters") {
+                    Some(Value::Obj(p)) => match p.get("unknown_68") {
+                        Some(Value::Obj(sc)) => side_chain_params(sc),
+                        _ => Vec::new(),
+                    },
+                    _ => Vec::new(),
+                },
                 _ => Vec::new(),
             };
             SlotInfo { module, name, active: param_i64(slot, "active").unwrap_or(1) != 0, plugin, params }
@@ -2269,6 +2288,7 @@ fn pattern(
     warnings: &mut Vec<String>,
 ) -> Pattern {
     let mut out = Pattern {
+        slot: 0,
         name: param_str(pat, "name"),
         color: color(pat),
         start: param_i64(pat, "start").unwrap_or(0),
@@ -2419,6 +2439,17 @@ fn channel_params(ix: &Index, ch: &Obj, sound: Option<usize>, out: &mut ModParam
         for (i, slot) in ix.elements(chain.get("slots")).into_iter().enumerate() {
             if let Some(m) = slot.get("module").and_then(|m| ix.obj(m)) {
                 walk(m, "", Some(i), sound, 2, out);
+                if m.type_name == "NI::MASCHINE::DATA::PluginHost" {
+                    let pages = m.get("parameters").and_then(|v| ix.obj(v)).and_then(|o| o.get("unknown_48"));
+                    for page in ix.elements(pages) {
+                        let Some(Value::Obj(arr)) = page.get("parameters") else { continue };
+                        for p in arr.fields.iter().filter(|(n, _)| n == "item").filter_map(|(_, v)| ix.obj(v)) {
+                            if let Some(id) = p.get("index").and_then(Value::as_int).filter(|&id| (0..i64::from(u32::MAX)).contains(&id)) {
+                                out.insert(p as *const Obj, (sound, ModTarget { slot: Some(i), field: id.to_string() }));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

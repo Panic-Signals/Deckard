@@ -428,6 +428,8 @@ unsafe extern "C" fn edited(user: *mut c_void, _object: *mut c_void, _event: *co
 struct RenderContext {
     input: [Vec<f32>; 2],
     input_channels: usize,
+    sidechain: [Vec<f32>; 2],
+    sc_channels: usize,
     sample_rate: f64,
     tempo: f64,
     quarters: f64,
@@ -442,7 +444,7 @@ unsafe extern "C" fn give_input(
     user: *mut c_void,
     _flags: *mut u32,
     _ts: *const TimeStamp,
-    _bus: u32,
+    bus: u32,
     frames: u32,
     list: *mut BufferList,
 ) -> i32 {
@@ -454,9 +456,10 @@ unsafe extern "C" fn give_input(
     let count = unsafe { (*list).count as usize };
     // (The list holds as many buffers as the unit asked for.)
     let buffers = unsafe { std::ptr::addr_of_mut!((*list).buffers) as *mut Buffer };
+    let (src, ch) = if bus >= 1 { (&mut ctx.sidechain, ctx.sc_channels) } else { (&mut ctx.input, ctx.input_channels) };
     for i in 0..count {
         let b = unsafe { &mut *buffers.add(i) };
-        let from = ctx.input[i.min(ctx.input_channels.max(1) - 1).min(1)].as_mut_ptr();
+        let from = src[i.min(ch.max(1) - 1).min(1)].as_mut_ptr();
         if b.data.is_null() {
             b.data = from.cast();
         } else {
@@ -747,6 +750,7 @@ pub struct AudioUnit {
     output_names: Vec<String>,
     /// Takes notes (an instrument, or a MIDI-controlled effect).
     takes_midi: bool,
+    has_sidechain: bool,
     sample_rate: f64,
     clock: i64,
     was_playing: bool,
@@ -785,6 +789,8 @@ impl AudioUnit {
         let context = Box::new(RenderContext {
             input: [vec![0f32; MAX_BLOCK], vec![0f32; MAX_BLOCK]],
             input_channels: 2,
+            sidechain: [vec![0f32; MAX_BLOCK], vec![0f32; MAX_BLOCK]],
+            sc_channels: 2,
             sample_rate,
             tempo: 120.0,
             quarters: 0.0,
@@ -795,7 +801,7 @@ impl AudioUnit {
         });
         let context = Box::into_raw(context);
         let started = Self::negotiate(unit, desc, sample_rate, context);
-        let (input_channels, outputs) = match started {
+        let (input_channels, sc_channels, outputs) = match started {
             Ok(v) => v,
             Err(e) => {
                 unsafe {
@@ -805,7 +811,10 @@ impl AudioUnit {
                 return Err(e);
             }
         };
-        unsafe { (*context).input_channels = input_channels };
+        unsafe {
+            (*context).input_channels = input_channels;
+            (*context).sc_channels = sc_channels.max(1);
+        }
         let output_names = (0..outputs.len() as u32).map(|e| element_name(unit, OUTPUT, e)).collect();
         let params = read_params(unit);
         let index = params.iter().enumerate().map(|(i, m)| (m.info.id, i)).collect();
@@ -828,6 +837,7 @@ impl AudioUnit {
             outputs,
             output_names,
             takes_midi: midi.contains(&desc.kind),
+            has_sidechain: sc_channels > 0,
             sample_rate,
             clock: 0,
             was_playing: false,
@@ -840,8 +850,9 @@ impl AudioUnit {
     }
 
     /// Settle the stream formats (stereo if it'll take it), and initialize. Returns the
-    /// main input's channels, and buffers for each output element.
-    fn negotiate(unit: Unit, desc: Desc, rate: f64, context: *mut RenderContext) -> Result<(usize, Outputs), String> {
+    /// main input's channels, the side-chain input's channels (0 if none), and buffers
+    /// for each output element.
+    fn negotiate(unit: Unit, desc: Desc, rate: f64, context: *mut RenderContext) -> Result<(usize, usize, Outputs), String> {
         let is_effect = desc.kind != u32::from_be_bytes(*b"aumu");
         let inputs = get_u32(unit, PROP_ELEMENT_COUNT, INPUT, 0).unwrap_or(0);
         if !is_effect {
@@ -849,6 +860,7 @@ impl AudioUnit {
         }
         let elements = get_u32(unit, PROP_ELEMENT_COUNT, OUTPUT, 0).unwrap_or(1).max(1);
         let takes_input = is_effect && inputs > 0;
+        let has_sc = takes_input && inputs > 1;
         if takes_input {
             let callback = RenderCallback { proc_: give_input, refcon: context.cast() };
             let r = unsafe {
@@ -863,6 +875,18 @@ impl AudioUnit {
             };
             if r != 0 {
                 return Err(format!("connecting the Audio Unit's input failed ({r})"));
+            }
+            if has_sc {
+                unsafe {
+                    AudioUnitSetProperty(
+                        unit,
+                        PROP_RENDER_CALLBACK,
+                        INPUT,
+                        1,
+                        (&raw const callback).cast(),
+                        std::mem::size_of::<RenderCallback>() as u32,
+                    )
+                };
             }
         }
         let callbacks =
@@ -885,6 +909,9 @@ impl AudioUnit {
             if i > 0 && set_format(unit, INPUT, 0, &stream_format(rate, i)) != 0 {
                 continue;
             }
+            if has_sc && set_format(unit, INPUT, 1, &stream_format(rate, 2)) != 0 {
+                let _ = set_format(unit, INPUT, 1, &stream_format(rate, 1));
+            }
             last = set_format(unit, OUTPUT, 0, &stream_format(rate, o));
             if last != 0 {
                 continue;
@@ -903,6 +930,7 @@ impl AudioUnit {
             return Err(format!("no stereo or mono layout works for this Audio Unit ({last})"));
         }
         let input_channels = if takes_input { channels_of(unit, INPUT, 0).unwrap_or(2).clamp(1, 2) } else { 2 };
+        let sc_channels = if has_sc { channels_of(unit, INPUT, 1).unwrap_or(2).clamp(1, 2) } else { 0 };
         let outputs = (0..elements)
             .map(|e| {
                 // An element in a layout this isn't set up for (more than two channels) isn't used.
@@ -910,7 +938,7 @@ impl AudioUnit {
                 if (1..=2).contains(&n) { vec![vec![0f32; MAX_BLOCK]; n] } else { Vec::new() }
             })
             .collect();
-        Ok((input_channels, outputs))
+        Ok((input_channels, sc_channels, outputs))
     }
 
     pub(crate) fn shared(&self) -> &Arc<Shared> {
@@ -1133,24 +1161,36 @@ impl AudioUnit {
         self.midi(0xE0, (v & 0x7F) as u32, (v >> 7) as u32);
     }
 
-    pub fn process_input(&mut self, frames: usize, transport: &Transport, input: Option<(&[f32], &[f32])>) -> (&[f32], &[f32]) {
+    pub fn has_sidechain(&self) -> bool {
+        self.has_sidechain
+    }
+
+    pub fn process_input_sc(
+        &mut self,
+        frames: usize,
+        transport: &Transport,
+        input: Option<(&[f32], &[f32])>,
+        sidechain: Option<(&[f32], &[f32])>,
+    ) -> (&[f32], &[f32]) {
         let frames = frames.min(MAX_BLOCK);
         if frames == 0 || self.outputs.first().is_none_or(|e| e.is_empty()) {
             return (&[], &[]);
         }
         {
             let ctx = unsafe { &mut *self.shared.context };
-            ctx.input[0][..frames].fill(0.0);
-            ctx.input[1][..frames].fill(0.0);
-            if let Some((l, r)) = input {
-                let n = frames.min(l.len()).min(r.len());
-                if ctx.input_channels == 1 {
-                    for (o, (a, b)) in ctx.input[0][..n].iter_mut().zip(l.iter().zip(r)) {
-                        *o = (a + b) * 0.5;
+            for (dst, ch, src) in [(&mut ctx.input, ctx.input_channels, input), (&mut ctx.sidechain, ctx.sc_channels, sidechain)] {
+                dst[0][..frames].fill(0.0);
+                dst[1][..frames].fill(0.0);
+                if let Some((l, r)) = src {
+                    let n = frames.min(l.len()).min(r.len());
+                    if ch == 1 {
+                        for (o, (a, b)) in dst[0][..n].iter_mut().zip(l.iter().zip(r)) {
+                            *o = (a + b) * 0.5;
+                        }
+                    } else {
+                        dst[0][..n].copy_from_slice(&l[..n]);
+                        dst[1][..n].copy_from_slice(&r[..n]);
                     }
-                } else {
-                    ctx.input[0][..n].copy_from_slice(&l[..n]);
-                    ctx.input[1][..n].copy_from_slice(&r[..n]);
                 }
             }
             ctx.tempo = if transport.tempo > 0.0 { transport.tempo } else { 120.0 };

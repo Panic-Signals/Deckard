@@ -193,6 +193,11 @@ fn font(size: f32) -> FontId {
     FontId::proportional(size)
 }
 
+fn bold_font(ctx: &egui::Context, size: f32) -> FontId {
+    let bold = egui::FontFamily::Name("bold".into());
+    if ctx.fonts(|f| f.families().contains(&bold)) { FontId::new(size, bold) } else { font(size) }
+}
+
 /// Text clipped to `rect`, left-aligned at `indent`, vertically centred.
 fn label(painter: &Painter, rect: Rect, indent: f32, text: &str, size: f32, color: Color32) {
     painter.with_clip_rect(rect.intersect(painter.clip_rect())).text(
@@ -320,17 +325,36 @@ fn pattern_span_handles(
     ];
     // The span as the drag began (the view moves under the pointer as it changes).
     let key = egui::Id::new(("pattern-span-drag", g, pi));
+    let free = ui.input(|i| i.modifiers.shift);
+    let snap = |t: i64| if free { t } else { (t as f64 / app.grid.max(1) as f64).round() as i64 * app.grid.max(1) };
+    let seek_at = |x: f32, acts: &mut Vec<Act>| {
+        if app.playing.is_none() {
+            let rel = ((x - x0) / scale).round() as i64;
+            acts.push(Act::SeekPattern(snap(rel).clamp(0, len.saturating_sub(1))));
+        }
+    };
+    let tl_resp = ui.interact(tl, key.with("tl"), Sense::click());
+    if tl_resp.clicked()
+        && let Some(pos) = tl_resp.interact_pointer_pos()
+    {
+        seek_at(pos.x, acts);
+    }
     for (part, r) in parts {
         if r.width() <= 0.0 {
             continue;
         }
-        let resp = ui.interact(r, key.with(part as u8), Sense::drag());
+        let resp = ui.interact(r, key.with(part as u8), Sense::click_and_drag());
         let hovered = resp.hovered() || resp.dragged();
         if hovered {
             ui.ctx().set_cursor_icon(match part {
                 Part::Body => egui::CursorIcon::Grab,
                 _ => egui::CursorIcon::ResizeHorizontal,
             });
+        }
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            seek_at(pos.x, acts);
         }
         if resp.drag_started() {
             ui.data_mut(|d| d.insert_temp(key, (start, len, scale)));
@@ -339,8 +363,6 @@ fn pattern_span_handles(
             && let Some((s0, l0, sc)) = ui.data(|d| d.get_temp::<(i64, i64, f32)>(key))
             && let (Some(from), Some(now)) = ui.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()))
         {
-            let free = ui.input(|i| i.modifiers.shift);
-            let snap = |t: i64| if free { t } else { (t as f64 / app.grid.max(1) as f64).round() as i64 * app.grid.max(1) };
             let delta = ((now.x - from.x) / sc) as i64;
             let min_len = if free { PPQ / 4 } else { app.grid.max(PPQ / 4) };
             let (s, l) = match part {
@@ -539,6 +561,8 @@ pub enum Act {
     AssignPattern(usize, usize, Option<usize>),
     /// A new empty pattern in group `.1`, put in scene `.0` and focused.
     NewPattern(usize, usize),
+    /// [`Act::NewPattern`] in an empty place of the group: scene, group, place from 0.
+    NewPatternAt(usize, usize, usize),
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
@@ -630,6 +654,10 @@ pub enum Act {
     PatternLengthAuto(usize, usize),
     /// A pattern's start and length (dragging its ends or its body on the timeline).
     PatternSpan(usize, usize, i64, i64),
+    /// Move the playhead to tick `.0` of the focused pattern's loop.
+    SeekPattern(i64),
+    /// Move the playhead to tick `.0` of the arrangement.
+    SeekArrangement(i64),
     TimeSignature(i64, i64),
     SetSwing(Target, Swing),
     /// Set a Sampler or zone parameter (dragging a Sampler knob).
@@ -650,6 +678,8 @@ pub enum Act {
     /// [`Act::PluginParam`] of the plug-in in slot `.1` of chain `.0` (a macro's: any
     /// chain).
     PluginParamIn(deckard_doc::Chain, usize, u32, f64),
+    /// Move parameter `id` of the MIDI input plug-in on group `.0`.
+    MidiInputParam(usize, u32, f64),
     /// The focused slot's page of parameters.
     PluginPage(usize),
     /// The page of parameters slot `.1` of chain `.0` shows (its strip panel's own).
@@ -679,6 +709,7 @@ pub enum Act {
     CopyGroup(usize),
     PasteGroup(usize),
     DeleteGroup(usize),
+    MoveGroup(usize, usize),
     ImportMidi(usize, usize),
     ExportMidi(usize, usize),
     ImportGroupMidi(usize),
@@ -945,8 +976,11 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     app.status = format!("can't change the extra output: {e}");
                 }
             }
+            Act::SeekPattern(t) => app.seek_pattern(t),
+            Act::SeekArrangement(t) => app.seek_arrangement(t),
             Act::AssignPattern(..)
             | Act::NewPattern(..)
+            | Act::NewPatternAt(..)
             | Act::AddScene
             | Act::AddGroup
             | Act::InsertScene(_)
@@ -1164,6 +1198,11 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
+            Act::MidiInputParam(g, id, v) => {
+                if let Some(Ok(out)) = &app.output {
+                    out.set_midi_input_param(g, id, v);
+                }
+            }
             Act::PluginPage(n) => app.plugin_page = n,
             Act::PluginPageOf(c, i, n) => {
                 if app.plugin_focus == Some((c, i)) {
@@ -1244,6 +1283,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             | Act::CutGroup(..)
             | Act::CopyGroup(..)
             | Act::PasteGroup(..)
+            | Act::MoveGroup(..)
             | Act::DeleteGroup(..)
             | Act::ImportMidi(..)
             | Act::ExportMidi(..)
@@ -1325,7 +1365,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     }
                     Target::Zone(..) => "Zone",
                     Target::Sampler(..) => "Sampler",
-                    Target::Module(..) => "Effect Parameter",
+                    Target::Module(..) | Target::ChainModule(..) => "Effect Parameter",
                     _ => "Channel Property",
                 };
                 // Variation and Generate settings of a project from before Maschine 3:
@@ -1419,19 +1459,32 @@ pub fn logo_font() -> Vec<u8> {
     crate::menu::settings_dir().and_then(|d| std::fs::read(d.join("logo.ttf")).ok()).unwrap_or_else(|| BUILT_IN_LOGO_FONT.to_vec())
 }
 
-/// The app's fonts: egui's, the logo's, and the emoji font for names.
+/// The app's fonts: IBM Plex Sans (regular, bold) and IBM Plex Mono, egui's fallbacks,
+/// the logo's, and the emoji font for names.
 fn font_definitions() -> egui::FontDefinitions {
     let bytes = logo_font();
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
     fonts.families.insert(egui::FontFamily::Name(LOGO_FONT.into()), vec![LOGO_FONT.into()]);
-    // Emoji in names: the full Noto Emoji (egui's has only the older ones), after
-    // the text fonts and before egui's.
-    fonts.font_data.insert(EMOJI_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(deckard_nwl::draw::EMOJI_FONT)));
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        let list = fonts.families.entry(family).or_default();
-        list.insert(1.min(list.len()), EMOJI_FONT.into());
+    for name in ["plex", "plex-bold", "plex-mono"] {
+        if let Some((_, data)) = deckard_surface::FONTS.iter().find(|(n, _)| *n == name) {
+            fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_static(data)));
+        }
     }
+    // Emoji in names: the full Noto Emoji (egui's has only the older ones), after
+    // the primary text font and before egui's fallbacks.
+    fonts.font_data.insert(EMOJI_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(deckard_nwl::draw::EMOJI_FONT)));
+    let prop_fallbacks = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    let mono_fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
+    let mut prop = vec!["plex".into(), EMOJI_FONT.into()];
+    prop.extend(prop_fallbacks);
+    fonts.families.insert(egui::FontFamily::Proportional, prop.clone());
+    let mut mono = vec!["plex-mono".into(), EMOJI_FONT.into()];
+    mono.extend(mono_fallbacks);
+    fonts.families.insert(egui::FontFamily::Monospace, mono);
+    let mut bold = vec!["plex-bold".into(), EMOJI_FONT.into()];
+    bold.extend(prop);
+    fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
     fonts
 }
 
@@ -1459,6 +1512,27 @@ fn dark_style(ctx: &egui::Context) {
         s.visuals.panel_fill = Color32::BLACK;
         s.visuals.override_text_color = Some(white(245));
     });
+}
+
+/// Draws the browser header icon (three equidistant shelf lines on the left and a magnifying glass on the right).
+fn draw_browser_icon(p: &Painter, r: Rect, c: Color32) {
+    let x0 = (r.center().x - 9.0).floor() + 0.5;
+    for i in 0..3 {
+        let x = x0 + i as f32 * 3.0;
+        p.vline(x, (r.center().y - 6.0)..=(r.center().y + 6.0), Stroke::new(1.0, c));
+    }
+    p.circle_stroke(r.center() + Vec2::new(5.5, -1.0), 3.5, Stroke::new(1.2, c));
+    p.line_segment([r.center() + Vec2::new(8.0, 1.5), r.center() + Vec2::new(10.0, 4.5)], Stroke::new(1.5, c));
+}
+
+/// Draws the mixer header icon (three vertical fader tracks with pixel-centred fader caps).
+fn draw_mixer_icon(p: &Painter, r: Rect, c: Color32) {
+    for i in 0..3 {
+        let x = (r.center().x - 6.0 + i as f32 * 6.0).floor() + 0.5;
+        p.vline(x, (r.center().y - 7.0)..=(r.center().y + 7.0), Stroke::new(1.0, c));
+        let y = r.center().y + [3.0, -3.0, 1.0][i];
+        p.rect_filled(Rect::from_center_size(Pos2::new(x, y), Vec2::new(5.0, 2.5)), 0.5, c);
+    }
 }
 
 /// A 32×24-style button drawing its own icon; `on` lights it in `on_color`.
@@ -1538,32 +1612,15 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 app.menu_commands.extend(chosen);
                 ui.add_space(2.0);
                 // The browser (F4): a magnifier over a shelf.
-                if icon_button(ui, Vec2::new(32.0, 24.0), app.browser.open, white(245), "Show or hide the browser (F4)", |p, r, c| {
-                    for i in 0..3 {
-                        let x = r.center().x - 7.0 + i as f32 * 4.0;
-                        p.vline(x, (r.center().y - 6.0)..=(r.center().y + 6.0), Stroke::new(1.5, c));
-                    }
-                    p.circle_stroke(r.center() + Vec2::new(5.0, -1.0), 3.5, Stroke::new(1.2, c));
-                    p.line_segment([r.center() + Vec2::new(7.5, 1.5), r.center() + Vec2::new(9.5, 4.5)], Stroke::new(1.5, c));
-                })
-                .clicked()
+                if icon_button(ui, Vec2::new(32.0, 24.0), app.browser.open, white(245), "Show or hide the browser (F4)", draw_browser_icon)
+                    .clicked()
                 {
                     acts.push(Act::Browse(crate::browser::BrowseAct::Toggle));
                 }
                 ui.add_space(2.0);
                 if app.doc.is_some() {
                     let on = app.mixer;
-                    if icon_button(ui, Vec2::new(32.0, 24.0), on, white(245), "Show or hide the Mixer", |p, r, c| {
-                        // Three faders.
-                        for i in 0..3 {
-                            let x = r.center().x - 6.0 + i as f32 * 6.0;
-                            p.vline(x, (r.center().y - 7.0)..=(r.center().y + 7.0), Stroke::new(1.0, c));
-                            let y = r.center().y + [3.0, -3.0, 1.0][i];
-                            p.rect_filled(Rect::from_center_size(Pos2::new(x, y), Vec2::new(4.0, 2.5)), 0.5, c);
-                        }
-                    })
-                    .clicked()
-                    {
+                    if icon_button(ui, Vec2::new(32.0, 24.0), on, white(245), "Show or hide the Mixer", draw_mixer_icon).clicked() {
                         acts.push(Act::ToggleMixer);
                     }
                     ui.add_space(4.0);
@@ -1843,7 +1900,7 @@ fn master_fader(ui: &mut Ui, level: f64, meter: (f32, f32), acts: &mut Vec<Act>)
     );
     if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
-        let dx = resp.drag_delta().x / if fine { 10.0 } else { 1.0 };
+        let dx = resp.drag_delta().x / if fine { 40.0 } else { 4.0 };
         if dx != 0.0 {
             acts.push(Act::SetLevel(Target::Song, (level + f64::from(dx / bars.width())).clamp(0.0, 1.0)));
         }
@@ -2538,8 +2595,9 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     painter.rect_filled(tiles, 0.0, S05);
     let columns = Rect::from_min_max(cells.min, tiles.max);
     let gx = hscroll(ui, "idea-columns", columns, p.groups.len() as f32 * IDEA_W + 27.0);
-    let most = p.groups.iter().map(|g| g.patterns.len()).max().unwrap_or(0);
-    let gy = scroll(ui, "idea-cells", cells, most as f32 * ROW + 8.0);
+    // A row per place; one more than the last pattern, for a new one.
+    let most = p.groups.iter().filter_map(|g| g.patterns.last()).map(|x| x.slot + 1).max().unwrap_or(0);
+    let gy = scroll(ui, "idea-cells", cells, (most + 1) as f32 * ROW + 8.0);
     let in_scene = |g: usize, pi: usize| p.scenes.get(app.scene).is_some_and(|s| s.patterns.contains(&(g, pi)));
     let cell_painter = painter.with_clip_rect(cells);
     for (g, group) in p.groups.iter().enumerate() {
@@ -2551,8 +2609,11 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         if g == app.group {
             cell_painter.rect_filled(col_rect, 0.0, white(10));
         }
+        let place =
+            |slot: usize| Rect::from_min_size(Pos2::new(x, cells.top() + 4.0 + slot as f32 * ROW - gy), Vec2::new(IDEA_W - 1.0, ROW));
         for pi in 0..group.patterns.len() {
-            let r = Rect::from_min_size(Pos2::new(x, cells.top() + 4.0 + pi as f32 * ROW - gy), Vec2::new(IDEA_W - 1.0, ROW));
+            let r = place(group.patterns[pi].slot);
+            note_rect(ui, &format!("pattern place {g} {}", group.patterns[pi].slot), r);
             if !r.intersects(cells) {
                 continue;
             }
@@ -2614,17 +2675,23 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             }
             resp.context_menu(|ui| pattern_menu(ui, p, g, pi, acts));
         }
-        // Below the group's patterns: double-click for a new one.
-        let free_top = cells.top() + 4.0 + group.patterns.len() as f32 * ROW - gy;
-        let free = Rect::from_min_max(Pos2::new(x, free_top.max(cells.top())), Pos2::new(x + IDEA_W - 1.0, cells.bottom()));
-        if free.height() > 0.0 {
-            let resp = ui.interact(free, ui.id().with(("new-pattern", g)), Sense::click());
-            if resp.hovered() {
-                let slot = Rect::from_min_size(Pos2::new(x, free_top), Vec2::new(IDEA_W - 1.0, ROW)).shrink2(Vec2::new(3.0, 2.0));
-                cell_painter.rect_stroke(slot, 3.0, Stroke::new(1.0, white(41)), StrokeKind::Inside);
+        // The empty places, between the group's patterns and below them: double-click for
+        // a new one there.
+        let first = ((gy - 4.0) / ROW).floor().max(0.0) as usize;
+        let last = ((gy - 4.0 + cells.height()) / ROW).ceil().max(0.0) as usize;
+        for slot in (first..=last).filter(|s| !group.patterns.iter().any(|x| x.slot == *s)) {
+            let r = place(slot);
+            note_rect(ui, &format!("pattern place {g} {slot}"), r);
+            let area = r.intersect(cells);
+            if area.height() <= 0.0 {
+                continue;
             }
-            if resp.on_hover_text("Double-click for a new pattern in this group").double_clicked() {
-                acts.push(Act::NewPattern(app.scene, g));
+            let resp = ui.interact(area, ui.id().with(("new-pattern", g, slot)), Sense::click());
+            if resp.hovered() {
+                cell_painter.rect_stroke(r.shrink2(Vec2::new(3.0, 2.0)), 3.0, Stroke::new(1.0, white(41)), StrokeKind::Inside);
+            }
+            if resp.on_hover_text("Double-click for a new pattern here").double_clicked() {
+                acts.push(Act::NewPatternAt(app.scene, g, slot));
             }
         }
         // Group tile.
@@ -2642,8 +2709,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let ink = if focused { black(245) } else { gcol };
         let letter = Pos2::new(tile.center().x, tile.top() + 12.0);
         let id = group_tab(g);
-        tp.text(letter, Align2::CENTER_CENTER, &id, FontId::proportional(16.0), ink);
-        tp.text(letter + Vec2::new(0.4, 0.0), Align2::CENTER_CENTER, &id, FontId::proportional(16.0), ink);
+        tp.text(letter, Align2::CENTER_CENTER, &id, bold_font(ui.ctx(), 16.0), ink);
         let name_rect = Rect::from_min_size(Pos2::new(tile.left() + 6.0, tile.top() + 20.0), Vec2::new(86.0, 20.0));
         let name_ink = if focused {
             black(245)
@@ -3153,6 +3219,8 @@ fn group_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, acts: &mut Vec<Act>
     item(ui, "Paste", app.group_clipboard.is_some(), || Act::PasteGroup(g), acts);
     ui.separator();
     item(ui, "Rename", true, || Act::StartRename(Target::Group(g)), acts);
+    item(ui, "Move Left", g > 0, || Act::MoveGroup(g, g.saturating_sub(1)), acts);
+    item(ui, "Move Right", g + 1 < p.groups.len(), || Act::MoveGroup(g, g + 1), acts);
     item(ui, "Delete", true, || Act::DeleteGroup(g), acts);
 }
 
@@ -3260,6 +3328,17 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
     let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
+    let tl_resp = ui.interact(timeline, ui.id().with("song-timeline"), Sense::click());
+    if app.playing.is_none()
+        && tl_resp.clicked()
+        && let Some(pos) = tl_resp.interact_pointer_pos()
+    {
+        let free = ui.input(|i| i.modifiers.shift);
+        let raw = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+        let snap = app.grid.max(1);
+        let tick = if free { raw } else { (raw as f64 / snap as f64).round() as i64 * snap };
+        acts.push(Act::SeekArrangement(tick.max(0)));
+    }
     let tracks = Rect::from_min_max(Pos2::new(ed.left(), rows_top), ed.max);
     let ep = painter.with_clip_rect(ed);
     ep.hline(timeline.x_range(), timeline.top(), Stroke::new(1.0, Color32::BLACK));
@@ -3621,6 +3700,9 @@ pub enum Edit {
     PluginIn(deckard_doc::Chain, usize, u32, f64),
     /// A routing choice, now entry `.0` of its list (the page holds the list).
     Route(usize),
+    /// A parameter of the MIDI input plug-in on a group: group, id, min, max, steps (0: any)
+    /// and its default.
+    MidiInputParam(usize, u32, f64, f64, u32, f64),
 }
 
 #[derive(Clone, Copy)]
@@ -3653,6 +3735,7 @@ impl Edit {
             Edit::Plugin(slot, id, _) => Act::PluginParam(slot, id, a),
             Edit::PluginIn(c, slot, id, _) => Act::PluginParamIn(c, slot, id, a),
             Edit::PluginChoice(slot, id, steps, ..) => Act::PluginParam(slot, id, (a * steps as f64).round() / steps as f64),
+            Edit::MidiInputParam(g, id, lo, hi, ..) => Act::MidiInputParam(g, id, lo + a * (hi - lo)),
             Edit::Route(_) => Act::Nothing,
         }
     }
@@ -3684,6 +3767,7 @@ impl Edit {
             Edit::Toggle(t, f, _) => Act::SetParam(t, f, 0.0),
             Edit::Plugin(slot, id, default) | Edit::PluginChoice(slot, id, _, _, default) => Act::PluginParam(slot, id, default),
             Edit::PluginIn(c, slot, id, default) => Act::PluginParamIn(c, slot, id, default),
+            Edit::MidiInputParam(g, id, _, _, _, default) => Act::MidiInputParam(g, id, default),
             Edit::Route(_) => Act::Nothing,
         }
     }
@@ -3715,6 +3799,7 @@ pub(crate) fn every_target(app: &App, doc: &deckard_doc::Document) -> Vec<channe
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|_| None,
+        midi_input: &|g| app.midi_input(g),
     };
     channel::every_target(&ctx)
 }
@@ -3750,6 +3835,7 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|id| plugin_macro_knob(app, doc, id),
+        midi_input: &|g| app.midi_input(g),
     };
     let set = app.prop_set.min(3);
     let macro_pages = if set == 3 { doc.macro_pages(channel::macro_channel(level)) } else { Vec::new() };
@@ -3768,6 +3854,7 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
 /// Set parameter `id` of the plug-in in slot `i` of chain `c` (normalized).
 fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64) {
     let mut native = false;
+    let mut new_text = None;
     if let Ok(p) = app.slot_plugin_in(chain, i)
         && let Ok(mut g) = p.lock()
     {
@@ -3777,9 +3864,11 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
             Some(h) => {
                 drop(g);
                 h.set(id, v);
+                new_text = Some(h.text(id, v));
             }
             None => {
                 g.set_param(id, v);
+                new_text = Some(g.param_text(id, v));
                 native = g.is_native();
             }
         }
@@ -3790,7 +3879,20 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
+    let page = app.view_page((chain, i));
     if let Some(view) = app.plugin_views.get_mut(&(chain, i)) {
+        if let Some(pg) = view.pages.get(page) {
+            for (k, (info, ..)) in pg.knobs.iter().enumerate() {
+                if info.id == id
+                    && let Some(slot) = view.values.get_mut(k)
+                {
+                    slot.0 = v;
+                    if let Some(t) = &new_text {
+                        slot.1 = t.clone();
+                    }
+                }
+            }
+        }
         view.page = usize::MAX;
         // (Shown until the plug-in reports it: the next turn goes on from it.)
         view.sent.retain(|(x, ..)| *x != id);
@@ -3850,8 +3952,7 @@ fn plugin_knob(app: &App, doc: &deckard_doc::Document, chain: deckard_doc::Chain
         Err(_) => (info.default, String::new()),
     };
     let units = if info.units.is_empty() || text.ends_with(&info.units) { String::new() } else { format!(" {}", info.units) };
-    let edit =
-        if chain == app.chain() { Edit::Plugin(slot, param, info.default) } else { Edit::PluginIn(chain, slot, param, info.default) };
+    let edit = Edit::PluginIn(chain, slot, param, info.default);
     Some((knob_label(&info.title).into(), format!("{text}{units}"), value as f32, Some(edit)))
 }
 
@@ -3907,8 +4008,31 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
     }
     if let Some(pr) = &slot.plugin {
         let v = app.plugin_views.get(&(app.chain(), i)).filter(|v| v.error.is_none())?;
-        let pages = v.pages.len().max(1);
+        let mut names: Vec<String> = v
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(n, x)| if x.name.is_empty() { format!("{} {}", pr.name, n + 1) } else { x.name.clone() })
+            .collect();
+        if v.sidechain {
+            names.push("Side-Chain Input".into());
+        }
+        let pages = names.len().max(1);
         let page = app.plugin_page.min(pages - 1);
+        if v.sidechain && page == v.pages.len() {
+            let pg = crate::module_ui::side_chain_page(slot, app.module_target(i));
+            let mut knobs: Vec<Option<Knob>> = pg.slots.into_iter().collect();
+            let mut routes = Vec::new();
+            if let Some((choices, sets, cur)) = channel::sidechain_choices(p, app.chain(), i)
+                && let Some(k) = knobs.first_mut()
+            {
+                let shown = channel::abbrev(choices[cur].split(" - ").next().unwrap_or(""));
+                *k = Some(("SOURCE".into(), shown, 0.0, Some(Edit::Route(cur))));
+                routes.push((0, choices, sets));
+            }
+            let sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
+            return Some(SlotPage { names, page, knobs, sections, show: Act::PluginPage, routes });
+        }
         let mut knobs = Vec::new();
         let mut sections = Vec::new();
         if let Some(pg) = v.pages.get(page) {
@@ -3920,7 +4044,7 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
                         let cur = (value * info.steps as f64).round() as usize;
                         Edit::PluginChoice(i, info.id, info.steps, cur.min(names.len() - 1), info.default)
                     }
-                    None => Edit::Plugin(i, info.id, info.default),
+                    None => Edit::PluginIn(app.chain(), i, info.id, info.default),
                 };
                 knobs.push(Some((knob_label(label).into(), format!("{text}{units}"), value as f32, Some(edit))));
                 if !section.is_empty() {
@@ -3928,15 +4052,13 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
                 }
             }
         }
-        let names = v
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(n, x)| if x.name.is_empty() { format!("{} {}", pr.name, n + 1) } else { x.name.clone() })
-            .collect();
         return Some(SlotPage { names, page, knobs, sections, show: Act::PluginPage, routes: Vec::new() });
     }
-    let names = crate::module_ui::pages(&slot.module)?;
+    let names: Vec<&str> = crate::module_ui::pages(&slot.module)?
+        .iter()
+        .copied()
+        .filter(|&n| !(matches!(app.chain(), deckard_doc::Chain::Master) && n == "Side-Chain Input"))
+        .collect();
     let page = app.plugin_page.min(names.len().saturating_sub(1));
     let slot = if live { app.live_slot((app.group, app.sound, i), s, slot) } else { Cow::Borrowed(slot) };
     let pg = crate::module_ui::page_for(&slot, app.module_target(i), page);
@@ -4150,6 +4272,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|id| plugin_macro_knob(app, doc, id),
+        midi_input: &|g| app.midi_input(g),
     };
     // On the Macro page: the channel, the page, what each slot controls, and the targets.
     let mut macro_view: Option<MacroView> = None;
@@ -4235,19 +4358,32 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     }
                     match app.plugin_views.get(&(app.chain(), i)) {
                         Some(v) if v.error.is_none() => {
-                            let pages = v.pages.len().max(1);
-                            let page = app.plugin_page.min(pages - 1);
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
                             heading = pr.name.clone();
-                            // Named pages (DECKARD's plug-ins name theirs) by name, else by number.
-                            let names: Vec<String> = if !v.pages.is_empty() && v.pages.iter().all(|p| !p.name.is_empty()) {
-                                v.pages.iter().map(|p| p.name.clone()).collect()
-                            } else {
-                                (1..=pages).map(|n| n.to_string()).collect()
-                            };
+                            // Named pages (DECKARD's plug-ins and NKS/saved pages with sections) by name, else by number.
+                            let mut names: Vec<String> = v
+                                .pages
+                                .iter()
+                                .enumerate()
+                                .map(|(n, p)| if p.name.is_empty() { (n + 1).to_string() } else { p.name.clone() })
+                                .collect();
+                            if v.sidechain {
+                                names.push("Side-Chain Input".into());
+                            }
+                            let pages = names.len().max(1);
+                            let page = app.plugin_page.min(pages - 1);
                             tabs = Some((names, page, Act::PluginPage));
-                            if let Some(pg) = v.pages.get(page) {
+                            if v.sidechain && page == v.pages.len() {
+                                let pg = crate::module_ui::side_chain_page(slot, app.module_target(i));
+                                params = pg.slots.into_iter().collect();
+                                if let Some((choices, sets, cur)) = channel::sidechain_choices(p, app.chain(), i) {
+                                    let shown = channel::abbrev(choices[cur].split(" - ").next().unwrap_or(""));
+                                    params[0] = Some(("SOURCE".into(), shown, 0.0, Some(Edit::Route(cur))));
+                                    routes.push((0, choices, sets));
+                                }
+                                sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
+                            } else if let Some(pg) = v.pages.get(page) {
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
                                     let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
@@ -4263,15 +4399,14 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                             let cur = (value * info.steps as f64).round() as usize;
                                             Edit::PluginChoice(i, info.id, info.steps, cur.min(names.len() - 1), info.default)
                                         }
-                                        None => Edit::Plugin(i, info.id, info.default),
+                                        None => Edit::PluginIn(app.chain(), i, info.id, info.default),
                                     };
                                     params.push(Some((name, format!("{text}{units}"), value as f32, Some(edit))));
                                     if !section.is_empty() {
                                         sections.push((k, section.clone().into()));
                                     }
                                 }
-                            }
-                            if v.pages.is_empty() {
+                            } else if v.pages.is_empty() {
                                 note = Some("This plug-in has no parameters to show".into());
                             }
                         }
@@ -4294,7 +4429,12 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 (Some(s), Some((i, slot))) if crate::module_ui::pages(&slot.module).is_some() => {
                     // One of Maschine's own effects (or synths), where its routes have
                     // its knobs now.
-                    let names = crate::module_ui::pages(&slot.module).unwrap_or(&[]);
+                    let names: Vec<&str> = crate::module_ui::pages(&slot.module)
+                        .unwrap_or(&[])
+                        .iter()
+                        .copied()
+                        .filter(|&n| !(matches!(app.chain(), deckard_doc::Chain::Master) && n == "Side-Chain Input"))
+                        .collect();
                     let page = app.plugin_page.min(names.len().saturating_sub(1));
                     // Several pages become tabs, so the title is only the module.
                     // One page has no tab, and its name stays in the title.
@@ -4486,7 +4626,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             }
         } else if let Some((t, f)) = edit.as_ref().and_then(channel::knob_param) {
             strip_resp.context_menu(|ui| param_macro_menu(ui, doc, t, f, acts));
-        } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
+        } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginIn(_, slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
             strip_resp.context_menu(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
         }
         // A parameter a macro controls: the macro icon at the top right.
@@ -4562,16 +4702,22 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 ui.data_mut(|d| d.insert_temp(start_id, (base, 0f32)));
             }
             let dy = -resp.drag_delta().y / if fine { 1000.0 } else { 200.0 };
-            if resp.dragged() && dy != 0.0 {
+            if resp.dragged() {
                 let (from, moved) = ui.data(|d| d.get_temp::<(f32, f32)>(start_id)).unwrap_or((base, 0.0));
                 let moved = moved + dy;
-                ui.data_mut(|d| d.insert_temp(start_id, (from, moved)));
+                if dy != 0.0 {
+                    ui.data_mut(|d| d.insert_temp(start_id, (from, moved)));
+                }
                 let to = (from + moved).clamp(0.0, 1.0);
                 if ring {
-                    acts.push(Act::Modulate(*edit, to, false));
+                    if dy != 0.0 {
+                        acts.push(Act::Modulate(*edit, to, false));
+                    }
                 } else {
                     amount = to;
-                    acts.push(edit.to_act(amount));
+                    if dy != 0.0 {
+                        acts.push(edit.to_act(amount));
+                    }
                 }
             }
             if resp.drag_stopped() && ring {
@@ -4951,8 +5097,9 @@ fn page_tabs(
     out
 }
 
-/// The sound's chain: one row per slot (click: its pages; right-click: bypass, remove,
-/// plug-in window), then "+" to add an internal module or a plug-in.
+/// The sound's chain: one row per slot (click: its pages; double-click: plug-in window;
+/// right-click: bypass, remove, plug-in window), then "+" to add an internal module or a
+/// plug-in.
 fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[deckard_model::SlotInfo], acts: &mut Vec<Act>) {
     const ROW: f32 = 21.0;
     let off = scroll(ui, "chain-slots", area, (slots.len() + 1) as f32 * ROW + 4.0);
@@ -5032,6 +5179,12 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                     acts.push(Act::SelectSlot(Some(i)));
                 }
                 let plugin = slot.plugin.is_some();
+                if plugin && resp.double_clicked() {
+                    acts.push(Act::OpenSlotEditor(i));
+                }
+                if cfg!(test) {
+                    note_rect(ui, &format!("chain slot {i}"), vis);
+                }
                 let active = slot.active;
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
@@ -5555,6 +5708,16 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     }
     if pat.is_some() {
         pattern_span_handles(ui, app, &painter, tl, start, plen, scale, x_of(start as f64), acts);
+    } else if app.playing.is_none() {
+        let tl_resp = ui.interact(tl, ui.id().with("pattern-timeline"), Sense::click());
+        if tl_resp.clicked()
+            && let Some(pos) = tl_resp.interact_pointer_pos()
+        {
+            let free = ui.input(|i| i.modifiers.shift);
+            let rel = ((pos.x - x_of(start as f64)) / scale).round() as i64;
+            let t = if free { rel } else { (rel as f64 / step as f64).round() as i64 * step };
+            acts.push(Act::SeekPattern(t.clamp(0, plen.saturating_sub(1))));
+        }
     }
 
     // Rows of the note area: 16 sound slots (24 each), or in the piano roll every
@@ -6657,7 +6820,10 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     });
 
     // Playhead.
-    if let Some(t) = pat.and_then(|_| pattern_position(p, head, app.group, app.pattern)) {
+    let playhead_pos = pat
+        .and_then(|_| pattern_position(p, head, app.group, app.pattern))
+        .or_else(|| head.filter(|_| app.playing.is_none()).map(|h| h.position.rem_euclid(plen as f64)));
+    if let Some(t) = playhead_pos {
         let x = x_of(start as f64 + t);
         painter.vline(x, Rect::from_min_max(tl.min, rect.max).y_range(), Stroke::new(1.0, Color32::WHITE));
     }
@@ -6989,7 +7155,10 @@ mod emoji_tests {
     fn the_apps_text_falls_back_to_the_emoji_font() {
         use eframe::egui::FontFamily;
         let f = super::font_definitions();
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        assert_eq!(f.families[&FontFamily::Proportional][0], "plex");
+        assert_eq!(f.families[&FontFamily::Monospace][0], "plex-mono");
+        assert_eq!(f.families[&FontFamily::Name("bold".into())][0], "plex-bold");
+        for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("bold".into())] {
             let list = &f.families[&family];
             assert_eq!(list[1], super::EMOJI_FONT, "{family:?}: {list:?}");
         }
@@ -7093,6 +7262,82 @@ mod theme_tests {
         assert!(visuals.dark_mode);
         for fill in [visuals.window_fill, visuals.panel_fill, visuals.extreme_bg_color, visuals.widgets.inactive.weak_bg_fill] {
             assert!(bright(fill) < 300, "{fill:?} under white text");
+        }
+    }
+}
+
+#[cfg(test)]
+mod header_icon_tests {
+    use super::*;
+
+    #[test]
+    fn browser_icon_separates_magnifying_glass_from_shelf_lines() {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(100.0, 8.0), Vec2::new(32.0, 24.0));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            draw_browser_icon(ui.painter(), rect, Color32::WHITE);
+        });
+        out.textures_delta.clear();
+        let shapes = out.shapes;
+        let mut vlines = Vec::new();
+        let mut rightmost_line_edge = f32::NEG_INFINITY;
+        let mut circle_left_edge = None;
+        for clipped in shapes {
+            match clipped.shape {
+                egui::Shape::LineSegment { points, stroke } if (points[0].x - points[1].x).abs() < 1e-4 => {
+                    let snapped_x = (points[0].x - 0.5).round() + 0.5;
+                    vlines.push(snapped_x);
+                    rightmost_line_edge = rightmost_line_edge.max(snapped_x + stroke.width * 0.5);
+                }
+                egui::Shape::Circle(c) => {
+                    circle_left_edge = Some(c.center.x - c.radius - c.stroke.width * 0.5);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(vlines.len(), 3, "three vertical shelf lines");
+        let d01 = vlines[1] - vlines[0];
+        let d12 = vlines[2] - vlines[1];
+        assert!((d01 - d12).abs() < 1e-4, "shelf lines should be equidistant: {d01} vs {d12}");
+        let circle_left = circle_left_edge.expect("magnifying glass circle painted");
+        assert!(
+            circle_left - rightmost_line_edge >= 2.0,
+            "magnifying glass left edge ({circle_left}) should clear shelf lines ({rightmost_line_edge}) by at least 2px"
+        );
+    }
+
+    #[test]
+    fn mixer_icon_centres_fader_knobs_on_vertical_lines() {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(140.0, 8.0), Vec2::new(32.0, 24.0));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            draw_mixer_icon(ui.painter(), rect, Color32::WHITE);
+        });
+        out.textures_delta.clear();
+        let shapes = out.shapes;
+        let mut lines = Vec::new();
+        let mut knobs = Vec::new();
+        for clipped in shapes {
+            match clipped.shape {
+                egui::Shape::LineSegment { points, stroke } if (points[0].x - points[1].x).abs() < 1e-4 => {
+                    // epaint snaps 1px vertical lines to pixel centers (x - 0.5).round() + 0.5
+                    let snapped_x = (points[0].x - 0.5).round() + 0.5;
+                    lines.push((snapped_x - stroke.width * 0.5, snapped_x + stroke.width * 0.5));
+                }
+                egui::Shape::Rect(r) => {
+                    // epaint snaps rect edges to integer pixel boundaries
+                    knobs.push((r.rect.min.x.round(), r.rect.max.x.round()));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(lines.len(), 3);
+        assert_eq!(knobs.len(), 3);
+        for ((line_l, line_r), (knob_l, knob_r)) in lines.into_iter().zip(knobs) {
+            let left_overhang = line_l - knob_l;
+            let right_overhang = knob_r - line_r;
+            assert!((left_overhang - right_overhang).abs() < 1e-4, "left overhang {left_overhang} != right overhang {right_overhang}");
+            assert!(left_overhang >= 1.5);
         }
     }
 }

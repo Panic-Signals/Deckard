@@ -152,6 +152,7 @@ pub fn stem_project(p: &Project, stem: Stem) -> Project {
             grp.slots.clear();
             grp.level = unity;
             grp.pan = 0.0;
+            crate::drop_fader_lanes(&mut grp.modulators);
             for (k, snd) in grp.sounds.iter_mut().enumerate() {
                 snd.muted = k != s;
             }
@@ -596,6 +597,7 @@ pub fn bounce_project(p: &Project, g: usize, s: usize) -> Project {
     if let Some(snd) = q.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) {
         snd.level = deckard_model::level_from_db(0.0);
         snd.pan = 0.0;
+        crate::drop_fader_lanes(&mut snd.modulators);
     }
     q
 }
@@ -1090,5 +1092,25 @@ mod tests {
         // Cancelled: nothing more.
         let none = export(&p, None, &jobs, &f, &dir, &AtomicBool::new(true), &mut |_, _| {}).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// What's rendered without a fader is without its modulation too.
+    #[test]
+    fn a_fader_left_out_takes_its_lane_with_it() {
+        let lanes = || vec![deckard_model::ModTarget { slot: None, field: "level".into() }];
+        let mut p = Project {
+            groups: vec![deckard_model::Group {
+                modulators: lanes(),
+                sounds: vec![deckard_model::Sound { modulators: lanes(), ..Default::default() }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        p.groups[0].level = 0.5;
+        let fader_of = |p: &Project| crate::channel_faders(p).0.iter().map(|f| f.sound).collect::<Vec<_>>();
+        assert_eq!(fader_of(&p), [None, Some(0)]);
+        assert_eq!(fader_of(&stem_project(&p, Stem::Group(0))), [None, Some(0)], "a group's stem is after its fader");
+        assert_eq!(fader_of(&stem_project(&p, Stem::Sound(0, 0))), [Some(0)], "a sound's isn't through its group's");
+        assert!(fader_of(&bounce_project(&p, 0, 0)).is_empty(), "a bounce is before its own");
     }
 }

@@ -14,7 +14,7 @@
 
 use crate::queue::Queue;
 use crate::{Engine, Live, Mode, Tap, Timeline, Timelines};
-use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::traits::StreamTrait;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -187,7 +187,8 @@ impl Sender {
                     }
                 }
             }
-            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => {}
+            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::MidiInputOut { .. } | Live::ChokeAll => {
+            }
         }
     }
 
@@ -216,8 +217,15 @@ pub struct Output {
     /// Device sample rate; create engines at this rate.
     pub rate: u32,
     pub device: String,
+    /// The audio system it plays through, and the sample format it takes there.
+    pub driver: crate::devices::AudioDriver,
+    pub format: cpal::SampleFormat,
     /// Frames per audio callback, as last seen.
     block: Arc<std::sync::atomic::AtomicUsize>,
+    /// From a block's start to when it's heard, as the driver last said (µs).
+    latency_us: Arc<AtomicU64>,
+    /// ASIO: the driver wants its streams opened afresh (see [`Output::take_invalidated`]).
+    invalidated: Arc<AtomicBool>,
     /// Audio to play through as it comes (interleaved stereo; an input being
     /// monitored while recording).
     monitor: Arc<Mutex<Vec<f32>>>,
@@ -252,7 +260,13 @@ pub struct Output {
     fx_meters: Arc<crate::meters::FxMeters>,
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
+    /// The MIDI input plug-ins by group, since the plug-ins are on the audio thread.
+    midi_inputs: Mutex<std::collections::BTreeMap<usize, crate::midi_input::Info>>,
+    /// Plug-ins put in with no engine playing, for the next one played.
+    midi_inputs_waiting: Mutex<std::collections::BTreeMap<usize, Box<dyn crate::midi_input::MidiInput>>>,
     _stream: cpal::Stream,
+    /// ASIO: see [`crate::devices::hold_asio_inputs`].
+    _inputs: Option<cpal::Stream>,
 }
 
 /// Peak (left, right) of each sound, `[group][sound]`.
@@ -294,6 +308,7 @@ fn apply(
                 old.end_midi();
                 old.release_routes();
                 new.take_unroutes(old);
+                new.take_midi_inputs(old);
             }
             engine.replace(new).map(Command::Play)
         }
@@ -469,12 +484,16 @@ impl Output {
     /// [`output_devices`]); `None`: the system's default.
     pub fn with_device(device: Option<&str>, frames: u32, multicore: bool) -> Result<Output, String> {
         let (device, config) = crate::devices::open_output(device)?;
-        if config.sample_format() != cpal::SampleFormat::F32 {
+        let driver = crate::devices::driver();
+        let asio = driver == crate::devices::AudioDriver::Asio;
+        if !crate::devices::format_ok(config.sample_format()) {
             return Err(format!("output sample format {:?} is not supported (need f32)", config.sample_format()));
         }
         let rate = config.sample_rate();
         let channels = config.channels() as usize;
         let block = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let latency_us: Arc<AtomicU64> = Arc::default();
+        let invalidated: Arc<AtomicBool> = Arc::default();
         let monitor: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Stats::default());
         // (Room made here, so publishing doesn't allocate on the audio thread.)
@@ -497,8 +516,12 @@ impl Output {
             cpal::SupportedBufferSize::Range { min, max } => Some(frames.clamp(*min, *max)),
             cpal::SupportedBufferSize::Unknown => None,
         };
+        crate::devices::note_asio_buffer(wanted.map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed));
+        let inputs = if asio { crate::devices::hold_asio_inputs(&device) } else { None };
         let build = |size: cpal::BufferSize| {
             let block = block.clone();
+            let latency_us = latency_us.clone();
+            let invalidated = invalidated.clone();
             let monitor = monitor.clone();
             let stats = stats.clone();
             let err_stats = stats.clone();
@@ -515,11 +538,21 @@ impl Output {
             let mut engine: Option<Box<Engine>> = None;
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
-            device.build_output_stream(
+            #[cfg(windows)]
+            let mut promoted = false;
+            crate::devices::build_output(
+                &device,
                 stream_config,
+                config.sample_format(),
                 move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     let started = Instant::now();
                     let frames = out.len() / channels;
+                    // The audio thread is cpal's, so this is the first chance to raise it.
+                    #[cfg(windows)]
+                    if !promoted {
+                        promoted = true;
+                        crate::pool::promote_current(frames as u32, rate);
+                    }
                     block.store(frames, std::sync::atomic::Ordering::Relaxed);
                     if stereo.len() < frames * 2 {
                         stereo.resize(frames * 2, 0.0); // only for unusually large host blocks
@@ -547,10 +580,11 @@ impl Output {
                         b[..ext_len].fill(0.0);
                     }
                     let master_bus = engine.as_ref().map_or(Some(0), |e| e.master_bus());
+                    // When this block is heard: as the device says, else a block on.
+                    let ts = info.timestamp();
+                    let ahead = ts.playback.duration_since(ts.callback);
+                    latency_us.store(ahead.as_micros() as u64, Ordering::Relaxed);
                     if let Some(engine) = engine.as_mut() {
-                        // When this block is heard: as the device says, else a block on.
-                        let ts = info.timestamp();
-                        let ahead = ts.playback.duration_since(ts.callback);
                         before_block(engine, &mut clock, started, if ahead.is_zero() { period } else { ahead });
                         engine.set_connected_outputs(connected.load(Ordering::Relaxed));
                         engine.process_outputs(buf, &mut ext);
@@ -613,22 +647,39 @@ impl Output {
                         stats.peak_load.fetch_max(load, Ordering::Relaxed);
                     }
                 },
-                move |e| {
+                move |e: cpal::Error| {
                     err_stats.device_errors.fetch_add(1, Ordering::Relaxed);
+                    if asio {
+                        // An overload arrives on the driver's thread: nothing there that can wait.
+                        if e.kind() == cpal::ErrorKind::Xrun {
+                            return;
+                        }
+                        // The driver reset, changed its rate or went away (the rest of the
+                        // app reopens it, off this thread).
+                        if matches!(e.kind(), cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable) {
+                            invalidated.store(true, Ordering::Relaxed);
+                        }
+                    }
                     eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
                 },
-                None,
             )
         };
         let stream = match wanted.map(|n| build(cpal::BufferSize::Fixed(n))) {
             Some(Ok(s)) => s,
-            _ => build(cpal::BufferSize::Default).map_err(|e| e.to_string())?,
+            _ => {
+                crate::devices::note_asio_buffer(cpal::BufferSize::Default);
+                build(cpal::BufferSize::Default).map_err(|e| e.to_string())?
+            }
         };
         stream.play().map_err(|e| e.to_string())?;
         Ok(Output {
             rate,
             device: device_name(&device),
+            driver,
+            format: config.sample_format(),
             block,
+            latency_us,
+            invalidated,
             monitor,
             midi_tx: Mutex::new(None),
             mpe_out: Mutex::default(),
@@ -644,11 +695,26 @@ impl Output {
             plays: AtomicU64::new(0),
             fx_meters: Arc::default(),
             route_travels: Arc::default(),
+            midi_inputs: Mutex::default(),
+            midi_inputs_waiting: Mutex::default(),
             routing,
             connected,
             channels,
             _stream: stream,
+            _inputs: inputs,
         })
+    }
+
+    /// From a block's start to when it's heard, as the driver last said.
+    pub fn latency(&self) -> Duration {
+        Duration::from_micros(self.latency_us.load(Ordering::Relaxed))
+    }
+
+    /// ASIO: whether the driver has asked since last time for its streams to be opened
+    /// afresh (a new buffer size or rate from its control panel, a reset, the interface
+    /// gone).
+    pub fn take_invalidated(&self) -> bool {
+        self.invalidated.swap(false, Ordering::Relaxed)
     }
 
     /// Preferences > Audio > Routing > Output: the interface channel (from 0) each of
@@ -688,6 +754,9 @@ impl Output {
         engine.pool = self.pool.clone();
         engine.set_fx_meters(&self.fx_meters);
         engine.set_route_travels(&self.route_travels);
+        for (group, plugin) in std::mem::take(&mut *self.midi_inputs_waiting.lock().unwrap()) {
+            engine.set_midi_input(group, Some(plugin));
+        }
         // Sounds that can't get live input render ahead, on a thread of their own.
         let ahead = self.ahead_frames.load(Ordering::Relaxed);
         if ahead > 0 {
@@ -772,6 +841,67 @@ impl Output {
     /// Note Repeat / the Arp on (with its settings) or off.
     pub fn set_repeat(&self, r: Option<(deckard_model::Arp, crate::repeat::RepeatMode)>) {
         self.sender.send(Command::Repeat(r));
+    }
+
+    /// Put a MIDI input plug-in on `group`, or take it out with `None`. Whatever comes out
+    /// goes back with the command, to be freed here.
+    pub fn set_midi_input(&self, group: usize, plugin: Option<Box<dyn crate::midi_input::MidiInput>>) {
+        if group < crate::midi_input::SLOTS {
+            let mut table = self.midi_inputs.lock().unwrap();
+            match plugin.as_deref() {
+                Some(p) => table.insert(group, crate::midi_input::Info::of(p)),
+                None => table.remove(&group),
+            };
+        }
+        if !self.has_engine() {
+            let mut waiting = self.midi_inputs_waiting.lock().unwrap();
+            match plugin {
+                Some(p) if group < crate::midi_input::SLOTS => waiting.insert(group, p),
+                _ => waiting.remove(&group),
+            };
+            return;
+        }
+        let mut plugin = plugin;
+        self.run(move |e| plugin = e.set_midi_input(group, plugin.take()));
+    }
+
+    /// `group`'s MIDI input plug-in, and where its parameters are.
+    /// Reindex the UI descriptors and inputs waiting for an engine. Runtime inputs
+    /// move at the edit's adoption boundary (Engine::prepare_group_swap).
+    pub fn swap_group_inputs(&self, a: usize, b: usize) {
+        fn swap<T>(map: &mut std::collections::BTreeMap<usize, T>, a: usize, b: usize) {
+            let va = map.remove(&a);
+            let vb = map.remove(&b);
+            if let Some(v) = va {
+                map.insert(b, v);
+            }
+            if let Some(v) = vb {
+                map.insert(a, v);
+            }
+        }
+        swap(&mut self.midi_inputs.lock().unwrap(), a, b);
+        swap(&mut self.midi_inputs_waiting.lock().unwrap(), a, b);
+    }
+
+    pub fn midi_input(&self, group: usize) -> Option<crate::midi_input::Info> {
+        self.midi_inputs.lock().unwrap().get(&group).cloned()
+    }
+
+    /// Move a parameter of `group`'s MIDI input plug-in. Returns the value it took (fitted
+    /// to its range and steps), `None` if there's no such parameter.
+    pub fn set_midi_input_param(&self, group: usize, id: u32, value: f64) -> Option<f64> {
+        let value = {
+            let mut table = self.midi_inputs.lock().unwrap();
+            let param = table.get_mut(&group)?.params.iter_mut().find(|p| p.desc.id == id)?;
+            param.value = param.desc.fit(value);
+            param.value
+        };
+        if let Some(p) = self.midi_inputs_waiting.lock().unwrap().get_mut(&group) {
+            p.set_param(id, value);
+        } else {
+            self.run(move |e| e.set_midi_input_param(group, id, value));
+        }
+        Some(value)
     }
 
     /// Record live notes (REC) or stop.
@@ -943,6 +1073,11 @@ impl Output {
             }
             (meters, std::mem::take(&mut t.master_peak))
         })
+    }
+
+    /// The cue bus's peaks since the last call (reset).
+    pub fn take_cue_peak(&self) -> (f32, f32) {
+        self.telemetry(|t| std::mem::take(&mut t.cue_peak))
     }
 
     /// Where zone `zone` of a sound plays, as last published; it is watched from now

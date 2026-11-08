@@ -20,7 +20,9 @@ DECKARD also does a few things Maschine doesn't:
 ## What you need
 
 - **A computer** running macOS, Linux or Windows.
-- **Speakers or headphones.** DECKARD uses your system's audio output.
+- **Speakers or headphones.** DECKARD uses your system's audio output. On Windows, a
+  build made with the `asio` feature can also play through an interface's ASIO driver,
+  for lower latency (Preferences ▸ Audio; [how to build it](DEVELOPMENT.md#asio-windows-optional)).
 - **Optional: a Maschine MK3, or a Maschine+ in controller mode.** DECKARD drives its
   pads, buttons, knobs, lights and both screens directly. Maschine+ support hasn't been
   tested on the hardware yet.
@@ -286,7 +288,7 @@ The LFO panel opens from the circle-and-sine button in the header. A project can
 up to 16 LFOs, one per pad.
 
 - **LFO mode:**
-  - Shape: Sine, Square, Triangle, Saw or Random;
+  - Shape: Sine, Square, Triangle, Saw, Random or Wander;
   - Sync to the tempo, or a free Rate;
   - Phase, Level and Quantize, which steps the wave into stairs;
   - Trigger: a sound whose notes restart it;

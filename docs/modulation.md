@@ -33,7 +33,8 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   - **SHIFT + pad 10** (Clear Auto) removes the focused sound's modulation in the
     focused pattern.
 - **LFOs as a source.** Up to 16 LFOs, one a pad (LFO 1 … LFO 16), each a route
-  source after Pressure, Slide and Pitch: Shape (Sine, Square, Triangle, Saw, Random),
+  source after Pressure, Slide and Pitch: Shape (Sine, Square, Triangle, Saw, Random,
+  Wander),
   Sync and Rate, Phase, Level, Quantize, Trigger (a sound whose notes restart it) and
   Fade in. A route maps the LFO's 0..1 onto its low..high as it does Pressure. Spec:
   `docs/superpowers/specs/2026-10-28-lfos-design.md`.
@@ -61,7 +62,7 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   each keyed by its slot and parameter so a knob never reads another route's travel.
 - **LFOs on the MK3: SHIFT + SELECT.** The pads pick LFOs (an empty pad makes one,
   ERASE + pad removes one, MUTE + pad mutes or unmutes one: lit red). The left screen shows the focused LFO's name, the right its
-  wave. Display buttons 1–5 pick the shape, 6 SYNC, 8 TRIG (the focused sound, or Off).
+  wave. Display buttons 1–5 pick the shape (button 5 cycles Random and Wander), 6 SYNC, 8 TRIG (the focused sound, or Off).
   Knobs 1–7: Shape, Rate, Phase, Level, Quantize, Trigger, Fade in. SHIFT + SELECT
   again goes back.
 - **The mod matrix on the MK3: SHIFT + SOLO.** Every route in the project, eight a page
@@ -106,6 +107,12 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   - Each span, effects with a lane playing take its value through their glide, and get
     their own value back when it stops.
   - Modulated sounds render on the audio thread rather than ahead.
+  - A sound's or group's level and pan (`slot: None`, field `level` or `pan`): a channel
+    with such a lane has its fader taken out of the routes through it, and the engine
+    multiplies in its gain at the place the lane has it, each span (`channel_faders`,
+    `Engine::apply_faders`). So a fader at the bottom can still rise, and the lane's
+    points stay deviations: moving the fader needs no new timeline. Side-chains fed
+    after a fader hear the fader's own place, not the lane's.
 - **App** (`apps/viewer/src/modulation.rs`, `App::modulate_at`): deviations are written
   at the play position into the group's playing pattern (`record::pattern_at`) inside a
   document take. They are thinned (`modulation::thin`, 1/200 of the travel) at the end.
@@ -118,6 +125,6 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
 - Step mode modulation: holding steps and turning knobs
   (`ModulationEditingAccess.setModulationStep`).
 - Instruments' (drum synths, Bass/Poly Synth), the Sampler's and plug-ins' parameters;
-  channel properties.
+  channel properties other than level and pan (sends, tune, swing).
 - Curved segments (v1's other coefficients are read as a straight line).
 - Hiding non-modulatable knobs on the MK3 while auto-writing (`Parameter:isAutomatable`).

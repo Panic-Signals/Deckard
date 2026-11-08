@@ -29,7 +29,7 @@ local util = require("lib.util")
 local browse = {}
 
 local KINDS = { "PROJECTS", "GROUPS", "SOUNDS", "INSTRUMENTS", "EFFECTS", "LOOPS", "ONE-SHOTS" }
-local LOOPS, ONE_SHOTS = 6, 7
+local GROUPS, LOOPS, ONE_SHOTS = 2, 6, 7
 
 -- The knob the jog wheel turns (bracketed): results to begin with, and kept between
 -- visits.
@@ -125,10 +125,12 @@ local function buttons(s, shift)
   local n = #b.results
   if shift then
     local c = s.control
+    local group = b.kind == GROUPS
     local sample = b.kind == LOOPS or b.kind == ONE_SHOTS
     return {
-      -- (Shown, but does nothing: its light is off.)
-      [4] = { text = "USER", selected = b.user, inert = true },
+      [3] = group and { text = "+ ROUTING", selected = b.routing } or nil,
+      -- (When not browsing Groups, USER is shown, but does nothing: its light is off.)
+      [4] = group and { text = "+ PATTERNS", selected = b.patterns } or { text = "USER", selected = b.user, inert = true },
       [5] = {
         arrows = true,
         text = c.slot and c.slot:upper() or "",
@@ -166,7 +168,11 @@ function browse.button(name, down)
     if b.busy then return true end
     local spec = buttons(s, shift)
     if shift then
-      if n == 5 or n == 6 then
+      if n == 3 and b.kind == GROUPS then
+        deckard.browse_routing(not b.routing)
+      elseif n == 4 and b.kind == GROUPS then
+        deckard.browse_patterns(not b.patterns)
+      elseif n == 5 or n == 6 then
         local arrows = spec[5]
         if (n == 5 and arrows.left) or (n == 6 and arrows.right) then deckard.slot(n == 5 and -1 or 1) end
       elseif n == 7 and #b.results > 0 then
@@ -193,7 +199,7 @@ function browse.button(name, down)
     return true
   end
   if name == "WHEEL" then
-    if focus == RESULTS and #b.results > 0 then
+    if #b.results > 0 then
       if shift then deckard.browse_set_favorite() else deckard.browse_load() end
     end
   elseif name == "WHEEL_LEFT" then
@@ -212,7 +218,10 @@ end
 
 function browse.knob(n, amount)
   local steps = knobs.gather(n, amount)
-  if steps ~= 0 then step(lib(deckard.state()), n, steps) end
+  if steps ~= 0 then
+    if n == RESULTS then focus = RESULTS end
+    step(lib(deckard.state()), n, steps)
+  end
   return true
 end
 
@@ -285,9 +294,11 @@ local function products(screen, theme, b)
     local chosen = p == b.product
     if chosen then
       screen:rect(x, y, TILE_W - 1, TILE_H - 1, "text")
+      screen:rect(x + 1, y + 1, TILE_W - 3, 65, "on_colour")
     else
       screen:frame(x, y, TILE_W + 1, TILE_H, "browse_tile")
     end
+    screen:image(x + 1, y + 1, TILE_W - 1, 66, "artwork:" .. name:lower(), true)
     screen:label(x + 6, y + 67, TILE_W - 12, 22, name, style(theme, "default", chosen and "on_colour" or "text"), "left")
   end
   -- The scrollbar, with more than a page of products.
@@ -303,7 +314,9 @@ local ROW_X, ROW_Y, ROW_W, ROW_H, ROW_STEP, ROWS = 721, 44, 231, 21, 26, 7
 local function results(screen, theme, b)
   local product = b.product and b.products[b.product]
   if product then
-    screen:label(500, 36, 200, 196, product, style(theme, "browse_logo"))
+    if not screen:image(480, 36, 240, 196, "artwork:" .. product:lower(), false) then
+      screen:label(500, 36, 200, 196, product, style(theme, "browse_logo"))
+    end
   end
   local n = #b.results
   local top = util.clamp(b.focus - ROWS // 2, 1, math.max(1, n - ROWS + 1))

@@ -206,8 +206,39 @@ impl Document {
         Ok(at)
     }
 
+    /// Pattern `to` of group `g` becomes a copy of its pattern `from`: its notes and length
+    /// (the scenes that play it go on playing it). Past the group's last pattern, a new
+    /// pattern goes at the end. Returns the index of the copy. One undo step.
+    pub fn copy_pattern(&mut self, g: usize, from: usize, to: usize) -> Result<usize, String> {
+        let group = self.project.groups.get(g).ok_or("no such group")?;
+        let pat = group.patterns.get(from).ok_or("no such pattern")?.clone();
+        let n = group.patterns.len();
+        if to == from {
+            return Ok(to);
+        }
+        let mut at = to;
+        self.transaction("Duplicate Pattern", |d| {
+            if to >= n {
+                at = d.insert_pattern(g, from, n, &pat.name)?;
+            }
+            let target = d.project.groups[g].patterns[at].clone();
+            let shift = |pos: i64| pos - pat.start + target.start;
+            let notes: Vec<Note> = pat.notes.iter().map(|x| Note { position: shift(x.position), ..*x }).collect();
+            let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
+            let ops = d.event_ops(g, at, &target.notes, &notes, &target.midi, &midi)?;
+            if !ops.is_empty() {
+                d.apply("Duplicate Pattern", ops)?;
+            }
+            if pat.length > 0 && pat.length != target.length {
+                d.set_pattern_length(g, at, pat.length)?;
+            }
+            Ok(())
+        })?;
+        Ok(at)
+    }
+
     /// Delete pattern `p` of group `g`: scenes that played it play nothing for the
-    /// group, and the patterns after it move up.
+    /// group, and the other patterns keep their places.
     pub fn delete_pattern(&mut self, g: usize, p: usize) -> Result<(), String> {
         let scenes: Vec<usize> =
             self.project.scenes.iter().enumerate().filter(|(_, sc)| sc.patterns.contains(&(g, p))).map(|(i, _)| i).collect();
@@ -267,6 +298,50 @@ mod tests {
         let (p, a) = deckard_model::Project::read(d.root());
         assert!(p == *d.project(), "patched model differs from a rebuild");
         assert!(a == *d.addresses());
+    }
+
+    /// A pattern copied onto another or past the last: its notes and length, a project that
+    /// saves and opens again, one undo step.
+    #[test]
+    fn a_pattern_is_copied_onto_another_or_past_the_last() {
+        let mut d = Document::new_project().unwrap();
+        let note = |position| Note { expr: None, sound: 2, position, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let first = d.add_pattern(0, usize::MAX, "A").unwrap_or(0);
+        d.edit_notes("Add", 0, first, &[], &[note(480)]).unwrap();
+        d.set_pattern_length(0, first, 7680).unwrap();
+        let second = d.copy_pattern(0, first, first + 1).unwrap();
+        assert_eq!(second, first + 1);
+        consistent(&d);
+        let rel = |p: &deckard_model::Pattern| p.notes.iter().map(|x| (x.sound, x.position - p.start)).collect::<Vec<_>>();
+        let p = d.project().groups[0].patterns.clone();
+        assert_eq!(rel(&p[second]), [(2, 480)]);
+        assert_eq!(p[second].length, 7680);
+        // Onto it again, now with its own notes.
+        d.edit_notes("Add", 0, second, &[], &[note(p[second].start + 960)]).unwrap();
+        assert_eq!(d.project().groups[0].patterns[second].notes.len(), 2);
+        d.copy_pattern(0, first, second).unwrap();
+        assert_eq!(rel(&d.project().groups[0].patterns[second]), [(2, 480)]);
+        assert_eq!(reload(&d).project().groups[0].patterns[second].notes.len(), 1);
+        assert!(d.undo());
+        assert_eq!(d.project().groups[0].patterns[second].notes.len(), 2, "one undo step");
+        assert_eq!(d.copy_pattern(0, first, first).unwrap(), first, "onto itself: nothing");
+    }
+
+    /// A scene copied: what the target plays, the target otherwise its own.
+    #[test]
+    fn a_scene_is_copied_onto_another_or_past_the_last() {
+        let mut d = Document::new_project().unwrap();
+        let a = d.add_pattern(0, usize::MAX, "A").unwrap_or(0);
+        d.assign_pattern(0, 0, Some(a)).unwrap();
+        let new = d.copy_scene(0, 1).unwrap();
+        assert_eq!(new, 1);
+        assert_eq!(d.project().scenes.len(), 2);
+        assert_eq!(d.project().scenes[1].patterns, [(0, a)]);
+        consistent(&d);
+        d.assign_pattern(1, 0, None).unwrap();
+        d.copy_scene(1, 0).unwrap();
+        assert!(d.project().scenes[0].patterns.is_empty(), "copying nothing clears it");
+        assert_eq!(reload(&d).project().scenes.len(), 2);
     }
 
     #[test]

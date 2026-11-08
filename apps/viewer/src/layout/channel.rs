@@ -24,35 +24,45 @@ pub enum RouteSet {
     /// A group's main output (`None`) or aux send.
     Group(usize, Option<usize>, AudioDest),
     GroupMidiSource(usize, String),
+    /// The MIDI input plug-in on a group, by its name.
+    GroupMidiInput(usize, Option<&'static str>),
     /// The master's output (`false`) or the cue bus's.
     Master(bool, AudioDest),
-    /// The side-chain source of the effect in slot `.2` of sound `.1` (group `.0`).
-    SideChain(usize, usize, usize, Option<deckard_model::ScSource>),
+    /// The side-chain source of the effect in slot `.1` of chain `.0`.
+    SideChain(deckard_doc::Chain, usize, Option<deckard_model::ScSource>),
 }
 
 /// The side-chain sources the effect in `slot` of chain `c` can listen to: none, any
-/// group, any other sound. Only a sound's effects take one (`None` for a group's or the
-/// master's).
+/// (other) group, any (other) sound. A sound's and a group's effects take one (`None`
+/// for the master's).
 pub fn sidechain_choices(p: &Project, c: deckard_doc::Chain, slot: usize) -> Option<(Vec<String>, Vec<RouteSet>, usize)> {
+    use deckard_doc::Chain;
     use deckard_model::ScSource;
-    let deckard_doc::Chain::Sound(g, s) = c else { return None };
+    let sidechain = match c {
+        Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.channel.sidechain,
+        Chain::Group(g) => &p.groups.get(g)?.channel.sidechain,
+        Chain::Master => return None,
+    };
     let mut options: Vec<(String, Option<ScSource>)> = vec![("None".into(), None)];
     for gi in 0..p.groups.len() {
+        if c == Chain::Group(gi) {
+            continue;
+        }
         options.push((format!("{} - {}", group_id(gi), group_name(p, gi)), Some(ScSource::Group(gi))));
     }
     for (gi, grp) in p.groups.iter().enumerate() {
         for (si, snd) in grp.sounds.iter().enumerate() {
-            if (gi, si) == (g, s) || (snd.slots.is_empty() && snd.name.is_empty()) {
+            if c == Chain::Sound(gi, si) || (snd.slots.is_empty() && snd.name.is_empty()) {
                 continue;
             }
             let name = if snd.name.is_empty() { format!("Sound {}", si + 1) } else { snd.name.clone() };
             options.push((format!("{}:S{} - {}: {name}", group_id(gi), si + 1, group_name(p, gi)), Some(ScSource::Sound(gi, si))));
         }
     }
-    let cur_src = p.groups[g].sounds[s].channel.sidechain.iter().find(|(k, _)| *k == slot).map(|(_, x)| *x);
+    let cur_src = sidechain.iter().find(|(k, _)| *k == slot).map(|(_, x)| *x);
     let cur = options.iter().position(|(_, x)| *x == cur_src).unwrap_or(0);
     let (names, srcs): (Vec<String>, Vec<Option<ScSource>>) = options.into_iter().unzip();
-    Some((names, srcs.into_iter().map(|x| RouteSet::SideChain(g, s, slot, x)).collect(), cur))
+    Some((names, srcs.into_iter().map(|x| RouteSet::SideChain(c, slot, x)).collect(), cur))
 }
 
 /// The action button at the end of a Groove page.
@@ -124,7 +134,7 @@ pub const SHORT: usize = 8;
 pub fn page_names(level: Level, set: usize, macros: &[String]) -> Vec<String> {
     let names: &[&str] = match (level, set) {
         (Level::Sound(..), 0) => &["Audio", "MIDI"],
-        (Level::Group(_), 0) => &["MIDI"],
+        (Level::Group(_), 0) => &["MIDI", "Plug-in"],
         (Level::Master, 0) => &[],
         (Level::Sound(..), 1) => &["Audio", "Aux", "MIDI"],
         (Level::Group(_), 1) => &["Audio", "Aux"],
@@ -167,6 +177,8 @@ pub struct Ctx<'a> {
     pub io: &'a crate::settings::Settings,
     /// The knob of a plug-in parameter (by object id), for a macro controlling it.
     pub plugin_knob: &'a dyn Fn(u64) -> Option<super::Knob>,
+    /// The MIDI input plug-in on a group.
+    pub midi_input: &'a dyn Fn(usize) -> Option<deckard_engine::midi_input::Info>,
 }
 
 pub fn page(c: &Ctx, level: Level, set: usize, page: usize) -> Page {
@@ -175,7 +187,8 @@ pub fn page(c: &Ctx, level: Level, set: usize, page: usize) -> Page {
         (Level::Master, 0) => pg.note = Some("The master has no input properties".into()),
         (Level::Sound(g, s), 0) if page == 0 => sound_audio_in(c, g, s, &mut pg),
         (Level::Sound(g, s), 0) => sound_midi_in(c, g, s, &mut pg),
-        (Level::Group(g), 0) => group_midi_in(c, g, &mut pg),
+        (Level::Group(g), 0) if page == 0 => group_midi_in(c, g, &mut pg),
+        (Level::Group(g), 0) => group_midi_input(c, g, &mut pg),
         (Level::Master, 1) => master_out(c, &mut pg),
         (Level::Sound(g, s), 1) => match page {
             0 => audio_out(c, level, Target::Sound(g, s), &mut pg),
@@ -287,6 +300,23 @@ fn group_midi_in(c: &Ctx, g: usize, pg: &mut Page) {
     let n = ch.start_note;
     pg.knob(("Start Note".into(), note_name(n), n as f32 / 127.0, Some(Edit::Param(t, "start_note", 0.0, 127.0, 36.0))));
     pg.knob(toggle("Thru", t, "midi_thru", ch.midi_thru));
+}
+
+/// The MIDI input plug-in on a group, and its parameters.
+fn group_midi_input(c: &Ctx, g: usize, pg: &mut Page) {
+    use deckard_engine::midi_input::BUILT_IN;
+    let on = (c.midi_input)(g);
+    let name = on.as_ref().and_then(|i| BUILT_IN.iter().find(|n| **n == i.name).copied());
+    pg.section("Plug-in");
+    let mut options = vec![("None".to_string(), RouteSet::GroupMidiInput(g, None))];
+    options.extend(BUILT_IN.iter().map(|n| (n.to_string(), RouteSet::GroupMidiInput(g, Some(*n)))));
+    pg.route("Plug-in", options, &RouteSet::GroupMidiInput(g, name));
+    for p in on.iter().flat_map(|i| &i.params) {
+        let d = &p.desc;
+        let amount = if d.max > d.min { (p.value - d.min) / (d.max - d.min) } else { 0.0 };
+        let edit = Edit::MidiInputParam(g, d.id, d.min, d.max, d.steps.unwrap_or(0), d.default);
+        pg.knob((d.name.clone().into(), d.text(p.value), amount as f32, Some(edit)));
+    }
 }
 
 /// A sound that takes other channels' audio: an effect in its first slot.
@@ -878,6 +908,44 @@ pub fn macro_page_name(p: &deckard_doc::MacroPage, i: usize) -> String {
 mod io_tests {
     use super::*;
 
+    /// A group's Plug-in page offers what there is, then shows the knobs of the one on it.
+    #[test]
+    fn the_plug_in_page_chooses_a_plug_in_and_shows_its_parameters() {
+        use deckard_engine::midi_input::{BUILT_IN, Info, built_in};
+        let doc = deckard_doc::Document::new_project().unwrap();
+        let io = crate::settings::Settings::default();
+        let groove = |_: usize, _: usize, _: &str| None;
+        let echo = BUILT_IN[0];
+        let chosen = Info::of(built_in(echo).unwrap().as_ref());
+        let on = |g: usize| (g == 1).then(|| chosen.clone());
+        let c = Ctx {
+            doc: &doc,
+            has_midi_macro: false,
+            p: doc.project(),
+            midi_ins: &[],
+            midi_outs: &[],
+            polyphonic: false,
+            groove: &groove,
+            io: &io,
+            plugin_knob: &|_| None,
+            midi_input: &on,
+        };
+        assert_eq!(page_names(Level::Group(0), 0, &[]), ["MIDI", "Plug-in"]);
+
+        let none = page(&c, Level::Group(0), 0, 1);
+        assert_eq!(none.slots.len(), 1, "only the choice");
+        assert_eq!(none.routes[0].1, ["None", echo]);
+        assert_eq!(none.routes[0].2[1], RouteSet::GroupMidiInput(0, Some(echo)));
+        assert!(matches!(none.slots[0], Some((_, _, _, Some(Edit::Route(0))))));
+
+        let some = page(&c, Level::Group(1), 0, 1);
+        assert!(matches!(some.slots[0], Some((_, _, _, Some(Edit::Route(1))))));
+        let shown: Vec<(String, String)> = some.slots[1..].iter().flatten().map(|k| (k.0.to_string(), k.1.clone())).collect();
+        assert_eq!(shown[0], ("TIME".to_string(), "3/16".to_string()));
+        assert_eq!(shown[3], ("PITCH".to_string(), "0 st".to_string()));
+        assert_eq!(shown.len(), 4);
+    }
+
     /// The output and input pickers show the connected channels by their aliases; one
     /// not connected isn't offered, unless it's the one picked.
     #[test]
@@ -899,6 +967,7 @@ mod io_tests {
             groove: &groove,
             io: &io,
             plugin_knob: &|_| None,
+            midi_input: &|_| None,
         };
         let names = |picked: AudioDest| destinations(&c, Level::Sound(0, 0), false, picked).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
         let shown = names(AudioDest::Parent);
@@ -939,6 +1008,7 @@ mod io_tests {
             groove: &groove,
             io: &io,
             plugin_knob: &|_| None,
+            midi_input: &|_| None,
         };
         let offered =
             |level: Level, picked: AudioDest| destinations(&c, level, false, picked).into_iter().any(|(_, d)| d == AudioDest::Group(1));

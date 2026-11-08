@@ -17,13 +17,16 @@ pub mod edit;
 pub mod export;
 pub mod fx;
 pub mod glide;
+mod group_move;
 mod lfo_rt;
 pub mod library;
 pub mod meters;
 mod metronome;
 pub mod midi;
+pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
+pub mod note_echo;
 #[cfg(feature = "output")]
 pub mod output;
 pub mod pads;
@@ -103,6 +106,10 @@ pub struct Timeline {
     pub length: i64,
     /// Modulation, by pass of a pattern.
     pub mods: Vec<modscale::ModLane>,
+    /// Modulation of channels' faders (their `level` and `pan`), by pass of a pattern.
+    /// Unlike [`Timeline::mods`], the points stay deviations: a moved fader needs no new
+    /// timeline.
+    pub faders: Vec<modscale::ModLane>,
     /// The project's per-note expression, which notes' `expr` index.
     pub exprs: Vec<std::sync::Arc<deckard_model::Expression>>,
     /// The sounds (group, sound) with PROB LOCK on: their notes' chances are the first
@@ -185,6 +192,11 @@ pub enum Live {
         velocity: i64,
         thru: bool,
     },
+    /// A note a MIDI input plug-in played, come due.
+    MidiInputOut {
+        group: usize,
+        note: midi_input::NoteOut,
+    },
     /// A channel-wide controller from MIDI input; `record`: the sound that records it.
     ControlIn {
         group: usize,
@@ -211,6 +223,9 @@ pub enum Live {
         pitch: i64,
         velocity: i64,
     },
+    /// Every voice of every sound ends at once (Maschine's Choke All Notes): as a choke
+    /// group's, a quick fade. The next notes play as usual. Not recorded.
+    ChokeAll,
 }
 
 /// Rendering sounds ahead (see [`ahead`]): the players' links, as the audio thread
@@ -367,6 +382,7 @@ fn add_clips(p: &Project, t: &mut Timeline) {
             // (A loop stopping where the clip starts still stops.)
             t.events.retain(|e| e.group != g || !span.contains(&e.tick) || (e.cue == Some(Cue::Off) && e.tick == span.start));
             t.mods.retain(|m| m.group != g || m.to <= span.start || m.from >= span.end);
+            t.faders.retain(|m| m.group != g || m.to <= span.start || m.from >= span.end);
             fill_with(p, g, pat, c.position, c.length, t);
             t.length = t.length.max(span.end);
         }
@@ -390,9 +406,10 @@ fn own_length(p: &Project, pat: &deckard_model::Pattern) -> i64 {
     if pat.length > 0 { pat.length } else { p.bar_length() }
 }
 
-/// A pattern's modulation of Maschine's own effects, as lanes: (sound, `None` for the
-/// group; chain slot; field; points from the pattern's start, at stored values). A
-/// point is a deviation from the knob's value ([`modscale`]).
+/// A pattern's modulation of instruments and effects, as lanes: (sound, `None` for the
+/// group; chain slot; field; points from the pattern's start, at stored values or, for
+/// plug-ins, normalized deviations). A point is a deviation from the knob's value
+/// ([`modscale`]).
 fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option<usize>, usize, String, Vec<(i64, f64)>)> {
     let grp = &p.groups[g];
     let plen = own_length(p, pat);
@@ -403,13 +420,27 @@ fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option
             Some(s) => grp.sounds.get(s).map(|x| &x.slots),
             None => Some(&grp.slots),
         };
-        let Some(info) = slots.and_then(|x| x.get(slot)).filter(|x| x.plugin.is_none()) else { continue };
-        let Some(&(_, base)) = info.params.iter().find(|(k, _)| *k == m.field) else { continue };
+        let Some(info) = slots.and_then(|x| x.get(slot)) else { continue };
         let pos = m.position - pat.start;
         if !(0..plen).contains(&pos) {
             continue;
         }
-        let v = modscale::scale_of(&info.module, &m.field).apply(base, m.value);
+        let v = if info.plugin.is_some() {
+            if m.field.parse::<u32>().is_err() {
+                continue;
+            }
+            m.value
+        } else if slot == 0 && info.module == "Sampler" {
+            let Some(smp) =
+                m.sound.and_then(|s| grp.sounds.get(s)?.sampler.as_ref()).filter(|_| sampler::MODULATED.contains(&m.field.as_str()))
+            else {
+                continue;
+            };
+            modscale::scale_of("Sampler", &m.field).apply(smp.get(&m.field), m.value)
+        } else {
+            let Some(&(_, base)) = info.params.iter().find(|(k, _)| *k == m.field) else { continue };
+            modscale::scale_of(&info.module, &m.field).apply(base, m.value)
+        };
         match out.iter_mut().find(|l| l.0 == m.sound && l.1 == slot && l.2 == m.field) {
             Some(l) => l.3.push((pos, v)),
             None => out.push((m.sound, slot, m.field.clone(), vec![(pos, v)])),
@@ -417,6 +448,27 @@ fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option
     }
     for l in &mut out {
         l.3.sort_by_key(|x| x.0);
+    }
+    out
+}
+
+/// A pattern's modulation of channels' faders, as lanes: (sound, `None` for the group;
+/// field; points from the pattern's start, at their deviations).
+fn fader_lanes(p: &Project, pat: &deckard_model::Pattern) -> Vec<(Option<usize>, String, Vec<(i64, f64)>)> {
+    let plen = own_length(p, pat);
+    let mut out: Vec<(Option<usize>, String, Vec<(i64, f64)>)> = Vec::new();
+    for m in pat.mods.iter().filter(|m| m.slot.is_none() && is_fader(&m.field)) {
+        let pos = m.position - pat.start;
+        if !(0..plen).contains(&pos) {
+            continue;
+        }
+        match out.iter_mut().find(|l| l.0 == m.sound && l.1 == m.field) {
+            Some(l) => l.2.push((pos, m.value)),
+            None => out.push((m.sound, m.field.clone(), vec![(pos, m.value)])),
+        }
+    }
+    for l in &mut out {
+        l.2.sort_by_key(|x| x.0);
     }
     out
 }
@@ -430,10 +482,25 @@ fn fill_pattern(p: &Project, g: usize, pi: usize, start: i64, length: i64, t: &m
 fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, length: i64, t: &mut Timeline) {
     let plen = own_length(p, pat);
     let lanes = mod_lanes(p, g, pat);
+    let fader_lanes = fader_lanes(p, pat);
     let out = &mut t.events;
     let mut rep = 0;
     while rep < length {
         let pass = (start + rep, start + rep + plen.min(length - rep));
+        for (sound, field, points) in &fader_lanes {
+            let points: Vec<(i64, f64)> = points.iter().map(|&(pos, v)| (pass.0 + pos, v)).filter(|x| x.0 < pass.1).collect();
+            if !points.is_empty() {
+                t.faders.push(modscale::ModLane {
+                    group: g,
+                    sound: *sound,
+                    slot: 0,
+                    field: field.clone(),
+                    from: pass.0,
+                    to: pass.1,
+                    points,
+                });
+            }
+        }
         for (sound, slot, field, points) in &lanes {
             let points: Vec<(i64, f64)> = points.iter().map(|&(pos, v)| (pass.0 + pos, v)).filter(|x| x.0 < pass.1).collect();
             if !points.is_empty() {
@@ -552,7 +619,7 @@ pub fn sound_bus(p: &Project, g: usize, s: usize) -> Option<usize> {
 /// [`sound_gain`] and [`sound_bus`].
 fn sound_route(p: &Project, g: usize, s: usize) -> Route {
     let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return SILENT };
-    let own = channel_gain(snd.level, snd.pan);
+    let own = fader_gain(snd.level, snd.pan, &snd.modulators);
     let (bus, gain) = if snd.cue { cue_route(p) } else { dest_route(p, snd.channel.dest, Some(g), 0) };
     (bus, mul(own, gain))
 }
@@ -574,6 +641,129 @@ fn channel_gain(level: f64, pan: f64) -> (f32, f32) {
     (lvl * l, lvl * r)
 }
 
+/// Whether a channel's property `field` is one of its fader's.
+fn is_fader(field: &str) -> bool {
+    matches!(field, "level" | "pan")
+}
+
+/// Whether a channel's fader has a modulation lane: its gain then isn't in the routes
+/// through it, which [`channel_faders`] lists for the engine to apply at each moment.
+fn moving(modulators: &[deckard_model::ModTarget]) -> bool {
+    modulators.iter().any(|m| m.slot.is_none() && is_fader(&m.field))
+}
+
+/// A channel rendered without its fader goes without the fader's modulation too.
+fn drop_fader_lanes(modulators: &mut Vec<deckard_model::ModTarget>) {
+    modulators.retain(|m| m.slot.is_some() || !is_fader(&m.field));
+}
+
+/// A channel's fader in a route: unity when it's modulated ([`moving`]).
+fn fader_gain(level: f64, pan: f64, modulators: &[deckard_model::ModTarget]) -> (f32, f32) {
+    if moving(modulators) { (1.0, 1.0) } else { channel_gain(level, pan) }
+}
+
+/// A channel whose fader is modulated, as the audio thread has it.
+#[derive(Debug, Clone, PartialEq)]
+struct Fader {
+    group: usize,
+    sound: Option<usize>,
+    /// The fader's own place.
+    level: f64,
+    pan: f64,
+    /// Its gain now.
+    gain: (f32, f32),
+}
+
+/// The gain of the faders on a path.
+fn path_gain(faders: &[Fader], path: &[usize]) -> (f32, f32) {
+    path.iter().filter_map(|&i| faders.get(i)).fold((1.0, 1.0), |gain, f| mul(gain, f.gain))
+}
+
+/// The modulated faders along the routes (what [`sound_route`] and [`group_out_route`]
+/// leave out): the faders, then each sound's path and each group bus's, as places in them.
+fn channel_faders(p: &Project) -> (Vec<Fader>, Vec<Vec<Vec<usize>>>, Vec<Vec<usize>>) {
+    let mut faders = Vec::new();
+    for (g, grp) in p.groups.iter().enumerate() {
+        if moving(&grp.modulators) {
+            faders.push(Fader { group: g, sound: None, level: grp.level, pan: grp.pan, gain: channel_gain(grp.level, grp.pan) });
+        }
+        for (s, snd) in grp.sounds.iter().enumerate().filter(|(_, snd)| moving(&snd.modulators)) {
+            faders.push(Fader { group: g, sound: Some(s), level: snd.level, pan: snd.pan, gain: channel_gain(snd.level, snd.pan) });
+        }
+    }
+    let place = |g: usize, s: Option<usize>| faders.iter().position(|f| (f.group, f.sound) == (g, s));
+    // As `dest_route`, `group_route` and `group_fader_route` walk.
+    fn after_group(p: &Project, g: usize, depth: u8, place: &dyn Fn(usize, Option<usize>) -> Option<usize>, out: &mut Vec<usize>) {
+        let Some(grp) = p.groups.get(g) else { return };
+        out.extend(place(g, None));
+        if !grp.cue {
+            after_dest(p, grp.channel.dest, None, depth, place, out);
+        }
+    }
+    fn after_dest(
+        p: &Project,
+        dest: deckard_model::AudioDest,
+        parent: Option<usize>,
+        depth: u8,
+        place: &dyn Fn(usize, Option<usize>) -> Option<usize>,
+        out: &mut Vec<usize>,
+    ) {
+        use deckard_model::AudioDest as D;
+        if depth > 8 {
+            return;
+        }
+        let into = |g: usize, out: &mut Vec<usize>| {
+            if p.groups.get(g).is_some_and(|grp| !has_bus(grp)) {
+                after_group(p, g, depth + 1, place, out);
+            }
+        };
+        match dest {
+            D::Parent => {
+                if let Some(g) = parent {
+                    into(g, out);
+                }
+            }
+            D::Group(g) => into(g, out),
+            D::Sound(g, s) => {
+                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)) {
+                    out.extend(place(g, Some(s)));
+                    if !bus.cue {
+                        after_dest(p, bus.channel.dest, Some(g), depth + 1, place, out);
+                    }
+                }
+            }
+            D::None | D::Master | D::Ext(_) => {}
+        }
+    }
+    let sounds = p
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(g, grp)| {
+            grp.sounds
+                .iter()
+                .enumerate()
+                .map(|(s, snd)| {
+                    let mut path = Vec::new();
+                    path.extend(place(g, Some(s)));
+                    if !snd.cue {
+                        after_dest(p, snd.channel.dest, Some(g), 0, &place, &mut path);
+                    }
+                    path
+                })
+                .collect()
+        })
+        .collect();
+    let buses = (0..p.groups.len())
+        .map(|g| {
+            let mut path = Vec::new();
+            after_group(p, g, 1, &place, &mut path);
+            path
+        })
+        .collect();
+    (faders, sounds, buses)
+}
+
 /// Undo the master's gain (for what doesn't go through it).
 fn past_master(p: &Project) -> (f32, f32) {
     let m = channel_gain(p.master_level, p.master_pan);
@@ -590,6 +780,89 @@ fn ext_route(p: &Project, n: i64, gain: (f32, f32)) -> Route {
         (Some(n as usize), gain)
     } else {
         SILENT
+    }
+}
+
+/// The cue bus as the audio thread has it: where it goes, what's on it, and its meter.
+struct CueBus {
+    /// Where the metronome and the prehear go: the bus, or with no output for it the
+    /// master's output as it is.
+    clicks_route: Route,
+    /// From what's mixed onto the bus's output to the bus's own level: a bus on the
+    /// master's output has been divided by the master's gain, which comes later.
+    to_meter: (f32, f32),
+    /// `[group][sound]`: this sound's output is on the bus. A sound going through a group
+    /// with effects isn't, its group's bus is.
+    sounds: Vec<Vec<bool>>,
+    /// Group `g`'s bus (after its effects) is on the bus.
+    groups: Vec<bool>,
+    /// What's on the bus over the part being rendered, and the click's and prehear's.
+    mix: Vec<f32>,
+    clicks: Vec<f32>,
+    /// Peak (left, right) since the UI last took it.
+    peak: (f32, f32),
+}
+
+impl CueBus {
+    fn of(p: &Project) -> CueBus {
+        let route = cue_route(p);
+        let clicks_route = match p.cue_output {
+            deckard_model::AudioDest::Ext(n) if (0..OUTPUTS as i64).contains(&n) => route,
+            _ => (None, (1.0, 1.0)),
+        };
+        let to_meter = if route.0.is_none() { channel_gain(p.master_level, p.master_pan) } else { (1.0, 1.0) };
+        let sounds = p
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, grp)| grp.sounds.iter().map(|s| s.cue || dest_cued(p, s.channel.dest, Some(g), 0)).collect())
+            .collect();
+        let groups = p.groups.iter().map(|g| g.cue || dest_cued(p, g.channel.dest, None, 1)).collect();
+        CueBus {
+            clicks_route,
+            to_meter,
+            sounds,
+            groups,
+            mix: vec![0.0; JOB_FRAMES * 2],
+            clicks: vec![0.0; JOB_FRAMES * 2],
+            peak: (0.0, 0.0),
+        }
+    }
+
+    /// The click and the prehear (in `clicks`) over `frames`, onto `dst` and the bus; then
+    /// the meter takes what's on the bus, ready for the next part.
+    fn finish(&mut self, frames: usize, dst: &mut [f32]) {
+        let gain = self.clicks_route.1;
+        for f in 0..frames {
+            let (a, z) = (self.clicks[f * 2] * gain.0, self.clicks[f * 2 + 1] * gain.1);
+            dst[f * 2] += a;
+            dst[f * 2 + 1] += z;
+            self.mix[f * 2] += a;
+            self.mix[f * 2 + 1] += z;
+        }
+        for frame in self.mix[..frames * 2].chunks_exact(2) {
+            self.peak.0 = self.peak.0.max((frame[0] * self.to_meter.0).abs());
+            self.peak.1 = self.peak.1.max((frame[1] * self.to_meter.1).abs());
+        }
+        self.mix[..frames * 2].fill(0.0);
+    }
+}
+
+/// Whether entering `dest` leads onto the cue bus (as [`dest_route`] walks; a group with
+/// effects ends it, its own bus going on from there).
+fn dest_cued(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>, depth: u8) -> bool {
+    use deckard_model::AudioDest as D;
+    if depth > 8 {
+        return false;
+    }
+    let group = |g: usize| p.groups.get(g).is_some_and(|grp| !has_bus(grp) && (grp.cue || dest_cued(p, grp.channel.dest, None, depth + 1)));
+    match dest {
+        D::Parent => parent.is_some_and(group),
+        D::Group(g) => group(g),
+        D::Sound(g, s) => {
+            p.groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|bus| bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))
+        }
+        D::None | D::Master | D::Ext(_) => false,
     }
 }
 
@@ -620,7 +893,7 @@ fn dest_route(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>
         D::Sound(g, s) => match p.groups.get(g).and_then(|x| x.sounds.get(s)) {
             Some(bus) if !(bus.muted && bus.channel.audio_mute) => {
                 let (to, gain) = if bus.cue { cue_route(p) } else { dest_route(p, bus.channel.dest, Some(g), depth + 1) };
-                (to, mul(channel_gain(bus.level, bus.pan), gain))
+                (to, mul(fader_gain(bus.level, bus.pan, &bus.modulators), gain))
             }
             _ => SILENT,
         },
@@ -772,7 +1045,7 @@ fn group_out_route(p: &Project, g: usize) -> Route {
 
 fn group_fader_route(p: &Project, g: usize, depth: u8) -> Route {
     let grp = &p.groups[g];
-    let own = channel_gain(grp.level, grp.pan);
+    let own = fader_gain(grp.level, grp.pan, &grp.modulators);
     let (to, gain) = if grp.cue { cue_route(p) } else { dest_route(p, grp.channel.dest, None, depth) };
     (to, mul(own, gain))
 }
@@ -834,6 +1107,12 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
     }
 }
 
+fn plugin_unit(plugin: Shared, params: &[(String, f64)], sr_f: f64) -> FxUnit {
+    let mut sc_filter = fx::sidechain::SidechainFilter::new(sr_f);
+    sc_filter.set(params);
+    FxUnit::Plugin { plugin, params: params.to_vec(), sc_filter }
+}
+
 /// The effects of a group's or the master's chain (all its slots), as a sound's are
 /// made: plug-ins (`key` names their slot), Maschine's own effects DECKARD renders.
 #[allow(clippy::too_many_arguments)]
@@ -841,6 +1120,7 @@ fn effect_units(
     project: &Project,
     slots: &[deckard_model::SlotInfo],
     key: impl Fn(usize) -> Slot,
+    hears: impl Fn(usize) -> Vec<usize>,
     owner: &str,
     tempo: f64,
     sr_f: f64,
@@ -849,10 +1129,11 @@ fn effect_units(
 ) -> Vec<Unit> {
     let mut units = Vec::with_capacity(slots.len() + FX_SPARE);
     for (slot, info) in slots.iter().enumerate() {
+        let listen = if info.active { hears(slot) } else { Vec::new() };
         match &info.plugin {
             Some(pr) if !info.active => {
                 if let Some(p) = cache.loaded_plugin(key(slot), &pr.id, &pr.name) {
-                    let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), false);
+                    let mut u = Unit::new(plugin_unit(p.clone(), &info.params, sr_f), slot, Vec::new(), false);
                     u.listen(owner_of(key(slot)), &p, &pr.id, project);
                     units.push(u);
                 }
@@ -860,7 +1141,7 @@ fn effect_units(
             Some(pr) => match cache.plugin(key(slot), &pr.id, &pr.name, &pr.chunk, sr_f) {
                 Ok(p) => {
                     report.plugins.push(format!("{owner}: {}", pr.name));
-                    let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), true);
+                    let mut u = Unit::new(plugin_unit(p.clone(), &info.params, sr_f), slot, listen, true);
                     u.listen(owner_of(key(slot)), &p, &pr.id, project);
                     units.push(u);
                 }
@@ -879,7 +1160,7 @@ fn effect_units(
                         hit: false,
                         modulated: false,
                     };
-                    units.push(Unit::new(unit, slot, Vec::new(), info.active));
+                    units.push(Unit::new(unit, slot, listen, info.active));
                 }
             }
         }
@@ -1111,7 +1392,7 @@ impl Unit {
     /// of Maschine's own effects.
     fn same(&self, other: &Unit) -> bool {
         match (&self.fx, &other.fx) {
-            (FxUnit::Plugin(a), FxUnit::Plugin(b)) => Arc::ptr_eq(a, b),
+            (FxUnit::Plugin { plugin: a, .. }, FxUnit::Plugin { plugin: b, .. }) => Arc::ptr_eq(a, b),
             (FxUnit::Internal { class: a, .. }, FxUnit::Internal { class: b, .. }) => a == b,
             _ => false,
         }
@@ -1120,7 +1401,11 @@ impl Unit {
 
 /// One effect of a chain: a plug-in, or one of Maschine's own (by class).
 enum FxUnit {
-    Plugin(Shared),
+    Plugin {
+        plugin: Shared,
+        params: Vec<(String, f64)>,
+        sc_filter: fx::sidechain::SidechainFilter,
+    },
     /// `params`: the settings `fx` was made with (an adopted effect takes them);
     /// `glide` takes it to new ones.
     Internal {
@@ -1173,13 +1458,17 @@ impl FxChain {
                 }
             }
             match u {
-                FxUnit::Plugin(shared) => {
+                FxUnit::Plugin { plugin: shared, sc_filter, .. } => {
+                    if !sources.is_empty() {
+                        sc_filter.process(&mut self.sl[..n], &mut self.sr[..n]);
+                    }
                     let started = std::time::Instant::now();
                     let Ok(mut p) = shared.lock() else {
                         skipped();
                         continue;
                     };
-                    let (ol, or) = p.process_input(n, transport, Some((&self.l[..n], &self.r[..n])));
+                    let sc = (!sources.is_empty()).then_some((&self.sl[..n], &self.sr[..n]));
+                    let (ol, or) = p.process_input_sc(n, transport, Some((&self.l[..n], &self.r[..n])), sc);
                     if ol.len() >= n && or.len() >= n {
                         self.l[..n].copy_from_slice(&ol[..n]);
                         self.r[..n].copy_from_slice(&or[..n]);
@@ -1244,9 +1533,15 @@ impl FxChain {
     fn set_params(&mut self, params: &mut [(usize, Vec<(String, f64)>)]) {
         for (slot, new) in params.iter_mut() {
             for u in self.units.iter_mut().filter(|u| u.slot == *slot && !u.ghost) {
-                if let FxUnit::Internal { params: had, fx, glide, .. } = &mut u.fx {
-                    std::mem::swap(had, new);
-                    fx.set(if glide.retarget(had) { glide.now() } else { had });
+                match &mut u.fx {
+                    FxUnit::Plugin { params: had, sc_filter, .. } => {
+                        std::mem::swap(had, new);
+                        sc_filter.set(had);
+                    }
+                    FxUnit::Internal { params: had, fx, glide, .. } => {
+                        std::mem::swap(had, new);
+                        fx.set(if glide.retarget(had) { glide.now() } else { had });
+                    }
                 }
             }
         }
@@ -1300,18 +1595,26 @@ impl FxChain {
             if self.units[i].same(&old.units[live[j]]) {
                 let o = &mut old.units[live[j]];
                 let u = &mut self.units[i];
-                if let (
-                    FxUnit::Internal { params, fx, glide, modulated, .. },
-                    FxUnit::Internal { params: op, fx: ofx, glide: og, modulated: om, .. },
-                ) = (&mut u.fx, &mut o.fx)
-                {
-                    std::mem::swap(fx, ofx);
-                    std::mem::swap(glide, og);
-                    // Modulated values it plays go back to the knob's when nothing holds them.
-                    *modulated = *om;
-                    if params != op {
-                        fx.set(if glide.retarget(params) { glide.now() } else { params });
+                match (&mut u.fx, &mut o.fx) {
+                    (FxUnit::Plugin { params, sc_filter, .. }, FxUnit::Plugin { params: op, sc_filter: osf, .. }) => {
+                        std::mem::swap(sc_filter, osf);
+                        if params != op {
+                            sc_filter.set(params);
+                        }
                     }
+                    (
+                        FxUnit::Internal { params, fx, glide, modulated, .. },
+                        FxUnit::Internal { params: op, fx: ofx, glide: og, modulated: om, .. },
+                    ) => {
+                        std::mem::swap(fx, ofx);
+                        std::mem::swap(glide, og);
+                        // Modulated values it plays go back to the knob's when nothing holds them.
+                        *modulated = *om;
+                        if params != op {
+                            fx.set(if glide.retarget(params) { glide.now() } else { params });
+                        }
+                    }
+                    _ => {}
                 }
                 // Its strips' gains glide on from where they are.
                 for x in &mut u.extras {
@@ -1482,6 +1785,8 @@ pub struct Recorded {
     /// Ticks on a clock that never wraps (loops and jumps don't move it back): what a
     /// held note's length is measured by.
     pub played: f64,
+    /// It came in over MIDI (not from a pad, Note Repeat or the Arp).
+    pub midi: bool,
 }
 
 /// Per-note expression played while recording, at the song position it came.
@@ -1521,6 +1826,8 @@ pub struct Telemetry {
     /// Peak (left, right) of each sound since the UI last took them, `[group][sound]`.
     pub meters: Vec<Vec<(f32, f32)>>,
     pub master_peak: (f32, f32),
+    /// Peak (left, right) of the cue bus since the UI last took it.
+    pub cue_peak: (f32, f32),
     /// Ticks.
     pub position: f64,
     pub length: f64,
@@ -1696,6 +2003,13 @@ pub struct Engine {
     /// Note Repeat / Arp: held live notes feed it; it plays on the rate's grid.
     repeater: Option<repeat::Repeater>,
     repeat_buf: Vec<repeat::Fired>,
+    /// MIDI input plug-ins, a slot per group, and what one just played.
+    midi_inputs: Vec<Option<Box<dyn midi_input::MidiInput>>>,
+    midi_input_out: Vec<midi_input::NoteOut>,
+    /// The slots that had a note since they last settled (a bit each).
+    midi_inputs_unsettled: u64,
+    /// A plug-in's note is playing: it doesn't go back in.
+    from_midi_input: bool,
     /// Recording (REC): live notes are noted with their song position.
     recording: bool,
     recorded: Vec<Recorded>,
@@ -1711,6 +2025,13 @@ pub struct Engine {
     /// [group][sound]: the external output a sound plays on when it isn't the master's
     /// ([`sound_bus`]).
     routes: Vec<Vec<Option<usize>>>,
+    /// The cue bus.
+    cue: CueBus,
+    /// The faders with modulation, and which are on each sound's way out ([group][sound])
+    /// and each group bus's ([`channel_faders`]).
+    faders: Vec<Fader>,
+    sound_faders: Vec<Vec<Vec<usize>>>,
+    bus_faders: Vec<Vec<usize>>,
     /// Peak output level (left, right) since the last `take_master_peak`.
     master_peak: (f32, f32),
     /// The last note id given out.
@@ -1756,6 +2077,7 @@ pub struct Engine {
     /// [`Engine::new_after`]); and whether to keep its timelines.
     reuse: Vec<Vec<Option<Reuse>>>,
     keep_timeline: bool,
+    group_swaps: Vec<(usize, usize)>,
     tap_block: Vec<f32>,
     /// Sounds' effect chains, `[group][sound]`.
     fx: Vec<Vec<Option<FxChain>>>,
@@ -1789,6 +2111,8 @@ pub struct Engine {
     touch_order: u64,
     /// The sounds' modulation routes ([`mod_rt`]).
     mod_routes: Vec<mod_rt::RouteRt>,
+    /// Plug-in parameters modulated by pattern lanes (`(plugin, id, hit_this_span)`).
+    modded_plugins: Vec<(Shared, u32, bool)>,
     /// Plug-in parameters routes let go of while the plug-in was busy ([`mod_rt`]).
     unrouted: Vec<(Shared, u32)>,
     /// Where the routes' travels are published, for their knobs.
@@ -2026,6 +2350,17 @@ impl Engine {
                 .filter_map(|k| sc_index.get(&k).copied())
                 .collect()
         };
+        // The side-chain buffers the effect in chain slot `slot` of group `gi` hears.
+        let hears_group = |gi: usize, slot: usize| -> Vec<usize> {
+            project.groups[gi]
+                .channel
+                .sidechain
+                .iter()
+                .filter(|(k, src)| *k == slot && *src != deckard_model::ScSource::Group(gi))
+                .flat_map(|&(_, src)| source_sounds(src))
+                .filter_map(|k| sc_index.get(&k).copied())
+                .collect()
+        };
         // What the playing engine can keep: only when the project's shape and its
         // side-chains are the same.
         let same_shape = |a: &Project| {
@@ -2045,7 +2380,7 @@ impl Engine {
                 (0..grp.sounds.len())
                     .map(|s| {
                         let (p, _) = prev?;
-                        let mut r = reuse_of(p, project, g, s, sr_f);
+                        let mut r = reuse_of(p, project, g, s, sr_f, &cache.plugins);
                         // A sound whose level feeds a side-chain (its group's sum)
                         // has that in its chain.
                         let (a, b) = (&p.groups[g].sounds[s], &grp.sounds[s]);
@@ -2078,7 +2413,7 @@ impl Engine {
                         // fade back in); none is loaded just to sit bypassed.
                         Some(pr) if !info.active => {
                             if let Some(p) = cache.loaded_plugin(key, &pr.id, &pr.name) {
-                                let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), false);
+                                let mut u = Unit::new(plugin_unit(p.clone(), &info.params, sr_f), slot, Vec::new(), false);
                                 u.listen(owner_of(key), &p, &pr.id, project);
                                 units.push(u);
                             }
@@ -2086,7 +2421,7 @@ impl Engine {
                         Some(pr) => match cache.plugin(key, &pr.id, &pr.name, &pr.chunk, sr_f) {
                             Ok(p) => {
                                 report.plugins.push(format!("{} / {}: {}", g.name, s.name, pr.name));
-                                let mut u = Unit::new(FxUnit::Plugin(p.clone()), slot, Vec::new(), true);
+                                let mut u = Unit::new(plugin_unit(p.clone(), &info.params, sr_f), slot, hears, true);
                                 u.listen(owner_of(key), &p, &pr.id, project);
                                 units.push(u);
                             }
@@ -2293,6 +2628,7 @@ impl Engine {
             instruments.push(row);
         }
         let mod_routes = mod_rt::routes_of(project, &cache.plugins);
+        let (faders, sound_faders, bus_faders) = channel_faders(project);
         // The playing timeline stays when the edit didn't change what makes it.
         let keep_timeline = prev.is_some_and(|(p, _)| same_timelines(p, project));
         let timeline = if keep_timeline { Timeline::default() } else { timeline(project, mode) };
@@ -2329,7 +2665,7 @@ impl Engine {
                         matches!(snd.channel.audio_in, deckard_model::AudioSource::Ext(_))
                             || sc_index.keys().any(|&(sg, ss, _)| (sg, ss) == (g, s))
                             // (From the project: an edit leaves a kept chain unbuilt here.)
-                            || effect_slots(snd).iter().any(|&(slot, x)| x.active && x.plugin.is_none() && !hears(g, s, slot).is_empty())
+                            || effect_slots(snd).iter().any(|&(slot, x)| x.active && !hears(g, s, slot).is_empty())
                             || matches!(routes.get(g).and_then(|r| r.get(s)), Some(Some(midi::OutRoute::Sound(_))))
                             || routed_to(g, s)
                             || explicit(&snd.channel.midi_source)
@@ -2402,6 +2738,7 @@ impl Engine {
                         project,
                         &grp.slots,
                         |slot| Slot::Group { group: gi, slot },
+                        |slot| hears_group(gi, slot),
                         &grp.name,
                         project.tempo,
                         sr_f,
@@ -2422,6 +2759,7 @@ impl Engine {
                 project,
                 &project.master_slots,
                 |slot| Slot::Master { slot },
+                |_| Vec::new(),
                 "Master",
                 project.tempo,
                 sr_f,
@@ -2464,6 +2802,10 @@ impl Engine {
             recording: false,
             repeater: None,
             repeat_buf: Vec::with_capacity(256),
+            midi_inputs: (0..midi_input::SLOTS).map(|_| None).collect(),
+            midi_input_out: Vec::with_capacity(midi_input::OUT_ROOM),
+            midi_inputs_unsettled: 0,
+            from_midi_input: false,
             counting: 0,
             count_frame: 0,
             recorded: Vec::with_capacity(RECORDED_ROOM),
@@ -2482,6 +2824,10 @@ impl Engine {
                 .enumerate()
                 .map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect())
                 .collect(),
+            cue: CueBus::of(project),
+            faders,
+            sound_faders,
+            bus_faders,
             master_peak: (0.0, 0.0),
             clock: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -2503,6 +2849,7 @@ impl Engine {
             focus: None,
             reuse,
             keep_timeline,
+            group_swaps: Vec::new(),
             tap_block: Vec::new(),
             fx,
             modulating: false,
@@ -2531,6 +2878,7 @@ impl Engine {
             held_keys: Vec::with_capacity(mod_rt::KEYS),
             touch_order: 0,
             mod_routes,
+            modded_plugins: Vec::with_capacity(mod_rt::UNROUTED),
             unrouted: Vec::with_capacity(mod_rt::UNROUTED),
             route_board: None,
             live_in: None,
@@ -2600,6 +2948,9 @@ impl Engine {
     #[must_use = "drop the replaced parts off the audio thread"]
     pub fn adopt_with(&mut self, fresh: Engine, timelines: &mut Timelines) -> Engine {
         let mut fresh = fresh;
+        for (a, b) in fresh.group_swaps.drain(..) {
+            self.swap_group_runtime(a, b);
+        }
         self.forward_edits(&mut fresh);
         self.keep_parts(&mut fresh);
         std::mem::swap(&mut self.live_hint, &mut fresh.live_hint);
@@ -2630,6 +2981,7 @@ impl Engine {
         std::mem::swap(&mut self.samples, &mut fresh.samples);
         std::mem::swap(&mut self.sounds, &mut fresh.sounds);
         self.adopt_routes(&mut fresh);
+        std::mem::swap(&mut self.modded_plugins, &mut fresh.modded_plugins);
         self.adopt_lfos(&mut fresh);
         self.adopt_ccs(&mut fresh);
         // Notes held by plug-ins that are gone or muted now end.
@@ -2702,6 +3054,12 @@ impl Engine {
         self.master_pan = fresh.master_pan;
         self.master_bus = fresh.master_bus;
         std::mem::swap(&mut self.routes, &mut fresh.routes);
+        // (Its meter goes on.)
+        fresh.cue.peak = self.cue.peak;
+        std::mem::swap(&mut self.cue, &mut fresh.cue);
+        std::mem::swap(&mut self.faders, &mut fresh.faders);
+        std::mem::swap(&mut self.sound_faders, &mut fresh.sound_faders);
+        std::mem::swap(&mut self.bus_faders, &mut fresh.bus_faders);
         self.stale = false;
         if fresh.keep_timeline {
             // The same timelines: this one's play on.
@@ -3138,6 +3496,11 @@ impl Engine {
     pub fn stop(&mut self) {
         self.sequencing = false;
         self.clock_stop();
+        self.live.retain(|(_, e)| !matches!(e, Live::MidiInputOut { .. }));
+        self.midi_inputs_unsettled = 0;
+        for p in self.midi_inputs.iter_mut().flatten() {
+            p.stopped();
+        }
         if let Some(a) = &self.ahead {
             for l in a.links.iter().flatten().flatten().filter(|l| l.state != LinkState::Live) {
                 let _ = l.inbox.push(ahead::Msg::At(self.time, ahead::Ev::Stop, false));
@@ -3361,6 +3724,10 @@ impl Engine {
     /// End a note started with [`Engine::note_hold`]: its envelope releases (one-shots
     /// play on), and a plug-in gets its note-off.
     pub fn note_release(&mut self, group: usize, sound: usize, pitch: i64) {
+        if self.midi_input_takes(group) {
+            self.midi_input_note(group, midi_input::NoteIn::Off { sound, pitch });
+            return;
+        }
         self.touch_release(group, sound, pitch);
         // Held notes sent out end now (also those passed on to another sound).
         let mut i = 0;
@@ -3755,9 +4122,14 @@ impl Engine {
         a.sent.retain(|x| x.5 >= now);
         let mut ahead = self.ahead.take().unwrap();
         let muted = &self.sound_muted;
+        let inputs = &self.midi_inputs;
         self.foresee(0, window, |seen| match seen {
             Seen::Event { t, e, plays, frame, pass } => {
                 if !plays || note_muted(muted, &e) {
+                    return;
+                }
+                // Its notes go to its MIDI input plug-in, when they're due.
+                if e.cue.is_none() && e.midi.is_none() && inputs.get(e.group).is_some_and(Option::is_some) {
                     return;
                 }
                 let Some(link) = ahead.links.get(e.group).and_then(|r| r.get(e.sound)).and_then(Option::as_ref) else { return };
@@ -3897,6 +4269,136 @@ impl Engine {
         self.repeater.is_some()
     }
 
+    /// Put a MIDI input plug-in on `group`, or take it out with `None`. The notes the old
+    /// one holds end. Returns it, to be freed off the audio thread (`plugin` itself if
+    /// there's no such slot).
+    pub fn set_midi_input(
+        &mut self,
+        group: usize,
+        plugin: Option<Box<dyn midi_input::MidiInput>>,
+    ) -> Option<Box<dyn midi_input::MidiInput>> {
+        let Some(slot) = self.midi_inputs.get_mut(group) else { return plugin };
+        let mut old = std::mem::replace(slot, plugin);
+        if let Some(p) = old.as_mut() {
+            let clock = self.midi_input_clock(0.0);
+            let mut out = std::mem::take(&mut self.midi_input_out);
+            p.finish(clock, &mut midi_input::Outbox::new(&mut out));
+            self.play_midi_input_out(group, clock.now, &out);
+            self.midi_input_out = out;
+        }
+        old
+    }
+
+    /// Move a parameter of `group`'s MIDI input plug-in, if it has one there.
+    pub fn set_midi_input_param(&mut self, group: usize, id: u32, value: f64) {
+        if let Some(p) = self.midi_inputs.get_mut(group).and_then(Option::as_mut) {
+            p.set_param(id, value);
+        }
+    }
+
+    /// The plug-ins go on with an engine that replaces this one. What they hold has been
+    /// ended, as the old engine's notes are.
+    #[cfg(any(test, feature = "output"))]
+    pub(crate) fn take_midi_inputs(&mut self, old: &mut Engine) {
+        old.live.retain(|(_, e)| !matches!(e, Live::MidiInputOut { .. }));
+        std::mem::swap(&mut self.midi_inputs, &mut old.midi_inputs);
+        for p in self.midi_inputs.iter_mut().flatten() {
+            p.stopped();
+        }
+    }
+
+    /// Whether `group` has a MIDI input plug-in.
+    pub fn has_midi_input(&self, group: usize) -> bool {
+        self.midi_inputs.get(group).is_some_and(Option::is_some)
+    }
+
+    /// Whether `group`'s notes go to a MIDI input plug-in (not one it's playing itself).
+    fn midi_input_takes(&self, group: usize) -> bool {
+        !self.from_midi_input && self.midi_inputs.get(group).is_some_and(Option::is_some)
+    }
+
+    fn midi_input_clock(&self, span: f64) -> midi_input::Clock {
+        let spt = self.samples_per_tick();
+        midi_input::Clock {
+            now: self.time as f64 / spt,
+            span,
+            song: self.sequencing.then(|| self.frame as f64 / spt),
+            seconds: self.time as f64 / self.sr,
+        }
+    }
+
+    /// A note into `group`'s MIDI input plug-in, and what it plays for it.
+    fn midi_input_note(&mut self, group: usize, note: midi_input::NoteIn) {
+        let Some(mut p) = self.midi_inputs.get_mut(group).and_then(Option::take) else { return };
+        let clock = self.midi_input_clock(0.0);
+        let mut out = std::mem::take(&mut self.midi_input_out);
+        p.note(note, clock, &mut midi_input::Outbox::new(&mut out));
+        self.midi_inputs[group] = Some(p);
+        self.midi_inputs_unsettled |= 1 << group;
+        self.play_midi_input_out(group, clock.now, &out);
+        self.midi_input_out = out;
+    }
+
+    /// Every note due at this instant is in: the plug-ins that had one work on them.
+    fn midi_inputs_settle(&mut self) {
+        let mut slots = std::mem::take(&mut self.midi_inputs_unsettled);
+        while slots != 0 {
+            let group = slots.trailing_zeros() as usize;
+            slots &= slots - 1;
+            let Some(mut p) = self.midi_inputs.get_mut(group).and_then(Option::take) else { continue };
+            let clock = self.midi_input_clock(0.0);
+            let mut out = std::mem::take(&mut self.midi_input_out);
+            p.settle(clock, &mut midi_input::Outbox::new(&mut out));
+            self.midi_inputs[group] = Some(p);
+            self.play_midi_input_out(group, clock.now, &out);
+            self.midi_input_out = out;
+        }
+    }
+
+    /// What the MIDI input plug-ins play by themselves over the next `frames`.
+    fn midi_inputs_ahead(&mut self, frames: usize) {
+        for group in 0..self.midi_inputs.len() {
+            let Some(mut p) = self.midi_inputs[group].take() else { continue };
+            let clock = self.midi_input_clock(frames as f64 / self.samples_per_tick());
+            let mut out = std::mem::take(&mut self.midi_input_out);
+            p.process(clock, &mut midi_input::Outbox::new(&mut out));
+            self.midi_inputs[group] = Some(p);
+            self.play_midi_input_out(group, clock.now, &out);
+            self.midi_input_out = out;
+        }
+    }
+
+    /// Play notes a plug-in played: at once, or queued for their frames.
+    fn play_midi_input_out(&mut self, group: usize, now: f64, notes: &[midi_input::NoteOut]) {
+        let spt = self.samples_per_tick();
+        for &note in notes {
+            let at = match note {
+                midi_input::NoteOut::On { at, .. } | midi_input::NoteOut::Off { at, .. } => at,
+            };
+            let offset = ((at - now) * spt).round().max(0.0) as u64;
+            if offset == 0 {
+                self.play_midi_input_note(group, note);
+            } else {
+                self.schedule(offset, Live::MidiInputOut { group, note });
+            }
+        }
+    }
+
+    /// A note a plug-in played sounds, as a live note would (a pattern's, if it was one,
+    /// has become one).
+    fn play_midi_input_note(&mut self, group: usize, note: midi_input::NoteOut) {
+        let timeline = std::mem::replace(&mut self.from_timeline, false);
+        self.from_midi_input = true;
+        match note {
+            midi_input::NoteOut::On { sound, pitch, velocity, length, .. } => {
+                self.note_on(group, sound, pitch, velocity, length.unwrap_or(HELD))
+            }
+            midi_input::NoteOut::Off { sound, pitch, .. } => self.note_release(group, sound, pitch),
+        }
+        self.from_midi_input = false;
+        self.from_timeline = timeline;
+    }
+
     /// Record live notes (REC) or stop.
     pub fn set_recording(&mut self, on: bool) {
         self.recording = on;
@@ -3975,16 +4477,21 @@ impl Engine {
                 }
                 _ => {}
             }
+            let midi = matches!(event, Live::NoteIn { .. });
             let note = match event {
                 Live::NoteOn { group, sound, pitch, velocity, length } => Some((group, sound, pitch, velocity, length)),
                 Live::NoteIn { group, sound, pitch, velocity, .. } => Some((group, sound, pitch, velocity, i64::MAX)),
                 Live::NoteRelease { group, sound, pitch } => Some((group, sound, pitch, 0, 0)),
-                Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => None,
+                Live::ControlIn { .. }
+                | Live::Expression { .. }
+                | Live::RepeatPressure { .. }
+                | Live::MidiInputOut { .. }
+                | Live::ChokeAll => None,
             };
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
             {
-                self.recorded.push(Recorded { group, sound, pitch, velocity, length, tick, mode, seq, played });
+                self.recorded.push(Recorded { group, sound, pitch, velocity, length, tick, mode, seq, played, midi });
             }
         }
         match event {
@@ -4004,6 +4511,7 @@ impl Engine {
                 self.hit_pads(group, sound, pitch, |e, s, p| e.note_in(group, s, p, velocity, thru));
             }
             Live::ControlIn { group, sound, kind, thru, .. } => self.control_in(group, sound, kind, thru),
+            Live::MidiInputOut { group, note } => self.play_midi_input_note(group, note),
             // Expression follows its held note out (above, it's recorded): on an MPE
             // port all of it on the note's channel, on a normal port its pressure as poly
             // aftertouch; a release velocity goes on the note-off.
@@ -4016,6 +4524,31 @@ impl Engine {
                 }
             }
             Live::RepeatPressure { .. } => {}
+            Live::ChokeAll => self.choke_all(),
+        }
+    }
+
+    /// Every voice of every sound ends: each sound as its choke group would end it.
+    fn choke_all(&mut self) {
+        let tps = 1.0 / self.samples_per_tick();
+        let shape: Vec<usize> = self.fx.iter().map(Vec::len).collect();
+        for (group, sounds) in shape.into_iter().enumerate() {
+            for sound in 0..sounds {
+                let e = NoteEvent {
+                    tick: 0,
+                    group,
+                    sound,
+                    pitch: 0,
+                    velocity: 0,
+                    length: 0,
+                    probability: 100,
+                    midi: Some(pads::CHOKE),
+                    cue: None,
+                    expr: None,
+                    from: None,
+                };
+                self.trigger(e, tps);
+            }
         }
     }
 
@@ -4138,6 +4671,7 @@ impl Engine {
         // Players' notes for the frames ahead of this span.
         self.send_ahead(frames as u64);
         self.repeat_ahead(frames);
+        self.midi_inputs_ahead(frames);
         self.follow_scene_tempo();
         let mut tps = 1.0 / self.samples_per_tick();
         let mut end = self.frame_of(self.timeline.length);
@@ -4192,6 +4726,7 @@ impl Engine {
                     self.sequencing = false;
                 }
             }
+            self.midi_inputs_settle();
             self.lfo_tick();
             self.apply_mods();
             if !self.cc_routes.is_empty() {
@@ -4257,7 +4792,6 @@ impl Engine {
                 self.flush_tap(&block);
                 self.tap_block = block;
             }
-            let clicks = &mut out[done * 2..(done + until) * 2];
             let ticks = if self.metronome_ticks > 0 { i64::from(self.metronome_ticks) } else { self.denominator.max(1) as i64 };
             let beat_frames = self.samples_per_tick() * (PPQ * 4) as f64 / ticks as f64;
             // (Its ticks in a bar: the first higher.)
@@ -4269,8 +4803,14 @@ impl Engine {
             } else {
                 (self.sequencing && (self.metronome || (self.metronome_auto && self.recording))).then_some(self.frame)
             };
+            let part = until as usize;
+            let clicks = &mut self.cue.clicks[..part * 2];
+            clicks.fill(0.0);
             self.click.mix(clicks, frame, beat_frames, per_bar, self.sr);
             self.prehear.mix(clicks, self.sr);
+            // On the cue bus's output; one the interface hasn't: the master's.
+            let on_ext = self.cue.clicks_route.0.and_then(|n| ext.get_mut(n)?.get_mut(at + done * 2..at + (done + part) * 2));
+            self.cue.finish(part, on_ext.unwrap_or(&mut out[done * 2..(done + part) * 2]));
             self.clock_span(until as u64);
             if self.sequencing {
                 self.frame += until as u64;
@@ -4338,36 +4878,71 @@ impl Engine {
         self.repeat_buf = fired;
     }
 
-    /// Modulation: Maschine's effects with a lane playing at the song's position take
-    /// its values; ones whose lanes stopped (or the song) have their own again. No
+    /// Modulation: instruments and effects with a lane playing at the song's position
+    /// take its values; ones whose lanes stopped (or the song) have their own again. No
     /// allocating (the audio thread).
     fn apply_mods(&mut self) {
         if !self.unrouted.is_empty() {
             self.retry_unroutes();
         }
-        if !self.modulating && (self.timeline.mods.is_empty() || !self.sequencing) && self.mod_routes.is_empty() {
+        self.apply_faders();
+        if !self.modulating
+            && self.modded_plugins.is_empty()
+            && (self.timeline.mods.is_empty() || !self.sequencing)
+            && self.mod_routes.is_empty()
+        {
             return;
         }
+        let modulate_plugin = |modded_plugins: &mut Vec<(Shared, u32, bool)>, plugin: &Shared, id: u32, dev: f64| {
+            if let Some(m) = modded_plugins.iter_mut().find(|(p, i, _)| *i == id && Arc::ptr_eq(p, plugin)) {
+                m.2 = true;
+            } else if modded_plugins.len() < modded_plugins.capacity() {
+                modded_plugins.push((plugin.clone(), id, true));
+            }
+            if let Ok(mut p) = plugin.try_lock() {
+                let target = (p.knob_value(id) + dev).clamp(0.0, 1.0);
+                p.modulate(id, target);
+            }
+        };
         let tick = self.frame as f64 / self.samples_per_tick();
         if self.sequencing {
             for lane in &self.timeline.mods {
                 if !((lane.from as f64)..(lane.to as f64)).contains(&tick) {
                     continue;
                 }
+                let v = lane.value_at(tick);
+                if let Some(s) = lane.sound
+                    && lane.slot == 0
+                {
+                    if let Some(Some(inst)) = self.instruments.get(lane.group).and_then(|r| r.get(s))
+                        && let Ok(id) = lane.field.parse::<u32>()
+                    {
+                        modulate_plugin(&mut self.modded_plugins, &inst.plugin, id, v);
+                    } else if let Some(Some(smp)) = self.sounds.get_mut(lane.group).and_then(|r| r.get_mut(s)) {
+                        smp.begin_modulation();
+                        smp.modulate(&lane.field, v);
+                    }
+                }
                 let chain = match lane.sound {
                     Some(s) => self.fx.get_mut(lane.group).and_then(|r| r.get_mut(s)).and_then(Option::as_mut),
                     None => self.buses.get_mut(lane.group).and_then(Option::as_mut).map(|b| &mut b.chain),
                 };
                 let Some(chain) = chain else { continue };
-                let v = lane.value_at(tick);
                 for u in chain.units.iter_mut().filter(|u| u.slot == lane.slot && !u.ghost) {
-                    if let FxUnit::Internal { params, modded, hit, .. } = &mut u.fx {
-                        if !*hit {
-                            modded.clone_from(params);
-                            *hit = true;
+                    match &mut u.fx {
+                        FxUnit::Internal { params, modded, hit, .. } => {
+                            if !*hit {
+                                modded.clone_from(params);
+                                *hit = true;
+                            }
+                            if let Some(x) = modded.iter_mut().find(|(k, _)| *k == lane.field) {
+                                x.1 = v;
+                            }
                         }
-                        if let Some(x) = modded.iter_mut().find(|(k, _)| *k == lane.field) {
-                            x.1 = v;
+                        FxUnit::Plugin { plugin, .. } => {
+                            if let Ok(id) = lane.field.parse::<u32>() {
+                                modulate_plugin(&mut self.modded_plugins, plugin, id, v);
+                            }
                         }
                     }
                 }
@@ -4375,6 +4950,9 @@ impl Engine {
         }
         self.apply_routes();
         let mut any = false;
+        for smp in self.sounds.iter_mut().flatten().flatten() {
+            any |= smp.finish_modulation();
+        }
         let chains = self.fx.iter_mut().flatten().flatten().chain(self.buses.iter_mut().flatten().map(|b| &mut b.chain));
         for chain in chains {
             for u in &mut chain.units {
@@ -4396,7 +4974,53 @@ impl Engine {
                 any |= *modulated;
             }
         }
+        let unrouted = &mut self.unrouted;
+        let mod_routes = &self.mod_routes;
+        self.modded_plugins.retain_mut(|(plugin, id, hit)| {
+            if std::mem::take(hit) {
+                return true;
+            }
+            if mod_routes.iter().any(|r| {
+                !r.now.is_nan()
+                    && matches!(&r.target, mod_rt::RouteTarget::Plugin { plugin: q, id: j } if *j == *id && Arc::ptr_eq(q, plugin))
+            }) {
+                return false;
+            }
+            match plugin.try_lock() {
+                Ok(mut p) => p.unmodulate(*id),
+                Err(_) if unrouted.len() < unrouted.capacity() => unrouted.push((plugin.clone(), *id)),
+                Err(_) => {}
+            }
+            false
+        });
+        any |= !self.modded_plugins.is_empty();
         self.modulating = any;
+    }
+
+    /// Modulated faders take their lanes' places at the song's position: their own moved
+    /// by the deviation there, or their own when no lane plays. No allocating (the audio
+    /// thread).
+    fn apply_faders(&mut self) {
+        if self.faders.is_empty() {
+            return;
+        }
+        let tick = self.frame as f64 / self.samples_per_tick();
+        for f in &mut self.faders {
+            let (mut level, mut pan) = (f.level, f.pan);
+            if self.sequencing {
+                let here =
+                    |l: &&modscale::ModLane| l.group == f.group && l.sound == f.sound && ((l.from as f64)..(l.to as f64)).contains(&tick);
+                for lane in self.timeline.faders.iter().filter(here) {
+                    let dev = lane.value_at(tick);
+                    match lane.field.as_str() {
+                        "level" => level = (f.level + dev).clamp(0.0, 1.0),
+                        // Its knob travels over −1..1.
+                        _ => pan = (f.pan + dev * 2.0).clamp(-1.0, 1.0),
+                    }
+                }
+            }
+            f.gain = channel_gain(level, pan);
+        }
     }
 
     /// The song's position now, `done` frames into the span being rendered.
@@ -4431,18 +5055,25 @@ impl Engine {
             for x in bus.chain.units.iter_mut().flat_map(|u| &mut u.extras) {
                 mix_strip(x, frames, glide, self.connected, out, ext, at, &mut self.buses, &mut self.meters_extra);
             }
-            bus.ramp.aim(bus.route.1, glide);
+            let fader = self.bus_faders.get(g).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
+            bus.ramp.aim(mul(bus.route.1, fader), glide);
             let dst: Option<&mut [f32]> = match bus.route.0 {
                 None => Some(&mut *out),
                 Some(n) if n >= GROUP_BUS => self.buses.get_mut(n - GROUP_BUS).and_then(Option::as_mut).map(|b| &mut b.buf[..frames * 2]),
                 Some(n) => ext.get_mut(n).and_then(|b| b.get_mut(at..at + frames * 2)),
             };
             if let Some(dst) = dst {
+                let cued = self.cue.groups.get(g).copied().unwrap_or(false);
                 for f in 0..frames {
                     let gain = bus.ramp.next();
                     let (a, z) = (bus.buf[f * 2] * gain.0, bus.buf[f * 2 + 1] * gain.1);
-                    dst[f * 2] += if a.is_finite() { a } else { 0.0 };
-                    dst[f * 2 + 1] += if z.is_finite() { z } else { 0.0 };
+                    let (a, z) = (if a.is_finite() { a } else { 0.0 }, if z.is_finite() { z } else { 0.0 });
+                    dst[f * 2] += a;
+                    dst[f * 2 + 1] += z;
+                    if cued {
+                        self.cue.mix[f * 2] += a;
+                        self.cue.mix[f * 2 + 1] += z;
+                    }
                 }
             }
             bus.buf[..frames * 2].fill(0.0);
@@ -4479,6 +5110,12 @@ impl Engine {
             return;
         }
         if note_muted(&self.sound_muted, &e) {
+            return;
+        }
+        // A MIDI input plug-in on the group has its notes, played or from a pattern.
+        if e.midi.is_none() && self.midi_input_takes(e.group) {
+            let length = (e.length != HELD).then_some(e.length);
+            self.midi_input_note(e.group, midi_input::NoteIn::On { sound: e.sound, pitch: e.pitch, velocity: e.velocity, length });
             return;
         }
         let frames = (e.length != HELD).then(|| ((e.length.max(1) as f64) / tps).max(1.0) as u64);
@@ -4697,6 +5334,8 @@ impl Engine {
         }
         let mp = std::mem::take(&mut self.master_peak);
         t.master_peak = (t.master_peak.0.max(mp.0), t.master_peak.1.max(mp.1));
+        let cp = std::mem::take(&mut self.cue.peak);
+        t.cue_peak = (t.cue_peak.0.max(cp.0), t.cue_peak.1.max(cp.1));
         t.position = self.position();
         t.played = self.played();
         // Recorded notes, handed over without allocating here.
@@ -4927,7 +5566,9 @@ impl Engine {
                     (None, None, _) => self.instruments[g][s].as_ref().map_or((0.0, 0.0), |i| i.gain),
                 };
                 let checked = chain.is_some() || link.is_some_and(|l| l.finite);
-                ramp.aim(gain, glide);
+                let fader = self.sound_faders.get(g).and_then(|r| r.get(s)).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
+                ramp.aim(mul(gain, fader), glide);
+                let cued = self.cue.sounds.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
                 if !chained && let Some(c) = chain {
                     c.record_from(&src[..frames * 2], &mut self.sc_bufs);
                 }
@@ -4951,6 +5592,10 @@ impl Engine {
                     }
                     dst[f * 2] += a;
                     dst[f * 2 + 1] += z;
+                    if cued {
+                        self.cue.mix[f * 2] += a;
+                        self.cue.mix[f * 2 + 1] += z;
+                    }
                     if tapped && let Some(t) = self.tap_block.get_mut(f * 2..f * 2 + 2) {
                         t[0] += a;
                         t[1] += z;
@@ -5021,14 +5666,22 @@ fn sidechain_sources(project: &Project, src: deckard_model::ScSource) -> Vec<(us
 /// fader).
 fn sidechain_index(project: &Project) -> HashMap<(usize, usize, bool), usize> {
     let mut sc_index = HashMap::new();
-    for g in &project.groups {
+    let mut add = |src| {
+        for k in sidechain_sources(project, src) {
+            let n = sc_index.len();
+            sc_index.entry(k).or_insert(n);
+        }
+    };
+    for (gi, g) in project.groups.iter().enumerate() {
+        for &(slot, src) in &g.channel.sidechain {
+            if src != deckard_model::ScSource::Group(gi) && g.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                add(src);
+            }
+        }
         for s in &g.sounds {
             for &(slot, src) in &s.channel.sidechain {
-                if s.slots.get(slot).is_some_and(|x| x.active && x.plugin.is_none() && !x.is_instrument()) {
-                    for k in sidechain_sources(project, src) {
-                        let n = sc_index.len();
-                        sc_index.entry(k).or_insert(n);
-                    }
+                if s.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                    add(src);
                 }
             }
         }
@@ -5055,8 +5708,13 @@ struct Reuse {
 }
 
 /// Whether `a` and `b` make the same timelines (the same patterns, scenes, sections,
-/// grooves and bar length): an edit elsewhere keeps the playing timeline.
+/// grooves, bar length and modulated parameters' base values): an edit elsewhere keeps
+/// the playing timeline.
 fn same_timelines(a: &Project, b: &Project) -> bool {
+    let same_slot = |sa: Option<&deckard_model::SlotInfo>, sb: Option<&deckard_model::SlotInfo>| match (sa, sb) {
+        (Some(x), Some(y)) if x.plugin.is_none() && y.plugin.is_none() => x.module == y.module && x.params == y.params,
+        (x, y) => x.map(|s| &s.plugin) == y.map(|s| &s.plugin),
+    };
     a.scenes == b.scenes
         && a.sections == b.sections
         && a.swing == b.swing
@@ -5067,13 +5725,45 @@ fn same_timelines(a: &Project, b: &Project) -> bool {
                 && x.swing == y.swing
                 && x.sounds.len() == y.sounds.len()
                 && x.sounds.iter().zip(&y.sounds).all(|(m, n)| m.swing == n.swing)
+                && x.patterns.iter().flat_map(|p| &p.mods).all(|m| match (m.sound, m.slot) {
+                    (Some(s), Some(i)) => {
+                        let (ma, mb) = (x.sounds.get(s), y.sounds.get(s));
+                        same_slot(ma.and_then(|snd| snd.slots.get(i)), mb.and_then(|snd| snd.slots.get(i)))
+                            && (i != 0
+                                || ma.and_then(|snd| snd.sampler.as_ref()).map(|smp| &smp.params)
+                                    == mb.and_then(|snd| snd.sampler.as_ref()).map(|smp| &smp.params))
+                    }
+                    (None, Some(i)) => same_slot(x.slots.get(i), y.slots.get(i)),
+                    _ => true,
+                })
         })
 }
 
 /// The slots of a sound's chain as its effect chain is built from them, without their
 /// effects' settings: what makes two chains the same but for those.
-fn chain_shape(s: &deckard_model::Sound) -> Vec<(usize, &str, bool, Option<&deckard_model::PluginRef>)> {
-    effect_slots(s).into_iter().map(|(i, x)| (i, x.module.as_str(), x.active, x.plugin.as_ref())).collect()
+fn chain_shape(s: &deckard_model::Sound) -> Vec<(usize, &str, bool, Option<(&str, &str)>)> {
+    effect_slots(s)
+        .into_iter()
+        .map(|(i, x)| (i, x.module.as_str(), x.active, x.plugin.as_ref().map(|p| (p.id.as_str(), p.name.as_str()))))
+        .collect()
+}
+
+/// Whether `slot`'s plug-in can be kept as it plays when `old` becomes `new`: either
+/// the saved chunk is unchanged, or the live instance already holds `new`'s chunk (a
+/// knob turn saved back into the document).
+fn plugin_kept(
+    plugins: &deckard_plugins::Host,
+    slot: Slot,
+    old: &Option<deckard_model::PluginRef>,
+    new: &Option<deckard_model::PluginRef>,
+) -> bool {
+    if old == new {
+        return true;
+    }
+    let (Some(a), Some(b)) = (old, new) else { return false };
+    a.id == b.id
+        && a.name == b.name
+        && plugins.existing(slot).is_some_and(|s| s.lock().ok().is_some_and(|p| p.chunk() == b.chunk.as_slice()))
 }
 
 /// The synth a sound plays (its first slot's module, when on and one of
@@ -5085,7 +5775,7 @@ fn synth_of(s: &deckard_model::Sound) -> Option<(&str, &[(String, f64)])> {
 
 /// What a sound being edited can keep of what plays, comparing it as it was (`old`,
 /// in `prev`) with what it is (`new`).
-fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> Reuse {
+fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64, plugins: &deckard_plugins::Host) -> Reuse {
     let (og, ng) = (&prev.groups[g], &project.groups[g]);
     let (old, new) = (&og.sounds[s], &ng.sounds[s]);
     let same_silence = muting(prev, g, s).silent == muting(project, g, s).silent;
@@ -5126,15 +5816,21 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> R
         v.sort_by_key(|&(o, bus, id, _)| (heard_rank(&Heard { owner: o, bus }), id));
         v
     }
-    r.instrument = old.plugin == new.plugin && strips(prev, g, s, false) == strips(project, g, s, false);
+    r.instrument = plugin_kept(plugins, Slot::Sound { group: g, sound: s }, &old.plugin, &new.plugin)
+        && strips(prev, g, s, false) == strips(project, g, s, false);
     // The chain: the same slots and side-chains (its effects' settings may differ).
+    let same_fx_plugins = effect_slots(old)
+        .into_iter()
+        .zip(effect_slots(new))
+        .all(|((slot, a), (_, b))| plugin_kept(plugins, Slot::Chain { group: g, sound: s, slot }, &a.plugin, &b.plugin));
     if chain_shape(old) == chain_shape(new)
+        && same_fx_plugins
         && old.channel.sidechain == new.channel.sidechain
         && strips(prev, g, s, true) == strips(project, g, s, true)
     {
         r.chain = true;
         for ((i, a), (_, b)) in effect_slots(old).into_iter().zip(effect_slots(new)) {
-            if a.plugin.is_none() && a.params != b.params {
+            if a.params != b.params {
                 r.params.push((i, b.params.clone()));
             }
         }
@@ -5825,6 +6521,31 @@ mod tests {
         assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 0), "the Send chokes the Receive");
     }
 
+    /// Choke All Notes ends what every sound plays, whatever its choke group; the next note
+    /// plays as usual.
+    #[test]
+    fn choke_all_ends_every_voice() {
+        let mut p = project();
+        let other = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(other);
+        let mut e = click_engine_for(&p, 1000);
+        e.sequencing = false;
+        set_sample(&mut e, vec![[0.5, 0.5]; 100], &[("envelope_type", 2.0)], true);
+        let voices = |e: &Engine, s: usize| e.sounds[0][s].as_ref().map_or(0, |x| x.voices());
+        let on = |sound| Live::NoteOn { group: 0, sound, pitch: 60, velocity: 100, length: i64::MAX };
+        let mut out = vec![0f32; 2 * 50];
+        e.play_live(on(0));
+        e.play_live(on(1));
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 1));
+        e.play_live(Live::ChokeAll);
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (0, 0), "both end");
+        e.play_live(on(0));
+        e.process(&mut out);
+        assert_eq!(voices(&e, 0), 1, "the next note plays");
+    }
+
     /// #21: a sound that plays only by a link is silent while the sound with the notes is
     /// muted; muted alone, it's silent and the Send still plays.
     #[test]
@@ -5877,6 +6598,7 @@ mod tests {
             }],
             length: 1,
             mods: Vec::new(),
+            faders: Vec::new(),
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
@@ -5911,6 +6633,7 @@ mod tests {
             }],
             length: 1,
             mods: Vec::new(),
+            faders: Vec::new(),
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
@@ -5935,6 +6658,20 @@ mod tests {
         e.schedule(0, Live::NoteIn { group: 2, sound: 3, pitch: 40, velocity: 30, thru: false });
         e.process(&mut out);
         assert_eq!(e.live_hit, (2, 2, 3, 40, 30));
+    }
+
+    /// What's recorded says whether it came in over MIDI.
+    #[test]
+    fn a_recorded_note_says_if_it_was_midi() {
+        let mut e = click_engine(1000);
+        e.set_recording(true);
+        let mut out = vec![0f32; 512];
+        e.schedule(0, Live::NoteOn { group: 0, sound: 1, pitch: 72, velocity: 90, length: PPQ });
+        e.schedule(0, Live::NoteIn { group: 0, sound: 0, pitch: 40, velocity: 30, thru: false });
+        e.process(&mut out);
+        let by_pitch = |p: i64| e.recorded.iter().find(|r| r.pitch == p).expect("recorded");
+        assert!(!by_pitch(72).midi, "a pad");
+        assert!(by_pitch(40).midi);
     }
 
     #[test]
@@ -7285,6 +8022,39 @@ mod tests {
         assert!(decay_now(&e).abs() < 1e-6, "{}", decay_now(&e));
     }
 
+    /// A Wander LFO moves a routed parameter along its four-sine sum, doesn't repeat on
+    /// the next beat, and restarts from cycle 0 when triggered by a note.
+    #[test]
+    fn a_wander_lfo_moves_a_routed_parameter_and_retriggers() {
+        use deckard_model::lfo::{Lfo, Shape};
+        let l = Lfo { shape: Shape::Wander, ..Lfo::new(1) };
+        let (_tmp, p) = lfo_project(1, vec![l.clone()]);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        blocks(&mut e, 1);
+        let at_start = decay_now(&e);
+        assert!((at_start - f64::from(l.wave_at(0.0))).abs() < 1e-5, "{at_start}");
+        let one_beat = (e.samples_per_tick() * 960.0 / 256.0).round() as usize;
+        blocks(&mut e, one_beat - 1);
+        let c1 = e.lfo_cycles(&e.lfos[0]);
+        blocks(&mut e, 1);
+        assert!((decay_now(&e) - f64::from(l.wave_at(c1))).abs() < 1e-5);
+        assert!((decay_now(&e) - at_start).abs() > 1e-2, "a cycle later is a new point on the curve");
+
+        let trig = Lfo { shape: Shape::Wander, trigger: Some((0, 1)), fade: 2.0, ..Lfo::new(1) };
+        let (_tmp, p) = lfo_project(1, vec![trig.clone()]);
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(e.lfo_value(1), Some(0.0), "0 before the trigger's first note");
+        e.note_on(0, 1, 60, 100, 240);
+        assert_eq!(e.lfo_cycles(&e.lfos[0]), 0.0, "restarted at the note-on");
+        blocks(&mut e, one_beat);
+        let c = e.lfo_cycles(&e.lfos[0]);
+        let v = e.lfo_value(1).unwrap();
+        assert!((v - trig.output(c, Some(c))).abs() < 1e-4, "{v} vs {}", trig.output(c, Some(c)));
+        e.note_on(0, 1, 60, 100, 240);
+        assert_eq!(e.lfo_cycles(&e.lfos[0]), 0.0, "retriggered back to cycle 0");
+    }
+
     /// Each route's travel is published for its knob (by group, sound and its place in
     /// the sound's routes, read only by the same route): it follows the LFO; a route
     /// gone, or the engine let go, publishes none.
@@ -7368,6 +8138,309 @@ mod tests {
         let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         e.note_on(0, 1, 60, 100, 240);
         assert_eq!(e.lfos[0].trig_at.map(|t| t.1), Some(e.time), "a muted LFO's trigger still counts");
+    }
+
+    /// A MIDI input plug-in for the tests: plays what comes in an octave up, tells what it
+    /// was given, and with `later` plays that many ticks late.
+    struct OctaveUp {
+        seen: Arc<Mutex<Vec<midi_input::NoteIn>>>,
+        stopped: Arc<Mutex<bool>>,
+        later: f64,
+        held: Option<(usize, i64)>,
+    }
+
+    impl midi_input::MidiInput for OctaveUp {
+        fn note(&mut self, note: midi_input::NoteIn, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+            self.seen.lock().unwrap().push(note);
+            let at = clock.now + self.later;
+            match note {
+                midi_input::NoteIn::On { sound, pitch, velocity, length } => {
+                    if length.is_none() {
+                        self.held = Some((sound, pitch + 12));
+                    }
+                    out.on(at, sound, pitch + 12, velocity, length);
+                }
+                midi_input::NoteIn::Off { sound, pitch } => {
+                    self.held = None;
+                    out.off(at, sound, pitch + 12);
+                }
+            }
+        }
+
+        fn stopped(&mut self) {
+            *self.stopped.lock().unwrap() = true;
+        }
+
+        fn finish(&mut self, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+            if let Some((sound, pitch)) = self.held.take() {
+                out.off(clock.now, sound, pitch);
+            }
+        }
+    }
+
+    type NotesIn = Arc<Mutex<Vec<midi_input::NoteIn>>>;
+
+    /// An engine with Group 0's Sound 0 sent out to MIDI, so what it plays can be read, with
+    /// [`OctaveUp`] on the group.
+    fn midi_input_engine(later: f64) -> (Engine, std::sync::mpsc::Receiver<midi::MidiOut>, NotesIn, Arc<Mutex<bool>>) {
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&project(), None, 48_000, Mode::Arrangement, &mut cache);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1024);
+        e.midi_tx = Some(tx);
+        e.midi_routes = vec![vec![Some(midi::OutRoute::Port { port: "Out".into(), channel: 0, transpose: 0 })]];
+        let (seen, stopped) = (NotesIn::default(), Arc::new(Mutex::new(false)));
+        let plugin = OctaveUp { seen: seen.clone(), stopped: stopped.clone(), later, held: None };
+        assert!(e.set_midi_input(0, Some(Box::new(plugin))).is_none());
+        (e, rx, seen, stopped)
+    }
+
+    /// The (status, note) of what went out, and whether each is a note-on.
+    fn midi_notes(rx: &std::sync::mpsc::Receiver<midi::MidiOut>) -> Vec<(bool, u8)> {
+        rx.try_iter()
+            .filter_map(|m| match m.bytes()[0] & 0xf0 {
+                0x90 => Some((true, m.bytes()[1])),
+                0x80 => Some((false, m.bytes()[1])),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A pattern's notes go in with their lengths; only what the plug-in plays is heard.
+    #[test]
+    fn a_midi_input_plugin_takes_a_patterns_notes() {
+        let (mut e, rx, seen, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap()[0], midi_input::NoteIn::On { sound: 0, pitch: 60, velocity: 127, length: Some(240) });
+        assert_eq!(midi_notes(&rx), [(true, 72)], "an octave up, and not as written");
+    }
+
+    /// A key is recorded as played, before the plug-in, and heard as it plays it.
+    #[test]
+    fn a_take_holds_what_was_played_before_a_midi_input_plugin() {
+        let (mut e, rx, seen, _) = midi_input_engine(0.0);
+        e.set_recording(true);
+        blocks(&mut e, 1);
+        seen.lock().unwrap().clear();
+        let _ = midi_notes(&rx);
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap()[0], midi_input::NoteIn::On { sound: 0, pitch: 50, velocity: 90, length: None });
+        assert_eq!(midi_notes(&rx), [(true, 62)]);
+        e.schedule(0, Live::NoteRelease { group: 0, sound: 0, pitch: 50 });
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap()[1], midi_input::NoteIn::Off { sound: 0, pitch: 50 });
+        assert_eq!(midi_notes(&rx), [(false, 62)]);
+        let rec = e.take_recorded();
+        assert_eq!(rec.iter().map(|r| r.pitch).collect::<Vec<_>>(), [50, 50], "{rec:?}");
+    }
+
+    /// What a plug-in plays later plays then, not before.
+    #[test]
+    fn a_midi_input_plugin_plays_at_the_time_it_says() {
+        let (mut e, rx, _, _) = midi_input_engine(120.0);
+        let frames_late = 120.0 * e.samples_per_tick();
+        let early = (frames_late / 256.0).floor() as usize - 1;
+        blocks(&mut e, early);
+        assert_eq!(midi_notes(&rx), [], "120 ticks not gone yet");
+        blocks(&mut e, 3);
+        assert_eq!(midi_notes(&rx), [(true, 72)]);
+    }
+
+    /// Stopping drops what it was still to play and tells it.
+    #[test]
+    fn stopping_ends_what_a_midi_input_plugin_was_to_play() {
+        let (mut e, rx, _, stopped) = midi_input_engine(480.0);
+        blocks(&mut e, 2);
+        e.stop();
+        assert!(*stopped.lock().unwrap());
+        let n = (960.0 * e.samples_per_tick() / 256.0).ceil() as usize;
+        blocks(&mut e, n);
+        assert_eq!(midi_notes(&rx), [], "nothing after the stop");
+    }
+
+    /// Note Echo's echoes come out at their times, and stopping ends those still to come.
+    #[test]
+    fn note_echo_plays_later_and_stops_with_the_song() {
+        let (mut e, rx, _, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        e.set_midi_input(0, Some(Box::new(note_echo::NoteEcho::new())));
+        let _ = midi_notes(&rx);
+
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: 60 });
+        blocks(&mut e, 1);
+        assert_eq!(midi_notes(&rx), [(true, 50)], "the note itself, at once");
+
+        // At its defaults, the first echo is 360 ticks on.
+        let block = 256.0 / e.samples_per_tick();
+        blocks(&mut e, (340.0 / block).floor() as usize);
+        assert!(!midi_notes(&rx).contains(&(true, 50)), "not yet");
+        blocks(&mut e, (40.0 / block).ceil() as usize);
+        assert!(midi_notes(&rx).contains(&(true, 50)), "the first echo");
+
+        e.stop();
+        let _ = midi_notes(&rx);
+        blocks(&mut e, (1200.0 / block).ceil() as usize);
+        assert!(!midi_notes(&rx).contains(&(true, 50)), "the rest are gone");
+    }
+
+    /// A parameter reaches the plug-in, and takes effect on the next note.
+    #[test]
+    fn a_midi_input_plugin_hears_its_parameters() {
+        struct Transpose(i64);
+        impl midi_input::MidiInput for Transpose {
+            fn note(&mut self, note: midi_input::NoteIn, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+                match note {
+                    midi_input::NoteIn::On { sound, pitch, velocity, length } => {
+                        out.on(clock.now, sound, pitch + self.0, velocity, length);
+                    }
+                    midi_input::NoteIn::Off { sound, pitch } => {
+                        out.off(clock.now, sound, pitch + self.0);
+                    }
+                }
+            }
+
+            fn set_param(&mut self, id: u32, value: f64) {
+                if id == 1 {
+                    self.0 = value as i64;
+                }
+            }
+        }
+
+        let (mut e, rx, _, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        e.set_midi_input(0, Some(Box::new(Transpose(0))));
+        let _ = midi_notes(&rx);
+
+        e.set_midi_input_param(0, 1, 5.0);
+        // Nothing there to hear it, and no such group: nothing happens.
+        e.set_midi_input_param(1, 1, 7.0);
+        e.set_midi_input_param(midi_input::SLOTS, 1, 7.0);
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        assert_eq!(midi_notes(&rx), [(true, 55)]);
+    }
+
+    /// Taken out, a plug-in ends what it holds, and notes go straight to the sound again.
+    #[test]
+    fn taking_a_midi_input_plugin_out_ends_its_notes() {
+        let (mut e, rx, seen, _) = midi_input_engine(0.0);
+        blocks(&mut e, 1);
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 50, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        let _ = midi_notes(&rx);
+        assert!(e.set_midi_input(0, None).is_some(), "it comes back, to be freed");
+        assert_eq!(midi_notes(&rx), [(false, 62)]);
+        let before = seen.lock().unwrap().len();
+        e.schedule(0, Live::NoteOn { group: 0, sound: 0, pitch: 55, velocity: 90, length: HELD });
+        blocks(&mut e, 1);
+        assert_eq!(seen.lock().unwrap().len(), before);
+        assert_eq!(midi_notes(&rx), [(true, 55)]);
+    }
+
+    /// A muted sound's notes don't go in, and a slot past the last refuses.
+    #[test]
+    fn a_midi_input_plugin_skips_muted_notes_and_slots_end() {
+        let (mut e, _rx, seen, _) = midi_input_engine(0.0);
+        e.sound_muted = vec![vec![true]];
+        blocks(&mut e, 1);
+        assert!(seen.lock().unwrap().is_empty());
+        let plugin = OctaveUp { seen: NotesIn::default(), stopped: Default::default(), later: 0.0, held: None };
+        assert!(e.set_midi_input(midi_input::SLOTS, Some(Box::new(plugin))).is_some());
+    }
+
+    /// Sounds rendered ahead have their pattern's notes sent in advance. With a plug-in on
+    /// the group they aren't: a plug-in that plays nothing silences them, and one that plays
+    /// its notes is heard.
+    #[test]
+    fn a_midi_input_plugin_takes_notes_from_sounds_rendered_ahead() {
+        struct Silent;
+        impl midi_input::MidiInput for Silent {
+            fn note(&mut self, _: midi_input::NoteIn, _: midi_input::Clock, _: &mut midi_input::Outbox) {}
+        }
+        let (_tmp, p) = eight_project();
+        let loudest = |plugin: Option<Box<dyn midi_input::MidiInput>>| {
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut SampleCache::default());
+            e.looping = true;
+            assert!(e.set_midi_input(0, plugin).is_none());
+            e.render_ahead(700, 2, 256, true);
+            let mut buf = vec![0f32; 512];
+            let mut most = 0f32;
+            for _ in 0..188 {
+                e.process(&mut buf);
+                most = buf.iter().fold(most, |a, s| a.max(s.abs()));
+            }
+            assert_eq!(e.ahead_underruns(), 0);
+            most
+        };
+        assert!(loudest(None) > 0.01, "the project plays");
+        assert_eq!(loudest(Some(Box::new(Silent))), 0.0, "nothing got past it");
+        let plugin = OctaveUp { seen: NotesIn::default(), stopped: Default::default(), later: 0.0, held: None };
+        assert!(loudest(Some(Box::new(plugin))) > 0.01, "what it plays reaches them");
+    }
+
+    /// A plug-in that holds what comes in until the notes are settled, and says what it
+    /// was called with.
+    struct Settling {
+        group: usize,
+        log: Arc<Mutex<Vec<(&'static str, usize, f64)>>>,
+        held: Vec<i64>,
+    }
+
+    impl midi_input::MidiInput for Settling {
+        fn note(&mut self, note: midi_input::NoteIn, clock: midi_input::Clock, _: &mut midi_input::Outbox) {
+            self.log.lock().unwrap().push(("note", self.group, clock.seconds));
+            if let midi_input::NoteIn::On { pitch, .. } = note {
+                self.held.push(pitch);
+            }
+        }
+
+        fn settle(&mut self, clock: midi_input::Clock, out: &mut midi_input::Outbox) {
+            self.log.lock().unwrap().push(("settle", self.group, clock.seconds));
+            for pitch in self.held.drain(..) {
+                out.on(clock.now, 0, pitch, 100, Some(120));
+            }
+        }
+    }
+
+    /// Notes due at one instant all go in before any plug-in settles, in whatever order
+    /// the groups came; each plug-in settles once, and a later instant is another.
+    #[test]
+    fn midi_input_plugins_settle_once_every_note_is_in() {
+        let (mut e, rx, _, _) = midi_input_engine(0.0);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        for group in [0, 1] {
+            let plugin = Settling { group, log: log.clone(), held: Vec::with_capacity(8) };
+            e.set_midi_input(group, Some(Box::new(plugin)));
+        }
+        e.next = e.timeline.events.len();
+        blocks(&mut e, 4);
+        assert!(log.lock().unwrap().is_empty(), "no notes, nothing to settle");
+        let _ = midi_notes(&rx);
+        // Group 1's first: the later group's chord has to be in before group 0 settles.
+        for (group, pitch) in [(1, 50), (0, 60), (0, 64)] {
+            e.schedule(0, Live::NoteOn { group, sound: 0, pitch, velocity: 100, length: HELD });
+        }
+        blocks(&mut e, 1);
+        let seen: Vec<(&str, usize)> = log.lock().unwrap().iter().map(|&(what, g, _)| (what, g)).collect();
+        assert_eq!(seen, [("note", 1), ("note", 0), ("note", 0), ("settle", 0), ("settle", 1)]);
+        assert_eq!(midi_notes(&rx), [(true, 60), (true, 64)], "what group 0 played, together, once settled");
+        let now = log.lock().unwrap()[0].2;
+        assert!((now - 4.0 * 256.0 / 48_000.0).abs() < 1e-9, "seconds run with the clock: {now}");
+        log.lock().unwrap().clear();
+        blocks(&mut e, 2);
+        assert!(log.lock().unwrap().is_empty(), "settled once");
+    }
+
+    /// An engine that replaces this one has its plug-ins, told the song stopped.
+    #[test]
+    fn a_new_engine_keeps_the_midi_input_plugins() {
+        let (mut old, _rx, seen, stopped) = midi_input_engine(0.0);
+        let mut cache = SampleCache::default();
+        let (mut new, _) = Engine::new(&project(), None, 48_000, Mode::Arrangement, &mut cache);
+        new.take_midi_inputs(&mut old);
+        assert!(*stopped.lock().unwrap());
+        blocks(&mut new, 1);
+        assert!(!seen.lock().unwrap().is_empty());
     }
 
     /// A CC route from Square LFO 1 (high 0.5) to CC 74 on channel 3 of "Synth", and what
@@ -8163,6 +9236,52 @@ mod tests {
         assert!((v - 0.9).abs() < 1e-6, "0.5 up 0.4: {v}");
     }
 
+    /// Pattern modulation lanes move the Sampler's parameters and a plug-in's parameters
+    /// while playing, and let go when stopped.
+    #[test]
+    fn modulation_moves_the_sampler_and_a_plugin_while_playing() {
+        let (_tmp, mut p) = eight_project();
+        let len = p.groups[0].patterns[0].length.max(p.bar_length());
+        let base_cutoff = p.groups[0].sounds[1].sampler.as_ref().unwrap().get("cutoff");
+        let class = deckard_plugins::native::CLASSES[0];
+        let param = class.params.iter().find(|x| x.steps == 0).unwrap();
+        let id = param.id;
+        let pr = deckard_model::PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
+        let snd2 = &mut p.groups[0].sounds[2];
+        snd2.sampler = None;
+        snd2.plugin = Some(pr.clone());
+        snd2.slots = vec![deckard_model::SlotInfo {
+            module: "PluginHost".into(),
+            name: class.name.into(),
+            active: true,
+            plugin: Some(pr),
+            params: vec![(id.to_string(), 0.25)],
+        }];
+        let pt = |sound, field: &str, position, value| deckard_model::ModPoint {
+            sound: Some(sound),
+            slot: Some(0),
+            field: field.into(),
+            position,
+            value,
+        };
+        let id_field = id.to_string();
+        p.groups[0].patterns[0].mods =
+            vec![pt(1, "cutoff", 0, -0.5), pt(1, "cutoff", len, -0.5), pt(2, &id_field, 0, 0.5), pt(2, &id_field, len, 0.5)];
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        blocks(&mut e, 2);
+        let cutoff = e.sounds[0][1].as_ref().unwrap().settings_cutoff();
+        assert!((f64::from(cutoff) - (base_cutoff - 0.5).clamp(0.0, 1.0)).abs() < 1e-4, "{cutoff} vs {base_cutoff}");
+        let plugin = e.instruments[0][2].as_ref().unwrap().plugin.clone();
+        let want = (param.default + 0.5).clamp(0.0, 1.0);
+        assert!((plugin.lock().unwrap().modulated(id).unwrap() - want).abs() < 1e-9);
+        e.sequencing = false;
+        blocks(&mut e, 2);
+        let cutoff = e.sounds[0][1].as_ref().unwrap().settings_cutoff();
+        assert!((f64::from(cutoff) - base_cutoff).abs() < 1e-4, "stopped: back to {base_cutoff} ({cutoff})");
+        assert_eq!(plugin.lock().unwrap().modulated(id), None, "stopped: plug-in back to its knob");
+    }
+
     /// A group's Perform FX: engaged (Reso Echo, the strip low) it's heard; not engaged,
     /// the group sounds as without it. (Reso Echo: released with nothing to ring out,
     /// Maschine's passes the input through exactly. Its Filter doesn't: it always runs
@@ -8716,6 +9835,141 @@ mod tests {
         assert!(ducked < alone * 0.1, "held down by sound 1's side-chain: {ducked} vs {alone}");
     }
 
+    /// Group routing: a Limiter on group 0 side-chained from sound 1 (routed to None)
+    /// ducks group 0's output when sound 1 plays.
+    #[test]
+    fn sidechain_ducks_a_group() {
+        let mut p = project();
+        let click = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(click);
+        let lim = vec![("mode".into(), 1.0), ("threshold".into(), -30.0), ("release".into(), 0.5), ("ceiling".into(), 1.0)];
+        p.groups[0].slots =
+            vec![deckard_model::SlotInfo { module: "Limiter".into(), name: "Limiter".into(), active: true, plugin: None, params: lim }];
+        p.groups[0].channel.sidechain = vec![(0, deckard_model::ScSource::Sound(0, 1))];
+        p.groups[0].sounds[1].channel.dest = deckard_model::AudioDest::None;
+        let peak = |with_source: bool| {
+            let mut e = click_engine_for(&p, 48_000);
+            e.sequencing = false;
+            e.note_on(0, 0, 60, 127, 960);
+            if with_source {
+                e.note_on(0, 1, 60, 127, 960);
+            }
+            let mut out = vec![0f32; 2 * 4800];
+            e.process(&mut out);
+            out.iter().fold(0f32, |m, v| m.max(v.abs()))
+        };
+        let (alone, ducked) = (peak(false), peak(true));
+        assert!(alone > 0.5, "group 0 alone passes: {alone}");
+        assert!(ducked < alone * 0.1, "group 0 held down by sound 1's side-chain: {ducked} vs {alone}");
+    }
+
+    /// Plug-in side-chain routing: a plug-in effect with a side-chain input receives the
+    /// routed side-chain audio (filtered through its `SidechainFilter`) on both Sound and
+    /// Group chains.
+    #[test]
+    fn sidechain_ducks_a_plugin_effect() {
+        struct Duck;
+        impl deckard_plugins::native::Engine for Duck {
+            fn set_param(&mut self, _: u32, _: f64) {}
+            fn note_on(&mut self, _: u8, _: u8) {}
+            fn note_off(&mut self, _: u8) {}
+            fn reset(&mut self) {}
+            fn has_sidechain(&self) -> bool {
+                true
+            }
+            fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &deckard_plugins::Transport) {}
+            fn process_sc(
+                &mut self,
+                left: &mut [f32],
+                right: &mut [f32],
+                sidechain: Option<(&[f32], &[f32])>,
+                _: &deckard_plugins::Transport,
+            ) {
+                if let Some((sl, sr)) = sidechain {
+                    for i in 0..left.len() {
+                        let sc = sl[i].abs().max(sr[i].abs());
+                        let g = (1.0 - sc * 4.0).max(0.0);
+                        left[i] *= g;
+                        right[i] *= g;
+                    }
+                }
+            }
+        }
+        static DUCK_CLASS: deckard_plugins::native::Class = deckard_plugins::native::Class {
+            cid: *b"DKRDTESTDUCKFX01",
+            name: "Duck",
+            instrument: false,
+            params: &[],
+            pages: &[],
+            make: |_| Box::new(Duck),
+        };
+
+        let run = |on_group: bool, with_source: bool, sc_gain: f64| {
+            let mut p = project();
+            let click = p.groups[0].sounds[0].clone();
+            p.groups[0].sounds.push(click);
+            p.groups[0].sounds[1].channel.dest = deckard_model::AudioDest::None;
+            let plugin_id = DUCK_CLASS.plugin_id();
+            let plug_slot = deckard_model::SlotInfo {
+                module: "PluginHost".into(),
+                name: "Duck".into(),
+                active: true,
+                plugin: Some(deckard_model::PluginRef { id: plugin_id.clone(), name: "Duck".into(), chunk: Vec::new(), pages: Vec::new() }),
+                params: vec![
+                    ("side_chain_filter/gain".into(), sc_gain),
+                    ("side_chain_filter/center_freq".into(), 0.5),
+                    ("side_chain_filter/width".into(), 0.5),
+                ],
+            };
+            let host_slot = if on_group {
+                p.groups[0].slots = vec![plug_slot];
+                p.groups[0].channel.sidechain = vec![(0, deckard_model::ScSource::Sound(0, 1))];
+                deckard_plugins::Slot::Group { group: 0, slot: 0 }
+            } else {
+                p.groups[0].sounds[0].slots = vec![
+                    deckard_model::SlotInfo {
+                        module: "Sampler".into(),
+                        name: "Sampler".into(),
+                        active: true,
+                        plugin: None,
+                        params: Vec::new(),
+                    },
+                    plug_slot,
+                ];
+                p.groups[0].sounds[0].channel.sidechain = vec![(1, deckard_model::ScSource::Sound(0, 1))];
+                deckard_plugins::Slot::Chain { group: 0, sound: 0, slot: 1 }
+            };
+            let mut cache = SampleCache::default();
+            let id = deckard_plugins::state::PluginId::parse(&plugin_id, "Duck").unwrap();
+            cache.plugins.insert(host_slot, deckard_plugins::Plugin::native(&DUCK_CLASS, id, "Duck", 48_000.0));
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            let mut frames = vec![[0f32; 2]; 100];
+            frames[0] = [1.0, 1.0];
+            set_sample(&mut e, frames, &[], false);
+            e.sequencing = false;
+            e.note_on(0, 0, 60, 127, 960);
+            if with_source {
+                e.note_on(0, 1, 60, 127, 960);
+            }
+            let mut out = vec![0f32; 2 * 480];
+            e.process(&mut out);
+            out.iter().fold(0f32, |m, v| m.max(v.abs()))
+        };
+
+        for on_group in [false, true] {
+            let alone = run(on_group, false, 0.5);
+            let ducked = run(on_group, true, 0.5);
+            let attenuated_sc = run(on_group, true, 0.0);
+            assert!(alone > 0.5, "on_group={on_group}: passes without side-chain: {alone}");
+            assert!(ducked < 0.01, "on_group={on_group}: ducked by side-chain: {ducked}");
+            assert!(
+                (attenuated_sc - alone * 0.6).abs() < 1e-3,
+                "on_group={on_group}: side_chain_filter/gain=0 (-20 dB) scales side-chain by 0.1: {attenuated_sc} vs {}",
+                alone * 0.6
+            );
+        }
+    }
+
     /// Playing patterns, rendering ahead, updated as the app updates (incrementally): a
     /// sound whose Compressor is side-chained from another goes silent when muted.
     #[test]
@@ -9072,7 +10326,7 @@ mod tests {
     /// [`Split`] as an effect in `owner`'s slot of `p`, listening as the engine sets it.
     fn split_unit(owner: deckard_model::extra_out::Owner, p: &Project) -> Unit {
         let plugin = split_plugin(&SPLIT);
-        let mut u = Unit::new(FxUnit::Plugin(plugin.clone()), 0, Vec::new(), true);
+        let mut u = Unit::new(plugin_unit(plugin.clone(), &[], 1000.0), 0, Vec::new(), true);
         u.listen(owner, &plugin, &SPLIT.plugin_id(), p);
         u
     }
@@ -9239,14 +10493,14 @@ mod tests {
             channels: Default::default(),
         };
         b.extra_outs = vec![strip.clone()];
-        let r = reuse_of(&a, &b, 0, 0, 1000.0);
+        let r = reuse_of(&a, &b, 0, 0, 1000.0, &deckard_plugins::Host::default());
         assert!(!r.chain && r.instrument);
         b.extra_outs[0].owner = Owner::Sound(0, 0);
-        let r = reuse_of(&a, &b, 0, 0, 1000.0);
+        let r = reuse_of(&a, &b, 0, 0, 1000.0, &deckard_plugins::Host::default());
         assert!(r.chain && !r.instrument);
         let mut c = b.clone();
         c.extra_outs[0].level = 0.5;
-        let r = reuse_of(&b, &c, 0, 0, 1000.0);
+        let r = reuse_of(&b, &c, 0, 0, 1000.0, &deckard_plugins::Host::default());
         assert!(r.chain && r.instrument, "a level is no new strip");
     }
 
@@ -9286,7 +10540,7 @@ mod tests {
         let class = deckard_plugins::native::CLASSES[0];
         let plugin = split_plugin(class);
         let p = project();
-        let mut u = Unit::new(FxUnit::Plugin(plugin.clone()), 0, Vec::new(), true);
+        let mut u = Unit::new(plugin_unit(plugin.clone(), &[], 1000.0), 0, Vec::new(), true);
         u.listen(Owner::Master(0), &plugin, &class.plugin_id(), &p);
         assert_eq!(u.scan, 0);
         e.master_fx.as_mut().unwrap().units[0] = u;
@@ -9377,7 +10631,7 @@ mod tests {
         }
     }
 
-    fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+    fn near_pair(a: (f32, f32), b: (f32, f32)) -> bool {
         about(a.0, b.0) && about(a.1, b.1)
     }
 
@@ -9387,12 +10641,12 @@ mod tests {
     fn a_strip_on_ext_reaches_that_output() {
         let mut x = Strips::new(|_| {});
         let (master, out3) = x.block(0.5);
-        assert!(near(out3, (0.25, 0.25)), "Out 3: {out3:?}");
-        assert!(near(master, (0.5, 0.5)), "the master: {master:?}");
+        assert!(near_pair(out3, (0.25, 0.25)), "Out 3: {out3:?}");
+        assert!(near_pair(master, (0.5, 0.5)), "the master: {master:?}");
         let mut t = Telemetry::default();
         x.e.publish(&mut t);
         assert_eq!(t.extra_meters.len(), 1);
-        assert!(near(t.extra_meters[0], (0.25, 0.25)), "{:?}", t.extra_meters);
+        assert!(near_pair(t.extra_meters[0], (0.25, 0.25)), "{:?}", t.extra_meters);
     }
 
     /// A strip's level and pan are its own: the owner's fader and the master's don't
@@ -9401,16 +10655,16 @@ mod tests {
     fn a_strips_level_and_pan_are_its_own() {
         let mut x = Strips::new(|p| (p.extra_outs[0].level, p.extra_outs[0].pan) = (0.5, -1.0));
         let left = 0.25 * 0.5 * std::f32::consts::SQRT_2;
-        assert!(near(x.block(0.5).1, (left, 0.0)), "{:?}", x.block(0.5));
+        assert!(near_pair(x.block(0.5).1, (left, 0.0)), "{:?}", x.block(0.5));
         let buf = x.e.fx[0][0].as_ref().unwrap().units[0].extras[0].buf.as_ptr();
         x.edit(|p| (p.groups[0].sounds[0].level, p.groups[0].level, p.master_level) = (0.3, 0.4, 0.2));
         x.block(0.5);
         let (master, out3) = x.block(0.5);
-        assert!(near(out3, (left, 0.0)), "the faders above don't move it: {out3:?}");
+        assert!(near_pair(out3, (left, 0.0)), "the faders above don't move it: {out3:?}");
         assert!(master.0 < 0.1, "they move the main pair: {master:?}");
         x.edit(|p| (p.extra_outs[0].level, p.extra_outs[0].pan) = (1.0, 0.0));
         x.block(0.5);
-        assert!(near(x.block(0.5).1, (0.25, 0.25)), "its own do");
+        assert!(near_pair(x.block(0.5).1, (0.25, 0.25)), "its own do");
         assert_eq!(x.e.fx[0][0].as_ref().unwrap().units[0].extras[0].buf.as_ptr(), buf, "the chain was kept");
     }
 
@@ -9424,8 +10678,8 @@ mod tests {
         });
         let (master, out3) = x.block(0.5);
         let g = deckard_model::level_gain(0.5) as f32;
-        assert!(near(out3, (0.0, 0.0)));
-        assert!(near(master, (0.5 + 0.25 * g, 0.5 + 0.25 * g)), "{master:?}");
+        assert!(near_pair(out3, (0.0, 0.0)));
+        assert!(near_pair(master, (0.5 + 0.25 * g, 0.5 + 0.25 * g)), "{master:?}");
     }
 
     /// A strip into a sound goes through that sound's fader, then where it goes.
@@ -9437,8 +10691,8 @@ mod tests {
         });
         let (master, out3) = x.block(0.5);
         let s = deckard_model::level_gain(0.5) as f32;
-        assert!(near(out3, (0.0, 0.0)));
-        assert!(near(master, (0.5 + 0.25 * s, 0.5 + 0.25 * s)), "{master:?}");
+        assert!(near_pair(out3, (0.0, 0.0)));
+        assert!(near_pair(master, (0.5 + 0.25 * s, 0.5 + 0.25 * s)), "{master:?}");
     }
 
     /// A strip on an output the interface doesn't have connected plays through its
@@ -9448,11 +10702,11 @@ mod tests {
         let mut x = Strips::new(|_| {});
         x.e.set_connected_outputs(0b1);
         let (master, out3) = x.block(0.5);
-        assert!(near(out3, (0.0, 0.0)), "{out3:?}");
-        assert!(near(master, (0.75, 0.75)), "{master:?}");
+        assert!(near_pair(out3, (0.0, 0.0)), "{out3:?}");
+        assert!(near_pair(master, (0.75, 0.75)), "{master:?}");
         x.e.set_connected_outputs(0b101);
         let (master, out3) = x.block(0.5);
-        assert!(near(out3, (0.25, 0.25)) && near(master, (0.5, 0.5)), "{master:?} {out3:?}");
+        assert!(near_pair(out3, (0.25, 0.25)) && near_pair(master, (0.5, 0.5)), "{master:?} {out3:?}");
     }
 
     /// A muted sound, or a muted group, keeps its plug-in running for an audible strip:
@@ -9466,11 +10720,11 @@ mod tests {
                 p.groups[0].sounds[0].channel.audio_mute = audio_mute;
             });
             let (master, out3) = x.block(0.5);
-            assert!(near(master, (0.0, 0.0)) && near(out3, (0.25, 0.25)), "sound (audio mute {audio_mute}): {master:?} {out3:?}");
+            assert!(near_pair(master, (0.0, 0.0)) && near_pair(out3, (0.25, 0.25)), "sound (audio mute {audio_mute}): {master:?} {out3:?}");
         }
         let mut x = Strips::new(|p| p.groups[0].muted = true);
         let (master, out3) = x.block(0.5);
-        assert!(near(master, (0.0, 0.0)) && near(out3, (0.25, 0.25)), "its group muted: {master:?} {out3:?}");
+        assert!(near_pair(master, (0.0, 0.0)) && near_pair(out3, (0.25, 0.25)), "its group muted: {master:?} {out3:?}");
         // The group's own plug-in (its sounds go into it as ever).
         let mut x = Strips::new(|p| {
             p.groups[0].sounds[0].slots.clear();
@@ -9479,12 +10733,12 @@ mod tests {
             p.groups[0].muted = true;
         });
         let (master, out3) = x.block(0.5);
-        assert!(near(master, (0.0, 0.0)) && near(out3, (0.25, 0.25)), "the group's plug-in: {master:?} {out3:?}");
+        assert!(near_pair(master, (0.0, 0.0)) && near_pair(out3, (0.25, 0.25)), "the group's plug-in: {master:?} {out3:?}");
         // Unmuted again: as before.
         x.edit(|p| p.groups[0].muted = false);
         x.block(0.5);
         let (master, out3) = x.block(0.5);
-        assert!(near(master, (0.5, 0.5)) && near(out3, (0.25, 0.25)), "unmuted: {master:?} {out3:?}");
+        assert!(near_pair(master, (0.5, 0.5)) && near_pair(out3, (0.25, 0.25)), "unmuted: {master:?} {out3:?}");
         // Without a strip that sounds, a muted owner is silent as ever.
         let mut x = Strips::new(|p| {
             p.groups[0].sounds[0].muted = true;
@@ -9492,7 +10746,7 @@ mod tests {
             p.extra_outs[0].muted = true;
         });
         assert!(x.e.in_routes.is_empty(), "not played");
-        assert!(near(x.block(0.5).0, (0.0, 0.0)));
+        assert!(near_pair(x.block(0.5).0, (0.0, 0.0)));
     }
 
     /// [`split_block`] with `(l, r)` on In 1.
@@ -9514,17 +10768,17 @@ mod tests {
         let mut x = Strips::new(|p| p.extra_outs[0].channels = Channels::Mono);
         // In 1 (0.8, 0.2): the pair is half of it, (0.4, 0.1); its sum halved, 0.25.
         let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.25, 0.25)), "Out 3: {:?}", ext[2]);
-        assert!(near(master, (0.8, 0.2)), "the main pair as it is: {master:?}");
+        assert!(near_pair(ext[2], (0.25, 0.25)), "Out 3: {:?}", ext[2]);
+        assert!(near_pair(master, (0.8, 0.2)), "the main pair as it is: {master:?}");
         x.edit(|p| p.extra_outs[0].pan = -1.0);
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.25 * std::f32::consts::SQRT_2, 0.0)), "panned left: {:?}", ext[2]);
+        assert!(near_pair(ext[2], (0.25 * std::f32::consts::SQRT_2, 0.0)), "panned left: {:?}", ext[2]);
         // Stereo again: each side its own.
         x.edit(|p| (p.extra_outs[0].pan, p.extra_outs[0].channels) = (0.0, Channels::Stereo));
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.4, 0.1)), "stereo: {:?}", ext[2]);
+        assert!(near_pair(ext[2], (0.4, 0.1)), "stereo: {:?}", ext[2]);
     }
 
     /// The halves of a split strip each play one side of the pair on both sides, with
@@ -9534,7 +10788,7 @@ mod tests {
         use deckard_model::extra_out::{self, Channels};
         let mut x = Strips::new(|_| {});
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.4, 0.1)), "stereo first: {:?}", ext[2]);
+        assert!(near_pair(ext[2], (0.4, 0.1)), "stereo first: {:?}", ext[2]);
         x.edit(|p| {
             extra_out::split(&mut p.extra_outs, 0);
             p.extra_outs[1].level = 0.5;
@@ -9543,18 +10797,18 @@ mod tests {
         assert_eq!(x.p.extra_outs.iter().map(|e| e.channels).collect::<Vec<_>>(), vec![Channels::Left, Channels::Right]);
         stereo_block(&mut x.e, 0.8, 0.2);
         let (master, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.4, 0.4)), "L on Out 3: {:?}", ext[2]);
-        assert!(near(ext[3], (0.05, 0.05)), "R at half on Out 4: {:?}", ext[3]);
-        assert!(near(master, (0.8, 0.2)), "the main pair: {master:?}");
+        assert!(near_pair(ext[2], (0.4, 0.4)), "L on Out 3: {:?}", ext[2]);
+        assert!(near_pair(ext[3], (0.05, 0.05)), "R at half on Out 4: {:?}", ext[3]);
+        assert!(near_pair(master, (0.8, 0.2)), "the main pair: {master:?}");
         let mut t = Telemetry::default();
         x.e.publish(&mut t);
         assert_eq!(t.extra_meters.len(), 2);
-        assert!(near(t.extra_meters[0], (0.4, 0.4)) && near(t.extra_meters[1], (0.05, 0.05)), "{:?}", t.extra_meters);
+        assert!(near_pair(t.extra_meters[0], (0.4, 0.4)) && near_pair(t.extra_meters[1], (0.05, 0.05)), "{:?}", t.extra_meters);
         // Joined: stereo again, with the left half's settings.
         x.edit(|p| extra_out::join(&mut p.extra_outs, 1));
         stereo_block(&mut x.e, 0.8, 0.2);
         let (_, ext) = stereo_block(&mut x.e, 0.8, 0.2);
-        assert!(near(ext[2], (0.4, 0.1)) && near(ext[3], (0.0, 0.0)), "{:?} {:?}", ext[2], ext[3]);
+        assert!(near_pair(ext[2], (0.4, 0.1)) && near_pair(ext[3], (0.0, 0.0)), "{:?} {:?}", ext[2], ext[3]);
     }
 
     /// A muted strip is silent; the main pair plays on.
@@ -9562,7 +10816,7 @@ mod tests {
     fn a_muted_strip_is_silent() {
         let mut x = Strips::new(|p| p.extra_outs[0].muted = true);
         let (master, out3) = x.block(0.5);
-        assert!(near(out3, (0.0, 0.0)) && near(master, (0.5, 0.5)), "{master:?} {out3:?}");
+        assert!(near_pair(out3, (0.0, 0.0)) && near_pair(master, (0.5, 0.5)), "{master:?} {out3:?}");
     }
 
     /// Taking the plug-in away (its strip with it, or left behind) while playing: no
@@ -9580,7 +10834,7 @@ mod tests {
             });
             x.block(0.5);
             let (master, out3) = x.block(0.5);
-            assert!(near(out3, (0.0, 0.0)) && near(master, (0.5, 0.5)), "{master:?} {out3:?}");
+            assert!(near_pair(out3, (0.0, 0.0)) && near_pair(master, (0.5, 0.5)), "{master:?} {out3:?}");
             let mut t = Telemetry::default();
             x.e.publish(&mut t);
             assert_eq!(t.extra_meters.len(), x.p.extra_outs.len());
@@ -9623,6 +10877,349 @@ mod tests {
         assert!(plain.iter().any(|v| v.abs() > 1e-3), "it plays");
         assert_eq!(plain, with);
         assert_eq!(others, 0.0);
+    }
+
+    /// A fader's lane: a channel's `field`, with no slot.
+    fn fader_lane(field: &str) -> deckard_model::ModTarget {
+        deckard_model::ModTarget { slot: None, field: field.into() }
+    }
+
+    fn fader_point(sound: Option<usize>, field: &str, position: i64, value: f64) -> deckard_model::ModPoint {
+        deckard_model::ModPoint { sound, slot: None, field: field.into(), position, value }
+    }
+
+    fn fader_project() -> Project {
+        input_project()
+    }
+
+    fn fader_engine(p: &Project) -> Engine {
+        input_project_engine(p)
+    }
+
+    /// A project with no notes whose only sound takes In 1, in a looped bar.
+    fn input_project() -> Project {
+        let mut p = project();
+        p.groups[0].patterns[0].notes.clear();
+        p.groups[0].sounds[0].channel.audio_in = deckard_model::AudioSource::Ext(0);
+        p
+    }
+
+    fn input_project_engine(p: &Project) -> Engine {
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(p, None, 1000, Mode::Arrangement, &mut cache);
+        e.live_in = Some(Default::default());
+        e.looping = true;
+        e
+    }
+
+    /// What a steady 0.5 on In 1 comes out as after `frames`, gains settled.
+    fn steady(e: &mut Engine, frames: usize) -> (f32, f32) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        // In short blocks: gains move at each block's start.
+        let mut out = vec![0f32; frames * 2];
+        for block in out.chunks_mut(16) {
+            e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, block.len() / 2));
+            e.process(block);
+        }
+        (out[frames * 2 - 2], out[frames * 2 - 1])
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// `frames` of a steady 0.5 on In 1, as `steady`, with Out 1-2 as buffers: what the
+    /// master's output and Out 2 end on.
+    fn steady_outs(e: &mut Engine, frames: usize) -> (f32, f32) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        let mut last = (0.0, 0.0);
+        for _ in 0..frames / 8 {
+            e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 8));
+            let mut out = vec![0f32; 16];
+            let mut ext = vec![vec![0f32; 16]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            last = (out[14], ext[1][14]);
+        }
+        last
+    }
+
+    /// The cue bus's meter reads what's on it, at its level; a channel not on it, nothing.
+    #[test]
+    fn the_cue_meter_reads_what_is_on_the_bus() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        p.cue_level = deckard_model::level_from_db(-6.0);
+        let g = deckard_model::level_gain(p.cue_level) as f32;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady_outs(&mut e, 80);
+        assert_eq!(e.cue.peak, (0.0, 0.0), "nothing on it");
+        p.groups[0].sounds[0].cue = true;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, cue) = steady_outs(&mut e, 80);
+        assert!(near(master, 0.0) && near(cue, 0.5 * g), "on Out 2: {master} {cue}");
+        assert!(near(e.cue.peak.0, 0.5 * g) && near(e.cue.peak.1, 0.5 * g), "{:?}", e.cue.peak);
+    }
+
+    /// On the master's output, the meter shows the bus, not what's divided by the master's
+    /// gain to get past it.
+    #[test]
+    fn the_cue_meter_is_past_the_masters_gain() {
+        let mut p = input_project();
+        p.master_level = deckard_model::level_from_db(-12.0);
+        p.groups[0].sounds[0].cue = true;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady(&mut e, 80);
+        assert!(near(e.cue.peak.0, 0.5), "{:?}", e.cue.peak);
+    }
+
+    /// A group is on the bus through its sounds, or with effects, its own bus; a sound
+    /// through a group with effects on the bus isn't itself.
+    #[test]
+    fn what_is_on_the_cue_bus_follows_the_routes() {
+        use deckard_model::AudioDest as D;
+        let mut p = input_project();
+        p.groups[0].cue = true;
+        assert!(CueBus::of(&p).sounds[0][0], "through its group");
+        assert!(CueBus::of(&p).groups[0]);
+        p.groups[0].slots = vec![driven_saturator()];
+        assert!(!CueBus::of(&p).sounds[0][0], "its group's bus is");
+        assert!(CueBus::of(&p).groups[0]);
+        p.groups[0].slots.clear();
+        p.groups[0].cue = false;
+        p.groups[0].sounds[0].channel.dest = D::Master;
+        assert!(!CueBus::of(&p).sounds[0][0]);
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady(&mut e, 80);
+        assert_eq!(e.cue.peak, (0.0, 0.0));
+        // With effects and on the bus: metered after them.
+        p.groups[0].sounds[0].channel.dest = D::Parent;
+        p.groups[0].slots = vec![driven_saturator()];
+        p.groups[0].cue = true;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady(&mut e, 400);
+        assert!(e.cue.peak.0 > 0.1, "{:?}", e.cue.peak);
+    }
+
+    /// The prehear of a sample `at` frames long, in `blocks` of 8, into Out 1-2.
+    fn hear(e: &mut Engine, blocks: usize) -> (f32, f32) {
+        e.prehear(Some(Arc::new(Sample { rate: e.sr as u32, frames: vec![[0.5, 0.5]; 1000] })), 1.0);
+        let (mut master, mut cue) = (0f32, 0f32);
+        for _ in 0..blocks {
+            let mut out = vec![0f32; 16];
+            let mut ext = vec![vec![0f32; 16]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            master = master.max(out[14].abs());
+            cue = cue.max(ext[1][14].abs());
+        }
+        (master, cue)
+    }
+
+    /// The metronome and the prehear are on the cue bus: its output, its level, its meter.
+    #[test]
+    fn the_prehear_is_on_the_cue_bus() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        p.cue_level = deckard_model::level_from_db(-6.0);
+        let g = deckard_model::level_gain(p.cue_level) as f32;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, cue) = hear(&mut e, 20);
+        assert_eq!(master, 0.0);
+        assert!(near(cue, 0.5 * g), "{cue}");
+        assert!(near(e.cue.peak.0, 0.5 * g), "{:?}", e.cue.peak);
+    }
+
+    /// The metronome goes the same way.
+    #[test]
+    fn the_click_is_on_the_cue_bus() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        // (At a rate a click can be heard at.)
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.metronome = true;
+        let mut master = 0f32;
+        let mut cue = 0f32;
+        for _ in 0..40 {
+            let mut out = vec![0f32; 16];
+            let mut ext = vec![vec![0f32; 16]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            master = out.iter().fold(master, |m, v| m.max(v.abs()));
+            cue = ext[1].iter().fold(cue, |m, v| m.max(v.abs()));
+        }
+        assert_eq!(master, 0.0);
+        assert!(cue > 0.01, "{cue}");
+        assert!(e.cue.peak.0 > 0.01, "{:?}", e.cue.peak);
+    }
+
+    /// With the cue on the master's output (the default), they sound there, the master's
+    /// fader not in the way.
+    #[test]
+    fn the_prehear_on_the_masters_output_is_past_its_fader() {
+        let mut p = input_project();
+        p.master_level = deckard_model::level_from_db(-12.0);
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, _) = hear(&mut e, 20);
+        assert!(near(master, 0.5), "{master}");
+    }
+
+    /// A cue output the interface doesn't have: they go on being heard, on the master's.
+    #[test]
+    fn the_prehear_falls_back_to_the_masters_output() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(7);
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, _) = hear(&mut e, 20);
+        assert!(master > 0.1, "{master}");
+        p.cue_output = deckard_model::AudioDest::None;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, _) = hear(&mut e, 20);
+        assert!(near(master, 0.5), "no cue output at all: {master}");
+    }
+
+    /// A sound's level follows its lane while the pattern plays, from its fader's place;
+    /// stopped, it's the fader's own again.
+    #[test]
+    fn a_lane_moves_a_sounds_level() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, -0.25)];
+        assert_eq!(sound_gain(&p, 0, 0), (1.0, 1.0), "its fader isn't in the route");
+        let mut e = fader_engine(&p);
+        let want = 0.5 * deckard_model::level_gain(0.5) as f32;
+        assert!(near(steady(&mut e, 100).0, want), "the lane: {want}");
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.5), "stopped: the fader's own");
+    }
+
+    /// Points are joined by lines, and the lane holds only where its pattern plays.
+    #[test]
+    fn a_lane_is_followed_along_the_pattern() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, 0.0), fader_point(Some(0), "level", 2 * PPQ, -0.5)];
+        let t = timeline(&p, Mode::Arrangement);
+        assert_eq!(t.faders.len(), 2, "a pass per bar of the section: {:?}", t.faders);
+        assert_eq!((t.faders[1].from, t.faders[1].to), (4 * PPQ, 8 * PPQ));
+        let mut e = fader_engine(&p);
+        // A quarter is 500 frames at 120 BPM and 1000 Hz: there, half way (a little behind
+        // it, gliding); past the last point, it holds.
+        let halfway = steady(&mut e, 500).0;
+        assert!((halfway - 0.5 * deckard_model::level_gain(0.5) as f32).abs() < 0.02, "{halfway}");
+        let held = steady(&mut e, 600).0;
+        assert!(near(held, 0.5 * deckard_model::level_gain(0.25) as f32), "{held}");
+    }
+
+    /// A fader at the bottom still rises with its lane (no gain to scale from).
+    #[test]
+    fn a_lane_lifts_a_silent_fader() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].level = 0.0;
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, 0.75)];
+        let mut e = fader_engine(&p);
+        assert!(near(steady(&mut e, 100).0, 0.5));
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.0));
+    }
+
+    /// Pan's lane: a deviation of its knob's travel, which covers −1..1.
+    #[test]
+    fn a_lane_moves_a_sounds_pan() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("pan")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "pan", 0, 0.5)];
+        let mut e = fader_engine(&p);
+        let (l, r) = steady(&mut e, 100);
+        assert!(l.abs() < 1e-4 && r > 0.5, "right: {l} {r}");
+        e.sequencing = false;
+        let (l, r) = steady(&mut e, 100);
+        assert!(near(l, r), "the middle again: {l} {r}");
+    }
+
+    /// A group's lane moves the sounds that go through it, and with effects, its bus.
+    #[test]
+    fn a_lane_moves_a_groups_level() {
+        let mut p = fader_project();
+        p.groups[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(None, "level", 0, -0.25)];
+        let mut e = fader_engine(&p);
+        assert_eq!(e.sound_faders[0][0], [0], "no bus: on the sound's way out");
+        let want = 0.5 * deckard_model::level_gain(0.5) as f32;
+        assert!(near(steady(&mut e, 100).0, want));
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.5));
+        // With effects, it's after them.
+        p.groups[0].slots = vec![driven_saturator()];
+        let mut e = fader_engine(&p);
+        assert!(e.sound_faders[0][0].is_empty());
+        assert_eq!(e.bus_faders[0], [0]);
+        let moved = steady(&mut e, 500).0;
+        e.sequencing = false;
+        let own = steady(&mut e, 500).0;
+        assert!((moved / own - deckard_model::level_gain(0.5) as f32).abs() < 1e-3, "{moved} / {own}");
+    }
+
+    /// Only the faders a sound's way out passes through move it.
+    #[test]
+    fn a_fader_off_the_route_leaves_a_sound_alone() {
+        use deckard_model::AudioDest as D;
+        let mut p = fader_project();
+        p.groups[0].modulators = vec![fader_lane("level")];
+        p.groups[0].sounds.push(Sound { modulators: vec![fader_lane("level")], ..Default::default() });
+        // Past its group, to a bus sound with a lane.
+        p.groups[0].sounds[0].channel.dest = D::Sound(0, 1);
+        p.groups[0].sounds[1].channel.dest = D::Master;
+        let (faders, sounds, _) = channel_faders(&p);
+        assert_eq!(faders.iter().map(|f| (f.group, f.sound)).collect::<Vec<_>>(), [(0, None), (0, Some(1))]);
+        assert_eq!(sounds[0][0], [1], "the bus sound's, not the group's");
+        // On the cue bus: none of them.
+        p.groups[0].sounds[0].cue = true;
+        assert!(channel_faders(&p).1[0][0].is_empty());
+    }
+
+    /// With no lane, nothing changes: the fader's in the route as ever.
+    #[test]
+    fn a_fader_with_no_lane_stays_in_the_route() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].level = 0.5;
+        let want = deckard_model::level_gain(0.5) as f32;
+        assert!(near(sound_gain(&p, 0, 0).0, want));
+        let e = fader_engine(&p);
+        assert!(e.faders.is_empty());
+        // Another of the channel's properties modulated isn't its fader.
+        p.groups[0].sounds[0].modulators = vec![fader_lane("aux1_level")];
+        assert!(near(sound_gain(&p, 0, 0).0, want));
+    }
+
+    /// A fader moved during play: the lane plays on from its new place, with the same
+    /// timeline.
+    #[test]
+    fn a_moved_fader_keeps_its_lane() {
+        let mut p = fader_project();
+        p.groups[0].sounds[0].modulators = vec![fader_lane("level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "level", 0, -0.25)];
+        let mut cache = SampleCache::default();
+        let (mut e, built) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+        e.live_in = Some(Default::default());
+        e.looping = true;
+        steady(&mut e, 100);
+        let mut moved = p.clone();
+        moved.groups[0].sounds[0].level = 0.5;
+        let (fresh, _) = Engine::new_after(&moved, Some((&p, built.chains.as_slice())), None, 1000, Mode::Arrangement, &mut cache);
+        assert!(fresh.keeps_timelines(), "nothing that makes the timeline changed");
+        drop(e.adopt(fresh, &moved));
+        assert!(near(steady(&mut e, 100).0, 0.5 * deckard_model::level_gain(0.25) as f32));
     }
 
     /// A project whose second sound takes In 2 (with `slots` and to `dest`), and an

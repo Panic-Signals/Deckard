@@ -13,6 +13,9 @@ use eframe::egui::{self, Align2, Color32, ColorImage, Id, Rect, RichText, Sense,
 pub const WIDTH: f32 = 300.0;
 const ACCENT: Color32 = Color32::from_rgb(0xF3, 0x9C, 0x12);
 const RESULT_ROW: f32 = 20.0;
+/// A favorite's heart in the results.
+const FAVORITE: Color32 = Color32::from_rgb(0xE8, 0x5A, 0x6E);
+const CHIPS_MAX_HEIGHT: f32 = 88.0;
 /// Splice's lockup (symbol and wordmark), black on transparent, 944 × 288.
 const SPLICE_LOGO: &[u8] = include_bytes!("../../assets/splice-logo.png");
 const SPLICE_BUTTON_HEIGHT: f32 = 36.0;
@@ -78,7 +81,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             acts.push(Act::Browse(BrowseAct::Favorites(!q.favorites)));
         }
     });
-    if !q.user && !b.results.products.is_empty() {
+    if !b.results.products.is_empty() {
         let shown = q.product.clone().unwrap_or_else(|| "All libraries".into());
         egui::ComboBox::from_id_salt("browser-product").width(WIDTH - 20.0).selected_text(shown).show_ui(ui, |ui| {
             if ui.selectable_label(q.product.is_none(), "All libraries").clicked() {
@@ -93,7 +96,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     }
     // Types: the chosen path (click a level to go back to it), then the next level.
     label(ui, "TYPES");
-    ui.horizontal_wrapped(|ui| {
+    chip_scroll(ui, "browser-types", |ui| {
         if !q.types.is_empty() && chip(ui, "All", false, 11.0).clicked() {
             acts.push(Act::Browse(BrowseAct::Types(Vec::new())));
         }
@@ -113,7 +116,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         }
     });
     label(ui, "CHARACTERS");
-    ui.horizontal_wrapped(|ui| {
+    chip_scroll(ui, "browser-characters", |ui| {
         let mut shown: Vec<(String, Option<usize>)> = b.results.characters.iter().map(|(c, n)| (c.clone(), Some(*n))).collect();
         // A chosen character stays shown even when nothing left has it.
         for c in &q.characters {
@@ -201,7 +204,8 @@ fn splice_line(ui: &mut Ui, text: &str, search: Option<&str>) {
 
 fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     let b = &app.browser;
-    let height = (ui.available_height() - 34.0).max(60.0);
+    let footer = if b.query.kind == Kind::Group { 58.0 } else { 34.0 };
+    let height = (ui.available_height() - footer).max(60.0);
     egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show_rows(
         ui,
         RESULT_ROW,
@@ -221,14 +225,22 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                     S00
                 };
                 ui.painter().rect_filled(r, 0.0, fill);
-                let fav = if item.favorite { "♥ " } else { "" };
-                ui.painter().text(
-                    r.left_center() + Vec2::new(6.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    format!("{fav}{}", item.name),
-                    font(11.0),
-                    white(230),
-                );
+                // The heart: a click adds or removes the favorite (as the right-click menu does).
+                let heart = Rect::from_center_size(r.left_center() + Vec2::new(12.0, 0.0), Vec2::splat(RESULT_ROW));
+                let tip = if item.favorite { "Remove from Favorites" } else { "Add to Favorites" };
+                let hr = ui.interact(heart, Id::new(("browser-favorite", &item.path)), Sense::click()).on_hover_text(tip);
+                hr.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+                let (glyph, color) = match (item.favorite, hr.hovered(), resp.hovered()) {
+                    (true, _, _) => ("♥", FAVORITE),
+                    (false, true, _) => ("♡", white(220)),
+                    (false, false, true) => ("♡", white(110)),
+                    (false, false, false) => ("♡", white(45)),
+                };
+                ui.painter().text(heart.center(), Align2::CENTER_CENTER, glyph, font(11.0), color);
+                if hr.clicked() {
+                    acts.push(Act::Browse(BrowseAct::Favorite(i, !item.favorite)));
+                }
+                ui.painter().text(r.left_center() + Vec2::new(24.0, 0.0), Align2::LEFT_CENTER, &item.name, font(11.0), white(230));
                 let detail = match (item.tempo, &item.product) {
                     (Some(t), _) if matches!(item.kind, Kind::Loop) => format!("{t:.0} BPM"),
                     (_, Some(p)) => p.clone(),
@@ -253,6 +265,9 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             }
         },
     );
+    if b.query.kind == Kind::Group {
+        group_load_row(app, ui, acts);
+    }
     prehear_row(app, ui, acts);
 }
 
@@ -341,6 +356,20 @@ fn files(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             }
         }
     });
+    group_load_row(app, ui, acts);
+}
+
+/// `+ ROUTING` and `+ PATTERNS`: whether loading a group loads its routing and patterns.
+fn group_load_row(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
+    let b = &app.browser;
+    ui.horizontal(|ui| {
+        if chip(ui, "+ ROUTING", b.routing, 10.0).on_hover_text("Load the group's sound and group routing").clicked() {
+            acts.push(Act::Browse(BrowseAct::Routing(!b.routing)));
+        }
+        if chip(ui, "+ PATTERNS", b.patterns, 10.0).on_hover_text("Load the group's patterns").clicked() {
+            acts.push(Act::Browse(BrowseAct::Patterns(!b.patterns)));
+        }
+    });
 }
 
 /// ▶, auto-prehear and its level.
@@ -378,6 +407,12 @@ pub(super) fn chip(ui: &mut Ui, text: &str, on: bool, size: f32) -> egui::Respon
     ui.painter().rect_filled(r, 9.0, fill);
     ui.painter().galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
     resp
+}
+
+fn chip_scroll(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
+    egui::ScrollArea::vertical().id_salt(id).max_height(CHIPS_MAX_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+        ui.horizontal_wrapped(add);
+    });
 }
 
 fn label(ui: &mut Ui, text: &str) {

@@ -205,6 +205,13 @@ impl Document {
                     *m.find_mut("plugin_name").ok_or("plug-in host without plugin_name")? = Value::Str(name.clone());
                     set_blob(crate::build::obj_mut(&mut m, "chunk")?, "size", chunk)?;
                     set_blob(crate::build::obj_mut(&mut m, "window")?, "size", &plugin_window())?;
+                    for (k, d) in [
+                        ("parameters/unknown_68/gain", 1.0),
+                        ("parameters/unknown_68/center_freq", 0.5),
+                        ("parameters/unknown_68/width", 0.5),
+                    ] {
+                        set_param(&mut m, k, d);
+                    }
                 }
             }
             let mut slot = b.blank(SLOT)?;

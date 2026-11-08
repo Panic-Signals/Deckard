@@ -53,6 +53,21 @@ fn text_search_matches_name() {
 }
 
 #[test]
+fn a_product_maschine_marks_as_gone_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = testing::fixture(tmp.path());
+    assert_eq!(NiIndex::open(&path).unwrap().query(&loops(&[])).unwrap().products, ["Deep Matter"]);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("UPDATE k_content_path SET state = 4 WHERE alias = 'Deep Matter'", []).unwrap();
+    drop(db);
+    let r = NiIndex::open(&path).unwrap().query(&loops(&[])).unwrap();
+    assert!(r.items.is_empty() && r.products.is_empty(), "{:?}", r.items);
+    // The user's own content isn't part of it.
+    let own = NiIndex::open(&path).unwrap().query(&Query { kind: Kind::OneShot, user: true, ..Query::default() }).unwrap();
+    assert_eq!(own.items.len(), 1);
+}
+
+#[test]
 fn hidden_items_are_skipped() {
     let tmp = tempfile::tempdir().unwrap();
     let ni = NiIndex::open(&testing::fixture(tmp.path())).unwrap();
@@ -68,6 +83,29 @@ fn products_list_the_aliases() {
     assert_eq!(r.products, ["Deep Matter"]);
     let r = ni.query(&Query { product: Some("Other Pack".into()), ..loops(&[]) }).unwrap();
     assert!(r.items.is_empty());
+}
+
+#[test]
+fn instrument_products_use_bank_chain_entry1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = testing::fixture(tmp.path());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "INSERT INTO k_sound_info VALUES
+            (40, 'Acid Lead', 'Native Instruments', 0, 1, '/Users/Shared/Deep Matter Library/Presets/Acid Lead.nksf', 0),
+            (41, 'User Pad', '', 0, 2, '/Users/me/Documents/Native Instruments/User Content/Omnisphere/User Pad.nksf', 0);
+         INSERT INTO p_sound_info_Instrument_2 VALUES (40, 'Acid Lead', 'Massive X', 'Deep Matter', NULL, 1, NULL);
+         INSERT INTO p_sound_info_Instrument_1 VALUES (41, 'User Pad', 'Omnisphere', NULL, NULL, 2, NULL);",
+    )
+    .unwrap();
+    drop(db);
+    let ni = NiIndex::open(&path).unwrap();
+    let factory = ni.query(&Query { kind: Kind::Instrument, ..Query::default() }).unwrap();
+    assert_eq!(factory.products, ["Massive X"]);
+    assert_eq!(factory.items[0].product.as_deref(), Some("Massive X"));
+    let user = ni.query(&Query { kind: Kind::Instrument, user: true, ..Query::default() }).unwrap();
+    assert_eq!(user.products, ["Omnisphere"]);
+    assert_eq!(user.items[0].product.as_deref(), Some("Omnisphere"));
 }
 
 /// Maschine holding its index (rescanning) makes a query fail quickly, not hang;

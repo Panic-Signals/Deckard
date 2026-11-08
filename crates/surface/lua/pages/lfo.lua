@@ -1,9 +1,10 @@
 -- The LFOs (SHIFT + SELECT; again, or another page's button, leaves).
 --
 --   left screen       the focused LFO's name, large ("Press a pad" with none)
---   right screen      its wave (at least two cycles, time lines for how long they take),
+--   right screen      its wave (two beats or two seconds, scrolling; no time lines),
 --                     under its shape, rate and "trig"
---   display 1-5       the shapes: Sine, Square, Triangle, Saw, Random
+--   display 1-5       the shapes: Sine, Square, Triangle, Saw, and Random / Wander
+--                     (button 5 cycles Random and Wander)
 --   display 6 / 8     SYNC (lit: synced, else Hz) / TRIG (the focused sound, or Off);
 --                     with SHIFT held, 8 is DELETE: removes the focused LFO
 --   display 7         ENV: Envelope mode (lit), an ADSR its trigger's notes play; then
@@ -23,7 +24,7 @@ local pin = require("lib.pin")
 
 local lfo = {}
 
-local SHAPES = { "Sine", "Square", "Triangle", "Saw", "Random" }
+local SHAPES = { "Sine", "Square", "Triangle", "Saw", "Random", "Wander" }
 local BUTTONS = { "SINE", "SQR", "TRI", "SAW", "RAND" }
 
 -- Each knob: what deckard.lfo calls it, and how far it turns for a step (lists a
@@ -49,6 +50,10 @@ local function shape_index(l)
     if name == l.shape then return i end
   end
   return 1
+end
+
+local function button_index(l)
+  return math.min(shape_index(l), #BUTTONS)
 end
 
 local function triggered(l)
@@ -85,7 +90,7 @@ function lfo.button(name, down)
       deckard.lfo("trigger_focused", l.pad, 1)
     end
   elseif n <= 5 then
-    deckard.lfo("shape", l.pad, n)
+    deckard.lfo("shape", l.pad, (n == 5 and l.shape == "Random") and 6 or n)
   elseif n == 6 then
     deckard.lfo("sync", l.pad, l.sync and 0 or 1)
   elseif n == 8 then
@@ -134,7 +139,7 @@ function lfo.leds()
   local l = on(s, s.lfo_focus)
   local env = l and l.env
   for i = 1, 5 do
-    deckard.led("SCREEN_" .. i, l and not env and (shape_index(l) == i and "on" or "dim") or "off")
+    deckard.led("SCREEN_" .. i, l and not env and (button_index(l) == i and "on" or "dim") or "off")
   end
   local six = l and (env and l.retrigger or (not env and l.sync))
   deckard.led("SCREEN_6", l and (six and "on" or "dim") or "off")
@@ -191,7 +196,8 @@ function lfo.draw(screen, theme)
   local env = l and l.env
   local specs = {}
   for i, text in ipairs(BUTTONS) do
-    specs[i] = env and { text = "" } or { text = text, selected = l and shape_index(l) == i, disabled = not l }
+    local label = (i == 5 and l and l.shape == "Wander") and "WAND" or text
+    specs[i] = env and { text = "" } or { text = label, selected = l and button_index(l) == i, disabled = not l }
   end
   if env then
     specs[6] = { text = "RETRIG", selected = l.retrigger }

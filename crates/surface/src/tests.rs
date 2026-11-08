@@ -55,12 +55,19 @@ fn taps_set_the_tempo() {
 
 #[test]
 fn auto_is_a_toggle() {
-    // (C38: a press on, the next off; DECKARD's, not Maschine's hold-to-write.)
+    // A tap without turning a knob latches AUTO on; the next press turns it off.
+    // Holding AUTO and turning a knob writes only while AUTO is held.
     let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
     assert_eq!(hold(&mut s, &v, "BUTTON_AUTO", true), [Action::AutoWrite(true)]);
     v.auto_write = true;
     assert!(hold(&mut s, &v, "BUTTON_AUTO", false).is_empty(), "stays on once let go");
     assert_eq!(press(&mut s, &v, "BUTTON_AUTO"), [Action::AutoWrite(false)], "the next press: off");
+    v.auto_write = false;
+    assert_eq!(hold(&mut s, &v, "BUTTON_AUTO", true), [Action::AutoWrite(true)]);
+    v.auto_write = true;
+    assert_eq!(s.event(&Event::Knob(0, 0.05), &v, now), [Action::Turn { knob: 0, inc: 0.05, fine: false }]);
+    assert_eq!(hold(&mut s, &v, "BUTTON_AUTO", false), [Action::AutoWrite(false)], "turned while held: off on release");
     v.auto_write = false;
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     assert_eq!(press(&mut s, &v, "BUTTON_AUTO"), [Action::AutoWrite(true)], "SHIFT + AUTO as well");
@@ -621,6 +628,13 @@ fn browse_buttons() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "nothing to load");
     v.browser.busy = true;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty(), "not while searching");
+    v.browser.busy = false;
+    v.browser.kind = 1;
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    let text = s.screen_text(&v);
+    assert!(text.contains(&"+ ROUTING".to_string()) && text.contains(&"+ PATTERNS".to_string()), "{text:?}");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Browse(Browse::Routing(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::Browse(Browse::Patterns(false))]);
 }
 
 #[test]
@@ -656,6 +670,9 @@ fn browse_wheel_turns_the_bracketed_knob() {
     );
     press(&mut s, &v, "BUTTON_WHEEL_LEFT");
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Product(Some(0)))], "skipping the empty banks");
+    assert_eq!(press(&mut s, &v, "BUTTON_WHEEL"), [Action::Browse(Browse::Load)], "wheel press loads even while a filter is bracketed");
+    assert_eq!(s.event(&Event::Knob(7, 0.1), &v, now), [Action::Browse(Browse::Focus(1))], "knob 8 returns the bracket to results");
+    assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Focus(1))]);
     press(&mut s, &v, "BUTTON_TEMPO");
     assert!(!s.event(&Event::Wheel(1), &v, now).iter().any(|a| matches!(a, Action::Browse(_))), "TEMPO keeps the wheel");
 }
@@ -671,6 +688,53 @@ fn browse_draws_a_library() {
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     assert!(s.screens(&v).is_some());
     assert_eq!(s.error(), None);
+}
+
+#[test]
+fn new_picture_invalidates_cached_drawing_commands() {
+    for recorded in [false, true] {
+        let (mut surface, mut v) = (Surface::new(), view());
+        v.control.chain[0].picture = Some("late-image".into());
+        surface.add_picture("late-image", true, 16, 16, vec![[10, 200, 30, 255]; 256]);
+        let draw = |s: &mut Surface| if recorded { s.screen_picture(&v).is_some() } else { s.screens(&v).is_some() };
+        assert!(draw(&mut surface));
+        assert!(!draw(&mut surface), "identical commands are cached");
+        let shared = &surface;
+        shared.add_picture("late-image", true, 16, 16, vec![[255; 4]; 256]);
+        assert!(draw(&mut surface), "new image data invalidates the cache through a shared surface");
+        assert!(!draw(&mut surface), "the invalidation is consumed once");
+    }
+}
+
+#[test]
+fn browse_and_chain_draw_product_and_hosted_plugin_pictures() {
+    let (mut s, mut v) = (Surface::new(), view());
+    library(&mut v);
+    v.browser.product = Some(0);
+    press(&mut s, &v, "BUTTON_BROWSE");
+    let before = s.picture(&v);
+    let key = format!("artwork:{}", v.browser.products[0].to_lowercase());
+    s.add_picture(&key, true, 16, 16, vec![[220, 40, 90, 255]; 256]);
+    s.add_picture(&key, false, 16, 16, vec![[40, 180, 220, 255]; 256]);
+    let after = s.picture(&v);
+    let left_changed = (41..107).any(|y| (20..155).any(|x| before[y * 960 + x] != after[y * 960 + x]));
+    let right_changed = (36..232).any(|y| (480..720).any(|x| before[y * 960 + x] != after[y * 960 + x]));
+    assert!(left_changed, "product tile artwork on left screen");
+    assert!(right_changed, "product logo on right screen");
+
+    // A hosted plug-in slot (`plugin: true`) with `picture` set draws its picture on
+    // Control and Module pages instead of the generic synth cartoon.
+    press(&mut s, &v, "BUTTON_PLUGIN");
+    v.control.modules_visible = true;
+    v.control.slot_count = 1;
+    v.control.slot_index = Some(0);
+    v.control.chain =
+        vec![SlotView { name: "Massive X".into(), instrument: true, active: true, plugin: true, picture: Some("massivex".into()) }];
+    let generic_px = s.picture(&v);
+    s.add_picture("massivex", true, 16, 16, vec![[200, 120, 30, 255]; 256]);
+    s.add_picture("massivex", false, 16, 16, vec![[30, 200, 120, 255]; 256]);
+    let pic_px = s.picture(&v);
+    assert!(generic_px != pic_px, "hosted plug-in picture drawn on Control page");
 }
 
 #[test]
@@ -1564,11 +1628,94 @@ fn the_events_select_mode_selects_with_the_pads() {
     assert_eq!(s.error(), None);
 }
 
+/// The built-in EQ's curve is on the right screen, and stays there on both pages.
+#[test]
+fn the_eq_curve_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "EQ".into();
+    v.control.slot = Some("EQ".into());
+    v.control.pages = vec!["Freq / Gain".into(), "Width / Output".into()];
+    v.control.eq = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.25, 0.5), (0.45, 0.8), (0.65, 0.3), (0.85, 0.5)],
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    assert_eq!(s.error(), None);
+}
+
+/// The Filter's curve stays on the right screen on Main and on Side-Chain Input.
+#[test]
+fn the_filter_curve_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Filter".into();
+    v.control.slot = Some("Filter".into());
+    v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
+    v.control.filter = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.55, 0.7)],
+        extent: vec![0.8; 48],
+        lfo: vec![0.0, 1.0, 0.0, 1.0],
+        side: vec![0.2; 48],
+        side_live: true,
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let dot = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+        assert!(dot(&px) > 20, "page {}: the cutoff dot", page + 1);
+    }
+    assert_eq!(s.error(), None);
+}
+
+/// A compressor's transfer, a delay's taps, and a grain cloud stay on the right screen.
+#[test]
+fn the_effect_picture_stays_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Compressor".into();
+    v.control.slot = Some("Compressor".into());
+    v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
+    v.control.picture = Some(crate::EqCurveView {
+        kind: "law".into(),
+        points: (0..48).map(|i| i as f32 / 47.0).collect(),
+        side: vec![0.2; 48],
+        side_live: true,
+        lfo: vec![0.0, 1.0, 0.2],
+        ..Default::default()
+    });
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    for page in [0, 1] {
+        v.control.page = page;
+        let px = s.picture(&v);
+        assert!(curve(&px) > 80, "page {}: the transfer on the right", page + 1);
+        assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
+    }
+    v.control.picture =
+        Some(crate::EqCurveView { kind: "dots".into(), bands: vec![(0.2, 0.7), (0.5, 0.4), (0.8, 0.6)], ..Default::default() });
+    let px = s.picture(&v);
+    let dots = px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    assert!(dots > 20, "the cloud: {dots}");
+    assert_eq!(s.error(), None);
+}
+
 /// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it in the chain (its
 /// thumbnail) and on the right display (its logo); one without shows a drawing.
 #[test]
 fn plugin_pictures_show_on_the_plugin_page() {
-    let (mut s, mut v) = (Surface::new(), view());
+    let (s, mut v) = (Surface::new(), view());
     let (thumb, logo) = ([10, 200, 30, 255], [200, 30, 10, 255]);
     s.add_picture("sampler", true, 160, 90, vec![thumb; 160 * 90]);
     s.add_picture("sampler", false, 240, 196, vec![logo; 240 * 196]);
@@ -1611,6 +1758,36 @@ fn shift_on_the_plugin_page_edits_the_chain() {
     // INSERT: the plug-in browser, for a new slot after the last.
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Slot(1)]);
     assert_eq!(s.page(), "module");
+    assert_eq!(s.error(), None);
+}
+
+/// SHIFT on Master and Group offers the same slot edits as Sound, and the encoder
+/// still steps that chain's inserts.
+#[test]
+fn shift_on_master_and_group_offers_the_sounds_slot_edits() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let slot = |name: &str| crate::SlotView { name: name.into(), instrument: false, active: true, plugin: true, picture: None };
+    v.control.modules_visible = true;
+    v.control.chain = vec![slot("EQ"), slot("Filter")];
+    (v.control.slot_count, v.control.slot_index) = (2, Some(0));
+    for level in [0, 1, 2] {
+        v.control.level = level;
+        hold(&mut s, &v, "BUTTON_SHIFT", true);
+        let text = s.screen_text(&v).join("|");
+        assert!(
+            text.contains("EDIT") && text.contains("INSERT") && text.contains("MOVE") && text.contains("BYPASS") && text.contains("REMOVE"),
+            "level {level}: {text}"
+        );
+        assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SlotEdit("remove")], "level {level}");
+        assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Slot(1)], "level {level} steps inserts");
+    }
+    // No insert on this chain: right does nothing, so it cannot change tab.
+    v.control.chain.clear();
+    (v.control.slot_count, v.control.slot_index) = (0, None);
+    for level in [0, 1] {
+        v.control.level = level;
+        assert!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT").is_empty(), "level {level}");
+    }
     assert_eq!(s.error(), None);
 }
 
@@ -2057,6 +2234,20 @@ fn a_knob_tapped_twice_resets_it() {
     );
 }
 
+/// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
+/// and an empty one makes a pattern there.
+#[test]
+fn pattern_pads_are_places_with_gaps() {
+    let mut s = Surface::new();
+    let mut v = view();
+    let at = |slot: usize| PatternView { color: 1, slot, ..Default::default() };
+    v.groups[0].patterns = vec![at(0), at(7)];
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    let pad = |s: &mut Surface, v: &View, n: usize| s.event(&Event::PadOn(n, 1.0), v, Instant::now());
+    assert_eq!(pad(&mut s, &v, 8), [Action::PickPattern(1)], "pad 8 holds the list's second");
+    assert_eq!(pad(&mut s, &v, 4), [Action::NewPatternAt { group: 0, slot: 3 }], "an empty place");
+}
+
 /// The Ideas view's knobs: the group above each steps through its patterns in the
 /// focused scene, round in a circle with none after the last (C36).
 #[test]
@@ -2488,6 +2679,19 @@ fn lfo_page_buttons_and_knobs() {
     press(&mut s, &v, "BUTTON_SELECT");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::Lfo("shape", 1, 2.0)], "Square");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::Lfo("shape", 1, 5.0)], "Sine: button 5 picks Random");
+    v.lfos[0].shape = "Random".into();
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_5"), Some(crate::leds::ON), "Random lights button 5");
+    assert!(s.screen_text(&v).contains(&"RAND".to_string()));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::Lfo("shape", 1, 6.0)], "Random: button 5 cycles to Wander");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::Lfo("shape", 1, 6.0)], "Shape knob: Random to Wander");
+    v.lfos[0].shape = "Wander".into();
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_5"), Some(crate::leds::ON), "Wander keeps button 5 lit");
+    assert!(s.screen_text(&v).contains(&"WAND".to_string()));
+    assert!(s.event(&Event::Knob(0, 0.1), &v, now).is_empty(), "Wander is the last");
+    assert_eq!(s.event(&Event::Knob(0, -0.1), &v, now), [Action::Lfo("shape", 1, 5.0)], "Shape knob: Wander back to Random");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::Lfo("shape", 1, 5.0)], "Wander: button 5 cycles back to Random");
+    v.lfos[0].shape = "Sine".into();
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Lfo("sync", 1, 0.0)], "synced: to Hz");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::Lfo("env", 1, 0.0)], "ENV: to Envelope mode");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::Lfo("trigger_focused", 1, 1.0)], "Off: the focused sound");
@@ -2967,4 +3171,19 @@ fn the_step_grid_places_a_pads_chord_in_chords_mode() {
         [Action::StepNotes { at: 720, length: 240, velocity: 100, pitches: step_pitches(&sorted) }]
     );
     assert!(s.screen_text(&v).join("|").contains("CHORD"));
+}
+
+#[test]
+fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.groups = (0..3).map(|_| v.groups[0].clone()).collect();
+    v.group = 1;
+    s.restore("pad_mode", "pad", &v, Instant::now());
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::MoveGroup { from: 1, to: 0 }]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::MoveGroup { from: 1, to: 2 }]);
+    v.group = 0;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_3").is_empty());
+    v.group = 2;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
