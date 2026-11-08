@@ -17,6 +17,9 @@ DECKARD also does a few things Maschine doesn't:
 
 ![DECKARD's Ideas view](docs/screenshots/ideas.png)
 
+The **[DECKARD Manual](https://panicsignals.tv/software/deckard/manual/)** covers all of
+this in depth. In the app, **Help ▸ DECKARD Manual** opens it.
+
 ## What you need
 
 - **A computer** running macOS, Linux or Windows.
@@ -75,6 +78,10 @@ DECKARD is free and open. If it earns a place in your music, these keep it going
 
 If you build DECKARD yourself, the packages end up in the `dist/` folder of your
 checkout. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
+
+New to DECKARD? Start with the
+[DECKARD Manual](https://panicsignals.tv/software/deckard/manual/), also at
+**Help ▸ DECKARD Manual**.
 
 ### Opening and saving projects
 
