@@ -101,6 +101,18 @@ impl Repeater {
     }
 
     /// Let go of everything (HOLD off, the mode left).
+    pub fn groups_moved(&mut self, a: usize, b: usize) {
+        for h in &mut self.held {
+            h.group = if h.group == a {
+                b
+            } else if h.group == b {
+                a
+            } else {
+                h.group
+            };
+        }
+    }
+
     pub fn release_group(&mut self, group: usize) {
         self.held.retain(|h| h.group != group);
     }

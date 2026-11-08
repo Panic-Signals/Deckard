@@ -42,6 +42,15 @@ impl Engine {
     pub(super) fn swap_group_runtime(&mut self, a: usize, b: usize) {
         self.release_moving_group(a);
         self.release_moving_group(b);
+        if let Some(r) = &mut self.repeater {
+            r.groups_moved(a, b);
+        }
+        for route in &mut self.mod_routes {
+            route.group = moved(route.group, a, b);
+        }
+        for lfo in &mut self.lfos {
+            lfo.lfo.trigger = lfo.lfo.trigger.map(|(g, s)| (moved(g, a, b), s));
+        }
         macro_rules! swap { ($($field:ident),*) => { $(if self.$field.len() > a.max(b) { self.$field.swap(a,b); })* }; }
         swap!(sounds, instruments, fx, buses, bufs, midi_inputs, live_hint, reuse);
         if let Some(ahead) = &mut self.ahead {

@@ -46,7 +46,9 @@ impl App {
                 self.meters.swap(a, b);
             }
             self.group_moves.ids.swap(a, b);
-            self.group_moves.pending.push((a, b));
+            if self.output.as_ref().and_then(|o| o.as_ref().ok()).is_some_and(|o| o.has_engine()) {
+                self.group_moves.pending.push((a, b));
+            }
             // A full edit uses the moved instances and the new routing graph.
             self.built = None;
         }
