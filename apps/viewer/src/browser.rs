@@ -36,6 +36,10 @@ pub struct Browser {
     /// Prehear a sample when it's selected.
     pub prehear_auto: bool,
     pub prehear_gain: f32,
+    /// Load a group with its sound routing (`+ ROUTING`).
+    pub routing: bool,
+    /// Load a group with its patterns (`+ PATTERNS`).
+    pub patterns: bool,
     /// Why NI's index can't be read, if it can't.
     pub error: Option<String>,
     /// The top-level types and the chosen type's sub-types, as last listed (the
@@ -63,6 +67,8 @@ impl Default for Browser {
             selected: None,
             prehear_auto: true,
             prehear_gain: 0.8,
+            routing: true,
+            patterns: true,
             error: None,
             top_types: Vec::new(),
             sub_types: Vec::new(),
@@ -251,6 +257,8 @@ impl Browser {
             focus: self.selected.unwrap_or(0),
             busy: self.waiting(),
             favorites: q.favorites,
+            routing: self.routing,
+            patterns: self.patterns,
         }
     }
 
@@ -276,6 +284,8 @@ impl Browser {
             C::Load => BrowseAct::Load(focus, None),
             C::ToggleFavorites => BrowseAct::Favorites(!q.favorites),
             C::Prehear => BrowseAct::Prehear(focus),
+            C::Routing(on) => BrowseAct::Routing(on),
+            C::Patterns(on) => BrowseAct::Patterns(on),
         })
     }
 
@@ -322,6 +332,10 @@ pub enum BrowseAct {
     Prehear(usize),
     PrehearAuto(bool),
     Gain(f32),
+    /// Load groups with (`true`) or without (`false`) their sound routing (`+ ROUTING`).
+    Routing(bool),
+    /// Load groups with (`true`) or without (`false`) their patterns (`+ PATTERNS`).
+    Patterns(bool),
     /// FILES: show this folder.
     Folder(PathBuf),
     /// FILES: the folder above.

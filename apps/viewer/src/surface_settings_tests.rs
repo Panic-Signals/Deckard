@@ -109,6 +109,7 @@ fn reload_off_starts_afresh_unless_work_was_unsaved() {
     app.new_project();
     app.doc.as_ref().unwrap().borrow_mut().set_tempo(99.0).unwrap();
     app.keep_session();
+    app.session_written();
     // (As though saved.)
     std::fs::write(dir.join("session.txt"), "dirty = false\n").unwrap();
     let start = |dir: &std::path::Path| {
@@ -120,6 +121,7 @@ fn reload_off_starts_afresh_unless_work_was_unsaved() {
     assert_ne!(start(&dir), 99.0, "saved: a new project");
     app.doc.as_ref().unwrap().borrow_mut().set_tempo(98.0).unwrap();
     app.keep_session();
+    app.session_written();
     assert_eq!(start(&dir), 98.0, "unsaved: back");
 }
 
