@@ -17,6 +17,7 @@ pub mod edit;
 pub mod export;
 pub mod fx;
 pub mod glide;
+mod group_move;
 mod lfo_rt;
 pub mod library;
 pub mod meters;
@@ -1696,6 +1697,7 @@ pub struct Engine {
     /// [`Engine::new_after`]); and whether to keep its timelines.
     reuse: Vec<Vec<Option<Reuse>>>,
     keep_timeline: bool,
+    group_swaps: Vec<(usize, usize)>,
     tap_block: Vec<f32>,
     /// Sounds' effect chains, `[group][sound]`.
     fx: Vec<Vec<Option<FxChain>>>,
@@ -2414,6 +2416,7 @@ impl Engine {
             focus: None,
             reuse,
             keep_timeline,
+            group_swaps: Vec::new(),
             tap_block: Vec::new(),
             fx,
             modulating: false,
@@ -2501,6 +2504,9 @@ impl Engine {
     #[must_use = "drop the replaced parts off the audio thread"]
     pub fn adopt_with(&mut self, fresh: Engine, timelines: &mut Timelines) -> Engine {
         let mut fresh = fresh;
+        for (a, b) in fresh.group_swaps.drain(..) {
+            self.swap_group_runtime(a, b);
+        }
         self.forward_edits(&mut fresh);
         self.keep_parts(&mut fresh);
         std::mem::swap(&mut self.live_hint, &mut fresh.live_hint);

@@ -1197,6 +1197,32 @@ impl Host {
         same.then(|| shared.clone())
     }
 
+    /// Move loaded instances with two Groups without reloading their plug-ins.
+    pub fn swap_groups(&mut self, a: usize, b: usize) {
+        let remap = |g| {
+            if g == a {
+                b
+            } else if g == b {
+                a
+            } else {
+                g
+            }
+        };
+        self.instances = self
+            .instances
+            .drain()
+            .map(|(slot, instance)| {
+                let slot = match slot {
+                    Slot::Sound { group, sound } => Slot::Sound { group: remap(group), sound },
+                    Slot::Chain { group, sound, slot } => Slot::Chain { group: remap(group), sound, slot },
+                    Slot::Group { group, slot } => Slot::Group { group: remap(group), slot },
+                    slot => slot,
+                };
+                (slot, instance)
+            })
+            .collect();
+    }
+
     /// Drop instances whose slot `keep` rejects (e.g. sounds that no longer exist).
     pub fn retain(&mut self, keep: impl Fn(&Slot) -> bool) {
         self.instances.retain(|s, _| keep(s));

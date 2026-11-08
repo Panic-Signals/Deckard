@@ -662,6 +662,7 @@ pub enum Act {
     CopyGroup(usize),
     PasteGroup(usize),
     DeleteGroup(usize),
+    MoveGroup(usize, usize),
     ImportMidi(usize, usize),
     ExportMidi(usize, usize),
     ImportGroupMidi(usize),
@@ -1160,6 +1161,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             | Act::CutGroup(..)
             | Act::CopyGroup(..)
             | Act::PasteGroup(..)
+            | Act::MoveGroup(..)
             | Act::DeleteGroup(..)
             | Act::ImportMidi(..)
             | Act::ExportMidi(..)
@@ -3095,6 +3097,8 @@ fn group_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, acts: &mut Vec<Act>
     item(ui, "Paste", app.group_clipboard.is_some(), || Act::PasteGroup(g), acts);
     ui.separator();
     item(ui, "Rename", true, || Act::StartRename(Target::Group(g)), acts);
+    item(ui, "Move Left", g > 0, || Act::MoveGroup(g, g.saturating_sub(1)), acts);
+    item(ui, "Move Right", g + 1 < p.groups.len(), || Act::MoveGroup(g, g + 1), acts);
     item(ui, "Delete", true, || Act::DeleteGroup(g), acts);
 }
 
