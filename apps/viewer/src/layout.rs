@@ -1241,7 +1241,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     }
                     Target::Zone(..) => "Zone",
                     Target::Sampler(..) => "Sampler",
-                    Target::Module(..) => "Effect Parameter",
+                    Target::Module(..) | Target::ChainModule(..) => "Effect Parameter",
                     _ => "Channel Property",
                 };
                 // Variation and Generate settings of a project from before Maschine 3:
@@ -3882,8 +3882,31 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
     }
     if let Some(pr) = &slot.plugin {
         let v = app.plugin_view.as_ref().filter(|v| v.key == (app.chain(), i) && v.error.is_none())?;
-        let pages = v.pages.len().max(1);
+        let mut names: Vec<String> = v
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(n, x)| if x.name.is_empty() { format!("{} {}", pr.name, n + 1) } else { x.name.clone() })
+            .collect();
+        if v.sidechain {
+            names.push("Side-Chain Input".into());
+        }
+        let pages = names.len().max(1);
         let page = app.plugin_page.min(pages - 1);
+        if v.sidechain && page == v.pages.len() {
+            let pg = crate::module_ui::side_chain_page(slot, app.module_target(i));
+            let mut knobs: Vec<Option<Knob>> = pg.slots.into_iter().collect();
+            let mut routes = Vec::new();
+            if let Some((choices, sets, cur)) = channel::sidechain_choices(p, app.chain(), i)
+                && let Some(k) = knobs.first_mut()
+            {
+                let shown = channel::abbrev(choices[cur].split(" - ").next().unwrap_or(""));
+                *k = Some(("SOURCE".into(), shown, 0.0, Some(Edit::Route(cur))));
+                routes.push((0, choices, sets));
+            }
+            let sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
+            return Some(SlotPage { names, page, knobs, sections, show: Act::PluginPage, routes });
+        }
         let mut knobs = Vec::new();
         let mut sections = Vec::new();
         if let Some(pg) = v.pages.get(page) {
@@ -3903,15 +3926,13 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
                 }
             }
         }
-        let names = v
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(n, x)| if x.name.is_empty() { format!("{} {}", pr.name, n + 1) } else { x.name.clone() })
-            .collect();
         return Some(SlotPage { names, page, knobs, sections, show: Act::PluginPage, routes: Vec::new() });
     }
-    let names = crate::module_ui::pages(&slot.module)?;
+    let names: Vec<&str> = crate::module_ui::pages(&slot.module)?
+        .iter()
+        .copied()
+        .filter(|&n| !(matches!(app.chain(), deckard_doc::Chain::Master) && n == "Side-Chain Input"))
+        .collect();
     let page = app.plugin_page.min(names.len().saturating_sub(1));
     let slot = if live { app.live_slot((app.group, app.sound, i), s, slot) } else { Cow::Borrowed(slot) };
     let pg = crate::module_ui::page_for(&slot, app.module_target(i), page);
@@ -4211,20 +4232,32 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     }
                     match app.plugin_view.as_ref().filter(|v| v.key == (app.chain(), i)) {
                         Some(v) if v.error.is_none() => {
-                            let pages = v.pages.len().max(1);
-                            let page = app.plugin_page.min(pages - 1);
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
                             heading = pr.name.clone();
                             // Named pages (DECKARD's plug-ins and NKS/saved pages with sections) by name, else by number.
-                            let names: Vec<String> = v
+                            let mut names: Vec<String> = v
                                 .pages
                                 .iter()
                                 .enumerate()
                                 .map(|(n, p)| if p.name.is_empty() { (n + 1).to_string() } else { p.name.clone() })
                                 .collect();
+                            if v.sidechain {
+                                names.push("Side-Chain Input".into());
+                            }
+                            let pages = names.len().max(1);
+                            let page = app.plugin_page.min(pages - 1);
                             tabs = Some((names, page, Act::PluginPage));
-                            if let Some(pg) = v.pages.get(page) {
+                            if v.sidechain && page == v.pages.len() {
+                                let pg = crate::module_ui::side_chain_page(slot, app.module_target(i));
+                                params = pg.slots.into_iter().collect();
+                                if let Some((choices, sets, cur)) = channel::sidechain_choices(p, app.chain(), i) {
+                                    let shown = channel::abbrev(choices[cur].split(" - ").next().unwrap_or(""));
+                                    params[0] = Some(("SOURCE".into(), shown, 0.0, Some(Edit::Route(cur))));
+                                    routes.push((0, choices, sets));
+                                }
+                                sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
+                            } else if let Some(pg) = v.pages.get(page) {
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
                                     let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
@@ -4247,8 +4280,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                         sections.push((k, section.clone().into()));
                                     }
                                 }
-                            }
-                            if v.pages.is_empty() {
+                            } else if v.pages.is_empty() {
                                 note = Some("This plug-in has no parameters to show".into());
                             }
                         }
@@ -4271,7 +4303,12 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 (Some(s), Some((i, slot))) if crate::module_ui::pages(&slot.module).is_some() => {
                     // One of Maschine's own effects (or synths), where its routes have
                     // its knobs now.
-                    let names = crate::module_ui::pages(&slot.module).unwrap_or(&[]);
+                    let names: Vec<&str> = crate::module_ui::pages(&slot.module)
+                        .unwrap_or(&[])
+                        .iter()
+                        .copied()
+                        .filter(|&n| !(matches!(app.chain(), deckard_doc::Chain::Master) && n == "Side-Chain Input"))
+                        .collect();
                     let page = app.plugin_page.min(names.len().saturating_sub(1));
                     // Several pages become tabs, so the title is only the module.
                     // One page has no tab, and its name stays in the title.

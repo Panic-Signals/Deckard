@@ -313,6 +313,32 @@ fn exp_hz(lo: f64, hi: f64, v: f64) -> f64 {
     lo * (hi / lo).powf(v)
 }
 
+/// The Side-Chain Input parameter page (shared by internal side-chain effects and
+/// plug-ins that expose a side-chain input).
+pub fn side_chain_page(slot: &SlotInfo, t: Target) -> Page {
+    let v = |f: &str, d: f64| slot.param(f).unwrap_or(d);
+    let knob = |label: &'static str, field: &'static str, lo: f64, hi: f64, default: f64, text: String| -> Option<Knob> {
+        let x = v(field, default);
+        Some((label.into(), text, ((x - lo) / (hi - lo)) as f32, Some(Edit::Param(t, field, lo, hi, default))))
+    };
+    let mut slots: [Option<Knob>; 8] = Default::default();
+    let sections = vec![(0, "Input"), (2, "Filter")];
+    let gain = v("side_chain_filter/gain", 1.0);
+    slots[1] = knob("GAIN", "side_chain_filter/gain", 0.0, 1.0, 1.0, format!("{:+.1} dB", 40.0 * gain - 20.0));
+    let on = v("side_chain_filter/filter", 0.0) != 0.0;
+    slots[2] = Some((
+        "FILTER".into(),
+        if on { "On" } else { "Off" }.into(),
+        on as i32 as f32,
+        Some(Edit::Toggle(t, "side_chain_filter/filter", on)),
+    ));
+    let c = v("side_chain_filter/center_freq", 0.5);
+    slots[3] = knob("CENTER FREQ", "side_chain_filter/center_freq", 0.0, 1.0, 0.5, hz(20.0 * 1000f64.powf(c)));
+    let w = v("side_chain_filter/width", 0.5);
+    slots[4] = knob("WIDTH", "side_chain_filter/width", 0.0, 1.0, 0.5, format!("{:.1} %", w * 100.0));
+    Page { slots, sections }
+}
+
 /// Page `page` of the module in slot `i` of sound `s` (group `g`).
 pub fn page(slot: &SlotInfo, g: usize, s: usize, i: usize, page: usize) -> Page {
     if crate::drum_ui::is_drum(&slot.module) {
@@ -362,23 +388,7 @@ pub fn page_for(slot: &SlotInfo, t: Target, page: usize) -> Page {
             slots[7] = knob("GAIN", "output_gain", -1.0, 1.0, 0.0, format!("{:.1} dB", o * 20.0));
         }
         ("PerformanceFX", page) => perform_fx_page(slot, t, page, &mut slots, &mut sections),
-        ("Compressor" | "Limiter" | "Maximizer" | "Filter" | "Gate", 1) => {
-            // Slot 0 is the Source (a routing list the Control area adds).
-            sections.extend([(0, "Input"), (2, "Filter")]);
-            let gain = v("side_chain_filter/gain", 1.0);
-            slots[1] = knob("GAIN", "side_chain_filter/gain", 0.0, 1.0, 1.0, format!("{:+.1} dB", 40.0 * gain - 20.0));
-            let on = v("side_chain_filter/filter", 0.0) != 0.0;
-            slots[2] = Some((
-                "FILTER".into(),
-                if on { "On" } else { "Off" }.into(),
-                on as i32 as f32,
-                Some(Edit::Toggle(t, "side_chain_filter/filter", on)),
-            ));
-            let c = v("side_chain_filter/center_freq", 0.5);
-            slots[3] = knob("CENTER FREQ", "side_chain_filter/center_freq", 0.0, 1.0, 0.5, hz(20.0 * 1000f64.powf(c)));
-            let w = v("side_chain_filter/width", 0.5);
-            slots[4] = knob("WIDTH", "side_chain_filter/width", 0.0, 1.0, 0.5, format!("{:.1} %", w * 100.0));
-        }
+        ("Compressor" | "Limiter" | "Maximizer" | "Filter" | "Gate", 1) => return side_chain_page(slot, t),
         ("Compressor", _) => {
             let mode = (v("mode", 0.0) as usize).min(1);
             sections.extend([(0, "Mode"), (1, "Depth"), (4, "Time"), (6, "Output")]);

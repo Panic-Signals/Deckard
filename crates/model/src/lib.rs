@@ -249,6 +249,8 @@ pub struct GroupChannel {
     pub aux_pre: [bool; 2],
     /// Its MIDI files hold each sound on its own channel (0) or note (1).
     pub midi_batch: i64,
+    /// Side-chain sources of the effects in its chain: (slot, source).
+    pub sidechain: Vec<(usize, ScSource)>,
 }
 
 impl Default for SoundChannel {
@@ -291,6 +293,7 @@ impl Default for GroupChannel {
             aux_dest: [AudioDest::None; 2],
             aux_pre: [false; 2],
             midi_batch: 0,
+            sidechain: Vec::new(),
         }
     }
 }
@@ -1507,6 +1510,7 @@ fn group_channel(ix: &Index, g: &Obj, strip: &Obj, t: &Targets) -> GroupChannel 
         aux_dest: [dest("aux1_output", AudioDest::None), dest("aux2_output", AudioDest::None)],
         aux_pre: [param_i64(strip, "aux1_order").unwrap_or(0) == 1, param_i64(strip, "aux2_order").unwrap_or(0) == 1],
         midi_batch: param_i64(g, "midi_batch_export").unwrap_or(0),
+        sidechain: sidechain_map(ix, g.get("sidechain_inputs"), t),
     }
 }
 
@@ -1691,6 +1695,10 @@ fn plugin_pages(m: &Obj) -> Vec<PluginPage> {
         .collect()
 }
 
+fn side_chain_params(sc: &Obj) -> Vec<(String, f64)> {
+    sc.fields.iter().filter_map(|(n, _)| param_f64(sc, n).map(|v| (format!("side_chain_filter/{n}"), v))).collect()
+}
+
 /// Every slot of an object's plug-in chain.
 /// The numeric parameters directly in a module object (not its base classes), by
 /// field name: `value` of each `MaschineNumericParameter` / `EnumParameter`.
@@ -1699,11 +1707,7 @@ fn module_params(m: &Obj) -> Vec<(String, f64)> {
         m.fields.iter().filter(|(n, _)| !n.starts_with('<')).filter_map(|(n, _)| param_f64(m, n).map(|v| (n.clone(), v))).collect();
     // The Side-Chain Input page's settings: `side_chain_filter/gain`, …
     if let Some(Value::Obj(sc)) = m.get("side_chain_filter") {
-        for (n, _) in &sc.fields {
-            if let Some(v) = param_f64(sc, n) {
-                out.push((format!("side_chain_filter/{n}"), v));
-            }
-        }
+        out.extend(side_chain_params(sc));
     }
     out
 }
@@ -1720,9 +1724,17 @@ fn chain_slots(ix: &Index, o: &Obj) -> Vec<SlotInfo> {
                 _ => module_label(&module).to_string(),
             };
             let plugin = m.filter(|m| m.type_name == "NI::MASCHINE::DATA::PluginHost").map(plugin_ref);
-            // An internal module's settings: its numeric parameters, by field.
+            // An internal module's settings: its numeric parameters, by field (and a
+            // plug-in host's side-chain filter).
             let params = match m {
                 Some(m) if plugin.is_none() && module != "Sampler" => module_params(m),
+                Some(m) if plugin.is_some() => match m.get("parameters") {
+                    Some(Value::Obj(p)) => match p.get("unknown_68") {
+                        Some(Value::Obj(sc)) => side_chain_params(sc),
+                        _ => Vec::new(),
+                    },
+                    _ => Vec::new(),
+                },
                 _ => Vec::new(),
             };
             SlotInfo { module, name, active: param_i64(slot, "active").unwrap_or(1) != 0, plugin, params }

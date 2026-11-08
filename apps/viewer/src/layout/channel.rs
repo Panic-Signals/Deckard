@@ -27,33 +27,41 @@ pub enum RouteSet {
     GroupMidiInput(usize, Option<&'static str>),
     /// The master's output (`false`) or the cue bus's.
     Master(bool, AudioDest),
-    /// The side-chain source of the effect in slot `.2` of sound `.1` (group `.0`).
-    SideChain(usize, usize, usize, Option<deckard_model::ScSource>),
+    /// The side-chain source of the effect in slot `.1` of chain `.0`.
+    SideChain(deckard_doc::Chain, usize, Option<deckard_model::ScSource>),
 }
 
 /// The side-chain sources the effect in `slot` of chain `c` can listen to: none, any
-/// group, any other sound. Only a sound's effects take one (`None` for a group's or the
-/// master's).
+/// (other) group, any (other) sound. A sound's and a group's effects take one (`None`
+/// for the master's).
 pub fn sidechain_choices(p: &Project, c: deckard_doc::Chain, slot: usize) -> Option<(Vec<String>, Vec<RouteSet>, usize)> {
+    use deckard_doc::Chain;
     use deckard_model::ScSource;
-    let deckard_doc::Chain::Sound(g, s) = c else { return None };
+    let sidechain = match c {
+        Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.channel.sidechain,
+        Chain::Group(g) => &p.groups.get(g)?.channel.sidechain,
+        Chain::Master => return None,
+    };
     let mut options: Vec<(String, Option<ScSource>)> = vec![("None".into(), None)];
     for gi in 0..p.groups.len() {
+        if c == Chain::Group(gi) {
+            continue;
+        }
         options.push((format!("{} - {}", group_id(gi), group_name(p, gi)), Some(ScSource::Group(gi))));
     }
     for (gi, grp) in p.groups.iter().enumerate() {
         for (si, snd) in grp.sounds.iter().enumerate() {
-            if (gi, si) == (g, s) || (snd.slots.is_empty() && snd.name.is_empty()) {
+            if c == Chain::Sound(gi, si) || (snd.slots.is_empty() && snd.name.is_empty()) {
                 continue;
             }
             let name = if snd.name.is_empty() { format!("Sound {}", si + 1) } else { snd.name.clone() };
             options.push((format!("{}:S{} - {}: {name}", group_id(gi), si + 1, group_name(p, gi)), Some(ScSource::Sound(gi, si))));
         }
     }
-    let cur_src = p.groups[g].sounds[s].channel.sidechain.iter().find(|(k, _)| *k == slot).map(|(_, x)| *x);
+    let cur_src = sidechain.iter().find(|(k, _)| *k == slot).map(|(_, x)| *x);
     let cur = options.iter().position(|(_, x)| *x == cur_src).unwrap_or(0);
     let (names, srcs): (Vec<String>, Vec<Option<ScSource>>) = options.into_iter().unzip();
-    Some((names, srcs.into_iter().map(|x| RouteSet::SideChain(g, s, slot, x)).collect(), cur))
+    Some((names, srcs.into_iter().map(|x| RouteSet::SideChain(c, slot, x)).collect(), cur))
 }
 
 /// The action button at the end of a Groove page.

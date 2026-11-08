@@ -335,7 +335,15 @@ impl Document {
         let mut path = Vec::new();
         for seg in field.split('/') {
             let Some(Value::Obj(o)) = self.tree.at(&[owner.as_slice(), &path].concat()) else { return None };
-            path.extend(o.find_path(seg)?);
+            let next = o.find_path(seg).or_else(|| {
+                (seg == "side_chain_filter").then(|| {
+                    let mut p = o.find_path("parameters")?;
+                    let Value::Obj(params) = o.at(&p)? else { return None };
+                    p.extend(params.find_path("unknown_68")?);
+                    Some(p)
+                })?
+            })?;
+            path.extend(next);
         }
         Some(path)
     }
@@ -929,7 +937,9 @@ impl Document {
 /// A parameter an internal module already shows, copied into its slot. False for what the
 /// model derives more from (the Audio module's loop).
 fn patch_slot(slot: Option<&mut deckard_model::SlotInfo>, field: &str, value: f64) -> bool {
-    let Some(slot) = slot.filter(|x| x.plugin.is_none() && x.module != "AudioModule") else { return false };
+    let Some(slot) = slot.filter(|x| (x.plugin.is_none() || field.starts_with("side_chain_filter/")) && x.module != "AudioModule") else {
+        return false;
+    };
     match slot.params.iter_mut().find(|(k, _)| k == field) {
         Some(param) => {
             param.1 = value;
