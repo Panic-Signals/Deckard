@@ -473,6 +473,10 @@ function page.draw(screen, theme)
       widgets.knob_icon(screen, theme, 5, "zoom")
       widgets.knob_icon(screen, theme, 6, "scroll")
     end
+  elseif v.no_sample then
+    -- Nothing to edit, slice or map: say why (an instrument's sound, an empty Sampler).
+    screen:label(480, 100, 480, 50, v.no_sample.title, { font = "roboto-bold", size = 36, color = "text" }, "center", "center")
+    screen:label(480, 156, 480, 30, v.no_sample.detail, { size = 18, color = "weak" }, "center", "center")
   end
 
   local p, n, count = knob_page(v)

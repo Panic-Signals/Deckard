@@ -173,3 +173,25 @@ fn waiting_to_record_flashes_start() {
     assert!(lit.len() > 1, "flashing: {lit:?}");
     assert!(s.screen_text(&v).iter().any(|t| t == "WAITING"));
 }
+
+/// With no sample to work on, EDIT, SLICE and ZONE say why (C64): what the sound
+/// plays instead. RECORD has nothing to say: it makes one.
+#[test]
+fn a_sound_with_no_sample_says_so() {
+    let mut s = Surface::new();
+    let without = |tab: usize| {
+        let mut v = sampled(tab);
+        v.sampling.sample = None;
+        v.sampling.no_sample = Some(NoSample { title: "NOT A SAMPLE".into(), detail: "Massive X is an instrument".into() });
+        v
+    };
+    press(&mut s, &without(1), "BUTTON_SAMPLE");
+    for tab in 1..=3 {
+        let text = s.screen_text(&without(tab));
+        for want in ["NOT A SAMPLE", "Massive X is an instrument"] {
+            assert!(text.iter().any(|t| t == want), "tab {tab}: {want} in {text:?}");
+        }
+    }
+    let text = s.screen_text(&without(0));
+    assert!(!text.iter().any(|t| t == "NOT A SAMPLE"), "{text:?}");
+}
