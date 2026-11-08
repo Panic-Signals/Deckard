@@ -10506,6 +10506,17 @@ mod tests {
         Some(h)
     }
 
+    /// [`harness`] for a test of Maschine's own controller scripts: `None` (skipped) without
+    /// the extract from the user's install in `out/ni-res`, which is never committed.
+    pub(super) fn scripted_harness(song_view: bool) -> Option<Harness<'static, App>> {
+        let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../out/ni-res");
+        if !scripts.exists() {
+            eprintln!("{} not found; skipping", scripts.display());
+            return None;
+        }
+        harness(true, song_view)
+    }
+
     fn click(h: &mut Harness<'static, App>, pos: Pos2) {
         h.hover_at(pos);
         h.step();
@@ -10532,7 +10543,7 @@ mod tests {
 
     #[test]
     fn clicking_a_scene_tab_with_the_controller_focuses_it() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         assert!(matches!(h.state().controller, Some(Ok(_))), "controller scripts should load");
         click(&mut h, scene_tab(3));
         assert_eq!(h.state().scene, 3);
@@ -10915,7 +10926,7 @@ mod tests {
     /// even with a later section picked; Loop switches in both and carries over.
     #[test]
     fn restart_plays_the_song_from_the_beginning_and_loop_carries_over() {
-        let Some(mut h) = harness(true, true) else { return };
+        let Some(mut h) = scripted_harness(true) else { return };
         let later = h.state().doc.as_ref().unwrap().borrow().project().sections.get(2).map(|_| ());
         if later.is_none() {
             return;
@@ -11197,7 +11208,7 @@ mod tests {
     /// header's switch turn the metronome on and off in both.
     #[test]
     fn tap_tempo_and_the_metronome() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         if let Some(Ok(c)) = &mut h.state_mut().controller {
             for k in 0..3 {
                 if k > 0 {
@@ -11236,7 +11247,7 @@ mod tests {
     /// an empty sound, not the last one shown.
     #[test]
     fn controller_pads_focus_their_sound_and_its_chain() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         h.state_mut().chain_tab = layout::ChainTab::Sound;
         let sounds: Vec<usize> = {
             let d = h.state().doc.as_ref().unwrap().borrow();
@@ -11495,7 +11506,7 @@ mod tests {
 
     #[test]
     fn controller_sampling_tabs_show_and_edit_the_sample() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         {
             let app = h.state_mut();
             (app.group, app.sound) = (0, 0);
@@ -11550,7 +11561,7 @@ mod tests {
 
     #[test]
     fn controller_sample_button_shows_sampling_and_takes_make_a_sampler() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         let effect = deckard_model::INTERNAL_EFFECTS[0].0;
         {
             let app = h.state_mut();
@@ -11680,7 +11691,7 @@ mod tests {
 
     #[test]
     fn controller_scene_button_and_pads_pick_scenes_in_the_ideas_view() {
-        let Some(mut h) = harness(true, true) else { return };
+        let Some(mut h) = scripted_harness(true) else { return };
         // Switch to the Ideas view with the strip button, as a user would.
         click(&mut h, Pos2::new(3.0 + 16.0, 33.0 + 3.0 + 6.0 + 12.0));
         assert!(!h.state().song_view);
@@ -11700,7 +11711,7 @@ mod tests {
     /// first, and doesn't close.
     #[test]
     fn closing_after_a_controller_edit_asks_to_save() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         h.run_steps(2);
         assert!(!h.state().dirty(), "nothing changed yet");
         {
@@ -11723,7 +11734,7 @@ mod tests {
     /// effect's first knob, and screen buttons 5/6 move between slots.
     #[test]
     fn controller_knobs_and_screen_buttons_work_the_control_area() {
-        let Some(mut h) = harness(true, true) else { return };
+        let Some(mut h) = scripted_harness(true) else { return };
         h.state_mut().menu_commands.push(menu::Command::New);
         h.run_steps(3);
         if h.state().confirm.is_some() {
@@ -11764,7 +11775,7 @@ mod tests {
     /// Effect, and an effect after it.
     #[test]
     fn controller_plugin_browser_loads_modules() {
-        let Some(mut h) = harness(true, true) else { return };
+        let Some(mut h) = scripted_harness(true) else { return };
         h.state_mut().menu_commands.push(menu::Command::New);
         h.run_steps(3);
         if h.state().confirm.is_some() {
@@ -11852,7 +11863,7 @@ mod tests {
 
     #[test]
     fn controller_buttons_switch_the_apps_views() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         let hw = |h: &mut Harness<'static, App>, button: &str, down: Option<bool>| {
             if let Some(Ok(c)) = &mut h.state_mut().controller {
                 match down {
@@ -11891,7 +11902,7 @@ mod tests {
 
     #[test]
     fn controller_scene_button_and_pads_pick_sections_in_the_song_view() {
-        let Some(mut h) = harness(true, true) else { return };
+        let Some(mut h) = scripted_harness(true) else { return };
         assert!(h.state().song_view);
         if h.state().doc.as_ref().unwrap().borrow().project().sections.len() < 4 {
             return;
@@ -12079,7 +12090,7 @@ mod tests {
 
     #[test]
     fn controller_screen_buttons_edit_scenes() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         // Switch the controller to the Ideas view too.
         h.state_mut().sync_controller();
         let n = project_of(&h).scenes.len();
@@ -12383,7 +12394,7 @@ mod tests {
     /// the keys outside it.
     #[test]
     fn scale_menu_sets_the_scale_and_marks_the_piano_roll() {
-        let Some(mut h) = harness(true, false) else { return };
+        let Some(mut h) = scripted_harness(false) else { return };
         h.state_mut().piano_roll = true;
         h.run_steps(3);
         h.get_by_label("SCALE").click();
@@ -14520,7 +14531,10 @@ mod tests {
         h.run_steps(3);
         let p = project_of(&h);
         assert_eq!(p.groups[g].patterns.len(), n);
-        assert_eq!(p.groups[g].patterns[1], before.groups[g].patterns[1]);
+        // Duplicate moved the next pattern on a place; Delete leaves the others where they are.
+        let mut moved = before.groups[g].patterns[1].clone();
+        moved.slot += 1;
+        assert_eq!(p.groups[g].patterns[1], moved);
         // The group tile: its menu, and a colour for the group.
         h.state_mut().menu_act(layout::Act::SetColor(vec![deckard_doc::Target::Group(1)], deckard_model::Color::Palette(12)));
         assert_eq!(project_of(&h).groups[1].color, deckard_model::Color::Palette(12));

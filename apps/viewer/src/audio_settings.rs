@@ -143,7 +143,7 @@ mod tests {
     /// On the MK3: SHIFT + SETTINGS, the AUDIO tab, knob 4 turns the buffer size.
     #[test]
     fn the_mk3_turns_the_buffer_size() {
-        let Some(mut h) = crate::tests::harness(true, false) else { return };
+        let Some(mut h) = crate::tests::scripted_harness(false) else { return };
         let before = h.state().settings.buffer_frames;
         h.run_steps(2);
         if let Some(Ok(c)) = &mut h.state_mut().controller {
