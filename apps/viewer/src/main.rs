@@ -42,6 +42,7 @@ mod drum_ui;
 mod export;
 mod github;
 mod goodbye;
+mod group_move;
 mod icon;
 
 /// The version shown: the release's (`DECKARD_VERSION`, set by the build scripts), else
@@ -800,6 +801,7 @@ pub struct App {
     doc: Option<Shared>,
     /// The document revision playback last took up.
     seen_revision: u64,
+    group_moves: group_move::State,
     /// Groups last seen, to notice one deleted (see [`App::clear_midi_inputs`]).
     midi_input_groups: usize,
     path: Option<PathBuf>,
@@ -1454,6 +1456,7 @@ impl App {
                 None => Ok(()),
             },
             Act::DeleteGroup(g) => self.delete_group(g),
+            Act::MoveGroup(g, to) => self.move_group(g, to),
             Act::ResetSound(g, s) => doc.borrow_mut().reset_sound(g, s),
             Act::ExportMidi(g, s) => self.export_midi(g, s),
             Act::ImportMidi(g, s) => self.import_midi(g, s),
@@ -5418,6 +5421,7 @@ impl App {
             A::Scale { root, bank, kind } => self.scale = (root, bank, kind),
             A::AddGroup => layout::apply_acts(self, vec![Act::AddGroup]),
             A::DeleteGroup(g) => layout::apply_acts(self, vec![Act::DeleteGroup(g)]),
+            A::MoveGroup { from, to } => layout::apply_acts(self, vec![Act::MoveGroup(from, to)]),
             A::UserChordNote { set, slot, note } => self.user_chords.toggle(set, slot, note),
             A::UserChordDelete { set, slot } => self.user_chords.delete(set, slot),
             A::UserChordMove { set, slot, next } => self.user_chords.move_chord(set, slot, next),
@@ -6085,6 +6089,7 @@ impl App {
     /// Let playback take up edits to the document (from the UI, the controller
     /// scripts, undo or redo), keeping its position.
     fn follow_edits(&mut self) {
+        self.follow_group_moves();
         let Some(doc) = self.doc.clone() else { return };
         // A group gone moves the numbers of those after it, and plug-ins go by number.
         let groups = doc.borrow().project().groups.len();
@@ -6111,7 +6116,10 @@ impl App {
         // (An edit sent again because playback switched mode meanwhile is built in
         // full: its timelines are what didn't arrive.)
         let prev = self.built.as_ref().filter(|b| b.0 == plays && !stale).map(|b| (&b.1, b.2.as_slice()));
-        let (fresh, report) = Engine::new_after(d.project(), prev, self.path.as_deref(), out.rate, mode, &mut self.samples);
+        let (mut fresh, report) = Engine::new_after(d.project(), prev, self.path.as_deref(), out.rate, mode, &mut self.samples);
+        for (a, b) in self.group_moves.pending.drain(..) {
+            fresh.prepare_group_swap(a, b);
+        }
         out.adopt(fresh, d.project());
         self.adopt_sent = out.sent();
         self.built = Some((plays, d.project().clone(), report.chains));

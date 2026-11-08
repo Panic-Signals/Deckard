@@ -876,6 +876,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     });
     indexed!("delete_scene", "a scene", Action::DeleteScene);
     request!("copy_scene", (from: usize, to: usize) => Action::CopyScene { from: index(from, "a scene")?, to: index(to, "a scene")? });
+    request!("move_group", (from: usize, to: usize) => Action::MoveGroup { from: index(from, "a group")?, to: index(to, "a group")? });
     request!("copy_group", (from: usize, to: usize) => Action::CopyGroup { from: index(from, "a group")?, to: index(to, "a group")? });
     request!("copy_sound", (from: usize, to: usize) => Action::CopySound { from: index(from, "a sound")?, to: index(to, "a sound")? });
     request!("set_send", (group: usize, sound: Option<usize>, aux: usize, level: f64) => {

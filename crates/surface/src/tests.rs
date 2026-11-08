@@ -3159,3 +3159,18 @@ fn the_step_grid_places_a_pads_chord_in_chords_mode() {
     );
     assert!(s.screen_text(&v).join("|").contains("CHORD"));
 }
+
+#[test]
+fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.groups = (0..3).map(|_| v.groups[0].clone()).collect();
+    v.group = 1;
+    s.restore("pad_mode", "pad", &v, Instant::now());
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::MoveGroup { from: 1, to: 0 }]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::MoveGroup { from: 1, to: 2 }]);
+    v.group = 0;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_3").is_empty());
+    v.group = 2;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
+}

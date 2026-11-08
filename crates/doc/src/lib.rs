@@ -42,6 +42,7 @@ mod sounds;
 pub use sounds::SoundClip;
 mod channel;
 mod groove;
+mod group_move;
 mod groups;
 mod lock;
 mod macros;

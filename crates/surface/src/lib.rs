@@ -923,6 +923,11 @@ pub enum Action {
         from: usize,
         to: usize,
     },
+    /// Move a Group one slot, exchanging places with its neighbour.
+    MoveGroup {
+        from: usize,
+        to: usize,
+    },
     /// Sound `to` of the focused group is replaced by a copy of its sound `from`, with its
     /// notes.
     CopySound {

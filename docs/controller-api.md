@@ -518,3 +518,12 @@ that device, never the MK3. Edits to its files reload it, and `open()` runs agai
 
 Scripts get Lua's `string`, `table`, `math` and `utf8` libraries, and the `deckard`
 API. They don't get files, processes or the network.
+
+### Group MOVE
+
+`deckard.move_group(from, to)` exchanges two neighbouring Group slots (1-based).
+Out-of-range requests and moves past the ends do nothing. Focus follows the music.
+On MK3 PAD MODE, hold SHIFT and use screen buttons 3/4 (MOVE left/right); without
+SHIFT these buttons retain bank navigation. SHIFT + screen button 6 remains BOUNCE.
+Names, custom colours, patterns, routing and arrangement references travel with the
+Group. One Undo restores the exchange.

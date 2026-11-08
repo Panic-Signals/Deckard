@@ -101,6 +101,10 @@ impl Repeater {
     }
 
     /// Let go of everything (HOLD off, the mode left).
+    pub fn release_group(&mut self, group: usize) {
+        self.held.retain(|h| h.group != group);
+    }
+
     pub fn clear(&mut self) {
         self.held.clear();
         self.down.clear();

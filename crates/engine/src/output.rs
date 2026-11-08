@@ -841,6 +841,23 @@ impl Output {
     }
 
     /// `group`'s MIDI input plug-in, and where its parameters are.
+    /// Reindex the UI descriptors and inputs waiting for an engine. Runtime inputs
+    /// move at the edit's adoption boundary (Engine::prepare_group_swap).
+    pub fn swap_group_inputs(&self, a: usize, b: usize) {
+        fn swap<T>(map: &mut std::collections::BTreeMap<usize, T>, a: usize, b: usize) {
+            let va = map.remove(&a);
+            let vb = map.remove(&b);
+            if let Some(v) = va {
+                map.insert(b, v);
+            }
+            if let Some(v) = vb {
+                map.insert(a, v);
+            }
+        }
+        swap(&mut self.midi_inputs.lock().unwrap(), a, b);
+        swap(&mut self.midi_inputs_waiting.lock().unwrap(), a, b);
+    }
+
     pub fn midi_input(&self, group: usize) -> Option<crate::midi_input::Info> {
         self.midi_inputs.lock().unwrap().get(&group).cloned()
     }
