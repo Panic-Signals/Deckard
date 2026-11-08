@@ -171,6 +171,9 @@ to the crate's and is shown in About DECKARD.
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps
   the builds as workflow artifacts.
+- **Release notes:** start from [docs/release-notes-template.md](docs/release-notes-template.md):
+  New and Enhanced Features, Bug Fixes, thanks to everyone who contributed, then
+  first-time contributors.
 
 Plug-ins are hosted on all three systems; see [Plug-ins](#plug-ins-cratesplugins) for
 what each one needs. Windows hosting is type-checked by CI but hasn't been tried with a
