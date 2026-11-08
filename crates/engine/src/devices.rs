@@ -534,7 +534,8 @@ mod linux {
     pub fn cards(dir: Dir) -> Vec<Card> {
         let mut cards = Vec::new();
         for card in alsa::card::Iter::new().filter_map(Result::ok) {
-            let Ok(ctl) = alsa::Ctl::new(&format!("hw:{}", card.get_index()), false) else { continue };
+            let index = card.get_index();
+            let Ok(ctl) = alsa::Ctl::new(&format!("hw:{index}"), false) else { continue };
             let Ok(info) = ctl.card_info() else { continue };
             let (Ok(id), Ok(card_name)) = (info.get_id(), info.get_name()) else { continue };
             for dev in alsa::ctl::DeviceIter::new(&ctl) {
@@ -545,8 +546,11 @@ mod linux {
                 };
                 cards.push(Card {
                     name,
-                    pcm: format!("plughw:CARD={id},DEV={dev}"),
-                    hw: format!("hw:CARD={id},DEV={dev}"),
+                    // By the card's index: cpal lists every card that way, but by its id
+                    // only when ALSA's extended name hints are on (they're off by
+                    // default), so `plughw:CARD=<id>` would not be found (#72).
+                    pcm: format!("plughw:CARD={index},DEV={dev}"),
+                    hw: format!("hw:CARD={index},DEV={dev}"),
                     id: id.to_string(),
                 });
             }
