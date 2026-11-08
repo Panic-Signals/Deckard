@@ -784,7 +784,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             let add = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
             let resp = ui.interact(vis(add), id.with("add"), Sense::click()).on_hover_text("Add an instrument, effect or plug-in");
             painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-            painter.text(add.center(), Align2::CENTER_CENTER, "+", font(13.0), white(142));
+            super::plus_glyph(painter, add.center(), 13.0, white(142));
             // The "+" menu adds to the focused chain: focus this sound's.
             let chain = deckard_doc::Chain::Sound(g, s);
             if resp.clicked() && app.chain() != chain {

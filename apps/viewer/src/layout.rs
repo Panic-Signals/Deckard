@@ -233,6 +233,12 @@ pub(crate) fn elide_middle(painter: &Painter, text: &str, size: f32, width: f32)
     cut(lo)
 }
 
+/// A "+" glyph optically centred on `c`: IBM Plex Sans places "+" on the lowercase
+/// x-height axis rather than the full ascent+descent line box used by `CENTER_CENTER`.
+pub(super) fn plus_glyph(painter: &Painter, c: Pos2, size: f32, color: Color32) {
+    painter.text(Pos2::new(c.x, c.y - (size * 0.13).round()), Align2::CENTER_CENTER, "+", font(size), color);
+}
+
 /// Bar.beat.sixteenth, 1-based, as Maschine's position display.
 fn position_string(p: &Project, ticks: f64) -> String {
     let t = ticks.max(0.0) as i64;
@@ -1593,7 +1599,7 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 let resp = resp.on_hover_text("Menus: File, Edit, View, Controller, Help");
                 if resp.hovered() {
                     ui.painter().rect_filled(
-                        Rect::from_min_size(r.min, Vec2::new(118.0, HEADER)).shrink2(Vec2::new(-4.0, 4.0)),
+                        Rect::from_min_max(Pos2::new(r.left() + 6.0, r.center().y - 11.0), Pos2::new(r.right() - 4.0, r.center().y + 11.0)),
                         3.0,
                         white(16),
                     );
@@ -1636,7 +1642,7 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     if icon_button(ui, Vec2::new(32.0, 24.0), on, white(245), "Show or hide the Mixer", draw_mixer_icon).clicked() {
                         acts.push(Act::ToggleMixer);
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(2.0);
                     let on = app.lfos;
                     if icon_button(ui, Vec2::new(32.0, 24.0), on, white(245), "Show or hide the LFOs", |p, r, c| {
                         // A circle with a sine through it.
@@ -1679,7 +1685,7 @@ pub fn header(app: &mut App, ui: &mut Ui) {
             // computer keyboard.
             let t = Vec2::new(32.0, 24.0);
             let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
-            let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0;
+            let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
             let mid_rect = Rect::from_min_size(Pos2::new(full.center().x - group / 2.0, full.top()), Vec2::new(group, HEADER));
             let mut mid = ui.new_child(UiBuilder::new().max_rect(mid_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
             {
@@ -1801,6 +1807,7 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 if follow.clicked() {
                     acts.push(Act::ToggleFollow);
                 }
+                ui.add_space(2.0);
                 let keys_tip = if app.keys.on {
                     format!("Computer keyboard: playing notes ({}) (⌘K)", app.keys.summary())
                 } else {
@@ -1937,7 +1944,7 @@ fn cpu_meter(ui: &mut Ui, load: Option<f32>) -> Response {
     };
     let resp = resp.on_hover_text(tip);
     let p = ui.painter();
-    let bar = Rect::from_center_size(r.center() - Vec2::new(0.0, 5.0), Vec2::new(r.width() - 4.0, 5.0));
+    let bar = Rect::from_center_size(r.center() - Vec2::new(0.0, 2.5), Vec2::new(r.width() - 4.0, 5.0));
     p.rect_filled(bar, 1.0, white(28));
     if let Some(l) = load.filter(|l| *l > 0.0) {
         let col = if l > 0.9 {
@@ -1949,7 +1956,7 @@ fn cpu_meter(ui: &mut Ui, load: Option<f32>) -> Response {
         };
         p.rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar.width() * l.min(1.0), bar.height())), 1.0, col);
     }
-    p.text(r.center() + Vec2::new(0.0, 6.0), Align2::CENTER_CENTER, "CPU", font(8.0), white(142));
+    p.text(r.center() + Vec2::new(0.0, 6.5), Align2::CENTER_CENTER, "CPU", font(8.0), white(142));
     resp
 }
 
@@ -1988,7 +1995,7 @@ fn link_button(ui: &mut Ui, view: Option<(u64, f64)>) -> Response {
 
 fn separator(ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, HEADER), Sense::hover());
-    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, Color32::BLACK));
+    ui.painter().vline(r.center().x, r.y_range().shrink(6.5), Stroke::new(1.0, S02));
 }
 
 /// The rounded display: tempo, signature, position and the scene name.
@@ -2069,44 +2076,97 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
     value(swing, &format!("{:.1} %", p.swing.amount), "SWING");
     // The time signature: a menu.
     note_rect(ui, "sig", sig);
-    menu_at(ui, sig.shrink2(Vec2::new(4.0, 2.0)), format!("{} / {}  SIG", p.numerator, p.denominator), |ui| {
-        time_signature_menu(ui, p, acts)
-    });
+    let sig_label = format!("{} / {}  SIG", p.numerator, p.denominator);
+    let sig_resp = ui.interact(sig, ui.id().with("sig"), Sense::click()).on_hover_text("Time signature");
+    sig_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &sig_label));
+    if sig_resp.hovered() {
+        painter.rect_filled(sig.shrink(3.0), 3.0, white(16));
+    }
+    value(sig, &format!("{}/{}", p.numerator, p.denominator), "SIG");
+    egui::Popup::menu(&sig_resp).show(|ui| time_signature_menu(ui, p, acts));
     painter.text(Pos2::new(position.left() + 8.0, y), Align2::LEFT_CENTER, position_string(p, pos), font(12.0), white(245));
     label(&painter, scene_cell, 2.0, &scene, 12.0, scene_col);
 }
 
-/// A menu button in a rectangle of a custom-drawn panel.
+/// A custom-styled pill menu button placed at `rect.min` (height `rect.height()`, width
+/// sized to `text` plus optional dropdown chevron).
+fn pill_menu_at(ui: &mut Ui, rect: Rect, text: String, chevron: bool, stay_open: bool, add: impl FnOnce(&mut Ui)) -> Response {
+    use egui::containers::menu::{MenuButton, MenuConfig};
+    let text_w = ui.painter().layout_no_wrap(text.clone(), font(11.0), Color32::WHITE).size().x;
+    let w = if chevron { (text_w + 26.0).ceil().max(46.0) } else { (text_w + 18.0).ceil() };
+    let pill = Rect::from_min_size(rect.min, Vec2::new(w, rect.height()));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(pill).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    child.spacing_mut().button_padding = Vec2::new(((w - text_w) * 0.5).max(0.0), 2.0);
+    child.spacing_mut().interact_size = pill.size();
+    {
+        let w = &mut child.visuals_mut().widgets;
+        for v in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            v.bg_fill = Color32::TRANSPARENT;
+            v.weak_bg_fill = Color32::TRANSPARENT;
+            v.bg_stroke = Stroke::NONE;
+            v.fg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
+        }
+    }
+    let rt = egui::RichText::new(text.clone()).size(11.0).color(Color32::TRANSPARENT);
+    let mut resp = if stay_open {
+        let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        MenuButton::new(rt).config(config).ui(&mut child, add).0
+    } else {
+        child.menu_button(rt, add).response
+    };
+    resp.rect = pill;
+    let p = ui.painter();
+    let hot = resp.hovered() || resp.has_focus();
+    p.rect_filled(pill, 3.0, if hot { S03 } else { S01 });
+    p.rect_stroke(pill, 3.0, Stroke::new(1.0, if hot { white(80) } else { S03 }), StrokeKind::Inside);
+    let ink = if hot { Color32::WHITE } else { white(215) };
+    if chevron {
+        p.text(Pos2::new(pill.left() + 8.0, pill.center().y), Align2::LEFT_CENTER, &text, font(11.0), ink);
+        let cx = pill.right() - 8.5;
+        let cy = pill.center().y + 0.5;
+        let ccol = if hot { white(215) } else { white(130) };
+        p.line_segment([Pos2::new(cx - 2.5, cy - 1.2), Pos2::new(cx, cy + 1.5)], Stroke::new(1.2, ccol));
+        p.line_segment([Pos2::new(cx, cy + 1.5), Pos2::new(cx + 2.5, cy - 1.2)], Stroke::new(1.2, ccol));
+    } else {
+        p.text(pill.center(), Align2::CENTER_CENTER, &text, font(11.0), ink);
+    }
+    resp
+}
+
+/// A dropdown menu button in a rectangle of a custom-drawn panel.
 fn menu_at(ui: &mut Ui, rect: Rect, text: String, add: impl FnOnce(&mut Ui)) -> Response {
-    // A child placed at `rect` that takes no room in the parent's layout.
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    child.spacing_mut().button_padding = Vec2::new(4.0, 1.0);
-    let text = egui::RichText::new(text).size(12.0).color(Color32::WHITE);
-    child.menu_button(text, add).response
+    pill_menu_at(ui, rect, text, true, false, add)
+}
+
+/// An action menu button (no dropdown chevron) in a rectangle of a custom-drawn panel.
+fn action_menu_at(ui: &mut Ui, rect: Rect, text: String, add: impl FnOnce(&mut Ui)) -> Response {
+    pill_menu_at(ui, rect, text, false, false, add)
 }
 
 /// [`menu_at`] for settings: it stays open while they're changed, until a click outside.
 fn settings_menu_at(ui: &mut Ui, rect: Rect, text: String, add: impl FnOnce(&mut Ui)) -> Response {
-    use egui::containers::menu::{MenuButton, MenuConfig};
-    let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-    child.spacing_mut().button_padding = Vec2::new(4.0, 1.0);
-    let text = egui::RichText::new(text).size(12.0).color(Color32::WHITE);
-    let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    MenuButton::new(text).config(config).ui(&mut child, add).0
+    pill_menu_at(ui, rect, text, true, true, add)
 }
 
 /// PAD TOUCH (next to SCALE): what pressing a held MK3 pad does for the focused sound,
 /// the settings the controller's Keyboard page has.
-fn pad_touch_menu(ui: &mut Ui, at: Rect, g: usize, s: usize, sound: Option<&deckard_model::Sound>, acts: &mut Vec<Act>) {
+fn pad_touch_menu(
+    ui: &mut Ui,
+    at: Rect,
+    g: usize,
+    s: usize,
+    sound: Option<&deckard_model::Sound>,
+    acts: &mut Vec<Act>,
+) -> Option<Response> {
     use deckard_model::pad_touch::{TouchMode, cc_label};
-    let Some(sound) = sound else { return };
+    let sound = sound?;
     let t = sound.pad_touch;
     let shown = match t.mode {
         TouchMode::Velocity => "PAD TOUCH".to_string(),
         TouchMode::Cc => format!("PAD: CC {}", cc_label(t.cc)),
         m => format!("PAD: {}", m.name().to_uppercase()),
     };
-    settings_menu_at(ui, at, shown, |ui| {
+    Some(settings_menu_at(ui, at, shown, |ui| {
         ui.label(egui::RichText::new(format!("Pressing a held MK3 pad, for {}", sound.name)).weak());
         for m in TouchMode::ALL {
             if ui.selectable_label(t.mode == m, m.name()).clicked() {
@@ -2137,7 +2197,7 @@ fn pad_touch_menu(ui: &mut Ui, at: Rect, g: usize, s: usize, sound: Option<&deck
             acts.push(Act::PadTouch(g, s, n));
         }
         ui.label(egui::RichText::new("The pressure modes play at Fixed Velocity; Min and Max are what's sent.").weak());
-    });
+    }))
 }
 
 fn time_signature_menu(ui: &mut Ui, p: &Project, acts: &mut Vec<Act>) {
@@ -2765,16 +2825,8 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     let plus = Rect::from_min_size(Pos2::new(tiles.left() + p.groups.len() as f32 * IDEA_W - gx, tiles.top()), Vec2::new(27.0, TILE_H));
     if plus.intersects(tiles) {
         let resp = ui.interact(plus.intersect(tiles), ui.id().with("add-group"), Sense::click());
-        if resp.hovered() {
-            painter.rect_filled(plus.shrink2(Vec2::new(0.5, 4.0)).intersect(tiles), 2.0, S03);
-        }
-        painter.with_clip_rect(tiles).text(
-            plus.center(),
-            Align2::CENTER_CENTER,
-            "+",
-            font(16.0),
-            white(if resp.hovered() { 245 } else { 142 }),
-        );
+        painter.rect_filled(plus.shrink(1.0).intersect(tiles), 2.0, if resp.hovered() { S03 } else { S01 });
+        plus_glyph(&painter.with_clip_rect(tiles), plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New group").clicked() {
             acts.push(Act::AddGroup);
         }
@@ -2783,10 +2835,8 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     let plus = Rect::from_min_size(Pos2::new(tabs.left() + p.scenes.len() as f32 * IDEA_W - sx, tabs.top()), Vec2::new(27.0, SCENE_ROW));
     if plus.intersects(tabs) {
         let resp = ui.interact(plus.intersect(tabs), ui.id().with("add-scene"), Sense::click());
-        if resp.hovered() {
-            painter.rect_filled(plus.shrink2(Vec2::new(0.5, 4.0)), 2.0, S03);
-        }
-        painter.text(plus.center(), Align2::CENTER_CENTER, "+", font(16.0), white(if resp.hovered() { 245 } else { 142 }));
+        painter.rect_filled(plus.shrink2(Vec2::new(0.5, 4.0)).intersect(tabs), 2.0, if resp.hovered() { S03 } else { S01 });
+        plus_glyph(&painter, plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New scene").clicked() {
             acts.push(Act::AddScene);
         }
@@ -3318,13 +3368,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         if resp.hovered() {
             row_painter.rect_filled(plus.shrink(1.0), 2.0, S03);
         }
-        row_painter.text(
-            Pos2::new(plus.left() + 16.0, plus.center().y),
-            Align2::CENTER_CENTER,
-            "+",
-            font(16.0),
-            white(if resp.hovered() { 245 } else { 142 }),
-        );
+        plus_glyph(&row_painter, Pos2::new(plus.left() + 16.0, plus.center().y), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New group").clicked() {
             acts.push(Act::AddGroup);
         }
@@ -3356,6 +3400,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let ep = painter.with_clip_rect(ed);
     ep.hline(timeline.x_range(), timeline.top(), Stroke::new(1.0, Color32::BLACK));
     ep.hline(timeline.x_range(), timeline.bottom(), Stroke::new(1.0, Color32::BLACK));
+    painter.hline(col.x_range(), rows_top - 0.5, Stroke::new(1.0, Color32::BLACK));
     let end_x = x_of(p.arrangement_length() as f64);
     ep.rect_filled(Rect::from_min_max(Pos2::new(end_x, tracks.top()), tracks.max), 0.0, S00);
     // Bars and beats.
@@ -3463,7 +3508,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
                 while t < sec.length {
                     let c0 = x_of((start - sec.length + t) as f64);
                     let c1 = x_of((start - sec.length + (t + plen).min(sec.length)) as f64);
-                    let clip = Rect::from_min_max(Pos2::new(c0 + 0.5, y + 2.0), Pos2::new(c1 - 0.5, y + ROW - 2.0));
+                    let clip = Rect::from_min_max(Pos2::new(c0 + 0.5, y + 1.0), Pos2::new(c1 - 0.5, y + ROW - 2.0));
                     // The pattern's repeats are dark, as the patterns not in the scene
                     // are in the Ideas view.
                     // Under clips, patterns are dimmed (clips are fully coloured).
@@ -3545,7 +3590,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         let plus = Rect::from_min_size(Pos2::new(end_x + 1.0, secs.top() + 4.0), Vec2::new(27.0, secs.height() - 8.0));
         let resp = ui.interact(plus.intersect(secs), ui.id().with("add-section"), Sense::click());
         ep.rect_filled(plus, 0.0, if resp.hovered() { S03 } else { S01 });
-        ep.text(plus.center(), Align2::CENTER_CENTER, "+", font(16.0), white(if resp.hovered() { 245 } else { 142 }));
+        plus_glyph(&ep, plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text(format!("New section playing {}", scene_name(p, app.scene.min(p.scenes.len() - 1)))).clicked() {
             acts.push(Act::AddSection(app.scene.min(p.scenes.len() - 1)));
         }
@@ -3568,7 +3613,7 @@ fn clip_lanes(ui: &mut Ui, app: &App, p: &Project, tracks: Rect, top: f32, x_of:
         let y = top + g as f32 * ROW;
         for (c, clip) in grp.clips.iter().enumerate() {
             let r = Rect::from_min_max(
-                Pos2::new(x_of(clip.position as f64) + 0.5, y + 2.0),
+                Pos2::new(x_of(clip.position as f64) + 0.5, y + 1.0),
                 Pos2::new(x_of((clip.position + clip.length) as f64) - 0.5, y + ROW - 2.0),
             );
             if !r.intersects(tracks) {
@@ -4144,32 +4189,18 @@ fn swing_knobs(t: Target, s: Swing) -> Vec<Knob> {
 
 fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, acts: &mut Vec<Act>) {
     let p = doc.project();
-    let painter = ui.painter_at(rect);
     let strip_r = Rect::from_min_size(rect.min, Vec2::new(STRIP, rect.height()));
-    painter.rect_filled(strip_r, 0.0, S05);
     // The far-left icons: channel properties (a knob) and plug-ins (a plug).
-    for (k, (on, tip, draw)) in [
-        (app.channel, "Channel properties", channel_icon as fn(&Painter, Rect, Color32)),
-        (!app.channel, "Plug-ins", plug_icon as fn(&Painter, Rect, Color32)),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let b = Rect::from_min_size(Pos2::new(strip_r.left(), strip_r.top() + 5.0 + k as f32 * 27.0), Vec2::new(STRIP, 24.0));
-        let resp = ui.interact(b, ui.id().with(("chain-mode", k)), Sense::click()).on_hover_text(tip);
-        ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-chain-mode", k)), b));
-        let ink = if on {
-            white(245)
-        } else if resp.hovered() {
-            white(164)
-        } else {
-            white(90)
-        };
-        draw(&painter, b, ink);
-        if resp.clicked() {
-            acts.push(Act::ChannelMode(k == 0));
-        }
+    match strip(ui, strip_r, S05, 6.0, &[(app.channel, "Channel properties", channel_icon), (!app.channel, "Plug-ins", plug_icon)]) {
+        Some(0) => acts.push(Act::ChannelMode(true)),
+        Some(1) => acts.push(Act::ChannelMode(false)),
+        _ => {}
     }
+    for k in 0..2 {
+        let b = Rect::from_min_size(Pos2::new(strip_r.left(), strip_r.top() + 6.0 + k as f32 * 28.0), Vec2::new(STRIP, 24.0));
+        ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-chain-mode", k)), b));
+    }
+    let painter = ui.painter_at(rect);
     // At the bottom: the Assignment area's arrow (down: open it; up: close it).
     {
         let open = app.remote.assign.is_some();
@@ -4203,7 +4234,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     for (tab, name) in [(ChainTab::Master, "MASTER"), (ChainTab::Group, "GROUP"), (ChainTab::Sound, "SOUND")] {
         // Each tab as wide as its name and a little room, 8 apart.
         let w = painter.layout_no_wrap(name.to_string(), font(12.0), Color32::WHITE).size().x + 4.0;
-        let r = Rect::from_min_size(Pos2::new(x, col.top()), Vec2::new(w, 24.0));
+        let r = Rect::from_min_size(Pos2::new(x, col.top()), Vec2::new(w, 32.0));
         let resp = ui.interact(r, ui.id().with(("tab", name)), Sense::click());
         let ink = if app.chain_tab == tab {
             white(245)
@@ -4221,6 +4252,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         }
         x += w + 8.0;
     }
+    painter.hline(col.x_range(), col.top() + 32.0, Stroke::new(1.0, Color32::BLACK));
     let title = match app.chain_tab {
         ChainTab::Master => "Master".to_string(),
         ChainTab::Group => group.map_or(String::new(), |_| group_name(p, app.group)),
@@ -4228,7 +4260,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             sound.map_or(String::new(), |s| if s.name.is_empty() { format!("Sound {}", app.sound + 1) } else { s.name.clone() })
         }
     };
-    let title_r = Rect::from_min_size(Pos2::new(col.left(), col.top() + 24.0), Vec2::new(COLUMN, 32.0));
+    let title_r = Rect::from_min_size(Pos2::new(col.left(), col.top() + 32.0), Vec2::new(COLUMN, 24.0));
     let on_sound = app.chain_tab == ChainTab::Sound && sound.is_some();
     label(&painter, title_r, 8.0, &title, 15.0, white(245));
     let level = match app.chain_tab {
@@ -4557,10 +4589,11 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     if let Some(n) = &note {
         painter.text(Pos2::new(knobs_x, header.bottom() + 20.0), Align2::LEFT_CENTER, n, font(12.0), white(142));
     }
-    // Section headings: from their slot to the next section.
+    // Section headings: from their slot to the last populated parameter before the next section.
     let slot_x = |i: usize| knobs_x + i as f32 * 83.0;
     for (k, (i, name)) in sections.iter().enumerate() {
-        let end = sections.get(k + 1).map_or(params.len().max(i + 1), |(j, _)| *j);
+        let next = sections.get(k + 1).map_or(params.len().max(i + 1), |(j, _)| *j);
+        let end = (*i..next).rev().find(|&m| params.get(m).and_then(|x| x.as_ref()).is_some()).map_or(*i + 1, |m| m + 1);
         let (x0, x1) = (slot_x(*i), slot_x(end) - 13.0);
         let y = header.bottom() + 9.0;
         let t = painter.text(Pos2::new(x0, y), Align2::LEFT_CENTER, name.as_ref(), font(10.0), gcol);
@@ -4627,13 +4660,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 }
                 painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name.as_ref(), font(10.0), white(90));
                 painter.circle_stroke(Pos2::new(r.center().x, r.top() + 42.0), 18.0, Stroke::new(1.0, white(30)));
-                painter.text(
-                    Pos2::new(r.center().x, r.top() + 42.0),
-                    Align2::CENTER_CENTER,
-                    "+",
-                    font(14.0),
-                    white(if resp.hovered() { 200 } else { 70 }),
-                );
+                plus_glyph(&painter, Pos2::new(r.center().x, r.top() + 42.0), 14.0, white(if resp.hovered() { 200 } else { 70 }));
                 egui::Popup::menu(&resp).show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
                 continue;
             }
@@ -4938,10 +4965,10 @@ fn macro_icon(p: &Painter, m: Pos2, c: Color32) {
 #[allow(clippy::too_many_arguments)]
 fn property_tiles(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, level: Option<Level>, _color: Color32, acts: &mut Vec<Act>) {
     let icons: [fn(&Painter, Pos2, Color32); 4] = [input_icon, output_icon, groove_icon, macro_icon];
-    let (w, h) = (75.0, 35.0);
+    let (w, h) = (73.0, 35.0);
     for (i, name) in channel::SETS.iter().enumerate() {
         let r = Rect::from_min_size(
-            Pos2::new(area.left() + 4.0 + (i % 2) as f32 * (w + 1.0), area.top() + 6.0 + (i / 2) as f32 * (h + 7.0)),
+            Pos2::new(area.left() + 6.0 + (i % 2) as f32 * (w + 5.0), area.top() + 6.0 + (i / 2) as f32 * (h + 5.0)),
             Vec2::new(w, h),
         );
         // The master has no input.
@@ -4986,9 +5013,9 @@ fn selector(
     acts: &mut Vec<Act>,
 ) {
     painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name, font(10.0), white(142));
-    let up = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 27.0), Vec2::new(40.0, 14.0));
-    let down = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 57.0), Vec2::new(40.0, 14.0));
-    let mid = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 42.0), Vec2::new(70.0, 16.0));
+    let up = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 25.0), Vec2::new(40.0, 14.0));
+    let down = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 55.0), Vec2::new(40.0, 14.0));
+    let mid = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 40.0), Vec2::new(70.0, 16.0));
     let arrow = |rect: Rect, pointing_up: bool, enabled: bool, id: &str| {
         let resp = ui.interact(rect, ui.id().with((id, i)), Sense::click());
         let c = if !enabled {
@@ -5097,9 +5124,13 @@ fn page_tabs(
         let resp = ui.interact(r, ui.id().with(("page-tab", i)), Sense::click());
         let on = i == page;
         let ink = if on || resp.hovered() { Color32::WHITE } else { white(142) };
-        painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
+        if name == "+" {
+            plus_glyph(painter, r.center(), 11.0, ink);
+        } else {
+            painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
+        }
         if on {
-            painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), r.bottom(), Stroke::new(2.0, Color32::WHITE));
+            painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), area.bottom() - 1.0, Stroke::new(2.0, Color32::WHITE));
         }
         if resp.clicked() {
             acts.push(act(i));
@@ -5236,7 +5267,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
             }
             None => {
                 p.rect_stroke(r, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-                p.text(r.center(), Align2::CENTER_CENTER, "+", font(15.0), if resp.hovered() { white(245) } else { white(142) });
+                plus_glyph(&p, r.center(), 15.0, if resp.hovered() { white(245) } else { white(142) });
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Add plug-in"));
                 let resp = resp.on_hover_text("Add an instrument, effect or plug-in");
                 // A sound has one instrument, in its first slot.
@@ -5461,7 +5492,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         ui,
         strip_rect,
         S00,
-        7.0,
+        6.0,
         &[
             (!app.piano_roll, "Drum grid", grid_icon),
             (app.piano_roll, "Piano roll (focused sound)", piano_icon),
@@ -5491,8 +5522,9 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let pat = group.patterns.get(app.pattern);
     // The Sampling view replaces the pattern editor; the sound list stays.
     if app.sampling_open {
-        label(&painter, Rect::from_min_size(col.min, Vec2::new(COLUMN, 32.0)), 8.0, &group_name(p, app.group), 15.0, gcol);
-        let list = Rect::from_min_max(Pos2::new(col.left(), col.top() + 56.0), col.max);
+        label(&painter, Rect::from_min_size(col.min, Vec2::new(COLUMN, 38.0)), 8.0, &group_name(p, app.group), 15.0, gcol);
+        let list = Rect::from_min_max(Pos2::new(col.left(), col.top() + 57.0), col.max);
+        painter.hline(col.x_range(), list.top() - 0.5, Stroke::new(1.0, Color32::BLACK));
         let lp = painter.with_clip_rect(list);
         let n = group.sounds.len().max(16);
         let y0 = scroll(ui, "sampling-sound-list", list, n as f32 * ROW);
@@ -5525,31 +5557,36 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         return;
     }
 
-    // Titles: sound list 56 = editor header 38 + timeline 19 (−1).
-    label(&painter, Rect::from_min_size(col.min, Vec2::new(COLUMN, 32.0)), 8.0, &group_name(p, app.group), 15.0, gcol);
+    // Titles: sound list 57 = editor header 38 + timeline 19.
+    label(&painter, Rect::from_min_size(col.min, Vec2::new(COLUMN, 38.0)), 8.0, &group_name(p, app.group), 15.0, gcol);
     let header = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 38.0));
     let bar = p.bar_length().max(1);
     match pat {
         Some(pt) => {
             let name = if pt.name.is_empty() { "Pattern" } else { &pt.name };
-            let r = painter.text(Pos2::new(header.left() + 8.0, header.center().y), Align2::LEFT_CENTER, name, font(15.0), gcol);
-            let mut x = r.right() + 24.0;
+            let y = header.center().y;
+            let sep = |p: &Painter, x: f32| {
+                p.vline(x, (y - 8.0)..=(y + 8.0), Stroke::new(1.0, S02));
+            };
+            let r = painter.text(Pos2::new(header.left() + 10.0, y), Align2::LEFT_CENTER, name, font(15.0), gcol);
+            let mut x = r.right() + 14.0;
+            sep(&painter, x);
+            x += 14.0;
             let len = pattern_len(p, app.group, app.pattern);
             let beat = PPQ * 4 / p.denominator.max(1);
-            let y = header.center().y;
-            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "START", font(10.0), white(61));
+            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "START", font(10.0), white(120));
             let r = painter.text(
                 Pos2::new(r.right() + 6.0, y),
                 Align2::LEFT_CENTER,
                 position_string(p, pt.start as f64),
-                font(12.0),
-                Color32::WHITE,
+                font(11.0),
+                white(215),
             );
-            x = r.right() + 20.0;
+            x = r.right() + 14.0;
             // Length, grid and quantize: menus.
             let (g, pi) = (app.group, app.pattern);
-            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "LENGTH", font(10.0), white(61));
-            let at = Rect::from_min_size(Pos2::new(r.right() + 2.0, y - 10.0), Vec2::new(64.0, 20.0));
+            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "LENGTH", font(10.0), white(120));
+            let at = Rect::from_min_size(Pos2::new(r.right() + 6.0, y - 10.0), Vec2::new(64.0, 20.0));
             // Auto (no length chosen): an empty pattern grows as it's recorded into.
             let auto = app.doc.as_ref().is_some_and(|d| d.borrow().length_is_auto(g, pi));
             let text = if auto && pt.notes.is_empty() {
@@ -5557,7 +5594,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             } else {
                 format!("{}:{}:{}", len / bar, len % bar / beat, len % beat / (PPQ / 4))
             };
-            menu_at(ui, at, text, |ui| {
+            let len_drawn = menu_at(ui, at, text, |ui| {
                 if ui
                     .selectable_label(auto, "Auto")
                     .on_hover_text("Recorded into from empty, the pattern grows a bar at a time as it's played into")
@@ -5580,10 +5617,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     }
                 }
             });
-            x = at.right() + 16.0;
-            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "GRID", font(10.0), white(61));
-            let at = Rect::from_min_size(Pos2::new(r.right() + 2.0, y - 10.0), Vec2::new(52.0, 20.0));
-            menu_at(ui, at, grid_name(app.grid), |ui| {
+            x = len_drawn.rect.right() + 14.0;
+            sep(&painter, x);
+            x += 14.0;
+            let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "GRID", font(10.0), white(120));
+            let at = Rect::from_min_size(Pos2::new(r.right() + 6.0, y - 10.0), Vec2::new(52.0, 20.0));
+            let grid_drawn = menu_at(ui, at, grid_name(app.grid), |ui| {
                 for (name, ticks) in GRIDS {
                     if ui.selectable_label(app.grid == ticks, name).clicked() {
                         acts.push(Act::Grid(ticks));
@@ -5591,7 +5630,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     }
                 }
             });
-            x = at.right() + 16.0;
+            x = grid_drawn.rect.right() + 8.0;
             let at = Rect::from_min_size(Pos2::new(x, y - 10.0), Vec2::new(78.0, 20.0));
             let selected = app.selected.iter().filter(|n| pt.notes.contains(n)).count();
             let what = match selected {
@@ -5599,8 +5638,20 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 1 => "the selected note".to_string(),
                 n => format!("the {n} selected notes"),
             };
+            let quant_drawn = action_menu_at(ui, at, "QUANTIZE".into(), |ui| {
+                ui.label(egui::RichText::new(format!("Snap {what} to the {} grid", grid_name(app.grid))).weak());
+                for pct in [100, 75, 50] {
+                    if ui.button(format!("{pct} %")).clicked() {
+                        acts.push(Act::Quantize(pct));
+                        ui.close();
+                    }
+                }
+            });
+            x = quant_drawn.rect.right() + 14.0;
+            sep(&painter, x);
+            x += 14.0;
             // The scale (Maschine only sets it on the controller): root and scale, by bank.
-            let scale_at = Rect::from_min_size(Pos2::new(at.right() + 16.0, y - 10.0), Vec2::new(150.0, 20.0));
+            let scale_at = Rect::from_min_size(Pos2::new(x, y - 10.0), Vec2::new(150.0, 20.0));
             let (root, bank, kind) = app.scale;
             let chromatic = bank == 0 && kind == 0;
             let names = deckard_lua_host::api::scales::scale_names(bank);
@@ -5633,26 +5684,20 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     });
                 }
             });
-            let pad_at = Rect::from_min_size(Pos2::new(scale_drawn.rect.right() + 16.0, y - 10.0), Vec2::new(130.0, 20.0));
-            pad_touch_menu(ui, pad_at, app.group, app.sound, group.sounds.get(app.sound), acts);
+            let pad_at = Rect::from_min_size(Pos2::new(scale_drawn.rect.right() + 8.0, y - 10.0), Vec2::new(130.0, 20.0));
+            let pad_right = pad_touch_menu(ui, pad_at, app.group, app.sound, group.sounds.get(app.sound), acts)
+                .map_or(scale_drawn.rect.right(), |r| r.rect.right());
             if selected > 0 {
+                let sx = pad_right + 14.0;
+                sep(&painter, sx);
                 painter.text(
-                    Pos2::new(pad_at.right() + 14.0, y),
+                    Pos2::new(sx + 14.0, y),
                     Align2::LEFT_CENTER,
                     format!("{selected} selected  (Esc clears)"),
                     font(11.0),
-                    Color32::WHITE,
+                    white(180),
                 );
             }
-            menu_at(ui, at, "QUANTIZE".into(), |ui| {
-                ui.label(egui::RichText::new(format!("Snap {what} to the {} grid", grid_name(app.grid))).weak());
-                for pct in [100, 75, 50] {
-                    if ui.button(format!("{pct} %")).clicked() {
-                        acts.push(Act::Quantize(pct));
-                        ui.close();
-                    }
-                }
-            });
         }
         None => label(&painter, header, 8.0, "No pattern", 12.0, white(142)),
     }
@@ -5670,7 +5715,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let grid = Rect::from_min_max(Pos2::new(ed.left() + keys_w, timeline.bottom()), Pos2::new(ed.right() - ZOOM_BAR, lane.top() - 7.0));
     let keys = Rect::from_min_max(Pos2::new(ed.left(), grid.top()), Pos2::new(grid.left(), grid.bottom()));
     let list = Rect::from_min_max(Pos2::new(col.left(), grid.top()), Pos2::new(col.right(), grid.bottom()));
-    painter.hline(rect.x_range(), lane.top() - 3.5, Stroke::new(1.0, Color32::BLACK));
+    painter.hline(col.x_range(), list.top() - 0.5, Stroke::new(1.0, Color32::BLACK));
+    painter.hline(col.left()..=rect.right(), lane.top() - 3.5, Stroke::new(1.0, Color32::BLACK));
     // Where the lane is, for tests that drive the window.
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-lane"), lane));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-grid"), grid));
@@ -6492,7 +6538,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             }
             None => {
                 let col = if app.lanes_dialog || resp.hovered() { Color32::WHITE } else { white(142) };
-                lp.text(Pos2::new(r.left() + 8.0, y), Align2::LEFT_CENTER, "+", font(16.0), col);
+                lp.text(Pos2::new(r.left() + 8.0, y - 2.0), Align2::LEFT_CENTER, "+", font(16.0), col);
                 if resp.on_hover_text("Add or remove MIDI controller lanes").clicked() {
                     acts.push(Act::LanesDialog(!app.lanes_dialog));
                 }
