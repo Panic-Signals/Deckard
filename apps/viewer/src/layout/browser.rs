@@ -41,21 +41,34 @@ const KINDS: [(Kind, &str); 7] = [
 
 pub fn panel(app: &mut App, ui: &mut Ui) {
     let mut acts = Vec::new();
-    egui::Panel::left("browser").exact_size(WIDTH).resizable(false).frame(egui::Frame::new().fill(S00).inner_margin(6.0)).show(ui, |ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-        ui.horizontal(|ui| {
-            for (tab, label) in [(Tab::Library, "LIBRARY"), (Tab::Files, "FILES")] {
-                if chip(ui, label, app.browser.tab == tab, 12.0).clicked() {
-                    acts.push(Act::Browse(BrowseAct::Tab(tab)));
+    egui::Panel::left("browser")
+        .exact_size(WIDTH)
+        .resizable(false)
+        .frame(egui::Frame::new().fill(S00).inner_margin(egui::Margin { left: 6, right: 6, top: 9, bottom: 6 }))
+        .show(ui, |ui| {
+            let panel_rect = ui.max_rect().expand2(Vec2::new(6.0, 0.0));
+            ui.painter().rect_filled(
+                Rect::from_min_max(
+                    egui::pos2(panel_rect.left(), panel_rect.top() - 9.0),
+                    egui::pos2(panel_rect.right(), panel_rect.top() - 6.0),
+                ),
+                0.0,
+                Color32::BLACK,
+            );
+            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+            ui.horizontal(|ui| {
+                for (tab, label) in [(Tab::Library, "LIBRARY"), (Tab::Files, "FILES")] {
+                    if chip(ui, label, app.browser.tab == tab, 12.0).clicked() {
+                        acts.push(Act::Browse(BrowseAct::Tab(tab)));
+                    }
                 }
+            });
+            ui.add_space(2.0);
+            match app.browser.tab {
+                Tab::Library => library(app, ui, &mut acts),
+                Tab::Files => files(app, ui, &mut acts),
             }
         });
-        ui.add_space(2.0);
-        match app.browser.tab {
-            Tab::Library => library(app, ui, &mut acts),
-            Tab::Files => files(app, ui, &mut acts),
-        }
-    });
     apply(app, acts);
 }
 
@@ -83,7 +96,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     });
     if !b.results.products.is_empty() {
         let shown = q.product.clone().unwrap_or_else(|| "All libraries".into());
-        egui::ComboBox::from_id_salt("browser-product").width(WIDTH - 20.0).selected_text(shown).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("browser-product").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
             if ui.selectable_label(q.product.is_none(), "All libraries").clicked() {
                 acts.push(Act::Browse(BrowseAct::Product(None)));
             }
@@ -133,7 +146,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
         }
     });
     let mut text = q.text.clone();
-    let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text("🔍 search").desired_width(WIDTH - 20.0));
+    let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text("🔍 search").desired_width(ui.available_width()));
     if edit.changed() {
         acts.push(Act::Browse(BrowseAct::Text(text)));
     }
@@ -240,13 +253,26 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                 if hr.clicked() {
                     acts.push(Act::Browse(BrowseAct::Favorite(i, !item.favorite)));
                 }
-                ui.painter().text(r.left_center() + Vec2::new(24.0, 0.0), Align2::LEFT_CENTER, &item.name, font(11.0), white(230));
                 let detail = match (item.tempo, &item.product) {
                     (Some(t), _) if matches!(item.kind, Kind::Loop) => format!("{t:.0} BPM"),
                     (_, Some(p)) => p.clone(),
                     _ => String::new(),
                 };
-                ui.painter().text(r.right_center() - Vec2::new(6.0, 0.0), Align2::RIGHT_CENTER, detail, font(10.0), white(120));
+                let name_right = if detail.is_empty() {
+                    r.right() - 6.0
+                } else {
+                    let dr =
+                        ui.painter().text(r.right_center() - Vec2::new(10.0, 0.0), Align2::RIGHT_CENTER, detail, font(10.0), white(120));
+                    (dr.left() - 6.0).max(r.left() + 24.0)
+                };
+                let name_clip = Rect::from_min_max(r.min, egui::pos2(name_right, r.bottom()));
+                ui.painter().with_clip_rect(name_clip).text(
+                    r.left_center() + Vec2::new(24.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    &item.name,
+                    font(11.0),
+                    white(230),
+                );
                 if resp.double_clicked() {
                     acts.push(Act::Browse(BrowseAct::Load(i, None)));
                 } else if resp.clicked() {
