@@ -331,7 +331,7 @@ mod tests {
     /// sound.
     #[test]
     fn the_mk3_bounces_the_focused_sound() {
-        let Some(mut h) = crate::tests::harness(true, false) else { return };
+        let Some(mut h) = crate::tests::scripted_harness(false) else { return };
         let hw = |h: &mut egui_kittest::Harness<'static, App>, button: &str, down: bool| {
             if let Some(Ok(c)) = &mut h.state_mut().controller {
                 let _ = c.host.button(button, down);
