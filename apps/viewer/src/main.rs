@@ -15664,7 +15664,9 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
                 resize(&panel, ((w as f32 * k).round() as u32).max(1), ((hh as f32 * k).round() as u32).max(1), FilterType::Lanczos3)
             };
             let thumb = if entry.instrument { fit(160, 90) } else { fit(130, 40) };
-            let mut logo = image::RgbaImage::from_pixel(240, 196, image::Rgba([0, 0, 0, 255]));
+            // Padded to 240 × 196 with nothing: the screen's own background shows around
+            // the panel, not black bars (C58).
+            let mut logo = image::RgbaImage::from_pixel(240, 196, image::Rgba([0, 0, 0, 0]));
             let big = fit(240, 196);
             image::imageops::overlay(&mut logo, &big, ((240 - big.width()) / 2) as i64, ((196 - big.height()) / 2) as i64);
             let key = deckard_lua_host::plugin_picture_key(&slot.name);
