@@ -1423,5 +1423,11 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
         st.set("progress", s.progress)?;
         t.set("stems", st)?;
     }
+    if let Some(n) = &v.no_sample {
+        let ns = lua.create_table()?;
+        ns.set("title", n.title.as_str())?;
+        ns.set("detail", n.detail.as_str())?;
+        t.set("no_sample", ns)?;
+    }
     Ok(t)
 }

@@ -710,3 +710,69 @@ fn group_browser_toggles_routing_and_patterns_on_load() {
     assert_eq!(g.patterns[0].name, "Kept Groove");
     assert_eq!(g.patterns[0].notes, vec![note]);
 }
+
+/// A project opened from the browser replaces the open one; Undo, with nothing of the
+/// new one's to undo, brings the old one back as it was: its edits, its undo history,
+/// its file. Unsaved changes discarded at the prompt come back too.
+#[test]
+fn undo_after_opening_a_project_brings_the_last_one_back() {
+    let (_tmp, dir) = temp();
+    let ctx = egui::Context::default();
+    let groups = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups.len();
+    let project = |name: &str, groups: usize| {
+        let mut d = deckard_doc::Document::new_project().unwrap();
+        while d.project().groups.len() < groups {
+            d.add_group().unwrap();
+        }
+        let path = dir.join(name);
+        d.save_as(&path).unwrap();
+        deckard_library::Item { kind: Kind::Project, name: name.into(), path, ..Default::default() }
+    };
+    let (two, three) = (project("Two.mxprj", 2), project("Three.mxprj", 3));
+    let mut app = App::default();
+    app.new_project();
+    app.load_item(&two, None).unwrap();
+    // An edit of its own, saved.
+    app.doc.as_ref().unwrap().borrow_mut().add_group().unwrap();
+    app.doc.as_ref().unwrap().borrow_mut().save_as(&two.path).unwrap();
+    assert_eq!(groups(&app), 3);
+    let undo_steps = app.doc.as_ref().unwrap().borrow().undo_labels().len();
+
+    app.load_item(&three, None).unwrap();
+    assert_eq!((groups(&app), app.path.clone()), (3, Some(three.path.clone())));
+    let offered = |app: &App| {
+        crate::menu::menus(app)
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .any(|i| matches!(i, crate::menu::Item::Command { label, enabled: true, .. } if label == "Undo Open Project"))
+    };
+    assert!(offered(&app), "the Edit menu offers it");
+    app.run_command(&ctx, crate::menu::Command::Undo(1));
+    assert_eq!(app.path, Some(two.path.clone()), "the last project is back");
+    assert_eq!(groups(&app), 3, "as it was");
+    assert_eq!(app.doc.as_ref().unwrap().borrow().undo_labels().len(), undo_steps, "with its undo history");
+    app.run_command(&ctx, crate::menu::Command::Undo(1));
+    assert_eq!(groups(&app), 2, "its own undo goes on");
+
+    // Opened over unsaved changes, discarded at the prompt: back with them.
+    assert!(app.dirty());
+    app.load_item(&three, None).unwrap();
+    let then = app.confirm.take().expect("asks about the unsaved changes");
+    app.proceed(&ctx, then);
+    assert_eq!(app.path, Some(three.path.clone()));
+    app.surface_edit("undo");
+    assert_eq!((app.path.clone(), groups(&app)), (Some(two.path.clone()), 2));
+    assert!(app.dirty(), "its unsaved changes too");
+
+    // An edit in the new project is undone first; then nothing goes back.
+    app.load_item(&three, None).unwrap();
+    let then = app.confirm.take().unwrap();
+    app.proceed(&ctx, then);
+    app.doc.as_ref().unwrap().borrow_mut().add_group().unwrap();
+    app.run_command(&ctx, crate::menu::Command::Undo(1));
+    assert_eq!((app.path.clone(), groups(&app)), (Some(three.path.clone()), 3), "the new project's edit");
+    // A new project forgets what was replaced.
+    app.new_project();
+    app.run_command(&ctx, crate::menu::Command::Undo(1));
+    assert_eq!(app.path, None);
+}

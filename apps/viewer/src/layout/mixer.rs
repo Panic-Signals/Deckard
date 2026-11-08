@@ -767,23 +767,32 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                     font(11.0),
                     if slot.active { white(220) } else { white(110) },
                 );
-                if ui.interact(vis(sq), id.with(("bypass", i)), Sense::click()).on_hover_text("Bypass").clicked() {
+                let chain = deckard_doc::Chain::Sound(g, s);
+                let bypass = ui.interact(vis(sq), id.with(("bypass", i)), Sense::click()).on_hover_text("Bypass");
+                if bypass.clicked() {
                     acts.push(Act::SlotActiveOf(g, s, i, !slot.active));
                 }
+                bypass.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
                 let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
-                if ui.interact(vis(name), id.with(("slot", i)), Sense::click()).on_hover_text("Show its pages").clicked() {
+                let shown = ui.interact(vis(name), id.with(("slot", i)), Sense::click()).on_hover_text("Show its pages");
+                if shown.clicked() {
                     acts.push(Act::FocusSlot(g, s, i));
                 }
+                shown.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
                 y += SLOT_ROW;
             }
             let add = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
-            let resp =
-                ui.interact(vis(add), id.with("add"), Sense::click()).on_hover_text("Add a module or plug-in (in the SOUND tab below)");
+            let resp = ui.interact(vis(add), id.with("add"), Sense::click()).on_hover_text("Add an instrument, effect or plug-in");
             painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
             super::plus_glyph(painter, add.center(), 13.0, white(142));
-            if resp.clicked() {
-                acts.push(Act::FocusSlot(g, s, usize::MAX));
+            // The "+" menu adds to the focused chain: focus this sound's.
+            let chain = deckard_doc::Chain::Sound(g, s);
+            if resp.clicked() && app.chain() != chain {
+                acts.push(Act::FocusChainSlot(chain, usize::MAX));
             }
+            // A sound has one instrument, in its first slot.
+            let instruments = st.slots.is_empty();
+            egui::Popup::menu(&resp).show(|ui| super::add_menu(ui, app, instruments, acts));
         }
     }
     // A group's and the master's effects: bypassed with the square, shown (in the
@@ -810,13 +819,17 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                 font(11.0),
                 if slot.active { white(220) } else { white(110) },
             );
-            if ui.interact(vis(sq), id.with(("cbypass", i)), Sense::click()).on_hover_text("Bypass").clicked() {
+            let bypass = ui.interact(vis(sq), id.with(("cbypass", i)), Sense::click()).on_hover_text("Bypass");
+            if bypass.clicked() {
                 acts.push(Act::ChainSlotActive(chain, i, !slot.active));
             }
+            bypass.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
             let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
-            if ui.interact(vis(name), id.with(("cslot", i)), Sense::click()).on_hover_text("Show its pages").clicked() {
+            let shown = ui.interact(vis(name), id.with(("cslot", i)), Sense::click()).on_hover_text("Show its pages");
+            if shown.clicked() {
                 acts.push(Act::FocusChainSlot(chain, i));
             }
+            shown.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
             y += SLOT_ROW;
         }
         // "+": add an effect at the end of this chain (the "+" menu, with this chain
@@ -1158,6 +1171,164 @@ impl Default for MixerSections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Strip `ch`'s "+" under its `slots` plug-in rows, in the whole app's Mixer.
+    fn add_row(h: &egui_kittest::Harness<'static, crate::App>, ch: Channel, slots: usize) -> egui::Pos2 {
+        let strips: Vec<(Channel, Rect)> = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-mixer-strips"))).expect("mixer drawn");
+        let r = strips.into_iter().find(|(c, _)| *c == ch).unwrap().1;
+        egui::pos2(r.center().x, r.top() + HEAD + 3.0 + 4.0 + slots as f32 * SLOT_ROW + SLOT_ROW / 2.0)
+    }
+
+    fn click_at(h: &mut egui_kittest::Harness<'static, crate::App>, pos: egui::Pos2) {
+        h.hover_at(pos);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        h.run_steps(3);
+    }
+
+    /// Every strip's "+" opens the add menu, as the master's always did.
+    #[test]
+    fn each_strips_plus_opens_the_add_menu() {
+        use egui_kittest::kittest::Queryable;
+        for (sounds, ch) in [(false, Channel::Master), (false, Channel::Group(1)), (true, Channel::Sound(0, 1)), (true, Channel::Group(0))]
+        {
+            let Some(mut h) = crate::tests::harness(false, false) else { return };
+            h.state_mut().group = 0;
+            (h.state_mut().mixer, h.state_mut().mixer_sounds) = (true, sounds);
+            h.run_steps(3);
+            let n = {
+                let doc = h.state().doc.clone().unwrap();
+                let d = doc.borrow();
+                let p = d.project();
+                match ch {
+                    Channel::Master => p.master_slots.len(),
+                    Channel::Group(g) => p.groups[g].slots.len(),
+                    Channel::Sound(g, s) => p.groups[g].sounds[s].slots.len(),
+                    Channel::Extra(_) => unreachable!(),
+                }
+            };
+            let at = add_row(&h, ch, n);
+            click_at(&mut h, at);
+            assert!(h.query_by_label("Internal ⏵").is_some(), "{ch:?}: no menu");
+        }
+    }
+
+    /// Pick "+" ▸ Internal ▸ Compressor in the open menu.
+    fn pick_compressor(h: &mut egui_kittest::Harness<'static, crate::App>) {
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Internal ⏵").click();
+        h.run_steps(3);
+        h.get_by_label("Compressor").click();
+        h.run_steps(3);
+    }
+
+    /// A sound strip's "+" adds to that sound, a group strip's to that group, whatever
+    /// was focused before.
+    #[test]
+    fn a_strips_plus_adds_to_its_own_chain() {
+        let Some(mut h) = crate::tests::harness(false, false) else { return };
+        (h.state_mut().mixer, h.state_mut().mixer_sounds) = (true, true);
+        h.run_steps(3);
+        let doc = h.state().doc.clone().unwrap();
+        let n = doc.borrow().project().groups[0].sounds[2].slots.len();
+        let at = add_row(&h, Channel::Sound(0, 2), n);
+        click_at(&mut h, at);
+        pick_compressor(&mut h);
+        assert_eq!(doc.borrow().project().groups[0].sounds[2].slots.len(), n + 1, "{}", h.state().status);
+        assert_eq!(h.state().sound, 2, "that sound focused");
+        assert!(!h.state().channel, "its plug-ins shown");
+
+        h.state_mut().mixer_sounds = false;
+        h.run_steps(3);
+        let n = doc.borrow().project().groups[3].slots.len();
+        let at = add_row(&h, Channel::Group(3), n);
+        click_at(&mut h, at);
+        pick_compressor(&mut h);
+        assert_eq!(doc.borrow().project().groups[3].slots.len(), n + 1, "{}", h.state().status);
+    }
+
+    /// An empty sound's "+" offers instruments.
+    #[test]
+    fn an_empty_sounds_plus_offers_instruments() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = crate::App::default();
+        app.new_project();
+        (app.mixer, app.mixer_sounds) = (true, true);
+        let doc = app.doc.clone().unwrap();
+        assert!(doc.borrow().project().groups[0].sounds[1].slots.is_empty());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Sound(0, 1), 0);
+        click_at(&mut h, at);
+        h.get_by_label("Internal ⏵").click();
+        h.run_steps(3);
+        h.get_by_label("Bass Synth").click();
+        h.run_steps(3);
+        assert_eq!(doc.borrow().project().groups[0].sounds[1].slots[0].module, "BassSynth", "{}", h.state().status);
+    }
+
+    fn right_click_at(h: &mut egui_kittest::Harness<'static, crate::App>, pos: egui::Pos2) {
+        h.hover_at(pos);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        h.run_steps(3);
+    }
+
+    /// Right-click ▸ Remove takes the row's own effect out, whichever chain is focused.
+    #[test]
+    fn a_rows_right_click_removes_it_from_its_own_chain() {
+        use egui_kittest::kittest::Queryable;
+        let Some(mut h) = crate::tests::harness(false, false) else { return };
+        (h.state_mut().mixer, h.state_mut().mixer_sounds) = (true, false);
+        h.run_steps(3);
+        let doc = h.state().doc.clone().unwrap();
+        let (focused, master) = {
+            let d = doc.borrow();
+            (d.project().groups[0].sounds[0].slots.len(), d.project().master_slots.iter().map(|x| x.name.clone()).collect::<Vec<_>>())
+        };
+        assert!(master.len() >= 2, "{master:?}");
+        let at = add_row(&h, Channel::Master, 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Remove").click();
+        h.run_steps(3);
+        let d = doc.borrow();
+        let left: Vec<_> = d.project().master_slots.iter().map(|x| x.name.clone()).collect();
+        assert_eq!(left, master[1..], "{}", h.state().status);
+        assert_eq!(d.project().groups[0].sounds[0].slots.len(), focused, "the focused chain is untouched");
+    }
+
+    /// Right-click ▸ Change Effect swaps the row's module, in place.
+    #[test]
+    fn a_rows_right_click_changes_its_effect_in_place() {
+        use egui_kittest::kittest::Queryable;
+        let Some(mut h) = crate::tests::harness(false, false) else { return };
+        (h.state_mut().mixer, h.state_mut().mixer_sounds, h.state_mut().group, h.state_mut().sound) = (true, true, 0, 0);
+        h.state_mut().chain_tab = crate::layout::ChainTab::Master;
+        h.run_steps(3);
+        let doc = h.state().doc.clone().unwrap();
+        let modules = |doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>| -> Vec<String> {
+            doc.borrow().project().groups[0].sounds[0].slots.iter().map(|x| x.module.clone()).collect()
+        };
+        assert_eq!(modules(&doc), ["Sampler", "EQ", "Compressor"]);
+        let at = add_row(&h, Channel::Sound(0, 0), 1);
+        right_click_at(&mut h, at);
+        h.get_by_label("Change Effect ⏵").click();
+        h.run_steps(3);
+        pick_compressor(&mut h);
+        assert_eq!(modules(&doc), ["Sampler", "Compressor", "Compressor"], "{}", h.state().status);
+        assert_eq!(h.state().slot, Some(1), "the new one shown");
+        doc.borrow_mut().undo();
+        assert_eq!(modules(&doc), ["Sampler", "EQ", "Compressor"], "one undo step restores it");
+    }
 
     #[test]
     fn scale_matches_maschine() {

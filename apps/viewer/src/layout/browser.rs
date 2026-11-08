@@ -423,6 +423,7 @@ pub(super) fn prehear_row(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
 pub(super) fn chip(ui: &mut Ui, text: &str, on: bool, size: f32) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_string(), font(size), if on { Color32::BLACK } else { white(200) });
     let (r, resp) = ui.allocate_exact_size(galley.size() + Vec2::new(12.0, 6.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text));
     let fill = if on {
         ACCENT
     } else if resp.hovered() {

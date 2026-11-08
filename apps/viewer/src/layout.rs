@@ -675,6 +675,10 @@ pub enum Act {
     SelectSlot(Option<usize>),
     AddSlot(AddWhat),
     RemoveSlot(usize),
+    /// Remove slot `.1` of chain `.0`, focused or not.
+    RemoveSlotIn(deckard_doc::Chain, usize),
+    /// Put a new module in slot `.1` of chain `.0`, and focus it.
+    ReplaceSlotIn(deckard_doc::Chain, usize, AddWhat),
     /// Move slot `.0` of the focused sound's chain to position `.1`.
     MoveSlot(usize, usize),
     SlotActive(usize, bool),
@@ -1186,13 +1190,18 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             Act::AddSlot(what) => app.add_slot(what),
             Act::MoveSlot(from, to) => app.move_slot(from, to),
-            Act::RemoveSlot(i) => {
+            Act::RemoveSlot(i) => apply(app, vec![Act::RemoveSlotIn(app.chain(), i)]),
+            Act::RemoveSlotIn(c, i) => {
                 if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().remove_slot_in(app.chain(), i)
+                    && let Err(e) = doc.borrow_mut().remove_slot_in(c, i)
                 {
                     app.status = format!("can't remove it: {e}");
                 }
                 app.plugin_views.clear();
+            }
+            Act::ReplaceSlotIn(c, i, what) => {
+                apply(app, vec![Act::FocusChainSlot(c, i)]);
+                app.replace_slot(i, what);
             }
             Act::SlotActive(i, on) => {
                 if let Some(doc) = app.doc.clone()
@@ -1267,7 +1276,11 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         app.focus_group(g);
                         ChainTab::Group
                     }
-                    deckard_doc::Chain::Sound(..) => ChainTab::Sound,
+                    deckard_doc::Chain::Sound(g, s) => {
+                        app.focus_group(g);
+                        app.sound = s;
+                        ChainTab::Sound
+                    }
                 };
                 app.channel = false;
                 app.slot = Some(i);
@@ -1342,8 +1355,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.sound = s;
                 app.chain_tab = ChainTab::Sound;
                 app.slot_of = Some(deckard_doc::Chain::Sound(g, s));
-                app.slot = (i != usize::MAX).then_some(i);
-                app.channel = i == usize::MAX;
+                app.slot = Some(i);
+                app.channel = false;
                 app.plugin_page = 0;
                 app.sampler_page = 0;
             }
@@ -5236,6 +5249,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                         acts.push(Act::SlotActive(i, !active));
                         ui.close();
                     }
+                    change_menu(ui, app, app.chain(), i, !movable, acts);
                     if ui.button("Remove").clicked() {
                         acts.push(Act::RemoveSlot(i));
                         ui.close();
@@ -5317,10 +5331,10 @@ fn native(instrument: bool) -> impl Iterator<Item = &'static deckard_plugins::na
 
 /// "+" › Internal's instruments (a sound's first slot only): the Sampler and Audio,
 /// Maschine's synths, DECKARD's own.
-fn internal_instruments(ui: &mut Ui, instruments: bool, acts: &mut Vec<Act>) {
+fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -> Act, acts: &mut Vec<Act>) {
     for (name, what) in [("Sampler", AddWhat::Sampler), ("Audio", AddWhat::Audio)] {
         if ui.add_enabled(instruments, egui::Button::new(name)).on_disabled_hover_text(AFTER_FX).clicked() {
-            acts.push(Act::AddSlot(what));
+            acts.push(pick(what));
             ui.close();
         }
     }
@@ -5329,14 +5343,14 @@ fn internal_instruments(ui: &mut Ui, instruments: bool, acts: &mut Vec<Act>) {
     for class in deckard_model::INTERNAL_INSTRUMENTS {
         let b = egui::Button::new(deckard_model::module_label(class));
         if ui.add_enabled(instruments, b).on_disabled_hover_text(AFTER_FX).clicked() {
-            acts.push(Act::AddSlot(AddWhat::Instrument(class)));
+            acts.push(pick(AddWhat::Instrument(class)));
             ui.close();
         }
     }
     // DECKARD's own.
     for c in native(true) {
         if ui.add_enabled(instruments, egui::Button::new(c.name)).on_disabled_hover_text(AFTER_FX).clicked() {
-            acts.push(Act::AddSlot(AddWhat::Plugin(native_entry(c))));
+            acts.push(pick(AddWhat::Plugin(native_entry(c))));
             ui.close();
         }
     }
@@ -5344,17 +5358,52 @@ fn internal_instruments(ui: &mut Ui, instruments: bool, acts: &mut Vec<Act>) {
 
 /// The "+" menu: Maschine's internal modules, then plug-ins by role and vendor.
 fn add_menu(ui: &mut Ui, app: &App, instruments: bool, acts: &mut Vec<Act>) {
+    module_menu(ui, app, app.chain(), instruments, true, &Act::AddSlot, acts);
+}
+
+/// A plug-in row's right-click menu in the Mixer: put another module in its place, or
+/// remove it. For chain `c`, which needn't be the focused one.
+fn slot_menu(ui: &mut Ui, app: &App, c: deckard_doc::Chain, i: usize, is_instrument: bool, acts: &mut Vec<Act>) {
+    change_menu(ui, app, c, i, is_instrument, acts);
+    if ui.button("Remove").clicked() {
+        acts.push(Act::RemoveSlotIn(c, i));
+        ui.close();
+    }
+}
+
+/// "Change Effect" (or "Change Instrument"): the modules that can take slot `i` of chain
+/// `c`'s place.
+fn change_menu(ui: &mut Ui, app: &App, c: deckard_doc::Chain, i: usize, is_instrument: bool, acts: &mut Vec<Act>) {
+    // A sound's instrument stays in its first slot.
+    let instruments = i == 0;
+    ui.menu_button(if is_instrument { "Change Instrument" } else { "Change Effect" }, |ui| {
+        module_menu(ui, app, c, instruments, false, &|what| Act::ReplaceSlotIn(c, i, what), acts);
+    });
+}
+
+/// The modules chain `chain` can take, `pick` saying what choosing one does: Maschine's
+/// internal modules, then plug-ins by role and vendor. `perform`: offer a group's Perform
+/// FX (it goes first in the chain, so it can't take another slot's place).
+fn module_menu(
+    ui: &mut Ui,
+    app: &App,
+    chain: deckard_doc::Chain,
+    instruments: bool,
+    perform: bool,
+    pick: &dyn Fn(AddWhat) -> Act,
+    acts: &mut Vec<Act>,
+) {
     ui.set_min_width(170.0);
     // A group's and the master's chains take effects only.
-    let sound = matches!(app.chain(), deckard_doc::Chain::Sound(..));
+    let sound = matches!(chain, deckard_doc::Chain::Sound(..));
     ui.menu_button("Internal", |ui| {
         if sound {
-            internal_instruments(ui, instruments, acts);
+            internal_instruments(ui, instruments, pick, acts);
             ui.separator();
         }
         for (class, _) in deckard_model::INTERNAL_EFFECTS {
             if ui.button(deckard_model::module_label(class)).clicked() {
-                acts.push(Act::AddSlot(AddWhat::Effect(class)));
+                acts.push(pick(AddWhat::Effect(class)));
                 ui.close();
             }
             if deckard_model::EFFECT_GROUP_ENDS.contains(class) {
@@ -5364,12 +5413,12 @@ fn add_menu(ui: &mut Ui, app: &App, instruments: bool, acts: &mut Vec<Act>) {
         // DECKARD's own effects.
         for c in native(false) {
             if ui.button(c.name).clicked() {
-                acts.push(Act::AddSlot(AddWhat::Plugin(native_entry(c))));
+                acts.push(pick(AddWhat::Plugin(native_entry(c))));
                 ui.close();
             }
         }
         // A group's Perform FX: one, first in its chain (Maschine's last category).
-        if let deckard_doc::Chain::Group(g) = app.chain() {
+        if let (true, deckard_doc::Chain::Group(g)) = (perform, chain) {
             ui.separator();
             let has = app.perform_slot(g).is_some();
             ui.add_enabled_ui(!has, |ui| {
@@ -5416,7 +5465,7 @@ fn add_menu(ui: &mut Ui, app: &App, instruments: bool, acts: &mut Vec<Act>) {
                             b
                         };
                         if b.clicked() {
-                            acts.push(Act::AddSlot(AddWhat::Plugin((*e).clone())));
+                            acts.push(pick(AddWhat::Plugin((*e).clone())));
                             ui.close();
                         }
                     }

@@ -512,14 +512,25 @@ pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: R
         panel(&mut child, app, &clip, r, snd, slot, g, s, i, color, acts);
         panels.push((i, r));
     }
-    // "+": add a plug-in at the end of the chain.
-    let add = Rect::from_min_size(Pos2::new(x, area.top() + PANEL_TOP), Vec2::new(ADD_W, area.height() - PANEL_TOP - 10.0));
+    // "+": add a plug-in at the end of the chain, kept in view when the chain runs past
+    // the right edge.
+    let add_x = x.min(area.right() - ADD_W - PANEL_GAP);
+    let add = Rect::from_min_size(Pos2::new(add_x, area.top() + PANEL_TOP), Vec2::new(ADD_W, area.height() - PANEL_TOP - 10.0));
     let resp = ui.interact(add.intersect(area), ui.id().with("strip-add"), Sense::click()).on_hover_text("Add a plug-in");
+    // Over the panels it's pinned above.
+    clip.rect_filled(add, 3.0, Color32::from_rgb(0x1b, 0x1b, 0x1b));
     clip.rect_stroke(add, 3.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(50) }), StrokeKind::Inside);
     super::plus_glyph(&clip, add.center(), 20.0, white(if resp.hovered() { 230 } else { 150 }));
+    // The "+" menu adds to the focused chain: this strip shows the sound's, whatever tab
+    // is focused.
+    let chain = deckard_doc::Chain::Sound(g, s);
+    if resp.clicked() && app.chain() != chain {
+        acts.push(Act::FocusChainSlot(chain, usize::MAX));
+    }
     // A sound has one instrument, in its first slot.
     let instruments = snd.slots.is_empty();
     egui::Popup::menu(&resp).show(|ui| add_menu(ui, app, instruments, acts));
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-strip-add"), (add, area)));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-strip-panels"), panels));
 }
 
@@ -564,6 +575,7 @@ fn panel(
     if nr.clicked() {
         acts.push(Act::FocusSlot(g, s, i));
     }
+    nr.context_menu(|ui| super::slot_menu(ui, app, deckard_doc::Chain::Sound(g, s), i, slot.is_instrument(), acts));
     // The body.
     let body = Rect::from_min_max(Pos2::new(r.left(), bar.bottom() + 4.0), r.max);
     painter.rect_filled(body, 3.0, Color32::from_rgb(0x22, 0x22, 0x22));

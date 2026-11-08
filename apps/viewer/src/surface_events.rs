@@ -176,7 +176,8 @@ impl App {
             }
             _ => true,
         };
-        if !done {
+        // Past the start of its history, the project an Open replaced comes back.
+        if !done && !(what.starts_with("undo") && self.back_to_replaced()) {
             self.status = format!("nothing to {}", if what.starts_with("undo") { "undo" } else { "redo" });
         }
     }
