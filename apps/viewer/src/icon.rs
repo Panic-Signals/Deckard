@@ -1,6 +1,8 @@
-//! DECKARD's icon: the television the MK3's displays show when DECKARD closes
+//! DECKARD's icons. The television the MK3's displays show when DECKARD closes
 //! ([`crate::goodbye`]), as an app icon: on macOS's rounded square, a dark room, the
 //! old set glowing teal with static on the tube, and deckard across it in the logo font.
+//! Or the logo's D, white on black. Preferences ▸ General picks the one the window, the
+//! taskbar and the Dock show ([`Style`], [`apply`]).
 
 use crate::goodbye::{Noise, blur, mix};
 
@@ -126,20 +128,287 @@ fn title(px: &mut [[u8; 4]], size: usize, (cx, cy, a, _, _): (f32, f32, f32, f32
     }
 }
 
-/// `icon(size)` as a PNG file (for the app bundle's icon set and the Linux desktop).
-pub fn write_png(path: &std::path::Path, size: usize) -> Result<(), String> {
-    let px = icon(size);
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), size as u32, size as u32);
+/// The logo's D, white on a black square, `size` × `size` RGBA. Drawn larger and scaled
+/// down, centred on the letter's ink: placed in whole pixels at the small sizes Windows
+/// shows, it would sit a pixel or two off.
+pub fn letter(size: usize) -> Vec<[u8; 4]> {
+    let mut px = vec![[0, 0, 0, 255]; size * size];
+    let logo = crate::layout::logo_font();
+    let Ok(font) = fontdue::Font::from_bytes(logo, fontdue::FontSettings::default()) else { return px };
+    let over = (1024 / size.max(1)).clamp(1, 16);
+    let big = size * over;
+    // The D's own shape, not its advance, fills the square (the letter leans).
+    let room = big as f32 * 0.72;
+    let at_100 = font.metrics('d', 100.0);
+    let sz = 100.0 * room / at_100.width.max(at_100.height).max(1) as f32;
+    let (m, bitmap) = font.rasterize('d', sz);
+    // Where the ink is: a rasterized letter's box can have empty or faint rows at its edges.
+    let ink = |x: usize, y: usize| bitmap[y * m.width + x] >= 128;
+    let rows: Vec<usize> = (0..m.height).filter(|&y| (0..m.width).any(|x| ink(x, y))).collect();
+    let columns: Vec<usize> = (0..m.width).filter(|&x| (0..m.height).any(|y| ink(x, y))).collect();
+    let (Some(&top), Some(&bottom), Some(&left), Some(&right)) = (rows.first(), rows.last(), columns.first(), columns.last()) else {
+        return px;
+    };
+    let x_at = (big as isize - (right + left + 1) as isize) / 2;
+    let y_at = (big as isize - (bottom + top + 1) as isize) / 2;
+    let mut sum = vec![0u32; size * size];
+    for gy in 0..m.height {
+        for gx in 0..m.width {
+            let (x, y) = (gx as isize + x_at, gy as isize + y_at);
+            if (0..big as isize).contains(&x) && (0..big as isize).contains(&y) {
+                sum[y as usize / over * size + x as usize / over] += u32::from(bitmap[gy * m.width + gx]);
+            }
+        }
+    }
+    let samples = (over * over) as u32;
+    for (p, s) in px.iter_mut().zip(sum) {
+        let v = (s / samples) as u8;
+        *p = [v, v, v, 255];
+    }
+    px
+}
+
+/// [`letter`] on macOS's rounded square, where the television sits (the Dock's icons
+/// share that grid): transparent outside it, the edge smoothed.
+pub fn letter_tile(size: usize) -> Vec<[u8; 4]> {
+    let s = size as f32 / 1024.0;
+    let c = 512.0 * s;
+    let tile = (c, c, 412.0 * s, 412.0 * s, 5.0);
+    let inner = ((824.0 * s).round() as usize).max(1);
+    let at = size.saturating_sub(inner) / 2;
+    let d = letter(inner);
+    let mut px = vec![[0u8; 4]; size * size];
+    // About a pixel, in the shape's measure at its edge, to smooth it over.
+    let feather = 5.0 / (412.0 * s).max(1.0);
+    for y in 0..size {
+        for x in 0..size {
+            let t = shape(x as f32 + 0.5, y as f32 + 0.5, tile);
+            let a = ((1.0 - t) / feather + 0.5).clamp(0.0, 1.0);
+            if a == 0.0 {
+                continue;
+            }
+            let (ix, iy) = (x.wrapping_sub(at), y.wrapping_sub(at));
+            let v = if ix < inner && iy < inner { d[iy * inner + ix][0] } else { 0 };
+            px[y * size + x] = [v, v, v, (a * 255.0).round() as u8];
+        }
+    }
+    px
+}
+
+/// Which icon DECKARD shows (Preferences ▸ General ▸ Icon).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Style {
+    /// The television (a new install's).
+    #[default]
+    Television,
+    /// The logo's D, white on black.
+    Letter,
+}
+
+impl Style {
+    pub const ALL: [Style; 2] = [Style::Television, Style::Letter];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Style::Television => "Television",
+            Style::Letter => "D",
+        }
+    }
+
+    /// As saved in the settings and given to `--write-icon`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Style::Television => "television",
+            Style::Letter => "letter",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Style> {
+        Style::ALL.into_iter().find(|s| s.key() == key)
+    }
+
+    /// The icon, `size` × `size` RGBA: the D on the rounded square on macOS (as Dock
+    /// icons are), the whole square elsewhere.
+    pub fn pixels(self, size: usize) -> Vec<[u8; 4]> {
+        match self {
+            Style::Television => icon(size),
+            Style::Letter if cfg!(target_os = "macos") => letter_tile(size),
+            Style::Letter => letter(size),
+        }
+    }
+
+    /// The window's icon, for egui.
+    pub fn icon_data(self) -> eframe::egui::IconData {
+        eframe::egui::IconData { rgba: self.pixels(256).into_iter().flatten().collect(), width: 256, height: 256 }
+    }
+}
+
+/// Shows `style` as the running program's icon: the window's and the taskbar's (Windows,
+/// Linux), the Dock's (macOS). The program file's own icon, and shortcuts to it, stay as
+/// they were installed.
+pub fn apply(ctx: &eframe::egui::Context, style: Style) {
+    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Icon(Some(std::sync::Arc::new(style.icon_data()))));
+    platform::apply(style);
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::Style;
+
+    /// The Dock's icon (winit's window icon does nothing on macOS).
+    pub fn apply(style: Style) {
+        use objc2::{AnyThread as _, MainThreadMarker};
+        use objc2_app_kit::{NSApplication, NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage};
+        use objc2_foundation::NSSize;
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let n = 512;
+        let px = style.pixels(n);
+        // SAFETY: given no planes, the image keeps a buffer of its own, n × n × 4 bytes,
+        // filled below (premultiplied, as AppKit takes it by default).
+        unsafe {
+            let Some(rep) = NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                n as isize,
+                n as isize,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                (n * 4) as isize,
+                32,
+            ) else {
+                return;
+            };
+            let data = rep.bitmapData();
+            if data.is_null() {
+                return;
+            }
+            let out = std::slice::from_raw_parts_mut(data, n * n * 4);
+            for (o, p) in out.chunks_exact_mut(4).zip(&px) {
+                let a = u16::from(p[3]);
+                let pre = |v: u8| (u16::from(v) * a / 255) as u8;
+                o.copy_from_slice(&[pre(p[0]), pre(p[1]), pre(p[2]), p[3]]);
+            }
+            let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(n as f64, n as f64));
+            image.addRepresentation(&rep);
+            NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
+        }
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::Style;
+
+    /// The taskbar's and Alt+Tab's icons: winit's window icon is only the small one.
+    pub fn apply(style: Style) {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateIconFromResourceEx, GetSystemMetrics, ICON_BIG, ICON_SMALL, LR_DEFAULTCOLOR, SM_CXICON, SM_CXSMICON, SendMessageW,
+            WM_SETICON,
+        };
+        // SAFETY: a getter; DECKARD's window is the active one while its preferences change
+        // and as it starts.
+        let window = unsafe { GetActiveWindow() };
+        if window.is_null() {
+            return;
+        }
+        // Big first, then small: given the big one alone, Windows scales it down badly.
+        for (which, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+            // SAFETY: a getter.
+            let size = unsafe { GetSystemMetrics(metric) }.clamp(16, 256) as usize;
+            // Drawn at the size asked for; Windows reads a PNG as an icon resource.
+            let Ok(mut png) = super::png_bytes(&style.pixels(size), size) else { return };
+            // SAFETY: the bytes are a whole PNG and outlive the call, which copies them.
+            let icon = unsafe {
+                CreateIconFromResourceEx(png.as_mut_ptr(), png.len() as u32, 1, 0x0003_0000, size as i32, size as i32, LR_DEFAULTCOLOR)
+            };
+            if icon.is_null() {
+                return;
+            }
+            // SAFETY: the window and the icon are both live handles.
+            unsafe { SendMessageW(window, WM_SETICON, which as usize, icon as isize) };
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod platform {
+    /// The window icon egui sets is the whole of it.
+    pub fn apply(_style: super::Style) {}
+}
+
+fn png_bytes(px: &[[u8; 4]], size: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, size as u32, size as u32);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     let mut w = enc.write_header().map_err(|e| e.to_string())?;
-    w.write_image_data(px.as_flattened()).map_err(|e| e.to_string())
+    w.write_image_data(px.as_flattened()).map_err(|e| e.to_string())?;
+    w.finish().map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// `style`'s icon as a PNG file (for the app bundle's icon set, the Linux desktop and the
+/// Windows installer's icon).
+pub fn write_png(path: &std::path::Path, size: usize, style: Style) -> Result<(), String> {
+    std::fs::write(path, png_bytes(&style.pixels(size), size)?).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::icon;
+    use super::{Style, icon, letter, letter_tile};
+
+    /// Windows shows the small sizes as they are, so each must be centred for itself.
+    #[test]
+    fn the_letter_is_centred_at_every_size() {
+        for n in [16, 20, 24, 32, 40, 48, 64, 256] {
+            let px = letter(n);
+            let lit = |x: usize, y: usize| px[y * n + x][0] >= 128;
+            let rows: Vec<usize> = (0..n).filter(|&y| (0..n).any(|x| lit(x, y))).collect();
+            let columns: Vec<usize> = (0..n).filter(|&x| (0..n).any(|y| lit(x, y))).collect();
+            let (top, bottom) = (rows[0], n - 1 - rows[rows.len() - 1]);
+            let (left, right) = (columns[0], n - 1 - columns[columns.len() - 1]);
+            assert!(top.abs_diff(bottom) <= 1, "{n}: {top} above, {bottom} below");
+            assert!(left.abs_diff(right) <= 1, "{n}: {left} left, {right} right");
+        }
+    }
+
+    #[test]
+    fn the_letter_is_white_on_black_at_every_size() {
+        for n in [16, 32, 48, 256] {
+            let px = letter(n);
+            assert_eq!(px.len(), n * n);
+            assert!(px.iter().all(|p| p[3] == 255), "{n}: opaque all over");
+            for corner in [0, n - 1, n * n - n, n * n - 1] {
+                assert_eq!(px[corner], [0, 0, 0, 255], "{n}: black in the corners");
+            }
+            assert!(px.iter().any(|p| p[0] > 200 && p[0] == p[1] && p[1] == p[2]), "{n}: the white letter");
+        }
+    }
+
+    #[test]
+    fn the_letter_tile_is_rounded_like_the_television() {
+        let n = 256;
+        let (d, tv) = (letter_tile(n), icon(n));
+        assert_eq!(d[n + 1][3], 0, "outside the rounded square: transparent");
+        assert_eq!(d[30 * n + n / 2][3], 255, "inside: opaque");
+        assert_eq!(d[n / 2 * n + 4][3], 0, "left of the square: transparent");
+        assert_eq!(tv[n / 2 * n + 40][3], 255);
+        assert_eq!(d[n / 2 * n + 40][3], 255, "where the television's square is");
+        assert!(d.iter().any(|p| p[0] > 200), "the white letter");
+    }
+
+    #[test]
+    fn styles_round_trip_through_their_keys() {
+        for s in Style::ALL {
+            assert_eq!(Style::from_key(s.key()), Some(s));
+        }
+        assert_eq!(Style::from_key("nonsense"), None);
+        assert_eq!(Style::default(), Style::Television);
+    }
 
     #[test]
     fn a_rounded_square_with_the_teal_set() {

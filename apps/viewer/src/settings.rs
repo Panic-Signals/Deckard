@@ -62,6 +62,8 @@ pub struct Settings {
     pub input_quantize: bool,
     /// Ask GitHub for a newer release at launch (default on).
     pub check_updates: bool,
+    /// Preferences ▸ General: the icon the window, the taskbar and the Dock show.
+    pub app_icon: crate::icon::Style,
     /// Preferences ▸ Library: folders of sound packs listed under Factory.
     pub library_folders: Vec<PathBuf>,
     /// MIDI ports switched off (Preferences > MIDI): `in:<name>` and `out:<name>`.
@@ -282,6 +284,7 @@ impl Default for Settings {
             count_in_bars: 1,
             input_quantize: false,
             check_updates: true,
+            app_icon: crate::icon::Style::default(),
             scan_on_start: false,
             bridge_windows: true,
             dirs: Vec::new(),
@@ -396,6 +399,7 @@ impl Settings {
                 "count_in_bars" => s.count_in_bars = v.parse().unwrap_or(1),
                 "input_quantize" => s.input_quantize = v == "true",
                 "check_updates" => s.check_updates = v != "false",
+                "app_icon" => s.app_icon = crate::icon::Style::from_key(v).unwrap_or_default(),
                 "input_device" => s.input_device = Some(v.to_string()),
                 "input_level_1" => s.input_levels[0] = v.parse().unwrap_or(0.75),
                 "input_level_2" => s.input_levels[1] = v.parse().unwrap_or(0.75),
@@ -699,6 +703,9 @@ impl Settings {
         out += &format!("count_in_bars = {}\ninput_quantize = {}\n", self.count_in_bars, self.input_quantize);
         if !self.check_updates {
             out += "check_updates = false\n";
+        }
+        if self.app_icon != crate::icon::Style::default() {
+            out += &format!("app_icon = {}\n", self.app_icon.key());
         }
         for d in &self.library_folders {
             out += &format!("library_folder = {}\n", d.display());
@@ -1158,6 +1165,15 @@ mod sync_tests {
     }
 
     /// The default project (Preferences ▸ General, BUGS #10): none unless set.
+    #[test]
+    fn app_icon_round_trips() {
+        use crate::icon::Style;
+        assert_eq!(Settings::parse("").app_icon, Style::Television);
+        let s = Settings { app_icon: Style::Letter, ..Settings::default() };
+        assert_eq!(Settings::parse(&s.to_text()).app_icon, Style::Letter);
+        assert_eq!(Settings::parse("app_icon = gone").app_icon, Style::Television, "an unknown one: the default");
+    }
+
     #[test]
     fn default_project_round_trips() {
         assert_eq!(Settings::default().default_project, None);
