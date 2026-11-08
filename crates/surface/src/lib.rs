@@ -145,6 +145,16 @@ pub struct SamplingView {
     pub take: Option<usize>,
     /// A stem separation running.
     pub stems: Option<StemsRun>,
+    /// Why there's no sample to work on, when there isn't (C64): what the sound plays.
+    pub no_sample: Option<NoSample>,
+}
+
+/// What the Sampling page says on a sound with no sample: a title ("NOT A SAMPLE",
+/// "NO SAMPLE") and a line under it ("Massive X is an instrument").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NoSample {
+    pub title: String,
+    pub detail: String,
 }
 
 /// The library as BROWSE shows it: the content kind (from 0: Projects, Groups,

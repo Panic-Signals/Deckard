@@ -7590,8 +7590,16 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
-            // No sample preview to play it with yet.
-            C::Prehear(..) => return,
+            // A slice's pad: hear the slice (C63).
+            C::Prehear(a, b) => {
+                if let Some(part) = self.sampling_part(a, b) {
+                    self.ensure_engine();
+                    if let Some(Ok(out)) = &self.output {
+                        out.prehear(Some(std::sync::Arc::new(part)), 1.0);
+                    }
+                }
+                return;
+            }
         };
         self.sampling_act(act);
     }

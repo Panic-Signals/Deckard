@@ -5,7 +5,7 @@
 
 use crate::layout::sampling::{RecordAct, SamplingAct};
 use crate::{App, record_knobs, sampling_hw};
-use deckard_surface::{Action, RecordPress, RecordState, SamplingView};
+use deckard_surface::{Action, NoSample, RecordPress, RecordState, SamplingView};
 
 impl App {
     /// The knob pages of every tab, with what each knob sets.
@@ -44,8 +44,35 @@ impl App {
         }
         if let Some(doc) = &self.doc {
             out.sample = sampling_hw::sample_view(&self.sampling, doc.borrow().project(), (self.group, self.sound, self.zone), None);
+            if out.sample.is_none() {
+                out.no_sample = self.no_sample();
+            }
         }
         out
+    }
+
+    /// Why the focused sound has no sample to edit (C64): it plays an instrument, or
+    /// its Sampler (or the sound) is empty.
+    pub(crate) fn no_sample(&self) -> Option<NoSample> {
+        let d = self.doc.as_ref()?.borrow();
+        let snd = d.project().groups.get(self.group)?.sounds.get(self.sound)?;
+        let empty = || NoSample { title: "NO SAMPLE".into(), detail: "Record one, or load one from the browser".into() };
+        if snd.sampler.is_some() {
+            return Some(empty());
+        }
+        let name = snd.plugin.as_ref().map_or(snd.instrument.as_str(), |p| p.name.as_str());
+        if name.is_empty() {
+            return Some(empty());
+        }
+        Some(NoSample { title: "NOT A SAMPLE".into(), detail: format!("{name} is an instrument") })
+    }
+
+    /// Frames `a` to `b` of the focused zone's sample, as a sample of their own (a
+    /// slice to hear); `None` if there's no sample or nothing in that range.
+    pub(crate) fn sampling_part(&self, a: usize, b: usize) -> Option<deckard_engine::sample::Sample> {
+        let s = self.sampling.sample.as_ref()?;
+        let b = b.min(s.frames.len());
+        (a < b).then(|| deckard_engine::sample::Sample { rate: s.rate, frames: s.frames[a..b].to_vec() })
     }
 
     /// RECORD's START / STOP (`toggle`) or the recording cancelled, as either
@@ -86,5 +113,38 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::App;
+    use deckard_engine::sample::Sample;
+
+    /// A slice's pad plays that slice (C63): its frames, cut from the zone's sample.
+    #[test]
+    fn a_slice_is_cut_from_the_zones_sample() {
+        let mut app = App::default();
+        assert!(app.sampling_part(0, 10).is_none(), "no sample");
+        let frames: Vec<[f32; 2]> = (0..8).map(|i| [i as f32, -(i as f32)]).collect();
+        app.sampling.sample = Some(std::sync::Arc::new(Sample { rate: 1000, frames }));
+        let part = app.sampling_part(2, 5).unwrap();
+        assert_eq!((part.rate, part.frames), (1000, vec![[2.0, -2.0], [3.0, -3.0], [4.0, -4.0]]));
+        assert_eq!(app.sampling_part(6, 99).unwrap().frames.len(), 2, "to the sample's end");
+        assert!(app.sampling_part(5, 5).is_none() && app.sampling_part(9, 12).is_none());
+    }
+
+    /// With no sample, the Sampling page says what the sound plays instead (C64).
+    #[test]
+    fn the_sampling_page_says_what_a_sound_without_a_sample_plays() {
+        let mut app = App::default();
+        app.new_project();
+        assert_eq!(app.no_sample().unwrap().title, "NO SAMPLE", "an empty sound");
+        let plugin = deckard_doc::NewModule::Plugin { id: "Vendor:VST3:INSTR:00".into(), name: "Massive X".into(), chunk: Vec::new() };
+        app.doc.as_ref().unwrap().borrow_mut().add_slot(0, 0, 0, &plugin).unwrap();
+        let n = app.no_sample().unwrap();
+        assert_eq!((n.title.as_str(), n.detail.as_str()), ("NOT A SAMPLE", "Massive X is an instrument"));
+        app.sampling_open = true;
+        assert_eq!(app.sampling_surface_view().no_sample, Some(n));
     }
 }
