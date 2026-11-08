@@ -170,10 +170,18 @@ fn main() {
         deckard_plugins::exit(code);
     }
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
-    // --write-icon OUT.png [SIZE]: draw the app's icon (1024 px), and stop.
+    // --write-icon OUT.png [SIZE] [--icon-style television|letter]: draw the app's icon
+    // (1024 px, the television), and stop.
     if let Some(out) = flag("--write-icon") {
         let size = args.iter().position(|a| a == "--write-icon").and_then(|i| args.get(i + 2)).and_then(|v| v.parse().ok()).unwrap_or(1024);
-        if let Err(e) = icon::write_png(Path::new(&out), size) {
+        let style = match flag("--icon-style") {
+            None => icon::Style::default(),
+            Some(k) => icon::Style::from_key(&k).unwrap_or_else(|| {
+                eprintln!("--icon-style: television or letter, not {k}");
+                std::process::exit(2);
+            }),
+        };
+        if let Err(e) = icon::write_png(Path::new(&out), size, style) {
             eprintln!("{out}: {e}");
             std::process::exit(1);
         }
@@ -216,9 +224,11 @@ fn main() {
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([width, 930.0]).with_drag_and_drop(true).with_icon(std::sync::Arc::new(
-            egui::IconData { rgba: icon::icon(256).into_iter().flatten().collect(), width: 256, height: 256 },
-        )),
+        // The icon picked in Preferences ▸ General, from the start.
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([width, 930.0])
+            .with_drag_and_drop(true)
+            .with_icon(std::sync::Arc::new(settings::Settings::load().app_icon.icon_data())),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -252,6 +262,10 @@ fn main() {
                 deckard_engine::devices::set_driver(app.settings.audio_driver);
             }
             app.update = update::Notice::start(app.settings.check_updates);
+            if app.settings.app_icon != icon::Style::default() {
+                // The Dock and the taskbar's big icon, which the window's icon doesn't set.
+                icon::apply(&cc.egui_ctx, app.settings.app_icon);
+            }
             app.surface = app.new_surface();
             if let Some(m) = &app.mk3 {
                 m.set_display_brightness(app.settings.display_brightness);
@@ -968,6 +982,8 @@ pub struct App {
     /// Maschine's user folder, when not the usual one (tests).
     user_dir_override: Option<PathBuf>,
     prefs: Option<usize>,
+    /// Preferences ▸ General ▸ Icon: each icon, drawn small, once it's been shown.
+    icon_previews: Vec<(icon::Style, egui::TextureHandle)>,
     /// Audio interfaces with inputs (name, channels), looked up when Preferences ▸ Audio
     /// opens.
     inputs: Option<Vec<(String, usize)>>,
@@ -2747,6 +2763,9 @@ impl App {
                 });
             });
             ui.end_row();
+            ui.label("Icon");
+            self.icon_choice(ui);
+            ui.end_row();
             ui.label("Updates");
             ui.checkbox(&mut self.settings.check_updates, "Check for updates at launch")
                 .on_hover_text("Asks GitHub for DECKARD's latest release once per launch. Help ▸ About shows what it found.");
@@ -2754,6 +2773,51 @@ impl App {
             ui.label("");
             ui.label(egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak());
             ui.end_row();
+        });
+    }
+
+    /// The icons to pick from, each drawn as it looks: the window, the taskbar and the Dock
+    /// show the one picked, at once.
+    fn icon_choice(&mut self, ui: &mut egui::Ui) {
+        if self.icon_previews.is_empty() {
+            self.icon_previews = icon::Style::ALL
+                .into_iter()
+                .map(|s| {
+                    let n = 128;
+                    let image = egui::ColorImage::from_rgba_unmultiplied([n, n], s.pixels(n).as_flattened());
+                    (s, ui.ctx().load_texture(format!("app-icon-{}", s.key()), image, egui::TextureOptions::LINEAR))
+                })
+                .collect();
+        }
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                for (style, texture) in &self.icon_previews {
+                    let on = self.settings.app_icon == *style;
+                    let picture = egui::Image::new((texture.id(), egui::vec2(56.0, 56.0)));
+                    let r = ui
+                        .vertical_centered(|ui| {
+                            ui.set_width(72.0);
+                            let r = ui.add(egui::Button::image(picture).selected(on).frame(true));
+                            ui.label(style.label());
+                            r
+                        })
+                        .inner;
+                    if r.clicked() && !on {
+                        self.settings.app_icon = *style;
+                        icon::apply(ui.ctx(), *style);
+                    }
+                }
+            });
+            ui.label(
+                egui::RichText::new(if cfg!(windows) {
+                    "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
+                } else if cfg!(target_os = "macos") {
+                    "The Dock shows it while DECKARD runs; Finder keeps the app's own."
+                } else {
+                    "The window and the taskbar show it."
+                })
+                .weak(),
+            );
         });
     }
 
