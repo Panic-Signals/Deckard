@@ -195,7 +195,8 @@ fn bare_state(bytes: &[u8]) -> State {
 /// A preset in a plug-in's own file format (`.nfm8`, `.nmsv`, `.nrkt`, `.rkplr`,
 /// `.ens`), hosted through its VST3 plug-in.
 pub fn native_preset(ext: &str, bytes: &[u8], installed: &[Entry]) -> Option<Result<Resolved, String>> {
-    let plugin = match ext {
+    let ext = ext.to_ascii_lowercase();
+    let plugin = match ext.as_str() {
         "nfm8" => "FM8",
         "nmsv" => "Massive",
         "nrkt" | "rkplr" | "ens" => "Reaktor 6",
@@ -208,11 +209,294 @@ pub fn native_preset(ext: &str, bytes: &[u8], installed: &[Entry]) -> Option<Res
             .ok_or_else(|| format!("{plugin} isn't installed as VST3"))?;
         let cid = hex16(&e.cid).ok_or("the plug-in has no class id")?;
         let id = e.maschine_id().ok_or("the plug-in has no id")?;
-        let state = State { component: bytes.to_vec(), controller: Vec::new() };
+        let component = wrap_nisound_preset(&ext, bytes).unwrap_or_else(|| bytes.to_vec());
+        let pages = parse_dsiny(bytes);
+        let state = State { component, controller: Vec::new() };
         let chunk = wrap_chunk(&state, Format::Vst3, &cid);
-        Ok(Resolved { id, name: e.name.clone(), chunk, pages: Vec::new() })
+        Ok(Resolved { id, name: e.name.clone(), chunk, pages })
     };
     Some(resolve())
+}
+
+fn find_tag(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Wrap a bare `.nfm8` or `.nmsv` `NISound` (`hsin`/`DSIN`) preset file in the 5-subchunk
+/// (`tsrp`/`knab`/`ctni`/`siug`/`gptc`) plug-in instance state that `FM8.vst3` and
+/// `Massive.vst3` expect from `IComponent::setState`. Without this wrapper, `FM8.vst3`
+/// stalls for ~8 s in `setState` and both plug-ins reject the preset.
+fn wrap_nisound_preset(ext: &str, raw: &[u8]) -> Option<Vec<u8>> {
+    if !matches!(ext, "nfm8" | "nmsv") || raw.len() < 120 {
+        return None;
+    }
+    let root_size = u64::from_le_bytes(raw.get(..8)?.try_into().ok()?) as usize;
+    let buf = raw.get(..root_size.min(raw.len()))?;
+    if buf.get(12..16) != Some(b"hsin") {
+        return None;
+    }
+    let e_idx = find_tag(buf, b"DSINe\0\0\0")?.checked_add(8)?;
+    let t_idx = find_tag(buf, b"DSINt\0\0\0")?.checked_sub(48)?;
+    let t_part = buf.get(t_idx..)?;
+    if t_part.len() < 117 || t_part.get(48..56) != Some(b"DSINt\0\0\0") || t_part.get(68..76) != Some(b"DSINs\0\0\0") {
+        return None;
+    }
+    let uncomp_len = u32::from_le_bytes(t_part.get(109..113)?.try_into().ok()?) as usize;
+    let comp_len = u32::from_le_bytes(t_part.get(113..117)?.try_into().ok()?) as usize;
+    let comp_end = 117usize.checked_add(comp_len)?;
+    let comp_stream = t_part.get(117..comp_end)?;
+    let t_footer = t_part.get(comp_end..)?;
+    let dec = fastlz_decompress(comp_stream, uncomp_len)?;
+    if dec.len() < 204 || dec.get(200..204) == Some(b"tsrp") {
+        return None;
+    }
+    let preset_len = u64::from_le_bytes(dec.get(180..188)?.try_into().ok()?) as usize;
+    let preset_end = 188usize.checked_add(preset_len)?;
+    if preset_end.checked_add(16)? != dec.len() {
+        return None;
+    }
+    let preset = &dec[188..preset_end];
+    let footer16 = &dec[preset_end..];
+
+    let push_sub = |out: &mut Vec<u8>, tag: &[u8; 4], body: &[u8]| {
+        out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(body);
+    };
+
+    let mut new_dec = Vec::with_capacity(dec.len() + 660);
+    new_dec.extend_from_slice(&dec[..188]);
+    new_dec.extend_from_slice(&5u32.to_le_bytes());
+    push_sub(&mut new_dec, b"tsrp", preset);
+    push_sub(&mut new_dec, b"knab", &[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0]);
+    if ext == "nfm8" {
+        let mut ctni = Vec::with_capacity(537);
+        ctni.extend_from_slice(b"E8MF");
+        ctni.extend_from_slice(&[0x11, 0x27, 0, 0, 0, 0, 0, 0, 0x41, 0, 0, 0, 0, 0, 0, 0xa0, 0x42, 0, 0, 0xa0, 0x42]);
+        ctni.extend_from_slice(&[0xff; 28]);
+        ctni.extend_from_slice(&0x74u32.to_le_bytes());
+        ctni.extend_from_slice(&[0xff; 8]);
+        ctni.extend_from_slice(&0x0fu32.to_le_bytes());
+        ctni.extend_from_slice(&[0xff; 468]);
+        push_sub(&mut new_dec, b"ctni", &ctni);
+
+        let mut siug = Vec::with_capacity(32);
+        siug.extend_from_slice(b"E8MF");
+        siug.extend_from_slice(&1000u64.to_le_bytes());
+        siug.extend_from_slice(&0u32.to_le_bytes());
+        siug.extend_from_slice(&u32::MAX.to_le_bytes());
+        siug.extend_from_slice(&25u32.to_le_bytes());
+        siug.extend_from_slice(&1u32.to_le_bytes());
+        siug.extend_from_slice(&1u32.to_le_bytes());
+        push_sub(&mut new_dec, b"siug", &siug);
+    } else {
+        let ctni = [8, 0, 0, 0, 3, 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff];
+        push_sub(&mut new_dec, b"ctni", &ctni);
+        push_sub(&mut new_dec, b"siug", &[0, 0, 0, 0]);
+    }
+    push_sub(&mut new_dec, b"gptc", b"YTME");
+    new_dec.extend_from_slice(footer16);
+
+    let total_dec = new_dec.len() as u64;
+    new_dec[0..8].copy_from_slice(&total_dec.to_le_bytes());
+    new_dec[84..92].copy_from_slice(&(total_dec - 84).to_le_bytes());
+    new_dec[124..132].copy_from_slice(&(total_dec - 132).to_le_bytes());
+    new_dec[180..188].copy_from_slice(&(total_dec - 204).to_le_bytes());
+
+    let new_comp = fastlz_compress(&new_dec);
+    let mut new_t = Vec::with_capacity(117 + new_comp.len() + t_footer.len());
+    new_t.extend_from_slice(&t_part[..117]);
+    new_t.extend_from_slice(&new_comp);
+    new_t.extend_from_slice(t_footer);
+    let t_len = new_t.len() as u64;
+    new_t[0..8].copy_from_slice(&t_len.to_le_bytes());
+    new_t[40..48].copy_from_slice(&(t_len - 48).to_le_bytes());
+    new_t[60..68].copy_from_slice(&(t_len - 73).to_le_bytes());
+    new_t[109..113].copy_from_slice(&(total_dec as u32).to_le_bytes());
+    new_t[113..117].copy_from_slice(&(new_comp.len() as u32).to_le_bytes());
+
+    let mut out = Vec::with_capacity(t_idx + new_t.len());
+    out.extend_from_slice(&buf[..t_idx]);
+    out.extend_from_slice(&new_t);
+    let out_len = out.len() as u64;
+    out[0..8].copy_from_slice(&out_len.to_le_bytes());
+    out[e_idx..e_idx + 8].copy_from_slice(&(out_len - e_idx as u64).to_le_bytes());
+    Some(out)
+}
+
+/// FastLZ Level 1 decompression (`DSINs` payload).
+fn fastlz_decompress(data: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(expected_len.min(1 << 20));
+    let mut i = 0usize;
+    while i < data.len() {
+        let ctrl = data[i];
+        i += 1;
+        if ctrl < 32 {
+            let len = (ctrl as usize) + 1;
+            let s = data.get(i..i.checked_add(len)?)?;
+            out.extend_from_slice(s);
+            i += len;
+        } else {
+            let mut len = ((ctrl >> 5) as usize) - 1;
+            let mut ofs = ((ctrl & 31) as usize) << 8;
+            if len == 6 {
+                len += *data.get(i)? as usize;
+                i += 1;
+            }
+            ofs += (*data.get(i)? as usize) + 1;
+            i += 1;
+            if ofs > out.len() {
+                return None;
+            }
+            let start = out.len() - ofs;
+            for k in 0..(len + 3) {
+                let b = out[start + k];
+                out.push(b);
+            }
+        }
+    }
+    (out.len() == expected_len).then_some(out)
+}
+
+/// FastLZ Level 1 compression (`DSINs` payload).
+fn fastlz_compress(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut lit_start = 0usize;
+    let mut lit_len = 0usize;
+    let flush_lit = |out: &mut Vec<u8>, input: &[u8], mut start: usize, mut len: usize| {
+        while len > 0 {
+            let chunk = len.min(32);
+            out.push((chunk - 1) as u8);
+            out.extend_from_slice(&input[start..start + chunk]);
+            start += chunk;
+            len -= chunk;
+        }
+    };
+    let mut i = 0usize;
+    while i < input.len() {
+        let mut best_len = 0usize;
+        let mut best_ofs = 0usize;
+        if i + 3 <= input.len() {
+            let min_j = i.saturating_sub(8192);
+            for j in (min_j..i).rev() {
+                if input[j] == input[i] && input[j + 1] == input[i + 1] && input[j + 2] == input[i + 2] {
+                    let mut l = 3usize;
+                    let max_l = (input.len() - i).min(264);
+                    while l < max_l && input[j + l] == input[i + l] {
+                        l += 1;
+                    }
+                    if l > best_len {
+                        best_len = l;
+                        best_ofs = i - j;
+                        if best_len == 264 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if best_len >= 3 {
+            flush_lit(&mut out, input, lit_start, lit_len);
+            lit_len = 0;
+            let len_code = best_len - 2;
+            let ofs = best_ofs - 1;
+            let ofs_hi = ((ofs >> 8) & 31) as u8;
+            let ofs_lo = (ofs & 0xff) as u8;
+            if len_code < 7 {
+                out.push(((len_code as u8) << 5) | ofs_hi);
+                out.push(ofs_lo);
+            } else {
+                out.push((7 << 5) | ofs_hi);
+                out.push((len_code - 7) as u8);
+                out.push(ofs_lo);
+            }
+            i += best_len;
+            lit_start = i;
+        } else {
+            if lit_len == 0 {
+                lit_start = i;
+            }
+            lit_len += 1;
+            i += 1;
+        }
+    }
+    flush_lit(&mut out, input, lit_start, lit_len);
+    out
+}
+
+/// Controller pages from the `DSINy` chunk of an `NISound` (`.nfm8`, `.nmsv`) preset.
+fn parse_dsiny(raw: &[u8]) -> Vec<Vec<Knob>> {
+    let parse = || -> Option<Vec<Vec<Knob>>> {
+        let root_size = u64::from_le_bytes(raw.get(..8)?.try_into().ok()?) as usize;
+        let buf = raw.get(..root_size.min(raw.len()))?;
+        let y_idx = find_tag(buf, b"DSINy\0\0\0")?.checked_sub(48)?;
+        let y_part = buf.get(y_idx..)?;
+        let y_size = u64::from_le_bytes(y_part.get(..8)?.try_into().ok()?) as usize;
+        let y = y_part.get(..y_size.min(y_part.len()))?;
+        if y.len() < 96 {
+            return None;
+        }
+        let mut at = 92usize;
+        let read_u32 = |at: &mut usize| -> Option<u32> {
+            let v = u32::from_le_bytes(y.get(*at..at.checked_add(4)?)?.try_into().ok()?);
+            *at += 4;
+            Some(v)
+        };
+        let read_utf16 = |at: &mut usize| -> Option<String> {
+            let n = read_u32(at)? as usize;
+            if n > 256 {
+                return None;
+            }
+            let bytes = y.get(*at..at.checked_add(n.checked_mul(2)?)?)?;
+            *at += n * 2;
+            let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            Some(String::from_utf16_lossy(&units))
+        };
+        let num_sections = (read_u32(&mut at)? as usize).min(64);
+        let mut pages: Vec<Vec<Knob>> = Vec::new();
+        let mut cur: Vec<Knob> = Vec::new();
+        for _ in 0..num_sections {
+            let _ver = read_u32(&mut at)?;
+            let num_knobs = (read_u32(&mut at)? as usize).min(64);
+            let section_name = read_utf16(&mut at)?;
+            let mut raw_knobs = Vec::with_capacity(num_knobs);
+            for _ in 0..num_knobs {
+                let _kver = read_u32(&mut at)?;
+                let kname = read_utf16(&mut at)?;
+                let _lo = read_u32(&mut at)?;
+                let _hi = read_u32(&mut at)?;
+                let pid = read_u32(&mut at)?;
+                let pos = read_u32(&mut at)?;
+                raw_knobs.push((kname, pid, pos));
+            }
+            let slots = raw_knobs.iter().filter_map(|&(_, _, pos)| (1..=8).contains(&pos).then_some(pos as usize)).max().unwrap_or(0);
+            if slots == 0 {
+                continue;
+            }
+            let mut sec_knobs = vec![Knob::default(); slots];
+            sec_knobs[0].section = section_name;
+            for (kname, pid, pos) in raw_knobs {
+                if (1..=slots).contains(&(pos as usize)) {
+                    let slot = &mut sec_knobs[pos as usize - 1];
+                    slot.id = (pid != u32::MAX).then_some(pid);
+                    slot.name = if kname == "<{[autoname]}>" { String::new() } else { kname.trim().to_string() };
+                }
+            }
+            if !cur.is_empty() && cur.len() + sec_knobs.len() > 8 {
+                cur.resize(8, Knob::default());
+                pages.push(std::mem::take(&mut cur));
+            }
+            cur.extend(sec_knobs);
+            if cur.len() == 8 {
+                pages.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            pages.push(cur);
+        }
+        Some(pages)
+    };
+    parse().unwrap_or_default()
 }
 
 /// A MessagePack value, as far as `PLID` needs one.
@@ -473,5 +757,94 @@ mod tests {
         riff.extend(plid);
         riff.extend(b"PCHK\x04\0\0\0\x01\0\0\0");
         assert!(parse(&riff).is_err());
+    }
+
+    #[test]
+    fn nfm8_and_nmsv_presets_wrap_tsrp_and_parse_dsiny_pages() {
+        let utf16 = |s: &str| -> Vec<u8> {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            let mut out = (units.len() as u32).to_le_bytes().to_vec();
+            for u in units {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+            out
+        };
+        // Build a synthetic NISound (.nfm8) container with DSINe, DSINy and DSINt/DSINs.
+        let mut y_body = vec![0u8; 92];
+        y_body[48..56].copy_from_slice(b"DSINy\0\0\0");
+        y_body.extend_from_slice(&2u32.to_le_bytes()); // 2 sections
+        for (sec_name, knobs) in [
+            ("Timbre", &[("<{[autoname]}>", 5u32, 1u32), ("Brightness", 0u32, 2u32)][..]),
+            ("FX", &[("Switch", 92u32, 1u32), ("Amount", 25u32, 2u32)][..]),
+        ] {
+            y_body.extend_from_slice(&100u32.to_le_bytes());
+            y_body.extend_from_slice(&(knobs.len() as u32).to_le_bytes());
+            y_body.extend(utf16(sec_name));
+            for &(kname, pid, pos) in knobs {
+                y_body.extend_from_slice(&100u32.to_le_bytes());
+                y_body.extend(utf16(kname));
+                y_body.extend_from_slice(&0.0f32.to_le_bytes());
+                y_body.extend_from_slice(&1.0f32.to_le_bytes());
+                y_body.extend_from_slice(&pid.to_le_bytes());
+                y_body.extend_from_slice(&pos.to_le_bytes());
+            }
+        }
+        let y_len = y_body.len() as u64;
+        y_body[0..8].copy_from_slice(&y_len.to_le_bytes());
+
+        let bare_preset = b"E8MFbare-fm8-preset-payload-with-repeats-repeats-repeats";
+        let mut dec = vec![0u8; 188];
+        dec[12..16].copy_from_slice(b"hsin");
+        dec[180..188].copy_from_slice(&(bare_preset.len() as u64).to_le_bytes());
+        dec.extend_from_slice(bare_preset);
+        dec.extend_from_slice(&[0u8; 16]);
+        let dec_len = dec.len() as u64;
+        dec[0..8].copy_from_slice(&dec_len.to_le_bytes());
+
+        let comp = fastlz_compress(&dec);
+        assert_eq!(fastlz_decompress(&comp, dec.len()).as_deref(), Some(&dec[..]));
+
+        let mut t_part = vec![0u8; 117];
+        t_part[48..56].copy_from_slice(b"DSINt\0\0\0");
+        t_part[68..76].copy_from_slice(b"DSINs\0\0\0");
+        t_part[109..113].copy_from_slice(&(dec.len() as u32).to_le_bytes());
+        t_part[113..117].copy_from_slice(&(comp.len() as u32).to_le_bytes());
+        t_part.extend_from_slice(&comp);
+        t_part.extend_from_slice(&[0u8; 16]);
+        let t_len = t_part.len() as u64;
+        t_part[0..8].copy_from_slice(&t_len.to_le_bytes());
+
+        let mut raw = vec![0u8; 64];
+        raw[12..16].copy_from_slice(b"hsin");
+        raw[48..56].copy_from_slice(b"DSINe\0\0\0");
+        raw.extend_from_slice(&y_body);
+        raw.extend_from_slice(&t_part);
+        let raw_len = raw.len() as u64;
+        raw[0..8].copy_from_slice(&raw_len.to_le_bytes());
+        raw[56..64].copy_from_slice(&(raw_len - 56).to_le_bytes());
+
+        let fm8 = vst3("Native Instruments", "FM8", true, "5653544E694638666D38000000000000");
+        let resolved = native_preset("nfm8", &raw, &[fm8]).unwrap().unwrap();
+        assert_eq!(resolved.pages.len(), 1);
+        assert_eq!(
+            resolved.pages[0],
+            vec![
+                Knob { id: Some(5), name: String::new(), section: "Timbre".into() },
+                Knob { id: Some(0), name: "Brightness".into(), section: String::new() },
+                Knob { id: Some(92), name: "Switch".into(), section: "FX".into() },
+                Knob { id: Some(25), name: "Amount".into(), section: String::new() },
+            ]
+        );
+        let state = parse_vstpreset(chunk_parts(&resolved.chunk).unwrap().1).unwrap();
+        let t_idx = find_tag(&state.component, b"DSINt\0\0\0").unwrap() - 48;
+        let tp = &state.component[t_idx..];
+        let ulen = u32::from_le_bytes(tp[109..113].try_into().unwrap()) as usize;
+        let clen = u32::from_le_bytes(tp[113..117].try_into().unwrap()) as usize;
+        let unwrapped = fastlz_decompress(&tp[117..117 + clen], ulen).unwrap();
+        assert_eq!(u32::from_le_bytes(unwrapped[188..192].try_into().unwrap()), 5);
+        assert_eq!(u64::from_le_bytes(unwrapped[192..200].try_into().unwrap()) as usize, bare_preset.len());
+        assert_eq!(&unwrapped[200..204], b"tsrp");
+        assert_eq!(&unwrapped[204..204 + bare_preset.len()], bare_preset);
+        assert_eq!(wrap_nisound_preset("nfm8", &state.component), None, "already wrapped");
     }
 }

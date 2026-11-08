@@ -51,8 +51,8 @@ fn favorite_ids(index: &Path) -> HashSet<String> {
     read().unwrap_or_default()
 }
 
-/// Up to a few `.nksf` / `.nksfx` preset files for `plugin` (one per bank/folder), from
-/// NI's library index if present.
+/// Up to a few `.nksf` / `.nksfx` / `.nfm8` / `.nmsv` preset files for `plugin` (one
+/// per bank/folder), from NI's library index if present.
 pub fn nks_presets_for(plugin: &str) -> Vec<PathBuf> {
     let Some(path) = default_path() else { return Vec::new() };
     let Ok((db, _)) = connect(&path) else { return Vec::new() };
@@ -61,7 +61,7 @@ pub fn nks_presets_for(plugin: &str) -> Vec<PathBuf> {
         let sql = format!(
             "SELECT k.file_name FROM {table} p JOIN k_sound_info k ON k.id = p.id \
              WHERE (lower(p.entry1) = lower(?1) OR lower(p.entry1) LIKE lower(?1) || ' %') \
-             AND lower(k.file_ext) IN ('nksf', 'nksfx') \
+             AND lower(k.file_ext) IN ('nksf', 'nksfx', 'nfm8', 'nmsv') \
              GROUP BY coalesce(p.entry2, ''), coalesce(k.sub_path, '') \
              ORDER BY CASE WHEN p.entry2 IS NULL OR p.entry2 = 'Factory' THEN 0 ELSE 1 END, k.id \
              LIMIT 10"
@@ -145,7 +145,7 @@ impl NiIndex {
         let favorite_id = if has_id { "p.favorite_id" } else { "NULL" };
         let sql = format!(
             "SELECT p.id, k.name, k.file_name, k.tempo, coalesce(k.author, ''), p.entry1, p.entry2, p.entry3, \
-             CASE WHEN c.content_type = 2 THEN c.alias END, {favorite_id} \
+             COALESCE(NULLIF(p.entry1, ''), CASE WHEN c.content_type = 2 THEN c.alias END), {favorite_id} \
              FROM {table} p JOIN k_sound_info k ON k.id = p.id LEFT JOIN k_content_path c ON c.id = k.content_path_id \
              WHERE k.hidden_for = 0 {installed}"
         );

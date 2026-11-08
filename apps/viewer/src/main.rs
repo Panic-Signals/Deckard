@@ -800,6 +800,8 @@ pub struct App {
     doc: Option<Shared>,
     /// The document revision playback last took up.
     seen_revision: u64,
+    /// Groups last seen, to notice one deleted (see [`App::clear_midi_inputs`]).
+    midi_input_groups: usize,
     path: Option<PathBuf>,
     error: Option<String>,
     /// Focus: group, its pattern and sound, and the scene.
@@ -1398,6 +1400,8 @@ impl App {
                 self.mixer_sounds = doc.borrow().project().mixer_sounds;
                 self.headroom.clear();
                 self.seen_revision = doc.borrow().revision();
+                self.clear_midi_inputs();
+                self.midi_input_groups = doc.borrow().project().groups.len();
                 self.doc = Some(doc);
                 self.error = None;
                 (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
@@ -3775,19 +3779,32 @@ impl App {
         let (pi, pos, dev) = {
             let d = doc.borrow();
             let p = d.project();
-            let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else { return };
-            let Some(at) = modulation::knob_travel(p, chain, &target) else { return };
+            let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else {
+                drop(d);
+                self.status = "can't write modulation: no pattern of this group is playing".into();
+                return;
+            };
+            let Some(at) = self.knob_travel(p, chain, &target) else { return };
             (pi, pos, (amount as f64 - at).clamp(-1.0, 1.0))
         };
         // Another knob or pattern: that touch ends.
         if self.mod_take.as_ref().is_some_and(|t| t.chain != chain || t.target != target || t.pattern != pi) {
             self.end_mod_take();
         }
-        let take = self.mod_take.get_or_insert_with(|| {
+        if self.mod_take.is_none() {
             doc.borrow_mut().begin_take("Record Modulation");
-            modulation::ModTake { chain, target: target.clone(), pattern: pi, samples: Vec::new(), moved: std::time::Instant::now() }
-        });
-        take.moved = std::time::Instant::now();
+            self.ensure_mod_param(chain, &target);
+            self.mod_take = Some(modulation::ModTake {
+                chain,
+                target: target.clone(),
+                pattern: pi,
+                samples: Vec::new(),
+                moved: std::time::Instant::now(),
+            });
+        }
+        if let Some(take) = self.mod_take.as_mut() {
+            take.moved = std::time::Instant::now();
+        }
         self.touch_write(pos, dev);
         if done {
             self.end_mod_take();
@@ -3845,6 +3862,23 @@ impl App {
         }
     }
 
+    /// Where the knob of `target` in `c` is (0..1), unmodulated: a module's parameter,
+    /// its channel's fader, or a plug-in's parameter.
+    pub(crate) fn knob_travel(&self, p: &deckard_model::Project, c: deckard_doc::Chain, target: &deckard_model::ModTarget) -> Option<f64> {
+        if let Some(v) = modulation::knob_travel(p, c, target) {
+            return Some(v);
+        }
+        let (slot, id) = (target.slot?, target.field.parse::<u32>().ok()?);
+        if let Some(inst) = self.samples.plugins.existing(self.plugin_slot_key(c, slot))
+            && let Ok(g) = inst.try_lock()
+        {
+            return Some(g.knob_value(id));
+        }
+        let v = self.plugin_view.as_ref().filter(|v| v.key == (c, slot))?;
+        let k = v.pages.get(v.page)?.knobs.iter().position(|(info, ..)| info.id == id)?;
+        v.values.get(k).map(|(val, _)| *val)
+    }
+
     /// Where a knob's modulation has it (0..1): as last written in the touch going on,
     /// else at the play position; `None` when it isn't modulated.
     fn mod_position(&self, edit: layout::Edit) -> Option<f64> {
@@ -3853,7 +3887,7 @@ impl App {
             && let Some(&(_, dev)) = take.samples.last()
         {
             let doc = self.doc.as_ref()?.borrow();
-            return Some((modulation::knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
+            return Some((self.knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
         }
         self.mod_amount(edit).map(f64::from)
     }
@@ -3914,7 +3948,7 @@ impl App {
             return None;
         }
         let lane = deckard_engine::modscale::ModLane { group: g, sound, slot: 0, field: String::new(), from: 0, to: 0, points };
-        let at = modulation::knob_travel(p, chain, &target)?;
+        let at = self.knob_travel(p, chain, &target)?;
         Some((at + lane.value_at(pos as f64)).clamp(0.0, 1.0) as f32)
     }
 
@@ -4635,7 +4669,7 @@ impl App {
                     instrument: s.instrument,
                     active: s.active,
                     plugin: s.plugin,
-                    picture: (!s.plugin).then(|| deckard_lua_host::plugin_picture_key(&s.name)).filter(|k| plugin_pictures::has(k)),
+                    picture: plugin_pictures::slot_key(&self.surface, &s.name),
                 })
                 .collect(),
             pages: c.pages.clone(),
@@ -4693,6 +4727,9 @@ impl App {
         // (Only while BROWSE shows, or the JAM has the panel open: the results can be long.)
         if self.surface.page() == "browse" || (self.jam_device.is_some() && self.browser.open) {
             let b = self.browser.view();
+            for name in &b.products {
+                plugin_pictures::ensure_browser_product(&self.surface, name);
+            }
             v.browser = deckard_surface::BrowserView {
                 kind: b.kind,
                 user: b.user,
@@ -4753,6 +4790,17 @@ impl App {
             v.scene_color = layout::scene_index(p, self.scene);
         }
         let mix = |level: f64, pan: f64, meter: (f32, f32), channel: layout::Channel, slots: &[deckard_model::SlotInfo]| {
+            // While modulation is written, where it has the fader: a turn goes on from there.
+            let t = match channel {
+                layout::Channel::Sound(g, s) => Some(deckard_doc::Target::Sound(g, s)),
+                layout::Channel::Group(g) => Some(deckard_doc::Target::GroupStrip(g)),
+                _ => None,
+            };
+            let written = |edit: fn(deckard_doc::Target) -> layout::Edit| {
+                t.map(edit).filter(|e| layout::knob_drag_writes(self, *e)).and_then(|e| self.mod_position(e))
+            };
+            let level = written(layout::Edit::Level).unwrap_or(level);
+            let pan = written(layout::Edit::Pan).map_or(pan, |a| a * 2.0 - 1.0);
             deckard_surface::MixView {
                 level: deckard_model::level_db(level),
                 pan,
@@ -4940,7 +4988,12 @@ impl App {
             A::Restart => self.restart(),
             A::Loop(on) => self.set_looping(on),
             A::Metronome(on) => self.set_metronome(on),
-            A::AutoWrite(on) => self.auto_write = on,
+            A::AutoWrite(on) => {
+                self.auto_write = on;
+                if !on {
+                    self.end_mod_take();
+                }
+            }
             A::Tempo(bpm) => layout::apply_acts(self, vec![Act::SetTempo(bpm)]),
             A::Swing(amount) => {
                 let Some(p) = project(self) else { return };
@@ -5118,14 +5171,23 @@ impl App {
                     Some(s) => Target::Sound(group, s),
                     None => Target::GroupStrip(group),
                 };
-                layout::apply_acts(self, vec![Act::SetLevel(t, deckard_model::level_from_db(db))]);
+                let level = deckard_model::level_from_db(db);
+                if layout::knob_drag_writes(self, layout::Edit::Level(t)) {
+                    self.modulate(layout::Edit::Level(t), level as f32, false);
+                } else {
+                    layout::apply_acts(self, vec![Act::SetLevel(t, level)]);
+                }
             }
             A::ChannelPan { group, sound, pan } => {
                 let t = match sound {
                     Some(s) => Target::Sound(group, s),
                     None => Target::GroupStrip(group),
                 };
-                layout::apply_acts(self, vec![Act::SetPan(t, pan)]);
+                if layout::knob_drag_writes(self, layout::Edit::Pan(t)) {
+                    self.modulate(layout::Edit::Pan(t), ((pan + 1.0) / 2.0) as f32, false);
+                } else {
+                    layout::apply_acts(self, vec![Act::SetPan(t, pan)]);
+                }
             }
             A::MuteGroup(group) => layout::apply_acts(self, vec![Act::ToggleMute(Target::Group(group))]),
             A::SoloGroup(group) => self.solo(layout::Channel::Group(group)),
@@ -5514,7 +5576,10 @@ impl App {
                 c.knobs[k] = knob.map(|(name, text, value, edit)| {
                     let (live_text, shown_value) = shown.unwrap_or((text.clone(), value));
                     let text = match edit.filter(|e| writing && modulation::mod_target(*e).is_some()) {
-                        Some(e) => format!("{:+.0}%", (self.mod_position(e).unwrap_or(value as f64) - value as f64) * 100.0),
+                        Some(e) => {
+                            let base = modulation::mod_target(e).and_then(|(ch, t)| self.knob_travel(p, ch, &t)).unwrap_or(value as f64);
+                            format!("{:+.0}%", (self.mod_position(e).unwrap_or(base) - base) * 100.0)
+                        }
                         // A routing choice (a side-chain source) whole while touched.
                         None => match edit {
                             Some(layout::Edit::Route(cur)) if touched[k] => {
@@ -5610,6 +5675,7 @@ impl App {
                     Edit::Int(_, _, lo, hi, _) => Some(1.0 / (hi - lo).max(1.0)),
                     Edit::Toggle(..) => Some(1.0),
                     Edit::PluginChoice(_, _, steps, ..) => Some(1.0 / steps.max(1) as f64),
+                    Edit::MidiInputParam(_, _, _, _, steps, _) if steps >= 2 => Some(1.0 / (steps - 1) as f64),
                     _ => None,
                 };
                 let to = match step {
@@ -6020,6 +6086,13 @@ impl App {
     /// scripts, undo or redo), keeping its position.
     fn follow_edits(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
+        // A group gone moves the numbers of those after it, and plug-ins go by number.
+        let groups = doc.borrow().project().groups.len();
+        if groups < self.midi_input_groups {
+            self.clear_midi_inputs();
+            self.status = "a group was deleted: MIDI plug-ins were taken out".into();
+        }
+        self.midi_input_groups = groups;
         let d = doc.borrow();
         let Some(Ok(out)) = &self.output else { return };
         // An edit that reached the engine while it switched modes is sent again.
@@ -8220,13 +8293,18 @@ impl App {
     }
 
     /// Look up a default NKS preset for `plugin_name` in NI's library index, preferring
-    /// one whose `NICA` pages carry section headings.
+    /// one whose `NICA` / `DSINy` pages carry section headings.
     fn default_nks_preset(&self, plugin_name: &str) -> Option<deckard_plugins::nks::Resolved> {
         let mut best: Option<deckard_plugins::nks::Resolved> = None;
         for path in deckard_library::ni::nks_presets_for(plugin_name) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
-            let Ok(preset) = deckard_plugins::nks::parse(&bytes) else { continue };
-            let Ok(resolved) = preset.resolve(&self.catalog.entries) else { continue };
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let resolved = if matches!(ext.to_ascii_lowercase().as_str(), "nksf" | "nksfx") {
+                deckard_plugins::nks::parse(&bytes).and_then(|p| p.resolve(&self.catalog.entries)).ok()
+            } else {
+                deckard_plugins::nks::native_preset(ext, &bytes, &self.catalog.entries).and_then(Result::ok)
+            };
+            let Some(resolved) = resolved else { continue };
             let has_sections = resolved.pages.iter().any(|pg| pg.iter().any(|k| !k.section.is_empty()));
             if has_sections {
                 return Some(resolved);
@@ -8521,6 +8599,32 @@ impl App {
     }
 
     /// Add a module or plug-in at the end of the focused sound's chain, and show it.
+    /// The MIDI input plug-in on `group`, as the audio output has it.
+    pub(crate) fn midi_input(&self, group: usize) -> Option<deckard_engine::midi_input::Info> {
+        match &self.output {
+            Some(Ok(out)) => out.midi_input(group),
+            _ => None,
+        }
+    }
+
+    /// Put the built-in MIDI input plug-in called `name` on `group`, or none.
+    fn set_midi_input(&mut self, group: usize, name: Option<&str>) {
+        let Ok(out) = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) else {
+            return;
+        };
+        out.set_midi_input(group, name.and_then(deckard_engine::midi_input::built_in));
+    }
+
+    /// Take the MIDI input plug-ins out: they go by group number, and aren't saved.
+    fn clear_midi_inputs(&mut self) {
+        let Some(Ok(out)) = &self.output else { return };
+        for group in 0..deckard_engine::midi_input::SLOTS {
+            if out.midi_input(group).is_some() {
+                out.set_midi_input(group, None);
+            }
+        }
+    }
+
     /// Make a routing choice from the channel properties.
     fn set_route(&mut self, r: layout::RouteSet) {
         let Some(doc) = self.doc.clone() else { return };
@@ -8528,6 +8632,11 @@ impl App {
         let done = match r {
             layout::RouteSet::Sound(g, s, route) => d.set_sound_route(g, s, route),
             layout::RouteSet::Group(g, aux, dest) => d.set_group_route(g, aux, dest),
+            layout::RouteSet::GroupMidiInput(g, name) => {
+                drop(d);
+                self.set_midi_input(g, name);
+                return;
+            }
             layout::RouteSet::GroupMidiSource(g, port) => {
                 d.set("MIDI Source", deckard_doc::Target::Group(g), "event_input", mxprj::decode::Value::Str(port))
             }
@@ -9895,6 +10004,20 @@ mod tests {
 
     const PROJECT: &str = "/Users/Shared/Velvet Lounge Library/Projects/Cloud 9 Vibes.mxprj";
 
+    /// How long a test on the real audio output waits for what it's waiting for. It goes
+    /// on as soon as that happens, so this only has to outlast a busy machine, where the
+    /// song can take seconds to get going.
+    const AUDIO_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Wait for what the audio thread publishes to catch up with what was sent to it:
+    /// until then, the playhead is still the last engine's.
+    fn published(app: &App) {
+        let wait = std::time::Instant::now();
+        while !matches!(&app.output, Some(Ok(out)) if out.is_current()) && wait.elapsed() < AUDIO_PATIENCE {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// A value sent to a plug-in shows until its controller reports it (JUCE's take it
     /// in at the next block), or for SENT_HOLD; then what the plug-in says again.
     #[test]
@@ -9991,7 +10114,7 @@ mod tests {
         // The playhead is what the audio thread published after its next block.
         let wait = std::time::Instant::now();
         let mut head = h.state().playhead();
-        while head.as_ref().is_none_or(|p| p.queued.is_none()) && wait.elapsed() < std::time::Duration::from_millis(500) {
+        while head.as_ref().is_none_or(|p| p.queued.is_none()) && wait.elapsed() < AUDIO_PATIENCE {
             std::thread::sleep(std::time::Duration::from_millis(5));
             head = h.state().playhead();
         }
@@ -10000,6 +10123,32 @@ mod tests {
         h.run_steps(10);
         assert_eq!(h.state().scene, 3, "the selection sticks while the old scene finishes");
         h.state_mut().stop();
+    }
+
+    /// A plug-in chosen with nothing playing reaches the engine played next, its parameter
+    /// moved on the way, and a new project takes it out.
+    #[test]
+    fn a_midi_plug_in_chosen_while_stopped_plays_and_goes_with_the_project() {
+        let mut app = App::default();
+        app.new_project();
+        app.set_route(layout::RouteSet::GroupMidiInput(0, Some(deckard_engine::note_echo::NAME)));
+        let Some(Ok(out)) = &app.output else {
+            eprintln!("no audio output; skipping");
+            return;
+        };
+        let info = out.midi_input(0).expect("on the group");
+        assert_eq!(info.name, deckard_engine::note_echo::NAME);
+        assert_eq!(out.set_midi_input_param(0, 2, 99.0), Some(8.0), "fitted to its range");
+        assert_eq!(out.midi_input(0).unwrap().params[1].value, 8.0);
+        assert_eq!(out.set_midi_input_param(0, 99, 1.0), None);
+
+        app.transport_play();
+        let Some(Ok(out)) = &app.output else { unreachable!() };
+        assert_eq!(out.call(|e| e.has_midi_input(0)), Some(true));
+
+        app.new_project();
+        let Some(Ok(out)) = &app.output else { unreachable!() };
+        assert!(out.midi_input(0).is_none());
     }
 
     /// #14: with the window covered (eframe runs only `logic`), an edit from the MK3
@@ -10017,7 +10166,7 @@ mod tests {
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
         let mut tempo = 0.0;
-        while tempo != 171.0 && wait.elapsed() < std::time::Duration::from_millis(1000) {
+        while tempo != 171.0 && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
             tempo = app.output.as_ref().unwrap().as_ref().unwrap().telemetry(|t| t.tempo);
@@ -10038,10 +10187,11 @@ mod tests {
             return;
         }
         let ctx = egui::Context::default();
-        let at = |app: &mut App, past: f64| {
+        let at = |app: &mut App, within: std::ops::Range<f64>| {
+            published(app);
             let wait = std::time::Instant::now();
             let mut pos = 0.0;
-            while pos <= past && wait.elapsed() < std::time::Duration::from_millis(2000) {
+            while !within.contains(&pos) && wait.elapsed() < AUDIO_PATIENCE {
                 app.background(&ctx);
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 pos = app.playhead().map_or(0.0, |h| h.position);
@@ -10049,18 +10199,20 @@ mod tests {
             pos
         };
         let quarter = deckard_model::PPQ as f64;
-        assert!(at(&mut app, quarter) > quarter, "playing");
+        // Early in the bar: going on from near its end could come round the loop to the
+        // start before the position is looked at.
+        assert!(at(&mut app, quarter + 1.0..2.0 * quarter) > quarter, "playing");
         app.stop();
         let parked = app.shown_playhead().expect("shown where it stopped").position;
         assert!(parked > quarter, "{parked}");
         // The MK3 (the touch strip's play position) shows it there too.
         assert_eq!(app.surface_view().position, Some(parked as i64));
         app.transport_play();
-        let first = at(&mut app, 0.0);
+        let first = at(&mut app, f64::MIN_POSITIVE..f64::MAX);
         assert!(first >= parked - 1.0, "on from {parked}: {first}");
         app.stop();
         app.restart();
-        let first = at(&mut app, 0.0);
+        let first = at(&mut app, f64::MIN_POSITIVE..f64::MAX);
         app.stop();
         assert!(first < parked, "RESTART: from the start ({first})");
     }
@@ -10079,7 +10231,7 @@ mod tests {
         let ctx = egui::Context::default();
         let quarter = deckard_model::PPQ as f64;
         let wait = std::time::Instant::now();
-        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < std::time::Duration::from_millis(2000) {
+        while app.playhead().map_or(0.0, |h| h.position) <= quarter && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -10088,6 +10240,7 @@ mod tests {
         assert!(parked > quarter, "{parked}");
         app.set_recording(true, true);
         app.background(&ctx);
+        published(&app);
         let first = app.playhead().map_or(0.0, |h| h.position);
         app.set_recording(false, false);
         app.stop();
@@ -10205,7 +10358,7 @@ mod tests {
         out.queue(app.doc.as_ref().unwrap().borrow().project(), Mode::Scene(1));
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
-        while app.scene != 1 && wait.elapsed() < std::time::Duration::from_secs(6) {
+        while app.scene != 1 && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -10230,7 +10383,7 @@ mod tests {
         let log = asked.clone();
         ctx.set_request_repaint_callback(move |info| log.lock().unwrap().push(info.delay));
         let wait = std::time::Instant::now();
-        while app.master_meter == (0.0, 0.0) && wait.elapsed() < std::time::Duration::from_millis(1500) {
+        while app.master_meter == (0.0, 0.0) && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -10253,7 +10406,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         let wait = std::time::Instant::now();
-        while app.master_meter == (0.0, 0.0) && wait.elapsed() < std::time::Duration::from_millis(1500) {
+        while app.master_meter == (0.0, 0.0) && wait.elapsed() < AUDIO_PATIENCE {
             app.background(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -13294,6 +13447,63 @@ mod tests {
         assert_eq!(slots(&h), [0, 1, 3, 6]);
     }
 
+    /// Auto-write on while the song plays: dragging a mixer strip's fader or pan writes
+    /// modulation and leaves them where they are. Otherwise it moves them.
+    #[test]
+    fn dragging_a_mixer_fader_writes_with_auto_write_on() {
+        let mut app = App { show_controller: false, follow: true, grid: PPQ / 4, prop_set: 1, ..Default::default() };
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "Pattern 1").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+        }
+        (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+        (app.mixer, app.mixer_sounds) = (true, false);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(4);
+        let strips: Vec<(layout::Channel, egui::Rect)> =
+            h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-mixer-strips"))).expect("mixer drawn");
+        let r = strips.iter().find(|(c, _)| *c == layout::Channel::Group(0)).unwrap().1;
+        let x = r.left() + 48.0;
+        let zero_db = r.bottom() - 186.0 + 26.0 + 25.0;
+        let pan = egui::pos2(r.left() + 5.0 + 30.5, r.bottom() - 186.0 + 8.0);
+        let level = |h: &Harness<'static, App>| project_of(h).groups[0].level;
+        let pan_now = |h: &Harness<'static, App>| project_of(h).groups[0].pan;
+        // Stopped: it moves.
+        let before = level(&h);
+        drag(&mut h, egui::pos2(x, zero_db), egui::pos2(x, zero_db + 22.0));
+        assert!(level(&h) < before * 0.8, "about -10 dB: {}", level(&h));
+        // Playing with Auto-write on: written.
+        let before = level(&h);
+        h.state_mut().auto_write = true;
+        h.state_mut().transport_play();
+        if !matches!(h.state().output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let wait = std::time::Instant::now();
+        while h.state().playhead().is_none() && wait.elapsed() < std::time::Duration::from_secs(60) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let at = zero_db + 22.0;
+        drag(&mut h, egui::pos2(x, at), egui::pos2(x, at + 15.0));
+        drag(&mut h, pan, pan + egui::vec2(10.0, 0.0));
+        h.state_mut().stop();
+        h.run_steps(2);
+        let p = project_of(&h);
+        assert_eq!(level(&h), before, "the fader stays");
+        assert_eq!(pan_now(&h), 0.0, "and the pan");
+        let points =
+            |field: &str| p.groups[0].patterns[0].mods.iter().filter(|m| m.sound.is_none() && m.slot.is_none() && m.field == field).count();
+        assert!(points("level") > 0, "the level written");
+        assert!(points("pan") > 0, "the pan written");
+        assert!(p.groups[0].patterns[0].mods.iter().filter(|m| m.field == "level").all(|m| m.value < 0.0), "down from the fader's place");
+    }
+
     /// The Mixer: a strip per group; the fader sets the level, M mutes, right-click on
     /// M solos (again: unsolo), the headphones cue; double-clicking a group header's
     /// background shows its sounds.
@@ -14372,8 +14582,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ni_resources_pictures_resolve_slots_and_browser_products() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, thumb_png, logo_png) = plugin_pictures::PICTURES[0];
+        let omni_art = tmp.path().join("omnisphere");
+        let omni_vendor = tmp.path().join("spectrasonics").join("omnisphere");
+        let kontakt = tmp.path().join("kontakt");
+        for d in [&omni_art, &omni_vendor, &kontakt] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(omni_art.join("MST_artwork.png"), thumb_png).unwrap();
+        std::fs::write(omni_vendor.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(omni_vendor.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(kontakt.join("MST_artwork.png"), thumb_png).unwrap();
+        std::fs::write(kontakt.join("MST_logo.png"), logo_png).unwrap();
+
+        let prev = std::env::var_os("DECKARD_NI_IMAGE_DIR");
+        // SAFETY: scoped to this unit test; `with_ni_pictures` rescans when the path changes.
+        unsafe { std::env::set_var("DECKARD_NI_IMAGE_DIR", tmp.path()) };
+        let s = deckard_surface::Surface::new();
+        assert_eq!(plugin_pictures::slot_key(&s, "Omnisphere").as_deref(), Some("omnisphere"));
+        assert!(s.has_picture("omnisphere", true) && s.has_picture("omnisphere", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Kontakt 7").as_deref(), Some("kontakt7"));
+        assert!(s.has_picture("kontakt7", true) && s.has_picture("kontakt7", false));
+        plugin_pictures::ensure_browser_product(&s, "Omnisphere");
+        assert!(s.has_picture("artwork:omnisphere", true) && s.has_picture("artwork:omnisphere", false));
+        match prev {
+            Some(v) => unsafe { std::env::set_var("DECKARD_NI_IMAGE_DIR", v) },
+            None => unsafe { std::env::remove_var("DECKARD_NI_IMAGE_DIR") },
+        }
+    }
+
     /// What `make_plugin_pictures` writes after the pictures' list.
     const PICTURE_HELPERS: &str = r#"
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
 /// Whether DECKARD has a picture of the plug-in with this key.
 pub fn has(key: &str) -> bool {
     PICTURES.iter().any(|(k, ..)| *k == key)
@@ -14390,15 +14636,233 @@ pub fn give(s: &mut deckard_surface::Surface) {
     }
 }
 
+/// The picture key for a chain slot (`s.name`): DECKARD's own built-in picture if it
+/// has one, else the plug-in's thumbnail and logo from `NI Resources\image` (loaded on
+/// demand into `s`).
+pub fn slot_key(s: &deckard_surface::Surface, name: &str) -> Option<String> {
+    let key = deckard_lua_host::plugin_picture_key(name);
+    if key.is_empty() {
+        return None;
+    }
+    if has(&key) || s.has_picture(&key, true) || s.has_picture(&key, false) {
+        return Some(key);
+    }
+    with_ni_pictures(|ni| ni.load_slot(s, name, &key)).then_some(key)
+}
+
+/// Ensure the controller's surface has the browser tile (`thumb = true`) and right-screen
+/// logo (`thumb = false`) for `product` under `"artwork:<lower>"`.
+pub fn ensure_browser_product(s: &deckard_surface::Surface, product: &str) {
+    let lower = product.trim().to_lowercase();
+    if lower.is_empty() {
+        return;
+    }
+    let key = format!("artwork:{lower}");
+    if s.has_picture(&key, true) && s.has_picture(&key, false) {
+        return;
+    }
+    with_ni_pictures(|ni| {
+        ni.load_browser_product(s, &lower, &key);
+    });
+}
+
+#[derive(Clone, Default)]
+struct Entry {
+    artwork: Option<PathBuf>,
+    plugin: Option<PathBuf>,
+    logo: Option<PathBuf>,
+}
+
+impl Entry {
+    fn merge(&mut self, other: &Self) {
+        if self.artwork.is_none() {
+            self.artwork.clone_from(&other.artwork);
+        }
+        if self.plugin.is_none() {
+            self.plugin.clone_from(&other.plugin);
+        }
+        if self.logo.is_none() {
+            self.logo.clone_from(&other.logo);
+        }
+    }
+}
+
+type DecodedImage = Option<(usize, usize, Vec<[u8; 4]>)>;
+
+#[derive(Default)]
+struct NiPictures {
+    root: Option<PathBuf>,
+    by_name: HashMap<String, Entry>,
+    by_key: HashMap<String, Entry>,
+    decoded: HashMap<PathBuf, DecodedImage>,
+}
+
+fn ni_image_root() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("DECKARD_NI_IMAGE_DIR") {
+        let p = PathBuf::from(dir);
+        return p.is_dir().then_some(p);
+    }
+    let mut candidates = vec![
+        PathBuf::from(r"C:\Users\Public\Documents\NI Resources\image"),
+        PathBuf::from("/Users/Shared/NI Resources/image"),
+    ];
+    if let Some(pub_dir) = std::env::var_os("PUBLIC") {
+        candidates.insert(0, PathBuf::from(pub_dir).join(r"Documents\NI Resources\image"));
+    }
+    candidates.into_iter().find(|p| p.is_dir())
+}
+
+fn strip_hash(name: &str) -> &str {
+    if name.len() > 33 && name.is_char_boundary(name.len() - 33) {
+        let (stem, suffix) = name.split_at(name.len() - 33);
+        if suffix.starts_with('_') && suffix[1..].bytes().all(|b| b.is_ascii_hexdigit()) {
+            return stem;
+        }
+    }
+    name
+}
+
+fn candidate_keys(name: &str) -> Vec<String> {
+    let base = deckard_lua_host::plugin_picture_key(name);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![base.clone()];
+    let no_fx = base.strip_suffix("fx").filter(|s| !s.is_empty()).unwrap_or(&base);
+    if no_fx != base {
+        out.push(no_fx.to_string());
+    }
+    for s in [base.as_str(), no_fx] {
+        let no_digits = s.trim_end_matches(|c: char| c.is_ascii_digit());
+        if !no_digits.is_empty() && !out.iter().any(|x| x == no_digits) {
+            out.push(no_digits.to_string());
+        }
+    }
+    out
+}
+
+impl NiPictures {
+    fn scan(root: Option<PathBuf>) -> Self {
+        let mut ni = Self { root: root.clone(), ..Self::default() };
+        if let Some(dir) = root {
+            Self::walk(&dir, 3, &mut ni);
+        }
+        ni
+    }
+
+    fn walk(dir: &Path, depth: usize, ni: &mut Self) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        dirs.sort();
+        for path in dirs {
+            let artwork = ["MST_artwork.png", "VB_artwork.png"].into_iter().map(|f| path.join(f)).find(|p| p.is_file());
+            let plugin = ["MST_plugin.png"].into_iter().map(|f| path.join(f)).find(|p| p.is_file());
+            let logo = ["MST_logo.png", "VB_logo.png"].into_iter().map(|f| path.join(f)).find(|p| p.is_file());
+            if artwork.is_some() || plugin.is_some() || logo.is_some() {
+                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    let entry = Entry { artwork, plugin, logo };
+                    let lower = name.trim().to_lowercase();
+                    let clean = strip_hash(&lower).trim().to_string();
+                    ni.by_name.entry(lower).or_default().merge(&entry);
+                    ni.by_name.entry(clean.clone()).or_default().merge(&entry);
+                    for k in candidate_keys(&clean) {
+                        ni.by_key.entry(k).or_default().merge(&entry);
+                    }
+                }
+            }
+            if depth > 1 {
+                Self::walk(&path, depth - 1, ni);
+            }
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<Entry> {
+        let lower = strip_hash(&name.trim().to_lowercase()).trim().to_string();
+        let mut found = self.by_name.get(&lower).cloned();
+        for k in candidate_keys(&lower) {
+            if let Some(e) = self.by_key.get(&k) {
+                match &mut found {
+                    Some(cur) => cur.merge(e),
+                    None => found = Some(e.clone()),
+                }
+            }
+        }
+        found
+    }
+
+    fn decode_cached(&mut self, path: &Path) -> DecodedImage {
+        if let Some(cached) = self.decoded.get(path) {
+            return cached.clone();
+        }
+        let img = std::fs::read(path).ok().and_then(|b| decode(&b));
+        self.decoded.insert(path.to_path_buf(), img.clone());
+        img
+    }
+
+    fn load_slot(&mut self, s: &deckard_surface::Surface, name: &str, key: &str) -> bool {
+        let Some(entry) = self.lookup(name) else { return false };
+        let thumb_path = entry.plugin.as_ref().or(entry.artwork.as_ref()).or(entry.logo.as_ref()).cloned();
+        let logo_path = entry.logo.as_ref().or(entry.plugin.as_ref()).or(entry.artwork.as_ref()).cloned();
+        let mut any = false;
+        if let Some(p) = thumb_path {
+            if let Some((w, h, px)) = self.decode_cached(&p) {
+                s.add_picture(key, true, w, h, px);
+                any = true;
+            }
+        }
+        if let Some(p) = logo_path {
+            if let Some((w, h, px)) = self.decode_cached(&p) {
+                s.add_picture(key, false, w, h, px);
+                any = true;
+            }
+        }
+        any
+    }
+
+    fn load_browser_product(&mut self, s: &deckard_surface::Surface, product_lower: &str, key: &str) -> bool {
+        let Some(entry) = self.lookup(product_lower) else { return false };
+        let thumb_path = entry.artwork.as_ref().or(entry.plugin.as_ref()).or(entry.logo.as_ref()).cloned();
+        let logo_path = entry.logo.as_ref().or(entry.artwork.as_ref()).or(entry.plugin.as_ref()).cloned();
+        let mut any = false;
+        if let Some(p) = thumb_path {
+            if let Some((w, h, px)) = self.decode_cached(&p) {
+                s.add_picture(key, true, w, h, px);
+                any = true;
+            }
+        }
+        if let Some(p) = logo_path {
+            if let Some((w, h, px)) = self.decode_cached(&p) {
+                s.add_picture(key, false, w, h, px);
+                any = true;
+            }
+        }
+        any
+    }
+}
+
+fn with_ni_pictures<R>(f: impl FnOnce(&mut NiPictures) -> R) -> R {
+    static NI: OnceLock<Mutex<NiPictures>> = OnceLock::new();
+    let root = ni_image_root();
+    let mut guard = NI.get_or_init(|| Mutex::new(NiPictures::scan(root.clone()))).lock().expect("ni pictures lock");
+    if guard.root != root {
+        *guard = NiPictures::scan(root);
+    }
+    f(&mut guard)
+}
+
 /// A PNG as RGBA pixels (w, h, pixels).
 fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
-    let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
+    let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info().ok()?;
     let mut buf = vec![0; r.output_buffer_size()?];
     let info = r.next_frame(&mut buf).ok()?;
     let buf = &buf[..info.buffer_size()];
     let px = match info.color_type {
         png::ColorType::Rgba => buf.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect(),
         png::ColorType::Rgb => buf.chunks(3).map(|c| [c[0], c[1], c[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.chunks(2).map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+        png::ColorType::Grayscale => buf.iter().map(|&g| [g, g, g, 255]).collect(),
         _ => return None,
     };
     Some((info.width as usize, info.height as usize, px))
