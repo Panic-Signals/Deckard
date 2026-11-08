@@ -1597,7 +1597,13 @@ pub fn header(app: &mut App, ui: &mut Ui) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
             let full = ui.max_rect();
-            // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit).
+            // Where the middle group (the transport, centred) starts.
+            let t = Vec2::new(32.0, 24.0);
+            let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
+            let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
+            let mid_left = full.center().x - group / 2.0;
+            // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
+            // and a new release's button.
             ui.horizontal_centered(|ui| {
                 // The DECKARD wordmark and its menu arrow. As Maschine's, clicking it opens
                 // the menus.
@@ -1611,12 +1617,6 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     );
                 }
                 let t = deckard_logo(ui.painter(), r.left_center());
-                if let Some(rel) = app.update.available() {
-                    let dot = Pos2::new(t.right() + 2.0, t.top() - 1.0);
-                    ui.painter().circle_filled(dot, 3.5, Color32::from_rgb(0xff, 0x80, 0x60));
-                    ui.interact(Rect::from_center_size(dot, Vec2::splat(12.0)), ui.id().with("update-dot"), Sense::hover())
-                        .on_hover_text(format!("Update available: {} (Help ▸ About)", rel.version_text()));
-                }
                 let c = Pos2::new(t.right() + 9.0, r.center().y + 1.0);
                 ui.painter().add(egui::Shape::convex_polygon(
                     vec![c + Vec2::new(-4.0, -2.5), c + Vec2::new(4.0, -2.5), c + Vec2::new(0.0, 2.5)],
@@ -1685,14 +1685,16 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                         acts.push(Act::Save);
                     }
                 }
+                if let Some(rel) = app.update.available()
+                    && update_button(ui, mid_left, rel.version_text()).is_some_and(|r| r.clicked())
+                {
+                    app.menu_commands.push(crate::menu::Command::About);
+                }
             });
             // The middle, centred as Maschine's: the transport and LINK, the metronome, the
             // display (BPM, SWING, SIG, the position and scene), then follow and the
             // computer keyboard.
-            let t = Vec2::new(32.0, 24.0);
-            let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
-            let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
-            let mid_rect = Rect::from_min_size(Pos2::new(full.center().x - group / 2.0, full.top()), Vec2::new(group, HEADER));
+            let mid_rect = Rect::from_min_size(Pos2::new(mid_left, full.top()), Vec2::new(group, HEADER));
             let mut mid = ui.new_child(UiBuilder::new().max_rect(mid_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
             {
                 let ui = &mut mid;
@@ -1997,6 +1999,38 @@ fn link_button(ui: &mut Ui, view: Option<(u64, f64)>) -> Response {
             p.rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar.width() * phase.clamp(0.0, 1.0) as f32, 2.0)), 0.0, c);
         }
     })
+}
+
+/// A new release's button in the header: green, with an update icon and "Update
+/// available"; `None` (not drawn) when it doesn't fit before `before` (the transport).
+fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> {
+    const GREEN: Color32 = Color32::from_rgb(0x2e, 0x9e, 0x4f);
+    const GREEN_HOVER: Color32 = Color32::from_rgb(0x38, 0xb4, 0x5c);
+    let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), Color32::WHITE);
+    let size = Vec2::new(10.0 + 14.0 + 6.0 + text.size().x + 10.0, 22.0);
+    let gap = 10.0;
+    if ui.cursor().left() + gap + size.x + gap > before {
+        return None;
+    }
+    ui.add_space(gap);
+    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+    let p = ui.painter();
+    p.rect_filled(r, 11.0, if resp.hovered() { GREEN_HOVER } else { GREEN });
+    // The icon: a circular arrow.
+    let c = Pos2::new(r.left() + 10.0 + 7.0, r.center().y);
+    let rad = 5.0;
+    let (a0, a1) = (-0.35 * std::f32::consts::PI, 1.35 * std::f32::consts::PI);
+    let pts: Vec<Pos2> = (0..=20).map(|i| a0 + (a1 - a0) * i as f32 / 20.0).map(|a| c + rad * Vec2::new(a.cos(), a.sin())).collect();
+    p.add(egui::Shape::line(pts, Stroke::new(1.6, Color32::WHITE)));
+    let tip = c + rad * Vec2::new(a0.cos(), a0.sin());
+    p.add(egui::Shape::convex_polygon(
+        vec![tip + Vec2::new(-3.5, -2.0), tip + Vec2::new(2.5, -3.0), tip + Vec2::new(1.0, 3.0)],
+        Color32::WHITE,
+        Stroke::NONE,
+    ));
+    p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, Color32::WHITE);
+    note_rect(ui, "update", r);
+    Some(resp.on_hover_text(format!("DECKARD {version} is out: click to see it and update (Help ▸ About)")))
 }
 
 fn separator(ui: &mut Ui) {
