@@ -1,0 +1,13 @@
+# The sections of GitHub's "Generate release notes", in the order of
+# docs/release-notes-template.md. GitHub adds the new contributors itself.
+changelog:
+  categories:
+    - title: ✨ New and Enhanced Features
+      labels:
+        - enhancement
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+    - title: 🧰 Other Changes
+      labels:
+        - "*"
