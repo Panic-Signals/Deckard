@@ -29,7 +29,7 @@ local util = require("lib.util")
 local browse = {}
 
 local KINDS = { "PROJECTS", "GROUPS", "SOUNDS", "INSTRUMENTS", "EFFECTS", "LOOPS", "ONE-SHOTS" }
-local LOOPS, ONE_SHOTS = 6, 7
+local GROUPS, LOOPS, ONE_SHOTS = 2, 6, 7
 
 -- The knob the jog wheel turns (bracketed): results to begin with, and kept between
 -- visits.
@@ -125,10 +125,12 @@ local function buttons(s, shift)
   local n = #b.results
   if shift then
     local c = s.control
+    local group = b.kind == GROUPS
     local sample = b.kind == LOOPS or b.kind == ONE_SHOTS
     return {
-      -- (Shown, but does nothing: its light is off.)
-      [4] = { text = "USER", selected = b.user, inert = true },
+      [3] = group and { text = "+ ROUTING", selected = b.routing } or nil,
+      -- (When not browsing Groups, USER is shown, but does nothing: its light is off.)
+      [4] = group and { text = "+ PATTERNS", selected = b.patterns } or { text = "USER", selected = b.user, inert = true },
       [5] = {
         arrows = true,
         text = c.slot and c.slot:upper() or "",
@@ -166,7 +168,11 @@ function browse.button(name, down)
     if b.busy then return true end
     local spec = buttons(s, shift)
     if shift then
-      if n == 5 or n == 6 then
+      if n == 3 and b.kind == GROUPS then
+        deckard.browse_routing(not b.routing)
+      elseif n == 4 and b.kind == GROUPS then
+        deckard.browse_patterns(not b.patterns)
+      elseif n == 5 or n == 6 then
         local arrows = spec[5]
         if (n == 5 and arrows.left) or (n == 6 and arrows.right) then deckard.slot(n == 5 and -1 or 1) end
       elseif n == 7 and #b.results > 0 then
@@ -193,7 +199,7 @@ function browse.button(name, down)
     return true
   end
   if name == "WHEEL" then
-    if focus == RESULTS and #b.results > 0 then
+    if #b.results > 0 then
       if shift then deckard.browse_set_favorite() else deckard.browse_load() end
     end
   elseif name == "WHEEL_LEFT" then
@@ -212,7 +218,10 @@ end
 
 function browse.knob(n, amount)
   local steps = knobs.gather(n, amount)
-  if steps ~= 0 then step(lib(deckard.state()), n, steps) end
+  if steps ~= 0 then
+    if n == RESULTS then focus = RESULTS end
+    step(lib(deckard.state()), n, steps)
+  end
   return true
 end
 

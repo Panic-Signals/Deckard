@@ -210,6 +210,9 @@ pub enum Live {
         pitch: i64,
         velocity: i64,
     },
+    /// Every voice of every sound ends at once (Maschine's Choke All Notes): as a choke
+    /// group's, a quick fade. The next notes play as usual. Not recorded.
+    ChokeAll,
 }
 
 /// Rendering sounds ahead (see [`ahead`]): the players' links, as the audio thread
@@ -589,6 +592,89 @@ fn ext_route(p: &Project, n: i64, gain: (f32, f32)) -> Route {
         (Some(n as usize), gain)
     } else {
         SILENT
+    }
+}
+
+/// The cue bus as the audio thread has it: where it goes, what's on it, and its meter.
+struct CueBus {
+    /// Where the metronome and the prehear go: the bus, or with no output for it the
+    /// master's output as it is.
+    clicks_route: Route,
+    /// From what's mixed onto the bus's output to the bus's own level: a bus on the
+    /// master's output has been divided by the master's gain, which comes later.
+    to_meter: (f32, f32),
+    /// `[group][sound]`: this sound's output is on the bus. A sound going through a group
+    /// with effects isn't, its group's bus is.
+    sounds: Vec<Vec<bool>>,
+    /// Group `g`'s bus (after its effects) is on the bus.
+    groups: Vec<bool>,
+    /// What's on the bus over the part being rendered, and the click's and prehear's.
+    mix: Vec<f32>,
+    clicks: Vec<f32>,
+    /// Peak (left, right) since the UI last took it.
+    peak: (f32, f32),
+}
+
+impl CueBus {
+    fn of(p: &Project) -> CueBus {
+        let route = cue_route(p);
+        let clicks_route = match p.cue_output {
+            deckard_model::AudioDest::Ext(n) if (0..OUTPUTS as i64).contains(&n) => route,
+            _ => (None, (1.0, 1.0)),
+        };
+        let to_meter = if route.0.is_none() { channel_gain(p.master_level, p.master_pan) } else { (1.0, 1.0) };
+        let sounds = p
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, grp)| grp.sounds.iter().map(|s| s.cue || dest_cued(p, s.channel.dest, Some(g), 0)).collect())
+            .collect();
+        let groups = p.groups.iter().map(|g| g.cue || dest_cued(p, g.channel.dest, None, 1)).collect();
+        CueBus {
+            clicks_route,
+            to_meter,
+            sounds,
+            groups,
+            mix: vec![0.0; JOB_FRAMES * 2],
+            clicks: vec![0.0; JOB_FRAMES * 2],
+            peak: (0.0, 0.0),
+        }
+    }
+
+    /// The click and the prehear (in `clicks`) over `frames`, onto `dst` and the bus; then
+    /// the meter takes what's on the bus, ready for the next part.
+    fn finish(&mut self, frames: usize, dst: &mut [f32]) {
+        let gain = self.clicks_route.1;
+        for f in 0..frames {
+            let (a, z) = (self.clicks[f * 2] * gain.0, self.clicks[f * 2 + 1] * gain.1);
+            dst[f * 2] += a;
+            dst[f * 2 + 1] += z;
+            self.mix[f * 2] += a;
+            self.mix[f * 2 + 1] += z;
+        }
+        for frame in self.mix[..frames * 2].chunks_exact(2) {
+            self.peak.0 = self.peak.0.max((frame[0] * self.to_meter.0).abs());
+            self.peak.1 = self.peak.1.max((frame[1] * self.to_meter.1).abs());
+        }
+        self.mix[..frames * 2].fill(0.0);
+    }
+}
+
+/// Whether entering `dest` leads onto the cue bus (as [`dest_route`] walks; a group with
+/// effects ends it, its own bus going on from there).
+fn dest_cued(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>, depth: u8) -> bool {
+    use deckard_model::AudioDest as D;
+    if depth > 8 {
+        return false;
+    }
+    let group = |g: usize| p.groups.get(g).is_some_and(|grp| !has_bus(grp) && (grp.cue || dest_cued(p, grp.channel.dest, None, depth + 1)));
+    match dest {
+        D::Parent => parent.is_some_and(group),
+        D::Group(g) => group(g),
+        D::Sound(g, s) => {
+            p.groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|bus| bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))
+        }
+        D::None | D::Master | D::Ext(_) => false,
     }
 }
 
@@ -1180,6 +1266,8 @@ pub struct Recorded {
     /// Ticks on a clock that never wraps (loops and jumps don't move it back): what a
     /// held note's length is measured by.
     pub played: f64,
+    /// It came in over MIDI (not from a pad, Note Repeat or the Arp).
+    pub midi: bool,
 }
 
 /// Per-note expression played while recording, at the song position it came.
@@ -1219,6 +1307,8 @@ pub struct Telemetry {
     /// Peak (left, right) of each sound since the UI last took them, `[group][sound]`.
     pub meters: Vec<Vec<(f32, f32)>>,
     pub master_peak: (f32, f32),
+    /// Peak (left, right) of the cue bus since the UI last took it.
+    pub cue_peak: (f32, f32),
     /// Ticks.
     pub position: f64,
     pub length: f64,
@@ -1330,6 +1420,8 @@ pub struct Engine {
     /// [group][sound]: the external output a sound plays on when it isn't the master's
     /// ([`sound_bus`]).
     routes: Vec<Vec<Option<usize>>>,
+    /// The cue bus.
+    cue: CueBus,
     /// Peak output level (left, right) since the last `take_master_peak`.
     master_peak: (f32, f32),
     /// The last note id given out.
@@ -1626,7 +1718,7 @@ impl Engine {
                 (0..grp.sounds.len())
                     .map(|s| {
                         let (p, _) = prev?;
-                        let mut r = reuse_of(p, project, g, s, sr_f);
+                        let mut r = reuse_of(p, project, g, s, sr_f, &cache.plugins);
                         // A sound whose level feeds a side-chain (its group's sum)
                         // has that in its chain.
                         let (a, b) = (&p.groups[g].sounds[s], &grp.sounds[s]);
@@ -2040,6 +2132,7 @@ impl Engine {
                 .enumerate()
                 .map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect())
                 .collect(),
+            cue: CueBus::of(project),
             master_peak: (0.0, 0.0),
             clock: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -2244,6 +2337,9 @@ impl Engine {
         self.master_pan = fresh.master_pan;
         self.master_bus = fresh.master_bus;
         std::mem::swap(&mut self.routes, &mut fresh.routes);
+        // (Its meter goes on.)
+        fresh.cue.peak = self.cue.peak;
+        std::mem::swap(&mut self.cue, &mut fresh.cue);
         self.stale = false;
         if fresh.keep_timeline {
             // The same timelines: this one's play on.
@@ -3479,16 +3575,17 @@ impl Engine {
                 }
                 _ => {}
             }
+            let midi = matches!(event, Live::NoteIn { .. });
             let note = match event {
                 Live::NoteOn { group, sound, pitch, velocity, length } => Some((group, sound, pitch, velocity, length)),
                 Live::NoteIn { group, sound, pitch, velocity, .. } => Some((group, sound, pitch, velocity, i64::MAX)),
                 Live::NoteRelease { group, sound, pitch } => Some((group, sound, pitch, 0, 0)),
-                Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } => None,
+                Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::ChokeAll => None,
             };
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
             {
-                self.recorded.push(Recorded { group, sound, pitch, velocity, length, tick, mode, seq, played });
+                self.recorded.push(Recorded { group, sound, pitch, velocity, length, tick, mode, seq, played, midi });
             }
         }
         match event {
@@ -3520,6 +3617,31 @@ impl Engine {
                 }
             }
             Live::RepeatPressure { .. } => {}
+            Live::ChokeAll => self.choke_all(),
+        }
+    }
+
+    /// Every voice of every sound ends: each sound as its choke group would end it.
+    fn choke_all(&mut self) {
+        let tps = 1.0 / self.samples_per_tick();
+        let shape: Vec<usize> = self.fx.iter().map(Vec::len).collect();
+        for (group, sounds) in shape.into_iter().enumerate() {
+            for sound in 0..sounds {
+                let e = NoteEvent {
+                    tick: 0,
+                    group,
+                    sound,
+                    pitch: 0,
+                    velocity: 0,
+                    length: 0,
+                    probability: 100,
+                    midi: Some(pads::CHOKE),
+                    cue: None,
+                    expr: None,
+                    from: None,
+                };
+                self.trigger(e, tps);
+            }
         }
     }
 
@@ -3761,7 +3883,6 @@ impl Engine {
                 self.flush_tap(&block);
                 self.tap_block = block;
             }
-            let clicks = &mut out[done * 2..(done + until) * 2];
             let ticks = if self.metronome_ticks > 0 { i64::from(self.metronome_ticks) } else { self.denominator.max(1) as i64 };
             let beat_frames = self.samples_per_tick() * (PPQ * 4) as f64 / ticks as f64;
             // (Its ticks in a bar: the first higher.)
@@ -3773,8 +3894,14 @@ impl Engine {
             } else {
                 (self.sequencing && (self.metronome || (self.metronome_auto && self.recording))).then_some(self.frame)
             };
+            let part = until as usize;
+            let clicks = &mut self.cue.clicks[..part * 2];
+            clicks.fill(0.0);
             self.click.mix(clicks, frame, beat_frames, per_bar, self.sr);
             self.prehear.mix(clicks, self.sr);
+            // On the cue bus's output; one the interface hasn't: the master's.
+            let on_ext = self.cue.clicks_route.0.and_then(|n| ext.get_mut(n)?.get_mut(at + done * 2..at + (done + part) * 2));
+            self.cue.finish(part, on_ext.unwrap_or(&mut out[done * 2..(done + part) * 2]));
             self.clock_span(until as u64);
             if self.sequencing {
                 self.frame += until as u64;
@@ -3935,11 +4062,17 @@ impl Engine {
                 Some(n) => ext.get_mut(n).and_then(|b| b.get_mut(at..at + frames * 2)),
             };
             if let Some(dst) = dst {
+                let cued = self.cue.groups.get(g).copied().unwrap_or(false);
                 for f in 0..frames {
                     let gain = bus.ramp.next();
                     let (a, z) = (bus.buf[f * 2] * gain.0, bus.buf[f * 2 + 1] * gain.1);
-                    dst[f * 2] += if a.is_finite() { a } else { 0.0 };
-                    dst[f * 2 + 1] += if z.is_finite() { z } else { 0.0 };
+                    let (a, z) = (if a.is_finite() { a } else { 0.0 }, if z.is_finite() { z } else { 0.0 });
+                    dst[f * 2] += a;
+                    dst[f * 2 + 1] += z;
+                    if cued {
+                        self.cue.mix[f * 2] += a;
+                        self.cue.mix[f * 2 + 1] += z;
+                    }
                 }
             }
             bus.buf[..frames * 2].fill(0.0);
@@ -4149,6 +4282,8 @@ impl Engine {
         }
         let mp = std::mem::take(&mut self.master_peak);
         t.master_peak = (t.master_peak.0.max(mp.0), t.master_peak.1.max(mp.1));
+        let cp = std::mem::take(&mut self.cue.peak);
+        t.cue_peak = (t.cue_peak.0.max(cp.0), t.cue_peak.1.max(cp.1));
         t.position = self.position();
         t.played = self.played();
         // Recorded notes, handed over without allocating here.
@@ -4379,6 +4514,7 @@ impl Engine {
                 };
                 let checked = chain.is_some() || link.is_some_and(|l| l.finite);
                 ramp.aim(gain, glide);
+                let cued = self.cue.sounds.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
                 if !chained && let Some(c) = chain {
                     c.record_from(&src[..frames * 2], &mut self.sc_bufs);
                 }
@@ -4402,6 +4538,10 @@ impl Engine {
                     }
                     dst[f * 2] += a;
                     dst[f * 2 + 1] += z;
+                    if cued {
+                        self.cue.mix[f * 2] += a;
+                        self.cue.mix[f * 2 + 1] += z;
+                    }
                     if tapped && let Some(t) = self.tap_block.get_mut(f * 2..f * 2 + 2) {
                         t[0] += a;
                         t[1] += z;
@@ -4507,8 +4647,29 @@ fn same_timelines(a: &Project, b: &Project) -> bool {
 
 /// The slots of a sound's chain as its effect chain is built from them, without their
 /// effects' settings: what makes two chains the same but for those.
-fn chain_shape(s: &deckard_model::Sound) -> Vec<(usize, &str, bool, Option<&deckard_model::PluginRef>)> {
-    effect_slots(s).into_iter().map(|(i, x)| (i, x.module.as_str(), x.active, x.plugin.as_ref())).collect()
+fn chain_shape(s: &deckard_model::Sound) -> Vec<(usize, &str, bool, Option<(&str, &str)>)> {
+    effect_slots(s)
+        .into_iter()
+        .map(|(i, x)| (i, x.module.as_str(), x.active, x.plugin.as_ref().map(|p| (p.id.as_str(), p.name.as_str()))))
+        .collect()
+}
+
+/// Whether `slot`'s plug-in can be kept as it plays when `old` becomes `new`: either
+/// the saved chunk is unchanged, or the live instance already holds `new`'s chunk (a
+/// knob turn saved back into the document).
+fn plugin_kept(
+    plugins: &deckard_plugins::Host,
+    slot: Slot,
+    old: &Option<deckard_model::PluginRef>,
+    new: &Option<deckard_model::PluginRef>,
+) -> bool {
+    if old == new {
+        return true;
+    }
+    let (Some(a), Some(b)) = (old, new) else { return false };
+    a.id == b.id
+        && a.name == b.name
+        && plugins.existing(slot).is_some_and(|s| s.lock().ok().is_some_and(|p| p.chunk() == b.chunk.as_slice()))
 }
 
 /// The synth a sound plays (its first slot's module, when on and one of
@@ -4520,7 +4681,7 @@ fn synth_of(s: &deckard_model::Sound) -> Option<(&str, &[(String, f64)])> {
 
 /// What a sound being edited can keep of what plays, comparing it as it was (`old`,
 /// in `prev`) with what it is (`new`).
-fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> Reuse {
+fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64, plugins: &deckard_plugins::Host) -> Reuse {
     let (og, ng) = (&prev.groups[g], &project.groups[g]);
     let (old, new) = (&og.sounds[s], &ng.sounds[s]);
     let silent = |grp: &deckard_model::Group, snd: &deckard_model::Sound| grp.muted || (snd.muted && snd.channel.audio_mute);
@@ -4545,9 +4706,13 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64) -> R
             _ => {}
         }
     }
-    r.instrument = old.plugin == new.plugin;
+    r.instrument = plugin_kept(plugins, Slot::Sound { group: g, sound: s }, &old.plugin, &new.plugin);
     // The chain: the same slots and side-chains (its effects' settings may differ).
-    if chain_shape(old) == chain_shape(new) && old.channel.sidechain == new.channel.sidechain {
+    let same_fx_plugins = effect_slots(old)
+        .into_iter()
+        .zip(effect_slots(new))
+        .all(|((slot, a), (_, b))| plugin_kept(plugins, Slot::Chain { group: g, sound: s, slot }, &a.plugin, &b.plugin));
+    if chain_shape(old) == chain_shape(new) && same_fx_plugins && old.channel.sidechain == new.channel.sidechain {
         r.chain = true;
         for ((i, a), (_, b)) in effect_slots(old).into_iter().zip(effect_slots(new)) {
             if a.plugin.is_none() && a.params != b.params {
@@ -5224,6 +5389,31 @@ mod tests {
         assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 0), "the Send chokes the Receive");
     }
 
+    /// Choke All Notes ends what every sound plays, whatever its choke group; the next note
+    /// plays as usual.
+    #[test]
+    fn choke_all_ends_every_voice() {
+        let mut p = project();
+        let other = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(other);
+        let mut e = click_engine_for(&p, 1000);
+        e.sequencing = false;
+        set_sample(&mut e, vec![[0.5, 0.5]; 100], &[("envelope_type", 2.0)], true);
+        let voices = |e: &Engine, s: usize| e.sounds[0][s].as_ref().map_or(0, |x| x.voices());
+        let on = |sound| Live::NoteOn { group: 0, sound, pitch: 60, velocity: 100, length: i64::MAX };
+        let mut out = vec![0f32; 2 * 50];
+        e.play_live(on(0));
+        e.play_live(on(1));
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 1));
+        e.play_live(Live::ChokeAll);
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (0, 0), "both end");
+        e.play_live(on(0));
+        e.process(&mut out);
+        assert_eq!(voices(&e, 0), 1, "the next note plays");
+    }
+
     /// #21: a sound that plays only by a link is silent while the sound with the notes is
     /// muted; muted alone, it's silent and the Send still plays.
     #[test]
@@ -5334,6 +5524,20 @@ mod tests {
         e.schedule(0, Live::NoteIn { group: 2, sound: 3, pitch: 40, velocity: 30, thru: false });
         e.process(&mut out);
         assert_eq!(e.live_hit, (2, 2, 3, 40, 30));
+    }
+
+    /// What's recorded says whether it came in over MIDI.
+    #[test]
+    fn a_recorded_note_says_if_it_was_midi() {
+        let mut e = click_engine(1000);
+        e.set_recording(true);
+        let mut out = vec![0f32; 512];
+        e.schedule(0, Live::NoteOn { group: 0, sound: 1, pitch: 72, velocity: 90, length: PPQ });
+        e.schedule(0, Live::NoteIn { group: 0, sound: 0, pitch: 40, velocity: 30, thru: false });
+        e.process(&mut out);
+        let by_pitch = |p: i64| e.recorded.iter().find(|r| r.pitch == p).expect("recorded");
+        assert!(!by_pitch(72).midi, "a pad");
+        assert!(by_pitch(40).midi);
     }
 
     #[test]
@@ -8407,6 +8611,197 @@ mod tests {
         e.process(&mut out);
         assert!((out[0] - 0.5).abs() < 1e-4 && (out[1] + 0.25).abs() < 1e-4, "{out:?}");
         assert!(live.lock().unwrap().is_empty());
+    }
+
+    /// A project with no notes whose only sound takes In 1, in a looped bar.
+    fn input_project() -> Project {
+        let mut p = project();
+        p.groups[0].patterns[0].notes.clear();
+        p.groups[0].sounds[0].channel.audio_in = deckard_model::AudioSource::Ext(0);
+        p
+    }
+
+    fn input_project_engine(p: &Project) -> Engine {
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(p, None, 1000, Mode::Arrangement, &mut cache);
+        e.live_in = Some(Default::default());
+        e.looping = true;
+        e
+    }
+
+    /// What a steady 0.5 on In 1 comes out as after `frames`, gains settled.
+    fn steady(e: &mut Engine, frames: usize) -> (f32, f32) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        // In short blocks: gains move at each block's start.
+        let mut out = vec![0f32; frames * 2];
+        for block in out.chunks_mut(16) {
+            e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, block.len() / 2));
+            e.process(block);
+        }
+        (out[frames * 2 - 2], out[frames * 2 - 1])
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// `frames` of a steady 0.5 on In 1, as `steady`, with Out 1-2 as buffers: what the
+    /// master's output and Out 2 end on.
+    fn steady_outs(e: &mut Engine, frames: usize) -> (f32, f32) {
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        let mut last = (0.0, 0.0);
+        for _ in 0..frames / 8 {
+            e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 8));
+            let mut out = vec![0f32; 16];
+            let mut ext = vec![vec![0f32; 16]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            last = (out[14], ext[1][14]);
+        }
+        last
+    }
+
+    /// The cue bus's meter reads what's on it, at its level; a channel not on it, nothing.
+    #[test]
+    fn the_cue_meter_reads_what_is_on_the_bus() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        p.cue_level = deckard_model::level_from_db(-6.0);
+        let g = deckard_model::level_gain(p.cue_level) as f32;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady_outs(&mut e, 80);
+        assert_eq!(e.cue.peak, (0.0, 0.0), "nothing on it");
+        p.groups[0].sounds[0].cue = true;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, cue) = steady_outs(&mut e, 80);
+        assert!(near(master, 0.0) && near(cue, 0.5 * g), "on Out 2: {master} {cue}");
+        assert!(near(e.cue.peak.0, 0.5 * g) && near(e.cue.peak.1, 0.5 * g), "{:?}", e.cue.peak);
+    }
+
+    /// On the master's output, the meter shows the bus, not what's divided by the master's
+    /// gain to get past it.
+    #[test]
+    fn the_cue_meter_is_past_the_masters_gain() {
+        let mut p = input_project();
+        p.master_level = deckard_model::level_from_db(-12.0);
+        p.groups[0].sounds[0].cue = true;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady(&mut e, 80);
+        assert!(near(e.cue.peak.0, 0.5), "{:?}", e.cue.peak);
+    }
+
+    /// A group is on the bus through its sounds, or with effects, its own bus; a sound
+    /// through a group with effects on the bus isn't itself.
+    #[test]
+    fn what_is_on_the_cue_bus_follows_the_routes() {
+        use deckard_model::AudioDest as D;
+        let mut p = input_project();
+        p.groups[0].cue = true;
+        assert!(CueBus::of(&p).sounds[0][0], "through its group");
+        assert!(CueBus::of(&p).groups[0]);
+        p.groups[0].slots = vec![driven_saturator()];
+        assert!(!CueBus::of(&p).sounds[0][0], "its group's bus is");
+        assert!(CueBus::of(&p).groups[0]);
+        p.groups[0].slots.clear();
+        p.groups[0].cue = false;
+        p.groups[0].sounds[0].channel.dest = D::Master;
+        assert!(!CueBus::of(&p).sounds[0][0]);
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady(&mut e, 80);
+        assert_eq!(e.cue.peak, (0.0, 0.0));
+        // With effects and on the bus: metered after them.
+        p.groups[0].sounds[0].channel.dest = D::Parent;
+        p.groups[0].slots = vec![driven_saturator()];
+        p.groups[0].cue = true;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        steady(&mut e, 400);
+        assert!(e.cue.peak.0 > 0.1, "{:?}", e.cue.peak);
+    }
+
+    /// The prehear of a sample `at` frames long, in `blocks` of 8, into Out 1-2.
+    fn hear(e: &mut Engine, blocks: usize) -> (f32, f32) {
+        e.prehear(Some(Arc::new(Sample { rate: e.sr as u32, frames: vec![[0.5, 0.5]; 1000] })), 1.0);
+        let (mut master, mut cue) = (0f32, 0f32);
+        for _ in 0..blocks {
+            let mut out = vec![0f32; 16];
+            let mut ext = vec![vec![0f32; 16]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            master = master.max(out[14].abs());
+            cue = cue.max(ext[1][14].abs());
+        }
+        (master, cue)
+    }
+
+    /// The metronome and the prehear are on the cue bus: its output, its level, its meter.
+    #[test]
+    fn the_prehear_is_on_the_cue_bus() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        p.cue_level = deckard_model::level_from_db(-6.0);
+        let g = deckard_model::level_gain(p.cue_level) as f32;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, cue) = hear(&mut e, 20);
+        assert_eq!(master, 0.0);
+        assert!(near(cue, 0.5 * g), "{cue}");
+        assert!(near(e.cue.peak.0, 0.5 * g), "{:?}", e.cue.peak);
+    }
+
+    /// The metronome goes the same way.
+    #[test]
+    fn the_click_is_on_the_cue_bus() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        // (At a rate a click can be heard at.)
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.metronome = true;
+        let mut master = 0f32;
+        let mut cue = 0f32;
+        for _ in 0..40 {
+            let mut out = vec![0f32; 16];
+            let mut ext = vec![vec![0f32; 16]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            master = out.iter().fold(master, |m, v| m.max(v.abs()));
+            cue = ext[1].iter().fold(cue, |m, v| m.max(v.abs()));
+        }
+        assert_eq!(master, 0.0);
+        assert!(cue > 0.01, "{cue}");
+        assert!(e.cue.peak.0 > 0.01, "{:?}", e.cue.peak);
+    }
+
+    /// With the cue on the master's output (the default), they sound there, the master's
+    /// fader not in the way.
+    #[test]
+    fn the_prehear_on_the_masters_output_is_past_its_fader() {
+        let mut p = input_project();
+        p.master_level = deckard_model::level_from_db(-12.0);
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, _) = hear(&mut e, 20);
+        assert!(near(master, 0.5), "{master}");
+    }
+
+    /// A cue output the interface doesn't have: they go on being heard, on the master's.
+    #[test]
+    fn the_prehear_falls_back_to_the_masters_output() {
+        let mut p = input_project();
+        p.cue_output = deckard_model::AudioDest::Ext(7);
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, _) = hear(&mut e, 20);
+        assert!(master > 0.1, "{master}");
+        p.cue_output = deckard_model::AudioDest::None;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let (master, _) = hear(&mut e, 20);
+        assert!(near(master, 0.5), "no cue output at all: {master}");
     }
 
     /// A project whose second sound takes In 2 (with `slots` and to `dest`), and an

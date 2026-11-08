@@ -436,6 +436,13 @@ pub(crate) struct PortState {
     held: Vec<(u8, u8, Vec<deckard_engine::midi::Hit>)>,
 }
 
+/// What key (`ch`, `note`) played when it went down, now it's been let go: a release ends
+/// those notes wherever the focus has moved since.
+fn take_held(held: &mut Vec<(u8, u8, Vec<deckard_engine::midi::Hit>)>, ch: u8, note: u8) -> Option<Vec<deckard_engine::midi::Hit>> {
+    let at = held.iter().position(|(c, n, _)| (*c, *n) == (ch, note))?;
+    Some(held.remove(at).2)
+}
+
 /// What an incoming message plays: notes, controllers (`record` on the sound that
 /// records them: the focused one if it takes them, else those set to that channel), and
 /// per-note expression for held notes. Expression for a note not held goes nowhere.
@@ -477,6 +484,8 @@ pub(crate) fn route(t: &MidiTable, st: &mut PortState, port: &str, msg: InMsg) -
         return match msg {
             InMsg::NoteOn { ch, note, velocity } => {
                 let hits = t.route_note(port, 1, note as i64);
+                st.held.retain(|(c, n, _)| (*c, *n) != (ch, note));
+                st.held.push((ch, note, hits.clone()));
                 let mut out = on(&hits, velocity);
                 if let Some(i) = member(ch) {
                     for (d, kind) in Dim::ALL.into_iter().enumerate() {
@@ -495,7 +504,8 @@ pub(crate) fn route(t: &MidiTable, st: &mut PortState, port: &str, msg: InMsg) -
                     z.members[i] = None;
                     z.initial[i] = [None; 3];
                 }
-                off(&t.route_note(port, 1, note as i64), velocity)
+                let hits = take_held(&mut st.held, ch, note).unwrap_or_else(|| t.route_note(port, 1, note as i64));
+                off(&hits, velocity)
             }
             InMsg::PitchBend { ch, value } => match member(ch) {
                 Some(i) => {
@@ -527,8 +537,8 @@ pub(crate) fn route(t: &MidiTable, st: &mut PortState, port: &str, msg: InMsg) -
             on(&hits, velocity)
         }
         InMsg::NoteOff { ch, note, velocity } => {
-            st.held.retain(|(c, n, _)| (*c, *n) != (ch, note));
-            off(&t.route_note(port, ch, note as i64), velocity)
+            let hits = take_held(&mut st.held, ch, note).unwrap_or_else(|| t.route_note(port, ch, note as i64));
+            off(&hits, velocity)
         }
         InMsg::PolyPressure { ch, note, value } => {
             let held: Vec<_> = st.held.iter().filter(|(c, n, _)| (*c, *n) == (ch, note)).flat_map(|(_, _, h)| h.clone()).collect();
@@ -711,6 +721,60 @@ mod tests {
                 out.iter().any(|l| matches!(l, Live::ControlIn { sound: 0, kind: MidiKind::ChannelPressure(40), record: true, .. })),
                 "{out:?}"
             );
+        }
+
+        fn released(out: &[Live]) -> Vec<(usize, usize, i64)> {
+            out.iter()
+                .filter_map(|l| match *l {
+                    Live::NoteRelease { group, sound, pitch } => Some((group, sound, pitch)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// A key let go after the focus moved ends the note it started, not one on the
+        /// sound that has the focus now (which would leave the first sounding for good).
+        #[test]
+        fn a_release_ends_the_note_its_key_started() {
+            let (mut t, mut st) = (table(), PortState::default());
+            t.default_focus = true;
+            assert!(matches!(run(&t, &mut st, "Keys", &[&[0x90, 60, 100]])[..], [Live::NoteIn { group: 0, sound: 1, .. }]));
+            t.focus = (1, 3);
+            let out = run(&t, &mut st, "Keys", &[&[0x80, 60, 0]]);
+            assert_eq!(released(&out), [(0, 1, 60)]);
+            // That key is done: the next press and release follow the focus again.
+            run(&t, &mut st, "Keys", &[&[0x90, 60, 100]]);
+            assert_eq!(released(&run(&t, &mut st, "Keys", &[&[0x80, 60, 0]])), [(1, 3, 60)]);
+            // A note-on with velocity 0 is a release too.
+            run(&t, &mut st, "Keys", &[&[0x90, 62, 100]]);
+            t.focus = (0, 1);
+            assert_eq!(released(&run(&t, &mut st, "Keys", &[&[0x90, 62, 0]])), [(1, 3, 62)]);
+        }
+
+        /// A release velocity goes with the note too, and a key never seen going down
+        /// still finds what the table says.
+        #[test]
+        fn a_release_velocity_goes_to_the_same_note() {
+            let (mut t, mut st) = (table(), PortState::default());
+            t.default_focus = true;
+            run(&t, &mut st, "Keys", &[&[0x90, 60, 100]]);
+            t.focus = (1, 3);
+            let out = run(&t, &mut st, "Keys", &[&[0x80, 60, 64]]);
+            assert!(out.iter().any(|l| matches!(*l, Live::Expression { group: 0, sound: 1, .. })), "{out:?}");
+            assert_eq!(released(&run(&t, &mut st, "Keys", &[&[0x80, 40, 0]])), [(1, 3, 40)]);
+        }
+
+        /// The same on an MPE port, on a member channel and on the manager channel.
+        #[test]
+        fn a_release_on_an_mpe_port_ends_the_note_its_key_started() {
+            for status in [0x91u8, 0x90] {
+                let (mut t, mut st) = (table(), mpe());
+                t.default_focus = true;
+                run(&t, &mut st, "Keys", &[&[status, 60, 100]]);
+                t.focus = (1, 3);
+                let out = run(&t, &mut st, "Keys", &[&[status - 0x10, 60, 0]]);
+                assert_eq!(released(&out), [(0, 1, 60)], "status {status:#x}");
+            }
         }
 
         #[test]

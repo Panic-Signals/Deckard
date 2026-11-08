@@ -188,12 +188,15 @@ impl Library {
             },
             None => Results::default(),
         };
-        let favorites = self.own.favorites();
+        // Maschine's favourites and DECKARD's: NI's file is never written, so one taken off
+        // here is remembered here.
+        let (favorites, not_favorites) = (self.own.favorites(), self.own.not_favorites());
+        let maschines: std::collections::HashSet<&PathBuf> = theirs.items.iter().filter(|i| i.favorite).map(|i| &i.path).collect();
         let mine: std::collections::HashSet<&PathBuf> = own.items.iter().map(|i| &i.path).collect();
         let mut items: Vec<Item> = theirs.items.iter().filter(|i| !mine.contains(&i.path)).cloned().collect();
         items.extend(own.items.iter().cloned());
         for i in &mut items {
-            i.favorite = favorites.contains(&i.path);
+            i.favorite = !not_favorites.contains(&i.path) && (favorites.contains(&i.path) || maschines.contains(&i.path));
         }
         items.retain(|i| !q.favorites || i.favorite);
         let products: std::collections::BTreeSet<String> = theirs.products.into_iter().chain(own.products).collect();

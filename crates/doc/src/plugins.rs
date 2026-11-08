@@ -38,14 +38,15 @@ impl Document {
     /// Store the state of the plug-in in chain slot `slot` (as [`Document::set_plugin_chunk`]).
     pub fn set_slot_plugin_chunk(&mut self, group: usize, sound: usize, slot: usize, chunk: Vec<u8>) -> Result<(), String> {
         let host = self.slot_host_path(group, sound, slot)?;
-        self.store_chunk(host, chunk)
+        self.store_chunk(crate::Target::ChainModule(crate::Chain::Sound(group, sound), slot), host, chunk)
     }
 
     /// Store the state of the plug-in in slot `slot` of a group's or the master's chain.
     pub fn set_chain_plugin_chunk(&mut self, c: crate::Chain, slot: usize, chunk: Vec<u8>) -> Result<(), String> {
-        let host = self.owner(crate::Target::ChainModule(c, slot)).ok_or("no such slot")?;
+        let target = crate::Target::ChainModule(c, slot);
+        let host = self.owner(target).ok_or("no such slot")?;
         match self.tree.at(&host) {
-            Some(Value::Obj(m)) if m.type_name == "NI::MASCHINE::DATA::PluginHost" => self.store_chunk(host, chunk),
+            Some(Value::Obj(m)) if m.type_name == "NI::MASCHINE::DATA::PluginHost" => self.store_chunk(target, host, chunk),
             _ => Err("the slot holds no plug-in".into()),
         }
     }
@@ -54,10 +55,10 @@ impl Document {
     /// `deckard_plugins::state`), as one undo step.
     pub fn set_plugin_chunk(&mut self, group: usize, sound: usize, chunk: Vec<u8>) -> Result<(), String> {
         let host = self.plugin_host_path(group, sound)?;
-        self.store_chunk(host, chunk)
+        self.store_chunk(crate::Target::Sound(group, sound), host, chunk)
     }
 
-    fn store_chunk(&mut self, host: Path, chunk: Vec<u8>) -> Result<(), String> {
+    fn store_chunk(&mut self, target: crate::Target, host: Path, chunk: Vec<u8>) -> Result<(), String> {
         let Some(Value::Obj(h)) = self.tree.at(&host) else { return Err("plug-in vanished".into()) };
         let cp = h.find_path("chunk").ok_or("the plug-in has no chunk")?;
         let Some(Value::Obj(c)) = h.at(&cp) else { return Err("the plug-in's chunk is not an object".into()) };
@@ -70,6 +71,56 @@ impl Document {
             Op::Set { path: [base.as_slice(), &sp].concat(), value: Value::Int(chunk.len() as i64) },
             Op::Set { path: [base.as_slice(), &dp].concat(), value: Value::Bytes(chunk) },
         ];
-        self.apply("Plug-in Edit", ops)
+        let params = vec![Some((target, "plugin_chunk".to_string())); ops.len()];
+        self.apply_with("Plug-in Edit", ops, params)
+    }
+
+    pub(crate) fn patch_plugin_chunk(&mut self, target: crate::Target) -> bool {
+        let host = match target {
+            crate::Target::Sound(g, s) => self.plugin_host_path(g, s).ok(),
+            crate::Target::ChainModule(crate::Chain::Sound(g, s), i) => self.slot_host_path(g, s, i).ok(),
+            crate::Target::ChainModule(c, i) => self.owner(crate::Target::ChainModule(c, i)),
+            _ => None,
+        };
+        let Some(host) = host else { return false };
+        let Some(Value::Obj(h)) = self.tree.at(&host) else { return false };
+        let Some(Value::Obj(c)) = h.find("chunk") else { return false };
+        let Some(Value::Bytes(bytes)) = c.find("size_data").cloned() else { return false };
+        match target {
+            crate::Target::Sound(g, s) => {
+                let Some(snd) = self.project.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) else { return false };
+                if let Some(pr) = &mut snd.plugin {
+                    pr.chunk = bytes.clone();
+                }
+                if let Some(pr) = snd.slots.iter_mut().find_map(|x| x.plugin.as_mut()) {
+                    pr.chunk = bytes;
+                }
+                true
+            }
+            crate::Target::ChainModule(crate::Chain::Sound(g, s), i) => {
+                let Some(snd) = self.project.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) else { return false };
+                let Some(pr) = snd.slots.get_mut(i).and_then(|x| x.plugin.as_mut()) else { return false };
+                pr.chunk = bytes.clone();
+                if i == 0
+                    && let Some(pr) = &mut snd.plugin
+                {
+                    pr.chunk = bytes;
+                }
+                true
+            }
+            crate::Target::ChainModule(crate::Chain::Group(g), i) => {
+                let Some(pr) = self.project.groups.get_mut(g).and_then(|x| x.slots.get_mut(i)).and_then(|x| x.plugin.as_mut()) else {
+                    return false;
+                };
+                pr.chunk = bytes;
+                true
+            }
+            crate::Target::ChainModule(crate::Chain::Master, i) => {
+                let Some(pr) = self.project.master_slots.get_mut(i).and_then(|x| x.plugin.as_mut()) else { return false };
+                pr.chunk = bytes;
+                true
+            }
+            _ => false,
+        }
     }
 }

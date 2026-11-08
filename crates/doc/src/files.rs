@@ -208,45 +208,150 @@ impl Document {
     /// replace the group's; the group keeps its place, routing and handles, and its slot
     /// in each scene is emptied (the old patterns are gone). One undo step.
     pub fn load_group_file(&mut self, g: usize, bytes: &[u8]) -> Result<(), String> {
+        self.load_group_file_with(g, bytes, true, true)
+    }
+
+    /// [`Document::load_group_file`], with or without the file's sound routing
+    /// (`routing`, Browser `+ ROUTING`) and patterns (`patterns`, `+ PATTERNS`).
+    pub fn load_group_file_with(&mut self, g: usize, bytes: &[u8], routing: bool, patterns: bool) -> Result<(), String> {
         let root = self.file_root(bytes, *b"GRP ")?;
         let path = self.owner(Target::Group(g)).ok_or("no such group")?;
         let Some(Value::Obj(old)) = self.tree.at(&path).cloned() else { return Err("no such group".into()) };
         let mut new = self.fresh_obj(root)?;
         take_id(&mut new, &old);
+        let old_sounds: Vec<Option<(mxprj::decode::Path, Obj)>> = (0..16)
+            .map(|s| {
+                let sp = self.owner(Target::Sound(g, s))?;
+                match self.tree.at(&sp) {
+                    Some(Value::Obj(o)) => Some((sp, o.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        let mut repoints = Vec::new();
+        let mut inlined_sounds = Vec::new();
+        if let Some(Value::Obj(sounds)) = new.get_mut("sounds")
+            && let Some(Value::Obj(objs)) = sounds.get_mut("objects")
+            && let Some(Value::List(items)) = objs.get_mut("items")
+        {
+            for (s, item) in items.iter_mut().enumerate() {
+                let (Some((sp, old_s)), Some(new_s)) = (old_sounds.get(s).and_then(Option::as_ref), crate::arrange::px_mut(item)) else {
+                    continue;
+                };
+                if let (Some(from), Some(to)) = (new_s.oid, old_s.oid) {
+                    repoints.push((from, to));
+                    if !sp.starts_with(&path) {
+                        inlined_sounds.push((sp.clone(), to));
+                    }
+                }
+                new_s.oid = old_s.oid;
+                new_s.export = old_s.export.clone();
+                if !patterns {
+                    copy_field(old_s, new_s, "sequences");
+                    if let Some(Value::Obj(m)) = new_s.find_mut("modulators") {
+                        empty_object_vector(m);
+                    }
+                }
+                if !routing {
+                    for f in SOUND_ROUTING_FIELDS {
+                        copy_field_repoint(old_s, new_s, f, &mut repoints);
+                    }
+                }
+            }
+        }
+        if !patterns {
+            copy_field(&old, &mut new, "patterns_by_id");
+            if let Some(Value::Obj(m)) = new.find_mut("modulators") {
+                empty_object_vector(m);
+            }
+        }
         // Project-level fields a group file leaves out, after its patterns_by_id.
         let at = new.fields.iter().position(|(n, _)| n == "patterns_by_id").map_or(new.fields.len(), |i| i + 1);
         for (k, name) in ["patterns", "sequence"].iter().enumerate() {
-            let Some(v) = old.get(name) else { continue };
+            let Some(mut v) = old.get(name).cloned() else { continue };
+            if patterns {
+                empty_group_clips(&mut v);
+            }
             match new.get_mut(name) {
-                Some(mine) => *mine = v.clone(),
-                None => new.fields.insert(at + k, (name.to_string(), v.clone())),
+                Some(mine) => *mine = v,
+                None => new.fields.insert(at + k, (name.to_string(), v)),
             }
         }
         // The project's routing, as the group had it.
-        copy_field(&old, &mut new, "event_input");
+        copy_field_repoint(&old, &mut new, "event_input", &mut repoints);
+        if !routing {
+            for f in GROUP_ROUTING_FIELDS {
+                copy_field_repoint(&old, &mut new, f, &mut repoints);
+            }
+        }
         if let (Some(Value::Obj(ot)), Some(Value::Obj(nt))) =
             (old.get("<NI::MASCHINE::DATA::Track>"), new.get_mut("<NI::MASCHINE::DATA::Track>"))
         {
             for n in ["audio_output", "aux1_output", "aux2_output"] {
-                copy_field(ot, nt, n);
+                copy_field_repoint(ot, nt, n, &mut repoints);
+            }
+            if !routing {
+                for n in TRACK_ROUTING_FIELDS {
+                    copy_field_repoint(ot, nt, n, &mut repoints);
+                }
             }
         }
+        if !routing
+            && let (Some(Value::Obj(oc)), Some(Value::Obj(nc))) = (old.get("sound_configs"), new.get_mut("sound_configs"))
+            && let (Some(Value::List(oi)), Some(Value::List(ni))) = (oc.get("items"), nc.get_mut("items"))
+        {
+            for (from_cfg, to_cfg) in oi.iter().zip(ni.iter_mut()) {
+                if let (Value::Obj(from_cfg), Value::Obj(to_cfg)) = (from_cfg, to_cfg) {
+                    for f in CONFIG_ROUTING_FIELDS {
+                        copy_field(from_cfg, to_cfg, f);
+                    }
+                }
+            }
+        }
+        for (from, to) in repoints {
+            new.fields.iter_mut().for_each(|(_, v)| repoint(v, from, to));
+        }
+        if !patterns {
+            let mut by_id = HashMap::new();
+            self.root().walk_paths(&mut |o, _| {
+                if let Some(id) = o.oid {
+                    by_id.entry(id).or_insert(o);
+                }
+            });
+            let mut v = Value::Obj(new);
+            strip_pattern_events(&mut v, &by_id);
+            let Value::Obj(o) = v else { unreachable!() };
+            new = o;
+        }
         let oid = old.oid.ok_or("group without id")?;
-        let mut ops = vec![Op::Set { path, value: Value::Obj(new) }];
-        // Its slot in every scene, empty.
-        let song = self.addresses.song.clone().ok_or("the project has no song")?;
-        let scenes = self.field_path(&song, &["scenes", "objects", "items"])?;
-        for k in 0..self.items(&scenes)?.len() {
-            let mut item = [scenes.as_slice(), &[k as u32]].concat();
-            let Some(Value::Obj(holder)) = self.tree.at(&item) else { continue };
-            item.extend(holder.find_path("px").ok_or("scene item without px")?);
-            let entries_path = self.field_path(&item, &["patterns", "objects", "items"])?;
-            let mut entries = self.items(&entries_path)?;
-            let Some(i) = entries.iter().position(|e| matches!(e, Value::Obj(p) if p.get("first") == Some(&Value::Ref(oid)))) else {
-                continue;
-            };
-            entries[i] = self.build(|b| b.scene_entry(oid))?;
-            ops.push(Op::Set { path: entries_path, value: Value::List(entries) });
+        let new_val = Value::Obj(new);
+        let kept = crate::automation::defined_ids(&new_val);
+        let mut old_ids = crate::automation::defined_ids(&Value::Obj(old));
+        for (_, old_s) in old_sounds.iter().flatten() {
+            old_ids.extend(crate::automation::defined_ids(&Value::Obj(old_s.clone())));
+        }
+        let gone: std::collections::HashSet<u64> = old_ids.into_iter().filter(|id| !kept.contains(id)).collect();
+        let mut ops = self.drop_automation_ops(&gone, &path)?;
+        for (sp, to) in inlined_sounds {
+            ops.push(Op::Set { path: sp, value: Value::Ref(to) });
+        }
+        ops.push(Op::Set { path, value: new_val });
+        if patterns {
+            // Its slot in every scene, empty.
+            let song = self.addresses.song.clone().ok_or("the project has no song")?;
+            let scenes = self.field_path(&song, &["scenes", "objects", "items"])?;
+            for k in 0..self.items(&scenes)?.len() {
+                let mut item = [scenes.as_slice(), &[k as u32]].concat();
+                let Some(Value::Obj(holder)) = self.tree.at(&item) else { continue };
+                item.extend(holder.find_path("px").ok_or("scene item without px")?);
+                let entries_path = self.field_path(&item, &["patterns", "objects", "items"])?;
+                let mut entries = self.items(&entries_path)?;
+                let Some(i) = entries.iter().position(|e| matches!(e, Value::Obj(p) if p.get("first") == Some(&Value::Ref(oid)))) else {
+                    continue;
+                };
+                entries[i] = self.build(|b| b.scene_entry(oid))?;
+                ops.push(Op::Set { path: entries_path, value: Value::List(entries) });
+            }
         }
         self.apply("Load Group", ops)?;
         self.check_reopens()
@@ -413,17 +518,53 @@ fn replace_first_ref(v: &mut Value, id: u64, def: &mut Option<Obj>, done: &mut b
     }
 }
 
+const GROUP_ROUTING_FIELDS: &[&str] = &["midi_channel", "start_note", "midi_thru", "midi_batch_export", "key_mode", "key_mode_plugin"];
+const TRACK_ROUTING_FIELDS: &[&str] = &["cue_enabled", "aux1_level", "aux1_order", "aux2_level", "aux2_order"];
+const SOUND_ROUTING_FIELDS: &[&str] = &[
+    "midi_channel",
+    "midi_thru",
+    "input_gain",
+    "aux1_level",
+    "aux1_order",
+    "aux2_level",
+    "aux2_order",
+    "event_output_channel",
+    "transpose",
+    "cue_enabled",
+];
+const CONFIG_ROUTING_FIELDS: &[&str] = &[
+    "midi_source",
+    "midi_channel",
+    "midi_thru",
+    "midi_source_plugin",
+    "unknown_flag_legacy",
+    "audio_input",
+    "input_gain",
+    "audio_output",
+    "aux1_output",
+    "aux1_level",
+    "aux1_order",
+    "aux2_output",
+    "aux2_level",
+    "aux2_order",
+    "event_output",
+    "midi_out_channel",
+    "transpose",
+    "cue_enabled",
+];
+
+fn repoint(v: &mut Value, from: u64, to: u64) {
+    match v {
+        Value::Ref(o) if *o == from => *o = to,
+        Value::List(items) => items.iter_mut().for_each(|i| repoint(i, from, to)),
+        Value::Obj(o) => o.fields.iter_mut().for_each(|(_, v)| repoint(v, from, to)),
+        _ => {}
+    }
+}
+
 /// `new` takes `old`'s place: its id (what refers to `old` refers to it) and export
 /// name; its references to itself follow.
 fn take_id(new: &mut Obj, old: &Obj) {
-    fn repoint(v: &mut Value, from: u64, to: u64) {
-        match v {
-            Value::Ref(o) if *o == from => *o = to,
-            Value::List(items) => items.iter_mut().for_each(|i| repoint(i, from, to)),
-            Value::Obj(o) => o.fields.iter_mut().for_each(|(_, v)| repoint(v, from, to)),
-            _ => {}
-        }
-    }
     if let (Some(from), Some(to)) = (new.oid, old.oid) {
         new.fields.iter_mut().for_each(|(_, v)| repoint(v, from, to));
     }
@@ -436,6 +577,92 @@ fn copy_field(from: &Obj, to: &mut Obj, field: &str) {
     if let (Some(v), Some(slot)) = (from.get(field), to.get_mut(field)) {
         *slot = v.clone();
     }
+}
+
+/// [`copy_field`], recording `(to_oid, from_oid)` when both are tracked parameter objects.
+fn copy_field_repoint(from: &Obj, to: &mut Obj, field: &str, repoints: &mut Vec<(u64, u64)>) {
+    let Some(v) = from.get(field) else { return };
+    let Some(slot) = to.get_mut(field) else { return };
+    if let (Value::Obj(fo), Value::Obj(to_o)) = (v, &*slot)
+        && let (Some(from_id), Some(to_id)) = (to_o.oid, fo.oid)
+    {
+        repoints.push((from_id, to_id));
+    }
+    *slot = v.clone();
+}
+
+/// An `ObjectVector`'s items, current and selection emptied.
+fn empty_object_vector(ov: &mut Obj) {
+    if let Some(Value::Obj(objs)) = ov.get_mut("objects")
+        && let Some(Value::List(items)) = objs.get_mut("items")
+    {
+        items.clear();
+    }
+    if let Some(cur) = ov.get_mut("current") {
+        *cur = Value::Null;
+    }
+    if let Some(Value::Obj(sel)) = ov.get_mut("selection")
+        && let Some(Value::List(items)) = sel.get_mut("items")
+    {
+        items.clear();
+    }
+}
+
+/// Empty a group's project-level clip list (`patterns`) or clip lane (`sequence`).
+fn empty_group_clips(v: &mut Value) {
+    let Value::Obj(o) = v else { return };
+    if o.type_name == "NI::MASCOMMON::DATA::Sequence" {
+        if let Some(Value::Obj(events)) = o.get("events").cloned() {
+            *o.get_mut("events").unwrap() = Value::Obj(crate::notes::events_with(&events, &[]));
+        }
+        if let Some(cur) = o.get_mut("current") {
+            *cur = Value::Null;
+        }
+    } else {
+        empty_object_vector(o);
+    }
+}
+
+/// Strip modulation and audio events from every `Sequence` in `v` (their target
+/// parameters and audio takes belonged to the replaced group).
+fn strip_pattern_events(v: &mut Value, by_id: &HashMap<u64, &Obj>) {
+    v.walk_mut(&mut |o| {
+        if o.type_name != "NI::MASCOMMON::DATA::Sequence" {
+            return;
+        }
+        let Some(Value::Obj(events)) = o.get("events") else { return };
+        let Ok(items) = crate::notes::items_of(events) else { return };
+        let mut removed = std::collections::HashSet::new();
+        let kept: Vec<_> = items
+            .iter()
+            .filter(|it| {
+                let ev = match &it.event {
+                    Value::Obj(te) => match te.get("event") {
+                        Some(Value::Obj(e)) => Some(e),
+                        Some(Value::Ref(id)) => by_id.get(id).copied(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(ev) = ev else { return true };
+                let drop = ev.type_name.contains("ModulationEvent") || ev.type_name.contains("AudioEvent");
+                if drop && let Some(id) = ev.oid {
+                    removed.insert(id);
+                }
+                !drop
+            })
+            .cloned()
+            .collect();
+        if kept.len() == items.len() {
+            return;
+        }
+        *o.get_mut("events").unwrap() = Value::Obj(crate::notes::events_with(events, &kept));
+        if crate::automation::pointee(o.get("current")).is_some_and(|c| removed.contains(&c))
+            && let Some(cur) = o.get_mut("current")
+        {
+            *cur = Value::Null;
+        }
+    });
 }
 
 /// The samples a file's zones and takes name, in order.
@@ -889,5 +1116,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn loading_a_group_without_patterns_keeps_notes_and_scenes() {
+        let mut src = Document::new_project().unwrap();
+        src.rename(crate::Target::Sound(0, 0), "Loaded Kick").unwrap();
+        src.add_slot(0, 0, 0, &crate::NewModule::Sampler).unwrap();
+        src.add_pattern(0, 0, "Kit Pattern").unwrap();
+        let bytes = src.file_bytes(FileItem::Group(0), &tagged("Kit")).unwrap();
+
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "My Groove").unwrap();
+        d.assign_pattern(0, 0, Some(0)).unwrap();
+        let note = deckard_model::Note { expr: None, sound: 0, position: 240, length: 480, pitch: 60, velocity: 100, probability: 100 };
+        d.add_note(0, 0, note).unwrap();
+
+        d.load_group_file_with(0, &bytes, true, false).unwrap();
+        let g = &d.project().groups[0];
+        assert_eq!(g.sounds[0].name, "Loaded Kick");
+        assert_eq!(g.sounds[0].slots.len(), 1);
+        assert_eq!(g.patterns.len(), 1);
+        assert_eq!(g.patterns[0].name, "My Groove");
+        assert_eq!(g.patterns[0].notes, vec![note]);
+        assert_eq!(d.project().scenes[0].patterns, vec![(0, 0)]);
+
+        let back = reload(&d);
+        let g = &back.project().groups[0];
+        assert_eq!(g.sounds[0].name, "Loaded Kick");
+        assert_eq!(g.patterns.len(), 1);
+        assert_eq!(g.patterns[0].name, "My Groove");
+        assert_eq!(g.patterns[0].notes, vec![note]);
+        assert_eq!(back.project().scenes[0].patterns, vec![(0, 0)]);
+
+        assert!(d.undo());
+        assert_eq!(d.project().groups[0].sounds[0].name, "");
+    }
+
+    #[test]
+    fn loading_a_group_without_routing_keeps_group_and_sound_routes() {
+        use crate::channel::SoundRoute;
+        use deckard_model::{AudioDest, MidiDest};
+
+        let mut src = Document::new_project().unwrap();
+        src.rename(crate::Target::Sound(0, 0), "Loaded Kick").unwrap();
+        src.set("Choke", crate::Target::Sound(0, 0), "choke_group", mxprj::decode::Value::Int(3)).unwrap();
+        src.set_sound_route(0, 0, SoundRoute::MidiSource("Focus".into())).unwrap();
+        src.set("MIDI", crate::Target::Group(0), "midi_channel", mxprj::decode::Value::Int(9)).unwrap();
+        src.add_pattern(0, 0, "Kit Pattern").unwrap();
+        let bytes = src.file_bytes(FileItem::Group(0), &tagged("Kit")).unwrap();
+
+        let mut d = Document::new_project().unwrap();
+        d.add_group().unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Output(AudioDest::Group(1))).unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Aux(0, AudioDest::Master)).unwrap();
+        d.set_sound_route(0, 0, SoundRoute::MidiSource("All".into())).unwrap();
+        d.set_sound_route(0, 0, SoundRoute::MidiOut(MidiDest::Port("Bus 1".into()))).unwrap();
+        d.set("MIDI", crate::Target::Sound(0, 0), "midi_channel", mxprj::decode::Value::Int(4)).unwrap();
+        d.set("MIDI", crate::Target::Sound(0, 0), "transpose", mxprj::decode::Value::Int(-5)).unwrap();
+        d.set_cue(crate::Target::Sound(0, 0), true).unwrap();
+        d.set("MIDI", crate::Target::Group(0), "midi_channel", mxprj::decode::Value::Int(7)).unwrap();
+        d.set("MIDI", crate::Target::Group(0), "start_note", mxprj::decode::Value::Int(48)).unwrap();
+        d.set_group_route(0, Some(0), AudioDest::Group(1)).unwrap();
+
+        d.load_group_file_with(0, &bytes, false, true).unwrap();
+        let check = |doc: &Document| {
+            let g = &doc.project().groups[0];
+            let s = &g.sounds[0];
+            assert_eq!(s.name, "Loaded Kick");
+            assert_eq!(g.patterns.len(), 1);
+            assert_eq!(g.patterns[0].name, "Kit Pattern");
+            assert_eq!(s.channel.choke_group, 3, "kit choke group comes from the file");
+            assert_eq!(s.channel.dest, AudioDest::Group(1));
+            assert_eq!(s.channel.aux_dest[0], AudioDest::Master);
+            assert_eq!(s.channel.midi_source, "All");
+            assert_eq!(s.channel.midi_out, MidiDest::Port("Bus 1".into()));
+            assert_eq!(s.channel.midi_channel, 4);
+            assert_eq!(s.channel.transpose, -5);
+            assert!(s.cue);
+            assert_eq!(g.channel.midi_channel, 7);
+            assert_eq!(g.channel.start_note, 48);
+            assert_eq!(g.channel.aux_dest[0], AudioDest::Group(1));
+        };
+        check(&d);
+        check(&reload(&d));
+
+        assert!(d.undo());
+        assert_eq!(d.project().groups[0].sounds[0].name, "");
     }
 }
