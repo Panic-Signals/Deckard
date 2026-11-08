@@ -2074,6 +2074,7 @@ impl App {
                 let url = "https://docs.native-instruments.com/online-guides/maschine-software-manual/en/index-en";
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
+            C::DeckardManual => ctx.open_url(egui::OpenUrl::new_tab("https://panicsignals.tv/software/deckard/manual/")),
             C::Splice => splice::open(ctx, None),
             C::About => self.about = Some(about::State::open()),
             C::Preferences => self.prefs = Some(self.prefs.unwrap_or(0)),
