@@ -1137,7 +1137,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.channel = true;
                 if app.prop_set != i {
                     app.prop_set = i;
-                    app.prop_page = 0;
+                    app.prop_page = app.kept_prop_page(i);
                 }
             }
             Act::PropPage(i) => {
@@ -1185,7 +1185,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::SelectSlot(i) => {
                 app.channel = i.is_none();
                 app.slot = i;
-                app.plugin_page = 0;
+                // It shows the page it was left on.
+                let chain = app.chain();
+                app.plugin_page = i.and_then(|i| app.chain_pages.get(&chain)?.slot_pages.get(&i).copied()).unwrap_or(0);
+                if app.slot_of == Some(chain) {
+                    app.page_key = Some((chain, i));
+                }
                 app.sampler_page = 0;
             }
             Act::AddSlot(what) => app.add_slot(what),
@@ -1226,6 +1231,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 if let Some(v) = app.plugin_views.get_mut(&(c, i)) {
                     v.shown = n;
                 }
+                app.chain_pages.entry(c).or_default().slot_pages.insert(i, n);
             }
             Act::Preferences => app.prefs = Some(app.prefs.unwrap_or(0)),
             Act::ToggleMixer => {

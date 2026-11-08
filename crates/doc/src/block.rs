@@ -13,8 +13,9 @@ pub(crate) const ITEM: [u8; 4] = *b"EXPR";
 pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
-/// CC routes) and 7 (before scene settings) still read.
-const VERSION: u32 = 9;
+/// CC routes), 7 (before scene settings), 8 (before extra outputs) and 9 (before the
+/// app's view) still read.
+const VERSION: u32 = 10;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -31,6 +32,9 @@ pub struct SavedScreen {
     /// The controller's page and pad mode (DECKARD's layer).
     pub page: String,
     pub mode: String,
+    /// The app's own view (Ideas or Song, the Mixer, the chain tab, where each chain was
+    /// left) as lines of text the app writes and reads (version 10).
+    pub view: String,
 }
 
 /// A note's expression as the block keys it.
@@ -271,7 +275,8 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
             }
         }
     }
-    for text in [&b.lfos, &b.cc_routes, &b.scene_settings, &b.extra_outs] {
+    let view = b.screen.as_ref().map_or("", |s| s.view.as_str());
+    for text in [b.lfos.as_str(), &b.cc_routes, &b.scene_settings, &b.extra_outs, view] {
         w.u32(text.len());
         for &c in text.as_bytes() {
             w.u8(c);
@@ -354,7 +359,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             Ok(String::from_utf8_lossy(&t).into_owned())
         };
         let (page, mode) = (text()?, text()?);
-        b.screen = Some(SavedScreen { group, sound, scene, pattern, slot, channel, page, mode });
+        b.screen = Some(SavedScreen { group, sound, scene, pattern, slot, channel, page, mode, view: String::new() });
     }
     if version >= 6 {
         let mut text = Vec::new();
@@ -383,6 +388,15 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             text.push(r.u8()?);
         }
         b.extra_outs = String::from_utf8_lossy(&text).into_owned();
+    }
+    if version >= 10 {
+        let mut text = Vec::new();
+        for _ in 0..r.count(1)? {
+            text.push(r.u8()?);
+        }
+        if let Some(s) = &mut b.screen {
+            s.view = String::from_utf8_lossy(&text).into_owned();
+        }
     }
     Ok(b)
 }
@@ -725,6 +739,7 @@ mod tests {
             channel: true,
             page: "mixer".into(),
             mode: "keyboard".into(),
+            view: "song 1\ntab group".into(),
         };
         d.set_screen(Some(screen.clone()));
         assert_eq!(reopen(&d).screen(), Some(&screen));
@@ -737,7 +752,7 @@ mod tests {
         let mut bytes = encode(&b);
         // Version 4: no screen or LFOs at the end.
         bytes[..4].copy_from_slice(&4u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 9);
+        bytes.truncate(bytes.len() - 13);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
@@ -748,7 +763,7 @@ mod tests {
         let mut bytes = encode(&full);
         // Version 5: no LFO text (a length and 3 bytes) at the end.
         bytes[..4].copy_from_slice(&5u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 11);
+        bytes.truncate(bytes.len() - 15);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
@@ -769,7 +784,7 @@ mod tests {
         let mut bytes = encode(&full);
         // Version 6: no CC route text (a length and 2 bytes) at the end.
         bytes[..4].copy_from_slice(&6u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 6);
+        bytes.truncate(bytes.len() - 10);
         assert_eq!(decode(&bytes).unwrap(), b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
     }
@@ -870,7 +885,7 @@ mod tests {
         let now = encode(&b);
         let mut v8 = now.clone();
         v8[..4].copy_from_slice(&8u32.to_le_bytes());
-        v8.truncate(v8.len() - 4);
+        v8.truncate(v8.len() - 8);
         assert_eq!(now[now.len() - 4..], [0, 0, 0, 0]);
         assert_eq!(decode(&v8).unwrap(), b);
     }
@@ -882,7 +897,7 @@ mod tests {
         let mut bytes = encode(&full);
         // Version 8: no extra-output text (a length and 2 bytes) at the end.
         bytes[..4].copy_from_slice(&8u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 6);
+        bytes.truncate(bytes.len() - 10);
         assert_eq!(decode(&bytes).unwrap(), b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
     }
@@ -923,7 +938,7 @@ mod tests {
         let mut bytes = encode(&b);
         // Version 3: no PROB LOCK count or screen at the end.
         bytes[..4].copy_from_slice(&3u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 13);
+        bytes.truncate(bytes.len() - 17);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
@@ -933,7 +948,7 @@ mod tests {
         let mut bytes = encode(&b);
         // Version 2: no routes or PROB LOCK counts, nor a screen, at the end.
         bytes[..4].copy_from_slice(&2u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 17);
+        bytes.truncate(bytes.len() - 21);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
