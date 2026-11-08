@@ -33,7 +33,8 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   - **SHIFT + pad 10** (Clear Auto) removes the focused sound's modulation in the
     focused pattern.
 - **LFOs as a source.** Up to 16 LFOs, one a pad (LFO 1 … LFO 16), each a route
-  source after Pressure, Slide and Pitch: Shape (Sine, Square, Triangle, Saw, Random),
+  source after Pressure, Slide and Pitch: Shape (Sine, Square, Triangle, Saw, Random,
+  Wander),
   Sync and Rate, Phase, Level, Quantize, Trigger (a sound whose notes restart it) and
   Fade in. A route maps the LFO's 0..1 onto its low..high as it does Pressure. Spec:
   `docs/superpowers/specs/2026-10-28-lfos-design.md`.
@@ -61,7 +62,7 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   each keyed by its slot and parameter so a knob never reads another route's travel.
 - **LFOs on the MK3: SHIFT + SELECT.** The pads pick LFOs (an empty pad makes one,
   ERASE + pad removes one, MUTE + pad mutes or unmutes one: lit red). The left screen shows the focused LFO's name, the right its
-  wave. Display buttons 1–5 pick the shape, 6 SYNC, 8 TRIG (the focused sound, or Off).
+  wave. Display buttons 1–5 pick the shape (button 5 cycles Random and Wander), 6 SYNC, 8 TRIG (the focused sound, or Off).
   Knobs 1–7: Shape, Rate, Phase, Level, Quantize, Trigger, Fade in. SHIFT + SELECT
   again goes back.
 - **The mod matrix on the MK3: SHIFT + SOLO.** Every route in the project, eight a page

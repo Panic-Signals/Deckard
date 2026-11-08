@@ -14,11 +14,14 @@ pub enum Shape {
     Saw,
     /// One held value per cycle, the same on every playback.
     Random,
+    /// Four non-harmonic sines summed, so it never repeats.
+    Wander,
 }
 
 impl Shape {
-    /// In the order of the MK3's display buttons 1–5.
-    pub const ALL: [Shape; 5] = [Shape::Sine, Shape::Square, Shape::Triangle, Shape::Saw, Shape::Random];
+    /// In the order of the shape picker and knob (display buttons 1–4 pick the first four,
+    /// and button 5 cycles [`Shape::Random`] and [`Shape::Wander`]).
+    pub const ALL: [Shape; 6] = [Shape::Sine, Shape::Square, Shape::Triangle, Shape::Saw, Shape::Random, Shape::Wander];
 
     /// Its name as DECKARD shows it.
     pub fn name(self) -> &'static str {
@@ -28,6 +31,7 @@ impl Shape {
             Shape::Triangle => "Triangle",
             Shape::Saw => "Saw",
             Shape::Random => "Random",
+            Shape::Wander => "Wander",
         }
     }
 
@@ -38,6 +42,7 @@ impl Shape {
             Shape::Triangle => "triangle",
             Shape::Saw => "saw",
             Shape::Random => "random",
+            Shape::Wander => "wander",
         }
     }
 
@@ -251,6 +256,7 @@ impl Lfo {
             Shape::Triangle => 1.0 - (2.0 * f - 1.0).abs(),
             Shape::Saw => f,
             Shape::Random => random(self.pad, c.floor() as i64),
+            Shape::Wander => wander(c),
         };
         w as f32
     }
@@ -348,6 +354,14 @@ impl Lfo {
 /// A different pad from [`random`] so it doesn't copy a Random wave.
 fn noise(pad: u8, cycles: f64) -> f64 {
     random(pad.wrapping_add(19), (cycles * 48.0).floor() as i64)
+}
+
+/// Four non-harmonic sines summed, scaled to 0..1: the frequency ratios never line up, so
+/// the wave drifts without repeating.
+fn wander(cycles: f64) -> f64 {
+    let t = std::f64::consts::TAU * cycles;
+    let s = t.sin() + 0.6 * (t * 1.61803 + 0.5).sin() + 0.4 * (t * 2.31415 + 1.2).sin() + 0.3 * (t * 0.70711 + 2.3).sin();
+    0.5 + 0.5 * (s / 2.3)
 }
 
 /// A repeatable value (0..1) for a pad's Random LFO in `cycle`.
@@ -780,5 +794,91 @@ mod tests {
         let root = Obj { fields: vec![(FIELD.into(), Value::Str(to_text(&[Lfo::new(4)])))], ..Default::default() };
         let (p, _) = crate::Project::read(&root);
         assert_eq!(p.lfos[0].pad, 4);
+    }
+
+    #[test]
+    fn wander_matches_four_sine_formula_and_stays_in_range() {
+        let l = Lfo { shape: Shape::Wander, ..Lfo::new(1) };
+        for c in [-2.5, 0.0, 0.25, 0.73, 1.0, 7.3, 42.125] {
+            let t = std::f64::consts::TAU * c;
+            let raw = (t.sin() + 0.6 * (t * 1.61803 + 0.5).sin() + 0.4 * (t * 2.31415 + 1.2).sin() + 0.3 * (t * 0.70711 + 2.3).sin()) / 2.3;
+            let expected = (0.5 + 0.5 * raw) as f32;
+            assert!(close(l.wave_at(c), expected), "at {c}: {} vs {expected}", l.wave_at(c));
+            let cc = (64 + (63.0 * raw).round() as i32).clamp(0, 127);
+            let from_wave = (64 + (63.0 * (f64::from(l.wave_at(c)) * 2.0 - 1.0)).round() as i32).clamp(0, 127);
+            assert_eq!(from_wave, cc);
+        }
+        for rate in 0..RATES.len() {
+            let synced = Lfo { shape: Shape::Wander, rate, ..Lfo::new(1) };
+            for step in 0..500 {
+                let c = synced.cycles(f64::from(step) * 197.0, 0.0);
+                let w = synced.wave_at(c);
+                let out = synced.output(c, None);
+                assert!((0.0..=1.0).contains(&w) && (0.0..=1.0).contains(&out), "rate {rate} step {step}: {w} {out}");
+            }
+        }
+        for hz in [0.01, 0.15, 0.5, 2.5, 20.0] {
+            let free = Lfo { shape: Shape::Wander, sync: false, hz, ..Lfo::new(1) };
+            for step in 0..500 {
+                let c = free.cycles(0.0, f64::from(step) * 0.037);
+                let w = free.wave_at(c);
+                let out = free.output(c, None);
+                assert!((0.0..=1.0).contains(&w) && (0.0..=1.0).contains(&out), "hz {hz} step {step}: {w} {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn wander_does_not_repeat_over_a_long_window() {
+        let l = Lfo { shape: Shape::Wander, ..Lfo::new(1) };
+        let window: Vec<f32> = (0..128).map(|i| l.wave_at(f64::from(i) * 0.05)).collect();
+        for shift in 1..=500 {
+            let offset = f64::from(shift) * 0.5;
+            let shifted: Vec<f32> = (0..128).map(|i| l.wave_at(offset + f64::from(i) * 0.05)).collect();
+            let max_diff = window.iter().zip(&shifted).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            assert!(max_diff > 1e-2, "shift {offset} repeated the window (max_diff {max_diff})");
+        }
+        // Unlike Sine, scrolling the picture by one full cycle draws a new stretch of the curve.
+        let sine = Lfo::new(1);
+        assert_eq!(sine.picture_at(64, 2.0), sine.picture_at(64, 3.0));
+        assert_ne!(l.picture_at(64, 2.0), l.picture_at(64, 3.0));
+    }
+
+    #[test]
+    fn wander_rate_level_offset_phase_quantize_jitter_and_trigger() {
+        let base = Lfo { shape: Shape::Wander, ..Lfo::new(1) };
+        let eighth = Lfo { rate: RATES.iter().position(|r| r.0 == "1/8").unwrap(), ..base.clone() };
+        assert!(close(eighth.cycles(960.0, 0.0) as f32, 2.0 * base.cycles(960.0, 0.0) as f32));
+        let shifted = Lfo { phase: 90.0, ..base.clone() };
+        assert!(close(shifted.wave_at(0.0), base.wave_at(0.25)));
+        let stepped = Lfo { quantize: 4, ..base.clone() };
+        assert_eq!(stepped.wave_at(0.26), stepped.wave_at(0.49));
+        assert_ne!(stepped.wave_at(0.24), stepped.wave_at(0.26));
+        let w = base.wave_at(0.37);
+        assert!(close(Lfo { level: 0.4, ..base.clone() }.output(0.37, None), w * 0.4));
+        assert!(close(Lfo { level: 0.5, offset: 0.2, ..base.clone() }.output(0.37, None), (w * 0.5 + 0.2).clamp(0.0, 1.0)));
+        assert!(close(Lfo { offset: 1.0, ..base.clone() }.output(0.37, None), 1.0));
+        assert!(close(Lfo { offset: -1.0, ..base.clone() }.output(0.37, None), 0.0));
+        let noisy = Lfo { jitter: 1.0, ..base.clone() };
+        assert_ne!(noisy.output(0.0, None), base.output(0.0, None));
+        let trig = Lfo { trigger: Some((0, 0)), fade: 2.0, ..base };
+        assert_eq!(trig.output(0.37, None), 0.0);
+        assert!(close(trig.output(0.37, Some(1.0)), w * 0.5));
+        assert!(close(trig.output(0.37, Some(2.0)), w));
+    }
+
+    #[test]
+    fn wander_round_trips_and_old_projects_still_load() {
+        let w = Lfo { shape: Shape::Wander, sync: false, hz: 0.5, phase: 45.0, level: 0.75, offset: 0.1, jitter: 0.05, ..Lfo::new(1) };
+        let text = to_text(&[w.clone(), Lfo::new(2)]);
+        assert!(text.starts_with("1 wander 0 "), "{text}");
+        assert_eq!(from_text(&text), vec![w.clone(), Lfo::new(2)]);
+        let old = from_text("1 sine 1 12 1 0 1 0 1 -\n2 random 0 12 2.5 90 0.5 8 2 1:2\n");
+        assert_eq!(old.len(), 2);
+        assert_eq!((old[0].shape, old[1].shape), (Shape::Sine, Shape::Random));
+        use mxprj::decode::{Obj, Value};
+        let root = Obj { fields: vec![(FIELD.into(), Value::Str(text))], ..Default::default() };
+        let (p, _) = crate::Project::read(&root);
+        assert_eq!(p.lfos[0], w);
     }
 }

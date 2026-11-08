@@ -7422,6 +7422,39 @@ mod tests {
         assert!(decay_now(&e).abs() < 1e-6, "{}", decay_now(&e));
     }
 
+    /// A Wander LFO moves a routed parameter along its four-sine sum, doesn't repeat on
+    /// the next beat, and restarts from cycle 0 when triggered by a note.
+    #[test]
+    fn a_wander_lfo_moves_a_routed_parameter_and_retriggers() {
+        use deckard_model::lfo::{Lfo, Shape};
+        let l = Lfo { shape: Shape::Wander, ..Lfo::new(1) };
+        let (_tmp, p) = lfo_project(1, vec![l.clone()]);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        blocks(&mut e, 1);
+        let at_start = decay_now(&e);
+        assert!((at_start - f64::from(l.wave_at(0.0))).abs() < 1e-5, "{at_start}");
+        let one_beat = (e.samples_per_tick() * 960.0 / 256.0).round() as usize;
+        blocks(&mut e, one_beat - 1);
+        let c1 = e.lfo_cycles(&e.lfos[0]);
+        blocks(&mut e, 1);
+        assert!((decay_now(&e) - f64::from(l.wave_at(c1))).abs() < 1e-5);
+        assert!((decay_now(&e) - at_start).abs() > 1e-2, "a cycle later is a new point on the curve");
+
+        let trig = Lfo { shape: Shape::Wander, trigger: Some((0, 1)), fade: 2.0, ..Lfo::new(1) };
+        let (_tmp, p) = lfo_project(1, vec![trig.clone()]);
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(e.lfo_value(1), Some(0.0), "0 before the trigger's first note");
+        e.note_on(0, 1, 60, 100, 240);
+        assert_eq!(e.lfo_cycles(&e.lfos[0]), 0.0, "restarted at the note-on");
+        blocks(&mut e, one_beat);
+        let c = e.lfo_cycles(&e.lfos[0]);
+        let v = e.lfo_value(1).unwrap();
+        assert!((v - trig.output(c, Some(c))).abs() < 1e-4, "{v} vs {}", trig.output(c, Some(c)));
+        e.note_on(0, 1, 60, 100, 240);
+        assert_eq!(e.lfo_cycles(&e.lfos[0]), 0.0, "retriggered back to cycle 0");
+    }
+
     /// Each route's travel is published for its knob (by group, sound and its place in
     /// the sound's routes, read only by the same route): it follows the LFO; a route
     /// gone, or the engine let go, publishes none.

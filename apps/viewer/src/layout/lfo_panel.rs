@@ -543,8 +543,10 @@ mod tests {
             assert!(h.state().text.to_lowercase().contains(&name.to_lowercase()), "{name} in {}", h.state().text);
         }
         h.state_mut().lfo.trigger = None;
+        h.state_mut().lfo.shape = Shape::Wander;
         h.run_steps(2);
         assert!(!h.state().text.contains("Fade in"), "no fade without a trigger: {}", h.state().text);
+        assert!(h.state().text.contains("Wander"), "Wander in {}", h.state().text);
         // Phase: the fifth cell (Mode, 130 + 110 + 130 wide, then half of 90), 28 down.
         let at = h.state().origin + Vec2::new(MODE_W + 130.0 + 110.0 + 130.0 + 45.0, 28.0);
         h.hover_at(at);
