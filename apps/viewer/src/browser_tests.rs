@@ -42,15 +42,18 @@ fn nks_presets_load_as_their_plugin() {
         d.project().groups[0].sounds[0].slots.iter().filter_map(|x| x.plugin.as_ref().map(|p| (p.name.clone(), p.id.clone()))).collect()
     };
 
+    let sound_name = |app: &App, s: usize| -> String { app.doc.clone().unwrap().borrow().project().groups[0].sounds[s].name.clone() };
     let lead = item("Lead.nksf", Kind::Instrument, &nks::fixture(uid(synth), 0, "Synth", b"first"));
     app.load_item(&lead, Some((0, 0))).unwrap();
     assert_eq!(plugins(&app), [("Synth".to_string(), format!("Vendor:VST3:INSTR:{synth}"))]);
+    assert_eq!(sound_name(&app, 0), "Lead");
     assert_eq!((app.slot_of, app.slot, app.plugin_page), (Some(deckard_doc::Chain::Sound(0, 0)), Some(0), 0));
     assert!(app.plugin_view.is_none());
-    // An effect goes last, and an instrument takes the instrument's place.
+    // An effect goes last (leaving the sound's name), and an instrument takes the instrument's place and renames the sound.
     let hall = item("Hall.nksfx", Kind::Effect, &nks::fixture(uid(effect), 0, "Verb", b"hall"));
     app.load_item(&hall, Some((0, 0))).unwrap();
     assert_eq!(app.slot, Some(1));
+    assert_eq!(sound_name(&app, 0), "Lead");
     let nica = vec![
         vec![
             nks::Knob { id: Some(0), name: "Spread".into(), section: "Performance".into() },
@@ -64,6 +67,7 @@ fn nks_presets_load_as_their_plugin() {
     let bass = item("Bass.nksf", Kind::Instrument, &nks::fixture_with_pages(uid(synth), 0, "Synth", b"second", &nica));
     app.load_item(&bass, Some((0, 0))).unwrap();
     assert_eq!(plugins(&app).iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["Synth", "Verb"]);
+    assert_eq!(sound_name(&app, 0), "Bass");
     {
         let doc = app.doc.clone().unwrap();
         let d = doc.borrow();
@@ -90,8 +94,17 @@ fn nks_presets_load_as_their_plugin() {
 
     // Native product presets (.nmsv, .nfm8, .nrkt, .rkplr, .ens) load into their VST3.
     app.catalog.entries.push(entry("Massive", true, "202122232425262728292A2B2C2D2E2F"));
-    app.load_item(&massive, Some((0, 0))).unwrap();
+    let zapp = item("Zappelmann.nmsv", Kind::Instrument, b"\x01\0\0\0");
+    app.load_item(&zapp, Some((0, 0))).unwrap();
     assert_eq!(plugins(&app)[0].0, "Massive");
+    assert_eq!(sound_name(&app, 0), "Zappelmann");
+
+    // Adding or replacing an instrument directly also names the sound after it.
+    app.sound = 1;
+    app.add_slot(layout::AddWhat::Instrument("BassSynth"));
+    assert_eq!(sound_name(&app, 1), "Bass Synth");
+    app.replace_slot(0, layout::AddWhat::Plugin(entry("Synth", true, synth)));
+    assert_eq!(sound_name(&app, 1), "Synth");
 }
 
 #[test]
