@@ -1,0 +1,30 @@
+# Every pull request needs a label that says where it goes in the release notes
+# (docs/release-notes-template.md, .github/release.yml): enhancement (New and Enhanced
+# Features), bug (Bug Fixes), documentation, or internal (build, CI and tests). This
+# check fails without one; adding a label runs it again.
+name: Labels
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize, labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  release-label:
+    name: Release label
+    runs-on: ubuntu-latest
+    steps:
+      - name: The pull request has a release label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          echo "Labels: $LABELS"
+          for label in enhancement bug documentation internal; do
+            if jq -e --arg l "$label" 'index($l) != null' <<< "$LABELS" > /dev/null; then
+              echo "Labelled $label."
+              exit 0
+            fi
+          done
+          echo "::error title=No release label::Label this pull request enhancement (a new or better feature), bug (a fix), documentation, or internal (build, CI, tests) so it lands in the right section of the release notes."
+          exit 1
