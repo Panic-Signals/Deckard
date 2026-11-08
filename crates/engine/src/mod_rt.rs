@@ -276,6 +276,7 @@ impl Engine {
                 }
                 RouteTarget::Sound { field, scale, .. } => {
                     if let Some(Some(snd)) = sounds.get_mut(r.group).and_then(|x| x.get_mut(r.sound)) {
+                        snd.begin_modulation();
                         snd.modulate(field, scale.at(t));
                     }
                 }
@@ -380,5 +381,12 @@ impl Engine {
             }
         }
         self.mod_routes = routes;
+        for (plugin, id, _) in self.modded_plugins.drain(..) {
+            if let Ok(mut p) = plugin.try_lock() {
+                p.unmodulate(id);
+            } else if self.unrouted.len() < self.unrouted.capacity() {
+                self.unrouted.push((plugin, id));
+            }
+        }
     }
 }

@@ -149,6 +149,21 @@ fn io_button(ui: &Ui, painter: &Painter, b: Rect, id: egui::Id, f: &IoField, act
 /// The meters' width and their spacing (the fader's arrow is beside them).
 const METER_W: f32 = 13.0;
 const METER_STEP: f32 = 14.0;
+/// Where modulation has a fader now (the colour of a knob's mark).
+const MODULATED: Color32 = Color32::from_rgb(0x9a, 0xd0, 0xff);
+
+/// ⌃-click (right-click) on a fader: its menu, to remove its modulation.
+fn remove_modulation(resp: &egui::Response, edit: super::Edit, acts: &mut Vec<Act>) {
+    if modulation::mod_target(edit).is_none() {
+        return;
+    }
+    resp.context_menu(|ui| {
+        if ui.button("Remove Modulation").on_hover_text("Remove this fader's modulation from every pattern").clicked() {
+            acts.push(Act::ClearModulation(edit));
+            ui.close();
+        }
+    });
+}
 
 /// dB to the y offset in the 99-high scale/meter area: +10, 0, −10, −20, −30 dB and −∞
 /// at 3, 25, 47, 63, 79 and 95 (`MIX_MTR_LevelScale`).
@@ -209,6 +224,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|_| None,
+        midi_input: &|g| app.midi_input(g),
     };
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, S00);
@@ -624,19 +640,32 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         st.color,
     );
     painter.vline(cx, pan_r.y_range(), Stroke::new(1.0, S00));
+    // Modulated: where it has the pan now, a mark.
+    if let Some(m) = app.mod_amount(super::Edit::Pan(target)) {
+        painter.vline(cx + (m * 2.0 - 1.0) * pan_r.width() / 2.0, pan_r.y_range(), Stroke::new(1.5, MODULATED));
+    }
     let pan_resp = ui
         .interact(vis(pan_r.expand2(Vec2::new(0.0, 4.0))), id.with("pan"), Sense::click_and_drag())
         .on_hover_text(format!("Pan {} (drag; double-click: centre)", pan(st.pan)));
     if pan_resp.hovered() || pan_resp.dragged() {
         painter.rect_filled(pan_r, 0.0, white(20));
     }
+    // With Auto-write on while the song plays, a drag writes modulation.
+    let pan_edit = super::Edit::Pan(target);
+    let pan_writes = super::knob_drag_writes(app, pan_edit);
+    let pan_now = if pan_writes { app.mod_position(pan_edit).map_or(st.pan, |a| a * 2.0 - 1.0) } else { st.pan };
     if pan_resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let d = pan_resp.drag_delta().x / if fine { 300.0 } else { 30.5 };
         if d != 0.0 {
-            acts.push(Act::SetPan(target, (st.pan + d as f64).clamp(-1.0, 1.0)));
+            let to = (pan_now + d as f64).clamp(-1.0, 1.0);
+            acts.push(if pan_writes { Act::Modulate(pan_edit, ((to + 1.0) / 2.0) as f32, false) } else { Act::SetPan(target, to) });
         }
     }
+    if pan_resp.drag_stopped() && pan_writes {
+        acts.push(Act::Modulate(pan_edit, ((pan_now + 1.0) / 2.0) as f32, true));
+    }
+    remove_modulation(&pan_resp, pan_edit, acts);
     super::value_entry::gestures(
         ui,
         &pan_resp,
@@ -688,19 +717,36 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         Color32::from_rgb(0xF2, 0xF2, 0xF2),
         Stroke::NONE,
     ));
+    // Modulated: where it has the level now, a mark beside the handle.
+    let level_y = |level: f64| {
+        let d = deckard_model::level_db(level) as f32;
+        if d.is_finite() { db_y(d) } else { 95.0 }
+    };
+    let level_edit = super::Edit::Level(target);
+    if let Some(m) = app.mod_amount(level_edit) {
+        let my = sm.top() + level_y(f64::from(m));
+        painter.hline((hx - 2.0)..=(hx + 6.0), my, Stroke::new(1.5, MODULATED));
+    }
     let fader = Rect::from_min_size(Pos2::new(sm.left() + 20.0, sm.top() - 2.0), Vec2::new(r.width() - 20.0, 103.0));
     let fr = ui
         .interact(vis(fader), id.with("fader"), Sense::click_and_drag())
         .on_hover_text(format!("{} (drag; Shift: fine; double-click: 0 dB)", db(st.level)));
+    // With Auto-write on while the song plays, a drag writes modulation.
+    let level_writes = super::knob_drag_writes(app, level_edit);
+    let level_now = if level_writes { app.mod_position(level_edit).unwrap_or(st.level) } else { st.level };
     if fr.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let dy = fr.drag_delta().y / if fine { 10.0 } else { 1.0 };
         if dy != 0.0 {
-            let cur = if level_db.is_finite() { db_y(level_db) } else { 95.0 };
-            let d = y_db((cur + dy).clamp(3.0, 95.0));
-            acts.push(Act::SetLevel(target, deckard_model::level_from_db(d as f64)));
+            let d = y_db((level_y(level_now) + dy).clamp(3.0, 95.0));
+            let to = deckard_model::level_from_db(d as f64);
+            acts.push(if level_writes { Act::Modulate(level_edit, to as f32, false) } else { Act::SetLevel(target, to) });
         }
     }
+    if fr.drag_stopped() && level_writes {
+        acts.push(Act::Modulate(level_edit, level_now as f32, true));
+    }
+    remove_modulation(&fr, level_edit, acts);
     super::value_entry::gestures(
         ui,
         &fr,

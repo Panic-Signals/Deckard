@@ -18,7 +18,7 @@ impl crate::App {
         let edit =
             layout::slot_page(self, doc.borrow().project(), slot).and_then(|pg| pg.knobs.get(pos).cloned().flatten()).and_then(|k| k.3);
         let param = match edit {
-            Some(Edit::Plugin(_, id, _) | Edit::PluginChoice(_, id, ..)) => id,
+            Some(Edit::Plugin(_, id, _) | Edit::PluginIn(_, _, id, _) | Edit::PluginChoice(_, id, ..)) => id,
             _ => return false,
         };
         let ch = match level {
@@ -28,6 +28,22 @@ impl crate::App {
         };
         self.toggle_plugin_macro(ch, self.chain(), slot, param);
         true
+    }
+
+    /// Save the plug-in's pages when `target` is a plug-in parameter that has no object
+    /// yet, so [`deckard_doc::Document::set_modulation`] can point at it.
+    pub(crate) fn ensure_mod_param(&self, chain: Chain, target: &deckard_model::ModTarget) {
+        let Some(doc) = &self.doc else { return };
+        let (Some(slot), Ok(id)) = (target.slot, target.field.parse::<u32>()) else { return };
+        let is_plugin = doc.borrow().chain_slots(chain).and_then(|s| s.get(slot)).is_some_and(|s| s.plugin.is_some());
+        if !is_plugin || doc.borrow().plugin_param_oid(chain, slot, id).is_some() {
+            return;
+        }
+        let mut pages = self.plugin_pages(chain, slot);
+        if !pages.iter().any(|p| p.knobs.iter().any(|(k, _)| *k == id)) {
+            pages.push(PluginPageSpec { name: String::new(), knobs: vec![(id, String::new())], custom_names: Vec::new() });
+        }
+        let _ = doc.borrow_mut().save_plugin_pages(chain, slot, &pages);
     }
 
     /// The pages of the plug-in in slot `slot` of `chain` (to save before one of its
