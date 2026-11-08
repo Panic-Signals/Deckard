@@ -119,29 +119,9 @@ pub fn set_search_paths(dirs: Vec<PathBuf>) {
     }
 }
 
-/// (However it's written: the scan lists a `Dexed.VST3` too.)
-fn is_vst3(p: &Path) -> bool {
-    p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vst3"))
-}
-
-/// Installed `.vst3` bundles (one level of subfolders is searched too).
+/// Installed `.vst3` bundles in [`search_paths`] and their subfolders.
 pub fn bundles() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for dir in search_paths() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if is_vst3(&p) {
-                out.push(p);
-            } else if p.is_dir()
-                && let Ok(sub) = std::fs::read_dir(&p)
-            {
-                out.extend(sub.flatten().map(|e| e.path()).filter(|p| is_vst3(p)));
-            }
-        }
-    }
-    out.sort();
-    out
+    crate::scan::vst3_bundles(&search_paths())
 }
 
 /// Class ids a bundle declares in its `moduleinfo.json`, if it has one (read without
@@ -362,5 +342,10 @@ mod tests {
         let mut other = own;
         other[15] ^= 1;
         assert_eq!(m.class_id(&other), None);
+    }
+
+    #[test]
+    fn bundles_matches_the_scanners_vst3_bundle_list() {
+        assert_eq!(bundles(), crate::scan::vst3_bundles(&search_paths()));
     }
 }
