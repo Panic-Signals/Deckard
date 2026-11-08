@@ -780,7 +780,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             let resp =
                 ui.interact(vis(add), id.with("add"), Sense::click()).on_hover_text("Add a module or plug-in (in the SOUND tab below)");
             painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-            painter.text(add.center(), Align2::CENTER_CENTER, "+", font(13.0), white(142));
+            super::plus_glyph(painter, add.center(), 13.0, white(142));
             if resp.clicked() {
                 acts.push(Act::FocusSlot(g, s, usize::MAX));
             }

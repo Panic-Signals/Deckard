@@ -1141,7 +1141,7 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
                 }
                 None => {
                     lp.rect_stroke(r, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-                    lp.text(r.center(), Align2::CENTER_CENTER, "+", font(14.0), white(142));
+                    super::plus_glyph(&lp, r.center(), 14.0, white(142));
                     if resp.on_hover_text("Add samples as zones").clicked() {
                         acts.push(sact(SamplingAct::AddZones));
                     }

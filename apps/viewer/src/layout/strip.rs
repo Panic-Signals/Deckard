@@ -516,7 +516,7 @@ pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: R
     let add = Rect::from_min_size(Pos2::new(x, area.top() + PANEL_TOP), Vec2::new(ADD_W, area.height() - PANEL_TOP - 10.0));
     let resp = ui.interact(add.intersect(area), ui.id().with("strip-add"), Sense::click()).on_hover_text("Add a plug-in");
     clip.rect_stroke(add, 3.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(50) }), StrokeKind::Inside);
-    clip.text(add.center(), Align2::CENTER_CENTER, "+", font(20.0), white(if resp.hovered() { 230 } else { 150 }));
+    super::plus_glyph(&clip, add.center(), 20.0, white(if resp.hovered() { 230 } else { 150 }));
     // A sound has one instrument, in its first slot.
     let instruments = snd.slots.is_empty();
     egui::Popup::menu(&resp).show(|ui| add_menu(ui, app, instruments, acts));

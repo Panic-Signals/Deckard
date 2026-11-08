@@ -233,6 +233,12 @@ pub(crate) fn elide_middle(painter: &Painter, text: &str, size: f32, width: f32)
     cut(lo)
 }
 
+/// A "+" glyph optically centred on `c`: IBM Plex Sans places "+" on the lowercase
+/// x-height axis rather than the full ascent+descent line box used by `CENTER_CENTER`.
+pub(super) fn plus_glyph(painter: &Painter, c: Pos2, size: f32, color: Color32) {
+    painter.text(Pos2::new(c.x, c.y - (size * 0.13).round()), Align2::CENTER_CENTER, "+", font(size), color);
+}
+
 /// Bar.beat.sixteenth, 1-based, as Maschine's position display.
 fn position_string(p: &Project, ticks: f64) -> String {
     let t = ticks.max(0.0) as i64;
@@ -2766,13 +2772,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     if plus.intersects(tiles) {
         let resp = ui.interact(plus.intersect(tiles), ui.id().with("add-group"), Sense::click());
         painter.rect_filled(plus.shrink(1.0).intersect(tiles), 2.0, if resp.hovered() { S03 } else { S01 });
-        painter.with_clip_rect(tiles).text(
-            plus.center(),
-            Align2::CENTER_CENTER,
-            "+",
-            font(16.0),
-            white(if resp.hovered() { 245 } else { 142 }),
-        );
+        plus_glyph(&painter.with_clip_rect(tiles), plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New group").clicked() {
             acts.push(Act::AddGroup);
         }
@@ -2782,7 +2782,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     if plus.intersects(tabs) {
         let resp = ui.interact(plus.intersect(tabs), ui.id().with("add-scene"), Sense::click());
         painter.rect_filled(plus.shrink2(Vec2::new(0.5, 4.0)).intersect(tabs), 2.0, if resp.hovered() { S03 } else { S01 });
-        painter.text(plus.center(), Align2::CENTER_CENTER, "+", font(16.0), white(if resp.hovered() { 245 } else { 142 }));
+        plus_glyph(&painter, plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New scene").clicked() {
             acts.push(Act::AddScene);
         }
@@ -3314,13 +3314,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         if resp.hovered() {
             row_painter.rect_filled(plus.shrink(1.0), 2.0, S03);
         }
-        row_painter.text(
-            Pos2::new(plus.left() + 16.0, plus.center().y),
-            Align2::CENTER_CENTER,
-            "+",
-            font(16.0),
-            white(if resp.hovered() { 245 } else { 142 }),
-        );
+        plus_glyph(&row_painter, Pos2::new(plus.left() + 16.0, plus.center().y), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New group").clicked() {
             acts.push(Act::AddGroup);
         }
@@ -3542,7 +3536,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         let plus = Rect::from_min_size(Pos2::new(end_x + 1.0, secs.top() + 4.0), Vec2::new(27.0, secs.height() - 8.0));
         let resp = ui.interact(plus.intersect(secs), ui.id().with("add-section"), Sense::click());
         ep.rect_filled(plus, 0.0, if resp.hovered() { S03 } else { S01 });
-        ep.text(plus.center(), Align2::CENTER_CENTER, "+", font(16.0), white(if resp.hovered() { 245 } else { 142 }));
+        plus_glyph(&ep, plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text(format!("New section playing {}", scene_name(p, app.scene.min(p.scenes.len() - 1)))).clicked() {
             acts.push(Act::AddSection(app.scene.min(p.scenes.len() - 1)));
         }
@@ -4612,13 +4606,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 }
                 painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name.as_ref(), font(10.0), white(90));
                 painter.circle_stroke(Pos2::new(r.center().x, r.top() + 42.0), 18.0, Stroke::new(1.0, white(30)));
-                painter.text(
-                    Pos2::new(r.center().x, r.top() + 42.0),
-                    Align2::CENTER_CENTER,
-                    "+",
-                    font(14.0),
-                    white(if resp.hovered() { 200 } else { 70 }),
-                );
+                plus_glyph(&painter, Pos2::new(r.center().x, r.top() + 42.0), 14.0, white(if resp.hovered() { 200 } else { 70 }));
                 egui::Popup::menu(&resp).show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
                 continue;
             }
@@ -5082,7 +5070,11 @@ fn page_tabs(
         let resp = ui.interact(r, ui.id().with(("page-tab", i)), Sense::click());
         let on = i == page;
         let ink = if on || resp.hovered() { Color32::WHITE } else { white(142) };
-        painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
+        if name == "+" {
+            plus_glyph(painter, r.center(), 11.0, ink);
+        } else {
+            painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
+        }
         if on {
             painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), area.bottom() - 1.0, Stroke::new(2.0, Color32::WHITE));
         }
@@ -5220,7 +5212,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
             }
             None => {
                 p.rect_stroke(r, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-                p.text(r.center(), Align2::CENTER_CENTER, "+", font(15.0), if resp.hovered() { white(245) } else { white(142) });
+                plus_glyph(&p, r.center(), 15.0, if resp.hovered() { white(245) } else { white(142) });
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Add plug-in"));
                 let resp = resp.on_hover_text("Add an instrument, effect or plug-in");
                 // A sound has one instrument, in its first slot.
@@ -6444,7 +6436,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             }
             None => {
                 let col = if app.lanes_dialog || resp.hovered() { Color32::WHITE } else { white(142) };
-                lp.text(Pos2::new(r.left() + 8.0, y), Align2::LEFT_CENTER, "+", font(16.0), col);
+                lp.text(Pos2::new(r.left() + 8.0, y - 2.0), Align2::LEFT_CENTER, "+", font(16.0), col);
                 if resp.on_hover_text("Add or remove MIDI controller lanes").clicked() {
                     acts.push(Act::LanesDialog(!app.lanes_dialog));
                 }
