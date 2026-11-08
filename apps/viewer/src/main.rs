@@ -371,6 +371,15 @@ fn main() {
     deckard_plugins::exit(result.is_err() as i32)
 }
 
+/// Where a chain was left: its focused slot, the page each of its slots showed, and the
+/// page each property set (Input, Output, Groove, Macro) showed.
+#[derive(Debug, Default, Clone)]
+pub struct ChainPages {
+    slot: Option<usize>,
+    slot_pages: std::collections::HashMap<usize, usize>,
+    prop_pages: [usize; 4],
+}
+
 /// A plug-in's parameter pages as the SOUND tab (or its strip panel) shows them, and the
 /// values of the page shown (value, text).
 pub struct PluginView {
@@ -1005,6 +1014,11 @@ pub struct App {
     channel: bool,
     prop_set: usize,
     prop_page: usize,
+    /// Where each chain was left, shown again on coming back to it. `pages_of` is the
+    /// chain the fields above were last kept for, `page_key` the slot `plugin_page` is for.
+    chain_pages: std::collections::HashMap<deckard_doc::Chain, ChainPages>,
+    pages_of: Option<deckard_doc::Chain>,
+    page_key: Option<(deckard_doc::Chain, Option<usize>)>,
     /// MIDI learn, host automation and macro editing (the Assignment area).
     remote: remote::Remote,
     /// MIDI ports (inputs, outputs) and when they were last looked up.
@@ -1368,9 +1382,11 @@ impl App {
     }
 
     /// Keep where the project is left (the focus, the controller's page and pad mode)
-    /// for the next save: it reopens there (BUGS #6).
+    /// for the next save: it reopens there (BUGS #6), with the app's view and where each
+    /// chain was left.
     pub(crate) fn store_screen(&mut self) {
-        let Some(doc) = &self.doc else { return };
+        let Some(doc) = self.doc.clone() else { return };
+        self.keep_pages();
         let (page, mode) = self.surface.screen().unwrap_or_default();
         let screen = deckard_doc::SavedScreen {
             group: self.group,
@@ -1381,6 +1397,7 @@ impl App {
             channel: self.channel,
             page,
             mode,
+            view: self.view_text(),
         };
         doc.borrow_mut().set_screen(Some(screen));
     }
@@ -1406,6 +1423,11 @@ impl App {
             self.slot = s.slot.filter(|&i| i < slots);
         }
         self.channel = s.channel;
+        self.apply_view_text(&s.view);
+        // The slot and pages come back from where its chain was left.
+        (self.slot_of, self.pages_of, self.page_key) = (None, None, None);
+        let chain = self.chain();
+        self.chain_pages.entry(chain).or_default().slot = self.slot;
         if !s.page.is_empty() {
             let view = self.surface_view();
             for a in self.surface.restore(&s.page, &s.mode, &view, std::time::Instant::now()) {
@@ -1444,6 +1466,9 @@ impl App {
         // (The plug-in views were the old project's instances.)
         self.plugin_views.clear();
         self.plugin_focus = None;
+        // (Where its chains were left was the old project's.)
+        self.chain_pages.clear();
+        (self.pages_of, self.page_key) = (None, None);
         self.samples = SampleCache::default();
         self.preload_plugins = deckard_plugins::on_main_thread();
         self.frames_drawn = 0;
@@ -5895,7 +5920,7 @@ impl App {
             }
             R::PageGroup(n) => {
                 self.prop_set = n.min(3);
-                self.prop_page = 0;
+                self.prop_page = self.kept_prop_page(self.prop_set);
                 return;
             }
             R::SetMacro { pos, level } => {
@@ -8715,23 +8740,36 @@ impl App {
         let chain = self.chain();
         let all = self.chain_slots();
         let slots = all.len();
-        if self.slot_of != Some(chain) {
-            self.slot_of = Some(chain);
-            self.slot = (slots > 0).then_some(0);
-            self.plugin_page = 0;
+        // Back on a chain, it shows where it was left: its slot (unless one was just
+        // picked on it) and its property pages.
+        if self.pages_of != Some(chain) {
+            let kept = self.chain_pages.get(&chain);
+            self.prop_page = kept.map_or(0, |k| k.prop_pages[self.prop_set.min(3)]);
+            if self.slot_of != Some(chain) {
+                self.slot_of = Some(chain);
+                self.slot = kept.and_then(|k| k.slot).filter(|&i| i < slots).or((slots > 0).then_some(0));
+            }
+            self.pages_of = Some(chain);
         }
         if self.slot.is_some_and(|i| i >= slots) {
             self.slot = slots.checked_sub(1);
         }
+        // A slot focused anew shows the page it was on (the first if none).
+        if self.page_key != Some((chain, self.slot)) {
+            self.page_key = Some((chain, self.slot));
+            self.plugin_page = self.slot.and_then(|i| self.chain_pages.get(&chain)?.slot_pages.get(&i).copied()).unwrap_or(0);
+        }
         let now = std::time::Instant::now();
         let focused = self.slot.filter(|&i| all[i].plugin.is_some()).map(|i| (chain, i));
-        // Focused anew, a plug-in shows the page it was on (the first if it had none).
+        // Focused anew, a plug-in shows the page its view is on (turned on its strip
+        // panel, say).
         if focused != self.plugin_focus {
             self.plugin_focus = focused;
-            if let Some(k) = focused {
-                self.plugin_page = self.plugin_views.get(&k).map_or(0, |v| v.shown);
+            if let Some(v) = focused.and_then(|k| self.plugin_views.get(&k)) {
+                self.plugin_page = v.shown;
             }
         }
+        self.keep_pages();
         // The views wanted: the focused slot's and the panels drawn since (still
         // plug-ins); the others go once not seen for a while.
         let drawn = std::mem::take(&mut *self.plugin_drawn.borrow_mut());
@@ -8791,6 +8829,121 @@ impl App {
                 read += 1;
             }
         }
+    }
+
+    /// Keep where the chain shown is (its slot and pages) for coming back to it.
+    fn keep_pages(&mut self) {
+        let Some(chain) = self.pages_of else { return };
+        let kept = self.chain_pages.entry(chain).or_default();
+        kept.slot = self.slot;
+        kept.prop_pages[self.prop_set.min(3)] = self.prop_page;
+        if let Some(i) = self.slot {
+            kept.slot_pages.insert(i, self.plugin_page);
+        }
+    }
+
+    /// The app's view as saved with the project (`SavedScreen::view`): one setting a
+    /// line, then a `chain` line for each chain's slot and pages.
+    fn view_text(&self) -> String {
+        let tab = match self.chain_tab {
+            layout::ChainTab::Master => "master",
+            layout::ChainTab::Group => "group",
+            layout::ChainTab::Sound => "sound",
+        };
+        let mut t = format!(
+            "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\n",
+            self.song_view as u8, self.mixer as u8, self.mixer_sounds as u8, self.piano_roll as u8, self.prop_set
+        );
+        let mut chains: Vec<_> = self.chain_pages.iter().collect();
+        chains.sort_by_key(|(c, _)| format!("{c:?}"));
+        for (c, k) in chains {
+            let at = match c {
+                deckard_doc::Chain::Sound(g, s) => format!("s {g} {s}"),
+                deckard_doc::Chain::Group(g) => format!("g {g}"),
+                deckard_doc::Chain::Master => "m".into(),
+            };
+            let slot = k.slot.map_or("-".into(), |i| i.to_string());
+            let [a, b, c, d] = k.prop_pages;
+            let mut pages: Vec<_> = k.slot_pages.iter().filter(|&(_, &p)| p > 0).collect();
+            pages.sort();
+            let pages: Vec<String> = pages.iter().map(|(i, p)| format!("{i}:{p}")).collect();
+            t += &format!("chain {at} slot {slot} props {a} {b} {c} {d} pages {}\n", pages.join(","));
+        }
+        t
+    }
+
+    /// Take up a saved [`App::view_text`]; lines that don't read are skipped.
+    fn apply_view_text(&mut self, text: &str) {
+        for line in text.lines() {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            let flag = |i: usize| w.get(i).map(|v| *v == "1");
+            match w.first().copied() {
+                Some("song") => self.song_view = flag(1).unwrap_or(self.song_view),
+                Some("mixer") => self.mixer = flag(1).unwrap_or(self.mixer),
+                Some("mixer_sounds") => self.mixer_sounds = flag(1).unwrap_or(self.mixer_sounds),
+                Some("piano_roll") => self.piano_roll = flag(1).unwrap_or(self.piano_roll),
+                Some("props") => {
+                    if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
+                        self.prop_set = n.min(3);
+                    }
+                }
+                Some("tab") => match w.get(1).copied() {
+                    Some("master") => self.chain_tab = layout::ChainTab::Master,
+                    Some("group") => self.chain_tab = layout::ChainTab::Group,
+                    Some("sound") => self.chain_tab = layout::ChainTab::Sound,
+                    _ => {}
+                },
+                Some("chain") => {
+                    let num = |i: usize| w.get(i).and_then(|v| v.parse::<usize>().ok());
+                    let (chain, rest) = match w.get(1).copied() {
+                        Some("s") => match (num(2), num(3)) {
+                            (Some(g), Some(s)) => (deckard_doc::Chain::Sound(g, s), 4),
+                            _ => continue,
+                        },
+                        Some("g") => match num(2) {
+                            Some(g) => (deckard_doc::Chain::Group(g), 3),
+                            None => continue,
+                        },
+                        Some("m") => (deckard_doc::Chain::Master, 2),
+                        _ => continue,
+                    };
+                    let mut kept = ChainPages::default();
+                    let mut i = rest;
+                    while i < w.len() {
+                        match w[i] {
+                            "slot" => {
+                                kept.slot = num(i + 1);
+                                i += 2;
+                            }
+                            "props" => {
+                                for (j, p) in kept.prop_pages.iter_mut().enumerate() {
+                                    *p = num(i + 1 + j).unwrap_or(0);
+                                }
+                                i += 5;
+                            }
+                            "pages" => {
+                                for pair in w.get(i + 1).map_or("", |v| *v).split(',') {
+                                    if let Some((a, b)) = pair.split_once(':')
+                                        && let (Ok(a), Ok(b)) = (a.parse(), b.parse())
+                                    {
+                                        kept.slot_pages.insert(a, b);
+                                    }
+                                }
+                                i += 2;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    self.chain_pages.insert(chain, kept);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The page property set `set` of the chain shown was left on (0 if never shown).
+    pub(crate) fn kept_prop_page(&self, set: usize) -> usize {
+        self.chain_pages.get(&self.chain()).map_or(0, |k| k.prop_pages[set.min(3)])
     }
 
     /// The focused slot's plug-in view (what the SOUND tab and the controller show).
@@ -10816,6 +10969,76 @@ mod tests {
         again.show_document(Document::from_bytes(bytes, None));
         assert_eq!((again.sound, again.slot, again.channel, again.scene), (3, Some(0), true, 1));
         assert_eq!(again.surface.screen(), Some(("mixer".to_string(), "keyboard".to_string())));
+    }
+
+    /// Two effects on sound 1, the second focused on its second page, and the Groove
+    /// set on its last page; sound 2 left on the Groove set's second page.
+    fn chains_left_somewhere() -> App {
+        let mut app = App::default();
+        app.new_project();
+        {
+            let doc = app.doc.clone().unwrap();
+            let mut d = doc.borrow_mut();
+            d.add_slot(0, 0, 0, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+            d.add_slot(0, 0, 1, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+        }
+        app.update_slot_view();
+        layout::apply_acts(&mut app, vec![layout::Act::SelectSlot(Some(1)), layout::Act::PluginPage(1)]);
+        app.update_slot_view();
+        layout::apply_acts(&mut app, vec![layout::Act::PropSet(2), layout::Act::PropPage(2)]);
+        app.update_slot_view();
+        app.sound = 1;
+        app.update_slot_view();
+        layout::apply_acts(&mut app, vec![layout::Act::PropPage(1)]);
+        app.update_slot_view();
+        app
+    }
+
+    /// Each chain shows where it was left: its slot and that slot's page, and each
+    /// property set's page, whatever was shown in between.
+    #[test]
+    fn each_chain_comes_back_where_it_was_left() {
+        let mut app = chains_left_somewhere();
+        assert_eq!((app.slot, app.prop_page), (None, 1));
+        (app.group, app.sound) = (1, 0);
+        app.update_slot_view();
+        assert_eq!(app.prop_page, 0);
+        (app.group, app.sound) = (0, 0);
+        app.update_slot_view();
+        assert_eq!((app.slot, app.plugin_page, app.prop_set, app.prop_page), (Some(1), 1, 2, 2));
+        // Another set and back: still on its page.
+        layout::apply_acts(&mut app, vec![layout::Act::PropSet(0)]);
+        app.update_slot_view();
+        assert_eq!(app.prop_page, 0);
+        layout::apply_acts(&mut app, vec![layout::Act::PropSet(2)]);
+        assert_eq!(app.prop_page, 2);
+        // The other slot and back: still on its page.
+        layout::apply_acts(&mut app, vec![layout::Act::SelectSlot(Some(0))]);
+        app.update_slot_view();
+        assert_eq!(app.plugin_page, 0);
+        layout::apply_acts(&mut app, vec![layout::Act::SelectSlot(Some(1))]);
+        app.update_slot_view();
+        assert_eq!(app.plugin_page, 1);
+        app.sound = 1;
+        app.update_slot_view();
+        assert_eq!(app.prop_page, 1);
+    }
+
+    /// A saved project reopens on the app's view (Ideas or Song, the Mixer, the chain
+    /// tab) and with each chain where it was left.
+    #[test]
+    fn a_project_reopens_on_its_view_and_where_each_chain_was_left() {
+        let mut app = chains_left_somewhere();
+        (app.song_view, app.mixer, app.chain_tab) = (true, true, layout::ChainTab::Sound);
+        app.store_screen();
+        let bytes = app.doc.as_ref().unwrap().borrow().to_bytes().unwrap();
+        let mut again = App::default();
+        again.show_document(Document::from_bytes(bytes, None));
+        again.update_slot_view();
+        assert_eq!((again.song_view, again.mixer, again.sound, again.prop_set, again.prop_page), (true, true, 1, 2, 1));
+        again.sound = 0;
+        again.update_slot_view();
+        assert_eq!((again.slot, again.plugin_page, again.prop_page), (Some(1), 1, 2));
     }
 
     /// C46: on DECKARD's layer the MK3 keeps a clock of its own, as the scripts' timer
@@ -14599,7 +14822,9 @@ mod tests {
         };
         // Every page of every set, for the sound, the group and the master.
         for (tab, level) in [(layout::ChainTab::Sound, "sound"), (layout::ChainTab::Group, "group"), (layout::ChainTab::Master, "master")] {
+            // (Coming to a chain shows where it was left: switched first, then paged.)
             h.state_mut().chain_tab = tab;
+            h.run_steps(1);
             for set in 0..3 {
                 for page in 0..3 {
                     (h.state_mut().prop_set, h.state_mut().prop_page) = (set, page);
@@ -14609,6 +14834,7 @@ mod tests {
             }
         }
         h.state_mut().chain_tab = layout::ChainTab::Sound;
+        h.run_steps(1);
         (h.state_mut().prop_set, h.state_mut().prop_page) = (1, 0);
         h.run_steps(3);
         assert_eq!(names(&h), ["DEST.", "CUE", "LEVEL", "PAN", "AUDIO MUTE"]);
@@ -14625,6 +14851,7 @@ mod tests {
         assert!(project_of(&h).groups[0].sounds[0].channel.audio_mute);
         // The group's MIDI input: Manual shows its source, channel, start note and thru.
         h.state_mut().chain_tab = layout::ChainTab::Group;
+        h.run_steps(1);
         (h.state_mut().prop_set, h.state_mut().prop_page) = (0, 0);
         layout::apply_acts(h.state_mut(), vec![layout::Act::SetParam(deckard_doc::Target::Group(0), "key_mode", 0.0)]);
         h.run_steps(3);
@@ -14635,6 +14862,7 @@ mod tests {
         shot(&mut h, "group-midi-manual");
         // Generate: Euclidean fills the sound's part of the pattern.
         h.state_mut().chain_tab = layout::ChainTab::Sound;
+        h.run_steps(1);
         (h.state_mut().prop_set, h.state_mut().prop_page) = (2, 2);
         layout::apply_acts(h.state_mut(), vec![layout::Act::SetParam(deckard_doc::Target::Sound(0, 0), "sequence_generation/mode", 1.0)]);
         h.run_steps(3);

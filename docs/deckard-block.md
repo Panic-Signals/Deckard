@@ -25,18 +25,18 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 9
+## Payload, version 10
 
-Version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 9
-and reads all eight.
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 10
+and reads all ten.
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
 IEEE single.
 
 ```text
-u32 version = 9        (8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
+u32 version = 10       (9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
                        2: without routes either; 1: without Pad Touch either)
 u32 pattern_count
 pattern × pattern_count:
@@ -96,6 +96,8 @@ u32 scene_len, u8 × scene_len version 8: scene settings as UTF-8 text
                               (`mod_matrix::cc_to_text`)
 u32 extra_len, u8 × extra_len version 9: a plug-in's extra-output strips as UTF-8 text
                               (`extra_out::to_text`), one strip per line
+u32 view_len, u8 × view_len   version 10: the app's view as UTF-8 text, part of the
+                              screen ("" if there's none)
 ```
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's
@@ -127,6 +129,15 @@ the controller's page and pad mode (a dialog or a page shown while a button is h
 isn't come back to; `global.lua`'s `restore`). It's kept on every save and in the
 session, and setting it is no edit. What's no longer there (a removed group, slot) is
 left at the default.
+
+**The app's view** (version 10) comes back with the screen, one setting a line: `song 1`
+(the Song view, else Ideas), `tab master|group|sound` (the chain tab), `mixer 1`,
+`mixer_sounds 1`, `piano_roll 1`, `props <set>` (the property set shown: 0 Input, 1 Output,
+2 Groove, 3 Macro), then a line for each chain left somewhere: `chain s <group> <sound>`,
+`chain g <group>` or `chain m`, then `slot <n>` (or `-`), `props <p0> <p1> <p2> <p3>` (each
+set's page) and `pages <slot>:<page>,…` (the page each slot showed, those past the first).
+Coming back to a chain shows where it was left. Lines and words that don't read are
+skipped.
 
 **PROB LOCK** (the Events and Step pages' display 8) lives in the document as a
 `deckard:prob_lock` field (`1`) on the sound's object. Maschine has its own (the sound's

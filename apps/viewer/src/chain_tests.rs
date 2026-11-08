@@ -556,3 +556,95 @@ fn right_clicking_a_chain_row_changes_its_effect() {
         assert_eq!(modules(&doc), before, "{tab:?}: one undo step");
     }
 }
+
+/// What the MK3 sends, on DECKARD's layer, then a frame.
+fn mk3(app: &mut crate::App, events: Vec<deckard_mk3::Event>) {
+    // (A frame even with no events.)
+    let frames: Vec<Vec<deckard_mk3::Event>> =
+        if events.is_empty() { vec![Vec::new()] } else { events.into_iter().map(|e| vec![e]).collect() };
+    for e in frames {
+        let mut requests = Vec::new();
+        app.mk3_events(e, &mut requests);
+        app.handle(requests);
+        app.update_slot_view();
+    }
+}
+
+fn mk3_press(app: &mut crate::App, button: &'static str) {
+    mk3(app, vec![deckard_mk3::Event::Button(button, true), deckard_mk3::Event::Button(button, false)]);
+}
+
+/// The pad of a sound (0-based), hit and let go: it focuses the sound.
+fn mk3_pad(app: &mut crate::App, sound: usize) {
+    // (Pads as printed: pad 1, bottom left, is sound 1.)
+    let pad = sound + 1;
+    mk3(app, vec![deckard_mk3::Event::PadOn(pad, 0.8), deckard_mk3::Event::PadOff(pad)]);
+}
+
+/// Sounds 1 and 2 of group 1: a Sampler, a Compressor and a Filter last; group 2 too.
+fn two_sounds_ending_in_a_filter() -> crate::App {
+    let mut app = crate::App::default();
+    app.new_project();
+    app.settings.controller = crate::settings::ControllerChoice::Deckard;
+    let doc = app.doc.clone().unwrap();
+    while doc.borrow().project().groups.len() < 2 {
+        doc.borrow_mut().add_group().unwrap();
+    }
+    for s in 0..2 {
+        let mut d = doc.borrow_mut();
+        d.add_slot(0, s, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        d.add_slot(0, s, 1, &deckard_doc::NewModule::Effect("Compressor")).unwrap();
+        d.add_slot(0, s, 2, &deckard_doc::NewModule::Effect("Filter")).unwrap();
+    }
+    (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, ChainTab::Sound, false);
+    mk3(&mut app, Vec::new());
+    app
+}
+
+fn focused(app: &crate::App) -> (usize, usize, Option<String>) {
+    let module = app.slot.and_then(|i| Some(app.doc.as_ref()?.borrow().chain_slots(app.chain())?.get(i)?.module.clone()));
+    (app.group, app.sound, module)
+}
+
+/// Group 1, sound 1's Filter focused from the MK3; GROUP B, then GROUP A: the Filter is
+/// still focused.
+#[test]
+fn the_mk3_comes_back_to_a_groups_focused_filter() {
+    use deckard_lua_host::state::ControlRequest as R;
+    let mut app = two_sounds_ending_in_a_filter();
+    app.control_request(R::Slot(2));
+    mk3(&mut app, Vec::new());
+    assert_eq!(focused(&app), (0, 0, Some("Filter".into())));
+    mk3_press(&mut app, "BUTTON_GROUP_B");
+    assert_eq!(app.group, 1, "{}", app.status);
+    mk3_press(&mut app, "BUTTON_GROUP_A");
+    assert_eq!(focused(&app), (0, 0, Some("Filter".into())));
+}
+
+/// The Filter focused on sounds 1 and 2: going back and forth between them on the MK3's
+/// pads, each still shows its Filter, and a slot focused elsewhere stays per sound.
+#[test]
+fn the_mk3_keeps_each_sounds_focused_plugin() {
+    use deckard_lua_host::state::ControlRequest as R;
+    let mut app = two_sounds_ending_in_a_filter();
+    app.control_request(R::Slot(2));
+    mk3(&mut app, Vec::new());
+    mk3_pad(&mut app, 1);
+    assert_eq!(app.sound, 1, "{}", app.status);
+    app.control_request(R::Slot(2));
+    mk3(&mut app, Vec::new());
+    assert_eq!(focused(&app), (0, 1, Some("Filter".into())));
+    for _ in 0..2 {
+        mk3_pad(&mut app, 0);
+        assert_eq!(focused(&app), (0, 0, Some("Filter".into())));
+        mk3_pad(&mut app, 1);
+        assert_eq!(focused(&app), (0, 1, Some("Filter".into())));
+    }
+    // Sound 2 on its Compressor: sound 1 still on its Filter.
+    app.control_request(R::Slot(-1));
+    mk3(&mut app, Vec::new());
+    mk3_pad(&mut app, 0);
+    assert_eq!(focused(&app), (0, 0, Some("Filter".into())));
+    mk3_pad(&mut app, 1);
+    assert_eq!(focused(&app), (0, 1, Some("Compressor".into())));
+}
