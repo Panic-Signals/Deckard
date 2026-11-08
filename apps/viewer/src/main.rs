@@ -262,6 +262,7 @@ fn main() {
                 deckard_engine::devices::set_driver(app.settings.audio_driver);
             }
             app.update = update::Notice::start(app.settings.check_updates);
+            app.after_update(VERSION);
             if app.settings.app_icon != icon::Style::default() {
                 // The Dock and the taskbar's big icon, which the window's icon doesn't set.
                 icon::apply(&cc.egui_ctx, app.settings.app_icon);
@@ -1231,6 +1232,8 @@ pub struct App {
     recent: Vec<PathBuf>,
     /// What to do once the user has said what happens to unsaved changes.
     confirm: Option<Pending>,
+    /// Just updated to this release: asks whether to open its release notes.
+    whats_new: Option<String>,
     /// The About box is open.
     about: Option<about::State>,
     /// The update check and what it found.
@@ -3257,7 +3260,47 @@ impl App {
         }
     }
 
+    /// At launch: a release newer than the last one run was just updated to, so offer
+    /// its release notes; and remember this one.
+    fn after_update(&mut self, version: &str) {
+        if !RELEASE_BUILD && !cfg!(test) {
+            return;
+        }
+        if update::just_updated(&self.settings.last_version, version) {
+            self.whats_new = Some(version.to_string());
+        }
+        if self.settings.last_version != version {
+            self.settings.last_version = version.to_string();
+            #[cfg(not(test))]
+            self.settings.save();
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(version) = self.whats_new.clone() {
+            let mut choice = None;
+            egui::Modal::new(egui::Id::new("whats-new")).show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
+                ui.add_space(4.0);
+                ui.label("Would you like to see the release notes?");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("See Release Notes").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        choice = Some(false);
+                    }
+                });
+            });
+            if let Some(open) = choice {
+                if open {
+                    ctx.open_url(egui::OpenUrl::new_tab(update::release_notes_url(&version)));
+                }
+                self.whats_new = None;
+            }
+        }
         if let Some(then) = self.confirm.clone() {
             let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
             let question = match then {

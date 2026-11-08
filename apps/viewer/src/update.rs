@@ -433,6 +433,17 @@ fn windows_helper(install_dir: &Path, new: &Path, work: &Path) -> Result<(), Str
     Ok(())
 }
 
+/// `now` is a newer release than `last` (the one that ran before): DECKARD was just
+/// updated. Not on a first run (no `last`), nor for a build that isn't a release.
+pub fn just_updated(last: &str, now: &str) -> bool {
+    matches!((github::parse_version(last), github::parse_version(now)), (Some(l), Some(n)) if n > l)
+}
+
+/// The release notes of `version` on GitHub.
+pub fn release_notes_url(version: &str) -> String {
+    format!("https://github.com/{}/releases/tag/{version}", github::REPO)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,5 +571,16 @@ mod tests {
         assert!(script.contains("robocopy"));
         assert!(script.contains("DECKARD.exe"));
         assert!(script.contains(&format!("rmdir /s /q \"{}\"", work.display())));
+    }
+
+    #[test]
+    fn a_newer_release_than_last_time_was_just_updated_to() {
+        assert!(just_updated("0.1.0", "0.2.0"));
+        assert!(just_updated("v0.2.0", "0.2.1"));
+        assert!(!just_updated("0.2.0", "0.2.0"), "the same release");
+        assert!(!just_updated("0.3.0", "0.2.0"), "an older one");
+        assert!(!just_updated("", "0.2.0"), "a first run");
+        assert!(!just_updated("0.1.0", "0.2.0-dev"), "not a release");
+        assert_eq!(release_notes_url("0.2.0"), "https://github.com/Panic-Signals/Deckard/releases/tag/0.2.0");
     }
 }

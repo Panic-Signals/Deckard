@@ -62,6 +62,9 @@ pub struct Settings {
     pub input_quantize: bool,
     /// Ask GitHub for a newer release at launch (default on).
     pub check_updates: bool,
+    /// The release that ran last: one newer at launch was just updated to, and offers
+    /// its release notes.
+    pub last_version: String,
     /// Preferences ▸ General: the icon the window, the taskbar and the Dock show.
     pub app_icon: crate::icon::Style,
     /// Preferences ▸ Library: folders of sound packs listed under Factory.
@@ -284,6 +287,7 @@ impl Default for Settings {
             count_in_bars: 1,
             input_quantize: false,
             check_updates: true,
+            last_version: String::new(),
             app_icon: crate::icon::Style::default(),
             scan_on_start: false,
             bridge_windows: true,
@@ -399,6 +403,7 @@ impl Settings {
                 "count_in_bars" => s.count_in_bars = v.parse().unwrap_or(1),
                 "input_quantize" => s.input_quantize = v == "true",
                 "check_updates" => s.check_updates = v != "false",
+                "last_version" => s.last_version = v.to_string(),
                 "app_icon" => s.app_icon = crate::icon::Style::from_key(v).unwrap_or_default(),
                 "input_device" => s.input_device = Some(v.to_string()),
                 "input_level_1" => s.input_levels[0] = v.parse().unwrap_or(0.75),
@@ -703,6 +708,9 @@ impl Settings {
         out += &format!("count_in_bars = {}\ninput_quantize = {}\n", self.count_in_bars, self.input_quantize);
         if !self.check_updates {
             out += "check_updates = false\n";
+        }
+        if !self.last_version.is_empty() {
+            out += &format!("last_version = {}\n", self.last_version);
         }
         if self.app_icon != crate::icon::Style::default() {
             out += &format!("app_icon = {}\n", self.app_icon.key());
@@ -1172,6 +1180,13 @@ mod sync_tests {
         let s = Settings { app_icon: Style::Letter, ..Settings::default() };
         assert_eq!(Settings::parse(&s.to_text()).app_icon, Style::Letter);
         assert_eq!(Settings::parse("app_icon = gone").app_icon, Style::Television, "an unknown one: the default");
+    }
+
+    #[test]
+    fn last_version_round_trips() {
+        assert_eq!(Settings::parse("").last_version, "");
+        let s = Settings { last_version: "0.2.0".into(), ..Settings::default() };
+        assert_eq!(Settings::parse(&s.to_text()).last_version, "0.2.0");
     }
 
     #[test]

@@ -112,3 +112,40 @@ fn cpu_load_is_busy_over_audio_time() {
     assert_eq!(cpu_load((100, 1_000), (350, 2_000)), Some(0.25));
     assert_eq!(cpu_load((0, 0), (3_000, 1_000)), Some(1.0), "late blocks: full");
 }
+
+/// A new release shows a green "Update available" button between save and the
+/// transport (no dot by the menus); clicking it opens About, where it updates.
+#[test]
+fn a_new_release_shows_an_update_button_before_the_transport() {
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    h.ctx.data_mut(|d| d.remove::<Rect>(crate::layout::header_rect("update")));
+    h.run_steps(2);
+    assert!(h.ctx.data(|d| d.get_temp::<Rect>(crate::layout::header_rect("update"))).is_none(), "none without an update");
+    h.state_mut().update.check = crate::update::Check::Available(crate::github::Release {
+        version: (9, 0, 0),
+        tag: "9.0.0".into(),
+        url: "https://github.com/Panic-Signals/Deckard/releases/tag/9.0.0".into(),
+        assets: Vec::new(),
+    });
+    h.run_steps(2);
+    let b = at(&h, "update");
+    assert!(b.left() > 200.0 && b.right() < at(&h, "restart").left(), "after the menus and save, before restart: {b:?}");
+    assert!(h.state().about.is_none());
+    click(&mut h, b.center(), false);
+    assert!(h.state().about.is_some(), "About opens, with its Update button");
+}
+
+/// Launched on a newer release than the last one run: it asks to open the release notes
+/// (once); the same release, or a first run, doesn't.
+#[test]
+fn a_new_release_offers_its_release_notes_once() {
+    let mut app = crate::App::default();
+    app.after_update("0.2.0");
+    assert_eq!(app.whats_new, None, "a first run");
+    assert_eq!(app.settings.last_version, "0.2.0");
+    app.after_update("0.2.0");
+    assert_eq!(app.whats_new, None, "the same release");
+    app.after_update("0.3.0");
+    assert_eq!(app.whats_new.as_deref(), Some("0.3.0"));
+    assert_eq!(app.settings.last_version, "0.3.0");
+}
