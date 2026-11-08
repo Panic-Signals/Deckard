@@ -634,6 +634,8 @@ pub enum Act {
     /// [`Act::PluginParam`] of the plug-in in slot `.1` of chain `.0` (a macro's: any
     /// chain).
     PluginParamIn(deckard_doc::Chain, usize, u32, f64),
+    /// Move parameter `id` of the MIDI input plug-in on group `.0`.
+    MidiInputParam(usize, u32, f64),
     PluginPage(usize),
     Preferences,
     /// The Sampling view.
@@ -1081,6 +1083,11 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
+            Act::MidiInputParam(g, id, v) => {
+                if let Some(Ok(out)) = &app.output {
+                    out.set_midi_input_param(g, id, v);
+                }
+            }
             Act::PluginPage(n) => app.plugin_page = n,
             Act::Preferences => app.prefs = Some(app.prefs.unwrap_or(0)),
             Act::ToggleMixer => {
@@ -3567,6 +3574,9 @@ pub enum Edit {
     PluginIn(deckard_doc::Chain, usize, u32, f64),
     /// A routing choice, now entry `.0` of its list (the page holds the list).
     Route(usize),
+    /// A parameter of the MIDI input plug-in on a group: group, id, min, max, steps (0: any)
+    /// and its default.
+    MidiInputParam(usize, u32, f64, f64, u32, f64),
 }
 
 #[derive(Clone, Copy)]
@@ -3599,6 +3609,7 @@ impl Edit {
             Edit::Plugin(slot, id, _) => Act::PluginParam(slot, id, a),
             Edit::PluginIn(c, slot, id, _) => Act::PluginParamIn(c, slot, id, a),
             Edit::PluginChoice(slot, id, steps, ..) => Act::PluginParam(slot, id, (a * steps as f64).round() / steps as f64),
+            Edit::MidiInputParam(g, id, lo, hi, ..) => Act::MidiInputParam(g, id, lo + a * (hi - lo)),
             Edit::Route(_) => Act::Nothing,
         }
     }
@@ -3630,6 +3641,7 @@ impl Edit {
             Edit::Toggle(t, f, _) => Act::SetParam(t, f, 0.0),
             Edit::Plugin(slot, id, default) | Edit::PluginChoice(slot, id, _, _, default) => Act::PluginParam(slot, id, default),
             Edit::PluginIn(c, slot, id, default) => Act::PluginParamIn(c, slot, id, default),
+            Edit::MidiInputParam(g, id, _, _, _, default) => Act::MidiInputParam(g, id, default),
             Edit::Route(_) => Act::Nothing,
         }
     }
@@ -3661,6 +3673,7 @@ pub(crate) fn every_target(app: &App, doc: &deckard_doc::Document) -> Vec<channe
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|_| None,
+        midi_input: &|g| app.midi_input(g),
     };
     channel::every_target(&ctx)
 }
@@ -3696,6 +3709,7 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|id| plugin_macro_knob(app, doc, id),
+        midi_input: &|g| app.midi_input(g),
     };
     let set = app.prop_set.min(3);
     let macro_pages = if set == 3 { doc.macro_pages(channel::macro_channel(level)) } else { Vec::new() };
@@ -4111,6 +4125,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         groove: &groove,
         io: &app.settings,
         plugin_knob: &|id| plugin_macro_knob(app, doc, id),
+        midi_input: &|g| app.midi_input(g),
     };
     // On the Macro page: the channel, the page, what each slot controls, and the targets.
     let mut macro_view: Option<MacroView> = None;

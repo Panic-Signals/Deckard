@@ -800,6 +800,8 @@ pub struct App {
     doc: Option<Shared>,
     /// The document revision playback last took up.
     seen_revision: u64,
+    /// Groups last seen, to notice one deleted (see [`App::clear_midi_inputs`]).
+    midi_input_groups: usize,
     path: Option<PathBuf>,
     error: Option<String>,
     /// Focus: group, its pattern and sound, and the scene.
@@ -1398,6 +1400,8 @@ impl App {
                 self.mixer_sounds = doc.borrow().project().mixer_sounds;
                 self.headroom.clear();
                 self.seen_revision = doc.borrow().revision();
+                self.clear_midi_inputs();
+                self.midi_input_groups = doc.borrow().project().groups.len();
                 self.doc = Some(doc);
                 self.error = None;
                 (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
@@ -5671,6 +5675,7 @@ impl App {
                     Edit::Int(_, _, lo, hi, _) => Some(1.0 / (hi - lo).max(1.0)),
                     Edit::Toggle(..) => Some(1.0),
                     Edit::PluginChoice(_, _, steps, ..) => Some(1.0 / steps.max(1) as f64),
+                    Edit::MidiInputParam(_, _, _, _, steps, _) if steps >= 2 => Some(1.0 / (steps - 1) as f64),
                     _ => None,
                 };
                 let to = match step {
@@ -6081,6 +6086,13 @@ impl App {
     /// scripts, undo or redo), keeping its position.
     fn follow_edits(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
+        // A group gone moves the numbers of those after it, and plug-ins go by number.
+        let groups = doc.borrow().project().groups.len();
+        if groups < self.midi_input_groups {
+            self.clear_midi_inputs();
+            self.status = "a group was deleted: MIDI plug-ins were taken out".into();
+        }
+        self.midi_input_groups = groups;
         let d = doc.borrow();
         let Some(Ok(out)) = &self.output else { return };
         // An edit that reached the engine while it switched modes is sent again.
@@ -8567,6 +8579,32 @@ impl App {
     }
 
     /// Add a module or plug-in at the end of the focused sound's chain, and show it.
+    /// The MIDI input plug-in on `group`, as the audio output has it.
+    pub(crate) fn midi_input(&self, group: usize) -> Option<deckard_engine::midi_input::Info> {
+        match &self.output {
+            Some(Ok(out)) => out.midi_input(group),
+            _ => None,
+        }
+    }
+
+    /// Put the built-in MIDI input plug-in called `name` on `group`, or none.
+    fn set_midi_input(&mut self, group: usize, name: Option<&str>) {
+        let Ok(out) = self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) else {
+            return;
+        };
+        out.set_midi_input(group, name.and_then(deckard_engine::midi_input::built_in));
+    }
+
+    /// Take the MIDI input plug-ins out: they go by group number, and aren't saved.
+    fn clear_midi_inputs(&mut self) {
+        let Some(Ok(out)) = &self.output else { return };
+        for group in 0..deckard_engine::midi_input::SLOTS {
+            if out.midi_input(group).is_some() {
+                out.set_midi_input(group, None);
+            }
+        }
+    }
+
     /// Make a routing choice from the channel properties.
     fn set_route(&mut self, r: layout::RouteSet) {
         let Some(doc) = self.doc.clone() else { return };
@@ -8574,6 +8612,11 @@ impl App {
         let done = match r {
             layout::RouteSet::Sound(g, s, route) => d.set_sound_route(g, s, route),
             layout::RouteSet::Group(g, aux, dest) => d.set_group_route(g, aux, dest),
+            layout::RouteSet::GroupMidiInput(g, name) => {
+                drop(d);
+                self.set_midi_input(g, name);
+                return;
+            }
             layout::RouteSet::GroupMidiSource(g, port) => {
                 d.set("MIDI Source", deckard_doc::Target::Group(g), "event_input", mxprj::decode::Value::Str(port))
             }
@@ -10032,6 +10075,32 @@ mod tests {
         h.run_steps(10);
         assert_eq!(h.state().scene, 3, "the selection sticks while the old scene finishes");
         h.state_mut().stop();
+    }
+
+    /// A plug-in chosen with nothing playing reaches the engine played next, its parameter
+    /// moved on the way, and a new project takes it out.
+    #[test]
+    fn a_midi_plug_in_chosen_while_stopped_plays_and_goes_with_the_project() {
+        let mut app = App::default();
+        app.new_project();
+        app.set_route(layout::RouteSet::GroupMidiInput(0, Some(deckard_engine::note_echo::NAME)));
+        let Some(Ok(out)) = &app.output else {
+            eprintln!("no audio output; skipping");
+            return;
+        };
+        let info = out.midi_input(0).expect("on the group");
+        assert_eq!(info.name, deckard_engine::note_echo::NAME);
+        assert_eq!(out.set_midi_input_param(0, 2, 99.0), Some(8.0), "fitted to its range");
+        assert_eq!(out.midi_input(0).unwrap().params[1].value, 8.0);
+        assert_eq!(out.set_midi_input_param(0, 99, 1.0), None);
+
+        app.transport_play();
+        let Some(Ok(out)) = &app.output else { unreachable!() };
+        assert_eq!(out.call(|e| e.has_midi_input(0)), Some(true));
+
+        app.new_project();
+        let Some(Ok(out)) = &app.output else { unreachable!() };
+        assert!(out.midi_input(0).is_none());
     }
 
     /// #14: with the window covered (eframe runs only `logic`), an edit from the MK3
