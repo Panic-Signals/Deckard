@@ -1261,6 +1261,7 @@ impl Surface {
                 self.dispatch(run, "pad_off", pad);
             }
             Event::Knob(k, amount) if k < 8 => {
+                self.call_global(run, "knob_turned", ());
                 self.dispatch(run, "knob", (k + 1, amount));
             }
             Event::Wheel(steps) => {

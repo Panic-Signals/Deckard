@@ -638,7 +638,12 @@ fn panel(
                             .enumerate()
                             .map(|(k, (info, label, _))| {
                                 let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
-                                Some((Cow::Owned(label.to_uppercase()), text, value as f32, Some(Edit::Plugin(i, info.id, info.default))))
+                                Some((
+                                    Cow::Owned(label.to_uppercase()),
+                                    text,
+                                    value as f32,
+                                    Some(Edit::PluginIn(deckard_doc::Chain::Sound(g, s), i, info.id, info.default)),
+                                ))
                             })
                             .collect();
                         grid(ui, painter, inner, &knobs, id.with(("plugin", page)), color, acts);
