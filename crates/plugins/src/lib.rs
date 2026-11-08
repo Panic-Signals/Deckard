@@ -318,6 +318,14 @@ impl Plugin {
         each!(self, p => p.param_value(id))
     }
 
+    /// A parameter's unmodulated knob value (normalized 0..1), even while modulated.
+    pub fn knob_value(&self, id: u32) -> f64 {
+        match &self.kind {
+            Kind::Vst3(p) => p.knob_value(id),
+            _ => self.param_value(id),
+        }
+    }
+
     /// How the plug-in shows value `v` of parameter `id`.
     pub fn param_text(&self, id: u32, v: f64) -> String {
         each!(self, p => p.param_text(id, v))
@@ -743,6 +751,9 @@ impl Vst3 {
     /// processor gets it at the next `process`. Counts as an edit of the state.
     pub fn set_param(&mut self, id: u32, v: f64) {
         let v = v.clamp(0.0, 1.0);
+        if let Some(m) = self.modded.iter_mut().find(|m| m.0 == id) {
+            m.2 = v;
+        }
         if let Some(c) = &self.controller {
             unsafe { c.setParamNormalized(id, v) };
         }
@@ -839,6 +850,10 @@ impl Vst3 {
 
     fn modulated(&self, id: u32) -> Option<f64> {
         self.modded.iter().find(|m| m.0 == id).map(|m| m.1)
+    }
+
+    fn knob_value(&self, id: u32) -> f64 {
+        self.modded.iter().find(|m| m.0 == id).map_or_else(|| self.param_value(id), |m| m.2)
     }
 
     /// A MIDI control change (value 0..127), at the next `process`.

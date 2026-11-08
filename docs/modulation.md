@@ -106,6 +106,12 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   - Each span, effects with a lane playing take its value through their glide, and get
     their own value back when it stops.
   - Modulated sounds render on the audio thread rather than ahead.
+  - A sound's or group's level and pan (`slot: None`, field `level` or `pan`): a channel
+    with such a lane has its fader taken out of the routes through it, and the engine
+    multiplies in its gain at the place the lane has it, each span (`channel_faders`,
+    `Engine::apply_faders`). So a fader at the bottom can still rise, and the lane's
+    points stay deviations: moving the fader needs no new timeline. Side-chains fed
+    after a fader hear the fader's own place, not the lane's.
 - **App** (`apps/viewer/src/modulation.rs`, `App::modulate_at`): deviations are written
   at the play position into the group's playing pattern (`record::pattern_at`) inside a
   document take. They are thinned (`modulation::thin`, 1/200 of the travel) at the end.
@@ -118,6 +124,6 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
 - Step mode modulation: holding steps and turning knobs
   (`ModulationEditingAccess.setModulationStep`).
 - Instruments' (drum synths, Bass/Poly Synth), the Sampler's and plug-ins' parameters;
-  channel properties.
+  channel properties other than level and pan (sends, tune, swing).
 - Curved segments (v1's other coefficients are read as a straight line).
 - Hiding non-modulatable knobs on the MK3 while auto-writing (`Parameter:isAutomatable`).

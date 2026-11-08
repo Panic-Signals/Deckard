@@ -101,7 +101,13 @@ impl Document {
             Some(i) => {
                 let items = self.field_path(&self.chain_of(c)?, &["slots", "objects", "items"])?;
                 let Some(Value::List(list)) = self.tree.at(&items) else { return Err("chain without slots".into()) };
-                crate::chain::module_of(list.get(i).ok_or("no such slot")?).ok_or("the slot's module isn't stored there")?
+                let m = crate::chain::module_of(list.get(i).ok_or("no such slot")?).ok_or("the slot's module isn't stored there")?;
+                if m.type_name == "NI::MASCHINE::DATA::PluginHost" {
+                    let id: u32 = target.field.parse().map_err(|_| format!("no parameter {}", target.field))?;
+                    let oid = self.plugin_param_oid(c, i, id).ok_or_else(|| format!("no parameter {}", target.field))?;
+                    return Ok((oid, "NI::MASCOMMON::DATA::MaschineNumericParameter<float>".into()));
+                }
+                m
             }
             None => self.obj_by_path(&channel).ok_or("no such channel")?,
         };
@@ -247,6 +253,64 @@ mod tests {
         d.undo();
         assert!(points(d.project(), Some(0)).is_empty());
         assert!(d.project().groups[0].sounds[0].modulators.is_empty());
+    }
+
+    /// A sound's and a group's level and pan take lanes as a module's parameters do: on
+    /// the channel, with no slot, and read back from the saved file.
+    #[test]
+    fn a_channels_fader_takes_a_lane() {
+        let mut d = project();
+        let target = |field: &str| ModTarget { slot: None, field: field.into() };
+        for field in ["level", "pan"] {
+            d.set_modulation(Chain::Sound(0, 0), &target(field), 0, (0, 960), &[(0, -0.25), (480, 0.25)]).unwrap();
+            d.set_modulation(Chain::Group(0), &target(field), 0, (0, 960), &[(0, 0.5)]).unwrap();
+        }
+        let check = |p: &Project| {
+            let lanes = [target("level"), target("pan")];
+            assert_eq!(p.groups[0].sounds[0].modulators, lanes);
+            assert_eq!(p.groups[0].modulators, lanes);
+            let of = |sound: Option<usize>, field: &str| -> Vec<(i64, f64)> {
+                p.groups[0].patterns[0]
+                    .mods
+                    .iter()
+                    .filter(|m| m.sound == sound && m.slot.is_none() && m.field == field)
+                    .map(|m| (m.position, m.value))
+                    .collect()
+            };
+            for field in ["level", "pan"] {
+                assert_eq!(of(Some(0), field), [(0, -0.25), (480, 0.25)], "the sound's {field}");
+                assert_eq!(of(None, field), [(0, 0.5)], "the group's {field}");
+            }
+        };
+        check(d.project());
+        check(Document::from_bytes(d.to_bytes().unwrap(), None).unwrap().project());
+        // Removed with its points, the channel keeps its other lane.
+        d.clear_modulation(Chain::Sound(0, 0), &target("level")).unwrap();
+        assert_eq!(d.project().groups[0].sounds[0].modulators, [target("pan")]);
+        assert!(d.project().groups[0].patterns[0].mods.iter().all(|m| m.sound != Some(0) || m.field != "level"));
+    }
+
+    /// A plug-in's parameter (once its pages are saved in the `PluginHost`) takes a
+    /// modulation lane and points, and round-trips through a saved project.
+    #[test]
+    fn a_plugins_parameter_takes_a_lane() {
+        let mut d = project();
+        let plugin = NewModule::Plugin { id: "V:VST3:INSTR:1".into(), name: "Synth".into(), chunk: Vec::new() };
+        d.add_slot(0, 1, 0, &plugin).unwrap();
+        let pages = vec![crate::PluginPageSpec { name: "Main".into(), knobs: vec![(42, "Filter".into())], custom_names: Vec::new() }];
+        d.save_plugin_pages(Chain::Sound(0, 1), 0, &pages).unwrap();
+        let target = ModTarget { slot: Some(0), field: "42".into() };
+        d.set_modulation(Chain::Sound(0, 1), &target, 0, (0, 960), &[(0, 0.25), (480, -0.5)]).unwrap();
+        for p in [d.project().clone(), Document::from_bytes(d.to_bytes().unwrap(), None).unwrap().project().clone()] {
+            assert_eq!(p.groups[0].sounds[1].modulators, [target.clone()]);
+            let pts: Vec<(i64, f64)> = p.groups[0].patterns[0]
+                .mods
+                .iter()
+                .filter(|m| m.sound == Some(1) && m.slot == Some(0) && m.field == "42")
+                .map(|m| (m.position, m.value))
+                .collect();
+            assert_eq!(pts, [(0, 0.25), (480, -0.5)]);
+        }
     }
 
     #[test]

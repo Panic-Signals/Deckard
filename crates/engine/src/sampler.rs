@@ -481,6 +481,16 @@ impl Settings {
     fn legato(&self) -> bool {
         self.polyphony == 0
     }
+
+    /// Copy all scalar fields and `synth` parameter values from `other` without
+    /// touching `synth`'s keys (no allocating on the audio thread).
+    pub(crate) fn copy_values_from(&mut self, other: &Settings) {
+        let mut synth = std::mem::take(&mut self.synth);
+        for (dst, src) in synth.iter_mut().zip(&other.synth) {
+            dst.1 = src.1;
+        }
+        *self = Settings { synth, ..*other };
+    }
 }
 
 /// Where a voice reads its zone's sample: play range, loop and crossfade, zone fades
@@ -881,6 +891,9 @@ pub struct Context {
 /// One sound's Sampler: settings, zones, voices and the controllers.
 pub struct SamplerRt {
     pub settings: Settings,
+    base: Settings,
+    hit: bool,
+    modulated: bool,
     pub zones: Vec<ZoneRt>,
     /// Sound and group level/pan combined.
     pub mix: (f32, f32),
@@ -912,8 +925,12 @@ pub struct SamplerRt {
 impl SamplerRt {
     pub fn new(settings: Settings, zones: Vec<ZoneRt>, mix: (f32, f32), sr: f64) -> SamplerRt {
         let zones_len = zones.len();
+        let base = settings.clone();
         SamplerRt {
             settings,
+            base,
+            hit: false,
+            modulated: false,
             zones,
             mix,
             sr,
@@ -977,6 +994,40 @@ impl SamplerRt {
         Some(s)
     }
 
+    /// Start modulating this span: if the previous span left modulated values in
+    /// `settings`, restore the unmodulated `base` first so only fields hit this span
+    /// move away from their knobs.
+    pub(crate) fn begin_modulation(&mut self) {
+        if !self.hit {
+            if self.modulated {
+                self.settings.copy_values_from(&self.base);
+            }
+            self.hit = true;
+        }
+    }
+
+    /// End the span's modulation: if a previous span modulated `settings` and nothing
+    /// hit this span, restore `base` (and retarget the synth's glide back to `base`).
+    pub(crate) fn finish_modulation(&mut self) -> bool {
+        if !self.hit && self.modulated {
+            self.settings.copy_values_from(&self.base);
+            if let Some((_, synth, ..)) = self.synth.as_mut() {
+                let params = &self.settings.synth;
+                match self.synth_glide.as_mut() {
+                    Some(g) => {
+                        if !g.heading_for(params) {
+                            synth.set(if g.retarget(params) { g.now() } else { params });
+                        }
+                    }
+                    None => synth.set(params),
+                }
+            }
+        }
+        self.modulated = self.hit;
+        self.hit = false;
+        self.modulated
+    }
+
     /// Modulation (the audio thread): field `k` plays at stored value `v` until the next
     /// edit or modulation: a Sampler field ([`MODULATED`]), or a parameter of the synth
     /// playing (one it has; it glides there).
@@ -1010,6 +1061,8 @@ impl SamplerRt {
     /// Put in new settings (an edit), handing back the old ones in `st`.
     pub fn swap_settings(&mut self, st: &mut Settings) {
         std::mem::swap(&mut self.settings, st);
+        self.base.copy_values_from(&self.settings);
+        self.modulated = false;
         if let Some((_, synth, ..)) = self.synth.as_mut() {
             let params = &self.settings.synth;
             match self.synth_glide.as_mut() {
