@@ -1197,10 +1197,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::MoveSlot(from, to) => app.move_slot(from, to),
             Act::RemoveSlot(i) => apply(app, vec![Act::RemoveSlotIn(app.chain(), i)]),
             Act::RemoveSlotIn(c, i) => {
-                if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().remove_slot_in(c, i)
-                {
-                    app.status = format!("can't remove it: {e}");
+                let key = app.plugin_slot_key(c, i);
+                if let Some(doc) = app.doc.clone() {
+                    match doc.borrow_mut().remove_slot_in(c, i) {
+                        Ok(()) => app.samples.plugins.retain(|s| *s != key),
+                        Err(e) => app.status = format!("can't remove it: {e}"),
+                    }
                 }
                 app.plugin_views.clear();
             }

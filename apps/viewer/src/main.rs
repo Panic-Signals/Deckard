@@ -1549,6 +1549,15 @@ impl App {
                     let mut d = doc.borrow_mut();
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
+                    drop(d);
+                    self.samples.plugins.retain(|slot| {
+                        !matches!(
+                            slot,
+                            deckard_plugins::Slot::Sound { group, sound }
+                                | deckard_plugins::Slot::Chain { group, sound, .. }
+                                if *group == g && *sound == s
+                        )
+                    });
                     Ok(())
                 })
             }
@@ -1568,7 +1577,20 @@ impl App {
             },
             Act::DeleteGroup(g) => self.delete_group(g),
             Act::MoveGroup(g, to) => self.move_group(g, to),
-            Act::ResetSound(g, s) => doc.borrow_mut().reset_sound(g, s),
+            Act::ResetSound(g, s) => {
+                let r = doc.borrow_mut().reset_sound(g, s);
+                if r.is_ok() {
+                    self.samples.plugins.retain(|slot| {
+                        !matches!(
+                            slot,
+                            deckard_plugins::Slot::Sound { group, sound }
+                                | deckard_plugins::Slot::Chain { group, sound, .. }
+                                if *group == g && *sound == s
+                        )
+                    });
+                }
+                r
+            }
             Act::ExportMidi(g, s) => self.export_midi(g, s),
             Act::ImportMidi(g, s) => self.import_midi(g, s),
             Act::ExportGroupMidi(g) => self.export_group_midi(g, None),
@@ -1609,6 +1631,15 @@ impl App {
     fn delete_group(&mut self, g: usize) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Ok(()) };
         doc.borrow_mut().delete_group(g)?;
+        self.samples.plugins.retain(|slot| {
+            !matches!(
+                slot,
+                deckard_plugins::Slot::Sound { group, .. }
+                    | deckard_plugins::Slot::Chain { group, .. }
+                    | deckard_plugins::Slot::Group { group, .. }
+                    if *group == g
+            )
+        });
         let n = doc.borrow().project().groups.len();
         let focus = if self.group > g { self.group - 1 } else { self.group.min(n.saturating_sub(1)) };
         if focus != self.group || self.group == g {
@@ -9624,13 +9655,16 @@ impl App {
             self.status = "a sound has one instrument, in its first slot".into();
             return;
         }
+        let c = self.chain();
+        let removed_key = self.plugin_slot_key(c, i);
         // The removal and the addition undo as one step.
         doc.borrow_mut().begin_take("Change Module");
-        if let Err(e) = doc.borrow_mut().remove_slot_in(self.chain(), i) {
+        if let Err(e) = doc.borrow_mut().remove_slot_in(c, i) {
             doc.borrow_mut().end_take();
             self.status = format!("can't replace it: {e}");
             return;
         }
+        self.samples.plugins.retain(|s| *s != removed_key);
         self.add_slot_at(what, i);
         doc.borrow_mut().end_take();
     }

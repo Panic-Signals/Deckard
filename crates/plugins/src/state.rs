@@ -94,10 +94,13 @@ pub(crate) fn au_codes(cid: &[u8; 16]) -> (u32, u32) {
 
 /// The VST3 class id of the VST3 version of a VST2 plug-in.
 pub fn vst2_cid(unique_id: u32, name: &str) -> [u8; 16] {
+    // Reaktor Player products (Monark, Prism) share Reaktor 6's VST2 id ("NiR6") and
+    // VST3 class ("VSTNiR6reaktor 6") while keeping their own product name.
+    let class_name = if &unique_id.to_be_bytes() == b"NiR6" { "reaktor 6" } else { name };
     let mut cid = [0u8; 16];
     cid[..3].copy_from_slice(b"VST");
     cid[3..7].copy_from_slice(&unique_id.to_be_bytes());
-    for (d, c) in cid[7..].iter_mut().zip(name.to_lowercase().bytes()) {
+    for (d, c) in cid[7..].iter_mut().zip(class_name.to_lowercase().bytes()) {
         *d = c;
     }
     cid
@@ -264,6 +267,8 @@ mod tests {
         assert_eq!(massive.cid, hex16("5653544E694D616D6173736976650000").unwrap());
         let reaktor = PluginId::parse("Native Instruments:VST:INSTR:1315525174", "Reaktor 6").unwrap();
         assert_eq!(reaktor.cid, hex16("5653544E6952367265616B746F722036").unwrap());
+        let monark = PluginId::parse("Native Instruments:VST:INSTR:1315525174", "Monark").unwrap();
+        assert_eq!(monark.cid, reaktor.cid);
         let v3 = PluginId::parse("Native Instruments:VST3:INSTR:5653544E694D616D6173736976650000", "Massive").unwrap();
         assert_eq!((v3.format, v3.cid), (Format::Vst3, massive.cid));
     }
