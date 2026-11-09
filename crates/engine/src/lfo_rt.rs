@@ -178,15 +178,16 @@ impl Engine {
         (self.mode == Mode::Arrangement && on).then(|| self.position() + self.song_offset)
     }
 
-    /// `l`'s cycles run now. Triggered, from its last note (its wave restarts there);
-    /// else on the song's clock: synced, the arrangement's ticks (plus the export's
-    /// offset) or the ticks played in Ideas (or since stopping, from there); free, the
-    /// seconds played.
+    /// `l`'s cycles run now.
+    #[cfg(test)]
     pub(crate) fn lfo_cycles(&self, l: &LfoRt) -> f64 {
         self.lfo_cycles_after(l, 0)
     }
 
-    /// [`Engine::lfo_cycles`], `frames` into the span.
+    /// `l`'s cycles run `frames` into the span. Triggered, from its last note (its wave
+    /// restarts there); else on the song's clock: synced, the arrangement's ticks (plus
+    /// the export's offset) or the ticks played in Ideas (or since stopping, from there);
+    /// free, the seconds played.
     fn lfo_cycles_after(&self, l: &LfoRt, frames: u64) -> f64 {
         if l.lfo.trigger.is_some() {
             let (t, f) = self.since_trig(l, frames);
