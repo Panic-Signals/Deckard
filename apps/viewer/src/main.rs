@@ -257,6 +257,8 @@ fn main() {
             };
             app.recent = menu::load_recent();
             app.settings = settings::Settings::load();
+            app.browser.routing = app.settings.load_group_routing;
+            app.browser.patterns = app.settings.load_group_patterns;
             // (Nothing to open through ASIO before a driver is picked.)
             if app.settings.asio_device.is_some() {
                 deckard_engine::devices::set_driver(app.settings.audio_driver);
@@ -8271,10 +8273,14 @@ impl App {
             }
             B::Routing(on) => {
                 b.routing = on;
+                self.settings.load_group_routing = on;
+                self.settings.save();
                 return;
             }
             B::Patterns(on) => {
                 b.patterns = on;
+                self.settings.load_group_patterns = on;
+                self.settings.save();
                 return;
             }
             B::Folder(dir) => {
