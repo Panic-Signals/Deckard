@@ -57,7 +57,7 @@ impl Document {
                 None => return Ok(()),
             },
             Chain::Group(g) => {
-                let pattern = self.addresses.groups.get(g).and_then(|ga| ga.patterns.get(p)).ok_or("no such pattern")?.clone();
+                let pattern = self.owner(crate::Target::Pattern(g, p)).ok_or("no such pattern")?;
                 let sp = self.field_path(&pattern, &["sequence"])?;
                 match self.tree.at(&sp) {
                     Some(Value::Obj(_)) => sp,
@@ -167,7 +167,7 @@ impl Document {
                 }
             }
             Chain::Group(g) => {
-                let pattern = self.addresses.groups.get(g).and_then(|ga| ga.patterns.get(p)).ok_or("no such pattern")?.clone();
+                let pattern = self.owner(crate::Target::Pattern(g, p)).ok_or("no such pattern")?;
                 let sp = self.field_path(&pattern, &["sequence"])?;
                 match self.tree.at(&sp) {
                     Some(Value::Obj(_)) => sp,
@@ -348,6 +348,18 @@ mod tests {
         let mut d = project();
         d.add_slot_in(Chain::Master, 0, &NewModule::Effect("Filter")).unwrap();
         assert!(d.set_modulation(Chain::Master, &cutoff(), 0, (0, 0), &[(0, 0.1)]).is_err());
+    }
+
+    #[test]
+    fn group_modulation_points_work_on_arrangement_clips() {
+        let mut d = project();
+        let clip = d.convert_to_clip(0, 0, 0, 3840).unwrap();
+        let p = crate::CLIP + clip;
+        let c = Chain::Group(0);
+        d.set_modulation(c, &cutoff(), p, (0, 960), &[(120, 0.25)]).unwrap();
+        assert_eq!(d.project().groups[0].clip_patterns[clip].mods.len(), 1);
+        d.clear_pattern_modulation(c, p).unwrap();
+        assert!(d.project().groups[0].clip_patterns[clip].mods.is_empty());
     }
 
     /// A project with Maschine 2's points gets v0 points.
