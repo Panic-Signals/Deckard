@@ -3288,6 +3288,8 @@ impl Engine {
         if self.frame == 0 {
             self.next = 0;
         }
+        // A loop switched on (or changed) by the edit sounds from where the song is.
+        self.recue();
         fresh
     }
 
@@ -8028,6 +8030,27 @@ mod tests {
         let after = &out[2 * 40_000..2 * 90_000];
         assert!((hz(before) - 440.0).abs() < 20.0, "before: {}", hz(before));
         assert!((hz(after) - 880.0).abs() < 30.0, "after: {}", hz(after));
+    }
+
+    /// A take switched on while the song plays (an edit) is heard at once, where the song
+    /// is, not at the pattern's next pass.
+    #[test]
+    fn a_loop_switched_on_while_playing_is_heard_at_once() {
+        let (_tmp, on) = audio_project(deckard_model::AudioEngine::Stretch);
+        let mut off = on.clone();
+        off.groups[0].patterns[0].audio.clear();
+        let chains = Engine::new(&off, None, 48_000, Mode::Arrangement, &mut SampleCache::default()).1.chains;
+        let out = render_with(&off, None, 256, 3.0, |k, e, cache| {
+            // Two beats in (48 000 frames): the take goes on, as an edit.
+            if k == 48_000 / 256 {
+                let (fresh, _) = Engine::new_after(&on, Some((&off, chains.as_slice())), None, 48_000, e.mode(), cache);
+                drop(e.adopt(fresh, &on));
+            }
+        });
+        let before: f32 = out[..2 * 47_000].iter().map(|v| v * v).sum();
+        let after: f32 = out[2 * 48_500..2 * 72_000].iter().map(|v| v * v).sum();
+        assert!(before < 1e-6, "silent before: {before}");
+        assert!(after > 1.0, "heard at once: {after}");
     }
 
     /// Started in the middle of its pattern, the loop plays at once, where the song is
