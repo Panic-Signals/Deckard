@@ -10,7 +10,10 @@ use std::{
 #[derive(Default)]
 pub struct HostedLocks {
     doc: RcWeak<RefCell<deckard_doc::Document>>,
-    pub(crate) slots: BTreeMap<usize, Vec<HostedSnapshot>>,
+    // Snapshot version identities survive undo/redo; payloads are session-only.
+    pub(crate) slots: BTreeMap<u64, Vec<HostedSnapshot>>,
+    states: BTreeMap<u64, Vec<HostedSnapshot>>,
+    applied_state: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -48,11 +51,14 @@ impl App {
     }
 
     pub(crate) fn lock_hosted_glides(&self, slot: usize) -> Vec<HostedGlide> {
-        self.lock_plugins
-            .slots
-            .get(&slot)
-            .into_iter()
-            .flatten()
+        let Some(id) = self.doc.as_ref().and_then(|d| d.borrow().snapshot_id(slot)) else { return Vec::new() };
+        let Some(snapshots) = self.lock_plugins.slots.get(&id) else { return Vec::new() };
+        self.lock_hosted_glides_of(snapshots)
+    }
+
+    fn lock_hosted_glides_of(&self, snapshots: &[HostedSnapshot]) -> Vec<HostedGlide> {
+        snapshots
+            .iter()
             .filter_map(|snapshot| {
                 let instance = snapshot.instance.upgrade()?;
                 if !self.samples.plugins.instances().any(|(_, current)| Arc::ptr_eq(current, &instance)) {
@@ -63,6 +69,63 @@ impl App {
                 Some(HostedGlide { snapshot: snapshot.clone(), from })
             })
             .collect()
+    }
+
+    /// Record each recall's own before/after values. Tokens live in Document's
+    /// session history; parameter payloads stay here and never enter saved files.
+    pub(crate) fn lock_hosted_record(&mut self, glides: &[HostedGlide]) -> Option<u64> {
+        if !glides
+            .iter()
+            .any(|g| g.snapshot.values.iter().zip(&g.from).any(|((_, _, to), from)| to.is_finite() && (to - from).abs() > 1e-9))
+        {
+            return None;
+        }
+        let Some(doc) = self.doc.clone() else { return None };
+        let before = self.lock_plugins.states.len() as u64;
+        let after = before + 1;
+        let from = glides
+            .iter()
+            .map(|g| {
+                let mut snapshot = g.snapshot.clone();
+                for ((_, _, value), from) in snapshot.values.iter_mut().zip(&g.from) {
+                    *value = *from;
+                }
+                snapshot
+            })
+            .collect();
+        self.lock_plugins.states.insert(before, from);
+        self.lock_plugins.states.insert(after, glides.iter().map(|g| g.snapshot.clone()).collect());
+        let mut d = doc.borrow_mut();
+        d.init_session_value("hosted-lock", before);
+        if let Err(e) = d.set_session_value("Recall Lock Snapshot", "hosted-lock", after) {
+            self.status = format!("can't record hosted Lock: {e}");
+        }
+        self.lock_plugins.applied_state = Some(after);
+        Some(after)
+    }
+
+    pub(crate) fn lock_capture_morph_state(&mut self) {
+        if let Some(id) = self.lock_morph.as_ref().and_then(|m| m.hosted_state) {
+            let current = self.lock_hosted_capture();
+            self.lock_plugins.states.insert(id, current);
+        }
+    }
+
+    /// All undo paths share the document token, including controller step undo.
+    pub(crate) fn lock_hosted_sync(&mut self) {
+        self.lock_hosted_prepare();
+        let token = self.doc.as_ref().and_then(|d| d.borrow().session_value("hosted-lock"));
+        if token == self.lock_plugins.applied_state {
+            return;
+        }
+        self.lock_capture_morph_state();
+        self.lock_morph = None;
+        let glides = token
+            .and_then(|id| self.lock_plugins.states.get(&id))
+            .map(|snapshots| self.lock_hosted_glides_of(snapshots))
+            .unwrap_or_default();
+        self.lock_hosted_step(&glides, 1.0);
+        self.lock_plugins.applied_state = token;
     }
 
     pub(crate) fn lock_hosted_step(&mut self, glides: &[HostedGlide], t: f64) {

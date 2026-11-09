@@ -199,7 +199,9 @@ fn hosted_lock_refreshes_every_visible_plugin_panel() {
     let mut h = strip_with_two_plugins();
     let a = h.state_mut();
     let snapshots = a.lock_hosted_capture();
-    a.lock_plugins.slots.insert(0, snapshots);
+    a.doc.as_ref().unwrap().borrow_mut().take_snapshot(0).unwrap();
+    let id = a.doc.as_ref().unwrap().borrow().snapshot_id(0).unwrap();
+    a.lock_plugins.slots.insert(id, snapshots);
     for slot in 0..2 {
         let v = &a.plugin_views[&(CHAIN, slot)];
         let id = v.pages[0].knobs[0].0.id;

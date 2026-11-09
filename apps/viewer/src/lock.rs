@@ -26,6 +26,8 @@ pub struct LockMorph {
     plugins: Vec<HostedGlide>,
     start: f64,
     end: f64,
+    history_start: usize,
+    pub(super) hosted_state: Option<u64>,
 }
 
 /// Seconds since the app started (the morphs' clock).
@@ -38,21 +40,28 @@ impl App {
     fn lock_take(&mut self, what: &str, slot: usize) {
         self.lock_hosted_prepare();
         let Some(doc) = self.doc.clone() else { return };
+        let before = doc.borrow_mut().begin_edit_group();
         let result = doc.borrow_mut().take_snapshot(slot);
         if result.is_ok() {
             let snapshot = self.lock_hosted_capture();
-            self.lock_plugins.slots.insert(slot, snapshot);
+            if let Some(id) = doc.borrow().snapshot_id(slot) {
+                self.lock_plugins.slots.insert(id, snapshot);
+            }
         }
+        doc.borrow_mut().end_edit_group(before, "Take Lock Snapshot");
         self.lock_do(what, result);
     }
 
     fn lock_arrive(&mut self, slot: usize) {
         let Some(doc) = self.doc.clone() else { return };
+        let before = doc.borrow_mut().begin_edit_group();
         let result = doc.borrow_mut().recall_snapshot(slot);
         if result.is_ok() {
             let plugins = self.lock_hosted_glides(slot);
+            let _ = self.lock_hosted_record(&plugins);
             self.lock_hosted_step(&plugins, 1.0);
         }
+        doc.borrow_mut().end_edit_group(before, "Recall Lock Snapshot");
         self.lock_do("recall the snapshot", result);
         self.follow_edits();
     }
@@ -149,10 +158,16 @@ impl App {
     pub fn lock_delete_slot(&mut self, slot: usize) {
         let Some(doc) = self.doc.clone() else { return };
         let r = doc.borrow_mut().delete_snapshot(slot);
-        if r.is_ok() {
-            self.lock_plugins.slots.remove(&slot);
-        }
         self.lock_do("delete the snapshot", r);
+    }
+
+    pub(crate) fn lock_end_morph(&mut self) {
+        self.lock_capture_morph_state();
+        if let Some(m) = self.lock_morph.take()
+            && let Some(doc) = &self.doc
+        {
+            doc.borrow_mut().end_edit_group(m.history_start, "Recall Lock Snapshot");
+        }
     }
 
     /// ◀ / ▶: the previous or next bank; ▶ past the last adds one (up to four).
@@ -191,7 +206,7 @@ impl App {
             return;
         }
         self.lock_hosted_prepare();
-        self.lock_morph = None;
+        self.lock_end_morph();
         if !l.morph {
             self.lock_arrive(slot);
             return;
@@ -219,7 +234,9 @@ impl App {
             .collect();
         drop(d);
         let plugins = self.lock_hosted_glides(slot);
-        self.lock_morph = Some(LockMorph { slot, glide, plugins, start: now, end: now + duration });
+        let history_start = doc.borrow_mut().begin_edit_group();
+        let hosted_state = self.lock_hosted_record(&plugins);
+        self.lock_morph = Some(LockMorph { slot, glide, plugins, start: now, end: now + duration, history_start, hosted_state });
     }
 
     /// Move a morph on to `now` (seconds); arrived, the snapshot is recalled whole.
@@ -228,8 +245,10 @@ impl App {
         let t = ((now - m.start) / (m.end - m.start).max(1e-6)).clamp(0.0, 1.0);
         if t >= 1.0 {
             let slot = m.slot;
+            let history_start = m.history_start;
             self.lock_morph = None;
             self.lock_arrive(slot);
+            doc.borrow_mut().end_edit_group(history_start, "Recall Lock Snapshot");
             return;
         }
         let step: Vec<LockEntry> =

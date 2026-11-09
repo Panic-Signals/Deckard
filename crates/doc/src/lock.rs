@@ -139,6 +139,11 @@ impl Document {
         self.snapshot_pairs().into_iter().find(|(s, _)| *s == slot).map(|x| x.1)
     }
 
+    /// Identity of this version of a snapshot, stable through undo/redo.
+    pub fn snapshot_id(&self, slot: usize) -> Option<u64> {
+        self.snapshot_obj(slot)?.oid
+    }
+
     /// Take a snapshot into `slot` (0–63), replacing one there; it becomes the focused
     /// one. One undo step.
     pub fn take_snapshot(&mut self, slot: usize) -> Result<(), String> {

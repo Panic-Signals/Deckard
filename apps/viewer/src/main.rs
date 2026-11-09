@@ -73,6 +73,8 @@ mod keys;
 mod layout;
 mod lock;
 #[cfg(test)]
+mod lock_hosted_tests;
+#[cfg(test)]
 mod lock_tests;
 mod loops;
 #[cfg(test)]
@@ -2130,19 +2132,23 @@ impl App {
                 }
             }
             C::UndoStep => {
+                self.lock_end_morph();
                 if let Some(doc) = self.doc.clone() {
                     let ok = doc.borrow_mut().undo_step();
                     if !ok && !self.back_to_replaced() {
                         self.status = "nothing to undo".into();
                     }
                 }
+                self.lock_hosted_sync();
             }
             C::RedoStep => {
+                self.lock_end_morph();
                 if let Some(doc) = &self.doc
                     && !doc.borrow_mut().redo_step()
                 {
                     self.status = "nothing to redo".into();
                 }
+                self.lock_hosted_sync();
             }
             C::SelectAll => {
                 if let Some(doc) = &self.doc {
@@ -6302,6 +6308,7 @@ impl App {
     /// Let playback take up edits to the document (from the UI, the controller
     /// scripts, undo or redo), keeping its position.
     fn follow_edits(&mut self) {
+        self.lock_hosted_sync();
         self.follow_group_moves();
         let Some(doc) = self.doc.clone() else { return };
         // A group gone moves the numbers of those after it, and plug-ins go by number.
@@ -6519,20 +6526,24 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.lock_end_morph();
         let Some(doc) = self.doc.clone() else { return };
         let ok = doc.borrow_mut().undo();
         if !ok && !self.back_to_replaced() {
             self.status = "nothing to undo".into();
         }
+        self.lock_hosted_sync();
     }
 
     fn redo(&mut self) {
+        self.lock_end_morph();
         if let Some(doc) = &self.doc {
             let ok = doc.borrow_mut().redo();
             if !ok {
                 self.status = "nothing to redo".into();
             }
         }
+        self.lock_hosted_sync();
     }
 
     /// Save over the opened file. The first save of a session keeps the file as it
