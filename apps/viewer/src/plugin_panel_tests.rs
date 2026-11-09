@@ -193,3 +193,25 @@ fn undo_reloads_the_focused_plugins_state_before_any_engine() {
     let k = v.pages[0].knobs.iter().position(|(i, ..)| i.id == id).unwrap();
     assert!((v.values[k].0 - before).abs() < 1e-6, "and its panel shows it");
 }
+
+#[test]
+fn hosted_lock_refreshes_every_visible_plugin_panel() {
+    let mut h = strip_with_two_plugins();
+    let a = h.state_mut();
+    let snapshots = a.lock_hosted_capture();
+    a.lock_plugins.slots.insert(0, snapshots);
+    for slot in 0..2 {
+        let v = &a.plugin_views[&(CHAIN, slot)];
+        let id = v.pages[0].knobs[0].0.id;
+        let instance = a.samples.plugins.existing(a.plugin_slot_key(CHAIN, slot)).unwrap();
+        let mut plugin = instance.lock().unwrap();
+        let base = plugin.knob_value(id);
+        plugin.set_param(id, if base < 0.5 { 0.9 } else { 0.1 });
+    }
+    let glides = a.lock_hosted_glides(0);
+    a.lock_hosted_step(&glides, 1.0);
+    assert_eq!(a.plugin_views.len(), 2);
+    for view in a.plugin_views.values() {
+        assert_eq!(view.page, usize::MAX, "LOCK refreshes each strip, including the unfocused slot");
+    }
+}

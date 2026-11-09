@@ -901,6 +901,7 @@ pub struct App {
     surface_settings_at: Option<std::time::Instant>,
     /// A Lock recall morphing its way.
     lock_morph: Option<lock::LockMorph>,
+    lock_plugins: lock::HostedLocks,
     /// What the lane under the note area shows, the (group, sound) it was picked
     /// for (a newly focused sound shows its saved lane), and whether the dialog to
     /// add or remove MIDI lanes is open.
@@ -1456,6 +1457,9 @@ impl App {
     /// Let go of what belongs to the open document (playback, caches, plug-in views).
     fn leave_document(&mut self) {
         self.zone_of = None;
+        self.lock_morph = None;
+        self.lock_active = false;
+        self.lock_plugins = Default::default();
         modulation::register();
         self.stop();
         self.backed_up = false;
