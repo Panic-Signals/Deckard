@@ -14789,7 +14789,7 @@ mod tests {
         // An Audio plug-in playing the take (its length the recording's, in beats), on in
         // the new pattern without notes.
         assert!(pat.notes.iter().all(|x| x.sound != s1));
-        assert_eq!(pat.audio, vec![deckard_model::AudioCue { sound: s1, take: 0 }]);
+        assert_eq!(pat.audio, vec![deckard_model::AudioCue { sound: s1, take: 0, offset: 0 }]);
         assert!(pat.length >= 2 * bar as i64);
         assert_eq!(q.scenes[0].patterns.iter().find(|(g, _)| *g == 0).map(|x| x.1), Some(n), "the scene plays the new pattern");
         let a = q.groups[0].sounds[s1].audio.clone().expect("an Audio plug-in");
@@ -14812,7 +14812,7 @@ mod tests {
         h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(0.5), channels: 1, mode: 2, ticks: bar / 2.0 });
         let q = project_of(&h);
         assert_eq!(q.groups[0].sounds[s2].audio.as_ref().map(|a| (a.takes.len(), a.focused)), Some((2, 1)));
-        assert!(q.groups[0].patterns[n].audio.contains(&deckard_model::AudioCue { sound: s2, take: 1 }));
+        assert!(q.groups[0].patterns[n].audio.contains(&deckard_model::AudioCue { sound: s2, take: 1, offset: 0 }));
 
         // Auto: zones with Maschine's key/velocity ranges and roots, in a free sound
         // when the focused one has no Sampler.

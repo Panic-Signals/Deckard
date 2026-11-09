@@ -7987,7 +7987,7 @@ mod tests {
         snd.sampler = None;
         snd.audio = Some(deckard_model::AudioLoop { takes: vec![take], engine, pitchbend: 0.5, fade: 0.1222, ..Default::default() });
         p.groups[0].patterns[0] =
-            Pattern { length: 8 * PPQ, audio: vec![deckard_model::AudioCue { sound: 0, take: 0 }], ..Default::default() };
+            Pattern { length: 8 * PPQ, audio: vec![deckard_model::AudioCue { sound: 0, take: 0, offset: 0 }], ..Default::default() };
         p.sections = vec![Section { scene: Some(0), length: 16 * PPQ, auto: false }];
         (tmp, p)
     }
