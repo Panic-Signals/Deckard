@@ -96,10 +96,11 @@ fn note_muted(muted: &[Vec<bool>], e: &NoteEvent) -> bool {
     of(e.sound) || e.from.is_some_and(of)
 }
 
-/// An Audio plug-in's loop starting (with this take) or stopping.
+/// An Audio plug-in's loop starting (with this take) or stopping. The `i64` is the shift
+/// in ticks from the cue's tick to the take's first frame (the offset less the pattern's Start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cue {
-    On(usize),
+    On(usize, i64),
     Off,
 }
 
@@ -393,10 +394,10 @@ fn add_clips(p: &Project, t: &mut Timeline) {
     }
 }
 
-/// The take a cue starts (none: it stops).
-fn cue_take(c: Cue) -> Option<usize> {
-    match c {
-        Cue::On(t) => Some(t),
+/// The take a cue starts and the beat its first frame falls on (none: it stops).
+fn cue_take(e: &NoteEvent) -> Option<(usize, f64)> {
+    match e.cue? {
+        Cue::On(t, shift) => Some((t, (e.tick + shift) as f64 / PPQ as f64)),
         Cue::Off => None,
     }
 }
@@ -538,7 +539,7 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
                 expr: None,
                 from: None,
             };
-            out.push(cue(at, Cue::On(c.take)));
+            out.push(cue(at, Cue::On(c.take, c.offset - pat.start)));
             out.push(cue(end, Cue::Off));
         }
         for n in &pat.notes {
@@ -3490,7 +3491,7 @@ impl Engine {
         for k in 0..self.audio_sounds.len() {
             let (g, s) = self.audio_sounds[k];
             let last = self.timeline.events[..self.next].iter().rev().find(|e| e.cue.is_some() && e.group == g && e.sound == s);
-            let cue = last.and_then(|e| cue_take(e.cue?).map(|t| (t, e.tick as f64 / PPQ as f64)));
+            let cue = last.and_then(cue_take);
             if self.link_ahead(g, s).is_some() {
                 self.send_live(g, s, ahead::Ev::Cue(cue.map(|c| c.0), cue.map_or(0.0, |c| c.1)));
             } else if let Some(Some(snd)) = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)) {
@@ -4369,7 +4370,10 @@ impl Engine {
                     return;
                 }
                 let ev = match (e.cue, e.midi) {
-                    (Some(c), _) => ahead::Ev::Cue(cue_take(c), e.tick as f64 / PPQ as f64),
+                    (Some(_), _) => {
+                        let cue = cue_take(&e);
+                        ahead::Ev::Cue(cue.map(|c| c.0), cue.map_or(0.0, |c| c.1))
+                    }
                     (None, Some(kind)) => ahead::Ev::Control(kind),
                     (None, None) => {
                         ahead.next_id += 1;
@@ -5431,11 +5435,11 @@ impl Engine {
     /// the sound's MIDI output.
     fn trigger_with(&mut self, e: NoteEvent, tps: f64, midi_out: bool) {
         // An Audio plug-in's loop starting or stopping (a player ahead has it already).
-        if let Some(c) = e.cue {
+        if e.cue.is_some() {
             if self.link_ahead(e.group, e.sound).is_none()
                 && let Some(Some(s)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound))
             {
-                s.cue(cue_take(c).map(|t| (t, e.tick as f64 / PPQ as f64)));
+                s.cue(cue_take(&e));
             }
             return;
         }
@@ -8057,6 +8061,36 @@ mod tests {
             let ahead = render_with(&p, Some(700), 256, 7.0, |_, _, _| {});
             assert_eq!(marks(&ahead), m, "{engine:?}: rendered ahead, the same");
         }
+    }
+
+    /// Marks of the loop in `audio_project` with the pattern's `start` and the cue's `offset`.
+    fn loop_marks(start: i64, offset: i64, seconds: f64) -> Vec<usize> {
+        let (_tmp, mut p) = audio_project(deckard_model::AudioEngine::Stretch);
+        p.groups[0].patterns[0].start = start;
+        p.groups[0].patterns[0].audio[0].offset = offset;
+        marks(&render_with(&p, None, 256, seconds, |_, _, _| {}))
+    }
+
+    /// Maschine's rule: the loop is where the pattern's Start puts it (Start 2 beats: its
+    /// first frame sounds 2 beats into the pass).
+    #[test]
+    fn a_loop_follows_the_patterns_start() {
+        let m = loop_marks(2 * PPQ, 0, 4.0);
+        assert!(m.first().is_some_and(|&f| f.abs_diff(48_000) < 512), "{m:?}");
+    }
+
+    /// The offset is where the take's first frame sounds: one beat in, then every take.
+    #[test]
+    fn a_loop_starts_at_its_offset() {
+        let m = loop_marks(0, PPQ, 4.0);
+        assert!(m.first().is_some_and(|&f| f.abs_diff(24_000) < 512), "{m:?}");
+        assert!(m.get(1).is_some_and(|&f| f.abs_diff(24_000 + 96_000) < 512), "{m:?}");
+    }
+
+    /// An offset past the take's length wraps: 5 beats on a 4-beat take is 1.
+    #[test]
+    fn an_offset_past_the_take_wraps() {
+        assert_eq!(loop_marks(0, 5 * PPQ, 4.0), loop_marks(0, PPQ, 4.0));
     }
 
     fn render_eight(ahead: Option<u64>, block: usize, seconds: f64) -> Vec<f32> {
