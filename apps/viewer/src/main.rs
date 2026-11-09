@@ -967,8 +967,8 @@ pub struct App {
     /// Auto-write: knob moves while the song plays are written as modulation (the
     /// header's AUTO, the MK3's AUTO).
     auto_write: bool,
-    /// The knob being written as modulation.
-    mod_take: Option<modulation::ModTake>,
+    /// The knobs being written as modulation, one per `(Chain, ModTarget)`.
+    mod_takes: Vec<modulation::ModTake>,
     /// The step the controller's Step Mod page shows (tick, length), while it shows.
     step_mod_at: Option<(i64, i64)>,
     /// An Auto-length pattern growing as it's recorded into.
@@ -1460,6 +1460,7 @@ impl App {
         self.stop();
         self.backed_up = false;
         self.lane_of = None;
+        self.mod_takes.clear();
         // (The mod matrix page's slot being made was the old project's.)
         self.mod_draft = None;
         *self.mod_order.borrow_mut() = Default::default();
@@ -3977,9 +3978,12 @@ impl App {
     /// an ordinary edit.
     fn modulate_at(&mut self, edit: layout::Edit, amount: f32, done: bool, head: Option<(Mode, f64)>) {
         let Some(doc) = self.doc.clone() else { return };
-        let target = modulation::mod_target(edit);
-        let (Some((chain, target)), Some((mode, tick))) = (target, head) else {
-            self.end_mod_take();
+        let Some((chain, target)) = modulation::mod_target(edit) else {
+            layout::apply_acts(self, vec![edit.to_act(amount)]);
+            return;
+        };
+        let Some((mode, tick)) = head else {
+            self.end_mod_take_for(chain, &target);
             layout::apply_acts(self, vec![edit.to_act(amount)]);
             return;
         };
@@ -3992,20 +3996,22 @@ impl App {
             let p = d.project();
             let Some((pi, pos)) = record::pattern_at(p, mode, tick, g) else {
                 drop(d);
-                self.status = "can't write modulation: no pattern of this group is playing".into();
+                layout::apply_acts(self, vec![edit.to_act(amount)]);
                 return;
             };
             let Some(at) = self.knob_travel(p, chain, &target) else { return };
             (pi, pos, (amount as f64 - at).clamp(-1.0, 1.0))
         };
-        // Another knob or pattern: that touch ends.
-        if self.mod_take.as_ref().is_some_and(|t| t.chain != chain || t.target != target || t.pattern != pi) {
-            self.end_mod_take();
+        // If this knob already had an open touch on another pattern, end that touch first.
+        if self.mod_takes.iter().any(|t| t.chain == chain && t.target == target && t.pattern != pi) {
+            self.end_mod_take_for(chain, &target);
         }
-        if self.mod_take.is_none() {
-            doc.borrow_mut().begin_take("Record Modulation");
+        if !self.mod_takes.iter().any(|t| t.chain == chain && t.target == target) {
+            if self.mod_takes.is_empty() {
+                doc.borrow_mut().begin_take("Record Modulation");
+            }
             self.ensure_mod_param(chain, &target);
-            self.mod_take = Some(modulation::ModTake {
+            self.mod_takes.push(modulation::ModTake {
                 chain,
                 target: target.clone(),
                 pattern: pi,
@@ -4013,20 +4019,21 @@ impl App {
                 moved: std::time::Instant::now(),
             });
         }
-        if let Some(take) = self.mod_take.as_mut() {
+        if let Some(take) = self.mod_takes.iter_mut().find(|t| t.chain == chain && t.target == target) {
             take.moved = std::time::Instant::now();
         }
-        self.touch_write(pos, dev);
+        self.touch_write_for(chain, &target, pos, dev);
         if done {
-            self.end_mod_take();
+            self.end_mod_take_for(chain, &target);
         }
     }
 
-    /// The touch going on writes `dev` at `pos`, over what was there since the last
-    /// position it wrote (the points passed over go; over the pattern's end, its end and
-    /// its start).
-    fn touch_write(&mut self, pos: i64, dev: f64) {
-        let (Some(doc), Some(take)) = (self.doc.clone(), self.mod_take.as_mut()) else { return };
+    /// The touch on `(chain, target)` writes `dev` at `pos`, over what was there since the
+    /// last position it wrote (the points passed over go; over the pattern's end, its end
+    /// and its start).
+    fn touch_write_for(&mut self, chain: deckard_doc::Chain, target: &deckard_model::ModTarget, pos: i64, dev: f64) {
+        let Some(doc) = self.doc.clone() else { return };
+        let Some(take) = self.mod_takes.iter_mut().find(|t| t.chain == chain && t.target == *target) else { return };
         let mut d = doc.borrow_mut();
         let (c, t, pi) = (take.chain, take.target.clone(), take.pattern);
         let g = match c {
@@ -4043,33 +4050,59 @@ impl App {
                     .and_then(|_| d.set_modulation(c, &t, pi, (l + 1, (len - 1).max(l + 1)), &[]))
                     .and_then(|_| d.set_modulation(c, &t, pi, (0, pos), &[(pos, dev)]))
             }
-            Some(_) => Ok(()),
+            Some(_) => d.set_modulation(c, &t, pi, (pos, pos), &[(pos, dev)]),
             None => d.set_modulation(c, &t, pi, (pos, pos), &[(pos, dev)]),
         };
-        take.samples.push((pos, dev));
+        if take.samples.last().is_some_and(|s| s.0 == pos) {
+            *take.samples.last_mut().unwrap() = (pos, dev);
+        } else {
+            take.samples.push((pos, dev));
+        }
         if let Err(e) = result {
             self.status = format!("can't write modulation: {e}");
         }
     }
 
-    /// The song at `head` while a knob is touched: still moving (within
-    /// [`record::IDLE`]), it goes on overwriting at its last value as the song passes,
-    /// as the controller lanes do; idle, stopped or in another pattern, the touch ends.
+    /// The song at `head` while knobs are touched: each touch still moving (within
+    /// [`record::IDLE`]) goes on overwriting at its last value as the song passes, as the
+    /// controller lanes do; idle, stopped or in another pattern, that touch ends.
     pub(crate) fn tick_mod_take(&mut self, head: Option<(Mode, f64)>, now: std::time::Instant) {
-        let Some(take) = self.mod_take.as_ref() else { return };
-        let (Some((mode, tick)), Some(doc)) = (head, self.doc.clone()) else { return self.end_mod_take() };
-        if now.duration_since(take.moved) >= record::IDLE {
-            return self.end_mod_take();
+        if self.mod_takes.is_empty() {
+            return;
         }
-        let g = match take.chain {
-            deckard_doc::Chain::Sound(g, _) | deckard_doc::Chain::Group(g) => g,
-            deckard_doc::Chain::Master => return,
-        };
-        let at = record::pattern_at(doc.borrow().project(), mode, tick, g);
-        match (at, take.samples.last()) {
-            (Some((pi, pos)), Some(&(last, dev))) if pi == take.pattern && pos != last => self.touch_write(pos, dev),
-            (Some((pi, _)), _) if pi == take.pattern => {}
-            _ => self.end_mod_take(),
+        let (Some((mode, tick)), Some(doc)) = (head, self.doc.clone()) else { return self.end_mod_take() };
+        let mut writes = Vec::new();
+        let mut ended = Vec::new();
+        {
+            let d = doc.borrow();
+            let p = d.project();
+            for take in &self.mod_takes {
+                if now.duration_since(take.moved) >= record::IDLE {
+                    ended.push((take.chain, take.target.clone()));
+                    continue;
+                }
+                let g = match take.chain {
+                    deckard_doc::Chain::Sound(g, _) | deckard_doc::Chain::Group(g) => g,
+                    deckard_doc::Chain::Master => {
+                        ended.push((take.chain, take.target.clone()));
+                        continue;
+                    }
+                };
+                let at = record::pattern_at(p, mode, tick, g);
+                match (at, take.samples.last()) {
+                    (Some((pi, pos)), Some(&(last, dev))) if pi == take.pattern && pos != last => {
+                        writes.push((take.chain, take.target.clone(), pos, dev));
+                    }
+                    (Some((pi, _)), _) if pi == take.pattern => {}
+                    _ => ended.push((take.chain, take.target.clone())),
+                }
+            }
+        }
+        for (chain, target, pos, dev) in writes {
+            self.touch_write_for(chain, &target, pos, dev);
+        }
+        for (chain, target) in ended {
+            self.end_mod_take_for(chain, &target);
         }
     }
 
@@ -4094,7 +4127,7 @@ impl App {
     /// else at the play position; `None` when it isn't modulated.
     fn mod_position(&self, edit: layout::Edit) -> Option<f64> {
         let (chain, target) = modulation::mod_target(edit)?;
-        if let Some(take) = self.mod_take.as_ref().filter(|t| t.chain == chain && t.target == target)
+        if let Some(take) = self.mod_takes.iter().find(|t| t.chain == chain && t.target == target)
             && let Some(&(_, dev)) = take.samples.last()
         {
             let doc = self.doc.as_ref()?.borrow();
@@ -4114,7 +4147,7 @@ impl App {
             }
             st.auto_write = self.auto_write;
         }
-        if self.mod_take.is_some() && (self.playing.is_none() || (was && !self.auto_write)) {
+        if !self.mod_takes.is_empty() && (self.playing.is_none() || (was && !self.auto_write)) {
             self.end_mod_take();
         }
     }
@@ -4228,14 +4261,34 @@ impl App {
         layout::mod_routes::live_sampler(smp, i, &self.routed_values(g, s, snd))
     }
 
-    /// The knob written as modulation is let go: its movement as few points (when it
-    /// stayed within one pass of the pattern), and the take's one undo step.
-    fn end_mod_take(&mut self) {
-        let Some(take) = self.mod_take.take() else { return };
+    /// Finish the open modulation touch for `(chain, target)`, thinning its run to points
+    /// and closing the undo take once the last active touch ends.
+    fn end_mod_take_for(&mut self, chain: deckard_doc::Chain, target: &deckard_model::ModTarget) {
+        let Some(idx) = self.mod_takes.iter().position(|t| t.chain == chain && t.target == *target) else { return };
+        let take = self.mod_takes.remove(idx);
         let Some(doc) = self.doc.clone() else { return };
         let mut d = doc.borrow_mut();
         if let Err(e) = modulation::write_run(&mut d, take.chain, &take.target, take.pattern, &take.samples) {
             self.status = format!("can't write modulation: {e}");
+        }
+        if self.mod_takes.is_empty() {
+            d.end_take();
+        }
+    }
+
+    /// Finish all open modulation touches: each movement as few points (when it stayed
+    /// within one pass of the pattern), and close the shared undo step.
+    fn end_mod_take(&mut self) {
+        if self.mod_takes.is_empty() {
+            return;
+        }
+        let takes = std::mem::take(&mut self.mod_takes);
+        let Some(doc) = self.doc.clone() else { return };
+        let mut d = doc.borrow_mut();
+        for take in takes {
+            if let Err(e) = modulation::write_run(&mut d, take.chain, &take.target, take.pattern, &take.samples) {
+                self.status = format!("can't write modulation: {e}");
+            }
         }
         d.end_take();
     }
