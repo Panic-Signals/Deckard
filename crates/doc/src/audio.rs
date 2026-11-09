@@ -161,6 +161,13 @@ impl Document {
         })
     }
 
+    /// Move sound `s`'s audio in pattern `p` to start `ticks` from the pattern's start
+    /// (negative: earlier), as one undo step. Errors when the pattern has no audio for it.
+    pub fn set_audio_offset(&mut self, g: usize, p: usize, s: usize, ticks: i64, label: &str) -> Result<(), String> {
+        let ops = self.audio_offset_ops(g, p, s, ticks)?;
+        if ops.is_empty() { Ok(()) } else { self.apply(label, ops) }
+    }
+
     /// In each of `patterns`, sound `s`'s Audio plug-in plays take `take` (none: it's
     /// off there), as one undo step.
     pub fn set_audio_in(&mut self, g: usize, s: usize, patterns: &[usize], take: Option<usize>, label: &str) -> Result<(), String> {
@@ -214,7 +221,7 @@ mod tests {
             assert!((a.takes[0].tempo(112_596, 44_100) - 94.0).abs() < 0.01);
             assert_eq!(a.takes[0].play_range, (0, 112_596));
             assert_eq!((a.mode, a.engine), (AudioMode::Loop, AudioEngine::Formant));
-            assert_eq!(d.project().groups[g].patterns[0].audio, [AudioCue { sound: s, take: 0 }]);
+            assert_eq!(d.project().groups[g].patterns[0].audio, [AudioCue { sound: s, take: 0, offset: 0 }]);
         };
         look(&d);
         let path = dir.join("audio.mxprj");
@@ -284,13 +291,70 @@ mod tests {
         assert_eq!(snd.instrument, "AudioModule");
         assert_eq!(snd.slots.len(), 1);
         assert_eq!(snd.audio.as_ref().unwrap().takes.len(), 2);
-        assert_eq!(p.groups[g].patterns[0].audio, [AudioCue { sound: s, take: 0 }]);
+        assert_eq!(p.groups[g].patterns[0].audio, [AudioCue { sound: s, take: 0, offset: 0 }]);
         assert!(p.groups[g].patterns[1].audio.is_empty());
-        assert_eq!(p.groups[g].patterns[2].audio, [AudioCue { sound: s, take: 1 }]);
+        assert_eq!(p.groups[g].patterns[2].audio, [AudioCue { sound: s, take: 1, offset: 0 }]);
         assert_eq!(p.groups[g].patterns[0].notes, [other], "only the bounced sound's notes go");
         assert!(p.groups[g].patterns[2].notes.is_empty());
         assert_eq!(d.undo_labels().first().copied(), Some("Bounce"));
         d.undo();
         assert_eq!(d.project().groups[g], before.groups[g], "one undo step");
+    }
+
+    /// A sound with one take on in pattern 0 of group 0, sound 3.
+    fn with_audio() -> Document {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, usize::MAX, "Pattern 1").unwrap();
+        assert!(d.audio_only(0, 3).unwrap());
+        let spec = |n: &str| TakeSpec { file: std::path::PathBuf::from(n), frames: 88_200, rate: 44_100, beats: 4.0 };
+        d.set_takes(0, 3, &[spec("a.wav"), spec("b.wav")], "Load").unwrap();
+        d.set_audio_in(0, 3, &[0], Some(0), "Load").unwrap();
+        d
+    }
+
+    fn offset(d: &Document) -> i64 {
+        d.project().groups[0].patterns[0].audio[0].offset
+    }
+
+    #[test]
+    fn an_audio_offset_is_set_and_undone() {
+        let mut d = with_audio();
+        assert_eq!(offset(&d), 0);
+        d.set_audio_offset(0, 0, 3, 1920, "Move Audio").unwrap();
+        assert_eq!(offset(&d), 1920);
+        assert_eq!(d.undo_labels().first().copied(), Some("Move Audio"));
+        assert!(d.undo());
+        assert_eq!(offset(&d), 0);
+        assert!(d.redo());
+        assert_eq!(offset(&d), 1920);
+        d.set_audio_offset(0, 0, 3, 0, "Move Audio").unwrap();
+        assert_eq!(offset(&d), 0);
+        assert!(d.set_audio_offset(0, 0, 2, 5, "Move Audio").is_err(), "no audio for that sound");
+    }
+
+    #[test]
+    fn an_audio_offset_survives_save_and_reopen() {
+        let mut d = with_audio();
+        d.set_audio_offset(0, 0, 3, -960, "Move Audio").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("offset.mxprj");
+        d.save_as(&path).unwrap();
+        assert_eq!(offset(&Document::open(&path).unwrap()), -960);
+        let bytes = std::fs::read(&path).unwrap();
+        let archive = mxprj::Project::parse(&bytes).unwrap().decode(&mxprj::types::Types::new()).unwrap();
+        let mut found = false;
+        archive.walk_paths(&mut |o, _| found |= o.fields.iter().any(|(f, _)| f.starts_with("deckard:")));
+        assert!(!found, "Maschine's archive has no DECKARD field");
+    }
+
+    #[test]
+    fn switching_the_take_resets_the_offset() {
+        let mut d = with_audio();
+        d.set_audio_offset(0, 0, 3, 1920, "Move Audio").unwrap();
+        d.set_audio_in(0, 3, &[0], Some(0), "Same").unwrap();
+        assert_eq!(offset(&d), 1920, "the same take keeps it");
+        d.set_audio_in(0, 3, &[0], Some(1), "Switch").unwrap();
+        assert_eq!(d.project().groups[0].patterns[0].audio[0].take, 1);
+        assert_eq!(offset(&d), 0);
     }
 }
