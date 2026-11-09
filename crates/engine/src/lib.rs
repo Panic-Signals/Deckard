@@ -2077,7 +2077,7 @@ pub struct Engine {
     /// [`Engine::new_after`]); and whether to keep its timelines.
     reuse: Vec<Vec<Option<Reuse>>>,
     keep_timeline: bool,
-    group_swaps: Vec<(usize, usize)>,
+    group_swaps: Vec<(usize, usize, Option<usize>)>,
     tap_block: Vec<f32>,
     /// Sounds' effect chains, `[group][sound]`.
     fx: Vec<Vec<Option<FxChain>>>,
@@ -2948,8 +2948,8 @@ impl Engine {
     #[must_use = "drop the replaced parts off the audio thread"]
     pub fn adopt_with(&mut self, fresh: Engine, timelines: &mut Timelines) -> Engine {
         let mut fresh = fresh;
-        for (a, b) in fresh.group_swaps.drain(..) {
-            self.swap_group_runtime(a, b);
+        for (a, b, keep) in fresh.group_swaps.drain(..) {
+            self.swap_group_runtime(a, b, keep);
         }
         self.forward_edits(&mut fresh);
         self.keep_parts(&mut fresh);
