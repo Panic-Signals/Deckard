@@ -124,6 +124,8 @@ mod surface_lfo;
 #[cfg(test)]
 mod surface_lfo_tests;
 #[cfg(test)]
+mod surface_mixer_tests;
+#[cfg(test)]
 mod surface_repeat_tests;
 mod surface_sampling;
 #[cfg(test)]
@@ -2199,10 +2201,7 @@ impl App {
             C::Splice => splice::open(ctx, None),
             C::About => self.about = Some(about::State::open()),
             C::Preferences => self.prefs = Some(self.prefs.unwrap_or(0)),
-            C::Mixer => {
-                self.mixer = !self.mixer;
-                self.lfos &= !self.mixer;
-            }
+            C::Mixer => self.set_mixer(!self.mixer),
         }
     }
 
@@ -4653,6 +4652,12 @@ impl App {
         }
     }
 
+    /// Maschine's scripts are showing their Mixer page, when that page id exists.
+    fn hardware_shows_mixer(host: &deckard_lua_host::Host) -> Option<bool> {
+        let page = host.constant("NI.HW.PAGE_MIXER").ok()?;
+        Some(host.state.borrow().hw.page_stack.last().copied() == Some(page))
+    }
+
     /// The MK3's events since the last frame, to the layer that runs it (Maschine's
     /// scripts, or DECKARD's own): what the pads play, the lights and new screens.
     /// Hardware-free, so tests drive it with made-up events.
@@ -4674,11 +4679,17 @@ impl App {
             }
             t
         };
-        if let Some(Ok(c)) = &mut self.controller {
+        let mut mixer_on = None;
+        let out = if let Some(Ok(c)) = &mut self.controller {
             for e in events {
                 match e {
                     Event::Button(name, down) => {
                         c.hold(name, down, requests);
+                        // Maschine's own scripts: MIX shows their mixer page. Follow it
+                        // in the window. DECKARD's layer does this with MixerView.
+                        if down && name == "BUTTON_MIX" {
+                            mixer_on = Self::hardware_shows_mixer(&c.host);
+                        }
                         if log_knobs() {
                             let top = c.host.state.borrow().hw.page_stack.last().copied();
                             eprintln!("button {name} {} (page {top:?})", if down { "down" } else { "up" });
@@ -4780,7 +4791,11 @@ impl App {
                 leds: self.surface.leds(&view),
                 screens: self.surface.screen_picture(&view).map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))),
             }
+        };
+        if let Some(on) = mixer_on {
+            self.set_mixer(on);
         }
+        out
     }
 
     /// The focused built-in EQ, as the right screen draws it.
@@ -5185,6 +5200,12 @@ impl App {
         Some(self.section.map_or(0, |i| i.min(last)))
     }
 
+    /// The software Mixer. Opening it closes the LFO panel, which shares its place.
+    pub(crate) fn set_mixer(&mut self, on: bool) {
+        self.mixer = on;
+        self.lfos &= !self.mixer;
+    }
+
     pub(crate) fn surface_act(&mut self, a: deckard_surface::Action) {
         use deckard_doc::Target;
         use deckard_lua_host::state::ControlRequest as R;
@@ -5304,6 +5325,7 @@ impl App {
                 layout::apply_acts(self, vec![a]);
             }
             A::SongView(on) => self.song_view = on,
+            A::MixerView(on) => self.set_mixer(on),
             A::FocusSection(i) => {
                 if project(self).is_some_and(|p| i < p.sections.len()) {
                     self.launch_section(i);

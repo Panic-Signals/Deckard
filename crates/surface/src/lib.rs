@@ -887,6 +887,8 @@ pub enum Action {
     SceneEdit(&'static str),
     /// ARRANGE shows the Song view (else the Ideas view).
     SongView(bool),
+    /// MIX shows the software's Mixer view (else closes it).
+    MixerView(bool),
     /// Focus section `.0` (while the song plays, it plays next).
     FocusSection(usize),
     /// The Song view's edits of the focused section: `create` (a new one after it),

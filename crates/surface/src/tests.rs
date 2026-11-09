@@ -2868,7 +2868,7 @@ fn shift_solo_opens_the_mod_matrix() {
     assert_eq!(s.page(), "lfo");
     press(&mut s, &v, "BUTTON_SOLO");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
-    assert_eq!(press(&mut s, &v, "BUTTON_MIX"), [Action::ModSlotsClosed], "the Mixer in its place");
+    assert_eq!(press(&mut s, &v, "BUTTON_MIX"), [Action::ModSlotsClosed, Action::MixerView(true)], "the Mixer in its place");
     assert_eq!(s.page(), "mixer");
     assert_eq!(s.error(), None);
 }

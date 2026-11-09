@@ -1234,10 +1234,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.chain_pages.entry(c).or_default().slot_pages.insert(i, n);
             }
             Act::Preferences => app.prefs = Some(app.prefs.unwrap_or(0)),
-            Act::ToggleMixer => {
-                app.mixer = !app.mixer;
-                app.lfos &= !app.mixer;
-            }
+            Act::ToggleMixer => app.set_mixer(!app.mixer),
             Act::ToggleLfos => {
                 app.lfos = !app.lfos;
                 app.mixer &= !app.lfos;
