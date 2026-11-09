@@ -128,6 +128,8 @@ mod surface_repeat_tests;
 mod surface_sampling;
 #[cfg(test)]
 mod surface_sampling_tests;
+#[cfg(test)]
+mod surface_select_tests;
 mod surface_settings;
 #[cfg(test)]
 mod surface_settings_tests;
@@ -858,6 +860,8 @@ pub struct App {
     group: usize,
     pattern: usize,
     sound: usize,
+    /// SELECT's other sounds in the focused group (the focused one is always selected).
+    sound_selection: Vec<usize>,
     scene: usize,
     /// The section picked in the Song view: the song plays from it, or jumps to it
     /// when the playing section ends.
@@ -3653,9 +3657,57 @@ impl App {
     fn focus_group(&mut self, group: usize) {
         if group != self.group {
             self.group = group;
-            self.sound = 0;
+            self.focus_sound(0);
             self.pattern = self.scene_pattern(group).unwrap_or(0);
         }
+    }
+
+    /// Focus a sound. A plain focus replaces SELECT's set with that one sound.
+    fn focus_sound(&mut self, sound: usize) {
+        self.sound = sound;
+        self.sound_selection.clear();
+    }
+
+    fn group_len(&self) -> usize {
+        self.doc.as_ref().and_then(|d| d.borrow().project().groups.get(self.group).map(|g| g.sounds.len())).unwrap_or(0)
+    }
+
+    /// SELECT + a pad. MULTI off replaces the set, or only moves the focus when the pad
+    /// is already selected. MULTI on adds a pad, or removes one that isn't the focus.
+    fn select_pad(&mut self, index: usize, multi: bool) {
+        let n = self.group_len();
+        if index >= n {
+            return;
+        }
+        let selected = index == self.sound || self.sound_selection.contains(&index);
+        if multi {
+            if selected {
+                if index != self.sound {
+                    self.sound_selection.retain(|s| *s != index);
+                }
+            } else {
+                self.sound_selection.push(index);
+            }
+        } else if selected {
+            if index != self.sound && !self.sound_selection.contains(&self.sound) {
+                self.sound_selection.push(self.sound);
+            }
+            self.sound = index;
+        } else {
+            self.sound = index;
+            self.sound_selection.clear();
+        }
+    }
+
+    /// SELECT + ALL: every sound of the focused group, focus unchanged.
+    fn select_all_sounds(&mut self) {
+        let n = self.group_len();
+        self.sound_selection = (0..n).filter(|&s| s != self.sound).collect();
+    }
+
+    /// SELECT + NONE: only the focused sound stays selected.
+    fn select_no_sounds(&mut self) {
+        self.sound_selection.clear();
     }
 
     /// The pattern `group` plays in the focused scene.
@@ -4533,7 +4585,7 @@ impl App {
                 // The scripts focus the sound (or not: Pad mode's Focus is Pinned).
                 controller::Request::Note(g, s) => self.note(g, s),
                 controller::Request::FocusGroup(g) => self.focus_group(g),
-                controller::Request::FocusSound(s) => self.sound = s,
+                controller::Request::FocusSound(s) => self.focus_sound(s),
                 controller::Request::LaunchScene(s) => self.launch_scene(s),
                 controller::Request::Bounce(g, s) => self.request_bounce(g, s),
                 controller::Request::LaunchSection(s) => self.launch_section(s),
@@ -5168,6 +5220,7 @@ impl App {
                                 touch_min: i64::from(snd.pad_touch.min),
                                 touch_max: i64::from(snd.pad_touch.max),
                                 prob_locked: snd.probability_locked,
+                                selected: g == self.group && (s == self.sound || self.sound_selection.contains(&s)),
                             }
                         })
                         .collect(),
@@ -5213,7 +5266,10 @@ impl App {
             A::Volume(level) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, level)]),
             A::VolumeDb(db) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, deckard_model::level_from_db(db))]),
             A::FocusGroup(group) => self.focus_group(group),
-            A::FocusSound(s) => self.sound = s,
+            A::FocusSound(s) => self.focus_sound(s),
+            A::SelectPad { index, multi } => self.select_pad(index, multi),
+            A::SelectAllSounds => self.select_all_sounds(),
+            A::SelectNoSounds => self.select_no_sounds(),
             A::FocusScene(scene) => {
                 if project(self).is_some_and(|p| scene < p.scenes.len()) {
                     self.launch_scene(scene);

@@ -420,6 +420,8 @@ pub struct SoundView {
     pub touch_max: i64,
     /// PROB LOCK: its notes' chances rolled once and kept.
     pub prob_locked: bool,
+    /// SELECT has it in the selection (the focused sound always is).
+    pub selected: bool,
 }
 
 /// A scene: its name and palette colour.
@@ -623,6 +625,16 @@ pub enum Action {
     FocusGroup(usize),
     /// Focus sound `.0` of the focused group.
     FocusSound(usize),
+    /// SELECT + a pad. `multi` is Button 8: on, the pad joins or leaves the selection
+    /// and the focus stays; off, an unselected pad becomes the only one selected.
+    SelectPad {
+        index: usize,
+        multi: bool,
+    },
+    /// SELECT + ALL: every sound of the focused group, focus unchanged.
+    SelectAllSounds,
+    /// SELECT + NONE: only the focused sound stays selected.
+    SelectNoSounds,
     /// Mute or unmute group `.0` (or sound `.0` of the focused group); solo it.
     MuteGroup(usize),
     SoloGroup(usize),

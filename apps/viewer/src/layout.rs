@@ -97,6 +97,11 @@ fn dim(c: Color32, f: f32) -> Color32 {
     Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
 }
 
+/// A sound row that SELECT has, besides the focused one.
+fn sound_base(app: &App, sound: usize) -> Color32 {
+    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { S00 }
+}
+
 /// A colour slot; `Default` falls back to `default_slot` (our guess at Maschine's
 /// default, two slots per index).
 fn palette(c: Color, default_slot: usize) -> Color32 {
@@ -885,12 +890,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::FocusGroup(g) => app.focus_group(g),
             Act::FocusPattern(g, p) => {
                 if g != app.group {
-                    app.sound = 0;
+                    app.focus_sound(0);
                 }
                 app.group = g;
                 app.pattern = p;
             }
-            Act::FocusSound(s) => app.sound = s,
+            Act::FocusSound(s) => app.focus_sound(s),
             Act::SongView(v) => app.song_view = v,
             Act::PianoRoll(v) => app.piano_roll = v,
             Act::ScenesShown => app.show_scenes = None,
@@ -5586,7 +5591,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 r == app.sound,
                 sound.is_some_and(|s| s.muted),
                 app.lit.contains(&(app.group, r)),
-                S00,
+                sound_base(app, r),
                 app.meter(app.group, Some(r)),
             );
             if r < group.sounds.len() {
@@ -5931,7 +5936,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             r == app.sound,
             sound.is_some_and(|s| s.muted),
             app.lit.contains(&(app.group, r)),
-            S00,
+            sound_base(app, r),
             app.meter(app.group, Some(r)),
         );
         if r < group.sounds.len() {

@@ -283,6 +283,7 @@ and `positions`.
 | `deckard.volume_db(db)` | The master level in dB (at most +10). |
 | `deckard.focus_group(g)`, `deckard.mute_group(g)`, `deckard.solo_group(g)` | Group `g`. |
 | `deckard.focus_sound(s)`, `deckard.mute_sound(s)`, `deckard.solo_sound(s)` | Sound `s` of the focused group. |
+| `deckard.select_pad(s, multi)`, `deckard.select_all_sounds()`, `deckard.select_no_sounds()` | SELECT mode. `multi` off: an unselected pad becomes the only one selected; an already selected pad only takes the focus. `multi` on: an unselected pad joins and a selected one leaves, unless it is the focus. ALL selects every sound; NONE leaves the focus. |
 | `deckard.erase_sound(s)` | Erase sound `s`'s notes from the focused pattern. |
 | `deckard.prob_lock(on)` | PROB LOCK of the focused sound: on, its notes' chances are rolled once and kept every pass. |
 | `deckard.reset_sound(s)` | Remove sound `s` of the focused group: an empty "Sound N" in its place, its notes gone (SHIFT + ERASE + its pad). |
