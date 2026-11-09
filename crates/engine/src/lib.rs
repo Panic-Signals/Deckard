@@ -4451,8 +4451,9 @@ impl Engine {
                     r.press(group, sound, pitch, velocity);
                     return;
                 }
-                Live::NoteRelease { group, sound, pitch } => {
-                    r.release(group, sound, pitch);
+                // Only the keys it took: a keyboard's NoteIn never goes to it, so its
+                // release must still end the note (else it hangs until the transport stops).
+                Live::NoteRelease { group, sound, pitch } if r.release(group, sound, pitch) => {
                     return;
                 }
                 Live::RepeatPressure { group, sound, pitch, velocity } => {
@@ -11628,6 +11629,19 @@ mod tests {
         e.play_live(Live::NoteRelease { group: 0, sound: 0, pitch: 60 });
         let got: Vec<Vec<u8>> = rx.try_iter().map(|m| m.bytes().to_vec()).collect();
         assert_eq!(got, vec![vec![0x82, 60, 64]]);
+    }
+
+    /// With Note Repeat / the Arp on, a keyboard's key (which never goes into the
+    /// repeater) still ends on its release, not when the transport stops.
+    #[test]
+    fn keyboard_release_ends_its_note_while_note_repeat_is_on() {
+        let (mut e, rx) = expr_engine(deckard_model::Expression::default(), PPQ);
+        e.set_repeat(Some((deckard_model::Arp { rate: 240, gate: 0.5, ..Default::default() }, repeat::RepeatMode::Arp)));
+        e.play_live(Live::NoteIn { group: 0, sound: 0, pitch: 60, velocity: 90, thru: true });
+        rx.try_iter().count();
+        e.play_live(Live::NoteRelease { group: 0, sound: 0, pitch: 60 });
+        let got: Vec<Vec<u8>> = rx.try_iter().map(|m| m.bytes().to_vec()).collect();
+        assert!(got.iter().any(|m| m[0] & 0xf0 == 0x80 && m[1] == 60), "the key's note-off: {got:?}");
     }
 
     /// A recorded note's pressure plays out with it as poly aftertouch on its key,
