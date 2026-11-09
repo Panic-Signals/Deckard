@@ -1541,7 +1541,13 @@ fn sound(ix: &Index, s: &Obj, config: Option<&Obj>, t: &Targets) -> Sound {
         *v = param_i64(s, field).unwrap_or(0);
     }
     c.midi_source = "Default".into();
-    c.dest = AudioDest::Parent;
+    c.audio_in = param(s, "audio_input").and_then(|v| ix.obj(v)).map_or(AudioSource::None, |v| audio_source(ix, v, t));
+    c.dest = param(s, "audio_output").and_then(|v| ix.obj(v)).map_or(AudioDest::Parent, |v| audio_dest(ix, v, t));
+    c.aux_dest = [
+        param(s, "aux1_output").and_then(|v| ix.obj(v)).map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
+        param(s, "aux2_output").and_then(|v| ix.obj(v)).map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
+    ];
+    c.midi_out = param(s, "event_output").and_then(|v| ix.obj(v)).map_or(MidiDest::None, |v| midi_dest(ix, v, t));
     let Some(cfg) = config else { return snd };
     let int = |k: &str| int_field(cfg, k);
     let float = |k: &str| match cfg.get(k) {
@@ -1554,16 +1560,24 @@ fn sound(ix: &Index, s: &Obj, config: Option<&Obj>, t: &Targets) -> Sound {
     }
     c.midi_channel = int("midi_channel").unwrap_or(c.midi_channel);
     c.midi_thru = int("midi_thru").map_or(c.midi_thru, |v| v != 0);
-    c.audio_in = obj("audio_input").map_or(AudioSource::None, |v| audio_source(ix, v, t));
+    if let Some(v) = obj("audio_input") {
+        c.audio_in = audio_source(ix, v, t);
+    }
     c.input_gain = float("input_gain").unwrap_or(c.input_gain);
-    c.dest = obj("audio_output").map_or(AudioDest::Parent, |v| audio_dest(ix, v, t));
+    if let Some(v) = obj("audio_output") {
+        c.dest = audio_dest(ix, v, t);
+    }
     c.audio_mute = int("audio_mute").map_or(c.audio_mute, |v| v != 0);
-    c.aux_dest = [
-        obj("aux1_output").map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
-        obj("aux2_output").map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
-    ];
+    if let Some(v) = obj("aux1_output") {
+        c.aux_dest[0] = audio_dest(ix, v, t);
+    }
+    if let Some(v) = obj("aux2_output") {
+        c.aux_dest[1] = audio_dest(ix, v, t);
+    }
     c.aux_pre = [int("aux1_order").map_or(c.aux_pre[0], |v| v == 1), int("aux2_order").map_or(c.aux_pre[1], |v| v == 1)];
-    c.midi_out = obj("event_output").map_or(MidiDest::None, |v| midi_dest(ix, v, t));
+    if let Some(v) = obj("event_output") {
+        c.midi_out = midi_dest(ix, v, t);
+    }
     c.midi_out_channel = int("midi_out_channel").unwrap_or(c.midi_out_channel);
     c.transpose = int("transpose").unwrap_or(c.transpose);
     for (field, v) in [

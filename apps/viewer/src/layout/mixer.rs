@@ -66,8 +66,9 @@ struct Strip {
     slots: Vec<deckard_model::SlotInfo>,
     /// Routing selectors: audio in, MIDI in, main output, aux 1, aux 2, MIDI out.
     io: [Option<IoField>; 6],
-    /// Aux 1 and 2 send levels.
+    /// Aux 1 and 2 send levels and Pre/Post order.
     aux: [f64; 2],
+    aux_pre: [bool; 2],
     /// An extra output's mode menu (see [`mode_field`]).
     mode: Option<IoField>,
 }
@@ -408,6 +409,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             slots: Vec::new(),
             io: [None, None, Some(strip_out_field(&ctx, i)), None, None, None],
             aux: [0.0; 2],
+            aux_pre: [false; 2],
             mode: Some(mode_field(x, i)),
         }
     };
@@ -432,6 +434,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     slots: snd.slots.clone(),
                     io: io_fields(&ctx, Level::Sound(app.group, s)),
                     aux: snd.aux,
+                    aux_pre: snd.channel.aux_pre,
                     mode: None,
                 });
             }
@@ -455,6 +458,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 slots: gr.slots.clone(),
                 io: io_fields(&ctx, Level::Group(g)),
                 aux: gr.aux,
+                aux_pre: gr.channel.aux_pre,
                 mode: None,
             });
         }
@@ -491,6 +495,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             slots: gr.slots.clone(),
             io: io_fields(&ctx, Level::Group(app.group)),
             aux: gr.aux,
+            aux_pre: gr.channel.aux_pre,
             mode: None,
         }
     } else {
@@ -511,6 +516,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             slots: p.master_slots.clone(),
             io: io_fields(&ctx, Level::Master),
             aux: [0.0; 2],
+            aux_pre: [false; 2],
             mode: None,
         }
     };
@@ -912,6 +918,35 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                 &format!("{:.1}", deckard_model::level_db(v)),
                 acts,
             );
+            // Pre/Post toggle under the Aux row when an Aux destination is assigned.
+            if st.io[3 + k].as_ref().is_some_and(|f| f.cur > 0 && f.cur != usize::MAX) {
+                let ord_r = Rect::from_min_size(Pos2::new(row.left(), row.bottom() + 1.0), Vec2::new(row.width(), 11.0));
+                let pre = st.aux_pre[k];
+                let ord_resp = ui.interact(vis(ord_r), id.with(("aux-order", k)), Sense::click()).on_hover_text(format!(
+                    "Aux {} order: {} (click to toggle Pre/Post fader)",
+                    k + 1,
+                    if pre { "Pre" } else { "Post" }
+                ));
+                let fill = if pre {
+                    st.color.gamma_multiply(0.35)
+                } else if ord_resp.hovered() {
+                    S03
+                } else {
+                    S01
+                };
+                painter.rect_filled(ord_r, 1.5, fill);
+                painter.text(
+                    ord_r.center(),
+                    Align2::CENTER_CENTER,
+                    if pre { "Pre" } else { "Post" },
+                    font(9.0),
+                    if pre { white(245) } else { white(150) },
+                );
+                if ord_resp.clicked() {
+                    let field = if k == 0 { "aux1_order" } else { "aux2_order" };
+                    acts.push(Act::SetParam(t, field, if pre { 0.0 } else { 1.0 }));
+                }
+            }
         }
         bottom = aux_top;
     }
@@ -1777,5 +1812,26 @@ mod tests {
                 assert!(t.starts_with('D') && t.ends_with('2') && t.matches('…').count() == 1, "{t}");
             }
         }
+    }
+
+    #[test]
+    fn assigned_aux_send_shows_pre_post_toggle_in_mixer() {
+        let mut app = app_with(Vec::new());
+        app.mixer_sections.extended = true;
+        app.mixer_sections.aux = true;
+        app.mixer_sounds = true;
+        app.group = 0;
+        let doc = app.doc.clone().unwrap();
+        doc.borrow_mut().set_sound_route(0, 0, deckard_doc::SoundRoute::Aux(0, AudioDest::Group(1))).unwrap();
+        let mut h = harness(app);
+        assert!(h.state().text.contains("|Post|"), "{}", h.state().text);
+        let r = h.state().strips.iter().find(|(c, _)| *c == Channel::Sound(0, 0)).unwrap().1;
+        // Aux 1 order toggle sits at bottom - 62 + 3 + 17 + 1 .. + 11.
+        let ord_pos = egui::pos2(r.center().x, r.bottom() - 62.0 + 3.0 + 18.0 + 5.5);
+        clicks(&mut h, ord_pos, 1);
+        assert!(h.state().app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].channel.aux_pre[0]);
+        assert!(h.state().text.contains("|Pre|"), "{}", h.state().text);
+        clicks(&mut h, ord_pos, 1);
+        assert!(!h.state().app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].channel.aux_pre[0]);
     }
 }

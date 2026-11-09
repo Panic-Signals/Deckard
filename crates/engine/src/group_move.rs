@@ -52,7 +52,7 @@ impl Engine {
             lfo.lfo.trigger = lfo.lfo.trigger.map(|(g, s)| (moved(g, a, b), s));
         }
         macro_rules! swap { ($($field:ident),*) => { $(if self.$field.len() > a.max(b) { self.$field.swap(a,b); })* }; }
-        swap!(sounds, instruments, fx, buses, bufs, midi_inputs, live_hint, reuse);
+        swap!(sounds, instruments, fx, buses, bufs, sound_aux, group_aux, midi_inputs, live_hint, reuse);
         if let Some(ahead) = &mut self.ahead {
             if ahead.links.len() > a.max(b) {
                 ahead.links.swap(a, b);
