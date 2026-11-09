@@ -2229,6 +2229,12 @@ pub struct Engine {
     lfos: Vec<lfo_rt::LfoRt>,
     /// The project's CC routes ([`lfo_rt::CcRt`]).
     cc_routes: Vec<lfo_rt::CcRt>,
+    /// The project's CV routes ([`lfo_rt::CvRt`]).
+    cv_routes: Vec<lfo_rt::CvRt>,
+    /// The output channels that are CV only (bits: channel 0 is bit 0).
+    cv_channels: u32,
+    /// Frames the CV outputs still glide for, after a jump in their LFOs.
+    cv_smooth_left: u32,
     /// Ticks before the timeline's start on the song's clock (an export of later
     /// sections), for synced LFOs.
     pub song_offset: f64,
@@ -2986,6 +2992,9 @@ impl Engine {
                 .collect(),
             lfos: lfo_rt::lfos_of(project),
             cc_routes: lfo_rt::ccs_of(project),
+            cv_routes: lfo_rt::cvs_of(project),
+            cv_channels: 0,
+            cv_smooth_left: 0,
             song_offset: 0.0,
             lfo_clock: lfo_rt::LfoClock::default(),
             silent: project.groups.iter().map(|g| vec![false; g.sounds.len()]).collect(),
@@ -3104,6 +3113,7 @@ impl Engine {
         std::mem::swap(&mut self.modded_plugins, &mut fresh.modded_plugins);
         self.adopt_lfos(&mut fresh);
         self.adopt_ccs(&mut fresh);
+        self.adopt_cvs(&mut fresh);
         // Notes held by plug-ins that are gone or muted now end.
         let kept = |p: &Shared| fresh.instruments.iter().flatten().flatten().any(|i| !i.muted && Arc::ptr_eq(&i.plugin, p));
         for i in self.instruments.iter().flatten().flatten() {
@@ -4941,6 +4951,12 @@ impl Engine {
             if let Some(at) = self.note_offs.iter().map(|o| o.0).min() {
                 until = until.min(at.saturating_sub(self.time).max(1));
             }
+            // (A note sent out over MIDI has no note-off here; CV follows its envelope by the frame.)
+            if self.cv_channels != 0
+                && let Some(at) = self.lfo_note_end()
+            {
+                until = until.min(at - self.time);
+            }
             // Notes playing expression out: often enough to follow their curves.
             if self.midi_offs.iter().any(|n| n.expr.is_some() && n.at > self.time) {
                 until = until.min(self.expr_step());
@@ -4992,6 +5008,7 @@ impl Engine {
             // On the cue bus's output; one the interface hasn't: the master's.
             let on_ext = self.cue.clicks_route.0.and_then(|n| ext.get_mut(n)?.get_mut(at + done * 2..at + (done + part) * 2));
             self.cue.finish(part, on_ext.unwrap_or(&mut out[done * 2..(done + part) * 2]));
+            self.write_cv(ext, at + done * 2, part);
             self.clock_span(until as u64);
             if self.sequencing {
                 self.frame += until as u64;
@@ -8763,6 +8780,220 @@ mod tests {
         assert!(*stopped.lock().unwrap());
         blocks(&mut new, 1);
         assert!(!seen.lock().unwrap().is_empty());
+    }
+
+    /// CV routes written into the outputs ([`lfo_rt::CvRt`]), at 1 kHz.
+    mod cv {
+        use super::*;
+        use deckard_model::lfo::{Lfo, Shape};
+        use deckard_model::mod_matrix::{CvRoute, ModSource};
+
+        const FRAMES: usize = 64;
+
+        /// A free-running 1 Hz Saw on pad 1.
+        fn saw() -> Lfo {
+            Lfo { shape: Shape::Saw, sync: false, hz: 1.0, ..Lfo::new(1) }
+        }
+
+        /// A route from LFO 1 to `channel`, swinging `low` to `high`.
+        fn route(channel: u8, low: f32, high: f32) -> CvRoute {
+            CvRoute { low, high, ..CvRoute::new(ModSource::Lfo(1), channel) }
+        }
+
+        fn engine(lfo: Lfo, routes: Vec<CvRoute>, mask: u32) -> (tempfile::TempDir, Project, Engine) {
+            let (tmp, mut p) = lfo_project(1, vec![lfo]);
+            p.cv_routes = routes;
+            let mut cache = SampleCache::default();
+            let (mut e, _) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+            e.set_cv_channels(mask);
+            (tmp, p, e)
+        }
+
+        /// `frames` more, in one call, on 16 outputs full of `fill`.
+        fn run_over(e: &mut Engine, frames: usize, fill: f32) -> Vec<Vec<f32>> {
+            let mut out = vec![0f32; frames * 2];
+            let mut ext = vec![vec![fill; frames * 2]; 16];
+            e.process_outputs(&mut out, &mut ext);
+            ext
+        }
+
+        fn run(e: &mut Engine, frames: usize) -> Vec<Vec<f32>> {
+            run_over(e, frames, 0.0)
+        }
+
+        /// Channel 2's frames (Out 2's left).
+        fn left(ext: &[Vec<f32>]) -> Vec<f32> {
+            ext[1].iter().step_by(2).copied().collect()
+        }
+
+        #[test]
+        fn cv_is_written_per_frame_not_per_span() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            let v = left(&run(&mut e, FRAMES));
+            assert_eq!(v.len(), FRAMES);
+            for n in 1..FRAMES {
+                assert!((v[n] - v[n - 1] - 2.0 / 1000.0).abs() < 1e-5, "frame {n}: {} then {}", v[n - 1], v[n]);
+            }
+        }
+
+        #[test]
+        fn cv_overwrites_audio_on_its_channel() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            let ext = run_over(&mut e, FRAMES, 0.9);
+            assert_ne!(ext[1][0], 0.9);
+            assert_eq!(ext[1][0], -1.0);
+            assert_eq!(ext[1][1], 0.9, "the other side of the pair isn't CV only");
+        }
+
+        #[test]
+        fn a_cv_only_channel_without_a_route_is_silent() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b1100);
+            let ext = run_over(&mut e, FRAMES, 0.9);
+            assert_eq!(ext[1][1], 0.0);
+            assert_eq!(ext[1][FRAMES * 2 - 1], 0.0);
+        }
+
+        #[test]
+        fn a_muted_source_sits_at_low() {
+            let (_tmp, _p, mut e) = engine(Lfo { muted: true, ..saw() }, vec![route(2, -0.5, 0.5)], 0b100);
+            assert!(left(&run(&mut e, FRAMES)).iter().all(|&v| v == -0.5));
+        }
+
+        #[test]
+        fn an_unmarked_channel_gets_no_cv_and_is_flagged() {
+            let (_tmp, p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0);
+            let ext = run_over(&mut e, FRAMES, 0.25);
+            assert!(ext[1].iter().all(|&v| v == 0.25));
+            assert_eq!(Engine::cv_conflicts(&p, 0), vec![0]);
+            assert!(Engine::cv_conflicts(&p, 0b100).is_empty());
+        }
+
+        #[test]
+        fn the_first_route_owns_a_shared_channel() {
+            let routes = vec![route(2, -0.5, -0.5), route(2, 0.5, 0.5)];
+            let (_tmp, p, mut e) = engine(saw(), routes, 0b100);
+            assert_eq!(Engine::cv_conflicts(&p, 0b100), vec![1]);
+            assert!(left(&run(&mut e, FRAMES)).iter().all(|&v| v == -0.5));
+        }
+
+        #[test]
+        fn the_lfo_restart_is_smoothed() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            let before = left(&run(&mut e, 400))[399];
+            e.lfo_clock_start();
+            let v = left(&run(&mut e, 10));
+            let jump = before + 1.0;
+            assert!(jump > 0.5, "{jump}");
+            let limit = jump / (0.005 * 1000.0) + 1e-5;
+            assert!((before - v[0]).abs() <= limit, "{before} then {}", v[0]);
+            assert!(v[0] > -0.9, "the first frame hasn't jumped: {}", v[0]);
+            for n in 1..10 {
+                assert!((v[n] - v[n - 1]).abs() <= limit, "frame {n}: {} then {}", v[n - 1], v[n]);
+            }
+            for (n, x) in v.iter().enumerate().skip(4) {
+                assert!((x - (-1.0 + 2.0 * n as f32 / 1000.0)).abs() < 1e-4, "frame {n}: {x}");
+            }
+        }
+
+        #[test]
+        fn smoothing_ends_with_one_frame_spans() {
+            let r = route(2, -1.0, 1.0);
+            let (_tmp, _p, mut e) = engine(saw(), vec![r.clone()], 0b100);
+            run(&mut e, 400);
+            e.lfo_clock_start();
+            for n in 0..12 {
+                let want = r.value(e.lfo_value(1).unwrap());
+                let got = run(&mut e, 1)[1][0];
+                if n == 0 {
+                    assert_ne!(got, want, "still gliding");
+                }
+                if n >= 4 {
+                    assert_eq!(got, want, "frame {n}");
+                }
+            }
+            assert_eq!(e.cv_smooth_left, 0);
+        }
+
+        #[test]
+        fn export_writes_no_cv() {
+            let (_tmp, p, _) = engine(saw(), vec![route(2, -1.0, 1.0)], 0);
+            let mut cache = SampleCache::default();
+            let (mut e, _) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+            let ext = run_over(&mut e, FRAMES, 0.25);
+            assert!(ext.iter().flatten().all(|&v| v == 0.25));
+        }
+
+        /// A wait stops the free clock, so nothing may run on inside a span.
+        #[test]
+        fn cv_holds_still_during_a_count_in() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            run(&mut e, 100);
+            e.sequencing = false;
+            e.counting = 10_000;
+            let v = left(&run(&mut e, FRAMES));
+            assert!(v.iter().all(|&x| x == v[0]), "{v:?}");
+        }
+
+        /// A note with no note-off to split the span on (one sent out over MIDI, say).
+        #[test]
+        fn cv_envelope_releases_on_its_notes_end() {
+            let env = Lfo { env: true, trigger: Some((0, 1)), attack: 0.001, decay: 0.001, sustain: 1.0, release: 1.0, ..Lfo::new(1) };
+            let (_tmp, _p, mut e) = engine(env, vec![route(2, 0.0, 1.0)], 0b100);
+            e.sequencing = false;
+            e.lfo_trigger(0, 1, 60, Some(100));
+            let v = left(&run(&mut e, 256));
+            assert!((v[50] - 1.0).abs() < 1e-3, "{}", v[50]);
+            assert!(v[200] < 0.95, "released at frame 100: {}", v[200]);
+        }
+
+        #[test]
+        fn cv_tolerates_missing_and_short_buffers() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0), route(31, -1.0, 1.0)], 0xffff_ffff);
+            let mut out = vec![0f32; FRAMES * 2];
+            e.process_outputs(&mut out, &mut []);
+            let mut ext = vec![vec![0.5f32; 3]; 2];
+            e.process_outputs(&mut out, &mut ext);
+            assert_ne!(ext[1][0], 0.5, "written as far as it reaches");
+            assert_eq!(ext[1][1], 0.0);
+            assert_eq!(ext[0], vec![0.0; 3]);
+        }
+
+        #[test]
+        fn cv_stays_in_range() {
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 5.0)], 0b100);
+            let v = left(&run(&mut e, 900));
+            assert!(v.iter().all(|x| (-1.0..=1.0).contains(x)));
+            assert_eq!(v[899], 1.0);
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, f32::NAN, 1.0)], 0b100);
+            assert!(left(&run(&mut e, FRAMES)).iter().all(|&x| x == 0.0));
+        }
+
+        #[test]
+        fn cv_carries_its_level_into_a_new_engine() {
+            let (_tmp, p, mut old) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            old.cv_routes[0].last = 0.7;
+            let mut cache = SampleCache::default();
+            let (mut new, _) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
+            new.set_cv_channels(0b100);
+            new.take_cv(&old);
+            let v = left(&run(&mut new, 1));
+            assert!((v[0] - (0.7 + (-1.0 - 0.7) / 5.0)).abs() < 1e-4, "{}", v[0]);
+        }
+
+        #[test]
+        fn cv_keeps_its_level_per_channel_across_an_edit() {
+            let (_tmp, p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0), route(3, -1.0, 1.0)], 0b1100);
+            e.cv_routes[0].last = 0.7;
+            e.cv_routes[1].last = -0.3;
+            let mut q = p.clone();
+            q.cv_routes = vec![route(3, 0.0, 1.0), route(5, 0.0, 1.0)];
+            let mut cache = SampleCache::default();
+            let (mut fresh, _) = Engine::new(&q, None, 1000, Mode::Arrangement, &mut cache);
+            e.adopt_cvs(&mut fresh);
+            assert_eq!(e.cv_routes[0].route.low, 0.0);
+            assert_eq!(e.cv_routes[0].last, -0.3);
+            assert_eq!(e.cv_routes[1].last, 0.0, "a channel new to CV starts from nothing");
+        }
     }
 
     /// A CC route from Square LFO 1 (high 0.5) to CC 74 on channel 3 of "Synth", and what
