@@ -335,6 +335,33 @@ fn a_cv_route_moves_between_kinds() {
     assert_eq!(app.mod_slot_views().len(), 2, "in its column");
 }
 
+/// One owner a channel: Out passes over those other routes have, keeping the route's own.
+/// With none free a new route's Out does nothing, and the draft stays.
+#[test]
+fn a_cv_slots_out_row_skips_a_taken_channel() {
+    let mut app = cv_app(&[2, 3, 4]);
+    let on = |c| CvRoute::new(ModSource::Lfo(1), c);
+    set_cv_routes(&app, vec![on(2), on(3)]);
+    app.surface_act(A::ModSlot(0, 2, 1));
+    assert_eq!(cv_routes(&app)[0].channel, 4, "past the one on 3");
+    app.surface_act(A::ModSlot(0, 2, -1));
+    assert_eq!(cv_routes(&app)[0].channel, 2, "its own stays offered, 3 passed over");
+    app.surface_act(A::ModSlot(1, 2, -1));
+    assert_eq!(cv_routes(&app)[1].channel, 3, "2 is taken: it stays");
+    // A new route's first Out: the one left.
+    app.surface_act(A::ModSlot(2, 0, 4));
+    app.surface_act(A::ModSlot(2, 1, 3));
+    app.surface_act(A::ModSlot(2, 2, 1));
+    assert_eq!(cv_routes(&app)[2].channel, 4);
+    // None left: nothing made.
+    app.surface_act(A::ModSlot(3, 0, 4));
+    app.surface_act(A::ModSlot(3, 1, 3));
+    assert!(app.mod_slot_views()[3].cv);
+    app.surface_act(A::ModSlot(3, 2, 1));
+    assert_eq!(cv_routes(&app).len(), 3);
+    assert!(app.mod_draft.is_some(), "the draft stays");
+}
+
 /// A strip's output or aux on a CV only side: its flag names the side and says why.
 #[test]
 fn audio_on_a_cv_only_output_is_flagged() {

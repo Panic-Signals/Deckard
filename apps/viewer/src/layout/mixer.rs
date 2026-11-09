@@ -743,13 +743,6 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         ui.interact(vis(head), id.with("head"), Sense::hover())
             .on_hover_text(format!("{}: {}, {} (an extra output of the plug-in)", st.owner, st.plugin, st.name));
     }
-    // Audio on a CV only output: "CV" in the header, why on hover.
-    if let Some(why) = &st.cv_flag {
-        let at = Pos2::new(head.right() - 12.0, head.top() + 11.0);
-        painter.with_clip_rect(vis(head)).text(at, Align2::RIGHT_CENTER, "CV", font(10.0), REC_ON);
-        let flag = Rect::from_min_size(Pos2::new(at.x - 18.0, at.y - 7.0), Vec2::new(20.0, 14.0));
-        ui.interact(vis(flag), id.with("cv-flag"), Sense::hover()).on_hover_text(why);
-    }
     // Header clicks: focus; double-click the ID: mute; the name: rename; elsewhere:
     // switch between groups and sounds.
     if !master && extra.is_none() {
@@ -778,6 +771,14 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                 acts.push(Act::MixerSounds(!sounds));
             }
         }
+    }
+    // Audio on a CV only output: "CV" in the header, why on hover (after the
+    // header's own area, which would otherwise take the hover).
+    if let Some(why) = &st.cv_flag {
+        let at = Pos2::new(head.right() - 12.0, head.top() + 11.0);
+        painter.with_clip_rect(vis(head)).text(at, Align2::RIGHT_CENTER, "CV", font(10.0), REC_ON);
+        let flag = Rect::from_min_size(Pos2::new(at.x - 18.0, at.y - 7.0), Vec2::new(20.0, 14.0));
+        ui.interact(vis(flag), id.with("cv-flag"), Sense::hover()).on_hover_text(why);
     }
     // The group-colour bar.
     let bar = Rect::from_min_size(Pos2::new(r.left(), head.bottom()), Vec2::new(r.width(), 3.0));
@@ -1893,5 +1894,26 @@ mod tests {
         assert!(h.state().text.contains("|Pre|"), "{}", h.state().text);
         clicks(&mut h, ord_pos, 1);
         assert!(!h.state().app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].channel.aux_pre[0]);
+    }
+
+    /// A group on a CV only output: hovering its header's "CV" shows why, over the
+    /// header's own tip.
+    #[test]
+    fn a_strips_cv_flag_says_why_on_hover() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = app_with(Vec::new());
+        app.settings.output_cv_only[2] = true;
+        apply_acts(&mut app, vec![Act::SetRoute(channel::RouteSet::Group(0, None, AudioDest::Ext(1))), Act::ToggleMixer]);
+        let p = app.doc.as_ref().unwrap().borrow().project().clone();
+        let why = strip_cv_flag(&app.settings, &p, Channel::Group(0)).expect("flagged");
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+        h.run_steps(3);
+        let strips: Vec<(Channel, Rect)> = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-mixer-strips"))).expect("mixer drawn");
+        let r = strips.iter().find(|(c, _)| *c == Channel::Group(0)).expect("the group's strip").1;
+        h.hover_at(Pos2::new(r.right() - 20.0, r.top() + 11.0));
+        h.run_steps(12);
+        assert!(h.query_by_label(&why).is_some(), "the reason shows");
     }
 }

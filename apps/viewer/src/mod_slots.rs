@@ -605,11 +605,11 @@ fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
     }
 }
 
-/// The CV draft given an Out (`steps` on over the CV only channels): it becomes a CV
+/// The CV draft given an Out (`steps` on over the free CV only channels): it becomes a CV
 /// route (moved from the route it was, in one undo step, keeping its range); a new one
 /// at Low 0%, High 50%, since Depth 0 would look broken.
 fn cv_destine(app: &mut App, p: &Project, d: ModDraft, m: CvDraft, steps: i64) {
-    let channels = cv_channels(app);
+    let channels = free_cv_channels(&app.settings, &p.cv_routes, None);
     let cur = m.channel.and_then(|c| channels.iter().position(|x| *x == c));
     let Some(to) = index_step(cur, steps, channels.len()) else { return };
     let made = CvRoute { low: 0.0, high: 0.5, ..CvRoute::new(d.source, channels[to]) };
@@ -690,6 +690,14 @@ fn cv_channels(app: &App) -> Vec<u8> {
     app.settings.cv_channels().into_iter().map(|c| c as u8).collect()
 }
 
+/// The CV only channels a route can take: none another route has. `own`: the route
+/// (among `routes`) being edited, whose channel stays offered.
+pub(crate) fn free_cv_channels(settings: &crate::settings::Settings, routes: &[CvRoute], own: Option<usize>) -> Vec<u8> {
+    let mine = own.and_then(|i| routes.get(i)).map(|r| r.channel);
+    let taken = |c: u8| routes.iter().enumerate().any(|(k, r)| Some(k) != own && r.channel == c);
+    settings.cv_channels().into_iter().map(|c| c as u8).filter(|&c| Some(c) == mine || !taken(c)).collect()
+}
+
 /// A draft's `midi` and `cv` for the Group row `past` steps on from MIDI: CV from the
 /// first step past it, while a channel is CV only; else MIDI.
 fn past_groups(app: &App, past: i64) -> (Option<CcDraft>, Option<CvDraft>) {
@@ -697,7 +705,7 @@ fn past_groups(app: &App, past: i64) -> (Option<CcDraft>, Option<CvDraft>) {
 }
 
 /// Row `row` of CV route `i` turned `steps` (0: erased): Source over the LFOs, Group
-/// back to MIDI (a draft), Out over the CV only channels, Low and High (−100%–100%).
+/// back to MIDI (a draft), Out over the free CV only channels, Low and High (−100%–100%).
 fn cv_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
     let mut list = p.cv_routes.clone();
     let r = list[i].clone();
@@ -721,7 +729,7 @@ fn cv_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
             return;
         }
         2 => {
-            let channels = cv_channels(app);
+            let channels = free_cv_channels(&app.settings, &p.cv_routes, Some(i));
             let cur = channels.iter().position(|x| *x == r.channel);
             let Some(to) = index_step(cur, steps, channels.len()) else { return };
             c.channel = channels[to];

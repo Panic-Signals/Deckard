@@ -322,7 +322,7 @@ fn cc_section(ui: &mut Ui, painter: &Painter, lfos: &[Lfo], ports: &[String], ro
 
 /// The CV section in `area`: the project's CV routes (`routes`), one row each (Source,
 /// Out, Low, High, and × to remove it; a route in `inactive` says why it writes nothing),
-/// then "+ Add CV" (off with no LFOs or no CV only channels in `settings`). Its rows are
+/// then "+ Add CV" (off with no LFOs or no free CV only channel in `settings`). Its rows are
 /// the CC section's sizes. An edit gives the whole list, as [`Act::SetCvRoutes`].
 #[allow(clippy::too_many_arguments)]
 fn cv_section(
@@ -337,7 +337,7 @@ fn cv_section(
 ) {
     let head = Rect::from_min_size(area.min, Vec2::new(area.width(), CC_TOP - 4.0));
     ui.put(head, egui::Label::new(egui::RichText::new("CV").size(11.0).color(white(140))));
-    let marked = settings.cv_channels();
+    let free = crate::mod_slots::free_cv_channels(settings, routes, None);
     let mut list = routes.to_vec();
     let mut changed = false;
     let mut gone = None;
@@ -367,8 +367,8 @@ fn cv_section(
             n.source = sources[k];
         }
         caption(c, "Source");
-        // Out: the CV only channels (one not marked now kept, last).
-        let mut outs: Vec<usize> = marked.clone();
+        // Out: the CV only channels no other route has (its own kept, last if not marked).
+        let mut outs: Vec<usize> = crate::mod_slots::free_cv_channels(settings, routes, Some(i)).into_iter().map(usize::from).collect();
         if !outs.contains(&usize::from(r.channel)) {
             outs.push(usize::from(r.channel));
         }
@@ -416,16 +416,16 @@ fn cv_section(
         changed = true;
     }
     let add = Rect::from_min_size(Pos2::new(area.left(), area.top() + CC_TOP + CC_ROW * routes.len() as f32), Vec2::new(90.0, 22.0));
-    let first = lfos.first().zip(marked.first());
+    let first = lfos.first().zip(free.first());
     let clicked = ui
         .scope_builder(UiBuilder::new().max_rect(add), |ui| {
             ui.add_enabled(first.is_some(), egui::Button::new("+ Add CV"))
-                .on_disabled_hover_text("Needs an LFO, and an output marked CV only in Preferences > Audio > Routing")
+                .on_disabled_hover_text("Needs an LFO, and an output marked CV only that no route has, in Preferences > Audio > Routing")
                 .clicked()
         })
         .inner;
     if clicked && let Some((l, c)) = first {
-        list.push(CvRoute { low: 0.0, high: 0.5, ..CvRoute::new(ModSource::Lfo(l.pad), *c as u8) });
+        list.push(CvRoute { low: 0.0, high: 0.5, ..CvRoute::new(ModSource::Lfo(l.pad), *c) });
         changed = true;
     }
     if changed {
@@ -884,5 +884,42 @@ mod tests {
         h.state_mut().inactive = vec![0];
         h.run_steps(2);
         assert!(h.query_by_label(CV_NOTE).is_some(), "says so");
+    }
+    /// "+ Add CV" takes the first channel no route has, and is off with none free; a
+    /// row's Out list leaves out those other routes have.
+    #[test]
+    fn the_cv_section_offers_only_free_channels() {
+        use deckard_model::mod_matrix::{CvRoute, ModSource};
+        use egui_kittest::kittest::Queryable;
+        struct St {
+            settings: crate::settings::Settings,
+            routes: Vec<CvRoute>,
+            acts: Vec<Act>,
+        }
+        let mut settings = crate::settings::Settings::default();
+        settings.output_cv_only[2] = true;
+        settings.output_cv_only[3] = true;
+        let on = |c| CvRoute::new(ModSource::Lfo(3), c);
+        assert_eq!(crate::mod_slots::free_cv_channels(&settings, &[on(2), on(3)], Some(0)), [2], "its own kept, the other's gone");
+        let st = St { settings, routes: vec![on(2)], acts: Vec::new() };
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 300.0)).build_ui_state(
+            |ui, st: &mut St| {
+                let area = Rect::from_min_size(ui.max_rect().min, Vec2::new(880.0, 280.0));
+                let painter = ui.painter().clone();
+                cv_section(ui, &painter, &[Lfo::new(3), Lfo::new(4)], &st.settings, &st.routes, &[], area, &mut st.acts);
+            },
+            st,
+        );
+        h.run_steps(2);
+        h.get_by_label("+ Add CV").click();
+        h.run_steps(2);
+        let Some(Act::SetCvRoutes(r)) = h.state().acts.last() else { panic!("{} acts", h.state().acts.len()) };
+        assert_eq!(r[1].channel, 3, "the free one");
+        h.state_mut().acts.clear();
+        h.state_mut().routes = vec![on(2), on(3)];
+        h.run_steps(2);
+        h.get_by_label("+ Add CV").click();
+        h.run_steps(2);
+        assert!(h.state().acts.is_empty(), "none free: off");
     }
 }
