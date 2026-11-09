@@ -1,6 +1,6 @@
-//! The project's CV routes ([`deckard_model::mod_matrix::CvRoute`]): LFOs sent out as control
-//! voltages on audio outputs, a DECKARD-only text field on the project's root object, so undo carries them,
-//! saved in the DECKARD block.
+//! The project's CV routes ([`deckard_model::mod_matrix::CvRoute`]): LFOs sent out as
+//! control voltages on audio outputs, a DECKARD-only text field on the project's root
+//! object, so undo carries them, saved in the DECKARD block.
 
 use super::{Document, Op};
 use deckard_model::mod_matrix::{CV_FIELD, CvRoute, cv_to_text};
