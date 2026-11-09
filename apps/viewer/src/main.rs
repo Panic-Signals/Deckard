@@ -748,7 +748,7 @@ fn open_output(settings: &settings::Settings, fallback: &mut Option<String>) -> 
     // ASIO not being in use says more than which system device stood in.
     *fallback = no_asio.or(fallback.take());
     let out = out?;
-    out.set_routing(&settings.output_routing);
+    out.set_routing(&settings.output_routing, settings.cv_mask());
     out.set_sample_accurate(settings.exact_timing);
     out.set_render_ahead(settings.render_ahead_ms as f64 / 1000.0);
     Ok(out)
@@ -2662,7 +2662,7 @@ impl App {
             })
             .weak(),
         );
-        let before = self.settings.output_routing.clone();
+        let before = (self.settings.output_routing.clone(), self.settings.output_cv_only.clone());
         let project = self.doc.as_ref().map(|d| d.borrow().project().clone()).unwrap_or_default();
         let (own, port, channels) = if outs { ("Out", "Output", out_channels) } else { ("In", "Input", in_channels) };
         let device = if outs { out_device } else { in_device };
@@ -2707,10 +2707,10 @@ impl App {
                 }
             });
         });
-        if self.settings.output_routing != before
+        if (&self.settings.output_routing, &self.settings.output_cv_only) != (&before.0, &before.1)
             && let Some(Ok(out)) = &self.output
         {
-            out.set_routing(&self.settings.output_routing);
+            out.set_routing(&self.settings.output_routing, self.settings.cv_mask());
         }
     }
 

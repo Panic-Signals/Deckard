@@ -15,7 +15,7 @@
 use crate::queue::Queue;
 use crate::{Engine, Live, Mode, Tap, Timeline, Timelines};
 use cpal::traits::StreamTrait;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -255,6 +255,8 @@ pub struct Output {
     /// [`connected_outputs`] of the routing, handed to the engine each block
     /// ([`Engine::set_connected_outputs`]).
     connected: Arc<AtomicU16>,
+    /// The CV only output channels (bit `i`: channel `i`), as [`Output::set_routing`] was given them.
+    cv_mask: Arc<AtomicU32>,
     channels: usize,
     /// Effects' meters for their panels (the Compressor's).
     fx_meters: Arc<crate::meters::FxMeters>,
@@ -308,6 +310,7 @@ fn apply(
                 old.end_midi();
                 old.release_routes();
                 new.take_unroutes(old);
+                new.take_cv(old);
                 new.take_midi_inputs(old);
             }
             engine.replace(new).map(Command::Play)
@@ -461,6 +464,20 @@ pub fn connected_outputs(routing: &[Option<usize>], channels: usize) -> u16 {
     mask
 }
 
+/// `routing` without the audio's channels that share an interface channel with a CV only
+/// one (bit `i` of `cv_mask` is channel `i`): the jack carries the CV alone.
+pub fn effective_routing(routing: &[Option<usize>], cv_mask: u32) -> Vec<Option<usize>> {
+    let is_cv = |i: usize| i < 32 && cv_mask >> i & 1 == 1;
+    let cv_jacks: Vec<usize> = routing.iter().enumerate().filter(|&(i, _)| is_cv(i)).filter_map(|(_, to)| *to).collect();
+    routing.iter().enumerate().map(|(i, to)| to.filter(|c| is_cv(i) || !cv_jacks.contains(c))).collect()
+}
+
+/// Whether output `channel` plays the master's mix: it is on the master's output and not CV
+/// only (a CV only side plays what the engine wrote for it in that output).
+pub fn channel_uses_master(channel: usize, master_bus: Option<usize>, cv_mask: u32) -> bool {
+    master_bus == Some(channel / 2) && !(channel < 32 && cv_mask >> channel & 1 == 1)
+}
+
 /// Out 1 L and R on the interface's first two channels; the rest not connected.
 pub fn default_route(i: usize) -> i32 {
     if i < 2 { i as i32 } else { -1 }
@@ -510,6 +527,7 @@ impl Output {
         let routing: Arc<[AtomicI32; OUT_CHANNELS]> = Arc::new(std::array::from_fn(|i| AtomicI32::new(default_route(i))));
         let defaults: Vec<Option<usize>> = (0..OUT_CHANNELS).map(|i| usize::try_from(default_route(i)).ok()).collect();
         let connected = Arc::new(AtomicU16::new(connected_outputs(&defaults, channels)));
+        let cv_mask = Arc::new(AtomicU32::new(0));
         // Small buffers keep pads and keys immediate (256 frames is ~5.3 ms at 48 kHz);
         // fall back to the device's default if the size is refused.
         let wanted = match config.buffer_size() {
@@ -530,6 +548,7 @@ impl Output {
             let exact = sample_accurate.clone();
             let routing = routing.clone();
             let connected = connected.clone();
+            let cv_mask = cv_mask.clone();
             // Out 1–16 (other than the master's), as the engine fills them.
             let mut ext = vec![vec![0f32; 16_384]; crate::OUTPUTS];
             let mut stream_config: cpal::StreamConfig = config.into();
@@ -587,6 +606,7 @@ impl Output {
                     if let Some(engine) = engine.as_mut() {
                         before_block(engine, &mut clock, started, if ahead.is_zero() { period } else { ahead });
                         engine.set_connected_outputs(connected.load(Ordering::Relaxed));
+                        engine.set_cv_channels(cv_mask.load(Ordering::Relaxed));
                         engine.process_outputs(buf, &mut ext);
                         // What its players sent back is freed off this thread.
                         while let Some(j) = engine.take_junk() {
@@ -622,13 +642,14 @@ impl Output {
                     // Each of DECKARD's output channels (Out 1 L … Out 16 R) onto the
                     // interface channel it's routed to.
                     out.fill(0.0);
+                    let cv = cv_mask.load(Ordering::Relaxed);
                     for (i, to) in routing.iter().enumerate() {
                         let to = to.load(Ordering::Relaxed);
                         if to < 0 || to as usize >= channels {
                             continue;
                         }
                         let (bus, side) = (i / 2, i % 2);
-                        let src: &[f32] = if master_bus == Some(bus) { buf } else { &ext[bus][..ext_len] };
+                        let src: &[f32] = if channel_uses_master(i, master_bus, cv) { buf } else { &ext[bus][..ext_len] };
                         for (f, frame) in out.chunks_mut(channels).enumerate() {
                             if let Some(v) = src.get(f * 2 + side) {
                                 frame[to as usize] += *v;
@@ -699,6 +720,7 @@ impl Output {
             midi_inputs_waiting: Mutex::default(),
             routing,
             connected,
+            cv_mask,
             channels,
             _stream: stream,
             _inputs: inputs,
@@ -720,8 +742,11 @@ impl Output {
     /// Preferences > Audio > Routing > Output: the interface channel (from 0) each of
     /// DECKARD's output channels (Out 1 L, Out 1 R, … Out 16 R) plays on, or none.
     /// The engine hears which of its outputs that leaves connected (a strip onto one that
-    /// isn't plays through its parent), from the next block.
-    pub fn set_routing(&self, routing: &[Option<usize>]) {
+    /// isn't plays through its parent), from the next block. The `cv_mask` channels (bit `i`:
+    /// channel `i`) carry CV only: no audio plays on the interface channel of one.
+    pub fn set_routing(&self, routing: &[Option<usize>], cv_mask: u32) {
+        let routing = &effective_routing(routing, cv_mask);
+        self.cv_mask.store(cv_mask, Ordering::Relaxed);
         for (i, r) in self.routing.iter().enumerate() {
             let to = routing.get(i).copied().unwrap_or(None).map_or(-1, |c| c as i32);
             r.store(to, Ordering::Relaxed);
@@ -1170,6 +1195,44 @@ mod tests {
         apply(&mut engine, Command::Play(new), Instant::now(), Duration::from_millis(10), 1000.0, 1, false);
         let got: Vec<Vec<u8>> = rx.try_iter().map(|m| m.bytes().to_vec()).collect();
         assert_eq!(got, vec![vec![0x81, 60, 0], vec![0xe1, 0, 64], vec![0xb1, 74, 64], vec![0xd1, 0]]);
+    }
+
+    /// Audio mapped to the interface channel a CV only output is on is dropped; the CV's stays.
+    #[test]
+    fn audio_mapped_to_a_cv_jack_is_dropped() {
+        let mut r = vec![None; 32];
+        r[2] = Some(4);
+        r[6] = Some(4);
+        let e = effective_routing(&r, 1 << 2);
+        assert_eq!((e[2], e[6]), (Some(4), None));
+    }
+
+    /// The master's output plays the master on its audio side only.
+    #[test]
+    fn a_cv_side_of_the_masters_output_does_not_play_the_master() {
+        assert!(!channel_uses_master(0, Some(0), 0b01));
+        assert!(channel_uses_master(1, Some(0), 0b01));
+        assert!(channel_uses_master(1, Some(0), 0));
+    }
+
+    /// A CV level goes on across the engine a Play brings.
+    #[test]
+    fn play_carries_cv_across_the_new_engine() {
+        use deckard_model::mod_matrix::{CvRoute, ModSource};
+        let mut p = crate::tests::project();
+        // No LFO 1: the route sits at its Low, so only a carried level shows in the first frame.
+        p.cv_routes = vec![CvRoute { low: -1.0, high: 1.0, ..CvRoute::new(ModSource::Lfo(1), 2) }];
+        let mut old = crate::tests::click_engine_for(&p, 1000);
+        old.cv_routes[0].last = 0.7;
+        let mut engine = Some(Box::new(old));
+        let new = Box::new(crate::tests::click_engine_for(&p, 1000));
+        apply(&mut engine, Command::Play(new), Instant::now(), Duration::from_millis(10), 1000.0, 1, false);
+        let e = engine.as_mut().unwrap();
+        e.set_cv_channels(0b100);
+        let mut ext = vec![vec![0f32; 64]; crate::OUTPUTS];
+        e.write_cv(&mut ext, 0, 1);
+        let v = ext[1][0];
+        assert!((v - (0.7 + (-1.0 - 0.7) / 5.0)).abs() < 1e-4, "{v}");
     }
 
     /// A clock always at 90 BPM, 1 beat into the bar, that notes what it was asked.
