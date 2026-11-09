@@ -6995,6 +6995,7 @@ impl App {
                 clock,
                 dir: PathBuf::new(),
                 stem: String::new(),
+                focus: (self.group, self.sound),
             },
         );
         if let Some(rec) = self.recorder.poll(output, clock) {
@@ -8039,6 +8040,7 @@ impl App {
             clock,
             dir,
             stem,
+            focus: (self.group, self.sound),
         });
     }
 
@@ -8046,7 +8048,7 @@ impl App {
     /// into its target; Auto maps its notes into a Sampler.
     fn finish_recording(&mut self, f: recorder::Finished) {
         match f {
-            recorder::Finished::Take { sample, channels, mode, ticks } => {
+            recorder::Finished::Take { sample, channels, mode, ticks, focus } => {
                 let path = self.sample_dir("Recordings").join(recorder::take_name());
                 if let Err(e) = deckard_engine::edit::write_wav_channels(&path, &sample, channels) {
                     self.recorder.view.error = Some(format!("can't save the recording: {e}"));
@@ -8055,10 +8057,21 @@ impl App {
                 self.recorder.view.takes.push(path.clone());
                 self.recorder.view.focused = Some(self.recorder.view.takes.len() - 1);
                 if mode == 2 {
-                    self.finish_loop(&path, sample.frames.len(), sample.rate, ticks);
+                    self.finish_loop(&path, sample.frames.len(), sample.rate, ticks, focus);
                 } else {
-                    let (g, s) = (self.group, self.sound);
-                    self.load_take(g, s, &path, sample.frames.len());
+                    let (g, s) = focus;
+                    let audio = self.doc.as_ref().is_some_and(|doc| {
+                        doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| x.instrument == "AudioModule")
+                    });
+                    if audio {
+                        // An Audio plug-in keeps its place: the take is one more of its takes. Detect
+                        // rounds its length to a sixteenth; Sync keeps its bars.
+                        let sixteenth = (PPQ / 4) as f64;
+                        let ticks = if mode == 0 { (ticks / sixteenth).round().max(1.0) * sixteenth } else { ticks };
+                        self.put_audio_take(g, s, &path, sample.frames.len(), sample.rate, ticks, 0, true, "Record");
+                    } else {
+                        self.load_take(g, s, &path, sample.frames.len());
+                    }
                 }
                 self.sampling.tab = 0;
             }
@@ -8066,14 +8079,16 @@ impl App {
         }
     }
 
-    /// The first sound after the focused one in its group with nothing loaded, else the
-    /// group's last sound (as Maschine's `isSoundAvailableForRecording`).
-    fn next_free_sound(&self, g: usize) -> usize {
-        let Some(doc) = &self.doc else { return self.sound };
+    /// The first sound after `from` in group `g` with nothing loaded, else the group's
+    /// last Audio plug-in, else its last sound (Maschine's `isSoundAvailableForRecording`
+    /// and the manual's "last Sound of the Group that contains an Audio plug-in").
+    fn next_free_sound(&self, g: usize, from: usize) -> usize {
+        let Some(doc) = &self.doc else { return from };
         let d = doc.borrow();
-        let Some(gr) = d.project().groups.get(g) else { return self.sound };
-        (self.sound + 1..gr.sounds.len())
+        let Some(gr) = d.project().groups.get(g) else { return from };
+        (from + 1..gr.sounds.len())
             .find(|&s| gr.sounds[s].slots.is_empty() && gr.sounds[s].sampler.is_none())
+            .or_else(|| gr.sounds.iter().rposition(|x| x.instrument == "AudioModule"))
             .unwrap_or(gr.sounds.len().saturating_sub(1))
     }
 
@@ -8082,62 +8097,14 @@ impl App {
     /// which grows to fit it. As the manual has it, into an Audio plug-in (Take: one
     /// more take of the sound's), in time with the song; a sound with a Sampler keeps it
     /// (the take its zone, a note in the pattern playing it).
-    fn finish_loop(&mut self, path: &Path, frames: usize, rate: u32, ticks: f64) {
+    fn finish_loop(&mut self, path: &Path, frames: usize, rate: u32, ticks: f64, focus: (usize, usize)) {
         let Some(doc) = self.doc.clone() else { return };
-        let g = self.group;
+        let (g, from) = focus;
         let target = self.recorder.view.target;
-        let s = if target == 0 { self.sound } else { self.next_free_sound(g) };
-        let (sampler, audio) = {
-            let d = doc.borrow();
-            let snd = d.project().groups.get(g).and_then(|x| x.sounds.get(s));
-            (snd.is_some_and(|x| x.sampler.is_some()), snd.is_some_and(|x| x.audio.is_some() && x.instrument == "AudioModule"))
-        };
+        let s = if target == 0 { from } else { self.next_free_sound(g, from) };
+        let sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| x.sampler.is_some());
         if !sampler {
-            let spec = deckard_doc::TakeSpec { file: path.to_path_buf(), frames, rate, beats: ticks / PPQ as f64 };
-            let (scene, song_view, focused) = (self.scene, self.song_view, self.pattern);
-            let mut made = None;
-            let done = doc.borrow_mut().transaction("Record Loop", |d| {
-                d.audio_only(g, s)?;
-                let k = if target == 0 && audio {
-                    d.add_take(g, s, &spec, "Record Loop")?
-                } else {
-                    d.set_takes(g, s, &[spec.clone()], "Record Loop")?;
-                    0
-                };
-                let mut pi = focused.min(d.project().groups[g].patterns.len().saturating_sub(1));
-                if d.project().groups[g].patterns.is_empty() {
-                    pi = d.add_pattern(g, usize::MAX, "Pattern 1")?;
-                } else if target == 2 {
-                    let n = d.project().groups[g].patterns.len();
-                    pi = d.add_pattern(g, focused, &format!("Pattern {}", n + 1))?;
-                    if !song_view {
-                        d.assign_pattern(scene, g, Some(pi))?;
-                    }
-                    made = Some(pi);
-                }
-                d.set_audio_in(g, s, &[pi], Some(k), "Record Loop")?;
-                // Long enough for the take: doubled while shorter.
-                let need = ticks.round().max(1.0) as i64;
-                let mut len = d.project().groups[g].patterns[pi].length.max(1);
-                let was = len;
-                while len < need {
-                    len *= 2;
-                }
-                if len != was {
-                    d.set_pattern_length(g, pi, len)?;
-                }
-                Ok(())
-            });
-            match done {
-                Ok(()) => {
-                    if let Some(pi) = made {
-                        self.pattern = pi;
-                    }
-                    self.sound = s;
-                    self.zone = 0;
-                }
-                Err(e) => self.status = format!("can't load the loop: {e}"),
-            }
+            self.put_audio_take(g, s, path, frames, rate, ticks, target, false, "Record Loop");
             return;
         }
         self.load_take(g, s, path, frames);
@@ -8183,13 +8150,79 @@ impl App {
         self.sound = s;
     }
 
+    /// Put a take in sound `s` of group `g` as an Audio plug-in's: one more take of the
+    /// sound's own on an Audio sound (the focused one, or the last one when no sound is
+    /// free), else its only one; playing from the
+    /// start of the pattern (a new pattern for target 2), which grows to hold `ticks`.
+    /// `rename`: the sound takes the file's name unless it was named by hand.
+    #[allow(clippy::too_many_arguments)]
+    fn put_audio_take(&mut self, g: usize, s: usize, path: &Path, frames: usize, rate: u32, ticks: f64, target: usize, rename: bool, label: &str) {
+        let Some(doc) = self.doc.clone() else { return };
+        let audio = {
+            let d = doc.borrow();
+            d.project().groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| x.audio.is_some() && x.instrument == "AudioModule")
+        };
+        let spec = deckard_doc::TakeSpec { file: path.to_path_buf(), frames, rate, beats: ticks / PPQ as f64 };
+        let (scene, song_view, focused) = (self.scene, self.song_view, self.pattern);
+        let mut made = None;
+        let done = doc.borrow_mut().transaction(label, |d| {
+            d.audio_only(g, s)?;
+            let k = if audio {
+                d.add_take(g, s, &spec, label)?
+            } else {
+                d.set_takes(g, s, &[spec.clone()], label)?;
+                0
+            };
+            let mut pi = focused.min(d.project().groups[g].patterns.len().saturating_sub(1));
+            if d.project().groups[g].patterns.is_empty() {
+                pi = d.add_pattern(g, usize::MAX, "Pattern 1")?;
+            } else if target == 2 {
+                let n = d.project().groups[g].patterns.len();
+                pi = d.add_pattern(g, focused, &format!("Pattern {}", n + 1))?;
+                if !song_view {
+                    d.assign_pattern(scene, g, Some(pi))?;
+                }
+                made = Some(pi);
+            }
+            d.set_audio_in(g, s, &[pi], Some(k), label)?;
+            // Long enough for the take: doubled while shorter.
+            let need = ticks.round().max(1.0) as i64;
+            let mut len = d.project().groups[g].patterns[pi].length.max(1);
+            let was = len;
+            while len < need {
+                len *= 2;
+            }
+            if len != was {
+                d.set_pattern_length(g, pi, len)?;
+            }
+            let name = d.project().groups[g].sounds[s].name.clone();
+            if rename
+                && (name.is_empty() || name.starts_with("Sound ") || name.parse::<u32>().is_ok())
+                && let Some(stem) = path.file_stem()
+            {
+                d.rename(deckard_doc::Target::Sound(g, s), &stem.to_string_lossy())?;
+            }
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                if let Some(pi) = made {
+                    self.pattern = pi;
+                }
+                self.sound = s;
+                self.zone = 0;
+            }
+            Err(e) => self.status = format!("can't load the take: {e}"),
+        }
+    }
+
     /// Auto: the recorded notes as zones of a Sampler, in the focused sound if it has
     /// one, else in the next free sound; then the Zone tab.
     fn finish_auto(&mut self, done: Vec<recorder::AutoTake>) {
         let Some(doc) = self.doc.clone() else { return };
         let g = self.group;
         let has_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(self.sound)).is_some_and(|x| x.sampler.is_some());
-        let s = if has_sampler { self.sound } else { self.next_free_sound(g) };
+        let s = if has_sampler { self.sound } else { self.next_free_sound(g, self.sound) };
         if !self.ensure_sampler(g, s) {
             return;
         }
@@ -14782,7 +14815,7 @@ mod tests {
         h.state_mut().recorder.view.set(RecParam::Target, 2);
         let s1 = free(&p, 0);
         let n = p.groups[0].patterns.len();
-        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(1.0), channels: 2, mode: 2, ticks: 2.0 * bar });
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(1.0), channels: 2, mode: 2, ticks: 2.0 * bar, focus: (0, 0) });
         let q = project_of(&h);
         assert_eq!(q.groups[0].patterns.len(), n + 1, "{}", h.state().status);
         let pat = &q.groups[0].patterns[n];
@@ -14802,14 +14835,14 @@ mod tests {
         h.state_mut().recorder.view.set(RecParam::Target, 1);
         let s2 = free(&q, 0);
         assert_ne!(s1, s2);
-        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(0.5), channels: 1, mode: 2, ticks: bar / 2.0 });
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(0.5), channels: 1, mode: 2, ticks: bar / 2.0, focus: (0, s1) });
         let q = project_of(&h);
         assert!(q.groups[0].patterns[n].audio.iter().any(|c| c.sound == s2));
         assert!(q.groups[0].sounds[s2].audio.is_some());
         // Loop, Target Take, on that sound: a second take, playing in the pattern.
         (h.state_mut().sound, h.state_mut().pattern) = (s2, n);
         h.state_mut().recorder.view.set(RecParam::Target, 0);
-        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(0.5), channels: 1, mode: 2, ticks: bar / 2.0 });
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone(0.5), channels: 1, mode: 2, ticks: bar / 2.0, focus: (0, s2) });
         let q = project_of(&h);
         assert_eq!(q.groups[0].sounds[s2].audio.as_ref().map(|a| (a.takes.len(), a.focused)), Some((2, 1)));
         assert!(q.groups[0].patterns[n].audio.contains(&deckard_model::AudioCue { sound: s2, take: 1, offset: 0 }));
@@ -14834,6 +14867,108 @@ mod tests {
         assert_eq!(got, vec![(48, 0, 53), (60, 54, 127)]);
         assert!(zones.iter().all(|z| z.loop_active && z.loop_range == (4800, 20_000)));
         assert_eq!((h.state().sound, h.state().sampling.tab), (s3, 3));
+    }
+
+    /// Finish a Loop/Take recording on sound `s` of group 0: it becomes an Audio plug-in.
+    fn audio_sound(h: &mut Harness<'static, App>, s: usize, tone: &deckard_engine::sample::Sample, bar: f64) {
+        use layout::sampling::RecParam;
+        (h.state_mut().group, h.state_mut().pattern, h.state_mut().sound) = (0, 0, s);
+        h.state_mut().recorder.view.set(RecParam::Target, 0);
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone.clone(), channels: 2, mode: 2, ticks: bar, focus: (0, s) });
+    }
+
+    fn tone_of(secs: f64) -> deckard_engine::sample::Sample {
+        deckard_engine::sample::Sample { rate: 48_000, frames: vec![[0.25, 0.25]; (secs * 48_000.0) as usize] }
+    }
+
+    #[test]
+    fn a_sync_take_on_an_audio_sound_is_a_new_take() {
+        let Some(mut h) = harness(false, true) else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        let p = project_of(&h);
+        let bar = p.bar_length() as f64;
+        let s = (1..16).find(|&s| p.groups[0].sounds[s].slots.is_empty() && p.groups[0].sounds[s].sampler.is_none()).unwrap();
+        audio_sound(&mut h, s, &tone_of(1.0), bar);
+        assert_eq!(project_of(&h).groups[0].sounds[s].audio.as_ref().map(|a| a.takes.len()), Some(1));
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(1.0), channels: 2, mode: 1, ticks: bar, focus: (0, s) });
+        let q = project_of(&h);
+        let snd = &q.groups[0].sounds[s];
+        assert_eq!(snd.instrument, "AudioModule", "{}", h.state().status);
+        assert!(snd.sampler.is_none());
+        assert_eq!(snd.audio.as_ref().map(|a| (a.takes.len(), a.focused)), Some((2, 1)));
+        assert!(q.groups[0].patterns[0].audio.contains(&deckard_model::AudioCue { sound: s, take: 1, offset: 0 }));
+    }
+
+    #[test]
+    fn a_detect_take_on_an_audio_sound_is_rounded_to_a_sixteenth() {
+        let Some(mut h) = harness(false, true) else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        let p = project_of(&h);
+        let bar = p.bar_length() as f64;
+        let s = (1..16).find(|&s| p.groups[0].sounds[s].slots.is_empty() && p.groups[0].sounds[s].sampler.is_none()).unwrap();
+        audio_sound(&mut h, s, &tone_of(1.0), bar);
+        let ticks = 4.0 * PPQ as f64 + 70.0;
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(2.0), channels: 2, mode: 0, ticks, focus: (0, s) });
+        let q = project_of(&h);
+        let a = q.groups[0].sounds[s].audio.as_ref().expect("still Audio");
+        assert_eq!(a.takes.len(), 2, "{}", h.state().status);
+        assert_eq!(a.takes[1].beats, 4.0);
+    }
+
+    #[test]
+    fn a_detect_take_on_an_empty_sound_is_a_sampler_zone() {
+        let Some(mut h) = harness(false, true) else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        let p = project_of(&h);
+        let s = (1..16).find(|&s| p.groups[0].sounds[s].slots.is_empty() && p.groups[0].sounds[s].sampler.is_none()).unwrap();
+        (h.state_mut().group, h.state_mut().sound) = (0, s);
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(1.0), channels: 2, mode: 0, ticks: 960.0, focus: (0, s) });
+        let q = project_of(&h);
+        let snd = &q.groups[0].sounds[s];
+        assert_eq!(snd.sampler.as_ref().map(|x| x.zones.len()), Some(1), "{}", h.state().status);
+        assert!(snd.audio.is_none());
+    }
+
+    #[test]
+    fn the_take_goes_to_the_sound_focused_at_start() {
+        let Some(mut h) = harness(false, true) else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        (h.state_mut().group, h.state_mut().sound) = (0, 5);
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(1.0), channels: 2, mode: 0, ticks: 960.0, focus: (0, 2) });
+        let q = project_of(&h);
+        assert_eq!(q.groups[0].sounds[2].sampler.as_ref().map(|x| x.zones.len()), Some(1), "{}", h.state().status);
+        assert!(q.groups[0].sounds[5].sampler.as_ref().is_none_or(|x| x.zones.is_empty()));
+    }
+
+    #[test]
+    fn with_no_free_sound_left_a_take_goes_to_the_last_audio_sound() {
+        use layout::sampling::RecParam;
+        let Some(mut h) = harness(false, true) else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        let p = project_of(&h);
+        let bar = p.bar_length() as f64;
+        // Sound 9 an Audio plug-in, sound 15 a Sampler, the rest in between taken.
+        audio_sound(&mut h, 9, &tone_of(1.0), bar);
+        (h.state_mut().group, h.state_mut().sound) = (0, 15);
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(1.0), channels: 2, mode: 0, ticks: bar, focus: (0, 15) });
+        for s in 1..15 {
+            if s != 9 {
+                (h.state_mut().group, h.state_mut().sound) = (0, s);
+                h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(0.2), channels: 2, mode: 0, ticks: bar, focus: (0, s) });
+            }
+        }
+        assert!(project_of(&h).groups[0].sounds[15].sampler.is_some());
+        (h.state_mut().group, h.state_mut().pattern, h.state_mut().sound) = (0, 0, 0);
+        h.state_mut().recorder.view.set(RecParam::Target, 1);
+        h.state_mut().finish_recording(recorder::Finished::Take { sample: tone_of(1.0), channels: 2, mode: 2, ticks: bar, focus: (0, 0) });
+        let q = project_of(&h);
+        assert_eq!(q.groups[0].sounds[9].audio.as_ref().map(|a| a.takes.len()), Some(2), "{}", h.state().status);
+        assert!(q.groups[0].sounds[15].sampler.is_some());
     }
 
     /// The divider above the chain area: dragged, the patterns and scenes take less or more

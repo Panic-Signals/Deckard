@@ -87,8 +87,8 @@ pub type AutoTake = (AutoItem, usize, Option<(usize, usize)>);
 /// A finished recording.
 pub enum Finished {
     /// Detect, Sync or Loop: the take, its channels (1 for Ext. Mono), the mode, and its
-    /// length in ticks at the song tempo.
-    Take { sample: Sample, channels: u16, mode: usize, ticks: f64 },
+    /// length in ticks at the song tempo, and the group and sound focused at Start.
+    Take { sample: Sample, channels: u16, mode: usize, ticks: f64, focus: (usize, usize) },
     /// Auto: each recorded note (written already), its length in frames and the loop
     /// found in it.
     Auto { done: Vec<AutoTake> },
@@ -107,6 +107,8 @@ pub struct StartWith<'a> {
     /// Auto: the folder and name stem of its files.
     pub dir: PathBuf,
     pub stem: String,
+    /// The group and sound focused at Start, where the take goes.
+    pub focus: (usize, usize),
 }
 
 /// An Auto run in progress.
@@ -124,6 +126,7 @@ struct AutoRun {
 }
 
 struct Run {
+    focus: (usize, usize),
     rate: u32,
     channels: u16,
     /// Frames that have arrived from the source, and the recent ones (pre-roll, and
@@ -286,6 +289,7 @@ impl Recorder {
             self.tap = Some(buffer);
         }
         let mut run = Run {
+            focus: with.focus,
             rate,
             channels: if self.view.source == 1 { 1 } else { 2 },
             received: 0,
@@ -741,6 +745,7 @@ fn take(run: &mut Run, mode: usize, clock: &Clock) -> Done {
         sample: Sample { rate: run.rate, frames },
         channels: run.channels,
         mode,
+        focus: run.focus,
     })
 }
 
@@ -974,6 +979,7 @@ mod tests {
             clock: clock_of(&out, &p),
             dir: dir.clone(),
             stem: "Kick".into(),
+            focus: (0, 0),
         });
         assert_eq!(r.view.error, None);
         let t0 = Instant::now();
@@ -1015,6 +1021,7 @@ mod tests {
             clock: clock_of(out, &p),
             dir: PathBuf::new(),
             stem: String::new(),
+            focus: (0, 0),
         };
         let t0 = Instant::now();
         while r.view.meter.0 < 0.01 {
@@ -1045,6 +1052,7 @@ mod tests {
             clock: clock_of(&out, &p),
             dir: std::env::temp_dir(),
             stem: String::new(),
+            focus: (0, 0),
         });
         let t0 = Instant::now();
         let f = loop {
@@ -1073,6 +1081,7 @@ mod tests {
         r.tap = Some(buffer.clone());
         r.view.status = RecStatus::Waiting;
         r.run = Some(Run {
+            focus: (0, 0),
             rate: 1000,
             channels: 2,
             received: 0,
