@@ -9,7 +9,7 @@ use crate::layout::{self, channel, mod_routes};
 use deckard_doc::Chain;
 use deckard_model::Project;
 use deckard_model::lfo::Lfo;
-use deckard_model::mod_matrix::{CC_MAX, CcRoute, ModParam, ModRoute, ModSource, choices};
+use deckard_model::mod_matrix::{CC_MAX, CcRoute, ModParam, ModRoute, ModSource, RouteMode, choices};
 use deckard_surface::ModSlotView;
 
 /// How far a Depth step moves High.
@@ -26,6 +26,7 @@ const MIDI: &str = "MIDI";
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModDraft {
     pub source: ModSource,
+    pub mode: RouteMode,
     pub group: Option<usize>,
     pub sound: Option<usize>,
     pub slot: Option<usize>,
@@ -36,7 +37,7 @@ pub struct ModDraft {
 
 impl ModDraft {
     fn new(source: ModSource) -> ModDraft {
-        ModDraft { source, group: None, sound: None, slot: None, from: None, midi: None, from_cc: None }
+        ModDraft { source, mode: RouteMode::Range, group: None, sound: None, slot: None, from: None, midi: None, from_cc: None }
     }
 }
 
@@ -237,6 +238,7 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
         sound,
         slot,
         from: Some((g, s, r.clone())),
+        mode: r.mode,
         ..ModDraft::new(r.source)
     };
     let keep_slot = |gg: usize, ss: usize| holds(p, gg, ss, r.slot, &r.module).then_some(r.slot);
@@ -276,7 +278,7 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
             }
         }
         4 => {
-            let dests = free(destinations(app, g, s, r.slot), &list, r.slot, Some(i));
+            let dests = free(destinations(app, g, s, r.slot), &list, r.slot, Some(i), r.mode);
             let cur = dests.iter().position(|d| d.param == r.param && d.module == r.module);
             let Some(to) = index_step(cur, steps, dests.len()) else { return };
             if Some(to) == cur {
@@ -290,8 +292,25 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
                 app.mod_rekey(Some(key(g, s, &r)), new, i);
             }
         }
+        6 => {
+            let mode = if r.mode == RouteMode::Range { RouteMode::Add } else { RouteMode::Range };
+            // A Range route cannot take a destination another Range owns.
+            if mode == RouteMode::Range
+                && list.iter().enumerate().any(|(k, x)| k != i && x.mode == RouteMode::Range && x.slot == r.slot && x.param == r.param)
+            {
+                return;
+            }
+            list[i].mode = mode;
+            set(app, g, s, list);
+        }
         5 => {
-            list[i].high = round2((r.high + DEPTH_STEP * steps as f32).clamp(0.0, 1.0));
+            if r.mode == RouteMode::Add {
+                let depth = round2((r.high - r.low + DEPTH_STEP * steps as f32).clamp(-1.0, 1.0));
+                list[i].low = (-depth).max(0.0);
+                list[i].high = depth.max(0.0);
+            } else {
+                list[i].high = round2((r.high + DEPTH_STEP * steps as f32).clamp(0.0, 1.0));
+            }
             set(app, g, s, list);
         }
         _ => {}
@@ -354,6 +373,7 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
         2 if d.group.is_some() => d.sound = index_step(d.sound, steps, sounds(d.group)),
         3 if d.sound.is_some() => d.slot = index_step(d.slot, steps, chain(d.group, d.sound)),
         4 => return destine(app, p, d, steps),
+        6 => d.mode = if d.mode == RouteMode::Range { RouteMode::Add } else { RouteMode::Range },
         _ => return,
     }
     // (What was chosen below a changed row stays while it's there.)
@@ -370,10 +390,10 @@ fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
     let routes = |g: usize, s: usize| p.groups[g].sounds[s].mod_routes.clone();
     let mut list = routes(g, s);
     let old_at = from.filter(|(fg, fs, _)| (*fg, *fs) == (g, s)).map(|(.., i)| i);
-    let dests = free(destinations(app, g, s, slot), &list, slot, old_at);
+    let dests = free(destinations(app, g, s, slot), &list, slot, old_at, d.mode);
     let Some(to) = index_step(None, steps, dests.len()) else { return };
     let dest = &dests[to];
-    let made = ModRoute::new(d.source, slot, &dest.module, dest.param.clone());
+    let made = ModRoute { mode: d.mode, ..ModRoute::new(d.source, slot, &dest.module, dest.param.clone()) };
     // A new route starts at the knob, Depth 0; a moved one keeps its range.
     let made = match (&d.from, &d.from_cc) {
         (Some((_, _, r)), _) => ModRoute { low: r.low, high: r.high, curve: r.curve, range: r.range, ..made },
@@ -540,9 +560,13 @@ fn cc_source_step(lfos: &[Lfo], cur: ModSource, steps: i64) -> Option<ModSource>
 }
 
 /// `dests` (of chain slot `slot`) less those another route in `list` (all but route
-/// `own`) drives: a Destination step passes over them, never taking one from its route.
-fn free(dests: Vec<Destination>, list: &[ModRoute], slot: usize, own: Option<usize>) -> Vec<Destination> {
-    let taken = |d: &Destination| list.iter().enumerate().any(|(k, x)| Some(k) != own && x.slot == slot && x.param == d.param);
+/// `own`) drives in Range mode. Add routes can share any destination.
+fn free(dests: Vec<Destination>, list: &[ModRoute], slot: usize, own: Option<usize>, mode: RouteMode) -> Vec<Destination> {
+    let taken = |d: &Destination| {
+        list.iter()
+            .enumerate()
+            .any(|(k, x)| mode == RouteMode::Range && x.mode == RouteMode::Range && Some(k) != own && x.slot == slot && x.param == d.param)
+    };
     dests.into_iter().filter(|d| !taken(d)).collect()
 }
 
@@ -565,11 +589,11 @@ fn erase_draft(app: &mut App, p: &Project, d: ModDraft) {
     }
 }
 
-/// Put route `r` in `list`, one route a parameter: at `at` (the route it was, which
+/// Put route `r` in `list`, retaining all Add contributions: at `at` (the route it was, which
 /// keeps its place; another on the same parameter goes), else in place of the one on
 /// its parameter, else last.
 fn place(list: &mut Vec<ModRoute>, r: ModRoute, at: Option<usize>) {
-    let same = |x: &ModRoute| x.slot == r.slot && x.param == r.param;
+    let same = |x: &ModRoute| r.mode == RouteMode::Range && x.mode == RouteMode::Range && x.slot == r.slot && x.param == r.param;
     match at {
         Some(i) => {
             // (Those before it that go move it down.)
@@ -737,7 +761,7 @@ impl App {
                             sound_text(p, g, s).unwrap_or_else(none),
                             module,
                             dest,
-                            depth_text(r.low, r.high),
+                            if r.mode == RouteMode::Add { format!("Add {}", depth_text(r.low, r.high)) } else { depth_text(r.low, r.high) },
                         ]
                     }
                     ModSlot::Cc(i) => {
@@ -779,7 +803,7 @@ impl App {
                             d.group.zip(d.sound).and_then(|(g, s)| sound_text(p, g, s)).unwrap_or_else(none),
                             module.unwrap_or_else(none),
                             none(),
-                            none(),
+                            if d.mode == RouteMode::Add { "Add".into() } else { none() },
                         ]
                     }
                     ModSlot::Empty => std::array::from_fn(|_| none()),
@@ -792,6 +816,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    include!("additive_route_tests.rs");
     use super::*;
     use deckard_surface::Action as A;
 

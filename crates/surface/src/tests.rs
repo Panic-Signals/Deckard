@@ -3173,6 +3173,22 @@ fn the_step_grid_places_a_pads_chord_in_chords_mode() {
     assert!(s.screen_text(&v).join("|").contains("CHORD"));
 }
 
+/// Holding Shift changes the route mode without changing the selected knob row.
+#[test]
+fn mod_matrix_shift_screen_toggles_route_mode() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    press(&mut s, &v, "BUTTON_SOLO");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::ModSlot(0, 6, 1)]);
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 5, 1)]);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    v.mod_slots[0].midi = true;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty(), "CC has no Add mode");
+    assert_eq!(s.error(), None);
+}
+
 #[test]
 fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     let (mut s, mut v) = (Surface::new(), view());

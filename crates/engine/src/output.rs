@@ -786,6 +786,11 @@ impl Output {
         self.route_travels.get(g, s, k, key)
     }
 
+    /// The lock-free route travels, shared with controller and display threads.
+    pub fn route_board(&self) -> Arc<crate::meters::RouteTravels> {
+        Arc::clone(&self.route_travels)
+    }
+
     /// How many engines have been played (an edit is built against the playing one).
     pub fn plays(&self) -> u64 {
         self.plays.load(Ordering::Acquire)

@@ -839,8 +839,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set(
         "mod_slot",
         lua.create_function(move |_, (slot, row, steps): (usize, usize, i64)| {
-            if slot < 1 || !(1..=6).contains(&row) {
-                return Err(mlua::Error::runtime("mod_slot(slot, row, steps): slots count from 1, rows from 1 to 6"));
+            if slot < 1 || !(1..=7).contains(&row) {
+                return Err(mlua::Error::runtime("mod_slot(slot, row, steps): slots count from 1, rows from 1 to 7 (7: route mode)"));
             }
             act(&sh, Action::ModSlot(slot - 1, row - 1, steps));
             Ok(())
