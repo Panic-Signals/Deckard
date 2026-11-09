@@ -13,9 +13,9 @@ pub(crate) const ITEM: [u8; 4] = *b"EXPR";
 pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
-/// CC routes), 7 (before scene settings), 8 (before extra outputs) and 9 (before the
-/// app's view) still read.
-const VERSION: u32 = 10;
+/// CC routes), 7 (before scene settings), 8 (before extra outputs), 9 (before the
+/// app's view) and 10 (before CV routes) still read.
+const VERSION: u32 = 11;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -80,6 +80,8 @@ pub(crate) struct Block {
     pub scene_settings: String,
     /// A plug-in's extra-output strips as [`deckard_model::extra_out::to_text`] (version 9).
     pub extra_outs: String,
+    /// The project's CV routes as [`deckard_model::mod_matrix::cv_to_text`] (version 11).
+    pub cv_routes: String,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -276,7 +278,7 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
         }
     }
     let view = b.screen.as_ref().map_or("", |s| s.view.as_str());
-    for text in [b.lfos.as_str(), &b.cc_routes, &b.scene_settings, &b.extra_outs, view] {
+    for text in [b.lfos.as_str(), &b.cc_routes, &b.scene_settings, &b.extra_outs, view, &b.cv_routes] {
         w.u32(text.len());
         for &c in text.as_bytes() {
             w.u8(c);
@@ -397,6 +399,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
         if let Some(s) = &mut b.screen {
             s.view = String::from_utf8_lossy(&text).into_owned();
         }
+    }
+    if version >= 11 {
+        let mut text = Vec::new();
+        for _ in 0..r.count(1)? {
+            text.push(r.u8()?);
+        }
+        b.cv_routes = String::from_utf8_lossy(&text).into_owned();
     }
     Ok(b)
 }
@@ -544,6 +553,7 @@ impl Document {
         b.cc_routes = deckard_model::mod_matrix::cc_to_text(&self.project.cc_routes);
         b.scene_settings = self.scene_settings_text();
         b.extra_outs = deckard_model::extra_out::to_text(&self.project.extra_outs);
+        b.cv_routes = deckard_model::mod_matrix::cv_to_text(&self.project.cv_routes);
         let payload = (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
@@ -553,7 +563,8 @@ impl Document {
             || !b.lfos.is_empty()
             || !b.cc_routes.is_empty()
             || !b.scene_settings.is_empty()
-            || !b.extra_outs.is_empty())
+            || !b.extra_outs.is_empty()
+            || !b.cv_routes.is_empty())
         .then(|| encode(&b));
         mxprj::container::set_root_child(archived, DOMAIN, ITEM, FRAME, payload.as_deref())
     }
@@ -635,6 +646,8 @@ impl Document {
         let _ = self.run(&ops);
         self.read_scene_settings(&b.scene_settings);
         let ops = self.extra_out_ops(&deckard_model::extra_out::from_text(&b.extra_outs));
+        let _ = self.run(&ops);
+        let ops = self.cv_route_ops(&deckard_model::mod_matrix::cv_from_text(&b.cv_routes));
         let _ = self.run(&ops);
         self.screen = b.screen;
         self.refresh();
@@ -752,7 +765,7 @@ mod tests {
         let mut bytes = encode(&b);
         // Version 4: no screen or LFOs at the end.
         bytes[..4].copy_from_slice(&4u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 13);
+        bytes.truncate(bytes.len() - 17);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
@@ -763,7 +776,7 @@ mod tests {
         let mut bytes = encode(&full);
         // Version 5: no LFO text (a length and 3 bytes) at the end.
         bytes[..4].copy_from_slice(&5u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 15);
+        bytes.truncate(bytes.len() - 19);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
@@ -784,7 +797,7 @@ mod tests {
         let mut bytes = encode(&full);
         // Version 6: no CC route text (a length and 2 bytes) at the end.
         bytes[..4].copy_from_slice(&6u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 10);
+        bytes.truncate(bytes.len() - 14);
         assert_eq!(decode(&bytes).unwrap(), b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
     }
@@ -885,9 +898,35 @@ mod tests {
         let now = encode(&b);
         let mut v8 = now.clone();
         v8[..4].copy_from_slice(&8u32.to_le_bytes());
-        v8.truncate(v8.len() - 8);
+        v8.truncate(v8.len() - 12);
         assert_eq!(now[now.len() - 4..], [0, 0, 0, 0]);
         assert_eq!(decode(&v8).unwrap(), b);
+    }
+
+    #[test]
+    fn cv_routes_round_trip_in_the_block() {
+        let mut d = doc_with(&[]);
+        d.set_cv_routes(vec![deckard_model::mod_matrix::CvRoute {
+            high: 0.5,
+            ..deckard_model::mod_matrix::CvRoute::new(deckard_model::mod_matrix::ModSource::Lfo(3), 7)
+        }])
+        .unwrap();
+        let b = Block { cv_routes: "x".into(), ..Block::default() };
+        assert_eq!(decode(&encode(&b)).unwrap(), b);
+        assert_eq!(reopen(&d).project().cv_routes, d.project().cv_routes);
+        assert!(!reopen(&d).is_dirty());
+    }
+
+    #[test]
+    fn version_10_blocks_still_read() {
+        let b = Block { extra_outs: "ex".into(), ..Block::default() };
+        let full = Block { cv_routes: "cv".into(), ..b.clone() };
+        let mut bytes = encode(&full);
+        // Version 10: no CV route text (a length and 2 bytes) at the end.
+        bytes[..4].copy_from_slice(&10u32.to_le_bytes());
+        bytes.truncate(bytes.len() - 6);
+        assert_eq!(decode(&bytes).unwrap(), b);
+        assert_eq!(decode(&encode(&full)).unwrap(), full);
     }
 
     #[test]
@@ -897,7 +936,7 @@ mod tests {
         let mut bytes = encode(&full);
         // Version 8: no extra-output text (a length and 2 bytes) at the end.
         bytes[..4].copy_from_slice(&8u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 10);
+        bytes.truncate(bytes.len() - 14);
         assert_eq!(decode(&bytes).unwrap(), b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
     }
@@ -938,7 +977,7 @@ mod tests {
         let mut bytes = encode(&b);
         // Version 3: no PROB LOCK count or screen at the end.
         bytes[..4].copy_from_slice(&3u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 17);
+        bytes.truncate(bytes.len() - 21);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 
@@ -948,7 +987,7 @@ mod tests {
         let mut bytes = encode(&b);
         // Version 2: no routes or PROB LOCK counts, nor a screen, at the end.
         bytes[..4].copy_from_slice(&2u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 21);
+        bytes.truncate(bytes.len() - 25);
         assert_eq!(decode(&bytes).unwrap(), b);
     }
 

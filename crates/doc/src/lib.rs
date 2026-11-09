@@ -30,6 +30,7 @@ mod zones;
 pub use audio::TakeSpec;
 pub use zones::{ZoneFrom, ZoneSpec};
 mod cc_routes;
+mod cv_routes;
 mod expression;
 mod extra_outs;
 mod files;

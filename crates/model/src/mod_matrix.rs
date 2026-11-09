@@ -269,6 +269,67 @@ fn cc_line(l: &str) -> Option<CcRoute> {
     })
 }
 
+/// The most output channels a CV route can reach (channels 0–31, one side of an output
+/// pair each).
+pub const CV_CHANNELS: u8 = 32;
+
+/// A route to a CV output: an LFO (`source`) is sent as a control voltage on audio output
+/// `channel` (0–31, one side of an output pair), swinging from `low` to `high` (−1–1) as
+/// the LFO goes 0 to 1. Project-wide, not on a sound: kept on the project's root object
+/// as [`CV_FIELD`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CvRoute {
+    pub source: ModSource,
+    pub channel: u8,
+    pub low: f32,
+    pub high: f32,
+}
+
+/// The project root's field holding its CV routes ([`cv_to_text`]).
+pub const CV_FIELD: &str = "deckard:cv_routes";
+
+impl CvRoute {
+    /// A route at Depth 0 (low = high = 0: it sends silence until turned up).
+    pub fn new(source: ModSource, channel: u8) -> CvRoute {
+        CvRoute { source, channel: channel.min(CV_CHANNELS - 1), low: 0.0, high: 0.0 }
+    }
+
+    /// The voltage it sends (−1–1) with the LFO at `x` (0..1).
+    pub fn value(&self, x: f32) -> f32 {
+        self.low + (self.high - self.low) * x.clamp(0.0, 1.0)
+    }
+}
+
+/// CV routes as text: one per line, `source channel low high`.
+pub fn cv_to_text(routes: &[CvRoute]) -> String {
+    let mut s = String::new();
+    for r in routes {
+        s.push_str(&format!("{} {} {} {}\n", r.source.key(), r.channel, r.low, r.high));
+    }
+    s
+}
+
+/// CV routes from [`cv_to_text`]'s text; lines that don't read (or whose source isn't an
+/// LFO) are skipped, values out of range clamped.
+pub fn cv_from_text(s: &str) -> Vec<CvRoute> {
+    s.lines().filter_map(cv_line).collect()
+}
+
+fn cv_line(l: &str) -> Option<CvRoute> {
+    let mut w = l.split(' ');
+    let source = ModSource::from_key(w.next()?).filter(|s| matches!(s, ModSource::Lfo(_)))?;
+    // (The channel reads wide, so one out of range is clamped rather than the line lost.)
+    let channel: i64 = w.next()?.parse().ok()?;
+    let low: f32 = w.next()?.parse().ok()?;
+    let high: f32 = w.next()?.parse().ok()?;
+    (low.is_finite() && high.is_finite()).then_some(CvRoute {
+        source,
+        channel: channel.clamp(0, i64::from(CV_CHANNELS - 1)) as u8,
+        low: low.clamp(-1.0, 1.0),
+        high: high.clamp(-1.0, 1.0),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     include!("additive_route_tests.rs");
@@ -310,6 +371,23 @@ mod tests {
         assert_eq!(r.value(1.0), 127);
         assert_eq!(r.value(0.5), 64);
         assert_eq!(CcRoute::new(ModSource::Lfo(1), "Out", 1, 1).value(1.0), 0, "a new route sits at Depth 0");
+    }
+
+    #[test]
+    fn cv_value_maps_low_to_high_bipolar() {
+        let r = CvRoute { low: -0.5, high: 0.5, ..CvRoute::new(ModSource::Lfo(1), 2) };
+        assert!(close(r.value(0.0), -0.5));
+        assert!(close(r.value(1.0), 0.5));
+        assert!(close(r.value(0.5), 0.0));
+    }
+
+    #[test]
+    fn cv_routes_round_trip_and_bad_lines_are_skipped() {
+        let a = CvRoute { low: -1.0, high: 0.25, ..CvRoute::new(ModSource::Lfo(16), 31) };
+        assert_eq!(cv_from_text(&cv_to_text(std::slice::from_ref(&a))), vec![a]);
+        let r = cv_from_text("nonsense\npressure 1 0 1\nlfo1 99 -3 3\nlfo2 x 0 1\n");
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].channel, r[0].low, r[0].high), (31, -1.0, 1.0));
     }
 
     fn close(a: f32, b: f32) -> bool {
