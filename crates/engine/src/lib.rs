@@ -3288,8 +3288,12 @@ impl Engine {
         if self.frame == 0 {
             self.next = 0;
         }
-        // A loop switched on (or changed) by the edit sounds from where the song is.
-        self.recue();
+        // The edit's Audio sounds; while playing, a loop it switched on (or changed)
+        // sounds from where the song is (stopped, it waits for the pattern to play).
+        std::mem::swap(&mut self.audio_sounds, &mut fresh.audio_sounds);
+        if self.sequencing {
+            self.recue();
+        }
         fresh
     }
 
@@ -8050,6 +8054,41 @@ mod tests {
         let before: f32 = out[..2 * 47_000].iter().map(|v| v * v).sum();
         let after: f32 = out[2 * 48_500..2 * 72_000].iter().map(|v| v * v).sum();
         assert!(before < 1e-6, "silent before: {before}");
+        assert!(after > 1.0, "heard at once: {after}");
+    }
+
+    /// Edited while the transport is stopped, a loop stays silent until the pattern plays.
+    #[test]
+    fn an_edit_while_stopped_does_not_start_a_loop() {
+        let (_tmp, p) = audio_project(deckard_model::AudioEngine::Stretch);
+        let out = render_with(&p, None, 256, 2.0, |k, e, cache| {
+            if k == 48_000 / 256 {
+                e.stop();
+            }
+            if k == 60_000 / 256 {
+                let (fresh, _) = Engine::new_after(&p, Some((&p, &[])), None, 48_000, e.mode(), cache);
+                drop(e.adopt(fresh, &p));
+            }
+        });
+        let after: f32 = out[2 * 66_000..].iter().map(|v| v * v).sum();
+        assert!(after < 1e-6, "silent after the edit: {after}");
+    }
+
+    /// A sound that becomes an Audio plug-in in the edit that cues it is heard at once.
+    #[test]
+    fn a_sound_made_audio_by_the_edit_is_heard_at_once() {
+        let (_tmp, on) = audio_project(deckard_model::AudioEngine::Stretch);
+        let mut off = on.clone();
+        off.groups[0].sounds[0].audio = None;
+        off.groups[0].patterns[0].audio.clear();
+        let chains = Engine::new(&off, None, 48_000, Mode::Arrangement, &mut SampleCache::default()).1.chains;
+        let out = render_with(&off, None, 256, 3.0, |k, e, cache| {
+            if k == 48_000 / 256 {
+                let (fresh, _) = Engine::new_after(&on, Some((&off, chains.as_slice())), None, 48_000, e.mode(), cache);
+                drop(e.adopt(fresh, &on));
+            }
+        });
+        let after: f32 = out[2 * 48_500..2 * 72_000].iter().map(|v| v * v).sum();
         assert!(after > 1.0, "heard at once: {after}");
     }
 
