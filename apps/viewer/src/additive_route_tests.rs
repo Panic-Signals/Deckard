@@ -78,3 +78,75 @@ mod additive_routes {
         assert!((mod_routes::base_of(&bases, deckard_doc::Target::Sampler(0, 0), "cutoff", 0.7) - 0.3).abs() < 1e-6);
     }
 }
+
+#[test]
+fn review_second_shared_route_keeps_column_when_destination_changes() {
+    use super::*;
+    use deckard_model::mod_matrix::RouteMode;
+    let mut app = App::default();
+    let mut doc = deckard_doc::Document::new_project().unwrap();
+    doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+    app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+    let a = ModRoute { mode: RouteMode::Add, ..cutoff(ModSource::Pressure) };
+    let b = ModRoute { source: ModSource::Slide, ..a.clone() };
+    set_routes(&app, vec![a, b]);
+    let initial = app.mod_slot_views();
+    assert_eq!(initial[1].rows[0], "Slide");
+    step(&mut app, 1, 4, 1);
+    let after = app.mod_slot_views();
+    assert_eq!(after[1].rows[0], "Slide", "the edited column should still contain the same source");
+    let doc = app.doc.clone().unwrap();
+    assert!(doc.borrow_mut().undo());
+    assert_eq!(app.mod_slot_views(), initial);
+    assert!(doc.borrow_mut().redo());
+    assert_eq!(app.mod_slot_views(), after);
+    let pressure = routes(&app)[0].clone();
+    step(&mut app, 1, 5, 2);
+    assert_eq!(routes(&app)[0], pressure, "next encoder turn still edits Slide");
+}
+
+#[test]
+fn additive_identical_routes_keep_the_second_draft_in_its_own_column() {
+    use super::*;
+    let mut app = App::default();
+    let mut doc = deckard_doc::Document::new_project().unwrap();
+    doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+    doc.add_slot(0, 1, 0, &deckard_doc::NewModule::Sampler).unwrap();
+    app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+    let r = ModRoute { mode: RouteMode::Add, ..cutoff(ModSource::Pressure) };
+    set_routes(&app, vec![r.clone(), r]);
+    let _ = app.mod_slot_views();
+    step(&mut app, 1, 2, 1); // move only the second identical contribution to sound 2
+    let p = app.doc.as_ref().unwrap().borrow().project().clone();
+    assert_eq!(&app.mod_columns(&p)[..2], &[ModSlot::Route(0, 0, 0), ModSlot::Draft]);
+    step(&mut app, 1, 4, 1);
+    assert_eq!(routes(&app).len(), 1);
+    assert!(app.mod_slot_views()[1].rows[2].starts_with("S2"));
+}
+
+#[test]
+fn additive_shared_routes_keep_order_when_an_earlier_route_is_removed_after_a_move() {
+    use super::*;
+    let mut app = App::default();
+    let mut doc = deckard_doc::Document::new_project().unwrap();
+    for s in 0..2 {
+        doc.add_slot(0, s, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        doc.set("Filter", deckard_doc::Target::Sampler(0, s), "filter", mxprj::decode::Value::Int(1)).unwrap();
+    }
+    app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+    let a = ModRoute { mode: RouteMode::Add, ..cutoff(ModSource::Pressure) };
+    let b = ModRoute { source: ModSource::Slide, ..a.clone() };
+    let other = ModRoute { param: ModParam::Field("drive".into()), ..cutoff(ModSource::Pitch) };
+    set_routes(&app, vec![a, other]);
+    app.doc.as_ref().unwrap().borrow_mut().set_mod_routes(0, 1, vec![b]).unwrap();
+    let _ = app.mod_slot_views();
+    step(&mut app, 0, 2, 1);
+    let choice = destinations(&app, 0, 1, 0).iter().position(|d| d.param == ModParam::Field("cutoff".into())).unwrap();
+    step(&mut app, 0, 4, choice as i64 + 1);
+    let moved = app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[1].mod_routes[1].clone();
+    assert_eq!(moved.source, ModSource::Pressure);
+    app.doc.as_ref().unwrap().borrow_mut().set_mod_routes(0, 1, vec![moved]).unwrap();
+    let shown = app.mod_slot_views();
+    assert_eq!(shown[0].rows[0], "Pressure");
+    assert_eq!(shown[1].rows[0], "Pitch", "deleting Slide must not move Pressure past the unrelated column");
+}

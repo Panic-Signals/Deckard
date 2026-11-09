@@ -31,13 +31,25 @@ pub struct ModDraft {
     pub sound: Option<usize>,
     pub slot: Option<usize>,
     pub from: Option<(usize, usize, ModRoute)>,
+    /// Original index, to distinguish otherwise identical Add contributions.
+    pub from_index: Option<usize>,
     pub midi: Option<CcDraft>,
     pub from_cc: Option<CcRoute>,
 }
 
 impl ModDraft {
     fn new(source: ModSource) -> ModDraft {
-        ModDraft { source, mode: RouteMode::Range, group: None, sound: None, slot: None, from: None, midi: None, from_cc: None }
+        ModDraft {
+            source,
+            mode: RouteMode::Range,
+            group: None,
+            sound: None,
+            slot: None,
+            from: None,
+            from_index: None,
+            midi: None,
+            from_cc: None,
+        }
     }
 }
 
@@ -59,16 +71,16 @@ pub enum ModSlot {
 }
 
 /// A route as the columns know it: a sound's (group, sound, chain slot and parameter:
-/// one route a parameter), or a CC route's (source, port, channel, CC). Kept on the
+/// including the contribution's source and settings), or a CC route's (source, port, channel, CC). Kept on the
 /// app, not saved.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Key {
-    Sound(usize, usize, usize, ModParam),
+    Sound(usize, usize, ModRoute),
     Cc(ModSource, String, u8, u8),
 }
 
 fn key(g: usize, s: usize, r: &ModRoute) -> Key {
-    Key::Sound(g, s, r.slot, r.param.clone())
+    Key::Sound(g, s, r.clone())
 }
 
 fn cc_key(r: &CcRoute) -> Key {
@@ -123,7 +135,18 @@ fn ordered(p: &Project, order: &[(Key, usize)]) -> Vec<(Key, At)> {
     }
     all.extend(p.cc_routes.iter().enumerate().map(|(i, r)| Some((cc_key(r), At::Cc(i)))));
     let mut take = |f: &dyn Fn(&(Key, At)) -> bool| all.iter_mut().find(|x| x.as_ref().is_some_and(f)).and_then(Option::take);
-    let mut got: Vec<_> = order.iter().map(|(k, _)| take(&|(kk, _)| kk == k)).collect();
+    // Add routes can share a destination. Match their last position first, then
+    // recover routes shifted by a removal, before falling back to edited targets.
+    let place_of = |k: &Key, i: usize| match k {
+        Key::Sound(g, s, ..) => At::Sound(*g, *s, i),
+        Key::Cc(..) => At::Cc(i),
+    };
+    let mut got: Vec<_> = order.iter().map(|(k, i)| take(&|(kk, at)| kk == k && *at == place_of(k, *i))).collect();
+    for (x, (k, _)) in got.iter_mut().zip(order) {
+        if x.is_none() {
+            *x = take(&|(kk, _)| kk == k);
+        }
+    }
     for (x, (k, i)) in got.iter_mut().zip(order) {
         if x.is_none() {
             let was = match k {
@@ -140,7 +163,7 @@ fn ordered(p: &Project, order: &[(Key, usize)]) -> Vec<(Key, At)> {
 /// came from), then a new draft or an empty slot.
 pub fn slots(p: &Project, draft: Option<&ModDraft>, routes: &[At]) -> Vec<ModSlot> {
     let origin = draft.and_then(|d| match (&d.from, &d.from_cc) {
-        (Some((g, s, r)), _) => Some(At::Sound(*g, *s, from_at(p, *g, *s, r)?)),
+        (Some((g, s, r)), _) => Some(At::Sound(*g, *s, from_at(p, *g, *s, r, draft.and_then(|d| d.from_index))?)),
         (_, Some(r)) => Some(At::Cc(p.cc_routes.iter().position(|x| x == r)?)),
         _ => None,
     });
@@ -158,8 +181,9 @@ pub fn slots(p: &Project, draft: Option<&ModDraft>, routes: &[At]) -> Vec<ModSlo
 }
 
 /// Where route `r` is on sound (`g`, `s`) now.
-fn from_at(p: &Project, g: usize, s: usize, r: &ModRoute) -> Option<usize> {
-    p.groups.get(g)?.sounds.get(s)?.mod_routes.iter().position(|x| x == r)
+fn from_at(p: &Project, g: usize, s: usize, r: &ModRoute, preferred: Option<usize>) -> Option<usize> {
+    let list = &p.groups.get(g)?.sounds.get(s)?.mod_routes;
+    preferred.filter(|&i| list.get(i) == Some(r)).or_else(|| list.iter().position(|x| x == r))
 }
 
 /// A parameter a route can drive: the module (class, or plug-in id) and parameter, its
@@ -238,6 +262,7 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
         sound,
         slot,
         from: Some((g, s, r.clone())),
+        from_index: Some(i),
         mode: r.mode,
         ..ModDraft::new(r.source)
     };
@@ -255,7 +280,12 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
         },
         1 if g as i64 + steps >= p.groups.len() as i64 => {
             if let Some(source) = cc_source(&p.lfos, r.source) {
-                app.mod_draft = Some(ModDraft { midi: Some(CcDraft::default()), from: Some((g, s, r.clone())), ..ModDraft::new(source) });
+                app.mod_draft = Some(ModDraft {
+                    midi: Some(CcDraft::default()),
+                    from: Some((g, s, r.clone())),
+                    from_index: Some(i),
+                    ..ModDraft::new(source)
+                });
             }
         }
         1 => {
@@ -287,9 +317,9 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
             let d = &dests[to];
             let moved = ModRoute { module: d.module.clone(), param: d.param.clone(), ..r };
             let new = key(g, s, &moved);
-            place(&mut list, moved, Some(i));
+            let at = place(&mut list, moved, Some(i));
             if set(app, g, s, list) {
-                app.mod_rekey(Some(key(g, s, &r)), new, i);
+                app.mod_rekey(Some((key(g, s, &r), i)), new, at);
             }
         }
         6 => {
@@ -367,7 +397,13 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
                 return;
             }
             let Some(source) = cc_source(&p.lfos, d.source) else { return };
-            d = ModDraft { midi: Some(CcDraft::default()), from: d.from, from_cc: d.from_cc, ..ModDraft::new(source) };
+            d = ModDraft {
+                midi: Some(CcDraft::default()),
+                from: d.from,
+                from_index: d.from_index,
+                from_cc: d.from_cc,
+                ..ModDraft::new(source)
+            };
         }
         1 => d.group = index_step(d.group, steps, p.groups.len()),
         2 if d.group.is_some() => d.sound = index_step(d.sound, steps, sounds(d.group)),
@@ -386,7 +422,7 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
 /// the one it was, in one undo step).
 fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
     let (Some(g), Some(s), Some(slot)) = (d.group, d.sound, d.slot) else { return };
-    let from = d.from.as_ref().and_then(|(fg, fs, r)| Some((*fg, *fs, from_at(p, *fg, *fs, r)?)));
+    let from = d.from.as_ref().and_then(|(fg, fs, r)| Some((*fg, *fs, from_at(p, *fg, *fs, r, d.from_index)?)));
     let routes = |g: usize, s: usize| p.groups[g].sounds[s].mod_routes.clone();
     let mut list = routes(g, s);
     let old_at = from.filter(|(fg, fs, _)| (*fg, *fs) == (g, s)).map(|(.., i)| i);
@@ -401,8 +437,7 @@ fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
         _ => ModRoute { low: dest.travel, high: dest.travel, ..made },
     };
     let new = key(g, s, &made);
-    place(&mut list, made, old_at);
-    let at = list.iter().position(|x| key(g, s, x) == new).unwrap_or(0);
+    let at = place(&mut list, made, old_at);
     app.mod_draft = None;
     let cc_at = d.from_cc.as_ref().and_then(|r| p.cc_routes.iter().position(|x| x == r));
     let done = match from {
@@ -437,8 +472,8 @@ fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
     // (It takes the draft's column: the route's it was, or the last.)
     if done {
         let old = match cc_at {
-            Some(_) => d.from_cc.as_ref().map(cc_key),
-            None => d.from.as_ref().filter(|_| from.is_some()).map(|(fg, fs, r)| key(*fg, *fs, r)),
+            Some(i) => d.from_cc.as_ref().map(|r| (cc_key(r), i)),
+            None => d.from.as_ref().zip(from).map(|((fg, fs, r), (_, _, i))| (key(*fg, *fs, r), i)),
         };
         app.mod_rekey(old, new, at);
     }
@@ -465,7 +500,7 @@ fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
     ccs.push(made);
     let at = ccs.len() - 1;
     app.mod_draft = None;
-    let from = d.from.as_ref().and_then(|(g, s, r)| Some((*g, *s, from_at(p, *g, *s, r)?)));
+    let from = d.from.as_ref().and_then(|(g, s, r)| Some((*g, *s, from_at(p, *g, *s, r, d.from_index)?)));
     let done = match from {
         Some((g, s, i)) => {
             let Some(doc) = app.doc.clone() else { return };
@@ -483,7 +518,7 @@ fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
         None => set_cc(app, ccs),
     };
     if done {
-        app.mod_rekey(d.from.as_ref().filter(|_| from.is_some()).map(|(g, s, r)| key(*g, *s, r)), new, at);
+        app.mod_rekey(d.from.as_ref().zip(from).map(|((g, s, r), (_, _, i))| (key(*g, *s, r), i)), new, at);
     }
 }
 
@@ -535,7 +570,7 @@ fn cc_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
     }
     let new = cc_key(c);
     if set_cc(app, list) {
-        app.mod_rekey(Some(cc_key(&r)), new, i);
+        app.mod_rekey(Some((cc_key(&r), i)), new, i);
     }
 }
 
@@ -574,7 +609,7 @@ fn free(dests: Vec<Destination>, list: &[ModRoute], slot: usize, own: Option<usi
 fn erase_draft(app: &mut App, p: &Project, d: ModDraft) {
     app.mod_draft = None;
     if let Some((g, s, r)) = &d.from
-        && let Some(i) = from_at(p, *g, *s, r)
+        && let Some(i) = from_at(p, *g, *s, r, d.from_index)
     {
         let mut list = p.groups[*g].sounds[*s].mod_routes.clone();
         list.remove(i);
@@ -592,7 +627,7 @@ fn erase_draft(app: &mut App, p: &Project, d: ModDraft) {
 /// Put route `r` in `list`, retaining all Add contributions: at `at` (the route it was, which
 /// keeps its place; another on the same parameter goes), else in place of the one on
 /// its parameter, else last.
-fn place(list: &mut Vec<ModRoute>, r: ModRoute, at: Option<usize>) {
+fn place(list: &mut Vec<ModRoute>, r: ModRoute, at: Option<usize>) -> usize {
     let same = |x: &ModRoute| r.mode == RouteMode::Range && x.mode == RouteMode::Range && x.slot == r.slot && x.param == r.param;
     match at {
         Some(i) => {
@@ -605,10 +640,17 @@ fn place(list: &mut Vec<ModRoute>, r: ModRoute, at: Option<usize>) {
                 keep
             });
             list[i - gone] = r;
+            i - gone
         }
         None => match list.iter().position(same) {
-            Some(k) => list[k] = r,
-            None => list.push(r),
+            Some(k) => {
+                list[k] = r;
+                k
+            }
+            None => {
+                list.push(r);
+                list.len() - 1
+            }
         },
     }
 }
@@ -720,9 +762,9 @@ impl App {
 
     /// The route `old` (none: a new one, last) is now `new`, at place `i` on its sound,
     /// in the same column.
-    fn mod_rekey(&self, old: Option<Key>, new: Key, i: usize) {
+    fn mod_rekey(&self, old: Option<(Key, usize)>, new: Key, i: usize) {
         let cols = &mut self.mod_order.borrow_mut().cols;
-        match old.and_then(|o| cols.iter().position(|(k, _)| *k == o)) {
+        match old.and_then(|o| cols.iter().position(|entry| *entry == o)) {
             Some(at) => cols[at] = (new, i),
             None => cols.push((new, i)),
         }
