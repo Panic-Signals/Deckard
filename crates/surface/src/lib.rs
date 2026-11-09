@@ -287,10 +287,13 @@ pub struct LfoView {
 /// A mod matrix slot as its column shows it: Source, Group ("A1 – name", "A1" unnamed), Sound
 /// ("S3 – name"), Module, Destination and Depth ("+50%"), "—" where unset. `midi`: a CC
 /// route (its Group "MIDI"), whose rows 3–5 are Port, Channel ("1"–"16") and CC ("0"–"119").
+/// `cv`: a CV route (its Group "CV"), whose rows are Out (" !" after it when it writes
+/// nothing), a blank, Low and High.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModSlotView {
     pub rows: [String; 6],
     pub midi: bool,
+    pub cv: bool,
 }
 
 /// Lock (LOCK, SHIFT + LOCK).

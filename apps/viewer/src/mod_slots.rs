@@ -2,14 +2,16 @@
 //! six rows (Source, Group, Sound, Module, Destination, Depth), and their edits
 //! ([`deckard_surface::Action::ModSlot`]). A slot without a Destination is a draft,
 //! kept on the app until it has one. Past the last group, Group is MIDI: the slot is a
-//! CC route ([`CcRoute`]), its rows Port, Channel and CC, made on its first CC.
+//! CC route ([`CcRoute`]), its rows Port, Channel and CC, made on its first CC. Past
+//! MIDI, while an output channel is CV only, Group is CV: a CV route ([`CvRoute`]), its
+//! rows Out, Low and High, made when Out is chosen.
 
 use crate::App;
 use crate::layout::{self, channel, mod_routes};
 use deckard_doc::Chain;
 use deckard_model::Project;
 use deckard_model::lfo::Lfo;
-use deckard_model::mod_matrix::{CC_MAX, CcRoute, ModParam, ModRoute, ModSource, RouteMode, choices};
+use deckard_model::mod_matrix::{CC_MAX, CcRoute, CvRoute, ModParam, ModRoute, ModSource, RouteMode, choices};
 use deckard_surface::ModSlotView;
 
 /// How far a Depth step moves High.
@@ -18,11 +20,14 @@ const DEPTH_STEP: f32 = 0.05;
 const NONE: &str = "—";
 /// The Group row of a CC route.
 const MIDI: &str = "MIDI";
+/// The Group row of a CV route.
+const CV: &str = "CV";
 
 /// A slot being made: its source, and the group, sound and chain slot chosen so far
-/// (or `midi`: a CC route's port and channel so far). `from`: the route (on sound `.0`,
-/// `.1`) it was, or `from_cc` the CC route, which stays until a Destination (or CC) is
-/// chosen, the draft shown in its place meanwhile.
+/// (or `midi`: a CC route's port and channel so far; `cv`: a CV route's). `from`: the
+/// route (on sound `.0`, `.1`) it was, or `from_cc` the CC route, or `from_cv` the CV
+/// route, which stays until a Destination (or CC, or Out) is chosen, the draft shown in
+/// its place meanwhile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModDraft {
     pub source: ModSource,
@@ -35,6 +40,8 @@ pub struct ModDraft {
     pub from_index: Option<usize>,
     pub midi: Option<CcDraft>,
     pub from_cc: Option<CcRoute>,
+    pub cv: Option<CvDraft>,
+    pub from_cv: Option<CvRoute>,
 }
 
 impl ModDraft {
@@ -49,6 +56,8 @@ impl ModDraft {
             from_index: None,
             midi: None,
             from_cc: None,
+            cv: None,
+            from_cv: None,
         }
     }
 }
@@ -60,23 +69,31 @@ pub struct CcDraft {
     pub channel: Option<u8>,
 }
 
-/// What a slot is: route `.2` of sound (`.0`, `.1`), CC route `.0`, the draft, or the
-/// empty one.
+/// A CV route being made: the output channel chosen so far.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CvDraft {
+    pub channel: Option<u8>,
+}
+
+/// What a slot is: route `.2` of sound (`.0`, `.1`), CC route `.0`, CV route `.0`, the
+/// draft, or the empty one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModSlot {
     Route(usize, usize, usize),
     Cc(usize),
+    Cv(usize),
     Draft,
     Empty,
 }
 
 /// A route as the columns know it: a sound's (group, sound, chain slot and parameter:
-/// including the contribution's source and settings), or a CC route's (source, port, channel, CC). Kept on the
-/// app, not saved.
+/// including the contribution's source and settings), a CC route's (source, port,
+/// channel, CC), or a CV route's (source, channel). Kept on the app, not saved.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Key {
     Sound(usize, usize, ModRoute),
     Cc(ModSource, String, u8, u8),
+    Cv(ModSource, u8),
 }
 
 fn key(g: usize, s: usize, r: &ModRoute) -> Key {
@@ -87,12 +104,17 @@ fn cc_key(r: &CcRoute) -> Key {
     Key::Cc(r.source, r.port.clone(), r.channel, r.cc)
 }
 
-/// Where a route is: (group, sound, place on the sound), or its place among the CC
-/// routes.
+fn cv_key(r: &CvRoute) -> Key {
+    Key::Cv(r.source, r.channel)
+}
+
+/// Where a route is: (group, sound, place on the sound), or its place among the CC or
+/// CV routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum At {
     Sound(usize, usize, usize),
     Cc(usize),
+    Cv(usize),
 }
 
 /// The columns' order, kept on the app (not saved): each column's route, and its place
@@ -124,8 +146,8 @@ fn extends(old: &[Vec<Vec<String>>], new: &[Vec<Vec<String>>]) -> bool {
 
 /// Every route in the project as (its key, where it is): those in `order` in that
 /// order; a column whose route is gone (an undo, a redo) takes the route now at its
-/// place (on its sound, or among the CC routes); then the rest by group, sound and
-/// place, then the CC routes.
+/// place (on its sound, or among the CC or CV routes); then the rest by group, sound
+/// and place, then the CC routes, then the CV routes.
 fn ordered(p: &Project, order: &[(Key, usize)]) -> Vec<(Key, At)> {
     let mut all: Vec<Option<(Key, At)>> = Vec::new();
     for (g, grp) in p.groups.iter().enumerate() {
@@ -134,12 +156,14 @@ fn ordered(p: &Project, order: &[(Key, usize)]) -> Vec<(Key, At)> {
         }
     }
     all.extend(p.cc_routes.iter().enumerate().map(|(i, r)| Some((cc_key(r), At::Cc(i)))));
+    all.extend(p.cv_routes.iter().enumerate().map(|(i, r)| Some((cv_key(r), At::Cv(i)))));
     let mut take = |f: &dyn Fn(&(Key, At)) -> bool| all.iter_mut().find(|x| x.as_ref().is_some_and(f)).and_then(Option::take);
     // Add routes can share a destination. Match their last position first, then
     // recover routes shifted by a removal, before falling back to edited targets.
     let place_of = |k: &Key, i: usize| match k {
         Key::Sound(g, s, ..) => At::Sound(*g, *s, i),
         Key::Cc(..) => At::Cc(i),
+        Key::Cv(..) => At::Cv(i),
     };
     let mut got: Vec<_> = order.iter().map(|(k, i)| take(&|(kk, at)| kk == k && *at == place_of(k, *i))).collect();
     for (x, (k, _)) in got.iter_mut().zip(order) {
@@ -152,6 +176,7 @@ fn ordered(p: &Project, order: &[(Key, usize)]) -> Vec<(Key, At)> {
             let was = match k {
                 Key::Sound(g, s, ..) => At::Sound(*g, *s, *i),
                 Key::Cc(..) => At::Cc(*i),
+                Key::Cv(..) => At::Cv(*i),
             };
             *x = take(&|(_, at)| *at == was);
         }
@@ -162,9 +187,10 @@ fn ordered(p: &Project, order: &[(Key, usize)]) -> Vec<(Key, At)> {
 /// The slots for routes `routes` in column order (the draft in place of the route it
 /// came from), then a new draft or an empty slot.
 pub fn slots(p: &Project, draft: Option<&ModDraft>, routes: &[At]) -> Vec<ModSlot> {
-    let origin = draft.and_then(|d| match (&d.from, &d.from_cc) {
-        (Some((g, s, r)), _) => Some(At::Sound(*g, *s, from_at(p, *g, *s, r, draft.and_then(|d| d.from_index))?)),
-        (_, Some(r)) => Some(At::Cc(p.cc_routes.iter().position(|x| x == r)?)),
+    let origin = draft.and_then(|d| match (&d.from, &d.from_cc, &d.from_cv) {
+        (Some((g, s, r)), ..) => Some(At::Sound(*g, *s, from_at(p, *g, *s, r, d.from_index)?)),
+        (_, Some(r), _) => Some(At::Cc(p.cc_routes.iter().position(|x| x == r)?)),
+        (.., Some(r)) => Some(At::Cv(p.cv_routes.iter().position(|x| x == r)?)),
         _ => None,
     });
     let mut out: Vec<ModSlot> = routes
@@ -173,6 +199,7 @@ pub fn slots(p: &Project, draft: Option<&ModDraft>, routes: &[At]) -> Vec<ModSlo
             _ if origin == Some(at) => ModSlot::Draft,
             At::Sound(g, s, i) => ModSlot::Route(g, s, i),
             At::Cc(i) => ModSlot::Cc(i),
+            At::Cv(i) => ModSlot::Cv(i),
         })
         .collect();
     // A draft from a route is in its place (each slot keeps its column); a new one last.
@@ -226,6 +253,7 @@ pub fn step(app: &mut App, slot: usize, row: usize, steps: i64) {
     match at {
         Some(ModSlot::Route(g, s, i)) => route_step(app, &p, (g, s, i), row, steps),
         Some(ModSlot::Cc(i)) => cc_step(app, &p, i, row, steps),
+        Some(ModSlot::Cv(i)) => cv_step(app, &p, i, row, steps),
         Some(ModSlot::Draft) => draft_step(app, &p, row, steps),
         Some(ModSlot::Empty) if row == 0 && steps > 0 => {
             if let Some(source) = source_step(&p.lfos, None, steps) {
@@ -280,12 +308,8 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
         },
         1 if g as i64 + steps >= p.groups.len() as i64 => {
             if let Some(source) = cc_source(&p.lfos, r.source) {
-                app.mod_draft = Some(ModDraft {
-                    midi: Some(CcDraft::default()),
-                    from: Some((g, s, r.clone())),
-                    from_index: Some(i),
-                    ..ModDraft::new(source)
-                });
+                let (midi, cv) = past_groups(app, g as i64 + steps - p.groups.len() as i64);
+                app.mod_draft = Some(ModDraft { midi, cv, from: Some((g, s, r.clone())), from_index: Some(i), ..ModDraft::new(source) });
             }
         }
         1 => {
@@ -352,6 +376,27 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
     if steps == 0 {
         return erase_draft(app, p, d);
     }
+    if let Some(m) = d.cv.clone() {
+        match row {
+            0 => match cc_source_step(&p.lfos, d.source, steps) {
+                Some(src) => d.source = src,
+                None => return erase_draft(app, p, d),
+            },
+            // Back from CV: MIDI. A CC route's draft is the route again, untouched.
+            1 if steps < 0 => {
+                if d.from_cc.is_some() && d.from.is_none() {
+                    app.mod_draft = None;
+                    return;
+                }
+                d.cv = None;
+                d.midi = Some(CcDraft::default());
+            }
+            2 => return cv_destine(app, p, d, m, steps),
+            _ => return,
+        }
+        app.mod_draft = Some(d);
+        return;
+    }
     if let Some(mut m) = d.midi.clone() {
         match row {
             0 => match cc_source_step(&p.lfos, d.source, steps) {
@@ -362,6 +407,15 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
             1 if steps < 0 && !p.groups.is_empty() => {
                 d.midi = None;
                 d.group = Some(clamp_step(p.groups.len(), steps, p.groups.len()));
+            }
+            // On past MIDI: CV. A CV route's draft is the route again, untouched.
+            1 if steps > 0 && !cv_channels(app).is_empty() => {
+                if d.from_cv.is_some() && d.from.is_none() {
+                    app.mod_draft = None;
+                    return;
+                }
+                d.midi = None;
+                d.cv = Some(CvDraft::default());
             }
             2 => {
                 let ports = out_ports(app);
@@ -384,24 +438,28 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
     let sounds = |g: Option<usize>| g.and_then(|g| p.groups.get(g)).map_or(0, |x| x.sounds.len());
     let chain =
         |g: Option<usize>, s: Option<usize>| g.zip(s).and_then(|(g, s)| p.groups.get(g)?.sounds.get(s)).map_or(0, |x| x.slots.len());
+    let past = d.group.map_or(steps - 1, |g| g as i64 + steps) - p.groups.len() as i64;
     match row {
         0 => match source_step(&p.lfos, Some(d.source), steps) {
             Some(src) => d.source = src,
             None => return erase_draft(app, p, d),
         },
-        1 if steps > 0 && d.group.map_or(steps - 1, |g| g as i64 + steps) >= p.groups.len() as i64 => {
-            // Past the last group: MIDI (an LFO's). A CC route's draft is the route
-            // again, untouched.
-            if d.from_cc.is_some() && d.from.is_none() {
+        1 if steps > 0 && past >= 0 => {
+            // Past the last group: MIDI, then CV (an LFO's). A CC or CV route's draft
+            // back on its own kind is the route again, untouched.
+            let (midi, cv) = past_groups(app, past);
+            if d.from.is_none() && (d.from_cc.is_some() && midi.is_some() || d.from_cv.is_some() && cv.is_some()) {
                 app.mod_draft = None;
                 return;
             }
             let Some(source) = cc_source(&p.lfos, d.source) else { return };
             d = ModDraft {
-                midi: Some(CcDraft::default()),
+                midi,
+                cv,
                 from: d.from,
                 from_index: d.from_index,
                 from_cc: d.from_cc,
+                from_cv: d.from_cv,
                 ..ModDraft::new(source)
             };
         }
@@ -431,16 +489,26 @@ fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
     let dest = &dests[to];
     let made = ModRoute { mode: d.mode, ..ModRoute::new(d.source, slot, &dest.module, dest.param.clone()) };
     // A new route starts at the knob, Depth 0; a moved one keeps its range.
-    let made = match (&d.from, &d.from_cc) {
-        (Some((_, _, r)), _) => ModRoute { low: r.low, high: r.high, curve: r.curve, range: r.range, ..made },
-        (_, Some(r)) => ModRoute { low: r.low, high: r.high, curve: r.curve, ..made },
+    let made = match (&d.from, &d.from_cc, &d.from_cv) {
+        (Some((_, _, r)), ..) => ModRoute { low: r.low, high: r.high, curve: r.curve, range: r.range, ..made },
+        (_, Some(r), _) => ModRoute { low: r.low, high: r.high, curve: r.curve, ..made },
+        (.., Some(r)) => ModRoute { low: r.low.clamp(0.0, 1.0), high: r.high.clamp(0.0, 1.0), ..made },
         _ => ModRoute { low: dest.travel, high: dest.travel, ..made },
     };
     let new = key(g, s, &made);
     let at = place(&mut list, made, old_at);
     app.mod_draft = None;
     let cc_at = d.from_cc.as_ref().and_then(|r| p.cc_routes.iter().position(|x| x == r));
+    let cv_at = d.from_cv.as_ref().and_then(|r| p.cv_routes.iter().position(|x| x == r));
     let done = match from {
+        _ if cv_at.is_some() => {
+            let mut cvs = p.cv_routes.clone();
+            cvs.remove(cv_at.unwrap_or(0));
+            in_one_step(app, |doc| {
+                doc.set_cv_routes(cvs)?;
+                doc.set_mod_routes(g, s, list)
+            })
+        }
         _ if cc_at.is_some() => {
             let Some(doc) = app.doc.clone() else { return };
             let mut ccs = p.cc_routes.clone();
@@ -471,9 +539,10 @@ fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
     };
     // (It takes the draft's column: the route's it was, or the last.)
     if done {
-        let old = match cc_at {
-            Some(i) => d.from_cc.as_ref().map(|r| (cc_key(r), i)),
-            None => d.from.as_ref().zip(from).map(|((fg, fs, r), (_, _, i))| (key(*fg, *fs, r), i)),
+        let old = match (cc_at, cv_at) {
+            (Some(i), _) => d.from_cc.as_ref().map(|r| (cc_key(r), i)),
+            (_, Some(i)) => d.from_cv.as_ref().map(|r| (cv_key(r), i)),
+            _ => d.from.as_ref().zip(from).map(|((fg, fs, r), (_, _, i))| (key(*fg, *fs, r), i)),
         };
         app.mod_rekey(old, new, at);
     }
@@ -481,7 +550,7 @@ fn destine(app: &mut App, p: &Project, d: ModDraft, steps: i64) {
 
 /// The MIDI draft given a CC (`steps` on from none: CC 1 for the first), the port and
 /// channel the first ones when not chosen: it becomes a CC route (moved from the route
-/// it was, in one undo step, keeping its range); a new one at Depth 0.
+/// (or CV route) it was, in one undo step, keeping its range); a new one at Depth 0.
 fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
     if steps < 0 {
         return;
@@ -491,9 +560,10 @@ fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
         return;
     };
     let made = CcRoute::new(d.source, &port, m.channel.unwrap_or(1), steps.clamp(0, i64::from(CC_MAX)) as u8);
-    let made = match &d.from {
-        Some((_, _, r)) => CcRoute { low: r.low, high: r.high, curve: r.curve, ..made },
-        None => made,
+    let made = match (&d.from, &d.from_cv) {
+        (Some((_, _, r)), _) => CcRoute { low: r.low, high: r.high, curve: r.curve, ..made },
+        (_, Some(r)) => CcRoute { low: r.low.clamp(0.0, 1.0), high: r.high.clamp(0.0, 1.0), ..made },
+        _ => made,
     };
     let new = cc_key(&made);
     let mut ccs = p.cc_routes.clone();
@@ -501,7 +571,16 @@ fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
     let at = ccs.len() - 1;
     app.mod_draft = None;
     let from = d.from.as_ref().and_then(|(g, s, r)| Some((*g, *s, from_at(p, *g, *s, r, d.from_index)?)));
+    let cv_at = d.from_cv.as_ref().and_then(|r| p.cv_routes.iter().position(|x| x == r));
     let done = match from {
+        None if cv_at.is_some() => {
+            let mut cvs = p.cv_routes.clone();
+            cvs.remove(cv_at.unwrap_or(0));
+            in_one_step(app, |doc| {
+                doc.set_cv_routes(cvs)?;
+                doc.set_cc_routes(ccs)
+            })
+        }
         Some((g, s, i)) => {
             let Some(doc) = app.doc.clone() else { return };
             let mut left = p.groups[g].sounds[s].mod_routes.clone();
@@ -518,8 +597,72 @@ fn cc_destine(app: &mut App, p: &Project, d: ModDraft, m: CcDraft, steps: i64) {
         None => set_cc(app, ccs),
     };
     if done {
-        app.mod_rekey(d.from.as_ref().zip(from).map(|((g, s, r), (_, _, i))| (key(*g, *s, r), i)), new, at);
+        let old = match cv_at {
+            Some(i) => d.from_cv.as_ref().map(|r| (cv_key(r), i)),
+            None => d.from.as_ref().zip(from).map(|((g, s, r), (_, _, i))| (key(*g, *s, r), i)),
+        };
+        app.mod_rekey(old, new, at);
     }
+}
+
+/// The CV draft given an Out (`steps` on over the CV only channels): it becomes a CV
+/// route (moved from the route it was, in one undo step, keeping its range); a new one
+/// at Low 0%, High 50%, since Depth 0 would look broken.
+fn cv_destine(app: &mut App, p: &Project, d: ModDraft, m: CvDraft, steps: i64) {
+    let channels = cv_channels(app);
+    let cur = m.channel.and_then(|c| channels.iter().position(|x| *x == c));
+    let Some(to) = index_step(cur, steps, channels.len()) else { return };
+    let made = CvRoute { low: 0.0, high: 0.5, ..CvRoute::new(d.source, channels[to]) };
+    let made = match (&d.from, &d.from_cc) {
+        (Some((_, _, r)), _) => CvRoute { low: r.low, high: r.high, ..made },
+        (_, Some(r)) => CvRoute { low: r.low, high: r.high, ..made },
+        _ => made,
+    };
+    let new = cv_key(&made);
+    let mut cvs = p.cv_routes.clone();
+    cvs.push(made);
+    let at = cvs.len() - 1;
+    app.mod_draft = None;
+    let from = d.from.as_ref().and_then(|(g, s, r)| Some((*g, *s, from_at(p, *g, *s, r, d.from_index)?)));
+    let cc_at = d.from_cc.as_ref().and_then(|r| p.cc_routes.iter().position(|x| x == r));
+    let done = match (from, cc_at) {
+        (Some((g, s, i)), _) => {
+            let mut left = p.groups[g].sounds[s].mod_routes.clone();
+            left.remove(i);
+            in_one_step(app, |doc| {
+                doc.set_mod_routes(g, s, left)?;
+                doc.set_cv_routes(cvs)
+            })
+        }
+        (_, Some(i)) => {
+            let mut ccs = p.cc_routes.clone();
+            ccs.remove(i);
+            in_one_step(app, |doc| {
+                doc.set_cc_routes(ccs)?;
+                doc.set_cv_routes(cvs)
+            })
+        }
+        _ => set_cv(app, cvs),
+    };
+    if done {
+        let old = match (cc_at, from) {
+            (Some(i), _) => d.from_cc.as_ref().map(|r| (cc_key(r), i)),
+            (_, Some((_, _, i))) => d.from.as_ref().map(|(g, s, r)| (key(*g, *s, r), i)),
+            _ => None,
+        };
+        app.mod_rekey(old, new, at);
+    }
+}
+
+/// A move between kinds of route, as one undo step; a failure goes to the status line.
+/// Whether it did.
+fn in_one_step(app: &mut App, f: impl FnOnce(&mut deckard_doc::Document) -> Result<(), String>) -> bool {
+    let Some(doc) = app.doc.clone() else { return false };
+    let r = doc.borrow_mut().transaction("Modulation", f);
+    if let Err(e) = &r {
+        app.status = format!("can't change that: {e}");
+    }
+    r.is_ok()
 }
 
 /// Give the project these CC routes; a failure goes to the status line. Whether it did.
@@ -532,8 +675,69 @@ fn set_cc(app: &mut App, routes: Vec<CcRoute>) -> bool {
     r.is_ok()
 }
 
+/// Give the project these CV routes; a failure goes to the status line. Whether it did.
+fn set_cv(app: &mut App, routes: Vec<CvRoute>) -> bool {
+    let Some(doc) = app.doc.clone() else { return false };
+    let r = doc.borrow_mut().set_cv_routes(routes);
+    if let Err(e) = &r {
+        app.status = format!("can't change that: {e}");
+    }
+    r.is_ok()
+}
+
+/// The output channels a CV route can go to (those marked CV only in Settings).
+fn cv_channels(app: &App) -> Vec<u8> {
+    app.settings.cv_channels().into_iter().map(|c| c as u8).collect()
+}
+
+/// A draft's `midi` and `cv` for the Group row `past` steps on from MIDI: CV from the
+/// first step past it, while a channel is CV only; else MIDI.
+fn past_groups(app: &App, past: i64) -> (Option<CcDraft>, Option<CvDraft>) {
+    if past >= 1 && !cv_channels(app).is_empty() { (None, Some(CvDraft::default())) } else { (Some(CcDraft::default()), None) }
+}
+
+/// Row `row` of CV route `i` turned `steps` (0: erased): Source over the LFOs, Group
+/// back to MIDI (a draft), Out over the CV only channels, Low and High (−100%–100%).
+fn cv_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
+    let mut list = p.cv_routes.clone();
+    let r = list[i].clone();
+    if steps == 0 {
+        list.remove(i);
+        set_cv(app, list);
+        return;
+    }
+    let c = &mut list[i];
+    match row {
+        0 => match cc_source_step(&p.lfos, r.source, steps) {
+            Some(src) => c.source = src,
+            None => {
+                list.remove(i);
+                set_cv(app, list);
+                return;
+            }
+        },
+        1 if steps < 0 => {
+            app.mod_draft = Some(ModDraft { midi: Some(CcDraft::default()), from_cv: Some(r.clone()), ..ModDraft::new(r.source) });
+            return;
+        }
+        2 => {
+            let channels = cv_channels(app);
+            let cur = channels.iter().position(|x| *x == r.channel);
+            let Some(to) = index_step(cur, steps, channels.len()) else { return };
+            c.channel = channels[to];
+        }
+        4 => c.low = round2((r.low + DEPTH_STEP * steps as f32).clamp(-1.0, 1.0)),
+        5 => c.high = round2((r.high + DEPTH_STEP * steps as f32).clamp(-1.0, 1.0)),
+        _ => return,
+    }
+    let new = cv_key(c);
+    if set_cv(app, list) {
+        app.mod_rekey(Some((cv_key(&r), i)), new, i);
+    }
+}
+
 /// Row `row` of CC route `i` turned `steps` (0: erased): Source over the LFOs, Group
-/// back to the last group (a draft), Port, Channel, CC, Depth.
+/// back to the last group (a draft) or on to CV (a draft), Port, Channel, CC, Depth.
 fn cc_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
     let mut list = p.cc_routes.clone();
     let r = list[i].clone();
@@ -555,6 +759,10 @@ fn cc_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
         1 if steps < 0 && !p.groups.is_empty() => {
             let group = clamp_step(p.groups.len(), steps, p.groups.len());
             app.mod_draft = Some(ModDraft { group: Some(group), from_cc: Some(r.clone()), ..ModDraft::new(r.source) });
+            return;
+        }
+        1 if steps > 0 && !cv_channels(app).is_empty() => {
+            app.mod_draft = Some(ModDraft { cv: Some(CvDraft::default()), from_cc: Some(r.clone()), ..ModDraft::new(r.source) });
             return;
         }
         2 => {
@@ -621,6 +829,13 @@ fn erase_draft(app: &mut App, p: &Project, d: ModDraft) {
         let mut list = p.cc_routes.clone();
         list.remove(i);
         set_cc(app, list);
+    }
+    if let Some(r) = &d.from_cv
+        && let Some(i) = p.cv_routes.iter().position(|x| x == r)
+    {
+        let mut list = p.cv_routes.clone();
+        list.remove(i);
+        set_cv(app, list);
     }
 }
 
@@ -720,6 +935,12 @@ fn depth_text(low: f32, high: f32) -> String {
     }
 }
 
+/// A CV route's Low or High (−1–1) as a percent: "50%", "−15%".
+fn cv_text(x: f32) -> String {
+    let d = (x * 100.0).round() as i32;
+    if d < 0 { format!("−{}%", -d) } else { format!("{d}%") }
+}
+
 /// A group as the Group row names it: "A1 – name", or "A1" when it has none of its
 /// own (none, or Maschine's "Group A1").
 fn group_text(p: &Project, g: usize) -> Option<String> {
@@ -751,7 +972,7 @@ impl App {
             .iter()
             .map(|(k, at)| {
                 let i = match at {
-                    At::Sound(.., i) | At::Cc(i) => *i,
+                    At::Sound(.., i) | At::Cc(i) | At::Cv(i) => *i,
                 };
                 (k.clone(), i)
             })
@@ -776,6 +997,8 @@ impl App {
         let shown = doc.borrow();
         let p = shown.project();
         let none = || NONE.to_string();
+        // (The CV routes that write nothing, shown as such.)
+        let inactive = deckard_engine::Engine::cv_conflicts(p, self.settings.cv_mask());
         // (Each slot's destinations once.)
         let mut dests: Vec<((usize, usize, usize), Vec<Destination>)> = Vec::new();
         self.mod_columns(p)
@@ -816,7 +1039,33 @@ impl App {
                             r.cc.to_string(),
                             depth_text(r.low, r.high),
                         ];
-                        return ModSlotView { rows, midi: true };
+                        return ModSlotView { rows, midi: true, cv: false };
+                    }
+                    ModSlot::Cv(i) => {
+                        let r = &p.cv_routes[i];
+                        let out = self.settings.output_name(usize::from(r.channel));
+                        let rows = [
+                            mod_routes::lfo_name(&p.lfos, r.source),
+                            CV.into(),
+                            if inactive.contains(&i) { format!("{out} !") } else { out },
+                            String::new(),
+                            cv_text(r.low),
+                            cv_text(r.high),
+                        ];
+                        return ModSlotView { rows, midi: false, cv: true };
+                    }
+                    ModSlot::Draft if self.mod_draft.as_ref().is_some_and(|d| d.cv.is_some()) => {
+                        let d = self.mod_draft.as_ref().expect("a draft slot has a draft");
+                        let m = d.cv.clone().unwrap_or_default();
+                        let rows = [
+                            mod_routes::lfo_name(&p.lfos, d.source),
+                            CV.into(),
+                            m.channel.map_or_else(none, |c| self.settings.output_name(usize::from(c))),
+                            String::new(),
+                            none(),
+                            none(),
+                        ];
+                        return ModSlotView { rows, midi: false, cv: true };
                     }
                     ModSlot::Draft if self.mod_draft.as_ref().is_some_and(|d| d.midi.is_some()) => {
                         let d = self.mod_draft.as_ref().expect("a draft slot has a draft");
@@ -829,7 +1078,7 @@ impl App {
                             none(),
                             none(),
                         ];
-                        return ModSlotView { rows, midi: true };
+                        return ModSlotView { rows, midi: true, cv: false };
                     }
                     ModSlot::Draft => {
                         let d = self.mod_draft.as_ref().expect("a draft slot has a draft");
@@ -850,7 +1099,7 @@ impl App {
                     }
                     ModSlot::Empty => std::array::from_fn(|_| none()),
                 };
-                ModSlotView { rows, midi: false }
+                ModSlotView { rows, midi: false, cv: false }
             })
             .collect()
     }
@@ -1435,6 +1684,8 @@ mod fuzz_tests {
         let ccs =
             vec![CcRoute::new(ModSource::Lfo(1), "Out A", 1, 74), CcRoute { high: 0.5, ..CcRoute::new(ModSource::Lfo(2), "Gone", 3, 1) }];
         doc.borrow_mut().set_cc_routes(ccs).unwrap();
+        app.settings.output_cv_only[2] = true;
+        doc.borrow_mut().set_cv_routes(vec![CvRoute { high: 0.5, ..CvRoute::new(ModSource::Lfo(1), 2) }]).unwrap();
         app
     }
 

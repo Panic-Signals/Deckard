@@ -23,6 +23,9 @@ pub mod sampling;
 pub mod save_dialog;
 pub(crate) mod strip;
 pub(crate) mod value_entry;
+pub(crate) use mixer::silent_master_note;
+#[cfg(test)]
+pub(crate) use mixer::strip_cv_flag;
 pub use mixer::{Channel, MixerSection, MixerSections};
 
 // Surfaces (Definitions/Colors.txt).
@@ -711,6 +714,8 @@ pub enum Act {
     RemoveLfo(u8),
     /// Give the project these CC routes (the LFO panel's MIDI CC section).
     SetCcRoutes(Vec<deckard_model::mod_matrix::CcRoute>),
+    /// Give the project these CV routes (the LFO panel's CV section).
+    SetCvRoutes(Vec<deckard_model::mod_matrix::CvRoute>),
     FocusLfo(u8),
     /// Show or hide the Sampler pages' waveform.
     ToggleWaveform,
@@ -1256,6 +1261,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::SetCcRoutes(routes) => {
                 let Some(doc) = app.doc.clone() else { continue };
                 if let Err(e) = doc.borrow_mut().set_cc_routes(routes) {
+                    app.status = format!("can't change that: {e}");
+                }
+            }
+            Act::SetCvRoutes(routes) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                if let Err(e) = doc.borrow_mut().set_cv_routes(routes) {
                     app.status = format!("can't change that: {e}");
                 }
             }

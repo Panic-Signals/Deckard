@@ -4,6 +4,8 @@
 //! the right. It replaces the work view; the chain area stays below it.
 
 use super::*;
+use crate::settings::Settings;
+use deckard_model::AudioDest;
 
 /// Strip pitch (71 + a 1px stroke) and the master column's width.
 const PITCH: f32 = 72.0;
@@ -71,6 +73,8 @@ struct Strip {
     aux_pre: [bool; 2],
     /// An extra output's mode menu (see [`mode_field`]).
     mode: Option<IoField>,
+    /// Why its audio isn't heard where it goes (see [`strip_cv_flag`]).
+    cv_flag: Option<String>,
 }
 
 /// What a pick in a routing list does.
@@ -96,6 +100,50 @@ fn pick_act(p: Pick) -> Act {
         Pick::Split(i) => Act::SplitExtraOut(i),
         Pick::Join(i) => Act::JoinExtraOut(i),
     }
+}
+
+/// The CV only sides of the external outputs in `dests` that are in `on` (from
+/// `Settings::audio_on_cv_only`), named as Settings shows them.
+fn cv_only_names(s: &Settings, on: &[usize], dests: &[AudioDest]) -> Option<String> {
+    let cv = s.cv_channels();
+    let mut sides: Vec<usize> = dests
+        .iter()
+        .filter_map(|d| match *d {
+            AudioDest::Ext(n) if n >= 0 && on.contains(&(n as usize)) => Some(n as usize),
+            _ => None,
+        })
+        .flat_map(|n| [n * 2, n * 2 + 1])
+        .filter(|c| cv.contains(c))
+        .collect();
+    sides.sort_unstable();
+    sides.dedup();
+    (!sides.is_empty()).then(|| sides.into_iter().map(|c| s.output_name(c)).collect::<Vec<_>>().join(", "))
+}
+
+/// Where channel `ch` sends audio: its output and auxes; the master's and the cue's.
+fn channel_dests(p: &Project, ch: Channel) -> Vec<AudioDest> {
+    match ch {
+        Channel::Group(g) => p.groups.get(g).map_or_else(Vec::new, |x| [&[x.channel.dest][..], &x.channel.aux_dest[..]].concat()),
+        Channel::Sound(g, s) => p
+            .groups
+            .get(g)
+            .and_then(|x| x.sounds.get(s))
+            .map_or_else(Vec::new, |x| [&[x.channel.dest][..], &x.channel.aux_dest[..]].concat()),
+        Channel::Master => vec![p.master_output, p.cue_output],
+        Channel::Extra(i) => p.extra_outs.get(i).map_or_else(Vec::new, |x| vec![x.dest]),
+    }
+}
+
+/// What strip `ch`'s flag says when it sends audio to a CV only output: none otherwise.
+pub(crate) fn strip_cv_flag(s: &Settings, p: &Project, ch: Channel) -> Option<String> {
+    let names = cv_only_names(s, &s.audio_on_cv_only(p), &channel_dests(p, ch))?;
+    Some(format!("{names}: CV only, so audio sent there isn't heard"))
+}
+
+/// What the status line says after PLAY when the master is on a CV only output.
+pub(crate) fn silent_master_note(s: &Settings, p: &Project) -> Option<String> {
+    let names = cv_only_names(s, &s.audio_on_cv_only(p), &[p.master_output])?;
+    Some(format!("the master can't be heard on {names}: it's CV only"))
 }
 
 /// Extra-output strip `i` (`x`)'s mode menu: Stereo, Mono or Split; on a split half,
@@ -411,6 +459,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             aux: [0.0; 2],
             aux_pre: [false; 2],
             mode: Some(mode_field(x, i)),
+            cv_flag: strip_cv_flag(&app.settings, p, Channel::Extra(i)),
         }
     };
     let mut strips: Vec<Strip> = Vec::new();
@@ -436,6 +485,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     aux: snd.aux,
                     aux_pre: snd.channel.aux_pre,
                     mode: None,
+                    cv_flag: strip_cv_flag(&app.settings, p, Channel::Sound(app.group, s)),
                 });
             }
         }
@@ -460,6 +510,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 aux: gr.aux,
                 aux_pre: gr.channel.aux_pre,
                 mode: None,
+                cv_flag: strip_cv_flag(&app.settings, p, Channel::Group(g)),
             });
         }
     }
@@ -497,6 +548,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             aux: gr.aux,
             aux_pre: gr.channel.aux_pre,
             mode: None,
+            cv_flag: strip_cv_flag(&app.settings, p, Channel::Group(app.group)),
         }
     } else {
         Strip {
@@ -518,6 +570,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             aux: [0.0; 2],
             aux_pre: [false; 2],
             mode: None,
+            cv_flag: strip_cv_flag(&app.settings, p, Channel::Master),
         }
     };
 
@@ -689,6 +742,13 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     if extra.is_some() {
         ui.interact(vis(head), id.with("head"), Sense::hover())
             .on_hover_text(format!("{}: {}, {} (an extra output of the plug-in)", st.owner, st.plugin, st.name));
+    }
+    // Audio on a CV only output: "CV" in the header, why on hover.
+    if let Some(why) = &st.cv_flag {
+        let at = Pos2::new(head.right() - 12.0, head.top() + 11.0);
+        painter.with_clip_rect(vis(head)).text(at, Align2::RIGHT_CENTER, "CV", font(10.0), REC_ON);
+        let flag = Rect::from_min_size(Pos2::new(at.x - 18.0, at.y - 7.0), Vec2::new(20.0, 14.0));
+        ui.interact(vis(flag), id.with("cv-flag"), Sense::hover()).on_hover_text(why);
     }
     // Header clicks: focus; double-click the ID: mute; the name: rename; elsewhere:
     // switch between groups and sounds.

@@ -2991,7 +2991,8 @@ fn mod_matrix_draws_slots() {
 #[test]
 fn mod_matrix_names_a_cc_slots_rows() {
     let (mut s, mut v) = (Surface::new(), view());
-    v.mod_slots[1] = ModSlotView { rows: ["LFO 2", "MIDI", "IAC Driver Bus 1", "3", "74", "+50%"].map(String::from), midi: true };
+    v.mod_slots[1] =
+        ModSlotView { rows: ["LFO 2", "MIDI", "IAC Driver Bus 1", "3", "74", "+50%"].map(String::from), midi: true, cv: false };
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     press(&mut s, &v, "BUTTON_SOLO");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
@@ -3010,6 +3011,28 @@ fn mod_matrix_names_a_cc_slots_rows() {
     assert!(s.event(&Event::Knob(1, 0.02), &v, now).is_empty(), "Channel: not yet a step");
     press(&mut s, &v, "BUTTON_SCREEN_2");
     assert_eq!(s.event(&Event::Knob(1, 0.02), &v, now), [Action::ModSlot(1, 4, 1)], "CC");
+    assert_eq!(s.error(), None);
+}
+
+/// A CV slot's rows read Out, Low and High; its Low and High step a fiftieth of a turn.
+#[test]
+fn mod_matrix_names_a_cv_slots_rows() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.mod_slots[1] = ModSlotView { rows: ["LFO 2", "CV", "Out 2 L", "", "0%", "50%"].map(String::from), midi: false, cv: true };
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    press(&mut s, &v, "BUTTON_SOLO");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    let text = s.screen_text(&v);
+    for t in ["OUT", "LOW", "HIGH", "CV", "Out 2 L", "50%"] {
+        assert!(text.contains(&t.to_string()), "{t}: {text:?}");
+    }
+    // (Opens on High.)
+    let now = Instant::now();
+    assert_eq!(s.event(&Event::Knob(1, 0.02), &v, now), [Action::ModSlot(1, 5, 1)], "High");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    assert!(s.event(&Event::Knob(1, 0.02), &v, now).is_empty(), "Out: a tenth of a turn a step");
     assert_eq!(s.error(), None);
 }
 

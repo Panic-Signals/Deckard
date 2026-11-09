@@ -66,7 +66,7 @@ fn scene_name(p: &Project, s: usize) -> String {
 
 /// The files an export writes, in order: each part of the range (a scene, a section)
 /// for each checked output.
-pub fn plan(p: &Project, at: Where, s: &Settings, name: &str) -> Vec<Job> {
+pub fn plan(p: &Project, at: Where, s: &Settings, cv_mask: u32, name: &str) -> Vec<Job> {
     let mut parts: Vec<(Range, String)> = Vec::new();
     if at.song_view {
         let (a, b) = match at.section.filter(|&i| s.range_loop && i < p.sections.len()) {
@@ -90,7 +90,7 @@ pub fn plan(p: &Project, at: Where, s: &Settings, name: &str) -> Vec<Job> {
             parts.push((Range::Scene(sc), format!("{name} - {}", scene_name(p, sc))));
         }
     }
-    let stems = stems(p, s);
+    let stems = stems(p, s, cv_mask);
     parts.iter().flat_map(|(range, name)| stems.iter().map(|&stem| Job { range: *range, stem, name: name.clone(), file: None })).collect()
 }
 
@@ -104,15 +104,17 @@ pub fn strip_key(x: &ExtraOut) -> StripKey {
 
 /// The extra-output strips that get a stem: those on a hardware output other than the
 /// master's (one routed into Deckard, or onto the master's output, is part of what it
-/// feeds). With their places in `project.extra_outs`.
-fn extra_stems(p: &Project) -> impl Iterator<Item = (usize, &ExtraOut)> {
-    p.extra_outs.iter().enumerate().filter(|(_, x)| matches!(x.dest, AudioDest::Ext(_)) && x.dest != p.master_output)
+/// feeds), and not on one with a side marked CV only (`cv_mask`, bit `i`: channel `i`):
+/// no audio plays there. With their places in `project.extra_outs`.
+fn extra_stems(p: &Project, cv_mask: u32) -> impl Iterator<Item = (usize, &ExtraOut)> {
+    let on_cv = move |d: AudioDest| matches!(d, AudioDest::Ext(n) if (0..16).contains(&n) && cv_mask >> (n * 2) & 3 != 0);
+    p.extra_outs.iter().enumerate().filter(move |(_, x)| matches!(x.dest, AudioDest::Ext(_)) && x.dest != p.master_output && !on_cv(x.dest))
 }
 
 /// The outputs checked in the panel's list: the Source's, then each checked strip on a
 /// hardware output.
-pub fn stems(p: &Project, s: &Settings) -> Vec<Stem> {
-    let extras = extra_stems(p).filter(|(_, x)| !s.extras_off.contains(&strip_key(x))).map(|(i, _)| Stem::Extra(i));
+pub fn stems(p: &Project, s: &Settings, cv_mask: u32) -> Vec<Stem> {
+    let extras = extra_stems(p, cv_mask).filter(|(_, x)| !s.extras_off.contains(&strip_key(x))).map(|(i, _)| Stem::Extra(i));
     let mut stems = match s.source {
         Source::Master => vec![Stem::Master],
         Source::Group => ex::exportable_groups(p).into_iter().filter(|g| !s.groups_off.contains(g)).map(Stem::Group).collect(),
@@ -219,7 +221,7 @@ impl App {
         let Some(doc) = &self.doc else { return };
         let p = doc.borrow().project().clone();
         let name = self.export.settings.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| self.project_name());
-        let jobs = plan(&p, self.export_where(), &self.export.settings, &name);
+        let jobs = plan(&p, self.export_where(), &self.export.settings, self.settings.cv_mask(), &name);
         if jobs.is_empty() {
             self.status = "nothing to export".into();
             return;
@@ -309,6 +311,7 @@ impl App {
         let default_name = self.project_name();
         let running = self.export.running.as_ref().map(|r| r.progress());
         let song_view = self.song_view;
+        let cv_mask = self.settings.cv_mask();
         let s = &mut self.export.settings;
         egui::Window::new(title).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
             ui.add_enabled_ui(running.is_none(), |ui| {
@@ -331,7 +334,7 @@ impl App {
                     );
                     ui.end_row();
                 });
-                output_list(ui, &p, s);
+                output_list(ui, &p, s, cv_mask);
                 ui.separator();
                 ui.heading("Options");
                 egui::Grid::new("export-options").num_columns(2).show(ui, |ui| {
@@ -428,10 +431,10 @@ fn combo<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, v: &mut T, choices: &
 /// The Output list: Master Output (checked, greyed), the groups, or the groups' sounds
 /// as a tree (a group's box checks all its sounds); then the extra-output strips on a
 /// hardware output, each a stem of its own.
-fn output_list(ui: &mut egui::Ui, p: &Project, s: &mut Settings) {
+fn output_list(ui: &mut egui::Ui, p: &Project, s: &mut Settings, cv_mask: u32) {
     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
         source_list(ui, p, s);
-        for (i, x) in extra_stems(p) {
+        for (i, x) in extra_stems(p, cv_mask) {
             let key = strip_key(x);
             let mut on = !s.extras_off.contains(&key);
             if ui.checkbox(&mut on, ex::extra_stem_name(p, i).unwrap_or_default()).changed() {
@@ -538,10 +541,10 @@ mod tests {
     fn the_song_or_its_loop_to_the_master() {
         let p = project();
         let mut s = Settings::default();
-        assert_eq!(parts(&plan(&p, song(Some(1)), &s, "Song")), [(Range::Song, Stem::Master, "Song")]);
+        assert_eq!(parts(&plan(&p, song(Some(1)), &s, 0, "Song")), [(Range::Song, Stem::Master, "Song")]);
         s.range_loop = true;
-        assert_eq!(parts(&plan(&p, song(Some(1)), &s, "Song")), [(Range::Sections(1, 1), Stem::Master, "Song")]);
-        assert_eq!(parts(&plan(&p, song(None), &s, "Song")), [(Range::Song, Stem::Master, "Song")], "no section picked: all");
+        assert_eq!(parts(&plan(&p, song(Some(1)), &s, 0, "Song")), [(Range::Sections(1, 1), Stem::Master, "Song")]);
+        assert_eq!(parts(&plan(&p, song(None), &s, 0, "Song")), [(Range::Song, Stem::Master, "Song")], "no section picked: all");
     }
 
     #[test]
@@ -549,7 +552,7 @@ mod tests {
         let p = project();
         let s = Settings { split_by_section: true, ..Default::default() };
         assert_eq!(
-            parts(&plan(&p, song(None), &s, "Song")),
+            parts(&plan(&p, song(None), &s, 0, "Song")),
             [
                 (Range::Sections(0, 0), Stem::Master, "Song - 01 Intro"),
                 (Range::Sections(1, 1), Stem::Master, "Song - 02 Scene 2"),
@@ -564,24 +567,24 @@ mod tests {
         let ideas = Where { song_view: false, section: None, scene: 1 };
         let mut s = Settings::default();
         assert_eq!(
-            parts(&plan(&p, ideas, &s, "Song")),
+            parts(&plan(&p, ideas, &s, 0, "Song")),
             [(Range::Scene(0), Stem::Master, "Song - Intro"), (Range::Scene(1), Stem::Master, "Song - Scene 2")]
         );
         s.scenes_selected = true;
-        assert_eq!(parts(&plan(&p, ideas, &s, "Song")), [(Range::Scene(1), Stem::Master, "Song - Scene 2")]);
+        assert_eq!(parts(&plan(&p, ideas, &s, 0, "Song")), [(Range::Scene(1), Stem::Master, "Song - Scene 2")]);
     }
 
     #[test]
     fn stems_are_the_checked_groups_or_sounds() {
         let p = project();
         let mut s = Settings { source: Source::Group, ..Default::default() };
-        assert_eq!(stems(&p, &s), [Stem::Group(0), Stem::Group(2)], "the empty group isn't listed");
+        assert_eq!(stems(&p, &s, 0), [Stem::Group(0), Stem::Group(2)], "the empty group isn't listed");
         s.groups_off.insert(2);
-        assert_eq!(stems(&p, &s), [Stem::Group(0)]);
+        assert_eq!(stems(&p, &s, 0), [Stem::Group(0)]);
         s.source = Source::Sound;
         s.sounds_off.insert((0, 1));
-        assert_eq!(stems(&p, &s), [Stem::Sound(0, 0), Stem::Sound(2, 0)], "empty slots aren't listed");
-        assert_eq!(plan(&p, song(None), &s, "Song").len(), 2);
+        assert_eq!(stems(&p, &s, 0), [Stem::Sound(0, 0), Stem::Sound(2, 0)], "empty slots aren't listed");
+        assert_eq!(plan(&p, song(None), &s, 0, "Song").len(), 2);
     }
 
     /// Each strip on a hardware output is a stem of its own, whatever the Source; a
@@ -612,12 +615,12 @@ mod tests {
             strip(AudioDest::Ext(0)),
         ];
         let mut s = Settings::default();
-        assert_eq!(stems(&p, &s), [Stem::Master, Stem::Extra(1), Stem::Extra(3)]);
+        assert_eq!(stems(&p, &s, 0), [Stem::Master, Stem::Extra(1), Stem::Extra(3)]);
         s.source = Source::Group;
-        assert_eq!(stems(&p, &s), [Stem::Group(0), Stem::Group(2), Stem::Extra(1), Stem::Extra(3)]);
+        assert_eq!(stems(&p, &s, 0), [Stem::Group(0), Stem::Group(2), Stem::Extra(1), Stem::Extra(3)]);
         p.extra_outs[3].bus = 2;
         s.extras_off.insert(strip_key(&p.extra_outs[3]));
-        assert_eq!(stems(&p, &s), [Stem::Group(0), Stem::Group(2), Stem::Extra(1)], "unchecked");
+        assert_eq!(stems(&p, &s, 0), [Stem::Group(0), Stem::Group(2), Stem::Extra(1)], "unchecked");
     }
 
     /// From the app: File ▸ Export Audio's job writes the files into the panel's folder,

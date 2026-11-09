@@ -3506,6 +3506,9 @@ impl App {
         if !report.missing.is_empty() {
             status += &format!("; {} samples not found", report.missing.len());
         }
+        if let Some(note) = layout::silent_master_note(&self.settings, project) {
+            status += &format!("; {note}");
+        }
         self.status = status;
     }
 

@@ -1076,6 +1076,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     for (i, m) in v.mod_slots.iter().enumerate() {
         let rows = lua.create_sequence_from(m.rows.iter().map(String::as_str))?;
         rows.set("midi", m.midi)?;
+        rows.set("cv", m.cv)?;
         slots.set(i + 1, rows)?;
     }
     t.set("mod_slots", slots)?;
