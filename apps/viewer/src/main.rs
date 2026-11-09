@@ -2663,15 +2663,20 @@ impl App {
             .weak(),
         );
         let before = self.settings.output_routing.clone();
+        let project = self.doc.as_ref().map(|d| d.borrow().project().clone()).unwrap_or_default();
         let (own, port, channels) = if outs { ("Out", "Output", out_channels) } else { ("In", "Input", in_channels) };
         let device = if outs { out_device } else { in_device };
         let names = self.channel_names_of(&device.unwrap_or_default(), !outs, channels);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("routing").striped(true).num_columns(3).show(ui, |ui| {
+            egui::Grid::new("routing").striped(true).num_columns(if outs { 4 } else { 3 }).show(ui, |ui| {
                 ui.strong("DECKARD");
                 ui.strong("Alias");
                 ui.strong("Interface");
+                if outs {
+                    ui.strong("CV only");
+                }
                 ui.end_row();
+                let may: Vec<bool> = (0..settings::CHANNELS).map(|i| self.settings.may_mark_cv_only(&project, i)).collect();
                 let s = &mut self.settings;
                 let (routes, aliases) =
                     if outs { (&mut s.output_routing, &mut s.output_aliases) } else { (&mut s.input_routing, &mut s.input_aliases) };
@@ -2689,6 +2694,15 @@ impl App {
                         }
                     });
                     routes[i] = pick;
+                    if outs {
+                        let marked = s.output_cv_only[i];
+                        ui.add_enabled_ui(may[i] || marked, |ui| {
+                            ui.checkbox(&mut s.output_cv_only[i], "")
+                                .on_hover_text("This channel carries control voltage, not audio, so audio isn't offered it.");
+                        })
+                        .response
+                        .on_disabled_hover_text("The project's master or cue output plays on this channel.");
+                    }
                     ui.end_row();
                 }
             });
