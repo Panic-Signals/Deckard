@@ -54,6 +54,8 @@ pub use macros::{Macro, MacroPage};
 mod plugin_params;
 pub use plugin_params::PluginPageSpec;
 mod plugins;
+mod prepared;
+pub use prepared::{EditSnapshot, PreparedEdit};
 pub mod remote;
 mod session;
 
