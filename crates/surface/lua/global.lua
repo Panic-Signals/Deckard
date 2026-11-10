@@ -474,7 +474,7 @@ function global.leds()
   deckard.led("TEMPO", lit(wheel.mode == "tempo"))
   deckard.led("SWING", lit(wheel.mode == "swing"))
   deckard.led("VOLUME", lit(wheel.mode == "volume"))
-  deckard.led("SAMPLE", page == "sampling" and "on" or "dim")
+  deckard.led("SAMPLE", lit(page == "sampling"))
   -- NOTE REPEAT: lit on its page, dim while it's on (LOCK) elsewhere.
   if page == "note_repeat" then
     deckard.led("NOTE_REPEAT", "on")

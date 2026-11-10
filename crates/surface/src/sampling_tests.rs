@@ -64,14 +64,17 @@ fn sampled(tab: usize) -> View {
 #[test]
 fn sample_shows_the_sampling_page_and_again_goes_back() {
     let (mut s, v) = (Surface::new(), sampled(1));
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(0), "dark outside Sampling");
     assert_eq!(press(&mut s, &v, "BUTTON_SAMPLE"), [Action::Sampling(true)]);
     assert_eq!(s.page(), "sampling");
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(deckard_mk3::leds::palette(16, 4)), "lit in Sampling");
     let text = s.screen_text(&v);
     for want in ["RECORD", "EDIT", "SLICE", "ZONE", "TRUNCATE", "APPLY", "PLAY RANGE", "1/2", "Tone.wav", "LENGTH"] {
         assert!(text.iter().any(|t| t == want), "{want} in {text:?}");
     }
     assert_eq!(press(&mut s, &v, "BUTTON_SAMPLE"), [Action::Sampling(false)]);
     assert_ne!(s.page(), "sampling");
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(0), "dark again when closed");
 }
 
 #[test]
