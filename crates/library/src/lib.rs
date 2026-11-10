@@ -8,6 +8,7 @@
 
 pub mod names;
 pub mod ni;
+pub mod products;
 #[doc(hidden)]
 pub mod testing;
 pub mod user;
@@ -72,6 +73,7 @@ impl Kind {
 /// One thing the library lists.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Item {
+    pub vendor: String,
     pub kind: Kind,
     pub user: bool,
     pub name: String,
@@ -91,6 +93,9 @@ pub struct Item {
 /// What the browser asks for.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Query {
+    /// Optional product set (for product-category facets). Empty admits all.
+    pub products: Vec<String>,
+    pub vendor: Option<String>,
     pub kind: Kind,
     /// User content (true) or the factory's.
     pub user: bool,
@@ -125,7 +130,11 @@ impl Query {
         let typed = self.types.is_empty() || item.types.iter().any(|t| t.starts_with(&self.types));
         let characters = self.characters.iter().all(|c| item.characters.contains(c));
         let text = self.text.is_empty() || item.name.to_lowercase().contains(&self.text.to_lowercase());
-        bank && typed && characters && text && (!self.favorites || item.favorite)
+        let product = self.products.is_empty()
+            || item.product.as_ref().is_some_and(|p| self.products.iter().any(|want| want.eq_ignore_ascii_case(p)))
+            || item.bank.first().is_some_and(|p| self.products.iter().any(|want| want.eq_ignore_ascii_case(p)));
+        let vendor = self.vendor.as_ref().is_none_or(|v| v.eq_ignore_ascii_case(&item.vendor));
+        bank && typed && characters && text && product && vendor && (!self.favorites || item.favorite)
     }
 }
 
