@@ -37,6 +37,9 @@ mod channel_names;
 mod clipboard;
 mod clips_ui;
 mod controller;
+#[cfg(test)]
+mod controller_quality_tests;
+mod controller_timing;
 mod drop_pos;
 mod drum_ui;
 mod export;
