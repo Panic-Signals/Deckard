@@ -3943,6 +3943,7 @@ impl App {
                     let (take, label) = if on { (None, "Audio Off") } else { (Some(take), "Audio On") };
                     d.set_audio_in(g, s, &[pi], take, label).map(|_| None)
                 }
+                Act::MoveAudio { g, p, s, offset } => d.set_audio_offset(g, p, s, offset, "Move Audio").map(|_| None),
                 Act::SplitNotes { g, p, targets, at } => {
                     let (remove, add) = d.split_notes(&targets, at);
                     d.edit_notes("Split Notes", g, p, &remove, &add).map(|_| None)
@@ -14894,6 +14895,117 @@ mod tests {
 
     fn tone_of(secs: f64) -> deckard_engine::sample::Sample {
         deckard_engine::sample::Sample { rate: 48_000, frames: vec![[0.25, 0.25]; (secs * 48_000.0) as usize] }
+    }
+
+    /// A free sound of group 0 made an Audio plug-in with a bar-long take, on in the
+    /// pattern in focus (no notes of its own there), focused: (its sound, the project's
+    /// folder, kept while the test runs).
+    fn loop_sound(h: &mut Harness<'static, App>) -> (usize, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        let p = project_of(h);
+        let bar = p.bar_length() as f64;
+        let free = |s: &usize| {
+            let snd = &p.groups[0].sounds[*s];
+            snd.slots.is_empty() && snd.sampler.is_none() && p.groups[0].patterns[0].notes.iter().all(|n| n.sound != *s)
+        };
+        let s = (1..16).find(free).expect("a free sound");
+        audio_sound(h, s, &tone_of(2.0), bar);
+        let pi = h.state().pattern;
+        h.state().doc.as_ref().unwrap().borrow_mut().set_audio_in(0, s, &[pi], Some(0), "t").unwrap();
+        (h.state_mut().group, h.state_mut().sound, h.state_mut().song_view) = (0, s, false);
+        h.run_steps(3);
+        assert_eq!(project_of(h).groups[0].sounds[s].instrument, "AudioModule", "{}", h.state().status);
+        (s, tmp)
+    }
+
+    /// Sound `s`'s audio offset in the pattern in focus.
+    fn offset_of(h: &Harness<'static, App>, s: usize) -> Option<i64> {
+        project_of(h).groups[0].patterns[h.state().pattern].audio.iter().find(|c| c.sound == s).map(|c| c.offset)
+    }
+
+    /// A drag along grid row `row`, from tick `a` to tick `b` (from the pattern's start).
+    fn drag_ticks(h: &mut Harness<'static, App>, row: usize, a: i64, b: i64, modifiers: egui::Modifiers) {
+        let (from, to) = (grid_pos(h, row, a), grid_pos(h, row, b));
+        h.event(Event::ModifiersChanged(modifiers));
+        h.hover_at(from);
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers });
+        h.step();
+        for k in 1..=6 {
+            let t = k as f32 / 6.0;
+            h.event(Event::PointerMoved(from + (to - from) * t));
+            h.step();
+        }
+        h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers });
+        h.step();
+        h.event(Event::ModifiersChanged(Default::default()));
+        h.run_steps(3);
+    }
+
+    /// The one feature beyond Maschine: a pattern's audio dragged along the grid starts
+    /// that much later, as one undo step.
+    #[test]
+    fn dragging_a_loop_moves_its_audio() {
+        let Some(mut h) = harness(false, false) else { return };
+        let (s, _tmp) = loop_sound(&mut h);
+        assert_eq!(offset_of(&h, s), Some(0));
+        drag_ticks(&mut h, s, PPQ / 2, PPQ / 2 + PPQ, Default::default());
+        assert_eq!(offset_of(&h, s), Some(PPQ));
+        let d = h.state().doc.clone().unwrap();
+        assert_eq!(d.borrow().undo_labels().first().copied(), Some("Move Audio"));
+        assert!(d.borrow_mut().undo());
+        assert_eq!(offset_of(&h, s), Some(0));
+    }
+
+    #[test]
+    fn a_loop_drag_snaps_unless_shift() {
+        let Some(mut h) = harness(false, false) else { return };
+        let (s, _tmp) = loop_sound(&mut h);
+        let step = h.state().grid;
+        let by = step * 13 / 10;
+        drag_ticks(&mut h, s, PPQ / 2, PPQ / 2 + by, Default::default());
+        assert_eq!(offset_of(&h, s), Some(step));
+        drag_ticks(&mut h, s, PPQ / 2, PPQ / 2 + by, egui::Modifiers::SHIFT);
+        let got = offset_of(&h, s).unwrap();
+        assert!((got - (step + by)).abs() <= 1, "{got} vs {}", step + by);
+    }
+
+    #[test]
+    fn dragging_a_note_on_a_gate_row_moves_the_note() {
+        let Some(mut h) = harness(false, false) else { return };
+        let (s, _tmp) = loop_sound(&mut h);
+        let pi = h.state().pattern;
+        let slot = project_of(&h).groups[0].sounds[s].slots.iter().position(|x| x.module == "AudioModule").unwrap();
+        layout::apply_acts(h.state_mut(), vec![layout::Act::SetParam(deckard_doc::Target::Module(0, s, slot), "mode", 1.0)]);
+        let a = project_of(&h).groups[0].sounds[s].audio.clone().unwrap();
+        assert_eq!(a.mode, deckard_model::AudioMode::Gate);
+        if offset_of(&h, s).is_none() {
+            h.state().doc.as_ref().unwrap().borrow_mut().set_audio_in(0, s, &[pi], Some(0), "t").unwrap();
+        }
+        let start = project_of(&h).groups[0].patterns[pi].start;
+        let n = Note { expr: None, sound: s, position: start, length: PPQ, pitch: 60, velocity: 100, probability: 100 };
+        h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("t", 0, pi, &[], &[n]).unwrap();
+        h.run_steps(3);
+        // The note: it moves a beat on, the audio stays.
+        // (A little past the beat: a note's move snaps down to the grid.)
+        drag_ticks(&mut h, s, PPQ / 4, PPQ / 4 + PPQ + 20, Default::default());
+        let notes: Vec<i64> = project_of(&h).groups[0].patterns[pi].notes.iter().filter(|x| x.sound == s).map(|x| x.position).collect();
+        assert_eq!(notes, vec![start + PPQ]);
+        assert_eq!(offset_of(&h, s), Some(0));
+        // Empty space on the row: the audio moves.
+        drag_ticks(&mut h, s, 3 * PPQ, 4 * PPQ, Default::default());
+        assert_eq!(offset_of(&h, s), Some(PPQ));
+    }
+
+    #[test]
+    fn the_piano_roll_drags_the_focused_loop() {
+        let Some(mut h) = harness(false, false) else { return };
+        let (s, _tmp) = loop_sound(&mut h);
+        h.state_mut().piano_roll = true;
+        h.run_steps(3);
+        drag_ticks(&mut h, 2, PPQ / 2, PPQ / 2 + PPQ, Default::default());
+        assert_eq!(offset_of(&h, s), Some(PPQ));
     }
 
     #[test]

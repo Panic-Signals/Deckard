@@ -602,6 +602,14 @@ pub enum Act {
     /// Sound `.1`'s Audio plug-in on (its take in focus) or off in pattern `.2` of group
     /// `.0` (a double-click on its waveform).
     ToggleAudio(usize, usize, usize),
+    /// Sound `s`'s audio in pattern `p` of group `g` to start at `offset` (ticks from
+    /// 1.1.1): its waveform dragged along the grid.
+    MoveAudio {
+        g: usize,
+        p: usize,
+        s: usize,
+        offset: i64,
+    },
     /// Notes of group `g`'s pattern `p` given new expression (the Expression editor).
     SetExpressions {
         g: usize,
@@ -1021,6 +1029,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             | Act::SplitNotes { .. }
             | Act::JoinNotes { .. }
             | Act::ToggleAudio(..)
+            | Act::MoveAudio { .. }
             | Act::EditMidi { .. } => app.arrange(a),
             Act::Lane(l) => app.lane = l,
             Act::LanesDialog(open) => app.lanes_dialog = open,
@@ -6146,10 +6155,24 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     if end < view {
         gp.rect_filled(Rect::from_min_max(Pos2::new(x_of(end as f64), grid.top()), grid.max), 0.0, black(80));
     }
+    let drag_id = ui.id().with("note-drag");
+    let mut drag: Option<NoteDrag> = ui.data(|d| d.get_temp(drag_id));
+    // An Expression edit left behind (its lane gone, the button up) isn't shown or kept.
+    if !expr_lane::keep_drag(&drag, app.lane, pat.is_some(), ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released())) {
+        drag = None;
+    }
+    // The grid; Shift snaps a quarter as fine.
+    let snap = if ui.input(|i| i.modifiers.shift) { (app.grid / 4).max(1) } else { app.grid.max(1) };
+    // A dragged loop's new offset: on the grid's step (Shift: any tick), within the loop.
+    let audio_to = |from: i64, ticks: i64, loop_ticks: i64| {
+        let q = if ui.input(|i| i.modifiers.shift) { 1 } else { app.grid.max(1) };
+        (((from + ticks) as f64 / q as f64).round() as i64 * q).rem_euclid(loop_ticks.max(1))
+    };
     // Audio plug-ins' loops on their sounds' rows (in the piano roll, the focused
-    // sound's behind its notes): from the pattern's start, a loop's length in beats at a
-    // time, repeats darker (as Maschine shows them), dim where it's off in the pattern.
-    // Placed by beats, they stay on the steps whatever the tempo.
+    // sound's behind its notes): the take's first frame at its offset (ticks from
+    // 1.1.1), a loop's length in beats at a time; the pass from there bright, the others
+    // darker (as Maschine shows repeats), dim where it's off in the pattern. Placed by
+    // beats, they stay on the steps whatever the tempo. A drag shows where it'll go.
     for (si, snd) in group.sounds.iter().enumerate() {
         if app.piano_roll && si != app.sound {
             continue;
@@ -6171,8 +6194,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         if loop_ticks <= 0.0 || peaks.is_empty() {
             continue;
         }
+        let offset = match &drag {
+            Some(NoteDrag::Audio { sound, from, ticks, loop_ticks }) if *sound == si => audio_to(*from, *ticks, *loop_ticks),
+            _ => cue.map_or(0, |c| c.offset),
+        } as f64;
         let colour = sound_color(p, app.group, si);
-        let alpha = |rep: usize| -> u8 {
+        let alpha = |rep: i64| -> u8 {
             match (cue.is_some(), app.piano_roll, rep) {
                 (false, ..) => 40,
                 (true, true, _) => 70,
@@ -6184,15 +6211,13 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         let (x0, x1) = (x_of(start as f64).max(grid.left()), x_of(end as f64).min(grid.right()));
         let mut x = x0.floor();
         while x < x1 {
-            let t = tick_at(x + 0.5) - start as f64;
-            if t >= 0.0 {
-                let rep = (t / loop_ticks).floor() as usize;
-                let f = (t / loop_ticks).fract();
-                let i = ((f * peaks.len() as f64) as usize).min(peaks.len() - 1);
-                let (lo, hi) = peaks[i];
-                let c = Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), alpha(rep));
-                gp.vline(x + 0.5, (mid - hi * half)..=(mid - lo * half).max(mid - hi * half + 1.0), Stroke::new(1.0, c));
-            }
+            let t = tick_at(x + 0.5) - offset;
+            let rep = (t / loop_ticks).floor() as i64;
+            let f = t.rem_euclid(loop_ticks) / loop_ticks;
+            let i = ((f * peaks.len() as f64) as usize).min(peaks.len() - 1);
+            let (lo, hi) = peaks[i];
+            let c = Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), alpha(rep));
+            gp.vline(x + 0.5, (mid - hi * half)..=(mid - lo * half).max(mid - hi * half + 1.0), Stroke::new(1.0, c));
             x += 1.0;
         }
     }
@@ -6201,12 +6226,6 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // empty space box-selects, double-click adds, Delete removes. Draw mode: click
     // adds or removes; dragging paints notes along the rows. A drag in progress lives
     // in egui memory and shows as a preview until the button is released.
-    let drag_id = ui.id().with("note-drag");
-    let mut drag: Option<NoteDrag> = ui.data(|d| d.get_temp(drag_id));
-    // An Expression edit left behind (its lane gone, the button up) isn't shown or kept.
-    if !expr_lane::keep_drag(&drag, app.lane, pat.is_some(), ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released())) {
-        drag = None;
-    }
     let row_of = |n: &Note| -> Option<usize> {
         if app.piano_roll {
             (n.sound == app.sound && n.pitch >= lo && n.pitch <= hi).then(|| (hi - n.pitch) as usize)
@@ -6223,8 +6242,6 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             Pos2::new(note_right(x_of(pos), x_of(pos + n.length as f64)), y + row_h - bottom),
         ))
     };
-    // The grid; Shift snaps a quarter as fine.
-    let snap = if ui.input(|i| i.modifiers.shift) { (app.grid / 4).max(1) } else { app.grid.max(1) };
     let snapped = |x: f32| (tick_at(x) as i64).div_euclid(snap) * snap;
     let row_at = |y: f32| ((y - grid.top() + y0) / row_h).floor() as i64;
     // A new note at a grid position: drum rows keep the pitch the sound already uses
@@ -6247,6 +6264,17 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             velocity: 100,
             probability: 100,
         })
+    };
+    // The Audio plug-in whose loop a press at `pos` would drag: its row's in pad view,
+    // the focused sound's in the piano roll; on in the pattern. (Sound, offset, the
+    // loop's ticks.)
+    let audio_at = |pos: Pos2| -> Option<(usize, i64, i64)> {
+        let s = if app.piano_roll { app.sound } else { usize::try_from(row_at(pos.y)).ok()? };
+        let snd = group.sounds.get(s).filter(|x| x.instrument == "AudioModule")?;
+        let cue = pat?.audio.iter().find(|c| c.sound == s)?;
+        let take = snd.audio.as_ref()?.takes.get(cue.take)?;
+        let loop_ticks = (take.beats * PPQ as f64).round() as i64;
+        (loop_ticks > 0).then_some((s, cue.offset, loop_ticks))
     };
     let hit = |pos: Pos2| {
         notes.iter().rev().find_map(|n| note_rect(n).filter(|r| r.expand(1.0).contains(pos)).map(|r| (**n, pos.x > r.right() - 6.0)))
@@ -6388,6 +6416,11 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         && let Some(at) = press.or(pointer)
     {
         drag = Some(match hit(at) {
+            // Empty space on an Audio plug-in's row: its loop moves along.
+            None if !app.draw_mode() && audio_at(at).is_some() => {
+                let (sound, from, loop_ticks) = audio_at(at).unwrap();
+                NoteDrag::Audio { sound, from, ticks: 0, loop_ticks }
+            }
             Some((n, true)) => {
                 // A selected note resizes the whole selection.
                 let ns = if app.selected.contains(&n) { app.selected.clone() } else { vec![n] };
@@ -6432,6 +6465,10 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 }
             }
             NoteDrag::Select { to, .. } => *to = pos,
+            NoteDrag::Audio { from, ticks, loop_ticks, .. } => {
+                *ticks = ((pos.x - origin.x) / scale).round() as i64;
+                resp.show_tooltip_text(position_string(p, audio_to(*from, *ticks, *loop_ticks) as f64));
+            }
             NoteDrag::Lane { .. } | NoteDrag::Midi { .. } | NoteDrag::Expr(_) | NoteDrag::Span { .. } => {}
         }
     }
@@ -6443,6 +6480,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                     let label = if matches!(d, NoteDrag::Resize { .. }) { "Resize Notes" } else { "Move Notes" };
                     let (remove, add): (Vec<Note>, Vec<Note>) = pairs.into_iter().unzip();
                     acts.push(Act::EditNotes { g: app.group, p: app.pattern, label, remove, add });
+                }
+            }
+            Some(NoteDrag::Audio { sound, from, ticks, loop_ticks }) => {
+                let offset = audio_to(from, ticks, loop_ticks);
+                if offset != from {
+                    acts.push(Act::MoveAudio { g: app.group, p: app.pattern, s: sound, offset });
                 }
             }
             Some(NoteDrag::Paint { notes: ns }) if !ns.is_empty() => {
@@ -7111,6 +7154,9 @@ enum NoteDrag {
     Paint { notes: Vec<Note> },
     /// Box selection.
     Select { origin: Pos2, to: Pos2 },
+    /// Sound `sound`'s loop dragged `ticks` along from offset `from` (a take
+    /// `loop_ticks` long).
+    Audio { sound: usize, from: i64, ticks: i64, loop_ticks: i64 },
     /// New velocity or probability values. When a selected note's bar is dragged, the
     /// whole selection moves with it: `base` holds their values before the drag and
     /// `anchor` the grabbed note's.
