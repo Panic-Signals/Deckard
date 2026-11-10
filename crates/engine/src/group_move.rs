@@ -83,7 +83,8 @@ fn live_group(e: &Live) -> Option<usize> {
         | Live::MidiInputOut { group, .. }
         | Live::ControlIn { group, .. }
         | Live::Expression { group, .. }
-        | Live::RepeatPressure { group, .. } => Some(*group),
+        | Live::RepeatPressure { group, .. }
+        | Live::ChokeGroup { group } => Some(*group),
         Live::ChokeAll => None,
     }
 }
