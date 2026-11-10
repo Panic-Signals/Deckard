@@ -192,6 +192,11 @@ pub fn start(p: Project, path: Option<PathBuf>, jobs: Vec<Job>, format: Format, 
     })
 }
 
+/// What an export of `p` warns of: there's no modular offline, so a Zhora's part isn't in it.
+pub fn warning(p: &Project) -> Option<&'static str> {
+    crate::zhora_ui::zhora_in(p).then_some("Zhora isn't included: record its return as audio to include it.")
+}
+
 impl App {
     /// The project's name for files (its file's name, else its own).
     pub fn project_name(&self) -> String {
@@ -227,6 +232,9 @@ impl App {
             return;
         }
         let dir = self.export_folder();
+        if let Some(w) = warning(&p) {
+            self.status = w.into();
+        }
         self.export.running = Some(start(p, self.path.clone(), jobs, self.export.settings.format, dir));
     }
 
@@ -381,6 +389,9 @@ impl App {
                 });
             });
             ui.separator();
+            if let Some(w) = warning(&p) {
+                ui.label(egui::RichText::new(w).color(ui.visuals().warn_fg_color));
+            }
             match running {
                 Some(f) => {
                     ui.horizontal(|ui| {
@@ -641,6 +652,45 @@ mod tests {
         let s = deckard_engine::sample::Sample::load(&files[0]).unwrap();
         assert_eq!(s.rate, 48_000);
         assert!(!s.frames.is_empty());
+    }
+
+    /// A project with Zhora: the panel and the status line say its part isn't included.
+    #[test]
+    fn exporting_a_project_with_zhora_warns() {
+        let class = &deckard_plugins::zhora::CLASS;
+        let mut p = project();
+        p.groups[2].sounds[0].plugin =
+            Some(deckard_model::PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() });
+        assert_eq!(warning(&p), Some("Zhora isn't included: record its return as audio to include it."));
+        let mut app = App::default();
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        (app.group, app.sound, app.chain_tab) = (0, 0, crate::layout::ChainTab::Sound);
+        app.add_slot(crate::layout::AddWhat::Plugin(crate::layout::native_entry(class)));
+        assert!(crate::zhora_ui::zhora_in(doc.borrow().project()), "{}", app.status);
+        let tmp = tempfile::tempdir().unwrap();
+        app.export.settings.folder = Some(tmp.path().to_path_buf());
+        app.start_export();
+        assert!(app.status.contains("Zhora isn't included"), "{}", app.status);
+        if let Some(r) = &app.export.running {
+            r.cancel();
+            let _ = r.wait();
+        }
+    }
+
+    #[test]
+    fn exporting_without_zhora_does_not_warn() {
+        assert_eq!(warning(&project()), None);
+        let mut app = App::default();
+        app.new_project();
+        let tmp = tempfile::tempdir().unwrap();
+        app.export.settings.folder = Some(tmp.path().to_path_buf());
+        app.start_export();
+        assert!(!app.status.contains("Zhora"), "{}", app.status);
+        if let Some(r) = &app.export.running {
+            r.cancel();
+            let _ = r.wait();
+        }
     }
 
     /// File ▸ Export MIDI…: what the song (or, in the Ideas view, the focused scene)

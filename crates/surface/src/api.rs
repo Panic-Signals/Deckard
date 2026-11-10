@@ -222,6 +222,21 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("next_page", () => Action::Page(true));
     request!("previous_page", () => Action::Page(false));
     request!("slot", (delta: i64) => Action::Slot(delta));
+    indexed!("plugin_page", "a page", Action::PluginPage);
+    {
+        let sh = shared.clone();
+        d.set(
+            "zhora",
+            lua.create_function(move |_, what: String| {
+                const WHAT: [&str; 4] = ["tune", "check", "live", "hold"];
+                let Some(&what) = WHAT.iter().find(|w| **w == what) else {
+                    return Err(mlua::Error::runtime(format!("no Zhora button \"{what}\" ({})", WHAT.join(", "))));
+                };
+                act(&sh, Action::Zhora(what));
+                Ok(())
+            })?,
+        )?;
+    }
     request!("pattern_span", (start: i64, length: i64) => Action::PatternSpan { start: start.max(0), length: length.max(1) });
     request!("pattern_length", (length: i64) => Action::PatternLength(length.max(1)));
     {
@@ -1332,6 +1347,22 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             t.set("preview", true)?;
         }
         ct.set(name, t)?;
+    }
+    // The focused Zhora's tuner, buttons and bar.
+    if let Some(z) = &c.zhora {
+        let t = lua.create_table()?;
+        t.set("note", z.note.as_deref())?;
+        t.set("cents", z.cents)?;
+        t.set("in_tune", z.in_tune)?;
+        t.set("status", z.status.as_str())?;
+        t.set("right", z.right.as_str())?;
+        t.set("tune", z.tune)?;
+        t.set("check", z.check)?;
+        t.set("live", z.live)?;
+        t.set("hold", z.hold)?;
+        t.set("message", z.message.as_deref())?;
+        t.set("input", z.input.as_str())?;
+        ct.set("zhora", t)?;
     }
     let knobs = lua.create_table()?;
     for k in 0..8 {

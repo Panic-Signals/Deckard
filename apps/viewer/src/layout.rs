@@ -700,6 +700,8 @@ pub enum Act {
     MidiInputParam(usize, u32, f64),
     /// The focused slot's page of parameters.
     PluginPage(usize),
+    /// A press of the focused Zhora's `tune`, `check`, `live` or `hold`.
+    Zhora(&'static str),
     /// The page of parameters slot `.1` of chain `.0` shows (its strip panel's own).
     PluginPageOf(deckard_doc::Chain, usize, usize),
     Preferences,
@@ -1229,6 +1231,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
+            Act::Zhora(what) => app.zhora_press(what),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
             Act::MidiInputParam(g, id, v) => {
                 if let Some(Ok(out)) = &app.output {
@@ -4359,6 +4362,9 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     let mut routes: Vec<(usize, Vec<String>, Vec<RouteSet>)> = Vec::new();
     // Knobs that are a plug-in's choices: (knob, the names of its values).
     let mut plugin_choices: Vec<(usize, Vec<String>)> = Vec::new();
+    // A Zhora output's choices: what each sets (only None and the channels free for it).
+    let mut choice_values: Vec<(usize, Vec<f64>)> = Vec::new();
+    let mut zhora: Option<deckard_surface::ZhoraView> = None;
     let mut groove_button = None;
     let mut hint: Option<String> = None;
     let groove = |g: usize, s: usize, f: &str| app.groove_setting(g, s, f);
@@ -4489,9 +4495,27 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                 }
                                 sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
                             } else if let Some(pg) = v.pages.get(page) {
+                                zhora = app.zhora_view(p);
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
-                                    let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
+                                    let (value, mut text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
+                                    if let Some(channels) = app.zhora_offered(p, info.id) {
+                                        let steps = info.steps.max(1) as f64;
+                                        let at = (value * steps).round() as usize;
+                                        let mut names = vec!["None".to_string()];
+                                        names.extend(channels.iter().map(|&c| app.settings.output_name(c)));
+                                        let values = std::iter::once(0.0).chain(channels.iter().map(|&c| (c + 1) as f64 / steps)).collect();
+                                        let cur = channels.iter().position(|&c| c + 1 == at).map_or(0, |n| n + 1);
+                                        text = names[cur].clone();
+                                        plugin_choices.push((k, names));
+                                        choice_values.push((k, values));
+                                        let edit = Edit::PluginChoice(i, info.id, info.steps, cur, info.default);
+                                        params.push(Some((name, text, value as f32, Some(edit))));
+                                        if !section.is_empty() {
+                                            sections.push((k, section.clone().into()));
+                                        }
+                                        continue;
+                                    }
                                     let units = if info.units.is_empty() || text.ends_with(&info.units) {
                                         String::new()
                                     } else {
@@ -4740,7 +4764,8 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         if let Some(Edit::PluginChoice(slot, id, steps, cur, _)) = *edit {
             if let Some((_, names)) = plugin_choices.iter().find(|(k, _)| *k == i) {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                let set = move |k: usize| Act::PluginParam(slot, id, k as f64 / steps as f64);
+                let values = choice_values.iter().find(|(k, _)| *k == i).map(|(_, v)| v.clone());
+                let set = move |k: usize| Act::PluginParam(slot, id, values.as_ref().map_or(k as f64 / steps as f64, |v| v[k]));
                 selector(ui, &painter, r, (i, name.as_ref(), value), &names, cur, &set, gcol, acts);
             }
             continue;
@@ -4853,6 +4878,12 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             painter.circle_filled(c + Vec2::angled(a) * 16.0, 3.0, Color32::from_rgb(0x9a, 0xd0, 0xff));
         }
     }
+    if let Some(z) = &zhora {
+        // After the eight knobs, as the MK3's right screen.
+        let r = Rect::from_min_max(Pos2::new(slot_x(8) - 6.0, header.bottom() + 8.0), Pos2::new(ed.right() - 10.0, knob_y + 84.0));
+        zhora_panel(ui, &painter, r, z, gcol, acts);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
     if assign_h > 0.0 {
         let fields = assign::Fields {
             area: Rect::from_min_max(Pos2::new(ed.left(), rect.bottom() - assign_h), rect.max),
@@ -4863,6 +4894,60 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         };
         assign::area(ui, app, doc, &painter, fields, gcol, acts);
     }
+}
+
+/// The focused Zhora's tuner in `r`, beside its knobs: TUNE, CHECK, LIVE and HOLD (lit
+/// while each is on), the note heard and its cents (green within 5), a needle over
+/// -50..+50 cents, and the bar (a message in its place).
+fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::ZhoraView, gcol: Color32, acts: &mut Vec<Act>) {
+    let green = Color32::from_rgb(0x3d, 0xd6, 0x6a);
+    let amber = Color32::from_rgb(0xff, 0xc2, 0x3a);
+    painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
+    let left = r.left() + 12.0;
+    for (k, (what, on)) in [("tune", z.tune), ("check", z.check), ("live", z.live), ("hold", z.hold)].into_iter().enumerate() {
+        let b = Rect::from_min_size(Pos2::new(left + k as f32 * 64.0, r.top()), Vec2::new(58.0, 22.0));
+        let name = what.to_uppercase();
+        let resp = ui.interact(b, ui.id().with(("zhora", what)), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+        let fill = if on {
+            gcol
+        } else if resp.hovered() {
+            S03
+        } else {
+            S02
+        };
+        painter.rect_filled(b, 3.0, fill);
+        painter.text(b.center(), Align2::CENTER_CENTER, &name, font(11.0), if on { Color32::BLACK } else { white(200) });
+        if resp.clicked() {
+            acts.push(Act::Zhora(what));
+        }
+    }
+    let ink = if z.in_tune { green } else { white(230) };
+    let y = r.top() + 50.0;
+    match &z.note {
+        Some(n) => painter.text(Pos2::new(left, y), Align2::LEFT_CENTER, n, font(28.0), ink),
+        None => painter.text(Pos2::new(left, y), Align2::LEFT_CENTER, "\u{2013}", font(28.0), white(90)),
+    };
+    if let Some(c) = z.cents {
+        painter.text(Pos2::new(left + 64.0, y), Align2::LEFT_CENTER, crate::zhora_ui::cents_text(c), font(13.0), ink);
+    }
+    let scale = Rect::from_min_max(Pos2::new(left + 112.0, y - 12.0), Pos2::new(left + 248.0, y + 12.0));
+    let at = |c: f32| scale.left() + (c.clamp(-50.0, 50.0) + 50.0) / 100.0 * scale.width();
+    painter.rect_filled(Rect::from_x_y_ranges(at(-5.0)..=at(5.0), scale.y_range()), 0.0, Color32::from_rgb(0x1a, 0x4a, 0x2a));
+    painter.hline(scale.x_range(), scale.center().y, Stroke::new(1.0, white(60)));
+    for t in [-50.0, -25.0, 0.0, 25.0, 50.0] {
+        let h = if t == 0.0 { 7.0 } else { 4.0 };
+        painter.vline(at(t), (scale.center().y - h)..=(scale.center().y + h), Stroke::new(1.0, white(110)));
+    }
+    if let Some(c) = z.cents {
+        painter.vline(at(c), (scale.top() - 2.0)..=(scale.bottom() + 2.0), Stroke::new(2.5, if z.in_tune { green } else { amber }));
+    }
+    let (text, colour) = match &z.message {
+        Some(m) => (m.clone(), amber),
+        None if z.right.is_empty() => (z.status.clone(), white(160)),
+        None => (format!("{} \u{b7} {}", z.status, z.right), white(160)),
+    };
+    painter.text(Pos2::new(left, r.bottom() - 10.0), Align2::LEFT_CENTER, text, font(11.0), colour);
 }
 
 /// A drag on knob `edit` is written as modulation: only with Auto-write on while the

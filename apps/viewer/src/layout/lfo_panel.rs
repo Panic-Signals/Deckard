@@ -322,8 +322,8 @@ fn cc_section(ui: &mut Ui, painter: &Painter, lfos: &[Lfo], ports: &[String], ro
 
 /// The CV section in `area`: the project's CV routes (`routes`), one row each (Source,
 /// Out, Low, High, and × to remove it; a route in `inactive` says why it writes nothing),
-/// then "+ Add CV" (off with no LFOs or no free CV only channel in `settings`). Its rows are
-/// the CC section's sizes. An edit gives the whole list, as [`Act::SetCvRoutes`].
+/// then "+ Add CV" (off with no LFOs or no free CV only channel in `settings`). The channels
+/// Zhoras have (`zhoras`) aren't offered. Its rows are the CC section's sizes. An edit gives the whole list, as [`Act::SetCvRoutes`].
 #[allow(clippy::too_many_arguments)]
 fn cv_section(
     ui: &mut Ui,
@@ -331,13 +331,14 @@ fn cv_section(
     lfos: &[Lfo],
     settings: &crate::settings::Settings,
     routes: &[CvRoute],
+    zhoras: &[u8],
     inactive: &[usize],
     area: Rect,
     acts: &mut Vec<Act>,
 ) {
     let head = Rect::from_min_size(area.min, Vec2::new(area.width(), CC_TOP - 4.0));
     ui.put(head, egui::Label::new(egui::RichText::new("CV").size(11.0).color(white(140))));
-    let free = crate::mod_slots::free_cv_channels(settings, routes, None);
+    let free = crate::mod_slots::free_cv_channels(settings, routes, zhoras, None);
     let mut list = routes.to_vec();
     let mut changed = false;
     let mut gone = None;
@@ -368,7 +369,8 @@ fn cv_section(
         }
         caption(c, "Source");
         // Out: the CV only channels no other route has (its own kept, last if not marked).
-        let mut outs: Vec<usize> = crate::mod_slots::free_cv_channels(settings, routes, Some(i)).into_iter().map(usize::from).collect();
+        let mut outs: Vec<usize> =
+            crate::mod_slots::free_cv_channels(settings, routes, zhoras, Some(i)).into_iter().map(usize::from).collect();
         if !outs.contains(&usize::from(r.channel)) {
             outs.push(usize::from(r.channel));
         }
@@ -487,7 +489,7 @@ pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, act
     let top = (cc.top() + CC_TOP + CC_ROW * p.cc_routes.len() as f32 + 34.0).min(body.bottom());
     let cv = Rect::from_min_max(Pos2::new(body.left(), top), body.max);
     let inactive = deckard_engine::Engine::cv_conflicts(p, app.settings.cv_mask());
-    cv_section(ui, &painter, &p.lfos, &app.settings, &p.cv_routes, &inactive, cv, acts);
+    cv_section(ui, &painter, &p.lfos, &app.settings, &p.cv_routes, &crate::zhora_ui::channels_held(p), &inactive, cv, acts);
     let Some(lfo) = focused(&p.lfos, app.lfo_focus) else {
         painter.text(body.left_top(), Align2::LEFT_TOP, "No LFOs yet: add one.", font(12.0), white(110));
         return;
@@ -869,7 +871,7 @@ mod tests {
             |ui, st: &mut St| {
                 let area = Rect::from_min_size(ui.max_rect().min, Vec2::new(880.0, 280.0));
                 let painter = ui.painter().clone();
-                cv_section(ui, &painter, &[Lfo::new(3)], &st.settings, &st.routes, &st.inactive, area, &mut st.acts);
+                cv_section(ui, &painter, &[Lfo::new(3)], &st.settings, &st.routes, &[], &st.inactive, area, &mut st.acts);
             },
             st,
         );
@@ -900,13 +902,14 @@ mod tests {
         settings.output_cv_only[2] = true;
         settings.output_cv_only[3] = true;
         let on = |c| CvRoute::new(ModSource::Lfo(3), c);
-        assert_eq!(crate::mod_slots::free_cv_channels(&settings, &[on(2), on(3)], Some(0)), [2], "its own kept, the other's gone");
+        assert_eq!(crate::mod_slots::free_cv_channels(&settings, &[on(2), on(3)], &[], Some(0)), [2], "its own kept, the other's gone");
+        assert!(crate::mod_slots::free_cv_channels(&settings, &[], &[2, 3], None).is_empty(), "a Zhora's channels aren't free");
         let st = St { settings, routes: vec![on(2)], acts: Vec::new() };
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 300.0)).build_ui_state(
             |ui, st: &mut St| {
                 let area = Rect::from_min_size(ui.max_rect().min, Vec2::new(880.0, 280.0));
                 let painter = ui.painter().clone();
-                cv_section(ui, &painter, &[Lfo::new(3), Lfo::new(4)], &st.settings, &st.routes, &[], area, &mut st.acts);
+                cv_section(ui, &painter, &[Lfo::new(3), Lfo::new(4)], &st.settings, &st.routes, &[], &[], area, &mut st.acts);
             },
             st,
         );

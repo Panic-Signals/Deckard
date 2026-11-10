@@ -524,6 +524,27 @@ pub struct ControlView {
     pub filter: Option<EqCurveView>,
     /// Any other focused built-in effect, drawn on the right screen on every page.
     pub picture: Option<EqCurveView>,
+    /// The focused Zhora: its tuner on the right screen, its buttons on both.
+    pub zhora: Option<ZhoraView>,
+}
+
+/// What Zhora's screens show. `note` is the note heard on its input and `cents` how far
+/// above it; `in_tune` within 5 cents. The bar reads `status` (when it was tuned), with
+/// `right` (what's held, or Live's state) at its end; `message` replaces it. `tune`,
+/// `check`, `live` and `hold` light their buttons. `input` is what it listens on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ZhoraView {
+    pub note: Option<String>,
+    pub cents: Option<f32>,
+    pub in_tune: bool,
+    pub status: String,
+    pub right: String,
+    pub tune: bool,
+    pub check: bool,
+    pub live: bool,
+    pub hold: bool,
+    pub message: Option<String>,
+    pub input: String,
 }
 
 /// A curve for the right screen. `points` run across the plot, each 0..1 (0.5 is the
@@ -658,6 +679,10 @@ pub enum Action {
     },
     /// The next (true) or previous page.
     Page(bool),
+    /// The focused plug-in's page `.0` (from 0).
+    PluginPage(usize),
+    /// A press of the focused Zhora's `tune`, `check`, `live` or `hold`.
+    Zhora(&'static str),
     /// Show the master (0), group (1) or sound (2) chain.
     Level(usize),
     /// Focus the slot `.0` places on.

@@ -153,6 +153,7 @@ mod transport_sync;
 mod update;
 mod user_chords;
 mod wine;
+mod zhora_ui;
 
 use deckard_doc::{Document, Shared};
 use deckard_engine::{Engine, Mode, SampleCache, output::Output};
@@ -1270,6 +1271,8 @@ pub struct App {
     doc_generation: u64,
     /// Cached `(doc_generation, revision, macro_targets, group_noted)` for `surface_view`.
     surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
+    /// The focused Zhora (group, sound, slot) as last shown, while the audio thread has it.
+    zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
 }
 
 /// Launch time (a newtype so `App` can derive `Default`).
@@ -5086,6 +5089,15 @@ impl App {
             }
         }
         let doc_cache = self.surface_doc_cache.borrow();
+        // A Zhora's outputs by the channels' names (their aliases).
+        let zhora_focused = self.focused_zhora().is_some();
+        let knob_text = |i: usize, text: &str| match edits.get(i).copied().flatten() {
+            Some(layout::Edit::PluginChoice(_, id, _, cur, _)) if zhora_focused && zhora_ui::OUTS.contains(&id) => match cur {
+                0 => "None".to_string(),
+                n => self.settings.output_name(n - 1),
+            },
+            _ => text.to_string(),
+        };
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -5115,7 +5127,7 @@ impl App {
                     k.as_ref().map(|k| KnobView {
                         name: k.name.clone(),
                         section: k.section.clone(),
-                        text: k.text.clone(),
+                        text: knob_text(i, &k.text),
                         value: k.value,
                         modulatable: edits.get(i).copied().flatten().and_then(modulation::mod_target).is_some(),
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
@@ -5129,6 +5141,7 @@ impl App {
             eq: None,
             filter: None,
             picture: None,
+            zhora: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -5190,6 +5203,7 @@ impl App {
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
             let page = c.page;
             v.control.picture = slot.and_then(|s| Self::effect_picture(s, Self::picture_phase(&s.module, &s.params, tempo), live, page));
+            v.control.zhora = self.zhora_view(p);
         }
         v.project = p.name.clone();
         v.swing = p.swing.amount;
@@ -5652,6 +5666,17 @@ impl App {
             }
             A::Turn { knob, inc, fine } => self.control_request(R::Turn { pos: knob, inc, fine }),
             A::Page(next) => self.control_request(R::Page(next)),
+            A::PluginPage(n) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let show = {
+                    let d = doc.borrow();
+                    self.slot.and_then(|i| layout::slot_page(self, d.project(), i)).filter(|pg| n < pg.names.len()).map(|pg| (pg.show)(n))
+                };
+                if let Some(act) = show {
+                    layout::apply_acts(self, vec![act]);
+                }
+            }
+            A::Zhora(what) => self.zhora_press(what),
             A::Level(level) => self.control_request(R::Level(level)),
             A::Slot(delta) => self.control_request(R::Slot(delta)),
             A::ModulesVisible(on) => self.control_request(R::ModulesVisible(on)),
@@ -6118,6 +6143,32 @@ impl App {
                         return;
                     }
                     layout::apply_acts(self, vec![Act::SetRoute(sets[to].clone())]);
+                    return;
+                }
+                // A Zhora's output: on along None and the CV only channels free for it, a
+                // step each quarter of the way a continuous one would go.
+                let zhora_out = match edit {
+                    Edit::PluginChoice(_, id, ..) => {
+                        let d = doc.borrow();
+                        self.zhora_offered(d.project(), id)
+                    }
+                    _ => None,
+                };
+                if let Edit::PluginChoice(slot, id, steps, cur, _) = edit
+                    && let Some(channels) = zhora_out
+                {
+                    let unit = 0.25 / steps.max(1) as f64;
+                    let n = (self.knob_acc[pos].abs() / unit).floor();
+                    if n < 1.0 {
+                        return;
+                    }
+                    let sign = self.knob_acc[pos].signum();
+                    self.knob_acc[pos] -= n * unit * sign;
+                    let to = zhora_ui::step_output(cur, n as i64 * sign as i64, &channels);
+                    if to == cur {
+                        return;
+                    }
+                    layout::apply_acts(self, vec![Act::PluginParam(slot, id, to as f64 / steps.max(1) as f64)]);
                     return;
                 }
                 // A stepped value moves a step once the knob has gone a quarter of the

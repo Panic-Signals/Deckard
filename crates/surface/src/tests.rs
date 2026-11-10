@@ -3288,3 +3288,83 @@ fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
         v.pattern_length = want;
     }
 }
+
+/// A view with Zhora focused: its four pages, an A3 heard 2 cents sharp.
+fn zhora_view() -> View {
+    let mut v = view();
+    v.control.chain[0] = crate::SlotView { name: "Zhora".into(), instrument: true, active: true, plugin: true, picture: None };
+    v.control.slot = Some("Zhora".into());
+    v.control.pages = ["OUTS", "ENV", "LEVELS", "MOD"].map(String::from).to_vec();
+    v.control.zhora = Some(crate::ZhoraView {
+        note: Some("A3".into()),
+        cents: Some(2.0),
+        in_tune: true,
+        status: "Tuned today 14:02 · worst note 3¢ · C1–C7".into(),
+        right: "Holding A3".into(),
+        input: "In 1 L+R".into(),
+        ..Default::default()
+    });
+    v
+}
+
+/// Zhora's tuner: the note, its cents and a green needle, on the right screen only, under
+/// the bar.
+#[test]
+fn zhora_tuner_is_drawn_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), zhora_view());
+    let green = |p: &[u8; 4]| p[1] > 180 && p[0] < 110 && p[2] < 140;
+    let right = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && green(p)).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && green(p)).count();
+    let px = s.picture(&v);
+    assert!(right(&px) > 200, "the note and needle in green on the right: {}", right(&px));
+    assert!(left(&px) < 20, "not on the left screen");
+    let text = s.screen_text(&v);
+    for t in
+        ["A3", "+2¢", "Tuned today 14:02 · worst note 3¢ · C1–C7", "Holding A3", "In 1 L+R", "TUNE", "CHECK", "LIVE", "HOLD", "OUTS", "MOD"]
+    {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    // Out of tune: not green. A message takes the bar's place.
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.cents, z.in_tune, z.message) = (Some(-20.0), false, Some("No signal on the input".into()));
+    let px = s.picture(&v);
+    assert!(right(&px) < 60, "no green while out of tune: {}", right(&px));
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|x| x == "No signal on the input") && !text.iter().any(|x| x.starts_with("Tuned")), "{text:?}");
+    assert_eq!(s.error(), None);
+}
+
+/// Zhora's display buttons 5 to 8 are TUNE, CHECK, LIVE and HOLD, lit as the view says.
+#[test]
+fn zhora_display_buttons_5_to_8_are_tune_check_live_hold() {
+    let (mut s, mut v) = (Surface::new(), zhora_view());
+    for (n, what) in [(5, "tune"), (6, "check"), (7, "live"), (8, "hold")] {
+        let name: &'static str = ["BUTTON_SCREEN_5", "BUTTON_SCREEN_6", "BUTTON_SCREEN_7", "BUTTON_SCREEN_8"][n - 5];
+        assert_eq!(press(&mut s, &v, name), [Action::Zhora(what)]);
+    }
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::DIM));
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.tune, z.hold) = (true, true);
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(crate::leds::ON), "tuning");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_6"), Some(deckard_mk3::leds::DIM));
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(crate::leds::ON), "holding");
+    // SHIFT keeps the slot edits.
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SlotEdit("bypass")]);
+}
+
+/// Zhora's display buttons 1 to 4 pick its pages, the one shown lit.
+#[test]
+fn zhora_display_buttons_1_to_4_pick_pages() {
+    let (mut s, mut v) = (Surface::new(), zhora_view());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::PluginPage(0)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::PluginPage(3)]);
+    v.control.page = 2;
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_3"), Some(crate::leds::ON));
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::DIM));
+    // Not Zhora: the levels again.
+    v.control.zhora = None;
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::Level(0)]);
+}

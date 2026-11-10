@@ -13,6 +13,8 @@ DECKARD also does a few things Maschine doesn't:
 - **Modulation:** a mod matrix with up to 16 LFOs and envelopes per project.
 - **Launchpad Pro MK3:** a session grid you can use alongside the MK3.
 - **Two synths of its own:** Replicant and Plaits.
+- **CV out to a modular:** LFOs and envelopes as CV, and **Zhora**, which plays a
+  modular voice and keeps it in tune.
 - **Custom themes** for the MK3's screens, which anyone can write.
 
 ![DECKARD's Ideas view](docs/screenshots/ideas.png)
@@ -183,7 +185,7 @@ find:
   follow the tempo.
 - **Drum synths:** Kick, Snare, Hi-hat, Tom, Percussion and Cymbal.
 - **Synths:** Bass Synth and Poly Synth, plus DECKARD's own **Replicant** and
-  **Plaits** (see below).
+  **Plaits** (see below), and **Zhora**, which plays a modular synth over CV.
 - **Effects:** Compressor, Gate, Transient Master, Limiter, Maximizer, EQ, Filter,
   Chorus, Flanger, FM, Freq Shifter, Phaser, Ice, Metaverb, Reflex, Reverb, Beat Delay,
   Grain Delay, Grain Stretch, Resochord, Distortion, Lo-Fi, Saturator and more.
@@ -309,6 +311,21 @@ up to 16 LFOs, one per pad.
 - **MIDI CC out:** an LFO or envelope can also be sent to external gear. The panel's
   **MIDI CC** section sends it as a MIDI controller to the port, channel and CC number
   you choose.
+
+### CV out
+
+With a DC-coupled interface, an LFO or envelope can drive a modular synth:
+
+1. In **Preferences ▸ Audio ▸ Routing ▸ Output**, mark the channels wired to the modular
+   **CV only**. Audio never goes to them. A channel the master or cue plays on can't be
+   marked.
+2. In the LFO panel's **CV** section, click **+ Add CV** and pick the LFO, the output,
+   and a **Low** and **High** (−100% to +100% of full scale). On the MK3's mod matrix,
+   turn Group past MIDI.
+
+CV skips the master, faders and effects, and isn't in exports or stems. Each CV only
+channel has one owner: CV routes first, then Zhora. A route whose channel isn't CV only
+on this computer stays silent and says so.
 
 ### On the MK3
 
@@ -439,8 +456,39 @@ Gillet's open-source code, so it sounds like the module.
 Plaits' code is © Emilie Gillet and used under the MIT licence; the licence is shown in
 DECKARD's About box. Add it from **+ ▸ Internal ▸ Plaits**.
 
-Replicant and Plaits are saved in the project like plug-ins, so the project still opens
-in Maschine. Maschine can't play them and reports them as missing plug-ins. In DECKARD's
+### Zhora
+
+Zhora plays one voice of a modular synth over CV, listens to it come back, and keeps it
+in tune. It needs outputs marked CV only (see [CV out](#cv-out)).
+
+- **Signals:** pitch, gate, clock (at a division of the tempo, while playing), its own
+  envelope, velocity and mod wheel. Each goes to a CV only output, or None. Gate,
+  clock, envelope, velocity and mod wheel have a Level, 50% to start: set it by ear or
+  with a scope.
+- **Playing:** one voice, the newest note wins, with pitch bend and Glide.
+- **The return:** **Input** picks the input the modular comes back on. It plays through
+  Zhora's sound like any sound, with its level, effects, mute and recording.
+- **Tune:** turn off the modular's effects, open its filter, and press **TUNE**. Zhora
+  steps the pitch for a few seconds, listens, and builds a table that puts every note in
+  the range it found within 5 cents. If it can't hear a clear pitch, it says so and
+  keeps the old table. The table is saved in the project.
+- **Check:** measures a spread of notes again and shows the worst, without changing the
+  table. Use it after touching the oscillator's tune knob or an output trim.
+- **Live:** trims slow drift while you play, on held notes only. Vibrato survives.
+- **Hold:** holds pitch and gate on **Hold Note**, so both hands are free for the
+  oscillator. The tuner reads the input all the time, at A = 440 Hz.
+
+On the MK3, display buttons 1–4 pick OUTS, ENV, LEVELS and MOD, and 5–8 are TUNE, CHECK,
+LIVE and HOLD. The right screen shows the note, its cents and a needle, green within 5
+cents, under a bar like "Tuned today 14:02 · worst note 3¢ · C1–C7". The plug-in panel
+shows the same beside the knobs.
+
+An export has no modular, so Zhora's part is left out of mixdowns and stems, and the
+Export panel says so. Record its return as audio first to include it. Add Zhora from
+**+ ▸ Internal ▸ Zhora**.
+
+Replicant, Plaits and Zhora are saved in the project like plug-ins, so the project still
+opens in Maschine. Maschine can't play them and reports them as missing plug-ins. In DECKARD's
 tests it kept their settings when it re-saved the project.
 
 ## More
