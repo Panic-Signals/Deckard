@@ -11,6 +11,8 @@
 
 mod ahead;
 pub mod audio_loop;
+mod channel_sends;
+use channel_sends as aux;
 #[cfg(feature = "output")]
 pub mod devices;
 pub mod edit;
@@ -457,7 +459,7 @@ fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option
 fn fader_lanes(p: &Project, pat: &deckard_model::Pattern) -> Vec<(Option<usize>, String, Vec<(i64, f64)>)> {
     let plen = own_length(p, pat);
     let mut out: Vec<(Option<usize>, String, Vec<(i64, f64)>)> = Vec::new();
-    for m in pat.mods.iter().filter(|m| m.slot.is_none() && is_fader(&m.field)) {
+    for m in pat.mods.iter().filter(|m| m.slot.is_none() && matches!(m.field.as_str(), "level" | "pan" | "aux1_level" | "aux2_level")) {
         let pos = m.position - pat.start;
         if !(0..plen).contains(&pos) {
             continue;
@@ -619,6 +621,9 @@ pub fn sound_bus(p: &Project, g: usize, s: usize) -> Option<usize> {
 /// [`sound_gain`] and [`sound_bus`].
 fn sound_route(p: &Project, g: usize, s: usize) -> Route {
     let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return SILENT };
+    if !snd.cue && has_sound_bus(snd) && reaches_main(p, snd.channel.dest, (g, Some(s)), Some(g), 0) {
+        return SILENT;
+    }
     let own = fader_gain(snd.level, snd.pan, &snd.modulators);
     let (bus, gain) = if snd.cue { cue_route(p) } else { dest_route(p, snd.channel.dest, Some(g), 0) };
     (bus, mul(own, gain))
@@ -725,7 +730,7 @@ fn channel_faders(p: &Project) -> (Vec<Fader>, Vec<Vec<Vec<usize>>>, Vec<Vec<usi
             }
             D::Group(g) => into(g, out),
             D::Sound(g, s) => {
-                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)) {
+                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|bus| !has_sound_bus(bus)) {
                     out.extend(place(g, Some(s)));
                     if !bus.cue {
                         after_dest(p, bus.channel.dest, Some(g), depth + 1, place, out);
@@ -859,9 +864,11 @@ fn dest_cued(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>,
     match dest {
         D::Parent => parent.is_some_and(group),
         D::Group(g) => group(g),
-        D::Sound(g, s) => {
-            p.groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|bus| bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))
-        }
+        D::Sound(g, s) => p
+            .groups
+            .get(g)
+            .and_then(|x| x.sounds.get(s))
+            .is_some_and(|bus| !has_sound_bus(bus) && (bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))),
         D::None | D::Master | D::Ext(_) => false,
     }
 }
@@ -890,13 +897,7 @@ fn dest_route(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>
         D::Master => (None, (1.0, 1.0)),
         D::Ext(n) => ext_route(p, n, (1.0, 1.0)),
         D::Group(g) => group_route(p, g, depth + 1),
-        D::Sound(g, s) => match p.groups.get(g).and_then(|x| x.sounds.get(s)) {
-            Some(bus) if !(bus.muted && bus.channel.audio_mute) => {
-                let (to, gain) = if bus.cue { cue_route(p) } else { dest_route(p, bus.channel.dest, Some(g), depth + 1) };
-                (to, mul(fader_gain(bus.level, bus.pan, &bus.modulators), gain))
-            }
-            _ => SILENT,
-        },
+        D::Sound(g, s) => sound_in_route(p, g, s, depth + 1),
     }
 }
 
@@ -1014,10 +1015,82 @@ fn muting(p: &Project, g: usize, s: usize) -> Muting {
 /// A route's output for group `g`'s bus (`GROUP_BUS + g`): a group with effects takes
 /// its sounds in there, runs its effects, then its fader (see [`group_out_route`]).
 const GROUP_BUS: usize = 1 << 20;
+const SOUND_BUS: usize = 1 << 21;
+const SOUND_STRIDE: usize = 1 << 10;
 
-/// Whether group `g` has a bus: effects in its chain.
+fn sound_bus_id(g: usize, s: usize) -> usize {
+    SOUND_BUS + g * SOUND_STRIDE + s
+}
+
+fn decode_sound_bus(n: usize) -> Option<(usize, usize)> {
+    (n >= SOUND_BUS).then(|| ((n - SOUND_BUS) / SOUND_STRIDE, (n - SOUND_BUS) % SOUND_STRIDE))
+}
+
+/// Whether group `g` has a bus: effects in its chain, or an Aux send.
 fn has_bus(grp: &deckard_model::Group) -> bool {
-    !grp.slots.is_empty()
+    !grp.slots.is_empty() || grp.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
+}
+
+/// Whether sound `snd` has a bus: active effects in its chain, or an Aux send.
+fn has_sound_bus(snd: &deckard_model::Sound) -> bool {
+    !effect_slots(snd).is_empty() || snd.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
+}
+
+/// Whether sound (`g`, `s`) has a bus and another channel routes or sends audio into it.
+fn is_sound_bus(p: &Project, g: usize, s: usize) -> bool {
+    let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(s)) else { return false };
+    if !has_sound_bus(snd) {
+        return false;
+    }
+    let target = deckard_model::AudioDest::Sound(g, s);
+    p.groups.iter().enumerate().any(|(gi, grp)| {
+        grp.channel.dest == target
+            || grp.channel.aux_dest.contains(&target)
+            || grp
+                .sounds
+                .iter()
+                .enumerate()
+                .any(|(si, x)| (gi, si) != (g, s) && (x.channel.dest == target || x.channel.aux_dest.contains(&target)))
+    }) || p.extra_outs.iter().any(|x| x.dest == target && strip_sounds(p, x))
+}
+
+fn sound_in_route(p: &Project, g: usize, s: usize, depth: u8) -> Route {
+    let Some((grp, bus)) = p.groups.get(g).and_then(|grp| Some((grp, grp.sounds.get(s)?))) else { return SILENT };
+    if (grp.muted || (bus.muted && bus.channel.audio_mute)) && !(has_sound_bus(bus) && sound_feeds_strip(p, g, s)) {
+        return SILENT;
+    }
+    if has_sound_bus(bus) {
+        return (Some(sound_bus_id(g, s)), (1.0, 1.0));
+    }
+    let (to, gain) = if bus.cue { cue_route(p) } else { dest_route(p, bus.channel.dest, Some(g), depth) };
+    (to, mul(fader_gain(bus.level, bus.pan, &bus.modulators), gain))
+}
+
+fn reaches_main(p: &Project, dest: deckard_model::AudioDest, wanted: (usize, Option<usize>), parent: Option<usize>, depth: u8) -> bool {
+    use deckard_model::AudioDest as D;
+    if depth > 16 {
+        return true;
+    }
+    let group = |g: usize| {
+        if (g, None) == wanted {
+            return true;
+        }
+        p.groups.get(g).is_some_and(|grp| !grp.cue && reaches_main(p, grp.channel.dest, wanted, None, depth + 1))
+    };
+    match dest {
+        D::None | D::Master | D::Ext(_) => false,
+        D::Parent => parent.is_some_and(group),
+        D::Group(g) => group(g),
+        D::Sound(g, s) => {
+            if (g, Some(s)) == wanted {
+                return true;
+            }
+            p.groups
+                .get(g)
+                .and_then(|grp| grp.sounds.get(s))
+                .is_some_and(|snd| !snd.cue && reaches_main(p, snd.channel.dest, wanted, Some(g), depth + 1))
+        }
+    }
 }
 
 /// A group channel's route (silent when muted): its bus, if it has effects; else its
@@ -1045,6 +1118,9 @@ fn group_out_route(p: &Project, g: usize) -> Route {
 
 fn group_fader_route(p: &Project, g: usize, depth: u8) -> Route {
     let grp = &p.groups[g];
+    if !grp.cue && has_bus(grp) && reaches_main(p, grp.channel.dest, (g, None), None, 0) {
+        return SILENT;
+    }
     let own = fader_gain(grp.level, grp.pan, &grp.modulators);
     let (to, gain) = if grp.cue { cue_route(p) } else { dest_route(p, grp.channel.dest, None, depth) };
     (to, mul(own, gain))
@@ -1074,8 +1150,11 @@ fn bus_order(buses: &[Option<Bus>]) -> Vec<usize> {
         }
         busy[g] = true;
         let strips = b.chain.units.iter().flat_map(|u| &u.extras).flat_map(|x| [x.route.0, x.fallback.0]);
-        let next: Vec<usize> =
-            std::iter::once(b.route.0).chain(strips).filter_map(|n| n.filter(|&n| n >= GROUP_BUS)).map(|n| n - GROUP_BUS).collect();
+        let next: Vec<usize> = std::iter::once(b.route.0)
+            .chain(strips)
+            .filter_map(|n| n.filter(|&n| (GROUP_BUS..SOUND_BUS).contains(&n)))
+            .map(|n| n - GROUP_BUS)
+            .collect();
         let d = next.into_iter().map(|n| 1 + depth(buses, n, memo, busy)).max().unwrap_or(0);
         busy[g] = false;
         memo[g] = Some(d);
@@ -1308,9 +1387,34 @@ fn refresh_strips(owner: Option<Owner>, extras: &mut [ExtraRt], routes: &[(Owner
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn route_dst<'a>(
+    bus: Option<usize>,
+    frames: usize,
+    at: usize,
+    inp_at: usize,
+    out: &'a mut [f32],
+    ext: &'a mut [Vec<f32>],
+    buses: &'a mut [Option<Bus>],
+    bufs: &'a mut [Vec<Option<Box<SoundBufs>>>],
+) -> Option<&'a mut [f32]> {
+    match bus {
+        None => out.get_mut(..frames * 2),
+        Some(n) if n >= SOUND_BUS => {
+            let (g, s) = decode_sound_bus(n)?;
+            let b = bufs.get_mut(g)?.get_mut(s)?.as_deref_mut()?;
+            b.inp_on = true;
+            b.inp.get_mut(inp_at * 2..(inp_at + frames) * 2)
+        }
+        Some(n) if n >= GROUP_BUS => buses.get_mut(n - GROUP_BUS)?.as_mut()?.buf.get_mut(..frames * 2),
+        Some(n) => ext.get_mut(n)?.get_mut(at..at + frames * 2),
+    }
+}
+
 /// Mix strip `x`'s span (`frames`) onto where it goes (`out`: the master's input; `ext`
-/// from `at`: the other outputs; `buses`: the groups'), gliding to its route, and note
-/// its peak in `meters`. `connected`: the outputs (bits) that are connected.
+/// from `at`: the other outputs; `buses`: the groups'; `bufs`: the sounds'), gliding to
+/// its route, and note its peak in `meters`. `connected`: the outputs (bits) that are
+/// connected.
 #[allow(clippy::too_many_arguments)]
 fn mix_strip(
     x: &mut ExtraRt,
@@ -1320,7 +1424,9 @@ fn mix_strip(
     out: &mut [f32],
     ext: &mut [Vec<f32>],
     at: usize,
+    inp_at: usize,
     buses: &mut [Option<Bus>],
+    bufs: &mut [Vec<Option<Box<SoundBufs>>>],
     meters: &mut [(f32, f32)],
 ) {
     let route = match x.ext {
@@ -1331,12 +1437,12 @@ fn mix_strip(
     if x.ramp.left == 0 && x.ramp.now == (0.0, 0.0) {
         return;
     }
-    let dst: Option<&mut [f32]> = match route.0 {
-        None => out.get_mut(..frames * 2),
-        Some(n) if n >= GROUP_BUS => buses.get_mut(n - GROUP_BUS).and_then(Option::as_mut).and_then(|b| b.buf.get_mut(..frames * 2)),
-        Some(n) => ext.get_mut(n).and_then(|b| b.get_mut(at..at + frames * 2)),
+    let Some(dst) = route_dst(route.0, frames, at, inp_at, out, ext, buses, bufs) else {
+        for _ in 0..frames {
+            x.ramp.next();
+        }
+        return;
     };
-    let Some(dst) = dst else { return };
     let mut peak = (0f32, 0f32);
     let channels = x.channels;
     for (o, i) in dst.as_chunks_mut::<2>().0.iter_mut().zip(x.buf.as_chunks::<2>().0) {
@@ -2086,6 +2192,8 @@ pub struct Engine {
     /// Groups with effects: their buses (`[group]`), and the order they run in.
     buses: Vec<Option<Bus>>,
     bus_order: Vec<usize>,
+    sound_aux: Vec<Vec<Vec<aux::Send>>>,
+    group_aux: Vec<Vec<aux::Send>>,
     /// The master's effects, run on its output before its level.
     master_fx: Option<FxChain>,
     /// What sounds feeding side-chains played over the span being rendered
@@ -2677,6 +2785,8 @@ impl Engine {
                             || (gr.channel.key_mode == 2 && explicit(&gr.channel.midi_source))
                             // Its strips are mixed where it plays.
                             || sound_has_strip(project, g, s)
+                            // A sound bus waits for the channels that feed it.
+                            || is_sound_bus(project, g, s)
                     })
                     .collect()
             })
@@ -2694,7 +2804,8 @@ impl Engine {
                     .map(|s| {
                         let has = sounds.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || instruments.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
-                            || in_routes.iter().any(|r| (r.0, r.1) == (g, s));
+                            || in_routes.iter().any(|r| (r.0, r.1) == (g, s))
+                            || is_sound_bus(project, g, s);
                         let smp_gain = if has_fx(g, s) {
                             (1.0, 1.0)
                         } else if muting(project, g, s).hushed {
@@ -2768,6 +2879,18 @@ impl Engine {
             );
             FxChain { heard: Some(cache.heard.clone()), ..bare_chain(units, sr_f) }
         });
+        let (sound_aux, group_aux) = aux::build(project, &faders);
+        let sound_routes: Vec<Vec<Option<usize>>> =
+            project.groups.iter().enumerate().map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect()).collect();
+        let sound_buses: Vec<Vec<bool>> = project
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, grp)| (0..grp.sounds.len()).map(|s| is_sound_bus(project, g, s)).collect())
+            .collect();
+        let strips: Vec<(Owner, usize, Channels, StripRoute)> =
+            project.extra_outs.iter().map(|x| (x.owner, x.bus, x.channels, strip_route(project, x))).collect();
+        let order = aux::order(&buses, &group_aux, &sound_buses, &sound_routes, &sound_aux, &strips);
         let engine = Engine {
             sr: sr_f,
             tempo: project.tempo,
@@ -2818,12 +2941,7 @@ impl Engine {
                 deckard_model::AudioDest::Ext(n) if (0..OUTPUTS as i64).contains(&n) => Some(n as usize),
                 _ => None,
             },
-            routes: project
-                .groups
-                .iter()
-                .enumerate()
-                .map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect())
-                .collect(),
+            routes: sound_routes,
             cue: CueBus::of(project),
             faders,
             sound_faders,
@@ -2853,8 +2971,10 @@ impl Engine {
             tap_block: Vec::new(),
             fx,
             modulating: false,
-            bus_order: bus_order(&buses),
+            bus_order: order,
             buses,
+            sound_aux,
+            group_aux,
             master_fx,
             sc_bufs: vec![Vec::new(); sc_index.len()],
             midi_routes: midi::out_routes(project),
@@ -2885,7 +3005,7 @@ impl Engine {
             heard_board: cache.heard.clone(),
             heard: [Heard { owner: Owner::Master(0), bus: 0 }; HEARD_ROOM],
             heard_len: 0,
-            strips: project.extra_outs.iter().map(|x| (x.owner, x.bus, x.channels, strip_route(project, x))).collect(),
+            strips,
             meters_extra: vec![(0.0, 0.0); project.extra_outs.len()],
             connected: u16::MAX,
             in_routes,
@@ -3009,10 +3129,21 @@ impl Engine {
             if let (Some(new), Some(Some(old))) = (new.as_mut(), self.buses.get_mut(g)) {
                 new.chain.adopt(&mut old.chain);
                 new.ramp = old.ramp;
+                if new.route.1 == (0.0, 0.0) && (old.ramp.left > 0 || old.ramp.now != (0.0, 0.0)) {
+                    new.route.0 = old.route.0;
+                }
             }
         }
         std::mem::swap(&mut self.buses, &mut fresh.buses);
         std::mem::swap(&mut self.bus_order, &mut fresh.bus_order);
+        for (old, new) in self.sound_aux.iter_mut().flatten().zip(fresh.sound_aux.iter_mut().flatten()) {
+            aux::adopt(old, new);
+        }
+        for (old, new) in self.group_aux.iter_mut().zip(&mut fresh.group_aux) {
+            aux::adopt(old, new);
+        }
+        std::mem::swap(&mut self.sound_aux, &mut fresh.sound_aux);
+        std::mem::swap(&mut self.group_aux, &mut fresh.group_aux);
         if let (Some(new), Some(old)) = (fresh.master_fx.as_mut(), self.master_fx.as_mut()) {
             new.adopt(old);
         }
@@ -3028,8 +3159,8 @@ impl Engine {
         std::mem::swap(&mut self.silent, &mut fresh.silent);
         std::mem::swap(&mut self.pads, &mut fresh.pads);
         // Gains glide on from where they are.
-        for (row, old_row) in fresh.bufs.iter_mut().zip(&self.bufs) {
-            for (b, ob) in row.iter_mut().zip(old_row) {
+        for (row, old) in fresh.bufs.iter_mut().zip(&self.bufs) {
+            for (b, ob) in row.iter_mut().zip(old) {
                 if let (Some(b), Some(ob)) = (b.as_deref_mut(), ob.as_deref()) {
                     b.ramps = ob.ramps;
                 }
@@ -3060,6 +3191,32 @@ impl Engine {
         std::mem::swap(&mut self.faders, &mut fresh.faders);
         std::mem::swap(&mut self.sound_faders, &mut fresh.sound_faders);
         std::mem::swap(&mut self.bus_faders, &mut fresh.bus_faders);
+        let fading_buses: Vec<usize> = self
+            .routes
+            .iter()
+            .flatten()
+            .copied()
+            .chain(self.buses.iter().flatten().map(|b| b.route.0))
+            .chain(self.sound_aux.iter().flatten().flatten().map(|s| s.route.0))
+            .chain(self.group_aux.iter().flatten().map(|s| s.route.0))
+            .flatten()
+            .filter(|&n| n >= SOUND_BUS)
+            .collect();
+        for n in fading_buses {
+            if let Some((g, s)) = decode_sound_bus(n) {
+                if self.bufs.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_none)
+                    && let Some(old_b) = fresh.bufs.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take)
+                {
+                    self.bufs[g][s] = Some(old_b);
+                }
+                if self.bufs.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some) && !self.bus_order.contains(&n) {
+                    self.bus_order.push(n);
+                    if let Some(h) = self.live_hint.get_mut(g).and_then(|r| r.get_mut(s)) {
+                        *h = true;
+                    }
+                }
+            }
+        }
         self.stale = false;
         if fresh.keep_timeline {
             // The same timelines: this one's play on.
@@ -4618,7 +4775,11 @@ impl Engine {
     /// take it (they play it in [`Engine::render_pass`]).
     fn take_input(&mut self, frames: usize) {
         for b in self.bufs.iter_mut().flatten().flatten() {
-            b.inp_on = false;
+            if b.inp_on {
+                let end = (frames * 2).min(b.inp.len());
+                b.inp[..end].fill(0.0);
+                b.inp_on = false;
+            }
         }
         let Some(live) = &self.live_in else { return };
         let Ok(mut q) = live.try_lock() else { return };
@@ -4628,8 +4789,10 @@ impl Engine {
         }
         for &(g, s, ..) in &self.in_routes {
             if let Some(b) = self.bufs.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut) {
-                b.inp.clear();
-                b.inp.resize(frames * 2, 0.0);
+                if b.inp.len() < frames * 2 {
+                    b.inp.resize(frames * 2, 0.0);
+                }
+                b.inp[..frames * 2].fill(0.0);
                 b.inp_on = true;
             }
         }
@@ -5015,7 +5178,8 @@ impl Engine {
                     match lane.field.as_str() {
                         "level" => level = (f.level + dev).clamp(0.0, 1.0),
                         // Its knob travels over −1..1.
-                        _ => pan = (f.pan + dev * 2.0).clamp(-1.0, 1.0),
+                        "pan" => pan = (f.pan + dev * 2.0).clamp(-1.0, 1.0),
+                        _ => (),
                     }
                 }
             }
@@ -5035,9 +5199,9 @@ impl Engine {
         }
     }
 
-    /// The groups' buses (what their sounds sent them over `out`'s frames): each
-    /// through its effects, then its fader onto where it goes; then the master's
-    /// effects over `out`.
+    /// The groups' and bus sounds' buses (what their senders sent them over `out`'s
+    /// frames): each through its effects, then its fader and sends onto where it goes;
+    /// then the master's effects over `out`.
     fn run_buses(&mut self, out: &mut [f32], ext: &mut [Vec<f32>], at: usize) {
         let frames = out.len() / 2;
         let glide = (GAIN_GLIDE_SECONDS * self.sr).round() as u32;
@@ -5045,7 +5209,12 @@ impl Engine {
         let spt = self.samples_per_tick();
         let pos = |done: usize| Transport { quarters: base.quarters + done as f64 / spt / PPQ as f64, ..base };
         for k in 0..self.bus_order.len() {
-            let g = self.bus_order[k];
+            let id = self.bus_order[k];
+            if let Some((g, s)) = decode_sound_bus(id) {
+                self.run_sound_bus(g, s, frames, at, glide, &base, spt, out, ext);
+                continue;
+            }
+            let g = id;
             let Some(mut bus) = self.buses.get_mut(g).and_then(Option::take) else { continue };
             for u in &mut bus.chain.units {
                 clear_strips(&mut u.extras, frames * 2);
@@ -5053,16 +5222,23 @@ impl Engine {
             run_chain(&mut bus.chain, &mut bus.buf[..frames * 2], frames, pos, &self.sc_bufs);
             // Its plug-ins' strips.
             for x in bus.chain.units.iter_mut().flat_map(|u| &mut u.extras) {
-                mix_strip(x, frames, glide, self.connected, out, ext, at, &mut self.buses, &mut self.meters_extra);
+                mix_strip(
+                    x,
+                    frames,
+                    glide,
+                    self.connected,
+                    out,
+                    ext,
+                    at,
+                    self.inp_at,
+                    &mut self.buses,
+                    &mut self.bufs,
+                    &mut self.meters_extra,
+                );
             }
             let fader = self.bus_faders.get(g).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
             bus.ramp.aim(mul(bus.route.1, fader), glide);
-            let dst: Option<&mut [f32]> = match bus.route.0 {
-                None => Some(&mut *out),
-                Some(n) if n >= GROUP_BUS => self.buses.get_mut(n - GROUP_BUS).and_then(Option::as_mut).map(|b| &mut b.buf[..frames * 2]),
-                Some(n) => ext.get_mut(n).and_then(|b| b.get_mut(at..at + frames * 2)),
-            };
-            if let Some(dst) = dst {
+            if let Some(dst) = route_dst(bus.route.0, frames, at, self.inp_at, out, ext, &mut self.buses, &mut self.bufs) {
                 let cued = self.cue.groups.get(g).copied().unwrap_or(false);
                 for f in 0..frames {
                     let gain = bus.ramp.next();
@@ -5076,6 +5252,24 @@ impl Engine {
                     }
                 }
             }
+            if let Some(sends) = self.group_aux.get_mut(g) {
+                aux::mix(
+                    sends,
+                    0,
+                    &bus.buf[..frames * 2],
+                    out,
+                    ext,
+                    &mut self.buses,
+                    &mut self.bufs,
+                    at,
+                    self.inp_at,
+                    &self.faders,
+                    &self.timeline.faders,
+                    self.frame as f64 / spt,
+                    self.sequencing,
+                    glide,
+                );
+            }
             bus.buf[..frames * 2].fill(0.0);
             self.buses[g] = Some(bus);
         }
@@ -5087,9 +5281,62 @@ impl Engine {
             // Its plug-ins' strips (one onto a group's bus plays there next span: the
             // buses have run).
             for x in chain.units.iter_mut().flat_map(|u| &mut u.extras) {
-                mix_strip(x, frames, glide, self.connected, out, ext, at, &mut self.buses, &mut self.meters_extra);
+                mix_strip(
+                    x,
+                    frames,
+                    glide,
+                    self.connected,
+                    out,
+                    ext,
+                    at,
+                    self.inp_at,
+                    &mut self.buses,
+                    &mut self.bufs,
+                    &mut self.meters_extra,
+                );
             }
             self.master_fx = Some(chain);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_sound_bus(
+        &mut self,
+        g: usize,
+        s: usize,
+        frames: usize,
+        at: usize,
+        glide: u32,
+        base: &Transport,
+        spt: f64,
+        out: &mut [f32],
+        ext: &mut [Vec<f32>],
+    ) {
+        if self.meters.len() != self.sounds.len() {
+            self.meters = self.sounds.iter().map(|g| vec![(0.0, 0.0); g.len()]).collect();
+        }
+        let Some(mut b) = self.bufs.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take) else { return };
+        let smp = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut);
+        let inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut);
+        let chain = self.fx.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut);
+        if smp.is_none() && inst.is_none() && !b.inp_on && chain.is_none() {
+            self.bufs[g][s] = Some(b);
+            return;
+        }
+        if smp.is_none() && inst.is_none() && chain.is_some() {
+            b.inp_on = true;
+        }
+        render_sound(smp, inst, chain, &mut b, (frames, self.inp_at), self.frame, base, spt, &self.sc_bufs);
+        b.inp[self.inp_at * 2..(self.inp_at + frames) * 2].fill(0.0);
+        b.inp_on = self.in_routes.iter().any(|r| (r.0, r.1) == (g, s));
+        self.bufs[g][s] = Some(b);
+        let mut loud = false;
+        for kind in [0u8, 1] {
+            loud |= self.mix_sound_output(g, s, kind, frames, at, glide, true, out, ext);
+        }
+        self.mix_sound_strips(g, s, frames, at, glide, out, ext);
+        if loud {
+            self.quiet = 0;
         }
     }
 
@@ -5476,6 +5723,9 @@ impl Engine {
         self.job_ptrs.clear();
         for g in 0..self.bufs.len() {
             for s in 0..self.bufs[g].len() {
+                if self.bus_order.contains(&sound_bus_id(g, s)) {
+                    continue;
+                }
                 // Rendered ahead: mixed with the others (they never listen to a
                 // side-chain, so in pass 0).
                 if self.link_ahead(g, s).is_some() {
@@ -5540,9 +5790,9 @@ impl Engine {
             }
         }
         // Mixing, in order: Sampler sounds, retired voices, then plug-in instruments.
-        let tap_on = |g: usize, s: usize| taps(self.tap.as_ref(), g, s);
         let glide = (GAIN_GLIDE_SECONDS * self.sr).round() as u32;
         let mut loud = false;
+        let jobs = std::mem::take(&mut self.job_list);
         for kind in [0u8, 1] {
             if kind == 1 && pass == 0 {
                 for smp in &mut self.retired {
@@ -5550,89 +5800,130 @@ impl Engine {
                 }
                 self.retired.retain(|s| s.voices() > 0);
             }
-            for &(g, s) in &self.job_list {
-                let Some(b) = self.bufs[g][s].as_deref_mut() else { continue };
-                let SoundBufs { smp, inst, smp_out, inst_out, smp_gain, ramps, .. } = b;
-                let (rendered, src, ramp) = if kind == 0 { (*smp_out, &*smp, &mut ramps[0]) } else { (*inst_out, &*inst, &mut ramps[1]) };
-                if !rendered {
-                    continue;
-                }
-                let chain = self.fx.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref);
-                let link = self.ahead.as_ref().and_then(|a| a.links.get(g)?.get(s)?.as_ref()).filter(|l| l.state != LinkState::Live);
-                let gain = match (link, chain, kind) {
-                    (Some(l), ..) => l.gains[kind as usize],
-                    (None, Some(c), _) => c.gain,
-                    (None, None, 0) => *smp_gain,
-                    (None, None, _) => self.instruments[g][s].as_ref().map_or((0.0, 0.0), |i| i.gain),
-                };
-                let checked = chain.is_some() || link.is_some_and(|l| l.finite);
-                let fader = self.sound_faders.get(g).and_then(|r| r.get(s)).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
-                ramp.aim(mul(gain, fader), glide);
-                let cued = self.cue.sounds.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
-                if !chained && let Some(c) = chain {
-                    c.record_from(&src[..frames * 2], &mut self.sc_bufs);
-                }
-                let tapped = tap_on(g, s);
-                let mut peak = (0f32, 0f32);
-                // Onto the master's output, or another (none: dropped).
-                let bus = self.routes.get(g).and_then(|r| r.get(s)).copied().flatten();
-                let dst: Option<&mut [f32]> = match bus {
-                    None => Some(&mut *out),
-                    Some(n) if n >= GROUP_BUS => {
-                        self.buses.get_mut(n - GROUP_BUS).and_then(Option::as_mut).map(|b| &mut b.buf[..frames * 2])
-                    }
-                    Some(n) => ext.get_mut(n).and_then(|b| b.get_mut(at..at + frames * 2)),
-                };
-                let Some(dst) = dst else { continue };
-                for f in 0..frames {
-                    let gain = ramp.next();
-                    let (mut a, mut z) = (src[f * 2] * gain.0, src[f * 2 + 1] * gain.1);
-                    if checked {
-                        (a, z) = (if a.is_finite() { a } else { 0.0 }, if z.is_finite() { z } else { 0.0 });
-                    }
-                    dst[f * 2] += a;
-                    dst[f * 2 + 1] += z;
-                    if cued {
-                        self.cue.mix[f * 2] += a;
-                        self.cue.mix[f * 2 + 1] += z;
-                    }
-                    if tapped && let Some(t) = self.tap_block.get_mut(f * 2..f * 2 + 2) {
-                        t[0] += a;
-                        t[1] += z;
-                    }
-                    peak = (peak.0.max(a.abs()), peak.1.max(z.abs()));
-                }
-                if kind == 1 && peak.0.max(peak.1) > 1e-4 {
-                    loud = true;
-                }
-                if let Some(m) = self.meters.get_mut(g).and_then(|r| r.get_mut(s)) {
-                    m.0 = m.0.max(peak.0);
-                    m.1 = m.1.max(peak.1);
-                }
+            for &(g, s) in &jobs {
+                loud |= self.mix_sound_output(g, s, kind, frames, at, glide, !chained, out, ext);
             }
         }
         // Their plug-ins' strips, each onto where it goes (sounds with strips play here,
         // not ahead: see `live_hint`).
-        let connected = self.connected;
-        for i in 0..self.job_list.len() {
-            let (g, s) = self.job_list[i];
-            if self.link_ahead(g, s).is_some() {
-                continue;
-            }
-            let (buses, meters) = (&mut self.buses, &mut self.meters_extra);
-            let inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut).map(|i| &mut i.extras);
-            let chain = self.fx.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut).map(|c| &mut c.units);
-            let units = chain.into_iter().flatten().map(|u| &mut u.extras);
-            for x in inst.into_iter().chain(units).flatten() {
-                mix_strip(x, frames, glide, connected, out, ext, at, buses, meters);
-            }
+        for &(g, s) in &jobs {
+            self.mix_sound_strips(g, s, frames, at, glide, out, ext);
         }
+        self.job_list = jobs;
         // Counted once per span (pass 0); the listening sounds (pass 1) can only make it
         // loud.
         if loud {
             self.quiet = 0;
         } else if pass == 0 {
             self.quiet = self.quiet.saturating_add(frames as u64);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mix_sound_output(
+        &mut self,
+        g: usize,
+        s: usize,
+        kind: u8,
+        frames: usize,
+        at: usize,
+        glide: u32,
+        record_sc: bool,
+        out: &mut [f32],
+        ext: &mut [Vec<f32>],
+    ) -> bool {
+        let Some(mut b) = self.bufs.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take) else { return false };
+        let rendered = if kind == 0 { b.smp_out } else { b.inst_out };
+        if !rendered {
+            self.bufs[g][s] = Some(b);
+            return false;
+        }
+        let src = if kind == 0 { &b.smp[..frames * 2] } else { &b.inst[..frames * 2] };
+        let chain = self.fx.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref);
+        let link = self.ahead.as_ref().and_then(|a| a.links.get(g)?.get(s)?.as_ref()).filter(|l| l.state != LinkState::Live);
+        let gain = match (link, chain, kind) {
+            (Some(l), ..) => l.gains[kind as usize],
+            (None, Some(c), _) => c.gain,
+            (None, None, 0) => b.smp_gain,
+            (None, None, _) => self.instruments[g][s].as_ref().map_or((0.0, 0.0), |i| i.gain),
+        };
+        let checked = chain.is_some() || link.is_some_and(|l| l.finite);
+        let fader = self.sound_faders.get(g).and_then(|r| r.get(s)).map_or((1.0, 1.0), |path| path_gain(&self.faders, path));
+        let cued = self.cue.sounds.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
+        if record_sc && let Some(c) = chain {
+            c.record_from(src, &mut self.sc_bufs);
+        }
+        let tapped = taps(self.tap.as_ref(), g, s);
+        let spt = self.samples_per_tick();
+        if let Some(sends) = self.sound_aux.get_mut(g).and_then(|row| row.get_mut(s)) {
+            aux::mix(
+                sends,
+                kind as usize,
+                src,
+                out,
+                ext,
+                &mut self.buses,
+                &mut self.bufs,
+                at,
+                self.inp_at,
+                &self.faders,
+                &self.timeline.faders,
+                self.frame as f64 / spt,
+                self.sequencing,
+                glide,
+            );
+        }
+        let ramp = &mut b.ramps[kind as usize];
+        ramp.aim(mul(gain, fader), glide);
+        // Onto the master's output, or another (none: dropped).
+        let bus = self.routes.get(g).and_then(|r| r.get(s)).copied().flatten();
+        let mut loud = false;
+        if let Some(dst) = route_dst(bus, frames, at, self.inp_at, out, ext, &mut self.buses, &mut self.bufs) {
+            let src = if kind == 0 { &b.smp[..frames * 2] } else { &b.inst[..frames * 2] };
+            let ramp = &mut b.ramps[kind as usize];
+            let mut peak = (0f32, 0f32);
+            for f in 0..frames {
+                let gain = ramp.next();
+                let (mut a, mut z) = (src[f * 2] * gain.0, src[f * 2 + 1] * gain.1);
+                if checked {
+                    (a, z) = (if a.is_finite() { a } else { 0.0 }, if z.is_finite() { z } else { 0.0 });
+                }
+                dst[f * 2] += a;
+                dst[f * 2 + 1] += z;
+                if cued {
+                    self.cue.mix[f * 2] += a;
+                    self.cue.mix[f * 2 + 1] += z;
+                }
+                if tapped && let Some(t) = self.tap_block.get_mut(f * 2..f * 2 + 2) {
+                    t[0] += a;
+                    t[1] += z;
+                }
+                peak = (peak.0.max(a.abs()), peak.1.max(z.abs()));
+            }
+            if kind == 1 && peak.0.max(peak.1) > 1e-4 {
+                loud = true;
+            }
+            if let Some(m) = self.meters.get_mut(g).and_then(|r| r.get_mut(s)) {
+                m.0 = m.0.max(peak.0);
+                m.1 = m.1.max(peak.1);
+            }
+        }
+        self.bufs[g][s] = Some(b);
+        loud
+    }
+
+    fn mix_sound_strips(&mut self, g: usize, s: usize, frames: usize, at: usize, glide: u32, out: &mut [f32], ext: &mut [Vec<f32>]) {
+        if self.link_ahead(g, s).is_some() {
+            return;
+        }
+        let connected = self.connected;
+        let inp_at = self.inp_at;
+        let (buses, bufs, meters) = (&mut self.buses, &mut self.bufs, &mut self.meters_extra);
+        let inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut).map(|i| &mut i.extras);
+        let chain = self.fx.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut).map(|c| &mut c.units);
+        let units = chain.into_iter().flatten().map(|u| &mut u.extras);
+        for x in inst.into_iter().chain(units).flatten() {
+            mix_strip(x, frames, glide, connected, out, ext, at, inp_at, buses, bufs, meters);
         }
     }
 }
@@ -5867,7 +6158,7 @@ impl SoundBufs {
             inst_out: false,
             smp_gain,
             ramps: [GainRamp::default(); 2],
-            inp: Vec::new(),
+            inp: vec![0.0; JOB_FRAMES * 2],
             inp_on: false,
         }
     }
@@ -5957,7 +6248,7 @@ fn render_sound(
             clear_strips(&mut u.extras, n2);
         }
     }
-    if smp.is_some() || b.inp_on {
+    if smp.is_some() || (b.inp_on && inst.is_none()) {
         let buf = &mut b.smp[..n2];
         buf.fill(0.0);
         let mut sounding = false;
@@ -5969,7 +6260,7 @@ fn render_sound(
                 sounding = true;
             }
         }
-        // The interface input it takes, with it.
+        // The interface or bus input it takes, with it.
         if b.inp_on {
             for (o, i) in buf.iter_mut().zip(&b.inp[inp_at * 2..]) {
                 *o += *i;
@@ -6020,6 +6311,12 @@ fn render_sound(
                     c.r[..m].copy_from_slice(&r[..m]);
                     c.l[m..n].fill(0.0);
                     c.r[m..n].fill(0.0);
+                    if b.inp_on {
+                        for f in 0..n {
+                            c.l[f] += b.inp[(inp_at + done + f) * 2];
+                            c.r[f] += b.inp[(inp_at + done + f) * 2 + 1];
+                        }
+                    }
                     take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
                     if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
                         hear(&p, owner, inst.scan, n, board);
@@ -6035,6 +6332,12 @@ fn render_sound(
                     for f in 0..m {
                         buf[(done + f) * 2] = l[f];
                         buf[(done + f) * 2 + 1] = r[f];
+                    }
+                    if b.inp_on {
+                        for f in 0..n {
+                            buf[(done + f) * 2] += b.inp[(inp_at + done + f) * 2];
+                            buf[(done + f) * 2 + 1] += b.inp[(inp_at + done + f) * 2 + 1];
+                        }
                     }
                     take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
                     if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
@@ -11757,6 +12060,406 @@ mod tests {
         assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
         let (l, r) = pan_gains(-1.0);
         assert!(r.abs() < 1e-6 && l > 1.0);
+    }
+
+    #[test]
+    fn remaining_aux_sound_pre_and_post_fader_reach_the_selected_output() {
+        for pre in [false, true] {
+            let mut p = fader_project();
+            let s = &mut p.groups[0].sounds[0];
+            s.channel.dest = deckard_model::AudioDest::None;
+            s.channel.aux_dest[0] = deckard_model::AudioDest::Master;
+            s.channel.aux_pre[0] = pre;
+            s.aux[0] = 0.75;
+            s.level = 0.5;
+            let mut e = fader_engine(&p);
+            let got = steady(&mut e, 100).0;
+            let want = 0.5 * if pre { 1.0 } else { deckard_model::level_gain(0.5) as f32 };
+            assert!(near(got, want), "pre={pre}: {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn remaining_aux_group_send_works_without_a_group_effect() {
+        let mut p = fader_project();
+        let g = &mut p.groups[0];
+        g.channel.dest = deckard_model::AudioDest::None;
+        g.channel.aux_dest[1] = deckard_model::AudioDest::Master;
+        g.aux[1] = 0.75;
+        let mut e = fader_engine(&p);
+        assert!(e.buses[0].is_some());
+        assert!(near(steady(&mut e, 100).0, 0.5));
+    }
+
+    #[test]
+    fn remaining_aux_automation_plays_and_stopped_returns_to_base() {
+        let mut p = fader_project();
+        let s = &mut p.groups[0].sounds[0];
+        s.channel.dest = deckard_model::AudioDest::None;
+        s.channel.aux_dest[0] = deckard_model::AudioDest::Master;
+        s.aux[0] = 0.75;
+        s.modulators = vec![fader_lane("aux1_level")];
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(0), "aux1_level", 0, -0.25)];
+        let mut e = fader_engine(&p);
+        assert!(near(steady(&mut e, 100).0, 0.5 * deckard_model::level_gain(0.5) as f32));
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.5));
+    }
+
+    #[test]
+    fn remaining_aux_cued_sound_does_not_leak_to_the_room() {
+        let mut p = fader_project();
+        let s = &mut p.groups[0].sounds[0];
+        s.cue = true;
+        s.channel.aux_dest[0] = deckard_model::AudioDest::Master;
+        s.aux[0] = 0.75;
+        p.cue_output = deckard_model::AudioDest::Ext(1);
+        let mut e = fader_engine(&p);
+        assert!(near(steady(&mut e, 100).0, 0.0));
+    }
+
+    #[test]
+    fn remaining_aux_return_buses_run_after_their_senders() {
+        let mut p = fader_project();
+        let mut ret = p.groups[0].clone();
+        ret.sounds.clear();
+        ret.channel.dest = deckard_model::AudioDest::None;
+        ret.channel.aux_dest[0] = deckard_model::AudioDest::Master;
+        ret.aux[0] = 0.75;
+        p.groups.push(ret);
+        p.groups[0].channel.dest = deckard_model::AudioDest::None;
+        p.groups[0].channel.aux_dest[0] = deckard_model::AudioDest::Group(1);
+        p.groups[0].aux[0] = 0.75;
+        let mut e = fader_engine(&p);
+        assert_eq!(e.bus_order, vec![0, 1]);
+        assert!(near(steady(&mut e, 100).0, 0.5));
+        p.groups[1].channel.aux_dest[0] = deckard_model::AudioDest::Group(0);
+        let mut e = fader_engine(&p);
+        assert!(e.group_aux.iter().all(|s| s.is_empty()));
+        assert!(near(steady(&mut e, 100).0, 0.0));
+    }
+
+    #[test]
+    fn remaining_aux_group_cycles_are_silent_and_do_not_feed_back() {
+        let mut p = fader_project();
+        p.groups[0].channel.aux_dest[0] = deckard_model::AudioDest::Group(0);
+        p.groups[0].aux[0] = 1.0;
+        let e = fader_engine(&p);
+        assert!(e.group_aux[0].is_empty());
+    }
+
+    struct HalfGainEffect;
+    impl fx::Effect for HalfGainEffect {
+        fn set(&mut self, _: &[(String, f64)]) {}
+        fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+            for s in l.iter_mut() {
+                *s *= 0.5;
+            }
+            for s in r.iter_mut() {
+                *s *= 0.5;
+            }
+        }
+    }
+
+    fn push_half_gain(chain: &mut FxChain) {
+        chain.units.push(Unit::new(
+            FxUnit::Internal {
+                class: "HalfGain".into(),
+                params: Vec::new(),
+                fx: Box::new(HalfGainEffect),
+                glide: glide::Glide::new(&[], 1000.0),
+                modded: Vec::new(),
+                hit: false,
+                modulated: false,
+            },
+            chain.units.len(),
+            Vec::new(),
+            true,
+        ));
+    }
+
+    fn passive_fx_slot() -> deckard_model::SlotInfo {
+        deckard_model::SlotInfo { module: "Compressor".into(), name: "Compressor".into(), active: false, plugin: None, params: Vec::new() }
+    }
+
+    fn bus_sound_with_fx() -> deckard_model::Sound {
+        deckard_model::Sound {
+            level: 0.75,
+            slots: vec![passive_fx_slot()],
+            channel: deckard_model::SoundChannel { dest: deckard_model::AudioDest::Master, ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn aux_review_dry_plus_both_aux_sends_to_group_sound_bus_and_ext_outputs() {
+        let mut p = fader_project();
+        p.groups[0].sounds.push(bus_sound_with_fx());
+
+        let mut ret_grp = deckard_model::Group { level: 0.75, slots: vec![passive_fx_slot()], ..Default::default() };
+        ret_grp.channel.dest = deckard_model::AudioDest::Ext(1);
+        p.groups.push(ret_grp);
+
+        let src = &mut p.groups[0].sounds[0];
+        src.level = 0.5;
+        src.channel.dest = deckard_model::AudioDest::Master;
+        src.channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 1);
+        src.channel.aux_pre[0] = false;
+        src.aux[0] = 0.75;
+        src.channel.aux_dest[1] = deckard_model::AudioDest::Group(1);
+        src.channel.aux_pre[1] = true;
+        src.aux[1] = 0.75;
+
+        let mut e = fader_engine(&p);
+        push_half_gain(e.fx[0][1].as_mut().unwrap());
+        push_half_gain(&mut e.buses[1].as_mut().unwrap().chain);
+        let (master, ext2) = steady_outs(&mut e, 120);
+        let fader = deckard_model::level_gain(0.5) as f32;
+        // Dry (0.5 * fader) + Aux 1 post-fader through Sound(0, 1) with HalfGainEffect (0.5 * fader * 0.5).
+        let want_master = 0.5 * fader + 0.5 * fader * 0.5;
+        // Aux 2 pre-fader through Group(1) with HalfGainEffect onto Ext(1) (0.5 * 0.5).
+        let want_ext2 = 0.5 * 0.5;
+        assert!(near(master, want_master), "master={master}, want={want_master}");
+        assert!(near(ext2, want_ext2), "ext2={ext2}, want={want_ext2}");
+    }
+
+    #[test]
+    fn aux_review_pre_and_post_source_level_and_pan_on_sound_and_group_sends() {
+        let lvl = deckard_model::level_from_db(-6.0);
+        let g_lvl = deckard_model::level_gain(lvl) as f32;
+        let pan = -0.5;
+        let (pl, pr) = pan_gains(pan);
+        for pre in [false, true] {
+            // Sound send with source level + pan
+            let mut p = fader_project();
+            let s = &mut p.groups[0].sounds[0];
+            s.level = lvl;
+            s.pan = pan;
+            s.channel.dest = deckard_model::AudioDest::None;
+            s.channel.aux_dest[1] = deckard_model::AudioDest::Master;
+            s.channel.aux_pre[1] = pre;
+            s.aux[1] = 0.75;
+            let mut e = fader_engine(&p);
+            let (l, r) = steady(&mut e, 100);
+            let (wl, wr) = if pre { (0.5, 0.5) } else { (0.5 * g_lvl * pl, 0.5 * g_lvl * pr) };
+            assert!(near(l, wl) && near(r, wr), "sound pre={pre}: got ({l}, {r}), want ({wl}, {wr})");
+
+            // Group send with group level + pan
+            let mut p = fader_project();
+            let g = &mut p.groups[0];
+            g.level = lvl;
+            g.pan = pan;
+            g.channel.dest = deckard_model::AudioDest::None;
+            g.channel.aux_dest[0] = deckard_model::AudioDest::Master;
+            g.channel.aux_pre[0] = pre;
+            g.aux[0] = 0.75;
+            let mut e = fader_engine(&p);
+            let (l, r) = steady(&mut e, 100);
+            assert!(near(l, wl) && near(r, wr), "group pre={pre}: got ({l}, {r}), want ({wl}, {wr})");
+        }
+    }
+
+    #[test]
+    fn aux_review_bus_sound_processes_incoming_main_and_aux_audio_and_onward_sends() {
+        // Put the Bus Sound at (0, 0) and the sender at (0, 1) so index order is reversed:
+        // topological bus_order must run sender (0, 1) in render_pass and Bus Sound (0, 0) in run_buses.
+        let mut p = fader_project();
+        let mut sender = p.groups[0].sounds[0].clone();
+        sender.channel.dest = deckard_model::AudioDest::None;
+        sender.channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 0);
+        sender.aux[0] = 0.75;
+
+        let mut bus_snd = bus_sound_with_fx();
+        bus_snd.channel.aux_dest[1] = deckard_model::AudioDest::Ext(1);
+        bus_snd.aux[1] = 0.75;
+        p.groups[0].sounds = vec![bus_snd, sender];
+
+        let mut e = fader_engine(&p);
+        assert_eq!(e.bus_order, vec![sound_bus_id(0, 0)]);
+        push_half_gain(e.fx[0][0].as_mut().unwrap());
+        let (master, ext2) = steady_outs(&mut e, 120);
+        assert!(near(master, 0.25), "master={master}");
+        assert!(near(ext2, 0.25), "onward send ext2={ext2}");
+        let meters = e.take_meters();
+        assert!(near(meters[0][0].0, 0.25), "bus sound meter={:?}", meters[0][0]);
+
+        // Group main output + Group Aux send feeding a Bus Sound in Group 1
+        let mut p = fader_project();
+        p.groups[0].slots = vec![passive_fx_slot()];
+        p.groups[0].channel.dest = deckard_model::AudioDest::Sound(1, 0);
+        p.groups[0].channel.aux_dest[0] = deckard_model::AudioDest::Sound(1, 0);
+        p.groups[0].aux[0] = 0.75;
+
+        let g1 = deckard_model::Group { level: 0.75, sounds: vec![bus_sound_with_fx()], ..Default::default() };
+        p.groups.push(g1);
+
+        let mut e = fader_engine(&p);
+        assert_eq!(e.bus_order, vec![0, sound_bus_id(1, 0)]);
+        push_half_gain(e.fx[1][0].as_mut().unwrap());
+        let (master, _) = steady(&mut e, 120);
+        // Group 0 sends 0.5 via main + 0.5 via Aux 1 = 1.0 into Sound(1, 0), halved by HalfGainEffect -> 0.5.
+        assert!(near(master, 0.5), "group->sound bus master={master}");
+
+        // Active native Maschine Compressor on Bus Sound attenuates incoming Aux audio
+        let mut p_native = fader_project();
+        let mut comp_bus = bus_sound_with_fx();
+        comp_bus.slots = vec![deckard_model::SlotInfo {
+            module: "Compressor".into(),
+            name: "Compressor".into(),
+            active: true,
+            plugin: None,
+            params: [("mode", 0.0), ("threshold", 0.0), ("amount", 0.0), ("knee", 0.5), ("attack", 0.2), ("release", 0.3), ("gain", 0.5)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+        }];
+        p_native.groups[0].sounds.push(comp_bus);
+        p_native.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::None;
+        p_native.groups[0].sounds[0].channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 1);
+        p_native.groups[0].sounds[0].aux[0] = 0.75;
+        let mut e_native = fader_engine(&p_native);
+        let (native_out, _) = steady(&mut e_native, 120);
+        // Compressor with amount=0.0, gain=0.5 (-18 dB = 10^(-18/20) ≈ 0.12589) scales 0.5 input to ~0.06295.
+        assert!((native_out - 0.5 * 0.12589254).abs() < 1e-3, "native compressor on bus sound: got {native_out}");
+    }
+
+    #[test]
+    fn aux_review_mute_solo_and_cue_semantics_across_bus_sounds_and_aux_sends() {
+        let mut p = fader_project();
+        p.groups[0].sounds.push(bus_sound_with_fx());
+        p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::None;
+        p.groups[0].sounds[0].channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 1);
+        p.groups[0].sounds[0].aux[0] = 0.75;
+
+        // 1. Trigger mute (audio_mute = false) on Bus Sound still passes incoming audio.
+        let mut trig_muted = p.clone();
+        trig_muted.groups[0].sounds[1].muted = true;
+        trig_muted.groups[0].sounds[1].channel.audio_mute = false;
+        let mut e = fader_engine(&trig_muted);
+        push_half_gain(e.fx[0][1].as_mut().unwrap());
+        assert!(near(steady(&mut e, 100).0, 0.25));
+
+        // 2. Audio Mute (audio_mute = true) on Bus Sound silences it.
+        let mut audio_muted = trig_muted.clone();
+        audio_muted.groups[0].sounds[1].channel.audio_mute = true;
+        let mut e = fader_engine(&audio_muted);
+        assert!(near(steady(&mut e, 100).0, 0.0));
+
+        // 3. Soloing sender (0, 0) via retain_sounds keeps Bus Sound (0, 1)'s FX return alive.
+        let mut e = fader_engine(&p);
+        push_half_gain(e.fx[0][1].as_mut().unwrap());
+        e.retain_sounds(|g, s| (g, s) == (0, 0));
+        assert!(near(steady(&mut e, 100).0, 0.25));
+
+        // 4. Cue on Bus Sound routes post-FX signal to cue output (Ext 2) without leaking to Master.
+        let mut cued = p.clone();
+        cued.cue_output = deckard_model::AudioDest::Ext(1);
+        cued.groups[0].sounds[1].cue = true;
+        let mut e = fader_engine(&cued);
+        e.sequencing = false;
+        push_half_gain(e.fx[0][1].as_mut().unwrap());
+        let (master, cue_out) = steady_outs(&mut e, 120);
+        assert!(near(master, 0.0), "cued bus sound leaked to master: {master}");
+        assert!(near(cue_out, 0.25), "cued bus sound on cue out: {cue_out}");
+        assert!(near(e.cue.peak.0, 0.25), "cue peak: {:?}", e.cue.peak);
+    }
+
+    #[test]
+    fn aux_review_feedback_cycles_across_sounds_and_groups_are_broken_without_runaway() {
+        // Sound(0, 0) -> Aux 1 -> Sound(0, 1) -> Aux 1 -> Sound(0, 0)
+        let mut p = fader_project();
+        let mut s1 = bus_sound_with_fx();
+        s1.channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 0);
+        s1.aux[0] = 1.0;
+        p.groups[0].sounds.push(s1);
+        p.groups[0].sounds[0].slots = vec![passive_fx_slot()];
+        p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::None;
+        p.groups[0].sounds[0].channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 1);
+        p.groups[0].sounds[0].aux[0] = 0.75;
+
+        let mut e = fader_engine(&p);
+        let (l, r) = steady(&mut e, 200);
+        assert!(l.is_finite() && r.is_finite() && l <= 0.5 + 1e-4, "cycle output=({l}, {r})");
+
+        // Self-routing on Sound main dest and Aux dest is silenced
+        let mut self_p = fader_project();
+        self_p.groups[0].sounds[0].slots = vec![passive_fx_slot()];
+        self_p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::Sound(0, 0);
+        self_p.groups[0].sounds[0].channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 0);
+        self_p.groups[0].sounds[0].aux[0] = 1.0;
+        let mut e = fader_engine(&self_p);
+        assert!(e.sound_aux[0][0].is_empty());
+        assert!(near(steady(&mut e, 100).0, 0.0));
+    }
+
+    #[test]
+    fn aux_review_live_adopt_glides_send_and_bus_edits_without_clicks_or_lost_fx_state() {
+        let mut p0 = fader_project();
+        p0.groups[0].sounds.push(bus_sound_with_fx());
+        p0.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::None;
+
+        let mut cache = SampleCache::default();
+        let (mut e, rep0) = Engine::new(&p0, None, 1000, Mode::Arrangement, &mut cache);
+        e.live_in = Some(Default::default());
+        e.looping = true;
+        push_half_gain(e.fx[0][1].as_mut().unwrap());
+        assert!(near(steady(&mut e, 80).0, 0.0));
+
+        // 1. Live-assign Aux 1 -> Sound(0, 1): must ramp smoothly from 0 to 0.25 (with HalfGainEffect preserved).
+        let mut p1 = p0.clone();
+        p1.groups[0].sounds[0].channel.aux_dest[0] = deckard_model::AudioDest::Sound(0, 1);
+        p1.groups[0].sounds[0].aux[0] = 0.75;
+        let (fresh, rep1) = Engine::new_after(&p1, Some((&p0, rep0.chains.as_slice())), None, 1000, Mode::Arrangement, &mut cache);
+        drop(e.adopt(fresh, &p1));
+
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 4));
+        let mut first_block = [0f32; 8];
+        e.process(&mut first_block);
+        // At sr=1000, 10ms glide is 10 frames: sample 0 must be small (< 0.05), not a step jump to 0.25.
+        assert!(first_block[0] > 0.0 && first_block[0] < 0.05, "step jump on send add: {:?}", first_block);
+        assert!(near(steady(&mut e, 80).0, 0.25), "fx state lost or wrong steady level after adopt");
+
+        // 2. Live-unassign Aux 1 -> None: must ramp smoothly down from 0.25 to 0.0 without a step drop to 0.
+        let (fresh2, _) = Engine::new_after(&p0, Some((&p1, rep1.chains.as_slice())), None, 1000, Mode::Arrangement, &mut cache);
+        drop(e.adopt(fresh2, &p0));
+        e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 4));
+        let mut fade_block = [0f32; 8];
+        e.process(&mut fade_block);
+        assert!(fade_block[0] > 0.15 && fade_block[0] < 0.25, "abrupt drop on send remove: {:?}", fade_block);
+        assert!(near(steady(&mut e, 80).0, 0.0), "did not settle to 0 after send remove");
+    }
+
+    #[test]
+    fn aux_review_bus_sound_automation_and_extra_output_strips() {
+        // 1. Automation on a Bus Sound's onward Aux 2 send
+        let mut p = fader_project();
+        let mut bus_snd = bus_sound_with_fx();
+        bus_snd.channel.dest = deckard_model::AudioDest::None;
+        bus_snd.channel.aux_dest[1] = deckard_model::AudioDest::Master;
+        bus_snd.aux[1] = 0.75;
+        bus_snd.modulators = vec![fader_lane("aux2_level")];
+        p.groups[0].sounds.push(bus_snd);
+        p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::Sound(0, 1);
+        p.groups[0].patterns[0].mods = vec![fader_point(Some(1), "aux2_level", 0, -0.25)];
+
+        let mut e = fader_engine(&p);
+        let modded = 0.5 * deckard_model::level_gain(0.5) as f32;
+        assert!(near(steady(&mut e, 100).0, modded));
+        e.sequencing = false;
+        assert!(near(steady(&mut e, 100).0, 0.5));
+
+        // 2. Extra-output strip on Sound(0, 0) routed into Bus Sound(0, 1)
+        let mut s = Strips::new(|p| {
+            p.groups[0].sounds.push(bus_sound_with_fx());
+            p.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::None;
+            p.extra_outs[0].dest = deckard_model::AudioDest::Sound(0, 1);
+        });
+        push_half_gain(s.e.fx[0][1].as_mut().unwrap());
+        // Input 0.5 -> Split bus 1 (x0.5 = 0.25) -> strip (level 1.0) -> Sound(0, 1) (HalfGainEffect x0.5 = 0.125).
+        let (master, _) = s.block(0.5);
+        assert!(near(master.0, 0.125) && near(master.1, 0.125), "strip->sound bus got={master:?}, want 0.125");
     }
 }
 
