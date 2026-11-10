@@ -3187,3 +3187,24 @@ fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     v.group = 2;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
+
+#[test]
+fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
+    let (mut surface, mut v) = (Surface::new(), view());
+    v.control.modules_visible = true;
+    v.control.chain = (0..3)
+        .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
+        .collect();
+    for (slot, direction, range) in [(0, "right", "1-2 / 3"), (2, "left", "2-3 / 3")] {
+        v.control.slot_index = Some(slot);
+        let picture = surface.draw_picture(&v);
+        assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
+        assert!(picture.ops.iter().any(|o| matches!(o,screen::DrawOp::Triangle{x,y:149,dir,..}if (*x==4||*x==469)&&dir==direction)));
+    }
+    for slot in &mut v.control.chain {
+        slot.instrument = false;
+        slot.name = "FX".into();
+    }
+    v.control.slot_index = Some(0);
+    assert!(!surface.draw_picture(&v).texts.iter().any(|s| s.ends_with(" / 3")));
+}
