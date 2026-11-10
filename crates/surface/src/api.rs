@@ -585,6 +585,18 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         )?;
     }
     indexed!("focus_sound", "a sound", Action::FocusSound);
+    {
+        let sh = shared.clone();
+        d.set(
+            "select_pad",
+            lua.create_function(move |_, (n, multi): (usize, bool)| {
+                act(&sh, Action::SelectPad { index: index(n, "a sound")?, multi });
+                Ok(())
+            })?,
+        )?;
+    }
+    request!("select_all_sounds", () => Action::SelectAllSounds);
+    request!("select_no_sounds", () => Action::SelectNoSounds);
     indexed!("mute_group", "a group", Action::MuteGroup);
     indexed!("solo_group", "a group", Action::SoloGroup);
     indexed!("mute_sound", "a sound", Action::MuteSound);
@@ -1249,6 +1261,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             st.set("base_key", s.base_key)?;
             st.set("default_color", s.default_color)?;
             st.set("prob_locked", s.prob_locked)?;
+            st.set("selected", s.selected)?;
             let touch = lua.create_table()?;
             touch.set("mode", s.touch_mode)?;
             touch.set("cc", s.touch_cc)?;

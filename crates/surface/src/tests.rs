@@ -187,7 +187,7 @@ fn select_mute_solo_erase_with_pads() {
     let (mut s, v) = (Surface::new(), view());
     let now = Instant::now();
     for (button, want) in [
-        ("BUTTON_SELECT", Action::FocusSound(4)),
+        ("BUTTON_SELECT", Action::SelectPad { index: 4, multi: false }),
         ("BUTTON_MUTE", Action::MuteSound(4)),
         ("BUTTON_SOLO", Action::SoloSound(4)),
         ("BUTTON_TRANSPORT_ERASE", Action::EraseSound(4)),
@@ -215,7 +215,7 @@ fn select_changes_sounds_without_playing_them() {
     let (mut s, v) = (Surface::new(), view());
     hold(&mut s, &v, "BUTTON_SELECT", true);
     assert!(!s.pads(&v).play);
-    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::FocusSound(4)));
+    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::SelectPad { index: 4, multi: false }));
     s.event(&Event::PadOff(5), &v, Instant::now());
     hold(&mut s, &v, "BUTTON_SELECT", false);
     assert!(s.pads(&v).play, "let go, they play");
@@ -224,7 +224,7 @@ fn select_changes_sounds_without_playing_them() {
     press(&mut s, &v, "BUTTON_SCREEN_1");
     hold(&mut s, &v, "BUTTON_SELECT", false);
     assert!(!s.pads(&v).play, "pinned");
-    assert!(s.event(&Event::PadOn(6, 0.5), &v, Instant::now()).contains(&Action::FocusSound(5)));
+    assert!(s.event(&Event::PadOn(6, 0.5), &v, Instant::now()).contains(&Action::SelectPad { index: 5, multi: false }));
     s.event(&Event::PadOff(6), &v, Instant::now());
     hold(&mut s, &v, "BUTTON_SELECT", true);
     press(&mut s, &v, "BUTTON_SCREEN_1");
@@ -261,10 +261,31 @@ fn select_picks_a_sound_in_keyboard_mode_too() {
     press(&mut s, &v, "BUTTON_KEYBOARD");
     hold(&mut s, &v, "BUTTON_SELECT", true);
     assert!(!s.pads(&v).play);
-    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::FocusSound(4)));
+    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::SelectPad { index: 4, multi: false }));
     s.event(&Event::PadOff(5), &v, Instant::now());
     hold(&mut s, &v, "BUTTON_SELECT", false);
     assert!(s.pads(&v).play, "the keys play again");
+}
+
+#[test]
+fn select_all_none_and_multi() {
+    let (mut s, v) = (Surface::new(), view());
+    hold(&mut s, &v, "BUTTON_SELECT", true);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SelectAllSounds]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SelectNoSounds]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "MULTI only changes later presses");
+    assert_eq!(
+        s.event(&Event::PadOn(3, 0.5), &v, Instant::now()),
+        [Action::SelectPad { index: 2, multi: true }],
+        "MULTI on: the pad joins"
+    );
+    s.event(&Event::PadOff(3), &v, Instant::now());
+    press(&mut s, &v, "BUTTON_SCREEN_8");
+    assert_eq!(
+        s.event(&Event::PadOn(4, 0.5), &v, Instant::now()),
+        [Action::SelectPad { index: 3, multi: false }],
+        "MULTI off: the pad replaces the selection"
+    );
 }
 
 #[test]

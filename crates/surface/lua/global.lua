@@ -292,13 +292,16 @@ function global.pad(n, velocity)
   local s = deckard.state()
   local group = s.groups[s.group]
   if not group or n > #group.sounds then return true end
-  if pin.active("MUTE") then
+  if pin.active("SELECT") then
+    -- MULTI (Button 8) adds the pad. Off, an unselected pad replaces the selection.
+    deckard.select_pad(n, require("pages.hold").multi == true)
+  elseif pin.active("MUTE") then
     deckard.mute_sound(n)
   elseif pin.active("SOLO") then
     deckard.solo_sound(n)
   elseif deckard.held("ERASE") then
     deckard.erase_sound(n)
-  elseif n ~= s.sound and (not pads.focus_pinned or pin.active("SELECT")) then
+  elseif n ~= s.sound and not pads.focus_pinned then
     deckard.focus_sound(n)
   end
   return true
@@ -573,15 +576,17 @@ function global.leds()
   for i = 1, 16 do
     local sound = sounds[i]
     local name = "PAD_" .. i
-    if not sound or (not sound.used and i ~= s.sound and not deckard.pad_held(i) and not sound.playing) then
+    local chosen = sound and (sound.selected or i == s.sound)
+    if not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
       deckard.led(name, "off")
     elseif muting then
       deckard.led(name, sound.palette, not sound.muted)
     elseif not sound.used then
-      -- The focused empty slot: Maschine lights it in its empty-slot colour.
+      -- A selected empty slot: Maschine lights it in its empty-slot colour.
       deckard.led(name, EMPTY_SLOT, true)
     else
-      deckard.led(name, sound.palette, deckard.pad_held(i) or i == s.sound or sound.playing)
+      -- Selected pads are fully lit, the others half lit.
+      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen or sound.playing)
     end
   end
 end
