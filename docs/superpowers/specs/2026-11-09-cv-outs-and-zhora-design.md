@@ -184,6 +184,11 @@ interface, the same as an external synth played over MIDI. (User's decision.)
 The modular's finished voice comes in on an input the user picks, and plays through
 Zhora's sound with the same level, effects, mute and recording as any sound.
 
+*(Added 2026-11-10, the user's call)*: Input lists mono channels, since the return is
+usually mono, by the names given in Audio Setup. It also offers **Sound's Input**, which
+listens on the sound's own audio input (a pair or a channel), the way an effect would hear
+it, and passes it through unchanged.
+
 **Mute** *(builder's call made in design)*: muting Zhora's sound or group behaves like any
 muted sound. Its notes don't play, so the gate stays low, and the return is silent. A gate
 that is high when the mute lands drops. The tuner, Tune, Check and Hold listen before the

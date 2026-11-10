@@ -3,9 +3,10 @@
 
 use deckard_doc::Chain;
 use deckard_engine::zhora_outs;
+use deckard_model::AudioSource;
 use deckard_model::Project;
-use deckard_plugins::native::{Readout, TuneState};
-use deckard_plugins::zhora::{CHECK, HOLD, HOLD_NOTE, LIVE, OUTS, SIGNAL_NAMES, TUNE, is_zhora};
+use deckard_plugins::native::{InputSource, Readout, TuneState};
+use deckard_plugins::zhora::{CHECK, HOLD, HOLD_NOTE, INPUT, LIVE, OUTS, SIGNAL_NAMES, TUNE, input_of, is_zhora};
 use deckard_surface::ZhoraView;
 
 use crate::App;
@@ -24,12 +25,50 @@ pub fn zhora_in(p: &Project) -> bool {
     p.groups.iter().flat_map(|g| &g.sounds).any(|s| s.plugin.as_ref().is_some_and(|pr| is_zhora(&pr.id)))
 }
 
-/// An output's step (0 None, n channel n - 1) moved `step` places along None and then
-/// `channels`, stopping at either end.
-pub fn step_output(current: usize, step: i64, channels: &[usize]) -> usize {
-    let list: Vec<usize> = std::iter::once(0).chain(channels.iter().map(|c| c + 1)).collect();
-    let at = list.iter().position(|&v| v == current).unwrap_or(0) as i64;
-    list[(at + step).clamp(0, list.len() as i64 - 1) as usize]
+/// A picker's step moved `step` places along the steps it offers (`list`, in order),
+/// stopping at either end.
+pub fn step_choice(current: usize, step: i64, list: &[usize]) -> usize {
+    let Some(&first) = list.first() else { return current };
+    let at = list.iter().position(|&v| v == current).map_or(0, |a| a as i64);
+    list.get((at + step).clamp(0, list.len() as i64 - 1) as usize).copied().unwrap_or(first)
+}
+
+/// The steps of Zhora's Input picker in channel order: None, Sound's Input, then the
+/// connected input channels (and `current`'s, connected or not).
+pub fn input_steps(settings: &Settings, current: usize) -> Vec<usize> {
+    let mut list = vec![0, 1];
+    list.extend((0..32).map(|c| c + 2).filter(|&n| n == current || settings.input_on(n - 2)));
+    list
+}
+
+/// What step `step` of Zhora's picker `id` (an output or its Input) is called, by the
+/// names given in Audio Setup; None for other knobs.
+pub fn choice_name(settings: &Settings, id: u32, step: usize) -> Option<String> {
+    if OUTS.contains(&id) {
+        return Some(step.checked_sub(1).map_or_else(|| "None".into(), |c| settings.output_name(c)));
+    }
+    (id == INPUT).then(|| match input_of(step as f64 / deckard_plugins::zhora::INPUT_STEPS as f64) {
+        None => "None".into(),
+        Some(InputSource::Sound) => "Sound's Input".into(),
+        Some(InputSource::Channel(c)) => settings.input_name(c),
+    })
+}
+
+/// What the Zhora on sound (`g`, `s`) listens on, as the tuner names it: a channel, or
+/// its sound's input and what that is set to.
+pub fn input_label(settings: &Settings, p: &Project, (g, s): (usize, usize), input: Option<InputSource>) -> String {
+    match input {
+        None => "No input".into(),
+        Some(InputSource::Channel(c)) => settings.input_name(c),
+        Some(InputSource::Sound) => {
+            let audio_in = p.groups.get(g).and_then(|grp| grp.sounds.get(s)).map(|snd| snd.channel.audio_in);
+            match audio_in {
+                Some(AudioSource::Ext(n)) if (0..16).contains(&n) => settings.input_pair_name(n as usize),
+                Some(AudioSource::Ext(n)) if (16..48).contains(&n) => settings.input_name(n as usize - 16),
+                _ => "Sound's Input (none set)".into(),
+            }
+        }
+    }
 }
 
 /// "+3¢", "−12¢", "0¢".
@@ -206,10 +245,10 @@ impl App {
         };
         // Only the raw values under the lock (the audio thread waits for it).
         let r = z.readout()?;
-        let (live, hold_note, input) = (z.param_value(LIVE) > 0.5, z.param_value(HOLD_NOTE), z.input_pair());
+        let (live, hold_note, input) = (z.param_value(LIVE) > 0.5, z.param_value(HOLD_NOTE), z.input_source());
         drop(z);
         let hold_note = crate::keys::note_name((hold_note * 127.0).round() as i64);
-        let input = input.map_or_else(|| "No input".into(), |n| self.settings.input_pair_name(n));
+        let input = input_label(&self.settings, p, (g, s), input);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let v = view(&r, live, &hold_note, input, output_problem(p, &self.settings, (g, s)), now);
         *shown = Some((key, v.clone()));
@@ -279,11 +318,16 @@ impl App {
         tuning
     }
 
-    /// The channels output `id` of the focused Zhora can take, when knob `id` is one.
-    pub(crate) fn zhora_offered(&self, p: &Project, id: u32) -> Option<Vec<usize>> {
+    /// The steps knob `id` of the focused Zhora offers, in order, when it is an output
+    /// (None, then the channels it can take) or its Input (see [`input_steps`]); it is on
+    /// step `current`.
+    pub(crate) fn zhora_offered(&self, p: &Project, id: u32, current: usize) -> Option<Vec<usize>> {
         let (g, s, _) = self.focused_zhora()?;
+        if id == INPUT {
+            return Some(input_steps(&self.settings, current));
+        }
         let signal = OUTS.iter().position(|&o| o == id)?;
-        Some(offered(p, &self.settings, (g, s), signal))
+        Some(std::iter::once(0).chain(offered(p, &self.settings, (g, s), signal).into_iter().map(|c| c + 1)).collect())
     }
 }
 
@@ -343,19 +387,51 @@ mod tests {
         s
     }
 
+    /// The Input picker offers None, Sound's Input and the connected channels, each by
+    /// the name Audio Setup gives it; a channel no longer connected stays while it is on it.
+    #[test]
+    fn the_input_picker_names_connected_mono_channels() {
+        let mut s = Settings::default();
+        s.input_routing = vec![None; 32];
+        (s.input_routing[0], s.input_routing[3]) = (Some(0), Some(3));
+        s.input_aliases[3] = "Modular".into();
+        assert_eq!(input_steps(&s, 0), [0, 1, 2, 5]);
+        assert_eq!(input_steps(&s, 9), [0, 1, 2, 5, 9], "the one it is on");
+        let names: Vec<String> = input_steps(&s, 0).into_iter().map(|n| choice_name(&s, INPUT, n).unwrap()).collect();
+        assert_eq!(names, ["None", "Sound's Input", "In 1 L", "Modular"]);
+        assert_eq!(choice_name(&s, OUTS[0], 3).as_deref(), Some("Out 2 L"));
+        assert_eq!(choice_name(&s, HOLD_NOTE, 3), None);
+    }
+
+    /// The tuner names what it listens on; on Sound's Input, what the sound's input is.
+    #[test]
+    fn the_tuner_names_its_input() {
+        let mut s = Settings::default();
+        s.input_aliases[2] = "VCO".into();
+        let mut p = project(vec![zhora(&[])]);
+        let label = |p: &Project, i| input_label(&s, p, (0, 0), i);
+        assert_eq!(label(&p, None), "No input");
+        assert_eq!(label(&p, Some(InputSource::Channel(2))), "VCO");
+        assert_eq!(label(&p, Some(InputSource::Sound)), "Sound's Input (none set)");
+        p.groups[0].sounds[0].channel.audio_in = AudioSource::Ext(16 + 2);
+        assert_eq!(label(&p, Some(InputSource::Sound)), "VCO");
+        p.groups[0].sounds[0].channel.audio_in = AudioSource::Ext(0);
+        assert_eq!(label(&p, Some(InputSource::Sound)), s.input_pair_name(0));
+    }
+
     #[test]
     fn step_output_visits_only_cv_channels_and_none() {
-        let channels = [2, 3];
+        let channels = [0, 3, 4];
         let mut at = 0;
         let mut seen = vec![at];
         for _ in 0..3 {
-            at = step_output(at, 1, &channels);
+            at = step_choice(at, 1, &channels);
             seen.push(at);
         }
         assert_eq!(seen, [0, 3, 4, 4], "None, channel 2, channel 3, then stops");
-        assert_eq!(step_output(4, -5, &channels), 0, "back to None");
-        assert_eq!(step_output(0, -1, &channels), 0);
-        assert_eq!(step_output(0, 1, &[]), 0, "no channels: None");
+        assert_eq!(step_choice(4, -5, &channels), 0, "back to None");
+        assert_eq!(step_choice(0, -1, &channels), 0);
+        assert_eq!(step_choice(0, 1, &[0]), 0, "no channels: None");
     }
 
     #[test]
@@ -523,11 +599,11 @@ mod tests {
         }
     }
 
-    /// Sound 1's Zhora, listening on In 1 with its pitch on Out 1 L, stored.
+    /// Sound 1's Zhora, listening on In 1 L with its pitch on Out 1 L, stored.
     fn listening_zhora() -> App {
         use deckard_plugins::zhora::{INPUT, PITCH_OUT};
         let mut app = app_with_zhora();
-        set(&mut app, INPUT, 1.0 / 16.0);
+        set(&mut app, INPUT, 2.0 / 33.0);
         set(&mut app, PITCH_OUT, 1.0 / 32.0);
         app.store_plugin_states();
         app

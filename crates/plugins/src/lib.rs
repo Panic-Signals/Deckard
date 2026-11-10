@@ -524,10 +524,10 @@ impl Plugin {
         }
     }
 
-    /// The input pair (0-based) the plug-in wants to hear.
-    pub fn input_pair(&self) -> Option<usize> {
+    /// The input the plug-in wants to hear.
+    pub fn input_source(&self) -> Option<native::InputSource> {
         match &self.kind {
-            Kind::Native(p) => p.input_pair(),
+            Kind::Native(p) => p.input_source(),
             _ => None,
         }
     }

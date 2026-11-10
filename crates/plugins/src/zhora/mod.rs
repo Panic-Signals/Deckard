@@ -13,7 +13,7 @@ use self::live::Trim;
 use self::pitch::{Pitch, WINDOW, detect};
 use self::table::Table;
 use self::tune::{Outcome, Run, Step, note_hz};
-use crate::native::{Class, Engine, Page, Param, Readout, TuneState};
+use crate::native::{Class, Engine, InputSource, Page, Param, Readout, TuneState};
 use crate::replicant::{Env, EnvSettings, env_time, glide_time, step, time_text};
 use crate::{MAX_BLOCK, Transport};
 
@@ -56,8 +56,8 @@ const fn p(id: u32, name: &'static str, short: &'static str, default: f64, steps
 
 /// Steps of an output picker.
 const OUT_STEPS: usize = 32;
-/// Steps of the input picker.
-const INPUT_STEPS: usize = 16;
+/// Steps of the input picker: None, the sound's input, then each mono channel.
+pub const INPUT_STEPS: usize = 33;
 /// The hold note's default: MIDI 69, which DECKARD names A3 (it calls note 60 C3).
 const HOLD_DEFAULT: f64 = 69.0 / 127.0;
 /// The clock divisions, and their lengths in quarter notes.
@@ -214,10 +214,19 @@ pub fn outputs(chunk: &[u8]) -> [Option<u8>; SIGNALS] {
     std::array::from_fn(|signal| channel(saved_value(&saved, PITCH_OUT + signal as u32)).and_then(|c| u8::try_from(c).ok()))
 }
 
-/// The input pair (0-based) saved in Zhora's Maschine `chunk`; None when it can't be read.
-pub fn input_pair(chunk: &[u8]) -> Option<usize> {
+/// The input of an Input picker's value: 0 is None, 1 the sound's own input, n channel n - 2.
+pub fn input_of(v: f64) -> Option<InputSource> {
+    match step(v, INPUT_STEPS) {
+        0 => None,
+        1 => Some(InputSource::Sound),
+        n => Some(InputSource::Channel(n - 2)),
+    }
+}
+
+/// The input saved in Zhora's Maschine `chunk`; None when it can't be read.
+pub fn input_source(chunk: &[u8]) -> Option<InputSource> {
     let saved = crate::native::saved_params(chunk).ok()?;
-    step(saved_value(&saved, INPUT), INPUT_STEPS).checked_sub(1)
+    input_of(saved_value(&saved, INPUT))
 }
 
 /// `note`'s name in DECKARD's naming (MIDI note 60 is C3).
@@ -388,7 +397,7 @@ pub struct Zhora {
     hold_note: u8,
 
     outs: [Option<usize>; SIGNALS],
-    input_pair: Option<usize>,
+    input: Option<InputSource>,
     env_values: [f64; 4],
     env_settings: EnvSettings,
     env: Env,
@@ -475,7 +484,7 @@ impl Zhora {
             holding: false,
             hold_note: 69,
             outs: [None; SIGNALS],
-            input_pair: None,
+            input: None,
             env_values: [0.1, 0.5, 0.7, 0.4],
             env_settings: EnvSettings::default(),
             env: Env::default(),
@@ -570,7 +579,7 @@ impl Zhora {
             return;
         }
         self.report.message = None;
-        if self.input_pair.is_none() {
+        if self.input.is_none() {
             self.report.message = Some(NO_INPUT);
             return;
         }
@@ -665,7 +674,7 @@ impl Engine for Zhora {
             ENV_LEVEL => self.env_level = v32,
             VEL_LEVEL => self.vel_level = v32,
             MOD_LEVEL => self.mod_level = v32,
-            INPUT => self.input_pair = step(value, INPUT_STEPS).checked_sub(1),
+            INPUT => self.input = input_of(value),
             HOLD_NOTE => self.hold_note = step(value, 127) as u8,
             LIVE => {
                 self.live = value > 0.5;
@@ -708,9 +717,10 @@ impl Engine for Zhora {
             },
             ATTACK | DECAY | RELEASE => time_text(env_time(v)),
             DIVISION => DIVISIONS[step(v, DIVISION_STEPS)].0.into(),
-            INPUT => match step(v, INPUT_STEPS) {
-                0 => "None".into(),
-                n => format!("In {n} L+R"),
+            INPUT => match input_of(v) {
+                None => "None".into(),
+                Some(InputSource::Sound) => "Sound's Input".into(),
+                Some(InputSource::Channel(c)) => format!("In {} {}", c / 2 + 1, if c % 2 == 0 { "L" } else { "R" }),
             },
             HOLD_NOTE => note_name(step(v, 127) as u8),
             LIVE | HOLD | TUNE | CHECK => ["Off", "On"][step(v, 1)].into(),
@@ -900,8 +910,8 @@ impl Engine for Zhora {
         }
     }
 
-    fn input_pair(&self) -> Option<usize> {
-        self.input_pair
+    fn input_source(&self) -> Option<InputSource> {
+        self.input
     }
 
     fn readout(&self) -> Option<Readout> {
@@ -911,10 +921,8 @@ impl Engine for Zhora {
             None if self.table.is_some() => TuneState::Idle,
             None => TuneState::NotTuned,
         };
-        let heard = (self.input_pair.is_some() && (self.since_input as f64) < STALE_S * self.sr)
-            .then(|| self.shared.reading())
-            .flatten()
-            .map(|p| {
+        let heard =
+            (self.input.is_some() && (self.since_input as f64) < STALE_S * self.sr).then(|| self.shared.reading()).flatten().map(|p| {
                 let exact = 69.0 + 12.0 * (p.hz / 440.0).log2();
                 let note = exact.round().clamp(0.0, 127.0);
                 (note as u8, (exact - note) * 100.0)
@@ -948,6 +956,9 @@ impl Engine for Zhora {
 mod tests {
     use super::table::Table;
     use super::*;
+
+    /// The Input picker on In 1 L.
+    const IN_1: f64 = 2.0 / INPUT_STEPS as f64;
     use crate::Transport;
     use crate::native::{Engine, TuneState};
     use std::time::{Duration, Instant};
@@ -1217,7 +1228,7 @@ mod tests {
     #[test]
     fn saved_actions_do_nothing_before_the_first_process() {
         let mut e = routed();
-        e.set_param(INPUT, 1.0 / 16.0);
+        e.set_param(INPUT, IN_1);
         e.set_param(TUNE, 1.0);
         e.set_param(HOLD, 1.0);
         run(e.as_mut(), BLOCK, &stopped());
@@ -1229,7 +1240,7 @@ mod tests {
     fn tune_runs_while_stopped_and_opens_gate_and_envelope() {
         let mut e = routed();
         let t = stopped();
-        e.set_param(INPUT, 1.0 / 16.0);
+        e.set_param(INPUT, IN_1);
         run(e.as_mut(), BLOCK, &t);
         e.set_param(TUNE, 1.0);
         run(e.as_mut(), BLOCK, &t);
@@ -1259,7 +1270,7 @@ mod tests {
     #[test]
     fn check_with_no_table_says_so() {
         let mut e = routed();
-        e.set_param(INPUT, 1.0 / 16.0);
+        e.set_param(INPUT, IN_1);
         run(e.as_mut(), BLOCK, &stopped());
         e.set_param(CHECK, 1.0);
         let r = e.readout().unwrap();
@@ -1272,7 +1283,7 @@ mod tests {
         let mut e = routed();
         let t = stopped();
         e.load(&bowed().to_bytes());
-        e.set_param(INPUT, 1.0 / 16.0);
+        e.set_param(INPUT, IN_1);
         run(e.as_mut(), BLOCK, &t);
         e.set_param(CHECK, 1.0);
         for _ in 0..190 {
@@ -1294,7 +1305,7 @@ mod tests {
         let mut e = routed();
         let t = stopped();
         e.load(&bowed().to_bytes());
-        e.set_param(INPUT, 1.0 / 16.0);
+        e.set_param(INPUT, IN_1);
         run(e.as_mut(), BLOCK, &t);
         e.set_param(CHECK, 1.0);
         for _ in 0..202 {
@@ -1311,7 +1322,7 @@ mod tests {
             let mut e = routed();
             let t = stopped();
             e.load(&bowed().to_bytes());
-            e.set_param(INPUT, 1.0 / 16.0);
+            e.set_param(INPUT, IN_1);
             run(e.as_mut(), BLOCK, &t);
             e.set_param(first, 1.0);
             e.set_param(first, 0.0);
@@ -1331,7 +1342,7 @@ mod tests {
         let mut z = Zhora::new(SR);
         defaults(&mut z);
         z.load(&bowed().to_bytes());
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         let t = stopped();
         run(&mut z, BLOCK, &t);
         z.set_param(CHECK, 1.0);
@@ -1360,7 +1371,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut z = Zhora::new(96_000.0);
         defaults(&mut z);
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         let mut phase = 0f32;
         for _ in 0..16 {
             let mut b = [0f32; HOP];
@@ -1498,7 +1509,8 @@ mod tests {
         assert_eq!(e.text(GATE_OUT, 1.0), "Out 16 R", "the last position is the last channel");
         assert!(PARAMS.iter().filter(|p| p.id <= MOD_OUT).all(|p| p.steps == 32));
         assert_eq!(e.text(INPUT, 0.0), "None");
-        assert_eq!(e.text(INPUT, 2.0 / 16.0), "In 2 L+R");
+        assert_eq!(e.text(INPUT, 1.0 / 33.0), "Sound's Input");
+        assert_eq!(e.text(INPUT, 5.0 / 33.0), "In 2 R");
         assert_eq!(e.text(DIVISION, 2.0 / 7.0), "1/16");
     }
 
@@ -1538,21 +1550,25 @@ mod tests {
         let mut p = crate::Plugin::native(&CLASS, id, CLASS.name, 48_000.0);
         p.set_param(PITCH_OUT, 3.0 / OUT_STEPS as f64);
         p.set_param(MOD_OUT, 32.0 / OUT_STEPS as f64);
-        p.set_param(INPUT, 2.0 / INPUT_STEPS as f64);
+        p.set_param(INPUT, 4.0 / INPUT_STEPS as f64);
         let chunk = p.save_chunk();
         assert_eq!(outputs(&chunk), [Some(2), None, None, None, None, Some(31)]);
-        assert_eq!(input_pair(&chunk), Some(1));
+        assert_eq!(input_source(&chunk), Some(InputSource::Channel(2)));
         assert_eq!(outputs(&[]), [None; SIGNALS], "the defaults");
-        assert_eq!(input_pair(&[]), None);
+        assert_eq!(input_source(&[]), None);
         assert_eq!(outputs(b"not a chunk at all"), [None; SIGNALS]);
     }
 
     #[test]
-    fn input_pair_follows_the_input_param() {
+    fn input_follows_the_input_param() {
         let mut e = engine();
-        assert_eq!(e.input_pair(), None);
-        e.set_param(INPUT, 3.0 / 16.0);
-        assert_eq!(e.input_pair(), Some(2));
+        assert_eq!(e.input_source(), None);
+        e.set_param(INPUT, 1.0 / 33.0);
+        assert_eq!(e.input_source(), Some(InputSource::Sound));
+        e.set_param(INPUT, 4.0 / 33.0);
+        assert_eq!(e.input_source(), Some(InputSource::Channel(2)));
+        e.set_param(INPUT, 1.0);
+        assert_eq!(e.input_source(), Some(InputSource::Channel(31)), "In 16 R, the last");
     }
 
     #[test]
@@ -1586,7 +1602,7 @@ mod tests {
         let mut z = Zhora::new(SR);
         defaults(&mut z);
         z.load(&bowed().to_bytes());
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         let t = stopped();
         run(&mut z, BLOCK, &t);
         z.set_param(CHECK, 1.0);
@@ -1607,7 +1623,7 @@ mod tests {
         let mut z = Zhora::new(SR);
         defaults(&mut z);
         z.load(&bowed().to_bytes());
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         run(&mut z, BLOCK, &stopped());
         z.set_param(CHECK, 1.0);
         let id = z.running.unwrap().id;
@@ -1697,7 +1713,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut z = Zhora::new(SR);
         defaults(&mut z);
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         let t = stopped();
         let mut hops = 0;
         let mut phase = 0f32;
@@ -1734,7 +1750,7 @@ mod tests {
         let mut z = Zhora::new(SR);
         defaults(&mut z);
         route(&mut z);
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         let t = stopped();
         run(&mut z, 1024, &t);
         z.set_param(TUNE, 1.0);
@@ -1838,7 +1854,7 @@ mod tests {
         defaults(&mut z);
         route(&mut z);
         z.load(&bowed().to_bytes());
-        z.set_param(INPUT, 1.0 / 16.0);
+        z.set_param(INPUT, IN_1);
         z
     }
 

@@ -1,21 +1,24 @@
 //! Zhora at play (docs/superpowers/specs/2026-11-09-cv-outs-and-zhora-design.md, Part 2):
-//! its tuner hears its input pair, its sound plays the modular's return, and its signals
+//! its tuner hears its input, its sound plays the modular's return, and its signals
 //! go out on the CV only channels.
 
 use super::{Engine, JOB_FRAMES, SampleCache, SoundBufs};
 use deckard_model::{AudioSource, PluginRef, Project, Sound};
+use deckard_plugins::native::InputSource;
 use deckard_plugins::zhora::{SIGNALS, outputs};
 use deckard_plugins::{Shared, Slot};
 use std::collections::VecDeque;
 
 /// A Zhora at play: its sound, its instance, whether the sound is muted (its return is
-/// silent; its tuner still hears), and its input gain (the return's, as any sound's input).
+/// silent; its tuner still hears), its input gain (the return's, as any sound's input),
+/// and the channels of its sound's own audio input (for Input set to Sound's Input).
 pub(crate) struct ZhoraRt {
     pub g: usize,
     pub s: usize,
     pub plugin: Shared,
     pub silent: bool,
     pub gain: f32,
+    pub sound_in: Option<(usize, usize)>,
 }
 
 /// One of a Zhora's signals on a channel, for the screens.
@@ -61,13 +64,18 @@ pub(crate) fn zhoras_of(project: &Project, cache: &SampleCache) -> Vec<ZhoraRt> 
         .filter_map(|(g, s, snd, pr)| {
             let plugin = cache.loaded_plugin(Slot::Sound { group: g, sound: s }, &pr.id, &pr.name)?;
             let gain = deckard_model::level_gain(snd.channel.input_gain) as f32;
-            Some(ZhoraRt { g, s, plugin, silent: super::muting(project, g, s).muted, gain })
+            let sound_in = match snd.channel.audio_in {
+                AudioSource::Ext(n) => super::ext_channels(n),
+                _ => None,
+            };
+            Some(ZhoraRt { g, s, plugin, silent: super::muting(project, g, s).muted, gain, sound_in })
         })
         .collect()
 }
 
-/// Each Zhora hears the first `frames` frames of `q` (its input pair, before mute); an
-/// unmuted one's sound takes them too, at its input gain, as its return. No allocating.
+/// Each Zhora hears the first `frames` frames of `q` (its input, before mute): one channel
+/// on both sides, or its sound's own audio input; an unmuted one's sound takes them too,
+/// at its input gain, as its return (passed through as an input sound's). No allocating.
 pub(crate) fn hear(
     zhoras: &[ZhoraRt],
     bufs: &mut [Vec<Option<Box<SoundBufs>>>],
@@ -79,7 +87,12 @@ pub(crate) fn hear(
     for z in zhoras {
         // (Held only for moments elsewhere, as for its notes; a poisoned one is skipped.)
         let Ok(mut p) = z.plugin.lock() else { continue };
-        let Some((l, r)) = p.input_pair().map(|k| (2 * k, 2 * k + 1)).filter(|&(_, r)| r < 32) else { continue };
+        let channels = match p.input_source() {
+            Some(InputSource::Channel(c)) => Some((c, c)),
+            Some(InputSource::Sound) => z.sound_in,
+            None => None,
+        };
+        let Some((l, r)) = channels.filter(|&(l, r)| l.max(r) < 32) else { continue };
         for (f, frame) in q.iter().take(n).enumerate() {
             (scratch.0[f], scratch.1[f]) = (frame[l], frame[r]);
         }
@@ -181,6 +194,8 @@ mod tests {
         snd.sampler = None;
         snd.plugin = Some(pr.clone());
         snd.slots = vec![SlotInfo { module: "PluginHost".into(), name: pr.name.clone(), active: true, plugin: Some(pr), params: vec![] }];
+        // In 2 L+R, which an [`Ear`] hears by default.
+        snd.channel.audio_in = AudioSource::Ext(1);
     }
 
     /// The test project, its one sound played by Zhora (`params`), with no notes.
@@ -224,9 +239,11 @@ mod tests {
     thread_local! {
         /// What the [`Ear`]s on this thread heard.
         static HEARD: RefCell<Vec<(f32, f32)>> = const { RefCell::new(Vec::new()) };
+        /// What the [`Ear`]s on this thread listen on.
+        static LISTENS: std::cell::Cell<Option<InputSource>> = const { std::cell::Cell::new(Some(InputSource::Sound)) };
     }
 
-    /// A stand-in for Zhora that notes what it hears on In 2.
+    /// A stand-in for Zhora that notes what it hears on [`LISTENS`] (its sound's input).
     struct Ear;
 
     impl deckard_plugins::native::Engine for Ear {
@@ -238,8 +255,8 @@ mod tests {
         fn input(&mut self, left: &[f32], right: &[f32]) {
             HEARD.with(|h| h.borrow_mut().extend(left.iter().copied().zip(right.iter().copied())));
         }
-        fn input_pair(&self) -> Option<usize> {
-            Some(1)
+        fn input_source(&self) -> Option<InputSource> {
+            LISTENS.get()
         }
     }
 
@@ -255,6 +272,12 @@ mod tests {
     /// An engine for `p` (its sound 0 a Zhora) with an [`Ear`] in Zhora's place, stopped,
     /// and 64 frames of (0.5, -0.25) queued on In 2.
     fn ear_engine(p: &Project) -> Engine {
+        ear_engine_on(p, Some(InputSource::Sound))
+    }
+
+    /// [`ear_engine`], the Ear listening on `source`.
+    fn ear_engine_on(p: &Project, source: Option<InputSource>) -> Engine {
+        LISTENS.set(source);
         HEARD.with(|h| h.borrow_mut().clear());
         let mut cache = SampleCache::default();
         cache.test_plugins.push((Slot::Sound { group: 0, sound: 0 }, split_plugin(&EAR)));
@@ -265,6 +288,39 @@ mod tests {
         live.lock().unwrap().extend(std::iter::repeat_n(frame, 64));
         e.live_in = Some(live);
         e
+    }
+
+    /// One input channel is heard, and returned, on both sides.
+    #[test]
+    fn a_zhora_on_one_channel_hears_it_on_both_sides() {
+        let p = zhora_project(&[]);
+        let mut e = ear_engine_on(&p, Some(InputSource::Channel(3)));
+        let (out, _) = run(&mut e, 64, 0.0);
+        assert_eq!(heard(), vec![(-0.25, -0.25); 64]);
+        assert!(out.chunks(2).all(|f| near(f[0], -0.25) && near(f[1], -0.25)), "{:?}", &out[..8]);
+    }
+
+    /// On Sound's Input it hears whatever the sound's audio input is: a pair, one channel,
+    /// or nothing.
+    #[test]
+    fn a_zhora_on_its_sounds_input_follows_the_sounds_audio_in() {
+        let mut p = zhora_project(&[]);
+        p.groups[0].sounds[0].channel.audio_in = AudioSource::Ext(16 + 2); // In 2 L
+        let mut e = ear_engine(&p);
+        let (out, _) = run(&mut e, 64, 0.0);
+        assert_eq!(heard(), vec![(0.5, 0.5); 64]);
+        assert!(out.chunks(2).all(|f| near(f[0], 0.5) && near(f[1], 0.5)), "{:?}", &out[..8]);
+        p.groups[0].sounds[0].channel.audio_in = AudioSource::None;
+        let mut e = ear_engine(&p);
+        let (out, _) = run(&mut e, 64, 0.0);
+        assert!(heard().is_empty() && out.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn a_zhora_with_no_input_hears_nothing() {
+        let mut e = ear_engine_on(&zhora_project(&[]), None);
+        let (out, _) = run(&mut e, 64, 0.0);
+        assert!(heard().is_empty() && out.iter().all(|&v| v == 0.0));
     }
 
     fn heard() -> Vec<(f32, f32)> {
@@ -321,8 +377,8 @@ mod tests {
         assert_eq!(heard(), vec![(0.5, -0.25); 64], "the tuner hears it before the gain");
     }
 
-    /// A Zhora sound also set to an interface input (its chain not starting with Zhora)
-    /// plays only Zhora's return, under Zhora's mute.
+    /// A Zhora sound whose chain doesn't start with Zhora plays its input once (Zhora's
+    /// return, not also as an input sound), under Zhora's mute.
     #[test]
     fn a_zhora_sound_set_to_an_input_plays_only_its_return() {
         for muted in [false, true] {
@@ -383,6 +439,7 @@ mod tests {
     /// An engine for `p` with an [`Ear`] in sound 0's place when it is a Zhora, stopped,
     /// and `input` queued on In 2.
     fn input_engine(p: &Project, input: &[(f32, f32)]) -> Engine {
+        LISTENS.set(Some(InputSource::Sound));
         HEARD.with(|h| h.borrow_mut().clear());
         let mut cache = SampleCache::default();
         if is_zhora(&p.groups[0].sounds[0]) {

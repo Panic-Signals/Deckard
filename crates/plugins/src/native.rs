@@ -18,6 +18,15 @@
 
 use crate::{ParamInfo, Transport};
 
+/// What an engine that listens wants to hear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    /// Whatever its sound's own audio input is set to (a pair or a channel).
+    Sound,
+    /// One interface input channel (0-based), heard on both sides.
+    Channel(usize),
+}
+
 /// The vendor name in a native plug-in's id.
 pub const VENDOR: &str = "DECKARD";
 
@@ -135,8 +144,8 @@ pub trait Engine: Send {
         let _ = (left, right);
     }
 
-    /// The input pair (0-based) the engine wants to hear.
-    fn input_pair(&self) -> Option<usize> {
+    /// The input the engine wants to hear.
+    fn input_source(&self) -> Option<InputSource> {
         None
     }
 
@@ -495,8 +504,8 @@ impl Instance {
         self.engine.input(left, right);
     }
 
-    pub(crate) fn input_pair(&self) -> Option<usize> {
-        self.engine.input_pair()
+    pub(crate) fn input_source(&self) -> Option<InputSource> {
+        self.engine.input_source()
     }
 
     pub(crate) fn readout(&self) -> Option<Readout> {

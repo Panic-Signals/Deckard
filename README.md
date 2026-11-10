@@ -466,8 +466,11 @@ in tune. It needs outputs marked CV only (see [CV out](#cv-out)).
   clock, envelope, velocity and mod wheel have a Level, 50% to start: set it by ear or
   with a scope.
 - **Playing:** one voice, the newest note wins, with pitch bend and Glide.
-- **The return:** **Input** picks the input the modular comes back on. It plays through
-  Zhora's sound like any sound, with its level, effects, mute and recording.
+- **The return:** **Input** picks the input the modular comes back on: one channel,
+  by the name you gave it in Audio Setup (heard on both sides), or **Sound's Input**,
+  which listens on whatever the sound's own audio input is set to, mono or stereo.
+  Either way the audio passes through Zhora's sound unchanged, like any input sound,
+  with its input gain, level, effects, mute and recording.
 - **Tune:** turn off the modular's effects, open its filter, and press **TUNE**. Zhora
   steps the pitch for a few seconds, listens, and builds a table that puts every note in
   the range it found within 5 cents. If it can't hear a clear pitch, it says so and

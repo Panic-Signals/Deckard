@@ -4513,16 +4513,13 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
                                     let (value, mut text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
-                                    if let Some(channels) = app.zhora_offered(p, info.id) {
-                                        let steps = info.steps.max(1) as f64;
-                                        let at = (value * steps).round() as usize;
-                                        let mut names = vec!["None".to_string()];
-                                        names.extend(channels.iter().map(|&c| app.settings.output_name(c)));
-                                        let values = std::iter::once(0.0).chain(channels.iter().map(|&c| (c + 1) as f64 / steps)).collect();
-                                        text = match at {
-                                            0 => names[0].clone(),
-                                            n => app.settings.output_name(n - 1),
-                                        };
+                                    let steps = info.steps.max(1) as f64;
+                                    let at = (value * steps).round() as usize;
+                                    if let Some(offered) = app.zhora_offered(p, info.id, at) {
+                                        let called = |n: usize| crate::zhora_ui::choice_name(&app.settings, info.id, n).unwrap_or_default();
+                                        let names = offered.iter().map(|&n| called(n)).collect();
+                                        let values = offered.iter().map(|&n| n as f64 / steps).collect();
+                                        text = called(at);
                                         plugin_choices.push((k, names));
                                         choice_values.push((k, values));
                                         // `cur` is the step, as on the controller; the selector finds it in the list.

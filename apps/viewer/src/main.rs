@@ -5096,11 +5096,8 @@ impl App {
         // A Zhora's outputs by the channels' names (their aliases).
         let zhora_focused = self.focused_zhora().is_some();
         let knob_text = |i: usize, text: &str| match edits.get(i).copied().flatten() {
-            Some(layout::Edit::PluginChoice(_, id, _, cur, _)) if zhora_focused && deckard_plugins::zhora::OUTS.contains(&id) => {
-                match cur {
-                    0 => "None".to_string(),
-                    n => self.settings.output_name(n - 1),
-                }
+            Some(layout::Edit::PluginChoice(_, id, _, cur, _)) if zhora_focused => {
+                zhora_ui::choice_name(&self.settings, id, cur).unwrap_or_else(|| text.to_string())
             }
             _ => text.to_string(),
         };
@@ -6154,12 +6151,13 @@ impl App {
                     layout::apply_acts(self, vec![Act::SetRoute(sets[to].clone())]);
                     return;
                 }
-                // A Zhora's output: on along None and the CV only channels free for it, a
-                // step each quarter of the way a continuous one would go.
+                // A Zhora's output or Input: on along the steps it offers (None, then the
+                // CV only channels free for it, or the connected inputs), a step each
+                // quarter of the way a continuous one would go.
                 let zhora_out = match edit {
-                    Edit::PluginChoice(_, id, ..) => {
+                    Edit::PluginChoice(_, id, _, cur, _) => {
                         let d = doc.borrow();
-                        self.zhora_offered(d.project(), id)
+                        self.zhora_offered(d.project(), id, cur)
                     }
                     _ => None,
                 };
@@ -6173,7 +6171,7 @@ impl App {
                     }
                     let sign = self.knob_acc[pos].signum();
                     self.knob_acc[pos] -= n * unit * sign;
-                    let to = zhora_ui::step_output(cur, n as i64 * sign as i64, &channels);
+                    let to = zhora_ui::step_choice(cur, n as i64 * sign as i64, &channels);
                     if to == cur {
                         return;
                     }

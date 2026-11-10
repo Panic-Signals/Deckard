@@ -2353,16 +2353,20 @@ fn input_routes(p: &Project) -> Vec<InRoute> {
             if muting(p, g, s).silent || snd.slots.first().is_some_and(|x| x.is_instrument()) || zhora_rt::is_zhora(snd) {
                 continue;
             }
-            let n = n.max(0) as usize;
-            let (l, r) = if n < 16 { (2 * n, 2 * n + 1) } else { (n - 16, n - 16) };
-            if r >= 32 {
-                continue;
-            }
+            let Some((l, r)) = ext_channels(n) else { continue };
             let gain = deckard_model::level_gain(snd.channel.input_gain) as f32;
             out.push((g, s, l, r, (gain, gain)));
         }
     }
     out
+}
+
+/// The interface channels (left, right) of a sound's audio input `Ext(n)`: pairs below 16,
+/// then each channel alone (heard on both sides). None past the 32 channels.
+pub(crate) fn ext_channels(n: i64) -> Option<(usize, usize)> {
+    let n = n.max(0) as usize;
+    let (l, r) = if n < 16 { (2 * n, 2 * n + 1) } else { (n - 16, n - 16) };
+    (r < 32).then_some((l, r))
 }
 
 /// Samples shared between engines (e.g. replaying another scene without reloading).
