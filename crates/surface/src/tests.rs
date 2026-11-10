@@ -3224,3 +3224,27 @@ fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     v.group = 2;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
+
+#[test]
+fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.pattern_start, v.pattern_length) = (0, 2 * 3840);
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    // POSITION and START gather small encoder packets rather than jumping on the first packet.
+    assert!(s.event(&Event::Knob(0, 0.03), &v, now).is_empty());
+    assert!(s.event(&Event::Knob(0, 0.03), &v, now).is_empty());
+    assert_eq!(s.event(&Event::Knob(0, 0.05), &v, now), [Action::PatternSpan { start: 3840, length: 2 * 3840 }]);
+    assert!(s.event(&Event::Knob(2, 0.04), &v, now).is_empty());
+    assert_eq!(s.event(&Event::Knob(2, 0.07), &v, now), [Action::PatternSpan { start: 3840, length: 3840 }]);
+    // LENGTH steps through ½, 1, 2, 4, 8… bars.
+    v.pattern_length = 1920;
+    for want in [3840, 2 * 3840, 4 * 3840, 8 * 3840] {
+        assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(want)]);
+        v.pattern_length = want;
+    }
+    for want in [4 * 3840, 2 * 3840, 3840, 1920, 1920] {
+        assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(want)]);
+        v.pattern_length = want;
+    }
+}
