@@ -35,16 +35,6 @@ ran, and any that were skipped for lack of local data. -->
 
 Tried on:
 
-## Screenshots
-
-<!-- For changes you can see: the same view before and after, taken with
-`deckard ... --screenshot before.png` (DEVELOPMENT.md, "Command line"). Write "None" if
-nothing visible changed. -->
-
-| Before | After |
-|--------|-------|
-|        |       |
-
 ## Notes for the reviewer
 
 <!-- Optional: design choices, risks, follow-ups. -->
