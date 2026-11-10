@@ -71,6 +71,12 @@ impl Repeater {
         !self.held.is_empty()
     }
 
+    /// The live drum repeat owns this lane while overdubbing. Its previous pass
+    /// must not retrigger underneath it before the UI records the replacement.
+    pub(crate) fn replaces(&self, group: usize, sound: usize, pitch: i64) -> bool {
+        self.mode == RepeatMode::NoteRepeat && self.held.iter().any(|h| (h.group, h.sound, h.pitch) == (group, sound, pitch))
+    }
+
     pub fn press(&mut self, group: usize, sound: usize, pitch: i64, velocity: i64) {
         if self.latched {
             self.held.clear();
@@ -91,13 +97,23 @@ impl Repeater {
         }
     }
 
-    pub fn release(&mut self, group: usize, sound: usize, pitch: i64) {
-        self.down.retain(|d| *d != (group, sound, pitch));
+    /// Let go of a key it took. Returns whether it had it: a key it never took (a
+    /// MIDI keyboard's note, or a pad pressed before it was on) is not its to end, so
+    /// the caller releases that note itself.
+    pub fn release(&mut self, group: usize, sound: usize, pitch: i64) -> bool {
+        let key = (group, sound, pitch);
+        let was_down = self.down.contains(&key);
+        let was_held = self.held.iter().any(|h| (h.group, h.sound, h.pitch) == key);
+        if !was_down && !was_held {
+            return false;
+        }
+        self.down.retain(|d| *d != key);
         if self.arp.hold {
             self.latched = self.down.is_empty();
         } else {
-            self.held.retain(|h| (h.group, h.sound, h.pitch) != (group, sound, pitch));
+            self.held.retain(|h| (h.group, h.sound, h.pitch) != key);
         }
+        true
     }
 
     /// Let go of everything (HOLD off, the mode left).
@@ -288,6 +304,17 @@ mod tests {
         r.release(0, 3, 60);
         r.release(0, 5, 60);
         assert!(r.due(1200.0, 960.0, Some(1200.0)).is_empty());
+    }
+
+    #[test]
+    fn release_reports_only_the_keys_it_took() {
+        let mut r = Repeater::new(Arp { hold: true, ..arp(ArpType::Up) }, RepeatMode::Arp);
+        assert!(!r.release(2, 0, 60), "a keyboard key it never took is not its to end");
+        r.press(0, 0, 60, 100);
+        assert!(r.release(0, 0, 60));
+        // Latched by HOLD: a stray release of another key leaves the chord alone.
+        assert!(!r.release(0, 0, 64));
+        assert_eq!(r.due(0.0, 240.0, Some(0.0))[0].pitch, 60);
     }
 
     #[test]

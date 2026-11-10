@@ -3463,6 +3463,13 @@ impl Engine {
         self.sequencing = true;
     }
 
+    fn repeat_replaces(&self, e: &NoteEvent) -> bool {
+        self.recording
+            && e.cue.is_none()
+            && e.midi.is_none()
+            && self.repeater.as_ref().is_some_and(|r| r.replaces(e.group, e.sound, e.pitch))
+    }
+
     /// The timeline events that will fire from `skip` to `skip + frames` output frames
     /// from now, if nothing changes meanwhile: each with its offset from now, its index,
     /// its pass, whether its probability lets it play, and the song frame it fires at.
@@ -3496,7 +3503,13 @@ impl Engine {
                         break;
                     }
                     if t >= skip {
-                        fire(Seen::Event { t, e, plays: chance(e.probability, next, tl.chance_pass(e, pass), self.rng), frame, pass });
+                        fire(Seen::Event {
+                            t,
+                            e,
+                            plays: chance(e.probability, next, tl.chance_pass(e, pass), self.rng) && !self.repeat_replaces(e),
+                            frame,
+                            pass,
+                        });
                     }
                     next += 1;
                 }
@@ -3669,6 +3682,10 @@ impl Engine {
                 p.all_notes_off();
             }
         }
+        if let Some(r) = &mut self.repeater {
+            r.clear();
+        }
+        self.held_keys.clear();
         self.note_offs.clear();
         self.touch.clear();
         self.lfo_release_all();
@@ -4608,8 +4625,9 @@ impl Engine {
                     r.press(group, sound, pitch, velocity);
                     return;
                 }
-                Live::NoteRelease { group, sound, pitch } => {
-                    r.release(group, sound, pitch);
+                // Only the keys it took: a keyboard's NoteIn never goes to it, so its
+                // release must still end the note (else it hangs until the transport stops).
+                Live::NoteRelease { group, sound, pitch } if r.release(group, sound, pitch) => {
                     return;
                 }
                 Live::RepeatPressure { group, sound, pitch, velocity } => {
@@ -4861,7 +4879,7 @@ impl Engine {
                     }
                     let idx = self.next;
                     self.next += 1;
-                    let plays = chance(e.probability, idx, self.timeline.chance_pass(&e, self.pass), self.rng);
+                    let plays = chance(e.probability, idx, self.timeline.chance_pass(&e, self.pass), self.rng) && !self.repeat_replaces(&e);
                     #[cfg(test)]
                     self.fired.push((self.time, e.tick, e.sound, e.pitch, plays));
                     if plays {
@@ -11932,6 +11950,19 @@ mod tests {
         e.play_live(Live::NoteRelease { group: 0, sound: 0, pitch: 60 });
         let got: Vec<Vec<u8>> = rx.try_iter().map(|m| m.bytes().to_vec()).collect();
         assert_eq!(got, vec![vec![0x82, 60, 64]]);
+    }
+
+    /// With Note Repeat / the Arp on, a keyboard's key (which never goes into the
+    /// repeater) still ends on its release, not when the transport stops.
+    #[test]
+    fn keyboard_release_ends_its_note_while_note_repeat_is_on() {
+        let (mut e, rx) = expr_engine(deckard_model::Expression::default(), PPQ);
+        e.set_repeat(Some((deckard_model::Arp { rate: 240, gate: 0.5, ..Default::default() }, repeat::RepeatMode::Arp)));
+        e.play_live(Live::NoteIn { group: 0, sound: 0, pitch: 60, velocity: 90, thru: true });
+        rx.try_iter().count();
+        e.play_live(Live::NoteRelease { group: 0, sound: 0, pitch: 60 });
+        let got: Vec<Vec<u8>> = rx.try_iter().map(|m| m.bytes().to_vec()).collect();
+        assert!(got.iter().any(|m| m[0] & 0xf0 == 0x80 && m[1] == 60), "the key's note-off: {got:?}");
     }
 
     /// A recorded note's pressure plays out with it as poly aftertouch on its key,
