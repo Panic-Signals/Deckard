@@ -25,6 +25,10 @@ const MIN_POINTS: usize = 5;
 const MAX_OFF: usize = 2;
 /// Where the straight line between table points is trusted no further, in cents of estimated error.
 const MAX_BEND_CENTS: f32 = 4.0;
+/// A slope under this fraction of the side's median has collapsed: the voice is saturating.
+const COLLAPSE: f32 = 0.6;
+/// How many points before the slope gives out a knee may begin.
+const KNEE_REACH: usize = 3;
 /// Notes replayed to verify a table.
 const VERIFY_NOTES: usize = 8;
 /// A verified note is in tune within this many cents.
@@ -155,17 +159,44 @@ impl Sweep {
         None
     }
 
-    /// Drops the points from where the response bends too sharply for a straight line between
-    /// points to be trusted (a soft knee at the top or bottom of the range) to that end.
+    /// Drops the points from where the response has gone flat (a saturating top or bottom) to
+    /// that end, but only where a straight line between points is also untrue. Curvature
+    /// alone, with the slope healthy, never cuts.
     fn cut_at_bends(&mut self) {
         let slope = |a: (f32, f32), b: (f32, f32)| (b.1 - a.1) / (b.0 - a.0);
         let bend = |p: &[(f32, f32)]| 1200.0 * (slope(p[1], p[2]) - slope(p[0], p[1])).abs() * (p[2].0 - p[0].0) / 16.0;
-        let sharp = (1..self.points.len().saturating_sub(1)).filter(|&i| bend(&self.points[i - 1..=i + 1]) > MAX_BEND_CENTS);
-        let (above, below): (Vec<usize>, Vec<usize>) = sharp.partition(|&i| self.points[i].0 > 0.0);
-        let first_above = above.first().copied().unwrap_or(self.points.len());
-        let last_below = below.last().map(|&i| i + 1).unwrap_or(0);
-        self.points.truncate(first_above);
-        self.points.drain(..last_below.min(self.points.len()));
+        // The typical slope of a side: the median over its inner half, which saturation at
+        // the far end cannot have dragged down.
+        let median = |outward: Vec<(f32, f32)>| {
+            let mut s: Vec<f32> = outward.windows(2).map(|w| slope(w[0], w[1]).abs()).collect();
+            s.truncate(s.len().div_ceil(2));
+            s.sort_by(|a, b| a.total_cmp(b));
+            s.get(s.len() / 2).copied()
+        };
+        let centre = self.points.partition_point(|p| p.0 < 0.0);
+        let below_outward: Vec<_> = self.points[..(centre + 1).min(self.points.len())].iter().rev().copied().collect();
+        let (below_med, above_med) = (median(below_outward), median(self.points[centre..].to_vec()));
+        let p = &self.points;
+        let collapsed =
+            |med: Option<f32>, beyond: (f32, f32), other: (f32, f32)| med.is_some_and(|m| slope(beyond, other).abs() < COLLAPSE * m);
+        let sharp = |i: usize| i >= 1 && i + 1 < p.len() && bend(&p[i - 1..=i + 1]) > MAX_BEND_CENTS;
+        let mut cut_above = p.len();
+        let mut cut_below = 0;
+        for i in 1..p.len().saturating_sub(1) {
+            if !sharp(i) {
+                continue;
+            }
+            // The knee starts at the first sharp point just before the slope gives out.
+            if p[i].0 > 0.0 {
+                if collapsed(above_med, p[i], p[i + 1]) {
+                    cut_above = cut_above.min((i.saturating_sub(KNEE_REACH)..=i).find(|&j| sharp(j) && p[j].0 > 0.0).unwrap_or(i));
+                }
+            } else if p[i].0 < 0.0 && collapsed(below_med, p[i - 1], p[i]) {
+                cut_below = cut_below.max((i..=i + KNEE_REACH).rev().find(|&j| sharp(j) && p[j].0 < 0.0).unwrap_or(i) + 1);
+            }
+        }
+        self.points.truncate(cut_above);
+        self.points.drain(..cut_below.min(self.points.len()));
     }
 
     fn into_table(mut self) -> Option<Table> {
@@ -270,7 +301,7 @@ impl Run {
             _ => {}
         }
         // A long block still has to sit through settling, one read phase at a time.
-        self.elapsed += dt_ms.clamp(0.0, READ_MS);
+        self.elapsed += if dt_ms.is_nan() { 0.0 } else { dt_ms.clamp(0.0, READ_MS) };
         if self.elapsed < SETTLE_MS {
             return Step::Output(self.output);
         }
@@ -613,6 +644,29 @@ mod tests {
     #[test]
     fn a_soft_saturating_vco_gives_failure_or_an_honest_table() {
         assert_honest(&Vco { soft: true, ceiling_hz: 20000.0, ..Vco::new() });
+    }
+
+    #[test]
+    fn a_curved_vco_keeps_its_whole_range() {
+        let vco = Vco { bow: 0.5, ..Vco::new() };
+        let Outcome::Tuned { table, off } = drive(Run::tune(), &vco, 25.0, 0.0).0 else { panic!("did not tune") };
+        let (lo, hi) = table.range();
+        // The 20 Hz floor is note 15 and the 4 kHz ceiling note 95.
+        assert!(lo <= 20 && hi >= 90, "range {lo}..{hi}");
+        assert!(off.is_empty(), "{off:?}");
+        for note in lo..=hi {
+            assert!(error_cents(&vco, &table, note).abs() < 5.0, "note {note}");
+        }
+    }
+
+    #[test]
+    fn a_nan_block_counts_as_no_time() {
+        let mut run = Run::tune();
+        let heard = Some(Pitch { hz: 440.0, clarity: 0.95 });
+        assert_eq!(run.step(f32::NAN, heard), Step::Output(0.0));
+        assert_eq!(run.step(50.0, heard), Step::Output(0.0));
+        assert_eq!(run.step(50.0, heard), Step::Output(0.0));
+        assert_eq!(run.step(50.0, heard), Step::Output(0.04));
     }
 
     #[test]
