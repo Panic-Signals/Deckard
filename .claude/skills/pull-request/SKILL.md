@@ -1,6 +1,6 @@
 ---
 name: pull-request
-description: Use when opening, writing or updating a pull request for DECKARD - classifies the change (bug fix, enhancement, documentation, other) for the triager, writes a one-to-two sentence summary, reviewer test steps, target platforms, and before/after screenshots of UI changes.
+description: Use when opening, writing or updating a pull request for DECKARD - classifies the change (bug fix, enhancement, documentation, other) for the triager, writes a one-to-two sentence summary, reviewer test steps, and target platforms.
 ---
 
 # Writing a DECKARD pull request
@@ -10,8 +10,8 @@ A DECKARD pull request is read by two people:
 - **The triager** reads the **Type** and adds the matching label. The label decides
   which section of the release notes the change lands in (`.github/release.yml`).
   Contributors don't add labels themselves.
-- **The peer reviewer** reads the rest to find out what changed, check that it works,
-  and see what it looks like.
+- **The peer reviewer** reads the rest to find out what changed and check that it
+  works.
 
 The body follows `.github/pull_request_template.md`. Fill in every section. Write "None"
 when a section doesn't apply, and never delete a heading.
@@ -69,55 +69,6 @@ Audio Units, ASIO, CoreMIDI or platform installers is for that system only.
 Also say which systems you actually tried it on. If you're on a Mac, run
 `scripts/check-platforms.sh` to type-check the other two before CI does.
 
-## 5. Screenshots: before and after
-
-For any change a user can see (the app window, menus, dialogs, the MK3's screens),
-attach a **before** and an **after** picture of the same view. Documentation and
-other changes with nothing to see: write "None".
-
-DECKARD draws its own window with egui; it isn't a web page, so browser tools like
-Playwright can't capture it. Use DECKARD's own screenshot mode instead
-(DEVELOPMENT.md, "Command line"):
-
-```sh
-# Keep screenshots from touching your real settings, recent list and session.
-export DECKARD_SETTINGS="$(mktemp -d)"
-
-# Before: build and capture main.
-git stash   # or: git switch main
-cargo build
-./target/debug/deckard path/to/project.mxprj --view ideas --group 0 --screenshot before.png
-
-# After: build and capture your branch, with the same arguments.
-git stash pop   # or: git switch -
-cargo build
-./target/debug/deckard path/to/project.mxprj --view ideas --group 0 --screenshot after.png
-```
-
-- **Same view:** use the same project, flags and window for both pictures, so the
-  only difference is your change.
-- **Choosing the view:** `--view ideas|song|mix|lfos`, `--group N`, `--sound N`,
-  `--pattern N`, `--piano`, `--draw`, `--lane ...` and the others in DEVELOPMENT.md.
-- **No flag for it:** script pointer input with `--input clicks.txt` (lines of
-  `<seconds> <move|down|up> <x> <y>`), and add `--wait SECS` so it finishes before
-  the picture is taken.
-- **The MK3's screens:** the on-screen controller panel (`--scripts DIR`, `--press`,
-  `--hold`, `--pad`). For hardware, a photo is fine.
-- **Sound or timing changes:** describe what to listen for under **How to check it
-  works**, and attach a short audio or screen recording if it helps.
-
-Drag the PNGs into the pull request's description on GitHub to upload them, and put
-them side by side:
-
-```markdown
-| Before | After |
-|--------|-------|
-| ![before](url) | ![after](url) |
-```
-
-Don't commit screenshots to the repository unless they're replacing images in
-`docs/screenshots/`.
-
 ## Before opening it
 
 - [ ] `cargo build` and `cargo test --workspace` pass.
@@ -131,4 +82,4 @@ Don't commit screenshots to the repository unless they're replacing images in
       ("Load Groups without freezing the UI"), not "fix bug" or a branch name.
 
 Create the pull request with `gh pr create --body-file <file>` using the template's
-sections, or paste them into GitHub's form. Then upload the screenshots there.
+sections, or paste them into GitHub's form.
