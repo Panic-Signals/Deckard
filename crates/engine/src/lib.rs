@@ -2342,8 +2342,9 @@ fn input_routes(p: &Project) -> Vec<InRoute> {
     for (g, grp) in p.groups.iter().enumerate() {
         for (s, snd) in grp.sounds.iter().enumerate() {
             let deckard_model::AudioSource::Ext(n) = snd.channel.audio_in else { continue };
-            // A chain starting with an instrument plays that, not the input.
-            if muting(p, g, s).silent || snd.slots.first().is_some_and(|x| x.is_instrument()) {
+            // A chain starting with an instrument plays that, not the input; Zhora's
+            // return is its own (see `zhora_rt`).
+            if muting(p, g, s).silent || snd.slots.first().is_some_and(|x| x.is_instrument()) || zhora_rt::is_zhora(snd) {
                 continue;
             }
             let n = n.max(0) as usize;
@@ -4840,7 +4841,7 @@ impl Engine {
         while q.len() > frames * 4 + 512 {
             q.pop_front();
         }
-        zhora_rt::hear(&mut self.zhoras, &mut self.bufs, &mut self.zhora_in, &q, frames);
+        zhora_rt::hear(&self.zhoras, &mut self.bufs, &mut self.zhora_in, &q, frames);
         for &(g, s, ..) in &self.in_routes {
             if let Some(b) = self.bufs.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut) {
                 if b.inp.len() < frames * 2 {

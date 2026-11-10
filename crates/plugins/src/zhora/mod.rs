@@ -155,14 +155,14 @@ static PAGES: &[Page] = &[
     },
 ];
 
-// The signals, in `Engine::cv` order.
+// The signals, in `Engine::cv` order (and [`outputs`]').
 const PITCH: usize = 0;
 const GATE: usize = 1;
 const CLOCK: usize = 2;
 const ENV: usize = 3;
 const VEL: usize = 4;
 const MOD: usize = 5;
-const SIGNALS: usize = 6;
+pub const SIGNALS: usize = 6;
 
 /// Frames between detections.
 const HOP: usize = 1024;
@@ -192,6 +192,25 @@ const TUNER_STOPPED: &str = "The tuner has stopped";
 /// The channel of an output picker's value: 0 is None, n is channel n - 1.
 fn channel(v: f64) -> Option<usize> {
     step(v, OUT_STEPS).checked_sub(1)
+}
+
+/// Parameter `id`'s value in `saved` (from [`crate::native::saved_params`]), else its default.
+fn saved_value(saved: &[(u32, f64)], id: u32) -> f64 {
+    let default = PARAMS.iter().find(|p| p.id == id).map_or(0.0, |p| p.default);
+    saved.iter().find(|p| p.0 == id).map_or(default, |p| p.1)
+}
+
+/// The channel each signal goes to (pitch, gate, clock, envelope, velocity, mod wheel), as
+/// saved in Zhora's Maschine `chunk`; all None when it can't be read.
+pub fn outputs(chunk: &[u8]) -> [Option<u8>; SIGNALS] {
+    let saved = crate::native::saved_params(chunk).unwrap_or_default();
+    std::array::from_fn(|signal| channel(saved_value(&saved, PITCH_OUT + signal as u32)).and_then(|c| u8::try_from(c).ok()))
+}
+
+/// The input pair (0-based) saved in Zhora's Maschine `chunk`; None when it can't be read.
+pub fn input_pair(chunk: &[u8]) -> Option<usize> {
+    let saved = crate::native::saved_params(chunk).ok()?;
+    step(saved_value(&saved, INPUT), INPUT_STEPS).checked_sub(1)
 }
 
 /// `note`'s name in DECKARD's naming (MIDI note 60 is C3).
@@ -1335,6 +1354,21 @@ mod tests {
         assert_eq!(page(1), [10, 11, 12, 13, 30, 31, 32, 33]);
         assert_eq!(page(2), [20, 21, 22, 23, 30, 31, 32, 33]);
         assert_eq!(page(3), [5, 24, 6, 25, 30, 31, 32, 33]);
+    }
+
+    #[test]
+    fn saved_outputs_and_input_read_from_a_chunk() {
+        let id = crate::state::PluginId::parse(&CLASS.plugin_id(), CLASS.name).unwrap();
+        let mut p = crate::Plugin::native(&CLASS, id, CLASS.name, 48_000.0);
+        p.set_param(PITCH_OUT, 3.0 / OUT_STEPS as f64);
+        p.set_param(MOD_OUT, 32.0 / OUT_STEPS as f64);
+        p.set_param(INPUT, 2.0 / INPUT_STEPS as f64);
+        let chunk = p.save_chunk();
+        assert_eq!(outputs(&chunk), [Some(2), None, None, None, None, Some(31)]);
+        assert_eq!(input_pair(&chunk), Some(1));
+        assert_eq!(outputs(&[]), [None; SIGNALS], "the defaults");
+        assert_eq!(input_pair(&[]), None);
+        assert_eq!(outputs(b"not a chunk at all"), [None; SIGNALS]);
     }
 
     #[test]

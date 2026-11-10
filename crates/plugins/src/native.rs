@@ -276,26 +276,11 @@ impl Instance {
     /// Restore settings from [`Instance::save`]'s bytes (empty: the defaults).
     pub fn load(&mut self, data: &[u8]) -> Result<(), String> {
         let mut values: Vec<f64> = self.class.params.iter().map(|p| p.default).collect();
-        let mut extra: &[u8] = &[];
-        if !data.is_empty() {
-            let mut r = Reader(data);
-            if r.take(4)? != MAGIC {
-                return Err(format!("{}: not a DECKARD state", self.class.name));
+        let (saved, extra) = read_state(data).map_err(|e| format!("{}: {e}", self.class.name))?;
+        for (id, v) in saved {
+            if let Some(i) = self.class.params.iter().position(|p| p.id == id) {
+                values[i] = v;
             }
-            let version = r.u32()?;
-            if version > VERSION {
-                return Err(format!("{}: saved by a newer DECKARD (state version {version})", self.class.name));
-            }
-            for _ in 0..r.u32()? {
-                let (id, v) = (r.u32()?, f64::from_le_bytes(r.take(8)?.try_into().unwrap()));
-                if let Some(i) = self.class.params.iter().position(|p| p.id == id)
-                    && v.is_finite()
-                {
-                    values[i] = v.clamp(0.0, 1.0);
-                }
-            }
-            let n = r.u32()? as usize;
-            extra = r.take(n)?;
         }
         self.engine.reset();
         self.engine.load(extra);
@@ -502,6 +487,38 @@ impl Instance {
     }
 }
 
+/// A saved state's parameter values (id, normalized; non-finite ones left out) and the
+/// engine's own bytes (see the module docs). Empty: none.
+fn read_state(data: &[u8]) -> Result<(Vec<(u32, f64)>, &[u8]), String> {
+    if data.is_empty() {
+        return Ok((Vec::new(), &[]));
+    }
+    let mut r = Reader(data);
+    if r.take(4)? != MAGIC {
+        return Err("not a DECKARD state".into());
+    }
+    let version = r.u32()?;
+    if version > VERSION {
+        return Err(format!("saved by a newer DECKARD (state version {version})"));
+    }
+    let mut values = Vec::new();
+    for _ in 0..r.u32()? {
+        let (id, v) = (r.u32()?, f64::from_le_bytes(r.take(8)?.try_into().unwrap()));
+        if v.is_finite() {
+            values.push((id, v.clamp(0.0, 1.0)));
+        }
+    }
+    let n = r.u32()? as usize;
+    Ok((values, r.take(n)?))
+}
+
+/// The parameter values (id, normalized) saved in a native plug-in's Maschine chunk, as
+/// [`Instance::load`] reads them; parameters not saved are left out.
+pub fn saved_params(chunk: &[u8]) -> Result<Vec<(u32, f64)>, String> {
+    let state = crate::state::unwrap_chunk(chunk, crate::state::Format::Vst3)?;
+    Ok(read_state(&state.component)?.0)
+}
+
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -588,6 +605,27 @@ mod tests {
         assert_eq!(q.output_count(), 1);
         assert_eq!(q.output_name(0), "Out 1");
         assert!(q.output_bus(1, 16).is_none());
+    }
+
+    /// The saved values read from a chunk without making the plug-in; a state from a newer
+    /// DECKARD is refused, and one that isn't a chunk is an error.
+    #[test]
+    fn saved_params_reads_a_chunk() {
+        let class = CLASSES[0];
+        let param = class.params.iter().find(|p| p.steps == 0).unwrap().id;
+        let id = crate::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+        let mut p = crate::Plugin::native(class, id, class.name, 48_000.0);
+        p.set_param(param, 0.25);
+        let saved = saved_params(&p.save_chunk()).unwrap();
+        assert_eq!(saved.len(), class.params.len());
+        assert!(saved.contains(&(param, 0.25)));
+        assert!(saved_params(&[]).unwrap().is_empty());
+        let mut newer = Instance::new(class, 48_000.0).save();
+        newer[4..8].copy_from_slice(&(VERSION + 1).to_le_bytes());
+        assert!(read_state(&newer).unwrap_err().contains("newer"));
+        let mut odd = Instance::new(class, 48_000.0).save();
+        odd[16..24].copy_from_slice(&f64::NAN.to_le_bytes());
+        assert_eq!(read_state(&odd).unwrap().0.len(), class.params.len() - 1, "a value that isn't finite is left out");
     }
 
     /// A native plug-in's state goes through Maschine's chunk (a `.vstpreset` in the

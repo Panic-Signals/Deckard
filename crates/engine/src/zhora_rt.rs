@@ -3,30 +3,19 @@
 //! go out on the CV only channels.
 
 use super::{Engine, JOB_FRAMES, SampleCache, SoundBufs};
-use deckard_model::{AudioSource, Project, Sound};
+use deckard_model::{AudioSource, PluginRef, Project, Sound};
+use deckard_plugins::zhora::{SIGNALS, outputs};
 use deckard_plugins::{Shared, Slot};
 use std::collections::VecDeque;
 
-/// Zhora's signals: pitch, gate, clock, envelope, velocity, mod wheel.
-const SIGNALS: usize = 6;
-/// The ids of Zhora's output parameters, in signal order, and their steps (saved: never
-/// renumbered).
-const OUT_IDS: [u32; SIGNALS] = [1, 2, 3, 4, 5, 6];
-const OUT_STEPS: f64 = 32.0;
-/// The id of Zhora's input parameter, and its steps.
-const INPUT_ID: u32 = 30;
-const INPUT_STEPS: f64 = 16.0;
-
-/// A Zhora at play: its sound, its instance, and whether the sound is muted (its return
-/// is silent; its tuner still hears). `pair` and `outs` are what it had last, for a span
-/// its instance is busy.
+/// A Zhora at play: its sound, its instance, whether the sound is muted (its return is
+/// silent; its tuner still hears), and its input gain (the return's, as any sound's input).
 pub(crate) struct ZhoraRt {
     pub g: usize,
     pub s: usize,
     pub plugin: Shared,
     pub silent: bool,
-    pair: Option<usize>,
-    outs: [Option<u8>; SIGNALS],
+    pub gain: f32,
 }
 
 /// One of a Zhora's signals on a channel, for the screens.
@@ -43,97 +32,59 @@ pub(crate) fn is_zhora(snd: &Sound) -> bool {
     snd.plugin.as_ref().is_some_and(|p| deckard_plugins::zhora::is_zhora(&p.id))
 }
 
+/// `p`'s Zhora sounds in project order (group, then sound), with their plug-ins.
+fn zhora_sounds(p: &Project) -> impl Iterator<Item = (usize, usize, &Sound, &PluginRef)> {
+    p.groups.iter().enumerate().flat_map(|(g, grp)| {
+        grp.sounds.iter().enumerate().filter_map(move |(s, snd)| Some((g, s, snd, snd.plugin.as_ref().filter(|_| is_zhora(snd))?)))
+    })
+}
+
 /// Whether `p` wants the interface's input: a sound takes it, or a Zhora listens.
 pub fn project_takes_input(p: &Project) -> bool {
     p.groups.iter().flat_map(|g| &g.sounds).any(|s| matches!(s.channel.audio_in, AudioSource::Ext(_)) || is_zhora(s))
 }
 
-/// The saved parameter values (id, normalized) in a native plug-in's chunk; none when it
-/// can't be read.
-fn saved_params(chunk: &[u8]) -> Vec<(u32, f64)> {
-    let Ok(state) = deckard_plugins::state::unwrap_chunk(chunk, deckard_plugins::state::Format::Vst3) else { return Vec::new() };
-    let d = &state.component;
-    if d.get(..4) != Some(b"DKRD".as_slice()) {
-        return Vec::new();
-    }
-    let u32_at = |at: usize| d.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
-    let n = u32_at(8).unwrap_or(0) as usize;
-    (0..n)
-        .map_while(|i| {
-            let at = 12 + i * 12;
-            Some((u32_at(at)?, f64::from_le_bytes(d.get(at + 4..at + 12)?.try_into().ok()?)))
-        })
-        .collect()
-}
-
-/// Parameter `id`'s saved value (0 when it isn't saved).
-fn saved(params: &[(u32, f64)], id: u32) -> f64 {
-    params.iter().find(|p| p.0 == id).map_or(0.0, |p| p.1).clamp(0.0, 1.0)
-}
-
-/// A picker's choice (0: None) as 0-based, as the instrument reads it.
-fn picked(v: f64, steps: f64) -> Option<usize> {
-    ((v * steps).round() as usize).checked_sub(1)
-}
-
 /// Each Zhora's outputs as saved, in the order they own channels: Zhoras in project order,
 /// then signals in order. Outputs set to None are left out.
 pub fn zhora_outs(p: &Project) -> Vec<ZhoraOut> {
-    let mut out = Vec::new();
-    for (g, grp) in p.groups.iter().enumerate() {
-        for (s, snd) in grp.sounds.iter().enumerate() {
-            let Some(pr) = snd.plugin.as_ref().filter(|_| is_zhora(snd)) else { continue };
-            let params = saved_params(&pr.chunk);
-            for (signal, &id) in OUT_IDS.iter().enumerate() {
-                if let Some(ch) = picked(saved(&params, id), OUT_STEPS) {
-                    out.push(ZhoraOut { g, s, signal, channel: ch as u8 });
-                }
-            }
-        }
-    }
-    out
+    zhora_sounds(p)
+        .flat_map(|(g, s, _, pr)| {
+            outputs(&pr.chunk).into_iter().enumerate().filter_map(move |(signal, ch)| Some(ZhoraOut { g, s, signal, channel: ch? }))
+        })
+        .collect()
 }
 
 /// `project`'s Zhoras, with the instances `cache` has for them (sounds whose plug-in
 /// didn't load are left out).
 pub(crate) fn zhoras_of(project: &Project, cache: &SampleCache) -> Vec<ZhoraRt> {
-    let mut out = Vec::new();
-    for (g, grp) in project.groups.iter().enumerate() {
-        for (s, snd) in grp.sounds.iter().enumerate() {
-            let Some(pr) = snd.plugin.as_ref().filter(|_| is_zhora(snd)) else { continue };
-            let Some(plugin) = cache.loaded_plugin(Slot::Sound { group: g, sound: s }, &pr.id, &pr.name) else { continue };
-            let params = saved_params(&pr.chunk);
-            let outs = OUT_IDS.map(|id| picked(saved(&params, id), OUT_STEPS).and_then(|c| u8::try_from(c).ok()));
-            let pair = picked(saved(&params, INPUT_ID), INPUT_STEPS);
-            out.push(ZhoraRt { g, s, plugin, silent: super::muting(project, g, s).muted, pair, outs });
-        }
-    }
-    out
+    zhora_sounds(project)
+        .filter_map(|(g, s, snd, pr)| {
+            let plugin = cache.loaded_plugin(Slot::Sound { group: g, sound: s }, &pr.id, &pr.name)?;
+            let gain = deckard_model::level_gain(snd.channel.input_gain) as f32;
+            Some(ZhoraRt { g, s, plugin, silent: super::muting(project, g, s).muted, gain })
+        })
+        .collect()
 }
 
 /// Each Zhora hears the first `frames` frames of `q` (its input pair, before mute); an
-/// unmuted one's sound takes them too, as its return. No allocating.
+/// unmuted one's sound takes them too, at its input gain, as its return. No allocating.
 pub(crate) fn hear(
-    zhoras: &mut [ZhoraRt],
+    zhoras: &[ZhoraRt],
     bufs: &mut [Vec<Option<Box<SoundBufs>>>],
     scratch: &mut (Vec<f32>, Vec<f32>),
     q: &VecDeque<[f32; 32]>,
     frames: usize,
 ) {
     let n = q.len().min(frames).min(JOB_FRAMES);
-    for z in zhoras.iter_mut() {
-        // Busy: it misses this block, and its return plays the pair it had.
-        let mut p = z.plugin.try_lock().ok();
-        if let Some(p) = &p {
-            z.pair = p.input_pair();
-        }
-        let Some((l, r)) = z.pair.map(|k| (2 * k, 2 * k + 1)).filter(|&(_, r)| r < 32) else { continue };
+    for z in zhoras {
+        // (Held only for moments elsewhere, as for its notes; a poisoned one is skipped.)
+        let Ok(mut p) = z.plugin.lock() else { continue };
+        let Some((l, r)) = p.input_pair().map(|k| (2 * k, 2 * k + 1)).filter(|&(_, r)| r < 32) else { continue };
         for (f, frame) in q.iter().take(n).enumerate() {
             (scratch.0[f], scratch.1[f]) = (frame[l], frame[r]);
         }
-        if let Some(p) = p.as_mut() {
-            p.input(&scratch.0[..n], &scratch.1[..n]);
-        }
+        p.input(&scratch.0[..n], &scratch.1[..n]);
+        drop(p);
         if z.silent {
             continue;
         }
@@ -141,7 +92,7 @@ pub(crate) fn hear(
         b.inp.clear();
         b.inp.resize(frames * 2, 0.0);
         for f in 0..n {
-            (b.inp[f * 2], b.inp[f * 2 + 1]) = (scratch.0[f], scratch.1[f]);
+            (b.inp[f * 2], b.inp[f * 2 + 1]) = (scratch.0[f] * z.gain, scratch.1[f] * z.gain);
         }
         b.inp_on = true;
     }
@@ -158,34 +109,27 @@ impl Engine {
         if mask == 0 {
             return;
         }
-        let bit = |ch: u8| 1u32.checked_shl(u32::from(ch)).unwrap_or(0);
-        let mut taken = self.cv_routes.iter().fold(0, |a, r| a | bit(r.channel)) & mask;
+        let bit = |ch: usize| u32::try_from(ch).ok().and_then(|c| 1u32.checked_shl(c)).unwrap_or(0);
+        let mut taken = self.cv_routes.iter().fold(0, |a, r| a | bit(r.channel.into())) & mask;
         let mut owned = 0;
-        for z in self.zhoras.iter_mut() {
-            // Busy: its channels hold their levels this span, still its.
-            let p = z.plugin.try_lock().ok();
+        for z in &self.zhoras {
+            let Ok(p) = z.plugin.lock() else { continue };
             for signal in 0..SIGNALS {
-                let cv = p.as_ref().map(|p| p.cv(signal, frames));
-                if let Some(cv) = &cv {
-                    z.outs[signal] = cv.and_then(|(ch, _)| u8::try_from(ch).ok());
-                }
-                let Some(ch) = z.outs[signal] else { continue };
+                let Some((ch, values)) = p.cv(signal, frames) else { continue };
                 let b = bit(ch);
                 if mask & b == 0 || taken & b != 0 {
                     continue;
                 }
                 (taken, owned) = (taken | b, owned | b);
-                let values = cv.flatten().map_or(&[][..], |(_, v)| v);
-                let mut buf = ext.get_mut(ch as usize / 2);
-                let side = ch as usize % 2;
-                let last = &mut self.cv_last[ch as usize];
+                let mut buf = ext.get_mut(ch / 2);
+                let last = &mut self.cv_last[ch];
                 for n in 0..frames {
                     if let Some(&v) = values.get(n)
                         && v.is_finite()
                     {
                         *last = v.clamp(-1.0, 1.0);
                     }
-                    if let Some(s) = buf.as_mut().and_then(|b| b.get_mut(at + n * 2 + side)) {
+                    if let Some(s) = buf.as_mut().and_then(|b| b.get_mut(at + n * 2 + ch % 2)) {
                         *s = *last;
                     }
                 }
@@ -210,6 +154,7 @@ mod tests {
     const PITCH: u32 = 1;
     const GATE: u32 = 2;
     const CLOCK: u32 = 3;
+    const ENV: u32 = 4;
     const VEL: u32 = 5;
     const MOD: u32 = 6;
 
@@ -363,6 +308,48 @@ mod tests {
         let mut e = ear_engine(&p);
         let (out, _) = run(&mut e, 64, 0.0);
         assert!(out[126] > 0.01 && out[126] < 0.45, "{}", out[126]);
+    }
+
+    #[test]
+    fn a_zhora_return_takes_the_sounds_input_gain() {
+        let mut p = zhora_project(&[]);
+        p.groups[0].sounds[0].channel.input_gain = 0.5;
+        let mut e = ear_engine(&p);
+        let (out, _) = run(&mut e, 64, 0.0);
+        let gain = deckard_model::level_gain(0.5) as f32;
+        assert!(out.chunks(2).all(|f| near(f[0], 0.5 * gain) && near(f[1], -0.25 * gain)), "{:?}", &out[..8]);
+        assert_eq!(heard(), vec![(0.5, -0.25); 64], "the tuner hears it before the gain");
+    }
+
+    /// A Zhora sound also set to an interface input (its chain not starting with Zhora)
+    /// plays only Zhora's return, under Zhora's mute.
+    #[test]
+    fn a_zhora_sound_set_to_an_input_plays_only_its_return() {
+        for muted in [false, true] {
+            let mut p = zhora_project(&[]);
+            let snd = &mut p.groups[0].sounds[0];
+            (snd.slots, snd.channel.audio_in, snd.muted) = (Vec::new(), AudioSource::Ext(1), muted);
+            let mut e = ear_engine(&p);
+            let (out, _) = run(&mut e, 64, 0.0);
+            let want = if muted { 0.0 } else { 0.5 };
+            assert!(out.chunks(2).all(|f| near(f[0], want)), "muted {muted}: {:?}", &out[..8]);
+        }
+    }
+
+    #[test]
+    fn stopping_drops_a_held_gate_and_envelope_and_holds_pitch() {
+        let p = zhora_project(&[(PITCH, on(2)), (GATE, on(3)), (ENV, on(4))]);
+        let mut cache = SampleCache::default();
+        let mut e = engine(&p, &mut cache, 0b1_1100);
+        e.sequencing = true;
+        note(&mut e, 0, 72);
+        let (_, ext) = run(&mut e, 50, 0.0);
+        assert!(near(channel(&ext, 3)[49], 0.5) && channel(&ext, 4)[49] > 0.1);
+        e.stop();
+        let (_, ext) = run(&mut e, 20, 0.0);
+        assert!(channel(&ext, 2).iter().all(|&v| near(v, Table::nominal(72.0))), "pitch holds");
+        assert!(channel(&ext, 3).iter().all(|&v| v == 0.0), "gate: {:?}", channel(&ext, 3));
+        assert!(channel(&ext, 4).iter().all(|&v| v == 0.0), "envelope: {:?}", channel(&ext, 4));
     }
 
     #[test]
