@@ -25,18 +25,18 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 11
+## Payload, version 12
 
-Version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 11
-and reads all eleven.
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 12
+and reads all twelve.
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
 IEEE single.
 
 ```text
-u32 version = 11       (10: without the CV routes; 9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
+u32 version = 12       (11: without the Audio offsets; 10: without the CV routes either; 9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
                        2: without routes either; 1: without Pad Touch either)
 u32 pattern_count
 pattern × pattern_count:
@@ -100,6 +100,11 @@ u32 view_len, u8 × view_len   version 10: the app's view as UTF-8 text, part of
                               screen ("" if there's none)
 u32 cv_len, u8 × cv_len       version 11: the project's CV routes as UTF-8 text
                               (`mod_matrix::cv_to_text`)
+u32 offset_count                version 12: the Audio offsets, those not 0
+offset × offset_count:
+  u32 group, u32 pattern      the pattern (clip patterns are 2^24 + k)
+  u32 sound                   the sound whose audio it is
+  i64 ticks                   from 1.1.1 (negative: earlier)
 ```
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's

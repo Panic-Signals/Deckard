@@ -213,6 +213,8 @@ in bars in Sync mode.
   - It is loaded into the focused sound's Sampler as one zone covering all keys and
     velocities. Other plug-ins in that sound are removed, but a Sampler stays.
   - In Loop mode it goes into an Audio module.
+  - "The recorded audio will be stored in the Sound that was under focus as you started the
+    recording." A sound with an Audio plug-in takes the recording as a take in any mode.
 - **Files:**
   - Saved in the **Recordings** folder of the user directory, or the project folder's
     Recordings when "Prefer Project Folder" is on.
@@ -551,6 +553,15 @@ range = the whole file. [inferred: default loop off, gain 0.75, root key 60]
   Sampler first: its other modules and plug-ins are removed, as one undo step
   (`Document::sampler_only`), as the manual describes. A sound with a Sampler keeps its
   chain; the take replaces its zones.
+- **Where a recording goes** (`App::finish_recording`):
+  - The destination is the sound focused when START was pressed, in every mode.
+  - Detect or Sync onto a sound with an Audio plug-in adds a take to it, selected and on in
+    the pattern (not a Sampler over it). Detect's take length is the recording's beats
+    rounded to the nearest sixteenth.
+  - Loop with Target Sound and no free sound left adds a take to the group's last sound
+    with an Audio plug-in; Auto keeps the group's last sound.
+  - A new take sits at offset 0 (1.1.1). Dragging the waveform in the pattern editor moves
+    it (`docs/audio-plugin.md`).
 - **SAMPLE LED:** dim while the page is hidden. The script asks for `LS_DIM_FLASH`, and
   DECKARD shows that dim, as `LS_DIM`.
 - **Input meter:** RECORD's meter shows the chosen source's level while nothing is recorded.

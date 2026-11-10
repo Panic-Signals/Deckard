@@ -787,12 +787,18 @@ impl Take {
     }
 }
 
-/// A sound's audio on in a pattern (its `AudioEvent`): the take it plays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A sound's audio on in a pattern (its `AudioEvent`): the take it plays, and how far
+/// (ticks from 1.1.1) its first frame sounds (negative: earlier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AudioCue {
     pub sound: usize,
     pub take: usize,
+    pub offset: i64,
 }
+
+/// The `AudioEvent` field DECKARD keeps an [`AudioCue::offset`] in (stripped from
+/// Maschine's archive on save).
+pub const AUDIO_OFFSET: &str = "deckard:audio_offset";
 
 /// A modulated parameter (a lane of a channel's `modulators`): a parameter of the
 /// module in chain slot `slot` (`field` as [`SlotInfo::params`] names it), or with no
@@ -2345,7 +2351,7 @@ fn pattern(
             // The sound's Audio plug-in plays here (this take).
             if ev.type_name == "NI::MASCHINE::DATA::AudioEvent" {
                 if let Some(&take) = ev.get("take").and_then(|t| ix.obj(t)).and_then(|t| take_ix.get(&(t as *const Obj))) {
-                    out.audio.push(AudioCue { sound, take });
+                    out.audio.push(AudioCue { sound, take, offset: ev.get(AUDIO_OFFSET).and_then(Value::as_int).unwrap_or(0) });
                 }
                 continue;
             }

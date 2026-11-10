@@ -14,8 +14,8 @@ pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
 /// CC routes), 7 (before scene settings), 8 (before extra outputs), 9 (before the
-/// app's view) and 10 (before CV routes) still read.
-const VERSION: u32 = 11;
+/// app's view), 10 (before CV routes) and 11 (before audio offsets) still read.
+const VERSION: u32 = 12;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -82,6 +82,8 @@ pub(crate) struct Block {
     pub extra_outs: String,
     /// The project's CV routes as [`deckard_model::mod_matrix::cv_to_text`] (version 11).
     pub cv_routes: String,
+    /// The patterns' Audio offsets (group, pattern, sound, ticks), those not 0 (version 12).
+    pub audio_offsets: Vec<(usize, usize, usize, i64)>,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -284,6 +286,13 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
             w.u8(c);
         }
     }
+    w.u32(b.audio_offsets.len());
+    for &(g, p, s, ticks) in &b.audio_offsets {
+        w.u32(g);
+        w.u32(p);
+        w.u32(s);
+        w.i64(ticks);
+    }
     w.0
 }
 
@@ -406,6 +415,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             text.push(r.u8()?);
         }
         b.cv_routes = String::from_utf8_lossy(&text).into_owned();
+    }
+    if version >= 12 {
+        for _ in 0..r.count(20)? {
+            b.audio_offsets.push((r.u32()?, r.u32()?, r.u32()?, r.i64()?));
+        }
     }
     Ok(b)
 }
@@ -554,6 +568,9 @@ impl Document {
         b.scene_settings = self.scene_settings_text();
         b.extra_outs = deckard_model::extra_out::to_text(&self.project.extra_outs);
         b.cv_routes = deckard_model::mod_matrix::cv_to_text(&self.project.cv_routes);
+        b.audio_offsets = patterns(&self.project)
+            .flat_map(|(g, p, pt)| pt.audio.iter().filter(|c| c.offset != 0).map(move |c| (g, p, c.sound, c.offset)))
+            .collect();
         let payload = (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
@@ -564,7 +581,8 @@ impl Document {
             || !b.cc_routes.is_empty()
             || !b.scene_settings.is_empty()
             || !b.extra_outs.is_empty()
-            || !b.cv_routes.is_empty())
+            || !b.cv_routes.is_empty()
+            || !b.audio_offsets.is_empty())
         .then(|| encode(&b));
         mxprj::container::set_root_child(archived, DOMAIN, ITEM, FRAME, payload.as_deref())
     }
@@ -649,6 +667,12 @@ impl Document {
         let _ = self.run(&ops);
         let ops = self.cv_route_ops(&deckard_model::mod_matrix::cv_from_text(&b.cv_routes));
         let _ = self.run(&ops);
+        for (g, p, s, ticks) in b.audio_offsets {
+            // A pattern or sound with no audio now: the error is ignored on purpose.
+            if let Ok(ops) = self.audio_offset_ops(g, p, s, ticks) {
+                let _ = self.run(&ops);
+            }
+        }
         self.screen = b.screen;
         self.refresh();
         // Strips whose slot holds another plug-in, or none (the file changed elsewhere).
@@ -922,11 +946,33 @@ mod tests {
         let b = Block { extra_outs: "ex".into(), ..Block::default() };
         let full = Block { cv_routes: "cv".into(), ..b.clone() };
         let mut bytes = encode(&full);
-        // Version 10: no CV route text (a length and 2 bytes) at the end.
+        // Version 10: no CV route text (a length and 2 bytes) and no audio offsets (a
+        // count of 0) at the end.
         bytes[..4].copy_from_slice(&10u32.to_le_bytes());
-        bytes.truncate(bytes.len() - 6);
+        bytes.truncate(bytes.len() - 10);
         assert_eq!(decode(&bytes).unwrap(), b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
+    }
+
+    #[test]
+    fn a_version_11_block_reads_with_no_offsets() {
+        let b = Block { cv_routes: "cv".into(), ..Block::default() };
+        let full = Block { audio_offsets: vec![(0, 1, 3, -960)], ..b.clone() };
+        let mut bytes = encode(&full);
+        // Version 11: no audio offsets (a count and one 20-byte entry) at the end.
+        bytes[..4].copy_from_slice(&11u32.to_le_bytes());
+        bytes.truncate(bytes.len() - 24);
+        let old = decode(&bytes).unwrap();
+        assert!(old.audio_offsets.is_empty());
+        assert_eq!(old, b);
+        assert_eq!(decode(&encode(&full)).unwrap(), full);
+        // A project carrying that version 11 block saves it as version 12.
+        let mut v11 = encode(&Block { prob_locked: vec![(0, 1)], ..Block::default() });
+        v11[..4].copy_from_slice(&11u32.to_le_bytes());
+        v11.truncate(v11.len() - 4);
+        let file = set_root_child(&doc_with(&[]).to_bytes().unwrap(), DOMAIN, ITEM, FRAME, Some(&v11)).unwrap();
+        let saved = Document::from_bytes(file, None).unwrap().to_bytes().unwrap();
+        assert_eq!(root_child(&saved, DOMAIN, ITEM).unwrap()[..4], 12u32.to_le_bytes());
     }
 
     #[test]
