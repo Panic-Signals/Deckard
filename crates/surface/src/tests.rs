@@ -3187,3 +3187,23 @@ fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     v.group = 2;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
+
+/// A pad tile that isn't chosen is near-neutral grey under text in its colour: a dimmed
+/// fill of the same hue made red text on red unreadable on the MK3's screen.
+#[test]
+fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
+    let mut s = Surface::new();
+    let v = view();
+    let now = std::time::Instant::now();
+    s.tick(&v, now);
+    s.event(&deckard_mk3::Event::Button("BUTTON_SELECT", true), &v, now);
+    let (_, px) = s.screens(&v).unwrap();
+    let at = |x: usize, y: usize| px[y * screen::WIDTH + x];
+    // Pad 2 (focus is on pad 1): its tile from x 603, y 213, 115 × 54; well clear of its name.
+    let [r, g, b, _] = at(603 + 100, 213 + 45);
+    assert!(r.abs_diff(g) < 24 && r.abs_diff(b) < 24, "near-neutral, not tinted red: {r},{g},{b}");
+    assert!(r > 16 && r < 64, "a dark grey, set apart from an empty pad: {r}");
+    // Pad 1, focused: still filled with its colour.
+    let [r, g, _, _] = at(484 + 100, 213 + 45);
+    assert!(r > 200 && g < 100, "the chosen pad keeps its colour: {r},{g}");
+}

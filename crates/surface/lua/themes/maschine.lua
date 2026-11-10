@@ -38,6 +38,8 @@ return {
     -- An empty pad, and the line between knobs' parameters.
     pad_empty = { 0x10, 0x10, 0x10 },
     pad_empty_text = { 0xa0, 0xa0, 0xa0 },
+    -- A group or pad tile that isn't chosen (its text is in its colour).
+    tile_off = { 0x1c, 0x1c, 0x1c },
     -- A pad that makes a new pattern or scene.
     pad_add = { 0x2a, 0x2a, 0x2a },
     separator = { 0x77, 0x6f, 0x6f },
@@ -106,6 +108,8 @@ return {
   palette_text = PALETTE_TEXT,
   -- What's not chosen shows its colour this bright (0..1).
   unfocused = 0.15,
+  -- How much of its colour a tile that isn't chosen mixes into `tile_off` (0..1).
+  tile_tint = 0.08,
   -- Corner pixels' opacity: a little rounding.
   corner = 0.65,
   -- How strongly a pattern not in the scene (and a group's bars) shows its colour.
