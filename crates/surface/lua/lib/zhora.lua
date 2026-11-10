@@ -2,7 +2,8 @@
 --
 --   display 1-4       its pages (OUTS, ENV, LEVELS, MOD), the one shown lit
 --   display 5-8       TUNE, CHECK, LIVE, HOLD, lit while each is on
---   left screen       its name, and what it listens on
+--   left screen       its name, and what it listens on; on the ENV page its envelope
+--                     instead of the name, drawn as the LFO page draws one
 --   right screen      the bar (when it was tuned, or a message), the note heard, its
 --                     cents, and a needle over -50..+50 cents, green within 5
 
@@ -45,10 +46,34 @@ function zhora.buttons(screen, theme, c)
   widgets.buttons(screen, theme, specs)
 end
 
--- The left screen's middle: the name, and the input.
+-- The envelope (`points`, 0..1) in the box `x, y, w, h`, a dashed line at the note off
+-- (`note_off`, 0..1 of the width).
+local function envelope(screen, points, note_off, x, y, w, h)
+  screen:rect(x, y, w, 1, "bar")
+  screen:rect(x, y + h, w, 1, "bar")
+  local nx = x + math.floor(note_off * w + 0.5)
+  for dy = 0, h - 1, 8 do
+    screen:rect(nx, y + dy, 1, math.min(4, h - dy), "bar")
+  end
+  local n = #points
+  if n < 2 then return end
+  local px = function(i) return x + (i - 1) / (n - 1) * w end
+  local py = function(i) return y + h - points[i] * h end
+  for i = 1, n - 1 do
+    screen:line(px(i), py(i), px(i + 1), py(i + 1), 2, "accent")
+  end
+end
+
+-- The left screen's middle: the name (on the ENV page, the envelope), and the input.
 function zhora.left(screen, c)
+  local z = c.zhora
+  if z.env then
+    envelope(screen, z.env, z.env_note_off or 0.5, 16, 66, 448, 92)
+    screen:label(0, 164, 480, 22, z.input, { size = 15, color = FAINT })
+    return
+  end
   screen:label(0, 92, 480, 40, "Zhora", { size = 30 })
-  screen:label(0, 136, 480, 22, c.zhora.input, { size = 15, color = FAINT })
+  screen:label(0, 136, 480, 22, z.input, { size = 15, color = FAINT })
 end
 
 -- "+2¢", "−20¢".

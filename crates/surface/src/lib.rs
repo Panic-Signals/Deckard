@@ -545,6 +545,11 @@ pub struct ZhoraView {
     pub hold: bool,
     pub message: Option<String>,
     pub input: String,
+    /// On its ENV page, its envelope's picture (0..1 samples, drawn by its knobs as the
+    /// LFO page's envelope is) for the left screen, and where it shows the note off.
+    /// Empty on other pages.
+    pub env: Vec<f32>,
+    pub env_note_off: f32,
 }
 
 /// A curve for the right screen. `points` run across the plot, each 0..1 (0.5 is the

@@ -6,7 +6,9 @@ use deckard_engine::zhora_outs;
 use deckard_model::AudioSource;
 use deckard_model::Project;
 use deckard_plugins::native::{InputSource, Readout, TuneState};
-use deckard_plugins::zhora::{CHECK, HOLD, HOLD_NOTE, INPUT, LIVE, OUTS, SIGNAL_NAMES, TUNE, input_of, is_zhora};
+use deckard_plugins::zhora::{
+    ATTACK, CHECK, DECAY, HOLD, HOLD_NOTE, INPUT, LIVE, OUTS, RELEASE, SIGNAL_NAMES, SUSTAIN, TUNE, input_of, is_zhora,
+};
 use deckard_surface::ZhoraView;
 
 use crate::App;
@@ -220,7 +222,19 @@ pub fn view(r: &Readout, live: bool, hold_note: &str, input: String, problem: Op
         hold: r.holding,
         message: r.message.map(str::to_string).or(problem),
         input,
+        env: Vec::new(),
+        env_note_off: 0.0,
     }
+}
+
+/// Samples in the envelope's picture.
+const ENV_POINTS: usize = 240;
+
+/// The picture of an envelope whose knobs are at `[attack, decay, sustain, release]`
+/// (0..1), as the LFO page draws one, and where it shows the note off.
+pub fn env_picture([a, d, s, r]: [f64; 4]) -> (Vec<f32>, f32) {
+    let (a, d, s, r) = (a as f32, d as f32, s as f32, r as f32);
+    (deckard_model::lfo::adsr_picture(ENV_POINTS, a, d, s, r), deckard_model::lfo::adsr_note_off(a, d, r))
 }
 
 impl App {
@@ -246,11 +260,17 @@ impl App {
         // Only the raw values under the lock (the audio thread waits for it).
         let r = z.readout()?;
         let (live, hold_note, input) = (z.param_value(LIVE) > 0.5, z.param_value(HOLD_NOTE), z.input_source());
+        // Its envelope, only while the ENV page is shown.
+        let on_env = deckard_plugins::zhora::CLASS.pages.get(self.plugin_page).is_some_and(|pg| pg.name == "ENV");
+        let env = on_env.then(|| [ATTACK, DECAY, SUSTAIN, RELEASE].map(|k| z.param_value(k)));
         drop(z);
         let hold_note = crate::keys::note_name((hold_note * 127.0).round() as i64);
         let input = input_label(&self.settings, p, (g, s), input);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let v = view(&r, live, &hold_note, input, output_problem(p, &self.settings, (g, s)), now);
+        let mut v = view(&r, live, &hold_note, input, output_problem(p, &self.settings, (g, s)), now);
+        if let Some(knobs) = env {
+            (v.env, v.env_note_off) = env_picture(knobs);
+        }
         *shown = Some((key, v.clone()));
         Some(v)
     }
@@ -523,6 +543,23 @@ mod tests {
         app.slot = Some(0);
         app.slot_plugin_in(Chain::Sound(0, 0), 0).unwrap();
         app
+    }
+
+    /// Its envelope's picture is sent on the ENV page only, and follows Attack.
+    #[test]
+    fn the_envelope_is_pictured_on_the_env_page_only() {
+        let mut app = app_with_zhora();
+        let env = |app: &App| app.surface_view().control.zhora.unwrap().env;
+        assert!(env(&app).is_empty(), "OUTS");
+        crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PluginPage(1)]);
+        let before = env(&app);
+        assert_eq!(before.len(), ENV_POINTS);
+        set(&mut app, ATTACK, 0.9);
+        let after = env(&app);
+        let peak = |p: &[f32]| p.iter().position(|&v| v > 0.99).unwrap();
+        assert!(peak(&after) > peak(&before), "a longer attack peaks later");
+        crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PluginPage(2)]);
+        assert!(env(&app).is_empty(), "LEVELS");
     }
 
     /// The tuner reads the instance for the Control page only.

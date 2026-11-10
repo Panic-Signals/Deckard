@@ -485,8 +485,9 @@ in tune. It needs outputs marked CV only (see [CV out](#cv-out)).
 
 On the MK3, display buttons 1–4 pick OUTS, ENV, LEVELS and MOD, and 5–8 are TUNE, CHECK,
 LIVE and HOLD. The right screen shows the note, its cents and a needle, green within 5
-cents, under a bar like "Tuned today 14:02 · worst note 3¢ · C1–C7". The plug-in panel
-shows the same beside the knobs.
+cents, under a bar like "Tuned today 14:02 · worst note 3¢ · C1–C7". On the ENV page
+the left screen draws the envelope, redrawn as you turn Attack, Decay, Sustain and
+Release. The plug-in panel shows the tuner beside the knobs.
 
 An export has no modular, so Zhora's part is left out of mixdowns and stems, and the
 Export panel says so. Record its return as audio first to include it. Add Zhora from

@@ -3334,6 +3334,32 @@ fn zhora_tuner_is_drawn_on_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
+/// On the ENV page the left screen draws Zhora's envelope in place of its name (the input
+/// still under it), and the tuner stays on the right; turning attack redraws it.
+#[test]
+fn zhora_env_page_draws_the_envelope_on_the_left_screen() {
+    let (s, mut v) = (Surface::new(), zhora_view());
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, _)| i % 960 < 480).map(|(_, p)| *p).collect::<Vec<_>>();
+    let right = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, _)| i % 960 >= 480).map(|(_, p)| *p).collect::<Vec<_>>();
+    let plain = s.picture(&v);
+    let adsr = |a: f32| {
+        let p = deckard_model::lfo::adsr_picture(240, a, 0.3, 0.6, 0.3);
+        (p, deckard_model::lfo::adsr_note_off(a, 0.3, 0.3))
+    };
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.env, z.env_note_off) = adsr(0.1);
+    let short = s.picture(&v);
+    let text = s.screen_text(&v);
+    assert!(!text.iter().any(|x| x == "Zhora") && text.iter().any(|x| x == "In 1 L+R"), "{text:?}");
+    assert!(text.iter().any(|x| x == "A3") && text.iter().any(|x| x == "+2¢"), "the tuner stays: {text:?}");
+    assert_ne!(left(&plain), left(&short), "the envelope drawn");
+    assert_eq!(right(&plain), right(&short), "the right screen unchanged");
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.env, z.env_note_off) = adsr(0.9);
+    assert_ne!(left(&short), left(&s.picture(&v)), "a longer attack redraws it");
+    assert_eq!(s.error(), None);
+}
+
 /// Zhora's display buttons 5 to 8 are TUNE, CHECK, LIVE and HOLD, lit as the view says.
 #[test]
 fn zhora_display_buttons_5_to_8_are_tune_check_live_hold() {

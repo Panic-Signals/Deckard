@@ -1362,6 +1362,10 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         t.set("hold", z.hold)?;
         t.set("message", z.message.as_deref())?;
         t.set("input", z.input.as_str())?;
+        if !z.env.is_empty() {
+            t.set("env", lua.create_sequence_from(z.env.iter().copied())?)?;
+            t.set("env_note_off", z.env_note_off)?;
+        }
         ct.set("zhora", t)?;
     }
     let knobs = lua.create_table()?;
