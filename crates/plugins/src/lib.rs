@@ -26,6 +26,7 @@ use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream}
 use module::Module;
 use state::{PluginId, State};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
@@ -106,6 +107,44 @@ pub struct Transport {
 /// Parameters of one plug-in modulation can drive at once.
 pub(crate) const MODDED: usize = 64;
 
+/// Saved knob bases for the parameters currently modulated. A packed atomic keeps
+/// identity and value coherent while the UI reads without the instance mutex.
+struct KnobBases([AtomicU64; MODDED]);
+impl Default for KnobBases {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| AtomicU64::new(u64::MAX)))
+    }
+}
+impl KnobBases {
+    fn get(&self, id: u32) -> Option<f64> {
+        self.0.iter().find_map(|c| {
+            let v = c.load(Ordering::Relaxed);
+            (v != u64::MAX && (v >> 32) as u32 == id).then(|| f32::from_bits(v as u32) as f64)
+        })
+    }
+    fn set(&self, id: u32, value: f64) {
+        let c = self
+            .0
+            .iter()
+            .find(|c| {
+                let v = c.load(Ordering::Relaxed);
+                v != u64::MAX && (v >> 32) as u32 == id
+            })
+            .or_else(|| self.0.iter().find(|c| c.load(Ordering::Relaxed) == u64::MAX));
+        if let Some(c) = c {
+            c.store(((id as u64) << 32) | (value as f32).to_bits() as u64, Ordering::Relaxed);
+        }
+    }
+    fn remove(&self, id: u32) {
+        for c in &self.0 {
+            let v = c.load(Ordering::Relaxed);
+            if v != u64::MAX && (v >> 32) as u32 == id {
+                c.store(u64::MAX, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 /// A running VST3 plug-in.
 struct Vst3 {
     component: ComPtr<IComponent>,
@@ -125,6 +164,7 @@ struct Vst3 {
     /// Parameters modulation drives (id, value, the knob's own value), room made with
     /// the plug-in.
     modded: Vec<(u32, f64, f64)>,
+    knob_bases: Arc<KnobBases>,
     params_out: ComWrapper<ParameterChanges>,
     /// [bus][channel] buffers of MAX_BLOCK frames, and pointers to them.
     inputs: Vec<Vec<Vec<f32>>>,
@@ -435,7 +475,9 @@ impl Plugin {
     /// None for DECKARD's own plug-ins (reading those under the lock is instant).
     pub fn params(&self) -> Option<Params> {
         match &self.kind {
-            Kind::Vst3(p) => Some(Params(ParamsOf::Vst3 { controller: p.controller.clone()?, edits: p.edits.clone() })),
+            Kind::Vst3(p) => {
+                Some(Params(ParamsOf::Vst3 { controller: p.controller.clone()?, edits: p.edits.clone(), bases: p.knob_bases.clone() }))
+            }
             Kind::Native(_) => None,
             #[cfg(target_os = "macos")]
             Kind::AudioUnit(p) => Some(Params(ParamsOf::AudioUnit(p.shared().clone()))),
@@ -582,6 +624,7 @@ impl Vst3 {
             events: ComWrapper::new(EventList::default()),
             params_in: ComWrapper::new(ParameterChanges::default()),
             modded: Vec::with_capacity(MODDED),
+            knob_bases: Arc::new(KnobBases::default()),
             params_out: ComWrapper::new(ParameterChanges::default()),
             inputs,
             outputs,
@@ -784,6 +827,7 @@ impl Vst3 {
         let v = v.clamp(0.0, 1.0);
         if let Some(m) = self.modded.iter_mut().find(|m| m.0 == id) {
             m.2 = v;
+            self.knob_bases.set(id, v);
         }
         if let Some(c) = &self.controller {
             unsafe { c.setParamNormalized(id, v) };
@@ -867,12 +911,14 @@ impl Vst3 {
             // shows the modulation as its value.
             let knob = self.param_value(id);
             self.modded.push((id, v, knob));
+            self.knob_bases.set(id, knob);
         }
     }
 
     fn unmodulate(&mut self, id: u32) {
         let Some(i) = self.modded.iter().position(|m| m.0 == id) else { return };
         let (_, _, knob) = self.modded.remove(i);
+        self.knob_bases.remove(id);
         self.params_in.add(id, knob);
         if let Some(c) = &self.controller {
             unsafe { c.setParamNormalized(id, knob) };
@@ -936,7 +982,10 @@ impl Vst3 {
         if let Ok(mut e) = self.edits.try_lock() {
             for (id, v) in e.pending.drain(..) {
                 match self.modded.iter_mut().find(|m| m.0 == id) {
-                    Some(m) => m.2 = v,
+                    Some(m) => {
+                        m.2 = v;
+                        self.knob_bases.set(id, v);
+                    }
                     None => self.params_in.add(id, v),
                 }
             }
@@ -1066,6 +1115,7 @@ enum ParamsOf {
     Vst3 {
         controller: ComPtr<IEditController>,
         edits: Arc<Mutex<Edits>>,
+        bases: Arc<KnobBases>,
     },
     #[cfg(target_os = "macos")]
     AudioUnit(Arc<au::Shared>),
@@ -1075,7 +1125,7 @@ impl Params {
     /// A parameter's value (normalized 0..1).
     pub fn value(&self, id: u32) -> f64 {
         match &self.0 {
-            ParamsOf::Vst3 { controller, .. } => unsafe { controller.getParamNormalized(id) },
+            ParamsOf::Vst3 { controller, bases, .. } => bases.get(id).unwrap_or_else(|| unsafe { controller.getParamNormalized(id) }),
             #[cfg(target_os = "macos")]
             ParamsOf::AudioUnit(a) => a.value(id),
         }
@@ -1101,8 +1151,9 @@ impl Params {
     /// next block.
     pub fn set(&self, id: u32, v: f64) {
         match &self.0 {
-            ParamsOf::Vst3 { controller, edits } => {
+            ParamsOf::Vst3 { controller, edits, bases } => {
                 let v = v.clamp(0.0, 1.0);
+                bases.set(id, v);
                 unsafe { controller.setParamNormalized(id, v) };
                 if let Ok(mut e) = edits.lock() {
                     e.pending.push((id, v));
@@ -1323,5 +1374,22 @@ impl Host {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knob_bases_atomic_cache_stores_and_removes() {
+        let b = KnobBases::default();
+        assert_eq!(b.get(42), None);
+        b.set(42, 0.65);
+        assert!((b.get(42).unwrap() - 0.65).abs() < 1e-6);
+        b.set(42, 0.85);
+        assert!((b.get(42).unwrap() - 0.85).abs() < 1e-6);
+        b.remove(42);
+        assert_eq!(b.get(42), None);
     }
 }
