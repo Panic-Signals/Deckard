@@ -191,12 +191,14 @@ impl Browser {
         let Some((_, answers)) = &self.worker else { return false };
         let mut newest = None;
         while let Ok(a) = answers.try_recv() {
-            newest = Some(a);
+            if a.0 == self.asked {
+                newest = Some(a);
+            }
         }
         let Some((n, results, error)) = newest else { return false };
         self.rev += 1;
-        // An older query's answer, overtaken by a newer one still to come, is still
-        // better than nothing; it's replaced when the newer one arrives.
+        // An old filter's results can omit the selected preset and send focus
+        // back to the first row. Only the current query may replace the list.
         self.shown = n;
         let keep = self.selected.and_then(|i| self.results.items.get(i)).map(|i| i.path.clone());
         match self.query.types.len() {
@@ -401,4 +403,57 @@ pub fn item_of(path: &Path) -> Option<Item> {
     let kind = deckard_library::Kind::of_file(path)?;
     let name = path.file_stem()?.to_string_lossy().into_owned();
     Some(Item { kind, user: true, name, path: path.to_path_buf(), ..Item::default() })
+}
+
+#[cfg(test)]
+mod query_order_tests {
+    use super::*;
+    #[test]
+    fn an_old_query_cannot_send_the_second_preset_back_to_the_first() {
+        let items: Vec<_> = ["First", "Second", "Third"]
+            .into_iter()
+            .map(|name| Item {
+                path: PathBuf::from(format!("{name}.nksf")),
+                name: name.into(),
+                kind: deckard_library::Kind::Instrument,
+                ..Default::default()
+            })
+            .collect();
+        let (jobs, _) = mpsc::channel();
+        let (answers, received) = mpsc::channel();
+        let mut browser = Browser {
+            worker: Some((jobs, received)),
+            asked: 2,
+            selected: Some(1),
+            results: Results { items: items.clone(), ..Default::default() },
+            ..Default::default()
+        };
+        answers.send((1, Results { items: vec![items[0].clone()], ..Default::default() }, None)).unwrap();
+        assert!(!browser.poll());
+        assert_eq!(browser.selected_item().unwrap().name, "Second");
+        assert!(browser.waiting());
+        answers.send((2, Results { items, ..Default::default() }, None)).unwrap();
+        assert!(browser.poll());
+        assert_eq!(browser.selected_item().unwrap().name, "Second");
+        assert!(!browser.waiting());
+    }
+}
+
+#[cfg(test)]
+mod current_query_tests {
+    use super::*;
+    #[test]
+    fn stale_results_after_current_results_in_the_same_drain_are_ignored() {
+        let (jobs, _) = mpsc::channel();
+        let (answers, received) = mpsc::channel();
+        let mut browser = Browser { worker: Some((jobs, received)), asked: 2, ..Default::default() };
+        let current =
+            Item { path: "current.nksf".into(), name: "Current".into(), kind: deckard_library::Kind::Instrument, ..Default::default() };
+        answers.send((2, Results { items: vec![current], ..Default::default() }, None)).unwrap();
+        answers.send((1, Results::default(), Some("old failure".into()))).unwrap();
+        assert!(browser.poll());
+        assert_eq!(browser.results.items[0].name, "Current");
+        assert!(browser.error.is_none());
+        assert!(!browser.waiting());
+    }
 }
