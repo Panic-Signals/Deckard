@@ -100,6 +100,7 @@ mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+mod preset_load;
 #[cfg(test)]
 mod print_tests;
 #[cfg(test)]
@@ -842,6 +843,7 @@ enum WineAction {
 
 #[derive(Default)]
 pub struct App {
+    group_load: Option<preset_load::GroupLoad>,
     /// The open project, shared with the controller scripts.
     doc: Option<Shared>,
     /// The project an Open replaced, with its undo history, and its file: Undo with
@@ -5174,6 +5176,12 @@ impl App {
                 }
             })
             .collect();
+        if let Some(load) = &self.group_load {
+            if let Some(group) = v.groups.get_mut(load.group) {
+                group.name = format!("Loading {}…", load.item.name);
+            }
+            v.browser.busy = true;
+        }
         v
     }
 
@@ -8166,6 +8174,7 @@ impl App {
                     Ok(())
                 })
             }),
+            FileItem::Group(g) => self.queue_group_load(&item, g),
             _ => self.load_item(&item, target),
         };
         if let Err(e) = r {
@@ -8245,7 +8254,12 @@ impl App {
             B::Load(i, target) => {
                 let Some(item) = b.results.items.get(i).cloned() else { return };
                 b.selected = Some(i);
-                if let Err(e) = self.load_item(&item, target) {
+                let result = if item.kind == deckard_library::Kind::Group {
+                    self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
+                } else {
+                    self.load_item(&item, target)
+                };
+                if let Err(e) = result {
                     self.status = e;
                 }
                 return;
@@ -8324,7 +8338,12 @@ impl App {
             B::LoadFile(path, target) => {
                 b.file_selected = Some(path.clone());
                 let Some(item) = browser::item_of(&path) else { return };
-                if let Err(e) = self.load_item(&item, target) {
+                let result = if item.kind == deckard_library::Kind::Group {
+                    self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
+                } else {
+                    self.load_item(&item, target)
+                };
+                if let Err(e) = result {
                     self.status = e;
                 }
                 return;
@@ -10245,6 +10264,10 @@ impl App {
     /// One frame of the whole window.
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        self.poll_group_load();
+        if self.group_load.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
         self.share_tempo();
         // A selection belongs to the pattern it was made in.
         if self.selected_in != (self.group, self.pattern) {
