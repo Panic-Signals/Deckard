@@ -121,6 +121,10 @@ Don't commit screenshots to the repository unless they're replacing images in
 ## Before opening it
 
 - [ ] `cargo build` and `cargo test --workspace` pass.
+- [ ] Tests run at least 70% of the lines you added or changed. CI's **Patch
+      coverage** check enforces this (DEVELOPMENT.md, "Patch coverage" has the commands
+      to check locally). Lines covered only by tests that need a Maschine install don't
+      count on CI, so give new code a test that runs without one.
 - [ ] `cargo fmt` has been run.
 - [ ] Every section of the template is filled in, or says "None".
 - [ ] The title is the summary in a few words, written like the release notes

@@ -40,3 +40,55 @@ jobs:
         run: cargo build --workspace --all-targets --locked
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
+
+  # At least 70% of the lines a pull request adds or changes must run under the tests.
+  # Measured on Linux only: the rest of the code is the same on every system. Tests that
+  # need a Maschine install or projects skip themselves here, so their lines count as
+  # not covered.
+  coverage:
+    name: Patch coverage
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      # The coverage comment.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base branch too, to diff against.
+          fetch-depth: 0
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux packages
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+      - name: Coverage tools
+        run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      # A report even if a test fails: the Test job says whether they pass, and timing
+      # tests can miss under the slower instrumented build.
+      - name: Measure coverage
+        run: cargo llvm-cov --workspace --locked --ignore-run-fail --cobertura --output-path coverage.xml
+      - name: At least 70% of changed lines covered
+        run: |
+          pipx install diff-cover==11.0.1
+          diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=70 \
+            --markdown-report coverage.md
+        env:
+          BASE_REF: ${{ github.base_ref }}
+      - name: Report
+        if: always()
+        run: test -f coverage.md && cat coverage.md >> "$GITHUB_STEP_SUMMARY" || true
+      # A coverage table as a comment on the pull request, updated on each push. It only
+      # reports: the step above enforces the 70%. Pull requests from forks get a
+      # read-only token, so the comment can fail there without failing the check.
+      - name: Comment on the pull request
+        if: always() && hashFiles('coverage.xml') != ''
+        continue-on-error: true
+        uses: orgoro/coverage@ca0c362dc1a4f100447309405e6dfea47e251495 # v3.3.1
+        with:
+          coverageFile: coverage.xml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sourceDir: ${{ github.workspace }}
