@@ -56,6 +56,10 @@ pub struct Settings {
     pub show_waveform: bool,
     /// The browser's FILES tab: folders pinned to its top.
     pub favorite_folders: Vec<PathBuf>,
+    /// The browser's `+ ROUTING` and `+ PATTERNS`: loading a group brings its routing
+    /// and its patterns (both on by default; kept between sessions).
+    pub load_group_routing: bool,
+    pub load_group_patterns: bool,
     /// Preferences ▸ General: bars counted in before recording from a stop (0: none),
     /// and recorded notes snapped to the grid.
     pub count_in_bars: u32,
@@ -283,6 +287,8 @@ impl Default for Settings {
             use_vst2: true,
             use_au: true,
             favorite_folders: Vec::new(),
+            load_group_routing: true,
+            load_group_patterns: true,
             library_folders: Vec::new(),
             count_in_bars: 1,
             input_quantize: false,
@@ -399,6 +405,8 @@ impl Settings {
                 "show_waveform" => s.show_waveform = v == "true",
                 "dir" => dirs.push(PathBuf::from(v)),
                 "favorite_folder" => s.favorite_folders.push(PathBuf::from(v)),
+                "load_group_routing" => s.load_group_routing = v != "false",
+                "load_group_patterns" => s.load_group_patterns = v != "false",
                 "library_folder" => s.library_folders.push(PathBuf::from(v)),
                 "count_in_bars" => s.count_in_bars = v.parse().unwrap_or(1),
                 "input_quantize" => s.input_quantize = v == "true",
@@ -704,6 +712,12 @@ impl Settings {
         }
         for d in &self.favorite_folders {
             out += &format!("favorite_folder = {}\n", d.display());
+        }
+        if !self.load_group_routing {
+            out += "load_group_routing = false\n";
+        }
+        if !self.load_group_patterns {
+            out += "load_group_patterns = false\n";
         }
         out += &format!("count_in_bars = {}\ninput_quantize = {}\n", self.count_in_bars, self.input_quantize);
         if !self.check_updates {
@@ -1071,6 +1085,18 @@ mod routing_tests {
         assert_eq!(back.output_routing[0], Some(1), "the system driver's device's own");
         back.set_audio_driver(AudioDriver::Asio);
         assert_eq!(back.output_routing[0], Some(2));
+    }
+
+    #[test]
+    fn group_load_options_round_trip_and_default_on() {
+        let s = Settings::parse("");
+        assert!(s.load_group_routing && s.load_group_patterns);
+        assert!(!s.to_text().contains("load_group"), "defaults aren't written");
+        for (routing, patterns) in [(false, true), (true, false), (false, false)] {
+            let s = Settings { load_group_routing: routing, load_group_patterns: patterns, ..Settings::default() };
+            let back = Settings::parse(&s.to_text());
+            assert_eq!((back.load_group_routing, back.load_group_patterns), (routing, patterns));
+        }
     }
 
     #[test]
