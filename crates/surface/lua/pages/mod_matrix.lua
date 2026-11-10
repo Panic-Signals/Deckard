@@ -72,7 +72,14 @@ function mod_matrix.button(name, down)
   end
   local n = tonumber(name:match("^SCREEN_(%d)$"))
   if not n then return end
-  if down then row[n] = row[n] % #ROWS + 1 end
+  if down then
+    local slot = shown(s) * 8 + n
+    if deckard.held("SHIFT") and s.mod_slots[slot] and not s.mod_slots[slot].midi then
+      deckard.mod_slot(slot, 7, 1) -- Range / Add; Depth shows Add while selected.
+    else
+      row[n] = row[n] % #ROWS + 1
+    end
+  end
   return true
 end
 

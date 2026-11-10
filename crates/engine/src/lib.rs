@@ -2218,7 +2218,7 @@ pub struct Engine {
     held_keys: Vec<mod_rt::HeldKey>,
     touch_order: u64,
     /// The sounds' modulation routes ([`mod_rt`]).
-    mod_routes: Vec<mod_rt::RouteRt>,
+    mod_routes: Vec<mod_rt::TargetRt>,
     /// Plug-in parameters modulated by pattern lanes (`(plugin, id, hit_this_span)`).
     modded_plugins: Vec<(Shared, u32, bool)>,
     /// Plug-in parameters routes let go of while the plug-in was busy ([`mod_rt`]).
@@ -6367,6 +6367,7 @@ pub fn render(engine: &mut Engine, max_seconds: f64) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    include!("additive_route_tests.rs");
     use super::*;
     use deckard_model::{Group, Note, Pattern, Sampler, Scene, Section, Sound, Zone};
 

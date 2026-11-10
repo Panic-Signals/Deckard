@@ -884,6 +884,14 @@ impl Vst3 {
     }
 
     fn knob_value(&self, id: u32) -> f64 {
+        // A UI edit is already the knob base, even before the next audio block
+        // consumes it (or while playback is stopped).
+        // Also read on the audio thread by additive routes: never wait for the UI.
+        if let Ok(edits) = self.edits.try_lock()
+            && let Some((_, value)) = edits.pending.iter().rev().find(|(param, _)| *param == id)
+        {
+            return *value;
+        }
         self.modded.iter().find(|m| m.0 == id).map_or_else(|| self.param_value(id), |m| m.2)
     }
 
