@@ -356,9 +356,7 @@ function control.draw(screen, theme, opts)
     local slot = c.chain[slot_at(c)]
     -- Browse.
     if not shift_layer and not opts.no_browse then
-      screen:frame(841, 4, 115, 24, "button", theme.corner)
-      screen:circle(902, 13.5, 5.6, { 0xee, 0xee, 0xee }, 1.6)
-      screen:line(897.5, 18, 892, 23.5, 1.8, { 0xee, 0xee, 0xee })
+      widgets.buttons(screen, theme, { [8] = { text = "BROWSE" } })
     end
     screen:rect(480, 35, 480, 25, "bar")
     if slot then

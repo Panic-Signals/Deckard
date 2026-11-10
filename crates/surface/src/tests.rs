@@ -586,6 +586,18 @@ fn themes_switch() {
     assert_eq!(s.theme(), "solarized_dark", "a theme that doesn't load leaves the last");
 }
 
+/// The default theme (and Maschine's) draw on black, with no controller folder of
+/// the user's to say so.
+#[test]
+fn the_shipped_default_and_maschine_themes_are_black() {
+    let (mut s, v) = (Surface::new(), view());
+    for theme in ["palenight", "maschine"] {
+        s.set_theme(theme);
+        assert_eq!((s.theme(), s.error()), (theme, None));
+        assert_eq!(s.draw_picture(&v).background, [0, 0, 0], "{theme}");
+    }
+}
+
 #[test]
 fn a_users_theme_is_listed() {
     let (_tmp, dir) = user_dir();
@@ -667,7 +679,12 @@ fn browse_knobs_gather_a_tenth_of_a_turn() {
     assert!(s.event(&Event::Knob(7, 0.05), &v, now).is_empty());
     assert_eq!(s.event(&Event::Knob(7, 0.05), &v, now), [Action::Browse(Browse::Focus(1))]);
     hold(&mut s, &v, "BUTTON_SHIFT", true);
-    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(10))], "SHIFT: up to twenty, to the last");
+    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(7))], "SHIFT: one page of 7 results");
+    v.browser.focus = 8;
+    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(3))], "and to the last");
+    v.browser.product = Some(0);
+    assert_eq!(s.event(&Event::Knob(1, 0.3), &v, now), [Action::Browse(Browse::Product(Some(2)))], "SHIFT + Knob 2 pages products");
+    v.browser.product = None;
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     assert_eq!(s.event(&Event::Knob(1, 0.1), &v, now), [Action::Browse(Browse::Product(Some(0)))], "from all: the first shown");
     assert_eq!(s.event(&Event::Knob(4, 0.1), &v, now), [Action::Browse(Browse::Attribute(0, Some(0)))]);
