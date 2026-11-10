@@ -206,20 +206,26 @@ impl Document {
         Ok(at)
     }
 
-    /// Pattern `to` of group `g` becomes a copy of its pattern `from`: its notes and length
-    /// (the scenes that play it go on playing it). Past the group's last pattern, a new
-    /// pattern goes at the end. Returns the index of the copy. One undo step.
+    /// The pattern in slot `to` of group `g` becomes a copy of the one in slot `from`: its
+    /// notes and length (the scenes that play it go on playing it). In an empty slot, a new
+    /// pattern is made there. Returns the index of the copy. One undo step.
     pub fn copy_pattern(&mut self, g: usize, from: usize, to: usize) -> Result<usize, String> {
         let group = self.project.groups.get(g).ok_or("no such group")?;
-        let pat = group.patterns.get(from).ok_or("no such pattern")?.clone();
-        let n = group.patterns.len();
+        let from_idx = group
+            .patterns
+            .iter()
+            .position(|p| p.slot == from)
+            .or_else(|| (from < group.patterns.len()).then_some(from))
+            .ok_or("no such pattern")?;
+        let pat = group.patterns[from_idx].clone();
         if to == from {
-            return Ok(to);
+            return Ok(from_idx);
         }
-        let mut at = to;
+        let existing = group.patterns.iter().position(|p| p.slot == to);
+        let mut at = existing.unwrap_or(0);
         self.transaction("Duplicate Pattern", |d| {
-            if to >= n {
-                at = d.insert_pattern(g, from, n, &pat.name)?;
+            if existing.is_none() {
+                at = d.add_pattern_in_slot(g, from_idx, to, &pat.name)?;
             }
             let target = d.project.groups[g].patterns[at].clone();
             let shift = |pos: i64| pos - pat.start + target.start;
@@ -325,6 +331,9 @@ mod tests {
         assert!(d.undo());
         assert_eq!(d.project().groups[0].patterns[second].notes.len(), 2, "one undo step");
         assert_eq!(d.copy_pattern(0, first, first).unwrap(), first, "onto itself: nothing");
+        let sparse = d.copy_pattern(0, first, 7).unwrap();
+        assert_eq!(d.project().groups[0].patterns[sparse].slot, 7, "copied into the empty slot chosen");
+        assert_eq!(rel(&d.project().groups[0].patterns[sparse]), [(2, 480)]);
     }
 
     /// A scene copied: what the target plays, the target otherwise its own.

@@ -190,7 +190,7 @@ fn duplicate_copies_from_the_source_on_to_each_target() {
     assert_eq!(apps(&pad(&mut d, &v, 1, 1)), [], "the source");
     assert_eq!(apps(&pad(&mut d, &v, 1, 2)), [Action::CopyPattern { group: 0, from: 0, to: 1 }]);
     assert_eq!(apps(&pad(&mut d, &v, 1, 3)), [Action::CopyPattern { group: 0, from: 1, to: 2 }], "again, from the copy");
-    assert_eq!(apps(&pad(&mut d, &v, 1, 8)), [Action::CopyPattern { group: 0, from: 2, to: 3 }], "an empty place: after the last");
+    assert_eq!(apps(&pad(&mut d, &v, 1, 8)), [Action::CopyPattern { group: 0, from: 2, to: 7 }], "an empty place: into that slot");
     release(&mut d, &v, "DUPLICATE");
 
     hold(&mut d, &v, "DUPLICATE");
