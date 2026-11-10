@@ -431,7 +431,9 @@ mod tests {
         assert_eq!(q.patterns[1].length, p0.length);
         let rel = |p: &deckard_model::Pattern| p.notes.iter().map(|x| (x.sound, x.position - p.start, x.pitch)).collect::<Vec<_>>();
         assert_eq!(rel(&q.patterns[1]), rel(&p0));
-        assert_eq!(q.patterns[2], before.groups[g].patterns[1], "the next pattern moved on one");
+        let next = &before.groups[g].patterns[1];
+        let moved = deckard_model::Pattern { slot: next.slot + 1, ..next.clone() };
+        assert_eq!(q.patterns[2], moved, "the next pattern moved on one, its slot too");
         consistent(&d);
         assert_eq!(reload(&d).project().groups[g].patterns.len(), n + 1);
 

@@ -13,6 +13,7 @@ pub struct EditSnapshot {
     expressions: Vec<std::sync::Arc<deckard_model::Expression>>,
     native_pressure: bool,
     screen: Option<SavedScreen>,
+    session_values: std::collections::BTreeMap<String, u64>,
 }
 
 pub struct PreparedEdit {
@@ -36,6 +37,7 @@ impl Document {
             expressions: self.expressions.clone(),
             native_pressure: self.native_pressure,
             screen: self.screen.clone(),
+            session_values: self.session_values.clone(),
         }
     }
 
@@ -59,6 +61,7 @@ impl Document {
         self.chosen_lengths = state.chosen_lengths;
         self.expressions = state.expressions;
         self.native_pressure = state.native_pressure;
+        self.session_values = state.session_values;
         // Keep live file/save/screen metadata and all previous undo steps.
         self.undo.push(step);
         self.redo.clear();
@@ -83,6 +86,7 @@ impl EditSnapshot {
             expressions: self.expressions,
             native_pressure: self.native_pressure,
             screen: self.screen,
+            session_values: self.session_values,
             types: mxprj::types::Types::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -102,6 +106,7 @@ impl EditSnapshot {
             expressions: d.expressions,
             native_pressure: d.native_pressure,
             screen: d.screen,
+            session_values: d.session_values,
         };
         Ok(PreparedEdit { base_revision, state, step })
     }

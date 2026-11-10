@@ -171,6 +171,11 @@ to the crate's and is shown in About DECKARD.
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps
   the builds as workflow artifacts.
+- **Pull requests:** fill in `.github/pull_request_template.md`: the type, a one-to-two
+  sentence summary, how a reviewer can check it works, the platforms it's for, and
+  before/after screenshots of anything visible. In Claude Code, the `pull-request`
+  skill (`.claude/skills/pull-request/`) writes it. A triager adds the label that
+  sorts it into the release notes.
 - **Release notes:** start from [docs/release-notes-template.md](docs/release-notes-template.md):
   New and Enhanced Features, Bug Fixes, thanks to everyone who contributed, then
   first-time contributors.
