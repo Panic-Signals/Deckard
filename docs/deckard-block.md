@@ -25,18 +25,18 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 10
+## Payload, version 11
 
-Version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 10
-and reads all ten.
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 11
+and reads all eleven.
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
 IEEE single.
 
 ```text
-u32 version = 10       (9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
+u32 version = 11       (10: without the CV routes; 9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
                        2: without routes either; 1: without Pad Touch either)
 u32 pattern_count
 pattern × pattern_count:
@@ -98,6 +98,8 @@ u32 extra_len, u8 × extra_len version 9: a plug-in's extra-output strips as UTF
                               (`extra_out::to_text`), one strip per line
 u32 view_len, u8 × view_len   version 10: the app's view as UTF-8 text, part of the
                               screen ("" if there's none)
+u32 cv_len, u8 × cv_len       version 11: the project's CV routes as UTF-8 text
+                              (`mod_matrix::cv_to_text`)
 ```
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's
@@ -111,6 +113,12 @@ text), one route a line: `source channel cc low high curve port`, e.g.
 `lfo2 10 74 0 0.5 50 IAC Driver Bus 1` (the port last; it may hold spaces). Lines that
 don't read, or whose source isn't an LFO, are skipped; channel is clamped to 1–16, CC to
 0–119 (120–127 are channel mode messages), low and high to 0–1, curve to 0–100.
+
+**CV routes** send an LFO out as a control voltage on one side of an audio output. They
+live in the document as a `deckard:cv_routes` text field on the project's root object (the
+same text), one route a line: `source channel low high`, e.g. `lfo2 7 -1 0.5`. Lines that
+don't read, or whose source isn't an LFO, are skipped; channel is clamped to 0–31, low and
+high to −1–1 (the voltage at the LFO's 0 and 1).
 
 **LFOs** (docs/superpowers/specs/2026-10-28-lfos-design.md) live in the document as a
 `deckard:lfos` text field on the project's root object (the same text), so undo carries

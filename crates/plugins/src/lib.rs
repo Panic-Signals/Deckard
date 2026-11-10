@@ -13,6 +13,8 @@ pub mod editor;
 pub mod module;
 pub mod native;
 pub mod nks;
+pub mod tuner;
+pub mod zhora;
 /// Mutable Instruments' licence (Plaits), for the About box.
 pub use deckard_mi::LICENSE as MUTABLE_INSTRUMENTS_LICENSE;
 mod plaits;
@@ -506,6 +508,46 @@ impl Plugin {
     /// The plug-in's name for output bus `bus`, else "Out N".
     pub fn output_name(&self, bus: usize) -> String {
         each!(self, p => p.output_name(bus)).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Out {}", bus + 1))
+    }
+
+    /// CV signal `signal` of the last `process`, as (output channel, values).
+    pub fn cv(&self, signal: usize, frames: usize) -> Option<(usize, &[f32])> {
+        match &self.kind {
+            Kind::Native(p) => p.cv(signal, frames),
+            _ => None,
+        }
+    }
+
+    /// Audio coming back from outside, for a plug-in that listens to it.
+    pub fn input(&mut self, left: &[f32], right: &[f32]) {
+        if let Kind::Native(p) = &mut self.kind {
+            p.input(left, right);
+        }
+    }
+
+    /// The input the plug-in wants to hear.
+    pub fn input_source(&self) -> Option<native::InputSource> {
+        match &self.kind {
+            Kind::Native(p) => p.input_source(),
+            _ => None,
+        }
+    }
+
+    /// What a tuner screen shows.
+    pub fn readout(&self) -> Option<native::Readout> {
+        match &self.kind {
+            Kind::Native(p) => p.readout(),
+            _ => None,
+        }
+    }
+
+    /// Whether the plug-in's state changed by itself (a finished Tune) and is to be
+    /// stored, without taking the news (as [`Plugin::take_dirty`] does).
+    pub fn changed_by_itself(&self) -> bool {
+        match &self.kind {
+            Kind::Native(p) => p.changed(),
+            _ => false,
+        }
     }
 
     /// The VST3 component (to query buses and the like); none for DECKARD's own.

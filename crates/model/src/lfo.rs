@@ -131,6 +131,43 @@ pub fn env_time(x: f32) -> f32 {
     ENV_MIN * (ENV_MAX / ENV_MIN).powf(x.clamp(0.0, 1.0))
 }
 
+/// An ADSR's picture: each of attack, decay and release as wide as its knob (0..1, plus a
+/// little), then a fixed sustain stretch, and a tail after the release. The widths as
+/// fractions: (attack, decay, sustain, release, total).
+fn adsr_widths(attack: f32, decay: f32, release: f32) -> (f64, f64, f64, f64, f64) {
+    let w = |k: f32| 0.1 + f64::from(k.clamp(0.0, 1.0));
+    let (a, d, r) = (w(attack), w(decay), w(release));
+    (a, d, 0.6, r, a + d + 0.6 + r + 0.2)
+}
+
+/// `n` samples (0..1) of an ADSR's picture, its times as knob positions (0..1) and
+/// `sustain` a level: drawn by its knobs, not to time, as the LFO page's envelope is.
+pub fn adsr_picture(n: usize, attack: f32, decay: f32, sustain: f32, release: f32) -> Vec<f32> {
+    let (a, d, s, r, total) = adsr_widths(attack, decay, release);
+    let sustain = f64::from(sustain.clamp(0.0, 1.0));
+    (0..n)
+        .map(|i| {
+            let x = i as f64 / n.max(1) as f64 * total;
+            let v = if x < a {
+                x / a
+            } else if x < a + d {
+                1.0 - (1.0 - sustain) * (x - a) / d
+            } else if x < a + d + s {
+                sustain
+            } else {
+                (sustain * (1.0 - (x - a - d - s) / r)).max(0.0)
+            };
+            v as f32
+        })
+        .collect()
+}
+
+/// Where [`adsr_picture`] shows the note off (0..1 of its width).
+pub fn adsr_note_off(attack: f32, decay: f32, release: f32) -> f32 {
+    let (a, d, s, _, total) = adsr_widths(attack, decay, release);
+    ((a + d + s) / total) as f32
+}
+
 /// [`env_time`]'s inverse: the knob position (0..1) of `seconds`.
 pub fn env_knob(seconds: f32) -> f32 {
     ((seconds.max(ENV_MIN) / ENV_MIN).ln() / (ENV_MAX / ENV_MIN).ln()).clamp(0.0, 1.0)
@@ -217,19 +254,9 @@ impl Lfo {
         v * self.level.clamp(0.0, 1.0)
     }
 
-    /// An envelope's picture: each of attack, decay and release as wide as its knob
-    /// (plus a little), then a fixed sustain stretch, and a tail after the release. The
-    /// widths as fractions: (attack, decay, sustain, release, total).
-    fn env_widths(&self) -> (f64, f64, f64, f64, f64) {
-        let w = |s: f32| 0.1 + f64::from(env_knob(s));
-        let (a, d, r) = (w(self.attack), w(self.decay), w(self.release));
-        (a, d, 0.6, r, a + d + 0.6 + r + 0.2)
-    }
-
     /// Where an envelope's picture shows the note off (0..1 of its width); `None` for an LFO.
     pub fn picture_note_off(&self) -> Option<f32> {
-        let (a, d, s, _, total) = self.env_widths();
-        self.env.then(|| ((a + d + s) / total) as f32)
+        self.env.then(|| adsr_note_off(env_knob(self.attack), env_knob(self.decay), env_knob(self.release)))
     }
 
     /// The rate's length in quarter notes.
@@ -321,23 +348,8 @@ impl Lfo {
     /// grows the wave travels left, so the rate is visible. An envelope ignores `at`.
     pub fn picture_at(&self, n: usize, at: f64) -> Vec<f32> {
         if self.env {
-            let (a, d, s, r, total) = self.env_widths();
-            let sustain = self.sustain.clamp(0.0, 1.0);
-            return (0..n)
-                .map(|i| {
-                    let x = i as f64 / n.max(1) as f64 * total;
-                    let raw = if x < a {
-                        x / a
-                    } else if x < a + d {
-                        1.0 - (1.0 - f64::from(sustain)) * (x - a) / d
-                    } else if x < a + d + s {
-                        f64::from(sustain)
-                    } else {
-                        (f64::from(sustain) * (1.0 - (x - a - d - s) / r)).max(0.0)
-                    };
-                    self.env_output(raw as f32)
-                })
-                .collect();
+            let (a, d, r) = (env_knob(self.attack), env_knob(self.decay), env_knob(self.release));
+            return adsr_picture(n, a, d, self.sustain, r).into_iter().map(|v| self.env_output(v)).collect();
         }
         let span = self.picture_cycles();
         let start = at - span;
@@ -637,6 +649,20 @@ mod tests {
     fn env_name_reads_env() {
         assert_eq!(Lfo::new(3).name(), "LFO 3");
         assert_eq!(Lfo { env: true, ..Lfo::new(3) }.name(), "ENV 3");
+    }
+
+    /// A longer attack draws a later peak, as its knob turns.
+    #[test]
+    fn adsr_picture_follows_its_knobs() {
+        let peak = |a: f32| {
+            let p = adsr_picture(200, a, 0.3, 0.5, 0.3);
+            p.iter().position(|&v| v > 0.99).unwrap()
+        };
+        assert!(peak(0.0) < peak(0.5) && peak(0.5) < peak(1.0), "{} {} {}", peak(0.0), peak(0.5), peak(1.0));
+        let p = adsr_picture(200, 0.2, 0.2, 0.7, 0.2);
+        let off = adsr_note_off(0.2, 0.2, 0.2);
+        assert!(close(p[(off * 200.0) as usize - 1], 0.7), "sustain until the note off");
+        assert!(close(p[199], 0.0));
     }
 
     #[test]

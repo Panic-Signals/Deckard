@@ -2,6 +2,7 @@
 //! of installed plug-ins, as in Maschine's Preferences > Plug-ins (Manager, Locations).
 
 use deckard_engine::devices::AudioDriver;
+use deckard_model::{AudioDest, Project};
 use deckard_plugins::scan::{self, Entry, Kind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -44,6 +45,9 @@ pub struct Settings {
     /// shown wherever they're offered.
     pub input_aliases: Vec<String>,
     pub output_aliases: Vec<String>,
+    /// Which output channels are CV only (Routing > Output): they carry control voltage,
+    /// so audio isn't offered them.
+    pub output_cv_only: Vec<bool>,
     /// Each device's routing and aliases, as last set ("in"/"out", device name; "" for
     /// the system's default): picking a device again brings its own back.
     pub routings: BTreeMap<(String, String), Routing>,
@@ -206,11 +210,13 @@ pub const CHANNELS: usize = 32;
 pub struct Routing {
     pub routes: Vec<Option<usize>>,
     pub aliases: Vec<String>,
+    /// Which channels are CV only (outputs; the inputs keep it false).
+    pub cv_only: Vec<bool>,
 }
 
 impl Default for Routing {
     fn default() -> Routing {
-        Routing { routes: default_routing(), aliases: vec![String::new(); CHANNELS] }
+        Routing { routes: default_routing(), aliases: vec![String::new(); CHANNELS], cv_only: vec![false; CHANNELS] }
     }
 }
 
@@ -255,9 +261,53 @@ impl Settings {
         self.input_on(pair * 2) || self.input_on(pair * 2 + 1)
     }
 
-    /// Whether external output `pair` is offered: either side connected.
+    /// Whether external output `pair` is offered to audio: either side connected, and
+    /// neither CV only.
     pub fn output_pair_on(&self, pair: usize) -> bool {
         (0..2).any(|k| self.output_routing.get(pair * 2 + k).is_some_and(Option::is_some))
+            && !(0..2).any(|k| self.output_cv_only.get(pair * 2 + k).copied().unwrap_or(false))
+    }
+
+    /// The CV only output channels, as a bit mask (bit `i` = channel `i`).
+    pub fn cv_mask(&self) -> u32 {
+        self.cv_channels().iter().fold(0, |m, &i| m | 1 << i)
+    }
+
+    /// The CV only output channels, lowest first.
+    pub fn cv_channels(&self) -> Vec<usize> {
+        (0..CHANNELS).filter(|&i| self.output_cv_only.get(i).copied().unwrap_or(false)).collect()
+    }
+
+    /// Whether output `channel` may be marked CV only: not while it is on the project's
+    /// master or cue output.
+    pub fn may_mark_cv_only(&self, p: &Project, channel: usize) -> bool {
+        ![p.master_output, p.cue_output].iter().any(|d| matches!(d, AudioDest::Ext(n) if *n >= 0 && *n as usize == channel / 2))
+    }
+
+    /// The external outputs (Ext. 1 = 0) the project's master, cue or strips send audio
+    /// to that have a CV only side, lowest first.
+    pub fn audio_on_cv_only(&self, p: &Project) -> Vec<usize> {
+        let mut dests = vec![p.master_output, p.cue_output];
+        for g in &p.groups {
+            dests.push(g.channel.dest);
+            dests.extend(g.channel.aux_dest);
+            for s in &g.sounds {
+                dests.push(s.channel.dest);
+                dests.extend(s.channel.aux_dest);
+            }
+        }
+        dests.extend(p.extra_outs.iter().map(|e| e.dest));
+        let mut pairs: Vec<usize> = dests
+            .into_iter()
+            .filter_map(|d| match d {
+                AudioDest::Ext(n) if n >= 0 => Some(n as usize),
+                _ => None,
+            })
+            .filter(|&n| (0..2).any(|k| self.output_cv_only.get(n * 2 + k).copied().unwrap_or(false)))
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
     }
 }
 
@@ -306,6 +356,7 @@ impl Default for Settings {
             output_routing: default_routing(),
             input_aliases: vec![String::new(); CHANNELS],
             output_aliases: vec![String::new(); CHANNELS],
+            output_cv_only: vec![false; CHANNELS],
             routings: BTreeMap::new(),
             audio_driver: AudioDriver::default(),
             asio_device: None,
@@ -428,7 +479,7 @@ impl Settings {
                         legacy.get_or_insert_with(|| (0..CHANNELS).map(Some).collect())[i] = x.parse::<usize>().ok();
                     }
                 }
-                "input_route" | "output_route" | "input_alias" | "output_alias" => {
+                "input_route" | "output_route" | "input_alias" | "output_alias" | "output_cv" => {
                     let (device, rest) = v.split_once('\t').unwrap_or(("", v));
                     if let Some((i, x)) = rest.split_once(':')
                         && let Ok(i) = i.parse::<usize>()
@@ -438,6 +489,8 @@ impl Settings {
                         let r = s.routings.entry((side.to_string(), device.to_string())).or_default();
                         if k.ends_with("route") {
                             r.routes[i] = x.parse::<usize>().ok();
+                        } else if k == "output_cv" {
+                            r.cv_only[i] = x == "1";
                         } else {
                             r.aliases[i] = x.to_string();
                         }
@@ -651,9 +704,9 @@ impl Settings {
     /// Remember the device in use's routing.
     fn keep_routing(&mut self, side: &str) {
         let r = if side == "in" {
-            Routing { routes: self.input_routing.clone(), aliases: self.input_aliases.clone() }
+            Routing { routes: self.input_routing.clone(), aliases: self.input_aliases.clone(), ..Routing::default() }
         } else {
-            Routing { routes: self.output_routing.clone(), aliases: self.output_aliases.clone() }
+            Routing { routes: self.output_routing.clone(), aliases: self.output_aliases.clone(), cv_only: self.output_cv_only.clone() }
         };
         self.routings.insert(self.device_key(side), r);
     }
@@ -664,7 +717,7 @@ impl Settings {
         if side == "in" {
             (self.input_routing, self.input_aliases) = (r.routes, r.aliases);
         } else {
-            (self.output_routing, self.output_aliases) = (r.routes, r.aliases);
+            (self.output_routing, self.output_aliases, self.output_cv_only) = (r.routes, r.aliases, r.cv_only);
         }
     }
 
@@ -806,6 +859,9 @@ impl Settings {
             }
             for (i, a) in r.aliases.iter().enumerate().filter(|(_, a)| !a.trim().is_empty()) {
                 out += &format!("{side}_alias = {device}\t{i}:{}\n", a.trim());
+            }
+            for i in (0..r.cv_only.len()).filter(|&i| r.cv_only[i] && side == "output") {
+                out += &format!("output_cv = {device}\t{i}:1\n");
             }
         }
         out
@@ -1042,6 +1098,53 @@ mod routing_tests {
         let mut back = back;
         back.set_output_device(Some("B".into()));
         assert_eq!(back.output_routing[0], None, "B's own, saved too");
+    }
+
+    #[test]
+    fn cv_only_is_kept_per_device_and_makes_a_mask() {
+        let mut s = Settings::default();
+        s.set_output_device(Some("A".into()));
+        s.output_cv_only[2] = true;
+        s.output_cv_only[3] = true;
+        assert_eq!(s.cv_mask(), 0b1100);
+        assert_eq!(s.cv_channels(), vec![2, 3]);
+        s.set_output_device(Some("B".into()));
+        assert_eq!(s.cv_mask(), 0, "B starts with none");
+        s.output_cv_only[0] = true;
+        s.set_output_device(Some("A".into()));
+        assert_eq!(s.cv_channels(), vec![2, 3], "A's own");
+        let mut back = Settings::parse(&s.to_text());
+        assert_eq!(back.cv_channels(), vec![2, 3], "A's, saved");
+        back.set_output_device(Some("B".into()));
+        assert_eq!(back.cv_channels(), vec![0], "B's own, saved too");
+    }
+
+    #[test]
+    fn a_pair_with_a_cv_only_side_is_not_offered_to_audio() {
+        let mut s = Settings::default();
+        s.output_routing[2] = Some(2);
+        s.output_routing[3] = Some(3);
+        assert!(s.output_pair_on(1));
+        s.output_cv_only[2] = true;
+        assert!(!s.output_pair_on(1));
+    }
+
+    #[test]
+    fn the_masters_and_cues_channels_cannot_be_marked() {
+        let s = Settings::default();
+        let p = Project { master_output: AudioDest::Ext(0), cue_output: AudioDest::Ext(4), ..Default::default() };
+        assert!(!s.may_mark_cv_only(&p, 1));
+        assert!(!s.may_mark_cv_only(&p, 8));
+        assert!(s.may_mark_cv_only(&p, 2));
+    }
+
+    #[test]
+    fn audio_sent_to_a_cv_only_pair_is_found() {
+        let mut s = Settings::default();
+        let p = Project { master_output: AudioDest::Ext(0), cue_output: AudioDest::Ext(4), ..Default::default() };
+        assert!(s.audio_on_cv_only(&p).is_empty());
+        s.output_cv_only[9] = true;
+        assert_eq!(s.audio_on_cv_only(&p), vec![4]);
     }
 
     /// The driver asked for and the ASIO driver picked come back; settings that never

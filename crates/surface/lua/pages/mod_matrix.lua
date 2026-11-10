@@ -1,7 +1,8 @@
 -- The mod matrix (SHIFT + SOLO; again, or another page's button, leaves): eight slots,
 -- one a column, four on each screen. The slots are every route in the project, then an
 -- empty one for a new route (`state.mod_slots`). A CC route's slot (`midi`: its Group
--- MIDI) names rows 3-5 Port, Channel and CC.
+-- MIDI) names rows 3-5 Port, Channel and CC. A CV route's (`cv`: its Group CV) names its
+-- rows Out, a blank, Low and High.
 --
 --   display 1-8       its column's highlight down a row (Source, Group, Sound, Module,
 --                     Destination, Depth), back to the top after Depth. The page opens
@@ -20,9 +21,11 @@ local mod_matrix = {}
 
 local ROWS = { "SOURCE", "GROUP", "SOUND", "MODULE", "DESTINATION", "DEPTH" }
 local MIDI_ROWS = { "SOURCE", "GROUP", "PORT", "CHANNEL", "CC", "DEPTH" }
+local CV_ROWS = { "SOURCE", "GROUP", "OUT", "", "LOW", "HIGH" }
 
 -- A slot's row names.
 local function names(rows)
+  if rows and rows.cv then return CV_ROWS end
   return rows and rows.midi and MIDI_ROWS or ROWS
 end
 
@@ -30,6 +33,8 @@ end
 local TURNS = { 0.1, 0.1, 0.1, 0.1, 0.1, 0.02 }
 -- A CC route's: CC (0-119) a fiftieth too.
 local MIDI_TURNS = { 0.1, 0.1, 0.1, 0.1, 0.02, 0.02 }
+-- A CV route's: Low and High a fiftieth.
+local CV_TURNS = { 0.1, 0.1, 0.1, 0.1, 0.02, 0.02 }
 
 -- The row the page opens on: Depth.
 local DEPTH = #ROWS
@@ -94,7 +99,7 @@ function mod_matrix.knob(n, amount)
     end
     return true
   end
-  local turns = s.mod_slots[slot].midi and MIDI_TURNS or TURNS
+  local turns = s.mod_slots[slot].cv and CV_TURNS or s.mod_slots[slot].midi and MIDI_TURNS or TURNS
   local steps = knobs.gather(n, amount, turns[row[n]])
   if steps ~= 0 then deckard.mod_slot(slot, row[n], steps) end
   return true

@@ -287,10 +287,13 @@ pub struct LfoView {
 /// A mod matrix slot as its column shows it: Source, Group ("A1 – name", "A1" unnamed), Sound
 /// ("S3 – name"), Module, Destination and Depth ("+50%"), "—" where unset. `midi`: a CC
 /// route (its Group "MIDI"), whose rows 3–5 are Port, Channel ("1"–"16") and CC ("0"–"119").
+/// `cv`: a CV route (its Group "CV"), whose rows are Out (" !" after it when it writes
+/// nothing), a blank, Low and High.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModSlotView {
     pub rows: [String; 6],
     pub midi: bool,
+    pub cv: bool,
 }
 
 /// Lock (LOCK, SHIFT + LOCK).
@@ -521,6 +524,45 @@ pub struct ControlView {
     pub filter: Option<EqCurveView>,
     /// Any other focused built-in effect, drawn on the right screen on every page.
     pub picture: Option<EqCurveView>,
+    /// The focused Zhora: its tuner on the right screen, its buttons on both.
+    pub zhora: Option<ZhoraView>,
+    /// The focused Tuner effect: its dial on the right screen.
+    pub tuner: Option<TunerView>,
+}
+
+/// What the Tuner effect's screen shows: the note heard and its `cents` above it
+/// (`in_tune` within 5), A4's pitch (`reference`, "440 Hz"), and whether Mute is on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TunerView {
+    pub note: Option<String>,
+    pub cents: Option<f32>,
+    pub in_tune: bool,
+    pub reference: String,
+    pub muted: bool,
+}
+
+/// What Zhora's screens show. `note` is the note heard on its input and `cents` how far
+/// above it; `in_tune` within 5 cents. The bar reads `status` (when it was tuned), with
+/// `right` (what's held, or Live's state) at its end; `message` replaces it. `tune`,
+/// `check`, `live` and `hold` light their buttons. `input` is what it listens on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ZhoraView {
+    pub note: Option<String>,
+    pub cents: Option<f32>,
+    pub in_tune: bool,
+    pub status: String,
+    pub right: String,
+    pub tune: bool,
+    pub check: bool,
+    pub live: bool,
+    pub hold: bool,
+    pub message: Option<String>,
+    pub input: String,
+    /// On its ENV page, its envelope's picture (0..1 samples, drawn by its knobs as the
+    /// LFO page's envelope is) for the left screen, and where it shows the note off.
+    /// Empty on other pages.
+    pub env: Vec<f32>,
+    pub env_note_off: f32,
 }
 
 /// A curve for the right screen. `points` run across the plot, each 0..1 (0.5 is the
@@ -655,6 +697,10 @@ pub enum Action {
     },
     /// The next (true) or previous page.
     Page(bool),
+    /// The focused plug-in's page `.0` (from 0).
+    PluginPage(usize),
+    /// A press of the focused Zhora's `tune`, `check`, `live` or `hold`.
+    Zhora(&'static str),
     /// Show the master (0), group (1) or sound (2) chain.
     Level(usize),
     /// Focus the slot `.0` places on.

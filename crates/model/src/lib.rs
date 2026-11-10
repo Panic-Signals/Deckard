@@ -62,6 +62,8 @@ pub struct Project {
     pub extra_outs: Vec<extra_out::ExtraOut>,
     /// The project's routes from LFOs to MIDI CCs (DECKARD's; [`mod_matrix::CcRoute`]).
     pub cc_routes: Vec<mod_matrix::CcRoute>,
+    /// The project's routes from LFOs to CV outputs (DECKARD's; [`mod_matrix::CvRoute`]).
+    pub cv_routes: Vec<mod_matrix::CvRoute>,
     pub warnings: Vec<String>,
     /// Per-note expression, by [`ExprId`] (a note's `expr`): the document's table, for
     /// the engine. Empty when read from a file (the document fills it).
@@ -329,6 +331,7 @@ impl Default for Project {
             lfos: Vec::new(),
             extra_outs: Vec::new(),
             cc_routes: Vec::new(),
+            cv_routes: Vec::new(),
             warnings: Vec::new(),
             expressions: Vec::new(),
         }
@@ -1196,6 +1199,9 @@ impl Project {
         }
         if let Some(Value::Str(t)) = r.get(mod_matrix::CC_FIELD) {
             p.cc_routes = mod_matrix::cc_from_text(t);
+        }
+        if let Some(Value::Str(t)) = r.get(mod_matrix::CV_FIELD) {
+            p.cv_routes = mod_matrix::cv_from_text(t);
         }
         let songs = ix.elements(r.get("songs"));
         let Some(song) = songs.first() else {

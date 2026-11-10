@@ -864,7 +864,7 @@ pub fn timestamp() -> String {
 
 /// The local time zone's offset from UTC at `secs` (seconds).
 #[cfg(unix)]
-fn local_offset(secs: i64) -> i64 {
+pub(crate) fn local_offset(secs: i64) -> i64 {
     #[repr(C)]
     struct Tm {
         sec: i32,
@@ -890,7 +890,7 @@ fn local_offset(secs: i64) -> i64 {
 
 /// The same from the C runtime: the local time read back as if it were UTC.
 #[cfg(windows)]
-fn local_offset(secs: i64) -> i64 {
+pub(crate) fn local_offset(secs: i64) -> i64 {
     #[repr(C)]
     #[derive(Default)]
     struct Tm {

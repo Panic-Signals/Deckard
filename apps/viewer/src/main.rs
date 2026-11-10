@@ -83,6 +83,8 @@ mod loops;
 #[cfg(test)]
 mod macro_surface_tests;
 #[cfg(test)]
+mod manual_shots;
+#[cfg(test)]
 mod master_fader_tests;
 mod menu;
 mod midi_devices;
@@ -153,6 +155,7 @@ mod transport_sync;
 mod update;
 mod user_chords;
 mod wine;
+mod zhora_ui;
 
 use deckard_doc::{Document, Shared};
 use deckard_engine::{Engine, Mode, SampleCache, output::Output};
@@ -748,7 +751,7 @@ fn open_output(settings: &settings::Settings, fallback: &mut Option<String>) -> 
     // ASIO not being in use says more than which system device stood in.
     *fallback = no_asio.or(fallback.take());
     let out = out?;
-    out.set_routing(&settings.output_routing);
+    out.set_routing(&settings.output_routing, settings.cv_mask());
     out.set_sample_accurate(settings.exact_timing);
     out.set_render_ahead(settings.render_ahead_ms as f64 / 1000.0);
     Ok(out)
@@ -1270,6 +1273,12 @@ pub struct App {
     doc_generation: u64,
     /// Cached `(doc_generation, revision, macro_targets, group_noted)` for `surface_view`.
     surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
+    /// The focused Zhora (group, sound, slot) as last shown, while the audio thread has it.
+    zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
+    /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
+    tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
+    /// When the Zhoras were last looked at for a finished Tune.
+    tunes_watched: Option<std::time::Instant>,
 }
 
 /// Launch time (a newtype so `App` can derive `Default`).
@@ -2054,6 +2063,8 @@ impl App {
     }
 
     fn quit(&mut self, ctx: &egui::Context) {
+        // A Tune just finished counts as a change.
+        self.store_finished_tunes(|_| true, true);
         if self.asks_on_quit() && !self.quitting {
             self.confirm = Some(Pending::Quit);
         } else {
@@ -2662,16 +2673,21 @@ impl App {
             })
             .weak(),
         );
-        let before = self.settings.output_routing.clone();
+        let before = (self.settings.output_routing.clone(), self.settings.output_cv_only.clone());
+        let project = self.doc.as_ref().map(|d| d.borrow().project().clone()).unwrap_or_default();
         let (own, port, channels) = if outs { ("Out", "Output", out_channels) } else { ("In", "Input", in_channels) };
         let device = if outs { out_device } else { in_device };
         let names = self.channel_names_of(&device.unwrap_or_default(), !outs, channels);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("routing").striped(true).num_columns(3).show(ui, |ui| {
+            egui::Grid::new("routing").striped(true).num_columns(if outs { 4 } else { 3 }).show(ui, |ui| {
                 ui.strong("DECKARD");
                 ui.strong("Alias");
                 ui.strong("Interface");
+                if outs {
+                    ui.strong("CV only");
+                }
                 ui.end_row();
+                let may: Vec<bool> = (0..settings::CHANNELS).map(|i| self.settings.may_mark_cv_only(&project, i)).collect();
                 let s = &mut self.settings;
                 let (routes, aliases) =
                     if outs { (&mut s.output_routing, &mut s.output_aliases) } else { (&mut s.input_routing, &mut s.input_aliases) };
@@ -2689,14 +2705,23 @@ impl App {
                         }
                     });
                     routes[i] = pick;
+                    if outs {
+                        let marked = s.output_cv_only[i];
+                        ui.add_enabled_ui(may[i] || marked, |ui| {
+                            ui.checkbox(&mut s.output_cv_only[i], "")
+                                .on_hover_text("This channel carries control voltage, not audio, so audio isn't offered it.");
+                        })
+                        .response
+                        .on_disabled_hover_text("The project's master or cue output plays on this channel.");
+                    }
                     ui.end_row();
                 }
             });
         });
-        if self.settings.output_routing != before
+        if (&self.settings.output_routing, &self.settings.output_cv_only) != (&before.0, &before.1)
             && let Some(Ok(out)) = &self.output
         {
-            out.set_routing(&self.settings.output_routing);
+            out.set_routing(&self.settings.output_routing, self.settings.cv_mask());
         }
     }
 
@@ -3491,6 +3516,9 @@ impl App {
         }
         if !report.missing.is_empty() {
             status += &format!("; {} samples not found", report.missing.len());
+        }
+        if let Some(note) = layout::silent_master_note(&self.settings, project) {
+            status += &format!("; {note}");
         }
         self.status = status;
     }
@@ -5069,6 +5097,14 @@ impl App {
             }
         }
         let doc_cache = self.surface_doc_cache.borrow();
+        // A Zhora's outputs by the channels' names (their aliases).
+        let zhora_focused = self.focused_zhora().is_some();
+        let knob_text = |i: usize, text: &str| match edits.get(i).copied().flatten() {
+            Some(layout::Edit::PluginChoice(_, id, _, cur, _)) if zhora_focused => {
+                zhora_ui::choice_name(&self.settings, id, cur).unwrap_or_else(|| text.to_string())
+            }
+            _ => text.to_string(),
+        };
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -5098,7 +5134,7 @@ impl App {
                     k.as_ref().map(|k| KnobView {
                         name: k.name.clone(),
                         section: k.section.clone(),
-                        text: k.text.clone(),
+                        text: knob_text(i, &k.text),
                         value: k.value,
                         modulatable: edits.get(i).copied().flatten().and_then(modulation::mod_target).is_some(),
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
@@ -5112,6 +5148,8 @@ impl App {
             eq: None,
             filter: None,
             picture: None,
+            zhora: None,
+            tuner: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -5173,6 +5211,11 @@ impl App {
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
             let page = c.page;
             v.control.picture = slot.and_then(|s| Self::effect_picture(s, Self::picture_phase(&s.module, &s.params, tempo), live, page));
+            // The tuner reads the instance: only for the page that shows it.
+            if self.surface.page() == "control" {
+                v.control.zhora = self.zhora_view(p);
+                v.control.tuner = self.tuner_view();
+            }
         }
         v.project = p.name.clone();
         v.swing = p.swing.amount;
@@ -5635,6 +5678,17 @@ impl App {
             }
             A::Turn { knob, inc, fine } => self.control_request(R::Turn { pos: knob, inc, fine }),
             A::Page(next) => self.control_request(R::Page(next)),
+            A::PluginPage(n) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let show = {
+                    let d = doc.borrow();
+                    self.slot.and_then(|i| layout::slot_page(self, d.project(), i)).filter(|pg| n < pg.names.len()).map(|pg| (pg.show)(n))
+                };
+                if let Some(act) = show {
+                    layout::apply_acts(self, vec![act]);
+                }
+            }
+            A::Zhora(what) => self.zhora_press(what),
             A::Level(level) => self.control_request(R::Level(level)),
             A::Slot(delta) => self.control_request(R::Slot(delta)),
             A::ModulesVisible(on) => self.control_request(R::ModulesVisible(on)),
@@ -6103,6 +6157,33 @@ impl App {
                     layout::apply_acts(self, vec![Act::SetRoute(sets[to].clone())]);
                     return;
                 }
+                // A Zhora's output or Input: on along the steps it offers (None, then the
+                // CV only channels free for it, or the connected inputs), a step each
+                // quarter of the way a continuous one would go.
+                let zhora_out = match edit {
+                    Edit::PluginChoice(_, id, _, cur, _) => {
+                        let d = doc.borrow();
+                        self.zhora_offered(d.project(), id, cur)
+                    }
+                    _ => None,
+                };
+                if let Edit::PluginChoice(slot, id, steps, cur, _) = edit
+                    && let Some(channels) = zhora_out
+                {
+                    let unit = 0.25 / steps.max(1) as f64;
+                    let n = (self.knob_acc[pos].abs() / unit).floor();
+                    if n < 1.0 {
+                        return;
+                    }
+                    let sign = self.knob_acc[pos].signum();
+                    self.knob_acc[pos] -= n * unit * sign;
+                    let to = zhora_ui::step_choice(cur, n as i64 * sign as i64, &channels);
+                    if to == cur {
+                        return;
+                    }
+                    layout::apply_acts(self, vec![Act::PluginParam(slot, id, to as f64 / steps.max(1) as f64)]);
+                    return;
+                }
                 // A stepped value moves a step once the knob has gone a quarter of the
                 // way a continuous one would.
                 let step = match edit {
@@ -6435,17 +6516,12 @@ impl App {
         }
     }
 
-    /// Open the interface input while a sound takes audio from it (and an engine to
-    /// play it through) or a controller shows its meters; close it when neither does.
+    /// Open the interface input while a sound takes audio from it or a Zhora listens
+    /// (and an engine to play it through) or a controller shows its meters; close it
+    /// when none does.
     pub(crate) fn input_sync(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let plays = doc
-            .borrow()
-            .project()
-            .groups
-            .iter()
-            .flat_map(|g| &g.sounds)
-            .any(|s| matches!(s.channel.audio_in, deckard_model::AudioSource::Ext(_)));
+        let plays = deckard_engine::project_takes_input(doc.borrow().project());
         let wants = plays || self.input_watched;
         self.input_bus.set_levels(&self.settings.input_levels);
         let key = (self.settings.input_device_in_use(), self.settings.input_routing.clone());
@@ -10050,15 +10126,7 @@ impl App {
             stored.push((*slot, chunk));
         }
         for (slot, chunk) in stored {
-            let r = match slot {
-                deckard_plugins::Slot::Sound { group, sound } => doc.borrow_mut().set_plugin_chunk(group, sound, chunk),
-                deckard_plugins::Slot::Chain { group, sound, slot } => doc.borrow_mut().set_slot_plugin_chunk(group, sound, slot, chunk),
-                deckard_plugins::Slot::Group { group, slot } => {
-                    doc.borrow_mut().set_chain_plugin_chunk(deckard_doc::Chain::Group(group), slot, chunk)
-                }
-                deckard_plugins::Slot::Master { slot } => doc.borrow_mut().set_chain_plugin_chunk(deckard_doc::Chain::Master, slot, chunk),
-            };
-            if let Err(e) = r {
+            if let Err(e) = store_chunk(&mut doc.borrow_mut(), slot, chunk) {
                 self.status = format!("plug-in state not stored: {e}");
             }
         }
@@ -10364,6 +10432,7 @@ impl App {
 
     /// What [`App::logic`] does while the window is covered or minimized.
     fn background(&mut self, ctx: &egui::Context) {
+        self.watch_tunes(ctx);
         self.share_tempo();
         self.follow_engine(ctx, undrawn(ctx, BACKGROUND_PACE));
         self.sync_notes_played();
@@ -10402,6 +10471,16 @@ impl App {
         self.follow_edits();
         self.keep_session_soon();
         self.update_meters(ctx, undrawn(ctx, BACKGROUND_PACE));
+    }
+}
+
+/// Store the state `chunk` of the plug-in in `slot` into `doc`.
+pub(crate) fn store_chunk(doc: &mut deckard_doc::Document, slot: deckard_plugins::Slot, chunk: Vec<u8>) -> Result<(), String> {
+    match slot {
+        deckard_plugins::Slot::Sound { group, sound } => doc.set_plugin_chunk(group, sound, chunk),
+        deckard_plugins::Slot::Chain { group, sound, slot } => doc.set_slot_plugin_chunk(group, sound, slot, chunk),
+        deckard_plugins::Slot::Group { group, slot } => doc.set_chain_plugin_chunk(deckard_doc::Chain::Group(group), slot, chunk),
+        deckard_plugins::Slot::Master { slot } => doc.set_chain_plugin_chunk(deckard_doc::Chain::Master, slot, chunk),
     }
 }
 
@@ -10494,6 +10573,8 @@ impl App {
         if self.group_load.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+        // Before this frame's edits, so a finished Tune is the step before them.
+        self.watch_tunes(ctx);
         self.share_tempo();
         // A selection belongs to the pattern it was made in.
         if self.selected_in != (self.group, self.pattern) {
