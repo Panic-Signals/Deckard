@@ -27,9 +27,15 @@ impl Table {
     /// The output value that sounds `note`, and whether the note lay outside the table (and
     /// so was clamped to its nearest end).
     pub fn value_for(&self, note: f32) -> (f32, bool) {
+        if !note.is_finite() {
+            return (Self::nominal(60.0), true);
+        }
         let (Some(&first), Some(&last)) = (self.points.first(), self.points.last()) else {
-            return (Self::nominal(note), true);
+            return (Self::nominal(note).clamp(-1.0, 1.0), true);
         };
+        if self.points.len() < 2 {
+            return (first.0, true);
+        }
         let l = log2_hz(note);
         if l <= first.1 {
             return (first.0, l < first.1);
@@ -86,8 +92,9 @@ impl Table {
             .chunks_exact(8)
             .map(|c| (f32::from_le_bytes(c[..4].try_into().unwrap()), f32::from_le_bytes(c[4..].try_into().unwrap())))
             .collect();
-        let sane =
-            points.iter().all(|p| p.0.is_finite() && p.1.is_finite()) && points.windows(2).all(|w| w[0].0 <= w[1].0 && w[0].1 <= w[1].1);
+        let sane = points.len() >= 2
+            && points.iter().all(|p| p.0.is_finite() && p.1.is_finite())
+            && points.windows(2).all(|w| w[0].0 <= w[1].0 && w[0].1 <= w[1].1);
         sane.then_some(Table { points, tuned_at, worst_cents })
     }
 }
@@ -126,6 +133,28 @@ mod tests {
         assert_eq!(t.value_for(200.0), (1.0, true));
         assert_eq!(t.value_for(-20.0), (0.0, true));
         assert_eq!(Table::nominal(60.0), 0.0);
+    }
+
+    #[test]
+    fn value_for_never_panics_on_odd_tables_or_notes() {
+        let t = bowed();
+        assert_eq!(t.value_for(f32::NAN), (Table::nominal(60.0), true));
+        assert_eq!(t.value_for(f32::INFINITY), (Table::nominal(60.0), true));
+        let one = Table { points: vec![(0.25, 8.0)], tuned_at: 0, worst_cents: 0.0 };
+        assert_eq!(one.value_for(60.0), (0.25, true));
+        assert_eq!(one.value_for(f32::NAN), (Table::nominal(60.0), true));
+        let none = Table { points: vec![], tuned_at: 0, worst_cents: 0.0 };
+        assert_eq!(none.value_for(72.0), (Table::nominal(72.0), true));
+        assert_eq!(none.value_for(f32::NEG_INFINITY), (Table::nominal(60.0), true));
+        assert_eq!(none.value_for(1e30), (1.0, true));
+    }
+
+    #[test]
+    fn a_saved_table_with_fewer_than_two_points_reads_none() {
+        for points in [vec![], vec![(0.5, 8.0)]] {
+            let t = Table { points, tuned_at: 1, worst_cents: 0.0 };
+            assert_eq!(Table::from_bytes(&t.to_bytes()), None);
+        }
     }
 
     #[test]
