@@ -8203,7 +8203,7 @@ impl App {
             let k = if audio {
                 d.add_take(g, s, &spec, label)?
             } else {
-                d.set_takes(g, s, &[spec.clone()], label)?;
+                d.set_takes(g, s, std::slice::from_ref(&spec), label)?;
                 0
             };
             let mut pi = focused.min(d.project().groups[g].patterns.len().saturating_sub(1));

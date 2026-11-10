@@ -4377,7 +4377,7 @@ impl Engine {
                 }
                 let ev = match (e.cue, e.midi) {
                     (Some(_), _) => {
-                        let cue = cue_take(&e);
+                        let cue = cue_take(e);
                         ahead::Ev::Cue(cue.map(|c| c.0), cue.map_or(0.0, |c| c.1))
                     }
                     (None, Some(kind)) => ahead::Ev::Control(kind),
