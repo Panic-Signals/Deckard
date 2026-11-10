@@ -122,6 +122,56 @@ pub trait Engine: Send {
     fn load(&mut self, data: &[u8]) {
         let _ = data;
     }
+
+    /// CV signal `signal` of the last `process`, as (output channel, values); `None` for a
+    /// signal that isn't sent.
+    fn cv(&self, signal: usize, frames: usize) -> Option<(usize, &[f32])> {
+        let _ = (signal, frames);
+        None
+    }
+
+    /// Audio coming back from outside, for an engine that listens to it.
+    fn input(&mut self, left: &[f32], right: &[f32]) {
+        let _ = (left, right);
+    }
+
+    /// The input pair (0-based) the engine wants to hear.
+    fn input_pair(&self) -> Option<usize> {
+        None
+    }
+
+    /// What a tuner screen shows.
+    fn readout(&self) -> Option<Readout> {
+        None
+    }
+}
+
+/// What a Tune or Check is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuneState {
+    Idle,
+    Tuning,
+    Checking,
+    NotTuned,
+}
+
+/// What a tuning instrument reports to its screens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Readout {
+    /// The nearest note heard on the input, and the cents above it.
+    pub note: Option<(u8, f32)>,
+    pub state: TuneState,
+    pub worst_cents: Option<f32>,
+    /// When the table was made, in seconds since the Unix epoch.
+    pub tuned_at: Option<u64>,
+    pub range: Option<(u8, u8)>,
+    /// `Some` while tuning live: whether it is locked on.
+    pub live_locked: Option<bool>,
+    /// The note playing lies outside the tuned range.
+    pub clamped: bool,
+    pub message: Option<&'static str>,
+    /// The notes over target in the last Tune or Check.
+    pub off: Vec<u8>,
 }
 
 /// A native plug-in: its identity, parameters and how to make its engine.
@@ -146,7 +196,7 @@ impl Class {
 }
 
 /// Every native plug-in.
-pub static CLASSES: &[&Class] = &[&crate::replicant::CLASS, &crate::plaits::CLASS];
+pub static CLASSES: &[&Class] = &[&crate::replicant::CLASS, &crate::plaits::CLASS, &crate::zhora::CLASS];
 
 /// The native plug-in with class id `cid`.
 pub fn find(cid: &[u8; 16]) -> Option<&'static Class> {
@@ -431,6 +481,22 @@ impl Instance {
 
     pub(crate) fn output_name(&self, bus: usize) -> Option<String> {
         self.engine.output_name(bus)
+    }
+
+    pub(crate) fn cv(&self, signal: usize, frames: usize) -> Option<(usize, &[f32])> {
+        self.engine.cv(signal, frames)
+    }
+
+    pub(crate) fn input(&mut self, left: &[f32], right: &[f32]) {
+        self.engine.input(left, right);
+    }
+
+    pub(crate) fn input_pair(&self) -> Option<usize> {
+        self.engine.input_pair()
+    }
+
+    pub(crate) fn readout(&self) -> Option<Readout> {
+        self.engine.readout()
     }
 }
 

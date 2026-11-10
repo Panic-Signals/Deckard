@@ -509,6 +509,37 @@ impl Plugin {
         each!(self, p => p.output_name(bus)).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Out {}", bus + 1))
     }
 
+    /// CV signal `signal` of the last `process`, as (output channel, values).
+    pub fn cv(&self, signal: usize, frames: usize) -> Option<(usize, &[f32])> {
+        match &self.kind {
+            Kind::Native(p) => p.cv(signal, frames),
+            _ => None,
+        }
+    }
+
+    /// Audio coming back from outside, for a plug-in that listens to it.
+    pub fn input(&mut self, left: &[f32], right: &[f32]) {
+        if let Kind::Native(p) = &mut self.kind {
+            p.input(left, right);
+        }
+    }
+
+    /// The input pair (0-based) the plug-in wants to hear.
+    pub fn input_pair(&self) -> Option<usize> {
+        match &self.kind {
+            Kind::Native(p) => p.input_pair(),
+            _ => None,
+        }
+    }
+
+    /// What a tuner screen shows.
+    pub fn readout(&self) -> Option<native::Readout> {
+        match &self.kind {
+            Kind::Native(p) => p.readout(),
+            _ => None,
+        }
+    }
+
     /// The VST3 component (to query buses and the like); none for DECKARD's own.
     pub fn component(&self) -> Option<&ComPtr<IComponent>> {
         match &self.kind {
