@@ -89,7 +89,7 @@ wrapped in the take's play range. A Maschine project always plays from 1.1.1.
   plays. 0 is Maschine's placement and every new take starts there. Each pattern places
   the same take on its own. The offset is a field of the AudioEvent in the document, kept
   out of Maschine's archive, so Maschine plays the take from 1.1.1. In the DECKARD block
-  (version 11) it is a list of (group, pattern, sound, ticks), for the cues whose offset
+  (version 12) it is a list of (group, pattern, sound, ticks), for the cues whose offset
   isn't 0.
 - **The drag.** In the pattern editor, drag a sound's waveform (pad view: the sound's row;
   piano roll: the focused sound's waveform, anywhere there is no note) to set the offset.

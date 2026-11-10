@@ -83,9 +83,9 @@ Everything else stays as it is, including the internal source list (Master and g
   as in Maschine's formula (counted from 1.1.1, Start included). Before `offset` the take
   wraps round, so a loop still fills the whole pattern; a take longer than the pattern
   still starts over each pass.
-- Saved in the DECKARD block (`crates/doc/src/block.rs`, version 11): per group, pattern and
-  sound, the offset when it isn't 0. Maschine's `AudioEvent` is unchanged and no audio is
-  rotated, so a project opened in Maschine plays the take from 1.1.1, as Maschine would.
+- Saved in the DECKARD block (`crates/doc/src/block.rs`, version 12, after version 11's
+  CV routes): per group, pattern and sound, the offset when it isn't 0. Maschine's
+  `AudioEvent` is unchanged and no audio is rotated, so a project opened in Maschine plays the take from 1.1.1, as Maschine would.
 - The take a pattern plays and its offset belong to the pattern; the takes belong to the
   sound. Each pattern can place the same take differently.
 - Undoable ("Move Audio").
