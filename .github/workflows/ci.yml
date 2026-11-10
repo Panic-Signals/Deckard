@@ -71,9 +71,13 @@ jobs:
       # tests can miss under the slower instrumented build.
       - name: Measure coverage
         run: cargo llvm-cov --workspace --locked --ignore-run-fail --cobertura --output-path coverage.xml
+      # diff-cover 11 needs Python 3.11 or later; ubuntu-22.04 has 3.10.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: At least 70% of changed lines covered
         run: |
-          pipx install diff-cover==11.0.1
+          python -m pip install diff-cover==11.0.1
           diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=70 \
             --markdown-report coverage.md
         env:
