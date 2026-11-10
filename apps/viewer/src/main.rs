@@ -10384,6 +10384,8 @@ impl App {
             self.pending_editor = false;
             self.open_plugin_editor(self.group, self.sound);
         }
+        // Plug-ins' timers, which this app's repainting would otherwise starve.
+        deckard_plugins::editor::serve_timers();
         self.poll_wine();
         if self.wine_task.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
