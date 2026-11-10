@@ -57,6 +57,8 @@ local function toggle_page(page)
     deckard.show_page(page)
     if page == "mod_matrix" then require("pages.mod_matrix").shown() end
   end
+  -- MIX opens the software's Mixer, and closes it when the button leaves that page.
+  if page == "mixer" then deckard.mixer_view(deckard.page() == "mixer") end
 end
 
 -- The page each pad mode shows.

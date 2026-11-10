@@ -472,6 +472,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("browse_routing", (on: bool) => Action::Browse(Browse::Routing(on)));
     request!("browse_patterns", (on: bool) => Action::Browse(Browse::Patterns(on)));
     request!("song_view", (on: bool) => Action::SongView(on));
+    request!("mixer_view", (on: bool) => Action::MixerView(on));
     request!("move_section", (next: bool) => Action::SectionMove(next));
     request!("section_scene", (next: bool) => Action::SectionScene(next));
     request!("section_length", (ticks: i64) => Action::SectionLength(ticks.max(1)));

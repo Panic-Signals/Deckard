@@ -336,6 +336,7 @@ and `positions`.
 | `deckard.pattern_edit(what)` | `"create"`, `"double"`, `"duplicate"` or `"delete"` the focused pattern. |
 | `deckard.scene_edit(what)` | `"create"` a scene after the last, `"insert"` one after the focused, `"duplicate"`, `"delete"` or `"clear"` (no group plays a pattern in it) the focused scene, or `"append"` it to the arrangement. |
 | `deckard.song_view(on)` | ARRANGE shows the Song view (`true`) or the Ideas view. |
+| `deckard.mixer_view(on)` | MIX shows the software's Mixer view (`true`), or closes it. |
 | `deckard.focus_section(n)` | Focus section `n`; while the song plays, it plays next. |
 | `deckard.section_edit(what)` | `"create"` a section after the focused one (playing its scene), `"duplicate"` or `"delete"` the focused one. |
 | `deckard.move_section(next)` | The focused section swaps places with the next (`true`) or the previous. |
