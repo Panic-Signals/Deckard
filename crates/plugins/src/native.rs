@@ -172,6 +172,8 @@ pub struct Readout {
     pub message: Option<&'static str>,
     /// The notes over target in the last Tune or Check.
     pub off: Vec<u8>,
+    /// Hold has the outputs.
+    pub holding: bool,
 }
 
 /// A native plug-in: its identity, parameters and how to make its engine.

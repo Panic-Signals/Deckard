@@ -7,7 +7,7 @@ pub mod tune;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use self::live::Trim;
 use self::pitch::{Pitch, WINDOW, detect};
@@ -55,7 +55,7 @@ const fn p(id: u32, name: &'static str, short: &'static str, default: f64, steps
 }
 
 /// Steps of an output picker.
-const OUT_STEPS: usize = 33;
+const OUT_STEPS: usize = 32;
 /// Steps of the input picker.
 const INPUT_STEPS: usize = 16;
 /// The hold note's default: MIDI 69, which DECKARD names A3 (it calls note 60 C3).
@@ -187,11 +187,11 @@ const NO_INPUT: &str = "Choose an input first";
 const NO_SIGNAL: &str = "No signal on the input";
 const NOT_TUNED: &str = "Tune first";
 const BUSY: &str = "Tuner is busy";
+const TUNER_STOPPED: &str = "The tuner has stopped";
 
-/// The channel of an output picker's value: 0 is None, n is channel n - 1 (of 32).
+/// The channel of an output picker's value: 0 is None, n is channel n - 1.
 fn channel(v: f64) -> Option<usize> {
-    let n = step(v, OUT_STEPS);
-    (1..=32).contains(&n).then(|| n - 1)
+    step(v, OUT_STEPS).checked_sub(1)
 }
 
 /// `note`'s name in DECKARD's naming (MIDI note 60 is C3).
@@ -387,6 +387,12 @@ pub struct Zhora {
 
     cv: [Vec<f32>; SIGNALS],
     frames: usize,
+    /// A retired report the queue had no room for, sent again on the next `process`.
+    retiring: Option<Cmd>,
+    /// The worker has ended, so no Run can finish.
+    worker_gone: bool,
+    /// Hold or a Run had the outputs in the last `process`.
+    was_open: bool,
 }
 
 impl Zhora {
@@ -457,6 +463,9 @@ impl Zhora {
             clamped: false,
             cv: std::array::from_fn(|_| vec![0.0; MAX_BLOCK]),
             frames: 0,
+            retiring: None,
+            worker_gone: false,
+            was_open: false,
         };
         z.update_env();
         z
@@ -536,9 +545,17 @@ impl Zhora {
         self.since_input = 0;
     }
 
-    /// Takes the worker's finished Run, if it is the one still wanted.
+    /// Takes the worker's finished Run, if it is the one still wanted. What it replaces goes
+    /// back to the worker; while the queue is full it waits in `retiring`, never freed here.
     fn take_finished(&mut self) {
-        while let Ok(mut report) = self.finished.try_recv() {
+        loop {
+            if let Some(cmd) = self.retiring.take()
+                && let Err(TrySendError::Full(cmd) | TrySendError::Disconnected(cmd)) = self.cmds.try_send(cmd)
+            {
+                self.retiring = Some(cmd);
+                return;
+            }
+            let Ok(mut report) = self.finished.try_recv() else { return };
             if self.running.is_some_and(|r| r.id == report.id) {
                 self.running = None;
                 // The table this one replaces goes back in `report` to be freed.
@@ -550,7 +567,7 @@ impl Zhora {
                 report = std::mem::replace(&mut self.report, report);
                 report.table = replaced;
             }
-            let _ = self.cmds.try_send(Cmd::Retire(report));
+            self.retiring = Some(Cmd::Retire(report));
         }
     }
 
@@ -693,11 +710,11 @@ impl Engine for Zhora {
     }
 
     /// Gate and envelope drop; pitch, velocity and mod wheel hold their last values.
+    /// The gate's last rendered frame stays as it was, so a note in the same span still retriggers.
     fn reset(&mut self) {
         self.stack.clear();
         self.env = Env::default();
         self.gap_left = 0;
-        self.gate_was_high = false;
         self.frozen = true;
         self.clamped = false;
     }
@@ -706,6 +723,9 @@ impl Engine for Zhora {
     fn process(&mut self, left: &mut [f32], _right: &mut [f32], transport: &Transport) {
         let n = left.len().min(MAX_BLOCK);
         self.take_finished();
+        if self.running.is_some() && self.worker_gone {
+            self.give_up(TUNER_STOPPED);
+        }
         if self.running.is_some() && self.since_input as f64 >= NO_INPUT_S * self.sr {
             self.give_up(NO_SIGNAL);
         }
@@ -717,6 +737,11 @@ impl Engine for Zhora {
         let run_value = running.then(|| f32::from_bits(self.shared.output.load(Ordering::Relaxed)));
         let hold_value = holding.then(|| self.value_for(self.hold_note as f64).0);
         let open = holding || running;
+        if self.was_open && !open {
+            // What was heard belonged to the hold note or the Run, not a settled note.
+            self.since_note_ms = 0.0;
+        }
+        self.was_open = open;
         if !open {
             let dt_ms = n as f32 * 1000.0 / self.sr as f32;
             if self.glide_left == 0 {
@@ -806,7 +831,9 @@ impl Engine for Zhora {
             self.filled += 1;
             if self.filled == HOP {
                 // A full queue means the analysis is behind, and this hop is lost.
-                let _ = self.blocks.try_send(self.block);
+                if let Err(TrySendError::Disconnected(_)) = self.blocks.try_send(self.block) {
+                    self.worker_gone = true;
+                }
                 self.filled = 0;
             }
         }
@@ -842,6 +869,7 @@ impl Engine for Zhora {
             clamped: self.clamped,
             message: self.report.message,
             off: self.report.off.clone(),
+            holding: self.holding,
         })
     }
 }
@@ -877,7 +905,7 @@ mod tests {
     /// Every signal to its own channel, 0..6.
     fn route(e: &mut dyn Engine) {
         for (i, id) in [PITCH_OUT, GATE_OUT, CLOCK_OUT, ENV_OUT, VEL_OUT, MOD_OUT].into_iter().enumerate() {
-            e.set_param(id, (i + 1) as f64 / 33.0);
+            e.set_param(id, (i + 1) as f64 / 32.0);
         }
     }
 
@@ -984,7 +1012,7 @@ mod tests {
         e.note_on(48, 100);
         run(e.as_mut(), BLOCK, &t);
         e.note_on(72, 100);
-        let frames = (glide_time(0.5) * SR) as usize;
+        let frames = (glide_time(0.5) * SR).round() as usize;
         let mut values = Vec::new();
         for _ in 0..(frames + 2 * BLOCK) / BLOCK {
             values.extend(block(e.as_mut(), PITCH, BLOCK, &t));
@@ -1029,7 +1057,7 @@ mod tests {
     #[test]
     fn a_none_output_returns_no_cv() {
         let mut e = engine();
-        e.set_param(PITCH_OUT, 3.0 / 33.0);
+        e.set_param(PITCH_OUT, 3.0 / 32.0);
         e.note_on(60, 100);
         run(e.as_mut(), BLOCK, &stopped());
         assert_eq!(e.cv(PITCH, BLOCK).unwrap().0, 2);
@@ -1052,12 +1080,16 @@ mod tests {
         }
         let rises: Vec<usize> = (1..values.len()).filter(|&i| values[i] > 0.0 && values[i - 1] == 0.0).collect();
         assert!(values[0] > 0.0, "the first pulse is at the start");
-        assert!(rises.len() >= 5);
+        assert_eq!(rises.len(), 6, "{rises:?}");
         assert!(rises.iter().all(|&r| r % 6000 <= 1 || r % 6000 >= 5999), "{rises:?}");
         let width = values[..3000].iter().filter(|&&v| v > 0.0).count();
         assert!((239..=241).contains(&width), "5 ms pulse, got {width} frames");
+        // The pulse at 6000 crosses the block boundary at 6144.
+        let width = values[5900..6400].iter().filter(|&&v| v > 0.0).count();
+        assert!((239..=241).contains(&width), "a pulse across blocks, got {width} frames");
         assert!(values.iter().all(|&v| v == 0.0 || near(v, 0.5)));
         t.playing = false;
+        t.quarters = 0.0;
         let idle = block(e.as_mut(), CLOCK, 1024, &t);
         assert!(idle.iter().all(|&v| v == 0.0));
     }
@@ -1266,15 +1298,17 @@ mod tests {
     fn output_param_text_reads_like_out_2_l() {
         let e = engine();
         assert_eq!(e.text(PITCH_OUT, 0.0), "None");
-        assert_eq!(e.text(PITCH_OUT, 3.0 / 33.0), "Out 2 L");
-        assert_eq!(e.text(GATE_OUT, 4.0 / 33.0), "Out 2 R");
+        assert_eq!(e.text(PITCH_OUT, 3.0 / 32.0), "Out 2 L");
+        assert_eq!(e.text(GATE_OUT, 4.0 / 32.0), "Out 2 R");
+        assert_eq!(e.text(GATE_OUT, 1.0), "Out 16 R", "the last position is the last channel");
+        assert!(PARAMS.iter().filter(|p| p.id <= MOD_OUT).all(|p| p.steps == 32));
         assert_eq!(e.text(INPUT, 0.0), "None");
         assert_eq!(e.text(INPUT, 2.0 / 16.0), "In 2 L+R");
         assert_eq!(e.text(DIVISION, 2.0 / 7.0), "1/16");
     }
 
     #[test]
-    fn process_never_allocates_in_a_held_note() {
+    fn process_writes_only_to_preallocated_buffers_in_a_held_note() {
         // The crate has no allocation counter: what `process` writes to must not move or grow.
         let mut z = Zhora::new(SR);
         defaults(&mut z);
@@ -1309,6 +1343,106 @@ mod tests {
         assert_eq!(e.input_pair(), None);
         e.set_param(INPUT, 3.0 / 16.0);
         assert_eq!(e.input_pair(), Some(2));
+    }
+
+    #[test]
+    fn a_note_in_the_same_span_as_a_reset_still_gets_its_gap() {
+        let mut e = routed();
+        let t = stopped();
+        e.note_on(60, 100);
+        run(e.as_mut(), BLOCK, &t);
+        e.reset();
+        e.note_on(64, 100);
+        let gate = block(e.as_mut(), GATE, BLOCK, &t);
+        assert!(gate[..96].iter().all(|&v| v == 0.0), "the gate was high when the reset landed");
+        assert!(near(gate[96], 0.5));
+    }
+
+    #[test]
+    fn readout_says_when_hold_is_holding() {
+        let mut e = routed();
+        e.set_param(HOLD, 1.0);
+        run(e.as_mut(), BLOCK, &stopped());
+        assert!(!e.readout().unwrap().holding, "a saved value is not a press");
+        e.set_param(HOLD, 0.0);
+        e.set_param(HOLD, 1.0);
+        assert!(e.readout().unwrap().holding);
+        e.set_param(HOLD, 0.0);
+        assert!(!e.readout().unwrap().holding);
+    }
+
+    #[test]
+    fn a_dead_worker_ends_the_run_and_keeps_the_table() {
+        let mut z = Zhora::new(SR);
+        defaults(&mut z);
+        z.load(&bowed().to_bytes());
+        z.set_param(INPUT, 1.0 / 16.0);
+        let t = stopped();
+        run(&mut z, BLOCK, &t);
+        z.set_param(CHECK, 1.0);
+        // The worker's end of the input is gone.
+        let (gone, rx) = sync_channel(1);
+        drop(rx);
+        z.blocks = gone;
+        z.input(&[0.1; HOP], &[0.1; HOP]);
+        run(&mut z, BLOCK, &t);
+        let r = z.readout().unwrap();
+        assert_eq!(r.state, TuneState::Idle);
+        assert!(r.message.is_some());
+        assert_eq!(z.save(), bowed().to_bytes());
+    }
+
+    #[test]
+    fn a_retired_report_waits_when_the_queue_is_full() {
+        let mut z = Zhora::new(SR);
+        defaults(&mut z);
+        z.load(&bowed().to_bytes());
+        z.set_param(INPUT, 1.0 / 16.0);
+        run(&mut z, BLOCK, &stopped());
+        z.set_param(CHECK, 1.0);
+        let id = z.running.unwrap().id;
+        // A full queue, and a finished Check waiting.
+        let (full, cmd_rx) = sync_channel(1);
+        full.try_send(Cmd::Cancel).unwrap();
+        z.cmds = full;
+        let (done, finished) = sync_channel(4);
+        z.finished = finished;
+        done.send(Report { id, worst_cents: Some(2.0), off: vec![60], ..Report::default() }).unwrap();
+        done.send(Report { id: id + 7, off: vec![61], ..Report::default() }).unwrap();
+        run(&mut z, BLOCK, &stopped());
+        assert_eq!(z.readout().unwrap().worst_cents, Some(2.0));
+        assert!(z.retiring.is_some(), "kept, not freed");
+        // Room again: it goes, and so does the next.
+        assert!(matches!(cmd_rx.try_recv(), Ok(Cmd::Cancel)));
+        run(&mut z, BLOCK, &stopped());
+        assert!(matches!(cmd_rx.try_recv(), Ok(Cmd::Retire(_))));
+        run(&mut z, BLOCK, &stopped());
+        assert!(matches!(cmd_rx.try_recv(), Ok(Cmd::Retire(r)) if r.off == [61]));
+        assert!(z.retiring.is_none());
+    }
+
+    #[test]
+    fn live_waits_for_a_settled_note_after_hold() {
+        let table = bowed();
+        let mut z = Zhora::new(SR);
+        defaults(&mut z);
+        route(&mut z);
+        z.load(&table.to_bytes());
+        z.set_param(LIVE, 1.0);
+        let t = stopped();
+        z.note_on(69, 100);
+        for _ in 0..100 {
+            run(&mut z, 1024, &t);
+        }
+        z.set_param(HOLD, 1.0);
+        for _ in 0..10 {
+            run(&mut z, 1024, &t);
+        }
+        z.set_param(HOLD, 0.0);
+        // The first reading after Hold is of the hold note's tail.
+        z.shared.publish(Some(Pitch { hz: 440.0 * (20.0f32 / 1200.0).exp2(), clarity: 0.99 }));
+        run(&mut z, 1024, &t);
+        assert_eq!(z.trim_semis, 0.0);
     }
 
     /// Live must trim the whole drift, which it can only do if it is told what the table
