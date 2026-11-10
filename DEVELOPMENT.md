@@ -167,10 +167,23 @@ to the crate's and is shown in About DECKARD.
   breakage before CI.
 - **CI:** `.github/workflows/ci.yml` builds and tests all three systems on every push
   to main and every pull request. Lint runs on Linux.
+- **Patch coverage:** on pull requests, CI's Patch coverage check fails unless the tests
+  run at least 70% of the lines the pull request adds or changes
+  ([cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and
+  [diff-cover](https://github.com/Bachmann1234/diff_cover), on Linux). To check
+  before pushing: `rustup component add llvm-tools-preview`, install both, then
+  `cargo llvm-cov --workspace --cobertura --output-path coverage.xml` and
+  `diff-cover coverage.xml --compare-branch=main --fail-under=70`. Tests that skip
+  themselves without a Maschine install still count against you on CI.
 - **Release builds:** `release.yml` builds all three when a release is published,
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps
   the builds as workflow artifacts.
+- **Pull requests:** fill in `.github/pull_request_template.md`: the type, a one-to-two
+  sentence summary, how a reviewer can check it works, the platforms it's for, and
+  before/after screenshots of anything visible. In Claude Code, the `pull-request`
+  skill (`.claude/skills/pull-request/`) writes it. A triager adds the label that
+  sorts it into the release notes.
 - **Release notes:** start from [docs/release-notes-template.md](docs/release-notes-template.md):
   New and Enhanced Features, Bug Fixes, thanks to everyone who contributed, then
   first-time contributors.

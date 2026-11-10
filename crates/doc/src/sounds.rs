@@ -409,9 +409,34 @@ mod tests {
         assert_eq!(d.project().groups[0], pasted.groups[0]);
     }
 
+    /// A new project whose first group has three patterns, each with its own notes, and a
+    /// scene that plays the second: built here, so tests using it run without a library.
+    fn three_patterns() -> Document {
+        let mut d = Document::new_project().unwrap();
+        while d.project().groups[0].patterns.len() < 3 {
+            let n = d.project().groups[0].patterns.len();
+            d.add_pattern(0, 0, &format!("Pattern {}", n + 1)).unwrap();
+        }
+        for p in 0..3 {
+            let start = d.project().groups[0].patterns[p].start;
+            let note = |sound, at: i64| Note {
+                expr: None,
+                sound,
+                position: start + at,
+                length: 240,
+                pitch: 60 + p as i64,
+                velocity: 100,
+                probability: 100,
+            };
+            d.edit_notes("Add", 0, p, &[], &[note(0, 0), note(1, 480 * (p as i64 + 1)), note(2, 1920)]).unwrap();
+        }
+        d.assign_pattern(0, 0, Some(1)).unwrap();
+        d
+    }
+
     #[test]
     fn clear_double_duplicate_and_delete_patterns() {
-        let Some(mut d) = open() else { return };
+        let mut d = three_patterns();
         let before = d.project().clone();
         let g = 0;
         let n = before.groups[g].patterns.len();
@@ -431,7 +456,9 @@ mod tests {
         assert_eq!(q.patterns[1].length, p0.length);
         let rel = |p: &deckard_model::Pattern| p.notes.iter().map(|x| (x.sound, x.position - p.start, x.pitch)).collect::<Vec<_>>();
         assert_eq!(rel(&q.patterns[1]), rel(&p0));
-        assert_eq!(q.patterns[2], before.groups[g].patterns[1], "the next pattern moved on one");
+        let next = &before.groups[g].patterns[1];
+        let moved = deckard_model::Pattern { slot: next.slot + 1, ..next.clone() };
+        assert_eq!(q.patterns[2], moved, "the next pattern moved on one, its slot too");
         consistent(&d);
         assert_eq!(reload(&d).project().groups[g].patterns.len(), n + 1);
 
