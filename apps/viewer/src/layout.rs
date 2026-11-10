@@ -3977,6 +3977,11 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
+    echo_plugin_param(app, chain, i, id, v, new_text.as_deref());
+}
+
+/// The shared local echo for software and hardware writes, on the slot's own page.
+pub(crate) fn echo_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64, text: Option<&str>) {
     let page = app.view_page((chain, i));
     if let Some(view) = app.plugin_views.get_mut(&(chain, i)) {
         if let Some(pg) = view.pages.get(page) {
@@ -3985,8 +3990,8 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
                     && let Some(slot) = view.values.get_mut(k)
                 {
                     slot.0 = v;
-                    if let Some(t) = &new_text {
-                        slot.1 = t.clone();
+                    if let Some(t) = &text {
+                        slot.1 = (*t).to_string();
                     }
                 }
             }

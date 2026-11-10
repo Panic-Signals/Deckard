@@ -55,6 +55,7 @@ mod plugin_params;
 pub use plugin_params::PluginPageSpec;
 mod plugins;
 pub mod remote;
+mod session;
 
 /// The document as the app's parts share it (all on the UI thread).
 pub type Shared = Rc<RefCell<Document>>;
@@ -67,6 +68,8 @@ pub enum Op {
     /// Set field `field` of the object at `path` (`None`: take it off). For DECKARD's
     /// own fields, which Maschine's objects don't have.
     SetField { path: Path, field: String, value: Option<Value> },
+    /// An undoable session value, never written into the project file.
+    Session { key: String, value: Option<u64> },
 }
 
 /// The part of the project a parameter belongs to.
@@ -155,6 +158,7 @@ pub struct Document {
     native_pressure: bool,
     /// Where the project was left, kept in the DECKARD block ([`SavedScreen`]).
     screen: Option<SavedScreen>,
+    session_values: std::collections::BTreeMap<String, u64>,
 }
 
 impl std::fmt::Debug for Document {
@@ -203,6 +207,7 @@ impl Document {
             expressions: Vec::new(),
             native_pressure: false,
             screen: None,
+            session_values: Default::default(),
         };
         d.next_oid = max_oid + 1;
         d.read_block();
@@ -680,6 +685,22 @@ impl Document {
         Ok(())
     }
 
+    /// Begin a synchronous group whose edits can come from separate owners.
+    pub fn begin_edit_group(&mut self) -> usize {
+        if let Some(last) = self.undo.last_mut() {
+            last.at = Instant::now() - MERGE_WINDOW;
+        }
+        self.undo.len()
+    }
+    /// Finish a group begun by `begin_edit_group`, retaining one undo step.
+    pub fn end_edit_group(&mut self, before: usize, label: &str) {
+        if before >= self.undo.len() {
+            return;
+        }
+        let steps: Vec<Step> = self.undo.drain(before..).collect();
+        self.undo.push(Step::merged(label, &steps));
+    }
+
     /// Start a take (a recording): the edits until [`Document::end_take`] undo as one
     /// step named `label`.
     pub fn begin_take(&mut self, label: &str) {
@@ -792,11 +813,11 @@ impl Document {
         // has nowhere to go, those before it are taken back.
         let mut inverse = Vec::with_capacity(ops.len());
         for op in ops {
-            match run_one(&mut self.tree, op) {
+            match run_one(&mut self.tree, &mut self.session_values, op) {
                 Some(undo) => inverse.push(undo),
                 None => {
                     for undo in inverse.iter().rev() {
-                        let _ = run_one(&mut self.tree, undo);
+                        let _ = run_one(&mut self.tree, &mut self.session_values, undo);
                     }
                     return Err(format!("no value at {:?}", op_path(op)));
                 }
@@ -990,13 +1011,15 @@ fn defines_objects(op: &Op) -> bool {
     }
     match op {
         Op::Set { value, .. } | Op::SetField { value: Some(value), .. } => has(value),
-        Op::SetField { value: None, .. } => false,
+        Op::SetField { value: None, .. } | Op::Session { .. } => false,
     }
 }
 
 fn op_path(op: &Op) -> &Path {
+    static SESSION_PATH: Path = Vec::new();
     match op {
         Op::Set { path, .. } | Op::SetField { path, .. } => path,
+        Op::Session { .. } => &SESSION_PATH,
     }
 }
 
@@ -1005,12 +1028,20 @@ fn op_target(op: &Op) -> (&Path, Option<&str>) {
     match op {
         Op::Set { path, .. } => (path, None),
         Op::SetField { path, field, .. } => (path, Some(field)),
+        Op::Session { key, .. } => (op_path(op), Some(key)),
     }
 }
 
 /// Apply one op to `tree`; its inverse, or `None` if it has nowhere to go.
-fn run_one(tree: &mut Value, op: &Op) -> Option<Op> {
+fn run_one(tree: &mut Value, session: &mut std::collections::BTreeMap<String, u64>, op: &Op) -> Option<Op> {
     match op {
+        Op::Session { key, value } => {
+            let old = match value {
+                Some(v) => session.insert(key.clone(), *v),
+                None => session.remove(key),
+            };
+            Some(Op::Session { key: key.clone(), value: old })
+        }
         Op::Set { path, value } => {
             let slot = tree.at_mut(path)?;
             let old = std::mem::replace(slot, value.clone());
