@@ -2020,6 +2020,9 @@ pub struct Engine {
     /// The master channel's level (linear) and pan gains.
     pub master: f32,
     master_pan: (f32, f32),
+    /// The master's gains as played: they glide to a new level or pan instead of
+    /// jumping (a master knob turned while playing would zip).
+    master_ramp: GainRamp,
     /// The external output the master plays on (Out n, from 0), if any.
     master_bus: Option<usize>,
     /// [group][sound]: the external output a sound plays on when it isn't the master's
@@ -2814,6 +2817,7 @@ impl Engine {
             record_seq: 0,
             master: deckard_model::level_gain(project.master_level) as f32,
             master_pan: pan_gains(project.master_pan),
+            master_ramp: GainRamp::default(),
             master_bus: match project.master_output {
                 deckard_model::AudioDest::Ext(n) if (0..OUTPUTS as i64).contains(&n) => Some(n as usize),
                 _ => None,
@@ -4839,15 +4843,15 @@ impl Engine {
         }
         // The master channel; never pass on NaN or runaway levels (a safety net for
         // speakers and ears).
-        let gain = [self.master * self.master_pan.0, self.master * self.master_pan.1];
-        for (i, s) in out.iter_mut().enumerate() {
-            let v = *s * gain[i % 2];
-            *s = if v.is_finite() { v.clamp(-4.0, 4.0) } else { 0.0 };
-            if i % 2 == 0 {
-                self.master_peak.0 = self.master_peak.0.max(s.abs());
-            } else {
-                self.master_peak.1 = self.master_peak.1.max(s.abs());
-            }
+        let glide = (MASTER_GLIDE_SECONDS * self.sr).round() as u32;
+        self.master_ramp.aim((self.master * self.master_pan.0, self.master * self.master_pan.1), glide);
+        for frame in out.chunks_exact_mut(2) {
+            let gain = self.master_ramp.next();
+            let (l, r) = (frame[0] * gain.0, frame[1] * gain.1);
+            frame[0] = if l.is_finite() { l.clamp(-4.0, 4.0) } else { 0.0 };
+            frame[1] = if r.is_finite() { r.clamp(-4.0, 4.0) } else { 0.0 };
+            self.master_peak.0 = self.master_peak.0.max(frame[0].abs());
+            self.master_peak.1 = self.master_peak.1.max(frame[1].abs());
         }
         if self.tap.as_ref().is_some_and(|t| t.source == TapSource::Master) {
             self.flush_tap(out);
@@ -5876,6 +5880,10 @@ impl SoundBufs {
 /// How long a sound's level, pan or mute takes to reach a new setting while playing
 /// (rather than jumping, which clicks).
 const GAIN_GLIDE_SECONDS: f64 = 0.01;
+
+/// The master's level and pan glide longer: a knob or fader sends steps tens of
+/// milliseconds apart, and each step of the whole mix would otherwise be heard.
+const MASTER_GLIDE_SECONDS: f64 = 0.03;
 
 /// A stereo gain that glides to a new value in a straight line; once there it is the
 /// value exactly (so steady playback is unchanged by it).
@@ -11757,6 +11765,29 @@ mod tests {
         assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
         let (l, r) = pan_gains(-1.0);
         assert!(r.abs() < 1e-6 && l > 1.0);
+    }
+
+    /// A master level change while playing glides (the mix doesn't jump, which zips when
+    /// a knob sends steps); steady playback is exact once it gets there.
+    #[test]
+    fn the_masters_level_glides_to_a_new_setting() {
+        let mut x = Strips::new(|_| {});
+        let (before, _) = x.block(0.5);
+        let target = deckard_model::level_from_db(-12.0);
+        let from = x.p.master_level;
+        x.edit(|p| p.master_level = target);
+        let mut frame = [0f32; 32];
+        (frame[0], frame[1]) = (0.5, 0.5);
+        x.e.live_in.as_ref().unwrap().lock().unwrap().extend(std::iter::repeat_n(frame, 64));
+        let mut out = vec![0f32; 128];
+        let mut ext = vec![vec![0f32; 128]; OUTPUTS];
+        x.e.process_outputs(&mut out, &mut ext);
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let after = before.0 * deckard_model::level_gain(target) as f32 / deckard_model::level_gain(from) as f32;
+        assert!(left[0] > before.0 * 0.9, "no jump on the first frame: {} vs {}", left[0], before.0);
+        assert!(left.windows(2).all(|w| w[1] <= w[0] + 1e-6), "it falls steadily: {left:?}");
+        assert!(about(left[63], after), "it gets there within the block: {} vs {after}", left[63]);
+        assert!(about(x.block(0.5).0.0, after));
     }
 }
 
