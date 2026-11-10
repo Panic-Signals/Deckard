@@ -83,6 +83,8 @@ mod loops;
 #[cfg(test)]
 mod macro_surface_tests;
 #[cfg(test)]
+mod manual_shots;
+#[cfg(test)]
 mod master_fader_tests;
 mod menu;
 mod midi_devices;
