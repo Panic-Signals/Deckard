@@ -1115,10 +1115,21 @@ impl SamplerRt {
             }
             return;
         }
-        let same = |a: &ZoneRt, b: &ZoneRt| Arc::ptr_eq(&a.sample, &b.sample);
-        for v in old.voices.drain(..) {
+        let same = |a: &ZoneRt, b: &ZoneRt| {
+            Arc::ptr_eq(&a.sample, &b.sample)
+                || (a.sample.frames.len() == b.sample.frames.len()
+                    && a.sample.rate == b.sample.rate
+                    && a.play == b.play
+                    && a.looped == b.looped)
+        };
+        for mut v in old.voices.drain(..) {
             match (old.zones.get(v.zone), self.zones.get(v.zone)) {
                 (Some(a), Some(b)) if same(a, b) => {}
+                (Some(a), Some(b)) if a.sample.rate == b.sample.rate && (v.stream.pos.max(0) as usize) < b.sample.frames.len() => {
+                    v.stream.play = (b.play.0 as i64, b.play.1 as i64);
+                    v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
+                    v.fade_out(self.sr);
+                }
                 _ => continue,
             }
             self.voices.push(v);
@@ -1907,5 +1918,47 @@ mod tests {
         }
         let (b0, b1, b2, ..) = two_pole(0.2, 0.0, true);
         assert!((b0 + b1 + b2).abs() < 1e-3, "high pass blocks DC");
+    }
+
+    #[test]
+    fn swapping_a_zone_sample_fades_out_voices_instead_of_cutting_off() {
+        let sample1 = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.5, 0.5]; 48_000] });
+        let sample2 = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.2, 0.2]; 48_000] });
+        let sample3 = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.1, 0.1]; 24_000] });
+        let make_zone = |sample: Arc<crate::sample::Sample>| {
+            let n = sample.frames.len();
+            ZoneRt {
+                sample,
+                root: 60,
+                keys: (0, 127),
+                vels: (1, 127),
+                gain: 1.0,
+                pan: 0.0,
+                tune: 0.0,
+                play: (0, n),
+                looped: None,
+                x_fade: 0,
+                fade_in: 0,
+                fade_out: 0,
+            }
+        };
+        let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
+        let mut smp1 = SamplerRt::new(settings.clone(), vec![make_zone(sample1)], (1.0, 1.0), 48_000.0);
+        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        smp1.note_on(1, 60, 100, &ctx);
+        assert_eq!(smp1.voices.len(), 1);
+        assert!(smp1.voices[0].fade.is_none());
+
+        // Swapping to identical dimensions (sample2): voice continues seamlessly without interruption.
+        let mut smp2 = SamplerRt::new(settings.clone(), vec![make_zone(sample2)], (1.0, 1.0), 48_000.0);
+        smp2.adopt(smp1);
+        assert_eq!(smp2.voices.len(), 1);
+        assert!(smp2.voices[0].fade.is_none(), "matching dimension sample continues seamlessly");
+
+        // Swapping to different sample bounds (sample3): voice is retained and fades out, not abruptly dropped.
+        let mut smp3 = SamplerRt::new(settings, vec![make_zone(sample3)], (1.0, 1.0), 48_000.0);
+        smp3.adopt(smp2);
+        assert_eq!(smp3.voices.len(), 1, "voice is retained across the sample swap");
+        assert!(smp3.voices[0].fade.is_some(), "voice is fading out to prevent digital click");
     }
 }
