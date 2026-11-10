@@ -134,4 +134,43 @@ mod tests {
         assert!(d.apply_prepared(stale).is_err());
         assert_eq!(d.project().tempo, 135.);
     }
+
+    /// A prepared edit that doesn't touch session state (a Group load) leaves it as it was:
+    /// the hosted LOCK's token isn't lost on the way through the worker.
+    #[test]
+    fn session_state_survives_a_prepared_edit() {
+        let mut d = Document::new_project().unwrap();
+        d.init_session_value("hosted-lock", 7);
+        let snapshot = d.edit_snapshot();
+        let prepared =
+            std::thread::spawn(move || snapshot.prepare("Load Group", |d| d.rename(Target::Group(0), "Kit"))).join().unwrap().unwrap();
+        assert!(d.apply_prepared(prepared).is_ok());
+        assert_eq!(d.project().groups[0].name, "Kit");
+        assert_eq!(d.session_value("hosted-lock"), Some(7));
+        assert!(d.undo());
+        assert_eq!(d.session_value("hosted-lock"), Some(7));
+    }
+
+    /// A prepared edit can change session state too, as one undo step with its other edits.
+    #[test]
+    fn a_prepared_edit_changes_session_state_in_one_undo_step() {
+        let mut d = Document::new_project().unwrap();
+        d.init_session_value("hosted-lock", 1);
+        let prepared = d
+            .edit_snapshot()
+            .prepare("Recall", |d| {
+                d.set_session_value("Recall", "hosted-lock", 2)?;
+                d.rename(Target::Group(0), "Recalled")
+            })
+            .unwrap();
+        assert!(d.apply_prepared(prepared).is_ok());
+        assert_eq!(d.session_value("hosted-lock"), Some(2));
+        assert_eq!(d.undo_label(), Some("Recall"));
+        assert!(d.undo());
+        assert_eq!(d.session_value("hosted-lock"), Some(1));
+        assert_ne!(d.project().groups[0].name, "Recalled");
+        assert!(d.redo());
+        assert_eq!(d.session_value("hosted-lock"), Some(2));
+        assert_eq!(d.project().groups[0].name, "Recalled");
+    }
 }

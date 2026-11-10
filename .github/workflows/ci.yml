@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m pip install diff-cover==11.0.1
           diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=70 \
-            --markdown-report coverage.md
+            --format markdown:coverage.md
         env:
           BASE_REF: ${{ github.base_ref }}
       - name: Report
