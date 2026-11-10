@@ -94,6 +94,13 @@ function zhora.right(screen, z)
     if rw > 0 then screen:label(950 - rw, 36, rw, 24, z.right, st, "right", "center") end
     screen:label(490, 36, 460 - rw - (rw > 0 and 12 or 0), 24, z.status, st, "left", "center")
   end
+  zhora.dial(screen, z)
+end
+
+-- The tuner under the right screen's bar: the note heard (`z.note`), its cents
+-- (`z.cents`), and a needle over -50..+50 cents, green within 5 (`z.in_tune`). The
+-- Tuner effect draws it too.
+function zhora.dial(screen, z)
   local ink = z.in_tune and GREEN or "text"
   screen:label(480, 64, 480, 58, z.note or "–", { size = 52, color = z.note and ink or FAINT })
   if z.cents then screen:label(480, 122, 480, 22, cents_text(z.cents), { size = 16, color = ink }) end

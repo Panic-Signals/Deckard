@@ -3360,6 +3360,34 @@ fn zhora_env_page_draws_the_envelope_on_the_left_screen() {
     assert_eq!(s.error(), None);
 }
 
+/// The Tuner effect focused: its dial on the right screen, under A4's pitch (and Muted),
+/// with the slot's usual buttons and knobs, not Zhora's.
+#[test]
+fn the_tuner_effect_draws_its_dial_on_the_right_screen() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Tuner".into();
+    v.control.slot = Some("Tuner".into());
+    v.control.pages = vec!["TUNER".into()];
+    let green = |p: &[u8; 4]| p[1] > 180 && p[0] < 110 && p[2] < 140;
+    let right = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && green(p)).count();
+    let plain = s.picture(&v);
+    v.control.tuner =
+        Some(crate::TunerView { note: Some("E1".into()), cents: Some(-3.0), in_tune: true, reference: "440 Hz".into(), muted: false });
+    let px = s.picture(&v);
+    assert_ne!(plain, px);
+    assert!(right(&px) > 200, "the note and needle in green: {}", right(&px));
+    let text = s.screen_text(&v);
+    for t in ["E1", "\u{2212}3¢", "A4 = 440 Hz", "Tuner"] {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    assert!(!text.iter().any(|x| x == "TUNE"), "not Zhora's buttons: {text:?}");
+    v.control.tuner.as_mut().unwrap().muted = true;
+    assert!(s.screen_text(&v).iter().any(|x| x == "A4 = 440 Hz  ·  Muted"));
+    // The display buttons are the slot's, not Zhora's.
+    assert_ne!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::Zhora("tune")]);
+    assert_eq!(s.error(), None);
+}
+
 /// Zhora's display buttons 5 to 8 are TUNE, CHECK, LIVE and HOLD, lit as the view says.
 #[test]
 fn zhora_display_buttons_5_to_8_are_tune_check_live_hold() {

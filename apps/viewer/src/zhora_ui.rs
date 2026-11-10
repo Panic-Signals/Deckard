@@ -9,7 +9,7 @@ use deckard_plugins::native::{InputSource, Readout, TuneState};
 use deckard_plugins::zhora::{
     ATTACK, CHECK, DECAY, HOLD, HOLD_NOTE, INPUT, LIVE, OUTS, RELEASE, SIGNAL_NAMES, SUSTAIN, TUNE, input_of, is_zhora,
 };
-use deckard_surface::ZhoraView;
+use deckard_surface::{TunerView, ZhoraView};
 
 use crate::App;
 use crate::settings::Settings;
@@ -237,7 +237,45 @@ pub fn env_picture([a, d, s, r]: [f64; 4]) -> (Vec<f32>, f32) {
     (deckard_model::lfo::adsr_picture(ENV_POINTS, a, d, s, r), deckard_model::lfo::adsr_note_off(a, d, r))
 }
 
+/// What the screens show of the Tuner effect: `r` its readout, `reference` its
+/// Reference knob (0..1).
+pub fn tuner_view(r: &Readout, reference: f64) -> TunerView {
+    let cents = r.note.map(|n| n.1);
+    TunerView {
+        note: r.note.map(|(n, _)| note(n)),
+        cents,
+        in_tune: cents.is_some_and(|c| c.abs() <= IN_TUNE),
+        reference: format!("{:.0} Hz", deckard_plugins::tuner::reference_hz(reference)),
+        muted: r.holding,
+    }
+}
+
 impl App {
+    /// The focused slot, when it is the Tuner effect, on any chain: (chain, slot).
+    pub(crate) fn focused_tuner(&self) -> Option<(Chain, usize)> {
+        let chain = self.chain();
+        let i = self.slot.filter(|_| !self.channel)?;
+        let d = self.doc.as_ref()?.borrow();
+        let tuner = d.chain_slots(chain)?.get(i)?.plugin.as_ref().is_some_and(|pr| deckard_plugins::tuner::is_tuner(&pr.id));
+        tuner.then_some((chain, i))
+    }
+
+    /// What the screens show of the focused Tuner. Read without waiting on the audio
+    /// thread: while it has the instance, the last view stays.
+    pub(crate) fn tuner_view(&self) -> Option<TunerView> {
+        let key = self.focused_tuner()?;
+        let inst = self.samples.plugins.existing(self.plugin_slot_key(key.0, key.1))?;
+        let mut shown = self.tuner_shown.borrow_mut();
+        let Ok(t) = inst.try_lock() else {
+            return shown.as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
+        };
+        let (r, reference) = (t.readout()?, t.param_value(deckard_plugins::tuner::REFERENCE));
+        drop(t);
+        let v = tuner_view(&r, reference);
+        *shown = Some((key, v.clone()));
+        Some(v)
+    }
+
     /// The focused slot, when it is a Zhora playing a sound: (group, sound, slot).
     pub(crate) fn focused_zhora(&self) -> Option<(usize, usize, usize)> {
         let Chain::Sound(g, s) = self.chain() else { return None };
@@ -421,6 +459,23 @@ mod tests {
         assert_eq!(names, ["None", "Sound's Input", "In 1 L", "Modular"]);
         assert_eq!(choice_name(&s, OUTS[0], 3).as_deref(), Some("Out 2 L"));
         assert_eq!(choice_name(&s, HOLD_NOTE, 3), None);
+    }
+
+    /// The Tuner effect's screens: the note and cents (green within 5), A4's pitch from
+    /// its Reference knob, and Muted while Mute is on.
+    #[test]
+    fn the_tuner_effect_shows_its_note_reference_and_mute() {
+        let r = Readout { note: Some((40, -3.4)), state: TuneState::Idle, ..readout() };
+        let v = tuner_view(&r, 0.5);
+        assert_eq!((v.note.as_deref(), v.cents, v.in_tune), (Some(note(40).as_str()), Some(-3.4), true));
+        assert_eq!((v.reference.as_str(), v.muted), ("440 Hz", false));
+        let r = Readout { note: Some((40, 12.0)), holding: true, ..readout() };
+        let v = tuner_view(&r, 12.0 / 20.0);
+        assert_eq!((v.in_tune, v.reference.as_str(), v.muted), (false, "442 Hz", true));
+        assert_eq!(tuner_view(&readout(), 0.5).note, None, "nothing heard");
+        // Offered as an effect in "+", by its name.
+        let fx: Vec<&str> = deckard_plugins::native::CLASSES.iter().filter(|c| !c.instrument).map(|c| c.name).collect();
+        assert!(fx.contains(&"Tuner"), "{fx:?}");
     }
 
     /// The tuner names what it listens on; on Sound's Input, what the sound's input is.

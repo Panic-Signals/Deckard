@@ -1273,6 +1273,8 @@ pub struct App {
     surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
     /// The focused Zhora (group, sound, slot) as last shown, while the audio thread has it.
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
+    /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
+    tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -5145,6 +5147,7 @@ impl App {
             filter: None,
             picture: None,
             zhora: None,
+            tuner: None,
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -5209,6 +5212,7 @@ impl App {
             // The tuner reads the instance: only for the page that shows it.
             if self.surface.page() == "control" {
                 v.control.zhora = self.zhora_view(p);
+                v.control.tuner = self.tuner_view();
             }
         }
         v.project = p.name.clone();

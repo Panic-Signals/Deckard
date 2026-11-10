@@ -193,7 +193,7 @@ pub struct Readout {
     pub message: Option<&'static str>,
     /// The notes over target in the last Tune or Check.
     pub off: Vec<u8>,
-    /// Hold has the outputs.
+    /// Hold has the outputs (the Tuner: Mute is on).
     pub holding: bool,
     /// Hops of input the analysis has finished: what feeding it in a closed loop (a
     /// test) waits for.
@@ -222,7 +222,7 @@ impl Class {
 }
 
 /// Every native plug-in.
-pub static CLASSES: &[&Class] = &[&crate::replicant::CLASS, &crate::plaits::CLASS, &crate::zhora::CLASS];
+pub static CLASSES: &[&Class] = &[&crate::replicant::CLASS, &crate::plaits::CLASS, &crate::zhora::CLASS, &crate::tuner::CLASS];
 
 /// The native plug-in with class id `cid`.
 pub fn find(cid: &[u8; 16]) -> Option<&'static Class> {

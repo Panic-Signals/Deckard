@@ -9,7 +9,8 @@
 --   LEFT / RIGHT      the previous / next page
 --   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages
 --
--- Zhora focused, its own buttons and tuner instead (lib/zhora.lua).
+-- Zhora focused, its own buttons and tuner instead (lib/zhora.lua). The Tuner effect
+-- focused, its dial on the right screen under A4's pitch.
 --
 -- With SHIFT held on PLUG-IN, the focused slot's edits: EDIT (a plug-in's window),
 -- INSERT (the plug-in browser for a new slot after the last), SAVE (not yet), MOVE
@@ -380,7 +381,12 @@ function control.draw(screen, theme, opts)
     screen:rect(480, 35, 480, 25, "bar")
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
-      if c.eq then eq_curve(screen, c.eq)
+      if c.tuner then
+        -- The Tuner effect: A4's pitch (and Muted) on the bar, the dial under it.
+        local t = c.tuner
+        screen:label(490, 36, 300, 24, t.reference .. (t.muted and "  ·  Muted" or ""), "default", "left", "center")
+        zhora.dial(screen, t)
+      elseif c.eq then eq_curve(screen, c.eq)
       elseif c.filter then eq_curve(screen, c.filter)
       elseif c.picture then eq_curve(screen, c.picture)
       else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end

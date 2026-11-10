@@ -188,7 +188,8 @@ find:
   **Plaits** (see below), and **Zhora**, which plays a modular synth over CV.
 - **Effects:** Compressor, Gate, Transient Master, Limiter, Maximizer, EQ, Filter,
   Chorus, Flanger, FM, Freq Shifter, Phaser, Ice, Metaverb, Reflex, Reverb, Beat Delay,
-  Grain Delay, Grain Stretch, Resochord, Distortion, Lo-Fi, Saturator and more.
+  Grain Delay, Grain Stretch, Resochord, Distortion, Lo-Fi, Saturator and more, plus
+  DECKARD's own **Tuner** (see below).
 - **Perform FX:** Filter, Flanger, Burst Echo, Reso Echo, Ring, Stutter, Tremolo and
   Scratcher. These go first in a group's chain and are played from a strip.
 
@@ -493,7 +494,18 @@ An export has no modular, so Zhora's part is left out of mixdowns and stems, and
 Export panel says so. Record its return as audio first to include it. Add Zhora from
 **+ ▸ Internal ▸ Zhora**.
 
-Replicant, Plaits and Zhora are saved in the project like plug-ins, so the project still
+### Tuner
+
+The Tuner is an effect for tuning a guitar, a bass, a voice, or anything else coming in.
+Put it on any sound's, group's or master's chain from **+ ▸ Internal ▸ Tuner**. The
+sound passes through untouched. When the Tuner is the focused slot, the MK3's right
+screen shows the note it hears, its cents and a needle, green within 5 cents, as Zhora's
+tuner does. The plug-in panel shows the same beside the knobs.
+
+- **Reference:** the pitch of A4, 430 to 450 Hz; 440 Hz to start.
+- **Mute:** silences the sound after the Tuner while it keeps reading, to tune quietly.
+
+Replicant, Plaits, Zhora and the Tuner are saved in the project like plug-ins, so the project still
 opens in Maschine. Maschine can't play them and reports them as missing plug-ins. In DECKARD's
 tests it kept their settings when it re-saved the project.
 

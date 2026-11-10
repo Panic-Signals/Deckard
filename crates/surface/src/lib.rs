@@ -526,6 +526,19 @@ pub struct ControlView {
     pub picture: Option<EqCurveView>,
     /// The focused Zhora: its tuner on the right screen, its buttons on both.
     pub zhora: Option<ZhoraView>,
+    /// The focused Tuner effect: its dial on the right screen.
+    pub tuner: Option<TunerView>,
+}
+
+/// What the Tuner effect's screen shows: the note heard and its `cents` above it
+/// (`in_tune` within 5), A4's pitch (`reference`, "440 Hz"), and whether Mute is on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TunerView {
+    pub note: Option<String>,
+    pub cents: Option<f32>,
+    pub in_tune: bool,
+    pub reference: String,
+    pub muted: bool,
 }
 
 /// What Zhora's screens show. `note` is the note heard on its input and `cents` how far

@@ -1368,6 +1368,16 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         }
         ct.set("zhora", t)?;
     }
+    // The focused Tuner effect's dial.
+    if let Some(tv) = &c.tuner {
+        let t = lua.create_table()?;
+        t.set("note", tv.note.as_deref())?;
+        t.set("cents", tv.cents)?;
+        t.set("in_tune", tv.in_tune)?;
+        t.set("reference", format!("A4 = {}", tv.reference))?;
+        t.set("muted", tv.muted)?;
+        ct.set("tuner", t)?;
+    }
     let knobs = lua.create_table()?;
     for k in 0..8 {
         let kt = match c.knobs.get(k) {

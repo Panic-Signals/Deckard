@@ -170,7 +170,7 @@ pub const OUTS: [u32; SIGNALS] = [PITCH_OUT, GATE_OUT, CLOCK_OUT, ENV_OUT, VEL_O
 
 /// Frames in a block sent to the worker, and samples (at the detector's rate) between
 /// detections: about 21 ms at any device rate.
-const HOP: usize = 1024;
+pub(crate) const HOP: usize = 1024;
 /// Gate drop that makes the modular retrigger on an overlapping note.
 const RETRIGGER_S: f64 = 0.002;
 /// Length of a clock pulse.
@@ -180,7 +180,7 @@ const MOD_RAMP_S: f64 = 0.064;
 /// Semitones of a full pitch bend.
 const BEND_SEMIS: f64 = 2.0;
 /// Input level under which there is no pitch (about -60 dBFS).
-const MIN_RMS: f32 = 0.001;
+pub(crate) const MIN_RMS: f32 = 0.001;
 /// The detector never sees a rate over this.
 const MAX_DETECT_RATE: f32 = 60_000.0;
 /// A Run fails after this long with no input arriving.
@@ -281,7 +281,7 @@ enum Cmd {
 
 /// Above 60 kHz, whole samples are averaged down by this so the window still spans low
 /// notes: the rate the detector sees, and the factor.
-fn detector_rate(sample_rate: f32) -> (f32, usize) {
+pub(crate) fn detector_rate(sample_rate: f32) -> (f32, usize) {
     let (mut rate, mut factor) = (sample_rate, 1);
     while rate > MAX_DETECT_RATE && factor < HOP {
         factor *= 2;

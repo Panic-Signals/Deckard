@@ -4379,6 +4379,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     // A Zhora output's choices: what each sets (only None and the channels free for it).
     let mut choice_values: Vec<(usize, Vec<f64>)> = Vec::new();
     let mut zhora: Option<deckard_surface::ZhoraView> = None;
+    let mut tuner: Option<deckard_surface::TunerView> = None;
     let mut groove_button = None;
     let mut hint: Option<String> = None;
     let groove = |g: usize, s: usize, f: &str| app.groove_setting(g, s, f);
@@ -4510,6 +4511,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                 sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
                             } else if let Some(pg) = v.pages.get(page) {
                                 zhora = app.zhora_view(p);
+                                tuner = app.tuner_view();
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
                                     let (value, mut text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
@@ -4900,6 +4902,16 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         zhora_panel(ui, &painter, r, z, gcol, acts);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
     }
+    if let Some(t) = &tuner {
+        // After its knobs, as the MK3's right screen.
+        let r = Rect::from_min_max(Pos2::new(slot_x(8) - 6.0, header.bottom() + 8.0), Pos2::new(ed.right() - 10.0, knob_y + 84.0));
+        painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
+        let left = r.left() + 12.0;
+        tuner_dial(&painter, Pos2::new(left, r.top() + 50.0), t.note.as_deref(), t.cents, t.in_tune);
+        let bar = if t.muted { format!("A4 = {} \u{b7} Muted", t.reference) } else { format!("A4 = {}", t.reference) };
+        painter.text(Pos2::new(left, r.bottom() - 10.0), Align2::LEFT_CENTER, bar, font(11.0), white(160));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
     if assign_h > 0.0 {
         let fields = assign::Fields {
             area: Rect::from_min_max(Pos2::new(ed.left(), rect.bottom() - assign_h), rect.max),
@@ -4916,7 +4928,6 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
 /// while each is on), the note heard and its cents (green within 5), a needle over
 /// -50..+50 cents, and the bar (a message in its place).
 fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::ZhoraView, gcol: Color32, acts: &mut Vec<Act>) {
-    let green = Color32::from_rgb(0x3d, 0xd6, 0x6a);
     let amber = Color32::from_rgb(0xff, 0xc2, 0x3a);
     painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
     let left = r.left() + 12.0;
@@ -4938,13 +4949,27 @@ fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::Zho
             acts.push(Act::Zhora(what));
         }
     }
-    let ink = if z.in_tune { green } else { white(230) };
-    let y = r.top() + 50.0;
-    match &z.note {
+    tuner_dial(painter, Pos2::new(left, r.top() + 50.0), z.note.as_deref(), z.cents, z.in_tune);
+    let (text, colour) = match &z.message {
+        Some(m) => (m.clone(), amber),
+        None if z.right.is_empty() => (z.status.clone(), white(160)),
+        None => (format!("{} \u{b7} {}", z.status, z.right), white(160)),
+    };
+    painter.text(Pos2::new(left, r.bottom() - 10.0), Align2::LEFT_CENTER, text, font(11.0), colour);
+}
+
+/// A tuner's dial with its left middle at `at`: the note heard and its cents (green
+/// within 5), and a needle over -50..+50 cents. Zhora's panel and the Tuner effect's.
+fn tuner_dial(painter: &Painter, at: Pos2, note: Option<&str>, cents: Option<f32>, in_tune: bool) {
+    let green = Color32::from_rgb(0x3d, 0xd6, 0x6a);
+    let amber = Color32::from_rgb(0xff, 0xc2, 0x3a);
+    let (left, y) = (at.x, at.y);
+    let ink = if in_tune { green } else { white(230) };
+    match note {
         Some(n) => painter.text(Pos2::new(left, y), Align2::LEFT_CENTER, n, font(28.0), ink),
         None => painter.text(Pos2::new(left, y), Align2::LEFT_CENTER, "\u{2013}", font(28.0), white(90)),
     };
-    if let Some(c) = z.cents {
+    if let Some(c) = cents {
         painter.text(Pos2::new(left + 64.0, y), Align2::LEFT_CENTER, crate::zhora_ui::cents_text(c), font(13.0), ink);
     }
     let scale = Rect::from_min_max(Pos2::new(left + 112.0, y - 12.0), Pos2::new(left + 248.0, y + 12.0));
@@ -4955,15 +4980,9 @@ fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::Zho
         let h = if t == 0.0 { 7.0 } else { 4.0 };
         painter.vline(at(t), (scale.center().y - h)..=(scale.center().y + h), Stroke::new(1.0, white(110)));
     }
-    if let Some(c) = z.cents {
-        painter.vline(at(c), (scale.top() - 2.0)..=(scale.bottom() + 2.0), Stroke::new(2.5, if z.in_tune { green } else { amber }));
+    if let Some(c) = cents {
+        painter.vline(at(c), (scale.top() - 2.0)..=(scale.bottom() + 2.0), Stroke::new(2.5, if in_tune { green } else { amber }));
     }
-    let (text, colour) = match &z.message {
-        Some(m) => (m.clone(), amber),
-        None if z.right.is_empty() => (z.status.clone(), white(160)),
-        None => (format!("{} \u{b7} {}", z.status, z.right), white(160)),
-    };
-    painter.text(Pos2::new(left, r.bottom() - 10.0), Align2::LEFT_CENTER, text, font(11.0), colour);
 }
 
 /// A drag on knob `edit` is written as modulation: only with Auto-write on while the
