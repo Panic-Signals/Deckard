@@ -4435,7 +4435,7 @@ impl App {
         }
         if on {
             doc.borrow_mut().begin_take("Record");
-            self.take = record::Take::default();
+            self.take = record::Take::begin(doc.borrow().project());
             (self.take_played, self.take_grown) = (0.0, None);
             self.controls = record::ControlWriter::default();
             // An empty Auto-length pattern starts as a bar, growing as it's played into
@@ -4480,10 +4480,26 @@ impl App {
                 let p = d.project();
                 let bar = p.bar_length();
                 let pat = &p.groups[g].patterns[pi];
-                let end = pat.notes.iter().map(|n| n.position - pat.start + n.length).max();
+                let first = pat.notes.iter().map(|n| n.position).min();
+                let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
+                let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
                 let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
                 drop(d);
-                let _ = doc.borrow_mut().set_pattern_length(g, pi, to);
+                let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
+            }
+            // First takes in fixed-length empty patterns follow the same start
+            // rule. Overdubs retain the existing pattern's deliberate space.
+            for (g, pi) in self.take.new_recordings() {
+                let d = doc.borrow();
+                let bar = d.project().bar_length().max(1);
+                let Some(pat) = d.project().groups.get(g).and_then(|g| g.patterns.get(pi)) else { continue };
+                let Some(first) = pat.notes.iter().map(|n| n.position).min() else { continue };
+                let leading = (first - pat.start).max(0) / bar * bar;
+                let (start, length) = (pat.start + leading, (pat.length - leading).max(bar));
+                drop(d);
+                if leading > 0 {
+                    let _ = doc.borrow_mut().set_pattern_span(g, pi, start, length);
+                }
             }
             doc.borrow_mut().end_take();
             self.status = "Recorded".into();
@@ -11139,6 +11155,106 @@ mod tests {
         app.set_recording(false, false);
         app.stop();
         assert!(first < quarter, "counted in from the start, not {parked}: {first}");
+    }
+
+    #[test]
+    fn finishing_a_grown_take_starts_at_the_first_occupied_bar() {
+        let mut app = App::default();
+        app.new_project();
+        app.settings.pattern_grow = true;
+        app.set_recording(true, false);
+        let doc = app.doc.clone().unwrap();
+        let bar = doc.borrow().project().bar_length();
+        let first = 2 * bar + bar / 4;
+        {
+            let mut d = doc.borrow_mut();
+            d.set_pattern_length(0, 0, 6 * bar).unwrap();
+            d.edit_notes(
+                "Record",
+                0,
+                0,
+                &[],
+                &[
+                    deckard_model::Note {
+                        position: first,
+                        length: bar / 2,
+                        sound: 0,
+                        pitch: 60,
+                        velocity: 100,
+                        probability: 100,
+                        expr: None,
+                    },
+                    deckard_model::Note {
+                        position: 4 * bar,
+                        length: bar,
+                        sound: 1,
+                        pitch: 62,
+                        velocity: 100,
+                        probability: 100,
+                        expr: None,
+                    },
+                ],
+            )
+            .unwrap();
+        }
+        app.set_recording(false, false);
+        let d = doc.borrow();
+        let pat = &d.project().groups[0].patterns[0];
+        assert_eq!((pat.start, pat.length), (2 * bar, 3 * bar));
+        assert_eq!(pat.notes[0].position, first, "events keep their timing; playback span moves");
+    }
+
+    #[test]
+    fn first_fixed_length_recording_skips_empty_bars_and_overdubs_keep_them() {
+        for overdub in [false, true] {
+            let mut app = App::default();
+            app.new_project();
+            app.settings.pattern_grow = false;
+            let doc = app.doc.clone().unwrap();
+            {
+                let mut d = doc.borrow_mut();
+                d.add_pattern(0, 0, "Pattern 1").unwrap();
+                d.assign_pattern(0, 0, Some(0)).unwrap();
+            }
+            let bar = doc.borrow().project().bar_length();
+            let note = deckard_model::Note {
+                position: bar + bar / 4,
+                length: bar / 4,
+                sound: 0,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+                expr: None,
+            };
+            {
+                let mut d = doc.borrow_mut();
+                d.set_pattern_length(0, 0, 4 * bar).unwrap();
+                d.set_length_auto(0, 0, false);
+                if overdub {
+                    d.edit_notes("seed", 0, 0, &[], &[note]).unwrap();
+                }
+            }
+            app.set_recording(true, false);
+            if !overdub {
+                app.take_in_recorded(vec![deckard_engine::Recorded {
+                    group: 0,
+                    sound: 0,
+                    pitch: 60,
+                    velocity: 100,
+                    length: bar / 4,
+                    tick: (bar + bar / 4) as f64,
+                    played: 0.,
+                    mode: deckard_engine::Mode::Scene(0),
+                    midi: false,
+                    seq: 0,
+                }]);
+            }
+            app.set_recording(false, false);
+            let d = doc.borrow();
+            let pat = &d.project().groups[0].patterns[0];
+            assert_eq!(pat.start, if overdub { 0 } else { bar });
+            assert_eq!(pat.length, if overdub { 4 * bar } else { 3 * bar });
+        }
     }
 
     /// Played (with audio): a new Auto-length pattern after a 4-bar one, recorded into
