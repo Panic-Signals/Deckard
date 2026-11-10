@@ -10,9 +10,9 @@
 
 use super::arrange::px_mut;
 use super::{Document, Op};
+use deckard_model::AUDIO_OFFSET;
 use deckard_model::{MidiEvent, MidiKind, Note};
 use mxprj::decode::{Obj, Path, Value};
-use deckard_model::AUDIO_OFFSET;
 use std::collections::HashMap;
 
 const SEQUENCE: &str = "NI::MASCOMMON::DATA::Sequence";
@@ -410,8 +410,8 @@ impl Document {
         Ok(ops)
     }
 
-    /// Ops that move sound `sound`'s audio in pattern `p` to start `ticks` from the
-    /// pattern's (its `AudioEvent`'s DECKARD offset field; none at 0).
+    /// Ops that move sound `sound`'s audio in pattern `p` to start `ticks` from 1.1.1
+    /// (its `AudioEvent`'s DECKARD offset field; none at 0).
     pub(crate) fn audio_offset_ops(&mut self, g: usize, p: usize, sound: usize, ticks: i64) -> Result<Vec<Op>, String> {
         let paths = self.object_paths();
         let (_, _, seq) = self.sequence_of(g, p, sound, &paths)?;

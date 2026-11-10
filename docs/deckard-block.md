@@ -104,7 +104,7 @@ u32 offset_count                version 12: the Audio offsets, those not 0
 offset × offset_count:
   u32 group, u32 pattern      the pattern (clip patterns are 2^24 + k)
   u32 sound                   the sound whose audio it is
-  i64 ticks                   from the pattern's start (negative: earlier)
+  i64 ticks                   from 1.1.1 (negative: earlier)
 ```
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's

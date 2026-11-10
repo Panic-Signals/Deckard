@@ -161,7 +161,7 @@ impl Document {
         })
     }
 
-    /// Move sound `s`'s audio in pattern `p` to start `ticks` from the pattern's start
+    /// Move sound `s`'s audio in pattern `p` to start `ticks` from 1.1.1
     /// (negative: earlier), as one undo step. Errors when the pattern has no audio for it.
     pub fn set_audio_offset(&mut self, g: usize, p: usize, s: usize, ticks: i64, label: &str) -> Result<(), String> {
         let ops = self.audio_offset_ops(g, p, s, ticks)?;

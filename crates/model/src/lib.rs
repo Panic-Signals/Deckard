@@ -788,7 +788,7 @@ impl Take {
 }
 
 /// A sound's audio on in a pattern (its `AudioEvent`): the take it plays, and how far
-/// (ticks) its start is moved from the pattern's (negative: earlier).
+/// (ticks from 1.1.1) its first frame sounds (negative: earlier).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AudioCue {
     pub sound: usize,

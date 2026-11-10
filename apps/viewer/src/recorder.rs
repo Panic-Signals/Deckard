@@ -90,8 +90,8 @@ pub enum Finished {
     /// length in ticks at the song tempo, and the group and sound focused at Start.
     Take { sample: Sample, channels: u16, mode: usize, ticks: f64, focus: (usize, usize) },
     /// Auto: each recorded note (written already), its length in frames and the loop
-    /// found in it.
-    Auto { done: Vec<AutoTake> },
+    /// found in it, and the group and sound focused at Start.
+    Auto { done: Vec<AutoTake>, focus: (usize, usize) },
 }
 
 /// What the recorder needs to start.
@@ -439,9 +439,10 @@ impl Recorder {
                 None
             }
             3 => {
+                let focus = run.focus;
                 let done = run.auto.as_mut().map(|a| std::mem::take(&mut a.done)).unwrap_or_default();
                 self.cancel(output);
-                (!done.is_empty()).then_some(Finished::Auto { done })
+                (!done.is_empty()).then_some(Finished::Auto { done, focus })
             }
             _ => {
                 let finished = take(run, 0, &clock);
@@ -712,7 +713,8 @@ impl Recorder {
         a.start = None;
         if a.i >= a.items.len() {
             let done = std::mem::take(&mut a.done);
-            return Some(Done::Take(Finished::Auto { done }));
+            let focus = run.focus;
+            return Some(Done::Take(Finished::Auto { done, focus }));
         }
         None
     }
@@ -990,7 +992,7 @@ mod tests {
             }
             assert!(t0.elapsed() < Duration::from_secs(5), "{}", r.view.info);
         };
-        let Finished::Auto { done } = done else { panic!("not an Auto result") };
+        let Finished::Auto { done, .. } = done else { panic!("not an Auto result") };
         assert_eq!(done.iter().map(|d| (d.0.note, d.0.keys)).collect::<Vec<_>>(), vec![(60, (0, 61)), (62, (62, 127))]);
         for (item, frames, _) in &done {
             assert_eq!(*frames, out.rate as usize * 3 / 10, "{}", item.path.display());

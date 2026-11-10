@@ -82,22 +82,23 @@ wrapped in the take's play range. A Maschine project always plays from 1.1.1.
 
 - **Model** (`crates/model`): `Sound::audio` (`AudioLoop`: takes, the focused one, mode,
   fade, tune, pitchbend, engine), `Take` (sample, beats, play range; `tempo()` from its
-  frames), and `Pattern::audio` (`AudioCue { sound, take, offset }`: a sound's take on in the pattern, and
-  where it sits).
+  frames), and `Pattern::audio` (`AudioCue { sound, take, offset }`: a sound's take on in
+  the pattern, and where it sits).
 - **Offset (DECKARD only).** Maschine can't slide a take; DECKARD can. `AudioCue::offset`
   is in ticks (960 per beat) from 1.1.1: the pattern time at which the take's first frame
-  plays. 0 is Maschine's placement and every new take starts there. Each pattern places the
-  same take on its own. It is saved as `deckard:audio_offset` on the AudioEvent in the DECKARD
-  block (version 11), when it isn't 0, and kept out of Maschine's archive, so Maschine plays
-  the take from 1.1.1.
+  plays. 0 is Maschine's placement and every new take starts there. Each pattern places
+  the same take on its own. The offset is a field of the AudioEvent in the document, kept
+  out of Maschine's archive, so Maschine plays the take from 1.1.1. In the DECKARD block
+  (version 11) it is a list of (group, pattern, sound, ticks), for the cues whose offset
+  isn't 0.
 - **The drag.** In the pattern editor, drag a sound's waveform (pad view: the sound's row;
-  piano roll: the focused sound's waveform, anywhere there is no note) to set the offset. The
-  waveform follows the pointer and the offset shows as bars.beats.sixteenths. It snaps to the
-  editor's grid; hold SHIFT to move to the tick. The offset wraps in the take's length. One
-  undo step, "Move Audio". The controller shows the offset but doesn't set it.
+  piano roll: the focused sound's waveform, anywhere there is no note) to set the offset.
+  The waveform follows the pointer and the offset shows as bars.beats.sixteenths. It snaps
+  to the editor's grid; hold SHIFT to move to the tick. The offset wraps in the take's
+  length. One undo step, "Move Audio". The controller shows the offset but doesn't set it.
 - **Document** (`crates/doc/src/audio.rs`): `audio_only` (a lone Audio plug-in),
   `set_takes`, `add_take`, `set_take_sample` (an edit: the beats scaled with the frames, so
-  the tempo stays), `set_audio_in` (AudioEvents on or off in patterns), and
+  the tempo stays), `set_audio_in` (AudioEvents on or off in patterns),
   `set_audio_offset` (the cue's offset, one undo step, "Move Audio"), and
   `Target::Take(g, s, k)` for a take's fields; the module's are `Target::Module(g, s, 0)`.
   Written as Maschine writes them (a take's `length.t1` its duration in beats at 120).
@@ -107,8 +108,8 @@ wrapped in the take's play range. A Maschine project always plays from 1.1.1.
   the take is `(t - offset) mod take length`, with t counted from 1.1.1 (Start included), as
   Maschine's formula at offset 0. Before the offset the take wraps round, so a loop still
   fills the pattern. A take switched on while the song plays is heard at once, at the
-  matching place; while the transport is stopped it waits for play. Re-pitch reads it at the rate the tempo asks;
-  Stretch and Formant go through `crates/stretch` (Signalsmith Stretch 1.3.1, MIT,
+  matching place; while the transport is stopped it waits for
+  play. Re-pitch reads it at the rate the tempo asks; Stretch and Formant go through `crates/stretch` (Signalsmith Stretch 1.3.1, MIT,
   vendored: `seek` pre-roll and the output latency dropped, so it's on the beat; it starts
   over where the song is when it drifts or jumps). Gate mode opens on notes (FADE: 0–100
   ms), each transposed from C3. Tune and the pitch wheel move Stretch's and Formant's

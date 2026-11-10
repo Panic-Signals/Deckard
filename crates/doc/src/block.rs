@@ -668,7 +668,7 @@ impl Document {
         let ops = self.cv_route_ops(&deckard_model::mod_matrix::cv_from_text(&b.cv_routes));
         let _ = self.run(&ops);
         for (g, p, s, ticks) in b.audio_offsets {
-            // A pattern or sound with no audio now: dropped.
+            // A pattern or sound with no audio now: the error is ignored on purpose.
             if let Ok(ops) = self.audio_offset_ops(g, p, s, ticks) {
                 let _ = self.run(&ops);
             }

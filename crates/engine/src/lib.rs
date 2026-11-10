@@ -520,8 +520,8 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
                 });
             }
         }
-        // Audio plug-ins on in the pattern: each instance starts its loop over (its first
-        // beat on the pattern's), and stops it at its end (a stop sorts before a start
+        // Audio plug-ins on in the pattern: each instance starts its loop over (the take's first
+        // frame falls at the cue's offset), and stops it at its end (a stop sorts before a start
         // at the same tick, a start before the notes).
         for c in &pat.audio {
             let at = start + rep;
@@ -8126,11 +8126,15 @@ mod tests {
     }
 
     /// Marks of the loop in `audio_project` with the pattern's `start` and the cue's `offset`.
+    /// Rendered live; the render-ahead path must give the same marks.
     fn loop_marks(start: i64, offset: i64, seconds: f64) -> Vec<usize> {
         let (_tmp, mut p) = audio_project(deckard_model::AudioEngine::Stretch);
         p.groups[0].patterns[0].start = start;
         p.groups[0].patterns[0].audio[0].offset = offset;
-        marks(&render_with(&p, None, 256, seconds, |_, _, _| {}))
+        let live = marks(&render_with(&p, None, 256, seconds, |_, _, _| {}));
+        let ahead = marks(&render_with(&p, Some(700), 256, seconds, |_, _, _| {}));
+        assert_eq!(ahead, live, "start {start}, offset {offset}: rendered ahead, the same");
+        live
     }
 
     /// Maschine's rule: the loop is where the pattern's Start puts it (Start 2 beats: its
