@@ -43,6 +43,7 @@ pub const PICTURES: &[(&str, &[u8], &[u8])] = &[
         include_bytes!("../assets/plugins/transientmaster_Thumb.png"),
         include_bytes!("../assets/plugins/transientmaster_Logo.png"),
     ),
+    ("zhora", include_bytes!("../assets/plugins/zhora_Thumb.png"), include_bytes!("../assets/plugins/zhora_Logo.png")),
 ];
 
 use std::collections::HashMap;

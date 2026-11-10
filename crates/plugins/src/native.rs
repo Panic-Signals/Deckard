@@ -144,6 +144,12 @@ pub trait Engine: Send {
     fn readout(&self) -> Option<Readout> {
         None
     }
+
+    /// Whether what [`Engine::save`] returns changed by itself (a finished Tune) since
+    /// last asked, so the state needs storing.
+    fn take_changed(&self) -> bool {
+        false
+    }
 }
 
 /// What a Tune or Check is doing.
@@ -174,6 +180,9 @@ pub struct Readout {
     pub off: Vec<u8>,
     /// Hold has the outputs.
     pub holding: bool,
+    /// Hops of input the analysis has finished: what feeding it in a closed loop (a
+    /// test) waits for.
+    pub analysed: u32,
 }
 
 /// A native plug-in: its identity, parameters and how to make its engine.
@@ -367,8 +376,10 @@ impl Instance {
         self.class.params.iter().position(|p| p.id == id).and_then(|i| self.modded[i])
     }
 
+    /// Whether the state changed since last asked: a knob, or the engine by itself.
     pub(crate) fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
+        let knob = self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
+        self.engine.take_changed() || knob
     }
 
     pub(crate) fn note_on(&mut self, pitch: i64, velocity: i64) {

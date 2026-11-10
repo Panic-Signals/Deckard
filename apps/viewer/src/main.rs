@@ -5092,10 +5092,12 @@ impl App {
         // A Zhora's outputs by the channels' names (their aliases).
         let zhora_focused = self.focused_zhora().is_some();
         let knob_text = |i: usize, text: &str| match edits.get(i).copied().flatten() {
-            Some(layout::Edit::PluginChoice(_, id, _, cur, _)) if zhora_focused && zhora_ui::OUTS.contains(&id) => match cur {
-                0 => "None".to_string(),
-                n => self.settings.output_name(n - 1),
-            },
+            Some(layout::Edit::PluginChoice(_, id, _, cur, _)) if zhora_focused && deckard_plugins::zhora::OUTS.contains(&id) => {
+                match cur {
+                    0 => "None".to_string(),
+                    n => self.settings.output_name(n - 1),
+                }
+            }
             _ => text.to_string(),
         };
         let control = ControlView {
@@ -5203,7 +5205,10 @@ impl App {
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
             let page = c.page;
             v.control.picture = slot.and_then(|s| Self::effect_picture(s, Self::picture_phase(&s.module, &s.params, tempo), live, page));
-            v.control.zhora = self.zhora_view(p);
+            // The tuner reads the instance: only for the page that shows it.
+            if self.surface.page() == "control" {
+                v.control.zhora = self.zhora_view(p);
+            }
         }
         v.project = p.name.clone();
         v.swing = p.swing.amount;

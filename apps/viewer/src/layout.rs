@@ -3967,6 +3967,12 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
     Some((names, page, pg))
 }
 
+/// Where step `step` of a parameter of `steps` steps is in `values` (its listed values,
+/// normalized): the first entry when it isn't listed.
+pub(crate) fn listed_at(values: &[f64], steps: i32, step: usize) -> usize {
+    values.iter().position(|&v| (v * steps.max(1) as f64).round() as usize == step).unwrap_or(0)
+}
+
 /// Set parameter `id` of the plug-in in slot `i` of chain `c` (normalized).
 fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64) {
     let mut native = false;
@@ -4505,11 +4511,14 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                         let mut names = vec!["None".to_string()];
                                         names.extend(channels.iter().map(|&c| app.settings.output_name(c)));
                                         let values = std::iter::once(0.0).chain(channels.iter().map(|&c| (c + 1) as f64 / steps)).collect();
-                                        let cur = channels.iter().position(|&c| c + 1 == at).map_or(0, |n| n + 1);
-                                        text = names[cur].clone();
+                                        text = match at {
+                                            0 => names[0].clone(),
+                                            n => app.settings.output_name(n - 1),
+                                        };
                                         plugin_choices.push((k, names));
                                         choice_values.push((k, values));
-                                        let edit = Edit::PluginChoice(i, info.id, info.steps, cur, info.default);
+                                        // `cur` is the step, as on the controller; the selector finds it in the list.
+                                        let edit = Edit::PluginChoice(i, info.id, info.steps, at, info.default);
                                         params.push(Some((name, text, value as f32, Some(edit))));
                                         if !section.is_empty() {
                                             sections.push((k, section.clone().into()));
@@ -4765,8 +4774,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             if let Some((_, names)) = plugin_choices.iter().find(|(k, _)| *k == i) {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 let values = choice_values.iter().find(|(k, _)| *k == i).map(|(_, v)| v.clone());
+                // A list of chosen steps (a Zhora output's) shows the step `cur` at its place in it.
+                let at = values.as_ref().map_or(cur, |v| listed_at(v, steps, cur));
                 let set = move |k: usize| Act::PluginParam(slot, id, values.as_ref().map_or(k as f64 / steps as f64, |v| v[k]));
-                selector(ui, &painter, r, (i, name.as_ref(), value), &names, cur, &set, gcol, acts);
+                selector(ui, &painter, r, (i, name.as_ref(), value), &names, at, &set, gcol, acts);
             }
             continue;
         }

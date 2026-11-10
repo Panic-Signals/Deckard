@@ -5,26 +5,11 @@ use deckard_doc::Chain;
 use deckard_engine::zhora_outs;
 use deckard_model::Project;
 use deckard_plugins::native::{Readout, TuneState};
-use deckard_plugins::zhora::is_zhora;
+use deckard_plugins::zhora::{CHECK, HOLD, HOLD_NOTE, LIVE, OUTS, SIGNAL_NAMES, TUNE, is_zhora};
 use deckard_surface::ZhoraView;
 
 use crate::App;
 use crate::settings::Settings;
-
-// Zhora's parameter ids (saved in projects: never renumbered).
-/// The outputs, pitch to mod wheel, in signal order (0 None, n channel n - 1).
-pub const OUTS: std::ops::RangeInclusive<u32> = 1..=6;
-const INPUT: u32 = 30;
-const HOLD_NOTE: u32 = 31;
-const LIVE: u32 = 32;
-const HOLD: u32 = 40;
-const TUNE: u32 = 41;
-const CHECK: u32 = 42;
-/// Steps of the input picker (0 None, n the stereo input n).
-const INPUT_STEPS: f64 = 16.0;
-
-/// The signals, in output order.
-const SIGNALS: [&str; 6] = ["Pitch", "Gate", "Clock", "Envelope", "Velocity", "Mod wheel"];
 
 /// A note within this many cents is in tune.
 const IN_TUNE: f32 = 5.0;
@@ -89,11 +74,11 @@ pub fn output_problem(p: &Project, settings: &Settings, (g, s): (usize, usize)) 
         } else if p.cv_routes.iter().any(|r| r.channel == o.channel) {
             format!("a CV route has {name}")
         } else if let Some(e) = outs[..k].iter().find(|e| e.channel == o.channel) {
-            if (e.g, e.s) == (g, s) { format!("{} has {name}", SIGNALS[e.signal]) } else { format!("another Zhora has {name}") }
+            if (e.g, e.s) == (g, s) { format!("{} has {name}", SIGNAL_NAMES[e.signal]) } else { format!("another Zhora has {name}") }
         } else {
             continue;
         };
-        return Some(format!("{} isn't sent: {why}", SIGNALS[o.signal]));
+        return Some(format!("{} isn't sent: {why}", SIGNAL_NAMES[o.signal]));
     }
     None
 }
@@ -216,14 +201,12 @@ impl App {
         let Ok(z) = inst.try_lock() else {
             return shown.as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
         };
+        // Only the raw values under the lock (the audio thread waits for it).
         let r = z.readout()?;
-        let live = z.param_value(LIVE) > 0.5;
-        let hold_note = z.param_text(HOLD_NOTE, z.param_value(HOLD_NOTE));
-        let input = match (z.param_value(INPUT) * INPUT_STEPS).round() as usize {
-            0 => "No input".into(),
-            n => self.settings.input_pair_name(n - 1),
-        };
+        let (live, hold_note, input) = (z.param_value(LIVE) > 0.5, z.param_value(HOLD_NOTE), z.input_pair());
         drop(z);
+        let hold_note = crate::keys::note_name((hold_note * 127.0).round() as i64);
+        let input = input.map_or_else(|| "No input".into(), |n| self.settings.input_pair_name(n));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let v = view(&r, live, &hold_note, input, output_problem(p, &self.settings, (g, s)), now);
         *shown = Some((key, v.clone()));
@@ -251,7 +234,8 @@ impl App {
     /// The channels output `id` of the focused Zhora can take, when knob `id` is one.
     pub(crate) fn zhora_offered(&self, p: &Project, id: u32) -> Option<Vec<usize>> {
         let (g, s, _) = self.focused_zhora()?;
-        OUTS.contains(&id).then(|| offered(p, &self.settings, (g, s), (id - OUTS.start()) as usize))
+        let signal = OUTS.iter().position(|&o| o == id)?;
+        Some(offered(p, &self.settings, (g, s), signal))
     }
 }
 
@@ -274,6 +258,7 @@ mod tests {
             message: None,
             off: Vec::new(),
             holding: false,
+            analysed: 0,
         }
     }
 
@@ -403,5 +388,104 @@ mod tests {
         assert_eq!(offered(&p, &settings, (0, 0), 3), [8], "a None output");
         assert_eq!(offered(&p, &settings, (0, 1), 0), [6, 8]);
         assert!(zhora_in(&p) && !zhora_in(&project(vec![Sound::default()])));
+    }
+
+    /// A new project with Zhora on sound 1, focused, its instance made.
+    fn app_with_zhora() -> App {
+        let mut app = App { settings: Settings::default(), ..App::default() };
+        app.new_project();
+        (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, crate::layout::ChainTab::Sound, false);
+        app.add_slot(crate::layout::AddWhat::Plugin(crate::layout::native_entry(&deckard_plugins::zhora::CLASS)));
+        app.slot = Some(0);
+        app.slot_plugin_in(Chain::Sound(0, 0), 0).unwrap();
+        app
+    }
+
+    /// The tuner reads the instance for the Control page only.
+    #[test]
+    fn the_zhora_tuner_is_built_on_the_control_page_only() {
+        let mut app = app_with_zhora();
+        assert_eq!(app.surface.page(), "control");
+        assert!(app.surface_view().control.zhora.is_some());
+        let view = app.surface_view();
+        for a in app.surface.restore("mixer", "keyboard", &view, std::time::Instant::now()) {
+            app.surface_act(a);
+        }
+        assert_eq!(app.surface.page(), "mixer");
+        assert!(app.surface_view().control.zhora.is_none());
+    }
+
+    /// The computer's output selector has the step (as the controller's knob does) and
+    /// shows it at its place among None and the channels offered.
+    #[test]
+    fn an_output_selector_finds_its_step_in_the_list() {
+        let values = [0.0, 5.0 / 32.0, 9.0 / 32.0];
+        assert_eq!(crate::layout::listed_at(&values, 32, 9), 2);
+        assert_eq!(crate::layout::listed_at(&values, 32, 5), 1);
+        assert_eq!(crate::layout::listed_at(&values, 32, 0), 0);
+        assert_eq!(crate::layout::listed_at(&values, 32, 7), 0, "not listed: the first");
+    }
+
+    /// A Tune that finishes after a knob stored the state mid-Tune: the next save has
+    /// the new table, and the project reopened plays it.
+    #[test]
+    fn a_finished_tune_reaches_the_saved_project() {
+        use deckard_plugins::zhora::{HOLD_NOTE, INPUT, PITCH_OUT};
+        use std::time::{Duration, Instant};
+        let mut app = app_with_zhora();
+        let rate = app.output_rate();
+        let chain = Chain::Sound(0, 0);
+        let set = |app: &mut App, id, v| crate::layout::apply_acts(app, vec![crate::layout::Act::PluginParamIn(chain, 0, id, v)]);
+        set(&mut app, INPUT, 1.0 / 16.0);
+        set(&mut app, PITCH_OUT, 1.0 / 32.0);
+        app.store_plugin_states();
+        let inst = app.samples.plugins.existing(app.plugin_slot_key(chain, 0)).unwrap();
+        let t = deckard_plugins::Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
+        inst.lock().unwrap().process(1024, &t);
+        app.zhora_press("tune");
+        let deadline = Instant::now() + Duration::from_secs(240);
+        let (mut hops, mut phase) = (0u32, 0f64);
+        loop {
+            {
+                let mut z = inst.lock().unwrap();
+                z.process(1024, &t);
+                if z.readout().unwrap().state != TuneState::Tuning {
+                    break;
+                }
+                let v = z.cv(0, 1024).unwrap().1[1023] as f64;
+                // A voice over two octaves either side of C3, silent past that.
+                let hz = (v.abs() <= 0.2 + 1e-4).then(|| 261.63 * 2f64.powf(v * 10.0));
+                let mut b = [0f32; 1024];
+                if let Some(hz) = hz {
+                    for s in &mut b {
+                        *s = (0.5 * (phase * std::f64::consts::TAU).sin()) as f32;
+                        phase = (phase + hz / rate).fract();
+                    }
+                }
+                z.input(&b, &b);
+            }
+            hops += 1;
+            // Each hop analysed before the next, as the voice would answer in time.
+            while inst.lock().unwrap().readout().unwrap().analysed != hops {
+                std::thread::sleep(Duration::from_millis(1));
+                assert!(Instant::now() < deadline, "the analysis fell silent");
+            }
+            // A knob mid-Tune (one the voice doesn't hear) stores the state then.
+            if hops == 20 {
+                set(&mut app, HOLD_NOTE, 60.0 / 127.0);
+            }
+            assert!(Instant::now() < deadline, "the tune never finished");
+        }
+        let r = inst.lock().unwrap().readout().unwrap();
+        assert_eq!((r.state, r.message.as_deref()), (TuneState::Idle, None));
+        assert!(r.tuned_at.is_some() && hops > 20, "{hops}");
+        app.store_plugin_states();
+        let bytes = app.doc.as_ref().unwrap().borrow().to_bytes().unwrap();
+        let mut again = App { settings: Settings::default(), ..App::default() };
+        again.show_document(deckard_doc::Document::from_bytes(bytes, None));
+        let z = again.slot_plugin_in(chain, 0).unwrap();
+        let back = z.lock().unwrap().readout().unwrap();
+        assert_eq!(back.tuned_at, r.tuned_at, "the table is in the saved project");
+        assert_eq!(back.worst_cents, r.worst_cents);
     }
 }

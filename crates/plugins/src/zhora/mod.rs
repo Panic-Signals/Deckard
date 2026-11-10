@@ -6,7 +6,7 @@ pub mod table;
 pub mod tune;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use self::live::Trim;
@@ -26,12 +26,12 @@ pub fn is_zhora(id: &str) -> bool {
 }
 
 // Parameter ids (saved in projects: never renumber).
-const PITCH_OUT: u32 = 1;
-const GATE_OUT: u32 = 2;
-const CLOCK_OUT: u32 = 3;
-const ENV_OUT: u32 = 4;
-const VEL_OUT: u32 = 5;
-const MOD_OUT: u32 = 6;
+pub const PITCH_OUT: u32 = 1;
+pub const GATE_OUT: u32 = 2;
+pub const CLOCK_OUT: u32 = 3;
+pub const ENV_OUT: u32 = 4;
+pub const VEL_OUT: u32 = 5;
+pub const MOD_OUT: u32 = 6;
 const ATTACK: u32 = 10;
 const DECAY: u32 = 11;
 const SUSTAIN: u32 = 12;
@@ -42,13 +42,13 @@ const GATE_LEVEL: u32 = 22;
 const ENV_LEVEL: u32 = 23;
 const VEL_LEVEL: u32 = 24;
 const MOD_LEVEL: u32 = 25;
-const INPUT: u32 = 30;
-const HOLD_NOTE: u32 = 31;
-const LIVE: u32 = 32;
-const GLIDE: u32 = 33;
-const HOLD: u32 = 40;
-const TUNE: u32 = 41;
-const CHECK: u32 = 42;
+pub const INPUT: u32 = 30;
+pub const HOLD_NOTE: u32 = 31;
+pub const LIVE: u32 = 32;
+pub const GLIDE: u32 = 33;
+pub const HOLD: u32 = 40;
+pub const TUNE: u32 = 41;
+pub const CHECK: u32 = 42;
 
 const fn p(id: u32, name: &'static str, short: &'static str, default: f64, steps: i32) -> Param {
     Param { id, name, short, default, steps }
@@ -163,6 +163,10 @@ const ENV: usize = 3;
 const VEL: usize = 4;
 const MOD: usize = 5;
 pub const SIGNALS: usize = 6;
+/// The signals' names, in signal order.
+pub const SIGNAL_NAMES: [&str; SIGNALS] = ["Pitch", "Gate", "Clock", "Envelope", "Velocity", "Mod wheel"];
+/// The outputs' parameters, in signal order (0 None, n channel n - 1).
+pub const OUTS: [u32; SIGNALS] = [PITCH_OUT, GATE_OUT, CLOCK_OUT, ENV_OUT, VEL_OUT, MOD_OUT];
 
 /// Frames between detections.
 const HOP: usize = 1024;
@@ -412,6 +416,8 @@ pub struct Zhora {
     worker_gone: bool,
     /// Hold or a Run had the outputs in the last `process`.
     was_open: bool,
+    /// A Tune made a new table since the state was last stored.
+    changed: AtomicBool,
 }
 
 impl Zhora {
@@ -485,6 +491,7 @@ impl Zhora {
             retiring: None,
             worker_gone: false,
             was_open: false,
+            changed: AtomicBool::new(false),
         };
         z.update_env();
         z
@@ -581,6 +588,7 @@ impl Zhora {
                 let replaced = report.table.take().and_then(|table| {
                     self.trim = Trim::new();
                     self.trim_semis = 0.0;
+                    self.changed.store(true, Ordering::Relaxed);
                     self.table.replace(table)
                 });
                 report = std::mem::replace(&mut self.report, report);
@@ -889,7 +897,12 @@ impl Engine for Zhora {
             message: self.report.message,
             off: self.report.off.clone(),
             holding: self.holding,
+            analysed: self.shared.seq.load(Ordering::Acquire),
         })
+    }
+
+    fn take_changed(&self) -> bool {
+        self.changed.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -1202,6 +1215,7 @@ mod tests {
         assert_eq!(r.state, TuneState::Idle);
         assert!(r.message.is_some());
         assert_eq!(e.save(), bowed().to_bytes());
+        assert!(!e.take_changed(), "a loaded table and a failed Tune change nothing");
     }
 
     #[test]
@@ -1562,6 +1576,7 @@ mod tests {
         let t = stopped();
         run(&mut z, 1024, &t);
         z.set_param(TUNE, 1.0);
+        assert!(!z.take_changed(), "nothing to store while it runs");
         let (mut hops, mut phase) = (0, 0f64);
         loop {
             run(&mut z, 1024, &t);
@@ -1588,6 +1603,8 @@ mod tests {
         assert!(r.tuned_at.is_some_and(|at| at > 1_000_000_000), "stamped");
         assert!(r.range.is_some_and(|(lo, hi)| lo <= 40 && hi >= 80), "{:?}", r.range);
         assert!(r.off.is_empty());
+        assert!(z.take_changed(), "the new table is to be stored");
+        assert!(!z.take_changed(), "once");
         // The table it made plays in tune.
         z.note_on(60, 100);
         let pitch = block(&mut z, PITCH, 256, &t);

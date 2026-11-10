@@ -353,13 +353,35 @@ fn a_cv_slots_out_row_skips_a_taken_channel() {
     app.surface_act(A::ModSlot(2, 1, 3));
     app.surface_act(A::ModSlot(2, 2, 1));
     assert_eq!(cv_routes(&app)[2].channel, 4);
-    // None left: nothing made.
+    // None left: no CV to step to.
     app.surface_act(A::ModSlot(3, 0, 4));
     app.surface_act(A::ModSlot(3, 1, 3));
-    assert!(app.mod_slot_views()[3].cv);
-    app.surface_act(A::ModSlot(3, 2, 1));
+    let v = app.mod_slot_views();
+    assert!(v[3].midi && !v[3].cv, "{:?}", v[3]);
     assert_eq!(cv_routes(&app).len(), 3);
-    assert!(app.mod_draft.is_some(), "the draft stays");
+}
+
+/// Every CV only channel taken, one by a route and one by a Zhora's output: Group past
+/// MIDI stays MIDI, with no empty CV choice.
+#[test]
+fn with_every_cv_channel_taken_the_group_row_skips_cv() {
+    use crate::layout::{Act, AddWhat, ChainTab, native_entry};
+    use deckard_plugins::zhora;
+    let mut app = cv_app(&[2, 3]);
+    set_cv_routes(&app, vec![CvRoute::new(ModSource::Lfo(1), 2)]);
+    (app.group, app.sound, app.chain_tab) = (0, 0, ChainTab::Sound);
+    app.add_slot(AddWhat::Plugin(native_entry(&zhora::CLASS)));
+    let pitch_on_3 = Act::PluginParamIn(deckard_doc::Chain::Sound(0, 0), 0, zhora::PITCH_OUT, 4.0 / 32.0);
+    crate::layout::apply_acts(&mut app, vec![pitch_on_3]);
+    assert_eq!(crate::zhora_ui::channels_held(app.doc.as_ref().unwrap().borrow().project()), vec![3]);
+    app.surface_act(A::ModSlot(1, 0, 4));
+    app.surface_act(A::ModSlot(1, 1, 3));
+    let v = app.mod_slot_views();
+    assert!(v[1].midi && !v[1].cv, "{:?}", v[1]);
+    // A free channel again: CV.
+    set_cv_routes(&app, Vec::new());
+    app.surface_act(A::ModSlot(0, 1, 1));
+    assert!(app.mod_slot_views()[0].cv);
 }
 
 /// A strip's output or aux on a CV only side: its flag names the side and says why.

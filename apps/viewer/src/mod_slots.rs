@@ -308,7 +308,7 @@ fn route_step(app: &mut App, p: &Project, (g, s, i): (usize, usize, usize), row:
         },
         1 if g as i64 + steps >= p.groups.len() as i64 => {
             if let Some(source) = cc_source(&p.lfos, r.source) {
-                let (midi, cv) = past_groups(app, g as i64 + steps - p.groups.len() as i64);
+                let (midi, cv) = past_groups(app, p, g as i64 + steps - p.groups.len() as i64, false);
                 app.mod_draft = Some(ModDraft { midi, cv, from: Some((g, s, r.clone())), from_index: Some(i), ..ModDraft::new(source) });
             }
         }
@@ -409,7 +409,7 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
                 d.group = Some(clamp_step(p.groups.len(), steps, p.groups.len()));
             }
             // On past MIDI: CV. A CV route's draft is the route again, untouched.
-            1 if steps > 0 && !cv_channels(app).is_empty() => {
+            1 if steps > 0 && (d.from_cv.is_some() || cv_free(app, p)) => {
                 if d.from_cv.is_some() && d.from.is_none() {
                     app.mod_draft = None;
                     return;
@@ -447,7 +447,7 @@ fn draft_step(app: &mut App, p: &Project, row: usize, steps: i64) {
         1 if steps > 0 && past >= 0 => {
             // Past the last group: MIDI, then CV (an LFO's). A CC or CV route's draft
             // back on its own kind is the route again, untouched.
-            let (midi, cv) = past_groups(app, past);
+            let (midi, cv) = past_groups(app, p, past, d.from_cv.is_some());
             if d.from.is_none() && (d.from_cc.is_some() && midi.is_some() || d.from_cv.is_some() && cv.is_some()) {
                 app.mod_draft = None;
                 return;
@@ -686,8 +686,9 @@ fn set_cv(app: &mut App, routes: Vec<CvRoute>) -> bool {
 }
 
 /// The output channels a CV route can go to (those marked CV only in Settings).
-fn cv_channels(app: &App) -> Vec<u8> {
-    app.settings.cv_channels().into_iter().map(|c| c as u8).collect()
+/// Whether a new CV route has a channel to take (one no route or Zhora has).
+fn cv_free(app: &App, p: &Project) -> bool {
+    !free_cv_channels(&app.settings, &p.cv_routes, &crate::zhora_ui::channels_held(p), None).is_empty()
 }
 
 /// The CV only channels a route can take: none another route or a Zhora (`zhoras`, the
@@ -700,9 +701,10 @@ pub(crate) fn free_cv_channels(settings: &crate::settings::Settings, routes: &[C
 }
 
 /// A draft's `midi` and `cv` for the Group row `past` steps on from MIDI: CV from the
-/// first step past it, while a channel is CV only; else MIDI.
-fn past_groups(app: &App, past: i64) -> (Option<CcDraft>, Option<CvDraft>) {
-    if past >= 1 && !cv_channels(app).is_empty() { (None, Some(CvDraft::default())) } else { (Some(CcDraft::default()), None) }
+/// first step past it, while a CV only channel is free (or `from_cv`, a CV route's
+/// draft, which has its own); else MIDI.
+fn past_groups(app: &App, p: &Project, past: i64, from_cv: bool) -> (Option<CcDraft>, Option<CvDraft>) {
+    if past >= 1 && (from_cv || cv_free(app, p)) { (None, Some(CvDraft::default())) } else { (Some(CcDraft::default()), None) }
 }
 
 /// Row `row` of CV route `i` turned `steps` (0: erased): Source over the LFOs, Group
@@ -770,7 +772,7 @@ fn cc_step(app: &mut App, p: &Project, i: usize, row: usize, steps: i64) {
             app.mod_draft = Some(ModDraft { group: Some(group), from_cc: Some(r.clone()), ..ModDraft::new(r.source) });
             return;
         }
-        1 if steps > 0 && !cv_channels(app).is_empty() => {
+        1 if steps > 0 && cv_free(app, p) => {
             app.mod_draft = Some(ModDraft { cv: Some(CvDraft::default()), from_cc: Some(r.clone()), ..ModDraft::new(r.source) });
             return;
         }
