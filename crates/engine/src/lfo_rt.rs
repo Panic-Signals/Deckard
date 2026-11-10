@@ -348,12 +348,13 @@ impl Engine {
 
     /// The channels marked CV only get their voltages for `frames` from `at` (interleaved)
     /// in each of `ext`: the first route on the channel's, or 0 V with none. An LFO
-    /// that's muted or gone sits at the route's Low. No allocating.
+    /// that's muted or gone sits at the route's Low. Those a Zhora wrote this span are
+    /// left alone. No allocating.
     pub fn write_cv(&mut self, ext: &mut [Vec<f32>], at: usize, frames: usize) {
         if self.cv_channels == 0 {
             return;
         }
-        let mut bits = self.cv_channels;
+        let mut bits = self.cv_channels & !self.zhora_cv_owned;
         while bits != 0 {
             let ch = bits.trailing_zeros();
             bits &= bits - 1;

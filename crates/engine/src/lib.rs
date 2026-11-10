@@ -44,6 +44,8 @@ pub mod synth;
 // The MP60 and S1200 filter tables wait for those engines (docs/sampler-dsp.md §10).
 #[allow(dead_code)]
 mod sampler_tables;
+mod zhora_rt;
+pub use zhora_rt::{ZhoraOut, project_takes_input, zhora_outs};
 
 use deckard_model::extra_out::{self, Channels, ExtraOut, Owner};
 use deckard_model::{Dim, ExprKind, MidiKind, PPQ, Project};
@@ -2271,6 +2273,11 @@ pub struct Engine {
     audio_sounds: Vec<(usize, usize)>,
     /// Following an outside clock and sending MIDI clock ([`sync`]).
     sync: sync::Sync,
+    /// The project's Zhoras ([`zhora_rt`]), room for handing one its input (left, right;
+    /// `JOB_FRAMES` each), and the CV only channels they wrote this span.
+    zhoras: Vec<zhora_rt::ZhoraRt>,
+    zhora_in: (Vec<f32>, Vec<f32>),
+    zhora_cv_owned: u32,
 }
 
 /// A note sent to a MIDI port, until its note-off: where it went, and its recorded
@@ -2743,6 +2750,7 @@ impl Engine {
             }
             instruments.push(row);
         }
+        let zhoras = zhora_rt::zhoras_of(project, cache);
         let mod_routes = mod_rt::routes_of(project, &cache.plugins);
         let (faders, sound_faders, bus_faders) = channel_faders(project);
         // The playing timeline stays when the edit didn't change what makes it.
@@ -2795,6 +2803,8 @@ impl Engine {
                             || sound_has_strip(project, g, s)
                             // A sound bus waits for the channels that feed it.
                             || is_sound_bus(project, g, s)
+                            // Its CV leaves with the outputs.
+                            || zhora_rt::is_zhora(snd)
                     })
                     .collect()
             })
@@ -2810,9 +2820,10 @@ impl Engine {
             .map(|(g, gr)| {
                 (0..gr.sounds.len())
                     .map(|s| {
+                        let takes_in = in_routes.iter().any(|r| (r.0, r.1) == (g, s)) || zhoras.iter().any(|z| (z.g, z.s) == (g, s));
                         let has = sounds.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || instruments.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
-                            || in_routes.iter().any(|r| (r.0, r.1) == (g, s))
+                            || takes_in
                             || is_sound_bus(project, g, s);
                         let smp_gain = if has_fx(g, s) {
                             (1.0, 1.0)
@@ -2821,7 +2832,14 @@ impl Engine {
                         } else {
                             sound_gain(project, g, s)
                         };
-                        has.then(|| Box::new(SoundBufs::new(smp_gain)))
+                        has.then(|| {
+                            let mut b = SoundBufs::new(smp_gain);
+                            // (Room for the input, so taking it allocates nothing.)
+                            if takes_in {
+                                b.inp.reserve(JOB_FRAMES * 2);
+                            }
+                            Box::new(b)
+                        })
                     })
                     .collect()
             })
@@ -3035,6 +3053,9 @@ impl Engine {
                 })
                 .collect(),
             sync: sync::Sync::default(),
+            zhoras,
+            zhora_in: (vec![0.0; JOB_FRAMES], vec![0.0; JOB_FRAMES]),
+            zhora_cv_owned: 0,
         };
         (engine, report)
     }
@@ -3168,6 +3189,7 @@ impl Engine {
         std::mem::swap(&mut self.meters_extra, &mut fresh.meters_extra);
         self.refresh_strips();
         std::mem::swap(&mut self.in_routes, &mut fresh.in_routes);
+        std::mem::swap(&mut self.zhoras, &mut fresh.zhoras);
         std::mem::swap(&mut self.sound_muted, &mut fresh.sound_muted);
         std::mem::swap(&mut self.silent, &mut fresh.silent);
         std::mem::swap(&mut self.pads, &mut fresh.pads);
@@ -4797,13 +4819,13 @@ impl Engine {
         }
     }
 
-    /// Whether any sound takes audio from the interface.
+    /// Whether any sound takes audio from the interface, or a Zhora listens to it.
     pub fn takes_input(&self) -> bool {
-        !self.in_routes.is_empty()
+        !self.in_routes.is_empty() || !self.zhoras.is_empty()
     }
 
     /// The interface input for the next `frames`, into the buffers of the sounds that
-    /// take it (they play it in [`Engine::render_pass`]).
+    /// take it (they play it in [`Engine::render_pass`]), and to the Zhoras' tuners.
     fn take_input(&mut self, frames: usize) {
         for b in self.bufs.iter_mut().flatten().flatten() {
             if b.inp_on {
@@ -4818,6 +4840,7 @@ impl Engine {
         while q.len() > frames * 4 + 512 {
             q.pop_front();
         }
+        zhora_rt::hear(&mut self.zhoras, &mut self.bufs, &mut self.zhora_in, &q, frames);
         for &(g, s, ..) in &self.in_routes {
             if let Some(b) = self.bufs.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut) {
                 if b.inp.len() < frames * 2 {
@@ -4970,6 +4993,10 @@ impl Engine {
             if self.sync.waiting > 0 {
                 until = until.min(self.sync.waiting);
             }
+            // A Zhora's CV is of its last block: one block per span.
+            if !self.zhoras.is_empty() {
+                until = until.min(MAX_BLOCK as u64);
+            }
             let until = until as usize;
             if self.tap.as_ref().is_some_and(|t| t.source != TapSource::Master) {
                 self.tap_block.clear();
@@ -5011,6 +5038,7 @@ impl Engine {
             // On the cue bus's output; one the interface hasn't: the master's.
             let on_ext = self.cue.clicks_route.0.and_then(|n| ext.get_mut(n)?.get_mut(at + done * 2..at + (done + part) * 2));
             self.cue.finish(part, on_ext.unwrap_or(&mut out[done * 2..(done + part) * 2]));
+            self.write_zhora_cv(ext, at + done * 2, part);
             self.write_cv(ext, at + done * 2, part);
             self.clock_span(until as u64);
             if self.sequencing {

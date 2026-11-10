@@ -286,7 +286,7 @@ const QUEUE_ROOM: usize = 4096;
 
 /// Apply `cmd` to the audio thread's engine; what to free elsewhere comes back.
 /// `start`: when this block's callback began; `period`: its length.
-fn apply(
+pub(crate) fn apply(
     engine: &mut Option<Box<Engine>>,
     cmd: Command,
     start: Instant,

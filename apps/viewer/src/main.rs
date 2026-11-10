@@ -6452,17 +6452,12 @@ impl App {
         }
     }
 
-    /// Open the interface input while a sound takes audio from it (and an engine to
-    /// play it through) or a controller shows its meters; close it when neither does.
+    /// Open the interface input while a sound takes audio from it or a Zhora listens
+    /// (and an engine to play it through) or a controller shows its meters; close it
+    /// when none does.
     pub(crate) fn input_sync(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let plays = doc
-            .borrow()
-            .project()
-            .groups
-            .iter()
-            .flat_map(|g| &g.sounds)
-            .any(|s| matches!(s.channel.audio_in, deckard_model::AudioSource::Ext(_)));
+        let plays = deckard_engine::project_takes_input(doc.borrow().project());
         let wants = plays || self.input_watched;
         self.input_bus.set_levels(&self.settings.input_levels);
         let key = (self.settings.input_device_in_use(), self.settings.input_routing.clone());
