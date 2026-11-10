@@ -247,7 +247,14 @@ fn wrap_nisound_preset(ext: &str, raw: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let e_idx = find_tag(buf, b"DSINe\0\0\0")?.checked_add(8)?;
-    let t_idx = find_tag(buf, b"DSINt\0\0\0")?.checked_sub(48)?;
+    // Real files have an outer resource tag and an inner NISound chunk with
+    // the same name. Only the inner one has the adjacent compressed DSINs.
+    let t_idx = buf
+        .windows(8)
+        .enumerate()
+        .filter(|(_, w)| *w == b"DSINt\0\0\0")
+        .filter_map(|(i, _)| i.checked_sub(48))
+        .find(|&i| buf.get(i + 68..i + 76) == Some(b"DSINs\0\0\0"))?;
     let t_part = buf.get(t_idx..)?;
     if t_part.len() < 117 || t_part.get(48..56) != Some(b"DSINt\0\0\0") || t_part.get(68..76) != Some(b"DSINs\0\0\0") {
         return None;
@@ -836,6 +843,9 @@ mod tests {
         let mut raw = vec![0u8; 64];
         raw[12..16].copy_from_slice(b"hsin");
         raw[48..56].copy_from_slice(b"DSINe\0\0\0");
+        // The real resource index repeats this tag before the inner NISound
+        // header. It has no adjacent DSINs and must not defeat state wrapping.
+        raw.extend_from_slice(b"DSINt\0\0\0");
         raw.extend_from_slice(&y_body);
         raw.extend_from_slice(&t_part);
         let raw_len = raw.len() as u64;
@@ -855,7 +865,14 @@ mod tests {
             ]
         );
         let state = parse_vstpreset(chunk_parts(&resolved.chunk).unwrap().1).unwrap();
-        let t_idx = find_tag(&state.component, b"DSINt\0\0\0").unwrap() - 48;
+        let t_idx = state
+            .component
+            .windows(8)
+            .enumerate()
+            .filter(|(_, w)| *w == b"DSINt\0\0\0")
+            .filter_map(|(i, _)| i.checked_sub(48))
+            .find(|&i| state.component.get(i + 68..i + 76) == Some(b"DSINs\0\0\0"))
+            .unwrap();
         let tp = &state.component[t_idx..];
         let ulen = u32::from_le_bytes(tp[109..113].try_into().unwrap()) as usize;
         let clen = u32::from_le_bytes(tp[113..117].try_into().unwrap()) as usize;
