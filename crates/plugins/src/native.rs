@@ -150,6 +150,12 @@ pub trait Engine: Send {
     fn take_changed(&self) -> bool {
         false
     }
+
+    /// Whether it changed by itself (as [`Engine::take_changed`]) since last asked, without
+    /// asking: cheap enough to look at often.
+    fn changed(&self) -> bool {
+        false
+    }
 }
 
 /// What a Tune or Check is doing.
@@ -495,6 +501,10 @@ impl Instance {
 
     pub(crate) fn readout(&self) -> Option<Readout> {
         self.engine.readout()
+    }
+
+    pub(crate) fn changed(&self) -> bool {
+        self.engine.changed()
     }
 }
 

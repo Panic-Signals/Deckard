@@ -540,6 +540,15 @@ impl Plugin {
         }
     }
 
+    /// Whether the plug-in's state changed by itself (a finished Tune) and is to be
+    /// stored, without taking the news (as [`Plugin::take_dirty`] does).
+    pub fn changed_by_itself(&self) -> bool {
+        match &self.kind {
+            Kind::Native(p) => p.changed(),
+            _ => false,
+        }
+    }
+
     /// The VST3 component (to query buses and the like); none for DECKARD's own.
     pub fn component(&self) -> Option<&ComPtr<IComponent>> {
         match &self.kind {

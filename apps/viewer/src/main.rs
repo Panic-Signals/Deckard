@@ -1273,6 +1273,8 @@ pub struct App {
     surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
     /// The focused Zhora (group, sound, slot) as last shown, while the audio thread has it.
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
+    /// When the Zhoras were last looked at for a finished Tune.
+    tunes_watched: Option<std::time::Instant>,
 }
 
 /// Launch time (a newtype so `App` can derive `Default`).
@@ -2057,6 +2059,8 @@ impl App {
     }
 
     fn quit(&mut self, ctx: &egui::Context) {
+        // A Tune just finished counts as a change.
+        self.store_finished_tunes();
         if self.asks_on_quit() && !self.quitting {
             self.confirm = Some(Pending::Quit);
         } else {
@@ -10118,15 +10122,7 @@ impl App {
             stored.push((*slot, chunk));
         }
         for (slot, chunk) in stored {
-            let r = match slot {
-                deckard_plugins::Slot::Sound { group, sound } => doc.borrow_mut().set_plugin_chunk(group, sound, chunk),
-                deckard_plugins::Slot::Chain { group, sound, slot } => doc.borrow_mut().set_slot_plugin_chunk(group, sound, slot, chunk),
-                deckard_plugins::Slot::Group { group, slot } => {
-                    doc.borrow_mut().set_chain_plugin_chunk(deckard_doc::Chain::Group(group), slot, chunk)
-                }
-                deckard_plugins::Slot::Master { slot } => doc.borrow_mut().set_chain_plugin_chunk(deckard_doc::Chain::Master, slot, chunk),
-            };
-            if let Err(e) = r {
+            if let Err(e) = store_chunk(&mut doc.borrow_mut(), slot, chunk) {
                 self.status = format!("plug-in state not stored: {e}");
             }
         }
@@ -10432,6 +10428,7 @@ impl App {
 
     /// What [`App::logic`] does while the window is covered or minimized.
     fn background(&mut self, ctx: &egui::Context) {
+        self.watch_tunes(ctx);
         self.share_tempo();
         self.follow_engine(ctx, undrawn(ctx, BACKGROUND_PACE));
         self.sync_notes_played();
@@ -10470,6 +10467,16 @@ impl App {
         self.follow_edits();
         self.keep_session_soon();
         self.update_meters(ctx, undrawn(ctx, BACKGROUND_PACE));
+    }
+}
+
+/// Store the state `chunk` of the plug-in in `slot` into `doc`.
+pub(crate) fn store_chunk(doc: &mut deckard_doc::Document, slot: deckard_plugins::Slot, chunk: Vec<u8>) -> Result<(), String> {
+    match slot {
+        deckard_plugins::Slot::Sound { group, sound } => doc.set_plugin_chunk(group, sound, chunk),
+        deckard_plugins::Slot::Chain { group, sound, slot } => doc.set_slot_plugin_chunk(group, sound, slot, chunk),
+        deckard_plugins::Slot::Group { group, slot } => doc.set_chain_plugin_chunk(deckard_doc::Chain::Group(group), slot, chunk),
+        deckard_plugins::Slot::Master { slot } => doc.set_chain_plugin_chunk(deckard_doc::Chain::Master, slot, chunk),
     }
 }
 
@@ -10562,6 +10569,8 @@ impl App {
         if self.group_load.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+        // Before this frame's edits, so a finished Tune is the step before them.
+        self.watch_tunes(ctx);
         self.share_tempo();
         // A selection belongs to the pattern it was made in.
         if self.selected_in != (self.group, self.pattern) {

@@ -31,32 +31,36 @@ pub fn detect(samples: &[f32], sample_rate: f32) -> Option<Pitch> {
     if max_tau < 3 {
         return None;
     }
-    // Difference function over a fixed integration window of `half` samples.
-    let mut d = vec![0.0f64; max_tau + 1];
-    for (tau, slot) in d.iter_mut().enumerate().skip(1) {
-        *slot = (0..half)
-            .map(|j| {
-                let e = x[j] - x[j + tau];
-                e * e
-            })
-            .sum();
-    }
-    // Cumulative mean normalised difference.
-    let mut cmnd = vec![1.0f64; max_tau + 1];
-    let mut sum = 0.0;
-    for tau in 1..=max_tau {
-        sum += d[tau];
-        cmnd[tau] = if sum > 0.0 { d[tau] * tau as f64 / sum } else { 1.0 };
-    }
     // Silence: nothing to measure.
-    if sum <= 1e-12 {
+    if x[..half].iter().all(|s| s.abs() < 1e-9) {
         return None;
     }
+    // Difference function over a fixed integration window of `half` samples, and its
+    // cumulative mean normalised form, worked out only as far as the search needs them.
+    let mut d = vec![0.0f64; max_tau + 1];
+    let mut cmnd = vec![1.0f64; max_tau + 1];
+    let mut sum = 0.0;
+    let mut done = 0;
+    let mut upto = |to: usize, d: &mut [f64], cmnd: &mut [f64]| {
+        while done < to.min(max_tau) {
+            done += 1;
+            let tau = done;
+            d[tau] = squared_difference(&x[..half], &x[tau..tau + half]);
+            sum += d[tau];
+            cmnd[tau] = if sum > 0.0 { d[tau] * tau as f64 / sum } else { 1.0 };
+        }
+    };
     // The first dip under the threshold, followed down to its bottom.
     let mut tau = 2;
+    upto(3, &mut d, &mut cmnd);
     while tau < max_tau {
+        upto(tau + 1, &mut d, &mut cmnd);
         if cmnd[tau] < THRESHOLD {
-            while tau + 1 < max_tau && cmnd[tau + 1] < cmnd[tau] {
+            loop {
+                upto(tau + 2, &mut d, &mut cmnd);
+                if !(tau + 1 < max_tau && cmnd[tau + 1] < cmnd[tau]) {
+                    break;
+                }
                 tau += 1;
             }
             break;
@@ -80,22 +84,34 @@ pub fn detect(samples: &[f32], sample_rate: f32) -> Option<Pitch> {
     Some(Pitch { hz: hz as f32, clarity: (1.0 - cmnd[tau]) as f32 })
 }
 
+/// The sum of `(a - b)²` over two equal slices, in four lanes so it vectorises.
+fn squared_difference(a: &[f64], b: &[f64]) -> f64 {
+    let mut lanes = [0.0f64; 4];
+    let (ca, cb) = (a.chunks_exact(4), b.chunks_exact(4));
+    let tail: f64 = ca.remainder().iter().zip(cb.remainder()).map(|(a, b)| (a - b) * (a - b)).sum();
+    for (a, b) in ca.zip(cb) {
+        for k in 0..4 {
+            let e = a[k] - b[k];
+            lanes[k] += e * e;
+        }
+    }
+    lanes.iter().sum::<f64>() + tail
+}
+
 /// Half the taps of the interpolating filter.
 const TAPS: usize = 8;
 
-/// `x` at the fractional position `p` (Hann-windowed sinc).
-fn sample_at(x: &[f64], p: f64) -> f64 {
-    let base = p.floor();
-    let frac = p - base;
-    let base = base as isize;
-    let mut acc = 0.0;
-    for k in -(TAPS as isize) + 1..=TAPS as isize {
-        let dist = k as f64 - frac;
+/// Golden-section steps: they narrow the two-sample bracket to under 1e-4 of a sample.
+const REFINE_STEPS: usize = 20;
+
+/// The Hann-windowed sinc taps that read a signal `frac` (0 to 1) of a sample past a point:
+/// tap `i` weighs the sample `i - TAPS + 1` places on.
+fn taps(frac: f64) -> [f64; 2 * TAPS] {
+    std::array::from_fn(|i| {
+        let dist = (i as isize - TAPS as isize + 1) as f64 - frac;
         let sinc = if dist.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * dist).sin() / (std::f64::consts::PI * dist) };
-        let win = 0.5 + 0.5 * (std::f64::consts::PI * dist / TAPS as f64).cos();
-        acc += x[(base + k) as usize] * sinc * win;
-    }
-    acc
+        sinc * (0.5 + 0.5 * (std::f64::consts::PI * dist / TAPS as f64).cos())
+    })
 }
 
 /// The lag near `start` (within a sample) where the signal best matches itself.
@@ -106,10 +122,16 @@ fn refine(x: &[f64], start: f64) -> f64 {
         return start;
     }
     let end = n - reach - TAPS - 1;
+    // Every sample is read at the same fraction past a whole one, so one set of taps serves.
     let diff = |lag: f64| -> f64 {
+        let whole = lag.floor();
+        let w = taps(lag - whole);
+        let first = whole as isize - TAPS as isize + 1;
         (TAPS..end.max(TAPS))
             .map(|j| {
-                let e = x[j] - sample_at(x, j as f64 + lag);
+                let at = (j as isize + first) as usize;
+                let shifted: f64 = x[at..at + 2 * TAPS].iter().zip(&w).map(|(s, c)| s * c).sum();
+                let e = x[j] - shifted;
                 e * e
             })
             .sum()
@@ -120,7 +142,7 @@ fn refine(x: &[f64], start: f64) -> f64 {
     let mut m1 = hi - ratio * (hi - lo);
     let mut m2 = lo + ratio * (hi - lo);
     let (mut f1, mut f2) = (diff(m1), diff(m2));
-    for _ in 0..30 {
+    for _ in 0..REFINE_STEPS {
         if f1 < f2 {
             hi = m2;
             m2 = m1;
@@ -173,6 +195,30 @@ mod tests {
                 let p = detect(&samples, RATE).unwrap_or_else(|| panic!("{name} at {hz} Hz: no pitch"));
                 assert!(cents(p.hz, hz).abs() < 1.0, "{name} at {hz} Hz read {} ({} cents)", p.hz, cents(p.hz, hz));
                 assert!(p.clarity >= 0.85, "{name} at {hz} Hz clarity {}", p.clarity);
+            }
+        }
+    }
+
+    /// A detection costs well under a hop, so the tuner keeps up at any rate. Timed only in
+    /// release builds: `cargo test --release -p deckard-plugins --lib zhora::pitch`.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_detection_takes_under_a_quarter_of_a_hop() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+        let budget = Duration::from_secs_f64(super::super::HOP as f64 / RATE as f64 / 4.0);
+        for hz in [32.7f32, 110.0, 440.0, 2093.0] {
+            for samples in [wave(hz, |k| if k == 1 { 0.5 } else { 0.0 }), wave(hz, |k| 0.4 / k as f32)] {
+                // The middle of several, so another test running at once doesn't decide it.
+                let mut times: Vec<Duration> = (0..9)
+                    .map(|_| {
+                        let t = Instant::now();
+                        black_box(detect(black_box(&samples), RATE));
+                        t.elapsed()
+                    })
+                    .collect();
+                times.sort();
+                assert!(times[4] < budget, "{hz} Hz took {:?}, over {budget:?}", times[4]);
             }
         }
     }

@@ -25,7 +25,7 @@ impl Table {
     }
 
     /// The output value that sounds `note`, and whether the note lay outside the table (and
-    /// so was clamped to its nearest end).
+    /// so was clamped to the nearest whole note inside it).
     pub fn value_for(&self, note: f32) -> (f32, bool) {
         if !note.is_finite() {
             return (Self::nominal(60.0), true);
@@ -36,18 +36,28 @@ impl Table {
         if self.points.len() < 2 {
             return (first.0, true);
         }
-        let l = log2_hz(note);
+        let mut l = log2_hz(note);
+        let outside = l < first.1 || l > last.1;
+        if outside {
+            // The nearest tuned note, unless no whole note lies inside the table at all.
+            let (lo, hi) = self.range();
+            l = match (l < first.1, lo <= hi) {
+                (_, false) => l,
+                (true, true) => log2_hz(lo as f32),
+                (false, true) => log2_hz(hi as f32),
+            };
+        }
         if l <= first.1 {
-            return (first.0, l < first.1);
+            return (first.0, outside);
         }
         if l >= last.1 {
-            return (last.0, l > last.1);
+            return (last.0, outside);
         }
         let i = self.points.partition_point(|p| p.1 <= l).clamp(1, self.points.len() - 1);
         let (lo, hi) = (self.points[i - 1], self.points[i]);
         let span = hi.1 - lo.1;
         let t = if span > 0.0 { (l - lo.1) / span } else { 0.0 };
-        (lo.0 + t * (hi.0 - lo.0), false)
+        (lo.0 + t * (hi.0 - lo.0), outside)
     }
 
     /// The lowest and highest whole MIDI notes the table covers.
@@ -127,11 +137,17 @@ mod tests {
         }
     }
 
+    /// Past either end, a note plays the nearest whole note the table covers, flagged.
     #[test]
-    fn notes_outside_the_table_clamp_and_flag() {
+    fn notes_outside_the_table_clamp_to_the_nearest_tuned_note_and_flag() {
         let t = bowed();
-        assert_eq!(t.value_for(200.0), (1.0, true));
-        assert_eq!(t.value_for(-20.0), (0.0, true));
+        let (lo, hi) = t.range();
+        assert_eq!(t.value_for(200.0), (t.value_for(hi as f32).0, true));
+        assert_eq!(t.value_for(hi as f32 + 1.0), (t.value_for(hi as f32).0, true));
+        assert_eq!(t.value_for(-20.0), (t.value_for(lo as f32).0, true));
+        assert!(!t.value_for(hi as f32).1 && !t.value_for(lo as f32).1);
+        // Not the table's ends, which lie between notes.
+        assert!(t.value_for(hi as f32).0 < 1.0 && t.value_for(lo as f32).0 > 0.0);
         assert_eq!(Table::nominal(60.0), 0.0);
     }
 

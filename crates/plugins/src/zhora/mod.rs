@@ -168,7 +168,8 @@ pub const SIGNAL_NAMES: [&str; SIGNALS] = ["Pitch", "Gate", "Clock", "Envelope",
 /// The outputs' parameters, in signal order (0 None, n channel n - 1).
 pub const OUTS: [u32; SIGNALS] = [PITCH_OUT, GATE_OUT, CLOCK_OUT, ENV_OUT, VEL_OUT, MOD_OUT];
 
-/// Frames between detections.
+/// Frames in a block sent to the worker, and samples (at the detector's rate) between
+/// detections: about 21 ms at any device rate.
 const HOP: usize = 1024;
 /// Gate drop that makes the modular retrigger on an overlapping note.
 const RETRIGGER_S: f64 = 0.002;
@@ -188,10 +189,12 @@ const NO_INPUT_S: f64 = 2.0;
 const STALE_S: f64 = 0.25;
 
 const NO_INPUT: &str = "Choose an input first";
-const NO_SIGNAL: &str = "No signal on the input";
+const NOTHING_ARRIVING: &str = "Nothing arriving on the input";
 const NOT_TUNED: &str = "Tune first";
 const BUSY: &str = "Tuner is busy";
 const TUNER_STOPPED: &str = "The tuner has stopped";
+const FELL_BEHIND: &str = "The tuner fell behind; try again";
+const CANCELLED: &str = "Cancelled";
 
 /// The channel of an output picker's value: 0 is None, n is channel n - 1.
 fn channel(v: f64) -> Option<usize> {
@@ -267,31 +270,38 @@ enum Cmd {
     Retire(Report),
 }
 
-/// The analysis thread. It owns the Run, since stepping one allocates, and ends when the
-/// engine drops its end of `blocks`.
-fn worker(sample_rate: f32, blocks: Receiver<[f32; HOP]>, cmds: Receiver<Cmd>, done: SyncSender<Report>, shared: Arc<Shared>) {
-    // Above 60 kHz, whole samples are averaged down so the window still spans low notes.
-    let mut factor = 1;
-    let mut rate = sample_rate;
-    while rate > MAX_DETECT_RATE {
+/// Above 60 kHz, whole samples are averaged down by this so the window still spans low
+/// notes: the rate the detector sees, and the factor.
+fn detector_rate(sample_rate: f32) -> (f32, usize) {
+    let (mut rate, mut factor) = (sample_rate, 1);
+    while rate > MAX_DETECT_RATE && factor < HOP {
         factor *= 2;
         rate *= 0.5;
     }
-    let hop_ms = HOP as f32 * 1000.0 / sample_rate;
+    (rate, factor)
+}
+
+/// The analysis thread. It owns the Run, since stepping one allocates, and ends when the
+/// engine drops its end of `blocks`.
+fn worker(sample_rate: f32, blocks: Receiver<[f32; HOP]>, cmds: Receiver<Cmd>, done: SyncSender<Report>, shared: Arc<Shared>) {
+    let (rate, factor) = detector_rate(sample_rate);
+    // One detection every `factor` blocks: `HOP` samples at the detector's rate.
+    let hop_ms = (HOP * factor) as f32 * 1000.0 / sample_rate;
+    let window_ms = WINDOW as f32 * 1000.0 / rate;
     let shift = HOP / factor;
     let mut window = vec![0f32; WINDOW];
-    let mut have = 0;
+    let (mut have, mut gathered, mut power) = (0, 0, 0.0f32);
     let mut run: Option<(u32, Run)> = None;
+    let mut started = false;
     while let Ok(block) = blocks.recv() {
-        let mut started = false;
         for cmd in cmds.try_iter() {
             match cmd {
                 Cmd::Tune(id) => {
-                    run = Some((id, Run::tune()));
+                    run = Some((id, Run::tune(window_ms)));
                     started = true;
                 }
                 Cmd::Check(id, table) => {
-                    run = Some((id, Run::check((*table).clone())));
+                    run = Some((id, Run::check((*table).clone(), window_ms)));
                     started = true;
                 }
                 Cmd::Cancel => run = None,
@@ -303,7 +313,13 @@ fn worker(sample_rate: f32, blocks: Receiver<[f32; HOP]>, cmds: Receiver<Cmd>, d
             *slot = chunk.iter().sum::<f32>() / factor as f32;
         }
         have = (have + shift).min(WINDOW);
-        let rms = (block.iter().map(|s| s * s).sum::<f32>() / HOP as f32).sqrt();
+        power += block.iter().map(|s| s * s).sum::<f32>();
+        gathered += 1;
+        if gathered < factor {
+            continue;
+        }
+        let rms = (power / (HOP * factor) as f32).sqrt();
+        (gathered, power) = (0, 0.0);
         // Written so that a NaN gives no pitch.
         let reading = if have == WINDOW && rms >= MIN_RMS { detect(&window, rate) } else { None };
         shared.publish(reading);
@@ -311,6 +327,7 @@ fn worker(sample_rate: f32, blocks: Receiver<[f32; HOP]>, cmds: Receiver<Cmd>, d
             // The hop that brought the order was played before it: no time has passed yet.
             let id = *id;
             let result = if started { r.step(0.0, None) } else { r.step(hop_ms, reading) };
+            started = false;
             match result {
                 Step::Output(v) => shared.output.store(v.to_bits(), Ordering::Relaxed),
                 Step::Done(outcome) => {
@@ -352,8 +369,11 @@ pub struct Zhora {
     /// The input going toward the next hop, and how much of it there is.
     block: [f32; HOP],
     filled: usize,
-    /// Frames of `process` since `input` was last called.
+    /// Frames of `process` since `input` last brought any.
     since_input: u64,
+    /// Hops the worker had no room for, and how many there were when the Run began.
+    dropped: u32,
+    dropped_at_press: u32,
     seen_seq: u32,
     table: Option<Arc<Table>>,
     report: Report,
@@ -441,6 +461,8 @@ impl Zhora {
             block: [0.0; HOP],
             filled: 0,
             since_input: 0,
+            dropped: 0,
+            dropped_at_press: 0,
             seen_seq: 0,
             table: None,
             report: Report::default(),
@@ -542,7 +564,9 @@ impl Zhora {
     }
 
     fn press(&mut self, tuning: bool) {
+        // A second press stops the Run; the table stays.
         if self.running.is_some() {
+            self.give_up(CANCELLED);
             return;
         }
         self.report.message = None;
@@ -569,6 +593,7 @@ impl Zhora {
         }
         self.running = Some(Running { id, tuning });
         self.since_input = 0;
+        self.dropped_at_press = self.dropped;
     }
 
     /// Takes the worker's finished Run, if it is the one still wanted. What it replaces goes
@@ -736,11 +761,12 @@ impl Engine for Zhora {
         self.bend = bend as f64;
     }
 
-    /// Gate and envelope drop; pitch, velocity and mod wheel hold their last values.
-    /// The gate's last rendered frame stays as it was, so a note in the same span still retriggers.
+    /// The gate drops and the envelope releases; pitch, velocity and mod wheel hold their
+    /// last values. The gate's last rendered frame stays as it was, so a note in the same
+    /// span still retriggers.
     fn reset(&mut self) {
         self.stack.clear();
-        self.env = Env::default();
+        self.env.gate(false);
         self.gap_left = 0;
         self.frozen = true;
         self.clamped = false;
@@ -754,7 +780,11 @@ impl Engine for Zhora {
             self.give_up(TUNER_STOPPED);
         }
         if self.running.is_some() && self.since_input as f64 >= NO_INPUT_S * self.sr {
-            self.give_up(NO_SIGNAL);
+            self.give_up(NOTHING_ARRIVING);
+        }
+        // A hop lost while it ran: what the Run heard is spliced and late.
+        if self.running.is_some() && self.dropped != self.dropped_at_press {
+            self.give_up(FELL_BEHIND);
         }
         self.since_input = self.since_input.saturating_add(n as u64);
 
@@ -852,14 +882,18 @@ impl Engine for Zhora {
     }
 
     fn input(&mut self, left: &[f32], right: &[f32]) {
-        self.since_input = 0;
+        if !left.is_empty() && !right.is_empty() {
+            self.since_input = 0;
+        }
         for (&l, &r) in left.iter().zip(right) {
             self.block[self.filled] = (l + r) * 0.5;
             self.filled += 1;
             if self.filled == HOP {
-                // A full queue means the analysis is behind, and this hop is lost.
-                if let Err(TrySendError::Disconnected(_)) = self.blocks.try_send(self.block) {
-                    self.worker_gone = true;
+                match self.blocks.try_send(self.block) {
+                    Ok(()) => {}
+                    // The analysis is behind, and this hop is lost.
+                    Err(TrySendError::Full(_)) => self.dropped = self.dropped.wrapping_add(1),
+                    Err(TrySendError::Disconnected(_)) => self.worker_gone = true,
                 }
                 self.filled = 0;
             }
@@ -903,6 +937,10 @@ impl Engine for Zhora {
 
     fn take_changed(&self) -> bool {
         self.changed.swap(false, Ordering::Relaxed)
+    }
+
+    fn changed(&self) -> bool {
+        self.changed.load(Ordering::Relaxed)
     }
 }
 
@@ -1246,12 +1284,105 @@ mod tests {
         }
         let r = e.readout().unwrap();
         assert_eq!(r.state, TuneState::Idle);
-        assert_eq!(r.message, Some("No signal on the input"));
+        assert_eq!(r.message, Some("Nothing arriving on the input"));
         assert_eq!(e.save(), bowed().to_bytes(), "the table stays");
     }
 
+    /// The engine hands over what it has, which may be nothing: only frames keep a Run alive.
     #[test]
-    fn reset_drops_gate_and_envelope_and_holds_pitch_velocity_and_mod() {
+    fn empty_input_does_not_keep_a_run_alive() {
+        let mut e = routed();
+        let t = stopped();
+        e.load(&bowed().to_bytes());
+        e.set_param(INPUT, 1.0 / 16.0);
+        run(e.as_mut(), BLOCK, &t);
+        e.set_param(CHECK, 1.0);
+        for _ in 0..202 {
+            e.input(&[], &[]);
+            run(e.as_mut(), BLOCK, &t);
+        }
+        let r = e.readout().unwrap();
+        assert_eq!((r.state, r.message), (TuneState::Idle, Some("Nothing arriving on the input")));
+    }
+
+    #[test]
+    fn a_second_press_cancels_the_run_and_keeps_the_table() {
+        for (first, second) in [(TUNE, TUNE), (TUNE, CHECK), (CHECK, CHECK)] {
+            let mut e = routed();
+            let t = stopped();
+            e.load(&bowed().to_bytes());
+            e.set_param(INPUT, 1.0 / 16.0);
+            run(e.as_mut(), BLOCK, &t);
+            e.set_param(first, 1.0);
+            e.set_param(first, 0.0);
+            run(e.as_mut(), BLOCK, &t);
+            assert_ne!(e.readout().unwrap().state, TuneState::Idle);
+            e.set_param(second, 1.0);
+            run(e.as_mut(), BLOCK, &t);
+            let r = e.readout().unwrap();
+            assert_eq!((r.state, r.message), (TuneState::Idle, Some("Cancelled")));
+            assert_eq!(e.save(), bowed().to_bytes(), "the table stays");
+        }
+    }
+
+    /// A hop the worker had no room for leaves a gap in what the Run hears: it fails.
+    #[test]
+    fn a_lost_hop_fails_the_run_and_keeps_the_table() {
+        let mut z = Zhora::new(SR);
+        defaults(&mut z);
+        z.load(&bowed().to_bytes());
+        z.set_param(INPUT, 1.0 / 16.0);
+        let t = stopped();
+        run(&mut z, BLOCK, &t);
+        z.set_param(CHECK, 1.0);
+        run(&mut z, BLOCK, &t);
+        // The worker's queue is full.
+        let (full, _rx) = sync_channel(1);
+        full.try_send([0.0; HOP]).unwrap();
+        z.blocks = full;
+        z.input(&[0.1; HOP], &[0.1; HOP]);
+        run(&mut z, BLOCK, &t);
+        let r = z.readout().unwrap();
+        assert_eq!((r.state, r.message), (TuneState::Idle, Some("The tuner fell behind; try again")));
+        assert_eq!(z.save(), bowed().to_bytes());
+    }
+
+    /// The detector reads 48 kHz or under, and detects once every 21 ms or so at any rate.
+    #[test]
+    fn a_hop_is_about_21_ms_at_every_rate() {
+        for sr in [44_100.0f32, 48_000.0, 88_200.0, 96_000.0] {
+            let (rate, factor) = detector_rate(sr);
+            assert!(rate <= MAX_DETECT_RATE && rate * factor as f32 == sr, "{sr}");
+            let hop_ms = (HOP * factor) as f32 * 1000.0 / sr;
+            assert!((21.0..23.5).contains(&hop_ms), "{sr}: {hop_ms} ms");
+        }
+        // Through the worker at 96 kHz: one detection for every two blocks.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut z = Zhora::new(96_000.0);
+        defaults(&mut z);
+        z.set_param(INPUT, 1.0 / 16.0);
+        let mut phase = 0f32;
+        for _ in 0..16 {
+            let mut b = [0f32; HOP];
+            for s in &mut b {
+                *s = 0.5 * (phase * std::f32::consts::TAU).sin();
+                phase = (phase + 440.0 / 96_000.0).fract();
+            }
+            z.input(&b, &b);
+        }
+        // Its end of the input gone, the worker takes what is queued and stops.
+        z.blocks = sync_channel(1).0;
+        while !matches!(z.finished.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) {
+            assert!(Instant::now() < deadline, "the worker never stopped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(z.shared.seq.load(Ordering::Acquire), 8);
+        let heard = z.shared.reading().expect("a pitch");
+        assert!(super::tune::cents(heard.hz, 440.0).abs() < 1.0, "{}", heard.hz);
+    }
+
+    #[test]
+    fn reset_drops_the_gate_releases_the_envelope_and_holds_pitch_velocity_and_mod() {
         let mut e = routed();
         let t = stopped();
         e.pitch_bend(0.5);
@@ -1270,7 +1401,36 @@ mod tests {
         assert!(near(last(e.as_ref(), VEL), vel));
         assert!(near(last(e.as_ref(), MOD), modw));
         assert!(e.cv(GATE, BLOCK).unwrap().1.iter().all(|&v| v == 0.0));
-        assert!(e.cv(ENV, BLOCK).unwrap().1.iter().all(|&v| v == 0.0));
+        let env = e.cv(ENV, BLOCK).unwrap().1;
+        assert!(env[0] > 0.1 && env.windows(2).all(|w| w[1] < w[0]), "the envelope releases");
+    }
+
+    /// Stop releases the envelope as a note-off does, so a VCA closes without a click.
+    #[test]
+    fn after_reset_the_envelope_falls_as_a_release_does() {
+        let (mut stopped_one, mut released) = (routed(), routed());
+        let t = stopped();
+        for e in [&mut stopped_one, &mut released] {
+            e.note_on(60, 100);
+            for _ in 0..20 {
+                run(e.as_mut(), BLOCK, &t);
+            }
+        }
+        let held = stopped_one.cv(ENV, BLOCK).unwrap().1[BLOCK - 1];
+        stopped_one.reset();
+        released.note_off(60);
+        let (mut a, mut b) = (vec![held], vec![held]);
+        for _ in 0..200 {
+            a.extend(block(stopped_one.as_mut(), ENV, BLOCK, &t));
+            b.extend(block(released.as_mut(), ENV, BLOCK, &t));
+        }
+        assert_eq!(a, b, "a reset releases as a note-off does");
+        // From the level it held, never more than one release step a frame (the release's
+        // own ratio), down to 0.
+        let step = 1.0 - a[2] / a[1];
+        assert!(step > 0.0 && step < 0.01, "{step}");
+        assert!(a.windows(2).all(|w| w[1] <= w[0] && w[0] - w[1] <= w[0] * step * 1.001 + 1e-5), "a step");
+        assert_eq!(*a.last().unwrap(), 0.0);
     }
 
     #[test]
@@ -1306,7 +1466,9 @@ mod tests {
         e.load(&table.to_bytes());
         e.note_on(127, 100);
         let pitch = block(e.as_mut(), PITCH, BLOCK, &stopped());
-        assert!(near(pitch[0], table.points.last().unwrap().0));
+        // The top whole note the table covers, not its end.
+        let top = table.value_for(table.range().1 as f32).0;
+        assert!(near(pitch[0], top) && top < table.points.last().unwrap().0 - 1e-4, "{} {top}", pitch[0]);
         assert!(e.readout().unwrap().clamped);
     }
 
@@ -1603,12 +1765,138 @@ mod tests {
         assert!(r.tuned_at.is_some_and(|at| at > 1_000_000_000), "stamped");
         assert!(r.range.is_some_and(|(lo, hi)| lo <= 40 && hi >= 80), "{:?}", r.range);
         assert!(r.off.is_empty());
+        assert!(z.changed() && z.changed(), "the new table is to be stored: looking doesn't take the news");
         assert!(z.take_changed(), "the new table is to be stored");
-        assert!(!z.take_changed(), "once");
+        assert!(!z.take_changed() && !z.changed(), "once");
         // The table it made plays in tune.
         z.note_on(60, 100);
         let pitch = block(&mut z, PITCH, 256, &t);
         let hz = 261.63 * 2f64.powf(pitch[255] as f64 * 10.0);
         assert!(1200.0 * (hz / 261.6256).log2().abs() < 5.0);
+    }
+
+    /// The simulated voice's true pitch for output value `v`: bowed, speaking over two
+    /// octaves either side of C3 and silent past that.
+    fn voice_hz(v: f64) -> Option<f64> {
+        (v.abs() <= 0.2 + 1e-4).then(|| 261.63 * 2f64.powf(v * 10.0 + 0.05 * (v * 12.0).sin()))
+    }
+
+    /// A band-limited saw (PolyBLEP) at `phase` (0 to 1), `dt` of a cycle per sample.
+    fn saw(phase: f64, dt: f64) -> f64 {
+        let blep = if phase < dt {
+            let t = phase / dt;
+            2.0 * t - t * t - 1.0
+        } else if phase > 1.0 - dt {
+            let t = (phase - 1.0) / dt;
+            t * t + 2.0 * t + 1.0
+        } else {
+            0.0
+        };
+        0.4 * (2.0 * phase - 1.0 - blep)
+    }
+
+    /// Tunes `z` against the simulated voice, its pitch CV reaching the voice through a
+    /// delay line `delay_ms` long, in blocks of 256 frames. Each hop is analysed before the
+    /// next is sent, so none is lost whatever the machine's speed.
+    fn tune_through_a_delay(z: &mut Zhora, delay_ms: f64, saw_wave: bool) {
+        const FRAMES: usize = 256;
+        let deadline = Instant::now() + Duration::from_secs(600);
+        let t = stopped();
+        run(z, FRAMES, &t);
+        z.set_param(TUNE, 1.0);
+        // The voice has been sounding the centre (Zhora's pitch before any note).
+        let mut line: std::collections::VecDeque<f32> = std::iter::repeat_n(0.0, (delay_ms * SR / 1000.0).round() as usize).collect();
+        let (mut phase, mut sent) = (0f64, 0usize);
+        loop {
+            run(z, FRAMES, &t);
+            if z.readout().unwrap().state != TuneState::Tuning {
+                break;
+            }
+            let cv = z.cv(PITCH, FRAMES).unwrap().1.to_vec();
+            let mut b = [0f32; FRAMES];
+            for (out, &v) in b.iter_mut().zip(&cv) {
+                line.push_back(v);
+                let heard = line.pop_front().unwrap();
+                if let Some(hz) = voice_hz(heard as f64) {
+                    let dt = hz / SR;
+                    *out = if saw_wave { saw(phase, dt) } else { 0.5 * (phase * std::f64::consts::TAU).sin() } as f32;
+                    phase = (phase + dt).fract();
+                }
+            }
+            z.input(&b, &b);
+            sent += FRAMES;
+            while z.shared.seq.load(Ordering::Acquire) != (sent / HOP) as u32 {
+                assert!(Instant::now() < deadline, "the worker fell silent");
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+    }
+
+    /// A Zhora with an old table, routed and listening.
+    fn tuner_with_an_old_table() -> Zhora {
+        let mut z = Zhora::new(SR);
+        defaults(&mut z);
+        route(&mut z);
+        z.load(&bowed().to_bytes());
+        z.set_param(INPUT, 1.0 / 16.0);
+        z
+    }
+
+    /// Tune hears the voice through the interface late. Every note of the table it makes
+    /// plays within 5 cents of the voice's true pitch (measured against the simulated
+    /// voice, not Zhora's own verify), apart from notes it names.
+    fn assert_tunes_through_a_delay(delay_ms: f64) {
+        for saw_wave in [true, false] {
+            let wave = if saw_wave { "saw" } else { "sine" };
+            let mut z = tuner_with_an_old_table();
+            tune_through_a_delay(&mut z, delay_ms, saw_wave);
+            let r = z.readout().unwrap();
+            assert_eq!((r.state, r.message), (TuneState::Idle, None), "{delay_ms} ms, {wave}");
+            let table = z.table.clone().unwrap();
+            assert_ne!(*table, bowed(), "{delay_ms} ms, {wave}: a new table");
+            let (lo, hi) = table.range();
+            assert!(lo <= 40 && hi >= 80, "{delay_ms} ms, {wave}: range {lo}..{hi}");
+            for note in lo..=hi {
+                let v = table.value_for(note as f32).0 as f64;
+                let error = voice_hz(v).map(|hz| 1200.0 * (hz / note_hz(note as f32) as f64).log2());
+                assert!(
+                    error.is_some_and(|e| e.abs() <= 5.0) || r.off.contains(&note),
+                    "{delay_ms} ms, {wave}: note {note} is {error:?} cents out, off {:?}",
+                    r.off
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tune_through_no_delay() {
+        assert_tunes_through_a_delay(0.0);
+    }
+
+    #[test]
+    fn tune_through_a_50_ms_delay() {
+        assert_tunes_through_a_delay(50.0);
+    }
+
+    #[test]
+    fn tune_through_a_100_ms_delay() {
+        assert_tunes_through_a_delay(100.0);
+    }
+
+    #[test]
+    fn tune_through_a_200_ms_delay() {
+        assert_tunes_through_a_delay(200.0);
+    }
+
+    /// Past half a second Tune fails, saying why, and the old table stays.
+    #[test]
+    fn tune_through_a_600_ms_delay_fails_and_keeps_the_table() {
+        for saw_wave in [true, false] {
+            let mut z = tuner_with_an_old_table();
+            tune_through_a_delay(&mut z, 600.0, saw_wave);
+            let r = z.readout().unwrap();
+            assert_eq!((r.state, r.message), (TuneState::Idle, Some(super::tune::TOO_SLOW)), "saw {saw_wave}");
+            assert_eq!(z.save(), bowed().to_bytes(), "the old table stays");
+        }
     }
 }

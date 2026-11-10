@@ -11,6 +11,9 @@ use deckard_surface::ZhoraView;
 use crate::App;
 use crate::settings::Settings;
 
+/// How often the Zhoras are looked at for a finished Tune.
+const TUNE_WATCH: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A note within this many cents is in tune.
 const IN_TUNE: f32 = 5.0;
 
@@ -231,6 +234,49 @@ impl App {
         }
     }
 
+    /// A few times a second, stores a Tune that finished (see [`App::store_finished_tunes`]),
+    /// and keeps frames coming while one runs.
+    pub(crate) fn watch_tunes(&mut self, ctx: &eframe::egui::Context) {
+        let now = std::time::Instant::now();
+        if self.tunes_watched.is_some_and(|t| now.duration_since(t) < TUNE_WATCH) {
+            return;
+        }
+        self.tunes_watched = Some(now);
+        if self.store_finished_tunes() {
+            ctx.request_repaint_after(TUNE_WATCH);
+        }
+    }
+
+    /// A Zhora that finished a Tune has a new table: its state goes into the project at
+    /// once, as its own undo step "Tune", so the project counts as changed and a later
+    /// edit's undo keeps it. Every instance is looked at, none waited for (one the audio
+    /// thread has is looked at next time). True while a Zhora is tuning.
+    pub(crate) fn store_finished_tunes(&mut self) -> bool {
+        let Some(doc) = self.doc.clone() else { return false };
+        let (mut stored, mut tuning) = (Vec::new(), false);
+        for (slot, p) in self.samples.plugins.instances() {
+            let Ok(mut p) = p.try_lock() else { continue };
+            if p.id.cid != deckard_plugins::zhora::CLASS.cid {
+                continue;
+            }
+            tuning |= p.readout().is_some_and(|r| r.state == TuneState::Tuning);
+            if !p.changed_by_itself() {
+                continue;
+            }
+            p.take_dirty();
+            let chunk = p.save_chunk();
+            p.mark_saved(chunk.clone());
+            stored.push((*slot, chunk));
+        }
+        for (slot, chunk) in stored {
+            let r = doc.borrow_mut().outside_take(|d| d.transaction("Tune", |d| crate::store_chunk(d, slot, chunk)));
+            if let Err(e) = r {
+                self.status = format!("tuning not stored: {e}");
+            }
+        }
+        tuning
+    }
+
     /// The channels output `id` of the focused Zhora can take, when knob `id` is one.
     pub(crate) fn zhora_offered(&self, p: &Project, id: u32) -> Option<Vec<usize>> {
         let (g, s, _) = self.focused_zhora()?;
@@ -426,22 +472,23 @@ mod tests {
         assert_eq!(crate::layout::listed_at(&values, 32, 7), 0, "not listed: the first");
     }
 
-    /// A Tune that finishes after a knob stored the state mid-Tune: the next save has
-    /// the new table, and the project reopened plays it.
-    #[test]
-    fn a_finished_tune_reaches_the_saved_project() {
-        use deckard_plugins::zhora::{HOLD_NOTE, INPUT, PITCH_OUT};
+    /// Runs a Tune on sound 1's Zhora (input and pitch output set), the instance fed a
+    /// simulated voice speaking within `reach` of the centre's output value, until it
+    /// ends; `each_hop` runs after every hop. The readout when it ended.
+    fn tune_in(app: &mut App, reach: f64, mut each_hop: impl FnMut(&mut App, u32)) -> Readout {
         use std::time::{Duration, Instant};
-        let mut app = app_with_zhora();
         let rate = app.output_rate();
         let chain = Chain::Sound(0, 0);
-        let set = |app: &mut App, id, v| crate::layout::apply_acts(app, vec![crate::layout::Act::PluginParamIn(chain, 0, id, v)]);
-        set(&mut app, INPUT, 1.0 / 16.0);
-        set(&mut app, PITCH_OUT, 1.0 / 32.0);
-        app.store_plugin_states();
         let inst = app.samples.plugins.existing(app.plugin_slot_key(chain, 0)).unwrap();
+        // Blocks to a detection: the detector reads 60 kHz or under.
+        let (mut per, mut r) = (1u32, rate);
+        while r > 60_000.0 {
+            (per, r) = (per * 2, r / 2.0);
+        }
         let t = deckard_plugins::Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
         inst.lock().unwrap().process(1024, &t);
+        // Detections the instance made before this Tune.
+        let before = inst.lock().unwrap().readout().unwrap().analysed;
         app.zhora_press("tune");
         let deadline = Instant::now() + Duration::from_secs(240);
         let (mut hops, mut phase) = (0u32, 0f64);
@@ -450,11 +497,10 @@ mod tests {
                 let mut z = inst.lock().unwrap();
                 z.process(1024, &t);
                 if z.readout().unwrap().state != TuneState::Tuning {
-                    break;
+                    return z.readout().unwrap();
                 }
                 let v = z.cv(0, 1024).unwrap().1[1023] as f64;
-                // A voice over two octaves either side of C3, silent past that.
-                let hz = (v.abs() <= 0.2 + 1e-4).then(|| 261.63 * 2f64.powf(v * 10.0));
+                let hz = (v.abs() <= reach + 1e-4).then(|| 261.63 * 2f64.powf(v * 10.0));
                 let mut b = [0f32; 1024];
                 if let Some(hz) = hz {
                     for s in &mut b {
@@ -466,19 +512,96 @@ mod tests {
             }
             hops += 1;
             // Each hop analysed before the next, as the voice would answer in time.
-            while inst.lock().unwrap().readout().unwrap().analysed != hops {
+            while inst.lock().unwrap().readout().unwrap().analysed != before.wrapping_add(hops / per) {
                 std::thread::sleep(Duration::from_millis(1));
                 assert!(Instant::now() < deadline, "the analysis fell silent");
             }
-            // A knob mid-Tune (one the voice doesn't hear) stores the state then.
-            if hops == 20 {
-                set(&mut app, HOLD_NOTE, 60.0 / 127.0);
-            }
+            each_hop(app, hops);
             assert!(Instant::now() < deadline, "the tune never finished");
         }
-        let r = inst.lock().unwrap().readout().unwrap();
-        assert_eq!((r.state, r.message.as_deref()), (TuneState::Idle, None));
-        assert!(r.tuned_at.is_some() && hops > 20, "{hops}");
+    }
+
+    /// Sound 1's Zhora, listening on In 1 with its pitch on Out 1 L, stored.
+    fn listening_zhora() -> App {
+        use deckard_plugins::zhora::{INPUT, PITCH_OUT};
+        let mut app = app_with_zhora();
+        set(&mut app, INPUT, 1.0 / 16.0);
+        set(&mut app, PITCH_OUT, 1.0 / 32.0);
+        app.store_plugin_states();
+        app
+    }
+
+    fn set(app: &mut App, id: u32, v: f64) {
+        crate::layout::apply_acts(app, vec![crate::layout::Act::PluginParamIn(Chain::Sound(0, 0), 0, id, v)]);
+    }
+
+    /// What sound 1's Zhora plays from, as the project has it now (an undo reloads it).
+    fn tuned_in_project(app: &mut App) -> Readout {
+        let z = app.slot_plugin_in(Chain::Sound(0, 0), 0).unwrap();
+        z.lock().unwrap().readout().unwrap()
+    }
+
+    /// A finished Tune is in the project as soon as the screens next look: quitting asks
+    /// about it, and it is its own undo step.
+    #[test]
+    fn a_finished_tune_is_stored_at_once() {
+        let mut app = listening_zhora();
+        let file = std::env::temp_dir().join(format!("zhora-tune-{}.mxprj", std::process::id()));
+        app.doc.as_ref().unwrap().borrow_mut().save_as(&file).unwrap();
+        let _ = std::fs::remove_file(&file);
+        assert!(!app.asks_on_quit(), "saved");
+        let r = tune_in(&mut app, 0.2, |_, _| {});
+        assert_eq!((r.state, r.message), (TuneState::Idle, None));
+        app.watch_tunes(&eframe::egui::Context::default());
+        assert!(app.asks_on_quit(), "quitting would lose the tuning");
+        assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Tune"));
+        assert_eq!(tuned_in_project(&mut app).tuned_at, r.tuned_at);
+    }
+
+    /// A knob turned after a Tune, and undone, leaves the new table playing.
+    #[test]
+    fn undoing_a_knob_after_a_tune_keeps_the_new_table() {
+        use deckard_plugins::zhora::HOLD_NOTE;
+        let mut app = listening_zhora();
+        let r = tune_in(&mut app, 0.2, |_, _| {});
+        app.watch_tunes(&eframe::egui::Context::default());
+        set(&mut app, HOLD_NOTE, 60.0 / 127.0);
+        app.undo();
+        let now = tuned_in_project(&mut app);
+        assert!(now.tuned_at.is_some() && now.tuned_at == r.tuned_at, "{:?}", now.tuned_at);
+        assert_eq!(now.range, r.range);
+    }
+
+    /// Undoing a Tune brings the table before it back.
+    #[test]
+    fn undoing_a_tune_brings_the_old_table_back() {
+        let mut app = listening_zhora();
+        let old = tune_in(&mut app, 0.2, |_, _| {});
+        app.watch_tunes(&eframe::egui::Context::default());
+        // A voice with a narrower range makes a table that tells apart.
+        let new = tune_in(&mut app, 0.1, |_, _| {});
+        app.watch_tunes(&eframe::egui::Context::default());
+        assert_ne!(new.range, old.range);
+        assert_eq!(tuned_in_project(&mut app).range, new.range);
+        app.undo();
+        assert_eq!(tuned_in_project(&mut app).range, old.range, "the old table is back");
+    }
+
+    /// A Tune that finishes after a knob stored the state mid-Tune: the next save has
+    /// the new table, and the project reopened plays it.
+    #[test]
+    fn a_finished_tune_reaches_the_saved_project() {
+        use deckard_plugins::zhora::HOLD_NOTE;
+        let mut app = listening_zhora();
+        let chain = Chain::Sound(0, 0);
+        // A knob mid-Tune (one the voice doesn't hear) stores the state then.
+        let r = tune_in(&mut app, 0.2, |app, hops| {
+            if hops == 20 {
+                set(app, HOLD_NOTE, 60.0 / 127.0);
+            }
+        });
+        assert_eq!((r.state, r.message), (TuneState::Idle, None));
+        assert!(r.tuned_at.is_some());
         app.store_plugin_states();
         let bytes = app.doc.as_ref().unwrap().borrow().to_bytes().unwrap();
         let mut again = App { settings: Settings::default(), ..App::default() };

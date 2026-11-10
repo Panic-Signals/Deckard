@@ -337,19 +337,144 @@ mod tests {
     }
 
     #[test]
-    fn stopping_drops_a_held_gate_and_envelope_and_holds_pitch() {
+    fn stopping_drops_a_held_gate_releases_the_envelope_and_holds_pitch() {
         let p = zhora_project(&[(PITCH, on(2)), (GATE, on(3)), (ENV, on(4))]);
         let mut cache = SampleCache::default();
         let mut e = engine(&p, &mut cache, 0b1_1100);
         e.sequencing = true;
         note(&mut e, 0, 72);
         let (_, ext) = run(&mut e, 50, 0.0);
-        assert!(near(channel(&ext, 3)[49], 0.5) && channel(&ext, 4)[49] > 0.1);
+        let held = channel(&ext, 4)[49];
+        assert!(near(channel(&ext, 3)[49], 0.5) && held > 0.1);
         e.stop();
         let (_, ext) = run(&mut e, 20, 0.0);
         assert!(channel(&ext, 2).iter().all(|&v| near(v, Table::nominal(72.0))), "pitch holds");
         assert!(channel(&ext, 3).iter().all(|&v| v == 0.0), "gate: {:?}", channel(&ext, 3));
-        assert!(channel(&ext, 4).iter().all(|&v| v == 0.0), "envelope: {:?}", channel(&ext, 4));
+        // The envelope releases from where it was, so a VCA closes without a click.
+        let env = channel(&ext, 4);
+        assert!(env[0] > 0.5 * held && env[0] < held && env.windows(2).all(|w| w[1] < w[0]), "envelope: {held} then {env:?}");
+    }
+
+    /// Stop waits for a Zhora the screens hold at that moment, so its gate never stays up.
+    #[test]
+    fn stopping_waits_for_a_zhora_held_elsewhere() {
+        let p = zhora_project(&[(GATE, on(3))]);
+        let mut cache = SampleCache::default();
+        let mut e = engine(&p, &mut cache, 0b1000);
+        e.sequencing = true;
+        note(&mut e, 0, 72);
+        let (_, ext) = run(&mut e, 50, 0.0);
+        assert!(near(channel(&ext, 3)[49], 0.5));
+        let plugin = e.zhoras[0].plugin.clone();
+        let (held, go) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = plugin.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(guard);
+        });
+        go.recv().unwrap();
+        e.stop();
+        holder.join().unwrap();
+        let (_, ext) = run(&mut e, 20, 0.0);
+        assert!(channel(&ext, 3).iter().all(|&v| v == 0.0), "gate: {:?}", channel(&ext, 3));
+    }
+
+    /// An engine for `p` with an [`Ear`] in sound 0's place when it is a Zhora, stopped,
+    /// and `input` queued on In 2.
+    fn input_engine(p: &Project, input: &[(f32, f32)]) -> Engine {
+        HEARD.with(|h| h.borrow_mut().clear());
+        let mut cache = SampleCache::default();
+        if is_zhora(&p.groups[0].sounds[0]) {
+            cache.test_plugins.push((Slot::Sound { group: 0, sound: 0 }, split_plugin(&EAR)));
+        }
+        let mut e = engine(p, &mut cache, 0);
+        let live: LiveIn = Default::default();
+        live.lock().unwrap().extend(input.iter().map(|&(l, r)| {
+            let mut frame = [0f32; 32];
+            (frame[2], frame[3]) = (l, r);
+            frame
+        }));
+        e.live_in = Some(live);
+        e
+    }
+
+    /// A Zhora's return goes through its sound's effects as a plain input sound's does:
+    /// once, with no silence from Zhora itself between the blocks.
+    #[test]
+    fn a_zhora_return_goes_through_stateful_effects_as_an_input_does() {
+        let fx = |module: &str, params: &[(&str, f64)]| SlotInfo {
+            module: module.into(),
+            name: module.into(),
+            active: true,
+            plugin: None,
+            params: params.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        };
+        let effects = vec![
+            fx("Filter", &[("mode", 0.0), ("cutoff", 0.3), ("resonance", 0.5), ("amount", 0.0)]),
+            fx("BeatDelay", &[("time", 0.0), ("feedback", 0.5), ("mix", 0.5)]),
+        ];
+        let mut zhora = zhora_project(&[]);
+        zhora.groups[0].sounds[0].slots.extend(effects.clone());
+        let mut plain = project();
+        plain.groups[0].patterns[0].notes.clear();
+        let snd = &mut plain.groups[0].sounds[0];
+        (snd.sampler, snd.plugin, snd.slots, snd.channel.audio_in) = (None, None, effects, AudioSource::Ext(1));
+        let input: Vec<(f32, f32)> = (0..640).map(|i| ((i as f32 * 0.37).sin() * 0.5, if i % 50 < 25 { 0.25 } else { -0.25 })).collect();
+        // Arriving a block at a time, as from the interface.
+        let play = |p: &Project| {
+            let mut e = input_engine(p, &[]);
+            let live = e.live_in.clone().unwrap();
+            let mut out = Vec::new();
+            for block in input.chunks(64) {
+                live.lock().unwrap().extend(block.iter().map(|&(l, r)| {
+                    let mut frame = [0f32; 32];
+                    (frame[2], frame[3]) = (l, r);
+                    frame
+                }));
+                out.extend(run(&mut e, 64, 0.0).0);
+            }
+            out
+        };
+        let (from_zhora, from_input) = (play(&zhora), play(&plain));
+        assert!(from_input.iter().any(|&v| v.abs() > 0.05), "the input plays");
+        let worst = from_zhora.iter().zip(&from_input).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-6, "they differ by up to {worst}");
+    }
+
+    /// While a Zhora listens, what stands in the input queue is kept short (it is the
+    /// tuner's delay), yet input arriving a block or two at a time is never cut.
+    #[test]
+    fn the_input_queue_stays_short_while_a_zhora_listens() {
+        let p = zhora_project(&[]);
+        let backlog = vec![(0.1, 0.1); 64 * 20];
+        let mut e = input_engine(&p, &backlog);
+        run(&mut e, 64, 0.0);
+        let left = e.live_in.as_ref().unwrap().lock().unwrap().len();
+        assert!(left <= 64 + 256, "{left} frames stand in the queue");
+        // A plain input sound keeps the longer queue.
+        let mut plain = project();
+        plain.groups[0].sounds[0].channel.audio_in = AudioSource::Ext(1);
+        let mut e = input_engine(&plain, &backlog);
+        run(&mut e, 64, 0.0);
+        assert_eq!(e.live_in.as_ref().unwrap().lock().unwrap().len(), 64 * 3 + 512);
+
+        // Two blocks arrive at once, then none: every frame is heard, in order.
+        let mut e = input_engine(&p, &[]);
+        let live = e.live_in.clone().unwrap();
+        let mut sent = 0;
+        for _ in 0..20 {
+            live.lock().unwrap().extend((sent..sent + 128).map(|i| {
+                let mut frame = [0f32; 32];
+                frame[2] = i as f32;
+                frame
+            }));
+            sent += 128;
+            run(&mut e, 64, 0.0);
+            run(&mut e, 64, 0.0);
+        }
+        let heard: Vec<f32> = heard().iter().map(|h| h.0).collect();
+        assert_eq!(heard, (0..sent).map(|i| i as f32).collect::<Vec<_>>());
     }
 
     #[test]

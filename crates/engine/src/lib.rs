@@ -1800,11 +1800,13 @@ struct InstrumentRt {
     heard: Option<Arc<meters::HeardBoard>>,
     /// Its pairs that have a strip (as [`Unit::extras`]).
     extras: Vec<ExtraRt>,
+    /// It is Zhora: it makes CV only, and its sound plays its return (see `zhora_rt`).
+    cv_only: bool,
 }
 
 impl InstrumentRt {
     fn new(plugin: Shared, gain: (f32, f32), muted: bool) -> InstrumentRt {
-        InstrumentRt { plugin, gain, muted, owner: None, scan: 0, heard: None, extras: Vec::new() }
+        InstrumentRt { plugin, gain, muted, owner: None, scan: 0, heard: None, extras: Vec::new(), cv_only: false }
     }
 
     /// As [`Unit::listen`].
@@ -2332,6 +2334,10 @@ const EXPR_STEP_SECS: f64 = 0.005;
 /// A sound taking an external input: (group, sound, left channel, right channel, gain).
 type InRoute = (usize, usize, usize, usize, (f32, f32));
 
+/// Frames the input queue may hold past two blocks while a Zhora listens, for an input
+/// whose blocks arrive unevenly.
+const ZHORA_INPUT_SLACK: usize = 256;
+
 /// Frames of interface input, routed to Maschine's 32 input channels.
 pub type LiveIn = Arc<Mutex<std::collections::VecDeque<[f32; 32]>>>;
 
@@ -2739,6 +2745,7 @@ impl Engine {
                             sound_gain(project, gi, si)
                         };
                         let mut inst = InstrumentRt::new(plugin.clone(), gain, m.muted);
+                        inst.cv_only = deckard_plugins::zhora::is_zhora(&pr.id);
                         inst.listen(Owner::Sound(gi, si), &plugin, &pr.id, project);
                         inst.heard = Some(cache.heard.clone());
                         row.push(Some(inst));
@@ -3714,7 +3721,10 @@ impl Engine {
             a.driver.wake();
         }
         for i in self.instruments.iter().flatten().flatten() {
-            if let Ok(mut p) = i.plugin.try_lock() {
+            // A Zhora is waited for (the screens hold it only for moments): a gate left
+            // up on a modular drones.
+            let held = if i.cv_only { i.plugin.lock().ok() } else { i.plugin.try_lock().ok() };
+            if let Some(mut p) = held {
                 p.all_notes_off();
             }
         }
@@ -4837,8 +4847,10 @@ impl Engine {
         }
         let Some(live) = &self.live_in else { return };
         let Ok(mut q) = live.try_lock() else { return };
-        // Keep up: never more than a few blocks behind.
-        while q.len() > frames * 4 + 512 {
+        // Keep up: never more than a few blocks behind. While a Zhora listens, what stands
+        // here is the tuner's delay: no more than a block (and some slack) is kept.
+        let cap = if self.zhoras.is_empty() { frames * 4 + 512 } else { frames * 2 + ZHORA_INPUT_SLACK };
+        while q.len() > cap {
             q.pop_front();
         }
         zhora_rt::hear(&self.zhoras, &mut self.bufs, &mut self.zhora_in, &q, frames);
@@ -6285,8 +6297,9 @@ struct JobPtrs {
 unsafe impl Send for JobPtrs {}
 unsafe impl Sync for JobPtrs {}
 
-/// Render one sound for `frames` frames into `b`: its Sampler voices, then its plug-in
-/// instrument, each through the sound's effects.
+/// Render one sound for `frames` frames into `b`: its Sampler voices (or the input it
+/// takes), then its plug-in instrument, each through the sound's effects. A Zhora makes
+/// only CV: its return, the input, goes through the effects alone.
 #[allow(clippy::too_many_arguments)]
 fn render_sound(
     smp: Option<&mut SamplerRt>,
@@ -6315,7 +6328,9 @@ fn render_sound(
             clear_strips(&mut u.extras, n2);
         }
     }
-    if smp.is_some() || (b.inp_on && inst.is_none()) {
+    let cv_only = inst.as_ref().is_some_and(|i| i.cv_only);
+    // Zhora (CV only) plays its return here, as a sound with no instrument does.
+    if smp.is_some() || (b.inp_on && inst.is_none()) || cv_only {
         let buf = &mut b.smp[..n2];
         buf.fill(0.0);
         let mut sounding = false;
@@ -6355,6 +6370,25 @@ fn render_sound(
             }
             None => b.smp_out = sounding,
         }
+    }
+    if cv_only {
+        // Its CV for the span; its audio is silence, and nothing of it is mixed.
+        let mut done = 0;
+        while let Some(inst) = inst.as_deref_mut()
+            && done < frames
+        {
+            let n = (frames - done).min(MAX_BLOCK);
+            let started = std::time::Instant::now();
+            match inst.plugin.lock() {
+                Ok(mut p) => {
+                    p.process(n, &at_frame(done));
+                    timed(&inst.plugin, started);
+                }
+                Err(_) => skipped(),
+            }
+            done += n;
+        }
+        return;
     }
     if let Some(inst) = inst {
         let buf = &mut b.inst[..n2];

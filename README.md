@@ -471,7 +471,9 @@ in tune. It needs outputs marked CV only (see [CV out](#cv-out)).
 - **Tune:** turn off the modular's effects, open its filter, and press **TUNE**. Zhora
   steps the pitch for a few seconds, listens, and builds a table that puts every note in
   the range it found within 5 cents. If it can't hear a clear pitch, it says so and
-  keeps the old table. The table is saved in the project.
+  keeps the old table. The table is saved in the project, as its own undo step. Tune
+  allows for the interface's delay up to half a second; a buffer of 256 frames is a good
+  setting for tuning. Pressing TUNE or CHECK again stops it.
 - **Check:** measures a spread of notes again and shows the worst, without changing the
   table. Use it after touching the oscillator's tune knob or an output trim.
 - **Live:** trims slow drift while you play, on held notes only. Vibrato survives.
