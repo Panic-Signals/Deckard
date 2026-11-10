@@ -33,8 +33,9 @@ const MIN_CLARITY: f32 = 0.85;
 const MIN_RISE: f32 = 1.0 / 1200.0;
 /// Fewest good points that make a table.
 const MIN_POINTS: usize = 5;
-/// A fresh table with more notes than this off or unheard when verified is thrown away.
-const MAX_OFF: usize = 4;
+/// A fresh table with more than this share of its verify notes off or unheard is thrown
+/// away (4 of 16; at least 1 of a short table's fewer).
+const MAX_OFF_SHARE: usize = 4;
 /// Where the straight line between table points is trusted no further, in cents of estimated error.
 const MAX_BEND_CENTS: f32 = 4.0;
 /// A slope under this fraction of the side's median has collapsed: the voice is saturating.
@@ -300,7 +301,7 @@ impl Verify {
         if !self.tuning {
             return Outcome::Checked { worst_cents, off };
         }
-        if off.len() > MAX_OFF {
+        if off.len() * MAX_OFF_SHARE > self.notes.len() {
             return Outcome::Failed("tuned table did not hold up");
         }
         Outcome::Tuned { table: Table { worst_cents, ..self.table }, off }
@@ -623,6 +624,22 @@ mod tests {
             assert!(e.abs() < 5.0, "note {note}: {e} cents");
         }
         assert!(table.worst_cents < 5.0);
+    }
+
+    /// A short table has fewer verify notes; with all of them off it still fails.
+    #[test]
+    fn a_short_table_with_every_verify_note_off_fails() {
+        // Heard only from the centre up to about 1.8 octaves: a handful of points.
+        let short = Vco { silent_below: -0.001, ceiling_hz: note_hz(60.0) * 1.8f32.exp2(), ..Vco::new() };
+        let dry = drive_with(Run::tune(W), &short, 25.0, 0.0);
+        let Outcome::Tuned { table, .. } = &dry.outcome else { panic!("expected a table, got {:?}", dry.outcome) };
+        assert!(table.points.len() < 17, "{} points", table.points.len());
+        // The voice jumps 120 cents just as verifying starts.
+        let wrong = Vco { after_ms: dry.verify_at.unwrap(), late_octaves: 0.1, ..short };
+        match drive(Run::tune(W), &wrong, 25.0, 0.0).0 {
+            Outcome::Failed(_) => {}
+            other => panic!("a table with every verify note off was kept: {other:?}"),
+        }
     }
 
     #[test]

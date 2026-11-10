@@ -242,20 +242,22 @@ impl App {
             return;
         }
         self.tunes_watched = Some(now);
-        if self.store_finished_tunes() {
+        if self.store_finished_tunes(|_| true, false) {
             ctx.request_repaint_after(TUNE_WATCH);
         }
     }
 
     /// A Zhora that finished a Tune has a new table: its state goes into the project at
     /// once, as its own undo step "Tune", so the project counts as changed and a later
-    /// edit's undo keeps it. Every instance is looked at, none waited for (one the audio
-    /// thread has is looked at next time). True while a Zhora is tuning.
-    pub(crate) fn store_finished_tunes(&mut self) -> bool {
+    /// edit's undo keeps it. The instances `which` picks are looked at; with `wait` false
+    /// none is waited for (one the audio thread has is looked at next time). True while a
+    /// Zhora is tuning.
+    pub(crate) fn store_finished_tunes(&mut self, which: impl Fn(&deckard_plugins::Slot) -> bool, wait: bool) -> bool {
         let Some(doc) = self.doc.clone() else { return false };
         let (mut stored, mut tuning) = (Vec::new(), false);
-        for (slot, p) in self.samples.plugins.instances() {
-            let Ok(mut p) = p.try_lock() else { continue };
+        for (slot, p) in self.samples.plugins.instances().filter(|(s, _)| which(s)) {
+            let p = if wait { p.lock().ok() } else { p.try_lock().ok() };
+            let Some(mut p) = p else { continue };
             if p.id.cid != deckard_plugins::zhora::CLASS.cid {
                 continue;
             }
@@ -570,6 +572,20 @@ mod tests {
         let now = tuned_in_project(&mut app);
         assert!(now.tuned_at.is_some() && now.tuned_at == r.tuned_at, "{:?}", now.tuned_at);
         assert_eq!(now.range, r.range);
+    }
+
+    /// A knob turned the moment a Tune ends, before the screens look, and undone: the
+    /// new table still plays, and the Tune is its own step.
+    #[test]
+    fn a_knob_right_after_a_tune_keeps_the_new_table() {
+        use deckard_plugins::zhora::HOLD_NOTE;
+        let mut app = listening_zhora();
+        let r = tune_in(&mut app, 0.2, |_, _| {});
+        set(&mut app, HOLD_NOTE, 60.0 / 127.0);
+        app.undo();
+        let now = tuned_in_project(&mut app);
+        assert!(now.tuned_at.is_some() && now.tuned_at == r.tuned_at, "{:?}", now.tuned_at);
+        assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Tune"));
     }
 
     /// Undoing a Tune brings the table before it back.

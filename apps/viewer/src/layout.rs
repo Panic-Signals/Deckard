@@ -3989,6 +3989,14 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
                 new_text = Some(h.text(id, v));
             }
             None => {
+                // A Tune that just finished on it is its own undo step first, so this
+                // edit's undo can't take the new table back with it.
+                if g.changed_by_itself() {
+                    drop(g);
+                    let key = app.plugin_slot_key(chain, i);
+                    app.store_finished_tunes(|s| *s == key, true);
+                    g = p.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
                 g.set_param(id, v);
                 new_text = Some(g.param_text(id, v));
                 native = g.is_native();

@@ -2060,7 +2060,7 @@ impl App {
 
     fn quit(&mut self, ctx: &egui::Context) {
         // A Tune just finished counts as a change.
-        self.store_finished_tunes();
+        self.store_finished_tunes(|_| true, true);
         if self.asks_on_quit() && !self.quitting {
             self.confirm = Some(Pending::Quit);
         } else {
