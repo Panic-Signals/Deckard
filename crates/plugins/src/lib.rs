@@ -1179,6 +1179,8 @@ impl Host {
         if let Some(shared) = self.instances.get(&slot) {
             let mut p = shared.lock().unwrap();
             if p.id.cid == id.cid && p.sample_rate() == sample_rate {
+                p.name = name.to_string();
+                p.id = id;
                 if p.chunk() != chunk {
                     p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
                 }
