@@ -71,6 +71,12 @@ impl Repeater {
         !self.held.is_empty()
     }
 
+    /// The live drum repeat owns this lane while overdubbing. Its previous pass
+    /// must not retrigger underneath it before the UI records the replacement.
+    pub(crate) fn replaces(&self, group: usize, sound: usize, pitch: i64) -> bool {
+        self.mode == RepeatMode::NoteRepeat && self.held.iter().any(|h| (h.group, h.sound, h.pitch) == (group, sound, pitch))
+    }
+
     pub fn press(&mut self, group: usize, sound: usize, pitch: i64, velocity: i64) {
         if self.latched {
             self.held.clear();

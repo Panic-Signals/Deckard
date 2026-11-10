@@ -3306,6 +3306,13 @@ impl Engine {
         self.sequencing = true;
     }
 
+    fn repeat_replaces(&self, e: &NoteEvent) -> bool {
+        self.recording
+            && e.cue.is_none()
+            && e.midi.is_none()
+            && self.repeater.as_ref().is_some_and(|r| r.replaces(e.group, e.sound, e.pitch))
+    }
+
     /// The timeline events that will fire from `skip` to `skip + frames` output frames
     /// from now, if nothing changes meanwhile: each with its offset from now, its index,
     /// its pass, whether its probability lets it play, and the song frame it fires at.
@@ -3339,7 +3346,13 @@ impl Engine {
                         break;
                     }
                     if t >= skip {
-                        fire(Seen::Event { t, e, plays: chance(e.probability, next, tl.chance_pass(e, pass), self.rng), frame, pass });
+                        fire(Seen::Event {
+                            t,
+                            e,
+                            plays: chance(e.probability, next, tl.chance_pass(e, pass), self.rng) && !self.repeat_replaces(e),
+                            frame,
+                            pass,
+                        });
                     }
                     next += 1;
                 }
@@ -3512,6 +3525,10 @@ impl Engine {
                 p.all_notes_off();
             }
         }
+        if let Some(r) = &mut self.repeater {
+            r.clear();
+        }
+        self.held_keys.clear();
         self.note_offs.clear();
         self.touch.clear();
         self.lfo_release_all();
@@ -4699,7 +4716,7 @@ impl Engine {
                     }
                     let idx = self.next;
                     self.next += 1;
-                    let plays = chance(e.probability, idx, self.timeline.chance_pass(&e, self.pass), self.rng);
+                    let plays = chance(e.probability, idx, self.timeline.chance_pass(&e, self.pass), self.rng) && !self.repeat_replaces(&e);
                     #[cfg(test)]
                     self.fired.push((self.time, e.tick, e.sound, e.pitch, plays));
                     if plays {
