@@ -2229,11 +2229,13 @@ pub struct Engine {
     lfos: Vec<lfo_rt::LfoRt>,
     /// The project's CC routes ([`lfo_rt::CcRt`]).
     cc_routes: Vec<lfo_rt::CcRt>,
-    /// The project's CV routes ([`lfo_rt::CvRt`]).
-    cv_routes: Vec<lfo_rt::CvRt>,
+    /// The project's CV routes.
+    cv_routes: Vec<deckard_model::mod_matrix::CvRoute>,
     /// The output channels that are CV only (bits: channel 0 is bit 0).
     cv_channels: u32,
-    /// Frames the CV outputs still glide for, after a jump in their LFOs.
+    /// Each CV channel's level: the voltage it wrote last.
+    cv_last: [f32; 32],
+    /// Frames the CV outputs still glide for, after a jump in their LFOs or an edit.
     cv_smooth_left: u32,
     /// Ticks before the timeline's start on the song's clock (an export of later
     /// sections), for synced LFOs.
@@ -2992,8 +2994,9 @@ impl Engine {
                 .collect(),
             lfos: lfo_rt::lfos_of(project),
             cc_routes: lfo_rt::ccs_of(project),
-            cv_routes: lfo_rt::cvs_of(project),
+            cv_routes: project.cv_routes.clone(),
             cv_channels: 0,
+            cv_last: [0.0; 32],
             cv_smooth_left: 0,
             song_offset: 0.0,
             lfo_clock: lfo_rt::LfoClock::default(),
@@ -8782,7 +8785,7 @@ mod tests {
         assert!(!seen.lock().unwrap().is_empty());
     }
 
-    /// CV routes written into the outputs ([`lfo_rt::CvRt`]), at 1 kHz.
+    /// CV routes written into the outputs, at 1 kHz.
     mod cv {
         use super::*;
         use deckard_model::lfo::{Lfo, Shape};
@@ -8809,6 +8812,21 @@ mod tests {
             (tmp, p, e)
         }
 
+        /// [`engine`], past the glide its first frames start with.
+        fn settled(lfo: Lfo, routes: Vec<CvRoute>, mask: u32) -> (tempfile::TempDir, Project, Engine) {
+            let (tmp, p, mut e) = engine(lfo, routes, mask);
+            e.cv_smooth_left = 0;
+            (tmp, p, e)
+        }
+
+        /// `e` takes `q` as an edit: the LFOs first, as adopting does.
+        fn adopt(e: &mut Engine, q: &Project) {
+            let mut cache = SampleCache::default();
+            let (mut fresh, _) = Engine::new(q, None, 1000, Mode::Arrangement, &mut cache);
+            e.adopt_lfos(&mut fresh);
+            e.adopt_cvs(&mut fresh);
+        }
+
         /// `frames` more, in one call, on 16 outputs full of `fill`.
         fn run_over(e: &mut Engine, frames: usize, fill: f32) -> Vec<Vec<f32>> {
             let mut out = vec![0f32; frames * 2];
@@ -8828,7 +8846,7 @@ mod tests {
 
         #[test]
         fn cv_is_written_per_frame_not_per_span() {
-            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            let (_tmp, _p, mut e) = settled(saw(), vec![route(2, -1.0, 1.0)], 0b100);
             let v = left(&run(&mut e, FRAMES));
             assert_eq!(v.len(), FRAMES);
             for n in 1..FRAMES {
@@ -8838,7 +8856,7 @@ mod tests {
 
         #[test]
         fn cv_overwrites_audio_on_its_channel() {
-            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
+            let (_tmp, _p, mut e) = settled(saw(), vec![route(2, -1.0, 1.0)], 0b100);
             let ext = run_over(&mut e, FRAMES, 0.9);
             assert_ne!(ext[1][0], 0.9);
             assert_eq!(ext[1][0], -1.0);
@@ -8855,7 +8873,7 @@ mod tests {
 
         #[test]
         fn a_muted_source_sits_at_low() {
-            let (_tmp, _p, mut e) = engine(Lfo { muted: true, ..saw() }, vec![route(2, -0.5, 0.5)], 0b100);
+            let (_tmp, _p, mut e) = settled(Lfo { muted: true, ..saw() }, vec![route(2, -0.5, 0.5)], 0b100);
             assert!(left(&run(&mut e, FRAMES)).iter().all(|&v| v == -0.5));
         }
 
@@ -8871,7 +8889,7 @@ mod tests {
         #[test]
         fn the_first_route_owns_a_shared_channel() {
             let routes = vec![route(2, -0.5, -0.5), route(2, 0.5, 0.5)];
-            let (_tmp, p, mut e) = engine(saw(), routes, 0b100);
+            let (_tmp, p, mut e) = settled(saw(), routes, 0b100);
             assert_eq!(Engine::cv_conflicts(&p, 0b100), vec![1]);
             assert!(left(&run(&mut e, FRAMES)).iter().all(|&v| v == -0.5));
         }
@@ -8971,7 +8989,7 @@ mod tests {
         #[test]
         fn cv_carries_its_level_into_a_new_engine() {
             let (_tmp, p, mut old) = engine(saw(), vec![route(2, -1.0, 1.0)], 0b100);
-            old.cv_routes[0].last = 0.7;
+            old.cv_last[2] = 0.7;
             let mut cache = SampleCache::default();
             let (mut new, _) = Engine::new(&p, None, 1000, Mode::Arrangement, &mut cache);
             new.set_cv_channels(0b100);
@@ -8983,16 +9001,87 @@ mod tests {
         #[test]
         fn cv_keeps_its_level_per_channel_across_an_edit() {
             let (_tmp, p, mut e) = engine(saw(), vec![route(2, -1.0, 1.0), route(3, -1.0, 1.0)], 0b1100);
-            e.cv_routes[0].last = 0.7;
-            e.cv_routes[1].last = -0.3;
+            e.cv_last[2] = 0.7;
+            e.cv_last[3] = -0.3;
             let mut q = p.clone();
             q.cv_routes = vec![route(3, 0.0, 1.0), route(5, 0.0, 1.0)];
+            adopt(&mut e, &q);
+            assert_eq!(e.cv_routes[0].low, 0.0);
+            assert_eq!(e.cv_last[3], -0.3);
+            assert_eq!(e.cv_last[2], 0.7, "it has no route now, and glides from there");
+            assert_eq!(e.cv_last[5], 0.0, "a channel new to CV starts from nothing");
+        }
+
+        #[test]
+        fn editing_high_glides_rather_than_steps() {
+            let (_tmp, p, mut e) = engine(saw(), vec![route(2, 0.0, 0.4)], 0b100);
+            let before = left(&run(&mut e, 500))[499];
+            let mut q = p.clone();
+            q.cv_routes = vec![route(2, 0.0, 1.0)];
+            adopt(&mut e, &q);
+            let v = left(&run(&mut e, 10));
+            let jump = 0.5 - before;
+            assert!(jump > 0.25, "{jump}");
+            assert!((v[0] - (before + jump / 5.0)).abs() < 1e-3, "{before} then {}", v[0]);
+            for n in 1..5 {
+                assert!(v[n] - v[n - 1] <= jump / 3.0, "frame {n}: {} then {}", v[n - 1], v[n]);
+            }
+            assert!((v[6] - 0.506).abs() < 1e-4, "{}", v[6]);
+        }
+
+        #[test]
+        fn muting_a_source_glides_to_low() {
+            let (_tmp, p, mut e) = engine(saw(), vec![route(2, -0.5, 0.5)], 0b100);
+            let before = left(&run(&mut e, 500))[499];
+            let mut q = p.clone();
+            q.lfos[0].muted = true;
+            adopt(&mut e, &q);
+            let v = left(&run(&mut e, 10));
+            assert!((v[0] - (before + (-0.5 - before) / 5.0)).abs() < 1e-4, "{before} then {}", v[0]);
+            assert!(v[4..].iter().all(|&x| x == -0.5), "{v:?}");
+        }
+
+        #[test]
+        fn removing_a_route_glides_to_zero() {
+            let (_tmp, p, mut e) = engine(saw(), vec![route(2, 0.5, 0.5)], 0b100);
+            run(&mut e, 20);
+            let mut q = p.clone();
+            q.cv_routes.clear();
+            adopt(&mut e, &q);
+            let v = left(&run(&mut e, 8));
+            for (n, want) in [0.4, 0.3, 0.2, 0.1, 0.0, 0.0, 0.0, 0.0].iter().enumerate() {
+                assert!((v[n] - want).abs() < 1e-5, "frame {n}: {}", v[n]);
+            }
+        }
+
+        #[test]
+        fn the_first_cv_frames_glide_from_zero() {
+            let want = [0.1, 0.2, 0.3, 0.4, 0.5, 0.5];
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, 0.5, 0.5)], 0b100);
+            let v = left(&run(&mut e, 6));
+            assert!(v.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5), "a new engine: {v:?}");
+            // Marked while running: the same, from 0 V.
+            let (_tmp, _p, mut e) = engine(saw(), vec![route(2, 0.5, 0.5)], 0);
+            run(&mut e, 20);
+            e.set_cv_channels(0b100);
+            let v = left(&run(&mut e, 6));
+            assert!(v.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5), "the first mark: {v:?}");
+        }
+
+        /// The cue's clicks land on Out 2 with its left CV only: the click stays on the
+        /// right, and the left holds the route's voltage.
+        #[test]
+        fn a_metronome_on_a_cv_output_never_reaches_it() {
+            let (_tmp, mut p, _) = engine(saw(), vec![route(2, 0.25, 0.25)], 0b100);
+            p.cue_output = deckard_model::AudioDest::Ext(1);
             let mut cache = SampleCache::default();
-            let (mut fresh, _) = Engine::new(&q, None, 1000, Mode::Arrangement, &mut cache);
-            e.adopt_cvs(&mut fresh);
-            assert_eq!(e.cv_routes[0].route.low, 0.0);
-            assert_eq!(e.cv_routes[0].last, -0.3);
-            assert_eq!(e.cv_routes[1].last, 0.0, "a channel new to CV starts from nothing");
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            e.set_cv_channels(0b100);
+            e.cv_smooth_left = 0;
+            e.metronome = true;
+            let ext = run(&mut e, 512);
+            assert!(ext[1].iter().skip(1).step_by(2).any(|v| v.abs() > 0.01), "it clicks");
+            assert!(left(&ext).iter().all(|&v| v == 0.25));
         }
     }
 

@@ -224,7 +224,7 @@ fn io_fields(c: &channel::Ctx, level: Level) -> [Option<IoField>; 6] {
 
 /// Extra-output strip `i`'s output selector. One on an output that isn't connected
 /// says where it plays instead: its parent (a sound's plug-in's, the group; else the
-/// master).
+/// master). One with a CV only side says so: it plays nowhere.
 fn strip_out_field(c: &channel::Ctx, i: usize) -> IoField {
     use deckard_model::AudioDest;
     use deckard_model::extra_out::Owner;
@@ -233,6 +233,10 @@ fn strip_out_field(c: &channel::Ctx, i: usize) -> IoField {
     let mut options = channel::strip_destinations(c, i);
     let cur = options.iter().position(|(_, d)| *d == x.dest);
     let fallback = match x.dest {
+        // Its audio is dropped there: it doesn't play through its parent.
+        AudioDest::Ext(n) if (0..deckard_engine::OUTPUTS as i64).contains(&n) && c.io.cv_mask() >> (n * 2) & 3 != 0 => {
+            Some(format!("Out {} (CV only)", n + 1))
+        }
         // (Past the engine's outputs is never connected, nor asked about: a huge pair
         // would overflow the routing's sums.)
         AudioDest::Ext(n) if n < 0 || n as usize >= deckard_engine::OUTPUTS || !c.io.output_pair_on(n as usize) => {
@@ -1691,6 +1695,53 @@ mod tests {
         p.extra_outs[2].dest = AudioDest::Ext(i64::MAX);
         let c = channel::Ctx { p: &p, ..c };
         assert_eq!(strip_out_field(&c, 2).text, format!("Out {} (not connected) → Master", i64::MAX));
+    }
+
+    /// An output with a CV only side says so: its audio is dropped, and it doesn't claim
+    /// to play through its parent, connected or not.
+    #[test]
+    fn a_cv_pair_says_cv_only_and_stays_flagged() {
+        let app = app_with(vec![
+            out(Owner::Group(0, 0), "Bus 1", AudioDest::Ext(1)),
+            out(Owner::Group(0, 0), "Bus 2", AudioDest::Ext(3)),
+            out(Owner::Group(0, 0), "Bus 3", AudioDest::Ext(0)),
+        ]);
+        let doc = app.doc.clone().unwrap();
+        let d = doc.borrow();
+        let mut io = crate::settings::Settings::default();
+        io.output_cv_only[2] = true;
+        io.output_cv_only[7] = true;
+        let groove = |_: usize, _: usize, _: &str| None;
+        let c = channel::Ctx {
+            doc: &d,
+            has_midi_macro: false,
+            p: d.project(),
+            midi_ins: &[],
+            midi_outs: &[],
+            polyphonic: false,
+            groove: &groove,
+            io: &io,
+            plugin_knob: &|_| None,
+            midi_input: &|_| None,
+        };
+        let f = strip_out_field(&c, 0);
+        assert_eq!(f.text, "Out 2 (CV only)");
+        assert_eq!(f.names[f.cur], f.text, "the list says so too");
+        assert_eq!(strip_out_field(&c, 1).text, "Out 4 (CV only)");
+        assert_eq!(strip_out_field(&c, 2).text, "Ext. 1", "an output without one reads as before");
+        assert!(strip_cv_flag(&io, d.project(), Channel::Extra(0)).is_some(), "the strip stays flagged");
+        assert!(strip_cv_flag(&io, d.project(), Channel::Extra(2)).is_none());
+    }
+
+    /// The master on an output with a CV only side is silent, and its flag and the note say so.
+    #[test]
+    fn a_master_on_a_cv_pair_says_it_is_silent() {
+        let mut io = crate::settings::Settings::default();
+        io.output_cv_only[3] = true;
+        let p = Project { master_output: AudioDest::Ext(1), ..Default::default() };
+        let name = io.output_name(3);
+        assert_eq!(strip_cv_flag(&io, &p, Channel::Master).unwrap(), format!("{name}: CV only, so audio sent there isn't heard"));
+        assert_eq!(silent_master_note(&io, &p).unwrap(), format!("the master can't be heard on {name}: it's CV only"));
     }
 
     /// Where strip `ch`'s mode menu is (under its label).

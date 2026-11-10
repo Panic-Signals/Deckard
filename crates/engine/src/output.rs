@@ -464,12 +464,25 @@ pub fn connected_outputs(routing: &[Option<usize>], channels: usize) -> u16 {
     mask
 }
 
-/// `routing` without the audio's channels that share an interface channel with a CV only
-/// one (bit `i` of `cv_mask` is channel `i`): the jack carries the CV alone.
+/// The outputs (bits: Out 1 is bit 0) with a CV only side in `cv_mask`: their audio is
+/// dropped, never played through a strip's parent, so the engine counts them connected.
+fn cv_outputs(cv_mask: u32) -> u16 {
+    (0..OUT_CHANNELS / 2).filter(|n| cv_mask >> (n * 2) & 3 != 0).fold(0, |m, n| m | 1 << n)
+}
+
+/// `routing` as it plays with the `cv_mask` channels (bit `i`: channel `i`) CV only. A
+/// CV only channel keeps its interface channel, unless a lower CV only one has it: two
+/// voltages are never summed. Audio is dropped if it shares an interface channel with a
+/// CV only one, or if the other side of its stereo output is CV only.
 pub fn effective_routing(routing: &[Option<usize>], cv_mask: u32) -> Vec<Option<usize>> {
     let is_cv = |i: usize| i < 32 && cv_mask >> i & 1 == 1;
     let cv_jacks: Vec<usize> = routing.iter().enumerate().filter(|&(i, _)| is_cv(i)).filter_map(|(_, to)| *to).collect();
-    routing.iter().enumerate().map(|(i, to)| to.filter(|c| is_cv(i) || !cv_jacks.contains(c))).collect()
+    let taken = |i: usize, c: usize| routing[..i].iter().enumerate().any(|(j, to)| is_cv(j) && *to == Some(c));
+    routing
+        .iter()
+        .enumerate()
+        .map(|(i, to)| to.filter(|&c| if is_cv(i) { !taken(i, c) } else { !is_cv(i ^ 1) && !cv_jacks.contains(&c) }))
+        .collect()
 }
 
 /// Whether output `channel` plays the master's mix: it is on the master's output and not CV
@@ -743,7 +756,8 @@ impl Output {
     /// DECKARD's output channels (Out 1 L, Out 1 R, … Out 16 R) plays on, or none.
     /// The engine hears which of its outputs that leaves connected (a strip onto one that
     /// isn't plays through its parent), from the next block. The `cv_mask` channels (bit `i`:
-    /// channel `i`) carry CV only: no audio plays on the interface channel of one.
+    /// channel `i`) carry CV only: no audio plays on the interface channel of one, or on
+    /// an output with a CV only side ([`effective_routing`]).
     pub fn set_routing(&self, routing: &[Option<usize>], cv_mask: u32) {
         let routing = &effective_routing(routing, cv_mask);
         self.cv_mask.store(cv_mask, Ordering::Relaxed);
@@ -751,7 +765,7 @@ impl Output {
             let to = routing.get(i).copied().unwrap_or(None).map_or(-1, |c| c as i32);
             r.store(to, Ordering::Relaxed);
         }
-        self.connected.store(connected_outputs(routing, self.channels), Ordering::Relaxed);
+        self.connected.store(connected_outputs(routing, self.channels) | cv_outputs(cv_mask), Ordering::Relaxed);
     }
 
     /// The interface's output channels.
@@ -1207,6 +1221,47 @@ mod tests {
         assert_eq!((e[2], e[6]), (Some(4), None));
     }
 
+    /// A stereo output with a CV only side is unavailable to audio as a whole.
+    #[test]
+    fn audio_on_the_other_side_of_a_cv_pair_is_dropped() {
+        let mut r = vec![None; 32];
+        r[2] = Some(4);
+        r[3] = Some(5);
+        let e = effective_routing(&r, 1 << 2);
+        assert_eq!((e[2], e[3]), (Some(4), None));
+    }
+
+    /// Two voltages are never summed on a jack: the lowest channel keeps it.
+    #[test]
+    fn two_cv_channels_on_one_jack_keep_the_first() {
+        let mut r = vec![None; 32];
+        r[2] = Some(4);
+        r[6] = Some(4);
+        r[9] = Some(4);
+        let e = effective_routing(&r, 1 << 2 | 1 << 6 | 1 << 9);
+        assert_eq!((e[2], e[6], e[9]), (Some(4), None, None));
+    }
+
+    /// An output with a CV only side stays connected even with nothing routed, so a strip
+    /// on it is dropped rather than playing through its parent.
+    #[test]
+    fn an_output_with_a_cv_side_counts_as_connected() {
+        let mut r = vec![None; 32];
+        r[3] = Some(5);
+        let e = effective_routing(&r, 1 << 2);
+        assert_eq!(connected_outputs(&e, 8), 0, "its audio is dropped");
+        assert_eq!(cv_outputs(1 << 2), 0b10);
+        assert_eq!(cv_outputs(1 << 31 | 1), 0b1000_0000_0000_0001);
+        assert_eq!(cv_outputs(0), 0);
+    }
+
+    /// With no CV only channels the routing is left as it is.
+    #[test]
+    fn no_cv_channels_leave_the_routing_alone() {
+        let r: Vec<Option<usize>> = (0..32).map(|i| (i % 3 != 0).then_some(i / 2)).collect();
+        assert_eq!(effective_routing(&r, 0), r);
+    }
+
     /// The master's output plays the master on its audio side only.
     #[test]
     fn a_cv_side_of_the_masters_output_does_not_play_the_master() {
@@ -1223,7 +1278,7 @@ mod tests {
         // No LFO 1: the route sits at its Low, so only a carried level shows in the first frame.
         p.cv_routes = vec![CvRoute { low: -1.0, high: 1.0, ..CvRoute::new(ModSource::Lfo(1), 2) }];
         let mut old = crate::tests::click_engine_for(&p, 1000);
-        old.cv_routes[0].last = 0.7;
+        old.cv_last[2] = 0.7;
         let mut engine = Some(Box::new(old));
         let new = Box::new(crate::tests::click_engine_for(&p, 1000));
         apply(&mut engine, Command::Play(new), Instant::now(), Duration::from_millis(10), 1000.0, 1, false);

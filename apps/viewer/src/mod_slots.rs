@@ -1697,9 +1697,9 @@ mod fuzz_tests {
         app
     }
 
-    fn count(app: &App) -> (usize, usize) {
+    fn count(app: &App) -> (usize, usize, usize) {
         let d = app.doc.as_ref().unwrap().borrow();
-        (d.project().groups[0].sounds[0].mod_routes.len(), d.project().cc_routes.len())
+        (d.project().groups[0].sounds[0].mod_routes.len(), d.project().cc_routes.len(), d.project().cv_routes.len())
     }
 
     /// Depth turned on every slot, up and down, far and near: nothing panics and no

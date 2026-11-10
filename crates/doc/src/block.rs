@@ -892,8 +892,8 @@ mod tests {
         assert!(root_child(&d.to_bytes().unwrap(), DOMAIN, ITEM).is_some());
         assert!(d.undo());
         assert_eq!(d.to_bytes().unwrap(), before);
-        // A block with other sections: the version 8 bytes, with only the version and a
-        // zero-length text added.
+        // A block with other sections: the version 8 bytes, with only the version and
+        // the zero-length texts of the versions since (9, 10 and 11) added.
         let b = Block { lfos: "lfo".into(), prob_locked: vec![(0, 1)], ..Block::default() };
         let now = encode(&b);
         let mut v8 = now.clone();

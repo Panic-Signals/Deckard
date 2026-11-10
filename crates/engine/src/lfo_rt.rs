@@ -6,7 +6,7 @@
 use super::{Engine, Mode};
 use deckard_model::PPQ;
 use deckard_model::lfo::{ENV_MAX, ENV_MIN, EnvState, Lfo};
-use deckard_model::mod_matrix::{CC_MAX, CcRoute, CvRoute, ModSource};
+use deckard_model::mod_matrix::{CC_MAX, CcRoute, ModSource};
 use std::sync::Arc;
 
 /// Notes an envelope follows at once (beyond: the oldest is let go).
@@ -107,13 +107,6 @@ pub(crate) struct CcRt {
     pub settle_until: u64,
 }
 
-/// A CV route at play ([`deckard_model::mod_matrix::CvRoute`]): `last` the voltage it
-/// wrote last.
-pub(crate) struct CvRt {
-    pub route: CvRoute,
-    pub last: f32,
-}
-
 /// How long a CV output glides after a jump in its LFOs (seconds).
 const CV_SMOOTH: f64 = 0.005;
 
@@ -123,18 +116,6 @@ const SETTLE: f64 = 0.25;
 /// `project`'s CC routes, nothing sent yet.
 pub(crate) fn ccs_of(project: &deckard_model::Project) -> Vec<CcRt> {
     project.cc_routes.iter().map(|r| CcRt { route: r.clone(), port: r.port.as_str().into(), sent: None, settle_until: 0 }).collect()
-}
-
-/// `project`'s CV routes, all at 0 V.
-pub(crate) fn cvs_of(project: &deckard_model::Project) -> Vec<CvRt> {
-    project.cv_routes.iter().map(|r| CvRt { route: r.clone(), last: 0.0 }).collect()
-}
-
-/// Each of `routes` carries on from what `old`'s first route on its channel wrote.
-fn keep_cv_levels(routes: &mut [CvRt], old: &[CvRt]) {
-    for c in routes.iter_mut() {
-        c.last = old.iter().find(|o| o.route.channel == c.route.channel).map_or(0.0, |o| o.last);
-    }
 }
 
 /// An envelope's run `st` under `old`'s settings, made `new`'s at `t` (seconds) so it
@@ -352,8 +333,12 @@ impl Engine {
     }
 
     /// Which output channels (bits: channel 0 is bit 0) are CV only. None, as an export
-    /// is: no CV is written.
+    /// is: no CV is written. The first CV frames, of an engine or after none were marked,
+    /// glide from the channels' levels.
     pub fn set_cv_channels(&mut self, mask: u32) {
+        if self.cv_channels == 0 && mask != 0 {
+            self.cv_smooth_left = self.cv_smooth_frames();
+        }
         self.cv_channels = mask;
     }
 
@@ -362,7 +347,7 @@ impl Engine {
     }
 
     /// The channels marked CV only get their voltages for `frames` from `at` (interleaved)
-    /// in each of `ext`: the first route on the channel's, or silence with none. An LFO
+    /// in each of `ext`: the first route on the channel's, or 0 V with none. An LFO
     /// that's muted or gone sits at the route's Low. No allocating.
     pub fn write_cv(&mut self, ext: &mut [Vec<f32>], at: usize, frames: usize) {
         if self.cv_channels == 0 {
@@ -374,10 +359,13 @@ impl Engine {
             bits &= bits - 1;
             let mut buf = ext.get_mut(ch as usize / 2);
             let side = ch as usize % 2;
-            let owner = self.cv_routes.iter().position(|c| u32::from(c.route.channel) == ch);
+            let owner = self.cv_routes.iter().position(|r| u32::from(r.channel) == ch);
             let mut left = self.cv_smooth_left;
             for n in 0..frames {
-                let v = owner.map_or(0.0, |i| self.cv_step(i, n as u64, left));
+                let target = owner.map_or(0.0, |i| self.cv_target(i, n as u64));
+                let last = self.cv_last[ch as usize];
+                let v = if left > 1 { last + (target - last) / left as f32 } else { target };
+                self.cv_last[ch as usize] = v;
                 if let Some(s) = buf.as_mut().and_then(|b| b.get_mut(at + n * 2 + side)) {
                     *s = v;
                 }
@@ -387,28 +375,36 @@ impl Engine {
         self.cv_smooth_left = self.cv_smooth_left.saturating_sub(frames as u32);
     }
 
-    /// CV route `i`'s next voltage, `n` frames into the span, gliding if `left` frames
-    /// of smoothing remain. Always within -1..1, for the hardware's sake.
-    fn cv_step(&mut self, i: usize, n: u64, left: u32) -> f32 {
-        let r = &self.cv_routes[i].route;
+    /// CV route `i`'s voltage `n` frames into the span. Always within -1..1, for the
+    /// hardware's sake.
+    fn cv_target(&self, i: usize, n: u64) -> f32 {
+        let r = &self.cv_routes[i];
         let x = if let ModSource::Lfo(pad) = r.source { self.lfo_value_after(pad, n) } else { None };
         let v = r.value(x.unwrap_or(0.0));
-        let target = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
-        let c = &mut self.cv_routes[i];
-        c.last = if left > 1 { c.last + (target - c.last) / left as f32 } else { target };
-        c.last
+        if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
     }
 
     /// This engine replaces `old`: each CV output glides from where `old` left it.
     pub fn take_cv(&mut self, old: &Engine) {
-        keep_cv_levels(&mut self.cv_routes, &old.cv_routes);
+        self.cv_last = old.cv_last;
         self.cv_smooth_left = self.cv_smooth_frames();
     }
 
-    /// Take `fresh`'s CV routes (an edit), each channel keeping its level. No allocating.
+    /// Take `fresh`'s CV routes (an edit); each channel keeps its level, and glides if
+    /// the routes or a routed LFO changed. After [`Engine::adopt_lfos`], so `fresh` holds
+    /// the LFOs that were playing. No allocating.
     pub(crate) fn adopt_cvs(&mut self, fresh: &mut Engine) {
         std::mem::swap(&mut self.cv_routes, &mut fresh.cv_routes);
-        keep_cv_levels(&mut self.cv_routes, &fresh.cv_routes);
+        fn lfo(e: &Engine, pad: u8) -> Option<&Lfo> {
+            e.lfos.iter().find(|l| l.lfo.pad == pad).map(|l| &l.lfo)
+        }
+        let same_lfos = self.cv_routes.iter().all(|r| match r.source {
+            ModSource::Lfo(pad) => lfo(self, pad) == lfo(fresh, pad),
+            _ => true,
+        });
+        if !same_lfos || self.cv_routes != fresh.cv_routes {
+            self.cv_smooth_left = self.cv_smooth_frames();
+        }
     }
 
     /// The indices of `project`'s CV routes that write nothing under `mask`: their channel
