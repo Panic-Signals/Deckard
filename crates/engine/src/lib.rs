@@ -2350,8 +2350,9 @@ fn input_routes(p: &Project) -> Vec<InRoute> {
         for (s, snd) in grp.sounds.iter().enumerate() {
             let deckard_model::AudioSource::Ext(n) = snd.channel.audio_in else { continue };
             // A chain starting with an instrument plays that, not the input; Zhora's
-            // return is its own (see `zhora_rt`).
-            if muting(p, g, s).silent || snd.slots.first().is_some_and(|x| x.is_instrument()) || zhora_rt::is_zhora(snd) {
+            // return is its own (see `zhora_rt`). A muted sound takes no input: unlike
+            // notes, nothing of it rings out (it still plays for strips it feeds).
+            if muting(p, g, s).muted || snd.slots.first().is_some_and(|x| x.is_instrument()) || zhora_rt::is_zhora(snd) {
                 continue;
             }
             let Some((l, r)) = ext_channels(n) else { continue };
@@ -11072,6 +11073,26 @@ mod tests {
         e.process(&mut out);
         assert!((out[0] - 0.5).abs() < 1e-4 && (out[1] + 0.25).abs() < 1e-4, "{out:?}");
         assert!(live.lock().unwrap().is_empty());
+    }
+
+    /// A muted sound doesn't pass its external input (Audio Mute or not).
+    #[test]
+    fn a_muted_sound_plays_no_audio_input() {
+        for audio_mute in [false, true] {
+            let mut p = project();
+            let snd = &mut p.groups[0].sounds[0];
+            (snd.channel.audio_in, snd.muted, snd.channel.audio_mute) = (deckard_model::AudioSource::Ext(1), true, audio_mute);
+            let mut e = click_engine_for(&p, 1000);
+            e.sequencing = false;
+            let live: LiveIn = Default::default();
+            e.live_in = Some(live.clone());
+            let mut frame = [0f32; 32];
+            (frame[2], frame[3]) = (0.5, -0.25);
+            live.lock().unwrap().extend(std::iter::repeat_n(frame, 4));
+            let mut out = vec![0f32; 8];
+            e.process(&mut out);
+            assert!(out.iter().all(|v| *v == 0.0), "audio_mute {audio_mute}: {out:?}");
+        }
     }
 
     /// A plug-in with three output pairs: as an effect, its input as it is, half of it on
