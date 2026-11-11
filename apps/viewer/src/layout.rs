@@ -117,7 +117,7 @@ fn palette(c: Color, default_slot: usize) -> Color32 {
 }
 
 fn group_color(p: &Project, g: usize) -> Color32 {
-    palette(p.groups[g].color, g * 2)
+    palette(p.groups[g].color, g * 2 + 1)
 }
 
 /// Group `g`'s colour, or its sound `s`'s, as a palette index (0..17, 16 white): what
@@ -127,7 +127,7 @@ pub(crate) fn colour_index(p: &Project, g: usize, s: Option<usize>) -> usize {
         Color::Palette(i) => (i as usize).min(16),
         Color::Default => default % 16,
     };
-    let group = slot(p.groups[g].color, g * 2);
+    let group = slot(p.groups[g].color, g * 2 + 1);
     match s.and_then(|s| p.groups[g].sounds.get(s)) {
         Some(snd) if snd.color != Color::Default => slot(snd.color, 0),
         _ => group,
@@ -138,7 +138,7 @@ pub(crate) fn colour_index(p: &Project, g: usize, s: Option<usize>) -> usize {
 pub(crate) fn scene_index(p: &Project, s: usize) -> usize {
     match p.scenes[s].color {
         Color::Palette(i) => (i as usize).min(16),
-        Color::Default => (s * 2) % 16,
+        Color::Default => (s + 4) % 16,
     }
 }
 
@@ -174,7 +174,7 @@ fn pattern_color(p: &Project, g: usize, pi: usize) -> Color32 {
 }
 
 fn scene_color(p: &Project, s: usize) -> Color32 {
-    palette(p.scenes[s].color, s * 2)
+    palette(p.scenes[s].color, s + 4)
 }
 
 /// Group ID as Maschine shows it: A1..H1, then A2.. for the next bank of eight.
