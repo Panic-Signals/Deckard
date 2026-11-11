@@ -11403,13 +11403,33 @@ mod tests {
             app.settings.controller = settings::ControllerChoice::Automatic;
         }
         app.open(Path::new(&path));
+        Some(harness_of(app, song_view))
+    }
+
+    /// [`harness`] on a new project (one group of 16 empty sounds, one scene), so the
+    /// test runs anywhere, CI included: no library project needed.
+    pub(super) fn blank_harness(song_view: bool) -> Harness<'static, App> {
+        let mut app = App {
+            settings: settings::Settings::default(),
+            model: "M3".into(),
+            show_controller: true,
+            follow: true,
+            grid: PPQ / 4,
+            prop_set: 1,
+            ..Default::default()
+        };
+        app.new_project();
+        harness_of(app, song_view)
+    }
+
+    fn harness_of(mut app: App, song_view: bool) -> Harness<'static, App> {
         app.song_view = song_view;
         let mut h = Harness::builder()
             .with_size(egui::vec2(1500.0 + layout::CONTROLLER_WIDTH, 930.0))
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
         h.run_steps(3);
-        Some(h)
+        h
     }
 
     /// [`harness`] for a test of Maschine's own controller scripts: `None` (skipped) without
@@ -15206,12 +15226,23 @@ mod tests {
         deckard_engine::sample::Sample { rate: 48_000, frames: vec![[0.25, 0.25]; (secs * 48_000.0) as usize] }
     }
 
+    /// A pattern in group 0, on in the scene, if it has none (a new project has none).
+    fn a_pattern(h: &mut Harness<'static, App>) {
+        let doc = h.state().doc.clone().unwrap();
+        let mut d = doc.borrow_mut();
+        if d.project().groups[0].patterns.is_empty() {
+            let pi = d.add_pattern(0, usize::MAX, "Pattern 1").unwrap();
+            super::play_in_scene(&mut d, 0, 0, pi).unwrap();
+        }
+    }
+
     /// A free sound of group 0 made an Audio plug-in with a bar-long take, on in the
     /// pattern in focus (no notes of its own there), focused: (its sound, the project's
     /// folder, kept while the test runs).
     fn loop_sound(h: &mut Harness<'static, App>) -> (usize, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        a_pattern(h);
         let p = project_of(h);
         let bar = p.bar_length() as f64;
         let free = |s: &usize| {
@@ -15319,9 +15350,10 @@ mod tests {
 
     #[test]
     fn a_sync_take_on_an_audio_sound_is_a_new_take() {
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        a_pattern(&mut h);
         let p = project_of(&h);
         let bar = p.bar_length() as f64;
         let s = (1..16).find(|&s| p.groups[0].sounds[s].slots.is_empty() && p.groups[0].sounds[s].sampler.is_none()).unwrap();
@@ -15349,7 +15381,7 @@ mod tests {
     #[test]
     fn an_audio_take_is_edited_in_the_sampling_view() {
         use layout::sampling::{EditOp, SamplingAct};
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let (s, _tmp) = loop_sound(&mut h);
         h.state_mut().sampling_open = true;
         h.state_mut().sampling.tab = 2;
@@ -15387,7 +15419,7 @@ mod tests {
     #[test]
     fn a_loop_take_fills_the_empty_focused_sound_and_names_it() {
         use layout::sampling::RecParam;
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
         let p = project_of(&h);
@@ -15409,9 +15441,10 @@ mod tests {
     #[test]
     fn deleting_a_recorded_take_stops_it_playing() {
         use layout::sampling::{RecParam, RecordAct, SamplingAct};
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
+        a_pattern(&mut h);
         let p = project_of(&h);
         let bar = p.bar_length() as f64;
         let s = (1..16).find(|&s| p.groups[0].sounds[s].slots.is_empty() && p.groups[0].sounds[s].sampler.is_none()).unwrap();
@@ -15452,7 +15485,7 @@ mod tests {
     #[test]
     fn a_long_loop_take_into_a_group_without_patterns_makes_a_pattern_as_long() {
         use layout::sampling::RecParam;
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
         let doc = h.state().doc.clone().unwrap();
@@ -15486,7 +15519,7 @@ mod tests {
     #[test]
     fn a_take_dragged_onto_a_sound_plays_there() {
         use layout::sampling::{RecParam, RecordAct, SamplingAct};
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
         let p = project_of(&h);
@@ -15528,6 +15561,11 @@ mod tests {
         assert!((a.takes[0].beats - 2.0 * bar / PPQ as f64).abs() < 1e-6, "the take's length: {}", a.takes[0].beats);
         assert!(q.groups[0].patterns[0].audio.iter().any(|c| c.sound == s2), "on in the pattern");
         assert!(q.groups[0].patterns[0].audio.iter().any(|c| c.sound == s1), "still on where it was recorded");
+        // RECORD shows it as a tile with its waveform.
+        assert!(h.state().recorder.view.take_waves.get(&take).is_some_and(|w| !w.is_empty()), "the take's wave");
+        (h.state_mut().sampling_open, h.state_mut().sampling.tab) = (true, 0);
+        h.run_steps(3);
+        assert_eq!(h.state().sampling.tab, 0);
     }
 
     /// Recording another take on an Audio sound stops its old take at once; the new take
@@ -15535,7 +15573,7 @@ mod tests {
     #[test]
     fn a_new_take_silences_the_old_one_while_it_records() {
         use layout::sampling::{RecParam, RecordAct, SamplingAct};
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let (s, _tmp) = loop_sound(&mut h);
         let bar = project_of(&h).bar_length() as f64;
         h.state_mut().recorder.view.set(RecParam::Mode, 2);
@@ -15568,7 +15606,7 @@ mod tests {
     /// goes to Loop. Sync onto one keeps its mode.
     #[test]
     fn a_loop_take_switches_a_gate_audio_plugin_to_loop() {
-        let Some(mut h) = harness(false, true) else { return };
+        let mut h = blank_harness(true);
         let tmp = tempfile::tempdir().unwrap();
         h.state_mut().path = Some(tmp.path().join("x.mxprj"));
         let p = project_of(&h);
