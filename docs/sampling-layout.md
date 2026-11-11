@@ -562,6 +562,46 @@ range = the whole file. [inferred: default loop off, gain 0.75, root key 60]
     with an Audio plug-in; Auto keeps the group's last sound.
   - A new take sits at offset 0 (1.1.1). Dragging the waveform in the pattern editor moves
     it (`docs/audio-plugin.md`).
+  - Loop makes one take per START: LENGTH recorded, then it stops. Target Sound uses the
+    focused sound when it's empty, else the next empty one; the sound takes the
+    recording's name (`YYYYMMDDTHHMMSS`) unless it was named by hand.
+  - A Loop take is heard at once: an Audio plug-in in Gate mode goes to Loop mode. Detect
+    and Sync onto one keep its mode.
+- **DELETE** (the take list's ✕, the MK3's RECORD screen) takes a recording back: while it
+  is still the last edit, its undo step is undone (the sound, its name, a new pattern, all
+  as they were); after other edits, the take is switched off in every pattern that plays
+  it, so it stops looping. The file stays on disk.
+- **Internal ▸ INPUT** lists the Master, each group, and under each group its sounds that
+  play something (`A1 1 Kick`). Maschine lists the Master and groups only (to record one
+  sound it says to solo it); a single sound is DECKARD's own.
+- **An Audio plug-in's take** shows RECORD and EDIT (no SLICE or ZONE), as in Maschine.
+  EDIT works on the focused take: its play range is the take's (no LOOP box), and the
+  edit functions write an edited copy the take then plays (`set_take_sample`). The MK3's
+  Sampling page shows the same two tabs.
+- **Picking a take** (the take list, PREVIOUS / NEXT, the MK3's pads) on a sound with an
+  Audio plug-in, or an empty one, plays it there with the Audio plug-in; only a sound with
+  a Sampler loads it as a zone.
+- **Recording a new take** silences the focused sound's take in the pattern as soon as
+  recording starts (Detect and Sync, and Loop with Target Take), so the old take isn't
+  heard over the new one. CANCEL puts it back.
+- **Dragging a take** from the take list onto a sound row plays it on that sound, by the
+  same rules as picking one.
+- **Take tiles** show each take's waveform under its name, in the app and on the MK3's
+  left display under the input meter (the last eight, or the bank of 16 when the takes are
+  on the pads).
+- **The MK3's RECORD screen:** START, DELETE, TAKES, BANK on buttons 5 to 8; SHIFT + 7 and
+  8 are PREVIOUS and NEXT. TAKES (lit while on) puts the takes on the pads, as Maschine's
+  "takes on pads": a pad plays its take on the focused sound, switching at once while the
+  pattern plays, and the takes are lit, the playing one bright. BANK goes round the banks
+  of 16 when there are more.
+- **The touch strip with no pattern** tracks the bar, in the group's colour, so you can see
+  where you are before recording into an empty group.
+- **A take into a group with no pattern** makes "Pattern 1" and puts it in the scene being
+  heard (the focused scene; in the Song view, the playing or focused section's scene), so
+  the take plays as soon as the recording ends. Loading a loop file
+  onto a sound in such a group does the same.
+- **SAMPLING's light** is red while recording, on the Sampling page or not, and flashes red
+  while waiting to start.
 - **SAMPLE LED:** dim while the page is hidden. The script asks for `LS_DIM_FLASH`, and
   DECKARD shows that dim, as `LS_DIM`.
 - **Input meter:** RECORD's meter shows the chosen source's level while nothing is recorded.

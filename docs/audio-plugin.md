@@ -139,6 +139,11 @@ wrapped in the take's play range. A Maschine project always plays from 1.1.1.
   cue's offset, so its transients sit on the steps whatever the tempo: the first pass in the sound's colour,
   repeats darker (before the offset too), dim where it's off; double-clicking a Loop-mode row switches it on or
   off in the pattern.
+- **DECKARD's MK3 layer** (`crates/surface`) draws each sound's loop behind the notes in
+  its pattern editors too (`lib/pattern_editor.lua`): pad mode's rows, the piano roll,
+  Step's lane and the Events lanes. The app hands it the focused group's loops
+  (`SoundView::audio`: peaks, length, offset, on, Gate) and it places them by the same
+  rule, the first pass brighter than the repeats, grey where the loop is off.
 - **Controller:** the Control page shows the same page. The pattern editors draw the loops
   in their lanes as Maschine's `ClipAudioLane` style has them (`HW/MaschineStudio/
   ArrangerPage.txt`: 10 pixels of a 12-pixel lane, 18 of 24; the sound's colour, repeats in

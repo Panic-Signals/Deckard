@@ -138,6 +138,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     ("dark", _) => 0,
                     ("dim", false) => deckard_mk3::leds::DIM,
                     ("on", false) => leds::ON,
+                    ("dim", true) if hw == "LED_SAMPLE" => deckard_mk3::leds::SAMPLE_DIM,
                     ("dim", true) => leds::dim([255; 3]),
                     ("on", true) => leds::bright([255; 3]),
                     (other, _) => return Err(mlua::Error::runtime(format!("light {name}: \"{other}\"? (off, dim, on)"))),
@@ -1278,6 +1279,16 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             st.set("default_color", s.default_color)?;
             st.set("prob_locked", s.prob_locked)?;
             st.set("selected", s.selected)?;
+            if let Some(a) = &s.audio {
+                let at = lua.create_table()?;
+                // (Flat: min, max, min, max, …; a column a pixel or two.)
+                at.set("peaks", lua.create_sequence_from(a.peaks.iter().flat_map(|&(lo, hi)| [lo, hi]))?)?;
+                at.set("ticks", a.ticks)?;
+                at.set("offset", a.offset)?;
+                at.set("on", a.on)?;
+                at.set("gate", a.gate)?;
+                st.set("audio", at)?;
+            }
             let touch = lua.create_table()?;
             touch.set("mode", s.touch_mode)?;
             touch.set("cc", s.touch_cc)?;
@@ -1466,6 +1477,7 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
         st.set("zones", zones)?;
         st.set("focus_zone", s.focus_zone + 1)?;
         st.set("palette", s.color)?;
+        st.set("take", s.take)?;
         t.set("sample", st)?;
     }
     let r = lua.create_table()?;
@@ -1476,6 +1488,11 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
     r.set("recording", v.record.recording)?;
     t.set("record", r)?;
     t.set("takes", v.takes)?;
+    let waves = lua.create_table()?;
+    for (i, w) in v.take_waves.iter().enumerate() {
+        waves.set(i + 1, lua.create_sequence_from(w.iter().flat_map(|&(lo, hi)| [lo, hi]))?)?;
+    }
+    t.set("take_waves", waves)?;
     t.set("take", v.take.map(|i| i + 1))?;
     if let Some(s) = v.stems {
         let st = lua.create_table()?;

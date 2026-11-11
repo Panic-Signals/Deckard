@@ -162,6 +162,10 @@ pub const BACKLIGHT: u8 = 0x09;
 /// A dim button: one that can be pressed but isn't selected.
 pub const DIM: u8 = 0x22;
 
+/// SAMPLING not selected. It's a colour LED, whose dim white doesn't look like the
+/// one-colour buttons around it; this byte, past the palette, does (picked on the hardware).
+pub const SAMPLE_DIM: u8 = 73;
+
 /// A one-colour button's brightness for a level the scripts set (0..1): full stays
 /// full; anything less is a dim button, 30% under the level (dim is 0.25 on the MK3),
 /// but never below the backlight.

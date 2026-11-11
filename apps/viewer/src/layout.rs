@@ -3161,7 +3161,8 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
         let over = app.file_drag.is_some_and(|at| r.contains(at))
             || ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p))
                 && (egui::DragAndDrop::payload::<crate::layout::browser::Dragged>(ui.ctx()).is_some()
-                    || egui::DragAndDrop::payload::<crate::layout::browser::DraggedFile>(ui.ctx()).is_some());
+                    || egui::DragAndDrop::payload::<crate::layout::browser::DraggedFile>(ui.ctx()).is_some()
+                    || egui::DragAndDrop::payload::<crate::layout::sampling::DraggedTake>(ui.ctx()).is_some());
         if over {
             ui.painter().rect_stroke(r.shrink(1.0), 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
         }

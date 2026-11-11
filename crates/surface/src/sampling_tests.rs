@@ -64,7 +64,7 @@ fn sampled(tab: usize) -> View {
 #[test]
 fn sample_shows_the_sampling_page_and_again_goes_back() {
     let (mut s, v) = (Surface::new(), sampled(1));
-    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(0), "dark outside Sampling");
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(deckard_mk3::leds::SAMPLE_DIM), "dim outside Sampling, as the other buttons");
     assert_eq!(press(&mut s, &v, "BUTTON_SAMPLE"), [Action::Sampling(true)]);
     assert_eq!(s.page(), "sampling");
     assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(deckard_mk3::leds::palette(16, 4)), "lit in Sampling");
@@ -74,7 +74,65 @@ fn sample_shows_the_sampling_page_and_again_goes_back() {
     }
     assert_eq!(press(&mut s, &v, "BUTTON_SAMPLE"), [Action::Sampling(false)]);
     assert_ne!(s.page(), "sampling");
-    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(0), "dark again when closed");
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(deckard_mk3::leds::SAMPLE_DIM), "dim again when closed");
+}
+
+/// SAMPLING lights red while it records, on its page or not.
+#[test]
+fn sample_lights_red_while_recording() {
+    let (mut s, mut v) = (Surface::new(), sampled(0));
+    let red = crate::leds::bright([255, 0, 0]);
+    assert_ne!(s.leds(&v).get("LED_SAMPLE"), Some(red));
+    v.sampling.record.recording = true;
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(red), "recording, elsewhere");
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(s.page(), "sampling");
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(red), "recording, on the page");
+    v.sampling.record.recording = false;
+    assert_eq!(s.leds(&v).get("LED_SAMPLE"), Some(deckard_mk3::leds::palette(16, 4)), "white again");
+}
+
+/// RECORD: TAKES (button 7, next to DELETE) puts the takes on the pads (Maschine's), a
+/// pad plays its take and they light, the focused brightest; the takes show under the
+/// meters as mini waveforms.
+#[test]
+fn takes_go_on_the_pads_and_show_under_the_meters() {
+    let (mut s, mut v) = (Surface::new(), sampled(0));
+    let now = Instant::now();
+    (v.sampling.takes, v.sampling.take) = (3, Some(2));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let before = s.picture(&v);
+    v.sampling.take_waves = vec![std::sync::Arc::new(vec![(-0.8, 0.8); 64]); 3];
+    let after = s.picture(&v);
+    let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+    assert!(changed > 200, "the takes' waves drawn ({changed} pixels)");
+    assert!(s.event(&Event::PadOn(1, 0.8), &v, now).is_empty(), "RECORD's pads: nothing yet");
+    // TAKES, next to DELETE, no SHIFT needed; lit while on.
+    let text = s.screen_text(&v);
+    let at = |t: &str| text.iter().position(|x| x == t).unwrap_or_else(|| panic!("{t}: {text:?}"));
+    assert_eq!(at("TAKES"), at("DELETE") + 1, "{text:?}");
+    let dim = s.leds(&v).get("LED_SCREEN_BUTTON_6");
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_7"), dim, "TAKES off: dim, as DELETE");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_7").is_empty());
+    let leds = s.leds(&v);
+    assert_ne!(leds.get("LED_SCREEN_BUTTON_7"), dim, "TAKES on: lit");
+    assert_eq!(leds.get("LED_PAD_3"), Some(deckard_mk3::leds::palette(16, 4)), "the focused take bright");
+    assert_eq!(leds.get("LED_PAD_1"), Some(deckard_mk3::leds::palette(16, 2)), "a take, dim");
+    assert_eq!(leds.get("LED_PAD_4"), Some(0), "no take");
+    assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::Take { index: 0, delete: false }]);
+    assert!(s.event(&Event::PadOn(4, 0.8), &v, now).is_empty(), "no fourth take");
+}
+
+/// An Audio plug-in's take: RECORD and EDIT; SLICE and ZONE aren't there.
+#[test]
+fn a_take_has_record_and_edit_only() {
+    let (mut s, mut v) = (Surface::new(), sampled(1));
+    v.sampling.sample.as_mut().unwrap().take = true;
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_3").is_empty(), "no SLICE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::SamplingTab(0)]);
+    let text = s.screen_text(&v);
+    assert!(!text.iter().any(|t| t == "SLICE" || t == "ZONE"), "{text:?}");
 }
 
 #[test]
@@ -130,7 +188,10 @@ fn record_starts_stops_and_cancels() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::RecordSample(RecordPress::Cancel)]);
     v.sampling.record.recording = false;
     (v.sampling.takes, v.sampling.take) = (2, Some(1));
+    // SHIFT + 7: PREVIOUS (7 itself is TAKES).
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, Instant::now());
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::Take { index: 0, delete: false }], "PREVIOUS");
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Take { index: 1, delete: true }], "DELETE");
 }
 

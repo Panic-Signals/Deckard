@@ -954,6 +954,56 @@ fn the_strip_follows_playback() {
     assert_eq!(s.leds(&v).get("LED_TS_01"), Some(deckard_mk3::leds::palette(16, 4)), "white");
 }
 
+/// A group with no pattern: the strip still tracks where playback is (the app sends the
+/// place in the bar), in the group's colour, to see where a take will start.
+#[test]
+fn the_strip_tracks_the_bar_with_no_pattern() {
+    let (s, mut v) = (Surface::new(), view());
+    let lit = |s: &Surface, v: &View| (1..=25).filter(|i| s.leds(v).get(&format!("LED_TS_{i:02}")).unwrap() != 0).count();
+    v.playing = true;
+    let g = v.group;
+    v.groups[g].scene_pattern = None;
+    v.groups[g].patterns.clear();
+    v.progress = Some(0.5);
+    assert_eq!(lit(&s, &v), 13, "half a bar: round(12) + 1");
+    assert_eq!(s.leds(&v).get("LED_TS_01"), Some(deckard_mk3::leds::palette(v.groups[g].color as i64, 4)), "the group's colour");
+    // In the Song view with no sections too.
+    v.song_view = true;
+    v.sections.clear();
+    assert_eq!(lit(&s, &v), 13, "no song to show");
+}
+
+/// An Audio plug-in's loop shows on the screens' pattern editors, behind the notes, as
+/// in the app: in pad mode's rows, the piano roll, Step's lane and the Events lanes.
+#[test]
+fn audio_loops_show_in_the_pattern_editors() {
+    let shown = |setup: &dyn Fn(&mut Surface, &View)| {
+        let (mut s, mut v) = (Surface::new(), view());
+        v.pattern_length = 3840;
+        setup(&mut s, &v);
+        let before = s.picture(&v);
+        // A bar-long loop, loud all through, on in the pattern (the focused sound's).
+        let sound = v.sound;
+        v.groups[v.group].sounds[sound].audio =
+            Some(LoopView { peaks: std::sync::Arc::new(vec![(-0.9, 0.9); 256]), ticks: 3840, offset: 0, on: true, gate: false });
+        let after = s.picture(&v);
+        before.iter().zip(&after).filter(|(a, b)| a != b).count()
+    };
+    let step = shown(&|s, v| {
+        press(s, v, "BUTTON_STEP");
+    });
+    assert!(step > 2000, "Step: rows and lane ({step} pixels)");
+    let piano = shown(&|s, v| {
+        press(s, v, "BUTTON_KEYBOARD");
+        press(s, v, "BUTTON_STEP");
+    });
+    assert!(piano > 2000, "the piano roll ({piano} pixels)");
+    let events = shown(&|s, v| {
+        hold(s, v, "BUTTON_EVENTS", true);
+    });
+    assert!(events > 2000, "Events ({events} pixels)");
+}
+
 /// Notes side by side on the screens stay apart: 2 pixels between them.
 #[test]
 fn notes_side_by_side_are_drawn_apart() {

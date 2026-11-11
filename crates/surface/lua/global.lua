@@ -474,7 +474,8 @@ function global.leds()
   deckard.led("TEMPO", lit(wheel.mode == "tempo"))
   deckard.led("SWING", lit(wheel.mode == "swing"))
   deckard.led("VOLUME", lit(wheel.mode == "volume"))
-  deckard.led("SAMPLE", lit(page == "sampling"))
+  -- (SAMPLING: red while it records, waiting flashes it; the Sampling page's own too.)
+  if not util.sample_led(s) then deckard.led("SAMPLE", page == "sampling" and "on" or "dim") end
   -- NOTE REPEAT: lit on its page, dim while it's on (LOCK) elsewhere.
   if page == "note_repeat" then
     deckard.led("NOTE_REPEAT", "on")
@@ -539,20 +540,28 @@ function global.leds()
 
   -- The touch strip: its mode's, or it fills as playback goes on, as Maschine's: the
   -- song in white on the Song view, else the focused group's pattern in its colour.
+  -- With no pattern (or no song) it tracks the bar, in the group's colour, so you can
+  -- see where you are before recording into an empty group.
   local pos, colour = nil, nil
+  local song = 0
+  if s.song_view then
+    for _, sec in ipairs(s.sections) do song = math.max(song, sec.start + sec.length) end
+  end
   if strip.leds(s) then
     -- (Its mode's.)
   elseif s.strip_position == 0 or (s.strip_position == 1 and not s.recording) then
     -- (HARDWARE's SHOW POSITION: not now.)
-  elseif s.song_view then
-    local length = 0
-    for _, sec in ipairs(s.sections) do length = math.max(length, sec.start + sec.length) end
+  elseif song > 0 then
     local at = s.position or 0
-    if at < length then pos, colour = at / length, 16 end
+    if at < song then pos, colour = at / song, 16 end
   elseif s.progress then
     local focused = s.groups[s.group]
     local pattern = focused and focused.scene_pattern and focused.patterns[focused.scene_pattern]
-    if pattern then pos, colour = s.progress, pattern.palette end
+    if pattern then
+      pos, colour = s.progress, pattern.palette
+    elseif focused then
+      pos, colour = s.progress, focused.palette
+    end
   end
   if not strip.mode then
     local filled = pos and util.round(pos * (TOUCH_STRIP - 1)) + 1 or 0
