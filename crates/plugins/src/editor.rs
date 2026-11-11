@@ -94,6 +94,30 @@ impl Linux::IRunLoopTrait for Frame {
     }
 }
 
+/// Windows: deliver the timer messages waiting on this thread. Call it every frame from
+/// the thread plug-ins were made on, outside any call into a plug-in.
+///
+/// Windows makes a WM_TIMER only when nothing else is queued, and an app that repaints
+/// every frame always has its own WM_PAINT queued, so its loop never reaches them.
+/// Native Instruments' plug-ins work from timers on windows of their own (not the editor's):
+/// without this Solid Bus Comp's editor showed noise and Kontakt's library browser "No
+/// results found". The app's own windows use none (winit and eframe set no timers), so
+/// every timer here is a plug-in's. Elsewhere, nothing to do.
+pub fn serve_timers() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, WM_TIMER};
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // Bounded, should a timer be due again as soon as it is served.
+        for _ in 0..64 {
+            if unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), WM_TIMER, WM_TIMER, PM_REMOVE) } == 0 {
+                break;
+            }
+            unsafe { DispatchMessageW(&msg) };
+        }
+    }
+}
+
 /// An open editor window. Closing the window (or dropping this) closes the editor.
 pub enum Editor {
     Vst3(Vst3Editor),
@@ -794,5 +818,66 @@ mod tests {
     fn the_frame_is_a_run_loop() {
         let frame = ComWrapper::new(Frame::default());
         assert!(frame.to_com_ptr::<Linux::IRunLoop>().is_some());
+    }
+
+    /// An app that repaints every frame always has a WM_PAINT queued (winit asks for one
+    /// with RDW_INTERNALPAINT), and Windows hands out WM_TIMER only when nothing else is
+    /// waiting: a plug-in's timer never fired, and Solid Bus Comp and Kontakt 7 never
+    /// drew or filled their browsers. Serving timers each frame lets them run.
+    #[cfg(windows)]
+    #[test]
+    fn a_plugins_timer_runs_while_the_app_repaints_every_frame() {
+        use windows_sys::Win32::Graphics::Gdi::{RDW_INTERNALPAINT, RedrawWindow};
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        static FIRED: AtomicU32 = AtomicU32::new(0);
+        unsafe extern "system" fn tick(_: windows_sys::Win32::Foundation::HWND, _: u32, _: usize, _: u32) {
+            FIRED.fetch_add(1, Ordering::SeqCst);
+        }
+        // The app's window (shown: a hidden one is never painted), off screen and never
+        // activated, asking to be redrawn every frame.
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let app = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_POPUP | WS_VISIBLE,
+                -20000,
+                -20000,
+                10,
+                10,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!app.is_null());
+        let timer = unsafe { SetTimer(std::ptr::null_mut(), 0, 1, Some(tick)) };
+        assert_ne!(timer, 0);
+        let frames = |serve: bool| {
+            FIRED.store(0, Ordering::SeqCst);
+            for _ in 0..30 {
+                unsafe { RedrawWindow(app, std::ptr::null(), std::ptr::null_mut(), RDW_INTERNALPAINT) };
+                // Longer than the timer's (system clock's) period.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                // The app's loop: one message, and its frame.
+                let mut msg: MSG = unsafe { std::mem::zeroed() };
+                if unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                    unsafe { DispatchMessageW(&msg) };
+                }
+                if serve {
+                    serve_timers();
+                }
+            }
+            FIRED.load(Ordering::SeqCst)
+        };
+        let (starved, served) = (frames(false), frames(true));
+        assert!(served >= 25, "served each frame: {served} of 30");
+        assert!(starved * 2 < served, "the app's paint starves the timer: {starved} vs {served}");
+        unsafe {
+            KillTimer(std::ptr::null_mut(), timer);
+            DestroyWindow(app);
+        }
     }
 }

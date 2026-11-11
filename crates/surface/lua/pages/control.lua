@@ -9,12 +9,16 @@
 --   LEFT / RIGHT      the previous / next page
 --   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages
 --
+-- Zhora focused, its own buttons and tuner instead (lib/zhora.lua). The Tuner effect
+-- focused, its dial on the right screen under A4's pitch.
+--
 -- With SHIFT held on PLUG-IN, the focused slot's edits: EDIT (a plug-in's window),
 -- INSERT (the plug-in browser for a new slot after the last), SAVE (not yet), MOVE
 -- (5 / 6: before or after its neighbour; an instrument stays first), BYPASS, REMOVE.
 
 local widgets = require("lib.widgets")
 local chain = require("lib.chain")
+local zhora = require("lib.zhora")
 
 local control = {}
 
@@ -93,7 +97,9 @@ function control.button(name, down)
     deckard.show_page("module")
   else
     if not n then return end
-    if n <= 3 then
+    if c.plugins and c.zhora then
+      zhora.button(c, n)
+    elseif n <= 3 then
       deckard.level(n)
     elseif n == 5 or n == 6 then
       step(c, n == 6)
@@ -121,16 +127,21 @@ function control.leds()
     if c.slot_index and c.slot_index < c.slots then deckard.led("WHEEL_RIGHT", 16, false) end
     return
   end
-  for i = 1, 3 do deckard.led("SCREEN_" .. i, i == c.level and "on" or "dim") end
+  local z = c.plugins and c.zhora
+  if z then
+    zhora.leds(c)
+  else
+    for i = 1, 3 do deckard.led("SCREEN_" .. i, i == c.level and "on" or "dim") end
+  end
   if can_step(c, false) then
-    deckard.led("SCREEN_5", "dim")
+    if not z then deckard.led("SCREEN_5", "dim") end
     deckard.led("WHEEL_LEFT", 16, false)
   end
   if can_step(c, true) then
-    deckard.led("SCREEN_6", "dim")
+    if not z then deckard.led("SCREEN_6", "dim") end
     deckard.led("WHEEL_RIGHT", 16, false)
   end
-  if c.plugins and c.slot_index then deckard.led("SCREEN_8", "dim") end
+  if c.plugins and c.slot_index and not z then deckard.led("SCREEN_8", "dim") end
 end
 
 -- A channel properties group's icon: Input, Output, Groove or Macro.
@@ -326,7 +337,8 @@ function control.draw(screen, theme, opts)
   local group = s.groups[s.group]
   local snd = group and group.sounds[s.sound]
   local shift_layer = c.plugins and deckard.held("SHIFT")
-  if not shift_layer then chain.tabs(screen, theme, c.level) end
+  local z = c.plugins and not shift_layer and c.zhora
+  if not shift_layer and not z then chain.tabs(screen, theme, c.level) end
   -- (The level's: the master's "M" in white, the group's label, or the sound's number.)
   local info = widgets.focus_info(s)
   if c.level == 1 then
@@ -346,6 +358,8 @@ function control.draw(screen, theme, opts)
       [7] = { text = "BYPASS", disabled = not slot, selected = slot and not slot.active },
       [8] = { text = "REMOVE", disabled = not slot },
     })
+  elseif z then
+    zhora.buttons(screen, theme, c)
   elseif c.plugins then
     local slot = c.chain[slot_at(c)]
     widgets.buttons(screen, theme, {
@@ -355,15 +369,24 @@ function control.draw(screen, theme, opts)
   if c.plugins then
     local slot = c.chain[slot_at(c)]
     -- Browse.
-    if not shift_layer and not opts.no_browse then
-      screen:frame(841, 4, 115, 24, "button", theme.corner)
-      screen:circle(902, 13.5, 5.6, { 0xee, 0xee, 0xee }, 1.6)
-      screen:line(897.5, 18, 892, 23.5, 1.8, { 0xee, 0xee, 0xee })
+    if not shift_layer and not z and not opts.no_browse then
+      widgets.buttons(screen, theme, { [8] = { text = "BROWSE" } })
+    end
+    if z then
+      zhora.right(screen, z)
+      zhora.left(screen, c)
+      knobs(screen, theme, c, false, knob_of)
+      return
     end
     screen:rect(480, 35, 480, 25, "bar")
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
-      if c.eq then eq_curve(screen, c.eq)
+      if c.tuner then
+        -- The Tuner effect: A4's pitch (and Muted) on the bar, the dial under it.
+        local t = c.tuner
+        screen:label(490, 36, 300, 24, t.reference .. (t.muted and "  ·  Muted" or ""), "default", "left", "center")
+        zhora.dial(screen, t)
+      elseif c.eq then eq_curve(screen, c.eq)
       elseif c.filter then eq_curve(screen, c.filter)
       elseif c.picture then eq_curve(screen, c.picture)
       else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end

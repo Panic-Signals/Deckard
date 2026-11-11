@@ -51,14 +51,25 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   own settings across switches; Trigger, Level, Quantize and Mute are shared. MK3:
   display button 7 ENV on the LFO page. Spec:
   `docs/superpowers/specs/2026-10-29-lfo-envelope-design.md`.
+- **Additive routes.** Range (the default, including old projects) sweeps between
+  Low and High. Add contributes `(high - low) * (shape(source) - rest)` to the
+  knob's own travel. Multiple Add routes on one destination sum, then clamp once.
+  Rest is zero for pressure, slide and envelopes, halfway for pitch, and
+  `level / 2 + offset` for periodic LFOs. Turning the knob moves the sweep's centre;
+  removing a source leaves the knob's base unchanged. If mixed with Range, the
+  last active Range sweep replaces the knob as the anchor, then Add sums on top.
+  Choose Mode in the desktop assignment editor, or SHIFT + the column's display
+  button in the MK3 matrix (before Destination for a new additive assignment).
+  Depth reads "Add" in this mode and covers -100% through +100%. MIDI CC routes keep their existing behavior.
+  Text appends an optional `mode:add` token after the module name.
 - **A routed knob moves.** While a route (a note's expression or an LFO) drives a
   built-in knob (an effect's, the Sampler's, a DECKARD synth's), the knob shows where
   the route has it, position and value, in the Control area, the strip and on the MK3,
   as a plug-in's knob does. Turning or dragging it changes its own value, from where
   that's set (not from where the route shows it).
   With nothing driving it (route gone, LFO muted or missing), it shows its own value;
-  Pressure at rest shows Low's. The engine publishes each route's travel each span
-  (`meters::RouteTravels`, lock-free; `Output::route_travel`), 32 routes a sound,
+  Pressure at rest shows Low's. The engine publishes each target's final travel in its first route's cell each span
+  (`meters::RouteTravels`, lock-free; `Output::route_travel`, or a shared `Output::route_board()`), 32 routes a sound,
   each keyed by its slot and parameter so a knob never reads another route's travel.
 - **LFOs on the MK3: SHIFT + SELECT.** The pads pick LFOs (an empty pad makes one,
   ERASE + pad removes one, MUTE + pad mutes or unmutes one: lit red). The left screen shows the focused LFO's name, the right its
@@ -71,7 +82,7 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
   moves its highlight down a row (wrapping), the knob below turns that row, and ERASE +
   the knob removes the route. A slot becomes a route once it has a Destination; one left
   without is dropped when the page goes. Destination passes over a parameter another
-  route on the sound already drives.
+  Range route on the sound already drives (Add can share destinations).
 - **MIDI CC as a destination.** An LFO can be sent out as a MIDI CC: a CC route has a
   Source (an LFO), a Port (a MIDI output port), a Channel (1–16), a CC (0–119: 120–127
   are channel mode messages, such as All Notes Off, not parameters) and a Depth. It sends `round(127 × travel)`, travel mapping the LFO's 0..1 onto low..high as

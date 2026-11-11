@@ -311,8 +311,8 @@ function widgets.sound_pads(s)
   for i = 1, 16 do
     local snd = group and group.sounds[i]
     if snd and snd.used then
-      out[i] = { name = snd.name, palette = snd.palette, on = i == s.sound }
-    elseif i == s.sound then
+      out[i] = { name = snd.name, palette = snd.palette, on = snd.selected or i == s.sound }
+    elseif (snd and snd.selected) or i == s.sound then
       out[i] = { name = "", palette = 15, on = true }
     else
       out[i] = { empty = true, name = "" }

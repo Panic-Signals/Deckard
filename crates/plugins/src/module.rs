@@ -4,14 +4,15 @@
 use std::ffi::c_void;
 use std::ffi::{CStr, c_char};
 use std::path::{Path, PathBuf};
-use vst3::ComPtr;
 use vst3::Steinberg::*;
+use vst3::{ComPtr, ComWrapper};
 
 /// A loaded VST3 module (kept loaded for the life of the process).
 pub struct Module {
     pub path: PathBuf,
     pub factory: ComPtr<IPluginFactory>,
     pub classes: Vec<ClassInfo>,
+    _host: ComWrapper<crate::com::HostApp>,
 }
 
 // The factory is only used on the thread that creates instances (the main thread).
@@ -29,6 +30,11 @@ impl Module {
     pub fn load(path: &Path) -> Result<Module, String> {
         let factory = unsafe { platform::load(path)? };
         let factory = unsafe { ComPtr::from_raw(factory) }.ok_or("the plug-in has no factory")?;
+        let host = ComWrapper::new(crate::com::HostApp);
+        if let Some(f3) = factory.cast::<IPluginFactory3>() {
+            let ctx = host.as_com_ref::<FUnknown>().unwrap().as_ptr();
+            unsafe { f3.setHostContext(ctx) };
+        }
         let mut classes = Vec::new();
         for i in 0..unsafe { factory.countClasses() } {
             let mut info: PClassInfo = unsafe { std::mem::zeroed() };
@@ -42,7 +48,7 @@ impl Module {
                 name: text(&info.name),
             });
         }
-        Ok(Module { path: path.to_path_buf(), factory, classes })
+        Ok(Module { path: path.to_path_buf(), factory, classes, _host: host })
     }
 
     pub fn has(&self, cid: &[u8; 16]) -> bool {

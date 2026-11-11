@@ -1621,6 +1621,68 @@ fn mk3_audio_loops_show_and_switch_on_the_step_page() {
     assert!(host.errors.is_empty(), "{:?}", host.errors);
 }
 
+/// The MK3's lane draws a take from the cue's offset (docs/audio-plugin.md), as the app's
+/// pattern editor does: with the offset one beat, the loop's first beat is one beat in,
+/// and what comes before it is the end of the take, drawn as a repeat (darker).
+#[test]
+fn the_mk3_lane_draws_the_loop_from_its_offset() {
+    let Some(doc) = project() else { return };
+    let Some(mut host) = boot("M3", Some(doc.clone())) else { return };
+    host.tick();
+    let (g, pi) = {
+        let st = host.state.borrow();
+        (st.focus.group, st.focus.pattern.unwrap())
+    };
+    let s = 3;
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("Loop[120].wav");
+    std::fs::write(&file, b"not read here").unwrap();
+    {
+        let mut d = doc.borrow_mut();
+        d.audio_only(g, s).unwrap();
+        d.set_takes(g, s, &[deckard_doc::TakeSpec { file, frames: 88_200, rate: 44_100, beats: 4.0 }], "Load Loop").unwrap();
+        d.set_audio_in(g, s, &[pi], Some(0), "Load Loop").unwrap();
+    }
+    // The first quarter of the take (its first beat) is loud, the rest silent.
+    let peaks: Vec<(f32, f32)> = (0..1024).map(|i| if i < 256 { (-0.9, 0.9) } else { (0.0, 0.0) }).collect();
+    host.state.borrow_mut().loop_peaks.insert((g, s, 0), std::sync::Arc::new(peaks));
+    host.state.borrow_mut().focus.sound = s;
+    host.tick();
+    host.press("BUTTON_STEP").unwrap();
+    host.tick();
+    // The x of the first loud column in the first colour, and in the repeats' colour.
+    let loud = |host: &Host| -> (Option<f32>, Option<f32>) {
+        use deckard_nwl::draw::Fill;
+        fn find(e: &deckard_nwl::draw::Element, out: &mut Vec<deckard_nwl::draw::Shape>) {
+            if e.kind == "EventPatternEditor" && !e.hidden {
+                out.extend(e.shapes.iter().cloned());
+            }
+            e.children.iter().for_each(|c| find(c, out));
+        }
+        let (page, _) = host.display().expect("display");
+        let mut shapes = Vec::new();
+        find(&page, &mut shapes);
+        let first = |palette: u32| {
+            shapes
+                .iter()
+                // The lane's columns (a 240th of the width), not notes or lines.
+                .filter(|sh| (sh.x1.frac - sh.x0.frac - 1.0 / 240.0).abs() < 1e-4 && sh.y1.px - sh.y0.px > 3)
+                .filter(|sh| matches!(sh.fill, Fill::Palette { palette: p, .. } if p == palette))
+                .map(|sh| sh.x0.frac)
+                .fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.min(v))))
+        };
+        (first(1), first(19))
+    };
+    let (bright0, _) = loud(&host);
+    let b0 = bright0.expect("loud bright columns at offset 0");
+    doc.borrow_mut().set_audio_offset(g, pi, s, 960, "Move Audio").unwrap();
+    host.tick();
+    let (bright1, _) = loud(&host);
+    let b1 = bright1.expect("loud bright columns at offset 960");
+    assert!(b1 > b0, "the first bright column is one beat in: {b0} -> {b1}");
+    assert!(host.errors.is_empty(), "{:?}", host.errors);
+}
+
 /// BROWSE on the MK3: NI's browse page runs on DECKARD's library as the app gives it
 /// (`BrowserView`), with no browser calls left stubbed and no errors; turning the 4-D
 /// encoder moves the result focus and pressing it loads.

@@ -192,13 +192,24 @@ fn bare_state(bytes: &[u8]) -> State {
     State { component: bytes.to_vec(), controller: Vec::new() }
 }
 
+/// Why a Kontakt library file (`.nksn` snapshot, `.nki` instrument) isn't loaded.
+pub const KONTAKT_FILE: &str = "Kontakt library snapshots and instruments (.nksn, .nki) can't be loaded from DECKARD's browser: Kontakt only recalls them when it opens the file itself. Load it in Kontakt's own browser, or load a Maschine sound or group saved with it.";
+
 /// A preset in a plug-in's own file format (`.nfm8`, `.nmsv`, `.nrkt`, `.rkplr`,
 /// `.ens`), hosted through its VST3 plug-in.
+///
+/// Kontakt library files are refused ([`KONTAKT_FILE`]). Kontakt 7 resolves a library
+/// instrument's content from where its file is; given the file's bytes as its state
+/// (raw, or inside the wrapper of a state Maschine saved), it can't, and stops in
+/// `setState` on a modal "cannot be recalled correctly, perhaps due to missing
+/// content" box, which froze the thread loading it. (Measured 2026-11-09 with Session
+/// Guitarist snapshots and instruments; a state Maschine saved still loads.)
 pub fn native_preset(ext: &str, bytes: &[u8], installed: &[Entry]) -> Option<Result<Resolved, String>> {
     let ext = ext.to_ascii_lowercase();
     let plugin = match ext.as_str() {
         "nfm8" => "FM8",
         "nmsv" => "Massive",
+        "nksn" | "nki" => return Some(Err(KONTAKT_FILE.into())),
         "nrkt" | "rkplr" | "ens" => "Reaktor 6",
         _ => return None,
     };
@@ -236,7 +247,14 @@ fn wrap_nisound_preset(ext: &str, raw: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let e_idx = find_tag(buf, b"DSINe\0\0\0")?.checked_add(8)?;
-    let t_idx = find_tag(buf, b"DSINt\0\0\0")?.checked_sub(48)?;
+    // Real files have an outer resource tag and an inner NISound chunk with
+    // the same name. Only the inner one has the adjacent compressed DSINs.
+    let t_idx = buf
+        .windows(8)
+        .enumerate()
+        .filter(|(_, w)| *w == b"DSINt\0\0\0")
+        .filter_map(|(i, _)| i.checked_sub(48))
+        .find(|&i| buf.get(i + 68..i + 76) == Some(b"DSINs\0\0\0"))?;
     let t_part = buf.get(t_idx..)?;
     if t_part.len() < 117 || t_part.get(48..56) != Some(b"DSINt\0\0\0") || t_part.get(68..76) != Some(b"DSINs\0\0\0") {
         return None;
@@ -429,7 +447,14 @@ fn parse_dsiny(raw: &[u8]) -> Vec<Vec<Knob>> {
     let parse = || -> Option<Vec<Vec<Knob>>> {
         let root_size = u64::from_le_bytes(raw.get(..8)?.try_into().ok()?) as usize;
         let buf = raw.get(..root_size.min(raw.len()))?;
-        let y_idx = find_tag(buf, b"DSINy\0\0\0")?.checked_sub(48)?;
+        // Both the outer resource and its NISound payload carry DSINy. Only
+        // the inner tag has the hsin frame whose offsets are parsed below.
+        let y_idx = buf
+            .windows(8)
+            .enumerate()
+            .filter(|(_, w)| *w == b"DSINy\0\0\0")
+            .filter_map(|(i, _)| i.checked_sub(48))
+            .find(|&i| buf.get(i + 12..i + 16) == Some(b"hsin"))?;
         let y_part = buf.get(y_idx..)?;
         let y_size = u64::from_le_bytes(y_part.get(..8)?.try_into().ok()?) as usize;
         let y = y_part.get(..y_size.min(y_part.len()))?;
@@ -771,6 +796,7 @@ mod tests {
         };
         // Build a synthetic NISound (.nfm8) container with DSINe, DSINy and DSINt/DSINs.
         let mut y_body = vec![0u8; 92];
+        y_body[12..16].copy_from_slice(b"hsin");
         y_body[48..56].copy_from_slice(b"DSINy\0\0\0");
         y_body.extend_from_slice(&2u32.to_le_bytes()); // 2 sections
         for (sec_name, knobs) in [
@@ -817,6 +843,9 @@ mod tests {
         let mut raw = vec![0u8; 64];
         raw[12..16].copy_from_slice(b"hsin");
         raw[48..56].copy_from_slice(b"DSINe\0\0\0");
+        // The real resource index repeats this tag before the inner NISound
+        // header. It has no adjacent DSINs and must not defeat state wrapping.
+        raw.extend_from_slice(b"DSINt\0\0\0");
         raw.extend_from_slice(&y_body);
         raw.extend_from_slice(&t_part);
         let raw_len = raw.len() as u64;
@@ -836,7 +865,14 @@ mod tests {
             ]
         );
         let state = parse_vstpreset(chunk_parts(&resolved.chunk).unwrap().1).unwrap();
-        let t_idx = find_tag(&state.component, b"DSINt\0\0\0").unwrap() - 48;
+        let t_idx = state
+            .component
+            .windows(8)
+            .enumerate()
+            .filter(|(_, w)| *w == b"DSINt\0\0\0")
+            .filter_map(|(i, _)| i.checked_sub(48))
+            .find(|&i| state.component.get(i + 68..i + 76) == Some(b"DSINs\0\0\0"))
+            .unwrap();
         let tp = &state.component[t_idx..];
         let ulen = u32::from_le_bytes(tp[109..113].try_into().unwrap()) as usize;
         let clen = u32::from_le_bytes(tp[113..117].try_into().unwrap()) as usize;
@@ -846,5 +882,17 @@ mod tests {
         assert_eq!(&unwrapped[200..204], b"tsrp");
         assert_eq!(&unwrapped[204..204 + bare_preset.len()], bare_preset);
         assert_eq!(wrap_nisound_preset("nfm8", &state.component), None, "already wrapped");
+    }
+
+    /// Kontakt library files are refused before Kontakt is made: it would stop on a
+    /// modal "missing content" box in setState.
+    #[test]
+    fn kontakt_library_files_are_refused_with_a_reason() {
+        let mut raw = vec![0; 32];
+        raw[12..16].copy_from_slice(b"hsin");
+        let kontakt = vst3("Native Instruments", "Kontakt 7", true, "11111111111111111111111111111111");
+        for ext in ["nksn", "NKSN", "nki", "NKI"] {
+            assert_eq!(native_preset(ext, &raw, &[kontakt.clone()]), Some(Err(KONTAKT_FILE.into())), "{ext}");
+        }
     }
 }

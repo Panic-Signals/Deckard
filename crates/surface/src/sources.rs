@@ -41,6 +41,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("lib/pattern_editor.lua", include_str!("../lua/lib/pattern_editor.lua")),
     ("lib/util.lua", include_str!("../lua/lib/util.lua")),
     ("lib/chain.lua", include_str!("../lua/lib/chain.lua")),
+    ("lib/zhora.lua", include_str!("../lua/lib/zhora.lua")),
     ("lib/quick_edit.lua", include_str!("../lua/lib/quick_edit.lua")),
     ("lib/pin.lua", include_str!("../lua/lib/pin.lua")),
     ("lib/paged.lua", include_str!("../lua/lib/paged.lua")),
