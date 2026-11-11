@@ -52,6 +52,30 @@ fn text_search_matches_name() {
     assert_eq!(r.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Snare[90] Dust"]);
 }
 
+/// The combined browser reads vendor metadata and shared favourites from
+/// different columns. Use only temporary databases, never the installed index.
+#[test]
+fn vendor_and_favorite_metadata_do_not_overlap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let product = tmp.path().join("Maschine 3");
+    std::fs::create_dir_all(&product).unwrap();
+    let path = testing::fixture(&product);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("ALTER TABLE k_sound_info ADD COLUMN vendor TEXT; UPDATE k_sound_info SET vendor='Synth Vendor' WHERE id=10").unwrap();
+    drop(db);
+    let shared = tmp.path().join("Shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let db = rusqlite::Connection::open(shared.join("favorites.db3")).unwrap();
+    db.execute_batch("CREATE TABLE favorites (id TEXT PRIMARY KEY); INSERT INTO favorites VALUES ('id-10')").unwrap();
+    drop(db);
+    let ni = NiIndex::open(&path).unwrap();
+    let r = ni.query(&Query { vendor: Some("Synth Vendor".into()), favorites: true, ..loops(&[]) }).unwrap();
+    assert_eq!(r.items.len(), 1);
+    assert_eq!(r.items[0].vendor, "Synth Vendor");
+    assert!(r.items[0].favorite);
+    assert_eq!(r.items[0].product.as_deref(), Some("Deep Matter"));
+}
+
 #[test]
 fn a_product_maschine_marks_as_gone_is_skipped() {
     let tmp = tempfile::tempdir().unwrap();

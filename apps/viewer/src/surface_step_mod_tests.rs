@@ -78,10 +78,10 @@ fn a_touched_knob_writes_with_touch_auto_write() {
     app.auto_write = true;
     let head = Some((deckard_engine::Mode::Scene(0), 100.0));
     app.touch_write_at(k, head);
-    assert!(app.mod_take.is_none(), "Touch Auto-write off");
+    assert!(app.mod_takes.is_empty(), "Touch Auto-write off");
     app.settings.touch_auto_write = true;
     app.touch_write_at(k, None);
-    assert!(app.mod_take.is_none(), "stopped");
+    assert!(app.mod_takes.is_empty(), "stopped");
     app.touch_write_at(k, head);
-    assert!(app.mod_take.is_some(), "writing");
+    assert!(!app.mod_takes.is_empty(), "writing");
 }

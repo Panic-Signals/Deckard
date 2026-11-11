@@ -238,6 +238,8 @@ struct Shared {
     repaint: Option<eframe::egui::Context>,
     /// What the LEDs should show.
     leds: Option<deckard_mk3::leds::Leds>,
+    #[cfg(test)]
+    leds_applied: Option<(deckard_mk3::leds::Leds, Instant)>,
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
     screens: Option<(u64, ScreenFrame)>,
     display_status: String,
@@ -348,6 +350,11 @@ impl Mk3Io {
         self.shared.lock().unwrap().leds = Some(leds);
     }
 
+    #[cfg(test)]
+    pub(crate) fn leds_applied_at(&self, leds: &deckard_mk3::leds::Leds) -> Option<Instant> {
+        self.shared.lock().unwrap().leds_applied.as_ref().filter(|(l, _)| l == leds).map(|(_, t)| *t)
+    }
+
     /// Show these on the displays (both side by side, 960 × 272); `n` changes when
     /// the picture does.
     pub fn set_screens(&self, n: u64, frame: ScreenFrame) {
@@ -407,6 +414,7 @@ fn run(shared: &Mutex<Shared>) {
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
+        let _polling = crate::controller_timing::Polling::start();
         {
             let mut s = shared.lock().unwrap();
             s.status = format!("{} connected", dev.model().name);
@@ -462,6 +470,10 @@ fn run(shared: &Mutex<Shared>) {
                     s.status = format!("Maschine MK3: {e}");
                     s.connected = false;
                     break;
+                }
+                #[cfg(test)]
+                if let Some(l) = &leds {
+                    shared.lock().unwrap().leds_applied = Some((l.clone(), Instant::now()));
                 }
                 shown = leds;
             }

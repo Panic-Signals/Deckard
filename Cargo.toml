@@ -11,3 +11,7 @@ opt-level = 3
 
 [profile.dev.package.deckard-stretch]
 opt-level = 3
+
+# Zhora's pitch detector has to keep up with the input, in dev builds too.
+[profile.dev.package.deckard-plugins]
+opt-level = 3

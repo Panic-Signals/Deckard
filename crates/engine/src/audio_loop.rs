@@ -1,6 +1,6 @@
 //! The Audio plug-in's player (docs/audio-plugin.md): a loop kept in time with the
 //! song. The timeline cues it on where a pattern plays it ([`LoopRt::cue`]: which take,
-//! and the song beat its first beat falls on); from then its place in the take follows
+//! and the song beat its first frame falls on: the pattern's offset and Start, as Maschine's); from then its place in the take follows
 //! the song (the beat since the cue, modulo the take's length in beats), whatever the
 //! tempo:
 //!

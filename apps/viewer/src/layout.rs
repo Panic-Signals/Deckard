@@ -23,6 +23,9 @@ pub mod sampling;
 pub mod save_dialog;
 pub(crate) mod strip;
 pub(crate) mod value_entry;
+pub(crate) use mixer::silent_master_note;
+#[cfg(test)]
+pub(crate) use mixer::strip_cv_flag;
 pub use mixer::{Channel, MixerSection, MixerSections};
 
 // Surfaces (Definitions/Colors.txt).
@@ -95,6 +98,11 @@ fn with_alpha(c: Color32, a: u8) -> Color32 {
 fn dim(c: Color32, f: f32) -> Color32 {
     let m = |v: u8| (v as f32 * f) as u8;
     Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
+}
+
+/// A sound row that SELECT has, besides the focused one.
+fn sound_base(app: &App, sound: usize) -> Color32 {
+    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { S00 }
 }
 
 /// A colour slot; `Default` falls back to `default_slot` (our guess at Maschine's
@@ -594,6 +602,14 @@ pub enum Act {
     /// Sound `.1`'s Audio plug-in on (its take in focus) or off in pattern `.2` of group
     /// `.0` (a double-click on its waveform).
     ToggleAudio(usize, usize, usize),
+    /// Sound `s`'s audio in pattern `p` of group `g` to start at `offset` (ticks from
+    /// 1.1.1): its waveform dragged along the grid.
+    MoveAudio {
+        g: usize,
+        p: usize,
+        s: usize,
+        offset: i64,
+    },
     /// Notes of group `g`'s pattern `p` given new expression (the Expression editor).
     SetExpressions {
         g: usize,
@@ -692,6 +708,8 @@ pub enum Act {
     MidiInputParam(usize, u32, f64),
     /// The focused slot's page of parameters.
     PluginPage(usize),
+    /// A press of the focused Zhora's `tune`, `check`, `live` or `hold`.
+    Zhora(&'static str),
     /// The page of parameters slot `.1` of chain `.0` shows (its strip panel's own).
     PluginPageOf(deckard_doc::Chain, usize, usize),
     Preferences,
@@ -706,6 +724,8 @@ pub enum Act {
     RemoveLfo(u8),
     /// Give the project these CC routes (the LFO panel's MIDI CC section).
     SetCcRoutes(Vec<deckard_model::mod_matrix::CcRoute>),
+    /// Give the project these CV routes (the LFO panel's CV section).
+    SetCvRoutes(Vec<deckard_model::mod_matrix::CvRoute>),
     FocusLfo(u8),
     /// Show or hide the Sampler pages' waveform.
     ToggleWaveform,
@@ -885,12 +905,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::FocusGroup(g) => app.focus_group(g),
             Act::FocusPattern(g, p) => {
                 if g != app.group {
-                    app.sound = 0;
+                    app.focus_sound(0);
                 }
                 app.group = g;
                 app.pattern = p;
             }
-            Act::FocusSound(s) => app.sound = s,
+            Act::FocusSound(s) => app.focus_sound(s),
             Act::SongView(v) => app.song_view = v,
             Act::PianoRoll(v) => app.piano_roll = v,
             Act::ScenesShown => app.show_scenes = None,
@@ -1009,6 +1029,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             | Act::SplitNotes { .. }
             | Act::JoinNotes { .. }
             | Act::ToggleAudio(..)
+            | Act::MoveAudio { .. }
             | Act::EditMidi { .. } => app.arrange(a),
             Act::Lane(l) => app.lane = l,
             Act::LanesDialog(open) => app.lanes_dialog = open,
@@ -1197,10 +1218,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::MoveSlot(from, to) => app.move_slot(from, to),
             Act::RemoveSlot(i) => apply(app, vec![Act::RemoveSlotIn(app.chain(), i)]),
             Act::RemoveSlotIn(c, i) => {
-                if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().remove_slot_in(c, i)
-                {
-                    app.status = format!("can't remove it: {e}");
+                let key = app.plugin_slot_key(c, i);
+                if let Some(doc) = app.doc.clone() {
+                    match doc.borrow_mut().remove_slot_in(c, i) {
+                        Ok(()) => app.samples.plugins.retain(|s| *s != key),
+                        Err(e) => app.status = format!("can't remove it: {e}"),
+                    }
                 }
                 app.plugin_views.clear();
             }
@@ -1217,6 +1240,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
+            Act::Zhora(what) => app.zhora_press(what),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
             Act::MidiInputParam(g, id, v) => {
                 if let Some(Ok(out)) = &app.output {
@@ -1234,10 +1258,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.chain_pages.entry(c).or_default().slot_pages.insert(i, n);
             }
             Act::Preferences => app.prefs = Some(app.prefs.unwrap_or(0)),
-            Act::ToggleMixer => {
-                app.mixer = !app.mixer;
-                app.lfos &= !app.mixer;
-            }
+            Act::ToggleMixer => app.set_mixer(!app.mixer),
             Act::ToggleLfos => {
                 app.lfos = !app.lfos;
                 app.mixer &= !app.lfos;
@@ -1252,6 +1273,12 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::SetCcRoutes(routes) => {
                 let Some(doc) = app.doc.clone() else { continue };
                 if let Err(e) = doc.borrow_mut().set_cc_routes(routes) {
+                    app.status = format!("can't change that: {e}");
+                }
+            }
+            Act::SetCvRoutes(routes) => {
+                let Some(doc) = app.doc.clone() else { continue };
+                if let Err(e) = doc.borrow_mut().set_cv_routes(routes) {
                     app.status = format!("can't change that: {e}");
                 }
             }
@@ -3134,7 +3161,8 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
         let over = app.file_drag.is_some_and(|at| r.contains(at))
             || ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p))
                 && (egui::DragAndDrop::payload::<crate::layout::browser::Dragged>(ui.ctx()).is_some()
-                    || egui::DragAndDrop::payload::<crate::layout::browser::DraggedFile>(ui.ctx()).is_some());
+                    || egui::DragAndDrop::payload::<crate::layout::browser::DraggedFile>(ui.ctx()).is_some()
+                    || egui::DragAndDrop::payload::<crate::layout::sampling::DraggedTake>(ui.ctx()).is_some());
         if over {
             ui.painter().rect_stroke(r.shrink(1.0), 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
         }
@@ -3949,6 +3977,12 @@ pub(crate) fn channel_page(app: &App, doc: &deckard_doc::Document) -> Option<(Ve
     Some((names, page, pg))
 }
 
+/// Where step `step` of a parameter of `steps` steps is in `values` (its listed values,
+/// normalized): the first entry when it isn't listed.
+pub(crate) fn listed_at(values: &[f64], steps: i32, step: usize) -> usize {
+    values.iter().position(|&v| (v * steps.max(1) as f64).round() as usize == step).unwrap_or(0)
+}
+
 /// Set parameter `id` of the plug-in in slot `i` of chain `c` (normalized).
 fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64) {
     let mut native = false;
@@ -3965,6 +3999,14 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
                 new_text = Some(h.text(id, v));
             }
             None => {
+                // A Tune that just finished on it is its own undo step first, so this
+                // edit's undo can't take the new table back with it.
+                if g.changed_by_itself() {
+                    drop(g);
+                    let key = app.plugin_slot_key(chain, i);
+                    app.store_finished_tunes(|s| *s == key, true);
+                    g = p.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
                 g.set_param(id, v);
                 new_text = Some(g.param_text(id, v));
                 native = g.is_native();
@@ -3977,6 +4019,11 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
         let key = app.plugin_slot_key(chain, i);
         app.store_plugin_states_of(|s| *s == key);
     }
+    echo_plugin_param(app, chain, i, id, v, new_text.as_deref());
+}
+
+/// The shared local echo for software and hardware writes, on the slot's own page.
+pub(crate) fn echo_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64, text: Option<&str>) {
     let page = app.view_page((chain, i));
     if let Some(view) = app.plugin_views.get_mut(&(chain, i)) {
         if let Some(pg) = view.pages.get(page) {
@@ -3985,8 +4032,8 @@ fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32,
                     && let Some(slot) = view.values.get_mut(k)
                 {
                     slot.0 = v;
-                    if let Some(t) = &new_text {
-                        slot.1 = t.clone();
+                    if let Some(t) = &text {
+                        slot.1 = (*t).to_string();
                     }
                 }
             }
@@ -4339,6 +4386,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     let mut routes: Vec<(usize, Vec<String>, Vec<RouteSet>)> = Vec::new();
     // Knobs that are a plug-in's choices: (knob, the names of its values).
     let mut plugin_choices: Vec<(usize, Vec<String>)> = Vec::new();
+    // A Zhora output's choices: what each sets (only None and the channels free for it).
+    let mut choice_values: Vec<(usize, Vec<f64>)> = Vec::new();
+    let mut zhora: Option<deckard_surface::ZhoraView> = None;
+    let mut tuner: Option<deckard_surface::TunerView> = None;
     let mut groove_button = None;
     let mut hint: Option<String> = None;
     let groove = |g: usize, s: usize, f: &str| app.groove_setting(g, s, f);
@@ -4469,9 +4520,28 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                 }
                                 sections = pg.sections.into_iter().map(|(i, n)| (i, n.into())).collect();
                             } else if let Some(pg) = v.pages.get(page) {
+                                zhora = app.zhora_view(p);
+                                tuner = app.tuner_view();
                                 for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
-                                    let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
+                                    let (value, mut text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
+                                    let steps = info.steps.max(1) as f64;
+                                    let at = (value * steps).round() as usize;
+                                    if let Some(offered) = app.zhora_offered(p, info.id, at) {
+                                        let called = |n: usize| crate::zhora_ui::choice_name(&app.settings, info.id, n).unwrap_or_default();
+                                        let names = offered.iter().map(|&n| called(n)).collect();
+                                        let values = offered.iter().map(|&n| n as f64 / steps).collect();
+                                        text = called(at);
+                                        plugin_choices.push((k, names));
+                                        choice_values.push((k, values));
+                                        // `cur` is the step, as on the controller; the selector finds it in the list.
+                                        let edit = Edit::PluginChoice(i, info.id, info.steps, at, info.default);
+                                        params.push(Some((name, text, value as f32, Some(edit))));
+                                        if !section.is_empty() {
+                                            sections.push((k, section.clone().into()));
+                                        }
+                                        continue;
+                                    }
                                     let units = if info.units.is_empty() || text.ends_with(&info.units) {
                                         String::new()
                                     } else {
@@ -4720,8 +4790,11 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         if let Some(Edit::PluginChoice(slot, id, steps, cur, _)) = *edit {
             if let Some((_, names)) = plugin_choices.iter().find(|(k, _)| *k == i) {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                let set = move |k: usize| Act::PluginParam(slot, id, k as f64 / steps as f64);
-                selector(ui, &painter, r, (i, name.as_ref(), value), &names, cur, &set, gcol, acts);
+                let values = choice_values.iter().find(|(k, _)| *k == i).map(|(_, v)| v.clone());
+                // A list of chosen steps (a Zhora output's) shows the step `cur` at its place in it.
+                let at = values.as_ref().map_or(cur, |v| listed_at(v, steps, cur));
+                let set = move |k: usize| Act::PluginParam(slot, id, values.as_ref().map_or(k as f64 / steps as f64, |v| v[k]));
+                selector(ui, &painter, r, (i, name.as_ref(), value), &names, at, &set, gcol, acts);
             }
             continue;
         }
@@ -4833,6 +4906,22 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             painter.circle_filled(c + Vec2::angled(a) * 16.0, 3.0, Color32::from_rgb(0x9a, 0xd0, 0xff));
         }
     }
+    if let Some(z) = &zhora {
+        // After the eight knobs, as the MK3's right screen.
+        let r = Rect::from_min_max(Pos2::new(slot_x(8) - 6.0, header.bottom() + 8.0), Pos2::new(ed.right() - 10.0, knob_y + 84.0));
+        zhora_panel(ui, &painter, r, z, gcol, acts);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    if let Some(t) = &tuner {
+        // After its knobs, as the MK3's right screen.
+        let r = Rect::from_min_max(Pos2::new(slot_x(8) - 6.0, header.bottom() + 8.0), Pos2::new(ed.right() - 10.0, knob_y + 84.0));
+        painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
+        let left = r.left() + 12.0;
+        tuner_dial(&painter, Pos2::new(left, r.top() + 50.0), t.note.as_deref(), t.cents, t.in_tune);
+        let bar = if t.muted { format!("A4 = {} \u{b7} Muted", t.reference) } else { format!("A4 = {}", t.reference) };
+        painter.text(Pos2::new(left, r.bottom() - 10.0), Align2::LEFT_CENTER, bar, font(11.0), white(160));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    }
     if assign_h > 0.0 {
         let fields = assign::Fields {
             area: Rect::from_min_max(Pos2::new(ed.left(), rect.bottom() - assign_h), rect.max),
@@ -4842,6 +4931,67 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             macro_view: macro_view.as_ref(),
         };
         assign::area(ui, app, doc, &painter, fields, gcol, acts);
+    }
+}
+
+/// The focused Zhora's tuner in `r`, beside its knobs: TUNE, CHECK, LIVE and HOLD (lit
+/// while each is on), the note heard and its cents (green within 5), a needle over
+/// -50..+50 cents, and the bar (a message in its place).
+fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::ZhoraView, gcol: Color32, acts: &mut Vec<Act>) {
+    let amber = Color32::from_rgb(0xff, 0xc2, 0x3a);
+    painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
+    let left = r.left() + 12.0;
+    for (k, (what, on)) in [("tune", z.tune), ("check", z.check), ("live", z.live), ("hold", z.hold)].into_iter().enumerate() {
+        let b = Rect::from_min_size(Pos2::new(left + k as f32 * 64.0, r.top()), Vec2::new(58.0, 22.0));
+        let name = what.to_uppercase();
+        let resp = ui.interact(b, ui.id().with(("zhora", what)), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+        let fill = if on {
+            gcol
+        } else if resp.hovered() {
+            S03
+        } else {
+            S02
+        };
+        painter.rect_filled(b, 3.0, fill);
+        painter.text(b.center(), Align2::CENTER_CENTER, &name, font(11.0), if on { Color32::BLACK } else { white(200) });
+        if resp.clicked() {
+            acts.push(Act::Zhora(what));
+        }
+    }
+    tuner_dial(painter, Pos2::new(left, r.top() + 50.0), z.note.as_deref(), z.cents, z.in_tune);
+    let (text, colour) = match &z.message {
+        Some(m) => (m.clone(), amber),
+        None if z.right.is_empty() => (z.status.clone(), white(160)),
+        None => (format!("{} \u{b7} {}", z.status, z.right), white(160)),
+    };
+    painter.text(Pos2::new(left, r.bottom() - 10.0), Align2::LEFT_CENTER, text, font(11.0), colour);
+}
+
+/// A tuner's dial with its left middle at `at`: the note heard and its cents (green
+/// within 5), and a needle over -50..+50 cents. Zhora's panel and the Tuner effect's.
+fn tuner_dial(painter: &Painter, at: Pos2, note: Option<&str>, cents: Option<f32>, in_tune: bool) {
+    let green = Color32::from_rgb(0x3d, 0xd6, 0x6a);
+    let amber = Color32::from_rgb(0xff, 0xc2, 0x3a);
+    let (left, y) = (at.x, at.y);
+    let ink = if in_tune { green } else { white(230) };
+    match note {
+        Some(n) => painter.text(Pos2::new(left, y), Align2::LEFT_CENTER, n, font(28.0), ink),
+        None => painter.text(Pos2::new(left, y), Align2::LEFT_CENTER, "\u{2013}", font(28.0), white(90)),
+    };
+    if let Some(c) = cents {
+        painter.text(Pos2::new(left + 64.0, y), Align2::LEFT_CENTER, crate::zhora_ui::cents_text(c), font(13.0), ink);
+    }
+    let scale = Rect::from_min_max(Pos2::new(left + 112.0, y - 12.0), Pos2::new(left + 248.0, y + 12.0));
+    let at = |c: f32| scale.left() + (c.clamp(-50.0, 50.0) + 50.0) / 100.0 * scale.width();
+    painter.rect_filled(Rect::from_x_y_ranges(at(-5.0)..=at(5.0), scale.y_range()), 0.0, Color32::from_rgb(0x1a, 0x4a, 0x2a));
+    painter.hline(scale.x_range(), scale.center().y, Stroke::new(1.0, white(60)));
+    for t in [-50.0, -25.0, 0.0, 25.0, 50.0] {
+        let h = if t == 0.0 { 7.0 } else { 4.0 };
+        painter.vline(at(t), (scale.center().y - h)..=(scale.center().y + h), Stroke::new(1.0, white(110)));
+    }
+    if let Some(c) = cents {
+        painter.vline(at(c), (scale.top() - 2.0)..=(scale.bottom() + 2.0), Stroke::new(2.5, if in_tune { green } else { amber }));
     }
 }
 
@@ -5586,7 +5736,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 r == app.sound,
                 sound.is_some_and(|s| s.muted),
                 app.lit.contains(&(app.group, r)),
-                S00,
+                sound_base(app, r),
                 app.meter(app.group, Some(r)),
             );
             if r < group.sounds.len() {
@@ -5764,7 +5914,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // Time: the pattern's own, from its tick 0 to two bars past the next whole bar after
     // its end (room to drag the end into); the pattern plays from `start` for `plen`
     // (the span marked on the timeline).
-    let (plen, start) = pat.map_or((bar, 0), |pt| (pattern_len(p, app.group, app.pattern), pt.start));
+    let (plen, start) = pat.map_or((app.default_pattern_length(p), 0), |pt| (pattern_len(p, app.group, app.pattern), pt.start));
     let end = start + plen;
     let view = (((end + bar - 1) / bar).max(1) + 2) * bar;
     // What of it is shown (horizontal zoom): from `shown_from` for `shown` ticks, kept as
@@ -5931,7 +6081,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             r == app.sound,
             sound.is_some_and(|s| s.muted),
             app.lit.contains(&(app.group, r)),
-            S00,
+            sound_base(app, r),
             app.meter(app.group, Some(r)),
         );
         if r < group.sounds.len() {
@@ -6006,10 +6156,24 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     if end < view {
         gp.rect_filled(Rect::from_min_max(Pos2::new(x_of(end as f64), grid.top()), grid.max), 0.0, black(80));
     }
+    let drag_id = ui.id().with("note-drag");
+    let mut drag: Option<NoteDrag> = ui.data(|d| d.get_temp(drag_id));
+    // An Expression edit left behind (its lane gone, the button up) isn't shown or kept.
+    if !expr_lane::keep_drag(&drag, app.lane, pat.is_some(), ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released())) {
+        drag = None;
+    }
+    // The grid; Shift snaps a quarter as fine.
+    let snap = if ui.input(|i| i.modifiers.shift) { (app.grid / 4).max(1) } else { app.grid.max(1) };
+    // A dragged loop's new offset: on the grid's step (Shift: any tick), within the loop.
+    let audio_to = |from: i64, ticks: i64, loop_ticks: i64| {
+        let q = if ui.input(|i| i.modifiers.shift) { 1 } else { app.grid.max(1) };
+        (((from + ticks) as f64 / q as f64).round() as i64 * q).rem_euclid(loop_ticks.max(1))
+    };
     // Audio plug-ins' loops on their sounds' rows (in the piano roll, the focused
-    // sound's behind its notes): from the pattern's start, a loop's length in beats at a
-    // time, repeats darker (as Maschine shows them), dim where it's off in the pattern.
-    // Placed by beats, they stay on the steps whatever the tempo.
+    // sound's behind its notes): the take's first frame at its offset (ticks from
+    // 1.1.1), a loop's length in beats at a time; the pass from there bright, the others
+    // darker (as Maschine shows repeats), dim where it's off in the pattern. Placed by
+    // beats, they stay on the steps whatever the tempo. A drag shows where it'll go.
     for (si, snd) in group.sounds.iter().enumerate() {
         if app.piano_roll && si != app.sound {
             continue;
@@ -6031,8 +6195,12 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         if loop_ticks <= 0.0 || peaks.is_empty() {
             continue;
         }
+        let offset = match &drag {
+            Some(NoteDrag::Audio { sound, from, ticks, loop_ticks }) if *sound == si => audio_to(*from, *ticks, *loop_ticks),
+            _ => cue.map_or(0, |c| c.offset),
+        } as f64;
         let colour = sound_color(p, app.group, si);
-        let alpha = |rep: usize| -> u8 {
+        let alpha = |rep: i64| -> u8 {
             match (cue.is_some(), app.piano_roll, rep) {
                 (false, ..) => 40,
                 (true, true, _) => 70,
@@ -6044,15 +6212,13 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         let (x0, x1) = (x_of(start as f64).max(grid.left()), x_of(end as f64).min(grid.right()));
         let mut x = x0.floor();
         while x < x1 {
-            let t = tick_at(x + 0.5) - start as f64;
-            if t >= 0.0 {
-                let rep = (t / loop_ticks).floor() as usize;
-                let f = (t / loop_ticks).fract();
-                let i = ((f * peaks.len() as f64) as usize).min(peaks.len() - 1);
-                let (lo, hi) = peaks[i];
-                let c = Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), alpha(rep));
-                gp.vline(x + 0.5, (mid - hi * half)..=(mid - lo * half).max(mid - hi * half + 1.0), Stroke::new(1.0, c));
-            }
+            let t = tick_at(x + 0.5) - offset;
+            let rep = (t / loop_ticks).floor() as i64;
+            let f = t.rem_euclid(loop_ticks) / loop_ticks;
+            let i = ((f * peaks.len() as f64) as usize).min(peaks.len() - 1);
+            let (lo, hi) = peaks[i];
+            let c = Color32::from_rgba_unmultiplied(colour.r(), colour.g(), colour.b(), alpha(rep));
+            gp.vline(x + 0.5, (mid - hi * half)..=(mid - lo * half).max(mid - hi * half + 1.0), Stroke::new(1.0, c));
             x += 1.0;
         }
     }
@@ -6061,12 +6227,6 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // empty space box-selects, double-click adds, Delete removes. Draw mode: click
     // adds or removes; dragging paints notes along the rows. A drag in progress lives
     // in egui memory and shows as a preview until the button is released.
-    let drag_id = ui.id().with("note-drag");
-    let mut drag: Option<NoteDrag> = ui.data(|d| d.get_temp(drag_id));
-    // An Expression edit left behind (its lane gone, the button up) isn't shown or kept.
-    if !expr_lane::keep_drag(&drag, app.lane, pat.is_some(), ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released())) {
-        drag = None;
-    }
     let row_of = |n: &Note| -> Option<usize> {
         if app.piano_roll {
             (n.sound == app.sound && n.pitch >= lo && n.pitch <= hi).then(|| (hi - n.pitch) as usize)
@@ -6083,8 +6243,6 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             Pos2::new(note_right(x_of(pos), x_of(pos + n.length as f64)), y + row_h - bottom),
         ))
     };
-    // The grid; Shift snaps a quarter as fine.
-    let snap = if ui.input(|i| i.modifiers.shift) { (app.grid / 4).max(1) } else { app.grid.max(1) };
     let snapped = |x: f32| (tick_at(x) as i64).div_euclid(snap) * snap;
     let row_at = |y: f32| ((y - grid.top() + y0) / row_h).floor() as i64;
     // A new note at a grid position: drum rows keep the pitch the sound already uses
@@ -6107,6 +6265,17 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             velocity: 100,
             probability: 100,
         })
+    };
+    // The Audio plug-in whose loop a press at `pos` would drag: its row's in pad view,
+    // the focused sound's in the piano roll; on in the pattern. (Sound, offset, the
+    // loop's ticks.)
+    let audio_at = |pos: Pos2| -> Option<(usize, i64, i64)> {
+        let s = if app.piano_roll { app.sound } else { usize::try_from(row_at(pos.y)).ok()? };
+        let snd = group.sounds.get(s).filter(|x| x.instrument == "AudioModule")?;
+        let cue = pat?.audio.iter().find(|c| c.sound == s)?;
+        let take = snd.audio.as_ref()?.takes.get(cue.take)?;
+        let loop_ticks = (take.beats * PPQ as f64).round() as i64;
+        (loop_ticks > 0).then_some((s, cue.offset, loop_ticks))
     };
     let hit = |pos: Pos2| {
         notes.iter().rev().find_map(|n| note_rect(n).filter(|r| r.expand(1.0).contains(pos)).map(|r| (**n, pos.x > r.right() - 6.0)))
@@ -6210,332 +6379,334 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     }
     let marks = marks.into_inner();
     ui.ctx().data_mut(|d| d.insert_temp(header_rect("expression marks"), marks));
-    if pat.is_some() {
-        let resp = ui.interact(grid, ui.id().with("grid"), Sense::click_and_drag());
-        let pointer = resp.interact_pointer_pos();
-        // Preview on press: the note under the pointer, or the one a click will draw.
-        if pressed(ui, &resp)
-            && let Some(pos) = pointer
-            && let Some(n) = hit(pos).map(|(n, _)| n).or_else(|| app.draw_mode().then(|| note_at(pos)).flatten())
-        {
-            acts.push(Act::HoldPitch(app.group, n.sound, n.pitch));
+    let resp = ui.interact(grid, ui.id().with("grid"), Sense::click_and_drag());
+    let pointer = resp.interact_pointer_pos();
+    // Preview on press: the note under the pointer, or the one a click will draw.
+    if pressed(ui, &resp)
+        && let Some(pos) = pointer
+        && let Some(n) = hit(pos).map(|(n, _)| n).or_else(|| app.draw_mode().then(|| note_at(pos)).flatten())
+    {
+        acts.push(Act::HoldPitch(app.group, n.sound, n.pitch));
+    }
+    // Drags are measured from where the button went down (egui reports the drag
+    // only after the pointer has moved a little).
+    let press = ui.input(|i| i.pointer.press_origin());
+    let shift = ui.input(|i| i.modifiers.shift);
+    if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
+        acts.push(Act::KeyFocus(KeyFocus::Events));
+    }
+    // Erase, Split, Join and Mute act on clicks only.
+    let tool = matches!(app.mouse, MouseMode::Erase | MouseMode::Split | MouseMode::Join | MouseMode::Mute);
+    // Where Split cuts: the grid line nearest the pointer (⌘: right under it).
+    let cut_at = |x: f32| {
+        let t = tick_at(x) as i64;
+        if ui.input(|i| i.modifiers.command) { t } else { (t + app.grid.max(1) / 2).div_euclid(app.grid.max(1)) * app.grid.max(1) }
+    };
+    if app.mouse == MouseMode::Split
+        && let Some(pos) = resp.hover_pos()
+        && let Some((n, _)) = hit(pos)
+        && let Some(r) = note_rect(&n)
+    {
+        let x = x_of(cut_at(pos.x) as f64);
+        if x > r.left() && x < r.right() {
+            gp.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], Stroke::new(1.5, Color32::WHITE));
         }
-        // Drags are measured from where the button went down (egui reports the drag
-        // only after the pointer has moved a little).
-        let press = ui.input(|i| i.pointer.press_origin());
-        let shift = ui.input(|i| i.modifiers.shift);
-        if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
-            acts.push(Act::KeyFocus(KeyFocus::Events));
-        }
-        // Erase, Split, Join and Mute act on clicks only.
-        let tool = matches!(app.mouse, MouseMode::Erase | MouseMode::Split | MouseMode::Join | MouseMode::Mute);
-        // Where Split cuts: the grid line nearest the pointer (⌘: right under it).
-        let cut_at = |x: f32| {
-            let t = tick_at(x) as i64;
-            if ui.input(|i| i.modifiers.command) { t } else { (t + app.grid.max(1) / 2).div_euclid(app.grid.max(1)) * app.grid.max(1) }
-        };
-        if app.mouse == MouseMode::Split
-            && let Some(pos) = resp.hover_pos()
-            && let Some((n, _)) = hit(pos)
-            && let Some(r) = note_rect(&n)
-        {
-            let x = x_of(cut_at(pos.x) as f64);
-            if x > r.left() && x < r.right() {
-                gp.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], Stroke::new(1.5, Color32::WHITE));
+    }
+    if resp.drag_started()
+        && !tool
+        && let Some(at) = press.or(pointer)
+    {
+        drag = Some(match hit(at) {
+            // Empty space on an Audio plug-in's row: its loop moves along.
+            None if !app.draw_mode() && audio_at(at).is_some() => {
+                let (sound, from, loop_ticks) = audio_at(at).unwrap();
+                NoteDrag::Audio { sound, from, ticks: 0, loop_ticks }
             }
-        }
-        if resp.drag_started()
-            && !tool
-            && let Some(at) = press.or(pointer)
-        {
-            drag = Some(match hit(at) {
-                Some((n, true)) => {
-                    // A selected note resizes the whole selection.
-                    let ns = if app.selected.contains(&n) { app.selected.clone() } else { vec![n] };
-                    NoteDrag::Resize { notes: ns, anchor: n, length: n.length }
-                }
-                Some((n, false)) => {
-                    let group_move = !app.draw_mode() && app.selected.contains(&n);
-                    if !app.draw_mode() && !group_move {
-                        acts.push(Act::SelectNotes(vec![n]));
-                    }
-                    NoteDrag::Move { notes: if group_move { app.selected.clone() } else { vec![n] }, ticks: 0, rows: 0 }
-                }
-                None if app.draw_mode() => NoteDrag::Paint { notes: note_at(at).into_iter().collect() },
-                None => NoteDrag::Select { origin: at, to: at },
-            });
-            ui.data_mut(|d| d.insert_temp(ui.id().with("note-drag-origin"), at));
-        }
-        let origin: Option<Pos2> = ui.data(|d| d.get_temp(ui.id().with("note-drag-origin")));
-        if let (Some(d), Some(pos), Some(origin)) = (drag.as_mut(), pointer, origin)
-            && resp.dragged()
-        {
-            match d {
-                NoteDrag::Move { notes: ns, ticks, rows } => {
-                    // Snap the grabbed note's new start to the grid; the rest follow.
-                    let anchor = hit(origin).map_or(ns[0], |(n, _)| n);
-                    let rel = anchor.position;
-                    let target = (rel + ((pos.x - origin.x) / scale) as i64).div_euclid(snap) * snap;
-                    *ticks = target - rel;
-                    *rows = row_at(pos.y) - row_at(origin.y);
-                }
-                NoteDrag::Resize { anchor, length, .. } => {
-                    let rel = anchor.position;
-                    let end = (rel + anchor.length + ((pos.x - origin.x) / scale) as i64 + snap - 1).div_euclid(snap) * snap;
-                    *length = (end - rel).max(snap);
-                }
-                NoteDrag::Paint { notes: ns } => {
-                    if let Some(n) = note_at(pos)
-                        && hit(pos).is_none()
-                        && !ns.iter().any(|m| m.sound == n.sound && m.pitch == n.pitch && m.position == n.position)
-                    {
-                        ns.push(n);
-                    }
-                }
-                NoteDrag::Select { to, .. } => *to = pos,
-                NoteDrag::Lane { .. } | NoteDrag::Midi { .. } | NoteDrag::Expr(_) | NoteDrag::Span { .. } => {}
+            Some((n, true)) => {
+                // A selected note resizes the whole selection.
+                let ns = if app.selected.contains(&n) { app.selected.clone() } else { vec![n] };
+                NoteDrag::Resize { notes: ns, anchor: n, length: n.length }
             }
-        }
-        if resp.drag_stopped() {
-            match drag.take() {
-                Some(d @ (NoteDrag::Move { .. } | NoteDrag::Resize { .. })) => {
-                    let pairs: Vec<(Note, Note)> = moved(&d).into_iter().filter(|(a, b)| a != b).collect();
-                    if !pairs.is_empty() {
-                        let label = if matches!(d, NoteDrag::Resize { .. }) { "Resize Notes" } else { "Move Notes" };
-                        let (remove, add): (Vec<Note>, Vec<Note>) = pairs.into_iter().unzip();
-                        acts.push(Act::EditNotes { g: app.group, p: app.pattern, label, remove, add });
-                    }
-                }
-                Some(NoteDrag::Paint { notes: ns }) if !ns.is_empty() => {
-                    acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Draw Notes", remove: Vec::new(), add: ns });
-                }
-                Some(NoteDrag::Select { origin, to }) => {
-                    let r = Rect::from_two_pos(origin, to);
-                    let mut sel: Vec<Note> =
-                        notes.iter().filter(|n| note_rect(n).is_some_and(|nr| nr.intersects(r))).map(|n| **n).collect();
-                    if shift {
-                        let extra: Vec<Note> = app.selected.iter().filter(|n| !sel.contains(n)).copied().collect();
-                        sel.extend(extra);
-                    }
-                    acts.push(Act::SelectNotes(sel));
-                }
-                _ => {}
-            }
-        }
-        if resp.clicked()
-            && tool
-            && let Some(pos) = pointer
-            && let Some((n, _)) = hit(pos)
-        {
-            let all: Vec<Note> = notes.iter().map(|n| **n).collect();
-            let selected: Vec<Note> = app.selected.iter().filter(|m| all.contains(m)).copied().collect();
-            let (g, p) = (app.group, app.pattern);
-            match app.mouse {
-                MouseMode::Erase => {
-                    acts.push(Act::SelectNotes(Vec::new()));
-                    acts.push(Act::EditNotes { g, p, label: "Delete Note", remove: vec![n], add: Vec::new() });
-                }
-                MouseMode::Split => {
-                    let targets = if selected.contains(&n) { selected } else { vec![n] };
-                    let at = cut_at(pos.x);
-                    if !deckard_doc::note_tools::split(&targets, at).0.is_empty() {
-                        acts.push(Act::SelectNotes(Vec::new()));
-                        acts.push(Act::SplitNotes { g, p, targets, at });
-                    }
-                }
-                MouseMode::Join => {
-                    if !deckard_doc::note_tools::join(&all, n, &selected).0.is_empty() {
-                        acts.push(Act::SelectNotes(Vec::new()));
-                        acts.push(Act::JoinNotes { g, p, all, clicked: n, selected });
-                    }
-                }
-                _ => {
-                    let ((remove, add), label) = deckard_doc::note_tools::toggle_mute(n, &selected);
-                    if !remove.is_empty() {
-                        acts.push(Act::SelectNotes(Vec::new()));
-                        acts.push(Act::EditNotes { g, p, label, remove, add });
-                    }
-                }
-            }
-        } else if resp.clicked()
-            && !tool
-            && let Some(pos) = pointer
-        {
-            match (hit(pos), app.draw_mode()) {
-                (Some((n, _)), true) => {
-                    acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Delete Note", remove: vec![n], add: Vec::new() })
-                }
-                (Some((n, _)), false) => {
-                    let mut sel = if shift { app.selected.clone() } else { Vec::new() };
-                    match sel.iter().position(|m| *m == n) {
-                        Some(i) if shift => {
-                            sel.remove(i);
-                        }
-                        _ => sel.push(n),
-                    }
-                    acts.push(Act::SelectNotes(sel));
-                    acts.push(Act::FocusSound(n.sound));
-                }
-                (None, true) => {
-                    if let Some(n) = note_at(pos) {
-                        acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Add Note", remove: Vec::new(), add: vec![n] });
-                        acts.push(Act::FocusSound(n.sound));
-                    }
-                }
-                (None, false) => acts.push(Act::SelectNotes(Vec::new())),
-            }
-        }
-        // Double-click: a note on an empty spot, or delete the note under the pointer; on
-        // an Audio plug-in's row in Loop mode, its loop on or off in the pattern.
-        let loop_row = |pos: Pos2| -> Option<usize> {
-            let s = usize::try_from(row_at(pos.y)).ok()?;
-            let snd = group.sounds.get(s)?;
-            let a = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule" && !app.piano_roll)?;
-            (a.mode == deckard_model::AudioMode::Loop && !a.takes.is_empty()).then_some(s)
-        };
-        if resp.double_clicked()
-            && !app.draw_mode()
-            && !tool
-            && let Some(pos) = pointer
-            && let Some(s) = loop_row(pos).filter(|_| hit(pos).is_none() && pat.is_some())
-        {
-            acts.push(Act::ToggleAudio(app.group, s, app.pattern));
-        } else if resp.double_clicked()
-            && !app.draw_mode()
-            && !tool
-            && let Some(pos) = pointer
-        {
-            match hit(pos) {
-                Some((n, _)) => {
-                    acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Delete Note", remove: vec![n], add: Vec::new() })
-                }
-                None => {
-                    if let Some(n) = note_at(pos) {
-                        acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Add Note", remove: Vec::new(), add: vec![n] });
-                        acts.push(Act::FocusSound(n.sound));
-                    }
-                }
-            }
-        }
-        // Right-click: the event area's menu. A note not in the selection becomes it;
-        // in Group view the row's sound takes the focus (a paste goes there).
-        let menu_id = ui.id().with("event-menu-at");
-        if resp.secondary_clicked()
-            && let Some(pos) = pointer
-        {
-            ui.data_mut(|d| d.insert_temp(menu_id, pos));
-            match hit(pos) {
-                Some((n, _)) if !app.selected.contains(&n) => {
+            Some((n, false)) => {
+                let group_move = !app.draw_mode() && app.selected.contains(&n);
+                if !app.draw_mode() && !group_move {
                     acts.push(Act::SelectNotes(vec![n]));
+                }
+                NoteDrag::Move { notes: if group_move { app.selected.clone() } else { vec![n] }, ticks: 0, rows: 0 }
+            }
+            None if app.draw_mode() => NoteDrag::Paint { notes: note_at(at).into_iter().collect() },
+            None => NoteDrag::Select { origin: at, to: at },
+        });
+        ui.data_mut(|d| d.insert_temp(ui.id().with("note-drag-origin"), at));
+    }
+    let origin: Option<Pos2> = ui.data(|d| d.get_temp(ui.id().with("note-drag-origin")));
+    if let (Some(d), Some(pos), Some(origin)) = (drag.as_mut(), pointer, origin)
+        && resp.dragged()
+    {
+        match d {
+            NoteDrag::Move { notes: ns, ticks, rows } => {
+                // Snap the grabbed note's new start to the grid; the rest follow.
+                let anchor = hit(origin).map_or(ns[0], |(n, _)| n);
+                let rel = anchor.position;
+                let target = (rel + ((pos.x - origin.x) / scale) as i64).div_euclid(snap) * snap;
+                *ticks = target - rel;
+                *rows = row_at(pos.y) - row_at(origin.y);
+            }
+            NoteDrag::Resize { anchor, length, .. } => {
+                let rel = anchor.position;
+                let end = (rel + anchor.length + ((pos.x - origin.x) / scale) as i64 + snap - 1).div_euclid(snap) * snap;
+                *length = (end - rel).max(snap);
+            }
+            NoteDrag::Paint { notes: ns } => {
+                if let Some(n) = note_at(pos)
+                    && hit(pos).is_none()
+                    && !ns.iter().any(|m| m.sound == n.sound && m.pitch == n.pitch && m.position == n.position)
+                {
+                    ns.push(n);
+                }
+            }
+            NoteDrag::Select { to, .. } => *to = pos,
+            NoteDrag::Audio { from, ticks, loop_ticks, .. } => {
+                *ticks = ((pos.x - origin.x) / scale).round() as i64;
+                resp.show_tooltip_text(position_string(p, audio_to(*from, *ticks, *loop_ticks) as f64));
+            }
+            NoteDrag::Lane { .. } | NoteDrag::Midi { .. } | NoteDrag::Expr(_) | NoteDrag::Span { .. } => {}
+        }
+    }
+    if resp.drag_stopped() {
+        match drag.take() {
+            Some(d @ (NoteDrag::Move { .. } | NoteDrag::Resize { .. })) => {
+                let pairs: Vec<(Note, Note)> = moved(&d).into_iter().filter(|(a, b)| a != b).collect();
+                if !pairs.is_empty() {
+                    let label = if matches!(d, NoteDrag::Resize { .. }) { "Resize Notes" } else { "Move Notes" };
+                    let (remove, add): (Vec<Note>, Vec<Note>) = pairs.into_iter().unzip();
+                    acts.push(Act::EditNotes { g: app.group, p: app.pattern, label, remove, add });
+                }
+            }
+            Some(NoteDrag::Audio { sound, from, ticks, loop_ticks }) => {
+                let offset = audio_to(from, ticks, loop_ticks);
+                if offset != from {
+                    acts.push(Act::MoveAudio { g: app.group, p: app.pattern, s: sound, offset });
+                }
+            }
+            Some(NoteDrag::Paint { notes: ns }) if !ns.is_empty() => {
+                acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Draw Notes", remove: Vec::new(), add: ns });
+            }
+            Some(NoteDrag::Select { origin, to }) => {
+                let r = Rect::from_two_pos(origin, to);
+                let mut sel: Vec<Note> = notes.iter().filter(|n| note_rect(n).is_some_and(|nr| nr.intersects(r))).map(|n| **n).collect();
+                if shift {
+                    let extra: Vec<Note> = app.selected.iter().filter(|n| !sel.contains(n)).copied().collect();
+                    sel.extend(extra);
+                }
+                acts.push(Act::SelectNotes(sel));
+            }
+            _ => {}
+        }
+    }
+    if resp.clicked()
+        && tool
+        && let Some(pos) = pointer
+        && let Some((n, _)) = hit(pos)
+    {
+        let all: Vec<Note> = notes.iter().map(|n| **n).collect();
+        let selected: Vec<Note> = app.selected.iter().filter(|m| all.contains(m)).copied().collect();
+        let (g, p) = (app.group, app.pattern);
+        match app.mouse {
+            MouseMode::Erase => {
+                acts.push(Act::SelectNotes(Vec::new()));
+                acts.push(Act::EditNotes { g, p, label: "Delete Note", remove: vec![n], add: Vec::new() });
+            }
+            MouseMode::Split => {
+                let targets = if selected.contains(&n) { selected } else { vec![n] };
+                let at = cut_at(pos.x);
+                if !deckard_doc::note_tools::split(&targets, at).0.is_empty() {
+                    acts.push(Act::SelectNotes(Vec::new()));
+                    acts.push(Act::SplitNotes { g, p, targets, at });
+                }
+            }
+            MouseMode::Join => {
+                if !deckard_doc::note_tools::join(&all, n, &selected).0.is_empty() {
+                    acts.push(Act::SelectNotes(Vec::new()));
+                    acts.push(Act::JoinNotes { g, p, all, clicked: n, selected });
+                }
+            }
+            _ => {
+                let ((remove, add), label) = deckard_doc::note_tools::toggle_mute(n, &selected);
+                if !remove.is_empty() {
+                    acts.push(Act::SelectNotes(Vec::new()));
+                    acts.push(Act::EditNotes { g, p, label, remove, add });
+                }
+            }
+        }
+    } else if resp.clicked()
+        && !tool
+        && let Some(pos) = pointer
+    {
+        match (hit(pos), app.draw_mode()) {
+            (Some((n, _)), true) => {
+                acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Delete Note", remove: vec![n], add: Vec::new() })
+            }
+            (Some((n, _)), false) => {
+                let mut sel = if shift { app.selected.clone() } else { Vec::new() };
+                match sel.iter().position(|m| *m == n) {
+                    Some(i) if shift => {
+                        sel.remove(i);
+                    }
+                    _ => sel.push(n),
+                }
+                acts.push(Act::SelectNotes(sel));
+                acts.push(Act::FocusSound(n.sound));
+            }
+            (None, true) => {
+                if let Some(n) = note_at(pos) {
+                    acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Add Note", remove: Vec::new(), add: vec![n] });
                     acts.push(Act::FocusSound(n.sound));
                 }
-                Some(_) => {}
-                None => {
-                    if let Some(n) = note_at(pos).filter(|_| !app.piano_roll) {
-                        acts.push(Act::FocusSound(n.sound));
-                    }
+            }
+            (None, false) => acts.push(Act::SelectNotes(Vec::new())),
+        }
+    }
+    // Double-click: a note on an empty spot, or delete the note under the pointer; on
+    // an Audio plug-in's row in Loop mode, its loop on or off in the pattern.
+    let loop_row = |pos: Pos2| -> Option<usize> {
+        let s = usize::try_from(row_at(pos.y)).ok()?;
+        let snd = group.sounds.get(s)?;
+        let a = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule" && !app.piano_roll)?;
+        (a.mode == deckard_model::AudioMode::Loop && !a.takes.is_empty()).then_some(s)
+    };
+    if resp.double_clicked()
+        && !app.draw_mode()
+        && !tool
+        && let Some(pos) = pointer
+        && let Some(s) = loop_row(pos).filter(|_| hit(pos).is_none())
+    {
+        if pat.is_some() {
+            acts.push(Act::ToggleAudio(app.group, s, app.pattern));
+        }
+    } else if resp.double_clicked()
+        && !app.draw_mode()
+        && !tool
+        && let Some(pos) = pointer
+    {
+        match hit(pos) {
+            Some((n, _)) => {
+                acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Delete Note", remove: vec![n], add: Vec::new() })
+            }
+            None => {
+                if let Some(n) = note_at(pos) {
+                    acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Add Note", remove: Vec::new(), add: vec![n] });
+                    acts.push(Act::FocusSound(n.sound));
                 }
             }
         }
-        let paste_at = ui.data(|d| d.get_temp::<Pos2>(menu_id)).map_or(crate::clipboard::PasteAt::Keys, |pos| {
-            crate::clipboard::PasteAt::Mouse { tick: tick_at(pos.x) as i64, pitch: app.piano_roll.then(|| hi - row_at(pos.y)) }
+    }
+    // Right-click: the event area's menu. A note not in the selection becomes it;
+    // in Group view the row's sound takes the focus (a paste goes there).
+    let menu_id = ui.id().with("event-menu-at");
+    if resp.secondary_clicked()
+        && let Some(pos) = pointer
+    {
+        ui.data_mut(|d| d.insert_temp(menu_id, pos));
+        match hit(pos) {
+            Some((n, _)) if !app.selected.contains(&n) => {
+                acts.push(Act::SelectNotes(vec![n]));
+                acts.push(Act::FocusSound(n.sound));
+            }
+            Some(_) => {}
+            None => {
+                if let Some(n) = note_at(pos).filter(|_| !app.piano_roll) {
+                    acts.push(Act::FocusSound(n.sound));
+                }
+            }
+        }
+    }
+    let paste_at = ui.data(|d| d.get_temp::<Pos2>(menu_id)).map_or(crate::clipboard::PasteAt::Keys, |pos| {
+        crate::clipboard::PasteAt::Mouse { tick: tick_at(pos.x) as i64, pitch: app.piano_roll.then(|| hi - row_at(pos.y)) }
+    });
+    resp.context_menu(|ui| event_menu(ui, app, paste_at, acts));
+    // ⌘X / ⌘C / ⌘V (macOS sends them as Cut, Copy and Paste).
+    if !ui.ctx().egui_wants_keyboard_input() && app.key_focus == KeyFocus::Events {
+        let (cut, copy, paste) = ui.input_mut(|i| {
+            let ev = |i: &egui::InputState, f: fn(&egui::Event) -> bool| i.events.iter().any(f);
+            let cut = ev(i, |e| matches!(e, egui::Event::Cut)) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::X);
+            let copy = ev(i, |e| matches!(e, egui::Event::Copy)) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+            let paste = ev(i, |e| matches!(e, egui::Event::Paste(_))) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+            (cut, copy, paste)
         });
-        resp.context_menu(|ui| event_menu(ui, app, paste_at, acts));
-        // ⌘X / ⌘C / ⌘V (macOS sends them as Cut, Copy and Paste).
-        if !ui.ctx().egui_wants_keyboard_input() && app.key_focus == KeyFocus::Events {
-            let (cut, copy, paste) = ui.input_mut(|i| {
-                let ev = |i: &egui::InputState, f: fn(&egui::Event) -> bool| i.events.iter().any(f);
-                let cut = ev(i, |e| matches!(e, egui::Event::Cut)) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::X);
-                let copy = ev(i, |e| matches!(e, egui::Event::Copy)) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-                let paste = ev(i, |e| matches!(e, egui::Event::Paste(_))) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
-                (cut, copy, paste)
-            });
-            if cut || copy {
-                acts.push(Act::CopyNotes { cut });
-            }
-            if paste {
-                // A sound copied last pastes onto the focused sound even from here.
-                if app.last_copied == crate::clipboard::Copied::Sound && !app.sound_clipboard.is_empty() {
-                    acts.push(Act::PasteSound(app.group, app.sound));
-                } else {
-                    acts.push(Act::PasteNotes(crate::clipboard::PasteAt::Keys));
-                }
-            }
+        if cut || copy {
+            acts.push(Act::CopyNotes { cut });
         }
-        // ⌘A selects the focused sound's notes; Esc clears the selection.
-        if !ui.ctx().egui_wants_keyboard_input() {
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
-                acts.push(Act::SelectNotes(notes.iter().filter(|n| n.sound == app.sound).map(|n| **n).collect()));
-            }
-            if !app.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                acts.push(Act::SelectNotes(Vec::new()));
-            }
-        }
-        // ⌥ + arrows nudge by the Nudge Grid: the selection, or every note shown, coming
-        // round at the pattern's ends (Maschine's Nudge).
-        let (left, right, alt) = ui.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.modifiers.alt));
-        if alt && (left || right) && !ui.ctx().egui_wants_keyboard_input() {
-            let amount = app.nudge.ticks(app.grid);
-            let shown: Vec<Note> = notes.iter().map(|n| **n).collect();
-            let targets: Vec<Note> = app.selected.iter().filter(|n| shown.contains(n)).copied().collect();
-            let targets = if targets.is_empty() { shown } else { targets };
-            let (remove, add) = deckard_doc::note_tools::nudge(&targets, if left { -amount } else { amount }, start, end);
-            if !remove.is_empty() {
-                if !app.selected.is_empty() {
-                    acts.push(Act::SelectNotes(add.clone()));
-                }
-                acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Nudge Notes", remove, add });
-            }
-        }
-        // Arrows alone move the selection by the step grid.
-        if !app.selected.is_empty() && !alt && !ui.ctx().egui_wants_keyboard_input() {
-            let delta = if left {
-                -app.grid
-            } else if right {
-                app.grid
+        if paste {
+            // A sound copied last pastes onto the focused sound even from here.
+            if app.last_copied == crate::clipboard::Copied::Sound && !app.sound_clipboard.is_empty() {
+                acts.push(Act::PasteSound(app.group, app.sound));
             } else {
-                0
-            };
-            if delta != 0 {
-                let moved: Vec<Note> =
-                    app.selected.iter().map(|n| Note { position: (n.position + delta).clamp(start, start + view - 1), ..*n }).collect();
-                if moved != app.selected {
-                    acts.push(Act::EditNotes {
-                        g: app.group,
-                        p: app.pattern,
-                        label: "Nudge Notes",
-                        remove: app.selected.clone(),
-                        add: moved,
-                    });
-                }
+                acts.push(Act::PasteNotes(crate::clipboard::PasteAt::Keys));
             }
         }
-        if !app.selected.is_empty()
-            && app.key_focus == KeyFocus::Events
-            && !ui.ctx().egui_wants_keyboard_input()
-            && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
-        {
-            acts.push(Act::EditNotes {
-                g: app.group,
-                p: app.pattern,
-                label: "Delete Notes",
-                remove: app.selected.clone(),
-                add: Vec::new(),
-            });
+    }
+    // ⌘A selects the focused sound's notes; Esc clears the selection.
+    if !ui.ctx().egui_wants_keyboard_input() {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+            acts.push(Act::SelectNotes(notes.iter().filter(|n| n.sound == app.sound).map(|n| **n).collect()));
         }
-        if resp.hovered() {
-            let edge = ui.input(|i| i.pointer.hover_pos()).and_then(hit).is_some_and(|(_, e)| e);
-            // Each mode's cursor: pencil (a crosshair here), cut line, plus, cross.
-            let icon = match app.mouse {
-                MouseMode::Split => egui::CursorIcon::Text,
-                MouseMode::Join => egui::CursorIcon::Copy,
-                MouseMode::Mute | MouseMode::Erase => egui::CursorIcon::NotAllowed,
-                _ if edge => egui::CursorIcon::ResizeHorizontal,
-                MouseMode::Draw => egui::CursorIcon::Crosshair,
-                MouseMode::Select => egui::CursorIcon::Default,
-            };
-            ui.ctx().set_cursor_icon(icon);
+        if !app.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            acts.push(Act::SelectNotes(Vec::new()));
         }
+    }
+    // ⌥ + arrows nudge by the Nudge Grid: the selection, or every note shown, coming
+    // round at the pattern's ends (Maschine's Nudge).
+    let (left, right, alt) = ui.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.modifiers.alt));
+    if alt && (left || right) && !ui.ctx().egui_wants_keyboard_input() {
+        let amount = app.nudge.ticks(app.grid);
+        let shown: Vec<Note> = notes.iter().map(|n| **n).collect();
+        let targets: Vec<Note> = app.selected.iter().filter(|n| shown.contains(n)).copied().collect();
+        let targets = if targets.is_empty() { shown } else { targets };
+        let (remove, add) = deckard_doc::note_tools::nudge(&targets, if left { -amount } else { amount }, start, end);
+        if !remove.is_empty() {
+            if !app.selected.is_empty() {
+                acts.push(Act::SelectNotes(add.clone()));
+            }
+            acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Nudge Notes", remove, add });
+        }
+    }
+    // Arrows alone move the selection by the step grid.
+    if !app.selected.is_empty() && !alt && !ui.ctx().egui_wants_keyboard_input() {
+        let delta = if left {
+            -app.grid
+        } else if right {
+            app.grid
+        } else {
+            0
+        };
+        if delta != 0 {
+            let moved: Vec<Note> =
+                app.selected.iter().map(|n| Note { position: (n.position + delta).clamp(start, start + view - 1), ..*n }).collect();
+            if moved != app.selected {
+                acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Nudge Notes", remove: app.selected.clone(), add: moved });
+            }
+        }
+    }
+    if !app.selected.is_empty()
+        && app.key_focus == KeyFocus::Events
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+    {
+        acts.push(Act::EditNotes { g: app.group, p: app.pattern, label: "Delete Notes", remove: app.selected.clone(), add: Vec::new() });
+    }
+    if resp.hovered() {
+        let edge = ui.input(|i| i.pointer.hover_pos()).and_then(hit).is_some_and(|(_, e)| e);
+        // Each mode's cursor: pencil (a crosshair here), cut line, plus, cross.
+        let icon = match app.mouse {
+            MouseMode::Split => egui::CursorIcon::Text,
+            MouseMode::Join => egui::CursorIcon::Copy,
+            MouseMode::Mute | MouseMode::Erase => egui::CursorIcon::NotAllowed,
+            _ if edge => egui::CursorIcon::ResizeHorizontal,
+            MouseMode::Draw => egui::CursorIcon::Crosshair,
+            MouseMode::Select => egui::CursorIcon::Default,
+        };
+        ui.ctx().set_cursor_icon(icon);
     }
 
     // ---- The lane: the focused sound's velocities, probabilities or MIDI events -----
@@ -6984,6 +7155,9 @@ enum NoteDrag {
     Paint { notes: Vec<Note> },
     /// Box selection.
     Select { origin: Pos2, to: Pos2 },
+    /// Sound `sound`'s loop dragged `ticks` along from offset `from` (a take
+    /// `loop_ticks` long).
+    Audio { sound: usize, from: i64, ticks: i64, loop_ticks: i64 },
     /// New velocity or probability values. When a selected note's bar is dragged, the
     /// whole selection moves with it: `base` holds their values before the drag and
     /// `anchor` the grabbed note's.

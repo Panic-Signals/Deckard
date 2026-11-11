@@ -43,8 +43,8 @@ local prehear = false
 local PRODUCTS_SHOWN = 6
 local product_page = 0
 
--- SHIFT + knob 8 jumps this many results.
-local JUMP = 20
+-- SHIFT + knob 8 / 4D wheel jumps one page of 7 results.
+local JUMP = 7
 
 local function lib(s)
   return s.browser
@@ -72,9 +72,24 @@ local function shown_page(b)
   return math.min(product_page, pages(b) - 1)
 end
 
+-- The previous (-1) or next six products: the page scrolled while none is chosen,
+-- else the chosen one moved by six (back past the first: all of them).
+local function page_products(b, dir)
+  if not b.product then
+    product_page = util.clamp(shown_page(b) + dir, 0, pages(b) - 1)
+    return
+  end
+  local p = math.min(#b.products, b.product + dir * PRODUCTS_SHOWN)
+  deckard.browse_product(p >= 1 and p or nil)
+end
+
 -- Knob `n`'s choice `steps` on.
 local function step(b, n, steps)
   if n == 2 then
+    if deckard.held("SHIFT") then
+      page_products(b, steps)
+      return
+    end
     local p = b.product
     if not p then
       -- (From all, turning on chooses the first product shown.)
@@ -106,17 +121,6 @@ local function next_focus(b, dir)
   while n >= 1 and n < RESULTS and count(b, n) == 0 do n = n + dir end
   if n < 1 then return focus end
   return math.min(n, RESULTS)
-end
-
--- The previous (-1) or next six products: the page scrolled while none is chosen,
--- else the chosen one moved by six (back past the first: all of them).
-local function page_products(b, dir)
-  if not b.product then
-    product_page = util.clamp(shown_page(b) + dir, 0, pages(b) - 1)
-    return
-  end
-  local p = math.min(#b.products, b.product + dir * PRODUCTS_SHOWN)
-  deckard.browse_product(p >= 1 and p or nil)
 end
 
 -- The display buttons' state: what each would do now.

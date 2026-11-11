@@ -187,7 +187,7 @@ fn select_mute_solo_erase_with_pads() {
     let (mut s, v) = (Surface::new(), view());
     let now = Instant::now();
     for (button, want) in [
-        ("BUTTON_SELECT", Action::FocusSound(4)),
+        ("BUTTON_SELECT", Action::SelectPad { index: 4, multi: false }),
         ("BUTTON_MUTE", Action::MuteSound(4)),
         ("BUTTON_SOLO", Action::SoloSound(4)),
         ("BUTTON_TRANSPORT_ERASE", Action::EraseSound(4)),
@@ -215,7 +215,7 @@ fn select_changes_sounds_without_playing_them() {
     let (mut s, v) = (Surface::new(), view());
     hold(&mut s, &v, "BUTTON_SELECT", true);
     assert!(!s.pads(&v).play);
-    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::FocusSound(4)));
+    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::SelectPad { index: 4, multi: false }));
     s.event(&Event::PadOff(5), &v, Instant::now());
     hold(&mut s, &v, "BUTTON_SELECT", false);
     assert!(s.pads(&v).play, "let go, they play");
@@ -224,7 +224,7 @@ fn select_changes_sounds_without_playing_them() {
     press(&mut s, &v, "BUTTON_SCREEN_1");
     hold(&mut s, &v, "BUTTON_SELECT", false);
     assert!(!s.pads(&v).play, "pinned");
-    assert!(s.event(&Event::PadOn(6, 0.5), &v, Instant::now()).contains(&Action::FocusSound(5)));
+    assert!(s.event(&Event::PadOn(6, 0.5), &v, Instant::now()).contains(&Action::SelectPad { index: 5, multi: false }));
     s.event(&Event::PadOff(6), &v, Instant::now());
     hold(&mut s, &v, "BUTTON_SELECT", true);
     press(&mut s, &v, "BUTTON_SCREEN_1");
@@ -261,10 +261,31 @@ fn select_picks_a_sound_in_keyboard_mode_too() {
     press(&mut s, &v, "BUTTON_KEYBOARD");
     hold(&mut s, &v, "BUTTON_SELECT", true);
     assert!(!s.pads(&v).play);
-    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::FocusSound(4)));
+    assert!(s.event(&Event::PadOn(5, 0.5), &v, Instant::now()).contains(&Action::SelectPad { index: 4, multi: false }));
     s.event(&Event::PadOff(5), &v, Instant::now());
     hold(&mut s, &v, "BUTTON_SELECT", false);
     assert!(s.pads(&v).play, "the keys play again");
+}
+
+#[test]
+fn select_all_none_and_multi() {
+    let (mut s, v) = (Surface::new(), view());
+    hold(&mut s, &v, "BUTTON_SELECT", true);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SelectAllSounds]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SelectNoSounds]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "MULTI only changes later presses");
+    assert_eq!(
+        s.event(&Event::PadOn(3, 0.5), &v, Instant::now()),
+        [Action::SelectPad { index: 2, multi: true }],
+        "MULTI on: the pad joins"
+    );
+    s.event(&Event::PadOff(3), &v, Instant::now());
+    press(&mut s, &v, "BUTTON_SCREEN_8");
+    assert_eq!(
+        s.event(&Event::PadOn(4, 0.5), &v, Instant::now()),
+        [Action::SelectPad { index: 3, multi: false }],
+        "MULTI off: the pad replaces the selection"
+    );
 }
 
 #[test]
@@ -565,6 +586,18 @@ fn themes_switch() {
     assert_eq!(s.theme(), "solarized_dark", "a theme that doesn't load leaves the last");
 }
 
+/// The default theme (and Maschine's) draw on black, with no controller folder of
+/// the user's to say so.
+#[test]
+fn the_shipped_default_and_maschine_themes_are_black() {
+    let (mut s, v) = (Surface::new(), view());
+    for theme in ["palenight", "maschine"] {
+        s.set_theme(theme);
+        assert_eq!((s.theme(), s.error()), (theme, None));
+        assert_eq!(s.draw_picture(&v).background, [0, 0, 0], "{theme}");
+    }
+}
+
 #[test]
 fn a_users_theme_is_listed() {
     let (_tmp, dir) = user_dir();
@@ -646,7 +679,12 @@ fn browse_knobs_gather_a_tenth_of_a_turn() {
     assert!(s.event(&Event::Knob(7, 0.05), &v, now).is_empty());
     assert_eq!(s.event(&Event::Knob(7, 0.05), &v, now), [Action::Browse(Browse::Focus(1))]);
     hold(&mut s, &v, "BUTTON_SHIFT", true);
-    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(10))], "SHIFT: up to twenty, to the last");
+    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(7))], "SHIFT: one page of 7 results");
+    v.browser.focus = 8;
+    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(3))], "and to the last");
+    v.browser.product = Some(0);
+    assert_eq!(s.event(&Event::Knob(1, 0.3), &v, now), [Action::Browse(Browse::Product(Some(2)))], "SHIFT + Knob 2 pages products");
+    v.browser.product = None;
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     assert_eq!(s.event(&Event::Knob(1, 0.1), &v, now), [Action::Browse(Browse::Product(Some(0)))], "from all: the first shown");
     assert_eq!(s.event(&Event::Knob(4, 0.1), &v, now), [Action::Browse(Browse::Attribute(0, Some(0)))]);
@@ -914,6 +952,56 @@ fn the_strip_follows_playback() {
     v.position = Some(3 * 3840);
     assert_eq!(lit(&s, &v), 7, "a quarter through the song: round(6) + 1");
     assert_eq!(s.leds(&v).get("LED_TS_01"), Some(deckard_mk3::leds::palette(16, 4)), "white");
+}
+
+/// A group with no pattern: the strip still tracks where playback is (the app sends the
+/// place in the bar), in the group's colour, to see where a take will start.
+#[test]
+fn the_strip_tracks_the_bar_with_no_pattern() {
+    let (s, mut v) = (Surface::new(), view());
+    let lit = |s: &Surface, v: &View| (1..=25).filter(|i| s.leds(v).get(&format!("LED_TS_{i:02}")).unwrap() != 0).count();
+    v.playing = true;
+    let g = v.group;
+    v.groups[g].scene_pattern = None;
+    v.groups[g].patterns.clear();
+    v.progress = Some(0.5);
+    assert_eq!(lit(&s, &v), 13, "half a bar: round(12) + 1");
+    assert_eq!(s.leds(&v).get("LED_TS_01"), Some(deckard_mk3::leds::palette(v.groups[g].color as i64, 4)), "the group's colour");
+    // In the Song view with no sections too.
+    v.song_view = true;
+    v.sections.clear();
+    assert_eq!(lit(&s, &v), 13, "no song to show");
+}
+
+/// An Audio plug-in's loop shows on the screens' pattern editors, behind the notes, as
+/// in the app: in pad mode's rows, the piano roll, Step's lane and the Events lanes.
+#[test]
+fn audio_loops_show_in_the_pattern_editors() {
+    let shown = |setup: &dyn Fn(&mut Surface, &View)| {
+        let (mut s, mut v) = (Surface::new(), view());
+        v.pattern_length = 3840;
+        setup(&mut s, &v);
+        let before = s.picture(&v);
+        // A bar-long loop, loud all through, on in the pattern (the focused sound's).
+        let sound = v.sound;
+        v.groups[v.group].sounds[sound].audio =
+            Some(LoopView { peaks: std::sync::Arc::new(vec![(-0.9, 0.9); 256]), ticks: 3840, offset: 0, on: true, gate: false });
+        let after = s.picture(&v);
+        before.iter().zip(&after).filter(|(a, b)| a != b).count()
+    };
+    let step = shown(&|s, v| {
+        press(s, v, "BUTTON_STEP");
+    });
+    assert!(step > 2000, "Step: rows and lane ({step} pixels)");
+    let piano = shown(&|s, v| {
+        press(s, v, "BUTTON_KEYBOARD");
+        press(s, v, "BUTTON_STEP");
+    });
+    assert!(piano > 2000, "the piano roll ({piano} pixels)");
+    let events = shown(&|s, v| {
+        hold(s, v, "BUTTON_EVENTS", true);
+    });
+    assert!(events > 2000, "Events ({events} pixels)");
 }
 
 /// Notes side by side on the screens stay apart: 2 pixels between them.
@@ -2868,7 +2956,7 @@ fn shift_solo_opens_the_mod_matrix() {
     assert_eq!(s.page(), "lfo");
     press(&mut s, &v, "BUTTON_SOLO");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
-    assert_eq!(press(&mut s, &v, "BUTTON_MIX"), [Action::ModSlotsClosed], "the Mixer in its place");
+    assert_eq!(press(&mut s, &v, "BUTTON_MIX"), [Action::ModSlotsClosed, Action::MixerView(true)], "the Mixer in its place");
     assert_eq!(s.page(), "mixer");
     assert_eq!(s.error(), None);
 }
@@ -2953,7 +3041,8 @@ fn mod_matrix_draws_slots() {
 #[test]
 fn mod_matrix_names_a_cc_slots_rows() {
     let (mut s, mut v) = (Surface::new(), view());
-    v.mod_slots[1] = ModSlotView { rows: ["LFO 2", "MIDI", "IAC Driver Bus 1", "3", "74", "+50%"].map(String::from), midi: true };
+    v.mod_slots[1] =
+        ModSlotView { rows: ["LFO 2", "MIDI", "IAC Driver Bus 1", "3", "74", "+50%"].map(String::from), midi: true, cv: false };
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     press(&mut s, &v, "BUTTON_SOLO");
     hold(&mut s, &v, "BUTTON_SHIFT", false);
@@ -2972,6 +3061,28 @@ fn mod_matrix_names_a_cc_slots_rows() {
     assert!(s.event(&Event::Knob(1, 0.02), &v, now).is_empty(), "Channel: not yet a step");
     press(&mut s, &v, "BUTTON_SCREEN_2");
     assert_eq!(s.event(&Event::Knob(1, 0.02), &v, now), [Action::ModSlot(1, 4, 1)], "CC");
+    assert_eq!(s.error(), None);
+}
+
+/// A CV slot's rows read Out, Low and High; its Low and High step a fiftieth of a turn.
+#[test]
+fn mod_matrix_names_a_cv_slots_rows() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.mod_slots[1] = ModSlotView { rows: ["LFO 2", "CV", "Out 2 L", "", "0%", "50%"].map(String::from), midi: false, cv: true };
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    press(&mut s, &v, "BUTTON_SOLO");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    let text = s.screen_text(&v);
+    for t in ["OUT", "LOW", "HIGH", "CV", "Out 2 L", "50%"] {
+        assert!(text.contains(&t.to_string()), "{t}: {text:?}");
+    }
+    // (Opens on High.)
+    let now = Instant::now();
+    assert_eq!(s.event(&Event::Knob(1, 0.02), &v, now), [Action::ModSlot(1, 5, 1)], "High");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    press(&mut s, &v, "BUTTON_SCREEN_2");
+    assert!(s.event(&Event::Knob(1, 0.02), &v, now).is_empty(), "Out: a tenth of a turn a step");
     assert_eq!(s.error(), None);
 }
 
@@ -3173,6 +3284,22 @@ fn the_step_grid_places_a_pads_chord_in_chords_mode() {
     assert!(s.screen_text(&v).join("|").contains("CHORD"));
 }
 
+/// Holding Shift changes the route mode without changing the selected knob row.
+#[test]
+fn mod_matrix_shift_screen_toggles_route_mode() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    press(&mut s, &v, "BUTTON_SOLO");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::ModSlot(0, 6, 1)]);
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::ModSlot(0, 5, 1)]);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    v.mod_slots[0].midi = true;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty(), "CC has no Add mode");
+    assert_eq!(s.error(), None);
+}
+
 #[test]
 fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     let (mut s, mut v) = (Surface::new(), view());
@@ -3186,4 +3313,162 @@ fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_3").is_empty());
     v.group = 2;
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
+}
+
+#[test]
+fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.pattern_start, v.pattern_length) = (0, 2 * 3840);
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    // POSITION and START gather small encoder packets rather than jumping on the first packet.
+    assert!(s.event(&Event::Knob(0, 0.03), &v, now).is_empty());
+    assert!(s.event(&Event::Knob(0, 0.03), &v, now).is_empty());
+    assert_eq!(s.event(&Event::Knob(0, 0.05), &v, now), [Action::PatternSpan { start: 3840, length: 2 * 3840 }]);
+    assert!(s.event(&Event::Knob(2, 0.04), &v, now).is_empty());
+    assert_eq!(s.event(&Event::Knob(2, 0.07), &v, now), [Action::PatternSpan { start: 3840, length: 3840 }]);
+    // LENGTH steps through ½, 1, 2, 4, 8… bars.
+    v.pattern_length = 1920;
+    for want in [3840, 2 * 3840, 4 * 3840, 8 * 3840] {
+        assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(want)]);
+        v.pattern_length = want;
+    }
+    for want in [4 * 3840, 2 * 3840, 3840, 1920, 1920] {
+        assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(want)]);
+        v.pattern_length = want;
+    }
+}
+
+/// A view with Zhora focused: its four pages, an A3 heard 2 cents sharp.
+fn zhora_view() -> View {
+    let mut v = view();
+    v.control.chain[0] = crate::SlotView { name: "Zhora".into(), instrument: true, active: true, plugin: true, picture: None };
+    v.control.slot = Some("Zhora".into());
+    v.control.pages = ["OUTS", "ENV", "LEVELS", "MOD"].map(String::from).to_vec();
+    v.control.zhora = Some(crate::ZhoraView {
+        note: Some("A3".into()),
+        cents: Some(2.0),
+        in_tune: true,
+        status: "Tuned today 14:02 · worst note 3¢ · C1–C7".into(),
+        right: "Holding A3".into(),
+        input: "In 1 L+R".into(),
+        ..Default::default()
+    });
+    v
+}
+
+/// Zhora's tuner: the note, its cents and a green needle, on the right screen only, under
+/// the bar.
+#[test]
+fn zhora_tuner_is_drawn_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), zhora_view());
+    let green = |p: &[u8; 4]| p[1] > 180 && p[0] < 110 && p[2] < 140;
+    let right = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && green(p)).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && green(p)).count();
+    let px = s.picture(&v);
+    assert!(right(&px) > 200, "the note and needle in green on the right: {}", right(&px));
+    assert!(left(&px) < 20, "not on the left screen");
+    let text = s.screen_text(&v);
+    for t in
+        ["A3", "+2¢", "Tuned today 14:02 · worst note 3¢ · C1–C7", "Holding A3", "In 1 L+R", "TUNE", "CHECK", "LIVE", "HOLD", "OUTS", "MOD"]
+    {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    // Out of tune: not green. A message takes the bar's place.
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.cents, z.in_tune, z.message) = (Some(-20.0), false, Some("No signal on the input".into()));
+    let px = s.picture(&v);
+    assert!(right(&px) < 60, "no green while out of tune: {}", right(&px));
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|x| x == "No signal on the input") && !text.iter().any(|x| x.starts_with("Tuned")), "{text:?}");
+    assert_eq!(s.error(), None);
+}
+
+/// On the ENV page the left screen draws Zhora's envelope in place of its name (the input
+/// still under it), and the tuner stays on the right; turning attack redraws it.
+#[test]
+fn zhora_env_page_draws_the_envelope_on_the_left_screen() {
+    let (s, mut v) = (Surface::new(), zhora_view());
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, _)| i % 960 < 480).map(|(_, p)| *p).collect::<Vec<_>>();
+    let right = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, _)| i % 960 >= 480).map(|(_, p)| *p).collect::<Vec<_>>();
+    let plain = s.picture(&v);
+    let adsr = |a: f32| {
+        let p = deckard_model::lfo::adsr_picture(240, a, 0.3, 0.6, 0.3);
+        (p, deckard_model::lfo::adsr_note_off(a, 0.3, 0.3))
+    };
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.env, z.env_note_off) = adsr(0.1);
+    let short = s.picture(&v);
+    let text = s.screen_text(&v);
+    assert!(!text.iter().any(|x| x == "Zhora") && text.iter().any(|x| x == "In 1 L+R"), "{text:?}");
+    assert!(text.iter().any(|x| x == "A3") && text.iter().any(|x| x == "+2¢"), "the tuner stays: {text:?}");
+    assert_ne!(left(&plain), left(&short), "the envelope drawn");
+    assert_eq!(right(&plain), right(&short), "the right screen unchanged");
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.env, z.env_note_off) = adsr(0.9);
+    assert_ne!(left(&short), left(&s.picture(&v)), "a longer attack redraws it");
+    assert_eq!(s.error(), None);
+}
+
+/// The Tuner effect focused: its dial on the right screen, under A4's pitch (and Muted),
+/// with the slot's usual buttons and knobs, not Zhora's.
+#[test]
+fn the_tuner_effect_draws_its_dial_on_the_right_screen() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "Tuner".into();
+    v.control.slot = Some("Tuner".into());
+    v.control.pages = vec!["TUNER".into()];
+    let green = |p: &[u8; 4]| p[1] > 180 && p[0] < 110 && p[2] < 140;
+    let right = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && green(p)).count();
+    let plain = s.picture(&v);
+    v.control.tuner =
+        Some(crate::TunerView { note: Some("E1".into()), cents: Some(-3.0), in_tune: true, reference: "440 Hz".into(), muted: false });
+    let px = s.picture(&v);
+    assert_ne!(plain, px);
+    assert!(right(&px) > 200, "the note and needle in green: {}", right(&px));
+    let text = s.screen_text(&v);
+    for t in ["E1", "\u{2212}3¢", "A4 = 440 Hz", "Tuner"] {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    assert!(!text.iter().any(|x| x == "TUNE"), "not Zhora's buttons: {text:?}");
+    v.control.tuner.as_mut().unwrap().muted = true;
+    assert!(s.screen_text(&v).iter().any(|x| x == "A4 = 440 Hz  ·  Muted"));
+    // The display buttons are the slot's, not Zhora's.
+    assert_ne!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::Zhora("tune")]);
+    assert_eq!(s.error(), None);
+}
+
+/// Zhora's display buttons 5 to 8 are TUNE, CHECK, LIVE and HOLD, lit as the view says.
+#[test]
+fn zhora_display_buttons_5_to_8_are_tune_check_live_hold() {
+    let (mut s, mut v) = (Surface::new(), zhora_view());
+    for (n, what) in [(5, "tune"), (6, "check"), (7, "live"), (8, "hold")] {
+        let name: &'static str = ["BUTTON_SCREEN_5", "BUTTON_SCREEN_6", "BUTTON_SCREEN_7", "BUTTON_SCREEN_8"][n - 5];
+        assert_eq!(press(&mut s, &v, name), [Action::Zhora(what)]);
+    }
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::DIM));
+    let z = v.control.zhora.as_mut().unwrap();
+    (z.tune, z.hold) = (true, true);
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(crate::leds::ON), "tuning");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_6"), Some(deckard_mk3::leds::DIM));
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(crate::leds::ON), "holding");
+    // SHIFT keeps the slot edits.
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SlotEdit("bypass")]);
+}
+
+/// Zhora's display buttons 1 to 4 pick its pages, the one shown lit.
+#[test]
+fn zhora_display_buttons_1_to_4_pick_pages() {
+    let (mut s, mut v) = (Surface::new(), zhora_view());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::PluginPage(0)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::PluginPage(3)]);
+    v.control.page = 2;
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_3"), Some(crate::leds::ON));
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::DIM));
+    // Not Zhora: the levels again.
+    v.control.zhora = None;
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::Level(0)]);
 }

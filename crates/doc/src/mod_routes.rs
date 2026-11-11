@@ -152,4 +152,18 @@ mod tests {
         assert_eq!(routes(&back), vec![cutoff(0), plug]);
         assert!(!back.is_dirty(), "reading the block is no edit");
     }
+    #[test]
+    fn additive_routes_share_a_target_and_survive_save_undo_and_slot_moves() {
+        use deckard_model::mod_matrix::RouteMode;
+        let mut d = doc();
+        let a = ModRoute { mode: RouteMode::Add, ..cutoff(1) };
+        let b = ModRoute { source: ModSource::Slide, ..a.clone() };
+        d.set_mod_routes(0, 0, vec![a.clone(), b.clone()]).unwrap();
+        let back = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(routes(&back), vec![a.clone(), b.clone()]);
+        d.add_slot(0, 0, 1, &NewModule::Effect("Filter")).unwrap();
+        assert!(routes(&d).iter().all(|r| r.slot == 2 && r.mode == RouteMode::Add));
+        assert!(d.undo());
+        assert_eq!(routes(&d), vec![a, b]);
+    }
 }

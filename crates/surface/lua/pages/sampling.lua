@@ -91,6 +91,11 @@ local function knob_page(v)
   return list[n], n, #list
 end
 
+-- How many tabs there are: an Audio plug-in's take has RECORD and EDIT only.
+local function tab_count(v)
+  return (v.sample and v.sample.take) and 2 or #TABS
+end
+
 local function sample_ok(v)
   return v.sample ~= nil and v.sample.frames > 0
 end
@@ -103,6 +108,9 @@ local function stems_running(v)
   return v.stems ~= nil
 end
 
+-- RECORD: the takes on the pads (TAKES), and the bank of 16 shown.
+local takes_on_pads, take_bank = false, 0
+
 -- What display buttons 5-8 show and do on the tab: { text, act = function, … }.
 local function buttons(v)
   local s = v.sample
@@ -114,11 +122,24 @@ local function buttons(v)
       }
     end
     local takes, take = v.takes, v.take
+    -- SHIFT: the takes one at a time.
+    if deckard.held("SHIFT") then
+      return {
+        nil,
+        nil,
+        { text = "PREVIOUS", disabled = takes == 0 or take == 1, act = function() deckard.take(take and take - 1 or takes) end },
+        { text = "NEXT", disabled = takes == 0 or take == takes, act = function() deckard.take(take and take + 1 or 1) end },
+      }
+    end
+    -- TAKES puts the takes on the pads (Maschine's "RecHistOnPads"), 16 a bank: a pad
+    -- plays its take. BANK goes round the banks.
+    local banks = math.max(1, (takes + 15) // 16)
+    if take_bank >= banks then take_bank = 0 end
     return {
       { text = "START", act = function() deckard.record_sample() end },
       { text = "DELETE", disabled = not take, act = function() deckard.take(take, true) end },
-      { text = "PREVIOUS", disabled = takes == 0 or take == 1, act = function() deckard.take(take and take - 1 or takes) end },
-      { text = "NEXT", disabled = takes == 0 or take == takes, act = function() deckard.take(take and take + 1 or 1) end },
+      { text = "TAKES", selected = takes_on_pads, disabled = takes == 0 and not takes_on_pads, act = function() takes_on_pads = not takes_on_pads end },
+      { text = "BANK " .. (take_bank + 1), disabled = not takes_on_pads or banks < 2, act = function() take_bank = (take_bank + 1) % banks end },
     }
   elseif v.tab == 2 then
     local f = FUNCTIONS[func]
@@ -168,7 +189,7 @@ function page.button(name, down)
   if n then
     if not down then return true end
     if n <= 4 then
-      deckard.sampling_tab(n)
+      if n <= tab_count(v) then deckard.sampling_tab(n) end
       return true
     end
     if v.tab == 2 and (n == 5 or n == 6) then
@@ -255,6 +276,12 @@ end
 
 function page.pad(n)
   local v = view()
+  if v.tab == 1 and takes_on_pads then
+    -- A take picked: it plays (Audio plug-in) or is loaded (Sampler).
+    local k = take_bank * 16 + n
+    if k <= v.takes then deckard.take(k) end
+    return true
+  end
   if v.tab ~= 3 then return end
   local s = v.sample
   if not s then return true end
@@ -278,20 +305,30 @@ end
 
 function page.leds()
   local v = view()
-  deckard.led("SAMPLE", "on")
-  for i = 1, 4 do deckard.led("SCREEN_" .. i, i == v.tab and "on" or "dim") end
+  if not require("lib.util").sample_led(deckard.state()) then deckard.led("SAMPLE", "on") end
+  for i = 1, 4 do deckard.led("SCREEN_" .. i, i == v.tab and "on" or (i <= tab_count(v) and "dim" or "off")) end
   local b = buttons(v)
   -- (WAITING flashes, four times a second.)
   local flash = v.record.waiting and (deckard.now() * 4) % 2 < 1
   for i = 5, 8 do
     local spec = b[i - 4] or (v.tab == 2 and i == 6 and b[1])
     local lit = spec and not spec.disabled and (spec.text or spec.arrows)
-    deckard.led("SCREEN_" .. i, lit and ((i == 5 and flash) and "on" or "dim") or "off")
+    deckard.led("SCREEN_" .. i, lit and (((i == 5 and flash) or spec.selected) and "on" or "dim") or "off")
   end
   local _, p, count = knob_page(v)
   deckard.led("LEFT", p > 1 and "dim" or "off")
   deckard.led("RIGHT", p < count and "dim" or "off")
-  if v.tab == 1 then
+  if v.tab == 1 and takes_on_pads then
+    -- A pad a take: the focused one bright.
+    for i = 1, 16 do
+      local k = take_bank * 16 + i
+      if k <= v.takes then
+        deckard.led("PAD_" .. i, 16, k == v.take)
+      else
+        deckard.led("PAD_" .. i, "off")
+      end
+    end
+  elseif v.tab == 1 then
     -- (RECORD's pads play nothing: dark.)
     for i = 1, 16 do deckard.led("PAD_" .. i, "off") end
   elseif v.tab == 3 then
@@ -316,10 +353,11 @@ local function split(text)
   return text or "", nil
 end
 
-local function draw_tabs(screen, theme, tab)
+local function draw_tabs(screen, theme, tab, count)
   screen:frame(4, 4, 472, 24, "button", theme.corner)
   local xs, ws = { 4, 121, 240, 359 }, { 117, 119, 119, 117 }
   for i, name in ipairs(TABS) do
+    if i > count then break end
     if i == tab then
       screen:rect(xs[i], 4, ws[i], 24, "button_selected", theme.corner)
       widgets.chase(screen, theme, xs[i], 4, ws[i], 24)
@@ -417,6 +455,38 @@ local function zone_map(screen, s, colour)
 end
 
 -- The recorder's two input meters, and in Detect mode the threshold across them.
+-- The takes (the Audio Pool) under the meters, a mini waveform each, the focused one
+-- outlined; with the takes on the pads, the bank's 16, else the last 8.
+local function take_tiles(screen, theme, v, colour)
+  local n = v.takes
+  if n == 0 then return end
+  local per = takes_on_pads and 16 or 8
+  local first = takes_on_pads and take_bank * 16 + 1 or math.max(1, n - per + 1)
+  local w = takes_on_pads and 27 or 56
+  for i = first, math.min(n, first + per - 1) do
+    local x = 7 + (i - first) * (w + 2)
+    local y = 132
+    screen:rect(x, y, w, 40, { 32, 32, 32 })
+    local wave = v.take_waves[i]
+    if wave and #wave >= 2 then
+      local cols = #wave // 2
+      for c = 0, w - 3 do
+        local k = math.min(cols - 1, c * cols // (w - 2)) * 2
+        local lo, hi = wave[k + 1], wave[k + 2]
+        local y0 = math.floor(y + 20 - hi * 18 + 0.5)
+        local y1 = math.floor(y + 20 - lo * 18 + 0.5)
+        screen:rect(x + 1 + c, y0, 1, math.max(1, y1 - y0), colour)
+      end
+    end
+    if i == v.take then
+      screen:rect(x, y, w, 1, "text")
+      screen:rect(x, y + 39, w, 1, "text")
+      screen:rect(x, y, 1, 40, "text")
+      screen:rect(x + w - 1, y, 1, 40, "text")
+    end
+  end
+end
+
 local function meters(screen, v, colour)
   local function at(db) return math.max(0, math.min(1, (db + 60) / 60)) end
   for ch = 1, 2 do
@@ -447,7 +517,7 @@ end
 function page.draw(screen, theme)
   local s = deckard.state()
   local v = s.sampling
-  draw_tabs(screen, theme, v.tab)
+  draw_tabs(screen, theme, v.tab, tab_count(v))
   local specs = {}
   for i, b in pairs(buttons(v)) do specs[i + 4] = b end
   if specs[5] and specs[5].arrows then specs[5].left, specs[5].right = not specs[5].disabled, not specs[5].disabled end
@@ -461,6 +531,7 @@ function page.draw(screen, theme)
     stems_progress(screen, theme, v)
   elseif v.tab == 1 then
     meters(screen, v, colour)
+    take_tiles(screen, theme, v, colour)
   elseif sample_ok(v) then
     local slices = v.tab == 3
     if v.tab == 4 then

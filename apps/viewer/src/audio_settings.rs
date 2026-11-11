@@ -88,6 +88,8 @@ impl App {
         self.settings.save();
         if restart && self.output.is_some() {
             self.restart_output();
+        } else if let Some(Ok(out)) = &self.output {
+            out.set_routing(&self.settings.output_routing, self.settings.cv_mask());
         }
     }
 

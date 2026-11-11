@@ -134,16 +134,11 @@ pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project) -> Knobs {
             input.push(choice("Input", "INPUT", &labels, at, Apply::Param(RecParam::AutoSound, Some(values))));
         }
         _ => {
-            let mut labels = vec!["Master".to_string()];
-            labels.extend(p.groups.iter().enumerate().map(|(g, gr)| format!("{} - {}", crate::layout::group_id(g), gr.name)));
-            let values = (-1..p.groups.len() as i64).collect();
-            input.push(choice(
-                "Input",
-                "INPUT",
-                &labels,
-                rec.internal.map_or(0, |g| g + 1),
-                Apply::Param(RecParam::Internal, Some(values)),
-            ));
+            let opts = crate::layout::sampling::internal_inputs(&p.groups);
+            let at = opts.iter().position(|o| o.1 == rec.internal).unwrap_or(0);
+            let (labels, values): (Vec<String>, Vec<i64>) =
+                opts.into_iter().map(|(l, s)| (l, crate::layout::sampling::internal_value(s))).unzip();
+            input.push(choice("Input", "INPUT", &labels, at, Apply::Param(RecParam::Internal, Some(values))));
         }
     }
     if external {

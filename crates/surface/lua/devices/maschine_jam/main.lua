@@ -963,11 +963,8 @@ local function press_project(s, col, row)
   if active("CLEAR") then
     if p then deckard.delete_pattern(g, p) end
   elseif active("DUPLICATE") then
-    if p then
-      duplicate("pattern", g, p, function(from, to) deckard.copy_pattern(g, from, to) end)
-    elseif st.dup and st.dup.kind == "pattern" and st.dup.group == g then
-      -- (An empty place: a new pattern, after the group's last.)
-      duplicate("pattern", g, #group.patterns + 1, function(from, to) deckard.copy_pattern(g, from, to) end)
+    if p or (st.dup and st.dup.kind == "pattern" and st.dup.group == g) then
+      duplicate("pattern", g, place, function(from, to) deckard.copy_pattern(g, from, to) end)
     end
   elseif not p then
     -- An unlit pad makes a pattern there (manual 6.1.3).
@@ -1646,7 +1643,7 @@ local function light_project(s)
       if group then p, pattern = pattern_in(group, st.pattern_row + row) end
       if not pattern then
         deckard.pad_led(col, row, "off")
-      elseif dup_is("pattern", g, p) then
+      elseif dup_is("pattern", g, st.pattern_row + row) then
         deckard.pad_led(col, row, blink() and pattern.palette or "off", true)
       elseif coming and coming.patterns[g] == p then
         deckard.pad_led(col, row, pattern.palette, beat_flash(s))
@@ -1811,8 +1808,10 @@ local function light_matrix(s)
   if sounds_shown() or st.view == "pad" then
     all_pads_off()
     light_sounds(s)
-  else
+  elseif VIEW_LIGHTS[st.view] then
     VIEW_LIGHTS[st.view](s)
+  else
+    all_pads_off()
   end
   -- SHIFT: the shortcuts over the top row.
   if shift() then

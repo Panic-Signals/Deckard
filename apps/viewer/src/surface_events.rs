@@ -150,6 +150,9 @@ impl App {
 
     /// SHIFT + a pad's edit ([`deckard_surface::Action::Edit`]).
     pub(crate) fn surface_edit(&mut self, what: &str) {
+        if what.starts_with("undo") || what.starts_with("redo") {
+            self.lock_end_morph();
+        }
         let Some(doc) = self.doc.clone() else { return };
         let done = match what {
             "undo" => doc.borrow_mut().undo(),
@@ -176,6 +179,7 @@ impl App {
             }
             _ => true,
         };
+        self.lock_hosted_sync();
         // Past the start of its history, the project an Open replaced comes back.
         if !done && !(what.starts_with("undo") && self.back_to_replaced()) {
             self.status = format!("nothing to {}", if what.starts_with("undo") { "undo" } else { "redo" });
