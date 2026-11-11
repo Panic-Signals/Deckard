@@ -760,11 +760,13 @@ mod tests {
     #[test]
     fn undoing_a_tune_brings_the_old_table_back() {
         let mut app = listening_zhora();
+        // Stored directly: `watch_tunes` skips a look soon after the last, and a fast
+        // machine finishes the second Tune inside that gap.
         let old = tune_in(&mut app, 0.2, |_, _| {});
-        app.watch_tunes(&eframe::egui::Context::default());
+        app.store_finished_tunes(|_| true, true);
         // A voice with a narrower range makes a table that tells apart.
         let new = tune_in(&mut app, 0.1, |_, _| {});
-        app.watch_tunes(&eframe::egui::Context::default());
+        app.store_finished_tunes(|_| true, true);
         assert_ne!(new.range, old.range);
         assert_eq!(tuned_in_project(&mut app).range, new.range);
         app.undo();
