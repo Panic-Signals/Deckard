@@ -10863,6 +10863,9 @@ impl eframe::App for App {
     /// While the window is covered or minimized eframe runs no `ui`, only this: keep the
     /// controller (scripts, LEDs, screens) and MIDI going, as `frame` does when shown.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.finish_quit(ctx) {
+            return;
+        }
         if ctx.input(|i| i.viewport().visible()) != Some(false) {
             return;
         }
@@ -10895,9 +10898,24 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Once confirmed, closing must bypass periodic device/engine work. A dead
+    /// audio callback can otherwise make each redundant parameter send wait.
+    fn finish_quit(&mut self, ctx: &egui::Context) -> bool {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.asks_on_quit() {
+            self.quitting = true;
+        }
+        if !self.quitting {
+            return false;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        true
+    }
     /// One frame of the whole window.
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        if self.finish_quit(ctx) {
+            return;
+        }
         self.poll_group_load();
         if self.group_load.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -11022,6 +11040,9 @@ impl App {
             ctx.request_repaint();
         }
         self.menu_frame(ctx);
+        if self.finish_quit(ctx) {
+            return;
+        }
         if self.preload_plugins {
             if self.frames_drawn >= 2 {
                 self.preload_plugins = false;
@@ -17601,4 +17622,20 @@ fn mk3_leds(host: &deckard_lua_host::Host) -> deckard_mk3::leds::Leds {
         out.set(name, byte);
     }
     out
+}
+
+#[test]
+fn confirmed_quit_bypasses_periodic_work_and_keeps_close_requested() {
+    let mut app = App::default();
+    let ctx = eframe::egui::Context::default();
+    ctx.begin_pass(Default::default());
+    assert!(!app.finish_quit(&ctx));
+    app.proceed(&ctx, Pending::Quit);
+    assert!(app.finish_quit(&ctx));
+    assert!(app.quitting);
+    let mut output = ctx.end_pass();
+    output.textures_delta.clear();
+    assert!(
+        output.viewport_output[&eframe::egui::ViewportId::ROOT].commands.iter().any(|c| matches!(c, eframe::egui::ViewportCommand::Close))
+    );
 }
