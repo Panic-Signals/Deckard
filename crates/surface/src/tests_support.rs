@@ -77,12 +77,16 @@ pub fn view() -> View {
         // (Two routes, then the empty slot.)
         mod_slots: vec![
             ModSlotView {
-                rows: ["LFO 1", "A1 – Drums", "S1 – Sound 1", "Compressor", "Knob 0", "+50%"].map(String::from), midi: false
+                rows: ["LFO 1", "A1 – Drums", "S1 – Sound 1", "Compressor", "Knob 0", "+50%"].map(String::from),
+                midi: false,
+                cv: false,
             },
             ModSlotView {
-                rows: ["Pressure", "A1 – Drums", "S2 – Sound 2", "Compressor", "Knob 1", "−25%"].map(String::from), midi: false
+                rows: ["Pressure", "A1 – Drums", "S2 – Sound 2", "Compressor", "Knob 1", "−25%"].map(String::from),
+                midi: false,
+                cv: false,
             },
-            ModSlotView { rows: ["—"; 6].map(String::from), midi: false },
+            ModSlotView { rows: ["—"; 6].map(String::from), midi: false, cv: false },
         ],
         ..Default::default()
     }

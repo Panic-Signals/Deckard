@@ -139,6 +139,11 @@ impl Document {
         self.snapshot_pairs().into_iter().find(|(s, _)| *s == slot).map(|x| x.1)
     }
 
+    /// Identity of this version of a snapshot, stable through undo/redo.
+    pub fn snapshot_id(&self, slot: usize) -> Option<u64> {
+        self.snapshot_obj(slot)?.oid
+    }
+
     /// Take a snapshot into `slot` (0–63), replacing one there; it becomes the focused
     /// one. One undo step.
     pub fn take_snapshot(&mut self, slot: usize) -> Result<(), String> {
@@ -387,17 +392,39 @@ impl Document {
 
     /// The ops setting `entries` (the parameters that differ), each as its kind.
     pub(crate) fn entry_ops(&self, entries: &[LockEntry]) -> Vec<Op> {
-        entries
-            .iter()
-            .filter_map(|e| {
-                let value = match self.tree.at(&e.path)? {
-                    Value::Int(i) if *i != e.value.round() as i64 => Value::Int(e.value.round() as i64),
-                    Value::Float(f) if (*f - e.value).abs() > 1e-9 => Value::Float(e.value),
-                    _ => return None,
-                };
-                Some(Op::Set { path: e.path.clone(), value })
-            })
-            .collect()
+        // SoundConfig overrides the sound's own mute, aux and channel values.
+        // A recall must use the same mirrored write as a knob or mute gesture.
+        let mut mirrored = std::collections::HashMap::new();
+        for (g, group) in self.project().groups.iter().enumerate() {
+            for s in 0..group.sounds.len() {
+                for (field, _) in crate::channel::MIRRORED {
+                    if let Ok(path) = self.param_path(Target::Sound(g, s), field) {
+                        mirrored.insert(path, (Target::Sound(g, s), field));
+                    }
+                }
+            }
+        }
+        let mut ops = Vec::new();
+        for entry in entries {
+            let Some(old) = self.tree.at(&entry.path) else { continue };
+            let value = match old {
+                Value::Int(_) => Value::Int(entry.value.round() as i64),
+                Value::Float(_) => Value::Float(entry.value),
+                _ => continue,
+            };
+            if let Some(&(target, field)) = mirrored.get(&entry.path) {
+                if let Ok(edits) = self.param_ops(target, field, value) {
+                    ops.extend(edits);
+                }
+            } else if match (old, &value) {
+                (Value::Int(a), Value::Int(b)) => a != b,
+                (Value::Float(a), Value::Float(b)) => (a - b).abs() > 1e-9,
+                _ => false,
+            } {
+                ops.push(Op::Set { path: entry.path.clone(), value });
+            }
+        }
+        ops
     }
 
     /// Set every parameter of the snapshot in `slot` back (one undo step, "Recall Lock").
@@ -460,6 +487,24 @@ mod tests {
         assert_eq!(d.undo_label(), Some("Recall Lock"));
         assert!(d.undo());
         assert!((level(&d) - 0.9).abs() < 1e-6, "recall undoes");
+    }
+
+    #[test]
+    fn lock_recall_restores_sound_config_mirrors_and_undoes_together() {
+        let mut d = project();
+        let initial_aux = d.project().groups[0].sounds[2].aux[0];
+        d.take_snapshot(0).unwrap();
+        d.set_mute(Target::Sound(0, 2), true).unwrap();
+        d.set("Aux", Target::Sound(0, 2), "aux1_level", Value::Float(0.2)).unwrap();
+        d.recall_snapshot(0).unwrap();
+        assert!(!d.project().groups[0].sounds[2].muted);
+        assert!((d.project().groups[0].sounds[2].aux[0] - initial_aux).abs() < 1e-6);
+        let rev = d.revision();
+        d.recall_snapshot(0).unwrap();
+        assert_eq!(d.revision(), rev, "unchanged recall is silent");
+        d.undo();
+        assert!(d.project().groups[0].sounds[2].muted);
+        assert!((d.project().groups[0].sounds[2].aux[0] - 0.2).abs() < 1e-6);
     }
 
     #[test]

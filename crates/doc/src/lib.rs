@@ -30,6 +30,7 @@ mod zones;
 pub use audio::TakeSpec;
 pub use zones::{ZoneFrom, ZoneSpec};
 mod cc_routes;
+mod cv_routes;
 mod expression;
 mod extra_outs;
 mod files;
@@ -54,7 +55,10 @@ pub use macros::{Macro, MacroPage};
 mod plugin_params;
 pub use plugin_params::PluginPageSpec;
 mod plugins;
+mod prepared;
+pub use prepared::{EditSnapshot, PreparedEdit};
 pub mod remote;
+mod session;
 
 /// The document as the app's parts share it (all on the UI thread).
 pub type Shared = Rc<RefCell<Document>>;
@@ -67,6 +71,8 @@ pub enum Op {
     /// Set field `field` of the object at `path` (`None`: take it off). For DECKARD's
     /// own fields, which Maschine's objects don't have.
     SetField { path: Path, field: String, value: Option<Value> },
+    /// An undoable session value, never written into the project file.
+    Session { key: String, value: Option<u64> },
 }
 
 /// The part of the project a parameter belongs to.
@@ -163,6 +169,7 @@ pub struct Document {
     /// Updated with each operation, so edits that remove unreferenced event
     /// objects do not scan the whole tree looking for dangling references.
     references: Option<std::collections::HashMap<u64, usize>>,
+    session_values: std::collections::BTreeMap<String, u64>,
 }
 
 impl std::fmt::Debug for Document {
@@ -215,6 +222,7 @@ impl Document {
             note_event: None,
             event_sequence: None,
             references: None,
+            session_values: Default::default(),
         };
         d.next_oid = max_oid + 1;
         d.read_block();
@@ -705,6 +713,22 @@ impl Document {
         Ok(())
     }
 
+    /// Begin a synchronous group whose edits can come from separate owners.
+    pub fn begin_edit_group(&mut self) -> usize {
+        if let Some(last) = self.undo.last_mut() {
+            last.at = Instant::now() - MERGE_WINDOW;
+        }
+        self.undo.len()
+    }
+    /// Finish a group begun by `begin_edit_group`, retaining one undo step.
+    pub fn end_edit_group(&mut self, before: usize, label: &str) {
+        if before >= self.undo.len() {
+            return;
+        }
+        let steps: Vec<Step> = self.undo.drain(before..).collect();
+        self.undo.push(Step::merged(label, &steps));
+    }
+
     /// Start a take (a recording): the edits until [`Document::end_take`] undo as one
     /// step named `label`.
     pub fn begin_take(&mut self, label: &str) {
@@ -822,7 +846,7 @@ impl Document {
         // has nowhere to go, those before it are taken back.
         let mut inverse = Vec::with_capacity(ops.len());
         for op in ops {
-            match run_one(&mut self.tree, op) {
+            match run_one(&mut self.tree, &mut self.session_values, op) {
                 Some(undo) => {
                     let refs = self.references.as_mut().unwrap();
                     if let Some(v) = op_value(&undo) {
@@ -835,7 +859,7 @@ impl Document {
                 }
                 None => {
                     for undo in inverse.iter().rev() {
-                        let _ = run_one(&mut self.tree, undo);
+                        let _ = run_one(&mut self.tree, &mut self.session_values, undo);
                     }
                     self.references = None;
                     return Err(format!("no value at {:?}", op_path(op)));
@@ -906,10 +930,14 @@ impl Document {
             }
             (Target::GroupStrip(g), "cue_enabled", Some(n), _) => p.groups[g].cue = n != 0.0,
             (Target::Sound(g, s), "cue_enabled", Some(n), _) => p.groups[g].sounds[s].cue = n != 0.0,
-            (Target::GroupStrip(g), "aux1_level", Some(n), _) => p.groups[g].aux[0] = n,
-            (Target::GroupStrip(g), "aux2_level", Some(n), _) => p.groups[g].aux[1] = n,
+            (Target::Group(g) | Target::GroupStrip(g), "aux1_level", Some(n), _) => p.groups[g].aux[0] = n,
+            (Target::Group(g) | Target::GroupStrip(g), "aux2_level", Some(n), _) => p.groups[g].aux[1] = n,
+            (Target::Group(g) | Target::GroupStrip(g), "aux1_order", Some(n), _) => p.groups[g].channel.aux_pre[0] = n as i64 == 1,
+            (Target::Group(g) | Target::GroupStrip(g), "aux2_order", Some(n), _) => p.groups[g].channel.aux_pre[1] = n as i64 == 1,
             (Target::Sound(g, s), "aux1_level", Some(n), _) => p.groups[g].sounds[s].aux[0] = n,
             (Target::Sound(g, s), "aux2_level", Some(n), _) => p.groups[g].sounds[s].aux[1] = n,
+            (Target::Sound(g, s), "aux1_order", Some(n), _) => p.groups[g].sounds[s].channel.aux_pre[0] = n as i64 == 1,
+            (Target::Sound(g, s), "aux2_order", Some(n), _) => p.groups[g].sounds[s].channel.aux_pre[1] = n as i64 == 1,
             (Target::Project, "name", _, Some(t)) => p.name = t,
             (Target::Group(g), "name", _, Some(t)) => p.groups[g].name = t,
             (Target::Group(g), "key_mode", Some(n), _) => p.groups[g].channel.key_mode = n as i64,
@@ -1069,8 +1097,10 @@ fn count_refs(value: &Value, refs: &mut std::collections::HashMap<u64, usize>, a
 }
 
 fn op_path(op: &Op) -> &Path {
+    static SESSION_PATH: Path = Vec::new();
     match op {
         Op::Set { path, .. } | Op::SetField { path, .. } => path,
+        Op::Session { .. } => &SESSION_PATH,
     }
 }
 
@@ -1079,12 +1109,20 @@ fn op_target(op: &Op) -> (&Path, Option<&str>) {
     match op {
         Op::Set { path, .. } => (path, None),
         Op::SetField { path, field, .. } => (path, Some(field)),
+        Op::Session { key, .. } => (op_path(op), Some(key)),
     }
 }
 
 /// Apply one op to `tree`; its inverse, or `None` if it has nowhere to go.
-fn run_one(tree: &mut Value, op: &Op) -> Option<Op> {
+fn run_one(tree: &mut Value, session: &mut std::collections::BTreeMap<String, u64>, op: &Op) -> Option<Op> {
     match op {
+        Op::Session { key, value } => {
+            let old = match value {
+                Some(v) => session.insert(key.clone(), *v),
+                None => session.remove(key),
+            };
+            Some(Op::Session { key: key.clone(), value: old })
+        }
         Op::Set { path, value } => {
             let slot = tree.at_mut(path)?;
             let old = std::mem::replace(slot, value.clone());
