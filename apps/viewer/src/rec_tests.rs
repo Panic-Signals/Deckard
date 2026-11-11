@@ -404,7 +404,7 @@ fn a_touched_knob_overwrites_until_idle() {
     assert!(!pts.iter().any(|p| p.1 == -0.5 && p.0 <= 2500), "the old points passed are gone: {pts:?}");
     assert!(pts.iter().any(|&(x, v)| x >= 2400 && v == 0.2), "the held value written up to the song: {pts:?}");
     app.tick_mod_take(head(2700.0), now + std::time::Duration::from_millis(300));
-    assert!(app.mod_take.is_none(), "idle: the touch ends");
+    assert!(app.mod_takes.is_empty(), "idle: the touch ends");
     let pts = cutoff_points(&app);
     assert!(pts.contains(&(3000, -0.5)), "what's after it stays: {pts:?}");
 }
@@ -418,7 +418,7 @@ fn removing_modulation_ends_its_touch() {
     for k in 0..6 {
         app.modulate_at(edit, at as f32 + 0.05 * k as f32, false, head(100.0 + 100.0 * k as f64));
     }
-    assert!(app.mod_take.is_some());
+    assert!(!app.mod_takes.is_empty());
     app.clear_modulation(edit);
     app.tick_mod_take(head(900.0), std::time::Instant::now() + std::time::Duration::from_millis(300));
     assert_eq!(cutoff_points(&app), [], "stays removed");
@@ -1193,7 +1193,8 @@ fn mk3_auto_writes_the_channel_pages_level() {
     assert!(!mods_of(&app).is_empty(), "written");
 }
 
-/// With no pattern of that group playing there's nowhere to write: it says so.
+/// With no pattern of that group playing, turning a knob while Auto-write is on and the
+/// song plays applies an ordinary edit directly to the parameter instead of dropping it.
 #[test]
 fn writing_with_no_pattern_to_write_into_says_so() {
     use crate::layout::Edit;
@@ -1201,7 +1202,50 @@ fn writing_with_no_pattern_to_write_into_says_so() {
     let mut app = crate::App::default();
     app.new_project();
     app.modulate_at(Edit::Level(Target::Sound(0, 0)), 0.5, false, Some((Mode::Scene(0), 100.0)));
-    assert!(app.status.contains("no pattern"), "{}", app.status);
+    let d = app.doc.as_ref().unwrap().borrow();
+    assert!((d.project().groups[0].sounds[0].level - 0.5).abs() < 1e-6, "idle group knob turn becomes an ordinary edit");
+    assert!(!app.status.starts_with("can't"), "{}", app.status);
+}
+
+/// Moving two knobs simultaneously while Auto-write is on and the song is playing keeps
+/// both modulation touches open independently, records both lanes intact, and groups
+/// them into one undo step.
+#[test]
+fn multiple_simultaneous_modulation_touches_record_both_lanes_in_one_undo_step() {
+    use crate::layout::Edit;
+    use deckard_doc::Target;
+    crate::modulation::register();
+    let mut app = fader_app();
+    let doc = app.doc.clone().unwrap();
+    let steps_before = doc.borrow().undo_labels().len();
+    let level_base = doc.borrow().project().groups[0].sounds[0].level as f32;
+    let level_edit = Edit::Level(Target::Sound(0, 0));
+    let pan_edit = Edit::Pan(Target::Sound(0, 0));
+    let head = |tick: f64| Some((Mode::Scene(0), tick));
+
+    // Interleave turns of Level and Pan over ticks 100..400.
+    app.modulate_at(level_edit, level_base - 0.2, false, head(100.0));
+    app.modulate_at(pan_edit, 0.75, false, head(100.0));
+    assert_eq!(app.mod_takes.len(), 2, "both touches remain open simultaneously");
+
+    app.modulate_at(level_edit, level_base - 0.1, false, head(250.0));
+    app.modulate_at(pan_edit, 0.9, false, head(250.0));
+    app.modulate_at(level_edit, level_base - 0.2, true, head(400.0));
+    assert_eq!(app.mod_takes.len(), 1, "releasing Level leaves Pan's touch open");
+    app.modulate_at(pan_edit, 1.0, true, head(400.0));
+    assert!(app.mod_takes.is_empty(), "both touches finished");
+
+    let level_pts = fader_points(&app, Some(0), "level");
+    let pan_pts = fader_points(&app, Some(0), "pan");
+    assert_eq!(level_pts, [(100, -0.2), (250, -0.1), (400, -0.2)], "level lane recorded intact");
+    assert_eq!(pan_pts, [(100, 0.25), (250, 0.4), (400, 0.5)], "pan lane recorded intact");
+    assert_eq!(doc.borrow().undo_labels().len(), steps_before + 1, "grouped into one undo step");
+    assert_eq!(doc.borrow().undo_label(), Some("Record Modulation"));
+
+    // One undo removes both lanes at once.
+    app.undo();
+    assert!(fader_points(&app, Some(0), "level").is_empty());
+    assert!(fader_points(&app, Some(0), "pan").is_empty());
 }
 
 /// A new project with two groups, each with a pattern on in scene 1, recording.
@@ -1260,4 +1304,26 @@ fn the_focus_can_be_kept_from_following_midi() {
     app.take_in_recorded(vec![played_into(1, 3, true)]);
     assert_eq!((app.group, app.sound), (0, 0));
     assert_eq!(app.doc.as_ref().unwrap().borrow().project().groups[1].patterns[0].notes.len(), 1, "recorded all the same");
+}
+
+#[test]
+fn simultaneous_controls_keep_the_last_value_on_the_same_tick() {
+    let (mut app, edit, at) = filter_app();
+    let head = Some((Mode::Scene(0), 100.));
+    app.modulate_at(edit, (at + 0.1) as f32, false, head);
+    app.modulate_at(edit, (at + 0.2) as f32, false, head);
+    assert_eq!(app.mod_takes[0].samples.len(), 1, "one sample per position");
+    let doc = app.doc.clone().unwrap();
+    assert!((doc.borrow().project().groups[0].patterns[0].mods[0].value - 0.2).abs() < 1e-6);
+    app.end_mod_take();
+    assert!((doc.borrow().project().groups[0].patterns[0].mods[0].value - 0.2).abs() < 1e-6);
+}
+
+#[test]
+fn an_unrecordable_control_does_not_end_another_knobs_touch() {
+    let (mut app, edit, at) = filter_app();
+    app.modulate_at(edit, (at + 0.1) as f32, false, Some((Mode::Scene(0), 100.)));
+    app.modulate_at(crate::layout::Edit::Level(deckard_doc::Target::Song), 0.6, true, Some((Mode::Scene(0), 100.)));
+    assert_eq!(app.mod_takes.len(), 1);
+    app.end_mod_take();
 }

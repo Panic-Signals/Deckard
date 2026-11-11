@@ -166,6 +166,7 @@ impl UserIndex {
                 let split = |s: String| s.split(LEVEL).filter(|x| !x.is_empty()).map(str::to_string).collect::<Vec<_>>();
                 let path = PathBuf::from(r.get::<_, String>(0)?);
                 Ok(Item {
+                    vendor: String::new(),
                     kind: q.kind,
                     user: q.user,
                     favorite: favorites.contains(&path),
@@ -183,7 +184,11 @@ impl UserIndex {
         let mut products = std::collections::BTreeSet::new();
         let mut items = Vec::new();
         for item in rows.flatten() {
-            if let Some(p) = &item.product {
+            let matches_facet = (q.products.is_empty()
+                || item.product.as_ref().is_some_and(|p| q.products.iter().any(|want| want.eq_ignore_ascii_case(p)))
+                || item.bank.first().is_some_and(|p| q.products.iter().any(|want| want.eq_ignore_ascii_case(p))))
+                && q.vendor.as_ref().is_none_or(|v| v.eq_ignore_ascii_case(&item.vendor));
+            if matches_facet && let Some(p) = &item.product {
                 products.insert(p.clone());
             }
             if (q.product.is_none() || q.product == item.product) && q.admits(&item) {

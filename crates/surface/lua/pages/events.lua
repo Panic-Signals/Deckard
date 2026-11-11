@@ -414,6 +414,7 @@ function events.draw_lanes(screen, theme, s, bottom)
     o.row_of = function(n) return n.sound == s.sound and high - n.pitch + 1 or nil end
   else
     o.row_of = function(n) return n.sound - first + 1 end
+    o.sound_row = function(n) return n - first + 1 end
     o.focus = s.sound - first + 1
   end
   editor.lanes(screen, theme, s, 480 + LIST_W, y, 480 - LIST_W, bottom - y, o)

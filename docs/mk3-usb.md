@@ -92,7 +92,9 @@ colours were confirmed on the hardware (`examples/mk3-led-check.rs`); each touch
 takes its own colour. DECKARD sends dim as shade 0 and every brighter state as 3, as
 Maschine's MK3 LED table gives bright and flash the full level; button LEDs that are off
 keep a faint backlight (0x09, picked on the hardware) so their labels can be read; dim ones (can be pressed, not
-selected) are 0x22, 30% under Maschine's 0.25.
+selected) are 0x22, 30% under Maschine's 0.25. SAMPLING is a colour LED, and its dim white
+doesn't look like the one-colour buttons, so when it isn't selected it gets byte 73, past
+the palette, picked on the hardware to match them.
 
 ## Other reports (from the HID report descriptor)
 

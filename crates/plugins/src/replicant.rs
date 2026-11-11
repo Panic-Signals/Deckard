@@ -190,7 +190,7 @@ fn super_gains(v: f64, sides: usize) -> (f64, f64) {
 const CONTROL: usize = 16;
 
 /// Envelope stage time: 1 ms .. 10 s.
-fn env_time(v: f64) -> f64 {
+pub(crate) fn env_time(v: f64) -> f64 {
     0.001 * 10_000f64.powf(v)
 }
 
@@ -202,15 +202,15 @@ fn lfo_hz(v: f64) -> f64 {
     0.05 * 400f64.powf(v)
 }
 
-fn glide_time(v: f64) -> f64 {
+pub(crate) fn glide_time(v: f64) -> f64 {
     if v <= 0.0 { 0.0 } else { 0.002 * 1000f64.powf(v) }
 }
 
-fn step(v: f64, steps: usize) -> usize {
+pub(crate) fn step(v: f64, steps: usize) -> usize {
     (v * steps as f64).round() as usize
 }
 
-fn time_text(s: f64) -> String {
+pub(crate) fn time_text(s: f64) -> String {
     if s < 1.0 { format!("{:.0} ms", s * 1000.0) } else { format!("{s:.2} s") }
 }
 
@@ -251,7 +251,7 @@ fn osc(wave: usize, t: f64, dt: f64, pw: f64) -> f64 {
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
-enum Stage {
+pub(crate) enum Stage {
     #[default]
     Off,
     Attack,
@@ -261,13 +261,13 @@ enum Stage {
 
 /// An ADSR: linear attack, exponential decay and release.
 #[derive(Clone, Copy, Default)]
-struct Env {
+pub(crate) struct Env {
     stage: Stage,
     level: f64,
 }
 
 #[derive(Clone, Copy, Default)]
-struct EnvSettings {
+pub(crate) struct EnvSettings {
     attack: f64,
     /// Per-sample multipliers of the distance to the target.
     decay: f64,
@@ -276,14 +276,14 @@ struct EnvSettings {
 }
 
 impl EnvSettings {
-    fn new(a: f64, d: f64, s: f64, r: f64, sr: f64) -> EnvSettings {
+    pub(crate) fn new(a: f64, d: f64, s: f64, r: f64, sr: f64) -> EnvSettings {
         let coef = |t: f64| (-5.0 / (t * sr)).exp();
         EnvSettings { attack: 1.0 / (env_time(a) * sr), decay: coef(env_time(d)), sustain: s, release: coef(env_time(r)) }
     }
 }
 
 impl Env {
-    fn gate(&mut self, on: bool) {
+    pub(crate) fn gate(&mut self, on: bool) {
         self.stage = if on {
             Stage::Attack
         } else if self.stage == Stage::Off {
@@ -293,7 +293,7 @@ impl Env {
         };
     }
 
-    fn next(&mut self, s: &EnvSettings) -> f64 {
+    pub(crate) fn next(&mut self, s: &EnvSettings) -> f64 {
         match self.stage {
             Stage::Off => self.level = 0.0,
             Stage::Attack => {

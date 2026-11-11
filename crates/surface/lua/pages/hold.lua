@@ -6,6 +6,9 @@ local pin = require("lib.pin")
 
 local hold = {}
 
+-- SELECT's MULTI (Button 8). Off: a pad replaces the selection. On: pads join it.
+hold.multi = false
+
 -- Which of them is held.
 local function held()
   for _, b in ipairs({ "MUTE", "SOLO", "SELECT" }) do
@@ -24,7 +27,21 @@ function hold.leds()
   local what = held()
   deckard.led("SCREEN_1", pin.on() and "on" or "dim")
   for _, i in ipairs({ 4, 5, 6 }) do deckard.led("SCREEN_" .. i, "dim") end
-  deckard.led("SCREEN_8", what == "SELECT" and "on" or "dim")
+  deckard.led("SCREEN_8", what == "SELECT" and hold.multi and "on" or "dim")
+end
+
+function hold.button(name, down)
+  if not down or held() ~= "SELECT" then return false end
+  if name == "SCREEN_5" then
+    deckard.select_all_sounds()
+  elseif name == "SCREEN_6" then
+    deckard.select_no_sounds()
+  elseif name == "SCREEN_8" then
+    hold.multi = not hold.multi
+  else
+    return false
+  end
+  return true
 end
 
 function hold.draw(screen, theme)
@@ -46,7 +63,7 @@ function hold.draw(screen, theme)
     { text = right[1] },
     { text = right[2] },
     nil,
-    { text = right[3] },
+    { text = right[3], selected = select and hold.multi },
   })
   widgets.info_bar(screen, theme, {
     number = s.sound,

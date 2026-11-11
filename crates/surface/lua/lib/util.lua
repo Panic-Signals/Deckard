@@ -55,4 +55,19 @@ function util.group_letter(g)
   return letter .. ((g - 1) // 8 + 1)
 end
 
+-- SAMPLING red while recording (flashing while it waits to start); false if not.
+function util.sample_led(s)
+  local r = s.sampling and s.sampling.record
+  if not r then return false end
+  if r.recording or (r.waiting and (deckard.now() * 4) % 2 < 1) then
+    deckard.led("SAMPLE", { 255, 0, 0 })
+    return true
+  end
+  if r.waiting then
+    deckard.led("SAMPLE", "dark")
+    return true
+  end
+  return false
+end
+
 return util

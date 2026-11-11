@@ -1079,6 +1079,9 @@ impl SamplerRt {
     }
 
     pub fn voices(&self) -> usize {
+        if let Some(a) = &self.audio {
+            return usize::from(a.runs());
+        }
         match &self.synth {
             Some((_, s, ..)) => s.voices(),
             None => self.voices.len(),
@@ -1149,7 +1152,7 @@ impl SamplerRt {
     pub fn note_on(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context) {
         if let Some(a) = self.audio.as_mut() {
             a.set_song(ctx.beats, ctx.tempo);
-            a.note_on(note);
+            a.note_on(id, note);
             return;
         }
         if let Some((_, s, ..)) = self.synth.as_mut() {
@@ -1158,6 +1161,13 @@ impl SamplerRt {
             return;
         }
         let velocity = if velocity <= 0 { 64 } else { velocity.min(127) };
+        if !self
+            .zones
+            .iter()
+            .any(|z| (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0)
+        {
+            return;
+        }
         let (legato, glide) = (self.settings.legato(), self.settings.glide);
         if legato {
             let had = !self.held.is_empty();
@@ -1334,7 +1344,7 @@ impl SamplerRt {
     /// Note-off for note `id` (§9).
     pub fn note_off(&mut self, id: u64, note: i64) {
         if let Some(a) = self.audio.as_mut() {
-            a.note_off(note);
+            a.note_off(id, note);
             return;
         }
         if let Some((_, s, ..)) = self.synth.as_mut() {
@@ -1362,7 +1372,7 @@ impl SamplerRt {
     /// Release every voice playing `note` (a key let go).
     pub fn release_note(&mut self, note: i64) {
         if let Some(a) = self.audio.as_mut() {
-            a.note_off(note);
+            a.release_note(note);
             return;
         }
         if let Some((_, s, ..)) = self.synth.as_mut() {
@@ -1960,5 +1970,42 @@ mod tests {
         smp3.adopt(smp2);
         assert_eq!(smp3.voices.len(), 1, "voice is retained across the sample swap");
         assert!(smp3.voices[0].fade.is_some(), "voice is fading out to prevent digital click");
+    }
+  
+    #[test]
+    fn legato_out_of_zone_note_does_not_glide_or_fade_voices() {
+        let sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.5, 0.5]; 48_000] });
+        let zone = ZoneRt {
+            sample,
+            root: 60,
+            keys: (60, 72),
+            vels: (1, 127),
+            gain: 1.0,
+            pan: 0.0,
+            tune: 0.0,
+            play: (0, 48_000),
+            looped: None,
+            x_fade: 0,
+            fade_in: 0,
+            fade_out: 0,
+        };
+        let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
+        settings.polyphony = 0; // Legato
+        settings.glide = 0.5;
+        let mut smp = SamplerRt::new(settings, vec![zone], (1.0, 1.0), 48_000.0);
+        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        smp.note_on(1, 60, 100, &ctx);
+        assert_eq!(smp.voices.len(), 1);
+        assert_eq!(smp.voices[0].note, 60);
+        assert!(smp.voices[0].fade.is_none());
+        assert_eq!(smp.glide_target, 0.0);
+
+        // Out-of-zone note (pitch 48 is below keys 60..=72): must not glide or fade the voice.
+        smp.note_on(2, 48, 100, &ctx);
+        assert_eq!(smp.voices.len(), 1);
+        assert_eq!(smp.voices[0].note, 60);
+        assert!(smp.voices[0].fade.is_none());
+        assert_eq!(smp.glide_target, 0.0);
+        assert_eq!(smp.glide_step, 0.0);
     }
 }

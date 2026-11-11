@@ -426,6 +426,25 @@ impl Player {
     /// Play what is due at the current frame.
     fn fire(&mut self) {
         let pos = self.pos;
+        // Due note-offs first, so a new note starting at the exact same frame is never
+        // immediately ended by the previous note's gate expiring.
+        if self.offs.iter().any(|o| o.0 <= pos) {
+            if let Some(p) = self.parts.as_mut() {
+                self.offs.retain(|&(at, id, pitch)| {
+                    if at > pos {
+                        return true;
+                    }
+                    if let Some(smp) = p.smp.as_mut() {
+                        smp.note_off(id, pitch);
+                    } else if let Some(inst) = &p.inst
+                        && let Ok(mut pl) = inst.plugin.lock()
+                    {
+                        pl.note_off(pitch);
+                    }
+                    false
+                });
+            }
+        }
         // Events in the order they came.
         let mut i = 0;
         while i < self.pending.len() {
@@ -441,22 +460,6 @@ impl Player {
             } else {
                 i += 1;
             }
-        }
-        if self.offs.iter().any(|o| o.0 <= pos) {
-            let Some(p) = self.parts.as_mut() else { return };
-            self.offs.retain(|&(at, id, pitch)| {
-                if at > pos {
-                    return true;
-                }
-                if let Some(smp) = p.smp.as_mut() {
-                    smp.note_off(id, pitch);
-                } else if let Some(inst) = &p.inst
-                    && let Ok(mut pl) = inst.plugin.lock()
-                {
-                    pl.note_off(pitch);
-                }
-                false
-            });
         }
     }
 

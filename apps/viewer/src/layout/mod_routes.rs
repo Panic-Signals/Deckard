@@ -6,7 +6,7 @@
 use super::*;
 use deckard_doc::Chain;
 use deckard_model::lfo::Lfo;
-use deckard_model::mod_matrix::{ModParam, ModRoute, ModSource, choices};
+use deckard_model::mod_matrix::{ModParam, ModRoute, ModSource, RouteMode, choices};
 
 /// What a route from knob `edit` would drive, in chain `c`: the sound (group, sound),
 /// the slot, the slot's module (or plug-in id) and the parameter. Continuous knobs of a
@@ -51,6 +51,9 @@ pub fn lfo_name(lfos: &[Lfo], s: ModSource) -> String {
 
 /// A route's range: "10–90".
 fn route_range(r: &ModRoute) -> String {
+    if r.mode == RouteMode::Add {
+        return format!("Add {:+.0}%", (r.high - r.low) * 100.0);
+    }
     let pct = |x: f32| (x * 100.0).round() as i32;
     format!("{}–{}", pct(r.low), pct(r.high))
 }
@@ -99,7 +102,12 @@ pub fn routed_values(snd: &deckard_model::Sound, travel: impl Fn(usize) -> Optio
         if !route_live(snd, r) {
             continue;
         }
-        if let Some(t) = travel(k) {
+        // Only the first route on a target publishes the sum. Also ignore duplicate
+        // cells during an edit, so a later contribution cannot overwrite that sum.
+        if out.iter().any(|(slot, field, _)| *slot == r.slot && field == f) {
+            continue;
+        }
+        if let Some(t) = travel(k).filter(|v| v.is_finite()) {
             out.push((r.slot, f.clone(), deckard_engine::modscale::scale_of(&r.module, f).at(f64::from(t))));
         }
     }
@@ -237,6 +245,12 @@ fn route_editor(
     let mut n = r.clone();
     let (mut low, mut high) = ((n.low * 100.0).round() as i32, (n.high * 100.0).round() as i32);
     egui::Grid::new("mod-route").num_columns(2).show(ui, |ui| {
+        ui.label("Mode");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut n.mode, RouteMode::Range, "Range");
+            ui.selectable_value(&mut n.mode, RouteMode::Add, "Add");
+        });
+        ui.end_row();
         ui.label("Low");
         ui.add(egui::Slider::new(&mut low, 0..=100).suffix(" %"));
         ui.end_row();

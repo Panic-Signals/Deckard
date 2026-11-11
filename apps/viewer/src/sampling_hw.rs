@@ -83,8 +83,9 @@ fn page(pages: &mut Pages, tab: usize, name: &str, knobs: Vec<(SamplingKnob, App
 /// `focus_slice`: the scripts' own, kept while there is such a slice.
 pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, usize), focus_slice: Option<usize>) -> Option<SampleView> {
     let sample = st.sample.as_ref()?;
-    let smp = p.groups.get(g)?.sounds.get(s)?.sampler.as_ref()?;
-    let z = smp.zones.get(zi)?;
+    let (zi, z, _, take) = crate::layout::sampling::edited(p, (g, s, zi))?;
+    let zones =
+        p.groups[g].sounds[s].sampler.as_ref().map_or(vec![], |smp| smp.zones.iter().map(|z| (z.key_range, z.velocity_range)).collect());
     let frames = sample.frames.len();
     let (v0, v1) = st.view();
     let peaks = |a: f64, b: f64| -> Vec<(f32, f32)> {
@@ -120,7 +121,8 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
         slices,
         focus_slice,
         playhead: st.playhead,
-        zones: smp.zones.iter().map(|z| (z.key_range, z.velocity_range)).collect(),
+        zones,
+        take,
         focus_zone: zi,
         color: Some(color),
     })
@@ -131,7 +133,7 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     let mut out = Pages::default();
     out.tabs[0] = record.pages;
     out.apply.extend(record.apply.into_iter().map(|(k, a)| (k, Apply::Record(a))));
-    let Some(z) = p.groups.get(g).and_then(|x| x.sounds.get(s)).and_then(|x| x.sampler.as_ref()).and_then(|x| x.zones.get(zi)) else {
+    let Some((_, z, _, take)) = crate::layout::sampling::edited(p, (g, s, zi)) else {
         return out;
     };
     let Some(sample) = st.sample.as_ref() else { return out };
@@ -161,6 +163,11 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         "SELECTION RANGE",
         vec![frames("Sel.Start", "START", sa, Apply::Selection(false)), frames("Sel.End", "END", sb, Apply::Selection(true))],
     );
+
+    // An Audio plug-in's take has no zones or slices.
+    if take {
+        return out;
+    }
 
     // ZONE.
     page(
