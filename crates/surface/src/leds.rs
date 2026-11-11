@@ -30,6 +30,11 @@ pub fn dim(rgb: [u8; 3]) -> u8 {
     bright(rgb) & !3
 }
 
+/// The same colour, flashing (white mixed in): what sounds while the transport runs.
+pub fn flash(rgb: [u8; 3]) -> u8 {
+    bright(rgb) | 3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,10 +93,11 @@ mod tests {
     fn held_mute_shows_muted_pads() {
         let (mut s, mut v) = (Surface::new(), view());
         v.groups[0].sounds[1].muted = true;
+        v.groups[0].sounds[2].playing = true;
         s.event(&Event::Button("BUTTON_MUTE", true), &v, Instant::now());
         let l = s.leds(&v);
         assert_eq!(byte(&l, "LED_PAD_2"), leds::palette(0, 2), "muted: dim");
-        assert_eq!(byte(&l, "LED_PAD_3"), leds::palette(0, 4), "playing: bright");
+        assert_eq!(byte(&l, "LED_PAD_3"), leds::palette(0, 5), "playing: flash");
         assert_eq!(byte(&l, "LED_MUTE"), ON);
     }
 

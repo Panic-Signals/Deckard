@@ -129,8 +129,9 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     let sh = shared.clone();
     d.set(
         "led",
-        lua.create_function(move |_, (name, how, bright): (String, Value, Option<bool>)| {
+        lua.create_function(move |_, (name, how, bright, flash): (String, Value, Option<bool>, Option<bool>)| {
             let Some(hw) = names::light(&name) else { return Err(mlua::Error::runtime(format!("no light {name}"))) };
+            let flash = flash.unwrap_or(false);
             let byte = match &how {
                 Value::String(s) => match (s.to_str()?.as_ref(), deckard_mk3::leds::is_colour(&hw)) {
                     ("off", true) => 0,
@@ -140,15 +141,15 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     ("on", false) => leds::ON,
                     ("dim", true) if hw == "LED_SAMPLE" => deckard_mk3::leds::SAMPLE_DIM,
                     ("dim", true) => leds::dim([255; 3]),
-                    ("on", true) => leds::bright([255; 3]),
+                    ("on", true) => if flash { leds::flash([255; 3]) } else { leds::bright([255; 3]) },
                     (other, _) => return Err(mlua::Error::runtime(format!("light {name}: \"{other}\"? (off, dim, on)"))),
                 },
                 Value::Table(t) => {
                     let rgb = crate::screen::rgb(t)?;
-                    if bright.unwrap_or(true) { leds::bright(rgb) } else { leds::dim(rgb) }
+                    if flash { leds::flash(rgb) } else if bright.unwrap_or(true) { leds::bright(rgb) } else { leds::dim(rgb) }
                 }
                 // A palette index (0..17, 16 white), as the project's colours are.
-                Value::Integer(i) => deckard_mk3::leds::palette(*i, if bright.unwrap_or(true) { 4 } else { 2 }),
+                Value::Integer(i) => deckard_mk3::leds::palette(*i, if flash { 5 } else if bright.unwrap_or(true) { 4 } else { 2 }),
                 Value::Nil => 0,
                 _ => return Err(mlua::Error::runtime(format!("light {name}: a level or a colour"))),
             };
