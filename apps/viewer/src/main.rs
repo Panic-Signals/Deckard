@@ -3119,7 +3119,7 @@ impl App {
                         controller_change = Some(choice);
                     }
                     ui.end_row();
-                    ui.label("Controller theme");
+                    ui.label("Controller theme").on_hover_text("The MK3's screens, pads and groups.");
                     let mut theme = self.settings.controller_theme.clone();
                     egui::ComboBox::from_id_salt("controller-theme").selected_text(theme_name(&theme)).show_ui(ui, |ui| {
                         for t in self.surface.themes() {
@@ -3133,7 +3133,19 @@ impl App {
                         self.settings.controller_theme = self.surface.theme().to_string();
                     }
                     ui.end_row();
-                    if self.settings.controller_theme == "lcd" {
+                    ui.label("Desktop theme").on_hover_text("The software window. It does not change the controller.");
+                    let mut desktop = self.settings.desktop_theme.clone();
+                    egui::ComboBox::from_id_salt("desktop-theme").selected_text(theme_name(&desktop)).show_ui(ui, |ui| {
+                        for t in self.surface.themes() {
+                            let name = theme_name(&t);
+                            ui.selectable_value(&mut desktop, t, name);
+                        }
+                    });
+                    if desktop != self.settings.desktop_theme {
+                        self.settings.desktop_theme = desktop;
+                    }
+                    ui.end_row();
+                    if self.settings.controller_theme == "lcd" || self.settings.desktop_theme == "lcd" {
                         ui.label("LCD colour");
                         let modes = [("yellow", "Yellow / black"), ("red", "Red / black"), ("blue", "Blue / white")];
                         let mut mode = self.settings.lcd_mode.clone();

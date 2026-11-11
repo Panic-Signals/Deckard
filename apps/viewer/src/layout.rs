@@ -107,8 +107,24 @@ thread_local! {
     static LCD_INK: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
     /// Pads and groups: the mode's one colour.
     static LCD_HUE: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
-    /// The pair last given to egui, so a frame that didn't change the mode leaves it.
-    static LCD_APPLIED: std::cell::Cell<Option<([u8; 3], [u8; 3])>> = const { std::cell::Cell::new(None) };
+    /// The pair last given to egui, and whether groups collapsed to one hue.
+    static LCD_APPLIED: std::cell::Cell<Option<([u8; 3], [u8; 3], bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The software window for `theme`: field, writing, and the LCD's one group colour.
+/// Maschine (and anything unknown) is `None`, the ordinary dark window, so an LCD
+/// controller does not restyle the software.
+fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3], Option<[u8; 3]>)> {
+    match theme {
+        "lcd" => {
+            let look = deckard_surface::lcd::look(mode);
+            Some((look.paper, look.ink, Some(look.hue)))
+        }
+        // Solarized's field and text. Palenight's writing on black.
+        "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1], None)),
+        "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff], None)),
+        _ => None,
+    }
 }
 
 /// Text that sits on `fill` while the LCD theme is on: the field or the pixel,
@@ -138,10 +154,10 @@ fn sound_base(app: &App, sound: usize) -> Color32 {
     if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { field() }
 }
 
-/// While the LCD theme is selected, the window uses that panel. Leaving it restores
-/// the dark style.
+/// The software window follows the desktop theme. The controller keeps its own.
+/// Maschine restores the ordinary dark window.
 fn sync_lcd(ctx: &egui::Context, app: &App) {
-    if app.settings.controller_theme != "lcd" {
+    let Some((paper, ink, hue)) = desktop_look(&app.settings.desktop_theme, &app.settings.lcd_mode) else {
         LCD_PAPER.with(|c| c.set(None));
         LCD_INK.with(|c| c.set(None));
         LCD_HUE.with(|c| c.set(None));
@@ -149,14 +165,13 @@ fn sync_lcd(ctx: &egui::Context, app: &App) {
             dark_style(ctx);
         }
         return;
-    }
-    let look = deckard_surface::lcd::look(&app.settings.lcd_mode);
-    LCD_PAPER.with(|c| c.set(Some(Color32::from_rgb(look.paper[0], look.paper[1], look.paper[2]))));
-    LCD_INK.with(|c| c.set(Some(Color32::from_rgb(look.ink[0], look.ink[1], look.ink[2]))));
-    LCD_HUE.with(|c| c.set(Some(Color32::from_rgb(look.hue[0], look.hue[1], look.hue[2]))));
-    let key = (look.paper, look.ink);
+    };
+    LCD_PAPER.with(|c| c.set(Some(Color32::from_rgb(paper[0], paper[1], paper[2]))));
+    LCD_INK.with(|c| c.set(Some(Color32::from_rgb(ink[0], ink[1], ink[2]))));
+    LCD_HUE.with(|c| c.set(hue.map(|h| Color32::from_rgb(h[0], h[1], h[2]))));
+    let key = (paper, ink, hue.is_some());
     if LCD_APPLIED.with(|c| c.replace(Some(key))) != Some(key) {
-        apply_lcd(ctx, Color32::from_rgb(key.0[0], key.0[1], key.0[2]), Color32::from_rgb(key.1[0], key.1[1], key.1[2]));
+        apply_lcd(ctx, Color32::from_rgb(paper[0], paper[1], paper[2]), Color32::from_rgb(ink[0], ink[1], ink[2]));
     }
 }
 
