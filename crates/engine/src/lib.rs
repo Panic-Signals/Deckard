@@ -231,6 +231,11 @@ pub enum Live {
     /// Every voice of every sound ends at once (Maschine's Choke All Notes): as a choke
     /// group's, a quick fade. The next notes play as usual. Not recorded.
     ChokeAll,
+    /// [`Live::ChokeAll`] for one Group's sounds only (e.g. track-level All Notes Off,
+    /// which leaves other Groups playing).
+    ChokeGroup {
+        group: usize,
+    },
 }
 
 /// Rendering sounds ahead (see [`ahead`]): the players' links, as the audio thread
@@ -4731,7 +4736,8 @@ impl Engine {
                 | Live::Expression { .. }
                 | Live::RepeatPressure { .. }
                 | Live::MidiInputOut { .. }
-                | Live::ChokeAll => None,
+                | Live::ChokeAll
+                | Live::ChokeGroup { .. } => None,
             };
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
@@ -4770,30 +4776,36 @@ impl Engine {
             }
             Live::RepeatPressure { .. } => {}
             Live::ChokeAll => self.choke_all(),
+            Live::ChokeGroup { group } => self.choke_group(group),
         }
     }
 
     /// Every voice of every sound ends: each sound as its choke group would end it.
     fn choke_all(&mut self) {
+        for group in 0..self.fx.len() {
+            self.choke_group(group);
+        }
+    }
+
+    /// Every voice of one Group's sounds ends, as [`Self::choke_all`] ends them.
+    fn choke_group(&mut self, group: usize) {
         let tps = 1.0 / self.samples_per_tick();
-        let shape: Vec<usize> = self.fx.iter().map(Vec::len).collect();
-        for (group, sounds) in shape.into_iter().enumerate() {
-            for sound in 0..sounds {
-                let e = NoteEvent {
-                    tick: 0,
-                    group,
-                    sound,
-                    pitch: 0,
-                    velocity: 0,
-                    length: 0,
-                    probability: 100,
-                    midi: Some(pads::CHOKE),
-                    cue: None,
-                    expr: None,
-                    from: None,
-                };
-                self.trigger(e, tps);
-            }
+        let sounds = self.fx.get(group).map_or(0, Vec::len);
+        for sound in 0..sounds {
+            let e = NoteEvent {
+                tick: 0,
+                group,
+                sound,
+                pitch: 0,
+                velocity: 0,
+                length: 0,
+                probability: 100,
+                midi: Some(pads::CHOKE),
+                cue: None,
+                expr: None,
+                from: None,
+            };
+            self.trigger(e, tps);
         }
     }
 
@@ -12690,6 +12702,29 @@ mod tests {
         assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6);
         let (l, r) = pan_gains(-1.0);
         assert!(r.abs() < 1e-6 && l > 1.0);
+    }
+
+    /// Choke only one Group's sounds: other Groups' voices keep playing.
+    #[test]
+    fn choke_group_ends_only_that_groups_voices() {
+        let mut p = project();
+        let other = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(other);
+        let mut e = click_engine_for(&p, 1000);
+        e.sequencing = false;
+        set_sample(&mut e, vec![[0.5, 0.5]; 100], &[("envelope_type", 2.0)], true);
+        let voices = |e: &Engine, s: usize| e.sounds[0][s].as_ref().map_or(0, |x| x.voices());
+        let on = |sound| Live::NoteOn { group: 0, sound, pitch: 60, velocity: 100, length: i64::MAX };
+        let mut out = vec![0f32; 2 * 50];
+        e.play_live(on(0));
+        e.play_live(on(1));
+        e.process(&mut out);
+        e.play_live(Live::ChokeGroup { group: 5 });
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 1), "another (absent) Group's choke leaves these playing");
+        e.play_live(Live::ChokeGroup { group: 0 });
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (0, 0), "its own Group's choke ends both");
     }
 
     #[test]

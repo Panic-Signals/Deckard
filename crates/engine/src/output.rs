@@ -187,8 +187,12 @@ impl Sender {
                     }
                 }
             }
-            Live::ControlIn { .. } | Live::Expression { .. } | Live::RepeatPressure { .. } | Live::MidiInputOut { .. } | Live::ChokeAll => {
-            }
+            Live::ControlIn { .. }
+            | Live::Expression { .. }
+            | Live::RepeatPressure { .. }
+            | Live::MidiInputOut { .. }
+            | Live::ChokeAll
+            | Live::ChokeGroup { .. } => {}
         }
     }
 
