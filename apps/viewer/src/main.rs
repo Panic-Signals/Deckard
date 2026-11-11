@@ -7515,7 +7515,8 @@ impl App {
                 RecordAct::FocusTake(i) => {
                     self.recorder.view.focused = Some(i);
                     if let Some(p) = self.recorder.view.takes.get(i).cloned() {
-                        self.load_into_sound(&p);
+                        let (g, s) = (self.group, self.sound);
+                        self.place_take(g, s, &p);
                     }
                 }
                 RecordAct::DeleteTake(i) => {
@@ -9257,13 +9258,6 @@ impl App {
             self.chain_tab = layout::ChainTab::Sound;
         }
         Ok(())
-    }
-
-    /// Load a sample file into the focused sound's Sampler as its only zone (adding a
-    /// Sampler if it has none).
-    fn load_into_sound(&mut self, path: &Path) {
-        let (g, s) = (self.group, self.sound);
-        self.place_take(g, s, path);
     }
 
     /// A recorded take put on sound (`g`, `s`) (a take clicked, or dragged onto a sound's
