@@ -2675,11 +2675,12 @@ impl Engine {
                                     let (lo, hi) = t.play_range;
                                     let range =
                                         if hi > lo { ((lo.max(0) as usize).min(len), (hi.max(0) as usize).min(len)) } else { (0, len) };
-                                    // Without a length, as many beats as fit at the song's tempo.
+                                    // Without a length, the power-of-two beat count nearest the song's tempo.
                                     let beats = if t.beats > 0.0 {
                                         t.beats
                                     } else {
-                                        ((range.1 - range.0) as f64 / sample.rate as f64 * project.tempo / 60.0).round().max(1.0)
+                                        let at_song = (range.1 - range.0) as f64 / sample.rate.max(1) as f64 * project.tempo / 60.0;
+                                        2f64.powf(at_song.max(1.0).log2().round()).clamp(1.0, 128.0)
                                     };
                                     audio_loop::TakeRt { sample, range, beats }
                                 })
@@ -2687,6 +2688,7 @@ impl Engine {
                             let settings = audio_loop::Settings {
                                 mode: a.mode,
                                 engine: a.engine,
+                                focused: a.focused,
                                 tune: a.tune,
                                 bend_range: (a.pitchbend - 0.5) * 24.0,
                                 fade: a.fade,
@@ -3517,6 +3519,7 @@ impl Engine {
         self.frame = 0;
         self.next = 0;
         self.sequencing = true;
+        self.recue();
     }
 
     fn repeat_replaces(&self, e: &NoteEvent) -> bool {
@@ -4308,6 +4311,11 @@ impl Engine {
                     }
                     ahead::Ev::Release { pitch } => self.note_release(g, s, pitch),
                     ahead::Ev::Control(kind) => self.control_in(g, s, kind, false),
+                    ahead::Ev::Cue(take, origin) => {
+                        if let Some(Some(snd)) = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)) {
+                            snd.cue(take.map(|t| (t, origin)));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -4960,6 +4968,7 @@ impl Engine {
                         self.pass += 1;
                         self.mode = mode;
                         self.timeline = timeline;
+                        self.recue();
                         end = self.frame_of(self.timeline.length);
                         continue;
                     }
@@ -8109,6 +8118,86 @@ mod tests {
         assert!(level > 1.0, "it plays from the start: {level}");
         let m = marks(&out);
         assert!(m.first().is_some_and(|&f| f.abs_diff(48_000) < 1024), "the next mark on beat 4: {m:?}");
+    }
+
+    #[test]
+    fn audio_loop_deactivates_on_scene_edits_and_jumps_and_plays_contiguous_gate_steps() {
+        // 1. Deactivating the group's pattern in Scene 0 (or jumping to an empty scene)
+        // stops an active AudioMode::Loop, and `beats == 0.0` snaps to a power-of-two beat count.
+        let (_tmp, mut on) = audio_project(deckard_model::AudioEngine::Repitch);
+        on.groups[0].sounds[0].audio.as_mut().unwrap().takes[0].beats = 0.0;
+        on.scenes.push(deckard_model::Scene { name: "Scene 2".into(), patterns: Vec::new(), ..Default::default() });
+        let mut deactivated = on.clone();
+        deactivated.scenes[0].patterns.clear();
+        let chains = Engine::new(&on, None, 48_000, Mode::Scene(0), &mut SampleCache::default()).1.chains;
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&on, None, 48_000, Mode::Scene(0), &mut cache);
+        e.looping = true;
+        let mut buf = vec![0.0f32; 512];
+        for _ in 0..40 {
+            e.process(&mut buf);
+        }
+        assert!(buf.iter().any(|v| v.abs() > 0.01), "loop playing before pattern deactivation");
+        assert_eq!(e.sounds[0][0].as_ref().unwrap().voices(), 1);
+        let (fresh, _) = Engine::new_after(&deactivated, Some((&on, chains.as_slice())), None, 48_000, Mode::Scene(0), &mut cache);
+        drop(e.adopt(fresh, &deactivated));
+        for _ in 0..10 {
+            e.process(&mut buf);
+        }
+        assert!(buf.iter().all(|v| v.abs() < 1e-6), "loop silent after pattern deactivated");
+
+        // Re-jump back to Scene 0 with the pattern active, then jump to empty Scene 1: stops.
+        e.jump(&on, Mode::Scene(0));
+        for _ in 0..20 {
+            e.process(&mut buf);
+        }
+        assert!(buf.iter().any(|v| v.abs() > 0.01), "loop playing after jump to Scene 0");
+        e.jump(&on, Mode::Scene(1));
+        for _ in 0..10 {
+            e.process(&mut buf);
+        }
+        assert!(buf.iter().all(|v| v.abs() < 1e-6), "loop silent after jump to empty Scene 1");
+
+        // Queued scene switch also recues cleanly.
+        e.jump(&on, Mode::Scene(0));
+        e.queue(&on, Mode::Scene(1));
+        for _ in 0..800 {
+            e.process(&mut buf);
+        }
+        assert!(buf.iter().all(|v| v.abs() < 1e-6), "loop silent after queued switch to empty Scene 1");
+
+        // 2. Switching to Gate mode and filling all 16th steps plays across every step
+        // (including when rendered ahead on an unfocused group) and releases live keys.
+        let mut gated = on.clone();
+        gated.groups[0].sounds[0].audio.as_mut().unwrap().mode = deckard_model::AudioMode::Gate;
+        gated.groups[0].patterns[0].audio.clear();
+        gated.groups[0].patterns[0].length = 4 * PPQ;
+        gated.groups[0].patterns[0].notes = (0..16)
+            .map(|step| deckard_model::Note {
+                expr: None,
+                sound: 0,
+                position: step * (PPQ / 4),
+                length: PPQ / 4,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            })
+            .collect();
+        let out_ahead = render_with(&gated, Some(1), 256, 2.0, |_, _, _| {});
+        for beat in 0..4 {
+            let slice = &out_ahead[beat * 24_000 * 2 + 2_000..(beat + 1) * 24_000 * 2 - 2_000];
+            let energy: f32 = slice.iter().map(|v| v * v).sum();
+            assert!(energy > 1.0, "beat {beat} silent in Gate mode with 16th steps: {energy}");
+        }
+        let (mut ge, _) = Engine::new(&gated, None, 48_000, Mode::Scene(0), &mut cache);
+        ge.sequencing = false;
+        ge.note_on(0, 0, 60, 100, HELD);
+        assert_eq!(ge.sounds[0][0].as_ref().unwrap().voices(), 1);
+        ge.note_release(0, 0, 60);
+        for _ in 0..10 {
+            ge.process(&mut buf);
+        }
+        assert_eq!(ge.sounds[0][0].as_ref().unwrap().voices(), 0);
     }
 
     /// The loop plays from the song's start, once every four beats at the song's 120

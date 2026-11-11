@@ -1079,6 +1079,9 @@ impl SamplerRt {
     }
 
     pub fn voices(&self) -> usize {
+        if let Some(a) = &self.audio {
+            return usize::from(a.runs());
+        }
         match &self.synth {
             Some((_, s, ..)) => s.voices(),
             None => self.voices.len(),
@@ -1138,7 +1141,7 @@ impl SamplerRt {
     pub fn note_on(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context) {
         if let Some(a) = self.audio.as_mut() {
             a.set_song(ctx.beats, ctx.tempo);
-            a.note_on(note);
+            a.note_on(id, note);
             return;
         }
         if let Some((_, s, ..)) = self.synth.as_mut() {
@@ -1330,7 +1333,7 @@ impl SamplerRt {
     /// Note-off for note `id` (§9).
     pub fn note_off(&mut self, id: u64, note: i64) {
         if let Some(a) = self.audio.as_mut() {
-            a.note_off(note);
+            a.note_off(id, note);
             return;
         }
         if let Some((_, s, ..)) = self.synth.as_mut() {
@@ -1358,7 +1361,7 @@ impl SamplerRt {
     /// Release every voice playing `note` (a key let go).
     pub fn release_note(&mut self, note: i64) {
         if let Some(a) = self.audio.as_mut() {
-            a.note_off(note);
+            a.release_note(note);
             return;
         }
         if let Some((_, s, ..)) = self.synth.as_mut() {
