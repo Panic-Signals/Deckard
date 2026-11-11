@@ -2286,6 +2286,7 @@ impl App {
     /// picked, and DECKARD's pictures of its plug-ins (C47).
     fn new_surface(&self) -> deckard_surface::Surface {
         let mut s = deckard_surface::Surface::with_user_dir(menu::settings_dir().map(|d| d.join("controller")));
+        s.set_lcd(&self.settings.lcd_mode);
         s.set_theme(&self.settings.controller_theme);
         plugin_pictures::give(&mut s);
         s
@@ -3118,7 +3119,7 @@ impl App {
                         controller_change = Some(choice);
                     }
                     ui.end_row();
-                    ui.label("Controller theme");
+                    ui.label("Controller theme").on_hover_text("The MK3's screens, pads and groups.");
                     let mut theme = self.settings.controller_theme.clone();
                     egui::ComboBox::from_id_salt("controller-theme").selected_text(theme_name(&theme)).show_ui(ui, |ui| {
                         for t in self.surface.themes() {
@@ -3127,10 +3128,39 @@ impl App {
                         }
                     });
                     if theme != self.settings.controller_theme {
+                        self.surface.set_lcd(&self.settings.lcd_mode);
                         self.surface.set_theme(&theme);
                         self.settings.controller_theme = self.surface.theme().to_string();
                     }
                     ui.end_row();
+                    ui.label("Desktop theme").on_hover_text("The software window. It does not change the controller.");
+                    let mut desktop = self.settings.desktop_theme.clone();
+                    egui::ComboBox::from_id_salt("desktop-theme").selected_text(theme_name(&desktop)).show_ui(ui, |ui| {
+                        for t in self.surface.themes() {
+                            let name = theme_name(&t);
+                            ui.selectable_value(&mut desktop, t, name);
+                        }
+                    });
+                    if desktop != self.settings.desktop_theme {
+                        self.settings.desktop_theme = desktop;
+                    }
+                    ui.end_row();
+                    if self.settings.controller_theme == "lcd" || self.settings.desktop_theme == "lcd" {
+                        ui.label("LCD colour");
+                        let modes = [("yellow", "Yellow / black"), ("red", "Red / black"), ("blue", "Blue / white")];
+                        let mut mode = self.settings.lcd_mode.clone();
+                        let shown = modes.iter().find(|(id, _)| *id == mode).map(|(_, name)| *name).unwrap_or("Yellow / black");
+                        egui::ComboBox::from_id_salt("lcd-mode").selected_text(shown).show_ui(ui, |ui| {
+                            for (id, name) in modes {
+                                ui.selectable_value(&mut mode, id.to_string(), name);
+                            }
+                        });
+                        if mode != self.settings.lcd_mode {
+                            self.settings.lcd_mode = deckard_surface::lcd::mode(&mode).to_string();
+                            self.surface.set_lcd(&self.settings.lcd_mode);
+                        }
+                        ui.end_row();
+                    }
                     ui.label("Maschine JAM");
                     ui.checkbox(&mut self.settings.relative_strips, "Relative level touchstrips").on_hover_text(
                         "On the mixer strips (LEVEL, AUX, SWING, TUNE, MACRO), a touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. CONTROL mode keeps absolute-fader behaviour. Off: a touch sets the value.",
@@ -12324,6 +12354,7 @@ mod tests {
     fn theme_names_read_well() {
         assert_eq!(theme_name("solarized_dark"), "Solarized Dark");
         assert_eq!(theme_name("maschine"), "Maschine");
+        assert_eq!(theme_name("lcd"), "LCD");
     }
 
     /// TAP on the controller sets the song's tempo from the taps; SHIFT + TAP and the
@@ -17593,6 +17624,9 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
 /// (or RGB), the others from their level.
 /// A controller theme's name as shown: `solarized_dark` → "Solarized Dark".
 fn theme_name(t: &str) -> String {
+    if t == "lcd" {
+        return "LCD".to_string();
+    }
     t.split('_')
         .map(|w| {
             let mut c = w.chars();

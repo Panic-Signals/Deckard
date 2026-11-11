@@ -20,20 +20,24 @@ local ALPHA_LOW, ALPHA_HIGH = 68, 216
 local STEP = PPQ // 4
 
 -- The timeline, the lines under the notes (steps, beats, bars), what's past the end,
--- the focused sound's row.
+-- the focused sound's row. The lines take the theme's text colour, so a light LCD
+-- still shows them (plain white disappears on a white field).
 local TIMELINE = { 38, 38, 38 }
 local TIMELINE_TEXT = { 170, 170, 170 }
-local STEP_LINE = { 255, 255, 255, 12 }
-local BEAT_LINE = { 255, 255, 255, 26 }
-local BAR_LINE = { 255, 255, 255, 56 }
 local PAST_END = { 0, 0, 0, 150 }
-local FOCUS_ROW = { 255, 255, 255, 14 }
--- (The lanes' focused row, lighter.)
-local FOCUS_LANE = { 255, 255, 255, 30 }
--- Keyboard mode: a white key's row, lighter; the overview's rows.
-local WHITE_ROW = { 255, 255, 255, 10 }
 local ROLL_ROW = 5
 local BLACK = { [1] = true, [3] = true, [6] = true, [8] = true, [10] = true }
+
+local function tone(theme, alpha)
+  local c = theme.colors.text
+  return { c[1], c[2], c[3], alpha }
+end
+
+-- A 5% pixel is a smudge on an LCD. A theme that sets `name` draws a solid step
+-- instead. Others keep the faint white line.
+local function mark(theme, alpha, name)
+  return theme.colors[name] or tone(theme, alpha)
+end
 
 -- The bar's and the beat's length in ticks.
 local function bar_beat(s)
@@ -90,8 +94,8 @@ local function timeline(screen, theme, s, x, y, w, h, t0, t1)
   t = (t0 // STEP) * STEP
   while t < t1 do
     if t > t0 and t % every == 0 then
-      local c = STEP_LINE
-      if t % bar == 0 then c = BAR_LINE elseif t % beat == 0 then c = BEAT_LINE end
+      local c = mark(theme, 12, "grid_step")
+      if t % bar == 0 then c = mark(theme, 56, "grid_bar") elseif t % beat == 0 then c = mark(theme, 26, "grid_beat") end
       screen:rect(at(t), y + HEADER, 1, h - HEADER, c)
     end
     t = t + STEP
@@ -177,9 +181,9 @@ function editor.pitch_top(s, rows)
 end
 
 -- The white keys' rows lighter, `high` the pitch of the top one.
-local function shade_rows(screen, x, y, w, row, rows, high)
+local function shade_rows(screen, theme, x, y, w, row, rows, high)
   for r = 1, rows do
-    if not BLACK[(high - r + 1) % 12] then screen:rect(x, y + (r - 1) * row, w, row - 1, WHITE_ROW) end
+    if not BLACK[(high - r + 1) % 12] then screen:rect(x, y + (r - 1) * row, w, row - 1, mark(theme, 10, "grid_row")) end
   end
 end
 
@@ -214,7 +218,7 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
     -- Keyboard mode: the focused sound's notes by pitch.
     local rows = (h - HEADER) // ROLL_ROW
     local high = editor.pitch_top(s, rows)
-    shade_rows(screen, x, y + HEADER, w, ROLL_ROW, rows, high)
+    shade_rows(screen, theme, x, y + HEADER, w, ROLL_ROW, rows, high)
     loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER, h - HEADER, true)
     for _, n in ipairs(s.notes) do
       local r = high - n.pitch + 1
@@ -225,7 +229,7 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
     end
   elseif not detail then
     -- Every sound of the group, a row each.
-    screen:rect(x, y + HEADER + (s.sound - 1) * ROW, w, ROW, FOCUS_ROW)
+    screen:rect(x, y + HEADER + (s.sound - 1) * ROW, w, ROW, mark(theme, 14, "grid_row"))
     for n = 1, math.min(16, #sounds) do
       loop_lane(screen, theme, s, sounds, n, at, x, w, t0, t1, y + HEADER + (n - 1) * ROW + 1, ROW - 1, false)
     end
@@ -278,8 +282,8 @@ function editor.lanes(screen, theme, s, x, y, w, h, o)
   local at = timeline(screen, theme, s, x, y, w, h, t0, t1)
   local group = s.groups[s.group]
   local sounds = group and group.sounds or {}
-  if o.focus then screen:rect(x, y + HEADER + (o.focus - 1) * o.row, w, o.row, FOCUS_LANE) end
-  if o.high then shade_rows(screen, x, y + HEADER, w, o.row, o.rows, o.high) end
+  if o.focus then screen:rect(x, y + HEADER + (o.focus - 1) * o.row, w, o.row, mark(theme, 30, "grid_beat")) end
+  if o.high then shade_rows(screen, theme, x, y + HEADER, w, o.row, o.rows, o.high) end
   if o.high and o.tint then
     for r = 1, o.rows do
       local c = o.tint(o.high - r + 1)

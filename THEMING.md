@@ -4,7 +4,9 @@ A theme sets how the Maschine MK3's two screens look: their colours, fonts and t
 sizes. Every page DECKARD draws on the MK3 uses the theme, so one file restyles them
 all. You don't need to know any programming beyond editing a list of values.
 
-Themes apply to the MK3's screens. The DECKARD app's own window isn't themable yet.
+Themes apply to the MK3's screens. The software window is a separate choice,
+**Preferences ▸ Hardware ▸ Desktop theme**, and it does not change the controller.
+Maschine keeps the ordinary dark window. LCD, Palenight and Solarized Dark restyle it.
 
 | Maschine | Palenight |
 |---|---|
@@ -19,7 +21,8 @@ Themes apply to the MK3's screens. The DECKARD app's own window isn't themable y
   chosen buttons have an animated orange-and-cyan border. A new install starts with it.
 - **Solarized Dark:** Ethan Schoonover's Solarized palette.
 
-Pick one in **Preferences ▸ Hardware ▸ Controller theme**.
+Pick one in **Preferences ▸ Hardware ▸ Controller theme**. The window's own menu on
+that page is **Desktop theme**.
 
 ## Your first theme in five minutes
 

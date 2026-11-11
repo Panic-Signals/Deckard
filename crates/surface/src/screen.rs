@@ -166,7 +166,20 @@ pub enum DrawOp {
     Circle { cx: f32, cy: f32, r: f32, width: Option<f32>, c: Paint, arc: Option<(f32, f32)> },
     Line { p0: (f32, f32), p1: (f32, f32), width: f32, c: Paint },
     Text { font_idx: usize, size: f32, colour: Paint, x: i32, y: i32, max_w: i32, text: String },
-    Image { x: i32, y: i32, w: i32, h: i32, key: String, thumb: bool },
+    Image { x: i32, y: i32, w: i32, h: i32, key: String, thumb: bool, restyle: bool },
+}
+
+/// A plug-in picture's pixel in the theme: orange (the knobs) becomes `accent`, and
+/// everything else is the field fading to the writing by how light the pixel was.
+pub fn plug_colour(px: [u8; 4], field: [u8; 3], ink: [u8; 3], accent: [u8; 3]) -> [u8; 3] {
+    let [r, g, b, _] = px;
+    let orange = r > 140 && u16::from(r) > u16::from(g) + 30 && u16::from(g) > u16::from(b) + 20 && g > 50;
+    if orange {
+        return accent;
+    }
+    let light = (u16::from(r) * 3 + u16::from(g) * 6 + u16::from(b)) / 10;
+    let mix = |i: usize| ((u16::from(field[i]) * (255 - light) + u16::from(ink[i]) * light) / 255) as u8;
+    [mix(0), mix(1), mix(2)]
 }
 
 /// What the scripts draw into.
@@ -178,11 +191,26 @@ pub struct Picture {
     pub px: Vec<[u8; 4]>,
     /// The text drawn, in order (for tests).
     pub texts: Vec<String>,
+    /// Plug-in pictures are redrawn with these (the field, the writing, the accent).
+    pub restyle_plugs: bool,
+    pub plug_field: [u8; 3],
+    pub plug_ink: [u8; 3],
+    pub plug_accent: [u8; 3],
 }
 
 impl Picture {
     pub fn new(background: [u8; 3]) -> Picture {
-        Picture { background, ops: Vec::new(), images: std::collections::HashMap::new(), px: Vec::new(), texts: Vec::new() }
+        Picture {
+            background,
+            ops: Vec::new(),
+            images: std::collections::HashMap::new(),
+            px: Vec::new(),
+            texts: Vec::new(),
+            restyle_plugs: false,
+            plug_field: background,
+            plug_ink: [255, 255, 255],
+            plug_accent: [0xff, 0xa5, 0x2a],
+        }
     }
 
     pub fn rasterize(&mut self) {
@@ -200,9 +228,9 @@ impl Picture {
                     let s = Style { font_idx: *font_idx, font: font_at(*font_idx), size: *size, colour: *colour };
                     self.text(&s, *x, *y, *max_w, text);
                 }
-                DrawOp::Image { x, y, w, h, key, thumb } => {
+                DrawOp::Image { x, y, w, h, key, thumb, restyle } => {
                     if let Some(img) = self.images.get(&(key.clone(), *thumb)).cloned() {
-                        self.image(*x, *y, *w, *h, &img);
+                        self.image(*x, *y, *w, *h, &img, *restyle);
                     }
                 }
             }
@@ -426,8 +454,8 @@ impl Picture {
     }
 
     /// `img` scaled to fit `w` × `h` at (x, y), centred, keeping its shape (each pixel
-    /// the average of those it covers).
-    fn image(&mut self, x: i32, y: i32, w: i32, h: i32, img: &Image) {
+    /// the average of those it covers). `restyle` redraws it in the theme.
+    fn image(&mut self, x: i32, y: i32, w: i32, h: i32, img: &Image, restyle: bool) {
         if img.w == 0 || img.h == 0 || w <= 0 || h <= 0 {
             return;
         }
@@ -449,7 +477,9 @@ impl Picture {
                     }
                 }
                 let avg = sum.map(|v| (v / n.max(1)) as u8);
-                self.blend(ox + dx, oy + dy, [avg[0], avg[1], avg[2]], f32::from(avg[3]) / 255.0);
+                let rgb =
+                    if restyle { plug_colour(avg, self.plug_field, self.plug_ink, self.plug_accent) } else { [avg[0], avg[1], avg[2]] };
+                self.blend(ox + dx, oy + dy, rgb, f32::from(avg[3]) / 255.0);
             }
         }
     }
@@ -524,7 +554,11 @@ impl UserData for Picture {
                 return Ok(false);
             };
             p.images.insert((key.clone(), thumb), img);
-            p.ops.push(DrawOp::Image { x, y, w, h, key, thumb });
+            // Product shots in the browser stay as they are. A plug-in's own picture is
+            // redrawn in the theme: its orange knobs take the accent, the rest the field
+            // and the writing.
+            let restyle = p.restyle_plugs && !key.starts_with("artwork:");
+            p.ops.push(DrawOp::Image { x, y, w, h, key, thumb, restyle });
             Ok(true)
         });
         m.add_method("text_width", |lua, _, (text, st): (String, Value)| Ok(Picture::width(&style(lua, &st)?, &text)));

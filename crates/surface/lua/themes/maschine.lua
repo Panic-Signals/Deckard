@@ -46,6 +46,8 @@ return {
     -- The Mixer: long names, the headroom, the scale, the pan's track, the 0 dB line,
     -- a focused strip's body, a muted strip, a muted value, the "+" for a new group.
     mixer_name = { 220, 220, 220 },
+    -- A selected strip's name, on the header filled with its colour. White, as `text`.
+    mixer_on = { 255, 255, 255 },
     mixer_headroom = { 80, 80, 80 },
     mixer_scale = { 95, 95, 95 },
     mixer_track = { 48, 48, 48 },
