@@ -654,8 +654,16 @@ fn browse_buttons() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::Browse(Browse::Load)]);
     assert_eq!(
         press(&mut s, &v, "BUTTON_SCREEN_6"),
+        [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)],
+        "NEXT prehears samples when prehear is on"
+    );
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "toggle PREHEAR off");
+    hold(&mut s, &v, "BUTTON_SHIFT", false);
+    assert_eq!(
+        press(&mut s, &v, "BUTTON_SCREEN_6"),
         [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Load)],
-        "NEXT loads (prehear is off)"
+        "NEXT loads when prehear is off"
     );
     v.browser.results.clear();
     assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "nothing to load");
@@ -666,6 +674,7 @@ fn browse_buttons() {
     hold(&mut s, &v, "BUTTON_SHIFT", true);
     let text = s.screen_text(&v);
     assert!(text.contains(&"+ ROUTING".to_string()) && text.contains(&"+ PATTERNS".to_string()), "{text:?}");
+    assert!(text.contains(&"PREHEAR".to_string()), "PREHEAR toggle shown on preset kinds too: {text:?}");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Browse(Browse::Routing(false))]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::Browse(Browse::Patterns(false))]);
 }
@@ -677,11 +686,26 @@ fn browse_knobs_gather_a_tenth_of_a_turn() {
     press(&mut s, &v, "BUTTON_BROWSE");
     let now = Instant::now();
     assert!(s.event(&Event::Knob(7, 0.05), &v, now).is_empty());
-    assert_eq!(s.event(&Event::Knob(7, 0.05), &v, now), [Action::Browse(Browse::Focus(1))]);
+    assert_eq!(s.event(&Event::Knob(7, 0.05), &v, now), [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)]);
+    v.browser.kind = 2; // SOUNDS (0-based Kind::ALL index)
+    assert_eq!(
+        s.event(&Event::Knob(7, 0.1), &v, now),
+        [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)],
+        "scrolling Sounds prehears too"
+    );
+    v.browser.kind = 6;
     hold(&mut s, &v, "BUTTON_SHIFT", true);
-    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(7))], "SHIFT: one page of 7 results");
+    assert_eq!(
+        s.event(&Event::Knob(7, 0.3), &v, now),
+        [Action::Browse(Browse::Focus(7)), Action::Browse(Browse::Prehear)],
+        "SHIFT: one page of 7 results"
+    );
     v.browser.focus = 8;
-    assert_eq!(s.event(&Event::Knob(7, 0.3), &v, now), [Action::Browse(Browse::Focus(3))], "and to the last");
+    assert_eq!(
+        s.event(&Event::Knob(7, 0.3), &v, now),
+        [Action::Browse(Browse::Focus(3)), Action::Browse(Browse::Prehear)],
+        "and to the last"
+    );
     v.browser.product = Some(0);
     assert_eq!(s.event(&Event::Knob(1, 0.3), &v, now), [Action::Browse(Browse::Product(Some(2)))], "SHIFT + Knob 2 pages products");
     v.browser.product = None;
@@ -698,7 +722,18 @@ fn browse_wheel_turns_the_bracketed_knob() {
     library(&mut v);
     press(&mut s, &v, "BUTTON_BROWSE");
     let now = Instant::now();
-    assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Focus(1))], "results to begin with");
+    assert_eq!(
+        s.event(&Event::Wheel(1), &v, now),
+        [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)],
+        "results to begin with"
+    );
+    v.browser.kind = 3; // INSTRUMENTS
+    assert_eq!(
+        s.event(&Event::Wheel(1), &v, now),
+        [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)],
+        "scrolling Instruments on wheel prehears"
+    );
+    v.browser.kind = 6;
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL"), [Action::Browse(Browse::Load)]);
     press(&mut s, &v, "BUTTON_WHEEL_LEFT");
     assert_eq!(
@@ -709,8 +744,12 @@ fn browse_wheel_turns_the_bracketed_knob() {
     press(&mut s, &v, "BUTTON_WHEEL_LEFT");
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Product(Some(0)))], "skipping the empty banks");
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL"), [Action::Browse(Browse::Load)], "wheel press loads even while a filter is bracketed");
-    assert_eq!(s.event(&Event::Knob(7, 0.1), &v, now), [Action::Browse(Browse::Focus(1))], "knob 8 returns the bracket to results");
-    assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Focus(1))]);
+    assert_eq!(
+        s.event(&Event::Knob(7, 0.1), &v, now),
+        [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)],
+        "knob 8 returns the bracket to results"
+    );
+    assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Browse(Browse::Focus(1)), Action::Browse(Browse::Prehear)]);
     press(&mut s, &v, "BUTTON_TEMPO");
     assert!(!s.event(&Event::Wheel(1), &v, now).iter().any(|a| matches!(a, Action::Browse(_))), "TEMPO keeps the wheel");
 }

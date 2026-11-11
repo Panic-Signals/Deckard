@@ -29,15 +29,15 @@ local util = require("lib.util")
 local browse = {}
 
 local KINDS = { "PROJECTS", "GROUPS", "SOUNDS", "INSTRUMENTS", "EFFECTS", "LOOPS", "ONE-SHOTS" }
-local GROUPS, LOOPS, ONE_SHOTS = 2, 6, 7
+local PROJECTS, GROUPS, LOOPS, ONE_SHOTS = 1, 2, 6, 7
 
 -- The knob the jog wheel turns (bracketed): results to begin with, and kept between
 -- visits.
 local RESULTS = 8
 local focus = RESULTS
 
--- Prehear: the focused sample plays as it's focused.
-local prehear = false
+-- Prehear: the focused result's sample or preview plays as it's scrolled onto.
+local prehear = true
 
 -- The products shown, six a page, while none is chosen: the first page's index (0..).
 local PRODUCTS_SHOWN = 6
@@ -50,8 +50,12 @@ local function lib(s)
   return s.browser
 end
 
+local function is_sample(b)
+  return b.kind == LOOPS or b.kind == ONE_SHOTS
+end
+
 local function can_prehear(b)
-  return prehear and (b.kind == LOOPS or b.kind == ONE_SHOTS) and #b.results > 0
+  return prehear and b.kind ~= PROJECTS and #b.results > 0
 end
 
 -- How many choices knob `n` has.
@@ -130,7 +134,6 @@ local function buttons(s, shift)
   if shift then
     local c = s.control
     local group = b.kind == GROUPS
-    local sample = b.kind == LOOPS or b.kind == ONE_SHOTS
     return {
       [3] = group and { text = "+ ROUTING", selected = b.routing } or nil,
       -- (When not browsing Groups, USER is shown, but does nothing: its light is off.)
@@ -142,7 +145,7 @@ local function buttons(s, shift)
         right = c.slot_index ~= nil and c.slot_index < c.slots,
       },
       [7] = { text = "SET", star = true, inert = n == 0 },
-      [8] = sample and { text = "PREHEAR", selected = prehear } or nil,
+      [8] = b.kind ~= PROJECTS and { text = "PREHEAR", selected = prehear } or nil,
     }
   end
   return {
@@ -159,7 +162,7 @@ end
 -- Focus the result `by` on, then prehear it (samples) or load it.
 local function step_and_load(b, by)
   deckard.browse_focus(by)
-  if can_prehear(b) then deckard.browse_prehear() else deckard.browse_load() end
+  if is_sample(b) and can_prehear(b) then deckard.browse_prehear() else deckard.browse_load() end
 end
 
 function browse.button(name, down)
