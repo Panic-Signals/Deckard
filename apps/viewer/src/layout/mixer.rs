@@ -651,7 +651,12 @@ fn group_tabs(ui: &mut Ui, app: &App, p: &deckard_model::Project, painter: &Pain
             S01
         };
         clip.rect_filled(inner, 2.0, fill);
-        let (id_ink, name_ink) = if selected { (black(245), black(245)) } else { (col, white(200)) };
+        let (id_ink, name_ink) = if selected {
+            let on = super::lcd_readable(col).unwrap_or(black(245));
+            (on, on)
+        } else {
+            (col, white(200))
+        };
         let text = clip.with_clip_rect(inner.intersect(tabs));
         text.text(Pos2::new(inner.left() + 6.0, inner.center().y), Align2::LEFT_CENTER, group_id(g), font(12.0), id_ink);
         let full = group_name(p, g);
@@ -695,8 +700,14 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let mute_col = MUTE_COL;
     let (bg, id_ink, name_ink) = match (st.focused && !master, st.muted) {
         _ if extra.is_some() => (EXTRA_BG, EXTRA_INK, if st.muted { white(142) } else { white(245) }),
-        (true, false) => (st.color, Color32::from_black_alpha(245), Color32::from_black_alpha(245)),
-        (true, true) => (mute_col, Color32::from_black_alpha(245), Color32::from_black_alpha(245)),
+        (true, false) => {
+            let on = super::lcd_readable(st.color).unwrap_or(Color32::from_black_alpha(245));
+            (st.color, on, on)
+        }
+        (true, true) => {
+            let on = super::lcd_readable(mute_col).unwrap_or(Color32::from_black_alpha(245));
+            (mute_col, on, on)
+        }
         (false, true) => (if sounds { S00 } else { S05 }, mute_col, white(142)),
         (false, false) => (if matches!(st.ch, Channel::Sound(..)) { S00 } else { S05 }, st.color, white(245)),
     };

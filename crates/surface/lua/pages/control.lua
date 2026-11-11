@@ -187,9 +187,9 @@ local function channel_tiles(screen, c)
     if i > c.page_groups then break end
     local x = 36 + (i - 1) * 104
     local on = i == c.page_group
-    local colour = on and "text" or { 0x7a, 0x7a, 0x7a }
+    local colour = on and "text" or "weak"
     if on then screen:rect(x, 108, 96, 52, "bar") end
-    screen:frame(x, 108, 96, 52, on and { 0xb9, 0xb9, 0xb9 } or { 0x66, 0x66, 0x66 })
+    screen:frame(x, 108, 96, 52, on and "text" or "button")
     channel_icon(screen, i, x + 48, 124, 8, colour, on and "bar" or "background")
     local title = name:sub(1, 1) .. name:sub(2):lower()
     screen:label(x, 138, 96, 18, title, { size = 12, color = colour })
@@ -246,20 +246,23 @@ end
 -- (20 Hz to 20 kHz, ±12 dB; the EQ and the Filter), law (input along the bottom,
 -- output up the side), time (level over time), or dots (a cloud). Several freq bands
 -- are numbered. The corner holds an LFO or envelope when one is sent.
-local function eq_curve(screen, eq)
+--
+-- The plot uses the theme: the curve is its accent, the handles its record colour,
+-- the grid its buttons. Palenight's curve is blue; the LCD's is its one ink.
+local function eq_curve(screen, theme, eq)
   local wave = eq.lfo or {}
   local show_lfo = #wave >= 2
   local kind = eq.kind or "freq"
   if kind == "" then kind = "freq" end
   -- With the modulator shape in the bottom right, the plot stops short of it.
   local x0, y0, w, h = 488, 66, show_lfo and 336 or 456, 132
-  screen:rect(x0, y0, w, h, { 0x12, 0x12, 0x14 })
+  screen:rect(x0, y0, w, h, "panel")
   local function px(t) return x0 + t * (w - 1) end
   local function py(v) return y0 + (1 - v) * (h - 1) end
   local function freq_x(hz)
     return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
   end
-  local grid = { 0x2c, 0x2c, 0x30 }
+  local grid = "button"
   if kind == "freq" then
     for _, hz in ipairs({ 100, 1000, 10000 }) do
       local x = px(freq_x(hz))
@@ -267,16 +270,16 @@ local function eq_curve(screen, eq)
     end
     for _, db in ipairs({ -6, 0, 6 }) do
       local y = py(db / 24 + 0.5)
-      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and { 0x48, 0x48, 0x4e } or grid)
+      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and "separator" or grid)
     end
   elseif kind == "law" then
-    screen:line(px(0), py(0), px(1), py(1), 1, { 0x48, 0x48, 0x4e })
+    screen:line(px(0), py(0), px(1), py(1), 1, "separator")
     for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
       screen:line(x0 + 1, py(t), x0 + w - 1, py(t), 1, grid)
       screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
     end
   else
-    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, { 0x48, 0x48, 0x4e })
+    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, "separator")
     for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
       screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
     end
@@ -288,43 +291,42 @@ local function eq_curve(screen, eq)
       screen:line(px((i - 1) / (n - 1)), py(pts[i]), px(i / (n - 1)), py(pts[i + 1]), width, ink)
     end
   end
-  stroke(eq.extent, 1, { 0x2a, 0x6a, 0x78 })
-  stroke(eq.side, 1.5, eq.side_live and { 0xe6, 0xc2, 0x6a } or { 0x5c, 0x50, 0x3a })
-  local curve_ink = eq.dim and { 0x2a, 0x6a, 0x78 } or { 0x3d, 0xc8, 0xe6 }
-  stroke(eq.points, 2, curve_ink)
+  stroke(eq.extent, 1, "muted")
+  stroke(eq.side, 1.5, eq.side_live and "marker" or "weak")
+  stroke(eq.points, 2, eq.dim and "muted" or "accent")
   local bands = eq.bands or {}
   local radius = kind == "freq" and 7 or 4
   for i, b in ipairs(bands) do
     local cx, cy = px(b.x), py(b.y)
     if kind == "time" then
-      screen:line(cx, py(0), cx, cy, 1.5, { 0xff, 0xc2, 0x3a })
+      screen:line(cx, py(0), cx, cy, 1.5, "record")
     end
-    screen:circle(cx, cy, radius, { 0xff, 0xc2, 0x3a })
+    screen:circle(cx, cy, radius, "record")
     if kind == "freq" and #bands > 1 then
-      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = { 0x14, 0x14, 0x16 } })
+      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = "on_colour" })
     end
   end
   if kind == "freq" then
     for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
       local x = px(freq_x(hz[1]))
-      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = "weak" })
     end
   end
   if eq.preview then
-    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = "weak" })
   end
   if show_lfo then
     -- Bottom right of the right screen, beside the curve.
     local bx, by, bw, bh = 832, y0 + h - 40, 112, 40
-    screen:rect(bx, by, bw, bh, { 0x0c, 0x0c, 0x0e })
-    screen:frame(bx, by, bw, bh, { 0x3a, 0x3a, 0x40 })
+    screen:rect(bx, by, bw, bh, "background")
+    screen:frame(bx, by, bw, bh, "button")
     local m = #wave
     for i = 1, m - 1 do
       local x1 = bx + 4 + (i - 1) / (m - 1) * (bw - 8)
       local x2 = bx + 4 + i / (m - 1) * (bw - 8)
       local y1 = by + 4 + (1 - wave[i]) * (bh - 8)
       local y2 = by + 4 + (1 - wave[i + 1]) * (bh - 8)
-      screen:line(x1, y1, x2, y2, 1.5, { 0xff, 0xc2, 0x3a })
+      screen:line(x1, y1, x2, y2, 1.5, "accent")
     end
   end
 end
@@ -386,19 +388,19 @@ function control.draw(screen, theme, opts)
         local t = c.tuner
         screen:label(490, 36, 300, 24, t.reference .. (t.muted and "  ·  Muted" or ""), "default", "left", "center")
         zhora.dial(screen, t)
-      elseif c.eq then eq_curve(screen, c.eq)
-      elseif c.filter then eq_curve(screen, c.filter)
-      elseif c.picture then eq_curve(screen, c.picture)
-      else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end
+      elseif c.eq then eq_curve(screen, theme, c.eq)
+      elseif c.filter then eq_curve(screen, theme, c.filter)
+      elseif c.picture then eq_curve(screen, theme, c.picture)
+      else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
     end
-    chain.draw(screen, c)
+    chain.draw(screen, theme, c)
   else
     widgets.buttons(screen, theme, {
       [5] = { arrows = true, text = PAGE_GROUPS[c.page_group] or "", left = can_step(c, false), right = can_step(c, true) },
     })
     channel_tiles(screen, c)
     screen:rect(480, 35, 480, 25, "bar")
-    channel_icon(screen, c.page_group, 720, 126, 37, { 0x3a, 0x3a, 0x3a }, "background")
+    channel_icon(screen, c.page_group, 720, 126, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
   end
   knobs(screen, theme, c, false, knob_of)
 end

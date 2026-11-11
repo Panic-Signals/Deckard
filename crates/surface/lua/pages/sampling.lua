@@ -429,12 +429,15 @@ local function wave(screen, theme, s, peaks, x, y, w, h, a, b, colour, slices)
       if x1 > x0 then screen:frame(x + x0, y, x1 - x0 + 1, h, "marker", 1) end
     end
   end
-  if s.playhead then mark(s.playhead, { 255, 255, 255, 198 }, 1) end
+  if s.playhead then
+    local c = theme.colors.text
+    mark(s.playhead, { c[1], c[2], c[3], 198 }, 1)
+  end
 end
 
 -- The zone map: the 128 keys across, velocity up, each zone over its keys and velocities.
 local BLACK = { [1] = true, [3] = true, [6] = true, [8] = true, [10] = true }
-local function zone_map(screen, s, colour)
+local function zone_map(screen, theme, s, colour)
   local x0, y0, w, h = 0, 60, 480, 144
   local kw = w / 128
   for key = 0, 127 do
@@ -450,7 +453,8 @@ local function zone_map(screen, s, colour)
     local yb = math.floor(y0 + (128 - z[3]) / 128 * h)
     local focused = i == s.focus_zone
     screen:rect(x, yt, xr - x, yb - yt, { colour[1], colour[2], colour[3], focused and 220 or 50 })
-    screen:frame(x, yt, xr - x, yb - yt, focused and "marker" or { 255, 255, 255, 90 }, 1)
+    local edge = theme.colors.text
+    screen:frame(x, yt, xr - x, yb - yt, focused and "marker" or { edge[1], edge[2], edge[3], 90 }, 1)
   end
 end
 
@@ -509,9 +513,10 @@ local function stems_progress(screen, theme, v)
   screen:label(20, 60, 440, 144, "Stem Separation in Progress", big, "center", "center")
   local st = { font = theme.styles.default.font, size = 18, color = "text" }
   screen:label(580, 136, 280, 24, "Exporting Sound...", st, "center", "center")
-  screen:frame(580, 166, 280, 20, { 255, 255, 255, 76 }, 1)
+  local edge = theme.colors.text
+  screen:frame(580, 166, 280, 20, { edge[1], edge[2], edge[3], 76 }, 1)
   local w = math.floor(272 * math.max(0, math.min(1, v.stems.progress)))
-  if w > 0 then screen:rect(584, 170, w, 12, { 255, 255, 255, 179 }) end
+  if w > 0 then screen:rect(584, 170, w, 12, { edge[1], edge[2], edge[3], 179 }) end
 end
 
 function page.draw(screen, theme)
@@ -535,7 +540,7 @@ function page.draw(screen, theme)
   elseif sample_ok(v) then
     local slices = v.tab == 3
     if v.tab == 4 then
-      zone_map(screen, smp, colour)
+      zone_map(screen, theme, smp, colour)
     else
       wave(screen, theme, smp, deckard.peaks("overview"), 0, 60, 480, 144, 0, smp.frames, colour, slices)
     end

@@ -383,7 +383,7 @@ local function draw_list(screen, theme, s, y, row, first, rows, high)
         local c = widgets.colour(theme, snd.palette, false, true)
         if i == s.sound then
           screen:rect(480, top, LIST_W, row, widgets.colour(theme, snd.palette))
-          c = { 0, 0, 0 }
+          c = theme.colors.on_colour
         end
         screen:label(482, top, LIST_W - 2, row, tostring(i), { font = st.font, size = st.size, color = c }, "left", "center")
       end

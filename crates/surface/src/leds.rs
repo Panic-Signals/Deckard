@@ -74,6 +74,25 @@ mod tests {
     }
 
     #[test]
+    fn the_lcd_theme_lights_pads_and_groups_in_one_colour() {
+        let (mut s, v) = (Surface::new(), view());
+        s.set_lcd("red");
+        s.set_theme("lcd");
+        assert_eq!(s.theme(), "lcd");
+        assert_eq!(s.error(), None);
+        let l = s.leds(&v);
+        let bright = leds::palette(0, 4);
+        let dim = leds::palette(0, 2);
+        assert_eq!(byte(&l, "LED_GROUP_A"), bright, "the focused group");
+        assert_eq!(byte(&l, "LED_GROUP_B"), dim, "another group, still red");
+        assert_eq!(byte(&l, "LED_GROUP_D"), 0, "no group stays dark");
+        assert_eq!(byte(&l, "LED_PAD_1"), bright);
+        assert_eq!(byte(&l, "LED_PAD_2"), dim);
+        assert_eq!(byte(&l, "LED_PAD_9"), 0, "an empty pad stays dark");
+        assert_eq!(byte(&l, "LED_TS_01"), 0, "the strip is not a pad");
+    }
+
+    #[test]
     fn pads_light_by_sound() {
         let (mut s, v) = (Surface::new(), view());
         let l = s.leds(&v);

@@ -160,6 +160,8 @@ pub struct Settings {
     pub controller: ControllerChoice,
     /// The MK3 screens' theme under DECKARD's own layer (Preferences > Hardware).
     pub controller_theme: String,
+    /// LCD colour while that theme is on: `yellow`, `red` or `blue`.
+    pub lcd_mode: String,
     /// Ableton Link (the header's LINK): joined, and starting and stopping with the
     /// session (Start Stop Sync).
     pub link: bool,
@@ -395,6 +397,7 @@ impl Default for Settings {
             touch_auto_write: false,
             controller: ControllerChoice::default(),
             controller_theme: CONTROLLER_THEME.to_string(),
+            lcd_mode: "yellow".to_string(),
             link: false,
             link_start_stop: false,
             midi_sync: MidiSync::Off,
@@ -546,6 +549,7 @@ impl Settings {
                 "clock_receive_offset_ms" => s.clock_receive_offset_ms = v.parse::<i32>().map_or(0, |n| n.clamp(-100, 100)),
                 "exact_timing" => s.exact_timing = v != "false",
                 "controller_theme" if !v.is_empty() => s.controller_theme = v.to_string(),
+                "lcd_mode" => s.lcd_mode = deckard_surface::lcd::mode(v).to_string(),
                 "controller" => {
                     s.controller = match v {
                         "automatic" => ControllerChoice::Automatic,
@@ -825,6 +829,9 @@ impl Settings {
         }
         if self.controller_theme != CONTROLLER_THEME {
             out += &format!("controller_theme = {}\n", self.controller_theme);
+        }
+        if self.lcd_mode != "yellow" {
+            out += &format!("lcd_mode = {}\n", self.lcd_mode);
         }
         let sync = match self.midi_sync {
             MidiSync::Off => "off",
@@ -1216,6 +1223,10 @@ mod routing_tests {
             let s = Settings { controller_theme: theme.into(), ..Settings::default() };
             assert_eq!(Settings::parse(&s.to_text()).controller_theme, theme);
         }
+        let lcd = Settings { lcd_mode: "blue".into(), ..Settings::default() };
+        assert_eq!(Settings::parse(&lcd.to_text()).lcd_mode, "blue");
+        assert_eq!(Settings::parse("lcd_mode = white").lcd_mode, "yellow");
+        assert_eq!(Settings::parse("lcd_mode = purple").lcd_mode, "yellow");
     }
 
     /// Settings saved before devices kept their own routing: the input device's routes

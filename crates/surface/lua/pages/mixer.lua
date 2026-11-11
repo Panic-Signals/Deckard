@@ -223,7 +223,10 @@ local function strip(screen, theme, x, top, bottom, ch, short, focused, row, sep
   if focused then screen:rect(x, top, 120, header_bottom - top, tint) end
   local short_c, name_c = tint_text, "mixer_name"
   if focused then
-    short_c, name_c = "text", "text"
+    -- On the colour fill. `mixer_on` is white on Maschine and the field colour on an LCD,
+    -- so the name is not the same colour as the header.
+    local on = theme.colors.mixer_on and "mixer_on" or "text"
+    short_c, name_c = on, on
   elseif muted then
     short_c, name_c = "muted", "muted"
   end

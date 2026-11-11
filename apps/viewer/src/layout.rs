@@ -100,14 +100,112 @@ fn dim(c: Color32, f: f32) -> Color32 {
     Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
 }
 
+thread_local! {
+    /// The LCD's field, while that theme is on. `None` is the ordinary dark window.
+    static LCD_PAPER: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
+    /// The LCD's pixel, the colour that reads on the field.
+    static LCD_INK: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
+    /// Pads and groups: the mode's one colour.
+    static LCD_HUE: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
+    /// The pair last given to egui, so a frame that didn't change the mode leaves it.
+    static LCD_APPLIED: std::cell::Cell<Option<([u8; 3], [u8; 3])>> = const { std::cell::Cell::new(None) };
+}
+
+/// Text that sits on `fill` while the LCD theme is on: the field or the pixel,
+/// whichever stands further from the fill. `None` when that theme is off.
+fn lcd_readable(fill: Color32) -> Option<Color32> {
+    let paper = LCD_PAPER.with(|c| c.get())?;
+    let ink = LCD_INK.with(|c| c.get())?;
+    let apart = |a: Color32, b: Color32| {
+        let dr = a.r() as i32 - b.r() as i32;
+        let dg = a.g() as i32 - b.g() as i32;
+        let db = a.b() as i32 - b.b() as i32;
+        dr * dr + dg * dg + db * db
+    };
+    let choice = if apart(fill, ink) >= apart(fill, paper) { ink } else { paper };
+    // The field brown does not read on a bright yellow or red segment.
+    let y = |c: Color32| 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
+    Some(if y(choice) < 40.0 && y(fill) > 140.0 { Color32::BLACK } else { choice })
+}
+
+/// The window's ground: the LCD's field, or the ordinary dark surface.
+fn field() -> Color32 {
+    LCD_PAPER.with(|c| c.get()).unwrap_or(S00)
+}
+
 /// A sound row that SELECT has, besides the focused one.
 fn sound_base(app: &App, sound: usize) -> Color32 {
-    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { S00 }
+    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { field() }
+}
+
+/// While the LCD theme is selected, the window uses that panel. Leaving it restores
+/// the dark style.
+fn sync_lcd(ctx: &egui::Context, app: &App) {
+    if app.settings.controller_theme != "lcd" {
+        LCD_PAPER.with(|c| c.set(None));
+        LCD_INK.with(|c| c.set(None));
+        LCD_HUE.with(|c| c.set(None));
+        if LCD_APPLIED.with(|c| c.take()).is_some() {
+            dark_style(ctx);
+        }
+        return;
+    }
+    let look = deckard_surface::lcd::look(&app.settings.lcd_mode);
+    LCD_PAPER.with(|c| c.set(Some(Color32::from_rgb(look.paper[0], look.paper[1], look.paper[2]))));
+    LCD_INK.with(|c| c.set(Some(Color32::from_rgb(look.ink[0], look.ink[1], look.ink[2]))));
+    LCD_HUE.with(|c| c.set(Some(Color32::from_rgb(look.hue[0], look.hue[1], look.hue[2]))));
+    let key = (look.paper, look.ink);
+    if LCD_APPLIED.with(|c| c.replace(Some(key))) != Some(key) {
+        apply_lcd(ctx, Color32::from_rgb(key.0[0], key.0[1], key.0[2]), Color32::from_rgb(key.1[0], key.1[1], key.1[2]));
+    }
+}
+
+fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
+    let y_of = |c: Color32| 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
+    ctx.set_theme(egui::Theme::Dark);
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = paper;
+    v.window_fill = paper;
+    v.extreme_bg_color = paper;
+    v.faint_bg_color = paper;
+    v.code_bg_color = paper;
+    v.override_text_color = Some(ink);
+    v.hyperlink_color = ink;
+    // Half-brightness amber and red are the muddy middle. Chrome stays near the pixel.
+    v.selection.bg_fill = dim(ink, 0.72);
+    v.selection.stroke = Stroke::new(1.0, ink);
+    let edge = Stroke::new(1.0, dim(ink, 0.78));
+    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.bg_fill = paper;
+        w.weak_bg_fill = paper;
+        w.bg_stroke = edge;
+        w.fg_stroke = Stroke::new(1.0, ink);
+    }
+    v.widgets.active.bg_fill = ink;
+    // Brown field-colour on a bright segment does not read. Black does.
+    let on_fill = if y_of(ink) > y_of(paper) { Color32::BLACK } else { paper };
+    v.widgets.active.fg_stroke = Stroke::new(1.0, on_fill);
+    v.widgets.hovered.weak_bg_fill = dim(ink, 0.4);
+    ctx.set_visuals(v);
+    ctx.all_styles_mut(|s| {
+        use egui::TextStyle::*;
+        s.text_styles.insert(Body, font(12.0));
+        s.text_styles.insert(Button, font(12.0));
+        s.text_styles.insert(Small, font(10.0));
+        s.text_styles.insert(Heading, font(15.0));
+        s.text_styles.insert(Monospace, FontId::monospace(12.0));
+        s.visuals.panel_fill = paper;
+        s.visuals.window_fill = paper;
+        s.visuals.override_text_color = Some(ink);
+    });
 }
 
 /// A colour slot; `Default` falls back to `default_slot` (our guess at Maschine's
-/// default, two slots per index).
+/// default, two slots per index). On the LCD every slot is the mode's one colour.
 fn palette(c: Color, default_slot: usize) -> Color32 {
+    if let Some(hue) = LCD_HUE.with(|cell| cell.get()) {
+        return hue;
+    }
     let i = match c {
         Color::Palette(i) => i as usize,
         Color::Default => default_slot % 16,
@@ -1616,10 +1714,11 @@ fn triangle(p: &Painter, c: Pos2, r: f32, color: Color32) {
 // Header
 
 pub fn header(app: &mut App, ui: &mut Ui) {
+    sync_lcd(ui.ctx(), app);
     let mut acts = Vec::new();
     egui::Panel::top("header")
         .exact_size(HEADER)
-        .frame(egui::Frame::new().fill(S00).inner_margin(egui::Margin { left: 6, right: 6, top: 0, bottom: 0 }))
+        .frame(egui::Frame::new().fill(field()).inner_margin(egui::Margin { left: 6, right: 6, top: 0, bottom: 0 }))
         .show_separator_line(false)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
@@ -2299,7 +2398,9 @@ fn time_signature_menu(ui: &mut Ui, p: &Project, acts: &mut Vec<Act>) {
 // Body
 
 pub fn body(app: &mut App, ui: &mut Ui) {
-    egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK).inner_margin(3.0)).show(ui, |ui| {
+    sync_lcd(ui.ctx(), app);
+    let ground = LCD_PAPER.with(|c| c.get()).unwrap_or(Color32::BLACK);
+    egui::CentralPanel::default().frame(egui::Frame::new().fill(ground).inner_margin(3.0)).show(ui, |ui| {
         let Some(doc) = app.doc.clone() else {
             let r = ui.max_rect();
             ui.painter().text(r.center(), Align2::CENTER_CENTER, "Drop a .mxprj file here", font(15.0), white(142));
@@ -2615,7 +2716,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     view_switch(ui, app, rect, acts);
     let area = Rect::from_min_max(Pos2::new(rect.left() + STRIP + 1.0, rect.top()), rect.max);
     let painter = ui.painter_at(area);
-    painter.rect_filled(area, 0.0, S00);
+    painter.rect_filled(area, 0.0, field());
     let time = ui.input(|i| i.time);
     let playing_scene = head.and_then(|h| match h.mode {
         Mode::Scene(s) => Some(s),
@@ -2764,7 +2865,9 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             // Patterns of the focused scene are lit; the group's other patterns are dark.
             cell_painter.rect_filled(shape, 3.0, if assigned { col } else { dim(col, 0.3) });
             if g == app.group && pi == app.pattern {
-                cell_painter.rect_stroke(shape, 3.0, Stroke::new(2.0, white(235)), StrokeKind::Outside);
+                // The outline has to read on the cell. White disappears on a light LCD.
+                let edge = lcd_readable(col).unwrap_or(white(235));
+                cell_painter.rect_stroke(shape, 3.0, Stroke::new(2.0, edge), StrokeKind::Outside);
             } else if resp.hovered() {
                 cell_painter.rect_stroke(shape, 3.0, Stroke::new(1.0, white(41)), StrokeKind::Outside);
             }
@@ -2838,7 +2941,13 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let tile = Rect::from_min_size(Pos2::new(x, tiles.top()), Vec2::new(IDEA_W - 1.0, TILE_H)).shrink(1.0);
         let resp = ui.interact(tile.intersect(tiles), ui.id().with(("tile", g)), Sense::click());
         note_rect(ui, &format!("group tile {g}"), tile);
-        let gcol = if group.muted { Color32::from_gray(0x7D) } else { group_color(p, g) };
+        let gcol = if group.muted && LCD_HUE.with(|c| c.get()).is_none() {
+            Color32::from_gray(0x7D)
+        } else if group.muted {
+            dim(group_color(p, g), 0.45)
+        } else {
+            group_color(p, g)
+        };
         let focused = g == app.group;
         let tp = painter.with_clip_rect(tiles);
         if focused {
@@ -2846,13 +2955,13 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         } else if resp.hovered() {
             tp.rect_filled(tile, 2.0, white(20));
         }
-        let ink = if focused { black(245) } else { gcol };
+        let ink = if focused { lcd_readable(gcol).unwrap_or(black(245)) } else { gcol };
         let letter = Pos2::new(tile.center().x, tile.top() + 12.0);
         let id = group_tab(g);
         tp.text(letter, Align2::CENTER_CENTER, &id, bold_font(ui.ctx(), 16.0), ink);
         let name_rect = Rect::from_min_size(Pos2::new(tile.left() + 6.0, tile.top() + 20.0), Vec2::new(86.0, 20.0));
         let name_ink = if focused {
-            black(245)
+            lcd_readable(gcol).unwrap_or(black(245))
         } else if group.muted {
             white(142)
         } else {
@@ -3083,21 +3192,24 @@ fn group_row(
     // grey where there is none).
     let id_ink = match (lit, focused, muted, color) {
         (true, ..) => {
-            painter.rect_filled(idr, 0.0, lighter(color.unwrap_or(Color32::from_gray(0x9B))));
-            S00
+            let fill = lighter(color.unwrap_or(Color32::from_gray(0x9B)));
+            painter.rect_filled(idr, 0.0, fill);
+            lcd_readable(fill).unwrap_or_else(field)
         }
         (_, true, _, Some(c)) => {
             painter.rect_filled(idr, 0.0, c);
-            S00
+            lcd_readable(c).unwrap_or_else(field)
         }
         (_, _, true, _) => Color32::from_gray(0x66),
-        _ => white(164),
+        _ => lcd_readable(base).unwrap_or(white(164)),
     };
     painter.text(idr.center(), Align2::CENTER_CENTER, id, font(12.0), id_ink);
-    let name_ink = if muted {
-        white(61)
-    } else if focused {
+    let name_ink = if focused {
         Color32::WHITE
+    } else if let Some(ink) = lcd_readable(base) {
+        if muted { dim(ink, 0.82) } else { ink }
+    } else if muted {
+        white(61)
     } else {
         white(142)
     };
@@ -5681,7 +5793,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     match strip(
         ui,
         strip_rect,
-        S00,
+        field(),
         6.0,
         &[
             (!app.piano_roll, "Drum grid", grid_icon),
@@ -5705,8 +5817,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let col = Rect::from_min_size(Pos2::new(rect.left() + STRIP + 1.0, rect.top()), Vec2::new(COLUMN, rect.height()));
     let ed = Rect::from_min_max(Pos2::new(col.right() + 1.0, rect.top()), rect.max);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(col, 0.0, S00);
-    painter.rect_filled(ed, 0.0, S00);
+    painter.rect_filled(col, 0.0, field());
+    painter.rect_filled(ed, 0.0, field());
     let Some(group) = p.groups.get(app.group) else { return };
     let gcol = group_color(p, app.group);
     let pat = group.patterns.get(app.pattern);

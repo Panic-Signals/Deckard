@@ -574,7 +574,7 @@ fn edited_user_scripts_reload() {
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["maschine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["lcd", "maschine", "palenight", "solarized_dark"]);
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -604,7 +604,7 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["lcd", "maschine", "mine", "palenight", "solarized_dark"]);
 }
 
 #[test]
@@ -1755,6 +1755,14 @@ fn the_events_select_mode_selects_with_the_pads() {
     assert_eq!(s.error(), None);
 }
 
+/// Maschine's accent (the curve) and record colour (a handle).
+fn accent(p: &[u8; 4]) -> bool {
+    p[0] > 220 && p[1] > 130 && p[1] < 200 && p[2] < 80
+}
+fn record(p: &[u8; 4]) -> bool {
+    p[0] > 190 && p[1] < 90 && p[2] < 90
+}
+
 /// The built-in EQ's curve is on the right screen, and stays there on both pages.
 #[test]
 fn the_eq_curve_stays_on_the_right_screen() {
@@ -1767,14 +1775,35 @@ fn the_eq_curve_stays_on_the_right_screen() {
         bands: vec![(0.25, 0.5), (0.45, 0.8), (0.65, 0.3), (0.85, 0.5)],
         ..Default::default()
     });
-    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
-    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && accent(p)).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && accent(p)).count();
     for page in [0, 1] {
         v.control.page = page;
         let px = s.picture(&v);
         assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
         assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
     }
+    assert_eq!(s.error(), None);
+}
+
+/// The curve takes the theme's accent: Palenight's blue, the LCD's amber ink.
+#[test]
+fn the_right_screen_curve_follows_the_theme() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.control.chain[0].name = "EQ".into();
+    v.control.slot = Some("EQ".into());
+    v.control.eq = Some(crate::EqCurveView { points: vec![0.5; 48], ..Default::default() });
+    let count = |px: &[[u8; 4]], f: fn(&[u8; 4]) -> bool| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && f(p)).count();
+    assert!(count(&s.picture(&v), accent) > 200, "Maschine's curve is its orange accent");
+    s.set_theme("palenight");
+    let blue = |p: &[u8; 4]| p[2] > 220 && (90..170).contains(&p[0]) && (140..210).contains(&p[1]);
+    let px = s.picture(&v);
+    assert!(count(&px, blue) > 200, "Palenight's curve is its blue accent: {}", count(&px, blue));
+    assert!(count(&px, accent) < 30, "not Maschine's orange");
+    s.set_lcd("yellow");
+    s.set_theme("lcd");
+    let amber = |p: &[u8; 4]| p[0] > 220 && (150..200).contains(&p[1]) && p[2] < 30;
+    assert!(count(&s.picture(&v), amber) > 200, "the LCD's curve is its ink");
     assert_eq!(s.error(), None);
 }
 
@@ -1794,9 +1823,9 @@ fn the_filter_curve_stays_on_the_right_screen() {
         side_live: true,
         ..Default::default()
     });
-    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
-    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
-    let dot = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && accent(p)).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && accent(p)).count();
+    let dot = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && record(p)).count();
     for page in [0, 1] {
         v.control.page = page;
         let px = s.picture(&v);
@@ -1822,8 +1851,8 @@ fn the_effect_picture_stays_on_the_right_screen() {
         lfo: vec![0.0, 1.0, 0.2],
         ..Default::default()
     });
-    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
-    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && p[2] > 200 && p[0] < 90 && p[1] > 160).count();
+    let curve = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && accent(p)).count();
+    let left = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) < 480 && accent(p)).count();
     for page in [0, 1] {
         v.control.page = page;
         let px = s.picture(&v);
@@ -1833,7 +1862,7 @@ fn the_effect_picture_stays_on_the_right_screen() {
     v.control.picture =
         Some(crate::EqCurveView { kind: "dots".into(), bands: vec![(0.2, 0.7), (0.5, 0.4), (0.8, 0.6)], ..Default::default() });
     let px = s.picture(&v);
-    let dots = px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && p[0] > 200 && p[1] > 150 && p[2] < 80).count();
+    let dots = px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && record(p)).count();
     assert!(dots > 20, "the cloud: {dots}");
     assert_eq!(s.error(), None);
 }
@@ -1844,6 +1873,13 @@ fn the_effect_picture_stays_on_the_right_screen() {
 fn plugin_pictures_show_on_the_plugin_page() {
     let (s, mut v) = (Surface::new(), view());
     let (thumb, logo) = ([10, 200, 30, 255], [200, 30, 10, 255]);
+    // The picture is redrawn in the theme: a neutral pixel becomes that light of the
+    // writing on the field. Maschine's field is black and its writing is white.
+    let themed = |px: [u8; 4]| {
+        let c = crate::screen::plug_colour(px, [0, 0, 0], [255, 255, 255], [0xff, 0xa5, 0x2a]);
+        [c[0], c[1], c[2], 255]
+    };
+    let (thumb, logo) = (themed(thumb), themed(logo));
     s.add_picture("sampler", true, 160, 90, vec![thumb; 160 * 90]);
     s.add_picture("sampler", false, 240, 196, vec![logo; 240 * 196]);
     let slot = crate::SlotView { name: "Sampler".into(), instrument: true, active: true, plugin: false, picture: Some("sampler".into()) };
@@ -1854,10 +1890,11 @@ fn plugin_pictures_show_on_the_plugin_page() {
     let px = s.picture(&v);
     assert!(count(&px, thumb, false) > 2000, "the thumbnail in the chain: {}", count(&px, thumb, false));
     assert!(count(&px, logo, true) > 5000, "the logo on the right: {}", count(&px, logo, true));
-    // Without the picture: a drawing, none of it.
+    // Without the picture: a drawing. A few of its pixels can land on the same grey.
     v.control.chain[0].picture = Some("nothing".into());
     let px = s.picture(&v);
-    assert_eq!((count(&px, thumb, false), count(&px, logo, true)), (0, 0));
+    assert!(count(&px, thumb, false) < 80, "the thumbnail is gone");
+    assert!(count(&px, logo, true) < 80, "the logo is gone");
     assert_eq!(s.error(), None);
 }
 
