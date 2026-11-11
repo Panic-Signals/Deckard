@@ -3037,7 +3037,18 @@ impl App {
                 let mut remove = None;
                 for d in &self.settings.library_folders {
                     ui.horizontal(|ui| {
-                        if ui.small_button("✕").on_hover_text("Take it out").clicked() {
+                        // The font has no "✕", so that character drew as an empty box.
+                        let response = ui.add_sized([18.0, 18.0], egui::Button::new("")).on_hover_text("Remove this folder");
+                        let r = response.rect.shrink(5.0);
+                        let color = if response.hovered() {
+                            ui.visuals().widgets.hovered.fg_stroke.color
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        let stroke = egui::Stroke::new(1.5, color);
+                        ui.painter().line_segment([r.left_top(), r.right_bottom()], stroke);
+                        ui.painter().line_segment([r.right_top(), r.left_bottom()], stroke);
+                        if response.clicked() {
                             remove = Some(d.clone());
                         }
                         ui.label(d.display().to_string());
