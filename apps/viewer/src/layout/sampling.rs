@@ -253,28 +253,51 @@ pub(crate) fn frames_text(f: usize, rate: u32) -> String {
     if s < 60.0 { format!("{s:.3} s") } else { format!("{}:{:06.3}", (s / 60.0) as u64, s % 60.0) }
 }
 
+/// A recorded take being dragged from RECORD's list (its file), to drop on a sound.
+pub struct DraggedTake(pub std::path::PathBuf);
+
+/// What the Sampling view works on in sound (`g`, `s`): its Sampler's zone `zi`, or, for
+/// an Audio plug-in, its take `zi` as a zone (its sample and play range, no loop); each
+/// with the index (kept in range), where its fields are set, and whether it's a take.
+pub fn edited(p: &Project, (g, s, zi): (usize, usize, usize)) -> Option<(usize, deckard_model::Zone, Target, bool)> {
+    let snd = p.groups.get(g)?.sounds.get(s)?;
+    if let Some(a) = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule") {
+        let k = zi.min(a.takes.len().checked_sub(1)?);
+        let t = &a.takes[k];
+        let z = deckard_model::Zone { sample: t.sample.clone(), play_range: t.play_range, ..Default::default() };
+        return Some((k, z, Target::Take(g, s, k), true));
+    }
+    let smp = snd.sampler.as_ref()?;
+    let k = zi.min(smp.zones.len().checked_sub(1)?);
+    Some((k, smp.zones[k].clone(), Target::Zone(g, s, k), false))
+}
+
 /// The Sampling view in `rect` (the pattern editor's place).
 pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act>) {
     let st = &app.sampling;
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::BLACK);
     let gcol = sound_color(p, app.group, app.sound);
-    let smp = p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).and_then(|s| s.sampler.as_ref());
-    let zi = app.zone.min(smp.map_or(0, |s| s.zones.len().saturating_sub(1)));
-    let zone = smp.and_then(|s| s.zones.get(zi));
+    let edited = edited(p, (app.group, app.sound, app.zone));
+    let (zi, zone, zt, take) = match &edited {
+        Some((zi, z, t, take)) => (*zi, Some(z), *t, *take),
+        None => (0, None, Target::Zone(app.group, app.sound, 0), false),
+    };
+    // An Audio plug-in's take: RECORD and EDIT only.
+    let tab = if take { st.tab.min(1) } else { st.tab };
 
     // Header: the tabs (only RECORD until the sound has a sample).
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 37.0));
     painter.rect_filled(header, 0.0, S00);
     let mut x = header.left() + 12.0;
     for (i, name) in TABS.iter().enumerate() {
-        if i > 0 && zone.is_none() {
+        if i > 0 && zone.is_none() || i > 1 && take {
             break;
         }
         let w = 14.0 + name.len() as f32 * 7.5;
         let r = Rect::from_min_size(Pos2::new(x, header.top() + 8.0), Vec2::new(w, 22.0));
         let resp = ui.interact(r, ui.id().with(("samp-tab", i)), Sense::click());
-        let on = st.tab == i;
+        let on = tab == i;
         painter.text(
             r.center(),
             Align2::CENTER_CENTER,
@@ -296,7 +319,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         }
         x += w + 10.0;
     }
-    if st.tab == 3 && zone.is_some() {
+    if tab == 3 && zone.is_some() {
         for (k, (label, on, act)) in
             [("LIST", st.zone_list, SamplingAct::ZoneList(!st.zone_list)), ("SAMPLE", !st.zone_map, SamplingAct::ZoneMap(!st.zone_map))]
                 .into_iter()
@@ -363,9 +386,9 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         );
     }
     let body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
-    match st.tab {
+    match tab {
         0 => record_tab(ui, app, p, body, gcol, acts),
-        1 => edit_tab(ui, app, body, zi, zone, gcol, acts),
+        1 => edit_tab(ui, app, body, zi, zone, zt, take, gcol, acts),
         2 => slice_tab(ui, app, body, zi, zone, gcol, acts),
         _ => zone_tab(ui, app, p, body, zi, gcol, acts),
     }
@@ -378,8 +401,8 @@ fn wave(
     ui: &mut Ui,
     app: &App,
     area: Rect,
-    zi: usize,
     zone: &deckard_model::Zone,
+    zt: Target,
     gcol: Color32,
     slices: bool,
     acts: &mut Vec<Act>,
@@ -519,7 +542,6 @@ fn wave(
     }
     // Interaction: drag a marker (S/E, loop edges or body, a slice), else select (or,
     // on the Slice tab, add/remove slices).
-    let zt = Target::Zone(app.group, app.sound, zi);
     let resp = ui.interact(w, ui.id().with("sample-wave"), Sense::click_and_drag());
     let drag_id = ui.id().with("sample-wave-drag");
     #[derive(Clone, Copy)]
@@ -883,13 +905,26 @@ fn tool_button(ui: &Ui, painter: &Painter, r: Rect, label: &str, enabled: bool, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn edit_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckard_model::Zone>, gcol: Color32, acts: &mut Vec<Act>) {
+/// The Edit tab: the focused zone's sample, or (`take`) an Audio plug-in's take, whose
+/// fields are `zt`'s (a take has a play range but no loop).
+#[allow(clippy::too_many_arguments)]
+fn edit_tab(
+    ui: &mut Ui,
+    app: &App,
+    body: Rect,
+    zi: usize,
+    zone: Option<&deckard_model::Zone>,
+    zt: Target,
+    take: bool,
+    gcol: Color32,
+    acts: &mut Vec<Act>,
+) {
     let Some(zone) = zone else { return };
     let st = &app.sampling;
     let painter = ui.painter_at(body);
     let tools_h = 120.0;
     let area = Rect::from_min_max(body.min, Pos2::new(body.right(), body.bottom() - tools_h));
-    wave(ui, app, area, zi, zone, gcol, false, acts);
+    wave(ui, app, area, zone, zt, gcol, false, acts);
     let tools = Rect::from_min_max(Pos2::new(body.left(), area.bottom() + 1.0), body.max);
     painter.rect_filled(tools, 0.0, S00);
     let has_sel = st.selection.is_some();
@@ -960,14 +995,15 @@ fn edit_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckard
         }
     }
     // Footer: play range, selection and loop, always there, in samples.
-    let zt = Target::Zone(app.group, app.sound, zi);
     let last = st.len().max(1) as i64 - 1;
     let per_step = frame_step(ui, last);
     let fy = y + 48.0;
     let mut x = tools.left() + 12.0;
     x = group_box(ui, &painter, x, fy, "PLAY RANGE", &play_fields(zt, zone, last, per_step), acts);
     x = group_box(ui, &painter, x, fy, "SELECTION RANGE", &selection_fields(st.selection, shown_play(zone, last), last, per_step), acts);
-    group_box(ui, &painter, x, fy, "LOOP", &loop_fields(zt, zone, last, per_step), acts);
+    if !take {
+        group_box(ui, &painter, x, fy, "LOOP", &loop_fields(zt, zone, last, per_step), acts);
+    }
 }
 
 /// How many samples a drag step of a footer's position moves: Shift, one.
@@ -998,7 +1034,7 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
     let st = &app.sampling;
     let painter = ui.painter_at(body);
     let area = Rect::from_min_max(body.min, Pos2::new(body.right(), body.bottom() - 120.0));
-    wave(ui, app, area, zi, zone, gcol, true, acts);
+    wave(ui, app, area, zone, Target::Zone(app.group, app.sound, zi), gcol, true, acts);
     let tools = Rect::from_min_max(Pos2::new(body.left(), area.bottom() + 1.0), body.max);
     painter.rect_filled(tools, 0.0, S00);
     let y = tools.top() + 6.0;
@@ -1154,7 +1190,7 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
     if st.zone_map {
         zone_map(ui, app, smp, view, zi, gcol, acts);
     } else if let Some(z) = smp.zones.get(zi) {
-        wave(ui, app, view, zi, z, gcol, false, acts);
+        wave(ui, app, view, z, Target::Zone(app.group, app.sound, zi), gcol, false, acts);
     }
     // Footer: the focused zone's parameters.
     let Some(z) = smp.zones.get(zi) else { return };
@@ -1464,11 +1500,32 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         if rr.right() > top.right() {
             break;
         }
-        let resp = ui.interact(rr, ui.id().with(("take", i)), Sense::click());
+        let resp = ui
+            .interact(rr, ui.id().with(("take", i)), Sense::click_and_drag())
+            .on_hover_text("Click to load it into the focused sound; drag it onto a sound");
+        if resp.drag_started() {
+            resp.dnd_set_drag_payload(DraggedTake(take.clone()));
+        }
         painter.rect_filled(rr, 2.0, Color32::from_rgb(32, 32, 32));
         painter.rect_stroke(rr, 2.0, Stroke::new(1.0, if rec.focused == Some(i) { gcol } else { S03 }), StrokeKind::Inside);
+        // Its waveform, the name over it.
+        if let Some(wave) = rec.take_waves.get(take).filter(|w| !w.is_empty()) {
+            let inner = rr.shrink2(Vec2::new(3.0, 4.0));
+            let mid = inner.center().y + 4.0;
+            let half = (inner.height() - 8.0) / 2.0;
+            let cols = inner.width() as usize;
+            for c in 0..cols {
+                let (lo, hi) = wave[(c * wave.len() / cols.max(1)).min(wave.len() - 1)];
+                let x = inner.left() + c as f32 + 0.5;
+                painter.vline(
+                    x,
+                    (mid - hi.clamp(-1.0, 1.0) * half)..=(mid - lo.clamp(-1.0, 1.0) * half + 1.0),
+                    Stroke::new(1.0, gcol.gamma_multiply(0.8)),
+                );
+            }
+        }
         let name = take.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
-        painter.with_clip_rect(rr).text(rr.left_top() + Vec2::new(4.0, 4.0), Align2::LEFT_TOP, name, font(9.0), white(164));
+        painter.with_clip_rect(rr).text(rr.left_top() + Vec2::new(4.0, 2.0), Align2::LEFT_TOP, name, font(9.0), white(200));
         let del = Rect::from_min_size(Pos2::new(rr.right() - 16.0, rr.bottom() - 16.0), Vec2::splat(14.0));
         let dr = ui.interact(del, ui.id().with(("take-del", i)), Sense::click()).on_hover_text("Delete the take (its file stays)");
         painter.text(del.center(), Align2::CENTER_CENTER, "×", font(12.0), if dr.hovered() { white(245) } else { white(110) });
@@ -1569,11 +1626,10 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             }));
         }
         _ => {
-            let mut opts = vec!["Master".to_string()];
-            opts.extend(p.groups.iter().enumerate().map(|(g, gr)| format!("{} - {}", crate::layout::group_id(g), gr.name)));
-            let cur = rec.internal.map_or(0, |g| g + 1);
+            let (opts, sources): (Vec<String>, Vec<deckard_engine::TapSource>) = internal_inputs(&p.groups).into_iter().unzip();
+            let cur = sources.iter().position(|&s| s == rec.internal).unwrap_or(0);
             fields.push(choice_field("INPUT", opts, cur, move |k| {
-                sact(SamplingAct::Record(RecordAct::Set(RecParam::Internal, k as i64 - 1)))
+                sact(SamplingAct::Record(RecordAct::Set(RecParam::Internal, internal_value(sources[k]))))
             }));
         }
     }
@@ -1709,16 +1765,54 @@ impl Default for AutoParams {
     }
 }
 
+/// Internal ▸ INPUT: the master, then each group followed by its sounds that play
+/// something. (Maschine lists the master and groups only; a sound is DECKARD's own, so
+/// one sound can be recorded without soloing it.)
+pub fn internal_inputs(groups: &[deckard_model::Group]) -> Vec<(String, deckard_engine::TapSource)> {
+    use deckard_engine::TapSource;
+    let mut out = vec![("Master".to_string(), TapSource::Master)];
+    for (g, gr) in groups.iter().enumerate() {
+        let id = crate::layout::group_id(g);
+        out.push((format!("{id} - {}", gr.name), TapSource::Group(g)));
+        for (s, snd) in gr.sounds.iter().enumerate() {
+            if !snd.slots.is_empty() || snd.sampler.is_some() {
+                out.push((format!("{id} {} {}", s + 1, snd.name).trim_end().to_string(), TapSource::Sound(g, s)));
+            }
+        }
+    }
+    out
+}
+
+/// An internal input as `RecParam::Internal`'s value: -1 the master, a group's index,
+/// or 1000 + 16 × group + sound.
+pub fn internal_value(t: deckard_engine::TapSource) -> i64 {
+    use deckard_engine::TapSource;
+    match t {
+        TapSource::Master => -1,
+        TapSource::Group(g) => g as i64,
+        TapSource::Sound(g, s) => 1000 + (g * 16 + s) as i64,
+    }
+}
+
+fn internal_from(v: i64) -> deckard_engine::TapSource {
+    use deckard_engine::TapSource;
+    match v {
+        ..0 => TapSource::Master,
+        0..1000 => TapSource::Group(v as usize),
+        _ => TapSource::Sound((v - 1000) as usize / 16, (v - 1000) as usize % 16),
+    }
+}
+
 /// What the RECORD tab shows, and the recorder's settings.
 #[derive(Default)]
 pub struct RecorderView {
     pub status: RecStatus,
     /// Ext. Ster., Ext. Mono or Internal, and each one's input: a stereo pair (0–15),
-    /// a channel (0–31), the master (`None`) or a group; Auto + Internal: the sound.
+    /// a channel (0–31), the master, a group or a sound; Auto + Internal: the sound.
     pub source: usize,
     pub ext_stereo: usize,
     pub ext_mono: usize,
-    pub internal: Option<usize>,
+    pub internal: deckard_engine::TapSource,
     pub auto_sound: Option<(usize, usize)>,
     /// Detect, Sync, Loop or Auto.
     pub mode: usize,
@@ -1735,6 +1829,8 @@ pub struct RecorderView {
     pub rate: u32,
     pub preview: Vec<(f32, f32)>,
     pub takes: Vec<std::path::PathBuf>,
+    /// Each take's mini waveform (`recorder::mini_wave`), by file.
+    pub take_waves: std::collections::HashMap<std::path::PathBuf, std::sync::Arc<Vec<(f32, f32)>>>,
     pub focused: Option<usize>,
     /// The info bar's status ("Waiting for next bar...").
     pub info: String,
@@ -1751,7 +1847,7 @@ impl RecorderView {
             RecParam::Source => self.source = v.clamp(0, 2) as usize,
             RecParam::ExtStereo => self.ext_stereo = v.clamp(0, 15) as usize,
             RecParam::ExtMono => self.ext_mono = v.clamp(0, 31) as usize,
-            RecParam::Internal => self.internal = (v >= 0).then_some(v as usize),
+            RecParam::Internal => self.internal = internal_from(v),
             RecParam::AutoSound => self.auto_sound = (v >= 0).then_some((v as usize / 16, v as usize % 16)),
             RecParam::Mode => self.mode = v.clamp(0, 3) as usize,
             RecParam::Length => self.length = v.clamp(0, 5) as usize,
@@ -1845,5 +1941,49 @@ mod zone_for_note_tests {
         assert_eq!(zone_for_note(&zones, 3, 65, 100), Some(3), "overlapping: the one in view stays");
         assert_eq!(zone_for_note(&zones[..3], 1, 100, 100), None, "no zone there: nothing changes");
         assert_eq!(zone_for_note(&[], 0, 60, 100), None);
+    }
+}
+
+#[cfg(test)]
+mod internal_input_tests {
+    use super::*;
+    use deckard_engine::TapSource;
+    use deckard_model::{Group, SlotInfo, Sound};
+
+    /// Internal ▸ INPUT lists the master, each group, and each of a group's sounds that
+    /// plays something (empty ones can't be heard).
+    #[test]
+    fn internal_input_lists_sounds_under_their_groups() {
+        let sound = |name: &str, used: bool| Sound {
+            name: name.into(),
+            slots: if used { vec![SlotInfo { module: "Sampler".into(), ..Default::default() }] } else { vec![] },
+            ..Default::default()
+        };
+        let groups = vec![
+            Group { name: "Drums".into(), sounds: vec![sound("Kick", true), sound("", false), sound("Snare", true)], ..Default::default() },
+            Group { name: "Bass".into(), sounds: vec![sound("Sub", true)], ..Default::default() },
+        ];
+        let got = internal_inputs(&groups);
+        let labels: Vec<&str> = got.iter().map(|o| o.0.as_str()).collect();
+        assert_eq!(labels, ["Master", "A1 - Drums", "A1 1 Kick", "A1 3 Snare", "B1 - Bass", "B1 1 Sub"]);
+        let sources: Vec<TapSource> = got.iter().map(|o| o.1).collect();
+        assert_eq!(
+            sources,
+            [
+                TapSource::Master,
+                TapSource::Group(0),
+                TapSource::Sound(0, 0),
+                TapSource::Sound(0, 2),
+                TapSource::Group(1),
+                TapSource::Sound(1, 0)
+            ]
+        );
+        // Each goes through the knob's value and back.
+        for s in sources {
+            let mut v = RecorderView::default();
+            v.set(RecParam::Internal, internal_value(s));
+            assert_eq!(v.internal, s);
+        }
+        assert_eq!(RecorderView::default().internal, TapSource::Master, "the master by default");
     }
 }

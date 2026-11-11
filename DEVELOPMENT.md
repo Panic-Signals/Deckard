@@ -92,7 +92,7 @@ Run the full suite once, at the end of a branch. CI runs it on all three systems
 | `crates/model` | `deckard-model` | Typed project model (songs, groups, sounds, patterns, scenes, sections, LFOs, routes) |
 | `crates/doc` | `deckard-doc` | The open project: one shared, editable copy with undo; the DECKARD block |
 | `crates/engine` | `deckard-engine` | Audio engine: Sampler, drum synths, effects, LFOs, modulation, export |
-| `crates/plugins` | `deckard-plugins` | VST3 hosting, and DECKARD's own plug-ins (Replicant, Plaits) |
+| `crates/plugins` | `deckard-plugins` | VST3 hosting, and DECKARD's own plug-ins (Replicant, Plaits, Zhora) |
 | `crates/mi` | `deckard-mi` | Mutable Instruments' Plaits, vendored C++ with a small bridge |
 | `crates/link` | `deckard-link` | Ableton Link, vendored C++ |
 | `crates/surface` | `deckard-surface` | DECKARD's own controller layer: Lua pages for the MK3, the Launchpad script |
@@ -167,10 +167,22 @@ to the crate's and is shown in About DECKARD.
   breakage before CI.
 - **CI:** `.github/workflows/ci.yml` builds and tests all three systems on every push
   to main and every pull request. Lint runs on Linux.
+- **Patch coverage:** on pull requests, CI's Patch coverage check fails unless the tests
+  run at least 70% of the lines the pull request adds or changes
+  ([cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and
+  [diff-cover](https://github.com/Bachmann1234/diff_cover), on Linux). To check
+  before pushing: `rustup component add llvm-tools-preview`, install both, then
+  `cargo llvm-cov --workspace --cobertura --output-path coverage.xml` and
+  `diff-cover coverage.xml --compare-branch=main --fail-under=70`. Tests that skip
+  themselves without a Maschine install still count against you on CI.
 - **Release builds:** `release.yml` builds all three when a release is published,
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps
   the builds as workflow artifacts.
+- **Pull requests:** fill in `.github/pull_request_template.md`: the type, a one-to-two
+  sentence summary, how a reviewer can check it works, and the platforms it's for. In
+  Claude Code, the `pull-request` skill (`.claude/skills/pull-request/`) writes it. A
+  triager adds the label that sorts it into the release notes.
 - **Release notes:** start from [docs/release-notes-template.md](docs/release-notes-template.md):
   New and Enhanced Features, Bug Fixes, thanks to everyone who contributed, then
   first-time contributors.
@@ -330,6 +342,13 @@ playback engine and the controller layers all share it (`Rc<RefCell<Document>>`)
   - Routes and LFOs run on the audio thread (`mod_rt.rs`, `lfo_rt.rs`).
   - Each route's travel is published lock-free (`meters::RouteTravels`) so knobs can
     show where a route has them.
+- **CV out:** CV routes (`lfo_rt.rs`) and Zhora's signals (`zhora_rt.rs`) are written
+  straight onto the output channels marked CV only, past the master, faders, effects
+  and limiters, and never into exports or stems. One owner per channel: routes first,
+  then Zhoras in project order (`zhora_outs`, which the screens use too).
+- **Zhora** (`zhora_rt.rs`): a sound played by Zhora is never rendered ahead, so its CV
+  leaves with the rest of the outputs, one block per span. Its input pair goes to its
+  tuner before mute, and to its sound as the return when not muted.
 - **Expression out:** recorded and live per-note expression goes out to MIDI ports, as
   poly aftertouch on normal ports or per-note channels on MPE ports.
 - **Library samples** are found through the `ContentDir` NI installers write to
@@ -425,8 +444,15 @@ cargo run --release --offline -p deckard-plugins --example plugin-state file.mxp
 
 ### DECKARD's own plug-ins
 
-Replicant (`replicant.rs`) and Plaits (`plaits.rs`, around `crates/mi`) are native
-plug-ins.
+Replicant (`replicant.rs`), Plaits (`plaits.rs`, around `crates/mi`) and Zhora
+(`zhora/`) are native plug-ins.
+
+- **Zhora's threads:** `process` only fills the CV blocks and hands the input on, in
+  1024-frame hops, over a bounded channel. A "zhora tuner" thread detects the pitch
+  (`pitch.rs`) and runs Tune and Check (`tune.rs`), which allocate. A finished table
+  comes back the same way, and the one it replaces goes back to that thread to be
+  freed, so `process` never allocates or blocks. Its screens read `Readout`
+  (`zhora_ui.rs` in the app, `lib/zhora.lua` on the MK3).
 
 - **Storage:** they're stored as `PluginHost` modules with a `DECKARD:VST3:INSTR:<cid>`
   id. Their state is a `.vstpreset` whose component state is DECKARD's (`native.rs`).

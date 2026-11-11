@@ -30,7 +30,7 @@ return {
     -- A display button that does nothing now.
     button_off = { 41, 41, 41 },
     -- The bar under the buttons, and text.
-    bar = { 0x1a, 0x1a, 0x1a },
+    bar = { 0, 0, 0 },
     text = { 255, 255, 255 },
     weak = { 255, 255, 255, 128 },
     -- Text on a filled colour.
@@ -55,14 +55,14 @@ return {
     -- Arrange's Ideas view: its background, the line under the scenes (and the
     -- focused scene's tab), the edge between tabs, a group tile's top edge, what a
     -- pattern not in the scene is faded over, a group's name.
-    ideas_bg = { 8, 8, 8 },
+    ideas_bg = { 0, 0, 0 },
     -- Browse: the brackets round the parameter the jog wheel turns, a parameter with
     -- nothing to choose, "All …", a result's row (the focused one's is "text"), a
     -- product's tile edge.
     browse_bracket = { 179, 179, 179 },
     browse_param_none = { 102, 102, 102 },
     browse_param_all = { 255, 255, 255, 102 },
-    browse_row = { 26, 26, 26 },
+    browse_row = { 0, 0, 0 },
     browse_tile = { 0x47, 0x47, 0x47 },
     ideas_line = { 40, 40, 40 },
     ideas_tab_edge = { 15, 15, 15 },
@@ -72,9 +72,9 @@ return {
     -- Arrange's Song view: its background, a bar ruler's ticks and numbers, empty bars
     -- and the line between them, the line where a section ends (or its pattern
     -- repeats), a section's tab (the focused one's, the edge between tabs, its name).
-    song_bg = { 16, 16, 16 },
+    song_bg = { 0, 0, 0 },
     song_tick = { 132, 132, 132 },
-    song_empty = { 26, 26, 26 },
+    song_empty = { 0, 0, 0 },
     song_bar_line = { 17, 17, 17 },
     song_section_edge = { 33, 33, 33 },
     song_tab = { 51, 51, 51 },
@@ -96,7 +96,7 @@ return {
     zone_black = { 47, 47, 47 },
     zone_line = { 38, 38, 38 },
     -- DECKARD's own pages that Maschine hasn't.
-    panel = { 0x2a, 0x2a, 0x2a },
+    panel = { 0, 0, 0 },
     accent = { 0xff, 0xa5, 0x2a },
     record = { 0xe0, 0x3c, 0x3c },
   },
