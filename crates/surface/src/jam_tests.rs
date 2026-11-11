@@ -213,19 +213,26 @@ fn duplicate_copies_from_the_source_on_to_each_target() {
 }
 
 #[test]
-fn the_source_blinks() {
+fn duplicate_changes_source_color_and_flashes_destination() {
     let mut d = jam();
     let v = jam_view();
+    let start = Instant::now();
+    assert_eq!(d.leds(&v, start).pads[1 + 8], colour(2, SHADE_FAINT));
+
     hold(&mut d, &v, "DUPLICATE");
     pad(&mut d, &v, 1, 1);
-    let start = Instant::now();
+    assert_eq!(d.leds(&v, start).pads[1 + 8], colour(4, SHADE_BRIGHT), "source changes color when tapped");
+
+    let t = start;
+    let _ = d.pad(0, 1, true, &v, t);
+    let _ = d.pad(0, 1, false, &v, t);
+    let _ = d.button("DUPLICATE", false, &v, t);
+
     let mut seen = std::collections::HashSet::new();
-    let mut t = start;
-    for _ in 0..8 {
-        t += Duration::from_millis(60);
-        seen.insert(d.leds(&v, t).pads[1 + 8]);
+    for step in 0..4 {
+        seen.insert(d.leds(&v, t + Duration::from_millis(step * 125 + 10)).pads[1 + 16]);
     }
-    assert_eq!(seen, [0, colour(2, SHADE_BRIGHT)].into_iter().collect());
+    assert_eq!(seen, [0, colour(WHITE, SHADE_BRIGHT)].into_iter().collect(), "destination flashes when tapped");
 }
 
 /// SHIFT's printed labels: the panel's own names (see the manual's top view).
