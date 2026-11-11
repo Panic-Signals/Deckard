@@ -51,7 +51,7 @@ impl FxMeters {
 /// Routes per sound that have room on [`RouteTravels`] (others' knobs don't move).
 pub const ROUTES: usize = 32;
 
-/// Each route's travel now (0..1), by group, sound and its place in the sound's routes:
+/// Each target's final travel in its first route's cell (other cells are empty) (0..1), by group, sound and its place in the sound's routes:
 /// the route's [`route_key`] (high 32 bits) and the travel as `f32` bits (`NaN`: not
 /// driving its knob), in one atomic so they're read together.
 pub struct RouteTravels {
@@ -107,7 +107,7 @@ impl RouteTravels {
     pub fn get(&self, g: usize, s: usize, k: usize, key: u32) -> Option<f32> {
         let x = self.cells[route_index(g, s, k)?].load(Ordering::Relaxed);
         let t = f32::from_bits(x as u32);
-        ((x >> 32) as u32 == key && !t.is_nan()).then_some(t)
+        ((x >> 32) as u32 == key && t.is_finite()).then_some(t)
     }
 }
 

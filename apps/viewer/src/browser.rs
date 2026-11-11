@@ -191,12 +191,14 @@ impl Browser {
         let Some((_, answers)) = &self.worker else { return false };
         let mut newest = None;
         while let Ok(a) = answers.try_recv() {
-            newest = Some(a);
+            if a.0 == self.asked {
+                newest = Some(a);
+            }
         }
         let Some((n, results, error)) = newest else { return false };
         self.rev += 1;
-        // An older query's answer, overtaken by a newer one still to come, is still
-        // better than nothing; it's replaced when the newer one arrives.
+        // An old filter's results can omit the selected preset and send focus
+        // back to the first row. Only the current query may replace the list.
         self.shown = n;
         let keep = self.selected.and_then(|i| self.results.items.get(i)).map(|i| i.path.clone());
         match self.query.types.len() {
@@ -352,23 +354,34 @@ pub enum BrowseAct {
     Rescan,
 }
 
-/// Whether `item` has something to prehear: a sample, or a sound's or group's preview.
+/// Whether `item` has something to prehear: a sample, or a preset's preview.
 pub fn can_prehear(item: &Item) -> bool {
     prehear_file(item).is_some()
 }
 
-/// The file to prehear for `item`: a sample itself; for a sound or group, the preview
-/// Maschine keeps beside it (`.previews/<file name>.ogg`) when there is one.
+/// The file to prehear for `item`: a sample itself; for a sound, group, instrument or
+/// effect, the preview Maschine keeps beside it (`.previews/<file name>.ogg`, or a `.wav`
+/// preview in `.previews/`) when there is one.
 pub fn prehear_file(item: &Item) -> Option<PathBuf> {
     use deckard_library::Kind;
     match item.kind {
         Kind::Loop | Kind::OneShot => Some(item.path.clone()),
-        Kind::Sound | Kind::Group => {
-            let name = item.path.file_name()?.to_string_lossy().into_owned();
-            let p = item.path.parent()?.join(".previews").join(format!("{name}.ogg"));
-            p.is_file().then_some(p)
+        Kind::Sound | Kind::Group | Kind::Instrument | Kind::Effect => {
+            let previews = item.path.parent()?.join(".previews");
+            let name = item.path.file_name()?.to_string_lossy();
+            let ogg = previews.join(format!("{name}.ogg"));
+            if ogg.is_file() {
+                return Some(ogg);
+            }
+            let wav_full = previews.join(format!("{name}.wav"));
+            if wav_full.is_file() {
+                return Some(wav_full);
+            }
+            let stem = item.path.file_stem()?.to_string_lossy();
+            let wav_stem = previews.join(format!("{stem}.wav"));
+            wav_stem.is_file().then_some(wav_stem)
         }
-        _ => None,
+        Kind::Project => None,
     }
 }
 
@@ -401,4 +414,89 @@ pub fn item_of(path: &Path) -> Option<Item> {
     let kind = deckard_library::Kind::of_file(path)?;
     let name = path.file_stem()?.to_string_lossy().into_owned();
     Some(Item { kind, user: true, name, path: path.to_path_buf(), ..Item::default() })
+}
+
+#[cfg(test)]
+mod query_order_tests {
+    use super::*;
+    #[test]
+    fn an_old_query_cannot_send_the_second_preset_back_to_the_first() {
+        let items: Vec<_> = ["First", "Second", "Third"]
+            .into_iter()
+            .map(|name| Item {
+                path: PathBuf::from(format!("{name}.nksf")),
+                name: name.into(),
+                kind: deckard_library::Kind::Instrument,
+                ..Default::default()
+            })
+            .collect();
+        let (jobs, _) = mpsc::channel();
+        let (answers, received) = mpsc::channel();
+        let mut browser = Browser {
+            worker: Some((jobs, received)),
+            asked: 2,
+            selected: Some(1),
+            results: Results { items: items.clone(), ..Default::default() },
+            ..Default::default()
+        };
+        answers.send((1, Results { items: vec![items[0].clone()], ..Default::default() }, None)).unwrap();
+        assert!(!browser.poll());
+        assert_eq!(browser.selected_item().unwrap().name, "Second");
+        assert!(browser.waiting());
+        answers.send((2, Results { items, ..Default::default() }, None)).unwrap();
+        assert!(browser.poll());
+        assert_eq!(browser.selected_item().unwrap().name, "Second");
+        assert!(!browser.waiting());
+    }
+}
+
+#[cfg(test)]
+mod current_query_tests {
+    use super::*;
+    #[test]
+    fn stale_results_after_current_results_in_the_same_drain_are_ignored() {
+        let (jobs, _) = mpsc::channel();
+        let (answers, received) = mpsc::channel();
+        let mut browser = Browser { worker: Some((jobs, received)), asked: 2, ..Default::default() };
+        let current =
+            Item { path: "current.nksf".into(), name: "Current".into(), kind: deckard_library::Kind::Instrument, ..Default::default() };
+        answers.send((2, Results { items: vec![current], ..Default::default() }, None)).unwrap();
+        answers.send((1, Results::default(), Some("old failure".into()))).unwrap();
+        assert!(browser.poll());
+        assert_eq!(browser.results.items[0].name, "Current");
+        assert!(browser.error.is_none());
+        assert!(!browser.waiting());
+    }
+
+    #[test]
+    fn prehear_file_resolves_ogg_and_wav_previews_for_instruments_effects_groups_and_sounds() {
+        use deckard_library::Kind;
+        let dir = std::env::temp_dir().join(format!("deckard_prehear_test_{}", std::process::id()));
+        let previews = dir.join(".previews");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&previews).unwrap();
+
+        let inst_ogg = previews.join("Lead.nksf.ogg");
+        let fx_full_wav = previews.join("Chorus.nksfx.wav");
+        let fx_wav = previews.join("Dub.wav");
+        let grp_ogg = previews.join("Kit.mxgrp.ogg");
+        let snd_ogg = previews.join("Kick.mxsnd.ogg");
+        for p in [&inst_ogg, &fx_full_wav, &fx_wav, &grp_ogg, &snd_ogg] {
+            std::fs::write(p, b"test").unwrap();
+        }
+
+        let item = |kind, file: &str| Item { kind, path: dir.join(file), name: file.into(), ..Default::default() };
+        assert!(can_prehear(&item(Kind::Loop, "Break.wav")));
+        assert_eq!(prehear_file(&item(Kind::Instrument, "Lead.nksf")), Some(inst_ogg));
+        assert_eq!(prehear_file(&item(Kind::Effect, "Chorus.nksfx")), Some(fx_full_wav));
+        assert_eq!(prehear_file(&item(Kind::Effect, "Dub.nksfx")), Some(fx_wav));
+        assert_eq!(prehear_file(&item(Kind::Group, "Kit.mxgrp")), Some(grp_ogg));
+        assert_eq!(prehear_file(&item(Kind::Sound, "Kick.mxsnd")), Some(snd_ogg));
+        assert!(!can_prehear(&item(Kind::Instrument, "Missing.nksf")));
+        assert!(!can_prehear(&item(Kind::Project, "Song.mxprj")));
+        let mut app = crate::App::default();
+        app.prehear_item(&item(Kind::Instrument, "Missing.nksf"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

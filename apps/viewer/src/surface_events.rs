@@ -150,6 +150,9 @@ impl App {
 
     /// SHIFT + a pad's edit ([`deckard_surface::Action::Edit`]).
     pub(crate) fn surface_edit(&mut self, what: &str) {
+        if what.starts_with("undo") || what.starts_with("redo") {
+            self.lock_end_morph();
+        }
         let Some(doc) = self.doc.clone() else { return };
         let done = match what {
             "undo" => doc.borrow_mut().undo(),
@@ -176,6 +179,7 @@ impl App {
             }
             _ => true,
         };
+        self.lock_hosted_sync();
         // Past the start of its history, the project an Open replaced comes back.
         if !done && !(what.starts_with("undo") && self.back_to_replaced()) {
             self.status = format!("nothing to {}", if what.starts_with("undo") { "undo" } else { "redo" });
@@ -213,10 +217,12 @@ impl App {
             return;
         };
         let n = Note { expr: None, sound: self.sound, position: at, length, pitch, velocity, probability: 100 };
-        layout::apply_acts(
-            self,
-            vec![Act::EditNotes { g: self.group, p: self.pattern, label: "Add Step", remove: Vec::new(), add: vec![n] }],
-        );
+        let mut acts = Vec::new();
+        if self.scene_pattern(self.group).is_none() {
+            acts.push(Act::AssignPattern(self.scene, self.group, Some(self.pattern)));
+        }
+        acts.push(Act::EditNotes { g: self.group, p: self.pattern, label: "Add Step", remove: Vec::new(), add: vec![n] });
+        layout::apply_acts(self, acts);
         self.select_events(vec![n]);
     }
 
@@ -249,7 +255,35 @@ impl App {
             missing.into_iter().map(|pitch| Note { expr: None, sound, position: at, length, pitch, velocity, probability: 100 }).collect();
         let mut chosen = there;
         chosen.extend_from_slice(&add);
-        layout::apply_acts(self, vec![Act::EditNotes { g: self.group, p: self.pattern, label: "Add Step", remove: Vec::new(), add }]);
+        let mut acts = Vec::new();
+        if self.scene_pattern(self.group).is_none() {
+            acts.push(Act::AssignPattern(self.scene, self.group, Some(self.pattern)));
+        }
+        acts.push(Act::EditNotes { g: self.group, p: self.pattern, label: "Add Step", remove: Vec::new(), add });
+        layout::apply_acts(self, acts);
         self.select_events(chosen);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adding_a_step_to_an_unassigned_pattern_assigns_it_in_the_scene() {
+        let mut app = crate::App::default();
+        app.new_project();
+        app.surface_step(0, 240, 100);
+        assert_eq!(app.scene_pattern(0), Some(0));
+
+        // Deactivate the group's pattern in Scene 0, then add a step: it re-assigns Pattern 0.
+        app.surface_act(deckard_surface::Action::ScenePattern { group: 0, pattern: None });
+        assert_eq!(app.scene_pattern(0), None);
+        app.surface_step(240, 240, 100);
+        assert_eq!(app.scene_pattern(0), Some(0));
+
+        // Same for `surface_step_notes` (Keyboard / Chords step entry).
+        app.surface_act(deckard_surface::Action::ScenePattern { group: 0, pattern: None });
+        assert_eq!(app.scene_pattern(0), None);
+        app.surface_step_notes(480, 240, 100, &[60, 64]);
+        assert_eq!(app.scene_pattern(0), Some(0));
     }
 }

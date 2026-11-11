@@ -62,6 +62,8 @@ pub struct Project {
     pub extra_outs: Vec<extra_out::ExtraOut>,
     /// The project's routes from LFOs to MIDI CCs (DECKARD's; [`mod_matrix::CcRoute`]).
     pub cc_routes: Vec<mod_matrix::CcRoute>,
+    /// The project's routes from LFOs to CV outputs (DECKARD's; [`mod_matrix::CvRoute`]).
+    pub cv_routes: Vec<mod_matrix::CvRoute>,
     pub warnings: Vec<String>,
     /// Per-note expression, by [`ExprId`] (a note's `expr`): the document's table, for
     /// the engine. Empty when read from a file (the document fills it).
@@ -329,6 +331,7 @@ impl Default for Project {
             lfos: Vec::new(),
             extra_outs: Vec::new(),
             cc_routes: Vec::new(),
+            cv_routes: Vec::new(),
             warnings: Vec::new(),
             expressions: Vec::new(),
         }
@@ -784,12 +787,18 @@ impl Take {
     }
 }
 
-/// A sound's audio on in a pattern (its `AudioEvent`): the take it plays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A sound's audio on in a pattern (its `AudioEvent`): the take it plays, and how far
+/// (ticks from 1.1.1) its first frame sounds (negative: earlier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AudioCue {
     pub sound: usize,
     pub take: usize,
+    pub offset: i64,
 }
+
+/// The `AudioEvent` field DECKARD keeps an [`AudioCue::offset`] in (stripped from
+/// Maschine's archive on save).
+pub const AUDIO_OFFSET: &str = "deckard:audio_offset";
 
 /// A modulated parameter (a lane of a channel's `modulators`): a parameter of the
 /// module in chain slot `slot` (`field` as [`SlotInfo::params`] names it), or with no
@@ -1197,6 +1206,9 @@ impl Project {
         if let Some(Value::Str(t)) = r.get(mod_matrix::CC_FIELD) {
             p.cc_routes = mod_matrix::cc_from_text(t);
         }
+        if let Some(Value::Str(t)) = r.get(mod_matrix::CV_FIELD) {
+            p.cv_routes = mod_matrix::cv_from_text(t);
+        }
         let songs = ix.elements(r.get("songs"));
         let Some(song) = songs.first() else {
             p.warnings.push("project has no song".into());
@@ -1541,7 +1553,13 @@ fn sound(ix: &Index, s: &Obj, config: Option<&Obj>, t: &Targets) -> Sound {
         *v = param_i64(s, field).unwrap_or(0);
     }
     c.midi_source = "Default".into();
-    c.dest = AudioDest::Parent;
+    c.audio_in = param(s, "audio_input").and_then(|v| ix.obj(v)).map_or(AudioSource::None, |v| audio_source(ix, v, t));
+    c.dest = param(s, "audio_output").and_then(|v| ix.obj(v)).map_or(AudioDest::Parent, |v| audio_dest(ix, v, t));
+    c.aux_dest = [
+        param(s, "aux1_output").and_then(|v| ix.obj(v)).map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
+        param(s, "aux2_output").and_then(|v| ix.obj(v)).map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
+    ];
+    c.midi_out = param(s, "event_output").and_then(|v| ix.obj(v)).map_or(MidiDest::None, |v| midi_dest(ix, v, t));
     let Some(cfg) = config else { return snd };
     let int = |k: &str| int_field(cfg, k);
     let float = |k: &str| match cfg.get(k) {
@@ -1554,16 +1572,24 @@ fn sound(ix: &Index, s: &Obj, config: Option<&Obj>, t: &Targets) -> Sound {
     }
     c.midi_channel = int("midi_channel").unwrap_or(c.midi_channel);
     c.midi_thru = int("midi_thru").map_or(c.midi_thru, |v| v != 0);
-    c.audio_in = obj("audio_input").map_or(AudioSource::None, |v| audio_source(ix, v, t));
+    if let Some(v) = obj("audio_input") {
+        c.audio_in = audio_source(ix, v, t);
+    }
     c.input_gain = float("input_gain").unwrap_or(c.input_gain);
-    c.dest = obj("audio_output").map_or(AudioDest::Parent, |v| audio_dest(ix, v, t));
+    if let Some(v) = obj("audio_output") {
+        c.dest = audio_dest(ix, v, t);
+    }
     c.audio_mute = int("audio_mute").map_or(c.audio_mute, |v| v != 0);
-    c.aux_dest = [
-        obj("aux1_output").map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
-        obj("aux2_output").map_or(AudioDest::None, |v| audio_dest(ix, v, t)),
-    ];
+    if let Some(v) = obj("aux1_output") {
+        c.aux_dest[0] = audio_dest(ix, v, t);
+    }
+    if let Some(v) = obj("aux2_output") {
+        c.aux_dest[1] = audio_dest(ix, v, t);
+    }
     c.aux_pre = [int("aux1_order").map_or(c.aux_pre[0], |v| v == 1), int("aux2_order").map_or(c.aux_pre[1], |v| v == 1)];
-    c.midi_out = obj("event_output").map_or(MidiDest::None, |v| midi_dest(ix, v, t));
+    if let Some(v) = obj("event_output") {
+        c.midi_out = midi_dest(ix, v, t);
+    }
     c.midi_out_channel = int("midi_out_channel").unwrap_or(c.midi_out_channel);
     c.transpose = int("transpose").unwrap_or(c.transpose);
     for (field, v) in [
@@ -2325,7 +2351,7 @@ fn pattern(
             // The sound's Audio plug-in plays here (this take).
             if ev.type_name == "NI::MASCHINE::DATA::AudioEvent" {
                 if let Some(&take) = ev.get("take").and_then(|t| ix.obj(t)).and_then(|t| take_ix.get(&(t as *const Obj))) {
-                    out.audio.push(AudioCue { sound, take });
+                    out.audio.push(AudioCue { sound, take, offset: ev.get(AUDIO_OFFSET).and_then(Value::as_int).unwrap_or(0) });
                 }
                 continue;
             }
