@@ -865,6 +865,8 @@ enum WineAction {
 #[derive(Default)]
 pub struct App {
     group_load: Option<preset_load::GroupLoad>,
+    /// A non-group library load held back a couple of frames so the MK3 "loading" overlay is drawn first.
+    item_load: Option<preset_load::ItemLoad>,
     /// The open project, shared with the controller scripts.
     doc: Option<Shared>,
     /// The project an Open replaced, with its undo history, and its file: Undo with
@@ -5452,6 +5454,7 @@ impl App {
             }
             v.browser.busy = true;
         }
+        v.loading = self.group_load.as_ref().map(|l| l.item.name.clone()).or_else(|| self.item_load.as_ref().map(|l| l.item.name.clone()));
         v
     }
 
@@ -8740,7 +8743,7 @@ impl App {
                 })
             }),
             FileItem::Group(g) => self.queue_group_load(&item, g),
-            _ => self.load_item(&item, target),
+            _ => self.queue_item_load(&item, target),
         };
         if let Err(e) = r {
             self.status = e;
@@ -8822,7 +8825,7 @@ impl App {
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
                 } else {
-                    self.load_item(&item, target)
+                    self.queue_item_load(&item, target)
                 };
                 if let Err(e) = result {
                     self.status = e;
@@ -8910,7 +8913,7 @@ impl App {
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
                 } else {
-                    self.load_item(&item, target)
+                    self.queue_item_load(&item, target)
                 };
                 if let Err(e) = result {
                     self.status = e;
@@ -10917,7 +10920,8 @@ impl App {
             return;
         }
         self.poll_group_load();
-        if self.group_load.is_some() {
+        self.poll_item_load();
+        if self.group_load.is_some() || self.item_load.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
         // Before this frame's edits, so a finished Tune is the step before them.

@@ -3552,3 +3552,13 @@ fn zhora_display_buttons_1_to_4_pick_pages() {
     v.control.zhora = None;
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::Level(0)]);
 }
+
+#[test]
+fn loading_overlays_both_screens() {
+    let (s, mut v) = (Surface::new(), view());
+    assert!(!s.screen_text(&v).contains(&"LOADING…".to_string()));
+    v.loading = Some("Dusty Kit".into());
+    let text = s.screen_text(&v);
+    assert_eq!(text.iter().filter(|t| *t == "LOADING…").count(), 2, "{text:?}");
+    assert_eq!(text.iter().filter(|t| *t == "Dusty Kit").count(), 2, "{text:?}");
+}
