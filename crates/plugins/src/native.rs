@@ -18,6 +18,15 @@
 
 use crate::{ParamInfo, Transport};
 
+/// What an engine that listens wants to hear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    /// Whatever its sound's own audio input is set to (a pair or a channel).
+    Sound,
+    /// One interface input channel (0-based), heard on both sides.
+    Channel(usize),
+}
+
 /// The vendor name in a native plug-in's id.
 pub const VENDOR: &str = "DECKARD";
 
@@ -122,6 +131,73 @@ pub trait Engine: Send {
     fn load(&mut self, data: &[u8]) {
         let _ = data;
     }
+
+    /// CV signal `signal` of the last `process`, as (output channel, values); `None` for a
+    /// signal that isn't sent.
+    fn cv(&self, signal: usize, frames: usize) -> Option<(usize, &[f32])> {
+        let _ = (signal, frames);
+        None
+    }
+
+    /// Audio coming back from outside, for an engine that listens to it.
+    fn input(&mut self, left: &[f32], right: &[f32]) {
+        let _ = (left, right);
+    }
+
+    /// The input the engine wants to hear.
+    fn input_source(&self) -> Option<InputSource> {
+        None
+    }
+
+    /// What a tuner screen shows.
+    fn readout(&self) -> Option<Readout> {
+        None
+    }
+
+    /// Whether what [`Engine::save`] returns changed by itself (a finished Tune) since
+    /// last asked, so the state needs storing.
+    fn take_changed(&self) -> bool {
+        false
+    }
+
+    /// Whether it changed by itself (as [`Engine::take_changed`]) since last asked, without
+    /// asking: cheap enough to look at often.
+    fn changed(&self) -> bool {
+        false
+    }
+}
+
+/// What a Tune or Check is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuneState {
+    Idle,
+    Tuning,
+    Checking,
+    NotTuned,
+}
+
+/// What a tuning instrument reports to its screens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Readout {
+    /// The nearest note heard on the input, and the cents above it.
+    pub note: Option<(u8, f32)>,
+    pub state: TuneState,
+    pub worst_cents: Option<f32>,
+    /// When the table was made, in seconds since the Unix epoch.
+    pub tuned_at: Option<u64>,
+    pub range: Option<(u8, u8)>,
+    /// `Some` while tuning live: whether it is locked on.
+    pub live_locked: Option<bool>,
+    /// The note playing lies outside the tuned range.
+    pub clamped: bool,
+    pub message: Option<&'static str>,
+    /// The notes over target in the last Tune or Check.
+    pub off: Vec<u8>,
+    /// Hold has the outputs (the Tuner: Mute is on).
+    pub holding: bool,
+    /// Hops of input the analysis has finished: what feeding it in a closed loop (a
+    /// test) waits for.
+    pub analysed: u32,
 }
 
 /// A native plug-in: its identity, parameters and how to make its engine.
@@ -146,7 +222,7 @@ impl Class {
 }
 
 /// Every native plug-in.
-pub static CLASSES: &[&Class] = &[&crate::replicant::CLASS, &crate::plaits::CLASS];
+pub static CLASSES: &[&Class] = &[&crate::replicant::CLASS, &crate::plaits::CLASS, &crate::zhora::CLASS, &crate::tuner::CLASS];
 
 /// The native plug-in with class id `cid`.
 pub fn find(cid: &[u8; 16]) -> Option<&'static Class> {
@@ -224,26 +300,11 @@ impl Instance {
     /// Restore settings from [`Instance::save`]'s bytes (empty: the defaults).
     pub fn load(&mut self, data: &[u8]) -> Result<(), String> {
         let mut values: Vec<f64> = self.class.params.iter().map(|p| p.default).collect();
-        let mut extra: &[u8] = &[];
-        if !data.is_empty() {
-            let mut r = Reader(data);
-            if r.take(4)? != MAGIC {
-                return Err(format!("{}: not a DECKARD state", self.class.name));
+        let (saved, extra) = read_state(data).map_err(|e| format!("{}: {e}", self.class.name))?;
+        for (id, v) in saved {
+            if let Some(i) = self.class.params.iter().position(|p| p.id == id) {
+                values[i] = v;
             }
-            let version = r.u32()?;
-            if version > VERSION {
-                return Err(format!("{}: saved by a newer DECKARD (state version {version})", self.class.name));
-            }
-            for _ in 0..r.u32()? {
-                let (id, v) = (r.u32()?, f64::from_le_bytes(r.take(8)?.try_into().unwrap()));
-                if let Some(i) = self.class.params.iter().position(|p| p.id == id)
-                    && v.is_finite()
-                {
-                    values[i] = v.clamp(0.0, 1.0);
-                }
-            }
-            let n = r.u32()? as usize;
-            extra = r.take(n)?;
         }
         self.engine.reset();
         self.engine.load(extra);
@@ -330,8 +391,10 @@ impl Instance {
         self.class.params.iter().position(|p| p.id == id).and_then(|i| self.modded[i])
     }
 
+    /// Whether the state changed since last asked: a knob, or the engine by itself.
     pub(crate) fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
+        let knob = self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
+        self.engine.take_changed() || knob
     }
 
     pub(crate) fn note_on(&mut self, pitch: i64, velocity: i64) {
@@ -432,6 +495,58 @@ impl Instance {
     pub(crate) fn output_name(&self, bus: usize) -> Option<String> {
         self.engine.output_name(bus)
     }
+
+    pub(crate) fn cv(&self, signal: usize, frames: usize) -> Option<(usize, &[f32])> {
+        self.engine.cv(signal, frames)
+    }
+
+    pub(crate) fn input(&mut self, left: &[f32], right: &[f32]) {
+        self.engine.input(left, right);
+    }
+
+    pub(crate) fn input_source(&self) -> Option<InputSource> {
+        self.engine.input_source()
+    }
+
+    pub(crate) fn readout(&self) -> Option<Readout> {
+        self.engine.readout()
+    }
+
+    pub(crate) fn changed(&self) -> bool {
+        self.engine.changed()
+    }
+}
+
+/// A saved state's parameter values (id, normalized; non-finite ones left out) and the
+/// engine's own bytes (see the module docs). Empty: none.
+fn read_state(data: &[u8]) -> Result<(Vec<(u32, f64)>, &[u8]), String> {
+    if data.is_empty() {
+        return Ok((Vec::new(), &[]));
+    }
+    let mut r = Reader(data);
+    if r.take(4)? != MAGIC {
+        return Err("not a DECKARD state".into());
+    }
+    let version = r.u32()?;
+    if version > VERSION {
+        return Err(format!("saved by a newer DECKARD (state version {version})"));
+    }
+    let mut values = Vec::new();
+    for _ in 0..r.u32()? {
+        let (id, v) = (r.u32()?, f64::from_le_bytes(r.take(8)?.try_into().unwrap()));
+        if v.is_finite() {
+            values.push((id, v.clamp(0.0, 1.0)));
+        }
+    }
+    let n = r.u32()? as usize;
+    Ok((values, r.take(n)?))
+}
+
+/// The parameter values (id, normalized) saved in a native plug-in's Maschine chunk, as
+/// [`Instance::load`] reads them; parameters not saved are left out.
+pub fn saved_params(chunk: &[u8]) -> Result<Vec<(u32, f64)>, String> {
+    let state = crate::state::unwrap_chunk(chunk, crate::state::Format::Vst3)?;
+    Ok(read_state(&state.component)?.0)
 }
 
 struct Reader<'a>(&'a [u8]);
@@ -520,6 +635,27 @@ mod tests {
         assert_eq!(q.output_count(), 1);
         assert_eq!(q.output_name(0), "Out 1");
         assert!(q.output_bus(1, 16).is_none());
+    }
+
+    /// The saved values read from a chunk without making the plug-in; a state from a newer
+    /// DECKARD is refused, and one that isn't a chunk is an error.
+    #[test]
+    fn saved_params_reads_a_chunk() {
+        let class = CLASSES[0];
+        let param = class.params.iter().find(|p| p.steps == 0).unwrap().id;
+        let id = crate::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+        let mut p = crate::Plugin::native(class, id, class.name, 48_000.0);
+        p.set_param(param, 0.25);
+        let saved = saved_params(&p.save_chunk()).unwrap();
+        assert_eq!(saved.len(), class.params.len());
+        assert!(saved.contains(&(param, 0.25)));
+        assert!(saved_params(&[]).unwrap().is_empty());
+        let mut newer = Instance::new(class, 48_000.0).save();
+        newer[4..8].copy_from_slice(&(VERSION + 1).to_le_bytes());
+        assert!(read_state(&newer).unwrap_err().contains("newer"));
+        let mut odd = Instance::new(class, 48_000.0).save();
+        odd[16..24].copy_from_slice(&f64::NAN.to_le_bytes());
+        assert_eq!(read_state(&odd).unwrap().0.len(), class.params.len() - 1, "a value that isn't finite is left out");
     }
 
     /// A native plug-in's state goes through Maschine's chunk (a `.vstpreset` in the

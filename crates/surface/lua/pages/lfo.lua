@@ -169,16 +169,16 @@ end
 -- (0..1 of the width); an envelope's (`note_off` given) with a dashed line where the
 -- note ends instead.
 local function wave(screen, points, x, y, w, h, marks, note_off)
-  screen:rect(x, y, w, 1, "bar")
-  screen:rect(x, y + h, w, 1, "bar")
+  screen:rect(x, y, w, 1, "ideas_line")
+  screen:rect(x, y + h, w, 1, "ideas_line")
   if note_off then
     local nx = x + math.floor(note_off * w + 0.5)
     for dy = 0, h - 1, 8 do
-      screen:rect(nx, y + dy, 1, math.min(4, h - dy), "bar")
+      screen:rect(nx, y + dy, 1, math.min(4, h - dy), "ideas_line")
     end
   else
     for _, m in ipairs(marks or {}) do
-      screen:rect(x + math.floor(m * w + 0.5), y, 1, h, "bar")
+      screen:rect(x + math.floor(m * w + 0.5), y, 1, h, "ideas_line")
     end
   end
   local n = #points

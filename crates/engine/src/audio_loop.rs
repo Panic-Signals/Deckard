@@ -1,6 +1,6 @@
 //! The Audio plug-in's player (docs/audio-plugin.md): a loop kept in time with the
 //! song. The timeline cues it on where a pattern plays it ([`LoopRt::cue`]: which take,
-//! and the song beat its first beat falls on); from then its place in the take follows
+//! and the song beat its first frame falls on: the pattern's offset and Start, as Maschine's); from then its place in the take follows
 //! the song (the beat since the cue, modulo the take's length in beats), whatever the
 //! tempo:
 //!
@@ -58,6 +58,8 @@ impl TakeRt {
 pub struct Settings {
     pub mode: AudioMode,
     pub engine: AudioEngine,
+    /// Fallback take index when Gate mode plays without a timeline [`AudioCue`].
+    pub focused: usize,
     /// Semitones.
     pub tune: f64,
     /// The pitch wheel's full throw, semitones.
@@ -75,8 +77,8 @@ pub struct LoopRt {
     tempo: f64,
     /// Playing: the take, and the song beat its first beat fell on.
     cued: Option<(usize, f64)>,
-    /// Gate mode's note (pitch), if one is held; the pitch wheel (−1…1).
-    gate: Option<i64>,
+    /// Gate mode's held notes `(id, pitch)` in order of trigger; the pitch wheel (−1…1).
+    gates: Vec<(u64, i64)>,
     bend: f64,
     /// The loudness now and where it's going (fades between).
     gain: f32,
@@ -101,7 +103,7 @@ impl LoopRt {
             beats: 0.0,
             tempo: 120.0,
             cued: None,
-            gate: None,
+            gates: Vec::with_capacity(16),
             bend: 0.0,
             gain: 0.0,
             stretch,
@@ -135,14 +137,26 @@ impl LoopRt {
         self.cued.map(|c| c.0)
     }
 
-    pub fn note_on(&mut self, note: i64) {
-        self.gate = Some(note);
+    pub fn note_on(&mut self, id: u64, note: i64) {
+        if id != 0 {
+            self.gates.retain(|&(gid, _)| gid != id);
+        }
+        if self.gates.len() == self.gates.capacity() {
+            self.gates.remove(0);
+        }
+        self.gates.push((id, note));
     }
 
-    pub fn note_off(&mut self, note: i64) {
-        if self.gate == Some(note) {
-            self.gate = None;
+    pub fn note_off(&mut self, id: u64, note: i64) {
+        if id == 0 {
+            self.gates.retain(|&(_, n)| n != note);
+        } else {
+            self.gates.retain(|&(gid, _)| gid != id);
         }
+    }
+
+    pub fn release_note(&mut self, note: i64) {
+        self.gates.retain(|&(_, n)| n != note);
     }
 
     pub fn control(&mut self, kind: MidiKind) {
@@ -154,22 +168,26 @@ impl LoopRt {
     /// Stop (the transport stopped): fade out, forget the cue.
     pub fn stop(&mut self) {
         self.cued = None;
-        self.gate = None;
+        self.gates.clear();
     }
 
     pub fn runs(&self) -> bool {
-        self.cued.is_some() || self.gain > 0.0
+        !self.gates.is_empty() || self.cued.is_some() || self.gain > 0.0
     }
 
     /// Keep `old`'s place (the same sound before an edit), if it plays the same take.
-    pub fn adopt(&mut self, old: LoopRt) {
+    pub fn adopt(&mut self, mut old: LoopRt) {
         self.cued = old.cued;
-        self.gate = old.gate;
+        if self.settings.mode == AudioMode::Gate {
+            std::mem::swap(&mut self.gates, &mut old.gates);
+        }
         self.bend = old.bend;
         self.gain = old.gain;
         let same = |a: &TakeRt, b: &TakeRt| Arc::ptr_eq(&a.sample, &b.sample) && a.range == b.range;
-        let take = old.cued.map(|c| c.0);
-        let kept = take.is_some_and(|t| old.takes.get(t).zip(self.takes.get(t)).is_some_and(|(a, b)| same(a, b)));
+        let active_take = old.cued.map(|c| c.0).or_else(|| {
+            (self.settings.mode == AudioMode::Gate && !old.takes.is_empty()).then(|| old.settings.focused.min(old.takes.len() - 1))
+        });
+        let kept = active_take.is_some_and(|t| old.takes.get(t).zip(self.takes.get(t)).is_some_and(|(a, b)| same(a, b)));
         if kept && old.settings.engine == self.settings.engine {
             self.stretch = old.stretch;
             self.feed = old.feed;
@@ -189,7 +207,7 @@ impl LoopRt {
 
     /// The transposition now, semitones (not with Re-pitch: its pitch is its speed).
     fn semitones(&self) -> f64 {
-        let note = match (self.settings.mode, self.gate) {
+        let note = match (self.settings.mode, self.gates.last().map(|g| g.1)) {
             (AudioMode::Gate, Some(n)) => (n - 60) as f64,
             _ => 0.0,
         };
@@ -217,7 +235,10 @@ impl LoopRt {
 
     fn render_chunk(&mut self, out: &mut [f32], n: usize) {
         // How loud: open while cued (Loop), or during a note (Gate); fades between.
-        let open = self.cued.is_some() && (self.settings.mode == AudioMode::Loop || self.gate.is_some());
+        let open = match self.settings.mode {
+            AudioMode::Loop => self.cued.is_some(),
+            AudioMode::Gate => !self.takes.is_empty() && !self.gates.is_empty(),
+        };
         let fade_s = if self.settings.mode == AudioMode::Gate { (self.settings.fade * FADE_MAX).max(EDGE_FADE) } else { EDGE_FADE };
         let step = (1.0 / (fade_s * self.sr)) as f32;
         let target = if open { 1.0 } else { 0.0 };
@@ -225,7 +246,9 @@ impl LoopRt {
             out.fill(0.0);
             return;
         }
-        let Some((ti, origin)) = self.cued.or_else(|| self.takes.first().map(|_| (0, self.beats))) else {
+        let Some((ti, origin)) =
+            self.cued.or_else(|| (!self.takes.is_empty()).then(|| (self.settings.focused.min(self.takes.len() - 1), 0.0)))
+        else {
             out.fill(0.0);
             return;
         };
@@ -330,7 +353,7 @@ mod tests {
     }
 
     fn player(engine: AudioEngine, mode: AudioMode) -> LoopRt {
-        LoopRt::new(vec![take(94.0, 4.0)], Settings { mode, engine, tune: 0.0, bend_range: 2.0, fade: 0.1222 }, SR)
+        LoopRt::new(vec![take(94.0, 4.0)], Settings { mode, engine, focused: 0, tune: 0.0, bend_range: 2.0, fade: 0.1222 }, SR)
     }
 
     /// Play `seconds` of the song at `tempo` from beat 0, in 256-frame blocks.
@@ -400,13 +423,51 @@ mod tests {
         let mut g = player(AudioEngine::Stretch, AudioMode::Gate);
         let silent = play(&mut g, 94.0, 1.0);
         assert!(silent.iter().all(|v| v.abs() < 1e-6), "gate closed");
-        g.note_on(72);
+        g.note_on(1, 72);
         let mut out = vec![0.0; (3.0 * SR) as usize * 2];
         for block in out.chunks_mut(512) {
             g.render(block);
         }
         let x: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
         assert!((tone_hz(&x) - 880.0).abs() < 30.0, "{}", tone_hz(&x));
+    }
+
+    #[test]
+    fn gate_mode_plays_without_cue_and_across_contiguous_step_notes() {
+        let mut g = player(AudioEngine::Repitch, AudioMode::Gate);
+        g.set_song(0.0, 120.0);
+        // No `cue(Some(...))` — e.g. a pattern without an AudioCue or after deactivating.
+        assert!(!g.runs());
+        g.note_on(1, 60);
+        assert!(g.runs());
+        let mut out = vec![0.0; 2048 * 2];
+        g.render(&mut out);
+        assert!(out.iter().any(|v| v.abs() > 0.1), "Gate mode sounds without an AudioCue");
+
+        // Contiguous step boundary: even if step 2's note_on arrives at the same frame
+        // before step 1's note_off, step 1's note_off must only end id 1, never step 2.
+        g.note_on(2, 60);
+        g.note_off(1, 60);
+        assert!(g.runs());
+        out.fill(0.0);
+        g.render(&mut out);
+        assert!(out.iter().skip(2048).any(|v| v.abs() > 0.1), "step 2 stays open after step 1 ends");
+
+        g.note_off(2, 60);
+        for _ in 0..8 {
+            g.render(&mut out);
+        }
+        assert!(!g.runs(), "fades out and stops running once all gates end");
+
+        // Live key release (`release_note`) and zero-id `note_off` release by pitch.
+        g.note_on(0, 64);
+        assert!(g.runs());
+        g.note_off(0, 64);
+        assert!(!g.runs());
+        g.note_on(3, 67);
+        assert!(g.runs());
+        g.release_note(67);
+        assert!(!g.runs());
     }
 
     /// The song jumping (a pattern starting over early) moves the loop with it.

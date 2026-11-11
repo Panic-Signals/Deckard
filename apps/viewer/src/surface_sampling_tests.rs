@@ -16,7 +16,8 @@ fn app() -> (crate::App, tempfile::TempDir) {
     };
     let path = tmp.path().join("Tone.wav");
     deckard_engine::edit::write_wav(&path, &tone).unwrap();
-    app.load_into_sound(&path);
+    let (g, s) = (app.group, app.sound);
+    app.load_take(g, s, &path, rate as usize);
     app.surface_act(A::Sampling(true));
     app.update_sampling();
     (app, tmp)

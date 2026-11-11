@@ -1,13 +1,13 @@
--- Palenight (the Material Theme's Palenight palette): deep blue-grey, soft lavender
--- text, purple and cyan accents.
+-- Palenight (the Material Theme's Palenight palette): soft lavender text, purple and
+-- cyan accents, on black (the MK3's screens are black behind everything).
 --
 -- A theme is the stylesheet every page draws with: copy a theme into your
 -- controller folder's themes/ under a new name to make your own. This one builds on
 -- the Maschine theme (`base`): what it leaves out comes from there.
 
-local BG = { 0x0f, 0x11, 0x1a }
-local DEEP = { 0x07, 0x08, 0x0d }
-local PANEL = { 0x1e, 0x20, 0x30 }
+local BG = { 0, 0, 0 }
+local DEEP = { 0, 0, 0 }
+local PANEL = { 0, 0, 0 }
 local LINE = { 0x44, 0x42, 0x67 }
 local COMMENT = { 0x67, 0x6e, 0x95 }
 local MUTED = { 0x8a, 0x91, 0xb8 }

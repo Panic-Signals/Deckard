@@ -142,35 +142,43 @@ pub(crate) enum RouteTarget {
     Plugin { plugin: super::Shared, id: u32 },
 }
 
-/// A route of sound (`group`, `sound`) at play: `now`, the knob travel it gives this
-/// span.
+/// A source resolved off the audio thread, with its original board cell.
 pub(crate) struct RouteRt {
-    pub group: usize,
-    pub sound: usize,
-    /// Its place in the sound's routes (its knob's, on [`crate::meters::RouteTravels`]).
     pub index: usize,
-    /// Its [`crate::meters::route_key`].
     pub key: u32,
     pub route: deckard_model::mod_matrix::ModRoute,
+    pub rest: f32,
+}
+
+/// All routes on one destination, gathered before playback. The first route owns
+/// the board cell for the final travel; other cells stay empty.
+pub(crate) struct TargetRt {
+    pub group: usize,
+    pub sound: usize,
+    pub routes: Vec<RouteRt>,
     pub target: RouteTarget,
     pub now: f32,
-    /// What was last sent to a plug-in (sent again only when it changes).
     pub sent: f32,
 }
 
-impl RouteRt {
-    /// The same route (an edit kept it).
-    fn same(&self, o: &RouteRt) -> bool {
-        (self.group, self.sound, self.route.slot, &self.route.param) == (o.group, o.sound, o.route.slot, &o.route.param)
+impl TargetRt {
+    fn same(&self, o: &TargetRt) -> bool {
+        let (a, b) = (&self.routes[0].route, &o.routes[0].route);
+        (self.group, self.sound, a.slot, &a.module, &a.param) == (o.group, o.sound, b.slot, &b.module, &b.param)
+            && match (&self.target, &o.target) {
+                (RouteTarget::Plugin { plugin: a, .. }, RouteTarget::Plugin { plugin: b, .. }) => std::sync::Arc::ptr_eq(a, b),
+                (RouteTarget::Plugin { .. }, _) | (_, RouteTarget::Plugin { .. }) => false,
+                _ => true,
+            }
     }
 }
 
 /// The routes of `project`'s sounds whose slot holds the module they name (plug-ins as
 /// loaded in `plugins`).
-pub(crate) fn routes_of(project: &deckard_model::Project, plugins: &deckard_plugins::Host) -> Vec<RouteRt> {
+pub(crate) fn routes_of(project: &deckard_model::Project, plugins: &deckard_plugins::Host) -> Vec<TargetRt> {
     use deckard_model::mod_matrix::ModParam;
     use deckard_plugins::Slot;
-    let mut out = Vec::new();
+    let mut out: Vec<TargetRt> = Vec::new();
     for (g, grp) in project.groups.iter().enumerate() {
         for (s, snd) in grp.sounds.iter().enumerate() {
             for (k, r) in snd.mod_routes.iter().enumerate() {
@@ -205,7 +213,22 @@ pub(crate) fn routes_of(project: &deckard_model::Project, plugins: &deckard_plug
                     _ => continue,
                 };
                 let key = crate::meters::route_key(r);
-                out.push(RouteRt { group: g, sound: s, index: k, key, route: r.clone(), target, now: f32::NAN, sent: f32::NAN });
+                let rest = match r.source {
+                    deckard_model::mod_matrix::ModSource::Pitch => 0.5,
+                    deckard_model::mod_matrix::ModSource::Lfo(n) => {
+                        project.lfos.iter().find(|l| l.pad == n && !l.env).map_or(0.0, |l| l.level / 2.0 + l.offset)
+                    }
+                    _ => 0.0,
+                };
+                let route = RouteRt { index: k, key, route: r.clone(), rest };
+                if let Some(t) = out.iter_mut().find(|t| {
+                    let a = &t.routes[0].route;
+                    (t.group, t.sound, a.slot, &a.module, &a.param) == (g, s, r.slot, &r.module, &r.param)
+                }) {
+                    t.routes.push(route);
+                } else {
+                    out.push(TargetRt { group: g, sound: s, routes: vec![route], target, now: f32::NAN, sent: f32::NAN });
+                }
             }
         }
     }
@@ -213,80 +236,107 @@ pub(crate) fn routes_of(project: &deckard_model::Project, plugins: &deckard_plug
 }
 
 impl Engine {
-    /// Each route's travel this span, from its sound's sources or its LFO (`NaN`: none).
-    fn route_travels(&mut self) {
-        for i in 0..self.mod_routes.len() {
-            let (g, s) = (self.mod_routes[i].group, self.mod_routes[i].sound);
-            let x = match self.mod_routes[i].route.source {
-                deckard_model::mod_matrix::ModSource::Pitch => self.sources(g, s)[0],
-                deckard_model::mod_matrix::ModSource::Slide => self.sources(g, s)[1],
-                deckard_model::mod_matrix::ModSource::Pressure => self.sources(g, s)[2],
-                deckard_model::mod_matrix::ModSource::Lfo(n) => match self.lfo_value(n) {
-                    Some(v) => Some(v),
-                    // No such LFO: the route sits out (its target keeps its own value; a
-                    // plug-in it was sent to is let go, or at a later span if busy).
-                    None => {
-                        let r = &mut self.mod_routes[i];
-                        r.now = f32::NAN;
-                        if let RouteTarget::Plugin { plugin, id } = &r.target
-                            && !r.sent.is_nan()
-                            && let Ok(mut p) = plugin.try_lock()
-                        {
-                            p.unmodulate(*id);
-                            r.sent = f32::NAN;
-                        }
-                        continue;
-                    }
-                },
-            };
-            let r = &mut self.mod_routes[i];
-            r.now = r.route.travel(x);
-        }
-    }
-
-    /// The routes' targets take their values (each span, after the modulation lanes, so
-    /// a route wins over a lane), and their travels are published. No allocating.
+    /// Apply one sum per target after the lanes, over the knob (or the last active
+    /// Range sweep). No target lookup, allocation or blocking lock on this path.
     pub(crate) fn apply_routes(&mut self) {
-        if self.mod_routes.is_empty() {
-            return;
-        }
-        self.route_travels();
-        if let Some(b) = &self.route_board {
-            for r in &self.mod_routes {
-                b.set(r.group, r.sound, r.index, r.key, r.now);
+        use deckard_model::mod_matrix::{ModSource, RouteMode};
+        for i in 0..self.mod_routes.len() {
+            let t = &self.mod_routes[i];
+            let (g, s) = (t.group, t.sound);
+            let mut sum = 0.0f64;
+            let mut range = None;
+            let mut active = false;
+            for r in &t.routes {
+                let x = match r.route.source {
+                    ModSource::Pitch => self.sources(g, s)[0],
+                    ModSource::Slide => self.sources(g, s)[1],
+                    ModSource::Pressure => self.sources(g, s)[2],
+                    ModSource::Lfo(n) => match self.lfo_value(n) {
+                        Some(v) => Some(v),
+                        None => continue,
+                    },
+                };
+                let v = match r.route.mode {
+                    RouteMode::Range => r.route.travel(x),
+                    RouteMode::Add => r.route.contribution(x, r.rest),
+                };
+                if !v.is_finite() {
+                    continue;
+                }
+                active = true;
+                match r.route.mode {
+                    RouteMode::Range => range = Some(f64::from(v)),
+                    RouteMode::Add => sum += f64::from(v),
+                }
             }
-        }
-        let Engine { mod_routes, fx, sounds, .. } = self;
-        for r in mod_routes.iter_mut().filter(|r| !r.now.is_nan()) {
-            let t = f64::from(r.now);
-            match &r.target {
-                RouteTarget::Fx { slot, field, scale } => {
-                    let Some(chain) = fx.get_mut(r.group).and_then(|x| x.get_mut(r.sound)).and_then(Option::as_mut) else { continue };
+            let t = &mut self.mod_routes[i];
+            t.now = f32::NAN;
+            match &t.target {
+                RouteTarget::Fx { slot, field, scale } if active => {
+                    let Some(chain) = self.fx.get_mut(g).and_then(|x| x.get_mut(s)).and_then(Option::as_mut) else { continue };
                     for u in chain.units.iter_mut().filter(|u| u.slot == *slot && !u.ghost) {
                         if let super::FxUnit::Internal { params, modded, hit, .. } = &mut u.fx {
+                            let Some(base) = params.iter().find(|(k, _)| k == field).map(|(_, v)| *v).filter(|v| v.is_finite()) else {
+                                continue;
+                            };
+                            let travel = (range.unwrap_or_else(|| scale.travel(base)) + sum).clamp(0.0, 1.0);
+                            let value = scale.at(travel);
+                            if !value.is_finite() {
+                                continue;
+                            }
                             if !*hit {
-                                modded.clone_from(params);
+                                // The fields were prepared with the effect. Copy only
+                                // their values: cloning (String, f64) tuples allocates.
+                                for (field, value) in modded.iter_mut() {
+                                    if let Some((_, base)) = params.iter().find(|(k, _)| k == field) {
+                                        *value = *base;
+                                    }
+                                }
                                 *hit = true;
                             }
                             if let Some(x) = modded.iter_mut().find(|(k, _)| k == field) {
-                                x.1 = scale.at(t);
+                                x.1 = value;
+                                t.now = travel as f32;
                             }
                         }
                     }
                 }
-                RouteTarget::Sound { field, scale, .. } => {
-                    if let Some(Some(snd)) = sounds.get_mut(r.group).and_then(|x| x.get_mut(r.sound)) {
+                RouteTarget::Sound { field, scale, base } if active && base.is_finite() => {
+                    let travel = (range.unwrap_or_else(|| scale.travel(*base)) + sum).clamp(0.0, 1.0);
+                    let value = scale.at(travel);
+                    if value.is_finite()
+                        && let Some(Some(snd)) = self.sounds.get_mut(g).and_then(|x| x.get_mut(s))
+                    {
                         snd.begin_modulation();
-                        snd.modulate(field, scale.at(t));
+                        snd.modulate(field, value);
+                        t.now = travel as f32;
                     }
                 }
                 RouteTarget::Plugin { plugin, id } => {
-                    if r.sent != r.now
-                        && let Ok(mut p) = plugin.try_lock()
-                    {
-                        p.modulate(*id, t);
-                        r.sent = r.now;
+                    if let Ok(mut p) = plugin.try_lock() {
+                        if active {
+                            let base = range.unwrap_or_else(|| p.knob_value(*id));
+                            if base.is_finite() {
+                                t.now = (base + sum).clamp(0.0, 1.0) as f32;
+                                if t.sent != t.now {
+                                    p.modulate(*id, f64::from(t.now));
+                                    t.sent = t.now;
+                                }
+                            }
+                        } else if t.sent.is_finite() {
+                            p.unmodulate(*id);
+                            t.sent = f32::NAN;
+                        }
+                    } else {
+                        // The plug-in still plays the last travel we sent.
+                        t.now = t.sent;
                     }
+                }
+                _ => {}
+            }
+            if let Some(b) = &self.route_board {
+                for (k, r) in t.routes.iter().enumerate() {
+                    b.set(g, s, r.index, r.key, if k == 0 { t.now } else { f32::NAN });
                 }
             }
         }
@@ -294,7 +344,7 @@ impl Engine {
 
     /// Route `r` is gone: its target has its own value again (an effect's comes back
     /// by itself, when no lane or route holds it).
-    fn unroute(&mut self, r: &RouteRt) {
+    fn unroute(&mut self, r: &TargetRt) {
         match &r.target {
             RouteTarget::Fx { .. } => {}
             RouteTarget::Sound { field, base, .. } => {
@@ -336,28 +386,17 @@ impl Engine {
     /// back in `fresh` (to be freed off the audio thread).
     pub(crate) fn adopt_routes(&mut self, fresh: &mut Engine) {
         std::mem::swap(&mut self.mod_routes, &mut fresh.mod_routes);
-        // Knobs whose route went no longer move (kept ones are published next span).
-        // Both lists are in (group, sound, place) order: one walk.
+        // Clear old cells, including ones now belonging to a different first route.
+        // The new sums are published on the next span.
         if let Some(b) = &self.route_board {
-            let at = |r: &RouteRt| (r.group, r.sound, r.index);
-            let mut j = 0;
-            for o in fresh.mod_routes.iter() {
-                while j < self.mod_routes.len() && at(&self.mod_routes[j]) < at(o) {
-                    j += 1;
-                }
-                if self.mod_routes.get(j).is_none_or(|n| at(n) != at(o)) {
-                    b.set(o.group, o.sound, o.index, o.key, f32::NAN);
+            for t in &fresh.mod_routes {
+                for r in &t.routes {
+                    b.set(t.group, t.sound, r.index, r.key, f32::NAN);
                 }
             }
         }
-        // A kept route on the same plug-in knows what it holds there (so it can let go).
-        for n in self.mod_routes.iter_mut() {
-            if let RouteTarget::Plugin { plugin, .. } = &n.target
-                && let Some(o) = fresh
-                    .mod_routes
-                    .iter()
-                    .find(|o| o.same(n) && matches!(&o.target, RouteTarget::Plugin { plugin: q, .. } if std::sync::Arc::ptr_eq(q, plugin)))
-            {
+        for n in &mut self.mod_routes {
+            if let Some(o) = fresh.mod_routes.iter().find(|o| o.same(n)) {
                 n.sent = o.sent;
             }
         }
@@ -377,7 +416,9 @@ impl Engine {
         for r in &routes {
             self.unroute(r);
             if let Some(b) = &self.route_board {
-                b.set(r.group, r.sound, r.index, r.key, f32::NAN);
+                for source in &r.routes {
+                    b.set(r.group, r.sound, source.index, source.key, f32::NAN);
+                }
             }
         }
         self.mod_routes = routes;

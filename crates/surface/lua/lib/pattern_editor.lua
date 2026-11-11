@@ -115,6 +115,56 @@ local function note_box(screen, theme, x0, x1, top, height, palette, n)
   end
 end
 
+-- An Audio plug-in loop's colours (Maschine's ClipAudioLane): off, or Gate mode away
+-- from the sound's notes, grey.
+local LOOP_OFF = { 102, 102, 102, 140 }
+local LOOP_OFF_REPEAT = { 79, 79, 79, 140 }
+-- The first pass's opacity, and the repeats' (before it too).
+local LOOP_ALPHA, LOOP_REPEAT_ALPHA = 200, 90
+
+-- Sound `n`'s Audio plug-in loop, if it has one (`sounds[n].audio`), between `top` and
+-- `top + height`, in the box from `x`, `w` wide, showing ticks `t0`..`t1` (`at` a tick's
+-- x): from 1.1.1 plus its offset, the take's length at a time, two pixels a column,
+-- inside the pattern. `piano`: an off loop isn't drawn (it would hide the keys).
+local function loop_lane(screen, theme, s, sounds, n, at, x, w, t0, t1, top, height, piano)
+  local a = sounds[n] and sounds[n].audio
+  if not a or a.ticks <= 0 or #a.peaks < 2 then return end
+  if piano and not a.on and not a.gate then return end
+  local start, finish = s.pattern_start, s.pattern_start + math.max(1, s.pattern_length)
+  local colour = widgets.colour(theme, sounds[n].palette or 16, false, true)
+  local columns = #a.peaks // 2
+  local mid, half = top + height / 2, height / 2
+  local function under_note(t)
+    for _, note in ipairs(s.notes) do
+      if note.sound == n and note.position <= t and t < note.position + note.length then return true end
+    end
+    return false
+  end
+  local px0, px1 = math.max(x, at(math.max(t0, start))), math.min(x + w, at(math.min(t1, finish)))
+  local span = math.max(1, t1 - t0)
+  local px = px0
+  while px < px1 do
+    local t = t0 + (px - x) / w * span
+    local rel = t - a.offset
+    local rep = rel // a.ticks
+    local within = rel - rep * a.ticks
+    local i = math.min(columns - 1, math.floor(within / a.ticks * columns)) * 2
+    local lo, hi = a.peaks[i + 1], a.peaks[i + 2]
+    local lit = a.on and (not a.gate or under_note(t)) or (a.gate and under_note(t))
+    local c
+    if lit then
+      c = { colour[1], colour[2], colour[3], rep == 0 and LOOP_ALPHA or LOOP_REPEAT_ALPHA }
+    else
+      c = rep == 0 and LOOP_OFF or LOOP_OFF_REPEAT
+    end
+    local y0 = math.floor(mid - math.max(-1, math.min(1, hi)) * half + 0.5)
+    local y1 = math.floor(mid - math.max(-1, math.min(1, lo)) * half + 0.5)
+    screen:rect(px, y0, math.min(2, px1 - px), math.max(1, y1 - y0), c)
+    px = px + 2
+  end
+end
+editor.loop_lane = loop_lane
+
 -- Keyboard mode's highest pitch in `rows` rows: the focused sound's notes in the
 -- middle (C3 without any).
 function editor.pitch_top(s, rows)
@@ -165,6 +215,7 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
     local rows = (h - HEADER) // ROLL_ROW
     local high = editor.pitch_top(s, rows)
     shade_rows(screen, x, y + HEADER, w, ROLL_ROW, rows, high)
+    loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER, h - HEADER, true)
     for _, n in ipairs(s.notes) do
       local r = high - n.pitch + 1
       if n.sound == s.sound and visible(n) and r >= 1 and r <= rows then
@@ -175,6 +226,9 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
   elseif not detail then
     -- Every sound of the group, a row each.
     screen:rect(x, y + HEADER + (s.sound - 1) * ROW, w, ROW, FOCUS_ROW)
+    for n = 1, math.min(16, #sounds) do
+      loop_lane(screen, theme, s, sounds, n, at, x, w, t0, t1, y + HEADER + (n - 1) * ROW + 1, ROW - 1, false)
+    end
     for _, n in ipairs(s.notes) do
       if visible(n) and n.sound <= 16 then
         local x0, x1 = span_of(n)
@@ -184,6 +238,7 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
   else
     -- The focused sound's notes in a row, and under each its velocity (or
     -- probability): a stem up from the bottom with a dot on top.
+    loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER + 1, LANE, false)
     for _, n in ipairs(s.notes) do
       if n.sound == s.sound and visible(n) then
         local x0, x1 = span_of(n)
@@ -230,6 +285,18 @@ function editor.lanes(screen, theme, s, x, y, w, h, o)
       local c = o.tint(o.high - r + 1)
       if c then screen:rect(x, y + HEADER + (r - 1) * o.row, w, o.row - 1, c) end
     end
+  end
+  -- Audio plug-in loops: a sound's in its lane (`o.sound_row`), or the focused sound's
+  -- behind pitch lanes.
+  if o.sound_row then
+    for n = 1, #sounds do
+      local r = o.sound_row(n)
+      if r and r >= 1 and r <= o.rows then
+        loop_lane(screen, theme, s, sounds, n, at, x, w, t0, t1, y + HEADER + (r - 1) * o.row + 1, o.row - 1, false)
+      end
+    end
+  elseif o.high then
+    loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER, o.rows * o.row, true)
   end
   for _, n in ipairs(s.notes) do
     local r = o.row_of(n)
