@@ -18,6 +18,8 @@ local M = {}
 
 local STRIP_LEDS, METER_LEDS = 11, 8
 local WHITE = 16
+local DUP_COLOR, DUP_ALT = 4, 8
+local DUP_FLASH = 0.5
 -- What a pad plays in Pad mode: a sound's root, as the MK3's pads.
 local PAD_PITCH = 60
 -- A double tap: two touches this close (seconds).
@@ -99,8 +101,9 @@ local function fresh()
     -- Modes pinned (SONG), and pressed on.
     pins = {},
     latched = {},
-    -- DUPLICATE's source: what the next press copies.
+    -- DUPLICATE's source: what the next press copies, and the last destination's flash.
     dup = nil,
+    dup_flash = nil,
     -- Step and Piano Roll.
     lanes = 1,
     step_page = 0,
@@ -910,20 +913,37 @@ end
 -- DUPLICATE: the first press takes the source; each later press copies it there and the copy
 -- is the source (manual 7.5).
 local function duplicate(kind, group, at, copy)
+  local now = deckard.now()
   local d = st.dup
   if d and d.kind == kind and d.group == group then
     if d.at ~= at then
       copy(d.at, at)
       st.dup.at = at
+      st.dup_flash = { kind = kind, group = group, at = at, started = now, until_at = now + DUP_FLASH }
     end
   else
     st.dup = { kind = kind, group = group, at = at }
+    st.dup_flash = nil
   end
 end
 
 local function dup_is(kind, group, at)
   local d = st.dup
   return d ~= nil and d.kind == kind and d.group == group and d.at == at
+end
+
+local function dup_color(palette)
+  return palette == DUP_COLOR and DUP_ALT or DUP_COLOR
+end
+
+local function dup_flash_is(kind, group, at)
+  local f = st.dup_flash
+  return f ~= nil and f.kind == kind and f.group == group and f.at == at and deckard.now() < f.until_at
+end
+
+local function dup_flash_on()
+  local f = st.dup_flash
+  return f ~= nil and math.floor(math.max(0, deckard.now() - f.started) * 8) % 2 == 0
 end
 
 -- A sound's pad, while the matrix shows the sounds.
@@ -1599,6 +1619,7 @@ function M.tick()
   elseif st.browser then
     browser_line()
   end
+  if st.dup_flash and deckard.now() >= st.dup_flash.until_at then st.dup_flash = nil end
   -- Touching a Control strip with AUTO held writes where it is, moving or not.
   if s.auto_write and s.playing and (st.strip == "control" or st.strip == "macro") then
     for n = 1, 8 do
@@ -1619,8 +1640,10 @@ local function light_sounds(s)
       deckard.pad_led(col, row, "off")
     elseif muting then
       deckard.pad_led(col, row, x.palette, not x.muted)
+    elseif dup_flash_is("sound", s.group, n) then
+      deckard.pad_led(col, row, dup_flash_on() and WHITE or "off", true)
     elseif dup_is("sound", s.group, n) then
-      deckard.pad_led(col, row, blink() and x.palette or "off", true)
+      deckard.pad_led(col, row, dup_color(x.used and x.palette or WHITE), true)
     elseif st.pressed[pad_key(col, row)] then
       deckard.pad_led(col, row, x.palette, "pale")
     elseif n == s.sound then
@@ -1639,12 +1662,15 @@ local function light_project(s)
     local g = st.group_bank * 8 + col
     local group = s.groups[g]
     for row = 1, 8 do
+      local slot = st.pattern_row + row
       local p, pattern
-      if group then p, pattern = pattern_in(group, st.pattern_row + row) end
-      if not pattern then
+      if group then p, pattern = pattern_in(group, slot) end
+      if dup_flash_is("pattern", g, slot) then
+        deckard.pad_led(col, row, dup_flash_on() and WHITE or "off", true)
+      elseif not pattern then
         deckard.pad_led(col, row, "off")
-      elseif dup_is("pattern", g, st.pattern_row + row) then
-        deckard.pad_led(col, row, blink() and pattern.palette or "off", true)
+      elseif dup_is("pattern", g, slot) then
+        deckard.pad_led(col, row, dup_color(pattern.palette), true)
       elseif coming and coming.patterns[g] == p then
         deckard.pad_led(col, row, pattern.palette, beat_flash(s))
       elseif group.scene_pattern == p then
@@ -1850,10 +1876,12 @@ local function light_scenes(s)
     local sc = st.scene_bank + n
     local scene = s.scenes[sc]
     local name = "SCENE_" .. n
-    if not scene then
+    if dup_flash_is("scene", 0, sc) then
+      deckard.led(name, dup_flash_on() and WHITE or "off", true)
+    elseif not scene then
       if sc == #s.scenes + 1 then deckard.led(name, WHITE, "faint") else deckard.led(name, "off") end
     elseif dup_is("scene", 0, sc) then
-      deckard.led(name, blink() and scene.palette or "off", true)
+      deckard.led(name, dup_color(scene.palette), true)
     elseif sc == s.queued_scene then
       deckard.led(name, beat_flash(s) and scene.palette or "off", true)
     else
@@ -1868,12 +1896,14 @@ local function light_groups(s)
     local g = st.group_bank * 8 + i
     local group = s.groups[g]
     local name = "GROUP_" .. group_letter(i)
-    if not group then
+    if dup_flash_is("group", 0, g) then
+      deckard.led(name, dup_flash_on() and WHITE or "off", true)
+    elseif not group then
       if g == #s.groups + 1 and not muting then deckard.led(name, WHITE, "faint") else deckard.led(name, "off") end
     elseif muting then
       deckard.led(name, group.palette, not group.muted)
     elseif dup_is("group", 0, g) then
-      deckard.led(name, blink() and group.palette or "off", true)
+      deckard.led(name, dup_color(group.palette), true)
     elseif g == s.group and mode_held() then
       -- Held, a mode's button makes the focused group blink (manual 8.1.1.1).
       deckard.led(name, blink() and group.palette or "off", true)
