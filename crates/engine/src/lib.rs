@@ -32,6 +32,8 @@ pub mod note_echo;
 #[cfg(feature = "output")]
 pub mod output;
 pub mod pads;
+#[cfg(test)]
+mod performance_regressions;
 pub mod pool;
 mod prehear;
 pub mod queue;
@@ -1536,6 +1538,39 @@ enum FxUnit {
     },
 }
 
+fn inherit_unit(u: &mut Unit, o: &mut Unit, fade: u32) {
+    match (&mut u.fx, &mut o.fx) {
+        (FxUnit::Plugin { params, sc_filter, .. }, FxUnit::Plugin { params: op, sc_filter: osf, .. }) => {
+            std::mem::swap(sc_filter, osf);
+            if params != op {
+                sc_filter.set(params);
+            }
+        }
+        (FxUnit::Internal { params, fx, glide, modulated, .. }, FxUnit::Internal { params: op, fx: ofx, glide: og, modulated: om, .. }) => {
+            std::mem::swap(fx, ofx);
+            std::mem::swap(glide, og);
+            // Modulated values it plays go back to the knob's when nothing holds them.
+            *modulated = *om;
+            if params != op {
+                fx.set(if glide.retarget(params) { glide.now() } else { params });
+            }
+        }
+        _ => {}
+    }
+    // Its strips' gains glide on from where they are.
+    for x in &mut u.extras {
+        if let Some(ox) = o.extras.iter().find(|ox| ox.bus == x.bus && ox.channels == x.channels) {
+            x.ramp = ox.ramp;
+        }
+    }
+    // Carry on from how far it was faded, toward its new state.
+    let target = u.target;
+    (u.mix, u.target, u.step, u.left) = (o.mix, o.target, o.step, o.left);
+    if target != u.target {
+        u.fade_to(target, fade);
+    }
+}
+
 impl FxChain {
     /// Run `l`/`r` (at most [`MAX_BLOCK`] frames) through the effects in place. A busy
     /// plug-in is passed by (the audio thread never waits).
@@ -1680,6 +1715,14 @@ impl FxChain {
     /// were removed stay (in their place) to fade out, until a later edit drops them.
     /// No allocation: the audio thread runs this.
     fn adopt(&mut self, old: &mut FxChain) {
+        // An unchanged chain needs no bounded pairing table. Preserve every
+        // unit's tail, even in long chains, on unrelated document edits.
+        if self.units.len() == old.units.len() && self.units.iter().zip(&old.units).all(|(u, o)| !o.ghost && u.same(o)) {
+            for (u, o) in self.units.iter_mut().zip(&mut old.units) {
+                inherit_unit(u, o, self.fade);
+            }
+            return;
+        }
         const N: usize = 32;
         const NONE: usize = usize::MAX;
         // Old units that take part in pairing (not ones already removed).
@@ -1691,9 +1734,10 @@ impl FxChain {
                 n_old += 1;
             }
         }
-        let n_new = self.units.len().min(N - 1);
-        // Longest common subsequence, on the stack.
-        let mut table = [[0u8; N]; N];
+        let n_new = self.units.len().min(N);
+        // Include the empty suffix row/column even when either chain has N units.
+        // Longest common subsequence, on the stack; no audio-thread allocation.
+        let mut table = [[0u8; N + 1]; N + 1];
         for i in (0..n_new).rev() {
             for j in (0..n_old).rev() {
                 table[i][j] =
@@ -1709,39 +1753,7 @@ impl FxChain {
             if self.units[i].same(&old.units[live[j]]) {
                 let o = &mut old.units[live[j]];
                 let u = &mut self.units[i];
-                match (&mut u.fx, &mut o.fx) {
-                    (FxUnit::Plugin { params, sc_filter, .. }, FxUnit::Plugin { params: op, sc_filter: osf, .. }) => {
-                        std::mem::swap(sc_filter, osf);
-                        if params != op {
-                            sc_filter.set(params);
-                        }
-                    }
-                    (
-                        FxUnit::Internal { params, fx, glide, modulated, .. },
-                        FxUnit::Internal { params: op, fx: ofx, glide: og, modulated: om, .. },
-                    ) => {
-                        std::mem::swap(fx, ofx);
-                        std::mem::swap(glide, og);
-                        // Modulated values it plays go back to the knob's when nothing holds them.
-                        *modulated = *om;
-                        if params != op {
-                            fx.set(if glide.retarget(params) { glide.now() } else { params });
-                        }
-                    }
-                    _ => {}
-                }
-                // Its strips' gains glide on from where they are.
-                for x in &mut u.extras {
-                    if let Some(ox) = o.extras.iter().find(|ox| ox.bus == x.bus && ox.channels == x.channels) {
-                        x.ramp = ox.ramp;
-                    }
-                }
-                // Carry on from how far it was faded, toward its new state.
-                let target = u.target;
-                (u.mix, u.target, u.step, u.left) = (o.mix, o.target, o.step, o.left);
-                if target != u.target {
-                    u.fade_to(target, fade);
-                }
+                inherit_unit(u, o, fade);
                 became[live[j]] = i;
                 paired_new[i] = true;
                 i += 1;

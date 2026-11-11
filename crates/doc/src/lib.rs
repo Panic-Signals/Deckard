@@ -67,12 +67,30 @@ pub type Shared = Rc<RefCell<Document>>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     /// Replace the value at `path` (from the root object).
-    Set { path: Path, value: Value },
+    Set {
+        path: Path,
+        value: Value,
+    },
+    /// Append/remove one list item without retaining a copy of the whole list in history.
+    Append {
+        path: Path,
+        value: Value,
+    },
+    Pop {
+        path: Path,
+    },
     /// Set field `field` of the object at `path` (`None`: take it off). For DECKARD's
     /// own fields, which Maschine's objects don't have.
-    SetField { path: Path, field: String, value: Option<Value> },
+    SetField {
+        path: Path,
+        field: String,
+        value: Option<Value>,
+    },
     /// An undoable session value, never written into the project file.
-    Session { key: String, value: Option<u64> },
+    Session {
+        key: String,
+        value: Option<u64>,
+    },
 }
 
 /// The part of the project a parameter belongs to.
@@ -640,8 +658,12 @@ impl Document {
             undo = self.run(&ops)?;
         }
         let now = Instant::now();
-        let same_targets =
-            |s: &Step| s.label == label && s.redo.len() == ops.len() && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b));
+        let same_targets = |s: &Step| {
+            s.label == label
+                && s.redo.len() == ops.len()
+                && !s.redo.iter().chain(&ops).any(|op| matches!(op, Op::Append { .. } | Op::Pop { .. }))
+                && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b))
+        };
         match self.undo.last_mut() {
             Some(last) if same_targets(last) && now.duration_since(last.at) < MERGE_WINDOW => {
                 last.redo = ops;
@@ -1012,16 +1034,20 @@ fn defines_objects(op: &Op) -> bool {
             _ => false,
         }
     }
+    op_value(op).is_some_and(has)
+}
+
+fn op_value(op: &Op) -> Option<&Value> {
     match op {
-        Op::Set { value, .. } | Op::SetField { value: Some(value), .. } => has(value),
-        Op::SetField { value: None, .. } | Op::Session { .. } => false,
+        Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } => Some(value),
+        _ => None,
     }
 }
 
 fn op_path(op: &Op) -> &Path {
     static SESSION_PATH: Path = Vec::new();
     match op {
-        Op::Set { path, .. } | Op::SetField { path, .. } => path,
+        Op::Set { path, .. } | Op::Append { path, .. } | Op::Pop { path } | Op::SetField { path, .. } => path,
         Op::Session { .. } => &SESSION_PATH,
     }
 }
@@ -1029,7 +1055,7 @@ fn op_path(op: &Op) -> &Path {
 /// What an op changes, for merging quick edits: its path, and the field it sets.
 fn op_target(op: &Op) -> (&Path, Option<&str>) {
     match op {
-        Op::Set { path, .. } => (path, None),
+        Op::Set { path, .. } | Op::Append { path, .. } | Op::Pop { path } => (path, None),
         Op::SetField { path, field, .. } => (path, Some(field)),
         Op::Session { key, .. } => (op_path(op), Some(key)),
     }
@@ -1044,6 +1070,15 @@ fn run_one(tree: &mut Value, session: &mut std::collections::BTreeMap<String, u6
                 None => session.remove(key),
             };
             Some(Op::Session { key: key.clone(), value: old })
+        }
+        Op::Append { path, value } => {
+            let Value::List(items) = tree.at_mut(path)? else { return None };
+            items.push(value.clone());
+            Some(Op::Pop { path: path.clone() })
+        }
+        Op::Pop { path } => {
+            let Value::List(items) = tree.at_mut(path)? else { return None };
+            Some(Op::Append { path: path.clone(), value: items.pop()? })
         }
         Op::Set { path, value } => {
             let slot = tree.at_mut(path)?;
