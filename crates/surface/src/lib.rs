@@ -143,6 +143,8 @@ pub struct SamplingView {
     /// How many recordings have been taken, and the one focused.
     pub takes: usize,
     pub take: Option<usize>,
+    /// Each take's mini waveform: (min, max) columns.
+    pub take_waves: Vec<std::sync::Arc<Vec<(f32, f32)>>>,
     /// A stem separation running.
     pub stems: Option<StemsRun>,
     /// Why there's no sample to work on, when there isn't (C64): what the sound plays.
@@ -425,6 +427,21 @@ pub struct SoundView {
     pub prob_locked: bool,
     /// SELECT has it in the selection (the focused sound always is).
     pub selected: bool,
+    /// Its Audio plug-in's loop in the focused pattern (focused group only).
+    pub audio: Option<LoopView>,
+}
+
+/// A sound's Audio plug-in loop as the pattern editors draw it (Maschine's
+/// `ClipAudioLane`): the take's peaks (min, max) across its play range, its length and
+/// where its first pass starts (ticks from 1.1.1, the cue's offset), whether it's on in
+/// the pattern, and Gate mode (heard only under the sound's notes).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoopView {
+    pub peaks: std::sync::Arc<Vec<(f32, f32)>>,
+    pub ticks: i64,
+    pub offset: i64,
+    pub on: bool,
+    pub gate: bool,
 }
 
 /// A scene: its name and palette colour.

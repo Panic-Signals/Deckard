@@ -27,6 +27,8 @@ pub struct SampleView {
     pub focus_zone: usize,
     /// The sound's colour (palette index), if it has one.
     pub color: Option<u32>,
+    /// An Audio plug-in's take (RECORD and EDIT only), not a Sampler zone.
+    pub take: bool,
 }
 
 /// A stem separation running in the app: whether it's the focused zone's sample, and

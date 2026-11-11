@@ -1819,9 +1819,10 @@ impl InstrumentRt {
 }
 
 /// What an internal recording takes its audio from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TapSource {
     /// The master output (after its level and pan).
+    #[default]
     Master,
     /// One group's output: its sounds mixed.
     Group(usize),

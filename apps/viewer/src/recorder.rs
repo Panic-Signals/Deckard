@@ -151,7 +151,7 @@ struct Run {
 
 /// What the idle meter listens to: the source, its external inputs, the interface,
 /// monitoring, and whether an engine runs (to tap, for the internal source).
-type MeterKey = (usize, usize, usize, Option<usize>, Option<String>, bool, bool);
+type MeterKey = (usize, usize, usize, TapSource, Option<String>, bool, bool);
 
 #[derive(Default)]
 pub struct Recorder {
@@ -195,6 +195,34 @@ impl Recorder {
         self.run.is_some()
     }
 
+    /// (Tests: as if recording had started on sound `focus`, no audio flowing.)
+    #[cfg(test)]
+    pub fn fake_recording(&mut self, focus: (usize, usize)) {
+        self.run = Some(Run {
+            focus,
+            rate: 48_000,
+            channels: 2,
+            received: 0,
+            ring: VecDeque::new(),
+            frames: Vec::new(),
+            limit: None,
+            abs: None,
+            last_pos: 0.0,
+            arm_line: None,
+            stop_line: None,
+            started: 0.0,
+            auto: None,
+            pending: Vec::new(),
+            base: 0,
+        });
+        self.view.status = RecStatus::Recording;
+    }
+
+    /// The group and sound focused when recording was started, while it runs.
+    pub fn focus(&self) -> Option<(usize, usize)> {
+        self.run.as_ref().map(|r| r.focus)
+    }
+
     /// Listening to the chosen source for the RECORD tab's input meter.
     pub fn is_metering(&self) -> bool {
         self.meter_key.is_some()
@@ -230,7 +258,7 @@ impl Recorder {
         if self.view.source == 2 {
             if let Some(o) = with.output.filter(|o| o.has_engine()) {
                 let buffer = Arc::new(Mutex::new(Vec::new()));
-                let source = self.view.internal.map_or(TapSource::Master, TapSource::Group);
+                let source = self.view.internal;
                 o.set_tap(Some(Tap { source, buffer: buffer.clone() }));
                 self.tap = Some(buffer);
             }
@@ -272,10 +300,7 @@ impl Recorder {
                 let (g, s) = self.view.auto_sound.unwrap_or_default();
                 TapSource::Sound(g, s)
             } else {
-                match self.view.internal {
-                    Some(g) => TapSource::Group(g),
-                    None => TapSource::Master,
-                }
+                self.view.internal
             };
             let buffer = Arc::new(Mutex::new(Vec::new()));
             match with.output.filter(|o| o.has_engine()) {
@@ -760,6 +785,23 @@ fn keep_recent(ring: &mut VecDeque<[f32; 2]>, new: Vec<[f32; 2]>, n: usize) {
 }
 
 /// (min, max) of the mid signal in up to 400 columns.
+/// A take's mini waveform (the take list's, the MK3's): (min, max) of the mid signal in
+/// 64 columns.
+pub fn mini_wave(frames: &[[f32; 2]]) -> std::sync::Arc<Vec<(f32, f32)>> {
+    let per = frames.len().div_ceil(64).max(1);
+    std::sync::Arc::new(
+        frames
+            .chunks(per)
+            .map(|c| {
+                c.iter().fold((0f32, 0f32), |(lo, hi), f| {
+                    let m = (f[0] + f[1]) * 0.5;
+                    (lo.min(m), hi.max(m))
+                })
+            })
+            .collect(),
+    )
+}
+
 fn preview(frames: &[[f32; 2]]) -> Vec<(f32, f32)> {
     let per = (frames.len() / 400).max(1);
     frames
