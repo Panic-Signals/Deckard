@@ -8929,8 +8929,13 @@ impl App {
         }
     }
 
-    fn prehear_item(&mut self, item: &deckard_library::Item) {
-        let Some(file) = browser::prehear_file(item) else { return };
+    pub(crate) fn prehear_item(&mut self, item: &deckard_library::Item) {
+        let Some(file) = browser::prehear_file(item) else {
+            if let Some(Ok(out)) = &self.output {
+                out.prehear(None, 0.0);
+            }
+            return;
+        };
         let gain = self.browser.prehear_gain;
         match deckard_engine::sample::Sample::load(&file) {
             Ok(s) => {
