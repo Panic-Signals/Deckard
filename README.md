@@ -1,5 +1,13 @@
 # DECKARD
 
+[![Join our Discord](https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/SGSpFaUnNh)
+[![Latest release](https://img.shields.io/github/v/release/Panic-Signals/Deckard?style=for-the-badge&logo=github&logoColor=white&label=Release)](https://github.com/Panic-Signals/Deckard/releases/latest)
+[![Last commit](https://img.shields.io/github/last-commit/Panic-Signals/Deckard/main?style=for-the-badge&logo=git&logoColor=white&label=Last%20commit)](https://github.com/Panic-Signals/Deckard/commits/main)
+[![CI status](https://img.shields.io/github/actions/workflow/status/Panic-Signals/Deckard/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/Panic-Signals/Deckard/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/Panic-Signals/Deckard/total?style=for-the-badge&logo=github&logoColor=white&label=Downloads)](https://github.com/Panic-Signals/Deckard/releases)
+[![License](https://img.shields.io/github/license/Panic-Signals/Deckard?style=for-the-badge&label=License)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/Panic-Signals/Deckard?style=for-the-badge&logo=github&logoColor=white&label=Stars)](https://github.com/Panic-Signals/Deckard/stargazers)
+
 DECKARD is a groovebox for your computer that works like NI's Maschine: scenes and
 patterns, a song arrangement, sixteen pads per group, a sampler, drum synths, effects
 and a mixer. It opens Maschine projects and saves them in Maschine's own format, so you
