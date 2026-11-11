@@ -220,7 +220,13 @@ local function tile(screen, theme, x, y, w, h, t)
     screen:rect(x, y, w, h, "pad_empty", theme.corner)
     return
   end
-  screen:rect(x, y, w, h, widgets.colour(theme, t.palette, not t.on), theme.corner)
+  -- A tile that isn't chosen is near-neutral dark grey with a trace of its colour,
+  -- under text in its colour: a dimmed fill of the same hue put red text on red.
+  local fill = widgets.colour(theme, t.palette)
+  if not t.on then
+    fill = widgets.blend(fill, theme.colors.tile_off or { 0x1c, 0x1c, 0x1c }, theme.tile_tint or 0.08)
+  end
+  screen:rect(x, y, w, h, fill, theme.corner)
   local text = t.on and theme.colors.on_colour or widgets.colour(theme, t.palette, false, true)
   if t.big then
     screen:label(x + 6, y + 3, w - 6, 30, t.big, style(theme, "tile_letter", text), "left", "top")
