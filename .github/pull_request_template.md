@@ -35,6 +35,13 @@ ran, and any that were skipped for lack of local data. -->
 
 Tried on:
 
+## Manual
+
+<!-- New hotkeys, UI that needs explaining or that no one would find by themselves, or
+features Maschine doesn't have need a pull request to the DECKARD manual
+(Panic-Signals/panic-signals-site, src/content/deckard-manual). Link it here:
+"Manual: Panic-Signals/panic-signals-site#12". Otherwise "None". -->
+
 ## Notes for the reviewer
 
 <!-- Optional: design choices, risks, follow-ups. -->
