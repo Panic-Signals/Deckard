@@ -87,6 +87,11 @@ impl EditSnapshot {
             native_pressure: self.native_pressure,
             screen: self.screen,
             session_values: self.session_values,
+            // Built again when needed (see `notes.rs` and `Document::run`).
+            event_node: None,
+            note_event: None,
+            event_sequence: None,
+            references: None,
             types: mxprj::types::Types::new(),
             undo: Vec::new(),
             redo: Vec::new(),

@@ -178,7 +178,8 @@ fn remap_live(e: &mut Live, a: usize, b: usize) {
         | Live::MidiInputOut { group, .. }
         | Live::ControlIn { group, .. }
         | Live::Expression { group, .. }
-        | Live::RepeatPressure { group, .. } => *group = moved(*group, a, b),
+        | Live::RepeatPressure { group, .. }
+        | Live::ChokeGroup { group } => *group = moved(*group, a, b),
         Live::ChokeAll => {}
     }
 }

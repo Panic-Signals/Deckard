@@ -179,6 +179,14 @@ pub struct Document {
     native_pressure: bool,
     /// Where the project was left, kept in the DECKARD block ([`SavedScreen`]).
     screen: Option<SavedScreen>,
+    /// Event-node markers are empty, with one archive-wide class version. Build
+    /// their template once instead of enumerating every project class per note.
+    event_node: Option<Value>,
+    note_event: Option<Value>,
+    event_sequence: Option<Value>,
+    /// Updated with each operation, so edits that remove unreferenced event
+    /// objects do not scan the whole tree looking for dangling references.
+    references: Option<std::collections::HashMap<u64, usize>>,
     session_values: std::collections::BTreeMap<String, u64>,
 }
 
@@ -228,10 +236,27 @@ impl Document {
             expressions: Vec::new(),
             native_pressure: false,
             screen: None,
+            event_node: None,
+            note_event: None,
+            event_sequence: None,
+            references: None,
             session_values: Default::default(),
         };
         d.next_oid = max_oid + 1;
         d.read_block();
+        // Preparing immutable event templates belongs to opening the document,
+        // rather than the first live step press. Unusual archives still open if
+        // a builder cannot supply a template; the edit keeps its existing error.
+        if let Ok((node, note, sequence)) = d.build(|b| Ok((b.node()?, b.note_event()?, b.item("NI::MASCOMMON::DATA::Sequence")?))) {
+            d.event_node = Some(node);
+            d.note_event = Some(note);
+            d.event_sequence = Some(sequence);
+        }
+        if d.references.is_none() {
+            let mut refs = std::collections::HashMap::new();
+            count_refs(&d.tree, &mut refs, true);
+            d.references = Some(refs);
+        }
         Ok(d)
     }
 
@@ -651,7 +676,7 @@ impl Document {
         let mut undo = self.run(&ops)?;
         // An edit that took away an object's definition: anything still referring to
         // it keeps it (see `rehomed`).
-        if undo.iter().any(defines_objects) {
+        if loses_referenced_objects(&undo, &ops, self.references.as_ref().unwrap()) {
             self.run(&undo).expect("undo of ops just applied");
             ops = self.rehomed(label, ops)?;
             params.resize(ops.len(), None);
@@ -834,16 +859,31 @@ impl Document {
     /// Apply ops in order; returns their inverses (to apply in order to undo).
     /// Nothing is applied if any op fails.
     fn run(&mut self, ops: &[Op]) -> Result<Vec<Op>, String> {
+        if self.references.is_none() {
+            let mut refs = std::collections::HashMap::new();
+            count_refs(&self.tree, &mut refs, true);
+            self.references = Some(refs);
+        }
         // In order (an op may set a value inside one an earlier op put there); if one
         // has nowhere to go, those before it are taken back.
         let mut inverse = Vec::with_capacity(ops.len());
         for op in ops {
             match run_one(&mut self.tree, &mut self.session_values, op) {
-                Some(undo) => inverse.push(undo),
+                Some(undo) => {
+                    let refs = self.references.as_mut().unwrap();
+                    if let Some(v) = op_value(&undo) {
+                        count_refs(v, refs, false);
+                    }
+                    if let Some(v) = op_value(op) {
+                        count_refs(v, refs, true);
+                    }
+                    inverse.push(undo);
+                }
                 None => {
                     for undo in inverse.iter().rev() {
                         let _ = run_one(&mut self.tree, &mut self.session_values, undo);
                     }
+                    self.references = None;
                     return Err(format!("no value at {:?}", op_path(op)));
                 }
             }
@@ -855,6 +895,11 @@ impl Document {
     /// Bring the model up to date after ops: patch it in place when every op set a
     /// known parameter, else rebuild it from the tree.
     fn update(&mut self, params: &[Option<(Target, String)>]) {
+        if !params.is_empty() && params.iter().all(|p| p.as_ref().is_some_and(|(_, field)| field == "__events")) && self.patch_event_model()
+        {
+            self.revision += 1;
+            return;
+        }
         let patched = params.iter().all(|p| match p {
             Some((target, field)) => self.patch(*target, field),
             None => false,
@@ -1026,21 +1071,50 @@ fn strip(t: Target) -> Target {
 
 /// Whether an op's value holds an object's definition (one with an id others may
 /// refer back to). Run on an edit's undo: what it replaced.
-fn defines_objects(op: &Op) -> bool {
-    fn has(v: &Value) -> bool {
-        match v {
-            Value::Obj(o) => o.oid.is_some() || o.fields.iter().any(|(_, f)| has(f)),
-            Value::List(items) => items.iter().any(has),
-            _ => false,
+fn loses_referenced_objects(before: &[Op], after: &[Op], refs: &std::collections::HashMap<u64, usize>) -> bool {
+    fn ids(ops: &[Op]) -> std::collections::HashSet<u64> {
+        let mut out = std::collections::HashSet::new();
+        for op in ops {
+            if let Some(value) = op_value(op) {
+                value.walk(&mut |o| {
+                    out.extend(o.oid);
+                });
+            }
         }
+        out
     }
-    op_value(op).is_some_and(has)
+    ids(before).difference(&ids(after)).any(|id| refs.get(id).copied().unwrap_or(0) > 0)
 }
 
 fn op_value(op: &Op) -> Option<&Value> {
     match op {
         Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } => Some(value),
         _ => None,
+    }
+}
+fn count_refs(value: &Value, refs: &mut std::collections::HashMap<u64, usize>, add: bool) {
+    match value {
+        Value::Ref(id) => {
+            if add {
+                *refs.entry(*id).or_default() += 1;
+            } else if let Some(n) = refs.get_mut(id) {
+                *n -= 1;
+                if *n == 0 {
+                    refs.remove(id);
+                }
+            }
+        }
+        Value::Obj(o) => {
+            for (_, v) in &o.fields {
+                count_refs(v, refs, add);
+            }
+        }
+        Value::List(items) => {
+            for v in items {
+                count_refs(v, refs, add);
+            }
+        }
+        _ => {}
     }
 }
 
