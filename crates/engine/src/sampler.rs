@@ -1971,7 +1971,7 @@ mod tests {
         assert_eq!(smp3.voices.len(), 1, "voice is retained across the sample swap");
         assert!(smp3.voices[0].fade.is_some(), "voice is fading out to prevent digital click");
     }
-  
+
     #[test]
     fn legato_out_of_zone_note_does_not_glide_or_fade_voices() {
         let sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.5, 0.5]; 48_000] });
