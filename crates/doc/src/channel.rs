@@ -604,4 +604,41 @@ mod sidechain_follows_tests {
         let back = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
         check(&back);
     }
+
+    #[test]
+    fn aux_sends_and_order_survive_save_and_undo() {
+        use crate::{SoundRoute, Target};
+        use deckard_model::AudioDest;
+        use mxprj::decode::Value;
+        let mut d = Document::new_project().unwrap();
+        let g1 = d.add_group().unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Aux(0, AudioDest::Group(g1))).unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Aux(1, AudioDest::Ext(2))).unwrap();
+        d.set("Aux 1 Level", Target::Sound(0, 0), "aux1_level", Value::Float(0.5)).unwrap();
+        d.set("Aux 2 Level", Target::Sound(0, 0), "aux2_level", Value::Float(0.25)).unwrap();
+        d.set("Aux 1 Order", Target::Sound(0, 0), "aux1_order", Value::Int(1)).unwrap();
+        d.set_group_route(0, Some(0), AudioDest::Sound(g1, 1)).unwrap();
+        d.set_group_route(0, Some(1), AudioDest::Master).unwrap();
+        d.set("Group Aux 1 Level", Target::GroupStrip(0), "aux1_level", Value::Float(0.625)).unwrap();
+        d.set("Group Aux 2 Order", Target::GroupStrip(0), "aux2_order", Value::Int(1)).unwrap();
+
+        let check = |doc: &Document| {
+            let snd = &doc.project().groups[0].sounds[0];
+            assert_eq!(snd.channel.aux_dest, [AudioDest::Group(g1), AudioDest::Ext(2)]);
+            assert_eq!(snd.aux, [0.5, 0.25]);
+            assert_eq!(snd.channel.aux_pre, [true, false]);
+            let grp = &doc.project().groups[0];
+            assert_eq!(grp.channel.aux_dest, [AudioDest::Sound(g1, 1), AudioDest::Master]);
+            assert_eq!(grp.aux[0], 0.625);
+            assert_eq!(grp.channel.aux_pre, [false, true]);
+        };
+        check(&d);
+        let reopened = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        check(&reopened);
+
+        while d.undo() {}
+        let snd = &d.project().groups[0].sounds[0];
+        assert_eq!(snd.channel.aux_dest, [AudioDest::None, AudioDest::None]);
+        assert_eq!(snd.channel.aux_pre, [false, false]);
+    }
 }

@@ -10,6 +10,7 @@
 
 use super::arrange::px_mut;
 use super::{Document, Op};
+use deckard_model::AUDIO_OFFSET;
 use deckard_model::{MidiEvent, MidiKind, Note};
 use mxprj::decode::{Obj, Path, Value};
 use std::collections::HashMap;
@@ -370,7 +371,7 @@ impl Document {
     pub(crate) fn audio_event_ops(&mut self, g: usize, p: usize, sound: usize, take: Option<u64>) -> Result<Vec<Op>, String> {
         let paths = self.object_paths();
         let (entries_path, entry, seq) = self.sequence_of(g, p, sound, &paths)?;
-        let item = match take {
+        let mut item = match take {
             Some(t) => Some(Item { event: self.build(|b| b.audio_event(t))?, node: self.new_node()? }),
             None => None,
         };
@@ -384,6 +385,18 @@ impl Document {
         let Some(Value::Obj(events)) = self.tree.at(&events_path).cloned() else { return Err("sequence without events".into()) };
         let mut items = items_of(&events)?;
         let before = items.len();
+        // The same take again keeps its offset; another starts at 0.
+        let kept = take.and_then(|t| {
+            items.iter().find_map(|it| {
+                let e = self.event_obj(&it.event, &paths).filter(|e| e.type_name == AUDIO_EVENT)?;
+                (e.get("take") == Some(&Value::Ref(t))).then(|| e.get(AUDIO_OFFSET).cloned()).flatten()
+            })
+        });
+        if let (Some(v), Some(Item { event: Value::Obj(te), .. })) = (kept, item.as_mut())
+            && let Some(Value::Obj(ev)) = te.get_mut("event")
+        {
+            ev.fields.push((AUDIO_OFFSET.into(), v));
+        }
         items.retain(|it| !self.event_obj(&it.event, &paths).is_some_and(|e| e.type_name == AUDIO_EVENT));
         if before == items.len() && item.is_none() {
             return Ok(Vec::new());
@@ -395,6 +408,29 @@ impl Document {
         // The sequence's `current` event, if it was an audio event now gone.
         ops.push(Op::Set { path: self.field_path(&seq_path, &["current"])?, value: Value::Null });
         Ok(ops)
+    }
+
+    /// Ops that move sound `sound`'s audio in pattern `p` to start `ticks` from 1.1.1
+    /// (its `AudioEvent`'s DECKARD offset field; none at 0).
+    pub(crate) fn audio_offset_ops(&mut self, g: usize, p: usize, sound: usize, ticks: i64) -> Result<Vec<Op>, String> {
+        let paths = self.object_paths();
+        let (_, _, seq) = self.sequence_of(g, p, sound, &paths)?;
+        let seq_path = seq.ok_or("no audio in the pattern for this sound")?;
+        let events_path = self.field_path(&seq_path, &["events"])?;
+        let Some(Value::Obj(events)) = self.tree.at(&events_path).cloned() else { return Err("sequence without events".into()) };
+        let mut items = items_of(&events)?;
+        let is_audio = |d: &Self, it: &Item| d.event_obj(&it.event, &paths).is_some_and(|e| e.type_name == AUDIO_EVENT);
+        let at = items.iter().position(|it| is_audio(self, it)).ok_or("no audio in the pattern for this sound")?;
+        let Value::Obj(te) = &mut items[at].event else { return Err("audio event".into()) };
+        let Some(Value::Obj(ev)) = te.get_mut("event") else { return Err("audio event".into()) };
+        if ev.get(AUDIO_OFFSET).and_then(Value::as_int).unwrap_or(0) == ticks {
+            return Ok(Vec::new());
+        }
+        ev.fields.retain(|(f, _)| f != AUDIO_OFFSET);
+        if ticks != 0 {
+            ev.fields.push((AUDIO_OFFSET.into(), Value::Int(ticks)));
+        }
+        Ok(vec![Op::Set { path: events_path, value: Value::Obj(events_with(&events, &items)) }])
     }
 
     /// Ops that give `sound` a new sequence (in its `sequences` list) holding `adds`,

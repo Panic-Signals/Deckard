@@ -313,8 +313,8 @@ const WAVE_PIANO_MUTED: [u8; 4] = [255, 255, 255, 51];
 const WAVE_PIANO_MUTED_REPEAT: [u8; 4] = [255, 255, 255, 26];
 
 /// Sound `s`'s Audio plug-in loop between `y0` and `y1` (Maschine's `ClipAudioLane`):
-/// from the pattern's start, a loop's length in beats at a time (a repeat after the
-/// first), on the same ticks as the steps whatever the tempo. Loop mode: in colour
+/// from 1.1.1 plus the cue's offset, a loop's length in beats at a time (a repeat on either
+/// side of the first), on the same ticks as the steps whatever the tempo. Loop mode: in colour
 /// where it's on in the pattern; Gate mode: in colour under the sound's notes.
 #[allow(clippy::too_many_arguments)]
 fn audio_lane(
@@ -338,6 +338,7 @@ fn audio_lane(
     if loop_ticks <= 0 || peaks.is_empty() {
         return;
     }
+    let offset = cue.map_or(0, |c| c.offset);
     let gate = a.mode == deckard_model::AudioMode::Gate;
     let muted = snd.muted || cue.is_none();
     if piano && muted && !gate {
@@ -366,8 +367,10 @@ fn audio_lane(
     let step = ((t1 - t0) / WAVE_COLUMNS).max(1);
     let mut t = from;
     while t < to {
-        let rel = t - pattern.start;
-        let (rep, within) = (rel / loop_ticks, rel % loop_ticks);
+        // From 1.1.1 and the cue's offset, as the app's pattern editor draws it; the
+        // first pass is bright, every other (before it too) a repeat.
+        let rel = t - offset;
+        let (rep, within) = (rel.div_euclid(loop_ticks), rel.rem_euclid(loop_ticks));
         let i = ((within as f64 / loop_ticks as f64 * peaks.len() as f64) as usize).min(peaks.len() - 1);
         let (lo, hi) = peaks[i];
         let (top, mut bottom) = (at(hi.clamp(-1.0, 1.0)), at(lo.clamp(-1.0, 1.0)));
@@ -375,7 +378,7 @@ fn audio_lane(
         if bottom.frac == top.frac && bottom.px <= top.px {
             bottom.px = top.px + 1;
         }
-        out.push(Shape::rect(x(t), top, x((t + step).min(to)), bottom, fill(t, rep > 0)));
+        out.push(Shape::rect(x(t), top, x((t + step).min(to)), bottom, fill(t, rep != 0)));
         t += step;
     }
 }

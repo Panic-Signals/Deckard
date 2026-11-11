@@ -87,11 +87,11 @@ pub type AutoTake = (AutoItem, usize, Option<(usize, usize)>);
 /// A finished recording.
 pub enum Finished {
     /// Detect, Sync or Loop: the take, its channels (1 for Ext. Mono), the mode, and its
-    /// length in ticks at the song tempo.
-    Take { sample: Sample, channels: u16, mode: usize, ticks: f64 },
+    /// length in ticks at the song tempo, and the group and sound focused at Start.
+    Take { sample: Sample, channels: u16, mode: usize, ticks: f64, focus: (usize, usize) },
     /// Auto: each recorded note (written already), its length in frames and the loop
-    /// found in it.
-    Auto { done: Vec<AutoTake> },
+    /// found in it, and the group and sound focused at Start.
+    Auto { done: Vec<AutoTake>, focus: (usize, usize) },
 }
 
 /// What the recorder needs to start.
@@ -107,6 +107,8 @@ pub struct StartWith<'a> {
     /// Auto: the folder and name stem of its files.
     pub dir: PathBuf,
     pub stem: String,
+    /// The group and sound focused at Start, where the take goes.
+    pub focus: (usize, usize),
 }
 
 /// An Auto run in progress.
@@ -124,6 +126,7 @@ struct AutoRun {
 }
 
 struct Run {
+    focus: (usize, usize),
     rate: u32,
     channels: u16,
     /// Frames that have arrived from the source, and the recent ones (pre-roll, and
@@ -148,7 +151,7 @@ struct Run {
 
 /// What the idle meter listens to: the source, its external inputs, the interface,
 /// monitoring, and whether an engine runs (to tap, for the internal source).
-type MeterKey = (usize, usize, usize, Option<usize>, Option<String>, bool, bool);
+type MeterKey = (usize, usize, usize, TapSource, Option<String>, bool, bool);
 
 #[derive(Default)]
 pub struct Recorder {
@@ -192,6 +195,34 @@ impl Recorder {
         self.run.is_some()
     }
 
+    /// (Tests: as if recording had started on sound `focus`, no audio flowing.)
+    #[cfg(test)]
+    pub fn fake_recording(&mut self, focus: (usize, usize)) {
+        self.run = Some(Run {
+            focus,
+            rate: 48_000,
+            channels: 2,
+            received: 0,
+            ring: VecDeque::new(),
+            frames: Vec::new(),
+            limit: None,
+            abs: None,
+            last_pos: 0.0,
+            arm_line: None,
+            stop_line: None,
+            started: 0.0,
+            auto: None,
+            pending: Vec::new(),
+            base: 0,
+        });
+        self.view.status = RecStatus::Recording;
+    }
+
+    /// The group and sound focused when recording was started, while it runs.
+    pub fn focus(&self) -> Option<(usize, usize)> {
+        self.run.as_ref().map(|r| r.focus)
+    }
+
     /// Listening to the chosen source for the RECORD tab's input meter.
     pub fn is_metering(&self) -> bool {
         self.meter_key.is_some()
@@ -227,7 +258,7 @@ impl Recorder {
         if self.view.source == 2 {
             if let Some(o) = with.output.filter(|o| o.has_engine()) {
                 let buffer = Arc::new(Mutex::new(Vec::new()));
-                let source = self.view.internal.map_or(TapSource::Master, TapSource::Group);
+                let source = self.view.internal;
                 o.set_tap(Some(Tap { source, buffer: buffer.clone() }));
                 self.tap = Some(buffer);
             }
@@ -269,10 +300,7 @@ impl Recorder {
                 let (g, s) = self.view.auto_sound.unwrap_or_default();
                 TapSource::Sound(g, s)
             } else {
-                match self.view.internal {
-                    Some(g) => TapSource::Group(g),
-                    None => TapSource::Master,
-                }
+                self.view.internal
             };
             let buffer = Arc::new(Mutex::new(Vec::new()));
             match with.output.filter(|o| o.has_engine()) {
@@ -286,6 +314,7 @@ impl Recorder {
             self.tap = Some(buffer);
         }
         let mut run = Run {
+            focus: with.focus,
             rate,
             channels: if self.view.source == 1 { 1 } else { 2 },
             received: 0,
@@ -435,9 +464,10 @@ impl Recorder {
                 None
             }
             3 => {
+                let focus = run.focus;
                 let done = run.auto.as_mut().map(|a| std::mem::take(&mut a.done)).unwrap_or_default();
                 self.cancel(output);
-                (!done.is_empty()).then_some(Finished::Auto { done })
+                (!done.is_empty()).then_some(Finished::Auto { done, focus })
             }
             _ => {
                 let finished = take(run, 0, &clock);
@@ -708,7 +738,8 @@ impl Recorder {
         a.start = None;
         if a.i >= a.items.len() {
             let done = std::mem::take(&mut a.done);
-            return Some(Done::Take(Finished::Auto { done }));
+            let focus = run.focus;
+            return Some(Done::Take(Finished::Auto { done, focus }));
         }
         None
     }
@@ -741,6 +772,7 @@ fn take(run: &mut Run, mode: usize, clock: &Clock) -> Done {
         sample: Sample { rate: run.rate, frames },
         channels: run.channels,
         mode,
+        focus: run.focus,
     })
 }
 
@@ -753,6 +785,23 @@ fn keep_recent(ring: &mut VecDeque<[f32; 2]>, new: Vec<[f32; 2]>, n: usize) {
 }
 
 /// (min, max) of the mid signal in up to 400 columns.
+/// A take's mini waveform (the take list's, the MK3's): (min, max) of the mid signal in
+/// 64 columns.
+pub fn mini_wave(frames: &[[f32; 2]]) -> std::sync::Arc<Vec<(f32, f32)>> {
+    let per = frames.len().div_ceil(64).max(1);
+    std::sync::Arc::new(
+        frames
+            .chunks(per)
+            .map(|c| {
+                c.iter().fold((0f32, 0f32), |(lo, hi), f| {
+                    let m = (f[0] + f[1]) * 0.5;
+                    (lo.min(m), hi.max(m))
+                })
+            })
+            .collect(),
+    )
+}
+
 fn preview(frames: &[[f32; 2]]) -> Vec<(f32, f32)> {
     let per = (frames.len() / 400).max(1);
     frames
@@ -864,7 +913,7 @@ pub fn timestamp() -> String {
 
 /// The local time zone's offset from UTC at `secs` (seconds).
 #[cfg(unix)]
-fn local_offset(secs: i64) -> i64 {
+pub(crate) fn local_offset(secs: i64) -> i64 {
     #[repr(C)]
     struct Tm {
         sec: i32,
@@ -890,7 +939,7 @@ fn local_offset(secs: i64) -> i64 {
 
 /// The same from the C runtime: the local time read back as if it were UTC.
 #[cfg(windows)]
-fn local_offset(secs: i64) -> i64 {
+pub(crate) fn local_offset(secs: i64) -> i64 {
     #[repr(C)]
     #[derive(Default)]
     struct Tm {
@@ -974,6 +1023,7 @@ mod tests {
             clock: clock_of(&out, &p),
             dir: dir.clone(),
             stem: "Kick".into(),
+            focus: (0, 0),
         });
         assert_eq!(r.view.error, None);
         let t0 = Instant::now();
@@ -984,7 +1034,7 @@ mod tests {
             }
             assert!(t0.elapsed() < Duration::from_secs(5), "{}", r.view.info);
         };
-        let Finished::Auto { done } = done else { panic!("not an Auto result") };
+        let Finished::Auto { done, .. } = done else { panic!("not an Auto result") };
         assert_eq!(done.iter().map(|d| (d.0.note, d.0.keys)).collect::<Vec<_>>(), vec![(60, (0, 61)), (62, (62, 127))]);
         for (item, frames, _) in &done {
             assert_eq!(*frames, out.rate as usize * 3 / 10, "{}", item.path.display());
@@ -1015,6 +1065,7 @@ mod tests {
             clock: clock_of(out, &p),
             dir: PathBuf::new(),
             stem: String::new(),
+            focus: (0, 0),
         };
         let t0 = Instant::now();
         while r.view.meter.0 < 0.01 {
@@ -1045,6 +1096,7 @@ mod tests {
             clock: clock_of(&out, &p),
             dir: std::env::temp_dir(),
             stem: String::new(),
+            focus: (0, 0),
         });
         let t0 = Instant::now();
         let f = loop {
@@ -1073,6 +1125,7 @@ mod tests {
         r.tap = Some(buffer.clone());
         r.view.status = RecStatus::Waiting;
         r.run = Some(Run {
+            focus: (0, 0),
             rate: 1000,
             channels: 2,
             received: 0,

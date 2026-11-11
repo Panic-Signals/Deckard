@@ -107,6 +107,9 @@ pub(crate) struct CcRt {
     pub settle_until: u64,
 }
 
+/// How long a CV output glides after a jump in its LFOs (seconds).
+const CV_SMOOTH: f64 = 0.005;
+
 /// How long a CC route's new place waits before it's sent to (seconds).
 const SETTLE: f64 = 0.25;
 
@@ -156,22 +159,32 @@ impl Engine {
         (self.mode == Mode::Arrangement && on).then(|| self.position() + self.song_offset)
     }
 
-    /// `l`'s cycles run now. Triggered, from its last note (its wave restarts there);
-    /// else on the song's clock: synced, the arrangement's ticks (plus the export's
-    /// offset) or the ticks played in Ideas (or since stopping, from there); free, the
-    /// seconds played.
+    /// `l`'s cycles run now.
+    #[cfg(test)]
     pub(crate) fn lfo_cycles(&self, l: &LfoRt) -> f64 {
-        if l.lfo.trigger.is_some() {
-            let (t, f) = self.since_trig(l);
-            return l.lfo.cycles(t, f / self.sr);
-        }
-        let ticks = self.lfo_song().unwrap_or(self.lfo_clock.ticks);
-        l.lfo.cycles(ticks, self.lfo_clock.secs)
+        self.lfo_cycles_after(l, 0)
     }
 
-    /// Ticks and frames since `l`'s trigger's last note (0 before one).
-    fn since_trig(&self, l: &LfoRt) -> (f64, f64) {
-        l.trig_at.map_or((0.0, 0.0), |(t, at)| (self.lfo_clock.ever - t, self.time.saturating_sub(at) as f64))
+    /// `l`'s cycles run `frames` into the span. Triggered, from its last note (its wave
+    /// restarts there); else on the song's clock: synced, the arrangement's ticks (plus
+    /// the export's offset) or the ticks played in Ideas (or since stopping, from there);
+    /// free, the seconds played.
+    fn lfo_cycles_after(&self, l: &LfoRt, frames: u64) -> f64 {
+        if l.lfo.trigger.is_some() {
+            let (t, f) = self.since_trig(l, frames);
+            return l.lfo.cycles(t, f / self.sr);
+        }
+        // (A count-in or a wait stops this clock: see `lfo_clock_run`.)
+        let run = if self.counting > 0 || self.sync.waits() { 0.0 } else { frames as f64 };
+        let ticks = self.lfo_song().unwrap_or(self.lfo_clock.ticks) + run / self.samples_per_tick();
+        l.lfo.cycles(ticks, self.lfo_clock.secs + run / self.sr)
+    }
+
+    /// Ticks and frames since `l`'s trigger's last note (0 before one), `frames` into
+    /// the span.
+    fn since_trig(&self, l: &LfoRt, frames: u64) -> (f64, f64) {
+        let ticks = self.lfo_clock.ever + frames as f64 / self.samples_per_tick();
+        l.trig_at.map_or((0.0, 0.0), |(t, at)| (ticks - t, (self.time + frames).saturating_sub(at) as f64))
     }
 
     /// The LFOs' clock moves on `frames` (after a span); `waited`: the span was a count-in
@@ -192,18 +205,24 @@ impl Engine {
     /// The song starts playing (a count-in or a wait over): the LFOs' clock restarts.
     pub(crate) fn lfo_clock_start(&mut self) {
         (self.lfo_clock.ticks, self.lfo_clock.secs) = (0.0, 0.0);
+        self.cv_smooth_left = self.cv_smooth_frames();
     }
 
     /// LFO `pad`'s value now (0..1); `None` when there's no such LFO, or it's muted, or
     /// it's an envelope with no trigger (its routes leave their targets alone).
     pub fn lfo_value(&self, pad: u8) -> Option<f32> {
+        self.lfo_value_after(pad, 0)
+    }
+
+    /// [`Engine::lfo_value`], `frames` into the span.
+    pub fn lfo_value_after(&self, pad: u8, frames: u64) -> Option<f32> {
         let l = self.lfos.iter().find(|l| l.lfo.pad == pad && !l.lfo.muted)?;
         if l.lfo.env {
             l.lfo.trigger?;
-            return Some(l.lfo.env_output(l.lfo.env_at(&l.env, self.time as f64 / self.sr)));
+            return Some(l.lfo.env_output(l.lfo.env_at(&l.env, (self.time + frames) as f64 / self.sr)));
         }
-        let since = l.trig_at.map(|_| self.since_trig(l).0 / PPQ as f64);
-        Some(l.lfo.output(self.lfo_cycles(l), since))
+        let since = l.trig_at.map(|_| self.since_trig(l, frames).0 / PPQ as f64);
+        Some(l.lfo.output(self.lfo_cycles_after(l, frames), since))
     }
 
     /// A note (`pitch`) of sound (`group`, `sound`) sounds now, for `frames` (`None`:
@@ -244,6 +263,11 @@ impl Engine {
         for l in self.lfos.iter_mut().filter(|l| l.held > 0) {
             l.env_expire(now, true, sr);
         }
+    }
+
+    /// The next frame an envelope's held note runs out on.
+    pub(crate) fn lfo_note_end(&self) -> Option<u64> {
+        self.lfos.iter().flat_map(|l| &l.notes[..l.held]).map(|n| n.1).filter(|&t| t != u64::MAX && t > self.time).min()
     }
 
     /// Take `fresh`'s LFOs (an edit), each keeping when it was last triggered while its
@@ -306,5 +330,96 @@ impl Engine {
                 None => (c.sent, c.settle_until) = (None, settled),
             }
         }
+    }
+
+    /// Which output channels (bits: channel 0 is bit 0) are CV only. None, as an export
+    /// is: no CV is written. The first CV frames, of an engine or after none were marked,
+    /// glide from the channels' levels.
+    pub fn set_cv_channels(&mut self, mask: u32) {
+        if self.cv_channels == 0 && mask != 0 {
+            self.cv_smooth_left = self.cv_smooth_frames();
+        }
+        self.cv_channels = mask;
+    }
+
+    fn cv_smooth_frames(&self) -> u32 {
+        (CV_SMOOTH * self.sr) as u32
+    }
+
+    /// The channels marked CV only get their voltages for `frames` from `at` (interleaved)
+    /// in each of `ext`: the first route on the channel's, or 0 V with none. An LFO
+    /// that's muted or gone sits at the route's Low. Those a Zhora wrote this span are
+    /// left alone. No allocating.
+    pub fn write_cv(&mut self, ext: &mut [Vec<f32>], at: usize, frames: usize) {
+        if self.cv_channels == 0 {
+            return;
+        }
+        let mut bits = self.cv_channels & !self.zhora_cv_owned;
+        while bits != 0 {
+            let ch = bits.trailing_zeros();
+            bits &= bits - 1;
+            let mut buf = ext.get_mut(ch as usize / 2);
+            let side = ch as usize % 2;
+            let owner = self.cv_routes.iter().position(|r| u32::from(r.channel) == ch);
+            let mut left = self.cv_smooth_left;
+            for n in 0..frames {
+                let target = owner.map_or(0.0, |i| self.cv_target(i, n as u64));
+                let last = self.cv_last[ch as usize];
+                let v = if left > 1 { last + (target - last) / left as f32 } else { target };
+                self.cv_last[ch as usize] = v;
+                if let Some(s) = buf.as_mut().and_then(|b| b.get_mut(at + n * 2 + side)) {
+                    *s = v;
+                }
+                left = left.saturating_sub(1);
+            }
+        }
+        self.cv_smooth_left = self.cv_smooth_left.saturating_sub(frames as u32);
+    }
+
+    /// CV route `i`'s voltage `n` frames into the span. Always within -1..1, for the
+    /// hardware's sake.
+    fn cv_target(&self, i: usize, n: u64) -> f32 {
+        let r = &self.cv_routes[i];
+        let x = if let ModSource::Lfo(pad) = r.source { self.lfo_value_after(pad, n) } else { None };
+        let v = r.value(x.unwrap_or(0.0));
+        if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
+    }
+
+    /// This engine replaces `old`: each CV output glides from where `old` left it.
+    pub fn take_cv(&mut self, old: &Engine) {
+        self.cv_last = old.cv_last;
+        self.cv_smooth_left = self.cv_smooth_frames();
+    }
+
+    /// Take `fresh`'s CV routes (an edit); each channel keeps its level, and glides if
+    /// the routes or a routed LFO changed. After [`Engine::adopt_lfos`], so `fresh` holds
+    /// the LFOs that were playing. No allocating.
+    pub(crate) fn adopt_cvs(&mut self, fresh: &mut Engine) {
+        std::mem::swap(&mut self.cv_routes, &mut fresh.cv_routes);
+        fn lfo(e: &Engine, pad: u8) -> Option<&Lfo> {
+            e.lfos.iter().find(|l| l.lfo.pad == pad).map(|l| &l.lfo)
+        }
+        let same_lfos = self.cv_routes.iter().all(|r| match r.source {
+            ModSource::Lfo(pad) => lfo(self, pad) == lfo(fresh, pad),
+            _ => true,
+        });
+        if !same_lfos || self.cv_routes != fresh.cv_routes {
+            self.cv_smooth_left = self.cv_smooth_frames();
+        }
+    }
+
+    /// The indices of `project`'s CV routes that write nothing under `mask`: their channel
+    /// isn't marked CV only, or an earlier route has it.
+    pub fn cv_conflicts(project: &deckard_model::Project, mask: u32) -> Vec<usize> {
+        let mut owned = 0u32;
+        let mut inactive = Vec::new();
+        for (i, r) in project.cv_routes.iter().enumerate() {
+            let bit = 1u32.checked_shl(u32::from(r.channel)).unwrap_or(0);
+            if mask & bit == 0 || owned & bit != 0 {
+                inactive.push(i);
+            }
+            owned |= bit;
+        }
+        inactive
     }
 }

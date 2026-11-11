@@ -143,6 +143,8 @@ pub struct SamplingView {
     /// How many recordings have been taken, and the one focused.
     pub takes: usize,
     pub take: Option<usize>,
+    /// Each take's mini waveform: (min, max) columns.
+    pub take_waves: Vec<std::sync::Arc<Vec<(f32, f32)>>>,
     /// A stem separation running.
     pub stems: Option<StemsRun>,
     /// Why there's no sample to work on, when there isn't (C64): what the sound plays.
@@ -287,10 +289,13 @@ pub struct LfoView {
 /// A mod matrix slot as its column shows it: Source, Group ("A1 – name", "A1" unnamed), Sound
 /// ("S3 – name"), Module, Destination and Depth ("+50%"), "—" where unset. `midi`: a CC
 /// route (its Group "MIDI"), whose rows 3–5 are Port, Channel ("1"–"16") and CC ("0"–"119").
+/// `cv`: a CV route (its Group "CV"), whose rows are Out (" !" after it when it writes
+/// nothing), a blank, Low and High.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModSlotView {
     pub rows: [String; 6],
     pub midi: bool,
+    pub cv: bool,
 }
 
 /// Lock (LOCK, SHIFT + LOCK).
@@ -420,6 +425,23 @@ pub struct SoundView {
     pub touch_max: i64,
     /// PROB LOCK: its notes' chances rolled once and kept.
     pub prob_locked: bool,
+    /// SELECT has it in the selection (the focused sound always is).
+    pub selected: bool,
+    /// Its Audio plug-in's loop in the focused pattern (focused group only).
+    pub audio: Option<LoopView>,
+}
+
+/// A sound's Audio plug-in loop as the pattern editors draw it (Maschine's
+/// `ClipAudioLane`): the take's peaks (min, max) across its play range, its length and
+/// where its first pass starts (ticks from 1.1.1, the cue's offset), whether it's on in
+/// the pattern, and Gate mode (heard only under the sound's notes).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoopView {
+    pub peaks: std::sync::Arc<Vec<(f32, f32)>>,
+    pub ticks: i64,
+    pub offset: i64,
+    pub on: bool,
+    pub gate: bool,
 }
 
 /// A scene: its name and palette colour.
@@ -519,6 +541,45 @@ pub struct ControlView {
     pub filter: Option<EqCurveView>,
     /// Any other focused built-in effect, drawn on the right screen on every page.
     pub picture: Option<EqCurveView>,
+    /// The focused Zhora: its tuner on the right screen, its buttons on both.
+    pub zhora: Option<ZhoraView>,
+    /// The focused Tuner effect: its dial on the right screen.
+    pub tuner: Option<TunerView>,
+}
+
+/// What the Tuner effect's screen shows: the note heard and its `cents` above it
+/// (`in_tune` within 5), A4's pitch (`reference`, "440 Hz"), and whether Mute is on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TunerView {
+    pub note: Option<String>,
+    pub cents: Option<f32>,
+    pub in_tune: bool,
+    pub reference: String,
+    pub muted: bool,
+}
+
+/// What Zhora's screens show. `note` is the note heard on its input and `cents` how far
+/// above it; `in_tune` within 5 cents. The bar reads `status` (when it was tuned), with
+/// `right` (what's held, or Live's state) at its end; `message` replaces it. `tune`,
+/// `check`, `live` and `hold` light their buttons. `input` is what it listens on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ZhoraView {
+    pub note: Option<String>,
+    pub cents: Option<f32>,
+    pub in_tune: bool,
+    pub status: String,
+    pub right: String,
+    pub tune: bool,
+    pub check: bool,
+    pub live: bool,
+    pub hold: bool,
+    pub message: Option<String>,
+    pub input: String,
+    /// On its ENV page, its envelope's picture (0..1 samples, drawn by its knobs as the
+    /// LFO page's envelope is) for the left screen, and where it shows the note off.
+    /// Empty on other pages.
+    pub env: Vec<f32>,
+    pub env_note_off: f32,
 }
 
 /// A curve for the right screen. `points` run across the plot, each 0..1 (0.5 is the
@@ -623,6 +684,16 @@ pub enum Action {
     FocusGroup(usize),
     /// Focus sound `.0` of the focused group.
     FocusSound(usize),
+    /// SELECT + a pad. `multi` is Button 8: on, the pad joins or leaves the selection
+    /// and the focus stays; off, an unselected pad becomes the only one selected.
+    SelectPad {
+        index: usize,
+        multi: bool,
+    },
+    /// SELECT + ALL: every sound of the focused group, focus unchanged.
+    SelectAllSounds,
+    /// SELECT + NONE: only the focused sound stays selected.
+    SelectNoSounds,
     /// Mute or unmute group `.0` (or sound `.0` of the focused group); solo it.
     MuteGroup(usize),
     SoloGroup(usize),
@@ -643,6 +714,10 @@ pub enum Action {
     },
     /// The next (true) or previous page.
     Page(bool),
+    /// The focused plug-in's page `.0` (from 0).
+    PluginPage(usize),
+    /// A press of the focused Zhora's `tune`, `check`, `live` or `hold`.
+    Zhora(&'static str),
     /// Show the master (0), group (1) or sound (2) chain.
     Level(usize),
     /// Focus the slot `.0` places on.
@@ -887,6 +962,8 @@ pub enum Action {
     SceneEdit(&'static str),
     /// ARRANGE shows the Song view (else the Ideas view).
     SongView(bool),
+    /// MIX shows the software's Mixer view (else closes it).
+    MixerView(bool),
     /// Focus section `.0` (while the song plays, it plays next).
     FocusSection(usize),
     /// The Song view's edits of the focused section: `create` (a new one after it),

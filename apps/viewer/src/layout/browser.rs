@@ -171,8 +171,9 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     results(app, ui, acts);
 }
 
-/// The Splice button: white, the width of the panel, Splice's logo on it. Opens
-/// Splice's front page through DECKARD's referral link, saying so on hover.
+/// The Splice button: the same dark grey as the filter chips, the width of the
+/// panel, Splice's logo in white on it. Opens Splice's front page through DECKARD's
+/// referral link, saying so on hover.
 fn splice_button(ui: &mut Ui) {
     // Decoded once per run; kept in the context's data. (Loading the texture must
     // happen outside `data_mut`: both take the context's lock.)
@@ -181,7 +182,15 @@ fn splice_button(ui: &mut Ui) {
         Some(t) => t,
         None => {
             let img = image::load_from_memory(SPLICE_LOGO).expect("the Splice logo is a PNG").to_rgba8();
-            let ci = ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            // The file is black on transparent. Flip the ink to white; the edges' alpha stays.
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let mut raw = img.into_raw();
+            for px in raw.chunks_exact_mut(4) {
+                px[0] = 255 - px[0];
+                px[1] = 255 - px[1];
+                px[2] = 255 - px[2];
+            }
+            let ci = ColorImage::from_rgba_unmultiplied([w, h], &raw);
             let t = ui.ctx().load_texture("splice-logo", ci, TextureOptions::LINEAR);
             ui.ctx().data_mut(|d| d.insert_temp(id, t.clone()));
             t
@@ -189,12 +198,13 @@ fn splice_button(ui: &mut Ui) {
     };
     let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), SPLICE_BUTTON_HEIGHT), Sense::click());
     let resp = resp.on_hover_text(crate::splice::DISCLOSURE);
+    // Same greys as the Projects / Groups / Sounds chips: S02 at rest, S03 under the pointer.
     let fill = if resp.is_pointer_button_down_on() {
-        Color32::from_gray(0xD8)
+        S01
     } else if resp.hovered() {
-        Color32::from_gray(0xEE)
+        S03
     } else {
-        Color32::WHITE
+        S02
     };
     ui.painter().rect_filled(r, 6.0, fill);
     let [w, h] = logo.size();

@@ -316,7 +316,7 @@ While SHIFT is held the button row is redrawn:
 | 4 | still shows **USER** | Kinds other than Groups, with accessibility off | Nothing happens. This is a quirk: the button keeps its unshifted look. |
 | 5 / 6 | Arrow pair whose label is the **focused plug-in slot's name** (e.g. "SAMPLER"). If the name is empty, two blank head buttons. | ◀ enabled when the chain has slots and the focus isn't slot 0. ▶ enabled when the focus is a real slot before the end. | Moves the plug-in slot focus −1 or +1 in the focused chain. |
 | 7 | **SET ★**, in white text | results > 0 | Toggles the focused result's favourite state. |
-| 8 | **PREHEAR** | Shown only when the prehear widget applies (sample kinds). Selected = prehear on. | Toggles prehear (only when a prehear type is selected). Turning it off stops playback. |
+| 8 | **PREHEAR** | Shown when prehear applies (all kinds except Projects). Selected = prehear on (default on). | Toggles prehear. |
 
 ## 6. 4-D encoder (jog wheel)
 
@@ -400,16 +400,16 @@ Ways to load:
 
 ## 8. Prehear
 
-Prehear is *possible* when all three hold:
+Prehear starts enabled and is *possible* when all three hold:
 
-- A prehear type is selected, which means the content kind is samples.
+- The content kind is not Projects (i.e. Groups, Sounds, Instruments, Effects, Loops, or One-shots).
 - There are results.
-- The app says prehear can play.
+- Prehear is enabled (`SHIFT` + button 8 toggles it).
 
 When prehear is possible:
 
-- Knob 8 and the wheel prehear the newly focused result.
-- PREVIOUS and NEXT prehear instead of loading.
+- Knob 8 and the wheel prehear the newly focused result (playing the sample itself or its NKS `.previews/` `.ogg`/`.wav` preview, and stopping prehear if the item has no preview).
+- On sample kinds (Loops and One-shots), PREVIOUS and NEXT prehear instead of loading; on preset kinds, PREVIOUS and NEXT continue to step and load.
 
 The prehear icon in the icon bar shows when prehear applies and is on. SHIFT + button 8
 toggles prehear.
