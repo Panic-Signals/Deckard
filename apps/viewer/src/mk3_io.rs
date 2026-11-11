@@ -408,6 +408,12 @@ fn run(shared: &Mutex<Shared>) {
                 continue;
             }
         };
+        // Clear the preceding host/session before waiting for the first UI state.
+        if let Err(e) = dev.write_leds(&deckard_mk3::leds::Leds::default()) {
+            shared.lock().unwrap().status = format!("Maschine MK3: {e}");
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
+        }
         let _polling = crate::controller_timing::Polling::start();
         {
             let mut s = shared.lock().unwrap();
