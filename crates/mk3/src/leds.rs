@@ -125,7 +125,9 @@ pub const PAD_LEDS: [&str; 41] = [
 pub fn is_colour(name: &str) -> bool {
     // The pads are LED_PAD_1..16; LED_PAD_MODE is a one-colour button.
     let pad = name.strip_prefix("LED_PAD_").is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()));
-    pad || name.starts_with("LED_GROUP_") || name.starts_with("LED_TS_") || name.starts_with("LED_WHEEL_BUTTON_")
+    // SAMPLING is a multicolour button: a brightness byte reads as a palette entry
+    // there, so the 0x09 backlight lit it orange.
+    pad || name == "LED_SAMPLE" || name.starts_with("LED_GROUP_") || name.starts_with("LED_TS_") || name.starts_with("LED_WHEEL_BUTTON_")
 }
 
 /// The palette byte of a scripts' colour (`LEDColors` index, 16 white) and LED state
@@ -159,6 +161,10 @@ pub const BACKLIGHT: u8 = 0x09;
 
 /// A dim button: one that can be pressed but isn't selected.
 pub const DIM: u8 = 0x22;
+
+/// SAMPLING not selected. It's a colour LED, whose dim white doesn't look like the
+/// one-colour buttons around it; this byte, past the palette, does (picked on the hardware).
+pub const SAMPLE_DIM: u8 = 73;
 
 /// A one-colour button's brightness for a level the scripts set (0..1): full stays
 /// full; anything less is a dim button, 30% under the level (dim is 0.25 on the MK3),
@@ -264,6 +270,7 @@ mod tests {
     fn palette_bytes() {
         assert_eq!(palette(0, 1), 0, "off");
         assert!(is_colour("LED_PAD_16") && !is_colour("LED_PAD_MODE"), "PAD MODE is a button, not a pad");
+        assert!(is_colour("LED_SAMPLE"), "SAMPLING is multicolour: a brightness byte would light it orange");
         assert_eq!(palette(0, 2), 0x04, "red dim");
         assert_eq!(palette(16, 3), palette(16, 2), "dim until flashed: dim");
         assert_eq!(button_level(3), DIM);

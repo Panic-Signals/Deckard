@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 pub const DEVICE: &str = "maschine_jam";
 
 /// How often the lights want redrawing, for what pulses and chases, when nothing else asks.
-const FRAME: Duration = Duration::from_millis(40);
+const FRAME: Duration = Duration::from_millis(16);
 
 #[derive(Default)]
 struct Shared {
@@ -33,6 +33,8 @@ struct Shared {
     output: Option<Sender>,
     route: Option<PadMap>,
     leds: Option<Leds>,
+    #[cfg(test)]
+    leds_applied: Option<(Leds, Instant)>,
     repaint: Option<eframe::egui::Context>,
     /// DECKARD is closing: lights off, then stop.
     closing: bool,
@@ -91,6 +93,11 @@ impl JamIo {
         self.shared.lock().unwrap().leds = Some(leds);
     }
 
+    #[cfg(test)]
+    pub(crate) fn leds_applied_at(&self, leds: &Leds) -> Option<Instant> {
+        self.shared.lock().unwrap().leds_applied.as_ref().filter(|(l, _)| l == leds).map(|(_, t)| *t)
+    }
+
     /// Leave the lights off. Waits (up to a second) for the thread to do it.
     pub fn shut_down(&self) {
         self.shared.lock().unwrap().closing = true;
@@ -136,6 +143,7 @@ fn run(shared: &Mutex<Shared>) {
                 continue;
             }
         };
+        let _polling = crate::controller_timing::Polling::start();
         {
             let mut s = shared.lock().unwrap();
             s.connected = true;
@@ -161,6 +169,12 @@ fn run(shared: &Mutex<Shared>) {
                 break;
             }
             let wrote = leds.as_ref().map_or(Ok(()), |l| jam.show(l));
+            #[cfg(test)]
+            if wrote.is_ok() {
+                if let Some(l) = &leds {
+                    shared.lock().unwrap().leds_applied = Some((l.clone(), Instant::now()));
+                }
+            }
             let read = wrote.and_then(|()| jam.poll(2, &mut events));
             if let Err(e) = read {
                 let mut s = shared.lock().unwrap();

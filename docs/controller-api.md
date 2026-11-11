@@ -222,6 +222,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `eq` | The focused built-in EQ, or `nil`. `{ points, bands }`: `points` its curve from 20 Hz to 20 kHz (each 0–1 over ±12 dB, 0.5 at 0 dB), `bands` Low, Low-Mid, High-Mid and High as `{ x, y }` on that axis. The same on both of its pages, drawn on the right screen. |
 | `filter` | The focused built-in Filter, or `nil`. The same `{ points, bands }`, for the current mode (low-pass, band-pass, high-pass, notch). `bands` is the one cutoff. `extent` is where Amount fully open sits (empty at Amount 0; further for Source Env). `lfo` is one cycle of LFO Shape, or the envelope when Source is Env, drawn in the bottom right, beside the curve. `side` is the side-chain filter on the same axis (flat gain, or the band when Filter is on); `side_live` is whether an input is routed to it. Amount moves the cutoff with the LFO, and Speed changes the rate without jumping the cycle. The same on both of its pages, drawn on the right screen. |
 | `picture` | The focused built-in effect when it is not the EQ or the Filter, or `nil`. Same fields, plus `kind`: `freq` (20 Hz–20 kHz), `law` (input to output), `time` (level over time), or `dots` (a cloud of `bands`). `dim` is Perform FX with Engage off. `preview` is the Cabinet, whose audio is still passed through. The same on every page, drawn on the right screen. |
+| `zhora` | The focused Zhora, or `nil`. `{ note, cents, in_tune, status, right, tune, check, live, hold, message, input }`: the note heard on its input ("A3", `nil` for none) and the cents above it, `in_tune` within 5 cents; the bar's `status` ("Tuned today 14:02 · worst note 3¢ · C1–C7", or "Not tuned") and `right` (what's held, or Live's state); `tune`, `check`, `live` and `hold` for their lights; `message` (a failed Tune, or an output that isn't sent) in place of the bar; `input`, what it listens on. |
 | `modules[i]` | What the plug-in browser can load, while the `module` page shows (else empty): `{ name, instrument, format, vendor }`. `format` is `"Internal"`, `"Audio Units"`, `"VST3"` or `"VST"`; Maschine's own vendor is `"Native Instruments"`. |
 
 `state().browser` holds:
@@ -283,6 +284,7 @@ and `positions`.
 | `deckard.volume_db(db)` | The master level in dB (at most +10). |
 | `deckard.focus_group(g)`, `deckard.mute_group(g)`, `deckard.solo_group(g)` | Group `g`. |
 | `deckard.focus_sound(s)`, `deckard.mute_sound(s)`, `deckard.solo_sound(s)` | Sound `s` of the focused group. |
+| `deckard.select_pad(s, multi)`, `deckard.select_all_sounds()`, `deckard.select_no_sounds()` | SELECT mode. `multi` off: an unselected pad becomes the only one selected; an already selected pad only takes the focus. `multi` on: an unselected pad joins and a selected one leaves, unless it is the focus. ALL selects every sound; NONE leaves the focus. |
 | `deckard.erase_sound(s)` | Erase sound `s`'s notes from the focused pattern. |
 | `deckard.prob_lock(on)` | PROB LOCK of the focused sound: on, its notes' chances are rolled once and kept every pass. |
 | `deckard.reset_sound(s)` | Remove sound `s` of the focused group: an empty "Sound N" in its place, its notes gone (SHIFT + ERASE + its pad). |
@@ -291,6 +293,8 @@ and `positions`.
 | `deckard.next_page()`, `deckard.previous_page()` | Change the Control page. |
 | `deckard.level(l)` | Show the Master (1), Group (2) or Sound (3) chain. |
 | `deckard.slot(delta)` | Focus the slot `delta` places on. |
+| `deckard.plugin_page(n)` | Show page `n` of the focused plug-in. |
+| `deckard.zhora(what)` | The focused Zhora's `tune`, `check`, `live` (on or off) or `hold` (on or off). |
 | `deckard.slot_edit(what)` | The focused slot: `edit` (open its plug-in's window), `move_left` / `move_right` (swap it with its neighbour), `bypass` (switch it off or on), `remove`. |
 | `deckard.show_plugins(on)` | Show the plug-ins, or the channel properties. |
 | `deckard.page_group(i)` | Show channel-property page group `i`. |
@@ -336,6 +340,7 @@ and `positions`.
 | `deckard.pattern_edit(what)` | `"create"`, `"double"`, `"duplicate"` or `"delete"` the focused pattern. |
 | `deckard.scene_edit(what)` | `"create"` a scene after the last, `"insert"` one after the focused, `"duplicate"`, `"delete"` or `"clear"` (no group plays a pattern in it) the focused scene, or `"append"` it to the arrangement. |
 | `deckard.song_view(on)` | ARRANGE shows the Song view (`true`) or the Ideas view. |
+| `deckard.mixer_view(on)` | MIX shows the software's Mixer view (`true`), or closes it. |
 | `deckard.focus_section(n)` | Focus section `n`; while the song plays, it plays next. |
 | `deckard.section_edit(what)` | `"create"` a section after the focused one (playing its scene), `"duplicate"` or `"delete"` the focused one. |
 | `deckard.move_section(next)` | The focused section swaps places with the next (`true`) or the previous. |

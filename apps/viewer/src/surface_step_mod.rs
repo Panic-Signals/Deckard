@@ -118,7 +118,7 @@ impl App {
         };
         let points = self.mod_points(chain, &target, pi);
         let dev = if let Some(&(_, dev)) =
-            self.mod_take.as_ref().filter(|t| t.chain == chain && t.target == target && t.pattern == pi).and_then(|t| t.samples.last())
+            self.mod_takes.iter().find(|t| t.chain == chain && t.target == target && t.pattern == pi).and_then(|t| t.samples.last())
         {
             dev
         } else if points.is_empty() {

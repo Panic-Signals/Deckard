@@ -101,8 +101,8 @@ end
 
 function pattern.knob(n, amount)
   local s = deckard.state()
-  -- (POSITION, START and LENGTH step at each turn; COLOR gathers.)
-  local steps = page == 1 and knobs.each(amount) or knobs.gather(n, amount)
+  -- Gather small encoder packets: a deliberate tenth of a turn per step.
+  local steps = knobs.gather(n, amount)
   if steps == 0 then return true end
   local fine = deckard.held("SHIFT")
   local start, length = s.pattern_start, s.pattern_length
@@ -113,8 +113,15 @@ function pattern.knob(n, amount)
       local to = math.max(0, snap(s, start, steps, fine))
       if to < start + length then deckard.pattern_span(to, start + length - to) end
     elseif n == 4 then
-      local step = fine and 240 or snap(s, 0, 1, false)
-      deckard.pattern_length(math.max(step, snap(s, length, steps, fine)))
+      -- Half a bar, then whole powers of two, including when SHIFT is held.
+      local half = math.max(1, snap(s, 0, 1, false) // 2)
+      local next = half
+      if steps > 0 then
+        while next <= length do next = next * 2 end
+      else
+        while next * 2 < length do next = next * 2 end
+      end
+      deckard.pattern_length(next)
     end
   elseif n == 1 then
     local p = patterns(s)[s.pattern]

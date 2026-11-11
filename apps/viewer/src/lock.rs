@@ -6,9 +6,13 @@
 //! arrival.
 
 use crate::App;
+#[path = "lock_hosted.rs"]
+mod hosted;
 use deckard_doc::{LockEntry, Target};
 use deckard_model::PPQ;
 use eframe::egui;
+use hosted::HostedGlide;
+pub use hosted::HostedLocks;
 use mxprj::decode::Value;
 
 /// Travel's lengths, in bars (`LOCK_TIMES`).
@@ -19,8 +23,11 @@ pub struct LockMorph {
     slot: usize,
     /// The continuous parameters: where each was and where it goes.
     glide: Vec<(LockEntry, f64)>,
+    plugins: Vec<HostedGlide>,
     start: f64,
     end: f64,
+    history_start: usize,
+    pub(super) hosted_state: Option<u64>,
 }
 
 /// Seconds since the app started (the morphs' clock).
@@ -30,6 +37,35 @@ pub fn clock() -> f64 {
 }
 
 impl App {
+    fn lock_take(&mut self, what: &str, slot: usize) {
+        self.lock_hosted_prepare();
+        let Some(doc) = self.doc.clone() else { return };
+        let before = doc.borrow_mut().begin_edit_group();
+        let result = doc.borrow_mut().take_snapshot(slot);
+        if result.is_ok() {
+            let snapshot = self.lock_hosted_capture();
+            if let Some(id) = doc.borrow().snapshot_id(slot) {
+                self.lock_plugins.slots.insert(id, snapshot);
+            }
+        }
+        doc.borrow_mut().end_edit_group(before, "Take Lock Snapshot");
+        self.lock_do(what, result);
+    }
+
+    fn lock_arrive(&mut self, slot: usize) {
+        let Some(doc) = self.doc.clone() else { return };
+        let before = doc.borrow_mut().begin_edit_group();
+        let result = doc.borrow_mut().recall_snapshot(slot);
+        if result.is_ok() {
+            let plugins = self.lock_hosted_glides(slot);
+            let _ = self.lock_hosted_record(&plugins);
+            self.lock_hosted_step(&plugins, 1.0);
+        }
+        doc.borrow_mut().end_edit_group(before, "Recall Lock Snapshot");
+        self.lock_do("recall the snapshot", result);
+        self.follow_edits();
+    }
+
     fn lock_state(&self) -> Option<deckard_model::Lock> {
         Some(self.doc.as_ref()?.borrow().project().lock.clone())
     }
@@ -59,7 +95,7 @@ impl App {
     /// LOCK: takes a snapshot (updating the focused one, else into the first free slot)
     /// and lights; pressed again, recalls it and goes out.
     pub fn lock_button(&mut self) {
-        let (Some(doc), Some(l)) = (self.doc.clone(), self.lock_state()) else { return };
+        let Some(l) = self.lock_state() else { return };
         if self.lock_active {
             if let Some(slot) = l.focus {
                 self.lock_recall(slot);
@@ -71,8 +107,7 @@ impl App {
             self.status = "every Lock slot is taken".into();
             return;
         };
-        let r = doc.borrow_mut().take_snapshot(slot);
-        self.lock_do("take a snapshot", r);
+        self.lock_take("take a snapshot", slot);
         self.lock_active = true;
     }
 
@@ -92,8 +127,7 @@ impl App {
             self.lock_do("focus the snapshot", r);
             self.lock_recall(slot);
         } else {
-            let r = doc.borrow_mut().take_snapshot(slot);
-            self.lock_do("take a snapshot", r);
+            self.lock_take("take a snapshot", slot);
         }
     }
 
@@ -109,10 +143,9 @@ impl App {
 
     /// UPDATE: the focused snapshot taken again.
     pub fn lock_update(&mut self) {
-        let (Some(doc), Some(l)) = (self.doc.clone(), self.lock_state()) else { return };
+        let Some(l) = self.lock_state() else { return };
         if let Some(slot) = l.focus {
-            let r = doc.borrow_mut().take_snapshot(slot);
-            self.lock_do("update the snapshot", r);
+            self.lock_take("update the snapshot", slot);
         }
     }
 
@@ -126,6 +159,15 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let r = doc.borrow_mut().delete_snapshot(slot);
         self.lock_do("delete the snapshot", r);
+    }
+
+    pub(crate) fn lock_end_morph(&mut self) {
+        self.lock_capture_morph_state();
+        if let Some(m) = self.lock_morph.take()
+            && let Some(doc) = &self.doc
+        {
+            doc.borrow_mut().end_edit_group(m.history_start, "Recall Lock Snapshot");
+        }
     }
 
     /// ◀ / ▶: the previous or next bank; ▶ past the last adds one (up to four).
@@ -160,10 +202,13 @@ impl App {
     /// Recall the snapshot in `slot` at `now` (seconds), the song at `tick` if playing.
     pub fn lock_recall_at(&mut self, slot: usize, now: f64, tick: Option<f64>) {
         let (Some(doc), Some(l)) = (self.doc.clone(), self.lock_state()) else { return };
-        self.lock_morph = None;
+        if !l.slots.contains(&slot) {
+            return;
+        }
+        self.lock_hosted_prepare();
+        self.lock_end_morph();
         if !l.morph {
-            let r = doc.borrow_mut().recall_snapshot(slot);
-            self.lock_do("recall the snapshot", r);
+            self.lock_arrive(slot);
             return;
         }
         let d = doc.borrow();
@@ -188,7 +233,10 @@ impl App {
             })
             .collect();
         drop(d);
-        self.lock_morph = Some(LockMorph { slot, glide, start: now, end: now + duration });
+        let plugins = self.lock_hosted_glides(slot);
+        let history_start = doc.borrow_mut().begin_edit_group();
+        let hosted_state = self.lock_hosted_record(&plugins);
+        self.lock_morph = Some(LockMorph { slot, glide, plugins, start: now, end: now + duration, history_start, hosted_state });
     }
 
     /// Move a morph on to `now` (seconds); arrived, the snapshot is recalled whole.
@@ -197,13 +245,16 @@ impl App {
         let t = ((now - m.start) / (m.end - m.start).max(1e-6)).clamp(0.0, 1.0);
         if t >= 1.0 {
             let slot = m.slot;
+            let history_start = m.history_start;
             self.lock_morph = None;
-            let r = doc.borrow_mut().recall_snapshot(slot);
-            self.lock_do("recall the snapshot", r);
+            self.lock_arrive(slot);
+            doc.borrow_mut().end_edit_group(history_start, "Recall Lock Snapshot");
             return;
         }
         let step: Vec<LockEntry> =
             m.glide.iter().map(|(e, from)| LockEntry { path: e.path.clone(), value: from + (e.value - from) * t }).collect();
+        let plugins = m.plugins.clone();
+        self.lock_hosted_step(&plugins, t);
         let r = doc.borrow_mut().morph_step(&step);
         self.lock_do("morph", r);
     }

@@ -17,20 +17,23 @@ impl App {
 
     /// What the Sampling page shows (nothing while it's closed).
     pub(crate) fn sampling_surface_view(&self) -> SamplingView {
-        if !self.sampling_open {
-            return SamplingView::default();
-        }
         let v = &self.recorder.view;
+        let record = RecordState {
+            levels: v.meter,
+            mode: v.mode as i64,
+            threshold: v.threshold,
+            waiting: v.status == crate::layout::sampling::RecStatus::Waiting,
+            recording: v.status == crate::layout::sampling::RecStatus::Recording,
+        };
+        // (Closed: only whether it records, for SAMPLING's light.)
+        if !self.sampling_open {
+            return SamplingView { record, ..Default::default() };
+        }
         let mut out = SamplingView {
             tab: self.sampling.tab.min(3),
-            record: RecordState {
-                levels: v.meter,
-                mode: v.mode as i64,
-                threshold: v.threshold,
-                waiting: v.status == crate::layout::sampling::RecStatus::Waiting,
-                recording: v.status == crate::layout::sampling::RecStatus::Recording,
-            },
+            record,
             takes: v.takes.len(),
+            take_waves: v.takes.iter().map(|t| v.take_waves.get(t).cloned().unwrap_or_default()).collect(),
             take: v.focused,
             stems: self
                 .stems
