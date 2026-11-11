@@ -398,8 +398,27 @@ impl ParameterChanges {
     }
 
     pub fn add(&self, id: ParamID, value: ParamValue) {
+        self.add_point(id, 0, value);
+    }
+
+    pub fn add_point(&self, id: ParamID, sample_offset: int32, value: ParamValue) {
         let i = self.queue(id);
-        self.queues.borrow()[i].points.borrow_mut().push((0, value));
+        let q = self.queues.borrow();
+        let mut pts = q[i].points.borrow_mut();
+        let pos = pts.partition_point(|&(off, _)| off <= sample_offset);
+        pts.insert(pos, (sample_offset, value));
+    }
+
+    /// Take the last queued value for `id` in this block (if any) and clear its points so a
+    /// schedule can replace them with sample-accurate points.
+    pub fn take_and_clear(&self, id: ParamID) -> Option<ParamValue> {
+        let n = self.len.get();
+        let q = self.queues.borrow();
+        let i = q.iter().take(n).position(|x| x.id.get() == id)?;
+        let mut pts = q[i].points.borrow_mut();
+        let last = pts.last().map(|&(_, v)| v);
+        pts.clear();
+        last
     }
 
     /// The last value of each changed parameter.
@@ -496,5 +515,21 @@ mod param_tests {
         c.clear();
         assert_eq!(unsafe { c.getParameterCount() }, 0);
         assert!(c.last_values().is_empty());
+    }
+
+    #[test]
+    fn changes_support_intra_block_sample_offsets_and_take_and_clear() {
+        let c = ParameterChanges::default();
+        c.add_point(10, 64, 0.75);
+        c.add_point(10, 16, 0.25);
+        c.add_point(10, 32, 0.50);
+        let q = c.queues.borrow();
+        assert_eq!(*q[0].points.borrow(), vec![(16, 0.25), (32, 0.50), (64, 0.75)]);
+        drop(q);
+        assert_eq!(c.take_and_clear(10), Some(0.75));
+        let q = c.queues.borrow();
+        assert!(q[0].points.borrow().is_empty());
+        drop(q);
+        assert_eq!(c.take_and_clear(999), None);
     }
 }

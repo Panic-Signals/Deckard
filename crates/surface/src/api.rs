@@ -138,6 +138,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     ("dark", _) => 0,
                     ("dim", false) => deckard_mk3::leds::DIM,
                     ("on", false) => leds::ON,
+                    ("dim", true) if hw == "LED_SAMPLE" => deckard_mk3::leds::SAMPLE_DIM,
                     ("dim", true) => leds::dim([255; 3]),
                     ("on", true) => leds::bright([255; 3]),
                     (other, _) => return Err(mlua::Error::runtime(format!("light {name}: \"{other}\"? (off, dim, on)"))),
@@ -222,6 +223,21 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("next_page", () => Action::Page(true));
     request!("previous_page", () => Action::Page(false));
     request!("slot", (delta: i64) => Action::Slot(delta));
+    indexed!("plugin_page", "a page", Action::PluginPage);
+    {
+        let sh = shared.clone();
+        d.set(
+            "zhora",
+            lua.create_function(move |_, what: String| {
+                const WHAT: [&str; 4] = ["tune", "check", "live", "hold"];
+                let Some(&what) = WHAT.iter().find(|w| **w == what) else {
+                    return Err(mlua::Error::runtime(format!("no Zhora button \"{what}\" ({})", WHAT.join(", "))));
+                };
+                act(&sh, Action::Zhora(what));
+                Ok(())
+            })?,
+        )?;
+    }
     request!("pattern_span", (start: i64, length: i64) => Action::PatternSpan { start: start.max(0), length: length.max(1) });
     request!("pattern_length", (length: i64) => Action::PatternLength(length.max(1)));
     {
@@ -472,6 +488,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("browse_routing", (on: bool) => Action::Browse(Browse::Routing(on)));
     request!("browse_patterns", (on: bool) => Action::Browse(Browse::Patterns(on)));
     request!("song_view", (on: bool) => Action::SongView(on));
+    request!("mixer_view", (on: bool) => Action::MixerView(on));
     request!("move_section", (next: bool) => Action::SectionMove(next));
     request!("section_scene", (next: bool) => Action::SectionScene(next));
     request!("section_length", (ticks: i64) => Action::SectionLength(ticks.max(1)));
@@ -584,6 +601,18 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         )?;
     }
     indexed!("focus_sound", "a sound", Action::FocusSound);
+    {
+        let sh = shared.clone();
+        d.set(
+            "select_pad",
+            lua.create_function(move |_, (n, multi): (usize, bool)| {
+                act(&sh, Action::SelectPad { index: index(n, "a sound")?, multi });
+                Ok(())
+            })?,
+        )?;
+    }
+    request!("select_all_sounds", () => Action::SelectAllSounds);
+    request!("select_no_sounds", () => Action::SelectNoSounds);
     indexed!("mute_group", "a group", Action::MuteGroup);
     indexed!("solo_group", "a group", Action::SoloGroup);
     indexed!("mute_sound", "a sound", Action::MuteSound);
@@ -839,8 +868,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set(
         "mod_slot",
         lua.create_function(move |_, (slot, row, steps): (usize, usize, i64)| {
-            if slot < 1 || !(1..=6).contains(&row) {
-                return Err(mlua::Error::runtime("mod_slot(slot, row, steps): slots count from 1, rows from 1 to 6"));
+            if slot < 1 || !(1..=7).contains(&row) {
+                return Err(mlua::Error::runtime("mod_slot(slot, row, steps): slots count from 1, rows from 1 to 7 (7: route mode)"));
             }
             act(&sh, Action::ModSlot(slot - 1, row - 1, steps));
             Ok(())
@@ -1063,6 +1092,7 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     for (i, m) in v.mod_slots.iter().enumerate() {
         let rows = lua.create_sequence_from(m.rows.iter().map(String::as_str))?;
         rows.set("midi", m.midi)?;
+        rows.set("cv", m.cv)?;
         slots.set(i + 1, rows)?;
     }
     t.set("mod_slots", slots)?;
@@ -1248,6 +1278,17 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             st.set("base_key", s.base_key)?;
             st.set("default_color", s.default_color)?;
             st.set("prob_locked", s.prob_locked)?;
+            st.set("selected", s.selected)?;
+            if let Some(a) = &s.audio {
+                let at = lua.create_table()?;
+                // (Flat: min, max, min, max, …; a column a pixel or two.)
+                at.set("peaks", lua.create_sequence_from(a.peaks.iter().flat_map(|&(lo, hi)| [lo, hi]))?)?;
+                at.set("ticks", a.ticks)?;
+                at.set("offset", a.offset)?;
+                at.set("on", a.on)?;
+                at.set("gate", a.gate)?;
+                st.set("audio", at)?;
+            }
             let touch = lua.create_table()?;
             touch.set("mode", s.touch_mode)?;
             touch.set("cc", s.touch_cc)?;
@@ -1317,6 +1358,36 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
             t.set("preview", true)?;
         }
         ct.set(name, t)?;
+    }
+    // The focused Zhora's tuner, buttons and bar.
+    if let Some(z) = &c.zhora {
+        let t = lua.create_table()?;
+        t.set("note", z.note.as_deref())?;
+        t.set("cents", z.cents)?;
+        t.set("in_tune", z.in_tune)?;
+        t.set("status", z.status.as_str())?;
+        t.set("right", z.right.as_str())?;
+        t.set("tune", z.tune)?;
+        t.set("check", z.check)?;
+        t.set("live", z.live)?;
+        t.set("hold", z.hold)?;
+        t.set("message", z.message.as_deref())?;
+        t.set("input", z.input.as_str())?;
+        if !z.env.is_empty() {
+            t.set("env", lua.create_sequence_from(z.env.iter().copied())?)?;
+            t.set("env_note_off", z.env_note_off)?;
+        }
+        ct.set("zhora", t)?;
+    }
+    // The focused Tuner effect's dial.
+    if let Some(tv) = &c.tuner {
+        let t = lua.create_table()?;
+        t.set("note", tv.note.as_deref())?;
+        t.set("cents", tv.cents)?;
+        t.set("in_tune", tv.in_tune)?;
+        t.set("reference", format!("A4 = {}", tv.reference))?;
+        t.set("muted", tv.muted)?;
+        ct.set("tuner", t)?;
     }
     let knobs = lua.create_table()?;
     for k in 0..8 {
@@ -1406,6 +1477,7 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
         st.set("zones", zones)?;
         st.set("focus_zone", s.focus_zone + 1)?;
         st.set("palette", s.color)?;
+        st.set("take", s.take)?;
         t.set("sample", st)?;
     }
     let r = lua.create_table()?;
@@ -1416,6 +1488,11 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
     r.set("recording", v.record.recording)?;
     t.set("record", r)?;
     t.set("takes", v.takes)?;
+    let waves = lua.create_table()?;
+    for (i, w) in v.take_waves.iter().enumerate() {
+        waves.set(i + 1, lua.create_sequence_from(w.iter().flat_map(|&(lo, hi)| [lo, hi]))?)?;
+    }
+    t.set("take_waves", waves)?;
     t.set("take", v.take.map(|i| i + 1))?;
     if let Some(s) = v.stems {
         let st = lua.create_table()?;

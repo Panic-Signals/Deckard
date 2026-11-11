@@ -7,7 +7,7 @@ use deckard_doc::Document;
 use deckard_engine::{Mode, Recorded, RecordedControl, RecordedExpr};
 use deckard_model::expression::thin;
 use deckard_model::{Curve, Dim, ExprKind, Expression, LaneRef, MidiEvent, MidiKind, Note, Project};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Where song position `tick` (in what `mode` plays) falls in group `g`'s pattern:
@@ -34,6 +34,8 @@ pub fn pattern_at(p: &Project, mode: Mode, tick: f64, g: usize) -> Option<(usize
 #[derive(Default)]
 pub struct Take {
     held: HashMap<(usize, usize, i64), Held>,
+    empty_at_start: HashSet<(usize, usize)>,
+    recorded_into: HashSet<(usize, usize)>,
 }
 
 /// How a played note is placed: Input Quantize's grid (ticks), if it's on.
@@ -87,6 +89,21 @@ impl Held {
 }
 
 impl Take {
+    pub fn begin(p: &Project) -> Self {
+        Self {
+            empty_at_start: p
+                .groups
+                .iter()
+                .enumerate()
+                .flat_map(|(g, group)| group.patterns.iter().enumerate().filter(|(_, p)| p.notes.is_empty()).map(move |(pi, _)| (g, pi)))
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    pub fn new_recordings(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.empty_at_start.intersection(&self.recorded_into).copied()
+    }
     /// Take in a recorded on or release: the edits it makes. A note goes in at once, a
     /// placeholder long (a tick, a grid step quantized, a repeat note its own length),
     /// replacing notes of its sound and pitch starting in that span; a release sets
@@ -104,6 +121,7 @@ impl Take {
         }
         let Some((pattern, mut position)) = pattern_at(p, r.mode, r.tick, r.group) else { return out };
         let Some(pat) = p.groups.get(r.group).and_then(|g| g.patterns.get(pattern)) else { return out };
+        self.recorded_into.insert((r.group, pattern));
         // Played with its length (Note Repeat): as it is. Else snapped, then wrapped.
         let repeat = r.length != i64::MAX;
         let quantize = at.quantize.filter(|q| *q > 0 && !repeat);

@@ -4,7 +4,7 @@
 
 use super::*;
 use deckard_model::lfo::{Lfo, RATES, Shape, env_knob, env_time};
-use deckard_model::mod_matrix::{CC_MAX, CcRoute, ModSource};
+use deckard_model::mod_matrix::{CC_MAX, CcRoute, CvRoute, ModSource};
 
 /// The list's width.
 const LIST_W: f32 = 170.0;
@@ -320,6 +320,124 @@ fn cc_section(ui: &mut Ui, painter: &Painter, lfos: &[Lfo], ports: &[String], ro
     }
 }
 
+/// The CV section in `area`: the project's CV routes (`routes`), one row each (Source,
+/// Out, Low, High, and × to remove it; a route in `inactive` says why it writes nothing),
+/// then "+ Add CV" (off with no LFOs or no free CV only channel in `settings`). The channels
+/// Zhoras have (`zhoras`) aren't offered. Its rows are the CC section's sizes. An edit gives the whole list, as [`Act::SetCvRoutes`].
+#[allow(clippy::too_many_arguments)]
+fn cv_section(
+    ui: &mut Ui,
+    painter: &Painter,
+    lfos: &[Lfo],
+    settings: &crate::settings::Settings,
+    routes: &[CvRoute],
+    zhoras: &[u8],
+    inactive: &[usize],
+    area: Rect,
+    acts: &mut Vec<Act>,
+) {
+    let head = Rect::from_min_size(area.min, Vec2::new(area.width(), CC_TOP - 4.0));
+    ui.put(head, egui::Label::new(egui::RichText::new("CV").size(11.0).color(white(140))));
+    let free = crate::mod_slots::free_cv_channels(settings, routes, zhoras, None);
+    let mut list = routes.to_vec();
+    let mut changed = false;
+    let mut gone = None;
+    for (i, r) in routes.iter().enumerate() {
+        let id = egui::Id::new(("cv-route", i));
+        let top = area.top() + CC_TOP + CC_ROW * i as f32;
+        let cy = top + CC_ROW / 2.0 - 8.0;
+        let x = std::cell::Cell::new(area.left());
+        let cell = |w: f32| {
+            x.set(x.get() + w);
+            Pos2::new(x.get() - w / 2.0, cy)
+        };
+        let caption = |c: Pos2, t: &str| {
+            painter.text(Pos2::new(c.x, c.y + 24.0), Align2::CENTER_CENTER, t, font(12.0), white(160));
+        };
+        let n = &mut list[i];
+        // Source: the LFOs (one that's gone shown as such, last).
+        let mut sources: Vec<ModSource> = lfos.iter().map(|l| ModSource::Lfo(l.pad)).collect();
+        if !sources.contains(&r.source) {
+            sources.push(r.source);
+        }
+        let names: Vec<String> = sources.iter().map(|s| mod_routes::lfo_name(lfos, *s)).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let c = cell(CC_SOURCE);
+        let at = sources.iter().position(|s| *s == r.source).unwrap_or(0);
+        if let Some(k) = strip::choice_pick(ui, painter, c, CC_SOURCE - 30.0, &names, at, id.with("source")) {
+            n.source = sources[k];
+        }
+        caption(c, "Source");
+        // Out: the CV only channels no other route has (its own kept, last if not marked).
+        let mut outs: Vec<usize> =
+            crate::mod_slots::free_cv_channels(settings, routes, zhoras, Some(i)).into_iter().map(usize::from).collect();
+        if !outs.contains(&usize::from(r.channel)) {
+            outs.push(usize::from(r.channel));
+        }
+        let names: Vec<String> = outs.iter().map(|o| settings.output_name(*o)).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let c = cell(CC_PORT);
+        let at = outs.iter().position(|o| *o == usize::from(r.channel)).unwrap_or(0);
+        if let Some(k) = strip::choice_pick(ui, painter, c, CC_PORT - 30.0, &names, at, id.with("out")) {
+            n.channel = outs[k] as u8;
+        }
+        caption(c, "Out");
+        // Low and High: −100%–100%, centred at 0; a double-click: where a new route starts.
+        let mut level = |value: f32, label: &str, reset: f32| {
+            let c = cell(CC_DEPTH);
+            let amount = (value + 1.0) / 2.0;
+            let pct = (value * 100.0).round() as i32;
+            let text = if pct < 0 { format!("\u{2212}{}%", -pct) } else { format!("{pct}%") };
+            let resp = strip::knob_face(ui, painter, c, 16.0, label, &text, amount, true, id.with(label), PLAY_ON);
+            let turned = strip::turned(ui, &resp, id.with((label, "drag")), amount, 150.0);
+            match (resp.double_clicked(), turned) {
+                (true, _) => reset,
+                (_, Some(v)) => ((v * 2.0 - 1.0).clamp(-1.0, 1.0) * 100.0).round() / 100.0,
+                _ => value,
+            }
+        };
+        n.low = level(r.low, "Low", 0.0);
+        n.high = level(r.high, "High", 0.5);
+        changed |= *n != *r;
+        // ×: remove it.
+        let c = cell(40.0);
+        let x_rect = Rect::from_center_size(c, Vec2::splat(22.0));
+        let resp = ui.interact(x_rect, id.with("remove"), Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Remove CV route {}", i + 1)));
+        painter.text(c, Align2::CENTER_CENTER, "\u{d7}", font(16.0), if resp.hovered() { white(230) } else { white(140) });
+        if resp.on_hover_text("Remove").clicked() {
+            gone = Some(i);
+        }
+        if inactive.contains(&i) {
+            let note = Rect::from_min_size(Pos2::new(x.get() + 8.0, cy - 9.0), Vec2::new((area.right() - x.get() - 8.0).max(0.0), 18.0));
+            ui.put(note, egui::Label::new(egui::RichText::new(CV_NOTE).size(11.0).color(REC_ON)).truncate());
+        }
+    }
+    if let Some(i) = gone {
+        list.remove(i);
+        changed = true;
+    }
+    let add = Rect::from_min_size(Pos2::new(area.left(), area.top() + CC_TOP + CC_ROW * routes.len() as f32), Vec2::new(90.0, 22.0));
+    let first = lfos.first().zip(free.first());
+    let clicked = ui
+        .scope_builder(UiBuilder::new().max_rect(add), |ui| {
+            ui.add_enabled(first.is_some(), egui::Button::new("+ Add CV"))
+                .on_disabled_hover_text("Needs an LFO, and an output marked CV only that no route has, in Preferences > Audio > Routing")
+                .clicked()
+        })
+        .inner;
+    if clicked && let Some((l, c)) = first {
+        list.push(CvRoute { low: 0.0, high: 0.5, ..CvRoute::new(ModSource::Lfo(l.pad), *c) });
+        changed = true;
+    }
+    if changed {
+        acts.push(Act::SetCvRoutes(list));
+    }
+}
+
+/// What a CV route that writes nothing says.
+const CV_NOTE: &str = "Not sent: this output isn't CV only, or an earlier route has it";
+
 /// The LFO panel, in `r`.
 pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, acts: &mut Vec<Act>) {
     let p = d.project();
@@ -367,6 +485,11 @@ pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, act
     // The MIDI CC section, under the controls.
     let cc = Rect::from_min_max(Pos2::new(body.left(), pic.bottom() + 100.0), body.max);
     cc_section(ui, &painter, &p.lfos, &crate::mod_slots::out_ports(app), &p.cc_routes, cc, acts);
+    // The CV section, under that.
+    let top = (cc.top() + CC_TOP + CC_ROW * p.cc_routes.len() as f32 + 34.0).min(body.bottom());
+    let cv = Rect::from_min_max(Pos2::new(body.left(), top), body.max);
+    let inactive = deckard_engine::Engine::cv_conflicts(p, app.settings.cv_mask());
+    cv_section(ui, &painter, &p.lfos, &app.settings, &p.cv_routes, &crate::zhora_ui::channels_held(p), &inactive, cv, acts);
     let Some(lfo) = focused(&p.lfos, app.lfo_focus) else {
         painter.text(body.left_top(), Align2::LEFT_TOP, "No LFOs yet: add one.", font(12.0), white(110));
         return;
@@ -727,5 +850,79 @@ mod tests {
         h.run_steps(3);
         assert_eq!(doc.borrow().project().cc_routes.len(), 1);
         assert_eq!(doc.borrow().project().cc_routes[0].port, "Port A");
+    }
+    /// The CV section alone: "+ Add CV" makes a route on the first LFO and CV only
+    /// channel at Low 0%, High 50%, off with none marked; a route that writes nothing
+    /// says so.
+    #[test]
+    fn the_cv_section_adds_and_flags() {
+        use deckard_model::mod_matrix::{CvRoute, ModSource};
+        use egui_kittest::kittest::Queryable;
+        struct St {
+            settings: crate::settings::Settings,
+            routes: Vec<CvRoute>,
+            inactive: Vec<usize>,
+            acts: Vec<Act>,
+        }
+        let mut settings = crate::settings::Settings::default();
+        settings.output_cv_only[2] = true;
+        let st = St { settings, routes: Vec::new(), inactive: Vec::new(), acts: Vec::new() };
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 300.0)).build_ui_state(
+            |ui, st: &mut St| {
+                let area = Rect::from_min_size(ui.max_rect().min, Vec2::new(880.0, 280.0));
+                let painter = ui.painter().clone();
+                cv_section(ui, &painter, &[Lfo::new(3)], &st.settings, &st.routes, &[], &st.inactive, area, &mut st.acts);
+            },
+            st,
+        );
+        h.run_steps(2);
+        h.get_by_label("+ Add CV").click();
+        h.run_steps(2);
+        let made = CvRoute { low: 0.0, high: 0.5, ..CvRoute::new(ModSource::Lfo(3), 2) };
+        assert!(matches!(&h.state().acts[..], [Act::SetCvRoutes(r)] if *r == vec![made.clone()]), "Add");
+        h.state_mut().routes = vec![made];
+        h.run_steps(2);
+        assert!(h.query_by_label(CV_NOTE).is_none(), "active");
+        h.state_mut().inactive = vec![0];
+        h.run_steps(2);
+        assert!(h.query_by_label(CV_NOTE).is_some(), "says so");
+    }
+    /// "+ Add CV" takes the first channel no route has, and is off with none free; a
+    /// row's Out list leaves out those other routes have.
+    #[test]
+    fn the_cv_section_offers_only_free_channels() {
+        use deckard_model::mod_matrix::{CvRoute, ModSource};
+        use egui_kittest::kittest::Queryable;
+        struct St {
+            settings: crate::settings::Settings,
+            routes: Vec<CvRoute>,
+            acts: Vec<Act>,
+        }
+        let mut settings = crate::settings::Settings::default();
+        settings.output_cv_only[2] = true;
+        settings.output_cv_only[3] = true;
+        let on = |c| CvRoute::new(ModSource::Lfo(3), c);
+        assert_eq!(crate::mod_slots::free_cv_channels(&settings, &[on(2), on(3)], &[], Some(0)), [2], "its own kept, the other's gone");
+        assert!(crate::mod_slots::free_cv_channels(&settings, &[], &[2, 3], None).is_empty(), "a Zhora's channels aren't free");
+        let st = St { settings, routes: vec![on(2)], acts: Vec::new() };
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 300.0)).build_ui_state(
+            |ui, st: &mut St| {
+                let area = Rect::from_min_size(ui.max_rect().min, Vec2::new(880.0, 280.0));
+                let painter = ui.painter().clone();
+                cv_section(ui, &painter, &[Lfo::new(3), Lfo::new(4)], &st.settings, &st.routes, &[], &[], area, &mut st.acts);
+            },
+            st,
+        );
+        h.run_steps(2);
+        h.get_by_label("+ Add CV").click();
+        h.run_steps(2);
+        let Some(Act::SetCvRoutes(r)) = h.state().acts.last() else { panic!("{} acts", h.state().acts.len()) };
+        assert_eq!(r[1].channel, 3, "the free one");
+        h.state_mut().acts.clear();
+        h.state_mut().routes = vec![on(2), on(3)];
+        h.run_steps(2);
+        h.get_by_label("+ Add CV").click();
+        h.run_steps(2);
+        assert!(h.state().acts.is_empty(), "none free: off");
     }
 }

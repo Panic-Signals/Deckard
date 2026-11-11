@@ -700,6 +700,14 @@ fn group_browser_toggles_routing_and_patterns_on_load() {
     act(&mut h, BrowseAct::Patterns(false));
     let i = names(&h).iter().position(|n| n == "Saved Kit").expect("saved group is listed");
     act(&mut h, BrowseAct::Load(i, None));
+    // A Group loads off the UI thread: wait for it to be applied.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.state().group_load.is_some() {
+        h.state_mut().poll_group_load();
+        assert!(std::time::Instant::now() < deadline, "Group load timed out: {}", h.state().status);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(h.state().status.ends_with(" loaded"), "status: {}", h.state().status);
     let doc = h.state().doc.clone().unwrap();
     let d = doc.borrow();
     let g = &d.project().groups[0];

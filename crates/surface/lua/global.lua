@@ -57,6 +57,8 @@ local function toggle_page(page)
     deckard.show_page(page)
     if page == "mod_matrix" then require("pages.mod_matrix").shown() end
   end
+  -- MIX opens the software's Mixer, and closes it when the button leaves that page.
+  if page == "mixer" then deckard.mixer_view(deckard.page() == "mixer") end
 end
 
 -- The page each pad mode shows.
@@ -290,13 +292,16 @@ function global.pad(n, velocity)
   local s = deckard.state()
   local group = s.groups[s.group]
   if not group or n > #group.sounds then return true end
-  if pin.active("MUTE") then
+  if pin.active("SELECT") then
+    -- MULTI (Button 8) adds the pad. Off, an unselected pad replaces the selection.
+    deckard.select_pad(n, require("pages.hold").multi == true)
+  elseif pin.active("MUTE") then
     deckard.mute_sound(n)
   elseif pin.active("SOLO") then
     deckard.solo_sound(n)
   elseif deckard.held("ERASE") then
     deckard.erase_sound(n)
-  elseif n ~= s.sound and (not pads.focus_pinned or pin.active("SELECT")) then
+  elseif n ~= s.sound and not pads.focus_pinned then
     deckard.focus_sound(n)
   end
   return true
@@ -469,7 +474,8 @@ function global.leds()
   deckard.led("TEMPO", lit(wheel.mode == "tempo"))
   deckard.led("SWING", lit(wheel.mode == "swing"))
   deckard.led("VOLUME", lit(wheel.mode == "volume"))
-  deckard.led("SAMPLE", page == "sampling" and "on" or "dim")
+  -- (SAMPLING: red while it records, waiting flashes it; the Sampling page's own too.)
+  if not util.sample_led(s) then deckard.led("SAMPLE", page == "sampling" and "on" or "dim") end
   -- NOTE REPEAT: lit on its page, dim while it's on (LOCK) elsewhere.
   if page == "note_repeat" then
     deckard.led("NOTE_REPEAT", "on")
@@ -534,20 +540,28 @@ function global.leds()
 
   -- The touch strip: its mode's, or it fills as playback goes on, as Maschine's: the
   -- song in white on the Song view, else the focused group's pattern in its colour.
+  -- With no pattern (or no song) it tracks the bar, in the group's colour, so you can
+  -- see where you are before recording into an empty group.
   local pos, colour = nil, nil
+  local song = 0
+  if s.song_view then
+    for _, sec in ipairs(s.sections) do song = math.max(song, sec.start + sec.length) end
+  end
   if strip.leds(s) then
     -- (Its mode's.)
   elseif s.strip_position == 0 or (s.strip_position == 1 and not s.recording) then
     -- (HARDWARE's SHOW POSITION: not now.)
-  elseif s.song_view then
-    local length = 0
-    for _, sec in ipairs(s.sections) do length = math.max(length, sec.start + sec.length) end
+  elseif song > 0 then
     local at = s.position or 0
-    if at < length then pos, colour = at / length, 16 end
+    if at < song then pos, colour = at / song, 16 end
   elseif s.progress then
     local focused = s.groups[s.group]
     local pattern = focused and focused.scene_pattern and focused.patterns[focused.scene_pattern]
-    if pattern then pos, colour = s.progress, pattern.palette end
+    if pattern then
+      pos, colour = s.progress, pattern.palette
+    elseif focused then
+      pos, colour = s.progress, focused.palette
+    end
   end
   if not strip.mode then
     local filled = pos and util.round(pos * (TOUCH_STRIP - 1)) + 1 or 0
@@ -571,15 +585,17 @@ function global.leds()
   for i = 1, 16 do
     local sound = sounds[i]
     local name = "PAD_" .. i
-    if not sound or (not sound.used and i ~= s.sound and not deckard.pad_held(i) and not sound.playing) then
+    local chosen = sound and (sound.selected or i == s.sound)
+    if not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
       deckard.led(name, "off")
     elseif muting then
       deckard.led(name, sound.palette, not sound.muted)
     elseif not sound.used then
-      -- The focused empty slot: Maschine lights it in its empty-slot colour.
+      -- A selected empty slot: Maschine lights it in its empty-slot colour.
       deckard.led(name, EMPTY_SLOT, true)
     else
-      deckard.led(name, sound.palette, deckard.pad_held(i) or i == s.sound or sound.playing)
+      -- Selected pads are fully lit, the others half lit.
+      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen or sound.playing)
     end
   end
 end

@@ -19,6 +19,9 @@ pub struct NiIndex {
     path: PathBuf,
     /// The connection, and whether it was opened immutable (no `-wal` then).
     db: std::cell::RefCell<(Connection, bool)>,
+    /// Cached items for factory content paths marked pending rescan (`state = 2`) with no
+    /// indexed `k_sound_info` rows yet.
+    unindexed: std::cell::RefCell<Option<Vec<Item>>>,
 }
 
 /// Where Maschine 3 keeps its index on this machine, if it's there.
@@ -83,7 +86,7 @@ pub fn nks_presets_for(plugin: &str) -> Vec<PathBuf> {
 impl NiIndex {
     /// Open it read-only (see [`connect`]).
     pub fn open(path: &Path) -> Result<NiIndex, String> {
-        Ok(NiIndex { path: path.to_path_buf(), db: std::cell::RefCell::new(connect(path)?) })
+        Ok(NiIndex { path: path.to_path_buf(), db: std::cell::RefCell::new(connect(path)?), unindexed: std::cell::RefCell::new(None) })
     }
 
     pub fn query(&self, q: &Query) -> Result<Results, String> {
@@ -129,6 +132,14 @@ impl NiIndex {
             characters.entry(r.get(0).map_err(err)?).or_default().push(r.get(1).map_err(err)?);
         }
 
+        let has_vendor = db
+            .prepare("PRAGMA table_info(k_sound_info)")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| r.get::<_, String>(1)).ok().map(|rows| rows.filter_map(Result::ok).any(|name| name == "vendor"))
+            })
+            .unwrap_or(false);
+        let vendor = if has_vendor { "coalesce(k.vendor, '')" } else { "''" };
         // A product Maschine has marked as gone (state 4) keeps its rows, but its files aren't
         // there to load. An older index may have no state.
         let has_state: bool = db
@@ -145,7 +156,7 @@ impl NiIndex {
         let favorite_id = if has_id { "p.favorite_id" } else { "NULL" };
         let sql = format!(
             "SELECT p.id, k.name, k.file_name, k.tempo, coalesce(k.author, ''), p.entry1, p.entry2, p.entry3, \
-             COALESCE(NULLIF(p.entry1, ''), CASE WHEN c.content_type = 2 THEN c.alias END), {favorite_id} \
+             COALESCE(NULLIF(p.entry1, ''), CASE WHEN c.content_type = 2 THEN c.alias END), {favorite_id}, {vendor} \
              FROM {table} p JOIN k_sound_info k ON k.id = p.id LEFT JOIN k_content_path c ON c.id = k.content_path_id \
              WHERE k.hidden_for = 0 {installed}"
         );
@@ -156,7 +167,13 @@ impl NiIndex {
         while let Some(r) = rows.next().map_err(err)? {
             let id: i64 = r.get(0).map_err(err)?;
             let product: Option<String> = r.get(8).map_err(err)?;
-            if let Some(p) = &product {
+            let vendor_str: String = r.get(10).unwrap_or_default();
+            let bank: Vec<String> = (5..8).filter_map(|i| r.get::<_, Option<String>>(i).ok().flatten()).filter(|s| !s.is_empty()).collect();
+            let matches_facet = (q.products.is_empty()
+                || product.as_ref().is_some_and(|p| q.products.iter().any(|want| want.eq_ignore_ascii_case(p)))
+                || bank.first().is_some_and(|p| q.products.iter().any(|want| want.eq_ignore_ascii_case(p))))
+                && q.vendor.as_ref().is_none_or(|v| v.eq_ignore_ascii_case(&vendor_str));
+            if matches_facet && let Some(p) = &product {
                 products.insert(p.clone());
             }
             if q.product.is_some() && q.product != product {
@@ -165,11 +182,12 @@ impl NiIndex {
             let name: String = r.get(1).map_err(err)?;
             let tempo = r.get::<_, Option<f64>>(3).map_err(err)?.filter(|t| *t > 0.0).or_else(|| crate::names::tempo_in_name(&name));
             let item = Item {
+                vendor: vendor_str,
                 kind: q.kind,
                 user: q.user,
                 path: PathBuf::from(r.get::<_, String>(2).map_err(err)?),
                 product,
-                bank: (5..8).filter_map(|i| r.get::<_, Option<String>>(i).ok().flatten()).filter(|s| !s.is_empty()).collect(),
+                bank,
                 types: deepest(types.remove(&id).unwrap_or_default()),
                 characters: characters.remove(&id).unwrap_or_default(),
                 tempo,
@@ -181,7 +199,122 @@ impl NiIndex {
                 items.push(item);
             }
         }
+        if !q.user && has_state {
+            if self.unindexed.borrow().is_none() {
+                *self.unindexed.borrow_mut() = Some(scan_unindexed_content_paths(db));
+            }
+            if let Some(extra) = self.unindexed.borrow().as_ref() {
+                for item in extra.iter().filter(|i| i.kind == q.kind) {
+                    let matches_facet = (q.products.is_empty()
+                        || item.product.as_ref().is_some_and(|p| q.products.iter().any(|want| want.eq_ignore_ascii_case(p)))
+                        || item.bank.first().is_some_and(|p| q.products.iter().any(|want| want.eq_ignore_ascii_case(p))))
+                        && q.vendor.as_ref().is_none_or(|v| v.eq_ignore_ascii_case(&item.vendor));
+                    if matches_facet && let Some(p) = &item.product {
+                        products.insert(p.clone());
+                    }
+                    if (q.product.is_none() || q.product == item.product) && q.admits(item) {
+                        items.push(item.clone());
+                    }
+                }
+            }
+        }
         Ok(Results::of(items, q, products.into_iter().collect()))
+    }
+}
+
+fn normalize_content_alias(alias: &str) -> String {
+    for suffix in [" Pro Factory Library", " Factory Library", " Factory Content", " Factory Presets", " Factory"] {
+        if let Some(stripped) = alias.strip_suffix(suffix)
+            && !stripped.is_empty()
+        {
+            return stripped.to_string();
+        }
+    }
+    alias.to_string()
+}
+
+fn is_fx_product(product: &str) -> bool {
+    matches!(
+        product,
+        "Filter MS-20" | "Guitar Rig 6" | "Infiltrator" | "OVox" | "Phasis" | "Raum" | "Replika XT" | "Solid Bus Comp" | "Transit"
+    )
+}
+
+fn scan_unindexed_content_paths(db: &Connection) -> Vec<Item> {
+    let sql = "SELECT c.alias, c.path FROM k_content_path c \
+               WHERE c.content_type = 2 AND c.state = 2 AND coalesce(c.alias, '') <> '' \
+               AND NOT EXISTS (SELECT 1 FROM k_sound_info k WHERE k.content_path_id = c.id AND k.hidden_for = 0)";
+    let Ok(mut st) = db.prepare(sql) else { return Vec::new() };
+    let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (alias, dir) in rows.flatten() {
+        if alias.eq_ignore_ascii_case("Freelance Soundlabs") {
+            continue;
+        }
+        let root = PathBuf::from(&dir);
+        if !root.is_dir() {
+            continue;
+        }
+        let product = normalize_content_alias(&alias);
+        let fx_default = is_fx_product(&product);
+        walk_unindexed_dir(&root, &product, fx_default, &mut out);
+    }
+    out
+}
+
+fn walk_unindexed_dir(dir: &Path, product: &str, fx_default: bool, out: &mut Vec<Item>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.eq_ignore_ascii_case("Snapshots2")
+                || name.eq_ignore_ascii_case("Samples")
+                || name.eq_ignore_ascii_case("Documentation")
+                || name.eq_ignore_ascii_case("Pictures")
+                || name.eq_ignore_ascii_case("Resources")
+            {
+                continue;
+            }
+            walk_unindexed_dir(&path, product, fx_default, out);
+        } else if ft.is_file() {
+            let Some(ext) = path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()) else { continue };
+            let kind = match ext.as_str() {
+                "mxprj" => crate::Kind::Project,
+                "mxgrp" => crate::Kind::Group,
+                "mxsnd" => crate::Kind::Sound,
+                "mxfx" | "nksfx" => crate::Kind::Effect,
+                "mxinst" | "nksn" | "nki" | "nmsv" | "nfm8" | "nrkt" | "rkplr" | "ens" => crate::Kind::Instrument,
+                "nksf" => {
+                    if fx_default {
+                        crate::Kind::Effect
+                    } else {
+                        crate::Kind::Instrument
+                    }
+                }
+                _ => continue,
+            };
+            let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+            let tempo = crate::names::tempo_in_name(&stem);
+            out.push(Item {
+                vendor: "Native Instruments".into(),
+                kind,
+                user: false,
+                name: stem,
+                path,
+                product: Some(product.to_string()),
+                bank: vec![product.to_string()],
+                types: Vec::new(),
+                characters: Vec::new(),
+                tempo,
+                author: String::new(),
+                favorite: false,
+            });
+        }
     }
 }
 
