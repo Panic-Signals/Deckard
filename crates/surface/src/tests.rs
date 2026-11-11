@@ -574,7 +574,7 @@ fn edited_user_scripts_reload() {
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["maschine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -604,7 +604,7 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
 }
 
 #[test]
