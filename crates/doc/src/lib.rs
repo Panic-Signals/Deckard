@@ -36,6 +36,7 @@ mod extra_outs;
 mod files;
 mod lfos;
 mod mod_routes;
+mod new_sampler;
 pub mod note_tools;
 mod notes;
 mod pad_touch;
