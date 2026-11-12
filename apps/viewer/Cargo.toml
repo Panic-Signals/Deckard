@@ -17,6 +17,7 @@ deckard-surface = { path = "../../crates/surface" }
 deckard-stems = { path = "../../crates/stems" }
 deckard-model = { path = "../../crates/model" }
 deckard-library = { path = "../../crates/library" }
+deckard-analysis = { path = "../../crates/analysis" }
 # Ableton Link (GPL-2.0-or-later).
 deckard-link = { path = "../../crates/link" }
 mxprj = { path = "../../crates/mxprj" }

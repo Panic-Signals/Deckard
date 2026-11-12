@@ -2136,6 +2136,7 @@ name = "deckard"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "deckard-analysis",
  "deckard-doc",
  "deckard-engine",
  "deckard-jam",

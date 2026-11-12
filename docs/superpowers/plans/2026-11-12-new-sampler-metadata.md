@@ -29,11 +29,11 @@ Auto rule); 1a: `2026-11-12-sample-analysis.md`.
 
 ## Review Focus
 
-1. A zone whose sample changes (edit, replace, undo): its old analysis isn't shown; it is analysed again (Task 1 `meta_for_another_file_is_ignored`, Task 4).
+1. A zone whose sample changes (edit, replace, undo): its old analysis isn't shown; it is analysed again (Task 2 `meta_for_another_file_is_ignored`, Task 4).
 2. Undo across an analysis result: undo still steps through the user's edits, and isn't blocked by analysis writing (Task 2 `zone_meta_is_no_undo_step`).
 3. A missing or unreadable file: no panic, no endless re-analysis (Task 4: a failure is remembered for that file).
 4. Old projects (block v12) still read; v13 round-trips both fields (Task 2).
-5. Replacing the New Sampler's slot with another instrument: it's no longer shown as a New Sampler (Task 1 `only_a_sampler_is_a_new_sampler`).
+5. Replacing the New Sampler's slot with another instrument: it's no longer shown as a New Sampler (Task 2 `only_a_sampler_is_a_new_sampler`).
 
 ---
 
@@ -60,8 +60,8 @@ Zone.meta: Option<ZoneMeta>            // None when absent or its `file` isn't t
 Text: `key value` lines (`v 1`, `stretch rendered`; zone: `file <path…>` last line so
 paths keep spaces); unknown keys skipped.
 
-- [ ] Tests: `settings_round_trip_as_text`, `zone_meta_round_trips` (path with spaces, every Option None and Some), `unknown_lines_are_skipped`, `meta_for_another_file_is_ignored`, `only_a_sampler_is_a_new_sampler`.
-- [ ] `mise exec -- cargo test -p deckard-model new_sampler` PASS; commit.
+- [x] Tests: `settings_round_trip_as_text`, `zone_meta_round_trips` (path with spaces, every Option None and Some), `unknown_lines_are_skipped`, `meta_for_another_file_is_ignored`, `only_a_sampler_is_a_new_sampler`.
+- [x] `mise exec -- cargo test -p deckard-model new_sampler` PASS; commit.
 
 ### Task 2: The document
 
@@ -69,8 +69,8 @@ paths keep spaces); unknown keys skipped.
 
 **Interfaces — Produces:** `Document::set_new_sampler(g, s, Option<&NewSampler>) -> Result<(), String>` (one undo step: "New Sampler" / "Convert to Sampler"); `Document::note_zone_meta(g, s, z, &ZoneMeta) -> Result<(), String>` (no undo step; the document's revision goes up so the engine and views follow); `pub(crate) fn new_sampler_ops`, `zone_meta_ops`. Block v13: count, then (g, s, text) per New Sampler sound; count, then (g, s, z, text) per zone meta.
 
-- [ ] Tests: `marks_and_unmarks_a_sound` (+ undo), `zone_meta_is_no_undo_step` (an edit, then meta, then undo undoes the edit and keeps the meta), `both_round_trip_through_a_save` (to_bytes → from_bytes), `version_12_blocks_still_read`, `maschine_sees_a_sampler` (the archive without the block has no `deckard:` fields and the sound's instrument is "Sampler").
-- [ ] `mise exec -- cargo test -p deckard-doc new_sampler block` PASS; commit.
+- [x] Tests: `marks_and_unmarks_a_sound` (+ undo), `zone_meta_is_no_undo_step` (an edit, then meta, then undo undoes the edit and keeps the meta), `both_round_trip_through_a_save` (to_bytes → from_bytes), `version_12_blocks_still_read`, `maschine_sees_a_sampler` (the archive without the block has no `deckard:` fields and the sound's instrument is "Sampler").
+- [x] `mise exec -- cargo test -p deckard-doc new_sampler block` PASS; commit.
 
 ### Task 3: Analysis results and their cache
 
@@ -86,19 +86,19 @@ impl Cache { pub fn new(dir) -> Cache; pub fn key(bytes: &[u8]) -> String /* sha
 ```
 One text file per key (`<key>.txt`, `v 1` first; written to a temp name, then renamed).
 
-- [ ] Tests: `analysis_round_trips_through_the_cache` (tempdir), `a_missing_or_bad_entry_is_none`, `the_key_is_the_content` (same bytes, same key; one byte off, another), `the_name_gives_the_hint` (120 BPM drums named "x 100bpm.wav" → bpm 100, Hint).
-- [ ] `mise exec -- cargo test -p deckard-analysis cache` PASS; commit.
+- [x] Tests: `analysis_round_trips_through_the_cache` (tempdir), `a_missing_or_bad_entry_is_none`, `the_key_is_the_content` (same bytes, same key; one byte off, another), `the_name_gives_the_hint` (120 BPM drums named "x 100bpm.wav" → bpm 100, Hint).
+- [x] `mise exec -- cargo test -p deckard-analysis cache` PASS; commit.
 
 ### Task 4: The app
 
 **Files:** Create `apps/viewer/src/analysis.rs`; modify `apps/viewer/Cargo.toml`, `apps/viewer/src/main.rs` (job polling, after edits), `apps/viewer/src/layout.rs` (`AddWhat::NewSampler`, the + menu, slot label), `plugin_choices`, `apps/viewer/src/layout/sampling.rs` (readout).
 
-**Interfaces — Produces:** `analysis::meta_from(a: &Analysis, file: &str, name: &str, keep: Option<&ZoneMeta>) -> ZoneMeta` (Auto rule; a kept meta's locked root and Manual bpm win); `analysis::Jobs` (`want(path)`, `poll() -> Vec<(PathBuf, Result<Analysis, String>)>`; one worker thread; a path asked twice is queued once; failures remembered); `App` asks for every New Sampler zone whose `meta` is None after each edit, and writes results with `note_zone_meta` to every zone still holding that file. "New Sampler" in the + menu after "Sampler" (adds a Sampler, then marks it, one step "Add New Sampler"); the chain shows "New Sampler". The Sampling page shows, for a New Sampler zone, "120.00 BPM · 16 beats · Root A2 −12 ct · SYNC" (or "Analysing…").
+**Interfaces — Produces:** `analysis::meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta` (Auto rule; a zone is analysed only while it has no meta, so nothing set by hand is overwritten); `analysis::Jobs` (`want(path)`, `poll() -> Vec<(PathBuf, Result<Analysis, String>)>`; one worker thread; a path asked twice is queued once; failures remembered); `App` asks for every New Sampler zone whose `meta` is None after each edit, and writes results with `note_zone_meta` to every zone still holding that file. "New Sampler" in the + menu after "Sampler" (adds a Sampler, then marks it, one step "Add New Sampler"); the chain shows "New Sampler". The Sampling page shows, for a New Sampler zone, "120.00 BPM · 16 beats · Root A2 −12 ct · SYNC" (or "Analysing…").
 
-- [ ] Tests: `the_auto_rule` (4 s loop with tempo → Sync; 2 s → Repitch; 8 s "808 Long.wav" → Repitch; no tempo → Repitch), `a_locked_root_is_kept`, `jobs_analyse_once_and_remember_failures` (tempdir wav; a missing file).
-- [ ] `mise exec -- cargo test -p deckard --bin deckard analysis` PASS; commit.
+- [x] Tests: `the_auto_rule` (4 s loop with tempo → Sync; 2 s → Repitch; 8 s "808 Long.wav" → Repitch; no tempo → Repitch), `the_readout`, `jobs_analyse_once`, `a_new_sampler_learns_its_loop` (end to end: no undo step; a missing file is never asked for).
+- [x] `mise exec -- cargo test -p deckard --bin deckard analysis` PASS; commit.
 
 ### Task 5: Finish
 
-- [ ] Roadmap: 1b built; Architecture: the New Sampler opens as a Sampler in Maschine. `docs/deckard-block.md`: v13. FEATURES #18: skeleton built.
-- [ ] `mise run lint`; tests for model, doc, analysis, viewer; release build.
+- [x] Roadmap: 1b built; Architecture: the New Sampler opens as a Sampler in Maschine. `docs/deckard-block.md`: v13. FEATURES #18: skeleton built.
+- [x] `mise run lint`; tests for model, doc, analysis, viewer; release build.

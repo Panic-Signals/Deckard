@@ -1616,7 +1616,7 @@ fn sound(ix: &Index, s: &Obj, config: Option<&Obj>, t: &Targets) -> Sound {
 
 fn sound_own(ix: &Index, s: &Obj) -> Sound {
     let modules = chain_modules(ix, s);
-    let slots = chain_slots(ix, s);
+    let mut slots = chain_slots(ix, s);
     let (lanes, lane) = lanes_of(ix, s);
     // Only a Sampler can be a New Sampler: the field stays when the slot changes.
     let new_sampler = match s.get(new_sampler::FIELD) {
@@ -1625,6 +1625,11 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
         }
         _ => None,
     };
+    if new_sampler.is_some()
+        && let Some(first) = slots.first_mut()
+    {
+        first.name = "New Sampler".into();
+    }
     Sound {
         instrument: modules.first().map_or(String::new(), |m| m.type_name.rsplit("::").next().unwrap_or("").to_string()),
         name: param_str(s, "name"),

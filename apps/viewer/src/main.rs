@@ -57,6 +57,7 @@ pub const VERSION: &str = match option_env!("DECKARD_VERSION") {
 };
 /// Built by the release scripts (with a version minted on GitHub), not from source.
 pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
+mod analysis;
 #[cfg(test)]
 mod auto_length_tests;
 #[cfg(test)]
@@ -1206,6 +1207,10 @@ pub struct App {
     hw_sampling_tab: Option<usize>,
     /// The stem separation running (EDIT ▸ STEMS; one at a time).
     stems: Option<stems::Job>,
+    /// The New Sampler's zones being analysed, and the document revision they were
+    /// last looked for at.
+    analysis: analysis::Jobs,
+    analysis_revision: Option<u64>,
     /// Where audio files dragged from the desktop are over the window, and those
     /// dropped this frame (they go to the sound row there: `drop_samples`).
     file_drag: Option<egui::Pos2>,
@@ -6977,6 +6982,7 @@ impl App {
     fn update_sampling(&mut self) {
         self.open_saved_zone();
         self.poll_stems();
+        self.follow_analysis();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
         let take_key = self.doc.as_ref().and_then(|doc| {
@@ -7202,6 +7208,52 @@ impl App {
         let smp = snd.sampler.as_ref()?;
         let k = self.zone.min(smp.zones.len().checked_sub(1)?);
         Some((k, smp.zones[k].sample.clone(), None))
+    }
+
+    /// Analyse the New Sampler's zones that aren't yet, and keep what's found in each
+    /// zone still holding that file (no undo step).
+    fn follow_analysis(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let done = self.analysis.poll();
+        if !done.is_empty() {
+            let mut targets = Vec::new();
+            {
+                let d = doc.borrow();
+                for (g, grp) in d.project().groups.iter().enumerate() {
+                    for (s, snd) in grp.sounds.iter().enumerate() {
+                        let Some(smp) = snd.sampler.as_ref().filter(|_| snd.new_sampler.is_some()) else { continue };
+                        for (z, zone) in smp.zones.iter().enumerate() {
+                            if let Some(job) = done.iter().find(|j| zone.meta.is_none() && j.file == zone.sample.path) {
+                                let name = analysis::file_name_of(&zone.sample.path);
+                                targets.push((g, s, z, analysis::meta_from(&job.analysis, &job.file, &name)));
+                            }
+                        }
+                    }
+                }
+            }
+            for (g, s, z, meta) in targets {
+                let _ = doc.borrow_mut().note_zone_meta(g, s, z, &meta);
+            }
+        }
+        let revision = doc.borrow().revision();
+        if self.analysis_revision == Some(revision) {
+            return;
+        }
+        self.analysis_revision = Some(revision);
+        let mut wanted = Vec::new();
+        {
+            let d = doc.borrow();
+            for snd in d.project().groups.iter().flat_map(|g| &g.sounds).filter(|s| s.new_sampler.is_some()) {
+                for zone in snd.sampler.iter().flat_map(|x| &x.zones).filter(|z| z.meta.is_none() && !z.sample.path.is_empty()) {
+                    wanted.push(zone.sample.clone());
+                }
+            }
+        }
+        for sample in wanted {
+            if let Some(audio) = self.samples.sample(&sample, self.path.as_deref()) {
+                self.analysis.want(&sample.path, &analysis::file_name_of(&sample.path), audio);
+            }
+        }
     }
 
     /// A finished (or failed, or cancelled) stem separation.
@@ -10222,7 +10274,11 @@ impl App {
             (PluginEntry { name: name.to_string(), instrument, format: PluginFormat::Internal, vendor: "Native Instruments".into() }, what)
         };
         let native = |instrument: bool| deckard_plugins::native::CLASSES.iter().filter(move |c| c.instrument == instrument);
-        let mut out = vec![internal("Sampler", true, AddWhat::Sampler), internal("Audio", true, AddWhat::Audio)];
+        let mut out = vec![
+            internal("Sampler", true, AddWhat::Sampler),
+            internal("New Sampler", true, AddWhat::NewSampler),
+            internal("Audio", true, AddWhat::Audio),
+        ];
         for class in deckard_model::INTERNAL_INSTRUMENTS {
             out.push(internal(deckard_model::module_label(class), true, AddWhat::Instrument(class)));
         }
@@ -10287,7 +10343,7 @@ impl App {
 
     fn is_instrument(what: &layout::AddWhat) -> bool {
         match what {
-            layout::AddWhat::Sampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,
+            layout::AddWhat::Sampler | layout::AddWhat::NewSampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,
             layout::AddWhat::Plugin(e) => e.instrument,
             layout::AddWhat::Effect(_) | layout::AddWhat::PerformFx(_) => false,
         }
@@ -10312,7 +10368,7 @@ impl App {
             return;
         }
         let module = match &what {
-            layout::AddWhat::Sampler => deckard_doc::NewModule::Sampler,
+            layout::AddWhat::Sampler | layout::AddWhat::NewSampler => deckard_doc::NewModule::Sampler,
             layout::AddWhat::Audio => deckard_doc::NewModule::Audio,
             layout::AddWhat::Effect(class) => deckard_doc::NewModule::Effect(class),
             layout::AddWhat::PerformFx(_) => return,
@@ -10351,8 +10407,12 @@ impl App {
             deckard_doc::NewModule::Effect(_) => "Load Effect",
             _ => "Load Module",
         };
+        let label = if matches!(what, layout::AddWhat::NewSampler) { "Add New Sampler" } else { label };
         let added = doc.borrow_mut().transaction(label, |d| {
             d.add_slot_in(c, at, &module)?;
+            if let (layout::AddWhat::NewSampler, deckard_doc::Chain::Sound(g, s)) = (&what, c) {
+                d.set_new_sampler(g, s, Some(&deckard_model::new_sampler::NewSampler::default()))?;
+            }
             if let deckard_doc::Chain::Sound(g, s) = c
                 && at == 0
                 && instrument

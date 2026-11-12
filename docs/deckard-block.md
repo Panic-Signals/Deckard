@@ -25,11 +25,11 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 12
+## Payload, version 13
 
-Version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 13 is version 12 with the New Sampler's sounds and zones at the end; version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 12
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 13
 and reads all twelve.
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
@@ -105,7 +105,21 @@ offset × offset_count:
   u32 group, u32 pattern      the pattern (clip patterns are 2^24 + k)
   u32 sound                   the sound whose audio it is
   i64 ticks                   from 1.1.1 (negative: earlier)
+u32 new_sampler_count           version 13: the New Sampler's sounds
+new_sampler × new_sampler_count:
+  u32 group, u32 sound
+  u32 len, u8 × len           its settings as UTF-8 text (`NewSampler::to_text`)
+u32 zone_meta_count             version 13: zones' analysis, those with any
+zone_meta × zone_meta_count:
+  u32 group, u32 sound, u32 zone
+  u32 len, u8 × len           as UTF-8 text (`ZoneMeta::to_text`)
 ```
+
+**The New Sampler** (docs/superpowers/plans/2026-11-12-new-sampler-metadata.md) is
+Maschine's Sampler with a `deckard:new_sampler` text field on the sound; each zone's
+analysis is a `deckard:zone` text field on the zone's object, naming the file it
+describes (one naming another file is ignored). Without the block, Maschine (or DECKARD)
+opens the sound as a plain Sampler.
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's
 own tempo (`tempo <scene> <bpm>`) and Edit ▸ MIDI Change's blocks (`scene_recall <trigger>

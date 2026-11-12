@@ -357,13 +357,23 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         }
         let name = z.sample.path.rsplit(['/', '\\']).next().unwrap_or("");
         let t = painter.text(Pos2::new(play.right() + 6.0, info.center().y), Align2::LEFT_CENTER, name, font(12.0), gcol);
-        painter.text(
+        let d = painter.text(
             Pos2::new(t.right() + 12.0, info.center().y),
             Align2::LEFT_CENTER,
             frames_text(s.frames.len(), s.rate),
             font(12.0),
             white(142),
         );
+        // A New Sampler zone: what analysis found (its tempo, its root, how it plays).
+        if !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some()) {
+            painter.text(
+                Pos2::new(d.right() + 12.0, info.center().y),
+                Align2::LEFT_CENTER,
+                crate::analysis::readout(z.meta.as_ref()),
+                font(12.0),
+                white(200),
+            );
+        }
         let tog = Rect::from_min_size(Pos2::new(info.right() - 60.0, info.top()), Vec2::new(50.0, 16.0));
         let resp = ui.interact(tog, ui.id().with("samp-stereo"), Sense::click()).on_hover_text("Show the two channels, or their mix");
         painter.text(

@@ -101,8 +101,10 @@ Sampler**; the real name comes later.
   start/end, loop, tune and the Audio plug-in's tempo. **New Sampler → Sampler** keeps what
   Maschine can play (zones, start/end, loop, tune, envelopes, filter) and lists what it
   drops (Sync, layers, stem lanes, modulation).
-- **In Maschine,** a sound with the New Sampler has no instrument. Saving offers to convert
-  those sounds, or warns.
+- **Stored as Maschine's Sampler** with a `deckard:new_sampler` field (built 2026-11-12):
+  in Maschine it opens as a plain Sampler that still plays (Repitch), so nothing needs
+  converting on save. Its zones and files are the Sampler's; what's new lives in
+  `deckard:` fields and the DECKARD block (`docs/deckard-block.md`, v13).
 - **Which one new sounds get** (a dropped sample, STEMS ▸ Into lanes, a recording, the
   browser) is a preference; the New Sampler once Phase 1 ships.
 - **MK3:** it needs its own pages; `sampling.lua` is built around Maschine's Sampler. The
@@ -182,6 +184,12 @@ synthetic drum loops and tones; a corpus of real loops is still to come.
   and detuned by known cents.
 
 ### 1b. Sample metadata (in the DECKARD block per zone, plus a cache keyed by file hash)
+
+**Built 2026-11-12** (plan `2026-11-12-new-sampler-metadata.md`): the New Sampler in the
+"+" menu and the controller's browser; its zones analysed in the background (cached in the
+settings folder's `analysis`, keyed by the audio's SHA-256), the Auto rule choosing Sync or
+Repitch, and a readout on the Sampling page. Not yet: the linked BPM/bars/loop-bars fields,
+ACID and `smpl` chunks, `key`. The engine still plays every zone as Repitch (1c).
 
 - **Fields:** `bpm`, `bpm_source`, `bars`, `loop_bars`, `grid_offset`, `tempo_markers`,
   `key`, `root`, `stretch` (Auto / Off / Normal / Beat).

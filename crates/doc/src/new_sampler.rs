@@ -142,7 +142,8 @@ mod tests {
         let file = path_of(&d);
         d.note_zone_meta(0, 0, 0, &meta(&file)).unwrap();
         let bytes = d.to_bytes().unwrap();
-        let without = mxprj::container::set_root_child(&bytes, crate::block::DOMAIN, crate::block::ITEM, crate::block::FRAME, None).unwrap();
+        let without =
+            mxprj::container::set_root_child(&bytes, crate::block::DOMAIN, crate::block::ITEM, crate::block::FRAME, None).unwrap();
         let plain = Document::from_bytes(without, None).unwrap();
         let snd = &plain.project().groups[0].sounds[0];
         assert_eq!((snd.instrument.as_str(), snd.new_sampler), ("Sampler", None));

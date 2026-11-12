@@ -867,6 +867,8 @@ pub enum ClipAct {
 #[derive(Debug, Clone)]
 pub enum AddWhat {
     Sampler,
+    /// DECKARD's sampler: a Sampler marked DECKARD's (`deckard_model::new_sampler`).
+    NewSampler,
     Audio,
     Plugin(deckard_plugins::scan::Entry),
     /// One of Maschine's effects (its class: "EQ", "BeatDelay", …).
@@ -5522,7 +5524,7 @@ fn native(instrument: bool) -> impl Iterator<Item = &'static deckard_plugins::na
 /// "+" › Internal's instruments (a sound's first slot only): the Sampler and Audio,
 /// Maschine's synths, DECKARD's own.
 fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -> Act, acts: &mut Vec<Act>) {
-    for (name, what) in [("Sampler", AddWhat::Sampler), ("Audio", AddWhat::Audio)] {
+    for (name, what) in [("Sampler", AddWhat::Sampler), ("New Sampler", AddWhat::NewSampler), ("Audio", AddWhat::Audio)] {
         if ui.add_enabled(instruments, egui::Button::new(name)).on_disabled_hover_text(AFTER_FX).clicked() {
             acts.push(pick(what));
             ui.close();
