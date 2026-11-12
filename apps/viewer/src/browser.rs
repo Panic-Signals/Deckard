@@ -20,6 +20,7 @@ enum Job {
     Query(u64, Query),
     Favorite(PathBuf, bool),
     Saved(PathBuf),
+    Entry(deckard_library::Item),
     Scan(Vec<Root>),
     Forget(PathBuf),
 }
@@ -175,6 +176,13 @@ impl Browser {
         self.refresh();
     }
 
+    /// A file DECKARD just saved, listed under User at once as `item` describes it
+    /// (for files whose tags DECKARD's index can't read itself, such as NKS presets).
+    pub fn add_item(&mut self, item: deckard_library::Item) {
+        self.send(Job::Entry(item));
+        self.refresh();
+    }
+
     /// Scan `roots` again (Maschine's user folders, library folders).
     pub fn rescan(&mut self, roots: Vec<Root>) {
         self.send(Job::Scan(roots));
@@ -300,6 +308,7 @@ fn run(lib: &mut Library, job: Job) {
     match job {
         Job::Favorite(p, on) => lib.set_favorite(&p, on),
         Job::Saved(p) => lib.add_saved(&p),
+        Job::Entry(item) => lib.add_entry(item),
         Job::Scan(roots) => {
             let _ = lib.scan(&roots);
         }

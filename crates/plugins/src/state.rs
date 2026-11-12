@@ -125,8 +125,7 @@ pub struct State {
 }
 
 /// A `PluginHost` chunk's type and data (nothing for an empty chunk).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn chunk_parts(chunk: &[u8]) -> Result<(u32, &[u8]), String> {
+pub fn chunk_parts(chunk: &[u8]) -> Result<(u32, &[u8]), String> {
     if chunk.is_empty() {
         return Ok((0, &[]));
     }

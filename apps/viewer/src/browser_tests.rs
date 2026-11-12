@@ -376,6 +376,15 @@ fn saving() -> Option<(tempfile::TempDir, Harness<'static, App>, PathBuf)> {
     Some((tmp, h, dir))
 }
 
+/// [`saving`] on a new project, so the test runs anywhere, CI included.
+fn saving_new() -> (tempfile::TempDir, Harness<'static, App>, PathBuf) {
+    let (tmp, dir) = temp();
+    let mut h = crate::tests::blank_harness(false);
+    h.state_mut().user_dir_override = Some(dir.join("Maschine 3"));
+    h.state_mut().browser.start(None, dir.join("library.db3"), Vec::new());
+    (tmp, h, dir)
+}
+
 fn save_as(h: &mut Harness<'static, App>, what: deckard_doc::FileItem, samples: bool, name: &str) {
     layout::apply_acts(
         h.state_mut(),
@@ -475,6 +484,99 @@ fn save_preset_writes_mxfx() {
     };
     save_as(&mut h, deckard_doc::FileItem::Slot(g, s, k), false, "My FX");
     assert!(dir.join("Maschine 3/Plug-ins/My FX.mxfx").is_file());
+}
+
+/// A sound with an NKS preset's plug-ins loaded: `Synth` (an instrument) with knob
+/// pages, then `Verb` (an effect). Returns the sound and the instrument's class.
+fn sound_with_hosted_plugins(h: &mut Harness<'static, App>, dir: &Path) -> ((usize, usize), String) {
+    use deckard_plugins::{nks, scan};
+    let entry = |name: &str, instrument: bool, cid: &str| scan::Entry {
+        kind: scan::Kind::Vst3,
+        vendor: "Vendor".into(),
+        name: name.into(),
+        instrument,
+        location: String::new(),
+        cid: cid.into(),
+    };
+    let (synth, effect) = ("000102030405060708090A0B0C0D0E0F", "101112131415161718191A1B1C1D1E1F");
+    h.state_mut().catalog.entries = vec![entry("Synth", true, synth), entry("Verb", false, effect)];
+    let word = |at: usize, hex: &str| u32::from_str_radix(&hex[at * 8..(at + 1) * 8], 16).unwrap();
+    let uid = |hex: &str| Some([word(0, hex), word(1, hex), word(2, hex), word(3, hex)]);
+    let pages = vec![vec![
+        nks::Knob { id: Some(0), name: "Spread".into(), section: "Performance".into() },
+        nks::Knob { id: Some(1), name: "Cutoff".into(), section: String::new() },
+    ]];
+    let (g, s) = (0, 0);
+    for (file, kind, bytes) in [
+        ("Lead.nksf", Kind::Instrument, nks::fixture_with_pages(uid(synth), 0, "Synth", b"lead state", &pages)),
+        ("Hall.nksfx", Kind::Effect, nks::fixture(uid(effect), 0, "Verb", b"hall state")),
+    ] {
+        let path = dir.join(file);
+        std::fs::write(&path, bytes).unwrap();
+        let item = deckard_library::Item { kind, name: file.into(), path, ..Default::default() };
+        h.state_mut().load_item(&item, Some((g, s))).unwrap();
+    }
+    ((g, s), synth.into())
+}
+
+/// Save Preset… on a hosted VST3 plug-in writes an NKS preset where Maschine does:
+/// NI's User Content folder, in the plug-in's folder, `.nksf` for an instrument.
+#[test]
+fn save_preset_of_a_plugin_writes_nks() {
+    use deckard_plugins::nks;
+    let (_tmp, mut h, dir) = saving_new();
+    let ((g, s), synth) = sound_with_hosted_plugins(&mut h, &dir);
+    save_as(&mut h, deckard_doc::FileItem::Slot(g, s, 0), false, "My Lead");
+    let file = dir.join("User Content/Synth/My Lead.nksf");
+    let p = nks::parse(&std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))).unwrap();
+    let cid: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&synth[i * 2..i * 2 + 2], 16).unwrap()).collect();
+    assert_eq!(p.vst3.map(|c| c.to_vec()), Some(cid));
+    assert_eq!((p.name.as_deref(), p.vendor.as_deref()), (Some("Synth"), Some("Vendor")));
+    assert!(p.state.starts_with(b"VST3"), "a .vstpreset, as Maschine writes for a VST3");
+    assert!(p.state.windows(10).any(|w| w == b"lead state"));
+    assert_eq!(p.pages[0][0], nks::Knob { id: Some(0), name: "Spread".into(), section: "Performance".into() });
+    assert_eq!(p.info.name, "My Lead");
+    assert_eq!(p.info.device_type, "INST");
+    assert_eq!(p.info.bankchain, ["Synth", "", ""], "the plug-in's name, as the Library");
+    assert_eq!(p.info.types, [vec!["Drums".to_string(), "Kick".to_string()]]);
+    assert_eq!(p.info.characters, ["Punchy", "Dark"]);
+    assert_eq!(p.info.vendor, "Vendor");
+    assert_eq!(p.info.uuid.len(), 36);
+
+    // Listed under User at once.
+    act(&mut h, BrowseAct::User(true));
+    act(&mut h, BrowseAct::Kind(Kind::Instrument));
+    assert!(names(&h).contains(&"My Lead".to_string()), "{:?}", names(&h));
+
+    // Save again: the same file, the same uuid.
+    let uuid = p.info.uuid.clone();
+    layout::apply_acts(h.state_mut(), vec![Act::SaveItem(deckard_doc::FileItem::Slot(g, s, 0), crate::SaveMode::Save)]);
+    assert!(h.state().save_dialog.is_none(), "no dialog");
+    assert_eq!(nks::parse(&std::fs::read(&file).unwrap()).unwrap().info.uuid, uuid);
+
+    // And it loads back, with its state.
+    let item = deckard_library::Item { kind: Kind::Instrument, name: "My Lead".into(), path: file, ..Default::default() };
+    h.state_mut().load_item(&item, Some((g, s))).unwrap();
+    let doc = h.state().doc.clone().unwrap();
+    let d = doc.borrow();
+    let pr = d.project().groups[g].sounds[s].slots[0].plugin.clone().unwrap();
+    assert_eq!(pr.name, "Synth");
+    assert!(pr.chunk.windows(10).any(|w| w == b"lead state"));
+}
+
+/// An effect plug-in's preset is an `.nksfx`.
+#[test]
+fn save_preset_of_an_effect_plugin_writes_nksfx() {
+    let (_tmp, mut h, dir) = saving_new();
+    let ((g, s), _) = sound_with_hosted_plugins(&mut h, &dir);
+    let k = {
+        let doc = h.state().doc.clone().unwrap();
+        let d = doc.borrow();
+        d.project().groups[g].sounds[s].slots.iter().position(|x| x.plugin.as_ref().is_some_and(|p| p.name == "Verb")).unwrap()
+    };
+    save_as(&mut h, deckard_doc::FileItem::Slot(g, s, k), false, "Big Hall");
+    let p = deckard_plugins::nks::parse(&std::fs::read(dir.join("User Content/Verb/Big Hall.nksfx")).unwrap()).unwrap();
+    assert_eq!(p.info.device_type, "FX");
 }
 
 /// BROWSE on the controller shows the app's library, and its LOAD loads into the

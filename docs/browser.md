@@ -27,6 +27,11 @@ Status: **working**, October 2026 (design: `docs/superpowers/specs/2026-10-22-br
     Library, and asks before replacing a file.
   - Files go to Maschine 3's user folder (`Sounds`, `Groups`, `Plug-ins`) in
     Maschine's own formats. They are listed under User at once.
+  - A hosted VST3 plug-in's Save Preset… writes an NKS preset instead, as Maschine
+    does: `.nksf` (instrument) or `.nksfx` (effect) in NI's `User Content/<plug-in>/`,
+    its Library the plug-in's name by default, a random `uuid`, the knob pages shown
+    and the plug-in's state as a `.vstpreset`. An AU's preset and an internal
+    module's stay `.mxinst` / `.mxfx`. (`crates/plugins/src/nks.rs`, `write`.)
   - Save writes the same file again.
 - **Preferences ▸ Library:** folders of sound packs, listed under Factory (each its
   folder's name, less " Library", as the product), for when NI's library isn't installed.
