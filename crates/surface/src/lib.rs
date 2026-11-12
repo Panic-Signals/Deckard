@@ -127,6 +127,8 @@ pub struct View {
     pub browser: BrowserView,
     /// What the Sampling page (SAMPLE) shows.
     pub sampling: SamplingView,
+    /// A group or sound is loading: the name, shown over both screens until it's in.
+    pub loading: Option<String>,
 }
 
 /// The app's sampler and recorder as the Sampling page's tabs show them.
@@ -1500,6 +1502,9 @@ impl Surface {
             }
             None => screen::Picture::new([0, 0, 0]),
         };
+        if let Some(name) = &v.loading {
+            p.loading(name);
+        }
         if let Some(e) = self.error() {
             p.error(&e);
         }
