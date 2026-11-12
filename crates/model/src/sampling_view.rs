@@ -66,6 +66,10 @@ pub enum SamplingCall {
     FocusZone(usize),
     /// Play frames (start, end) of the focused sample.
     Prehear(usize, usize),
+    /// A New Sampler zone's tempo doubled or halved (true: doubled); the song's tempo
+    /// set to it.
+    ScaleBpm(bool),
+    ToProject,
 }
 
 /// A page of the Sampling page's knobs (up to four; knobs 5 and 6 zoom and scroll).

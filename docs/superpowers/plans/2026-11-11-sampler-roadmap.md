@@ -250,6 +250,14 @@ This covers what the Audio plug-in does, and is why the New Sampler can replace 
 
 ### 1d. Analysis UI
 
+**First cut built 2026-11-12:** over a New Sampler zone's EDIT and SLICE pages, TEMPO (BPM
+and BEATS, linked; ×2, ½, TAP, TO PROJECT), PITCH (ROOT, set by hand and then locked;
+PLAYS AT, the note its Tune makes, its cents tuned out) and REPITCH / SYNC / KEYS; the
+waveform's ruler in bars and beats with beat lines. MK3: EDIT's TEMPO / PITCH knob page
+(MODE, BPM, ROOT, PLAYS AT), and under SHIFT X2, 1/2, TO PROJECT on the display buttons.
+Not yet: snapping to beats, ± nudge, Match key, SLICE ▸ Grid at the sample's tempo, the
+sample-only nudge, Flatten, the key, and Serato's waveform colouring.
+
 - **Header on the EDIT and SLICE pages:**
   - the BPM, with ×2, ½, TAP and ± nudge
   - the key, the root note (with its lock) and the target note

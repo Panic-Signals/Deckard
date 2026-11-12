@@ -4,6 +4,8 @@
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), PREVIOUS, NEXT take
 --   EDIT 5-6 / 8      ◀ the edit function ▶, APPLY (STEMS: CANCEL while separating)
+--   SHIFT+EDIT 5-7    a New Sampler zone's tempo: X2, 1/2, TO PROJECT (its TEMPO /
+--                     PITCH knob page: MODE, BPM, ROOT, PLAYS AT)
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
@@ -108,6 +110,26 @@ local function stems_running(v)
   return v.stems ~= nil
 end
 
+-- A New Sampler zone: the app gives its EDIT tab a TEMPO / PITCH page.
+local function tempo_page(v)
+  for _, p in ipairs(v.pages[2] or {}) do
+    if p.name == "TEMPO / PITCH" then return p end
+  end
+end
+
+-- SHIFT on EDIT, for a New Sampler zone with a tempo.
+local function tempo_buttons(v)
+  if v.tab ~= 2 or not deckard.held("SHIFT") then return nil end
+  local p = tempo_page(v)
+  if not p then return nil end
+  local has = p.knobs[2] and p.knobs[2].text ~= "-"
+  return {
+    { text = "X2", disabled = not has, act = function() deckard.sampling_call("double_bpm") end },
+    { text = "1/2", disabled = not has, act = function() deckard.sampling_call("halve_bpm") end },
+    { text = "TO PROJECT", disabled = not has, act = function() deckard.sampling_call("to_project") end },
+  }
+end
+
 -- RECORD: the takes on the pads (TAKES), and the bank of 16 shown.
 local takes_on_pads, take_bank = false, 0
 
@@ -142,6 +164,8 @@ local function buttons(v)
       { text = "BANK " .. (take_bank + 1), disabled = not takes_on_pads or banks < 2, act = function() take_bank = (take_bank + 1) % banks end },
     }
   elseif v.tab == 2 then
+    local t = tempo_buttons(v)
+    if t then return t end
     local f = FUNCTIONS[func]
     local cancel = f[2] == "stems" and v.stems and v.stems.focused
     return {
@@ -192,7 +216,7 @@ function page.button(name, down)
       if n <= tab_count(v) then deckard.sampling_tab(n) end
       return true
     end
-    if v.tab == 2 and (n == 5 or n == 6) then
+    if v.tab == 2 and (n == 5 or n == 6) and not tempo_buttons(v) then
       if v.sample then func = (func + (n == 6 and 1 or -1) - 1) % #FUNCTIONS + 1 end
       return true
     end
@@ -311,7 +335,7 @@ function page.leds()
   -- (WAITING flashes, four times a second.)
   local flash = v.record.waiting and (deckard.now() * 4) % 2 < 1
   for i = 5, 8 do
-    local spec = b[i - 4] or (v.tab == 2 and i == 6 and b[1])
+    local spec = b[i - 4] or (v.tab == 2 and i == 6 and not tempo_buttons(v) and b[1])
     local lit = spec and not spec.disabled and (spec.text or spec.arrows)
     deckard.led("SCREEN_" .. i, lit and (((i == 5 and flash) or spec.selected) and "on" or "dim") or "off")
   end

@@ -60,6 +60,7 @@ pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
 mod analysis;
 #[cfg(test)]
 mod auto_length_tests;
+mod beat;
 #[cfg(test)]
 mod expr_lane_tests;
 #[cfg(test)]
@@ -7527,6 +7528,42 @@ impl App {
             S::ZoneMap(on) => self.sampling.zone_map = on,
             S::ZoneList(on) => self.sampling.zone_list = on,
             S::AddZones => self.add_zones(),
+            S::Meta(meta) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, _, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Zone Tempo") {
+                    self.status = format!("can't change the zone: {e}");
+                }
+            }
+            S::Tap(t) => {
+                let taps = &mut self.sampling.taps;
+                if taps.last().is_some_and(|l| t - l > beat::TAP_GAP || t < *l) {
+                    taps.clear();
+                }
+                taps.push(t);
+                let Some(bpm) = beat::tap_bpm(taps) else { return };
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                let (Some(meta), Some(s)) = (zone.meta, self.sampling.sample.as_ref()) else { return };
+                let meta = beat::with_bpm(&meta, bpm, s.frames.len() as f64 / s.rate.max(1) as f64);
+                // The taps of one count are one undo step.
+                let label = "Tap Tempo";
+                let mut d = doc.borrow_mut();
+                if self.sampling.taps.len() > 2 && d.undo_label() == Some(label) {
+                    d.undo();
+                }
+                if let Err(e) = d.set_zone_meta(self.group, self.sound, zi, &meta, label) {
+                    self.status = format!("can't change the zone: {e}");
+                }
+            }
+            S::ToProject(bpm) => {
+                let Some(doc) = self.doc.clone() else { return };
+                if let Err(e) = doc.borrow_mut().set_tempo(bpm) {
+                    self.status = format!("can't set the tempo: {e}");
+                }
+            }
             S::PlayMode(mode) => {
                 let Some(doc) = self.doc.clone() else { return };
                 let p = doc.borrow().project().clone();
@@ -8092,6 +8129,32 @@ impl App {
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
+            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt)) => {
+                use deckard_model::new_sampler::PlayMode;
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some(m) = z.meta else { return };
+                let seconds = self.sampling.sample.as_ref().map_or(0.0, |s| s.frames.len() as f64 / s.rate.max(1) as f64);
+                match a {
+                    Apply::PlayMode => {
+                        let mode = [PlayMode::Repitch, PlayMode::Sync, PlayMode::Keys][at.min(2)];
+                        if mode != PlayMode::Repitch && m.bpm.is_none() {
+                            return;
+                        }
+                        SamplingAct::PlayMode(mode)
+                    }
+                    Apply::Bpm => SamplingAct::Meta(beat::with_bpm(&m, value, seconds)),
+                    Apply::Root => SamplingAct::Meta(beat::with_root(&m, at.min(127) as u8)),
+                    _ => {
+                        let Some(r) = m.root else { return };
+                        let tune = beat::tune_for(r, m.cents, at.min(127) as i64).clamp(-36.0, 36.0);
+                        layout::apply_acts(self, vec![layout::Act::SetParam(t, "tune", tune)]);
+                        return;
+                    }
+                }
+            }
             Some(Apply::None) | None => return,
         };
         self.sampling_act(act);
@@ -8147,6 +8210,20 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::ScaleBpm(_) | C::ToProject => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some((m, bpm)) = z.meta.and_then(|m| Some((m.clone(), m.bpm?))) else { return };
+                match c {
+                    C::ScaleBpm(up) => {
+                        let seconds = self.sampling.sample.as_ref().map_or(0.0, |s| s.frames.len() as f64 / s.rate.max(1) as f64);
+                        S::Meta(beat::with_bpm(&m, if up { bpm * 2.0 } else { bpm / 2.0 }, seconds))
+                    }
+                    _ => S::ToProject(bpm),
+                }
+            }
             // A slice's pad: hear the slice (C63).
             C::Prehear(a, b) => {
                 if let Some(part) = self.sampling_part(a, b) {

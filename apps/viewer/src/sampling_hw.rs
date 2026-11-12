@@ -4,7 +4,7 @@
 //! each sets, as the Sampling view's footers have them:
 //!
 //! - EDIT: PLAY RANGE (START, END), SELECTION RANGE (START, END); the MK3 manual's two
-//!   pages.
+//!   pages. A New Sampler zone's also TEMPO / PITCH (MODE, BPM, ROOT, PLAYS AT).
 //! - ZONE: PLAY RANGE, LOOP (ACTIVE, START, END, XFADE), TUNE / MIX (TUNE, GAIN, PAN,
 //!   ROOT KEY), ENVELOPE (ATTACK, DECAY), MAP (KEY LO, KEY HI, VEL LO, VEL HI); the
 //!   manual's five pages.
@@ -43,6 +43,12 @@ pub enum Apply {
     Sensitivity,
     ZeroX,
     PatternMode,
+    /// A New Sampler zone's play mode (0 Repitch, 1 Sync, 2 Keys), tempo, root note, and
+    /// the note it plays at (its Tune).
+    PlayMode,
+    Bpm,
+    Root,
+    PlaysAt,
     /// Shown, not set.
     None,
 }
@@ -167,6 +173,38 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     // An Audio plug-in's take has no zones or slices.
     if take {
         return out;
+    }
+
+    // A New Sampler zone: how it plays, its tempo and its pitch (roadmap 1d; the
+    // display buttons have ×2, ½ and TO PROJECT under SHIFT).
+    let new_sampler = p.groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| x.new_sampler.is_some());
+    if let (true, Some(m)) = (new_sampler, z.meta.as_ref()) {
+        use deckard_model::new_sampler::PlayMode;
+        let modes = ["Repitch".to_string(), "Sync".into(), "Keys".into()];
+        let mode = match m.mode {
+            PlayMode::Repitch => 0,
+            PlayMode::Sync => 1,
+            PlayMode::Keys => 2,
+        };
+        let bpm = m.bpm.unwrap_or(120.0);
+        let bpm_text = m.bpm.map_or("-".into(), |b| format!("{b:.2}"));
+        let root = m.root.unwrap_or(z.root_key.clamp(0, 127) as u8);
+        let root_text = match m.root {
+            Some(r) if m.cents.abs() >= 1.0 => format!("{} {:+.0}", crate::analysis::note_name(r), m.cents),
+            Some(r) => crate::analysis::note_name(r),
+            None => "-".into(),
+        };
+        let mut knobs = vec![
+            (choice("Beat.Mode", "MODE", &modes, mode), Apply::PlayMode),
+            (knob("Beat.Bpm", "BPM", bpm_text, bpm, (20.0, 999.0), 0.01, 1.0 / 400.0), Apply::Bpm),
+            (knob("Beat.Root", "ROOT", root_text, f64::from(root), (0.0, 127.0), 1.0, TURN), Apply::Root),
+        ];
+        if let Some(r) = m.root {
+            let at = crate::beat::target_of(r, m.cents, z.tune).clamp(0, 127);
+            let text = crate::analysis::note_name(at as u8);
+            knobs.push((knob("Beat.PlaysAt", "PLAYS AT", text, at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));
+        }
+        page(&mut out, 1, "TEMPO / PITCH", knobs);
     }
 
     // ZONE.

@@ -568,6 +568,9 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "remove_zone" => C::RemoveZone(n(a, "a zone")?),
                     "focus_zone" => C::FocusZone(n(a, "a zone")?),
                     "prehear" => C::Prehear(frame(a) as usize, frame(b) as usize),
+                    "double_bpm" => C::ScaleBpm(true),
+                    "halve_bpm" => C::ScaleBpm(false),
+                    "to_project" => C::ToProject,
                     _ => return Err(mlua::Error::runtime(format!("no sampling call \"{what}\""))),
                 };
                 act(&sh, Action::SamplingCall(call));

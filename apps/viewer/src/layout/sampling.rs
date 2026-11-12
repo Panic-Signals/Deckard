@@ -103,6 +103,8 @@ pub struct SamplingState {
     peaks: Vec<[(f32, f32); 2]>,
     /// Where the focused zone plays (frames).
     pub playhead: Option<usize>,
+    /// TAP's times (seconds), the latest count.
+    pub taps: Vec<f64>,
 }
 
 impl Default for SamplingState {
@@ -128,6 +130,7 @@ impl Default for SamplingState {
             sample_key: None,
             peaks: Vec::new(),
             playhead: None,
+            taps: Vec::new(),
         }
     }
 }
@@ -228,6 +231,12 @@ pub enum SamplingAct {
     Record(RecordAct),
     /// How the focused New Sampler zone plays.
     PlayMode(deckard_model::new_sampler::PlayMode),
+    /// The focused New Sampler zone's tempo, length or root, set by hand.
+    Meta(deckard_model::new_sampler::ZoneMeta),
+    /// TAP, at this time (seconds).
+    Tap(f64),
+    /// The song's tempo set to the sample's.
+    ToProject(f64),
 }
 
 /// Recording controls.
@@ -368,51 +377,13 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         );
         // A New Sampler zone: what analysis found (its tempo, its root, how it plays).
         if !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some()) {
-            let r = painter.text(
+            painter.text(
                 Pos2::new(d.right() + 12.0, info.center().y),
                 Align2::LEFT_CENTER,
                 crate::analysis::readout(z.meta.as_ref()),
                 font(12.0),
                 white(200),
             );
-            if let Some(m) = &z.meta {
-                use deckard_model::new_sampler::PlayMode;
-                let mut x = r.right() + 12.0;
-                for (label, mode, tip) in [
-                    ("REPITCH", PlayMode::Repitch, "Pitch and speed together: Tune changes the length"),
-                    ("SYNC", PlayMode::Sync, "In time with the song: Tune keeps the length"),
-                    ("KEYS", PlayMode::Keys, "In time with the song, notes change the pitch and keep the length"),
-                ] {
-                    let b = Rect::from_min_size(Pos2::new(x, info.top() + 1.0), Vec2::new(8.0 + label.len() as f32 * 7.0, 14.0));
-                    x = b.right() + 4.0;
-                    let usable = mode == PlayMode::Repitch || m.bpm.is_some();
-                    let tip = if usable { tip } else { "No tempo: set one first" };
-                    let resp = ui.interact(b, ui.id().with(("samp-mode", label)), Sense::click()).on_hover_text(tip);
-                    let on = m.mode == mode;
-                    painter.rect_filled(
-                        b,
-                        2.0,
-                        if on {
-                            gcol
-                        } else if resp.hovered() && usable {
-                            S03
-                        } else {
-                            S01
-                        },
-                    );
-                    let col = if on {
-                        Color32::BLACK
-                    } else if usable {
-                        white(200)
-                    } else {
-                        white(80)
-                    };
-                    painter.text(b.center(), Align2::CENTER_CENTER, label, font(10.0), col);
-                    if resp.clicked() && usable && !on {
-                        acts.push(sact(SamplingAct::PlayMode(mode)));
-                    }
-                }
-            }
         }
         let tog = Rect::from_min_size(Pos2::new(info.right() - 60.0, info.top()), Vec2::new(50.0, 16.0));
         let resp = ui.interact(tog, ui.id().with("samp-stereo"), Sense::click()).on_hover_text("Show the two channels, or their mix");
@@ -435,13 +406,138 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             white(142),
         );
     }
-    let body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
+    let mut body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
+    // A New Sampler zone's tempo and pitch, over its EDIT and SLICE pages.
+    let new_sampler = !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some());
+    if let (true, 1 | 2, Some(z), Some(s)) = (new_sampler, tab, zone, &st.sample) {
+        let bar = Rect::from_min_size(body.min, Vec2::new(body.width(), 62.0));
+        beat_bar(ui, app, bar, z, zt, s.frames.len() as f64 / s.rate.max(1) as f64, gcol, acts);
+        body = Rect::from_min_max(Pos2::new(body.left(), bar.bottom() + 1.0), body.max);
+    }
     match tab {
         0 => record_tab(ui, app, p, body, gcol, acts),
         1 => edit_tab(ui, app, body, zi, zone, zt, take, gcol, acts),
         2 => slice_tab(ui, app, body, zi, zone, gcol, acts),
         _ => zone_tab(ui, app, p, body, zi, gcol, acts),
     }
+}
+
+/// A New Sampler zone's tempo and pitch (roadmap 1d), Serato's header: its BPM and
+/// length in beats (linked; ×2, ½, TAP, TO PROJECT), its root note (set by hand, it's
+/// locked) and the note it plays at (its Tune), and how it plays (REPITCH, SYNC, KEYS).
+#[allow(clippy::too_many_arguments)]
+fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Target, seconds: f64, gcol: Color32, acts: &mut Vec<Act>) {
+    use crate::beat;
+    use deckard_model::new_sampler::{PlayMode, ZoneMeta};
+    let painter = ui.painter_at(bar);
+    painter.rect_filled(bar, 0.0, S00);
+    let Some(m) = z.meta.clone() else {
+        painter.text(Pos2::new(bar.left() + 12.0, bar.center().y), Align2::LEFT_CENTER, "Analysing…", font(12.0), white(142));
+        return;
+    };
+    let y = bar.top() + 4.0;
+    let mut x = bar.left() + 12.0;
+    let meta = |m: ZoneMeta| sact(SamplingAct::Meta(m));
+    let bpm = m.bpm;
+    let (m1, m2) = (m.clone(), m.clone());
+    let mut fields = vec![field("BPM", bpm.map_or("—".into(), |b| format!("{b:.2}")), move |n| {
+        meta(beat::with_bpm(&m1, bpm.unwrap_or(120.0) + n * 0.1, seconds))
+    })];
+    fields[0].tip = "The sample's tempo: drag (Shift: finer)";
+    let beats = m.beats;
+    let mut bf = field("BEATS", beats.map_or("—".into(), |b| format!("{}", (b * 100.0).round() / 100.0)), move |n| {
+        let b = beats.map_or(4.0, f64::round) + n;
+        beat::with_beats(&m2, b.max(1.0), seconds).map_or(Act::Nothing, meta)
+    });
+    bf.tip = "The sample's length in beats: drag to fit it to whole beats (its tempo follows)";
+    fields.push(bf);
+    x = group_box(ui, &painter, x, y, "TEMPO", &fields, acts);
+    let small = |x: f32, row: f32, w: f32| Rect::from_min_size(Pos2::new(x, y + row * 28.0), Vec2::new(w, 25.0));
+    let has = bpm.is_some();
+    if tool_button(ui, &painter, small(x, 0.0, 36.0), "×2", has, false, "beat-x2") {
+        acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(0.0) * 2.0, seconds)));
+    }
+    if tool_button(ui, &painter, small(x, 1.0, 36.0), "½", has, false, "beat-half") {
+        acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(0.0) / 2.0, seconds)));
+    }
+    x += 40.0;
+    if tool_button(ui, &painter, small(x, 0.0, 70.0), "TAP", true, false, "beat-tap") {
+        acts.push(sact(SamplingAct::Tap(ui.input(|i| i.time))));
+    }
+    if tool_button(ui, &painter, small(x, 1.0, 70.0), "TO PROJECT", has, false, "beat-to-project") {
+        acts.push(sact(SamplingAct::ToProject(bpm.unwrap_or(120.0))));
+    }
+    x += 82.0;
+    // Pitch: the root (detected, or set and locked) and the note it plays at.
+    let root = m.root;
+    let m3 = m.clone();
+    let start_root = root.unwrap_or(z.root_key.clamp(0, 127) as u8);
+    let root_text = match root {
+        Some(r) if m.cents.abs() >= 1.0 => format!("{} {:+.0} ct", crate::analysis::note_name(r), m.cents).replace('-', "−"),
+        Some(r) => crate::analysis::note_name(r),
+        None => "—".into(),
+    };
+    let mut rf = field(if m.root_locked { "ROOT (SET)" } else { "ROOT" }, root_text, move |n| {
+        meta(beat::with_root(&m3, (i64::from(start_root) + n as i64).clamp(0, 127) as u8))
+    });
+    rf.tip = "The sample's root note: drag to set it (then analysis leaves it)";
+    let mut pitch = vec![rf];
+    if let Some(r) = root {
+        let cents = m.cents;
+        let target = beat::target_of(r, cents, z.tune);
+        let mut tf = field("PLAYS AT", crate::analysis::note_name(target.clamp(0, 127) as u8), move |n| {
+            Act::SetParam(zt, "tune", beat::tune_for(r, cents, (target + n as i64).clamp(0, 127)).clamp(-36.0, 36.0))
+        });
+        tf.tip = if m.mode == PlayMode::Repitch {
+            "The note it plays at: drag to re-tune it (in Repitch, Tune changes the length too)"
+        } else {
+            "The note it plays at: drag to re-tune it (its length stays)"
+        };
+        pitch.push(tf);
+    }
+    x = group_box(ui, &painter, x, y, "PITCH", &pitch, acts);
+    // How it plays.
+    x += 8.0;
+    for (k, (label, mode, tip)) in [
+        ("REPITCH", PlayMode::Repitch, "Pitch and speed together: Tune changes the length"),
+        ("SYNC", PlayMode::Sync, "In time with the song: Tune keeps the length"),
+        ("KEYS", PlayMode::Keys, "In time with the song; notes change the pitch and keep the length"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let b = Rect::from_min_size(Pos2::new(x + k as f32 * 74.0, y + 14.0), Vec2::new(70.0, 30.0));
+        let usable = mode == PlayMode::Repitch || has;
+        let on = m.mode == mode;
+        let resp = ui.interact(b, ui.id().with(("samp-mode", label)), Sense::click()).on_hover_text(if usable {
+            tip
+        } else {
+            "No tempo: set one first"
+        });
+        painter.rect_filled(
+            b,
+            3.0,
+            if on {
+                gcol
+            } else if resp.hovered() && usable {
+                S02
+            } else {
+                S01
+            },
+        );
+        let col = if on {
+            Color32::BLACK
+        } else if usable {
+            white(200)
+        } else {
+            white(60)
+        };
+        painter.text(b.center(), Align2::CENTER_CENTER, label, font(11.0), col);
+        if resp.clicked() && usable && !on {
+            acts.push(sact(SamplingAct::PlayMode(mode)));
+        }
+    }
+    let _ = app;
 }
 
 /// Timeline, waveform and zoom bar in `area` (for the Edit, Slice and Zone ▸ Sample
@@ -470,12 +566,37 @@ fn wave(
     let xf = |x: f32| (v0 + ((x - w.left()) / w.width()) as f64 * (v1 - v0)).clamp(0.0, len as f64);
     painter.rect_filled(timeline, 0.0, S00);
     painter.rect_filled(w, 0.0, S00);
+    // Timeline: a New Sampler zone with a tempo shows its bars and beats (lines through
+    // the waveform, bars brighter); others, seconds.
+    let grid = zone.meta.as_ref().and_then(|m| m.bpm.map(|b| crate::beat::beats_in(b, m.grid_offset as f64, sample.rate, v0, v1)));
+    if let Some(beats) = grid.as_ref().filter(|b| !b.is_empty()) {
+        let px = w.width() as f64 / beats.len() as f64;
+        for &(f, bar, beat) in beats {
+            let x = fx(f);
+            let downbeat = beat == 1;
+            if !downbeat && px < 6.0 {
+                continue;
+            }
+            painter.vline(x, w.y_range(), Stroke::new(1.0, if downbeat { white(40) } else { white(16) }));
+            painter.vline(x, (timeline.bottom() - if downbeat { 10.0 } else { 5.0 })..=timeline.bottom(), Stroke::new(1.0, white(120)));
+            if downbeat || px > 40.0 {
+                let label = if downbeat { format!("{bar}") } else { format!("{bar}.{beat}") };
+                painter.text(
+                    Pos2::new(x + 3.0, timeline.top() + 1.0),
+                    Align2::LEFT_TOP,
+                    label,
+                    font(9.0),
+                    white(if downbeat { 200 } else { 110 }),
+                );
+            }
+        }
+    }
     // Timeline: seconds.
     let secs = (v1 - v0) / sample.rate.max(1) as f64;
     let step =
         [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0].into_iter().find(|s| secs / s <= 10.0).unwrap_or(60.0);
     let mut t = (v0 / sample.rate as f64 / step).ceil() * step;
-    while t * (sample.rate as f64) < v1 {
+    while grid.as_ref().is_none_or(Vec::is_empty) && t * (sample.rate as f64) < v1 {
         let x = fx(t * sample.rate as f64);
         painter.vline(x, (timeline.bottom() - 8.0)..=timeline.bottom(), Stroke::new(1.0, white(92)));
         painter.text(

@@ -283,3 +283,65 @@ fn manual_shots() {
     feed(h.state_mut(), Chain::Sound(0, 0), 0, flat_e, 6, true);
     window(&mut h, "tuner.png", Some(CONTROL));
 }
+
+/// The New Sampler's EDIT page: a 4-bar 120 BPM loop, analysed, in Sync (roadmap 1d).
+#[test]
+#[ignore]
+fn new_sampler_shots() {
+    let dir = tempfile::tempdir().unwrap();
+    let rate = 44_100u32;
+    let beat = rate as usize / 2;
+    let frames: Vec<[f32; 2]> = (0..beat * 16)
+        .map(|i| {
+            let k = i % beat;
+            let hit = if k < 3000 { (1.0 - k as f32 / 3000.0) * ((k as f32 * 0.05).sin()) } else { 0.0 };
+            let tone = (i as f32 * 110.0 * std::f32::consts::TAU / rate as f32).sin() * 0.2;
+            [hit * 0.8 + tone, hit * 0.7 + tone]
+        })
+        .collect();
+    let file = dir.path().join("Bass Loop 120bpm A1.wav");
+    deckard_engine::edit::write_wav_channels(&file, &deckard_engine::sample::Sample { rate, frames }, 2).unwrap();
+    let mut doc = deckard_doc::Document::new_project().unwrap();
+    if doc.project().groups[0].sounds[0].slots.is_empty() {
+        doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+    }
+    let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+    doc.set_zones(0, 0, &[spec], "Load").unwrap();
+    doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+    let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+    let meta = deckard_model::new_sampler::ZoneMeta {
+        file: path,
+        mode: deckard_model::new_sampler::PlayMode::Sync,
+        bpm: Some(120.0),
+        bpm_source: deckard_model::new_sampler::BpmSource::Name,
+        beats: Some(16.0),
+        root: Some(45),
+        cents: -12.0,
+        ..Default::default()
+    };
+    doc.note_zone_meta(0, 0, 0, &meta).unwrap();
+    let mut app = App::default();
+    app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+    app.sampling_open = true;
+    let mut h = harness(app);
+    h.run_steps(10);
+    window(&mut h, "new-sampler-edit.png", None);
+    // The MK3: SAMPLE, EDIT, its TEMPO / PITCH page; then SHIFT.
+    use deckard_mk3::Event;
+    let mut press = |h: &mut Harness<'static, App>, name: &'static str, down: bool| {
+        let app = h.state_mut();
+        let v = app.surface_view();
+        for a in app.surface.event(&Event::Button(name, down), &v, Instant::now()) {
+            app.surface_act(a);
+        }
+        h.run_steps(2);
+    };
+    for name in ["BUTTON_SAMPLE", "BUTTON_SCREEN_2", "BUTTON_RIGHT", "BUTTON_RIGHT"] {
+        press(&mut h, name, true);
+        press(&mut h, name, false);
+    }
+    mk3(&mut h, "mk3-new-sampler-tempo.png");
+    press(&mut h, "BUTTON_SHIFT", true);
+    mk3(&mut h, "mk3-new-sampler-shift.png");
+    press(&mut h, "BUTTON_SHIFT", false);
+}

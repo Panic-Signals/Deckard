@@ -176,6 +176,41 @@ fn knobs_5_and_6_zoom_and_scroll_the_sample() {
     assert!(s.event(&Event::Button("CAP_5", true), &v, now).is_empty());
 }
 
+/// A New Sampler zone's EDIT tab: its TEMPO / PITCH page, and under SHIFT the
+/// display buttons double or halve its tempo or give it to the song.
+#[test]
+fn a_new_sampler_zone_has_its_tempo_on_edit() {
+    let (mut s, mut v) = (Surface::new(), sampled(1));
+    let k = |key: &str, name: &str, text: &str, value: f64| SamplingKnob {
+        key: key.into(),
+        name: name.into(),
+        text: text.into(),
+        value,
+        min: 0.0,
+        max: 999.0,
+        step: 1.0,
+        turn: 0.01,
+    };
+    v.sampling.pages[1].push(KnobPage {
+        name: "TEMPO / PITCH".into(),
+        knobs: vec![k("Beat.Mode", "MODE", "Sync", 1.0), k("Beat.Bpm", "BPM", "120.00", 120.0), k("Beat.Root", "ROOT", "A1", 45.0)],
+    });
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    assert!(s.screen_text(&v).iter().any(|t| t == "TEMPO / PITCH"));
+    assert_eq!(s.event(&Event::Knob(1, 0.01), &v, Instant::now()), [Action::SamplingKnob { page: 2, knob: 1, value: 121.0 }]);
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, Instant::now());
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO PROJECT"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SamplingCall(SamplingCall::ScaleBpm(true))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::ScaleBpm(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::ToProject)]);
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
+    // Without SHIFT, the edit functions as ever.
+    press(&mut s, &v, "BUTTON_SCREEN_6");
+    assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
+}
+
 #[test]
 fn record_starts_stops_and_cancels() {
     let (mut s, mut v) = (Surface::new(), sampled(0));
