@@ -59,6 +59,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("devices/maschine_jam/main.lua", include_str!("../lua/devices/maschine_jam/main.lua")),
     ("themes/maschine.lua", include_str!("../lua/themes/maschine.lua")),
     ("themes/palenight.lua", include_str!("../lua/themes/palenight.lua")),
+    ("themes/palenight_blue_green.lua", include_str!("../lua/themes/palenight_blue_green.lua")),
     ("themes/solarized_dark.lua", include_str!("../lua/themes/solarized_dark.lua")),
 ];
 
