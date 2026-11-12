@@ -199,6 +199,18 @@ ACID and `smpl` chunks, `key`. The engine still plays every zone as Repitch (1c)
 
 ### 1c. Sampler playback mode: **Repitch | Sync | Keys** (per zone)
 
+**Built 2026-11-12, Rendered engine** (plan `2026-11-12-sync-playback.md`): REPITCH / SYNC /
+KEYS on the Sampling page (one undo step); a Sync or Keys zone plays a Signalsmith render
+of its play range at the song's tempo with its Tune in it (`crates/engine/src/render.rs`,
+made on the app's render thread, kept up to ~400 MB, least recently used dropped). Until
+the render comes, and while the tempo moves away from it, the zone reads faster or slower
+so it stays in time (repitched); a new render takes over sounding notes where the music
+is. Keys renders ±12 semitones around the root, nearest first, and transposes by speed
+until a note's render is made. Not yet: the Live engine (Live plays as Rendered),
+grid-quantized starts, target note / Match key / Fine-tune to 0 ct, the root lock in the
+UI, modulated Tune and the pitch envelope in the stretcher (they still repitch), and
+exports waiting for renders.
+
 This covers what the Audio plug-in does, and is why the New Sampler can replace it for new work.
 - **Repitch:** today's behaviour, and the default for one-shots.
 - **Sync:** follows the song's tempo, and is **on by default for loops** dropped onto a pad

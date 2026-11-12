@@ -34,6 +34,13 @@ impl Document {
         Ok(())
     }
 
+    /// Change how zone `z` plays (its mode, its tempo or root set by hand): one undo
+    /// step, `label`.
+    pub fn set_zone_meta(&mut self, g: usize, s: usize, z: usize, meta: &ZoneMeta, label: &str) -> Result<(), String> {
+        let ops = self.zone_meta_ops(g, s, z, Some(meta))?;
+        if ops.is_empty() { Ok(()) } else { self.apply(label, ops) }
+    }
+
     /// The ops giving zone `z` this meta (none if it has it).
     pub(crate) fn zone_meta_ops(&self, g: usize, s: usize, z: usize, meta: Option<&ZoneMeta>) -> Result<Vec<Op>, String> {
         let path = self.owner(Target::Zone(g, s, z)).ok_or("no such zone")?;
@@ -101,6 +108,20 @@ mod tests {
         assert!(d.undo()); // the New Sampler goes; the meta stays
         assert_eq!(d.project().groups[0].sounds[0].new_sampler, None);
         assert_eq!(zone_meta(&d), Some(meta(&file)));
+    }
+
+    #[test]
+    fn set_zone_meta_is_undoable() {
+        let mut d = doc("/s/a.wav");
+        let file = path_of(&d);
+        d.note_zone_meta(0, 0, 0, &meta(&file)).unwrap();
+        let keys = ZoneMeta { mode: PlayMode::Keys, ..meta(&file) };
+        d.set_zone_meta(0, 0, 0, &keys, "Play Mode").unwrap();
+        assert_eq!(zone_meta(&d).map(|m| m.mode), Some(PlayMode::Keys));
+        assert!(d.undo());
+        assert_eq!(zone_meta(&d), Some(meta(&file)), "back to what analysis found");
+        assert!(d.redo());
+        assert_eq!(zone_meta(&d).map(|m| m.mode), Some(PlayMode::Keys));
     }
 
     #[test]

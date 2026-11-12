@@ -117,6 +117,7 @@ mod record;
 mod record_knobs;
 mod recorder;
 mod remote;
+mod render_jobs;
 mod sampler_ui;
 mod sampling_hw;
 #[cfg(test)]
@@ -1211,6 +1212,8 @@ pub struct App {
     /// last looked for at.
     analysis: analysis::Jobs,
     analysis_revision: Option<u64>,
+    /// The New Sampler's Sync and Keys renders being made.
+    renders: render_jobs::Renders,
     /// Where audio files dragged from the desktop are over the window, and those
     /// dropped this frame (they go to the sound row there: `drop_samples`).
     file_drag: Option<egui::Pos2>,
@@ -6983,6 +6986,7 @@ impl App {
         self.open_saved_zone();
         self.poll_stems();
         self.follow_analysis();
+        self.follow_renders();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
         let take_key = self.doc.as_ref().and_then(|doc| {
@@ -7256,6 +7260,25 @@ impl App {
         }
     }
 
+    /// The Sync and Keys renders engines asked for go to the render thread; those made
+    /// go to the samples, and playback is built again to play them (its voices carry on
+    /// where the music is).
+    fn follow_renders(&mut self) {
+        for job in self.samples.wanted_renders() {
+            self.renders.want(job);
+        }
+        let made = self.renders.poll();
+        if made.is_empty() {
+            return;
+        }
+        for (job, r) in made {
+            self.samples.add_render(&job, r);
+        }
+        // Built in full: the sounds' zones change, not the document.
+        self.built = None;
+        self.seen_revision = u64::MAX;
+    }
+
     /// A finished (or failed, or cancelled) stem separation.
     fn poll_stems(&mut self) {
         let Some(result) = self.stems.as_ref().and_then(stems::Job::poll) else { return };
@@ -7504,6 +7527,16 @@ impl App {
             S::ZoneMap(on) => self.sampling.zone_map = on,
             S::ZoneList(on) => self.sampling.zone_list = on,
             S::AddZones => self.add_zones(),
+            S::PlayMode(mode) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                let Some(meta) = zone.meta else { return };
+                let meta = deckard_model::new_sampler::ZoneMeta { mode, ..meta };
+                if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Play Mode") {
+                    self.status = format!("can't change how the zone plays: {e}");
+                }
+            }
             S::RemoveZone(i) => {
                 let Some(doc) = self.doc.clone() else { return };
                 let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());

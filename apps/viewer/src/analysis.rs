@@ -134,7 +134,7 @@ pub fn note_name(note: u8) -> String {
 }
 
 /// The Sampling page's line for a New Sampler zone: "120.00 BPM · 16 beats · Root A1
-/// −12 ct · SYNC", or "Analysing…".
+/// −12 ct", or "Analysing…" (the play mode shows on its buttons).
 pub fn readout(meta: Option<&ZoneMeta>) -> String {
     let Some(m) = meta else { return "Analysing…".into() };
     let mut parts = Vec::new();
@@ -148,11 +148,6 @@ pub fn readout(meta: Option<&ZoneMeta>) -> String {
         Some(r) => parts.push(format!("Root {}", note_name(r))),
         None => parts.push("No root".into()),
     }
-    parts.push(match m.mode {
-        PlayMode::Repitch => "REPITCH".into(),
-        PlayMode::Sync => "SYNC".into(),
-        PlayMode::Keys => "KEYS".into(),
-    });
     parts.join(" · ")
 }
 
@@ -181,7 +176,7 @@ mod tests {
     #[test]
     fn the_readout() {
         let a = Analysis { tempo: tempo(120.0, 8.0), root: Some(Root { note: 45, cents: -12.4, confidence: 1.0 }), seconds: 8.0 };
-        assert_eq!(readout(Some(&meta_from(&a, "f", "x.wav"))), "120.00 BPM · 16 beats · Root A1 −12 ct · SYNC");
+        assert_eq!(readout(Some(&meta_from(&a, "f", "x.wav"))), "120.00 BPM · 16 beats · Root A1 −12 ct");
         assert_eq!(readout(None), "Analysing…");
     }
 
@@ -250,5 +245,24 @@ mod app_tests {
         assert!((meta.bpm.unwrap() - 120.0).abs() < 0.05, "{meta:?}");
         assert_eq!(meta.mode, PlayMode::Sync);
         assert_eq!(app.doc.as_ref().unwrap().borrow().undo_labels().len(), steps);
+
+        // In Sync, playback asks for its render at the song's tempo; made on the render
+        // thread, it goes to the samples and playback is built again to play it.
+        let build = |app: &mut App| {
+            let d = app.doc.as_ref().unwrap().clone();
+            let mut p = d.borrow().project().clone();
+            p.tempo = 100.0;
+            drop(deckard_engine::Engine::new(&p, None, 48_000, deckard_engine::Mode::Arrangement, &mut app.samples));
+        };
+        build(&mut app);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.seen_revision != u64::MAX {
+            app.follow_renders();
+            assert!(std::time::Instant::now() < until, "no render");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.built.is_none(), "built again in full");
+        build(&mut app);
+        assert!(app.samples.wanted_renders().is_empty(), "it plays the render");
     }
 }

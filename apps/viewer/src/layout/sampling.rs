@@ -226,6 +226,8 @@ pub enum SamplingAct {
     ZoneMap(bool),
     ZoneList(bool),
     Record(RecordAct),
+    /// How the focused New Sampler zone plays.
+    PlayMode(deckard_model::new_sampler::PlayMode),
 }
 
 /// Recording controls.
@@ -366,13 +368,51 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         );
         // A New Sampler zone: what analysis found (its tempo, its root, how it plays).
         if !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some()) {
-            painter.text(
+            let r = painter.text(
                 Pos2::new(d.right() + 12.0, info.center().y),
                 Align2::LEFT_CENTER,
                 crate::analysis::readout(z.meta.as_ref()),
                 font(12.0),
                 white(200),
             );
+            if let Some(m) = &z.meta {
+                use deckard_model::new_sampler::PlayMode;
+                let mut x = r.right() + 12.0;
+                for (label, mode, tip) in [
+                    ("REPITCH", PlayMode::Repitch, "Pitch and speed together: Tune changes the length"),
+                    ("SYNC", PlayMode::Sync, "In time with the song: Tune keeps the length"),
+                    ("KEYS", PlayMode::Keys, "In time with the song, notes change the pitch and keep the length"),
+                ] {
+                    let b = Rect::from_min_size(Pos2::new(x, info.top() + 1.0), Vec2::new(8.0 + label.len() as f32 * 7.0, 14.0));
+                    x = b.right() + 4.0;
+                    let usable = mode == PlayMode::Repitch || m.bpm.is_some();
+                    let tip = if usable { tip } else { "No tempo: set one first" };
+                    let resp = ui.interact(b, ui.id().with(("samp-mode", label)), Sense::click()).on_hover_text(tip);
+                    let on = m.mode == mode;
+                    painter.rect_filled(
+                        b,
+                        2.0,
+                        if on {
+                            gcol
+                        } else if resp.hovered() && usable {
+                            S03
+                        } else {
+                            S01
+                        },
+                    );
+                    let col = if on {
+                        Color32::BLACK
+                    } else if usable {
+                        white(200)
+                    } else {
+                        white(80)
+                    };
+                    painter.text(b.center(), Align2::CENTER_CENTER, label, font(10.0), col);
+                    if resp.clicked() && usable && !on {
+                        acts.push(sact(SamplingAct::PlayMode(mode)));
+                    }
+                }
+            }
         }
         let tog = Rect::from_min_size(Pos2::new(info.right() - 60.0, info.top()), Vec2::new(50.0, 16.0));
         let resp = ui.interact(tog, ui.id().with("samp-stereo"), Sense::click()).on_hover_text("Show the two channels, or their mix");
