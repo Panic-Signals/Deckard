@@ -20,7 +20,6 @@ enum Job {
     Query(u64, Query),
     Favorite(PathBuf, bool),
     Saved(PathBuf),
-    Entry(deckard_library::Item),
     Scan(Vec<Root>),
     Forget(PathBuf),
 }
@@ -101,7 +100,10 @@ impl Browser {
             .name("library".into())
             .spawn(move || {
                 let mut lib = match Library::new(ni, &own) {
-                    Ok(l) => l,
+                    Ok(mut l) => {
+                        l.set_reader(nks_item);
+                        l
+                    }
                     Err(e) => {
                         // Answer every query with the error.
                         while let Ok(job) = rx.recv() {
@@ -173,13 +175,6 @@ impl Browser {
     /// A file just saved: listed at once.
     pub fn add_saved(&mut self, path: &Path) {
         self.send(Job::Saved(path.to_path_buf()));
-        self.refresh();
-    }
-
-    /// A file DECKARD just saved, listed under User at once as `item` describes it
-    /// (for files whose tags DECKARD's index can't read itself, such as NKS presets).
-    pub fn add_item(&mut self, item: deckard_library::Item) {
-        self.send(Job::Entry(item));
         self.refresh();
     }
 
@@ -308,7 +303,6 @@ fn run(lib: &mut Library, job: Job) {
     match job {
         Job::Favorite(p, on) => lib.set_favorite(&p, on),
         Job::Saved(p) => lib.add_saved(&p),
-        Job::Entry(item) => lib.add_entry(item),
         Job::Scan(roots) => {
             let _ = lib.scan(&roots);
         }
@@ -416,6 +410,27 @@ pub fn list_folder(dir: &Path) -> Vec<Entry> {
         .collect();
     out.sort_by_key(|e| (!e.dir, e.path.file_name().map(|n| n.to_string_lossy().to_lowercase())));
     out
+}
+
+/// An NKS preset as the library lists it: its tags, and its plug-in as product.
+fn nks_item(path: &Path) -> Option<Item> {
+    use deckard_plugins::nks;
+    let p = nks::parse(&std::fs::read(path).ok()?).ok()?;
+    let fx = p.info.device_type == "FX" || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("nksfx"));
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    Some(Item {
+        vendor: if p.info.vendor.is_empty() { p.vendor.unwrap_or_default() } else { p.info.vendor },
+        kind: if fx { deckard_library::Kind::Effect } else { deckard_library::Kind::Instrument },
+        user: true,
+        name: if p.info.name.is_empty() { stem } else { p.info.name },
+        path: path.to_path_buf(),
+        product: p.name,
+        bank: p.info.bankchain.into_iter().filter(|b| !b.is_empty()).collect(),
+        types: p.info.types,
+        characters: p.info.characters,
+        author: p.info.author,
+        ..Item::default()
+    })
 }
 
 /// A file as a library item (its kind from its extension or name).

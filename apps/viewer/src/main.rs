@@ -8593,13 +8593,14 @@ impl App {
     }
 
     /// The folders DECKARD's library indexes: Maschine's user folders (Maschine 3's,
-    /// and Maschine 2's beside it), listed under User, and the library folders from
+    /// and Maschine 2's beside it) and NI's User Content (NKS presets), listed under User, and the library folders from
     /// Preferences, under Factory, each its folder's name (less " Library") as product.
     fn library_roots(&self) -> Vec<deckard_library::user::Root> {
         use deckard_library::user::Root;
         let user = self.user_dir();
         let m2 = user.parent().map(|p| p.join("Maschine 2"));
-        let mut roots: Vec<Root> = [Some(user), m2]
+        let content = self.user_content_dir();
+        let mut roots: Vec<Root> = [Some(user), m2, Some(content)]
             .into_iter()
             .flatten()
             .filter(|p| p.is_dir())
@@ -8665,6 +8666,11 @@ impl App {
         let slot = doc.project().groups.get(g)?.sounds.get(s)?.slots.get(k)?;
         let plugin = slot.plugin.clone()?;
         let id = PluginId::parse(&plugin.id, &plugin.name)?;
+        // DECKARD's own modules are stored as VST3 plug-ins, but they're internal
+        // modules: their presets are Maschine's own files, which NI's apps load.
+        if deckard_plugins::native::find(&id.cid).is_some() {
+            return None;
+        }
         let ids = deckard_plugins::nks::PluginIds {
             vst3: (id.format == Format::Vst3).then_some(id.cid),
             vst2: if id.format == Format::Vst2 { Some(plugin.id.rsplit(':').next()?.parse().ok()?) } else { None },
@@ -8742,19 +8748,7 @@ impl App {
         match written {
             Ok(()) => {
                 self.status = format!("saved {}", s.path.display());
-                self.browser.add_item(deckard_library::Item {
-                    vendor: ids.vendor,
-                    kind: if instrument { deckard_library::Kind::Instrument } else { deckard_library::Kind::Effect },
-                    user: true,
-                    name: info.name,
-                    path: s.path.clone(),
-                    product: Some(plugin.name),
-                    bank: info.bankchain.into_iter().filter(|b| !b.is_empty()).collect(),
-                    types: info.types,
-                    characters: info.characters,
-                    author: info.author,
-                    ..Default::default()
-                });
+                self.browser.add_saved(&s.path);
                 self.saved.insert(what, s);
                 true
             }

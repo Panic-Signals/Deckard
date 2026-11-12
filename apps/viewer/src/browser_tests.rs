@@ -579,6 +579,47 @@ fn save_preset_of_an_effect_plugin_writes_nksfx() {
     assert_eq!(p.info.device_type, "FX");
 }
 
+/// A preset saved before the browser was ever opened is listed, with its tags, when it
+/// is: NI's User Content is one of the user folders the library scans.
+#[test]
+fn an_nks_preset_saved_before_browsing_is_listed() {
+    let (_tmp, dir) = temp();
+    let mut h = crate::tests::blank_harness(false);
+    h.state_mut().user_dir_override = Some(dir.join("Maschine 3"));
+    let ((g, s), _) = sound_with_hosted_plugins(&mut h, &dir);
+    save_as(&mut h, deckard_doc::FileItem::Slot(g, s, 0), false, "Early Lead");
+    assert!(dir.join("User Content/Synth/Early Lead.nksf").is_file());
+    let roots = h.state().library_roots();
+    h.state_mut().browser.start(None, dir.join("library.db3"), roots);
+    h.state_mut().browser.wait();
+    act(&mut h, BrowseAct::User(true));
+    act(&mut h, BrowseAct::Kind(Kind::Instrument));
+    assert_eq!(names(&h), ["Early Lead"]);
+    let item = h.state().browser.results.items[0].clone();
+    assert_eq!(item.types, [vec!["Drums".to_string(), "Kick".to_string()]]);
+    assert_eq!(item.product.as_deref(), Some("Synth"), "filed under its plug-in");
+}
+
+/// DECKARD's own modules are stored like VST3 plug-ins, but their presets aren't NKS
+/// (NI's apps can't load them): Zhora's saves as a Maschine `.mxinst`, as an
+/// internal module's does in Maschine, and is listed under User.
+#[test]
+fn save_preset_of_a_deckard_module_writes_mxinst() {
+    let (_tmp, mut h, dir) = saving_new();
+    {
+        let app = h.state_mut();
+        (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, crate::layout::ChainTab::Sound, false);
+        app.add_slot(crate::layout::AddWhat::Plugin(crate::layout::native_entry(&deckard_plugins::zhora::CLASS)));
+    }
+    save_as(&mut h, deckard_doc::FileItem::Slot(0, 0, 0), false, "My Zhora");
+    assert!(!dir.join("User Content").exists(), "no NKS preset");
+    let file = dir.join("Maschine 3/Plug-ins/My Zhora.mxinst");
+    assert!(file.is_file(), "{} saved", file.display());
+    act(&mut h, BrowseAct::User(true));
+    act(&mut h, BrowseAct::Kind(Kind::Instrument));
+    assert!(names(&h).contains(&"My Zhora".to_string()), "{:?}", names(&h));
+}
+
 /// BROWSE on the controller shows the app's library, and its LOAD loads into the
 /// focused sound (the 4-D encoder moves the focus first).
 #[test]

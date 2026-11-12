@@ -240,6 +240,11 @@ impl Library {
         let _ = self.own.add_entry(&item, 0);
     }
 
+    /// Read NKS presets in user folders with `reader` ([`user::UserIndex::set_reader`]).
+    pub fn set_reader(&mut self, reader: user::Reader) {
+        self.own.set_reader(reader);
+    }
+
     pub fn set_favorite(&mut self, path: &std::path::Path, on: bool) {
         let _ = self.own.set_favorite(path, on);
     }

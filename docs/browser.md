@@ -31,7 +31,8 @@ Status: **working**, October 2026 (design: `docs/superpowers/specs/2026-10-22-br
     does: `.nksf` (instrument) or `.nksfx` (effect) in NI's `User Content/<plug-in>/`,
     its Library the plug-in's name by default, a random `uuid`, the knob pages shown
     and the plug-in's state as a `.vstpreset`. An AU's preset and an internal
-    module's stay `.mxinst` / `.mxfx`. (`crates/plugins/src/nks.rs`, `write`.)
+    module's (DECKARD's own, such as Zhora, though they're stored like VST3 plug-ins)
+    stay `.mxinst` / `.mxfx`. (`crates/plugins/src/nks.rs`, `write`.)
   - Save writes the same file again.
 - **Preferences ▸ Library:** folders of sound packs, listed under Factory (each its
   folder's name, less " Library", as the product), for when NI's library isn't installed.
@@ -55,8 +56,11 @@ Status: **working**, October 2026 (design: `docs/superpowers/specs/2026-10-22-br
     - Types come from `k_category` (three levels);
     - Characters come from `k_mode`.
 - **DECKARD's index:** `library.db3` in DECKARD's settings folder. It holds Maschine's
-  user folders, the library folders and what DECKARD saves.
+  user folders, NI's `User Content`, the library folders and what DECKARD saves.
   - Maschine files are tagged from their own tag block.
+  - NKS presets in the user folders are tagged from their `NISI` chunk, their plug-in
+    as product (the app gives the index its reader). Those in library folders are
+    left to NI's index.
   - Samples are untagged: a Loop when their name gives a tempo, else a One-shot.
 - **The tag block** of every Maschine file (`NISD/108`, `NI::SOUND::SoundInfo2`;
   `crates/mxprj/src/sound_info.rs`) holds:
