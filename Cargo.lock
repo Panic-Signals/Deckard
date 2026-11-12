@@ -2170,6 +2170,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckard-analysis"
+version = "0.1.0"
+dependencies = [
+ "deckard-library",
+ "deckard-plugins",
+]
+
+[[package]]
 name = "deckard-doc"
 version = "0.1.0"
 dependencies = [

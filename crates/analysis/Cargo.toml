@@ -1,0 +1,9 @@
+[package]
+name = "deckard-analysis"
+version = "0.1.0"
+edition = "2024"
+description = "What a sample is: its tempo, its root note (the sampler's analysis, off the audio thread)"
+
+[dependencies]
+deckard-plugins = { path = "../plugins" }
+deckard-library = { path = "../library" }

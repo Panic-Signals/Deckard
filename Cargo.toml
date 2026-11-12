@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mxprj", "crates/model", "crates/doc", "apps/viewer", "crates/lua-host", "crates/engine", "crates/plugins", "apps/player", "crates/mk3", "crates/jam", "crates/nwl", "crates/mi", "crates/stems", "crates/stretch", "crates/library", "crates/link", "crates/surface"]
+members = ["crates/mxprj", "crates/model", "crates/doc", "apps/viewer", "crates/lua-host", "crates/engine", "crates/plugins", "apps/player", "crates/mk3", "crates/jam", "crates/nwl", "crates/mi", "crates/stems", "crates/stretch", "crates/library", "crates/link", "crates/surface", "crates/analysis"]
 
 # The display renderer runs every time a screen changes: fast even in dev builds.
 [profile.dev.package.deckard-nwl]
@@ -14,4 +14,8 @@ opt-level = 3
 
 # Zhora's pitch detector has to keep up with the input, in dev builds too.
 [profile.dev.package.deckard-plugins]
+opt-level = 3
+
+# Tests analyse seconds of audio: fast even in dev builds.
+[profile.dev.package.deckard-analysis]
 opt-level = 3
