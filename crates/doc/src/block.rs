@@ -528,9 +528,8 @@ impl Document {
         self.native_pressure = on;
     }
 
-    /// The file bytes `archived` (Maschine's part, saved) with this document's DECKARD
-    /// block, or without one if there's nothing to keep.
-    pub(crate) fn with_block(&self, archived: &[u8]) -> Result<Vec<u8>, String> {
+    /// The DECKARD block as it is saved now, or `None` if there's nothing to keep.
+    pub(crate) fn block_payload(&self) -> Option<Vec<u8>> {
         let mut b = block_of(&self.project, &|id| self.expression(id).cloned());
         b.pressure = if self.native_pressure { Vec::new() } else { self.made_pressure(std::mem::take(&mut b.pressure)) };
         b.touch = self
@@ -584,7 +583,12 @@ impl Document {
             || !b.cv_routes.is_empty()
             || !b.audio_offsets.is_empty())
         .then(|| encode(&b));
-        mxprj::container::set_root_child(archived, DOMAIN, ITEM, FRAME, payload.as_deref())
+        payload
+    }
+
+    /// `archived` (Maschine's part) with the DECKARD block `payload` ([`Document::block_payload`]).
+    pub(crate) fn put_block(archived: &[u8], payload: Option<&[u8]>) -> Result<Vec<u8>, String> {
+        mxprj::container::set_root_child(archived, DOMAIN, ITEM, FRAME, payload)
     }
 
     /// Where the project was left, as saved ([`SavedScreen`]).
