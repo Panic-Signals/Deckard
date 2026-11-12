@@ -1563,7 +1563,49 @@ fn dark_style(ctx: &egui::Context) {
         s.text_styles.insert(Monospace, FontId::monospace(12.0));
         s.visuals.panel_fill = Color32::BLACK;
         s.visuals.override_text_color = Some(white(245));
+        // Room inside windows, dialogs, popups and tooltips.
+        s.spacing.window_margin = egui::Margin::same(16);
+        s.spacing.menu_margin = egui::Margin::same(6);
     });
+}
+
+/// Every menu's style: egui's (no frames on the items), with room around each item's
+/// text and between the items.
+pub fn menu_style(s: &mut egui::Style) {
+    egui::containers::menu::menu_style(s);
+    // Most of the room is the frame's, so items line up with the labels, fields and
+    // checkboxes some menus have (whose text isn't padded like a button's).
+    s.spacing.menu_margin = egui::Margin::symmetric(14, 8);
+    s.spacing.button_padding = Vec2::new(4.0, 4.0);
+    s.spacing.interact_size.y = 26.0;
+    s.spacing.item_spacing = Vec2::new(8.0, 2.0);
+    s.spacing.icon_spacing = 8.0;
+}
+
+/// A menu that opens on a right-click, in [`menu_style`].
+pub trait ContextMenu {
+    fn menu_on_right_click(&self, add: impl FnOnce(&mut Ui)) -> Option<egui::InnerResponse<()>>;
+}
+
+impl ContextMenu for Response {
+    fn menu_on_right_click(&self, add: impl FnOnce(&mut Ui)) -> Option<egui::InnerResponse<()>> {
+        egui::Popup::context_menu(self).style(menu_style).show(add)
+    }
+}
+
+/// A drop-down list whose items are spaced like a menu's.
+pub fn combo(id: impl egui::AsIdSalt) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id).popup_style(menu_style.into())
+}
+
+/// Preferences and the other windows: room between their rows and inside their buttons
+/// and fields.
+pub fn dialog_style(ui: &mut Ui) {
+    let s = ui.spacing_mut();
+    s.item_spacing = Vec2::new(10.0, 8.0);
+    s.button_padding = Vec2::new(10.0, 4.0);
+    s.interact_size.y = 24.0;
+    s.icon_spacing = 6.0;
 }
 
 /// Draws the browser header icon (three equidistant shelf lines on the left and a magnifying glass on the right).
@@ -1652,7 +1694,7 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 ));
                 let menus = crate::menu::menus(app);
                 let mut chosen = Vec::new();
-                egui::Popup::menu(&resp).show(|ui| {
+                egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| {
                     ui.set_min_width(150.0);
                     for (title, items) in &menus {
                         ui.menu_button(*title, |ui| crate::menu::show(ui, items, &mut chosen));
@@ -2150,7 +2192,7 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
         painter.rect_filled(sig.shrink(3.0), 3.0, white(16));
     }
     value(sig, &format!("{}/{}", p.numerator, p.denominator), "SIG");
-    egui::Popup::menu(&sig_resp).show(|ui| time_signature_menu(ui, p, acts));
+    egui::Popup::menu(&sig_resp).style(crate::layout::menu_style).show(|ui| time_signature_menu(ui, p, acts));
     painter.text(Pos2::new(position.left() + 8.0, y), Align2::LEFT_CENTER, position_string(p, pos), font(12.0), white(245));
     label(&painter, scene_cell, 2.0, &scene, 12.0, scene_col);
 }
@@ -2175,12 +2217,11 @@ fn pill_menu_at(ui: &mut Ui, rect: Rect, text: String, chevron: bool, stay_open:
         }
     }
     let rt = egui::RichText::new(text.clone()).size(11.0).color(Color32::TRANSPARENT);
-    let mut resp = if stay_open {
-        let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        MenuButton::new(rt).config(config).ui(&mut child, add).0
-    } else {
-        child.menu_button(rt, add).response
-    };
+    let mut config = MenuConfig::new().style(menu_style);
+    if stay_open {
+        config = config.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    }
+    let mut resp = MenuButton::new(rt).config(config).ui(&mut child, add).0;
     resp.rect = pill;
     let p = ui.painter();
     let hot = resp.hovered() || resp.has_focus();
@@ -2721,6 +2762,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         );
         // (Stays open for Scene Tempo's checkbox and BPM; its other items close it.)
         egui::Popup::context_menu(&resp)
+            .style(menu_style)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| scene_menu(ui, p, s, app.scene_tempo_available(), acts));
     }
@@ -2813,7 +2855,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             if resp.secondary_clicked() {
                 acts.push(Act::FocusPattern(g, pi));
             }
-            resp.context_menu(|ui| pattern_menu(ui, p, g, pi, acts));
+            resp.menu_on_right_click(|ui| pattern_menu(ui, p, g, pi, acts));
         }
         // The empty places, between the group's patterns and below them: double-click for
         // a new one there.
@@ -2886,7 +2928,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         } else if resp.clicked() || resp.secondary_clicked() {
             acts.push(Act::FocusGroup(g));
         }
-        resp.context_menu(|ui| group_menu(ui, app, p, g, acts));
+        resp.menu_on_right_click(|ui| group_menu(ui, app, p, g, acts));
     }
     // "+" after the last group: a new empty group (MK3 manual, "Creating Groups").
     let plus = Rect::from_min_size(Pos2::new(tiles.left() + p.groups.len() as f32 * IDEA_W - gx, tiles.top()), Vec2::new(27.0, TILE_H));
@@ -3192,7 +3234,7 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
     } else if resp.clicked() || resp.secondary_clicked() {
         acts.push(focus);
     }
-    resp.context_menu(|ui| match target {
+    resp.menu_on_right_click(|ui| match target {
         Target::Sound(g, s) => sound_menu(ui, app, p, g, s, acts),
         Target::Group(g) => group_menu(ui, app, p, g, acts),
         _ => {}
@@ -3605,7 +3647,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         } else if resp.clicked() {
             acts.push(Act::LaunchSection(i));
         }
-        resp.context_menu(|ui| section_menu(ui, p, i, acts));
+        resp.menu_on_right_click(|ui| section_menu(ui, p, i, acts));
     }
     clip_lanes(ui, app, p, tracks, rows_top - y0, &x_of, ppb, acts);
     // Section ends, over the headers: drag to make a section longer or shorter.
@@ -3737,7 +3779,7 @@ fn clip_lanes(ui: &mut Ui, app: &App, p: &Project, tracks: Rect, top: f32, x_of:
                     );
                 }
             }
-            body.on_hover_text("A clip: drag to move it, drag its end to resize, right-click for more").context_menu(|ui| {
+            body.on_hover_text("A clip: drag to move it, drag its end to resize, right-click for more").menu_on_right_click(|ui| {
                 ui.set_min_width(150.0);
                 item(ui, "Duplicate", true, || Act::Clip(g, c, ClipAct::Duplicate), acts);
                 item(ui, "Double", true, || Act::Clip(g, c, ClipAct::Double), acts);
@@ -4672,7 +4714,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         if macro_tabs && let Some((level, ..)) = &macro_view {
             let ch = channel::macro_channel(*level);
             for (i, resp) in tab_resps.iter().enumerate().take(names.len() - 1) {
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     let id = ui.id().with(("macro-page-name", i));
                     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| names[i].clone());
                     ui.label("Name");
@@ -4758,7 +4800,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             let ch = channel::macro_channel(*level);
             let (page, slot) = (*page, i);
             let assigned = doc.macro_pages(ch).get(page).and_then(|p| p.macros.get(slot)).is_some_and(|m| m.target.is_some());
-            strip_resp.context_menu(|ui| assign::macro_slot_menu(ui, app, (ch, page, slot), assigned, acts));
+            strip_resp.menu_on_right_click(|ui| assign::macro_slot_menu(ui, app, (ch, page, slot), assigned, acts));
             if !assigned {
                 // An empty macro: a click picks what it controls.
                 let body = Rect::from_min_max(Pos2::new(r.left(), strip.bottom()), r.max);
@@ -4771,13 +4813,15 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name.as_ref(), font(10.0), white(90));
                 painter.circle_stroke(Pos2::new(r.center().x, r.top() + 42.0), 18.0, Stroke::new(1.0, white(30)));
                 plus_glyph(&painter, Pos2::new(r.center().x, r.top() + 42.0), 14.0, white(if resp.hovered() { 200 } else { 70 }));
-                egui::Popup::menu(&resp).show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
+                egui::Popup::menu(&resp)
+                    .style(crate::layout::menu_style)
+                    .show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
                 continue;
             }
         } else if let Some((t, f)) = edit.as_ref().and_then(channel::knob_param) {
-            strip_resp.context_menu(|ui| param_macro_menu(ui, doc, t, f, acts));
+            strip_resp.menu_on_right_click(|ui| param_macro_menu(ui, doc, t, f, acts));
         } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginIn(_, slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
-            strip_resp.context_menu(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
+            strip_resp.menu_on_right_click(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
         }
         // A parameter a macro controls: the macro icon at the top right.
         if macro_view.is_none() && edit.and_then(|e| edit_param_oid(app, doc, e)).is_some_and(|id| macro_targets.contains(&id)) {
@@ -4881,7 +4925,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             // modulation.
             if modulation::mod_target(*edit).is_some() {
                 let e = *edit;
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     if ui.button("Remove Modulation").on_hover_text("Remove this knob's modulation from every pattern").clicked() {
                         acts.push(Act::ClearModulation(e));
                         ui.close();
@@ -5270,7 +5314,7 @@ fn selector(
 /// returns the one picked.
 pub fn choice_list<'a>(resp: &egui::Response, options: impl IntoIterator<Item = &'a str>, cur: usize) -> Option<usize> {
     let mut picked = None;
-    egui::Popup::menu(resp).show(|ui| {
+    egui::Popup::menu(resp).style(crate::layout::menu_style).show(|ui| {
         ui.set_min_width(resp.rect.width().max(110.0));
         for (k, o) in options.into_iter().enumerate() {
             let text = egui::RichText::new(o).size(12.0);
@@ -5422,7 +5466,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let active = slot.active;
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     if plugin && ui.button("Open Plug-in Window").clicked() {
                         acts.push(Act::OpenSlotEditor(i));
                         ui.close();
@@ -5462,7 +5506,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let resp = resp.on_hover_text("Add an instrument, effect or plug-in");
                 // A sound has one instrument, in its first slot.
                 let instruments = slots.is_empty();
-                egui::Popup::menu(&resp).show(|ui| add_menu(ui, app, instruments, acts));
+                egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| add_menu(ui, app, instruments, acts));
             }
         }
     }
@@ -6624,7 +6668,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let paste_at = ui.data(|d| d.get_temp::<Pos2>(menu_id)).map_or(crate::clipboard::PasteAt::Keys, |pos| {
         crate::clipboard::PasteAt::Mouse { tick: tick_at(pos.x) as i64, pitch: app.piano_roll.then(|| hi - row_at(pos.y)) }
     });
-    resp.context_menu(|ui| event_menu(ui, app, paste_at, acts));
+    resp.menu_on_right_click(|ui| event_menu(ui, app, paste_at, acts));
     // ⌘X / ⌘C / ⌘V (macOS sends them as Cut, Copy and Paste).
     if !ui.ctx().egui_wants_keyboard_input() && app.key_focus == KeyFocus::Events {
         let (cut, copy, paste) = ui.input_mut(|i| {
@@ -7050,6 +7094,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         egui::Window::new("MIDI Lanes").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(
             ui.ctx(),
             |ui| {
+                dialog_style(ui);
                 ui.label(egui::RichText::new(format!("Lanes for {sound}")).weak());
                 ui.add_space(4.0);
                 let shown: Vec<Lane> =

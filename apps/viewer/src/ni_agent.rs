@@ -248,6 +248,7 @@ pub fn ask_about(
     }
     let (mut quitting, mut declined) = (false, false);
     egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
+        crate::layout::dialog_style(ui);
         ui.set_width(420.0);
         ui.label(egui::RichText::new(words.title).strong());
         ui.add_space(4.0);

@@ -459,7 +459,7 @@ pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, act
             if resp.clicked() {
                 acts.push(Act::FocusLfo(l.pad));
             }
-            resp.context_menu(|ui| {
+            resp.menu_on_right_click(|ui| {
                 if ui.button("Remove").clicked() {
                     acts.push(Act::RemoveLfo(l.pad));
                     ui.close();
