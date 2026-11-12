@@ -465,6 +465,117 @@ fn the_mk3_variation_button_shows_the_grooves_variation() {
     assert_eq!(names.get(cur).map(String::as_str), Some("Variation"));
 }
 
+/// The Groove page last shown is every sound's: other sounds show it, and VARIATION
+/// goes back to it after other pages (the Keyboard's or the Pads'). It's saved with
+/// the project.
+#[test]
+fn the_groove_page_last_shown_is_every_sounds_and_variations() {
+    use deckard_lua_host::state::ControlRequest::GroovePage;
+    let mut app = crate::App::default();
+    app.new_project();
+    app.update_slot_view();
+    app.control_request(GroovePage(1));
+    app.update_slot_view();
+    assert_eq!(app.prop_page, 1, "Variation the first time");
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(2)]);
+    app.update_slot_view();
+    // Another sound: Generate still.
+    app.sound = 1;
+    app.update_slot_view();
+    assert_eq!((app.prop_set, app.prop_page), (2, 2));
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(0)]);
+    app.update_slot_view();
+    // Away to the plug-ins (as the Keyboard or Pads would leave it), back to the
+    // first sound, and VARIATION: Swing, the page last shown.
+    app.channel = false;
+    app.sound = 0;
+    app.update_slot_view();
+    app.control_request(GroovePage(1));
+    app.update_slot_view();
+    assert_eq!((app.prop_set, app.prop_page), (2, 0));
+    // The Groove set picked in the software: the same page.
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropSet(0)]);
+    app.update_slot_view();
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropSet(2)]);
+    assert_eq!(app.prop_page, 0);
+    // Saved with the project.
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(2)]);
+    app.update_slot_view();
+    app.store_screen();
+    let bytes = app.doc.as_ref().unwrap().borrow().to_bytes().unwrap();
+    let mut again = crate::App::default();
+    again.show_document(deckard_doc::Document::from_bytes(bytes, None));
+    again.update_slot_view();
+    again.control_request(GroovePage(1));
+    assert_eq!(again.prop_page, 2);
+}
+
+/// The Groove knobs follow small turns as the MK3 sends them (a thousandth of the
+/// knob's travel at a time): a percentage and Euclidean Fills keep moving instead of
+/// rounding back to where they were.
+#[test]
+fn groove_knobs_follow_small_turns() {
+    use deckard_lua_host::state::ControlRequest::{GroovePage, Turn};
+    let mut app = crate::App::default();
+    app.new_project();
+    app.update_slot_view();
+    app.control_request(GroovePage(1));
+    let get = |app: &crate::App, f: &str| app.groove_setting(0, 0, f).unwrap_or(0.0);
+    // Variation's Velocity Amount: a fifth of the travel, 20 %, in 100 small turns.
+    for _ in 0..100 {
+        app.control_request(Turn { pos: 0, inc: 0.002, fine: false });
+    }
+    let v = get(&app, "sequence_variation/velocity_amount");
+    assert!((19.0..=20.0).contains(&v) && v.fract() == 0.0, "whole and on with the knob: {v}");
+    // Generate in Euclidean mode: Fills a step on in a short turn.
+    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(2)]);
+    crate::layout::apply_acts(
+        &mut app,
+        vec![crate::layout::Act::SetParam(deckard_doc::Target::Sound(0, 0), "sequence_generation/mode", 1.0)],
+    );
+    let fills = get(&app, "sequence_generation/fills").max(5.0);
+    for _ in 0..20 {
+        app.control_request(Turn { pos: 2, inc: 0.002, fine: false });
+    }
+    assert_eq!(get(&app, "sequence_generation/fills"), fills + 1.0);
+}
+
+/// Euclidean's Root knob (knob 6) is the sound's base key: turned, a semitone a short
+/// turn; Generate then writes the rhythm on it.
+#[test]
+fn euclidean_root_knob_sets_the_note_generate_writes() {
+    use deckard_lua_host::state::ControlRequest::{GroovePage, Turn};
+    let mut app = crate::App::default();
+    app.new_project();
+    app.update_slot_view();
+    app.control_request(GroovePage(1));
+    crate::layout::apply_acts(
+        &mut app,
+        vec![
+            crate::layout::Act::PropPage(2),
+            crate::layout::Act::SetParam(deckard_doc::Target::Sound(0, 0), "sequence_generation/mode", 1.0),
+        ],
+    );
+    let doc = app.doc.clone().unwrap();
+    let knob = |app: &crate::App| {
+        let (_, _, pg) = crate::layout::channel_page(app, &doc.borrow()).unwrap();
+        pg.slots[5].clone().map(|(name, text, ..)| (name.to_string(), text))
+    };
+    let base = || doc.borrow().project().groups[0].sounds[0].channel.base_key;
+    assert_eq!(knob(&app).map(|k| k.0), Some("NOTE".to_string()));
+    let start = base();
+    // Two semitones' worth of small turns.
+    for _ in 0..8 {
+        app.control_request(Turn { pos: 5, inc: 0.002, fine: false });
+    }
+    assert_eq!(base(), start + 2);
+    doc.borrow_mut().add_pattern(0, 0, "P").unwrap();
+    app.pattern = 0;
+    app.groove(crate::layout::GrooveButton::Generate);
+    let pitches: Vec<i64> = doc.borrow().project().groups[0].patterns[app.pattern].notes.iter().map(|n| n.pitch).collect();
+    assert!(!pitches.is_empty() && pitches.iter().all(|&p| p == start + 2), "{pitches:?}");
+}
+
 /// The scale picked in the pattern editor is the one Generate's Random keeps to, with
 /// no controller connected (the controller's Keyboard scale is the same one).
 #[test]

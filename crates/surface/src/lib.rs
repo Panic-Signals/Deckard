@@ -547,6 +547,38 @@ pub struct ControlView {
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
+    /// The sound's Generate page in Euclidean mode: its circle on the right screen.
+    pub euclid: Option<EuclidView>,
+    /// The sound's Generate page in Random mode: its notes on the right screen.
+    pub random: Option<RandomView>,
+}
+
+/// What Random Generate made, as the right screen's piano roll draws it: the
+/// pattern's grid steps (`steps`, `beat` of them a beat), the sound's notes there
+/// (step, pitch, velocity), the pitches shown (`range`, low to high), where playback is
+/// (steps, fractional; `None` when stopped), and the knobs that shape the odds:
+/// Probability (%), Velocity's amount (%), Distribution (0 Even, 1 Natural, 2 Skewed).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RandomView {
+    pub steps: usize,
+    pub beat: usize,
+    pub notes: Vec<(usize, i64, i64)>,
+    pub position: Option<f64>,
+    pub probability: f64,
+    pub velocity_amount: f64,
+    pub distribution: usize,
+    pub range: (i64, i64),
+}
+
+/// A Euclidean rhythm as the right screen draws it: which of its steps get a note
+/// (`hits`, already turned by Rotate), its Fills and Rotate, and where playback is in
+/// it (steps from the first, fractional; `None` when stopped).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EuclidView {
+    pub hits: Vec<bool>,
+    pub fills: usize,
+    pub rotate: usize,
+    pub position: Option<f64>,
 }
 
 /// What the Tuner effect's screen shows: the note heard and its `cents` above it

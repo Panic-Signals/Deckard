@@ -1437,7 +1437,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     continue;
                 }
                 if let Target::Sound(g, s) = t
-                    && field.starts_with("sequence_")
+                    && (field.starts_with("sequence_") || field == "base_key")
                 {
                     app.live_groove(g, s, field);
                 }

@@ -3518,6 +3518,77 @@ fn the_tuner_effect_draws_its_dial_on_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
+/// CHANNEL's Generate page in Euclidean mode: its rhythm as a circle on the right
+/// screen (Fills over Steps in the middle), the step playing lit, and the hand turning
+/// as playback moves.
+#[test]
+fn euclidean_generate_draws_its_circle_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    (v.control.modules_visible, v.control.page_group, v.control.page_groups) = (false, 2, 4);
+    v.control.pages = vec!["Swing".into(), "Variation".into(), "Generate".into()];
+    v.control.page = 2;
+    let plain = s.picture(&v);
+    let hits = vec![true, false, true, false, true, true, false, true];
+    v.control.euclid = Some(crate::EuclidView { hits, fills: 5, rotate: 0, position: None });
+    let stopped = s.picture(&v);
+    assert_ne!(plain, stopped);
+    let text = s.screen_text(&v);
+    for t in ["5", "8", "Euclidean", "ROTATE 0"] {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    let amber = |p: &[u8; 4]| p[0] > 200 && p[1] > 150 && p[2] < 110;
+    let lit = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && amber(p)).count();
+    assert_eq!(lit(&stopped), 0, "nothing playing, nothing lit");
+    v.control.euclid.as_mut().unwrap().position = Some(0.25);
+    let first = s.picture(&v);
+    assert!(lit(&first) > 50, "the step playing and the hand: {}", lit(&first));
+    v.control.euclid.as_mut().unwrap().position = Some(4.5);
+    let later = s.picture(&v);
+    assert_ne!(first, later, "the hand turns");
+    v.control.euclid.as_mut().unwrap().hits.rotate_left(1);
+    assert_ne!(later, s.picture(&v), "Rotate turns the hits");
+    assert_eq!(s.error(), None);
+}
+
+/// CHANNEL's Generate page in Random mode: its notes as a piano roll on the right
+/// screen, Probability and how many notes on the bar, the notes under the playhead lit.
+#[test]
+fn random_generate_draws_its_roll_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    (v.control.modules_visible, v.control.page_group, v.control.page_groups) = (false, 2, 4);
+    v.control.pages = vec!["Swing".into(), "Variation".into(), "Generate".into()];
+    v.control.page = 2;
+    let plain = s.picture(&v);
+    let notes = vec![(0, 60, 100), (0, 64, 100), (5, 67, 90), (9, 72, 110)];
+    let r = crate::RandomView {
+        steps: 16,
+        beat: 4,
+        notes,
+        probability: 55.0,
+        velocity_amount: 10.0,
+        distribution: 1,
+        range: (60, 72),
+        ..Default::default()
+    };
+    v.control.random = Some(r);
+    let stopped = s.picture(&v);
+    assert_ne!(plain, stopped);
+    let text = s.screen_text(&v);
+    for t in ["Random", "55 %  ·  4 notes", "C3", "C4", "VELOCITY · NATURAL"] {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    // (Amber in the roll only, not the corner's curve.)
+    let amber = |p: &[u8; 4]| p[0] > 150 && p[1] > 100 && p[2] < 90;
+    let lit = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (480..826).contains(&(i % 960)) && amber(p)).count();
+    assert_eq!(lit(&stopped), 0, "nothing playing, nothing lit");
+    v.control.random.as_mut().unwrap().position = Some(5.5);
+    let playing = s.picture(&v);
+    assert!(lit(&playing) > 150, "the playhead and the note under it: {}", lit(&playing));
+    v.control.random.as_mut().unwrap().position = Some(12.5);
+    assert_ne!(playing, s.picture(&v), "the playhead moves");
+    assert_eq!(s.error(), None);
+}
+
 /// Zhora's display buttons 5 to 8 are TUNE, CHECK, LIVE and HOLD, lit as the view says.
 #[test]
 fn zhora_display_buttons_5_to_8_are_tune_check_live_hold() {
