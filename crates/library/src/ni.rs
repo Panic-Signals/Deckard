@@ -24,16 +24,22 @@ pub struct NiIndex {
     unindexed: std::cell::RefCell<Option<Vec<Item>>>,
 }
 
-/// Where Maschine 3 keeps its index on this machine, if it's there.
+/// Where Maschine keeps its index on this machine, if it's there: Maschine 3's, else
+/// Maschine 2's (the same tables, for a user who has only Maschine 2).
 pub fn default_path() -> Option<PathBuf> {
-    let p = if cfg!(target_os = "macos") {
-        PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/Native Instruments/Maschine 3/komplete.db3")
+    let base = if cfg!(target_os = "macos") {
+        PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/Native Instruments")
     } else if cfg!(windows) {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Native Instruments\\Maschine 3\\komplete.db3")
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Native Instruments")
     } else {
         return None;
     };
-    p.is_file().then_some(p)
+    index_in(&base)
+}
+
+/// The index under NI's folder `base`, Maschine 3's before Maschine 2's.
+fn index_in(base: &Path) -> Option<PathBuf> {
+    ["Maschine 3", "Maschine 2"].into_iter().map(|m| base.join(m).join("komplete.db3")).find(|p| p.is_file())
 }
 
 /// The favourites NI's products share, beside the products' own folders
@@ -346,4 +352,23 @@ fn uri_path(path: &Path) -> String {
 /// Only the deepest of each type (an item is tagged with "Drums" and "Drums › Kick").
 fn deepest(all: Vec<Vec<String>>) -> Vec<Vec<String>> {
     all.iter().filter(|t| !all.iter().any(|u| u.len() > t.len() && u.starts_with(t))).cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn index_falls_back_to_maschine_2() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path();
+        assert_eq!(index_in(base), None);
+        let m2 = base.join("Maschine 2").join("komplete.db3");
+        std::fs::create_dir_all(m2.parent().unwrap()).unwrap();
+        std::fs::write(&m2, b"").unwrap();
+        assert_eq!(index_in(base), Some(m2));
+        let m3 = base.join("Maschine 3").join("komplete.db3");
+        std::fs::create_dir_all(m3.parent().unwrap()).unwrap();
+        std::fs::write(&m3, b"").unwrap();
+        assert_eq!(index_in(base), Some(m3));
+    }
 }
