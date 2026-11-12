@@ -111,12 +111,59 @@ Sampler**; the real name comes later.
 
 ---
 
+## The UI: on par with Serato Sample, in the software and on the MK3 (decided 2026-11-12)
+
+Every phase ships with its UI at this level; a feature isn't done until it is. The bar is
+Serato Sample's clarity and speed, in DECKARD's own look (clean room: match the quality,
+not the trade dress).
+
+**Software**
+- **Two waveforms:** an overview of the whole file (cues, playhead; click to jump) above a
+  zoomed main waveform (drag to scrub; +/−, the wheel and keys to zoom; **Freeze** stops it
+  following the playhead while editing; **Grid** mode shows the beat grid and its tools).
+- **Waveforms coloured by sound:** colour from frequency content (lows warm, highs cool),
+  so kicks, bass and hats read at a glance; it recolours live as stem lanes mute.
+- **Cues as colours:** each cue or slice has a colour, its pad shows it, and its region is
+  shaded in it on both waveforms; empty pads are dark grey. The parameter panel takes the
+  selected cue's colour, white when several are selected (edits apply to all).
+- **Direct manipulation:** press an empty pad while it plays to catch a cue; drag a cue's
+  handles; drag a cue onto another pad to move or swap it, Alt-drag to copy; drop a file
+  anywhere to load it.
+- **Readouts up top, big:** BPM (with ×2, ½, TAP), key, root note and its lock, target
+  note, SYNC, the playback mode.
+- **Fast:** waveform peaks precomputed at several zoom levels when the sample loads, so
+  zoom and scroll stay at the display's frame rate; analysis shows progress inline and
+  never blocks the UI.
+- **Checked side by side:** each phase's UI is reviewed with screenshots next to Serato
+  Sample's for the same task (load, sync, chop, edit a cue).
+
+**MK3** (two colour screens, RGB pads, the 4-D encoder)
+- **Left screen:** the overview strip above the zoomed waveform, cues in their colours, the
+  playhead moving smoothly. **Right screen:** the selected cue's parameters on Knobs 1–8,
+  headed in its colour.
+- **Pads light in their cue colours**, dim when empty, flash on play; pressing an empty pad
+  while the sample plays catches a cue there.
+- **The 4-D encoder** scrubs (turn), zooms (SHIFT + turn) and moves between cues (push
+  left/right); in Grid mode it slips the grid.
+- **Stem lanes** stacked on a screen, with their mutes on the buttons (Phase 2b).
+- **Same bar for speed:** waveform images are drawn from the same precomputed peaks;
+  check the frame rate on the hardware (`crates/nwl`).
+
+**Phase 1d builds this base** (both waveforms, colouring, readouts, cue colours, the MK3
+pages); later phases add to it.
+
+---
+
 ## Phase 1: Beat matching (top priority)
 
 **Goal:** drop any loop or break onto a pad and it plays at the song's tempo, on its grid,
 in key, in the New Sampler.
 
 ### 1a. Tempo analysis (`crates/analysis`, new, runs off the audio thread)
+
+**Built 2026-11-12** (`crates/analysis`: `tempo`, `root`, `root_with_name`;
+`deckard_library::names::note_in_name`; plan `2026-11-12-sample-analysis.md`). Tested on
+synthetic drum loops and tones; a corpus of real loops is still to come.
 
 - **Onset novelty:** spectral flux. Reuse and improve `edit.rs::detect_positions`.
 - **Tempo estimate:** a tempogram or autocorrelation, searched over 60–200 BPM, then folded

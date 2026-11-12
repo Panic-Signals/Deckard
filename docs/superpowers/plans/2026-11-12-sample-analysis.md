@@ -49,8 +49,8 @@ octave (−2..8). Single-letter tokens without an octave count only in upper cas
 C.wav" yes, "a.wav" no). The last match in the name wins (names end in the note: "Piano
 F#2.wav"). The extension is ignored.
 
-- [ ] Tests: `notes_from_names`: "Piano F#2.wav" → (6, Some(2)); "Bass_Db1_soft.wav" → (1, Some(1)); "Lead C.wav" → (0, None); "Kick 01.wav" → None; "Bass Amber.wav" → None; "Pad E-1.aif" → (4, Some(-1)); "Cello a3.wav" → (9, Some(3)); "drums.wav" → None; "Synth [120] G3.wav" → (7, Some(3)).
-- [ ] Run `mise exec -- cargo test -p deckard-library names` — PASS. Commit.
+- [x] Tests: `notes_from_names`: "Piano F#2.wav" → (6, Some(2)); "Bass_Db1_soft.wav" → (1, Some(1)); "Lead C.wav" → (0, None); "Kick 01.wav" → None; "Bass Amber.wav" → None; "Pad E-1.aif" → (4, Some(-1)); "Cello a3.wav" → (9, Some(3)); "drums.wav" → None; "Synth [120] G3.wav" → (7, Some(3)).
+- [x] Run `mise exec -- cargo test -p deckard-library names` — PASS. Commit.
 
 ### Task 2: The crate and tempo
 
@@ -90,8 +90,8 @@ pub(crate) fn onset::envelope(frames: &[[f32; 2]], rate: u32) -> (Vec<f32>, f64 
   noise, 150 ms, deterministic LCG) on 2 and 4, closed hats (8 ms noise bursts) on 8ths;
   `tone(hz, seconds, rate, harmonics)`.
 
-- [ ] Tests (`tempo.rs`): `finds_the_tempo_of_a_drum_loop` (4 bars at 93, 120, 140 BPM, 44.1 kHz: |bpm − true| < 0.05, source Loop); `the_tempo_of_an_unlooped_range` (4 bars + 300 ms tail at 120: within 1 BPM, source Audio); `folds_fast_tempos_and_keeps_the_other` (174 BPM: bpm 87 ± 0.1, candidates[0] ≈ 174); `swing_doesnt_throw_it` (120 BPM, 8ths swung 60 %: within 0.5); `the_hint_wins` (120 BPM audio, hint 100: bpm 100, Hint, confidence 1); `a_single_hit_has_no_tempo` (one kick: None); `silence_and_tiny_inputs` (empty, 10 frames, 2 s of zeros, rate 0: None); `other_rates_agree` (120 BPM at 22 050 and 96 000: within 0.05); `the_offset_finds_the_first_beat` (the loop rotated by 1/4 beat: offset within one hop of 1/4 beat's frames).
-- [ ] Run `mise exec -- cargo test -p deckard-analysis tempo` — PASS. Commit.
+- [x] Tests (`tempo.rs`): `finds_the_tempo_of_a_drum_loop` (4 bars at 93, 120, 140 BPM, 44.1 kHz: |bpm − true| < 0.05, source Loop); `the_tempo_of_an_unlooped_range` (4 bars + 300 ms tail at 120: within 1 BPM, source Audio); `folds_fast_tempos_and_keeps_the_other` (174 BPM: bpm 87 ± 0.1, candidates[0] ≈ 174); `swing_doesnt_throw_it` (120 BPM, 8ths swung 60 %: within 0.5); `the_hint_wins` (120 BPM audio, hint 100: bpm 100, Hint, confidence 1); `a_single_hit_has_no_tempo` (one kick: None); `silence_and_tiny_inputs` (empty, 10 frames, 2 s of zeros, rate 0: None); `other_rates_agree` (120 BPM at 22 050 and 96 000: within 0.05); `the_offset_finds_the_first_beat` (the loop rotated by 1/4 beat: offset within one hop of 1/4 beat's frames).
+- [x] Run `mise exec -- cargo test -p deckard-analysis tempo` — PASS. Commit.
 
 ### Task 3: Root note
 
@@ -114,10 +114,10 @@ pub fn root_with_name(frames: &[[f32; 2]], rate: u32, name: &str) -> Option<Root
   name's, else the detected note's nearest octave of that class, else 3 (C3 = 60). Cents
   from detection when its class matches, else 0. Confidence 1.
 
-- [ ] Tests: `finds_a_sine`s root (110 Hz → 45, |cents| < 2); `finds_the_cents` (110·2^(−12/1200) → 45, cents −12 ± 2); `a_rich_tone_keeps_its_fundamental` (sawtooth-like, 10 harmonics, 130.81 Hz → 48); `the_longest_note_wins` (3 s E2 + 1 s G2 → 40); `drums_have_no_root` (Task 2's drum loop → None); `silence_and_tiny_inputs` (None); `other_rates_agree` (220 Hz at 96 000 → 57); `the_name_sets_the_class` (220 Hz sine named "Pad A2.wav" → 57 conf 1; named "Pad C.wav" → 60 (C nearest 57's octave: 60), cents 0).
-- [ ] Run `mise exec -- cargo test -p deckard-analysis root` — PASS. Commit.
+- [x] Tests: `finds_a_sine`s root (110 Hz → 45, |cents| < 2); `finds_the_cents` (110·2^(−12/1200) → 45, cents −12 ± 2); `a_rich_tone_keeps_its_fundamental` (sawtooth-like, 10 harmonics, 130.81 Hz → 48); `the_longest_note_wins` (3 s E2 + 1 s G2 → 40); `drums_have_no_root` (Task 2's drum loop → None); `silence_and_tiny_inputs` (None); `other_rates_agree` (220 Hz at 96 000 → 57); `the_name_sets_the_class` (220 Hz sine named "Pad A2.wav" → 57 conf 1; named "Pad C.wav" → 60 (C nearest 57's octave: 60), cents 0).
+- [x] Run `mise exec -- cargo test -p deckard-analysis root` — PASS. Commit.
 
 ### Task 4: Finish
 
-- [ ] Roadmap: mark 1a built (tempo, root, names); note the corpus is synthetic for now.
-- [ ] `mise run lint` PASS; `mise exec -- cargo test -p deckard-analysis -p deckard-library` all ok; `mise exec -- cargo clippy -p deckard-analysis` clean.
+- [x] Roadmap: mark 1a built (tempo, root, names); note the corpus is synthetic for now.
+- [x] `mise run lint` PASS; `mise exec -- cargo test -p deckard-analysis -p deckard-library` all ok; `mise exec -- cargo clippy -p deckard-analysis` clean.
