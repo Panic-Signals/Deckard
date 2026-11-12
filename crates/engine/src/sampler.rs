@@ -260,6 +260,46 @@ pub struct ZoneRt {
     /// Zone fade-in and fade-out, frames (§6.5).
     pub fade_in: usize,
     pub fade_out: usize,
+    /// A New Sampler zone in Sync or Keys: kept in time with the song.
+    pub sync: Option<ZoneSync>,
+}
+
+/// How a New Sampler zone in Sync or Keys plays (roadmap 1c): its sample (usually a
+/// [`crate::render`] of it, its Tune already in) is in time with the song at `tempo`,
+/// and reads `song tempo / tempo` frames a frame, so it stays in time whatever the
+/// song does (repitched, until a render for the new tempo comes). Sync plays every
+/// note the same; Keys transposes by the note, from `notes` (renders by distance from
+/// the root, the same length) when it has the note, else by reading faster or slower.
+#[derive(Clone, Default)]
+pub struct ZoneSync {
+    pub tempo: f64,
+    pub keys: bool,
+    pub notes: Vec<(i64, Arc<Sample>)>,
+}
+
+impl ZoneSync {
+    /// The render for `offset` semitones from the root, in Keys.
+    fn note(&self, offset: i64) -> Option<usize> {
+        if self.keys { self.notes.iter().position(|(o, _)| *o == offset) } else { None }
+    }
+}
+
+impl ZoneRt {
+    /// The frames voice `variant` reads: a Keys note's render, or the zone's sample.
+    fn data(&self, variant: Option<usize>) -> &[[f32; 2]] {
+        match variant.and_then(|i| self.sync.as_ref()?.notes.get(i)) {
+            Some((_, s)) => &s.frames,
+            None => &self.sample.frames,
+        }
+    }
+
+    /// Speed at song tempo `tempo` (1 unless in Sync or Keys).
+    fn speed(&self, tempo: f64) -> f64 {
+        match &self.sync {
+            Some(s) if s.tempo > 0.0 && tempo > 0.0 => tempo / s.tempo,
+            _ => 1.0,
+        }
+    }
 }
 
 /// The Sampler's fields modulation can drive ([`Settings::set_field`]).
@@ -857,6 +897,8 @@ struct Voice {
     /// Pitch in octaves, without glide and modulation.
     octaves: f32,
     rate_ratio: f64,
+    /// The Keys render it reads ([`ZoneSync::notes`]), if any.
+    variant: Option<usize>,
     inc: u32,
     /// Static gain (zone gain, velocity → volume) and zone pan, per channel.
     gain: [f32; 2],
@@ -920,6 +962,8 @@ pub struct SamplerRt {
     synth_glide: Option<crate::glide::Glide>,
     /// The Audio plug-in's loop playing instead of zones.
     audio: Option<Box<crate::audio_loop::LoopRt>>,
+    /// The song's tempo (Sync and Keys zones follow it).
+    tempo: f64,
 }
 
 impl SamplerRt {
@@ -953,6 +997,7 @@ impl SamplerRt {
             synth: None,
             synth_glide: None,
             audio: None,
+            tempo: 0.0,
         }
     }
 
@@ -966,6 +1011,7 @@ impl SamplerRt {
     /// Where the song is (beats) and its tempo, at the start of the next render (the
     /// Audio plug-in follows it).
     pub fn set_song(&mut self, beats: f64, tempo: f64) {
+        self.tempo = tempo;
         if let Some(a) = self.audio.as_mut() {
             a.set_song(beats, tempo);
         }
@@ -1127,7 +1173,32 @@ impl SamplerRt {
         };
         for mut v in old.voices.drain(..) {
             match (old.zones.get(v.zone), self.zones.get(v.zone)) {
-                (Some(a), Some(b)) if same(a, b) => {}
+                (Some(a), Some(b)) if same(a, b) && a.sync.is_none() == b.sync.is_none() => {
+                    v.variant =
+                        b.sync.as_ref().and_then(|sy| v.variant.and_then(|i| a.sync.as_ref()?.notes.get(i)).and_then(|(o, _)| sy.note(*o)));
+                }
+                // A Sync or Keys zone given another render (a new tempo, or the first):
+                // its voices carry on from the same place in the music, in the new one.
+                (Some(a), Some(b)) if a.sync.is_some() && b.sync.is_some() && a.sample.rate == b.sample.rate => {
+                    let (la, lb) = ((a.play.1 - a.play.0).max(1) as f64, (b.play.1 - b.play.0) as f64);
+                    let at = (v.stream.pos - a.play.0 as i64) as f64 / la;
+                    v.stream.pos = b.play.0 as i64 + (at * lb) as i64;
+                    v.stream.play = (b.play.0 as i64, b.play.1 as i64);
+                    if v.stream.looped.is_some() {
+                        v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
+                    }
+                    v.stream.fade_in = b.fade_in as i64;
+                    v.stream.fade_out = b.fade_out as i64;
+                    v.stream.x_fade = b.x_fade as i64;
+                    v.stream.fading = 0;
+                    let offset = v.note - b.root;
+                    v.variant = b.sync.as_ref().and_then(|sy| sy.note(offset));
+                    let keys = b.sync.as_ref().is_some_and(|sy| sy.keys);
+                    v.octaves = if keys && v.variant.is_none() { offset as f32 / 12.0 } else { 0.0 };
+                    if (v.stream.pos.max(0) as usize) >= b.sample.frames.len() {
+                        continue;
+                    }
+                }
                 (Some(a), Some(b)) if a.sample.rate == b.sample.rate && (v.stream.pos.max(0) as usize) < b.sample.frames.len() => {
                     v.stream.play = (b.play.0 as i64, b.play.1 as i64);
                     v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
@@ -1150,6 +1221,7 @@ impl SamplerRt {
 
     /// Note-on (§9). `id` identifies the note for its note-off.
     pub fn note_on(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context) {
+        self.tempo = ctx.tempo;
         if let Some(a) = self.audio.as_mut() {
             a.set_song(ctx.beats, ctx.tempo);
             a.note_on(id, note);
@@ -1295,7 +1367,16 @@ impl SamplerRt {
                 if sync == 1 { (hz, s.lfo_phase as f64) } else { (hz, s.lfo_phase as f64 + ratio * ctx.beats.rem_euclid(1.0 / ratio)) }
             }
         };
-        let octaves = z.tune / 12.0 + s.tune + (note - z.root) as f32 / 12.0;
+        // Sync and Keys: Tune is in the render (the length stays); Keys transposes by
+        // the note, from its render if there is one.
+        let (octaves, variant) = match &z.sync {
+            None => (z.tune / 12.0 + s.tune + (note - z.root) as f32 / 12.0, None),
+            Some(sy) => match sy.note(note - z.root) {
+                Some(i) => (0.0, Some(i)),
+                None if sy.keys => ((note - z.root) as f32 / 12.0, None),
+                None => (0.0, None),
+            },
+        };
         let mut v = Voice {
             id,
             note,
@@ -1315,6 +1396,7 @@ impl SamplerRt {
             lfo_seed: self.seed,
             octaves,
             rate_ratio: z.sample.rate as f64 / self.sr,
+            variant,
             inc: 65536,
             gain,
             pan_mod: 0.0,
@@ -1334,7 +1416,7 @@ impl SamplerRt {
             sustained: false,
         };
         // Prime the interpolator: x[n] .. x[n+4] are the first frames.
-        let data = &z.sample.frames;
+        let data = z.data(variant);
         for k in 3..8 {
             v.hist[k] = v.stream.next(data);
         }
@@ -1467,6 +1549,7 @@ impl SamplerRt {
         let comp_target = s.comp.clamp(0.0, 1.0) * 50.0;
         let mw = self.mod_wheel;
         let bend = self.bend * s.bend_range;
+        let tempo = self.tempo;
         let engine_gain = if s.mode == 1 { 0.8637621 } else { 1.0 };
         let quantize = s.mode >= 1;
         for f in 0..frames {
@@ -1497,7 +1580,7 @@ impl SamplerRt {
                     let lfo = v.lfo(s.lfo_type);
                     let env = v.modenv.level;
                     let octaves = v.octaves + glide + s.lfo_pitch * lfo_scale * lfo + s.env_pitch * env + bend;
-                    let ratio = 2f64.powf(octaves as f64) * v.rate_ratio;
+                    let ratio = 2f64.powf(octaves as f64) * v.rate_ratio * z.speed(tempo);
                     let ratio = if s.mode == 1 { ratio.min(1.49831) } else { ratio };
                     v.inc = (ratio * 65536.0).round().clamp(1.0, 65536.0 * 64.0) as u32;
                     let dmod = s.env_drive * env + s.lfo_drive * lfo_scale * lfo;
@@ -1547,7 +1630,7 @@ impl SamplerRt {
                 while v.frac >= 65536 {
                     v.frac -= 65536;
                     v.hist.copy_within(1..8, 0);
-                    let mut next = v.stream.next(&z.sample.frames);
+                    let mut next = v.stream.next(z.data(v.variant));
                     if quantize {
                         next = [(next[0] * 2048.0).trunc() / 2048.0, (next[1] * 2048.0).trunc() / 2048.0];
                     }
@@ -1745,6 +1828,7 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
@@ -1757,6 +1841,97 @@ mod tests {
         assert_eq!(smp.voices.as_ptr(), buffer, "the voice list was not reallocated");
         let sounding = smp.voices.iter().filter(|v| v.fade.is_none()).count();
         assert!(sounding <= limit, "{sounding} notes sound, limit {limit}");
+    }
+
+    /// A Sampler of one zone (a 2 s ramp at 48 kHz), in Sync or Keys when given.
+    fn synced(sync: Option<ZoneSync>) -> SamplerRt {
+        let sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: (0..96_000).map(|i| [i as f32 / 96_000.0; 2]).collect() });
+        let zone = ZoneRt {
+            sample,
+            root: 60,
+            keys: (0, 127),
+            vels: (0, 127),
+            gain: 1.0,
+            pan: 0.0,
+            tune: 5.0,
+            play: (0, 96_000),
+            looped: None,
+            x_fade: 0,
+            fade_in: 0,
+            fade_out: 0,
+            sync,
+        };
+        SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
+    }
+
+    /// Frames its first voice read over `n` frames of output.
+    fn read(smp: &mut SamplerRt, n: usize) -> i64 {
+        let from = smp.voices[0].stream.pos;
+        let mut out = vec![0.0; n * 2];
+        smp.render(&mut out);
+        smp.voices[0].stream.pos - from
+    }
+
+    /// A zone in time at 100 BPM reads 1.2 frames a frame in a 120 BPM song, and
+    /// follows the song when its tempo moves; Tune (in the render) doesn't move it.
+    #[test]
+    fn sync_voices_follow_the_tempo() {
+        let mut smp = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
+        smp.set_song(0.0, 120.0);
+        smp.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0 });
+        let got = read(&mut smp, 4800);
+        assert!((got - 5760).abs() <= 2, "read {got}");
+        smp.set_song(0.0, 100.0);
+        let got = read(&mut smp, 4800);
+        assert!((got - 4800).abs() <= 33, "read {got}");
+        // Repitch: the zone's Tune (5 semitones) moves the speed.
+        let mut plain = synced(None);
+        plain.set_song(0.0, 120.0);
+        plain.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0 });
+        let got = read(&mut plain, 4800);
+        assert!((got - (4800.0 * 2f64.powf(5.0 / 12.0)) as i64).abs() <= 2, "read {got}");
+    }
+
+    /// Sync plays every note alike; Keys transposes, from a note's render when it has
+    /// one (the same length), else by speed.
+    #[test]
+    fn sync_ignores_the_note_and_keys_plays_its_render() {
+        let ctx = Context { tempo: 100.0, beats: 0.0 };
+        let mut smp = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
+        smp.set_song(0.0, 100.0);
+        smp.note_on(1, 72, 100, &ctx);
+        assert_eq!((smp.voices[0].octaves, smp.voices[0].variant), (0.0, None));
+        let up = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.25; 2]; 96_000] });
+        let mut keys = synced(Some(ZoneSync { tempo: 100.0, keys: true, notes: vec![(12, up)] }));
+        keys.set_song(0.0, 100.0);
+        keys.note_on(1, 72, 100, &ctx);
+        keys.note_on(2, 67, 100, &ctx);
+        let (a, b) = (&keys.voices[0], &keys.voices[1]);
+        assert_eq!((a.octaves, a.variant), (0.0, Some(0)), "the octave's render");
+        assert_eq!((b.octaves, b.variant), (7.0 / 12.0, None), "no render: by speed");
+        assert_eq!(read(&mut keys, 480), 480, "a note's render plays at the tempo's speed");
+    }
+
+    /// A Sync zone given a render for another tempo: its voice carries on from the
+    /// same place in the music.
+    #[test]
+    fn a_new_render_takes_over_where_the_music_is() {
+        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let mut old = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
+        old.set_song(0.0, 120.0);
+        old.note_on(1, 60, 100, &ctx);
+        read(&mut old, 9600);
+        let at = old.voices[0].stream.pos as f64 / 96_000.0;
+        // The render at 120: 100/120 as long.
+        let mut new = synced(Some(ZoneSync { tempo: 120.0, ..ZoneSync::default() }));
+        let len = 80_000;
+        new.zones[0].sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.1; 2]; len] });
+        new.zones[0].play = (0, len);
+        new.adopt(old);
+        assert_eq!(new.voices.len(), 1, "it plays on");
+        let v = &new.voices[0];
+        assert!(v.fade.is_none(), "not faded out");
+        assert!(((v.stream.pos as f64 / len as f64) - at).abs() < 1e-3, "same place: {} vs {at}", v.stream.pos as f64 / len as f64);
     }
 
     /// A stream over frames whose value is their index, so a mix shows what it read.
@@ -1950,6 +2125,7 @@ mod tests {
                 x_fade: 0,
                 fade_in: 0,
                 fade_out: 0,
+                sync: None,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
@@ -1988,6 +2164,7 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato

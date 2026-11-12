@@ -37,6 +37,7 @@ mod performance_regressions;
 pub mod pool;
 mod prehear;
 pub mod queue;
+pub mod render;
 pub mod repeat;
 pub use ahead::Junk;
 pub mod sample;
@@ -2392,6 +2393,59 @@ pub(crate) fn ext_channels(n: i64) -> Option<(usize, usize)> {
     (r < 32).then_some((l, r))
 }
 
+/// Keys mode asks for renders this many semitones either side of the root.
+const KEYS_SPAN: i64 = 12;
+
+/// A New Sampler zone in Sync or Keys (its `meta` says so, with a tempo): it plays the
+/// render of its play range at the song's `tempo`, its Tune (zone's and sound's,
+/// semitones) in it, when `renders` has it, and asks for it when not, playing its own
+/// sample in time (repitched) meanwhile. Keys asks for the notes' renders around the
+/// root, nearest first, and plays those made. Other zones are left as they are.
+fn synced_zone(
+    zone: &mut sampler::ZoneRt,
+    meta: Option<&deckard_model::new_sampler::ZoneMeta>,
+    sound_tune: f64,
+    tempo: f64,
+    renders: &mut render::Renders,
+) {
+    use deckard_model::new_sampler::PlayMode;
+    let Some(meta) = meta.filter(|m| m.mode != PlayMode::Repitch) else { return };
+    let Some(bpm) = meta.bpm.filter(|b| b.is_finite() && *b > 0.0) else { return };
+    if !(tempo.is_finite() && tempo > 0.0) || zone.play.1 <= zone.play.0 {
+        return;
+    }
+    let keys = meta.mode == PlayMode::Keys;
+    let semitones = zone.tune as f64 + sound_tune;
+    let base = render::RenderJob::new(&zone.sample, zone.play, bpm, tempo, semitones);
+    let Some(made) = renders.get_or_want(base.clone()) else {
+        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new() });
+        return;
+    };
+    let mut notes = Vec::new();
+    if keys {
+        let mut offsets: Vec<i64> =
+            (-KEYS_SPAN..=KEYS_SPAN).filter(|o| *o != 0 && (zone.keys.0..=zone.keys.1).contains(&(zone.root + o))).collect();
+        offsets.sort_by_key(|o| (o.abs(), *o < 0));
+        for o in offsets {
+            let job = render::RenderJob::new(&zone.sample, zone.play, bpm, tempo, semitones + o as f64);
+            if let Some(r) = renders.get_or_want(job) {
+                notes.push((o, r));
+            }
+        }
+    }
+    // The render holds the play range only, `time` times as long.
+    let time = base.time;
+    let (a, len) = (zone.play.0, made.frames.len());
+    let scale = |x: usize| ((x as f64 * time).round() as usize).min(len);
+    zone.looped = zone.looped.map(|(l, r)| (scale(l - a), scale(r - a))).filter(|(l, r)| r > l);
+    zone.x_fade = scale(zone.x_fade);
+    zone.fade_in = scale(zone.fade_in);
+    zone.fade_out = scale(zone.fade_out);
+    zone.play = (0, len);
+    zone.sample = made;
+    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes });
+}
+
 /// Samples shared between engines (e.g. replaying another scene without reloading).
 #[derive(Default)]
 pub struct SampleCache {
@@ -2406,6 +2460,8 @@ pub struct SampleCache {
     /// Where the engines made with it note plug-ins' extra pairs making sound (one board,
     /// so parts an edit keeps and parts it makes anew note on the same).
     heard: Arc<meters::HeardBoard>,
+    /// The New Sampler's stretched renders (Sync and Keys), and those asked for.
+    renders: render::Renders,
     /// Tests: plug-ins (made by the test) that play these slots, whatever the project
     /// names.
     #[cfg(test)]
@@ -2413,6 +2469,18 @@ pub struct SampleCache {
 }
 
 impl SampleCache {
+    /// The renders engines made with it asked for since last time: make them
+    /// ([`render::RenderJob::run`], off the audio and UI threads), give them back with
+    /// [`SampleCache::add_render`], and build the engine again to play them.
+    pub fn wanted_renders(&mut self) -> Vec<render::RenderJob> {
+        self.renders.take_wanted()
+    }
+
+    /// A render made for `job`.
+    pub fn add_render(&mut self, job: &render::RenderJob, render: Arc<Sample>) {
+        self.renders.add(job, render);
+    }
+
     /// The instance for `slot` (see [`deckard_plugins::Host::instance`]).
     fn plugin(&mut self, slot: Slot, plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64) -> Result<Shared, String> {
         #[cfg(test)]
@@ -2661,6 +2729,7 @@ impl Engine {
             });
             Some(sample)
         };
+        let mut renders = std::mem::take(&mut cache.renders);
         let sounds: Vec<Vec<Option<SamplerRt>>> = project
             .groups
             .iter()
@@ -2729,7 +2798,7 @@ impl Engine {
                                 let a = (ll.max(0) as usize).clamp(play.0, play.1);
                                 (a, ((lh + 1) as usize).clamp(a, play.1))
                             });
-                            zones.push(sampler::ZoneRt {
+                            let mut zone = sampler::ZoneRt {
                                 sample,
                                 root: z.root_key,
                                 keys: z.key_range,
@@ -2742,7 +2811,12 @@ impl Engine {
                                 x_fade: z.x_fade.max(0) as usize,
                                 fade_in: z.fade_in.max(0) as usize,
                                 fade_out: z.fade_out.max(0) as usize,
-                            });
+                                sync: None,
+                            };
+                            if s.new_sampler.is_some() {
+                                synced_zone(&mut zone, z.meta.as_ref(), smp.tune, project.tempo, &mut renders);
+                            }
+                            zones.push(zone);
                         }
                         // At unity: the sound's level and pan are the mixer's (they glide).
                         Some(SamplerRt::new(sampler::Settings::new(smp, sr_f), zones, (1.0, 1.0), sr_f))
@@ -2750,6 +2824,7 @@ impl Engine {
                     .collect()
             })
             .collect();
+        cache.renders = renders;
         let mut instruments: Vec<Vec<Option<InstrumentRt>>> = Vec::new();
         for (gi, g) in project.groups.iter().enumerate() {
             let mut row = Vec::new();
@@ -6935,6 +7010,7 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -7617,6 +7693,7 @@ mod tests {
                 x_fade: (rnd() * 3000.0) as usize,
                 fade_in: 0,
                 fade_out: 0,
+                sync: None,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -8019,6 +8096,87 @@ mod tests {
         }
         w.finalize().unwrap();
         path
+    }
+
+    /// A 120 BPM song whose sound 0 is a New Sampler playing a 4-beat 94 BPM loop in
+    /// `mode` (its zone told so, as analysis does). With the folder holding the loop.
+    fn new_sampler_project(mode: deckard_model::new_sampler::PlayMode) -> (tempfile::TempDir, Project, usize) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project();
+        p.tempo = 120.0;
+        let path: String = loop_wav(tmp.path(), 94.0, 4.0).to_string_lossy().into();
+        let frames = (48_000.0 * 60.0 / 94.0 * 4.0) as usize;
+        let snd = &mut p.groups[0].sounds[0];
+        snd.new_sampler = Some(Default::default());
+        let z = &mut snd.sampler.as_mut().unwrap().zones[0];
+        z.sample = deckard_model::SampleRef { kind: 0, path: path.clone(), ..Default::default() };
+        z.play_range = (0, frames as i64 - 1);
+        z.meta = Some(deckard_model::new_sampler::ZoneMeta { file: path, mode, bpm: Some(94.0), beats: Some(4.0), ..Default::default() });
+        (tmp, p, frames)
+    }
+
+    fn zone0(e: &Engine) -> &sampler::ZoneRt {
+        &e.sounds[0][0].as_ref().unwrap().zones[0]
+    }
+
+    /// A Sync zone plays its own sample in time (repitched) and asks for its render;
+    /// given it, it plays the render: as long as 4 beats at 120, in time at 120.
+    #[test]
+    fn a_sync_zone_asks_then_plays_its_render() {
+        let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let z = zone0(&e);
+        assert_eq!((z.sample.frames.len(), z.sync.as_ref().unwrap().tempo), (frames, 94.0), "its own sample, in time at 94");
+        let jobs = cache.wanted_renders();
+        assert_eq!(jobs.len(), 1);
+        let (e2, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        drop(e2);
+        assert!(cache.wanted_renders().is_empty(), "asked once until made");
+        for j in &jobs {
+            let r = j.run();
+            cache.add_render(j, r);
+        }
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let z = zone0(&e);
+        let want = (frames as f64 * 94.0 / 120.0).round() as usize;
+        assert_eq!((z.sample.frames.len(), z.play), (want, (0, want)));
+        assert_eq!(z.sync.as_ref().unwrap().tempo, 120.0);
+        // Another tempo asks for another render.
+        let mut faster = p.clone();
+        faster.tempo = 130.0;
+        let (_e, _) = Engine::new(&faster, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(cache.wanted_renders().len(), 1);
+    }
+
+    /// Keys asks for the notes' renders around the root, nearest first.
+    #[test]
+    fn keys_asks_for_its_notes() {
+        let (_tmp, p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Keys);
+        let mut cache = SampleCache::default();
+        let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let base = cache.wanted_renders();
+        assert_eq!(base.len(), 1, "the root's render first");
+        cache.add_render(&base[0], base[0].run());
+        let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let notes = cache.wanted_renders();
+        assert_eq!(notes.len(), 24);
+        let shifts: Vec<f64> = notes.iter().take(3).map(|j| j.semitones).collect();
+        assert_eq!(shifts, [1.0, -1.0, 2.0]);
+    }
+
+    /// Repitch zones, and a plain Sampler's zones whatever their meta, play as before.
+    #[test]
+    fn repitch_zones_are_untouched() {
+        let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).sync.is_none() && zone0(&e).sample.frames.len() == frames);
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        p.groups[0].sounds[0].new_sampler = None;
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).sync.is_none());
+        assert!(cache.wanted_renders().is_empty());
     }
 
     /// A 120 BPM song whose sound 0 is an Audio plug-in playing a 4-beat 94 BPM loop
