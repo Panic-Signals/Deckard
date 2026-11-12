@@ -28,6 +28,7 @@ mod audio;
 mod lanes;
 mod zones;
 pub use audio::TakeSpec;
+pub use new_sampler::TakeZone;
 pub use zones::{ZoneFrom, ZoneSpec};
 mod cc_routes;
 mod cv_routes;

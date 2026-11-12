@@ -699,6 +699,9 @@ pub enum Act {
     MoveSlot(usize, usize),
     SlotActive(usize, bool),
     OpenSlotEditor(usize),
+    /// The focused sound's instrument made a New Sampler (a Sampler or an Audio
+    /// plug-in), or a New Sampler made a plain Sampler (false).
+    ConvertInstrument(bool),
     /// Set parameter `id` of the plug-in in slot `.0` (normalized).
     PluginParam(usize, u32, f64),
     /// [`Act::PluginParam`] of the plug-in in slot `.1` of chain `.0` (a macro's: any
@@ -1241,6 +1244,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
+            Act::ConvertInstrument(to_new) => app.convert_instrument(to_new),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::Zhora(what) => app.zhora_press(what),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
@@ -5442,6 +5446,28 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                         ui.close();
                     }
                     change_menu(ui, app, app.chain(), i, !movable, acts);
+                    // The Sampler and the Audio plug-in become a New Sampler, and back.
+                    if i == 0 && matches!(app.chain(), deckard_doc::Chain::Sound(..)) {
+                        let new_sampler = slot.name == "New Sampler";
+                        if new_sampler {
+                            if ui
+                                .button("Convert to Sampler")
+                                .on_hover_text("A plain Sampler, as Maschine has it: Sync, Keys and the analysis go")
+                                .clicked()
+                            {
+                                acts.push(Act::ConvertInstrument(false));
+                                ui.close();
+                            }
+                        } else if (slot.module == "Sampler" || slot.module == "AudioModule")
+                            && ui
+                                .button("Convert to New Sampler")
+                                .on_hover_text("Keep its samples, in DECKARD's New Sampler (loops in Sync)")
+                                .clicked()
+                        {
+                            acts.push(Act::ConvertInstrument(true));
+                            ui.close();
+                        }
+                    }
                     if ui.button("Remove").clicked() {
                         acts.push(Act::RemoveSlot(i));
                         ui.close();

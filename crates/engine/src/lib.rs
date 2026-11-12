@@ -2499,6 +2499,13 @@ impl SampleCache {
         self.plugins.loaded(slot, plugin_id, name)
     }
 
+    /// Where the file `sample` (as a project refers to it) is, if it's found.
+    pub fn path_of(&self, sample: &deckard_model::SampleRef, project_path: Option<&Path>) -> Option<std::path::PathBuf> {
+        let mut resolver = library::Resolver::new(project_path);
+        resolver.set_extra(&self.library_dirs);
+        resolver.resolve(sample)
+    }
+
     /// The sample `sample` (as a project refers to it) decoded, loading it if needed.
     pub fn sample(&mut self, sample: &deckard_model::SampleRef, project_path: Option<&Path>) -> Option<Arc<Sample>> {
         let mut resolver = library::Resolver::new(project_path);

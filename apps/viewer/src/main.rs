@@ -10451,6 +10451,50 @@ impl App {
         doc.borrow_mut().end_take();
     }
 
+    /// The focused sound's instrument made a New Sampler (`to_new`: a Sampler keeps its
+    /// zones; an Audio plug-in's takes become zones in Sync at their tempos), or a New
+    /// Sampler made a plain Sampler (roadmap 1f). One undo step.
+    fn convert_instrument(&mut self, to_new: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (g, s) = (self.group, self.sound);
+        let Some(snd) = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(s)).cloned() else { return };
+        let result = if !to_new {
+            let synced = snd
+                .sampler
+                .iter()
+                .flat_map(|x| &x.zones)
+                .any(|z| z.meta.as_ref().is_some_and(|m| m.mode != deckard_model::new_sampler::PlayMode::Repitch));
+            let r = doc.borrow_mut().new_sampler_to_sampler(g, s);
+            if r.is_ok() && synced {
+                self.status = "converted to a Sampler: its loops play at their own speed now (no Sync or Keys)".into();
+            }
+            r
+        } else if let Some(a) = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule") {
+            let mut takes = Vec::new();
+            for t in &a.takes {
+                let Some(file) = self.samples.path_of(&t.sample, self.path.as_deref()) else {
+                    self.status = format!("can't convert: {} is missing", t.sample.path);
+                    return;
+                };
+                let audio = self.samples.sample(&t.sample, self.path.as_deref());
+                let play = (t.play_range.1 > t.play_range.0).then_some(t.play_range);
+                let bpm = audio.filter(|_| t.beats > 0.0).map(|x| {
+                    let frames = play.map_or(x.frames.len(), |(lo, hi)| (hi - lo).max(1) as usize);
+                    t.tempo(frames, x.rate)
+                });
+                takes.push(deckard_doc::TakeZone { file, play, bpm, beats: (t.beats > 0.0).then_some(t.beats) });
+            }
+            doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune)
+        } else if snd.sampler.is_some() && snd.new_sampler.is_none() {
+            doc.borrow_mut().transaction("Convert to New Sampler", |d| d.set_new_sampler(g, s, Some(&Default::default())))
+        } else {
+            return;
+        };
+        if let Err(e) = result {
+            self.status = format!("can't convert it: {e}");
+        }
+    }
+
     fn is_instrument(what: &layout::AddWhat) -> bool {
         match what {
             layout::AddWhat::Sampler | layout::AddWhat::NewSampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,

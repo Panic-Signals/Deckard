@@ -265,4 +265,36 @@ mod app_tests {
         build(&mut app);
         assert!(app.samples.wanted_renders().is_empty(), "it plays the render");
     }
+
+    /// An Audio plug-in's take becomes a New Sampler zone in Sync at the take's tempo;
+    /// converting back leaves a plain Sampler.
+    #[test]
+    fn an_audio_plugin_converts_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 48_000u32;
+        let frames = vec![[0.1f32; 2]; rate as usize * 2];
+        let file = dir.path().join("Loop.wav");
+        deckard_engine::edit::write_wav_channels(&file, &deckard_engine::sample::Sample { rate, frames }, 2).unwrap();
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        doc.audio_only(0, 0).unwrap();
+        // Four beats in two seconds: 120 BPM.
+        let spec = deckard_doc::TakeSpec { file: file.clone(), frames: rate as usize * 2, rate, beats: 4.0 };
+        doc.set_takes(0, 0, &[spec], "Load").unwrap();
+        let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+        app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+        app.convert_instrument(true);
+        {
+            let d = app.doc.as_ref().unwrap().borrow();
+            let snd = &d.project().groups[0].sounds[0];
+            assert!(snd.new_sampler.is_some(), "{}", app.status);
+            let m = snd.sampler.as_ref().unwrap().zones[0].meta.clone().unwrap();
+            assert_eq!(m.mode, PlayMode::Sync);
+            assert!((m.bpm.unwrap() - 120.0).abs() < 0.1, "{m:?}");
+            assert_eq!(d.undo_label(), Some("Convert to New Sampler"));
+        }
+        app.convert_instrument(false);
+        let d = app.doc.as_ref().unwrap().borrow();
+        assert!(d.project().groups[0].sounds[0].new_sampler.is_none());
+        assert!(app.status.contains("Sync"), "says what it dropped: {}", app.status);
+    }
 }

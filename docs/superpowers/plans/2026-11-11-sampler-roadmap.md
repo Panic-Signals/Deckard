@@ -282,6 +282,13 @@ sample-only nudge, Flatten, the key, and Serato's waveform colouring.
 
 ### 1f. Converting into the New Sampler
 
+**Built 2026-11-12:** the instrument slot's right-click menu has **Convert to New Sampler**
+(a Sampler keeps its zones; an Audio plug-in's takes become zones, one key each from C3
+or all keys for one take, in Sync at the take's tempo, the plug-in's Tune on each) and
+**Convert to Sampler** (Sync, Keys and the analysis go; the status line says so). One
+undo step each. Not yet: on the MK3, and an Audio plug-in's pattern cues as notes (a
+converted loop plays when its pad is played, not where the pattern cued the take).
+
 Audio → New Sampler and Sampler → New Sampler (see Architecture above). The Audio plug-in
 and the Sampler both stay.
 
