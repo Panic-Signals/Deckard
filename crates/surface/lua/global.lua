@@ -198,7 +198,8 @@ function global.button(name, down)
     local page = deckard.page()
     if page == "file" or page == "save" then back.go() else back.over("file") end
   elseif name == "VARIATION" and not shift then
-    -- (The focused sound's Groove ▸ Variation, on the Control page.)
+    -- (The focused sound's Groove page it was left on, Variation the first time, on
+    -- the Control page.)
     pin.shown = nil
     deckard.show_page("control")
     deckard.groove_page(2)

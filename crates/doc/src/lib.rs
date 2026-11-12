@@ -44,6 +44,7 @@ mod sounds;
 pub use sounds::SoundClip;
 mod channel;
 mod groove;
+pub use groove::{division_ticks, euclid};
 mod group_move;
 mod groups;
 mod lock;

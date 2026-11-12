@@ -395,7 +395,8 @@ fn main() {
 }
 
 /// Where a chain was left: its focused slot, the page each of its slots showed, and the
-/// page each property set (Input, Output, Groove, Macro) showed.
+/// page each property set (Input, Output, Groove, Macro) showed. (A sound's Groove
+/// page is the app's, `App::groove_page`, not the chain's.)
 #[derive(Debug, Default, Clone)]
 pub struct ChainPages {
     slot: Option<usize>,
@@ -1041,6 +1042,9 @@ pub struct App {
     channel: bool,
     prop_set: usize,
     prop_page: usize,
+    /// The Groove page (Swing, Variation, Generate) last shown on any sound: every
+    /// sound's Groove shows it, and VARIATION goes back to it. `None` before one shows.
+    groove_page: Option<usize>,
     /// Where each chain was left, shown again on coming back to it. `pages_of` is the
     /// chain the fields above were last kept for, `page_key` the slot `plugin_page` is for.
     chain_pages: std::collections::HashMap<deckard_doc::Chain, ChainPages>,
@@ -5172,6 +5176,8 @@ impl App {
             picture: None,
             zhora: None,
             tuner: None,
+            euclid: self.euclid_view(c.level, c.page, head),
+            random: self.random_view(c.level, c.page, head),
         };
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
@@ -6208,18 +6214,24 @@ impl App {
                     return;
                 }
                 // A stepped value moves a step once the knob has gone a quarter of the
-                // way a continuous one would.
+                // way a continuous one would. A Variation or Generate setting over a
+                // range of whole numbers (a percentage, a note) is kept whole: it moves
+                // a whole one once the knob has gone as far as a continuous one would
+                // (else each small turn would be rounded back to where it was).
                 let step = match edit {
-                    Edit::Choice(_, _, options, ..) => Some(1.0 / (options.len().max(2) - 1) as f64),
-                    Edit::Int(_, _, lo, hi, _) => Some(1.0 / (hi - lo).max(1.0)),
-                    Edit::Toggle(..) => Some(1.0),
-                    Edit::PluginChoice(_, _, steps, ..) => Some(1.0 / steps.max(1) as f64),
-                    Edit::MidiInputParam(_, _, _, _, steps, _) if steps >= 2 => Some(1.0 / (steps - 1) as f64),
+                    Edit::Choice(_, _, options, ..) => Some((1.0 / (options.len().max(2) - 1) as f64, 0.25)),
+                    Edit::Int(_, _, lo, hi, _) => Some((1.0 / (hi - lo).max(1.0), 0.25)),
+                    Edit::Param(_, f, lo, hi, _) if (f.starts_with("sequence_") || f == "base_key") && hi - lo >= 2.0 => {
+                        Some((1.0 / (hi - lo), 1.0))
+                    }
+                    Edit::Toggle(..) => Some((1.0, 0.25)),
+                    Edit::PluginChoice(_, _, steps, ..) => Some((1.0 / steps.max(1) as f64, 0.25)),
+                    Edit::MidiInputParam(_, _, _, _, steps, _) if steps >= 2 => Some((1.0 / (steps - 1) as f64, 0.25)),
                     _ => None,
                 };
                 let to = match step {
-                    Some(q) => {
-                        let unit = (q * 0.25).max(1e-9);
+                    Some((q, speed)) => {
+                        let unit = (q * speed).max(1e-9);
                         let n = (self.knob_acc[pos].abs() / unit).floor();
                         if n < 1.0 {
                             return;
@@ -6237,7 +6249,12 @@ impl App {
                 if log_knobs() {
                     eprintln!("  turn {}: {inc:+.3}{} {value:.3} -> {:.3}", pos + 1, if fine { " fine" } else { "" }, to.clamp(0.0, 1.0));
                 }
-                edit.to_act(to.clamp(0.0, 1.0) as f32)
+                // (The groove's whole numbers stay whole: the knob's position is an f32.)
+                if let (Edit::Param(t, f, lo, hi, _), Some((_, 1.0))) = (edit, step) {
+                    Act::SetParam(t, f, (lo + to.clamp(0.0, 1.0) * (hi - lo)).round())
+                } else {
+                    edit.to_act(to.clamp(0.0, 1.0) as f32)
+                }
             }
             R::Page(next) if self.channel => {
                 let Some((names, cur, _)) = layout::channel_page(self, &doc.borrow()) else { return };
@@ -6333,11 +6350,14 @@ impl App {
                 self.send_live(surface_strip::strip_note(group, sound, pitch, velocity, on));
                 return;
             }
+            // VARIATION: the Groove page last shown (Swing, Variation or Generate, on
+            // any sound), else page `n`.
             R::GroovePage(n) => {
                 layout::apply_acts(self, vec![Act::ChainTab(layout::ChainTab::Sound)]);
                 self.channel = true;
                 self.prop_set = 2;
-                self.prop_page = n.min(2);
+                let page = *self.groove_page.get_or_insert(n.min(2));
+                self.prop_page = page;
                 return;
             }
         };
@@ -9435,6 +9455,9 @@ impl App {
         if self.pages_of != Some(chain) {
             let kept = self.chain_pages.get(&chain);
             self.prop_page = kept.map_or(0, |k| k.prop_pages[self.prop_set.min(3)]);
+            if let (2, deckard_doc::Chain::Sound(..), Some(p)) = (self.prop_set, chain, self.groove_page) {
+                self.prop_page = p;
+            }
             if self.slot_of != Some(chain) {
                 self.slot_of = Some(chain);
                 self.slot = kept.and_then(|k| k.slot).filter(|&i| i < slots).or((slots > 0).then_some(0));
@@ -9527,6 +9550,9 @@ impl App {
         let kept = self.chain_pages.entry(chain).or_default();
         kept.slot = self.slot;
         kept.prop_pages[self.prop_set.min(3)] = self.prop_page;
+        if self.prop_set == 2 && self.channel && matches!(chain, deckard_doc::Chain::Sound(..)) {
+            self.groove_page = Some(self.prop_page);
+        }
         if let Some(i) = self.slot {
             kept.slot_pages.insert(i, self.plugin_page);
         }
@@ -9544,6 +9570,9 @@ impl App {
             "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\n",
             self.song_view as u8, self.mixer as u8, self.mixer_sounds as u8, self.piano_roll as u8, self.prop_set
         );
+        if let Some(p) = self.groove_page {
+            t += &format!("groove_page {p}\n");
+        }
         let mut chains: Vec<_> = self.chain_pages.iter().collect();
         chains.sort_by_key(|(c, _)| format!("{c:?}"));
         for (c, k) in chains {
@@ -9572,6 +9601,11 @@ impl App {
                 Some("mixer") => self.mixer = flag(1).unwrap_or(self.mixer),
                 Some("mixer_sounds") => self.mixer_sounds = flag(1).unwrap_or(self.mixer_sounds),
                 Some("piano_roll") => self.piano_roll = flag(1).unwrap_or(self.piano_roll),
+                Some("groove_page") => {
+                    if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
+                        self.groove_page = Some(n.min(2));
+                    }
+                }
                 Some("props") => {
                     if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
                         self.prop_set = n.min(3);
@@ -9633,7 +9667,11 @@ impl App {
 
     /// The page property set `set` of the chain shown was left on (0 if never shown).
     pub(crate) fn kept_prop_page(&self, set: usize) -> usize {
-        self.chain_pages.get(&self.chain()).map_or(0, |k| k.prop_pages[set.min(3)])
+        let chain = self.chain();
+        if let (2, deckard_doc::Chain::Sound(..), Some(p)) = (set, chain, self.groove_page) {
+            return p;
+        }
+        self.chain_pages.get(&chain).map_or(0, |k| k.prop_pages[set.min(3)])
     }
 
     /// The focused slot's plug-in view (what the SOUND tab and the controller show).
@@ -9881,7 +9919,9 @@ impl App {
         let p = if g == self.group { self.pattern } else { 0 };
         let variation = field.starts_with("sequence_variation/");
         let live = if variation { "sequence_variation/live" } else { "sequence_generation/live_mode" };
-        if !(variation || field.starts_with("sequence_generation/")) || self.groove_setting(g, s, live).unwrap_or(0.0) == 0.0 {
+        // (The base key is the root note Generate writes.)
+        let generation = field.starts_with("sequence_generation/") || field == "base_key";
+        if !(variation || generation) || self.groove_setting(g, s, live).unwrap_or(0.0) == 0.0 {
             return;
         }
         if !variation {
@@ -10155,6 +10195,70 @@ impl App {
     }
 
     /// A Variation or Generate setting of sound `s` in group `g`.
+    /// The focused sound's notes in the focused pattern, while its Generate page
+    /// (CHANNEL, Groove, page 3) shows in Random mode: by grid step, over the note range
+    /// (widened to take in every note), with where playback is.
+    fn random_view(&self, level: usize, page: usize, head: Option<Playhead>) -> Option<deckard_surface::RandomView> {
+        if !self.channel || self.prop_set != 2 || level != 2 || page != 2 {
+            return None;
+        }
+        let (g, s) = (self.group, self.sound);
+        let f = |k: &str, d: f64| self.groove_setting(g, s, &format!("sequence_generation/{k}")).unwrap_or(d);
+        if f("mode", 0.0) as i64 != 0 {
+            return None;
+        }
+        let d = self.doc.as_ref()?.borrow();
+        let p = d.project();
+        let pat = p.groups.get(g)?.patterns.get(self.pattern)?;
+        let grid = self.grid.max(1);
+        let length = if pat.length > 0 { pat.length } else { p.bar_length() };
+        let steps = ((length + grid - 1) / grid).max(1) as usize;
+        let notes: Vec<(usize, i64, i64)> = pat
+            .notes
+            .iter()
+            .filter(|n| n.sound == s && n.position >= pat.start)
+            .map(|n| (((n.position - pat.start) / grid) as usize, n.pitch, n.velocity))
+            .filter(|n| n.0 < steps)
+            .collect();
+        let (a, b) = (f("note_range/low", 60.0) as i64, f("note_range/high", 72.0) as i64);
+        let (mut lo, mut hi) = (a.min(b).clamp(0, 127), a.max(b).clamp(0, 127));
+        for n in &notes {
+            (lo, hi) = (lo.min(n.1), hi.max(n.1));
+        }
+        let beat = (p.bar_length() / p.numerator.max(1) / grid).max(1) as usize;
+        let position = self.pattern_at(g, head).map(|(at, _)| at as f64 / grid as f64);
+        Some(deckard_surface::RandomView {
+            steps,
+            beat,
+            notes,
+            position,
+            probability: f("probability", 55.0),
+            velocity_amount: f("velocity_amount", 10.0),
+            distribution: f("distribution", 1.0) as usize,
+            range: (lo, hi),
+        })
+    }
+
+    /// The focused sound's Euclidean rhythm, while its Generate page (CHANNEL, Groove,
+    /// page 3) shows in Euclidean mode: the steps that get a note and where playback is
+    /// in them, as Generate lays them from the pattern's start.
+    fn euclid_view(&self, level: usize, page: usize, head: Option<Playhead>) -> Option<deckard_surface::EuclidView> {
+        if !self.channel || self.prop_set != 2 || level != 2 || page != 2 {
+            return None;
+        }
+        let (g, s) = (self.group, self.sound);
+        let f = |k: &str, d: f64| self.groove_setting(g, s, &format!("sequence_generation/{k}")).unwrap_or(d);
+        if f("mode", 0.0) as i64 != 1 {
+            return None;
+        }
+        let steps = f("steps", 8.0).max(1.0) as usize;
+        let (fills, rotate) = (f("fills", 5.0) as usize, f("rotate", 0.0) as usize);
+        let bar = self.doc.as_ref()?.borrow().project().bar_length();
+        let step = deckard_doc::division_ticks(f("division", 0.0) as i64, self.grid, bar, steps as i64).max(1);
+        let position = self.pattern_at(g, head).map(|(at, _)| (at as f64 / step as f64).rem_euclid(steps as f64));
+        Some(deckard_surface::EuclidView { hits: deckard_doc::euclid(steps, fills, rotate), fills: fills.min(steps), rotate, position })
+    }
+
     pub fn groove_setting(&self, g: usize, s: usize, field: &str) -> Option<f64> {
         let doc = self.doc.as_ref()?.borrow();
         if doc.has_groove_settings(g, s) {
@@ -11805,7 +11909,7 @@ mod tests {
         app.update_slot_view();
         layout::apply_acts(&mut app, vec![layout::Act::SelectSlot(Some(1)), layout::Act::PluginPage(1)]);
         app.update_slot_view();
-        layout::apply_acts(&mut app, vec![layout::Act::PropSet(2), layout::Act::PropPage(2)]);
+        layout::apply_acts(&mut app, vec![layout::Act::PropSet(1), layout::Act::PropPage(2)]);
         app.update_slot_view();
         app.sound = 1;
         app.update_slot_view();
@@ -11825,12 +11929,12 @@ mod tests {
         assert_eq!(app.prop_page, 0);
         (app.group, app.sound) = (0, 0);
         app.update_slot_view();
-        assert_eq!((app.slot, app.plugin_page, app.prop_set, app.prop_page), (Some(1), 1, 2, 2));
+        assert_eq!((app.slot, app.plugin_page, app.prop_set, app.prop_page), (Some(1), 1, 1, 2));
         // Another set and back: still on its page.
         layout::apply_acts(&mut app, vec![layout::Act::PropSet(0)]);
         app.update_slot_view();
         assert_eq!(app.prop_page, 0);
-        layout::apply_acts(&mut app, vec![layout::Act::PropSet(2)]);
+        layout::apply_acts(&mut app, vec![layout::Act::PropSet(1)]);
         assert_eq!(app.prop_page, 2);
         // The other slot and back: still on its page.
         layout::apply_acts(&mut app, vec![layout::Act::SelectSlot(Some(0))]);
@@ -11855,7 +11959,7 @@ mod tests {
         let mut again = App::default();
         again.show_document(Document::from_bytes(bytes, None));
         again.update_slot_view();
-        assert_eq!((again.song_view, again.mixer, again.sound, again.prop_set, again.prop_page), (true, true, 1, 2, 1));
+        assert_eq!((again.song_view, again.mixer, again.sound, again.prop_set, again.prop_page), (true, true, 1, 1, 1));
         again.sound = 0;
         again.update_slot_view();
         assert_eq!((again.slot, again.plugin_page, again.prop_page), (Some(1), 1, 2));

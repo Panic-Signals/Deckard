@@ -7,7 +7,9 @@
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
 --   LEFT / RIGHT      the previous / next page
---   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages
+--   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages;
+--                     CHANNEL's Generate page: Euclidean, its rhythm as a circle; Random,
+--                     its notes along the pattern
 --
 -- Zhora focused, its own buttons and tuner instead (lib/zhora.lua). The Tuner effect
 -- focused, its dial on the right screen under A4's pitch.
@@ -329,6 +331,126 @@ local function eq_curve(screen, eq)
   end
 end
 
+-- The Generate page's Euclidean rhythm on the right screen: a dot for each step round
+-- a circle (the first at the top, clockwise), each hit an arc along the rim the length
+-- of its step, Fills over Steps in the middle and, while playing, a hand out from the
+-- middle at where playback is, turning with the beat. Rotate turns the hits round.
+local function euclid_circle(screen, e)
+  local n = #e.hits
+  if n == 0 then return end
+  local cx, cy, r = 720, 133, 60
+  local function angle(i) return -90 + 360 * i / n end
+  local function point(i, radius)
+    local a = math.rad(angle(i))
+    return cx + radius * math.cos(a), cy + radius * math.sin(a)
+  end
+  local dim, hit, lit = { 0x48, 0x48, 0x4e }, { 0x3d, 0xc8, 0xe6 }, { 0xff, 0xc2, 0x3a }
+  local now = e.position and math.floor(e.position) % n or nil
+  screen:circle(cx, cy, r, { 0x2c, 0x2c, 0x30 }, 1)
+  -- (A gap at each arc's end, so hits side by side read as two.)
+  local gap = math.min(4, 120 / n)
+  for i = 0, n - 1 do
+    if e.hits[i + 1] then
+      screen:circle(cx, cy, r + 2.5, i == now and lit or hit, 5, angle(i), angle(i + 1) - gap)
+    end
+  end
+  for i = 0, n - 1 do
+    local x, y = point(i, r)
+    local on = e.hits[i + 1]
+    local ink = (i == now and lit) or (on and hit) or dim
+    screen:circle(x, y, (i == now and 5) or (on and 4) or 2.5, ink)
+  end
+  -- Fills over Steps.
+  local text = { 0xe0, 0xe0, 0xe4 }
+  screen:label(cx - 30, cy - 24, 60, 22, tostring(e.fills), { size = 18, color = text })
+  screen:line(cx - 14, cy, cx + 14, cy, 1.5, { 0x8a, 0x8a, 0x90 })
+  screen:label(cx - 30, cy + 2, 60, 22, tostring(n), { size = 18, color = text })
+  if e.position then
+    local a = math.rad(-90 + 360 * e.position / n)
+    local c, s = math.cos(a), math.sin(a)
+    screen:line(cx + 26 * c, cy + 26 * s, cx + (r - 7) * c, cy + (r - 7) * s, 2, lit)
+  end
+  screen:label(830, 180, 120, 20, "ROTATE " .. e.rotate, { size = 11, color = { 0x8a, 0x8a, 0x90 } }, "right", "center")
+end
+
+-- The Generate page's Random notes on the right screen: a piano roll of the
+-- pattern's grid steps, left to right, and its pitches from Note Lo to Note Hi (a
+-- chord a stack in one column), each note as bright as its velocity. While playing,
+-- an amber line at where playback is, the notes under it amber. In the corner, the
+-- velocities Generate draws from: Velocity's range around 100, shaped by Distribution.
+local NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }
+local function random_view(screen, r)
+  local n = math.max(1, r.steps)
+  -- (A gutter at the left for the note names.)
+  local x0, y0, w, h = 512, 66, 312, 132
+  local cw = w / n
+  local hit, lit = { 0x3d, 0xc8, 0xe6 }, { 0xff, 0xc2, 0x3a }
+  local now = r.position and math.floor(r.position) % n or nil
+  local grid = { 0x2c, 0x2c, 0x30 }
+  screen:rect(x0, y0, w, h, { 0x12, 0x12, 0x14 })
+  local beat = math.max(1, r.beat or 4)
+  for i = 0, n, beat do
+    local x = x0 + i * cw
+    screen:line(x, y0 + 1, x, y0 + h - 1, 1, i % (beat * 4) == 0 and { 0x3a, 0x3a, 0x40 } or grid)
+  end
+  local lo, hi = math.min(r.low, r.high), math.max(r.low, r.high)
+  local rh = (h - 2) / (hi - lo + 1)
+  local function row_y(p) return y0 + 1 + (hi - p) * rh end
+  for p = lo, hi do
+    if p % 12 == 0 then
+      local y = row_y(p) + rh
+      screen:line(x0, y, x0 + w - 1, y, 1, grid)
+    end
+    if p % 12 == 0 or p == lo or p == hi then
+      local name = NOTE_NAMES[p % 12 + 1] .. (p // 12 - 2)
+      screen:label(x0 - 26, math.floor(row_y(p) + rh / 2 - 6), 23, 12, name, { size = 9, color = { 0x8a, 0x8a, 0x90 } }, "right", "center")
+    end
+  end
+  for _, note in ipairs(r.notes) do
+    if note.pitch >= lo and note.pitch <= hi then
+      local ink = note.step == now and lit or hit
+      local a = 0.35 + 0.65 * math.max(0, math.min(1, note.velocity / 127))
+      ink = { math.floor(ink[1] * a), math.floor(ink[2] * a), math.floor(ink[3] * a) }
+      screen:rect(math.floor(x0 + note.step * cw + 1), math.floor(row_y(note.pitch)), math.max(1, math.floor(cw - 1)), math.max(2, math.floor(rh - 1)), ink)
+    end
+  end
+  if r.position then
+    local x = x0 + (r.position % n) * cw
+    screen:line(x, y0, x, y0 + h - 1, 2, lit)
+  end
+  -- The velocities drawn from: 1 to 127 across the box, Velocity's range about 100.
+  local bx, by, bw, bh = 832, 158, 112, 40
+  screen:rect(bx, by, bw, bh, { 0x0c, 0x0c, 0x0e })
+  screen:frame(bx, by, bw, bh, { 0x3a, 0x3a, 0x40 })
+  local spread = (r.velocity_amount or 0) / 100 * 63.5
+  local lo_v, hi_v = 100 - spread, 100 + spread
+  local function vx(v) return bx + 4 + (math.max(1, math.min(127, v)) - 1) / 126 * (bw - 8) end
+  local function vy(t) return by + bh - 4 - t * (bh - 10) end
+  screen:line(vx(100), by + 3, vx(100), by + bh - 3, 1, grid)
+  if spread < 0.5 then
+    screen:line(vx(100), vy(0), vx(100), vy(1), 2, lit)
+  else
+    local m, prev = 24, nil
+    for k = 0, m do
+      local t = k / m
+      local v = lo_v + t * (hi_v - lo_v)
+      local d = r.distribution or 1
+      local y
+      if d == 0 then y = 0.7
+      elseif d == 1 then y = math.exp(-((t - 0.5) / 0.25) ^ 2 / 2)
+      else y = math.exp(-(t / 0.25) ^ 2 / 2) end
+      -- (Draws past 127 or under 1 are drawn again: they pile up at the ends.)
+      local pt = { vx(v), vy(y) }
+      if v >= 1 and v <= 127 then
+        if prev then screen:line(prev[1], prev[2], pt[1], pt[2], 1.5, lit) end
+        prev = pt
+      end
+    end
+  end
+  local names = { "EVEN", "NATURAL", "SKEWED" }
+  screen:label(bx, by - 16, bw, 14, "VELOCITY · " .. (names[(r.distribution or 1) + 1] or ""), { size = 9, color = { 0x8a, 0x8a, 0x90 } }, "left", "center")
+end
+
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -398,7 +520,18 @@ function control.draw(screen, theme, opts)
     })
     channel_tiles(screen, c)
     screen:rect(480, 35, 480, 25, "bar")
-    channel_icon(screen, c.page_group, 720, 126, 37, { 0x3a, 0x3a, 0x3a }, "background")
+    if c.euclid then
+      screen:label(490, 36, 300, 24, "Euclidean", "default", "left", "center")
+      euclid_circle(screen, c.euclid)
+    elseif c.random then
+      local r = c.random
+      screen:label(490, 36, 200, 24, "Random", "default", "left", "center")
+      local made = #r.notes .. (#r.notes == 1 and " note" or " notes")
+      screen:label(700, 36, 250, 24, string.format("%.0f %%  ·  %s", r.probability, made), "default", "right", "center")
+      random_view(screen, r)
+    else
+      channel_icon(screen, c.page_group, 720, 126, 37, { 0x3a, 0x3a, 0x3a }, "background")
+    end
   end
   knobs(screen, theme, c, false, knob_of)
 end

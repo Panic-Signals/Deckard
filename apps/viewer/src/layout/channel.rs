@@ -641,7 +641,7 @@ fn generate(c: &Ctx, g: usize, s: usize, pg: &mut Page) {
                 "Note Count".into(),
                 format!("{n:.0}"),
                 ((n - 1.0) / 5.0) as f32,
-                Some(Edit::Param(t, "sequence_generation/note_count", 1.0, 6.0, 1.0)),
+                Some(Edit::Int(t, "sequence_generation/note_count", 1.0, 6.0, 1.0)),
             ));
         } else {
             for _ in 0..3 {
@@ -660,7 +660,7 @@ fn generate(c: &Ctx, g: usize, s: usize, pg: &mut Page) {
             "Amount".into(),
             format!("{n:.0}"),
             ((n - 2.0) / (max - 2.0)) as f32,
-            Some(Edit::Param(t, "sequence_generation/steps", 2.0, max, 8.0)),
+            Some(Edit::Int(t, "sequence_generation/steps", 2.0, max, 8.0)),
         ));
         pg.section("Fills");
         let k = f("fills", 5.0);
@@ -668,14 +668,17 @@ fn generate(c: &Ctx, g: usize, s: usize, pg: &mut Page) {
             "Amount".into(),
             format!("{k:.0}"),
             ((k - 1.0) / 7.0) as f32,
-            Some(Edit::Param(t, "sequence_generation/fills", 1.0, 8.0, 5.0)),
+            Some(Edit::Int(t, "sequence_generation/fills", 1.0, 8.0, 5.0)),
         ));
         pg.section("Rotate");
         let r = f("rotate", 0.0);
-        pg.knob(("Steps".into(), format!("{r:.0}"), (r / 7.0) as f32, Some(Edit::Param(t, "sequence_generation/rotate", 0.0, 7.0, 0.0))));
+        pg.knob(("Steps".into(), format!("{r:.0}"), (r / 7.0) as f32, Some(Edit::Int(t, "sequence_generation/rotate", 0.0, 7.0, 0.0))));
         pg.section("Division");
         pg.knob(choice("Division", t, "sequence_generation/division", &DIVISIONS, division, 0.0));
-        pg.empty();
+        // The note it writes: the sound's base key (its pad's pitch).
+        pg.section("Root");
+        let root = c.p.groups[g].sounds[s].channel.base_key.clamp(0, 127);
+        pg.knob(("Note".into(), note_name(root), root as f32 / 127.0, Some(Edit::Param(t, "base_key", 0.0, 127.0, 60.0))));
         pg.empty();
         pg.knob(toggle("Live", t, "sequence_generation/live_mode", f("live_mode", 0.0) != 0.0));
     }

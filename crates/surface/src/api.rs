@@ -1389,6 +1389,37 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         t.set("muted", tv.muted)?;
         ct.set("tuner", t)?;
     }
+    // The Generate page's Euclidean circle.
+    if let Some(e) = &c.euclid {
+        let t = lua.create_table()?;
+        t.set("hits", lua.create_sequence_from(e.hits.iter().copied())?)?;
+        t.set("fills", e.fills)?;
+        t.set("rotate", e.rotate)?;
+        t.set("position", e.position)?;
+        ct.set("euclid", t)?;
+    }
+    // The Generate page's Random notes.
+    if let Some(r) = &c.random {
+        let t = lua.create_table()?;
+        t.set("steps", r.steps)?;
+        t.set("beat", r.beat)?;
+        let notes = lua.create_table()?;
+        for (i, &(step, pitch, velocity)) in r.notes.iter().enumerate() {
+            let nt = lua.create_table()?;
+            nt.set("step", step)?;
+            nt.set("pitch", pitch)?;
+            nt.set("velocity", velocity)?;
+            notes.set(i + 1, nt)?;
+        }
+        t.set("notes", notes)?;
+        t.set("position", r.position)?;
+        t.set("probability", r.probability)?;
+        t.set("velocity_amount", r.velocity_amount)?;
+        t.set("distribution", r.distribution)?;
+        t.set("low", r.range.0)?;
+        t.set("high", r.range.1)?;
+        ct.set("random", t)?;
+    }
     let knobs = lua.create_table()?;
     for k in 0..8 {
         let kt = match c.knobs.get(k) {
