@@ -269,7 +269,7 @@ impl crate::App {
     pub fn sync_preferences(&mut self, ui: &mut egui::Ui) {
         let link = self.settings.link;
         ui.label(egui::RichText::new("Sync").strong());
-        egui::Grid::new("midi-sync").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        egui::Grid::new("midi-sync").num_columns(2).spacing([20.0, 12.0]).show(ui, |ui| {
             let s = &mut self.settings;
             ui.label("Mode");
             let name = |m: MidiSync| match m {
@@ -277,7 +277,7 @@ impl crate::App {
                 MidiSync::Send => "Send Clock",
                 MidiSync::Receive => "Receive Clock",
             };
-            egui::ComboBox::from_id_salt("midi-sync-mode").selected_text(name(s.midi_sync)).show_ui(ui, |ui| {
+            crate::layout::combo("midi-sync-mode").selected_text(name(s.midi_sync)).show_ui(ui, |ui| {
                 for m in [MidiSync::Off, MidiSync::Send, MidiSync::Receive] {
                     let r = ui.add_enabled_ui(m != MidiSync::Receive || !link, |ui| ui.selectable_value(&mut s.midi_sync, m, name(m)));
                     r.response.on_disabled_hover_text("Not while Link is on: Link takes priority");

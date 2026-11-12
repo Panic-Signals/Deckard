@@ -18,9 +18,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         deckard_doc::FileItem::Slot(..) => "Save Preset",
     };
     egui::Modal::new(egui::Id::new("save-dialog")).show(ctx, |ui| {
+        crate::layout::dialog_style(ui);
         ui.set_width(360.0);
         ui.heading(title);
-        egui::Grid::new("save-fields").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new("save-fields").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
             ui.label("Name");
             let name = ui.text_edit_singleline(&mut d.name);
             if name.changed() {

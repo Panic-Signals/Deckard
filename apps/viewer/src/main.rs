@@ -2369,7 +2369,7 @@ impl App {
         let mut restart = false;
         egui::Grid::new("audio-engine").num_columns(2).show(ui, |ui| {
             ui.label("Buffer size");
-            egui::ComboBox::from_id_salt("buffer-size").selected_text(format!("{size} samples ({:.1} ms)", ms(size))).show_ui(ui, |ui| {
+            crate::layout::combo("buffer-size").selected_text(format!("{size} samples ({:.1} ms)", ms(size))).show_ui(ui, |ui| {
                 for n in BUFFER_SIZES {
                     ui.selectable_value(&mut size, n, format!("{n} samples ({:.1} ms)", ms(n)));
                 }
@@ -2397,7 +2397,7 @@ impl App {
             ui.label("Render ahead");
             let mut ahead = self.settings.render_ahead_ms;
             let shown = |ms: u32| if ms == 0 { "Off".to_string() } else { format!("{ms} ms") };
-            egui::ComboBox::from_id_salt("render-ahead").selected_text(shown(ahead)).show_ui(ui, |ui| {
+            crate::layout::combo("render-ahead").selected_text(shown(ahead)).show_ui(ui, |ui| {
                 for ms in [0, 10, 20, 40, 80] {
                     ui.selectable_value(&mut ahead, ms, shown(ms));
                 }
@@ -2461,7 +2461,7 @@ impl App {
         egui::Grid::new("audio-driver").num_columns(2).show(ui, |ui| {
             ui.label("Driver");
             if ASIO_BUILT {
-                egui::ComboBox::from_id_salt("audio-driver-pick").selected_text(pick.name()).show_ui(ui, |ui| {
+                crate::layout::combo("audio-driver-pick").selected_text(pick.name()).show_ui(ui, |ui| {
                     for d in [AudioDriver::System, AudioDriver::Asio] {
                         ui.selectable_value(&mut pick, d, d.name());
                     }
@@ -2594,7 +2594,7 @@ impl App {
             for (label, pick, devices, default, kind) in rows {
                 ui.label(label);
                 let shown = pick.clone().unwrap_or_else(|| default_label(default));
-                egui::ComboBox::from_id_salt(label).selected_text(shown).width(320.0).show_ui(ui, |ui| {
+                crate::layout::combo(label).selected_text(shown).width(320.0).show_ui(ui, |ui| {
                     ui.selectable_value(pick, None, default_label(default));
                     for (name, ch) in devices {
                         ui.selectable_value(pick, Some(name.clone()), format!("{name} ({ch} {kind})"));
@@ -2713,7 +2713,7 @@ impl App {
                     let text =
                         |c: Option<usize>| c.map_or("Not connected".to_string(), |c| channel_names::interface_label(c, port, &names));
                     let mut pick = cur;
-                    egui::ComboBox::from_id_salt(("route", outs, i)).selected_text(text(cur)).width(200.0).show_ui(ui, |ui| {
+                    crate::layout::combo(("route", outs, i)).selected_text(text(cur)).width(200.0).show_ui(ui, |ui| {
                         ui.selectable_value(&mut pick, None, text(None));
                         for c in 0..channels.max(cur.map_or(0, |c| c + 1)) {
                             ui.selectable_value(&mut pick, Some(c), text(Some(c)));
@@ -2842,7 +2842,7 @@ impl App {
                     ui.label(&name);
                     let ch = self.settings.drum_channels.get(&id).copied();
                     let text = |c: Option<u8>| c.map_or("Off".to_string(), |c| format!("Channel {c}"));
-                    egui::ComboBox::from_id_salt(("drum-channel", &id)).selected_text(text(ch)).show_ui(ui, |ui| {
+                    crate::layout::combo(("drum-channel", &id)).selected_text(text(ch)).show_ui(ui, |ui| {
                         for c in std::iter::once(None).chain((1..=16).map(Some)) {
                             if ui.selectable_label(ch == c, text(c)).clicked() {
                                 match c {
@@ -2855,7 +2855,7 @@ impl App {
                     // (A print says its track, not its kind: which one is the drums.)
                     let tr = self.settings.drum_tracks.get(&id).copied();
                     let track_text = |t: Option<u8>| t.map_or("Prints: as notes".to_string(), |t| format!("Prints: track {t} as pads"));
-                    egui::ComboBox::from_id_salt(("drum-track", &id))
+                    crate::layout::combo(("drum-track", &id))
                         .selected_text(track_text(tr))
                         .show_ui(ui, |ui| {
                             for t in std::iter::once(None).chain((1..=8).map(Some)) {
@@ -2891,7 +2891,7 @@ impl App {
     /// each can be switched off; Rescan) and Location (folders searched for VST).
     /// Preferences ▸ General: the default project File ▸ New starts from (BUGS #10).
     fn general_preferences(&mut self, ui: &mut egui::Ui) {
-        egui::Grid::new("general-prefs").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        egui::Grid::new("general-prefs").num_columns(2).spacing([20.0, 12.0]).show(ui, |ui| {
             ui.label("Default project");
             ui.vertical(|ui| {
                 let shown =
@@ -2988,7 +2988,8 @@ impl App {
         let mut library_change = None;
         let mut controller_change = None;
         let mut wine_action = None;
-        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([620.0, 460.0]).open(&mut open).show(ctx, |ui| {
+        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([760.0, 700.0]).open(&mut open).show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, 7, "General");
                 ui.selectable_value(&mut tab, 2, "Audio");
@@ -3009,9 +3010,9 @@ impl App {
             } else if tab == 3 {
                 self.midi_preferences(ui);
             } else if tab == 6 {
-                egui::Grid::new("recording-prefs").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                egui::Grid::new("recording-prefs").num_columns(2).spacing([20.0, 12.0]).show(ui, |ui| {
                     ui.label("Count-in");
-                    egui::ComboBox::from_id_salt("count-in")
+                    crate::layout::combo("count-in")
                         .selected_text(match self.settings.count_in_bars {
                             0 => "Off".to_string(),
                             1 => "1 bar".to_string(),
@@ -3054,7 +3055,7 @@ impl App {
                     library_change = Some((dir, false));
                 }
             } else if tab == 4 {
-                egui::Grid::new("hardware-prefs").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                egui::Grid::new("hardware-prefs").num_columns(2).spacing([20.0, 12.0]).show(ui, |ui| {
                     ui.label("Pad sensitivity");
                     let mut n = self.settings.pad_sensitivity;
                     ui.add(egui::Slider::new(&mut n, 0..=100).suffix(" %"));
@@ -3073,7 +3074,7 @@ impl App {
                         let in_use = ni_agent::screen_driver_in_use(mk3.displays_released(), mk3.displays_connected(), switching);
                         let selected = in_use.map(ni_agent::ScreenDriver::label).unwrap_or("Not open");
                         let mut picked = None;
-                        egui::ComboBox::from_id_salt("screen-driver").selected_text(selected).show_ui(ui, |ui| {
+                        crate::layout::combo("screen-driver").selected_text(selected).show_ui(ui, |ui| {
                             for driver in [ni_agent::ScreenDriver::Windows, ni_agent::ScreenDriver::Maschine] {
                                 let hover = match driver {
                                     ni_agent::ScreenDriver::Windows => "DECKARD draws the screens, using Windows' WinUSB driver. Asks for administrator approval.",
@@ -3105,7 +3106,7 @@ impl App {
                     ui.label("Controller");
                     use settings::ControllerChoice as C;
                     let mut choice = self.settings.controller;
-                    egui::ComboBox::from_id_salt("controller-layer")
+                    crate::layout::combo("controller-layer")
                         .selected_text(match choice {
                             C::Automatic => "Automatic",
                             C::Deckard => "DECKARD",
@@ -3122,7 +3123,7 @@ impl App {
                     ui.end_row();
                     ui.label("Controller theme");
                     let mut theme = self.settings.controller_theme.clone();
-                    egui::ComboBox::from_id_salt("controller-theme").selected_text(theme_name(&theme)).show_ui(ui, |ui| {
+                    crate::layout::combo("controller-theme").selected_text(theme_name(&theme)).show_ui(ui, |ui| {
                         for t in self.surface.themes() {
                             let name = theme_name(&t);
                             ui.selectable_value(&mut theme, t, name);
@@ -3283,6 +3284,7 @@ impl App {
         match offer {
             StemsOffer::Asking => {
                 egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
+                    crate::layout::dialog_style(ui);
                     ui.set_width(420.0);
                     ui.label(egui::RichText::new("Install stem separation?").strong());
                     ui.add_space(4.0);
@@ -3322,6 +3324,7 @@ impl App {
                 }
                 if !done {
                     egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
+                        crate::layout::dialog_style(ui);
                         ui.set_width(420.0);
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -3372,6 +3375,7 @@ impl App {
         if let Some(version) = self.whats_new.clone() {
             let mut choice = None;
             egui::Modal::new(egui::Id::new("whats-new")).show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
                 ui.set_width(360.0);
                 ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
                 ui.add_space(4.0);
@@ -3401,6 +3405,7 @@ impl App {
             };
             let mut choice = None;
             egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
                 ui.set_width(360.0);
                 ui.label(egui::RichText::new(question).strong());
                 ui.add_space(4.0);
@@ -7759,6 +7764,7 @@ impl App {
         let mut edits: Vec<(String, f64)> = Vec::new();
         let (mut on, mut lock) = (self.repeat_soft, self.arp_locked);
         egui::Window::new("Note Repeat / Arp").open(&mut open).resizable(false).show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 ui.toggle_value(&mut on, "On").on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
                 ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
@@ -7774,12 +7780,12 @@ impl App {
                 }
             });
             ui.separator();
-            egui::Grid::new("arp-settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
                 for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
                     ui.label(&k.name);
                     match view.lists.iter().find(|(key, _)| *key == k.key) {
                         Some((_, list)) => {
-                            egui::ComboBox::from_id_salt(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
+                            crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
                                 for (i, name) in list.iter().enumerate() {
                                     if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
                                         edits.push((k.key.clone(), i as f64));
@@ -10478,7 +10484,7 @@ impl App {
         );
         let st = self.wine_status.get_or_insert_with(wine::Status::probe).clone();
         let busy = self.wine_task.is_some();
-        egui::Grid::new("wine").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
+        egui::Grid::new("wine").num_columns(3).spacing([20.0, 8.0]).show(ui, |ui| {
             ui.label("Wine");
             match &st.wine {
                 Some(v) => {
