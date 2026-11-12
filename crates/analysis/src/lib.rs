@@ -4,12 +4,14 @@
 //! Pure functions over a sample's frames: no files, no threads. They take a while on long
 //! samples, so callers run them off the audio thread and keep the answers.
 
+pub mod cache;
 mod onset;
 pub mod root;
 pub mod tempo;
 #[cfg(test)]
 mod test_signals;
 
+pub use cache::{Analysis, Cache, analyse};
 pub use root::{Root, root, root_with_name};
 pub use tempo::{Tempo, TempoSource, tempo};
 

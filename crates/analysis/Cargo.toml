@@ -7,3 +7,7 @@ description = "What a sample is: its tempo, its root note (the sampler's analysi
 [dependencies]
 deckard-plugins = { path = "../plugins" }
 deckard-library = { path = "../library" }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.27.0"

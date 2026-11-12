@@ -2175,6 +2175,8 @@ version = "0.1.0"
 dependencies = [
  "deckard-library",
  "deckard-plugins",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
