@@ -190,3 +190,25 @@ pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project) -> Knobs {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::sampling::internal_value;
+    use deckard_engine::TapSource;
+
+    /// The Internal INPUT knob lists the Master, the group, and each sound with something
+    /// on it, at the input chosen; turning it sets that input.
+    #[test]
+    fn the_internal_input_knob_lists_the_master_groups_and_sounds() {
+        let mut d = deckard_doc::Document::new_project().unwrap();
+        d.add_slot(0, 1, 0, &deckard_doc::NewModule::Effect(deckard_model::PERFORM_FX.0)).unwrap();
+        let rec = RecorderView { source: 2, internal: TapSource::Sound(0, 1), ..Default::default() };
+        let k = knobs(&rec, &Settings::default(), d.project());
+        let input = k.pages.iter().flat_map(|p| &p.knobs).find(|k| k.key == "Input").expect("an INPUT knob");
+        assert_eq!(input.value, 2.0, "the sound chosen: after the Master and the group");
+        assert_eq!(input.max, 2.0, "the Master, the group, the one sound with a plug-in");
+        let values = [TapSource::Master, TapSource::Group(0), TapSource::Sound(0, 1)].map(internal_value).to_vec();
+        assert_eq!(k.apply["Input"], Apply::Param(RecParam::Internal, Some(values)));
+    }
+}

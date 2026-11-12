@@ -13,6 +13,13 @@ pub(crate) struct GroupLoad {
     pub(super) ready: Option<Receiver<Result<deckard_doc::PreparedEdit, String>>>,
 }
 
+/// A sound/preset/effect load waiting for the controller screens to show "loading".
+pub(crate) struct ItemLoad {
+    pub(super) item: Item,
+    target: Option<(usize, usize)>,
+    frames: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +65,20 @@ mod tests {
     }
 
     #[test]
+    fn sound_load_shows_the_overlay_for_two_frames_before_it_loads() {
+        let (mut app, _dir, mut item) = fixture();
+        item.kind = deckard_library::Kind::Sound;
+        item.name = "Pad".into();
+        app.queue_item_load(&item, None).unwrap();
+        assert_eq!(app.surface_view().loading.as_deref(), Some("Pad"));
+        app.poll_item_load();
+        assert!(app.item_load.is_some(), "the overlay gets a frame before the load starts");
+        app.poll_item_load();
+        assert!(app.item_load.is_none());
+        assert_eq!(app.surface_view().loading, None);
+    }
+
+    #[test]
     fn invalid_group_preserves_the_playing_kit_and_history() {
         let (mut app, _dir, item) = fixture();
         std::fs::write(&item.path, b"bad group").unwrap();
@@ -97,6 +118,33 @@ mod tests {
 }
 
 impl App {
+    /// Load a library item after the screens have had two frames to show the overlay.
+    /// Projects and a load already waiting go straight through.
+    pub(crate) fn queue_item_load(&mut self, item: &Item, target: Option<(usize, usize)>) -> Result<(), String> {
+        if self.item_load.is_some() || matches!(item.kind, deckard_library::Kind::Project) {
+            return self.load_item(item, target);
+        }
+        if !item.path.is_file() {
+            return Err(format!("{} isn't there", item.path.display()));
+        }
+        let target = target.or(Some((self.group, self.sound)));
+        self.item_load = Some(ItemLoad { item: item.clone(), target, frames: 2 });
+        self.status = format!("Loading {}…", item.name);
+        Ok(())
+    }
+
+    pub(crate) fn poll_item_load(&mut self) {
+        let Some(mut job) = self.item_load.take() else { return };
+        job.frames = job.frames.saturating_sub(1);
+        if job.frames > 0 {
+            self.item_load = Some(job);
+            return;
+        }
+        if let Err(e) = self.load_item(&job.item, job.target) {
+            self.status = e;
+        }
+    }
+
     pub(crate) fn queue_group_load(&mut self, item: &Item, group: usize) -> Result<(), String> {
         if self.group_load.is_some() {
             return Err("A Group is already loading".into());

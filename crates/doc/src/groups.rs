@@ -21,7 +21,7 @@ impl Document {
         let items_path = self.field_path(&song, &["groups", "objects", "items"])?;
         let current_path = self.field_path(&song, &["groups", "current"])?;
         let qb_path = self.field_path(&song, &["quick_browse"])?;
-        let mut items = self.items(&items_path)?;
+        let Some(Value::List(items)) = self.tree.at(&items_path) else { return Err("no group list".into()) };
         let n = items.len();
         let name = format!("Group {}{}", (b'A' + (n % 8) as u8) as char, n / 8 + 1);
 
@@ -32,7 +32,6 @@ impl Document {
             let handle = b.handles("group_", 1)?;
             Ok((b.shared(GROUP, g), oid, handle))
         })?;
-        items.push(item);
 
         // One handle per group: `group_0` alone is stored as itself.
         let qb = match self.tree.at(&qb_path) {
@@ -48,7 +47,7 @@ impl Document {
         };
 
         let mut ops = vec![
-            Op::Set { path: items_path, value: Value::List(items) },
+            Op::Append { path: items_path, value: item },
             Op::Set { path: current_path, value: Value::Ref(oid) },
             Op::Set { path: qb_path, value: qb },
         ];
@@ -59,9 +58,8 @@ impl Document {
             let Some(Value::Obj(holder)) = self.tree.at(&item) else { continue };
             item.extend(holder.find_path("px").ok_or("scene item without px")?);
             let entries_path = self.field_path(&item, &["patterns", "objects", "items"])?;
-            let mut entries = self.items(&entries_path)?;
-            entries.push(self.build(|b| b.scene_entry(oid))?);
-            ops.push(Op::Set { path: entries_path, value: Value::List(entries) });
+            let value = self.build(|b| b.scene_entry(oid))?;
+            ops.push(Op::Append { path: entries_path, value });
         }
         self.apply("Add Group", ops)?;
         Ok(n)
@@ -313,5 +311,37 @@ mod tests {
                 assert_eq!(left, want, "group {g}");
             }
         }
+    }
+
+    #[test]
+    fn group_history_keeps_one_group_per_add_and_undo_redo_keeps_existing_edits() {
+        let mut d = Document::new_project().unwrap();
+        d.rename(crate::Target::Sound(0, 0), "Keep this sound").unwrap();
+        for _ in 0..5 {
+            d.add_group().unwrap();
+            let mut groups = 0;
+            for op in &d.undo.last().unwrap().redo {
+                if let Some(value) = crate::op_value(op) {
+                    value.walk(&mut |o| {
+                        if o.type_name == "NI::MASCHINE::DATA::Group" {
+                            groups += 1;
+                        }
+                    });
+                }
+            }
+            assert_eq!(groups, 1, "a Group addition must not snapshot existing Groups");
+        }
+        for n in (1..=5).rev() {
+            assert!(d.undo());
+            assert_eq!(d.project().groups.len(), n);
+        }
+        assert_eq!(d.project().groups[0].sounds[0].name, "Keep this sound");
+        for n in 2..=6 {
+            assert!(d.redo());
+            assert_eq!(d.project().groups.len(), n);
+        }
+        let reopened = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(reopened.project().groups.len(), 6);
+        assert_eq!(reopened.project().groups[0].sounds[0].name, "Keep this sound");
     }
 }

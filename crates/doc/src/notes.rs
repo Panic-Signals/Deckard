@@ -23,6 +23,121 @@ const AUDIO_EVENT: &str = "NI::MASCHINE::DATA::AudioEvent";
 const LENGTH_BASE: &str = "<NI::MASCOMMON::DATA::LengthEvent>";
 const POLICY: &str = "NI::MASCOMMON::DATA::ProbabilityEventPolicy<NI::MASCOMMON::DATA::NoteEvent>";
 
+#[test]
+fn note_model_and_reference_index_match_full_reads_through_history() {
+    fn check(d: &Document) {
+        assert_eq!(d.project(), &deckard_model::Project::read(d.root()).0);
+        if let Some(refs) = &d.references {
+            let mut actual = HashMap::new();
+            super::count_refs(&d.tree, &mut actual, true);
+            assert_eq!(refs, &actual);
+        }
+    }
+    let mut d = Document::new_project().unwrap();
+    d.add_pattern(0, 0, "Notes").unwrap();
+    let a = Note { expr: None, sound: 0, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let b = Note { sound: 1, position: 240, ..a };
+    d.edit_notes("Insert", 0, 0, &[], &[a, b]).unwrap();
+    check(&d);
+    let changed = Note { position: 480, velocity: 78, length: 240, probability: 67, ..a };
+    d.edit_notes("Change", 0, 0, &[a], &[changed]).unwrap();
+    check(&d);
+    d.edit_midi("MIDI", 0, 0, &[], &[MidiEvent { sound: 1, position: 90, kind: MidiKind::ChannelPressure(64) }]).unwrap();
+    check(&d);
+    d.edit_notes("Delete", 0, 0, &[b], &[]).unwrap();
+    check(&d);
+    for _ in 0..4 {
+        assert!(d.undo());
+        check(&d);
+    }
+    for _ in 0..4 {
+        assert!(d.redo());
+        check(&d);
+    }
+}
+
+#[test]
+fn event_edit_keeps_other_references_to_the_old_note() {
+    let mut d = Document::new_project().unwrap();
+    d.add_pattern(0, 0, "Notes").unwrap();
+    let a = Note { expr: None, sound: 0, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let b = Note { sound: 1, ..a };
+    d.edit_notes("Seed", 0, 0, &[], &[a, b]).unwrap();
+    let paths = d.object_paths();
+    let seq0 = d.sequence_of(0, 0, 0, &paths).unwrap().2.unwrap();
+    let seq1 = d.sequence_of(0, 0, 1, &paths).unwrap().2.unwrap();
+    let events0 = d.field_path(&seq0, &["events", "items"]).unwrap();
+    let events1 = d.field_path(&seq1, &["events", "items"]).unwrap();
+    let first_event = |d: &Document, p: &Path| {
+        d.obj_by_path(p).unwrap().fields.iter().position(|(_, v)| matches!(v,Value::Obj(o)if o.type_name==TIMED_EVENT)).unwrap() as u32
+    };
+    let te0 = [events0.as_slice(), &[first_event(&d, &events0)]].concat();
+    let te1 = [events1.as_slice(), &[first_event(&d, &events1)]].concat();
+    let note = d.obj_by_path(&te0).unwrap().get("event").and_then(|v| if let Value::Obj(o) = v { o.oid } else { None }).unwrap();
+    let path = d.field_path(&te1, &["event"]).unwrap();
+    d.apply("Share event", vec![Op::Set { path, value: Value::Ref(note) }]).unwrap();
+    let changed = Note { velocity: 47, ..a };
+    d.edit_notes("Change one", 0, 0, &[a], &[changed]).unwrap();
+    assert_eq!(d.project().groups[0].patterns[0].notes, vec![changed, b]);
+    assert_eq!(d.project(), &deckard_model::Project::read(d.root()).0);
+    assert!(d.undo());
+    assert_eq!(d.project(), &deckard_model::Project::read(d.root()).0);
+    assert!(d.redo());
+    assert_eq!(d.project(), &deckard_model::Project::read(d.root()).0);
+}
+
+#[test]
+#[ignore = "offline session stage profile"]
+fn note_edit_stage_profile() {
+    use std::time::Instant;
+    let path = std::env::var_os("DECKARD_PROFILE_SESSION").expect("fixture");
+    let mut d = Document::open(std::path::Path::new(&path)).unwrap();
+    let (g, p, notes) = d
+        .project()
+        .groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, group)| group.patterns.iter().enumerate().map(move |(p, pat)| (g, p, pat.notes.clone())))
+        .max_by_key(|x| x.2.len())
+        .unwrap();
+    let add: Vec<_> = notes.iter().map(|n| Note { velocity: 99, ..*n }).collect();
+    let t = Instant::now();
+    let paths = d.object_paths();
+    println!("object_paths {:?}", t.elapsed());
+    println!("indexed objects {}", paths.len());
+    let t = Instant::now();
+    let classes = crate::build::class_table(Some(d.root()));
+    println!("class_table {:?}", t.elapsed());
+    let mut b = crate::build::Builder::new(&d.types, classes, d.next_oid);
+    let t = Instant::now();
+    b.node().unwrap();
+    println!("blank_node {:?}", t.elapsed());
+    let t = Instant::now();
+    d.new_node().unwrap();
+    println!("new_node {:?}", t.elapsed());
+    let t = Instant::now();
+    d.new_event(&add[0], None, &paths).unwrap();
+    println!("new_event_blank {:?}", t.elapsed());
+    let t = Instant::now();
+    let ops = d.event_ops(g, p, &notes, &add, &[], &[]).unwrap();
+    println!("event_ops {:?}", t.elapsed());
+    let t = Instant::now();
+    let undo = d.run(&ops).unwrap();
+    println!("run {:?}", t.elapsed());
+    let t = Instant::now();
+    d.run(&undo).unwrap();
+    println!("undo {:?}", t.elapsed());
+    let t = Instant::now();
+    let ops = d.rehomed("profile", ops).unwrap();
+    println!("rehome {:?}", t.elapsed());
+    let t = Instant::now();
+    d.run(&ops).unwrap();
+    println!("rerun {:?}", t.elapsed());
+    let t = Instant::now();
+    d.refresh();
+    println!("refresh {:?}", t.elapsed());
+}
+
 /// Bring note events to the format that has a probability (NoteEvent v1 with a
 /// ProbabilityEventPolicy v1), as Maschine 3 does when it re-saves an older project.
 /// Returns how many objects changed.
@@ -103,6 +218,87 @@ impl Item {
 }
 
 impl Document {
+    /// Sequences and their events live outside plug-in state. Index those small
+    /// subtrees first; unusual cross-subtree definitions retain the full fallback.
+    fn event_paths(&self) -> HashMap<u64, Path> {
+        let mut out = HashMap::new();
+        for group in &self.addresses.groups {
+            let roots = group
+                .sounds
+                .iter()
+                .filter_map(|p| self.field_path(p, &["sequences"]).ok())
+                .chain(group.patterns.iter().chain(&group.clip_patterns).filter_map(|p| self.field_path(p, &["sound_sequences"]).ok()));
+            for prefix in roots {
+                if let Some(Value::Obj(o)) = self.tree.at(&prefix) {
+                    o.walk_paths(&mut |o, path| {
+                        if let Some(id) = o.oid {
+                            out.entry(id).or_insert_with(|| [prefix.as_slice(), path].concat());
+                        }
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Note edits preserve routing, modules, audio cues and modulation. Re-read
+    /// notes/MIDI for every pattern, including other references to a shared sequence.
+    pub(crate) fn patch_event_model(&mut self) -> bool {
+        let paths = self.event_paths();
+        let mut fresh = Vec::new();
+        for (g, group) in self.project.groups.iter().enumerate() {
+            for p in (0..group.patterns.len()).chain((0..group.clip_patterns.len()).map(|p| p + crate::CLIP)) {
+                let mut notes = Vec::new();
+                let mut midi = Vec::new();
+                for sound in 0..group.sounds.len() {
+                    let Ok((_, _, seq)) = self.sequence_of(g, p, sound, &paths) else { return false };
+                    let Some(seq) = seq else { continue };
+                    let Some(events) = self
+                        .obj_by_path(&seq)
+                        .and_then(|o| o.get("events"))
+                        .and_then(|v| if let Value::Obj(o) = v { Some(o) } else { None })
+                    else {
+                        return false;
+                    };
+                    let Ok(items) = items_of(events) else { return false };
+                    for item in items {
+                        let Some(ev) = self.event_obj(&item.event, &paths) else { return false };
+                        let position = item.position();
+                        if ev.type_name == MIDI_EVENT {
+                            if let Some(kind) = midi_kind(ev) {
+                                midi.push(MidiEvent { sound, position, kind });
+                            }
+                        } else if ev.type_name.ends_with("NoteEvent") {
+                            let Some((length, pitch, velocity)) = note_fields(ev) else { return false };
+                            let expr = if let Value::Obj(te) = &item.event {
+                                te.get(deckard_model::expression::EXPR_FIELD)
+                                    .and_then(Value::as_int)
+                                    .map(|i| deckard_model::ExprId(i as u32))
+                            } else {
+                                None
+                            };
+                            let probability = ev
+                                .find("probability")
+                                .and_then(Value::as_int)
+                                .or_else(|| ev.find("muted").and_then(Value::as_int).map(|m| if m != 0 { 0 } else { 100 }))
+                                .unwrap_or(100);
+                            notes.push(Note { expr, sound, position, length, pitch, velocity, probability });
+                        }
+                    }
+                }
+                notes.sort_by_key(|n| (n.position, n.sound, n.pitch));
+                midi.sort_by_key(|m| (m.position, m.sound));
+                fresh.push((g, p, notes, midi));
+            }
+        }
+        for (g, p, notes, midi) in fresh {
+            let group = &mut self.project.groups[g];
+            let pat = if p >= crate::CLIP { &mut group.clip_patterns[p - crate::CLIP] } else { &mut group.patterns[p] };
+            pat.notes = notes;
+            pat.midi = midi;
+        }
+        true
+    }
     /// Every object by id (first occurrence) with its path.
     pub(crate) fn object_paths(&self) -> HashMap<u64, Path> {
         let mut out = HashMap::new();
@@ -147,7 +343,10 @@ impl Document {
     fn new_event(&mut self, n: &Note, template: Option<&Value>, paths: &HashMap<u64, Path>) -> Result<Value, String> {
         let te = match template {
             Some(t) => t.clone(),
-            None => self.build(|b| b.note_event())?,
+            None => match &self.note_event {
+                Some(template) => template.clone(),
+                None => self.build(|b| b.note_event())?,
+            },
         };
         // The event itself (not a reference to someone else's).
         let ev = self.event_obj(&te, paths).ok_or("note event not found")?.clone();
@@ -186,7 +385,11 @@ impl Document {
     }
 
     pub(crate) fn new_node(&mut self) -> Result<Value, String> {
-        self.build(|b| b.node())
+        if self.event_node.is_none() {
+            self.event_node = Some(self.build(|b| b.node())?);
+        }
+        let template = self.event_node.as_ref().unwrap().clone();
+        Ok(self.fresh_copy(&template))
     }
 
     /// The pattern's entry for `sound` (index in the entries list) and where its
@@ -261,7 +464,8 @@ impl Document {
         if ops.is_empty() {
             return Ok(());
         }
-        self.apply(label, ops)
+        let hints = vec![Some((super::Target::Pattern(g, p), "__events".into())); ops.len()];
+        self.apply_with(label, ops, hints)
     }
 
     /// The ops of an [`edit_events`](Self::edit_events), to apply with others.
@@ -278,11 +482,24 @@ impl Document {
         if add.iter().any(|n| n.probability != 100) {
             self.upgrade_note_format();
         }
-        let paths = self.object_paths();
         let mut sounds: Vec<usize> =
             remove.iter().chain(add).map(|n| n.sound).chain(remove_midi.iter().chain(add_midi).map(|m| m.sound)).collect();
         sounds.sort_unstable();
         sounds.dedup();
+        let mut paths = self.event_paths();
+        let complete = sounds.iter().all(|&s| {
+            self.sequence_of(g, p, s, &paths).is_ok_and(|(_, _, seq)| {
+                seq.is_none_or(|seq| {
+                    self.obj_by_path(&seq)
+                        .and_then(|o| o.get("events"))
+                        .and_then(|v| if let Value::Obj(o) = v { items_of(o).ok() } else { None })
+                        .is_some_and(|items| items.iter().all(|it| self.event_obj(&it.event, &paths).is_some()))
+                })
+            })
+        });
+        if !complete {
+            paths = self.object_paths();
+        }
         let mut ops = Vec::new();
         for sound in sounds {
             let (entries_path, entry, seq) = self.sequence_of(g, p, sound, &paths)?;
@@ -469,7 +686,10 @@ impl Document {
                 let t = t.clone();
                 self.fresh_copy(&t)
             }
-            None => self.build(|b| b.item(SEQUENCE))?,
+            None => match self.event_sequence.clone() {
+                Some(template) => self.fresh_copy(&template),
+                None => self.build(|b| b.item(SEQUENCE))?,
+            },
         };
         let header = self.new_node()?;
         let mut new_items = first;
@@ -515,12 +735,15 @@ impl Document {
     /// A class has one version per archive, so this covers the whole project and the
     /// undo history. It is not an undo step of its own; the project counts as changed.
     pub fn upgrade_note_format(&mut self) -> bool {
+        if let Some(template) = &mut self.note_event {
+            upgrade_notes(template);
+        }
         if upgrade_notes(&mut self.tree) == 0 {
             return false;
         }
         for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             for op in step.undo.iter_mut().chain(step.redo.iter_mut()) {
-                if let Op::Set { value, .. } = op {
+                if let Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } = op {
                     upgrade_notes(value);
                 }
             }

@@ -205,6 +205,8 @@ pub trait MidiInput: Send {
     /// The transport stopped: the engine has ended every note, and any it was still to
     /// play are gone. Forget what's held in the song's name; keys may still be down.
     fn stopped(&mut self) {}
+    /// Owning Group changed slot; preserve the processor and its session state.
+    fn group_moved(&mut self, _group: usize) {}
 
     /// It's being taken out: end every note it holds.
     fn finish(&mut self, _clock: Clock, _out: &mut Outbox) {}

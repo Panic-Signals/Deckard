@@ -600,6 +600,9 @@ fn mk3_surface_browse_load_button_and_wheel_load_one_shots() {
     // Display button 8 (LOAD) sets up a Sampler with a single full-range zone and focuses slot 0.
     app.browse(BrowseAct::Focus(hit_i));
     app.mk3_events(vec![Event::Button("BUTTON_SCREEN_8", true), Event::Button("BUTTON_SCREEN_8", false)], &mut reqs);
+    assert!(app.item_load.is_some(), "the load waits for the loading overlay");
+    app.poll_item_load();
+    app.poll_item_load();
     {
         let doc = app.doc.clone().unwrap();
         let d = doc.borrow();
@@ -624,6 +627,8 @@ fn mk3_surface_browse_load_button_and_wheel_load_one_shots() {
         ],
         &mut reqs,
     );
+    app.poll_item_load();
+    app.poll_item_load();
     let doc = app.doc.clone().unwrap();
     let d = doc.borrow();
     let snd = &d.project().groups[g].sounds[s];

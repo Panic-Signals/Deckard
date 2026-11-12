@@ -130,10 +130,18 @@ function chain.draw(screen, c)
     span = span + widths[first]
   end
   local x = 0
+  local function overflow(last)
+    if first > 1 or last < #c.chain then
+      local range = last >= first and (first == last and tostring(first) or first .. "-" .. last) or "+"
+      screen:label(16, 174, 448, 18, range .. " / " .. #c.chain, { size = 12, color = "text" }, "right", "center")
+      if first > 1 then screen:triangle(4, 149, 7, 11, "left", "text") end
+      if last < #c.chain then screen:triangle(469, 149, 7, 11, "right", "text") end
+    end
+  end
   for i = first, #c.chain do
     local slot = c.chain[i]
     local size, name_w, w = slot_size(screen, slot)
-    if x + w > SCREEN_W then return end
+    if x + w > SCREEN_W then overflow(i - 1); return end
     local focused = i == c.slot_index
     kind_icon(screen, x + 13, 72, slot.instrument)
     local colour = focused and "text" or { 0xb1, 0xb1, 0xb1 }
@@ -145,6 +153,7 @@ function chain.draw(screen, c)
     chain.thumbnail(screen, x + 12, 94, size[1], size[2], slot)
     x = x + w
   end
+  overflow(#c.chain)
   if x + NEW_W > SCREEN_W then return end
   -- A new slot, framed while it's the one focused (the plug-in browser loads into it).
   if not c.slot_index then

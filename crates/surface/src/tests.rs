@@ -574,7 +574,7 @@ fn edited_user_scripts_reload() {
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["maschine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -604,7 +604,7 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
 }
 
 #[test]
@@ -3354,6 +3354,47 @@ fn pad_mode_group_move_uses_shift_3_4_and_respects_ends() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
 
+/// A pad tile that isn't chosen is near-neutral grey under text in its colour: a dimmed
+/// fill of the same hue made red text on red unreadable on the MK3's screen.
+#[test]
+fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
+    let mut s = Surface::new();
+    let v = view();
+    let now = std::time::Instant::now();
+    s.tick(&v, now);
+    s.event(&deckard_mk3::Event::Button("BUTTON_SELECT", true), &v, now);
+    let (_, px) = s.screens(&v).unwrap();
+    let at = |x: usize, y: usize| px[y * screen::WIDTH + x];
+    // Pad 2 (focus is on pad 1): its tile from x 603, y 213, 115 × 54; well clear of its name.
+    let [r, g, b, _] = at(603 + 100, 213 + 45);
+    assert!(r.abs_diff(g) < 24 && r.abs_diff(b) < 24, "near-neutral, not tinted red: {r},{g},{b}");
+    assert!(r > 16 && r < 64, "a dark grey, set apart from an empty pad: {r}");
+    // Pad 1, focused: still filled with its colour.
+    let [r, g, _, _] = at(484 + 100, 213 + 45);
+    assert!(r > 200 && g < 100, "the chosen pad keeps its colour: {r},{g}");
+}
+
+#[test]
+fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
+    let (mut surface, mut v) = (Surface::new(), view());
+    v.control.modules_visible = true;
+    v.control.chain = (0..3)
+        .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
+        .collect();
+    for (slot, direction, range) in [(0, "right", "1-2 / 3"), (2, "left", "2-3 / 3")] {
+        v.control.slot_index = Some(slot);
+        let picture = surface.draw_picture(&v);
+        assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
+        assert!(picture.ops.iter().any(|o| matches!(o,screen::DrawOp::Triangle{x,y:149,dir,..}if (*x==4||*x==469)&&dir==direction)));
+    }
+    for slot in &mut v.control.chain {
+        slot.instrument = false;
+        slot.name = "FX".into();
+    }
+    v.control.slot_index = Some(0);
+    assert!(!surface.draw_picture(&v).texts.iter().any(|s| s.ends_with(" / 3")));
+}
+
 #[test]
 fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
     let (mut s, mut v) = (Surface::new(), view());
@@ -3583,3 +3624,12 @@ fn zhora_display_buttons_1_to_4_pick_pages() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::Level(0)]);
 }
 
+#[test]
+fn loading_overlays_both_screens() {
+    let (s, mut v) = (Surface::new(), view());
+    assert!(!s.screen_text(&v).contains(&"LOADING…".to_string()));
+    v.loading = Some("Dusty Kit".into());
+    let text = s.screen_text(&v);
+    assert_eq!(text.iter().filter(|t| *t == "LOADING…").count(), 2, "{text:?}");
+    assert_eq!(text.iter().filter(|t| *t == "Dusty Kit").count(), 2, "{text:?}");
+}
