@@ -697,6 +697,13 @@ pub struct Saved {
     samples: bool,
 }
 
+/// A slot's hosted plug-in whose preset saves as NKS ([`App::nks_plugin`]).
+struct NksPlugin {
+    ids: deckard_plugins::nks::PluginIds,
+    instrument: bool,
+    plugin: deckard_model::PluginRef,
+}
+
 /// "Drums › Kick; Bass" as type level lists.
 fn parse_types(text: &str) -> Vec<Vec<String>> {
     text.split(';')
@@ -8592,13 +8599,14 @@ impl App {
     }
 
     /// The folders DECKARD's library indexes: Maschine's user folders (Maschine 3's,
-    /// and Maschine 2's beside it), listed under User, and the library folders from
+    /// and Maschine 2's beside it) and NI's User Content (NKS presets), listed under User, and the library folders from
     /// Preferences, under Factory, each its folder's name (less " Library") as product.
     fn library_roots(&self) -> Vec<deckard_library::user::Root> {
         use deckard_library::user::Root;
         let user = self.user_dir();
         let m2 = user.parent().map(|p| p.join("Maschine 2"));
-        let mut roots: Vec<Root> = [Some(user), m2]
+        let content = self.user_content_dir();
+        let mut roots: Vec<Root> = [Some(user), m2, Some(content)]
             .into_iter()
             .flatten()
             .filter(|p| p.is_dir())
@@ -8635,28 +8643,139 @@ impl App {
             }
         };
         let Some(name) = name else { return };
+        // A hosted plug-in's preset is an NKS preset in NI's User Content, in a folder
+        // named after the plug-in, filed under it (Maschine's `NKSRoundtrip::saveAs`).
+        let nks = self.nks_plugin(what).map(|n| n.plugin.name);
         let before = self.saved.get(&what).map(|s| &s.info);
         self.save_dialog = Some(SaveDialog {
             what,
             name,
             types: before.map(|i| i.types().iter().map(|t| t.join(" › ")).collect::<Vec<_>>().join("; ")).unwrap_or_default(),
             characters: before.map(|i| i.characters().join(", ")).unwrap_or_default(),
-            library: before.and_then(|i| i.bank.first().cloned()).unwrap_or_else(|| "User".into()),
-            folder: self.user_dir().join(folder),
+            library: before.and_then(|i| i.bank.first().cloned()).or_else(|| nks.clone()).unwrap_or_else(|| "User".into()),
+            folder: match &nks {
+                Some(plugin) => self.user_content_dir().join(plugin.replace(['/', '\\', ':'], "-")),
+                None => self.user_dir().join(folder),
+            },
             samples: mode == SaveMode::WithSamples,
             confirm_overwrite: false,
         });
     }
 
+    /// The hosted plug-in in slot `what` when its preset saves as NKS: a VST3 plug-in
+    /// (or a VST2 one, hosted through its VST3 version), as Maschine's `canSaveAsNKS`.
+    /// An AU's preset, and an internal module's, stay Maschine's own files.
+    fn nks_plugin(&self, what: deckard_doc::FileItem) -> Option<NksPlugin> {
+        use deckard_plugins::state::{Format, PluginId};
+        let deckard_doc::FileItem::Slot(g, s, k) = what else { return None };
+        let doc = self.doc.as_ref()?.borrow();
+        let slot = doc.project().groups.get(g)?.sounds.get(s)?.slots.get(k)?;
+        let plugin = slot.plugin.clone()?;
+        let id = PluginId::parse(&plugin.id, &plugin.name)?;
+        // DECKARD's own modules are stored as VST3 plug-ins, but they're internal
+        // modules: their presets are Maschine's own files, which NI's apps load.
+        if deckard_plugins::native::find(&id.cid).is_some() {
+            return None;
+        }
+        let ids = deckard_plugins::nks::PluginIds {
+            vst3: (id.format == Format::Vst3).then_some(id.cid),
+            vst2: if id.format == Format::Vst2 { Some(plugin.id.rsplit(':').next()?.parse().ok()?) } else { None },
+            name: plugin.name.clone(),
+            vendor: id.vendor,
+        };
+        (id.format != Format::AudioUnit).then(|| NksPlugin { ids, instrument: slot.is_instrument(), plugin })
+    }
+
+    /// NI's User Content folder, beside Maschine 3's, where NKS presets are saved.
+    fn user_content_dir(&self) -> PathBuf {
+        let user = self.user_dir();
+        user.parent().map_or_else(|| user.join("User Content"), |ni| ni.join("User Content"))
+    }
+
+    /// The knob pages an NKS preset of slot `k` of `chain` gets: those shown (a
+    /// plug-in's automatic ones too), else those saved with it; a page's name is its
+    /// first knob's section when that has none (NKS pages have no names of their own).
+    fn nks_pages(&self, chain: deckard_doc::Chain, k: usize, plugin: &deckard_model::PluginRef) -> Vec<Vec<deckard_plugins::nks::Knob>> {
+        use deckard_plugins::nks::Knob;
+        let knob = |i: usize, id: u32, name: &str, section: &str, page: &str| Knob {
+            id: Some(id),
+            name: name.to_string(),
+            section: if i == 0 && section.is_empty() { page.to_string() } else { section.to_string() },
+        };
+        match self.plugin_views.get(&(chain, k)) {
+            Some(v) => {
+                v.pages.iter().map(|pg| pg.knobs.iter().enumerate().map(|(i, (p, l, s))| knob(i, p.id, l, s, &pg.name)).collect()).collect()
+            }
+            None => plugin
+                .pages
+                .iter()
+                .map(|pg| pg.params.iter().enumerate().map(|(i, p)| knob(i, p.id, &p.name, &p.section, &pg.name)).collect())
+                .collect(),
+        }
+    }
+
+    /// Write slot `what`'s hosted plug-in as the NKS preset `s` says (its state as it is
+    /// now). Saving the same file again keeps its `uuid`; a new file gets a new one.
+    fn write_nks(&mut self, what: deckard_doc::FileItem, s: Saved) -> bool {
+        use deckard_plugins::nks;
+        let deckard_doc::FileItem::Slot(g, sd, k) = what else { return false };
+        let key = self.instance_key(g, sd, k);
+        self.store_plugin_states_of(|x| *x == key);
+        let Some(NksPlugin { ids, instrument, plugin }) = self.nks_plugin(what) else { return false };
+        let again = self.saved.get(&what).is_some_and(|o| o.path == s.path);
+        let uuid = again
+            .then(|| std::fs::read(&s.path).ok().and_then(|b| nks::parse(&b).ok()))
+            .flatten()
+            .map(|p| p.info.uuid)
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(nks::new_uuid);
+        let mut bankchain = s.info.bank.clone();
+        bankchain.resize(bankchain.len().max(3), String::new());
+        let info = nks::SoundInfo {
+            author: s.info.author.clone(),
+            bankchain,
+            characters: s.info.characters(),
+            comment: String::new(),
+            device_type: if instrument { "INST" } else { "FX" }.into(),
+            modes: Vec::new(),
+            name: s.info.name.clone(),
+            types: s.info.types(),
+            uuid,
+            vendor: ids.vendor.clone(),
+        };
+        let pages = self.nks_pages(deckard_doc::Chain::Sound(g, sd), k, &plugin);
+        let written = deckard_plugins::state::chunk_parts(&plugin.chunk).and_then(|(_, state)| {
+            let bytes = nks::write(&info, &pages, &ids, state);
+            let dir = s.path.parent().ok_or("no folder to save in")?;
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            let tmp = s.path.with_extension("deckard-tmp");
+            std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &s.path)).map_err(|e| e.to_string())
+        });
+        match written {
+            Ok(()) => {
+                self.status = format!("saved {}", s.path.display());
+                self.browser.add_saved(&s.path);
+                self.saved.insert(what, s);
+                true
+            }
+            Err(e) => {
+                self.status = format!("can't save {}: {e}", s.path.display());
+                false
+            }
+        }
+    }
+
     /// The Save dialog's Save: asks first when the file is there (and isn't this
     /// one's own), then writes it.
     fn confirm_save(&mut self) {
+        let Some(what) = self.save_dialog.as_ref().map(|d| d.what) else { return };
+        let nks = self.nks_plugin(what).map(|n| if n.instrument { "nksf" } else { "nksfx" });
         let Some(dlg) = &mut self.save_dialog else { return };
         let Some(doc) = self.doc.clone() else { return };
         let ext = match dlg.what {
             deckard_doc::FileItem::Sound(..) => "mxsnd",
             deckard_doc::FileItem::Group(_) => "mxgrp",
-            deckard_doc::FileItem::Slot(g, s, k) => doc.borrow().slot_extension(g, s, k),
+            deckard_doc::FileItem::Slot(g, s, k) => nks.unwrap_or_else(|| doc.borrow().slot_extension(g, s, k)),
         };
         let name = dlg.name.trim().replace(['/', '\\', ':'], "-");
         if name.is_empty() {
@@ -8698,6 +8817,9 @@ impl App {
 
     /// Write `what` as `s` says; listed under User at once. True when written.
     fn write_item(&mut self, what: deckard_doc::FileItem, s: Saved) -> bool {
+        if s.path.extension().is_some_and(|e| e == "nksf" || e == "nksfx") {
+            return self.write_nks(what, s);
+        }
         let Some(doc) = self.doc.clone() else { return false };
         let user = self.user_dir();
         let mut resolver = deckard_engine::library::Resolver::new(self.path.as_deref());

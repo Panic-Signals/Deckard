@@ -111,7 +111,7 @@ then ask for and DECKARD only stubs:
 - **Plug-in mode** (Maschine as VST3/AU in a DAW) and host sync.
 - **Preferences:** Default, Audio (partial), MIDI, Library, Plug-ins, Hardware, Colors
   pages.
-- **NKS** presets and the light guide; **footswitch** (the MK3's PEDAL socket isn't
+- **NKS:** the light guide (presets load, and Save Preset… writes them for VST3 plug-ins); **footswitch** (the MK3's PEDAL socket isn't
   decoded: its HID report needs reading with a pedal attached); **Live Slicing**.
 
 ## Order suggested

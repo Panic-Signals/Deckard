@@ -5,6 +5,11 @@
 //! `PLID` names the plug-in by its VST3 class (`VST3.uid`, four 32-bit numbers) or by its
 //! VST2 unique id (`VST.magic`), the latter hosted through the VST3 version as a project's
 //! are ([`crate::state`]). `PCHK` holds a `.vstpreset` or the plug-in's bare state.
+//!
+//! [`write`] writes one as Maschine 3 does when it saves a VST3 plug-in's preset
+//! (`ChainFileCommands::saveSlotAs` › `NKSRoundtrip::saveAs`): `NISI`, `NICA`, `PLID`,
+//! `PCHK`, each `[u32 1]` then MessagePack (msgpack-c's shortest forms, maps' keys in
+//! order) or, for `PCHK`, the state. NI's factory presets come out byte for byte.
 
 use crate::module::{com_order, same_class};
 use crate::scan::{Entry, Kind};
@@ -27,10 +32,43 @@ pub struct Preset {
     /// The VST2 unique id.
     pub vst2: Option<u32>,
     pub name: Option<String>,
+    /// The plug-in's vendor (`pluginVendor`).
+    pub vendor: Option<String>,
     /// The plug-in's state.
     pub state: Vec<u8>,
     /// Controller pages (`NICA` › `ni8`), up to eight knobs each.
     pub pages: Vec<Vec<Knob>>,
+    /// What the preset says about itself (`NISI`).
+    pub info: SoundInfo,
+}
+
+/// A preset's description (`NISI`): its name, where it's filed and its tags.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SoundInfo {
+    pub author: String,
+    /// Product, bank and sub-bank (three levels, empty where there's none).
+    pub bankchain: Vec<String>,
+    pub characters: Vec<String>,
+    pub comment: String,
+    /// `"INST"` or `"FX"`.
+    pub device_type: String,
+    /// Modes (a preset's playing styles, e.g. "Arp"; most have none).
+    pub modes: Vec<String>,
+    pub name: String,
+    /// Each a type and its sub-type.
+    pub types: Vec<Vec<String>>,
+    /// Lower-case, hyphenated (Maschine gives each preset it saves a random one).
+    pub uuid: String,
+    pub vendor: String,
+}
+
+/// Which plug-in a preset is for (`PLID`): its VST3 class (standard order) or VST2 id.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginIds {
+    pub vst3: Option<[u8; 16]>,
+    pub vst2: Option<u32>,
+    pub name: String,
+    pub vendor: String,
 }
 
 /// A preset as a project stores a plug-in.
@@ -48,7 +86,7 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
     if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"NIKS") {
         return Err("not an NKS preset".into());
     }
-    let (mut plid, mut pchk, mut nica) = (None, None, None);
+    let (mut plid, mut pchk, mut nica, mut nisi) = (None, None, None, None);
     let mut at = 12usize;
     while let Some(head) = bytes.get(at..at + 8) {
         let n = u32::from_le_bytes(head[4..].try_into().unwrap()) as usize;
@@ -57,6 +95,7 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
             b"PLID" => plid = Some(body),
             b"PCHK" => pchk = Some(body),
             b"NICA" => nica = Some(body),
+            b"NISI" => nisi = Some(body),
             _ => {}
         }
         at += 8 + n + (n & 1);
@@ -88,11 +127,228 @@ pub fn parse(bytes: &[u8]) -> Result<Preset, String> {
         Some(Mp::Int(magic)) => Some(*magic as u32).filter(|m| *m != 0),
         _ => None,
     };
-    let name = match field("pluginName") {
-        Some(Mp::Str(name)) if !name.is_empty() => Some(name.clone()),
+    let text = |key: &str| match field(key) {
+        Some(Mp::Str(s)) if !s.is_empty() => Some(s.clone()),
         _ => None,
     };
-    Ok(Preset { vst3, vst2, name, state, pages })
+    let (name, vendor) = (text("pluginName"), text("pluginVendor"));
+    let info = nisi.and_then(|b| b.get(4..)).map_or_else(SoundInfo::default, parse_nisi);
+    Ok(Preset { vst3, vst2, name, vendor, state, pages, info })
+}
+
+/// A preset's description (`NISI` after its version number).
+fn parse_nisi(b: &[u8]) -> SoundInfo {
+    let Ok(Mp::Map(fields)) = (Reader { b, at: 0 }).value(0) else { return SoundInfo::default() };
+    let text = |v: &Mp| match v {
+        Mp::Str(s) => s.clone(),
+        _ => String::new(),
+    };
+    let texts = |v: &Mp| match v {
+        Mp::List(l) => l.iter().map(text).collect(),
+        _ => Vec::new(),
+    };
+    let mut info = SoundInfo::default();
+    for (key, v) in &fields {
+        match key.as_str() {
+            "author" => info.author = text(v),
+            "bankchain" => info.bankchain = texts(v),
+            "characters" => info.characters = texts(v),
+            "comment" => info.comment = text(v),
+            "deviceType" => info.device_type = text(v),
+            "modes" => info.modes = texts(v),
+            "name" => info.name = text(v),
+            "types" => info.types = if let Mp::List(l) = v { l.iter().map(texts).collect() } else { Vec::new() },
+            "uuid" => info.uuid = text(v),
+            "vendor" => info.vendor = text(v),
+            _ => {}
+        }
+    }
+    info
+}
+
+/// An NKS preset file as Maschine writes one when it saves a plug-in's preset
+/// (`NKSRoundtrip::saveAs` › `nksf::NKSWriter::v1::write`): a RIFF form `NIKS` of
+/// `NISI` (`info`), `NICA` (the knob `pages`), `PLID` (`plugin`) and `PCHK` (its
+/// `state`), each a version number (1) and then its data, padded to an even length.
+pub fn write(info: &SoundInfo, pages: &[Vec<Knob>], plugin: &PluginIds, state: &[u8]) -> Vec<u8> {
+    // NISI: every key, in order (a `std::map`); `modes` only when there are some.
+    let mut nisi = Pack::default();
+    nisi.map(9 + !info.modes.is_empty() as usize);
+    nisi.str("author").str(&info.author);
+    nisi.str("bankchain").strs(&info.bankchain);
+    nisi.str("characters").strs(&info.characters);
+    nisi.str("comment").str(&info.comment);
+    nisi.str("deviceType").str(&info.device_type);
+    if !info.modes.is_empty() {
+        nisi.str("modes").strs(&info.modes);
+    }
+    nisi.str("name").str(&info.name);
+    nisi.str("types").list(info.types.len());
+    for t in &info.types {
+        nisi.strs(t);
+    }
+    nisi.str("uuid").str(&info.uuid);
+    nisi.str("vendor").str(&info.vendor);
+
+    // NICA: `{"ni8": [page, ...]}`, each knob's keys in order, `name` and `section` only
+    // when set (an empty slot is `autoname` and `vflag` alone). Every knob NI's factory
+    // presets have is `autoname` true and `vflag` false.
+    let mut nica = Pack::default();
+    nica.map(1).str("ni8").list(pages.len());
+    for page in pages {
+        nica.list(page.len());
+        for k in page {
+            nica.map(2 + k.id.is_some() as usize + !k.name.is_empty() as usize + !k.section.is_empty() as usize);
+            nica.str("autoname").bool(true);
+            if let Some(id) = k.id {
+                nica.str("id").uint(id.into());
+            }
+            if !k.name.is_empty() {
+                nica.str("name").str(&k.name);
+            }
+            if !k.section.is_empty() {
+                nica.str("section").str(&k.section);
+            }
+            nica.str("vflag").bool(false);
+        }
+    }
+
+    // PLID: those present of `VST.magic`, `VST3.uid`, `pluginName`, `pluginVendor`.
+    let mut plid = Pack::default();
+    let has = |s: &str| !s.is_empty();
+    plid.map(plugin.vst2.is_some() as usize + plugin.vst3.is_some() as usize + has(&plugin.name) as usize + has(&plugin.vendor) as usize);
+    if let Some(magic) = plugin.vst2 {
+        plid.str("VST.magic").uint(magic.into());
+    }
+    if let Some(cid) = plugin.vst3 {
+        plid.str("VST3.uid").list(4);
+        for word in cid.as_chunks::<4>().0 {
+            plid.uint(u32::from_be_bytes(*word).into());
+        }
+    }
+    if has(&plugin.name) {
+        plid.str("pluginName").str(&plugin.name);
+    }
+    if has(&plugin.vendor) {
+        plid.str("pluginVendor").str(&plugin.vendor);
+    }
+
+    let mut body = b"NIKS".to_vec();
+    for (id, data) in [(b"NISI", &nisi.0[..]), (b"NICA", &nica.0[..]), (b"PLID", &plid.0[..]), (b"PCHK", state)] {
+        body.extend(id);
+        body.extend((4 + data.len() as u32).to_le_bytes());
+        body.extend(1u32.to_le_bytes());
+        body.extend(data);
+        if data.len() & 1 == 1 {
+            body.push(0);
+        }
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend((body.len() as u32).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+/// A new preset's `uuid`: random (version 4), lower case and hyphenated, as Maschine
+/// gives each preset it saves. The randomness is the standard library's per-process
+/// random hash keys (no extra dependency for an id that only has to be unique).
+pub fn new_uuid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, Ordering::Relaxed);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let half = |salt: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(salt);
+        h.write_u64(n);
+        h.write_u128(now);
+        h.finish()
+    };
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&half(1).to_le_bytes());
+    b[8..].copy_from_slice(&half(2).to_le_bytes());
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// MessagePack as msgpack-c packs it: every value in its shortest form.
+#[derive(Default)]
+struct Pack(Vec<u8>);
+
+impl Pack {
+    fn head(&mut self, n: usize, fix: u8, max_fix: usize, wide: u8) -> &mut Self {
+        if n <= max_fix {
+            self.0.push(fix | n as u8);
+        } else if n <= 0xffff {
+            self.0.push(wide);
+            self.0.extend((n as u16).to_be_bytes());
+        } else {
+            self.0.push(wide + 1);
+            self.0.extend((n as u32).to_be_bytes());
+        }
+        self
+    }
+
+    fn map(&mut self, n: usize) -> &mut Self {
+        self.head(n, 0x80, 15, 0xde)
+    }
+
+    fn list(&mut self, n: usize) -> &mut Self {
+        self.head(n, 0x90, 15, 0xdc)
+    }
+
+    fn str(&mut self, s: &str) -> &mut Self {
+        let n = s.len();
+        if n < 32 {
+            self.0.push(0xa0 | n as u8);
+        } else if n < 256 {
+            self.0.extend([0xd9, n as u8]);
+        } else if n <= 0xffff {
+            self.0.push(0xda);
+            self.0.extend((n as u16).to_be_bytes());
+        } else {
+            self.0.push(0xdb);
+            self.0.extend((n as u32).to_be_bytes());
+        }
+        self.0.extend(s.as_bytes());
+        self
+    }
+
+    fn strs(&mut self, l: &[String]) -> &mut Self {
+        self.list(l.len());
+        for s in l {
+            self.str(s);
+        }
+        self
+    }
+
+    fn uint(&mut self, v: u64) -> &mut Self {
+        match v {
+            0..=0x7f => self.0.push(v as u8),
+            0x80..=0xff => self.0.extend([0xcc, v as u8]),
+            0x100..=0xffff => {
+                self.0.push(0xcd);
+                self.0.extend((v as u16).to_be_bytes());
+            }
+            0x1_0000..=0xffff_ffff => {
+                self.0.push(0xce);
+                self.0.extend((v as u32).to_be_bytes());
+            }
+            _ => {
+                self.0.push(0xcf);
+                self.0.extend(v.to_be_bytes());
+            }
+        }
+        self
+    }
+
+    fn bool(&mut self, b: bool) -> &mut Self {
+        self.0.push(if b { 0xc3 } else { 0xc2 });
+        self
+    }
 }
 
 /// Controller assignments (`NICA` after its version number): `{"ni8": [[knob, ...], ...]}`.
@@ -894,5 +1150,201 @@ mod tests {
         for ext in ["nksn", "NKSN", "nki", "NKI"] {
             assert_eq!(native_preset(ext, &raw, &[kontakt.clone()]), Some(Err(KONTAKT_FILE.into())), "{ext}");
         }
+    }
+
+    fn info() -> SoundInfo {
+        SoundInfo {
+            author: String::new(),
+            bankchain: vec!["Infiltrator".into(), String::new(), String::new()],
+            characters: vec!["Dark".into()],
+            comment: String::new(),
+            device_type: "INST".into(),
+            modes: Vec::new(),
+            name: "Night Lead".into(),
+            types: vec![vec!["Synth Lead".into(), "Classic".into()]],
+            uuid: "0b6a6a5e-3f0e-4c47-9d0e-2f1f4b5c6d7e".into(),
+            vendor: "Steinberg".into(),
+        }
+    }
+
+    fn ids(vst3: Option<[u8; 16]>, vst2: Option<u32>) -> PluginIds {
+        PluginIds { vst3, vst2, name: "Infiltrator".into(), vendor: "Steinberg".into() }
+    }
+
+    const CID: [u8; 16] = *b"VSTFUCKinfiltrat";
+
+    #[test]
+    fn a_written_preset_reads_back() {
+        let pages = vec![
+            vec![
+                Knob { id: Some(3), name: "Cutoff".into(), section: "Filter".into() },
+                Knob { id: None, name: String::new(), section: String::new() },
+            ],
+            vec![Knob { id: Some(300), name: "Drive".into(), section: String::new() }],
+        ];
+        let bytes = write(&info(), &pages, &ids(Some(CID), None), b"VST3 state");
+        let p = parse(&bytes).unwrap();
+        assert_eq!(p.vst3, Some(CID));
+        assert_eq!(p.vst2, None);
+        assert_eq!(p.name.as_deref(), Some("Infiltrator"));
+        assert_eq!(p.state, b"VST3 state");
+        assert_eq!(p.pages, pages);
+        assert_eq!(p.info, info());
+    }
+
+    /// RIFF form `NIKS`; `NISI`, `NICA`, `PLID`, `PCHK` in that order, each a version
+    /// (1) then its data, padded to even (`nksf::NKSWriter::v1::write`, `riff::write`).
+    #[test]
+    fn chunks_go_in_maschines_order() {
+        let bytes = write(&info(), &[], &ids(Some(CID), None), b"odd");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8);
+        assert_eq!(&bytes[8..12], b"NIKS");
+        let mut at = 12;
+        let mut seen = Vec::new();
+        while at < bytes.len() {
+            let n = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            assert_eq!(u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()), 1, "version");
+            seen.push(bytes[at..at + 4].to_vec());
+            at += 8 + n + (n & 1);
+        }
+        assert_eq!(at, bytes.len());
+        assert_eq!(seen, [b"NISI", b"NICA", b"PLID", b"PCHK"].map(|c| c.to_vec()));
+        assert_eq!(&bytes[bytes.len() - 4..], b"odd\0", "PCHK last, padded to even");
+    }
+
+    /// `PLID`: `VST.magic`, `VST3.uid`, `pluginName`, `pluginVendor`, those present
+    /// (`nksf::writePluginIdentifiers`); numbers in their shortest form.
+    #[test]
+    fn plid_names_the_plugin_as_maschine_does() {
+        let bytes = write(&info(), &[], &ids(None, Some(u32::from_be_bytes(*b"NiR7"))), b"");
+        let plid = chunk(&bytes, b"PLID");
+        let mut want = vec![0x83, 0xa9];
+        want.extend(b"VST.magic");
+        want.push(0xce);
+        want.extend(b"NiR7");
+        want.push(0xaa);
+        want.extend(b"pluginName");
+        want.push(0xab);
+        want.extend(b"Infiltrator");
+        want.push(0xac);
+        want.extend(b"pluginVendor");
+        want.push(0xa9);
+        want.extend(b"Steinberg");
+        assert_eq!(plid, want);
+
+        let plid = chunk(
+            &write(&info(), &[], &ids(Some([0; 15].into_iter().chain([7]).collect::<Vec<_>>().try_into().unwrap()), None), b""),
+            b"PLID",
+        );
+        let mut want = vec![0x83, 0xa8];
+        want.extend(b"VST3.uid");
+        want.extend([0x94, 0, 0, 0, 7]);
+        assert_eq!(plid[..want.len()], want[..], "four words, each as short as it goes");
+    }
+
+    /// `NISI`'s keys in order (a `std::map`), every one written, and a knob's
+    /// `autoname`, `id`, `name`, `section` (when it has one), `vflag`.
+    #[test]
+    fn nisi_and_nica_keys_are_sorted() {
+        let bytes = write(&info(), &[vec![Knob { id: Some(5), name: "Mix".into(), section: String::new() }]], &ids(Some(CID), None), b"");
+        let nisi = chunk(&bytes, b"NISI");
+        assert_eq!(nisi[0], 0x89, "nine keys");
+        let keys = ["author", "bankchain", "characters", "comment", "deviceType", "name", "types", "uuid", "vendor"];
+        let mut at = 0;
+        for k in keys {
+            let found = nisi[at..].windows(k.len() + 1).position(|w| w[0] == 0xa0 | k.len() as u8 && &w[1..] == k.as_bytes());
+            at += found.unwrap_or_else(|| panic!("{k} after the one before")) + k.len() + 1;
+        }
+        let nica = chunk(&bytes, b"NICA");
+        let mut want = vec![0x81, 0xa3];
+        want.extend(b"ni8");
+        want.extend([0x91, 0x91, 0x84, 0xa8]);
+        want.extend(b"autoname");
+        want.extend([0xc3, 0xa2]);
+        want.extend(b"id");
+        want.extend([0x05, 0xa4]);
+        want.extend(b"name");
+        want.push(0xa3);
+        want.extend(b"Mix");
+        want.push(0xa5);
+        want.extend(b"vflag");
+        want.push(0xc2);
+        assert_eq!(nica, want);
+    }
+
+    /// A new preset's `uuid`: random (version 4), lower case and hyphenated, as
+    /// Maschine's (`NI::GP::UUID::generateRandom`, `toString`).
+    #[test]
+    fn new_uuids_are_random_version_4() {
+        let (a, b) = (new_uuid(), new_uuid());
+        assert_ne!(a, b);
+        for u in [a, b] {
+            let groups: Vec<_> = u.split('-').map(str::len).collect();
+            assert_eq!(groups, [8, 4, 4, 4, 12], "{u}");
+            assert!(u.chars().all(|c| c == '-' || c.is_ascii_digit() || ('a'..='f').contains(&c)), "{u}");
+            assert_eq!(&u[14..15], "4", "{u}");
+            assert!("89ab".contains(&u[19..20]), "{u}");
+        }
+    }
+
+    #[test]
+    fn modes_are_written_when_there_are_some() {
+        let mut i = info();
+        i.modes = vec!["Arp".into()];
+        let bytes = write(&i, &[], &ids(Some(CID), None), b"");
+        assert_eq!(chunk(&bytes, b"NISI")[0], 0x8a, "ten keys");
+        assert_eq!(parse(&bytes).unwrap().info.modes, ["Arp"]);
+    }
+
+    /// The data of chunk `id` (after its version).
+    fn chunk(bytes: &[u8], id: &[u8; 4]) -> Vec<u8> {
+        let mut at = 12;
+        while at + 8 <= bytes.len() {
+            let n = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            if &bytes[at..at + 4] == id {
+                return bytes[at + 12..at + 8 + n].to_vec();
+            }
+            at += 8 + n + (n & 1);
+        }
+        panic!("no {}", String::from_utf8_lossy(id));
+    }
+
+    /// NI's factory presets, written again from what they say, come out the same,
+    /// byte for byte (they're written by the same `nksf` library as Maschine's). Skipped
+    /// without NI's Raum installed.
+    #[test]
+    fn factory_presets_are_written_byte_for_byte() {
+        let raum = std::path::Path::new("/Library/Application Support/Native Instruments/Raum");
+        let Ok(dirs) = std::fs::read_dir(raum) else { return };
+        let files = dirs.flatten().filter_map(|d| std::fs::read_dir(d.path()).ok()).flatten().flatten().map(|f| f.path());
+        let mut n = 0;
+        for f in files.filter(|p| p.extension().is_some_and(|e| e == "nksfx")) {
+            let bytes = std::fs::read(&f).unwrap();
+            let p = parse(&bytes).unwrap();
+            let plugin = PluginIds {
+                vst3: p.vst3,
+                vst2: p.vst2,
+                name: p.name.clone().unwrap_or_default(),
+                vendor: p.vendor.clone().unwrap_or_default(),
+            };
+            let ours = write(&p.info, &p.pages, &plugin, &p.state);
+            for id in [b"NISI", b"NICA", b"PLID", b"PCHK"] {
+                let (a, b) = (chunk(&ours, id), chunk(&bytes, id));
+                let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                assert_eq!(
+                    a,
+                    b,
+                    "{} {}: from byte {at}: {:02x?} vs {:02x?}",
+                    f.display(),
+                    String::from_utf8_lossy(id),
+                    &a[at..(at + 24).min(a.len())],
+                    &b[at..(at + 24).min(b.len())]
+                );
+            }
+            assert_eq!(ours, bytes, "{}", f.display());
+            n += 1;
+        }
+        assert!(n > 0);
     }
 }

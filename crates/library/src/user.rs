@@ -35,8 +35,12 @@ pub fn documents() -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Documents"))
 }
 
+/// Reads a file the index can't read itself (an NKS preset) as the item it lists.
+pub type Reader = fn(&Path) -> Option<Item>;
+
 pub struct UserIndex {
     db: Connection,
+    reader: Option<Reader>,
 }
 
 /// Levels of a type are joined by US, types by RS.
@@ -55,7 +59,13 @@ impl UserIndex {
              CREATE TABLE IF NOT EXISTS not_favorites (path TEXT PRIMARY KEY);",
         )
         .map_err(|e| e.to_string())?;
-        Ok(UserIndex { db })
+        Ok(UserIndex { db, reader: None })
+    }
+
+    /// Read NKS presets (`.nksf`, `.nksfx`) in user folders with `reader`. Under a
+    /// library folder they're left to NI's index, which lists them with its tags.
+    pub fn set_reader(&mut self, reader: Reader) {
+        self.reader = Some(reader);
     }
 
     /// Bring the index up to date with `roots`: new and changed files read, files no
@@ -64,7 +74,7 @@ impl UserIndex {
         let mut seen = HashSet::new();
         for root in roots {
             let mut files = Vec::new();
-            walk(&root.path, &mut files, 0);
+            walk(&root.path, &mut files, 0, self.reader.is_some() && !root.factory);
             for f in files {
                 let mtime = mtime(&f);
                 let known: Option<i64> = self.db.query_row("SELECT mtime FROM items WHERE path = ?1", [path_text(&f)], |r| r.get(0)).ok();
@@ -110,7 +120,13 @@ impl UserIndex {
 
     /// Read one file into the index (one DECKARD just saved, or a scan's).
     pub fn add_file(&mut self, path: &Path, root: &Root) -> Result<(), String> {
-        let Some(kind) = Kind::of_file(path) else { return Ok(()) };
+        let Some(kind) = Kind::of_file(path) else {
+            let read = self.reader.filter(|_| !root.factory && is_preset(path)).and_then(|r| r(path));
+            return match read {
+                Some(item) => self.add_entry(&Item { user: true, path: path.to_path_buf(), ..item }, mtime(path)),
+                None => Ok(()),
+            };
+        };
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let mut item =
             Item { kind, user: !root.factory, name: stem, path: path.to_path_buf(), product: root.product.clone(), ..Item::default() };
@@ -238,7 +254,13 @@ fn mtime(p: &Path) -> i64 {
 
 /// The files under `dir` the library lists (hidden folders and Maschine's `.previews`
 /// skipped).
-fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+/// An NKS preset, which the index lists through its reader.
+fn is_preset(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("nksf") || e.eq_ignore_ascii_case("nksfx"))
+}
+
+/// The files under `dir` the index lists; NKS presets too when `presets`.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize, presets: bool) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
@@ -246,8 +268,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
             continue;
         }
         match e.file_type() {
-            Ok(t) if t.is_dir() && depth < 8 => walk(&p, out, depth + 1),
-            Ok(t) if t.is_file() && Kind::of_file(&p).is_some() => out.push(p),
+            Ok(t) if t.is_dir() && depth < 8 => walk(&p, out, depth + 1, presets),
+            Ok(t) if t.is_file() && (Kind::of_file(&p).is_some() || presets && is_preset(&p)) => out.push(p),
             _ => {}
         }
     }
