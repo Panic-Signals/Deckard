@@ -328,7 +328,7 @@ fn new_sampler_shots() {
     window(&mut h, "new-sampler-edit.png", None);
     // The MK3: SAMPLE, EDIT, its TEMPO / PITCH page; then SHIFT.
     use deckard_mk3::Event;
-    let mut press = |h: &mut Harness<'static, App>, name: &'static str, down: bool| {
+    let press = |h: &mut Harness<'static, App>, name: &'static str, down: bool| {
         let app = h.state_mut();
         let v = app.surface_view();
         for a in app.surface.event(&Event::Button(name, down), &v, Instant::now()) {
@@ -344,4 +344,9 @@ fn new_sampler_shots() {
     press(&mut h, "BUTTON_SHIFT", true);
     mk3(&mut h, "mk3-new-sampler-shift.png");
     press(&mut h, "BUTTON_SHIFT", false);
+    // Warp markers on its hits, the third pulled a little late.
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Detect);
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Move(2, 0.75));
+    h.run_steps(4);
+    window(&mut h, "new-sampler-warp.png", Some((200, 560, 1740, 240)));
 }

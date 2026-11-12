@@ -69,6 +69,99 @@ pub struct ZoneMeta {
     pub cents: f32,
     /// Set by hand: analysis leaves it alone.
     pub root_locked: bool,
+    /// Warp markers (roadmap 1e): frames of the sample pinned to beats, in order. None:
+    /// the sample's beats are evenly spaced at `bpm` from `grid_offset`.
+    pub warps: Vec<Warp>,
+}
+
+/// A warp marker: frame `frame` of the sample falls on beat `beat` (from the first, 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Warp {
+    pub frame: u64,
+    pub beat: f64,
+}
+
+/// Where a sample's frames fall in beats, and back: through its warp markers (straight
+/// between them; past the ends at the nearest segment's speed), else evenly at its tempo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeatMap {
+    /// (frame, beat), both strictly rising; at least two.
+    points: Vec<(f64, f64)>,
+}
+
+impl BeatMap {
+    /// A zone's map, for a sample at `rate` Hz: `None` without a tempo.
+    pub fn of(meta: &ZoneMeta, rate: u32) -> Option<BeatMap> {
+        let bpm = meta.bpm.filter(|b| b.is_finite() && *b > 0.0)?;
+        if rate == 0 {
+            return None;
+        }
+        let per = f64::from(rate) * 60.0 / bpm;
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        for w in &meta.warps {
+            let p = (w.frame as f64, w.beat);
+            if points.last().is_none_or(|l| p.0 > l.0 && p.1 > l.1) {
+                points.push(p);
+            }
+        }
+        match points.len() {
+            0 => points = vec![(meta.grid_offset as f64, 0.0), (meta.grid_offset as f64 + per, 1.0)],
+            1 => points.push((points[0].0 + per, points[0].1 + 1.0)),
+            _ => {}
+        }
+        Some(BeatMap { points })
+    }
+
+    /// The segment holding `x` (by frame, or by beat), the ends' extended.
+    fn seg(&self, x: f64, by_beat: bool) -> ((f64, f64), (f64, f64)) {
+        let key = |p: &(f64, f64)| if by_beat { p.1 } else { p.0 };
+        let n = self.points.len();
+        let i = self.points.partition_point(|p| key(p) <= x).clamp(1, n - 1);
+        (self.points[i - 1], self.points[i])
+    }
+
+    pub fn beat_at(&self, frame: f64) -> f64 {
+        let (a, b) = self.seg(frame, false);
+        a.1 + (frame - a.0) * (b.1 - a.1) / (b.0 - a.0)
+    }
+
+    pub fn frame_at(&self, beat: f64) -> f64 {
+        let (a, b) = self.seg(beat, true);
+        a.0 + (beat - a.1) * (b.0 - a.0) / (b.1 - a.1)
+    }
+
+    /// A hash of the points (renders made with another map aren't this one's).
+    pub fn id(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (f, b) in &self.points {
+            f.to_bits().hash(&mut h);
+            b.to_bits().hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
+/// Warp markers at `frames` (transients, in order), each on the beat it falls on now.
+pub fn warps_at(meta: &ZoneMeta, rate: u32, frames: &[usize]) -> Vec<Warp> {
+    let Some(map) = BeatMap::of(meta, rate) else { return Vec::new() };
+    frames.iter().map(|&f| Warp { frame: f as u64, beat: map.beat_at(f as f64) }).collect()
+}
+
+/// Audio quantize: each warp marker moved `strength` (0..1) of the way to the nearest
+/// multiple of `division` beats (0.25: sixteenths). Markers that would land on or before
+/// the one before are dropped, so the map keeps rising.
+pub fn quantize(warps: &[Warp], division: f64, strength: f64) -> Vec<Warp> {
+    let s = strength.clamp(0.0, 1.0);
+    let mut out: Vec<Warp> = Vec::new();
+    for w in warps {
+        let target = if division > 0.0 { (w.beat / division).round() * division } else { w.beat };
+        let beat = w.beat + s * (target - w.beat);
+        if out.last().is_none_or(|l| w.frame > l.frame && beat > l.beat + 1e-6) {
+            out.push(Warp { frame: w.frame, beat });
+        }
+    }
+    out
 }
 
 fn word<T: Copy>(table: &[(T, &'static str)], v: T, eq: impl Fn(T, T) -> bool) -> &'static str {
@@ -128,6 +221,9 @@ impl ZoneMeta {
         if let Some(r) = self.root {
             t += &format!("root {r}\n");
         }
+        for w in &self.warps {
+            t += &format!("warp {} {}\n", w.frame, w.beat);
+        }
         t + "file " + &self.file
     }
 
@@ -146,6 +242,14 @@ impl ZoneMeta {
                 "bpm" => m.bpm = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "beats" => m.beats = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "root" => m.root = v.parse().ok().filter(|r| *r < 128),
+                "warp" => {
+                    if let Some((f, b)) = v.split_once(' ')
+                        && let (Ok(frame), Ok(beat)) = (f.parse(), b.parse::<f64>())
+                        && beat.is_finite()
+                    {
+                        m.warps.push(Warp { frame, beat });
+                    }
+                }
                 _ => {}
             }
         }
@@ -177,10 +281,45 @@ mod tests {
             root: Some(45),
             cents: -12.5,
             root_locked: true,
+            warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 22_050, beat: 1.0625 }],
         };
         assert_eq!(ZoneMeta::from_text(&full.to_text()), Some(full));
         let bare = ZoneMeta { file: "x.wav".into(), ..ZoneMeta::default() };
         assert_eq!(ZoneMeta::from_text(&bare.to_text()), Some(bare));
+    }
+
+    /// Without markers, beats are even at the tempo from the grid offset; with them,
+    /// straight between and at the ends' speed beyond.
+    #[test]
+    fn the_beat_map() {
+        let m = ZoneMeta { bpm: Some(120.0), grid_offset: 1000, ..ZoneMeta::default() };
+        let even = BeatMap::of(&m, 48_000).unwrap();
+        assert_eq!((even.beat_at(1000.0), even.beat_at(25_000.0), even.frame_at(2.0)), (0.0, 1.0, 49_000.0));
+        assert!(BeatMap::of(&ZoneMeta::default(), 48_000).is_none(), "no tempo, no map");
+        let warped = ZoneMeta {
+            warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 30_000, beat: 1.0 }, Warp { frame: 48_000, beat: 2.0 }],
+            ..m
+        };
+        let w = BeatMap::of(&warped, 48_000).unwrap();
+        assert_eq!((w.beat_at(15_000.0), w.beat_at(39_000.0), w.frame_at(3.0)), (0.5, 1.5, 66_000.0));
+        assert_eq!(w.frame_at(w.beat_at(12_345.0)).round(), 12_345.0);
+        assert_ne!(w.id(), even.id());
+    }
+
+    #[test]
+    fn quantize_moves_markers_to_the_grid() {
+        let w = [
+            Warp { frame: 0, beat: 0.02 },
+            Warp { frame: 100, beat: 0.27 },
+            Warp { frame: 200, beat: 0.26 },
+            Warp { frame: 300, beat: 0.6 },
+        ];
+        let q = quantize(&w, 0.25, 1.0);
+        assert_eq!(q.iter().map(|w| w.beat).collect::<Vec<_>>(), [0.0, 0.25, 0.5], "one past the next dropped, the rest snapped");
+        let half = quantize(&w[..2], 0.25, 0.5);
+        assert!((half[1].beat - 0.26).abs() < 1e-9);
+        let m = ZoneMeta { bpm: Some(120.0), ..ZoneMeta::default() };
+        assert_eq!(warps_at(&m, 48_000, &[12_000]), [Warp { frame: 12_000, beat: 0.5 }]);
     }
 
     #[test]

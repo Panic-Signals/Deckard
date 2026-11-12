@@ -19,13 +19,19 @@ pub const MAX_FRAMES: usize = 50_000_000;
 pub fn stretched(s: &Sample, range: (usize, usize), time: f64, semitones: f64) -> Sample {
     let a = range.0.min(s.frames.len());
     let b = range.1.clamp(a, s.frames.len());
-    let len = b - a;
     let time = time.clamp(0.05, 20.0);
-    let out_len = (time * len as f64).round() as usize;
-    if len == 0 || out_len == 0 || s.rate == 0 {
+    let out_len = (time * (b - a) as f64).round() as usize;
+    stretched_by(s, out_len, |o| a as f64 + o / time, semitones)
+}
+
+/// `out_len` frames of `s` read through `input_at` (the input frame each output frame
+/// plays, rising), shifted `semitones`: the speed follows it chunk by chunk, so a warp
+/// map stretches each stretch between its markers by its own amount.
+pub fn stretched_by(s: &Sample, out_len: usize, input_at: impl Fn(f64) -> f64, semitones: f64) -> Sample {
+    if out_len == 0 || s.rate == 0 || s.frames.is_empty() {
         return Sample { rate: s.rate, frames: Vec::new() };
     }
-    let rate = 1.0 / time;
+    let speed = |o: f64, n: f64| ((input_at(o + n) - input_at(o)) / n).clamp(0.05, 20.0);
     let get = |i: f64| -> [f32; 2] {
         let i = i.floor();
         if i >= 0.0 && (i as usize) < s.frames.len() { s.frames[i as usize] } else { [0.0; 2] }
@@ -33,17 +39,19 @@ pub fn stretched(s: &Sample, range: (usize, usize), time: f64, semitones: f64) -
     let mut st = Stretch::new(s.rate as f32, false);
     st.set_transpose(2f64.powf(semitones / 12.0) as f32);
     let (lat_in, lat_out) = st.latency();
-    let room = (lat_in * 2).max(4096).max((CHUNK as f64 * rate).ceil() as usize + 2).max((lat_out as f64 * rate).ceil() as usize + 2);
+    let room = (lat_in * 2).max(4096).max(CHUNK * 20 + 2).max(lat_out * 20 + 2);
     let (mut il, mut ir) = (vec![0f32; room], vec![0f32; room]);
     let (mut ol, mut or) = (vec![0f32; CHUNK.max(lat_out)], vec![0f32; CHUNK.max(lat_out)]);
     // Pre-roll ending the input latency past the start, then the output latency run
     // through and dropped (as the Audio plug-in starts over).
+    let start = input_at(0.0);
+    let rate = speed(0.0, CHUNK as f64);
     let pre = (lat_in * 2).max(4096);
     for k in 0..pre {
-        [il[k], ir[k]] = get(a as f64 + lat_in as f64 - pre as f64 + k as f64);
+        [il[k], ir[k]] = get(start + lat_in as f64 - pre as f64 + k as f64);
     }
     st.seek(&il[..pre], &ir[..pre], rate);
-    let mut feed = a as f64 + lat_in as f64;
+    let mut feed = start + lat_in as f64;
     let m = (lat_out as f64 * rate).round() as usize;
     for k in 0..m {
         [il[k], ir[k]] = get(feed + k as f64);
@@ -53,10 +61,12 @@ pub fn stretched(s: &Sample, range: (usize, usize), time: f64, semitones: f64) -
     let mut frames = Vec::with_capacity(out_len);
     while frames.len() < out_len {
         let n = CHUNK.min(out_len - frames.len());
-        let start = feed.floor();
-        let m = ((feed + n as f64 * rate).floor() - start).max(0.0) as usize;
+        // Fed ahead by the latency: the speed where this chunk's input is.
+        let rate = speed(frames.len() as f64, n as f64);
+        let from = feed.floor();
+        let m = (((feed + n as f64 * rate).floor() - from).max(0.0) as usize).min(room);
         for k in 0..m {
-            [il[k], ir[k]] = get(start + k as f64);
+            [il[k], ir[k]] = get(from + k as f64);
         }
         feed += n as f64 * rate;
         st.process(&il[..m], &ir[..m], &mut ol[..n], &mut or[..n]);
@@ -74,6 +84,8 @@ pub struct RenderKey {
     pub range: (usize, usize),
     pub tempo: i64,
     pub cents: i64,
+    /// The warp map's [`deckard_model::new_sampler::BeatMap::id`] (0: none).
+    pub warp: u64,
 }
 
 /// A render to make: [`stretched`] of `sample` with these.
@@ -83,6 +95,8 @@ pub struct RenderJob {
     pub sample: Arc<Sample>,
     pub time: f64,
     pub semitones: f64,
+    /// The warp map the range plays through, if it has markers.
+    pub warp: Option<Arc<deckard_model::new_sampler::BeatMap>>,
 }
 
 impl RenderJob {
@@ -94,13 +108,39 @@ impl RenderJob {
             range,
             tempo: (tempo * 100.0).round() as i64,
             cents: (semitones * 100.0).round() as i64,
+            warp: 0,
         };
-        RenderJob { key, sample: sample.clone(), time: bpm / (key.tempo as f64 / 100.0), semitones: key.cents as f64 / 100.0 }
+        RenderJob { key, sample: sample.clone(), time: bpm / (key.tempo as f64 / 100.0), semitones: key.cents as f64 / 100.0, warp: None }
+    }
+
+    /// The same through warp map `map`: each beat of the range lasts a beat at the tempo.
+    pub fn warped(mut self, map: Arc<deckard_model::new_sampler::BeatMap>) -> RenderJob {
+        self.key.warp = map.id();
+        self.warp = Some(map);
+        self
+    }
+
+    /// Frames the render is, and where frame `f` of the range lands in it.
+    pub fn out_frame(&self, f: f64) -> f64 {
+        match &self.warp {
+            Some(map) => {
+                let per = f64::from(self.sample.rate) * 60.0 / (self.key.tempo as f64 / 100.0);
+                (map.beat_at(f) - map.beat_at(self.key.range.0 as f64)) * per
+            }
+            None => (f - self.key.range.0 as f64) * self.time.clamp(0.05, 20.0),
+        }
     }
 
     /// Make it (slow: off the audio and UI threads).
     pub fn run(&self) -> Arc<Sample> {
-        Arc::new(stretched(&self.sample, self.key.range, self.time, self.semitones))
+        let Some(map) = &self.warp else {
+            return Arc::new(stretched(&self.sample, self.key.range, self.time, self.semitones));
+        };
+        let (a, b) = (self.key.range.0.min(self.sample.frames.len()), self.key.range.1.min(self.sample.frames.len()));
+        let out_len = self.out_frame(b as f64).round().max(0.0) as usize;
+        let per = f64::from(self.sample.rate) * 60.0 / (self.key.tempo as f64 / 100.0);
+        let b0 = map.beat_at(a as f64);
+        Arc::new(stretched_by(&self.sample, out_len, |o| map.frame_at(b0 + o / per), self.semitones))
     }
 }
 
@@ -237,6 +277,33 @@ mod tests {
         assert_eq!(stretched(&s, (0, 1000), 2.0, 0.0).frames.len(), 2000);
         let past = stretched(&s, (40_000, 90_000), 1.0, 0.0);
         assert_eq!(past.frames.len(), s.frames.len() - 40_000, "clamped to the file");
+    }
+
+    /// Through a warp map, each stretch between markers takes its beats at the tempo:
+    /// a click late in the sample lands on its beat.
+    #[test]
+    fn warp_markers_put_hits_on_their_beats() {
+        use deckard_model::new_sampler::{BeatMap, Warp, ZoneMeta};
+        // A click at 0 and one at 30 000 (meant for beat 1 at 120 BPM: 24 000).
+        let mut s = Sample { rate: 48_000, frames: vec![[0.0; 2]; 96_000] };
+        for at in [0usize, 30_000] {
+            for k in 0..64 {
+                s.frames[at + k] = [0.9 * (1.0 - k as f32 / 64.0); 2];
+            }
+        }
+        let meta = ZoneMeta {
+            bpm: Some(120.0),
+            warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 30_000, beat: 1.0 }, Warp { frame: 54_000, beat: 2.0 }],
+            ..ZoneMeta::default()
+        };
+        let map = Arc::new(BeatMap::of(&meta, 48_000).unwrap());
+        let src = Arc::new(s);
+        let job = RenderJob::new(&src, (0, 54_000), 120.0, 120.0, 0.0).warped(map);
+        assert_ne!(job.key.warp, 0);
+        let r = job.run();
+        assert_eq!(r.frames.len(), 48_000, "two beats at 120");
+        let peak = (20_000..28_000).max_by(|x, y| r.frames[*x][0].abs().total_cmp(&r.frames[*y][0].abs())).unwrap();
+        assert!(peak.abs_diff(24_000) < 300, "the late click on beat 1: {peak}");
     }
 
     #[test]

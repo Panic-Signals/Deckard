@@ -7558,6 +7558,7 @@ impl App {
                     self.status = format!("can't change the zone: {e}");
                 }
             }
+            S::Warp(w) => self.warp_act(w),
             S::ToProject(bpm) => {
                 let Some(doc) = self.doc.clone() else { return };
                 if let Err(e) = doc.borrow_mut().set_tempo(bpm) {
@@ -10449,6 +10450,75 @@ impl App {
         self.samples.plugins.retain(|s| *s != removed_key);
         self.add_slot_at(what, i);
         doc.borrow_mut().end_take();
+    }
+
+    /// The focused New Sampler zone's warp markers (roadmap 1e): one undo step each.
+    fn warp_act(&mut self, w: layout::sampling::WarpAct) {
+        use deckard_model::new_sampler::{Warp, quantize, warps_at};
+        use layout::sampling::WarpAct as W;
+        match w {
+            W::Strength(v) => return self.sampling.warp_strength = v,
+            W::Grid(k) => return self.sampling.warp_grid = k.min(beat::WARP_GRIDS.len() - 1),
+            _ => {}
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let (Some(meta), Some(sample)) = (zone.meta.clone(), self.sampling.sample.clone()) else { return };
+        let mut warps = meta.warps.clone();
+        let label = match w {
+            W::Detect => {
+                let len = sample.frames.len();
+                let (lo, hi) = if zone.play_range.1 > zone.play_range.0 {
+                    (zone.play_range.0 as usize, zone.play_range.1 as usize + 1)
+                } else {
+                    (0, len)
+                };
+                // Every hit (detection merges those closer than 50 ms).
+                let hits = deckard_engine::edit::detect_positions(&sample, (lo, hi.min(len)), 1.0, false);
+                warps = warps_at(&meta, sample.rate, &hits);
+                "Warp Markers"
+            }
+            W::Quantize => {
+                let (div, _) = beat::WARP_GRIDS[self.sampling.warp_grid.min(beat::WARP_GRIDS.len() - 1)];
+                warps = quantize(&warps, div, self.sampling.warp_strength);
+                "Quantize Audio"
+            }
+            W::Clear => {
+                warps.clear();
+                "Clear Warp Markers"
+            }
+            W::Add(frame) => {
+                let Some(map) = deckard_model::new_sampler::BeatMap::of(&meta, sample.rate) else { return };
+                let at = warps.partition_point(|x| x.frame < frame as u64);
+                if warps.get(at).is_some_and(|x| x.frame == frame as u64) {
+                    return;
+                }
+                warps.insert(at, Warp { frame: frame as u64, beat: map.beat_at(frame as f64) });
+                "Add Warp Marker"
+            }
+            W::Remove(i) => {
+                if i >= warps.len() {
+                    return;
+                }
+                warps.remove(i);
+                "Remove Warp Marker"
+            }
+            W::Move(i, beat) => {
+                // Between its neighbours' beats.
+                let lo = i.checked_sub(1).and_then(|k| warps.get(k)).map_or(f64::MIN, |x| x.beat + 1e-3);
+                let hi = warps.get(i + 1).map_or(f64::MAX, |x| x.beat - 1e-3);
+                let Some(x) = warps.get_mut(i) else { return };
+                x.beat = beat.clamp(lo, hi.max(lo));
+                "Move Warp Marker"
+            }
+            W::Strength(_) | W::Grid(_) => return,
+        };
+        let meta = deckard_model::new_sampler::ZoneMeta { warps, ..meta };
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, label) {
+            self.status = format!("can't change the warp markers: {e}");
+        }
     }
 
     /// The focused sound's instrument made a New Sampler (`to_new`: a Sampler keeps its

@@ -2416,7 +2416,16 @@ fn synced_zone(
     }
     let keys = meta.mode == PlayMode::Keys;
     let semitones = zone.tune as f64 + sound_tune;
-    let base = render::RenderJob::new(&zone.sample, zone.play, bpm, tempo, semitones);
+    // Warp markers: the range plays through its beat map.
+    let map = (!meta.warps.is_empty()).then(|| deckard_model::new_sampler::BeatMap::of(meta, zone.sample.rate).map(Arc::new)).flatten();
+    let job = |semis: f64| {
+        let j = render::RenderJob::new(&zone.sample, zone.play, bpm, tempo, semis);
+        match &map {
+            Some(m) => j.warped(m.clone()),
+            None => j,
+        }
+    };
+    let base = job(semitones);
     let Some(made) = renders.get_or_want(base.clone()) else {
         zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new() });
         return;
@@ -2427,17 +2436,17 @@ fn synced_zone(
             (-KEYS_SPAN..=KEYS_SPAN).filter(|o| *o != 0 && (zone.keys.0..=zone.keys.1).contains(&(zone.root + o))).collect();
         offsets.sort_by_key(|o| (o.abs(), *o < 0));
         for o in offsets {
-            let job = render::RenderJob::new(&zone.sample, zone.play, bpm, tempo, semitones + o as f64);
-            if let Some(r) = renders.get_or_want(job) {
+            if let Some(r) = renders.get_or_want(job(semitones + o as f64)) {
                 notes.push((o, r));
             }
         }
     }
-    // The render holds the play range only, `time` times as long.
-    let time = base.time;
-    let (a, len) = (zone.play.0, made.frames.len());
-    let scale = |x: usize| ((x as f64 * time).round() as usize).min(len);
-    zone.looped = zone.looped.map(|(l, r)| (scale(l - a), scale(r - a))).filter(|(l, r)| r > l);
+    // The render holds the play range only, its frames where `out_frame` puts them.
+    let len = made.frames.len();
+    let at = |f: usize| (base.out_frame(f as f64).round().max(0.0) as usize).min(len);
+    let a = zone.play.0;
+    let scale = |x: usize| at(a + x) - at(a);
+    zone.looped = zone.looped.map(|(l, r)| (at(l), at(r))).filter(|(l, r)| r > l);
     zone.x_fade = scale(zone.x_fade);
     zone.fade_in = scale(zone.fade_in);
     zone.fade_out = scale(zone.fade_out);

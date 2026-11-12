@@ -1,7 +1,7 @@
 //! The New Sampler's tempo and pitch controls, as numbers (roadmap 1d): tap tempo, the
 //! linked BPM and beat count, the target note's Tune, and the sample's bars and beats.
 
-use deckard_model::new_sampler::{BpmSource, ZoneMeta};
+use deckard_model::new_sampler::{BeatMap, BpmSource, ZoneMeta};
 
 /// Taps further apart than this start a new count, seconds.
 pub const TAP_GAP: f64 = 2.0;
@@ -47,20 +47,21 @@ pub fn tune_for(root: u8, cents: f32, target: i64) -> f64 {
     (t * 100.0).round() / 100.0
 }
 
-/// The beats of a sample at `bpm` (`rate` frames a second, the first on frame
-/// `offset`) between frames `from` and `to`: (frame, bar from 1, beat in it from 1).
-pub fn beats_in(bpm: f64, offset: f64, rate: u32, from: f64, to: f64) -> Vec<(f64, i64, i64)> {
-    if !(bpm > 0.0) || rate == 0 || to <= from {
+/// The beats of a sample (through its beat map) between frames `from` and `to`:
+/// (frame, bar from 1, beat in it from 1).
+pub fn beats_in(map: &BeatMap, from: f64, to: f64) -> Vec<(f64, i64, i64)> {
+    if to <= from {
         return Vec::new();
     }
-    let per = rate as f64 * 60.0 / bpm;
-    if (to - from) / per > 4000.0 {
+    let (b0, b1) = (map.beat_at(from), map.beat_at(to));
+    if !(b1 - b0 < 4000.0) {
         return Vec::new();
     }
-    let first = ((from - offset) / per).ceil() as i64;
-    let last = ((to - offset) / per).floor() as i64;
-    (first..=last).map(|k| (offset + k as f64 * per, k.div_euclid(4) + 1, k.rem_euclid(4) + 1)).collect()
+    (b0.ceil() as i64..=b1.floor() as i64).map(|k| (map.frame_at(k as f64), k.div_euclid(4) + 1, k.rem_euclid(4) + 1)).collect()
 }
+
+/// Quantize grids, beats: 1/4, 1/8, 1/16, 1/32 notes.
+pub const WARP_GRIDS: [(f64, &str); 4] = [(1.0, "1/4"), (0.5, "1/8"), (0.25, "1/16"), (0.125, "1/32")];
 
 #[cfg(test)]
 mod tests {
@@ -99,10 +100,12 @@ mod tests {
     #[test]
     fn bars_and_beats() {
         // 120 BPM at 48 kHz: a beat every 24 000 frames, the first at 1 000.
-        let b = beats_in(120.0, 1000.0, 48_000, 0.0, 100_000.0);
+        let m = ZoneMeta { bpm: Some(120.0), grid_offset: 1000, ..ZoneMeta::default() };
+        let map = BeatMap::of(&m, 48_000).unwrap();
+        let b = beats_in(&map, 0.0, 100_000.0);
         assert_eq!(b.len(), 5);
         assert_eq!(b[0], (1000.0, 1, 1));
         assert_eq!(b[4], (97_000.0, 2, 1));
-        assert!(beats_in(0.0, 0.0, 48_000, 0.0, 1.0).is_empty());
+        assert!(beats_in(&map, 1.0, 0.0).is_empty());
     }
 }

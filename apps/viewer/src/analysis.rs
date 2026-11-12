@@ -119,6 +119,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         root: a.root.map(|r| r.note),
         cents: a.root.map_or(0.0, |r| r.cents),
         root_locked: false,
+        warps: Vec::new(),
     }
 }
 
@@ -264,6 +265,53 @@ mod app_tests {
         assert!(app.built.is_none(), "built again in full");
         build(&mut app);
         assert!(app.samples.wanted_renders().is_empty(), "it plays the render");
+    }
+
+    /// MARKERS puts warp markers on a loop's hits, QUANTIZE moves late ones onto the
+    /// grid (one undo step each), CLEAR takes them away.
+    #[test]
+    fn warp_markers_on_the_hits_quantized() {
+        use crate::layout::sampling::WarpAct;
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 48_000u32;
+        // Clicks on the beats at 120, the third 30 ms late.
+        let mut frames = vec![[0.0f32; 2]; rate as usize * 2];
+        for (k, at) in [0usize, 24_000, 48_000 + 1_440, 72_000].into_iter().enumerate() {
+            for i in 0..400 {
+                frames[at + i] = [0.9 * (1.0 - i as f32 / 400.0) * if k % 2 == 0 { 1.0 } else { -1.0 }; 2];
+            }
+        }
+        let file = dir.path().join("Hits.wav");
+        let sample = deckard_engine::sample::Sample { rate, frames };
+        deckard_engine::edit::write_wav_channels(&file, &sample, 2).unwrap();
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        if doc.project().groups[0].sounds[0].slots.is_empty() {
+            doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        }
+        let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+        doc.set_zones(0, 0, &[spec], "Load").unwrap();
+        doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+        let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+        use deckard_model::new_sampler::ZoneMeta;
+        let meta = ZoneMeta { file: path, mode: PlayMode::Sync, bpm: Some(120.0), beats: Some(4.0), ..ZoneMeta::default() };
+        doc.note_zone_meta(0, 0, 0, &meta).unwrap();
+        let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+        app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+        app.sampling.sample = Some(std::sync::Arc::new(sample));
+        let warps = |app: &App| {
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone().unwrap().warps
+        };
+        app.warp_act(WarpAct::Detect);
+        let w = warps(&app);
+        assert_eq!(w.len(), 4, "{w:?}");
+        assert!((w[2].beat - 2.06).abs() < 0.02, "the late hit is late: {w:?}");
+        app.warp_act(WarpAct::Quantize);
+        let w = warps(&app);
+        assert!(w.iter().enumerate().all(|(k, x)| (x.beat - k as f64).abs() < 1e-9), "on the grid: {w:?}");
+        assert!(w[2].frame > 49_000, "the marker stays on its hit");
+        assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Quantize Audio"));
+        app.warp_act(WarpAct::Clear);
+        assert!(warps(&app).is_empty());
     }
 
     /// An Audio plug-in's take becomes a New Sampler zone in Sync at the take's tempo;

@@ -274,6 +274,16 @@ sample-only nudge, Flatten, the key, and Serato's waveform colouring.
 
 ### 1e. Tempo markers and warp markers
 
+**Warp markers built 2026-11-12:** a zone's markers pin frames to beats (`deckard:zone`'s
+`warp` lines; `BeatMap` in `crates/model/src/new_sampler.rs`, straight between markers,
+at the end segments' speed beyond). Sync and Keys render through the map, each stretch
+between markers at its own speed (`render::stretched_by`). On the Sampling page:
+MARKERS (on every hit), QUANTIZE (to 1/4–1/32, with STRENGTH), CLEAR; drag a marker's
+handle to move its beat, double-click it to remove it, double-click the ruler for a new
+one; the bars-and-beats ruler follows the map. Not yet: Serato's tempo markers and
+ADJUST (warp markers cover a piecewise tempo; a tempo-marker UI on top is to come), the
+waveform drawn warped (it stays in sample time, the grid moves instead), and the MK3.
+
 - **Tempo markers:** Serato-style, up to 128, giving a piecewise tempo map. The ADJUST
   control stretches the segment under the playhead.
 - **Warp markers:** start at the detected transients. Sync stretches piecewise between

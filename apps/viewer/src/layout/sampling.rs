@@ -105,6 +105,9 @@ pub struct SamplingState {
     pub playhead: Option<usize>,
     /// TAP's times (seconds), the latest count.
     pub taps: Vec<f64>,
+    /// QUANTIZE's grid (`beat::WARP_GRIDS`) and strength (0..1).
+    pub warp_grid: usize,
+    pub warp_strength: f64,
 }
 
 impl Default for SamplingState {
@@ -131,6 +134,8 @@ impl Default for SamplingState {
             peaks: Vec::new(),
             playhead: None,
             taps: Vec::new(),
+            warp_grid: 2,
+            warp_strength: 1.0,
         }
     }
 }
@@ -237,6 +242,24 @@ pub enum SamplingAct {
     Tap(f64),
     /// The song's tempo set to the sample's.
     ToProject(f64),
+    /// The focused New Sampler zone's warp markers.
+    Warp(WarpAct),
+}
+
+/// What the warp controls do (roadmap 1e).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WarpAct {
+    /// Markers on the sample's hits (each on the beat it falls on now).
+    Detect,
+    /// Move them toward the grid (`SamplingState::warp_grid`, `warp_strength`).
+    Quantize,
+    Clear,
+    /// A marker at this frame; marker `.0` removed; marker `.0` moved to beat `.1`.
+    Add(usize),
+    Remove(usize),
+    Move(usize, f64),
+    Strength(f64),
+    Grid(usize),
 }
 
 /// Recording controls.
@@ -496,6 +519,27 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         pitch.push(tf);
     }
     x = group_box(ui, &painter, x, y, "PITCH", &pitch, acts);
+    // Warp markers: on the hits, quantized, cleared.
+    let st = &app.sampling;
+    let (grid, strength) = (st.warp_grid, st.warp_strength);
+    let grids: Vec<String> = beat::WARP_GRIDS.iter().map(|g| g.1.to_string()).collect();
+    let mut sf = field("STRENGTH", format!("{:.0} %", strength * 100.0), move |n| {
+        sact(SamplingAct::Warp(WarpAct::Strength((strength + n * 0.05).clamp(0.0, 1.0))))
+    });
+    sf.tip = "How far QUANTIZE moves the markers toward the grid";
+    let warp_fields = [choice_field("GRID", grids, grid, |k| sact(SamplingAct::Warp(WarpAct::Grid(k)))), sf];
+    x = group_box(ui, &painter, x, y, if m.warps.is_empty() { "WARP" } else { "WARP (ON)" }, &warp_fields, acts);
+    if tool_button(ui, &painter, small(x, 0.0, 70.0), "MARKERS", has, false, "warp-detect") {
+        acts.push(sact(SamplingAct::Warp(WarpAct::Detect)));
+    }
+    if tool_button(ui, &painter, small(x, 1.0, 70.0), "QUANTIZE", !m.warps.is_empty(), false, "warp-quantize") {
+        acts.push(sact(SamplingAct::Warp(WarpAct::Quantize)));
+    }
+    x += 74.0;
+    if tool_button(ui, &painter, small(x, 0.0, 50.0), "CLEAR", !m.warps.is_empty(), false, "warp-clear") {
+        acts.push(sact(SamplingAct::Warp(WarpAct::Clear)));
+    }
+    x += 54.0;
     // How it plays.
     x += 8.0;
     for (k, (label, mode, tip)) in [
@@ -568,7 +612,8 @@ fn wave(
     painter.rect_filled(w, 0.0, S00);
     // Timeline: a New Sampler zone with a tempo shows its bars and beats (lines through
     // the waveform, bars brighter); others, seconds.
-    let grid = zone.meta.as_ref().and_then(|m| m.bpm.map(|b| crate::beat::beats_in(b, m.grid_offset as f64, sample.rate, v0, v1)));
+    let map = zone.meta.as_ref().and_then(|m| deckard_model::new_sampler::BeatMap::of(m, sample.rate));
+    let grid = map.as_ref().map(|m| crate::beat::beats_in(m, v0, v1));
     if let Some(beats) = grid.as_ref().filter(|b| !b.is_empty()) {
         let px = w.width() as f64 / beats.len() as f64;
         for &(f, bar, beat) in beats {
@@ -590,6 +635,48 @@ fn wave(
                 );
             }
         }
+    }
+    // Warp markers: a line through the waveform and a handle on the timeline. Drag a
+    // handle to move its beat (the grid moves past it), double-click it to remove it;
+    // double-click the timeline for a new one.
+    if let (Some(m), Some(map)) = (zone.meta.as_ref(), map.as_ref()) {
+        let warp_col = Color32::from_rgb(0xf2, 0xc1, 0x4e);
+        let per = sample.rate as f64 * 60.0 / m.bpm.unwrap_or(120.0);
+        let frames_per_px = (v1 - v0) / w.width().max(1.0) as f64;
+        let mut on_handle = false;
+        for (i, wp) in m.warps.iter().enumerate() {
+            let f = wp.frame as f64;
+            if f < v0 || f > v1 {
+                continue;
+            }
+            let x = fx(f);
+            painter.vline(x, w.y_range(), Stroke::new(1.0, warp_col.gamma_multiply(0.6)));
+            let h = Rect::from_center_size(Pos2::new(x, timeline.center().y), Vec2::new(9.0, timeline.height()));
+            painter.add(egui::Shape::convex_polygon(
+                vec![Pos2::new(x - 4.5, h.top()), Pos2::new(x + 4.5, h.top()), Pos2::new(x, h.bottom())],
+                warp_col,
+                Stroke::NONE,
+            ));
+            let resp = ui
+                .interact(h, ui.id().with(("warp", i)), Sense::click_and_drag())
+                .on_hover_text(format!("Warp marker on beat {:.2}: drag to move its beat, double-click to remove it", wp.beat + 1.0));
+            on_handle |= resp.hovered();
+            if resp.double_clicked() {
+                acts.push(sact(SamplingAct::Warp(WarpAct::Remove(i))));
+            } else if resp.dragged() && resp.drag_delta().x != 0.0 {
+                let fine = if ui.input(|i| i.modifiers.shift) { 0.1 } else { 1.0 };
+                let d = resp.drag_delta().x as f64 * frames_per_px / per * fine;
+                acts.push(sact(SamplingAct::Warp(WarpAct::Move(i, wp.beat + d))));
+            }
+        }
+        let tl = ui.interact(timeline, ui.id().with("warp-timeline"), Sense::click());
+        if !on_handle
+            && tl.double_clicked()
+            && let Some(p) = tl.interact_pointer_pos()
+        {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Add(xf(p.x) as usize))));
+        }
+        let _ = map;
     }
     // Timeline: seconds.
     let secs = (v1 - v0) / sample.rate.max(1) as f64;
