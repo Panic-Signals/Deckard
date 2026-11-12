@@ -139,15 +139,14 @@ fn ac(env: &[f32], lag: f64) -> f64 {
         return 0.0;
     }
     let n = env.len() - whole - 1;
-    let sum: f64 = (0..n)
-        .map(|i| f64::from(env[i]) * ((1.0 - frac) * f64::from(env[i + whole]) + frac * f64::from(env[i + whole + 1])))
-        .sum();
+    let sum: f64 =
+        (0..n).map(|i| f64::from(env[i]) * ((1.0 - frac) * f64::from(env[i + whole]) + frac * f64::from(env[i + whole + 1]))).sum();
     sum / n as f64
 }
 
 /// The frame where the beat grid (one beat every `lag` hops) best meets the onsets.
 fn offset(env: &[f32], lag: f64, hop: f64) -> usize {
-    if env.is_empty() || !(lag >= 1.0) {
+    if env.is_empty() || lag.is_nan() || lag < 1.0 {
         return 0;
     }
     let phases = lag.ceil() as usize;

@@ -10,7 +10,7 @@ pub mod tempo;
 #[cfg(test)]
 mod test_signals;
 
-// ROOT_EXPORTS
+pub use root::{Root, root, root_with_name};
 pub use tempo::{Tempo, TempoSource, tempo};
 
 /// The frames mixed to mono.
