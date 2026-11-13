@@ -60,10 +60,12 @@ pub struct Boot {
     /// The step whose line is showing as running.
     running: Option<Step>,
     // (Filled by the plug-in steps.)
-    #[allow(dead_code)]
     wanted: Vec<(deckard_plugins::Slot, deckard_model::PluginRef)>,
-    #[allow(dead_code)]
     failed: Vec<String>,
+    /// The audio output's rate, once it is open.
+    rate: f64,
+    /// When the plug-ins began to load.
+    plugins_from: Option<Instant>,
 }
 
 impl Boot {
@@ -80,6 +82,8 @@ impl Boot {
             running: None,
             wanted: Vec::new(),
             failed: Vec::new(),
+            rate: 0.0,
+            plugins_from: None,
         }
     }
 
@@ -133,26 +137,29 @@ impl App {
         let Some(mut boot) = self.boot.take() else { return };
         if boot.log.last().is_some_and(|l| l.outcome.is_none()) {
             let step = boot.running.take();
+            // (A step may add lines of its own after its).
+            let at = boot.log.len() - 1;
             let outcome = step.map_or(Outcome::Ok, |s| self.run_step(&mut boot, s));
-            if let Some(line) = boot.log.last_mut() {
+            if let Some(line) = boot.log.get_mut(at) {
                 line.outcome = Some(outcome);
             }
             boot.done += 1;
         } else if let Some(step) = boot.queue.pop_front() {
-            boot.log.push(LogLine { label: self.step_label(&step), outcome: None });
+            boot.log.push(LogLine { label: self.step_label(&boot, &step), outcome: None });
             boot.running = Some(step);
         }
         self.boot = Some(boot);
     }
 
-    /// Run startup to the end at once.
+    /// Run startup to the end at once (also when the queue runs dry before the count
+    /// says so, so a miscount can't hang it).
     pub(crate) fn boot_to_end(&mut self) {
-        while self.boot.as_ref().is_some_and(|b| !b.finished()) {
+        while self.boot.as_ref().is_some_and(|b| !b.finished() && (!b.queue.is_empty() || b.running.is_some())) {
             self.boot_next();
         }
     }
 
-    fn step_label(&self, step: &Step) -> String {
+    fn step_label(&self, boot: &Boot, step: &Step) -> String {
         match step {
             Step::Settings => "READING SETTINGS".into(),
             Step::AudioDriver => "AUDIO DRIVER".into(),
@@ -167,7 +174,10 @@ impl App {
             Step::Project(None) => "NEW PROJECT".into(),
             Step::Plugins => "PLUG-INS".into(),
             Step::AudioOutput => "AUDIO OUTPUT".into(),
-            Step::Plugin(i) => format!("PLUG-IN {}", i + 1),
+            Step::Plugin(i) => {
+                let name = boot.wanted.get(*i).map_or_else(String::new, |(_, p)| p.name.to_uppercase());
+                format!("LOADING PLUG-IN {name} [{}/{}]", i + 1, boot.wanted.len())
+            }
             Step::Done => "READY".into(),
         }
     }
@@ -241,13 +251,66 @@ impl App {
                 } else {
                     self.start_project();
                 }
+                // (The plug-ins load in the steps after, not again once the window is up.)
+                self.preload_plugins = false;
                 match &self.error {
                     Some(e) => Outcome::Err(e.clone()),
                     None => Outcome::Text(name.unwrap_or_else(|| "NEW PROJECT".into())),
                 }
             }
-            // (Loaded in the main loop, as before; steps for them come with the plug-in queue.)
-            Step::Plugins | Step::AudioOutput | Step::Plugin(_) => Outcome::Skipped,
+            Step::Plugins => {
+                boot.wanted = self.wanted_plugins();
+                let n = boot.wanted.len();
+                if n == 0 {
+                    return Outcome::Text("NONE".into());
+                }
+                // The output opens first, then each plug-in loads at its rate.
+                for i in (0..n).rev() {
+                    boot.queue.push_front(Step::Plugin(i));
+                }
+                boot.queue.push_front(Step::AudioOutput);
+                boot.total += n + 1;
+                boot.plugins_from = Some(Instant::now());
+                Outcome::Text(format!("{n} TO LOAD"))
+            }
+            Step::AudioOutput => {
+                #[cfg(test)]
+                let opened = self.boot_output.clone();
+                #[cfg(not(test))]
+                let opened = None;
+                let opened = opened.unwrap_or_else(|| {
+                    match self.output.get_or_insert_with(|| crate::open_output(&self.settings, &mut self.output_fallback)) {
+                        Ok(out) => Ok(out.rate as f64),
+                        Err(e) => Err(e.clone()),
+                    }
+                });
+                match opened {
+                    Ok(rate) => {
+                        boot.rate = rate;
+                        Outcome::Ok
+                    }
+                    Err(e) => {
+                        let before = boot.queue.len();
+                        boot.queue.retain(|s| !matches!(s, Step::Plugin(_)));
+                        boot.total -= before - boot.queue.len();
+                        boot.log.push(LogLine { label: format!("PLUG-INS ({})", boot.wanted.len()), outcome: Some(Outcome::Skipped) });
+                        self.status = format!("plug-ins not loaded: {e}");
+                        Outcome::Err(e)
+                    }
+                }
+            }
+            Step::Plugin(i) => {
+                let Some((slot, p)) = boot.wanted.get(i).cloned() else { return Outcome::Skipped };
+                let result = self.load_plugin(slot, &p, boot.rate);
+                if let Err(e) = &result {
+                    boot.failed.push(e.clone());
+                }
+                if i + 1 == boot.wanted.len() {
+                    let secs = boot.plugins_from.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    self.status = App::plugins_loaded_status(boot.wanted.len(), secs, &boot.failed);
+                }
+                result.map_or_else(Outcome::Err, |()| Outcome::Ok)
+            }
             Step::Done => {
                 boot.ready_at = Some(Instant::now());
                 Outcome::Ok
@@ -259,6 +322,59 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_with_two_plugins() -> crate::App {
+        let mut app = crate::App::default();
+        let plugin = |name: &str| deckard_model::PluginRef { id: format!("{name}:none"), name: name.into(), ..Default::default() };
+        app.boot_wanted = Some(vec![
+            (deckard_plugins::Slot::Sound { group: 0, sound: 0 }, plugin("One")),
+            (deckard_plugins::Slot::Sound { group: 0, sound: 1 }, plugin("Two")),
+        ]);
+        app
+    }
+
+    #[test]
+    fn each_plugin_is_its_own_step() {
+        let mut app = app_with_two_plugins();
+        app.boot = Some(Boot::new(vec![Step::Plugins, Step::Done]));
+        app.boot_output = Some(Ok(48000.0));
+        app.boot_to_end();
+        let b = app.boot.as_ref().unwrap();
+        let plugin_lines = b.log.iter().filter(|l| l.label.starts_with("LOADING PLUG-IN")).count();
+        assert_eq!(plugin_lines, 2);
+        assert!(b.log.iter().any(|l| l.label.ends_with("[2/2]")));
+        assert_eq!(b.progress(), 1.0);
+    }
+
+    #[test]
+    fn output_failure_skips_the_plugins_and_says_so() {
+        let mut app = app_with_two_plugins();
+        app.boot = Some(Boot::new(vec![Step::Plugins, Step::Done]));
+        app.boot_output = Some(Err("no device".into()));
+        app.boot_to_end();
+        let b = app.boot.as_ref().unwrap();
+        assert!(b.log.iter().any(|l| matches!(l.outcome, Some(Outcome::Err(_))) && l.label.starts_with("AUDIO OUTPUT")));
+        assert!(b.log.iter().any(|l| matches!(l.outcome, Some(Outcome::Skipped)) && l.label.contains("PLUG-INS")));
+        assert!(!app.status.is_empty());
+        assert!(b.finished() && b.progress() == 1.0);
+    }
+
+    #[test]
+    fn the_project_step_stops_the_old_preload() {
+        let mut app = crate::App::default();
+        app.boot = Some(Boot::new(vec![Step::Project(None), Step::Done]));
+        app.boot_to_end();
+        assert!(!app.preload_plugins, "plug-ins load in boot steps, not again after");
+    }
+
+    #[test]
+    fn a_miscount_cannot_hang_startup() {
+        let mut app = crate::App::default();
+        let mut b = Boot::new(vec![Step::Done]);
+        b.total = 5;
+        app.boot = Some(b);
+        app.boot_to_end();
+    }
 
     #[test]
     fn a_line_shows_before_its_step_runs() {

@@ -951,6 +951,12 @@ pub struct App {
     preload_plugins: bool,
     /// Startup in progress, as a queue of steps (`None` once it is over).
     boot: Option<boot::Boot>,
+    /// Test hook: what the AUDIO OUTPUT step returns (the rate, or why not), instead of opening one.
+    #[cfg(test)]
+    boot_output: Option<Result<f64, String>>,
+    /// Test hook: the plug-ins the PLUG-INS step finds, instead of the project's.
+    #[cfg(test)]
+    boot_wanted: Option<Vec<(deckard_plugins::Slot, deckard_model::PluginRef)>>,
     /// Frames drawn since the project was opened (plug-ins load after the second).
     frames_drawn: u32,
     /// Open plug-in windows: (group, sound, window).
@@ -10578,12 +10584,16 @@ impl App {
         }
     }
 
-    /// Load every plug-in instrument of the project (at the output's rate), so playing
-    /// and editing never wait for one.
-    fn load_plugins(&mut self) {
-        let Some(doc) = self.doc.clone() else { return };
+    /// The plug-ins the project carries: each instrument, then the effects after it, then
+    /// the groups' and the master's effects.
+    pub(crate) fn wanted_plugins(&self) -> Vec<(deckard_plugins::Slot, deckard_model::PluginRef)> {
+        #[cfg(test)]
+        if let Some(w) = &self.boot_wanted {
+            return w.clone();
+        }
+        let Some(doc) = self.doc.clone() else { return Vec::new() };
         let d = doc.borrow();
-        let wanted: Vec<_> = d
+        let mut wanted: Vec<_> = d
             .project()
             .groups
             .iter()
@@ -10603,7 +10613,6 @@ impl App {
             })
             .collect();
         // Groups' and the master's effect plug-ins.
-        let mut wanted = wanted;
         let p = d.project();
         for (g, gr) in p.groups.iter().enumerate() {
             for (i, x) in gr.slots.iter().enumerate() {
@@ -10617,7 +10626,23 @@ impl App {
                 wanted.push((deckard_plugins::Slot::Master { slot: i }, pl));
             }
         }
-        drop(d);
+        wanted
+    }
+
+    /// Load one plug-in at the output's `rate`.
+    pub(crate) fn load_plugin(&mut self, slot: deckard_plugins::Slot, p: &deckard_model::PluginRef, rate: f64) -> Result<(), String> {
+        self.samples.plugins.instance(slot, &p.id, &p.name, &p.chunk, rate).map(|_| ())
+    }
+
+    /// What the status line says once the plug-ins are loaded.
+    pub(crate) fn plugins_loaded_status(n: usize, secs: f64, failed: &[String]) -> String {
+        if failed.is_empty() { format!("{n} plug-ins loaded ({secs:.1} s)") } else { format!("plug-ins failed: {}", failed.join(", ")) }
+    }
+
+    /// Load every plug-in instrument of the project (at the output's rate), so playing
+    /// and editing never wait for one.
+    fn load_plugins(&mut self) {
+        let wanted = self.wanted_plugins();
         if wanted.is_empty() {
             return;
         }
@@ -10628,15 +10653,11 @@ impl App {
         let t = std::time::Instant::now();
         let mut failed = Vec::new();
         for (slot, p) in &wanted {
-            if let Err(e) = self.samples.plugins.instance(*slot, &p.id, &p.name, &p.chunk, rate) {
+            if let Err(e) = self.load_plugin(*slot, p, rate) {
                 failed.push(e);
             }
         }
-        self.status = if failed.is_empty() {
-            format!("{} plug-ins loaded ({:.1} s)", wanted.len(), t.elapsed().as_secs_f64())
-        } else {
-            format!("plug-ins failed: {}", failed.join(", "))
-        };
+        self.status = Self::plugins_loaded_status(wanted.len(), t.elapsed().as_secs_f64(), &failed);
     }
 
     /// Write the state of plug-ins edited in their windows into the document.
