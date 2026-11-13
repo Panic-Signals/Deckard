@@ -120,6 +120,7 @@ mod sampler_ui;
 mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
+mod session_backup;
 mod settings;
 mod splice;
 mod stems;
@@ -1293,8 +1294,10 @@ pub struct App {
     session_kept: (u64, u64),
     session_due: Option<std::time::Instant>,
     session_due_for: (u64, u64),
-    /// The backup being written in the background, if any (see [`App::session_written`]).
-    session_writing: Option<std::thread::JoinHandle<()>>,
+    /// Encodes and writes the backup off the UI thread (see [`App::keep_session`]).
+    session_keeper: session_backup::Keeper,
+    /// The backup there is marked ended, now AUTO BACKUP is off.
+    session_retired: bool,
     /// Goes up with each project opened or made.
     doc_generation: u64,
     /// Cached `(doc_generation, revision, macro_targets, group_noted)` for `surface_view`.
@@ -1948,7 +1951,9 @@ impl App {
         self.keep_session_as(true);
     }
 
-    /// [`App::keep_session`], `clean` once DECKARD quits as it should.
+    /// [`App::keep_session`], `clean` once DECKARD quits as it should. The UI thread only
+    /// takes a snapshot; the encoding and the writing are the keeper's. With AUTO BACKUP
+    /// off, only where the project is saved is kept (on quitting), not its contents.
     fn keep_session_as(&mut self, clean: bool) {
         let Some(dir) = self.session_dir.clone() else { return };
         self.store_screen();
@@ -1956,35 +1961,25 @@ impl App {
         let d = doc.borrow();
         self.session_kept = (self.doc_generation, d.revision());
         self.session_due = None;
-        let Ok(bytes) = d.to_bytes() else { return };
         let mut info = format!("dirty = {}\nclean = {clean}\n", d.is_dirty());
         if let Some(p) = d.path() {
             info += &format!("path = {}\n", p.display());
         }
-        drop(d);
-        // One at a time, in order: an older backup never lands over a newer one.
-        self.session_written();
-        let write = move || {
-            let _ = std::fs::create_dir_all(&dir);
-            for (name, data) in [("session.mxprj", bytes), ("session.txt", info.into_bytes())] {
-                let tmp = dir.join(format!("{name}.saving"));
-                if std::fs::write(&tmp, data).is_ok() {
-                    let _ = std::fs::rename(&tmp, dir.join(name));
-                }
-            }
-        };
-        if clean {
-            write();
+        let job = if self.settings.auto_backup {
+            session_backup::Job::Keep { dir, snapshot: d.snapshot(), info }
         } else {
-            self.session_writing = Some(std::thread::spawn(write));
+            session_backup::Job::Info { dir, info }
+        };
+        drop(d);
+        self.session_keeper.submit(job);
+        if clean {
+            self.session_keeper.finish();
         }
     }
 
     /// Wait for the backup being written in the background, if there is one.
     fn session_written(&mut self) {
-        if let Some(w) = self.session_writing.take() {
-            let _ = w.join();
-        }
+        self.session_keeper.finish();
     }
 
     /// Keep the session a few seconds after the last edit (unless the Settings page's
@@ -1992,8 +1987,19 @@ impl App {
     fn keep_session_soon(&mut self) {
         let Some(doc) = &self.doc else { return };
         if !self.settings.auto_backup {
+            // Off: no backup is taken, and the one there (from before) is not to come
+            // back after a crash as if it were this session's.
+            if !self.session_retired
+                && let Some(dir) = self.session_dir.clone()
+            {
+                self.session_retired = true;
+                self.session_due = None;
+                self.session_kept = (u64::MAX, 0);
+                self.session_keeper.submit(session_backup::Job::Retire { dir });
+            }
             return;
         }
+        self.session_retired = false;
         let now = (self.doc_generation, doc.borrow().revision());
         if self.session_dir.is_none() || now == self.session_kept {
             return;

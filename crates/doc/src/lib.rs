@@ -191,6 +191,47 @@ pub struct Document {
     session_values: std::collections::BTreeMap<String, u64>,
 }
 
+/// The project file as it would be saved at one moment ([`Document::snapshot`]); `Send`.
+pub struct Snapshot {
+    file: Vec<u8>,
+    root: Obj,
+    native_pressure: bool,
+    block: Option<Vec<u8>>,
+}
+
+impl Snapshot {
+    /// The same bytes [`Document::to_bytes`] gave when the snapshot was taken.
+    pub fn to_bytes(self) -> Result<Vec<u8>, String> {
+        self.encode(&mxprj::types::Types::new())
+    }
+
+    /// [`Snapshot::to_bytes`] with `types` kept from an earlier one (they can't cross
+    /// threads, so each thread that encodes makes its own).
+    pub fn encode(self, types: &mxprj::types::Types) -> Result<Vec<u8>, String> {
+        encode_file(&self.file, self.root, types, self.native_pressure, self.block.as_deref())
+    }
+}
+
+/// The expensive part of saving: `root` encoded into `file`'s container, with the
+/// DECKARD block `block`.
+fn encode_file(
+    file: &[u8],
+    root: Obj,
+    types: &mxprj::types::Types,
+    native_pressure: bool,
+    block: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let doc = mxprj::Project::parse(file).map_err(|e| e.to_string())?;
+    let mut root = Value::Obj(root);
+    if !native_pressure {
+        block::strip_channel_pressure(&mut root);
+    }
+    expression::strip_deckard_fields(&mut root);
+    let Value::Obj(root) = root else { unreachable!() };
+    let archived = doc.encode(types, root).map_err(|(e, at)| format!("{e} in {at}"))?;
+    Document::put_block(&archived, block)
+}
+
 impl std::fmt::Debug for Document {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Document")
@@ -1022,15 +1063,13 @@ impl Document {
 
     /// The project file as it would be saved now.
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        let doc = mxprj::Project::parse(&self.file).map_err(|e| e.to_string())?;
-        let mut root = Value::Obj(self.root().clone());
-        if !self.native_pressure {
-            block::strip_channel_pressure(&mut root);
-        }
-        expression::strip_deckard_fields(&mut root);
-        let Value::Obj(root) = root else { unreachable!() };
-        let archived = doc.encode(&self.types, root).map_err(|(e, at)| format!("{e} in {at}"))?;
-        self.with_block(&archived)
+        encode_file(&self.file, self.root().clone(), &self.types, self.native_pressure, self.block_payload().as_deref())
+    }
+
+    /// Everything [`Document::to_bytes`] needs, copied: the cheap part of saving, for
+    /// the expensive part ([`Snapshot::to_bytes`]) to run on another thread.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { file: self.file.clone(), root: self.root().clone(), native_pressure: self.native_pressure, block: self.block_payload() }
     }
 
     /// Write the project to `path` (through a temporary file, so a failed write
@@ -1535,5 +1574,27 @@ mod knob_patch_tests {
         assert_eq!(slot.param("gain"), Some(0.7));
         assert!(!patch_slot(Some(&mut slot), "unknown", 0.7), "not one it shows");
         assert!(!patch_slot(None, "gain", 0.7));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    /// A snapshot gives the very bytes `to_bytes` does, also once the document has moved on.
+    #[test]
+    fn a_snapshot_encodes_to_the_same_bytes_as_to_bytes() {
+        let mut d = Document::new_project().unwrap();
+        d.set_tempo(101.5).unwrap();
+        let (snap, bytes) = (d.snapshot(), d.to_bytes().unwrap());
+        d.set_tempo(77.0).unwrap();
+        assert_eq!(snap.to_bytes().unwrap(), bytes, "as it was when taken");
+        assert_ne!(d.to_bytes().unwrap(), bytes);
+        let back = Document::from_bytes(bytes, None).unwrap();
+        assert_eq!(back.project().tempo, 101.5);
+        // On another thread, with its own types.
+        let snap = d.snapshot();
+        let now = d.to_bytes().unwrap();
+        assert_eq!(std::thread::spawn(move || snap.to_bytes().unwrap()).join().unwrap(), now);
     }
 }

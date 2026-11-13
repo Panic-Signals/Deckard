@@ -138,3 +138,37 @@ fn auto_backup_off_keeps_nothing_after_an_edit() {
     app.keep_session_soon();
     assert!(!dir.join("session.mxprj").exists());
 }
+
+/// AUTO BACKUP off: nothing is written as a backup, and the one from before (when it
+/// was on) isn't offered after a crash.
+#[test]
+fn auto_backup_off_retires_the_old_backup_and_writes_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("session");
+    let start = |dir: &std::path::Path, auto: bool| {
+        let mut app = crate::App { session_dir: Some(dir.to_path_buf()), ..Default::default() };
+        app.settings.auto_backup = auto;
+        app.start_project();
+        app
+    };
+    // On: a crash with unsaved changes leaves a backup.
+    let mut app = start(&dir, true);
+    app.doc.as_ref().unwrap().borrow_mut().set_tempo(97.0).unwrap();
+    app.keep_session();
+    app.session_written();
+    let before = std::fs::read(dir.join("session.mxprj")).unwrap();
+    // Off, next start: this crash is offered once ...
+    let mut app = start(&dir, false);
+    assert_eq!(app.doc.as_ref().unwrap().borrow().project().tempo, 97.0, "the crash's backup");
+    // ... and turned off, no further backup is taken and it's retired.
+    app.doc.as_ref().unwrap().borrow_mut().set_tempo(96.0).unwrap();
+    app.session_due = Some(std::time::Instant::now());
+    app.keep_session_soon();
+    app.session_written();
+    assert_eq!(std::fs::read(dir.join("session.mxprj")).unwrap(), before, "no new backup");
+    let next = start(&dir, false);
+    assert_ne!(next.doc.as_ref().unwrap().borrow().project().tempo, 97.0, "the stale backup isn't offered again");
+    // Quitting with it off keeps no project either.
+    app.end_session();
+    assert_eq!(std::fs::read(dir.join("session.mxprj")).unwrap(), before);
+}
