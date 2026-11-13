@@ -492,12 +492,19 @@ mod tests {
     }
 
     #[test]
-    fn space_does_nothing_while_loading() {
+    fn keys_do_nothing_while_loading() {
+        // F4 toggles the browser and needs no audio device.
         let mut h = booting_harness();
         h.step();
-        h.key_press(egui::Key::Space);
+        let before = h.state().browser.open;
+        h.key_press(egui::Key::F4);
         h.step();
-        assert!(h.state().playing.is_none());
+        assert_eq!(h.state().browser.open, before, "blocked while loading");
+        h.state_mut().boot = None;
+        h.step();
+        h.key_press(egui::Key::F4);
+        h.step();
+        assert_ne!(h.state().browser.open, before, "the same key works once loaded");
     }
 
     #[test]
