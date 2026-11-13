@@ -2429,7 +2429,7 @@ fn synced_zone(
     // The stem lanes' renders for a Tune (each lane stretched as the sample is): all
     // of them, or none yet.
     let lanes = zone.lanes.clone();
-    let mut lane_renders = |renders: &mut render::Renders, semis: f64| -> Option<[Option<Arc<Sample>>; sampler::LANES]> {
+    let lane_renders = |renders: &mut render::Renders, semis: f64| -> Option<[Option<Arc<Sample>>; sampler::LANES]> {
         let l = lanes.as_ref()?;
         let made: [Option<Option<Arc<Sample>>>; sampler::LANES] = std::array::from_fn(|k| match &l.samples[k] {
             Some(s) => renders.get_or_want(job_of(s, semis)).map(Some),

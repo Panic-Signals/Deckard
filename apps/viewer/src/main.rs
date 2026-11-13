@@ -713,7 +713,7 @@ fn parse_list(text: &str) -> Vec<String> {
 }
 
 fn is_sample_file(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["wav", "aif", "aiff", "aifc"].contains(&e.to_ascii_lowercase().as_str()))
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| deckard_engine::sample::EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 fn new_zone(file: &Path, frames: usize, from: deckard_doc::ZoneFrom) -> deckard_doc::ZoneSpec {
@@ -7602,7 +7602,7 @@ impl App {
                 }
             }
             S::LoadStems => {
-                if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "aifc"]).pick_files() {
+                if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() {
                     self.load_stems(&files);
                 }
             }
@@ -7940,7 +7940,7 @@ impl App {
     /// Zone list "+": load samples as new zones (each over all keys and velocities).
     fn add_zones(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "aifc"]).pick_files() else { return };
+        let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() else { return };
         let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
         let mut specs: Vec<deckard_doc::ZoneSpec> =
             (0..n).map(|k| deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Zone(k), file: None, set: Vec::new() }).collect();

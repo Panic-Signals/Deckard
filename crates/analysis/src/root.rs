@@ -24,14 +24,17 @@ const MIN_RMS: f32 = 0.003_162;
 /// The fewest detections that may name a root, and the least share of the sound.
 const MIN_VOTES: usize = 3;
 const MIN_CONFIDENCE: f32 = 0.4;
+/// How much of a long recording is listened to (seconds): a root is one note's, and a
+/// whole song has none to find however long it is searched.
+const LISTEN: usize = 30;
 
 /// The root of `frames` at `rate`, or `None` when it has no clear pitch (drums, noise,
 /// silence): better unset than a guess.
 pub fn root(frames: &[[f32; 2]], rate: u32) -> Option<Root> {
-    let (mut x, mut rate) = (mono(frames), rate);
     if rate == 0 {
         return None;
     }
+    let (mut x, mut rate) = (mono(&frames[..frames.len().min(LISTEN * rate as usize)]), rate);
     while rate > MAX_RATE {
         x = x.chunks(2).map(|p| p.iter().sum::<f32>() / p.len() as f32).collect();
         rate /= 2;

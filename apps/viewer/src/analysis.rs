@@ -269,6 +269,48 @@ mod app_tests {
         assert!(app.samples.wanted_renders().is_empty(), "it plays the render");
     }
 
+    /// An MP3 dropped on a sound: an Audio plug-in's take on an empty sound, a zone in a
+    /// Sampler and in a New Sampler, and it sounds when its key is played.
+    #[test]
+    fn an_mp3_dropped_on_each_kind_of_sound() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Tone.MP3");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/engine/testdata/tone.mp3"), &file).unwrap();
+        assert!(crate::is_sample_file(&file));
+        assert_eq!(deckard_library::Kind::of_file(&file), Some(deckard_library::Kind::OneShot));
+
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        for s in [1, 2] {
+            if doc.project().groups[0].sounds[s].sampler.is_none() {
+                doc.add_slot(0, s, 0, &deckard_doc::NewModule::Sampler).unwrap();
+            }
+        }
+        doc.set_new_sampler(0, 2, Some(&Default::default())).unwrap();
+        // Sound 4 is left with nothing on it.
+        let empty = (0..16).find(|&s| doc.project().groups[0].sounds[s].slots.is_empty()).expect("an empty sound");
+        let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+        app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+        for s in [empty, 1, 2] {
+            app.drop_samples((0, s), std::slice::from_ref(&file));
+            assert!(!app.status.contains("can't"), "{}", app.status);
+        }
+        let p = app.doc.as_ref().unwrap().borrow().project().clone();
+        let sounds = &p.groups[0].sounds;
+        let take = &sounds[empty].audio.as_ref().expect("an Audio plug-in").takes[0];
+        assert!(take.sample.path.ends_with("Tone.MP3"), "{:?}", take.sample);
+        for s in [1, 2] {
+            let z = sounds[s].sampler.as_ref().unwrap().zones.last().unwrap();
+            assert!(z.sample.path.ends_with("Tone.MP3"), "{:?}", z.sample);
+            assert!((z.play_range.1 - 44_099).abs() <= 2, "{:?}", z.play_range);
+            let key = z.root_key;
+            let (mut e, _) = deckard_engine::Engine::new(&p, None, 44_100, deckard_engine::Mode::Arrangement, &mut app.samples);
+            e.note_on(0, s, key, 127, 960);
+            let mut out = vec![0.0f32; 2 * 8192];
+            e.process(&mut out);
+            assert!(out.iter().any(|v| v.abs() > 0.01), "sound {s} is silent");
+        }
+    }
+
     /// MARKERS puts warp markers on a loop's hits, QUANTIZE moves late ones onto the
     /// grid (one undo step each), CLEAR takes them away.
     #[test]

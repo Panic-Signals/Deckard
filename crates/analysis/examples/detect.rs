@@ -1,22 +1,16 @@
-//! What analysis hears in a WAV, or in ranges of it:
-//! `cargo run --release -p deckard-analysis --example detect -- IN.wav [START:SECONDS ...]`
+//! What analysis hears in an audio file (WAV, AIFF, MP3), or in ranges of it:
+//! `cargo run --release -p deckard-analysis --example detect -- FILE [START:SECONDS ...]`
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(input) = args.first() else {
-        eprintln!("detect IN.wav [START:SECONDS ...]");
+        eprintln!("detect FILE [START:SECONDS ...]");
         return;
     };
-    let mut r = hound::WavReader::open(input).unwrap();
-    let spec = r.spec();
-    let scale = 2f32.powi(i32::from(spec.bits_per_sample) - 1);
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => r.samples::<f32>().map(Result::unwrap).collect(),
-        hound::SampleFormat::Int => r.samples::<i32>().map(|s| s.unwrap() as f32 / scale).collect(),
-    };
-    let ch = usize::from(spec.channels);
-    let frames: Vec<[f32; 2]> = samples.chunks(ch).map(|c| [c[0], c[ch.min(2) - 1]]).collect();
-    let rate = spec.sample_rate;
+    let t = std::time::Instant::now();
+    let sample = deckard_engine::sample::Sample::load(std::path::Path::new(input)).unwrap();
+    let (frames, rate) = (sample.frames, sample.rate);
+    eprintln!("{} frames at {rate} Hz, read in {:.2} s", frames.len(), t.elapsed().as_secs_f64());
     let at = |seconds: f64| ((seconds * f64::from(rate)) as usize).min(frames.len());
     let ranges: Vec<(f64, f64)> = if args.len() > 1 {
         args[1..]
@@ -31,7 +25,9 @@ fn main() {
     };
     for (start, len) in ranges {
         let part = &frames[at(start)..at(start + len)];
+        let t = std::time::Instant::now();
         let a = deckard_analysis::analyse(part, rate, "");
+        eprintln!("analysed in {:.2} s", t.elapsed().as_secs_f64());
         print!("{start:>7.2} s +{len:<6.2}");
         match a.tempo {
             Some(t) => print!(

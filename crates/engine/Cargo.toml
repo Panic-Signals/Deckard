@@ -7,6 +7,7 @@ description = "Sample playback engine for Maschine projects"
 [dependencies]
 hound = "3.5.1"
 lewton = "0.10.2"
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 deckard-model = { path = "../model" }
 deckard-stretch = { path = "../stretch" }
 deckard-plugins = { path = "../plugins" }

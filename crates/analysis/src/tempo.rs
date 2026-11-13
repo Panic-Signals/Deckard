@@ -93,10 +93,11 @@ pub fn tempo(frames: &[[f32; 2]], rate: u32, hint: Option<f64>) -> Option<Tempo>
         return None;
     }
     // Fine: every 0.01 BPM within 1 BPM, over as many beats' lags as fit in half the
-    // sample, so the error doesn't grow with the hop.
+    // sample (64 at most: a whole song takes no longer than a long loop), so the error
+    // doesn't grow with the hop.
     let fine = |bpm: f64| {
         let l = lag_of(bpm);
-        let k = ((env.len() as f64 / 2.0) / l).floor().max(1.0) as usize;
+        let k = ((env.len() as f64 / 2.0) / l).floor().clamp(1.0, 64.0) as usize;
         (1..=k).map(|i| ac(&env, l * i as f64)).sum::<f64>()
     };
     let mut bpm = best;
