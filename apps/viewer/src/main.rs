@@ -7733,6 +7733,7 @@ impl App {
             }
             S::ClearSlices => self.sampling.slices.clear(),
             S::PatternMode(m) => self.sampling.pattern_mode = m,
+            S::SliceToEnd(on) => self.sampling.slice_to_end = Some(on),
             S::ApplySlices => self.apply_slices(),
             S::FocusZone(i) => self.zone = i,
             S::ZoneMap(on) => self.sampling.zone_map = on,
@@ -7919,10 +7920,15 @@ impl App {
             return;
         }
         let zi = self.zone;
+        let (g, snd) = (self.group, self.sound);
+        // Start points: each slice plays on to the end, for as long as its pad is held.
+        let new_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(snd)).is_some_and(|x| x.new_sampler.is_some());
+        let to_end = self.sampling.slices_to_end(new_sampler);
         let specs: Vec<deckard_doc::ZoneSpec> = slices
             .iter()
             .enumerate()
             .map(|(i, &(a, b))| {
+                let b = if to_end { end } else { b };
                 let key = (36 + i).min(127) as f64;
                 deckard_doc::ZoneSpec {
                     from: deckard_doc::ZoneFrom::Zone(zi),
@@ -7940,8 +7946,17 @@ impl App {
                 }
             })
             .collect();
-        let (g, snd) = (self.group, self.sound);
-        if let Err(e) = doc.borrow_mut().set_zones(g, snd, &specs, "Apply Slices") {
+        let done = doc.borrow_mut().transaction("Apply Slices", |d| {
+            d.set_zones(g, snd, &specs, "Apply Slices")?;
+            // A one-shot would play on to the end whatever the pad does: the notes end it.
+            let one_shot = d.project().groups[g].sounds[snd].sampler.as_ref().is_some_and(|x| x.envelope_type == 0);
+            if to_end && one_shot {
+                d.set("Apply Slices", deckard_doc::Target::Sampler(g, snd), "envelope_type", mxprj::decode::Value::Float(2.0))?;
+                d.set("Apply Slices", deckard_doc::Target::Sampler(g, snd), "volume_envelope/release", mxprj::decode::Value::Float(0.1))?;
+            }
+            Ok(())
+        });
+        if let Err(e) = done {
             self.status = format!("can't apply the slices: {e}");
             return;
         }

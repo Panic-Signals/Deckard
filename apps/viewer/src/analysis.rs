@@ -415,11 +415,31 @@ mod app_tests {
         app.record_apply.insert("Beat.Start".into(), crate::sampling_hw::Apply::StartGrid);
         app.sampling_knob("Beat.Start", 3.0);
         assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Quarter);
-        // Slices keep the stems, each with mutes of its own.
+        // Slices to the next slice (a Sampler's way): each its own piece, one undo step.
+        let zones = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones.clone();
+        let envelope = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().envelope_type;
+        let ranges = |app: &App| zones(app).iter().map(|z| z.play_range).collect::<Vec<_>>();
+        let last = 95_999;
         app.sampling.slices = vec![0, 24_000, 48_000, 72_000];
         app.sampling.pattern_mode = 2;
+        app.sampling_act(crate::layout::sampling::SamplingAct::SliceToEnd(false));
         app.apply_slices();
-        let zones = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones.clone();
+        assert_eq!(ranges(&app), [(0, 23_999), (24_000, 47_999), (48_000, 71_999), (72_000, last)], "{}", app.status);
+        assert_eq!(envelope(&app), 0, "still a one-shot");
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        assert_eq!(zones(&app).len(), 1);
+        // A New Sampler's own way: start points, each playing on to the sample's end
+        // while its pad is held (the notes end it: not a one-shot any more).
+        app.sampling.slice_to_end = None;
+        app.zone = 0;
+        app.sampling.slices = vec![0, 24_000, 48_000, 72_000];
+        app.apply_slices();
+        assert_eq!(ranges(&app), [(0, last), (24_000, last), (48_000, last), (72_000, last)], "{}", app.status);
+        assert_eq!(envelope(&app), 2);
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        assert_eq!((zones(&app).len(), envelope(&app)), (1, 0), "one undo step");
+        app.doc.as_ref().unwrap().borrow_mut().redo();
+        // Slices keep the stems, each with mutes of its own.
         assert_eq!(zones(&app).len(), 4, "{}", app.status);
         assert!(zones(&app).iter().all(|z| z.meta.as_ref().is_some_and(|m| m.has_stems())), "each slice has the lanes");
         app.zone = 1;

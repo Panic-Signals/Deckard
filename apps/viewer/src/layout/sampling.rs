@@ -94,6 +94,9 @@ pub struct SamplingState {
     /// The SLICE tool removes instead of adding.
     pub remove_tool: bool,
     pub pattern_mode: usize,
+    /// APPLY's slices each play on to the sample's end (start points, as Serato's
+    /// cues), not to the next slice. Unset: so for a New Sampler, not for a Sampler.
+    pub slice_to_end: Option<bool>,
     /// Stretch settings while the stretch bar is open.
     pub stretch: Option<Stretch>,
     /// Zone tab: the map (else the focused zone's sample) and the zone list.
@@ -132,6 +135,7 @@ impl Default for SamplingState {
             zero_x: true,
             remove_tool: false,
             pattern_mode: 2,
+            slice_to_end: None,
             stretch: None,
             zone_map: true,
             zone_list: true,
@@ -216,6 +220,11 @@ impl SamplingState {
         self.peaks = peaks_of(&sample);
         self.sample = Some(sample);
         self.sample_key = Some(key);
+    }
+
+    /// Whether APPLY's slices play to the sample's end: as set, else so for a New Sampler.
+    pub fn slices_to_end(&self, new_sampler: bool) -> bool {
+        self.slice_to_end.unwrap_or(new_sampler)
     }
 
     /// No sample to show (what the last one showed is kept for when it comes back).
@@ -330,6 +339,8 @@ pub enum SamplingAct {
     ClearSlices,
     ApplySlices,
     PatternMode(usize),
+    /// APPLY's slices play to the sample's end (else to the next slice).
+    SliceToEnd(bool),
     FocusZone(usize),
     AddZones,
     RemoveZone(usize),
@@ -1674,7 +1685,16 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
         nx,
         fy,
         "APPLY",
-        &[choice_field("PATTERN", PATTERN_MODES.map(String::from).to_vec(), pm, |k| sact(SamplingAct::PatternMode(k)))],
+        &[choice_field("PATTERN", PATTERN_MODES.map(String::from).to_vec(), pm, |k| sact(SamplingAct::PatternMode(k))), {
+            let to_end = st.slices_to_end(app.doc.as_ref().is_some_and(|d| {
+                d.borrow().project().groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some())
+            }));
+            let mut f = choice_field("EACH PLAYS TO", vec!["Next slice".into(), "Sample end".into()], usize::from(to_end), |k| {
+                sact(SamplingAct::SliceToEnd(k == 1))
+            });
+            f.tip = "Next slice: each pad plays its own piece. Sample end: each pad is a start point, playing on for as long as it's held";
+            f
+        }],
         acts,
     );
 }

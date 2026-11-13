@@ -2403,8 +2403,8 @@ pub(crate) fn ext_channels(n: i64) -> Option<(usize, usize)> {
 const KEYS_SPAN: i64 = 12;
 
 /// A New Sampler zone in Sync or Keys (its `meta` says so, with a tempo): it plays the
-/// render of its play range at the song's `tempo`, its Tune (zone's and sound's,
-/// semitones) in it, when `renders` has it, and asks for it when not, playing its own
+/// render of `span` (its play range, or more of the file around it) at the song's
+/// `tempo`, its Tune (zone's and sound's, semitones) in it, when `renders` has it, and asks for it when not, playing its own
 /// sample in time (repitched) meanwhile. Keys asks for the notes' renders around the
 /// root, nearest first, and plays those made. Other zones are left as they are.
 fn synced_zone(
@@ -2412,6 +2412,7 @@ fn synced_zone(
     meta: Option<&deckard_model::new_sampler::ZoneMeta>,
     sound_tune: f64,
     tempo: f64,
+    span: (usize, usize),
     renders: &mut render::Renders,
 ) {
     use deckard_model::new_sampler::PlayMode;
@@ -2425,7 +2426,7 @@ fn synced_zone(
     // Warp markers: the range plays through its beat map.
     let map = (!meta.warps.is_empty()).then(|| deckard_model::new_sampler::BeatMap::of(meta, zone.sample.rate).map(Arc::new)).flatten();
     let job_of = |sample: &Arc<Sample>, semis: f64| {
-        let j = render::RenderJob::new(sample, zone.play, bpm, tempo, semis);
+        let j = render::RenderJob::new(sample, span, bpm, tempo, semis);
         match &map {
             Some(m) => j.warped(m.clone()),
             None => j,
@@ -2479,7 +2480,9 @@ fn synced_zone(
         Some(samples) => zone.lanes.as_mut().unwrap().samples = samples,
         None => zone.lanes = None,
     }
-    // The render holds the play range only, its frames where `out_frame` puts them.
+    // The render holds `span` only (the play range, or the stretch of the file this zone
+    // and its sound's other zones of it play: chops of one sample share one render),
+    // its frames where `out_frame` puts them.
     let len = made.frames.len();
     let at = |f: usize| (base.out_frame(f as f64).round().max(0.0) as usize).min(len);
     let a = zone.play.0;
@@ -2497,7 +2500,7 @@ fn synced_zone(
     zone.x_fade = scale(zone.x_fade);
     zone.fade_in = scale(zone.fade_in);
     zone.fade_out = scale(zone.fade_out);
-    zone.play = (0, len);
+    zone.play = (at(zone.play.0), at(zone.play.1));
     zone.sample = made;
     zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats(), shown });
 }
@@ -2896,7 +2899,25 @@ impl Engine {
                                         zone.lanes = Some(sampler::Lanes { samples, levels });
                                     }
                                 }
-                                synced_zone(&mut zone, z.meta.as_ref(), smp.tune, project.tempo, &mut renders);
+                                // Zones of the same file stretched alike (chops of one sample)
+                                // share one render, of all they play between them.
+                                let alike = |o: &&deckard_model::Zone| {
+                                    use deckard_model::new_sampler::PlayMode;
+                                    let (Some(m), Some(om)) = (z.meta.as_ref(), o.meta.as_ref()) else { return false };
+                                    o.sample == z.sample
+                                        && o.tune == z.tune
+                                        && om.mode != PlayMode::Repitch
+                                        && (om.bpm, &om.warps, om.grid_offset) == (m.bpm, &m.warps, m.grid_offset)
+                                };
+                                let span = smp.zones.iter().filter(alike).fold(play, |a, o| {
+                                    let (lo, hi) = o.play_range;
+                                    if hi > lo {
+                                        (a.0.min((lo.max(0) as usize).min(len)), a.1.max(((hi + 1) as usize).min(len)))
+                                    } else {
+                                        (0, len)
+                                    }
+                                });
+                                synced_zone(&mut zone, z.meta.as_ref(), smp.tune, project.tempo, span, &mut renders);
                             }
                             zones.push(zone);
                         }
@@ -8341,6 +8362,33 @@ mod tests {
         assert!((one - half - 6128).abs() < 300, "rendered: {one} from {half}");
         let three = at(&mut cache, 3);
         assert!((three - half - 3 * 6128).abs() < 400, "rendered: {three} from {half}");
+    }
+
+    /// Chops of one sample, each from its own start to the sample's end: one render
+    /// between them, each zone playing it from its own place.
+    #[test]
+    fn chops_of_a_sample_share_a_render() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let zones = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones;
+        let mut chop = zones[0].clone();
+        chop.play_range = (frames as i64 / 2, frames as i64 - 1);
+        (chop.key_range, chop.root_key) = ((61, 61), 61);
+        zones[0].key_range = (60, 60);
+        zones.push(chop);
+        let mut cache = SampleCache::default();
+        let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let jobs = cache.wanted_renders();
+        assert_eq!(jobs.len(), 1, "one render for both");
+        assert_eq!(jobs[0].key.range, (0, frames));
+        cache.add_render(&jobs[0], jobs[0].run());
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(cache.wanted_renders().is_empty());
+        let z = &e.sounds[0][0].as_ref().unwrap().zones;
+        assert!(Arc::ptr_eq(&z[0].sample, &z[1].sample));
+        let len = z[0].sample.frames.len();
+        assert_eq!(z[0].play, (0, len));
+        assert_eq!(z[1].play.1, len);
+        assert!(z[1].play.0.abs_diff(len / 2) <= 2, "{:?} of {len}", z[1].play);
     }
 
     /// Keys asks for the notes' renders around the root, nearest first.
