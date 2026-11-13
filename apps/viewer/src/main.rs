@@ -8249,6 +8249,10 @@ impl App {
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
+            Some(Apply::LaneGain(k)) => {
+                let gain = if value <= -60.0 { 0.0 } else { 10f64.powf(value.min(6.0) / 20.0) };
+                SamplingAct::Lane(k, layout::sampling::LaneAct::Gain(gain))
+            }
             Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
             Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
             Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid)) => {
@@ -8336,6 +8340,8 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::LaneMute(k) => S::Lane(k, layout::sampling::LaneAct::Mute),
+            C::LaneSolo(k) => S::Lane(k, layout::sampling::LaneAct::Solo),
             C::Warp(k) => {
                 use layout::sampling::WarpAct as W;
                 S::Warp([W::Detect, W::Quantize, W::Clear][k.min(2)])

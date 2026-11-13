@@ -372,4 +372,10 @@ fn new_sampler_shots() {
     h.state_mut().lane_act(2, crate::layout::sampling::LaneAct::Gain(0.5));
     h.run_steps(6);
     window(&mut h, "new-sampler-lanes.png", Some((200, 560, 1740, 240)));
+    // The MK3: on to the STEMS knob page (after TEMPO / PITCH and SYNC).
+    for name in ["BUTTON_RIGHT", "BUTTON_RIGHT"] {
+        press(&mut h, name, true);
+        press(&mut h, name, false);
+    }
+    mk3(&mut h, "mk3-new-sampler-stems.png");
 }

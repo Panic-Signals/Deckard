@@ -29,6 +29,21 @@ pub struct SampleView {
     pub color: Option<u32>,
     /// An Audio plug-in's take (RECORD and EDIT only), not a Sampler zone.
     pub take: bool,
+    /// The zone's stem lanes (a New Sampler's), in their order.
+    pub lanes: Vec<LaneView>,
+}
+
+/// A stem lane of the focused zone, for the controller: which (0 Drums, 1 Vocals, 2
+/// Bass, 3 Leads), whether it's heard (not muted, nor left out by another's solo), and
+/// its peaks over the frames shown.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LaneView {
+    pub lane: usize,
+    pub name: String,
+    pub mute: bool,
+    pub solo: bool,
+    pub heard: bool,
+    pub detail: Vec<(f32, f32)>,
 }
 
 /// A stem separation running in the app: whether it's the focused zone's sample, and
@@ -72,6 +87,9 @@ pub enum SamplingCall {
     ToProject,
     /// Its Tune set so its root is the nearest note of the song's key.
     MatchKey,
+    /// Stem lane `.0` (from 0, as [`LaneView::lane`]) muted or not; soloed or not.
+    LaneMute(usize),
+    LaneSolo(usize),
     /// Its warp markers: 0 put on its hits, 1 quantized, 2 cleared.
     Warp(usize),
     /// The sound's Sampler made a New Sampler, or back.

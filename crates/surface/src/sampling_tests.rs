@@ -224,6 +224,44 @@ fn a_new_sampler_zone_has_its_tempo_on_edit() {
     assert!(s.screen_text(&v).iter().any(|t| t == "TO NEW SAMPLER"));
 }
 
+/// A zone with stem lanes: on EDIT's STEMS knob page the knobs are the lanes' levels,
+/// display buttons 5-8 mute them and, with SHIFT, solo them.
+#[test]
+fn stem_lanes_have_their_mutes_on_the_display_buttons() {
+    use deckard_model::sampling_view::LaneView;
+    let (mut s, mut v) = (Surface::new(), sampled(1));
+    let lane =
+        |lane: usize, name: &str| LaneView { lane, name: name.into(), heard: true, detail: vec![(-0.2, 0.2); 480], ..Default::default() };
+    v.sampling.sample.as_mut().unwrap().lanes = vec![lane(0, "DRUMS"), lane(1, "VOCALS"), lane(3, "LEADS")];
+    v.sampling.pages[1].push(KnobPage {
+        name: "STEMS".into(),
+        knobs: vec![SamplingKnob {
+            key: "Stem.Gain0".into(),
+            name: "DRUMS".into(),
+            text: "+0.0 dB".into(),
+            value: 0.0,
+            min: -60.0,
+            max: 6.0,
+            step: 0.5,
+            turn: 0.01,
+        }],
+    });
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    // Off the STEMS page the buttons are the edit functions'.
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Edit(1))], "APPLY (TRUNCATE)");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "STEMS") && text.iter().any(|t| t == "LEADS"), "{text:?}");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SamplingCall(SamplingCall::LaneMute(0))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::LaneMute(3))], "the third shown is Leads");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "no fourth lane");
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, Instant::now());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::LaneSolo(1))]);
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
+    assert_eq!(s.event(&Event::Knob(0, -0.01), &v, Instant::now()), [Action::SamplingKnob { page: 2, knob: 0, value: -0.5 }]);
+}
+
 #[test]
 fn record_starts_stops_and_cancels() {
     let (mut s, mut v) = (Surface::new(), sampled(0));

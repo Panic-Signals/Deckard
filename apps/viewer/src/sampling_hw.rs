@@ -51,6 +51,8 @@ pub enum Apply {
     PlaysAt,
     /// A Sync zone's start grid (`StartGrid::ALL`).
     StartGrid,
+    /// Stem lane `.0`'s level, in dB (−60: silent).
+    LaneGain(usize),
     /// QUANTIZE's grid (`beat::WARP_GRIDS`) and strength (0..1).
     WarpGrid,
     WarpStrength,
@@ -111,6 +113,31 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
             .collect()
     };
     let play = if z.play_range.1 > z.play_range.0 { (z.play_range.0 as usize, z.play_range.1 as usize + 1) } else { (0, frames) };
+    // Its stem lanes, those whose waveforms are loaded.
+    let lanes = z.meta.as_ref().filter(|_| !take).map_or_else(Vec::new, |m| {
+        let levels = deckard_model::new_sampler::lane_levels(&m.stems);
+        (0..m.stems.len())
+            .filter_map(|k| {
+                let l = m.stems[k].as_ref().filter(|_| st.lanes[k].is_some())?;
+                let detail = (0..COLUMNS)
+                    .map(|c| {
+                        let f0 = (v0 + (v1 - v0) * c as f64 / COLUMNS as f64) as usize;
+                        let f1 = ((v0 + (v1 - v0) * (c + 1) as f64 / COLUMNS as f64) as usize).max(f0 + 1);
+                        let [a, b] = st.lane_column(k, f0, f1);
+                        (a.0.min(b.0).min(0.0), a.1.max(b.1).max(0.0))
+                    })
+                    .collect();
+                Some(deckard_model::sampling_view::LaneView {
+                    lane: k,
+                    name: deckard_model::new_sampler::LANE_NAMES[k].to_uppercase(),
+                    mute: l.mute,
+                    solo: l.solo,
+                    heard: levels[k] > 0.0,
+                    detail,
+                })
+            })
+            .collect()
+    });
     let group = &p.groups[g];
     let color = match (group.sounds[s].color, group.color) {
         (Color::Palette(i), _) | (Color::Default, Color::Palette(i)) => i as u32,
@@ -136,6 +163,7 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
         take,
         focus_zone: zi,
         color: Some(color),
+        lanes,
     })
 }
 
@@ -215,6 +243,20 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             let grids: Vec<String> = StartGrid::ALL.iter().map(|g| g.label().to_string()).collect();
             let cur = StartGrid::ALL.iter().position(|g| *g == m.start).unwrap_or(0);
             page(&mut out, 1, "SYNC", vec![(choice("Beat.Start", "START", &grids, cur), Apply::StartGrid)]);
+        }
+        // Its stem lanes' levels (the display buttons mute them while this page shows;
+        // SHIFT: solo).
+        if m.has_stems() {
+            let knobs = (0..m.stems.len())
+                .filter_map(|k| {
+                    let l = m.stems[k].as_ref()?;
+                    let db = if l.gain > 0.0005 { (20.0 * l.gain.log10()).max(-60.0) } else { -60.0 };
+                    let text = if db <= -60.0 { "-inf".into() } else { format!("{db:+.1} dB") };
+                    let name = deckard_model::new_sampler::LANE_NAMES[k].to_uppercase();
+                    Some((knob(&format!("Stem.Gain{k}"), &name, text, db, (-60.0, 6.0), 0.5, 1.0 / 132.0), Apply::LaneGain(k)))
+                })
+                .collect();
+            page(&mut out, 1, "STEMS", knobs);
         }
         // Warp markers (the EDIT functions put them on the hits, quantize and clear them).
         if m.bpm.is_some() {

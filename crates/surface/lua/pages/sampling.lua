@@ -8,6 +8,8 @@
 --                     knob pages: TEMPO / PITCH, SYNC, WARP; its edit functions go on
 --                     with WARP MARKERS, QUANTIZE AUDIO, CLEAR WARP; TO (NEW) SAMPLER
 --                     converts the sound's Sampler)
+--   EDIT, STEMS page  a zone with stem lanes: knobs 1-4 their levels, 5-8 mute them
+--                     (SHIFT: solo); the right display shows the lanes stacked
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
@@ -155,6 +157,27 @@ local function tempo_buttons(v)
   }
 end
 
+-- The stem lanes' colours, by lane: Drums, Vocals, Bass, Leads.
+local LANE_COLOURS = { { 242, 162, 60 }, { 232, 88, 138 }, { 90, 156, 242 }, { 98, 199, 138 } }
+
+-- EDIT's STEMS knob page shows (a zone with stem lanes): the display buttons mute its
+-- lanes (lit: heard), SHIFT solos them.
+local function stem_buttons(v)
+  if v.tab ~= 2 or not (v.sample and v.sample.lanes and #v.sample.lanes > 0) then return nil end
+  local p = knob_page(v)
+  if not p or p.name ~= "STEMS" then return nil end
+  local solo = deckard.held("SHIFT")
+  local out = {}
+  for i, l in ipairs(v.sample.lanes) do
+    out[i] = {
+      text = l.name,
+      selected = solo and l.solo or (not solo and l.heard),
+      act = function() deckard.sampling_call(solo and "lane_solo" or "lane_mute", l.lane) end,
+    }
+  end
+  return out
+end
+
 -- RECORD: the takes on the pads (TAKES), and the bank of 16 shown.
 local takes_on_pads, take_bank = false, 0
 
@@ -189,7 +212,7 @@ local function buttons(v)
       { text = "BANK " .. (take_bank + 1), disabled = not takes_on_pads or banks < 2, act = function() take_bank = (take_bank + 1) % banks end },
     }
   elseif v.tab == 2 then
-    local t = tempo_buttons(v)
+    local t = stem_buttons(v) or tempo_buttons(v)
     if t then return t end
     local f = current(v)
     local cancel = f[2] == "stems" and v.stems and v.stems.focused
@@ -241,7 +264,7 @@ function page.button(name, down)
       if n <= tab_count(v) then deckard.sampling_tab(n) end
       return true
     end
-    if v.tab == 2 and (n == 5 or n == 6) and not tempo_buttons(v) then
+    if v.tab == 2 and (n == 5 or n == 6) and not stem_buttons(v) and not tempo_buttons(v) then
       if v.sample then
         local _, count = current(v)
         func = (func + (n == 6 and 1 or -1) - 1) % count + 1
@@ -363,7 +386,7 @@ function page.leds()
   -- (WAITING flashes, four times a second.)
   local flash = v.record.waiting and (deckard.now() * 4) % 2 < 1
   for i = 5, 8 do
-    local spec = b[i - 4] or (v.tab == 2 and i == 6 and not tempo_buttons(v) and b[1])
+    local spec = b[i - 4] or (v.tab == 2 and i == 6 and not stem_buttons(v) and not tempo_buttons(v) and b[1])
     local lit = spec and not spec.disabled and (spec.text or spec.arrows)
     deckard.led("SCREEN_" .. i, lit and (((i == 5 and flash) or spec.selected) and "on" or "dim") or "off")
   end
@@ -591,7 +614,20 @@ function page.draw(screen, theme)
     else
       wave(screen, theme, smp, deckard.peaks("overview"), 0, 60, 480, 144, 0, smp.frames, colour, slices)
     end
-    wave(screen, theme, smp, deckard.peaks("detail"), 480, 60, 480, 212, smp.view[1], smp.view[2], colour, slices)
+    local lanes = smp.lanes or {}
+    if #lanes > 0 and v.tab == 2 then
+      -- Its stem lanes stacked, each in its colour (dim: not heard), its name on it.
+      local h = math.floor(212 / #lanes)
+      for i, l in ipairs(lanes) do
+        local c = LANE_COLOURS[l.lane] or colour
+        if not l.heard then c = widgets.blend(c, { 0, 0, 0 }, 0.3) end
+        local y = 60 + (i - 1) * h
+        wave(screen, theme, smp, deckard.peaks("lane" .. i), 480, y, 480, h - 1, smp.view[1], smp.view[2], c, false)
+        screen:label(486, y + 2, 120, 14, l.name .. (l.solo and "  S" or (l.mute and "  M" or "")), { size = 11, color = "weak" }, "left", "top")
+      end
+    else
+      wave(screen, theme, smp, deckard.peaks("detail"), 480, 60, 480, 212, smp.view[1], smp.view[2], colour, slices)
+    end
     if touched[5] or touched[6] or touched[7] or touched[8] then
       widgets.knob_icon(screen, theme, 5, "zoom")
       widgets.knob_icon(screen, theme, 6, "scroll")
