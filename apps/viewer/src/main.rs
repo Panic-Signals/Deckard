@@ -7078,6 +7078,17 @@ impl App {
                     Some(Ok(out)) => out.zone_position(self.group, self.sound, zi),
                     _ => None,
                 };
+                // Its stem lanes' waveforms.
+                let files: [Option<String>; deckard_model::new_sampler::LANES] = {
+                    let d = doc.borrow();
+                    let z = layout::sampling::edited(d.project(), (self.group, self.sound, self.zone)).filter(|e| !e.3);
+                    let stems = z.and_then(|(_, z, ..)| z.meta).map(|m| m.stems).unwrap_or_default();
+                    stems.map(|l| l.map(|l| l.file))
+                };
+                let samples = &mut self.samples;
+                self.sampling.set_lanes(files, |file| {
+                    samples.sample(&deckard_model::SampleRef { kind: 0, path: file.to_string(), ..Default::default() }, path.as_deref())
+                });
             }
             None => {
                 self.sampling.sample = None;
@@ -7188,14 +7199,23 @@ impl App {
     }
 
     /// STEMS: separate the focused zone's sample in the background.
-    fn start_stems(&mut self) {
+    fn start_stems(&mut self, to_group: bool) {
         let (Some(sample), Some(dir)) = (self.sampling.sample.clone(), menu::settings_dir()) else { return };
+        // A New Sampler's analysed zone takes the stems as its lanes.
+        let into_lanes = !to_group
+            && self.doc.as_ref().is_some_and(|d| {
+                let d = d.borrow();
+                d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).is_some_and(|snd| {
+                    snd.new_sampler.is_some() && snd.sampler.as_ref().and_then(|x| x.zones.get(self.zone)).is_some_and(|z| z.meta.is_some())
+                })
+            });
         let Some((_, sref, beats)) = self.focused_sample() else { return };
         let file = sref.path.rsplit(['/', '\\']).next().unwrap_or("Sample");
         let name = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string();
         self.status = format!("separating {name} into stems…");
         let mut job = stems::Job::start(sample, name, (self.group, self.sound, self.zone), dir);
         job.beats = beats;
+        job.into_lanes = into_lanes;
         self.stems = Some(job);
     }
 
@@ -7285,9 +7305,88 @@ impl App {
         let Some(result) = self.stems.as_ref().and_then(stems::Job::poll) else { return };
         let job = self.stems.take().expect("the job polled");
         match result {
+            Ok(stems) if job.into_lanes => self.finish_stem_lanes(&job.name, job.rate, stems, job.source),
             Ok(stems) => self.finish_stems(&job.name, job.rate, stems, job.beats),
             Err(_) if job.cancelled() => self.status = "stem separation cancelled".into(),
             Err(e) => self.status = format!("stem separation failed: {e}"),
+        }
+    }
+
+    /// The stems as the zone's lanes (roadmap 2b): each saved as a sample ("<name>
+    /// Drums", …) and put on zone `at` (still playing the sample they came from), all
+    /// on. One undo step.
+    fn finish_stem_lanes(&mut self, name: &str, rate: u32, stems: Vec<deckard_stems::Stem>, at: (usize, usize, usize)) {
+        use deckard_model::new_sampler::StemLane;
+        use deckard_stems::Kind;
+        let Some(doc) = self.doc.clone() else { return };
+        let meta = doc
+            .borrow()
+            .project()
+            .groups
+            .get(at.0)
+            .and_then(|g| g.sounds.get(at.1))
+            .and_then(|x| x.sampler.as_ref())
+            .and_then(|x| x.zones.get(at.2))
+            .and_then(|z| z.meta.clone());
+        let Some(mut meta) = meta else {
+            self.status = "the zone changed while its stems were made: they weren't kept".into();
+            return;
+        };
+        let dir = self.sample_dir("Stems");
+        for s in stems {
+            let lane = match s.kind {
+                Kind::Drums => 0,
+                Kind::Vocals => 1,
+                Kind::Bass => 2,
+                Kind::Other => 3,
+            };
+            let path = dir.join(format!("{name} {}.wav", s.kind.name()).replace(['/', ':'], "-"));
+            if let Err(e) = deckard_engine::edit::write_wav_channels(&path, &deckard_engine::sample::Sample { rate, frames: s.frames }, 2) {
+                self.status = format!("can't save the stems: {e}");
+                return;
+            }
+            meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
+        }
+        match doc.borrow_mut().set_zone_meta(at.0, at.1, at.2, &meta, "Stems") {
+            Ok(()) => self.status = format!("{name}: stems on its lanes (M and S on each)"),
+            Err(e) => self.status = format!("can't put the stems on the zone: {e}"),
+        }
+    }
+
+    /// A stem lane of the focused zone muted, soloed, set to a gain, or all removed.
+    fn lane_act(&mut self, lane: usize, act: layout::sampling::LaneAct) {
+        use layout::sampling::LaneAct as L;
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let Some(mut meta) = zone.meta else { return };
+        let label = match act {
+            L::Clear => {
+                meta.stems = Default::default();
+                "Remove Stems"
+            }
+            _ => {
+                let Some(l) = meta.stems.get_mut(lane).and_then(Option::as_mut) else { return };
+                match act {
+                    L::Mute => {
+                        l.mute = !l.mute;
+                        "Stem Mute"
+                    }
+                    L::Solo => {
+                        l.solo = !l.solo;
+                        "Stem Solo"
+                    }
+                    L::Gain(g) => {
+                        l.gain = g.clamp(0.0, 2.0);
+                        "Stem Gain"
+                    }
+                    L::Clear => return,
+                }
+            }
+        };
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, label) {
+            self.status = format!("can't change the stems: {e}");
         }
     }
 
@@ -7436,8 +7535,15 @@ impl App {
             S::Edit(EditOp::AutoLoop) => self.auto_loop(),
             S::Edit(EditOp::Stems) => match &self.stems {
                 Some(job) => job.cancel(),
-                None => self.start_stems(),
+                None => self.start_stems(false),
             },
+            S::StemsToGroup => {
+                if self.stems.is_none() {
+                    self.start_stems(true);
+                }
+            }
+            S::Lane(k, act) => self.lane_act(k, act),
+            S::LanesMix(on) => self.sampling.lanes_mix = on,
             S::Edit(op) => {
                 let (Some(s), Some(r)) = (self.sampling.sample.clone(), self.edit_range()) else { return };
                 let (out, label) = match op {

@@ -121,6 +121,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         root_locked: false,
         warps: Vec::new(),
         start: Default::default(),
+        stems: Default::default(),
     }
 }
 
@@ -313,6 +314,30 @@ mod app_tests {
         assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Quantize Audio"));
         app.warp_act(WarpAct::Clear);
         assert!(warps(&app).is_empty());
+        // STEMS on a New Sampler zone: the stems go on its lanes (Drums, Vocals, Bass,
+        // Leads), all on; M mutes one; one undo step each.
+        app.path = Some(dir.path().join("x.mxprj"));
+        let stems = deckard_stems::Kind::ALL.iter().map(|&kind| deckard_stems::Stem { kind, frames: vec![[0.1; 2]; 96_000] }).collect();
+        app.finish_stem_lanes("Hits", rate, stems, (0, 0, 0));
+        let lanes = |app: &App| {
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone().unwrap().stems
+        };
+        let l = lanes(&app);
+        let names: Vec<String> =
+            l.iter().map(|x| x.as_ref().unwrap().file.rsplit('/').next().unwrap().trim_end_matches(".wav").to_string()).collect();
+        assert_eq!(names, ["Hits Drums", "Hits Vocal", "Hits Bass", "Hits Other"], "{}", app.status);
+        assert!(l.iter().flatten().all(|x| !x.mute && x.gain == 1.0 && std::path::Path::new(&x.file).exists()));
+        assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Stems"));
+        use crate::layout::sampling::LaneAct;
+        app.lane_act(1, LaneAct::Mute);
+        app.lane_act(3, LaneAct::Gain(0.5));
+        let l = lanes(&app);
+        assert_eq!(deckard_model::new_sampler::lane_levels(&l), [1.0, 0.0, 1.0, 0.5]);
+        assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Stem Gain"));
+        app.lane_act(0, LaneAct::Clear);
+        assert!(lanes(&app).iter().all(Option::is_none));
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        assert!(lanes(&app).iter().all(Option::is_some), "back with one undo");
         // SLICE's Grid follows the sample's own beats (120 here), not the song's (90).
         app.doc.as_ref().unwrap().borrow_mut().set_tempo(90.0).unwrap();
         (app.sampling.slice_mode, app.sampling.grid) = (1, 0);

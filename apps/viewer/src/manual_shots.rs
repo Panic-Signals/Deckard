@@ -349,4 +349,27 @@ fn new_sampler_shots() {
     h.state_mut().warp_act(crate::layout::sampling::WarpAct::Move(2, 0.75));
     h.run_steps(4);
     window(&mut h, "new-sampler-warp.png", Some((200, 560, 1740, 240)));
+    // Stem lanes: the separation's result put on the zone, the drums muted, the bass down.
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Clear);
+    h.state_mut().path = Some(dir.path().join("x.mxprj"));
+    let n = beat * 16;
+    let stems = deckard_stems::Kind::ALL
+        .iter()
+        .enumerate()
+        .map(|(k, &kind)| deckard_stems::Stem {
+            kind,
+            frames: (0..n)
+                .map(|i| {
+                    let j = i % (beat * (k + 1) / 2).max(1);
+                    let hit = if j < 4000 { 1.0 - j as f32 / 4000.0 } else { 0.0 };
+                    [hit * (i as f32 * 0.02 * (k + 1) as f32).sin() * 0.7; 2]
+                })
+                .collect(),
+        })
+        .collect();
+    h.state_mut().finish_stem_lanes("Bass Loop 120bpm A1", rate, stems, (0, 0, 0));
+    h.state_mut().lane_act(0, crate::layout::sampling::LaneAct::Mute);
+    h.state_mut().lane_act(2, crate::layout::sampling::LaneAct::Gain(0.5));
+    h.run_steps(6);
+    window(&mut h, "new-sampler-lanes.png", Some((200, 560, 1740, 240)));
 }

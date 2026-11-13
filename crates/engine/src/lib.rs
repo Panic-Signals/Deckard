@@ -2418,28 +2418,53 @@ fn synced_zone(
     let semitones = zone.tune as f64 + sound_tune;
     // Warp markers: the range plays through its beat map.
     let map = (!meta.warps.is_empty()).then(|| deckard_model::new_sampler::BeatMap::of(meta, zone.sample.rate).map(Arc::new)).flatten();
-    let job = |semis: f64| {
-        let j = render::RenderJob::new(&zone.sample, zone.play, bpm, tempo, semis);
+    let job_of = |sample: &Arc<Sample>, semis: f64| {
+        let j = render::RenderJob::new(sample, zone.play, bpm, tempo, semis);
         match &map {
             Some(m) => j.warped(m.clone()),
             None => j,
         }
     };
+    let job = |semis: f64| job_of(&zone.sample, semis);
+    // The stem lanes' renders for a Tune (each lane stretched as the sample is): all
+    // of them, or none yet.
+    let lanes = zone.lanes.clone();
+    let mut lane_renders = |renders: &mut render::Renders, semis: f64| -> Option<[Option<Arc<Sample>>; sampler::LANES]> {
+        let l = lanes.as_ref()?;
+        let made: [Option<Option<Arc<Sample>>>; sampler::LANES] = std::array::from_fn(|k| match &l.samples[k] {
+            Some(s) => renders.get_or_want(job_of(s, semis)).map(Some),
+            None => Some(None),
+        });
+        made.iter().all(Option::is_some).then(|| made.map(Option::flatten))
+    };
     let base = job(semitones);
     let Some(made) = renders.get_or_want(base.clone()) else {
-        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new(), grid: meta.start.beats() });
+        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new(), note_lanes: Vec::new(), grid: meta.start.beats() });
         return;
     };
     let mut notes = Vec::new();
+    let mut note_lanes = Vec::new();
     if keys {
         let mut offsets: Vec<i64> =
             (-KEYS_SPAN..=KEYS_SPAN).filter(|o| *o != 0 && (zone.keys.0..=zone.keys.1).contains(&(zone.root + o))).collect();
         offsets.sort_by_key(|o| (o.abs(), *o < 0));
+        // A note's lanes are asked for once a lane is off unity (a mute then waits for
+        // them; until they come the note plays whole).
+        let muted = lanes.as_ref().is_some_and(|l| (0..sampler::LANES).any(|k| l.samples[k].is_some() && l.levels[k] != 1.0));
         for o in offsets {
             if let Some(r) = renders.get_or_want(job(semitones + o as f64)) {
                 notes.push((o, r));
+                if muted {
+                    note_lanes.push(lane_renders(renders, semitones + o as f64).unwrap_or_default());
+                }
             }
         }
+    }
+    // The sample's own lanes are rendered with it, so a mute never waits; until they
+    // are, it plays whole.
+    match lane_renders(renders, semitones) {
+        Some(samples) => zone.lanes.as_mut().unwrap().samples = samples,
+        None => zone.lanes = None,
     }
     // The render holds the play range only, its frames where `out_frame` puts them.
     let len = made.frames.len();
@@ -2452,7 +2477,7 @@ fn synced_zone(
     zone.fade_out = scale(zone.fade_out);
     zone.play = (0, len);
     zone.sample = made;
-    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, grid: meta.start.beats() });
+    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats() });
 }
 
 /// Samples shared between engines (e.g. replaying another scene without reloading).
@@ -2828,8 +2853,27 @@ impl Engine {
                                 fade_in: z.fade_in.max(0) as usize,
                                 fade_out: z.fade_out.max(0) as usize,
                                 sync: None,
+                                lanes: None,
                             };
                             if s.new_sampler.is_some() {
+                                // Its stem lanes: files at the sample's rate.
+                                if let Some(m) = z.meta.as_ref().filter(|m| m.has_stems()) {
+                                    let rate = zone.sample.rate;
+                                    let samples: [Option<Arc<Sample>>; sampler::LANES] = std::array::from_fn(|k| {
+                                        let l = m.stems[k].as_ref()?;
+                                        load(&deckard_model::SampleRef { kind: 0, path: l.file.clone(), ..Default::default() })
+                                            .filter(|x| x.rate == rate)
+                                    });
+                                    let mut levels = deckard_model::new_sampler::lane_levels(&m.stems);
+                                    for k in 0..sampler::LANES {
+                                        if samples[k].is_none() {
+                                            levels[k] = 0.0;
+                                        }
+                                    }
+                                    if samples.iter().any(Option::is_some) {
+                                        zone.lanes = Some(sampler::Lanes { samples, levels });
+                                    }
+                                }
                                 synced_zone(&mut zone, z.meta.as_ref(), smp.tune, project.tempo, &mut renders);
                             }
                             zones.push(zone);
@@ -7035,6 +7079,7 @@ mod tests {
             fade_in: 0,
             fade_out: 0,
             sync: None,
+            lanes: None,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -7718,6 +7763,7 @@ mod tests {
                 fade_in: 0,
                 fade_out: 0,
                 sync: None,
+                lanes: None,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -8188,6 +8234,50 @@ mod tests {
             let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
             assert_eq!(zone0(&e).sync.as_ref().unwrap().tempo, 120.0, "the engine it played had the render");
             assert!(cache.wanted_renders().is_empty());
+        }
+    }
+
+    /// A zone's stem lanes are loaded with it; in Sync each is stretched as the sample
+    /// is (asked for with it; until they're all made the zone plays whole).
+    #[test]
+    fn stem_lanes_load_and_stretch_with_the_zone() {
+        use deckard_model::new_sampler::{PlayMode, StemLane};
+        for mode in [PlayMode::Repitch, PlayMode::Sync] {
+            let (tmp, mut p, frames) = new_sampler_project(mode);
+            let stem = |name: &str| -> String {
+                let path = tmp.path().join(name);
+                edit::write_wav(&path, &Sample { rate: 48_000, frames: vec![[0.1; 2]; frames] }).unwrap();
+                path.to_string_lossy().into()
+            };
+            let meta = p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].meta.as_mut().unwrap();
+            meta.stems[0] = Some(StemLane { mute: true, ..StemLane::new(stem("d.wav")) });
+            meta.stems[3] = Some(StemLane::new(stem("l.wav")));
+            meta.stems[1] = Some(StemLane::new("/nowhere/v.wav".into()));
+            let mut cache = SampleCache::default();
+            let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            let l = zone0(&e).lanes.clone().expect("lanes");
+            assert_eq!(l.samples.iter().map(Option::is_some).collect::<Vec<_>>(), [true, false, false, true], "a missing file is no lane");
+            assert_eq!(l.levels, [0.0, 0.0, 0.0, 1.0]);
+            assert_eq!(l.samples[0].as_ref().unwrap().frames.len(), frames);
+            if mode == PlayMode::Sync {
+                let jobs = cache.wanted_renders();
+                assert_eq!(jobs.len(), 1, "the sample's render first");
+                for j in &jobs {
+                    cache.add_render(j, j.run());
+                }
+                let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+                assert!(zone0(&e).lanes.is_none(), "whole until its lanes are stretched");
+                let jobs = cache.wanted_renders();
+                assert_eq!(jobs.len(), 2, "a render a lane");
+                for j in &jobs {
+                    cache.add_render(j, j.run());
+                }
+                let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+                let z = zone0(&e);
+                let l = z.lanes.as_ref().expect("stretched lanes");
+                assert_eq!(l.samples[3].as_ref().unwrap().frames.len(), z.sample.frames.len(), "as long as the zone's render");
+                assert_eq!(l.levels, [0.0, 0.0, 0.0, 1.0]);
+            }
         }
     }
 

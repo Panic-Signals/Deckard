@@ -74,6 +74,38 @@ impl StartGrid {
     }
 }
 
+/// A zone's stem lanes at most (roadmap 2b), in this order.
+pub const LANES: usize = 4;
+pub const LANE_NAMES: [&str; LANES] = ["Drums", "Vocals", "Bass", "Leads"];
+
+/// One stem of a zone's sample: a file as long as it, at its rate, played with the
+/// others in its place when any lane is muted, soloed or off unity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StemLane {
+    /// The stem's file (an absolute path).
+    pub file: String,
+    pub mute: bool,
+    pub solo: bool,
+    /// Linear: 1 is unity.
+    pub gain: f64,
+}
+
+impl StemLane {
+    pub fn new(file: String) -> StemLane {
+        StemLane { file, mute: false, solo: false, gain: 1.0 }
+    }
+}
+
+/// How loud each lane plays (0: silent, or no lane): muted lanes and, when any is
+/// soloed, those that aren't, are silent; the others at their gain.
+pub fn lane_levels(stems: &[Option<StemLane>; LANES]) -> [f32; LANES] {
+    let solo = stems.iter().flatten().any(|l| l.solo);
+    std::array::from_fn(|k| match &stems[k] {
+        Some(l) if !l.mute && (!solo || l.solo) => l.gain.clamp(0.0, 4.0) as f32,
+        _ => 0.0,
+    })
+}
+
 /// Where a zone's tempo came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BpmSource {
@@ -111,6 +143,14 @@ pub struct ZoneMeta {
     pub warps: Vec<Warp>,
     /// Sync: the grid notes played live start on.
     pub start: StartGrid,
+    /// Its stem lanes ([`LANE_NAMES`]): none, the sample plays as it is.
+    pub stems: [Option<StemLane>; LANES],
+}
+
+impl ZoneMeta {
+    pub fn has_stems(&self) -> bool {
+        self.stems.iter().any(Option::is_some)
+    }
 }
 
 /// A warp marker: frame `frame` of the sample falls on beat `beat` (from the first, 0).
@@ -266,6 +306,11 @@ impl ZoneMeta {
         for w in &self.warps {
             t += &format!("warp {} {}\n", w.frame, w.beat);
         }
+        for (k, l) in self.stems.iter().enumerate() {
+            if let Some(l) = l {
+                t += &format!("stem {k} {}{} {} {}\n", u8::from(l.mute), u8::from(l.solo), l.gain, l.file);
+            }
+        }
         t + "file " + &self.file
     }
 
@@ -285,6 +330,19 @@ impl ZoneMeta {
                 "bpm" => m.bpm = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "beats" => m.beats = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "root" => m.root = v.parse().ok().filter(|r| *r < 128),
+                "stem" => {
+                    let mut it = v.splitn(4, ' ');
+                    if let (Some(k), Some(flags), Some(gain), Some(file)) = (it.next(), it.next(), it.next(), it.next())
+                        && let (Ok(k), Ok(gain)) = (k.parse::<usize>(), gain.parse::<f64>())
+                        && k < LANES
+                        && gain.is_finite()
+                        && !file.is_empty()
+                    {
+                        let b = flags.as_bytes();
+                        m.stems[k] =
+                            Some(StemLane { file: file.to_string(), mute: b.first() == Some(&b'1'), solo: b.get(1) == Some(&b'1'), gain });
+                    }
+                }
                 "warp" => {
                     if let Some((f, b)) = v.split_once(' ')
                         && let (Ok(frame), Ok(beat)) = (f.parse(), b.parse::<f64>())
@@ -326,7 +384,17 @@ mod tests {
             root_locked: true,
             warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 22_050, beat: 1.0625 }],
             start: StartGrid::Bar,
+            stems: [
+                Some(StemLane { file: "/Samples/Stems/Break 94 BPM (Drums).wav".into(), mute: true, solo: false, gain: 0.5 }),
+                None,
+                Some(StemLane { file: "/b.wav".into(), mute: false, solo: true, gain: 1.0 }),
+                None,
+            ],
         };
+        assert_eq!(lane_levels(&full.stems), [0.0, 0.0, 1.0, 0.0], "the soloed lane only");
+        let mut open = full.stems.clone();
+        open[2].as_mut().unwrap().solo = false;
+        assert_eq!(lane_levels(&open), [0.0, 0.0, 1.0, 0.0], "the muted lane is silent");
         assert_eq!(ZoneMeta::from_text(&full.to_text()), Some(full));
         let bare = ZoneMeta { file: "x.wav".into(), ..ZoneMeta::default() };
         assert_eq!(ZoneMeta::from_text(&bare.to_text()), Some(bare));

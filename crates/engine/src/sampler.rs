@@ -262,6 +262,28 @@ pub struct ZoneRt {
     pub fade_out: usize,
     /// A New Sampler zone in Sync or Keys: kept in time with the song.
     pub sync: Option<ZoneSync>,
+    /// Its stem lanes, if it has them.
+    pub lanes: Option<Lanes>,
+}
+
+/// A zone's stem lanes (roadmap 2b): each as long as the zone's sample, read at the same
+/// place. With every lane at unity a voice plays the sample itself; else the lanes'
+/// sum at their `levels` (0: muted), crossfading between the two and ramping the levels
+/// over [`LANE_RAMP_MS`] so sounding notes don't click.
+#[derive(Clone, Default)]
+pub struct Lanes {
+    pub samples: [Option<Arc<Sample>>; LANES],
+    pub levels: [f32; LANES],
+}
+
+pub const LANES: usize = deckard_model::new_sampler::LANES;
+const LANE_RAMP_MS: f64 = 5.0;
+
+impl Lanes {
+    /// Every lane there is plays at unity: the sample itself is what's heard.
+    fn all_on(&self) -> bool {
+        (0..LANES).all(|k| self.samples[k].is_none() || self.levels[k] == 1.0)
+    }
 }
 
 /// How a New Sampler zone in Sync or Keys plays (roadmap 1c): its sample (usually a
@@ -275,6 +297,9 @@ pub struct ZoneSync {
     pub tempo: f64,
     pub keys: bool,
     pub notes: Vec<(i64, Arc<Sample>)>,
+    /// The stem lanes' renders for `notes` (as many, or none): a note without them
+    /// plays whole, whatever is muted.
+    pub note_lanes: Vec<[Option<Arc<Sample>>; LANES]>,
     /// Sync: notes played live start on this grid (beats; 0: when played). One up to
     /// half a division early waits for the line; a later one starts at once, as far
     /// into the sample as it is late.
@@ -294,6 +319,16 @@ impl ZoneRt {
         match variant.and_then(|i| self.sync.as_ref()?.notes.get(i)) {
             Some((_, s)) => &s.frames,
             None => &self.sample.frames,
+        }
+    }
+
+    /// The lanes voice `variant` reads, and their levels: none when it has no lanes, or
+    /// they all play at unity.
+    fn lanes_of(&self, variant: Option<usize>) -> Option<(&[Option<Arc<Sample>>; LANES], &[f32; LANES])> {
+        let l = self.lanes.as_ref().filter(|l| !l.all_on())?;
+        match variant {
+            Some(i) => self.sync.as_ref()?.note_lanes.get(i).filter(|s| s.iter().any(Option::is_some)).map(|s| (s, &l.levels)),
+            None => Some((&l.samples, &l.levels)),
         }
     }
 
@@ -555,7 +590,7 @@ struct Stream {
 
 impl Stream {
     /// Frame `p` under the zone's fades, by its place in the play range: nothing before it.
-    fn faded(&self, data: &[[f32; 2]], p: i64) -> [f32; 2] {
+    fn faded(&self, read: &impl Fn(usize) -> [f32; 2], p: i64) -> [f32; 2] {
         let (start, end) = self.play;
         let mut g = 1.0;
         if self.fade_in > 0 && p >= start && p - start < self.fade_in {
@@ -564,11 +599,16 @@ impl Stream {
         if self.fade_out > 0 && p < end && end - p <= self.fade_out {
             g *= (end - p) as f32 / self.fade_out as f32;
         }
-        let x = data[p as usize];
+        let x = read(p as usize);
         [x[0] * g, x[1] * g]
     }
 
     fn next(&mut self, data: &[[f32; 2]]) -> [f32; 2] {
+        self.next_by(data.len(), &|p| data[p])
+    }
+
+    /// [`Stream::next`] of `len` frames given by `read`.
+    fn next_by(&mut self, len: usize, read: &impl Fn(usize) -> [f32; 2]) -> [f32; 2] {
         if self.done {
             return [0.0; 2];
         }
@@ -578,12 +618,12 @@ impl Stream {
             self.done = true;
             return [0.0; 2];
         }
-        let mut x = self.faded(data, p);
+        let mut x = self.faded(read, p);
         // Loop crossfade: the last frames before the jump back fade into what the jump
         // would otherwise skip, linearly (§6.5). That's in the sample whether or not it's
         // in the play range.
         if let Some((ls, le)) = self.looped {
-            let last = data.len() as i64;
+            let last = len as i64;
             let (left, room, other) = if self.forward {
                 (le - p, ls, ls - (le - p))
             } else {
@@ -598,7 +638,7 @@ impl Stream {
                 }
                 if other >= 0 && other < last {
                     let w = left as f32 / self.fading as f32;
-                    let y = self.faded(data, other);
+                    let y = self.faded(read, other);
                     x = [x[0] * w + y[0] * (1.0 - w), x[1] * w + y[1] * (1.0 - w)];
                 }
             }
@@ -623,6 +663,21 @@ impl Stream {
         }
         x
     }
+}
+
+/// Frame `p` of a zone: `whole` of its sample `data`, the rest of its stem lanes' sum
+/// at levels `lane` (lanes shorter than it are silent past their end).
+fn mixed(data: &[[f32; 2]], lanes: Option<&[Option<Arc<Sample>>; LANES]>, whole: f32, lane: &[f32; LANES], p: usize) -> [f32; 2] {
+    let x = data[p];
+    let Some(lanes) = lanes.filter(|_| whole < 1.0) else { return x };
+    let mut sum = [0f32; 2];
+    for (s, g) in lanes.iter().zip(lane) {
+        if let Some(f) = s.as_ref().and_then(|s| s.frames.get(p)).filter(|_| *g != 0.0) {
+            sum[0] += f[0] * g;
+            sum[1] += f[1] * g;
+        }
+    }
+    [x[0] * whole + sum[0] * (1.0 - whole), x[1] * whole + sum[1] * (1.0 - whole)]
 }
 
 /// The 8-point interpolator's tap weights for `t = 1 − frac` (§7), for taps
@@ -921,6 +976,10 @@ struct Voice {
     cutoff: f32,
     cutoff_set: bool,
     eq: Biquad,
+    /// Stem lanes: how much of the sample itself it plays (1: all of it, 0: the lanes'
+    /// sum), and each lane's level, both on their way to the zone's.
+    whole: f32,
+    lane: [f32; LANES],
     /// Frames of silence before it starts (a Sync note waiting for its grid line).
     wait: u32,
     /// A short fade-in (a Sync note started late, inside its sample): frames left.
@@ -1441,6 +1500,8 @@ impl SamplerRt {
             cutoff: 0.0,
             cutoff_set: false,
             eq: Biquad::default(),
+            whole: if z.lanes_of(variant).is_some() { 0.0 } else { 1.0 },
+            lane: z.lanes.as_ref().map_or([1.0; LANES], |l| l.levels),
             wait,
             rise,
             fade: None,
@@ -1449,8 +1510,9 @@ impl SamplerRt {
         };
         // Prime the interpolator: x[n] .. x[n+4] are the first frames.
         let data = z.data(variant);
+        let lanes = z.lanes_of(variant);
         for k in 3..8 {
-            v.hist[k] = v.stream.next(data);
+            v.hist[k] = v.stream.next_by(data.len(), &|p| mixed(data, lanes.map(|l| l.0), v.whole, &v.lane, p));
         }
         v
     }
@@ -1584,6 +1646,7 @@ impl SamplerRt {
         let tempo = self.tempo;
         let engine_gain = if s.mode == 1 { 0.8637621 } else { 1.0 };
         let quantize = s.mode >= 1;
+        let lane_step = (1000.0 / (LANE_RAMP_MS * self.sr)) as f32;
         for f in 0..frames {
             // Glide (legato).
             if self.glide_step != 0.0 {
@@ -1666,7 +1729,30 @@ impl SamplerRt {
                 while v.frac >= 65536 {
                     v.frac -= 65536;
                     v.hist.copy_within(1..8, 0);
-                    let mut next = v.stream.next(z.data(v.variant));
+                    // Stem lanes: toward the zone's levels, and between the sample itself
+                    // and the lanes' sum.
+                    let data = z.data(v.variant);
+                    let lanes = z.lanes_of(v.variant);
+                    if lanes.is_some() || v.whole < 1.0 {
+                        let toward = |x: &mut f32, to: f32| *x = if *x < to { (*x + lane_step).min(to) } else { (*x - lane_step).max(to) };
+                        toward(&mut v.whole, if lanes.is_some() { 0.0 } else { 1.0 });
+                        if let Some((_, levels)) = lanes {
+                            for k in 0..LANES {
+                                toward(&mut v.lane[k], levels[k]);
+                            }
+                        }
+                    }
+                    // (Fading back to the sample itself, the lanes still sound.)
+                    let lane_samples = if v.whole < 1.0 {
+                        lanes.map(|l| l.0).or(match v.variant {
+                            Some(i) => z.sync.as_ref().and_then(|sy| sy.note_lanes.get(i)),
+                            None => z.lanes.as_ref().map(|l| &l.samples),
+                        })
+                    } else {
+                        None
+                    };
+                    let (whole, lane) = (v.whole, v.lane);
+                    let mut next = v.stream.next_by(data.len(), &|p| mixed(data, lane_samples, whole, &lane, p));
                     if quantize {
                         next = [(next[0] * 2048.0).trunc() / 2048.0, (next[1] * 2048.0).trunc() / 2048.0];
                     }
@@ -1869,6 +1955,7 @@ mod tests {
             fade_in: 0,
             fade_out: 0,
             sync: None,
+            lanes: None,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
@@ -1900,6 +1987,7 @@ mod tests {
             fade_in: 0,
             fade_out: 0,
             sync,
+            lanes: None,
         };
         SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
     }
@@ -1942,7 +2030,7 @@ mod tests {
         smp.note_on(1, 72, 100, &ctx);
         assert_eq!((smp.voices[0].octaves, smp.voices[0].variant), (0.0, None));
         let up = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.25; 2]; 96_000] });
-        let mut keys = synced(Some(ZoneSync { tempo: 100.0, keys: true, notes: vec![(12, up)], grid: 0.0 }));
+        let mut keys = synced(Some(ZoneSync { tempo: 100.0, keys: true, notes: vec![(12, up)], ..ZoneSync::default() }));
         keys.set_song(0.0, 100.0);
         keys.note_on(1, 72, 100, &ctx);
         keys.note_on(2, 67, 100, &ctx);
@@ -1950,6 +2038,63 @@ mod tests {
         assert_eq!((a.octaves, a.variant), (0.0, Some(0)), "the octave's render");
         assert_eq!((b.octaves, b.variant), (7.0 / 12.0, None), "no render: by speed");
         assert_eq!(read(&mut keys, 480), 480, "a note's render plays at the tempo's speed");
+    }
+
+    /// Stem lanes: with them all on a voice plays the sample itself; a muted lane leaves
+    /// the others' sum, reached over a few milliseconds on a sounding note, and unmuting
+    /// goes back to the sample.
+    #[test]
+    fn stem_lanes_mute_on_sounding_notes() {
+        let flat = |v: f32| Some(Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[v; 2]; 96_000] }));
+        let lanes = |levels| Lanes { samples: [flat(0.1), flat(0.2), None, flat(0.4)], levels };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let level = |smp: &mut SamplerRt, n: usize| {
+            let mut out = vec![0.0; n * 2];
+            smp.render(&mut out);
+            out[n * 2 - 2]
+        };
+        // The sample itself is 0.5 throughout (not the lanes' sum, 0.7).
+        let mut smp = synced(None);
+        smp.zones[0].tune = 0.0;
+        smp.zones[0].sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.5; 2]; 96_000] });
+        smp.zones[0].lanes = Some(lanes([1.0, 1.0, 0.0, 1.0]));
+        smp.note_on(1, 60, 127, &ctx);
+        let whole = level(&mut smp, 480);
+        assert!(whole > 0.0);
+        // The first lane muted, as an edit does it (a new Sampler adopting the voices).
+        let mut muted = synced(None);
+        muted.zones[0] = smp.zones[0].clone();
+        muted.zones[0].lanes = Some(lanes([0.0, 1.0, 0.0, 1.0]));
+        muted.adopt(smp);
+        let soon = level(&mut muted, 48);
+        assert!((soon - whole).abs() < whole * 0.25, "no jump: {soon} from {whole}");
+        let after = level(&mut muted, 960);
+        assert!((after / whole - 0.6 / 0.5).abs() < 1e-3, "the other lanes' sum: {after} against {whole}");
+        // A lane at half: 0.1 + 0.1 + 0.4.
+        let mut half = synced(None);
+        half.zones[0] = muted.zones[0].clone();
+        half.zones[0].lanes = Some(lanes([1.0, 0.5, 0.0, 1.0]));
+        half.adopt(muted);
+        let after = level(&mut half, 960);
+        assert!((after / whole - 0.6 / 0.5).abs() < 1e-3, "{after}");
+        // All on again: the sample itself.
+        let mut on = synced(None);
+        on.zones[0] = half.zones[0].clone();
+        on.zones[0].lanes = Some(lanes([1.0, 1.0, 0.0, 1.0]));
+        on.adopt(half);
+        let after = level(&mut on, 960);
+        assert!((after - whole).abs() < 1e-6, "{after} against {whole}");
+        assert_eq!(on.voices[0].whole, 1.0);
+        // A note begun with a lane muted starts on the sum.
+        let mut fresh = synced(None);
+        fresh.zones[0] = muted_zone(&on.zones[0], lanes([0.0, 1.0, 0.0, 1.0]));
+        fresh.note_on(1, 60, 127, &ctx);
+        let first = level(&mut fresh, 480);
+        assert!((first / whole - 0.6 / 0.5).abs() < 1e-3, "{first}");
+    }
+
+    fn muted_zone(z: &ZoneRt, lanes: Lanes) -> ZoneRt {
+        ZoneRt { lanes: Some(lanes), ..z.clone() }
     }
 
     /// A Sync note played live starts on its grid: just early, it waits for the line;
@@ -2194,6 +2339,7 @@ mod tests {
                 fade_in: 0,
                 fade_out: 0,
                 sync: None,
+                lanes: None,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
@@ -2233,6 +2379,7 @@ mod tests {
             fade_in: 0,
             fade_out: 0,
             sync: None,
+            lanes: None,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato

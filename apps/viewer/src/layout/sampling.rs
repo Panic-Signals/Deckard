@@ -108,6 +108,9 @@ pub struct SamplingState {
     /// QUANTIZE's grid (`beat::WARP_GRIDS`) and strength (0..1).
     pub warp_grid: usize,
     pub warp_strength: f64,
+    /// The focused zone's stem lanes, and whether they're folded into one waveform.
+    pub lanes: [Option<LaneView>; 4],
+    pub lanes_mix: bool,
 }
 
 impl Default for SamplingState {
@@ -136,6 +139,8 @@ impl Default for SamplingState {
             taps: Vec::new(),
             warp_grid: 2,
             warp_strength: 1.0,
+            lanes: Default::default(),
+            lanes_mix: false,
         }
     }
 }
@@ -143,23 +148,50 @@ impl Default for SamplingState {
 /// Frames per peak block.
 const BLOCK: usize = 256;
 
+fn peaks_of(sample: &Sample) -> Vec<[(f32, f32); 2]> {
+    sample
+        .frames
+        .chunks(BLOCK)
+        .map(|c| {
+            let mut p = [(f32::MAX, f32::MIN); 2];
+            for f in c {
+                for ch in 0..2 {
+                    p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
+                }
+            }
+            p
+        })
+        .collect()
+}
+
+/// (min, max) per channel of `frames` over [a, b), from `peaks` when it's long.
+fn column_of(frames: &[[f32; 2]], peaks: &[[(f32, f32); 2]], a: usize, b: usize) -> [(f32, f32); 2] {
+    let b = b.min(frames.len());
+    if a >= b {
+        return [(0.0, 0.0); 2];
+    }
+    let mut p = [(f32::MAX, f32::MIN); 2];
+    if b - a >= BLOCK * 2 {
+        for blk in &peaks[a / BLOCK..b.div_ceil(BLOCK).min(peaks.len())] {
+            for ch in 0..2 {
+                p[ch] = (p[ch].0.min(blk[ch].0), p[ch].1.max(blk[ch].1));
+            }
+        }
+    } else {
+        for f in &frames[a..b] {
+            for ch in 0..2 {
+                p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
+            }
+        }
+    }
+    p
+}
+
 impl SamplingState {
     /// Show `sample` (for `key`), computing its peak blocks.
     pub fn set_sample(&mut self, key: (usize, usize, usize, String), sample: Arc<Sample>) {
         let changed = self.sample_key.as_ref().is_none_or(|k| (k.0, k.1, k.2) != (key.0, key.1, key.2));
-        self.peaks = sample
-            .frames
-            .chunks(BLOCK)
-            .map(|c| {
-                let mut p = [(f32::MAX, f32::MIN); 2];
-                for f in c {
-                    for ch in 0..2 {
-                        p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
-                    }
-                }
-                p
-            })
-            .collect();
+        self.peaks = peaks_of(&sample);
         if changed {
             self.view = None;
             self.selection = None;
@@ -180,32 +212,61 @@ impl SamplingState {
 
     /// (min, max) per channel over frames [a, b).
     pub(crate) fn column(&self, a: usize, b: usize) -> [(f32, f32); 2] {
-        let Some(s) = &self.sample else { return [(0.0, 0.0); 2] };
-        let b = b.min(s.frames.len());
-        if a >= b {
-            return [(0.0, 0.0); 2];
-        }
-        let mut p = [(f32::MAX, f32::MIN); 2];
-        if b - a >= BLOCK * 2 {
-            for blk in &self.peaks[a / BLOCK..b.div_ceil(BLOCK).min(self.peaks.len())] {
-                for ch in 0..2 {
-                    p[ch] = (p[ch].0.min(blk[ch].0), p[ch].1.max(blk[ch].1));
+        self.sample.as_ref().map_or([(0.0, 0.0); 2], |s| column_of(&s.frames, &self.peaks, a, b))
+    }
+
+    /// The same of stem lane `k`.
+    pub(crate) fn lane_column(&self, k: usize, a: usize, b: usize) -> [(f32, f32); 2] {
+        self.lanes[k].as_ref().map_or([(0.0, 0.0); 2], |l| column_of(&l.sample.frames, &l.peaks, a, b))
+    }
+
+    /// Show the stem lanes in `files`, loading (with `load`) those not shown yet.
+    pub fn set_lanes(&mut self, files: [Option<String>; 4], mut load: impl FnMut(&str) -> Option<Arc<Sample>>) {
+        for (k, file) in files.into_iter().enumerate() {
+            match file {
+                Some(f) if self.lanes[k].as_ref().is_some_and(|l| l.file == f) => {}
+                Some(f) => {
+                    self.lanes[k] = load(&f).map(|sample| LaneView { peaks: peaks_of(&sample), file: f, sample });
                 }
-            }
-        } else {
-            for f in &s.frames[a..b] {
-                for ch in 0..2 {
-                    p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
-                }
+                None => self.lanes[k] = None,
             }
         }
-        p
     }
 }
 
 /// What the Sampling view asks for.
+/// What's done to a stem lane (roadmap 2b). `Clear` takes them all off the zone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LaneAct {
+    Mute,
+    Solo,
+    Gain(f64),
+    Clear,
+}
+
+/// The stem lanes' colours, in their order: Drums, Vocals, Bass, Leads.
+pub const LANE_COLOURS: [Color32; 4] = [
+    Color32::from_rgb(0xf2, 0xa2, 0x3c),
+    Color32::from_rgb(0xe8, 0x58, 0x8a),
+    Color32::from_rgb(0x5a, 0x9c, 0xf2),
+    Color32::from_rgb(0x62, 0xc7, 0x8a),
+];
+
+/// A stem lane's waveform: its file, sample and peak blocks.
+pub struct LaneView {
+    pub file: String,
+    pub sample: Arc<Sample>,
+    peaks: Vec<[(f32, f32); 2]>,
+}
+
 #[derive(Debug, Clone)]
 pub enum SamplingAct {
+    /// STEMS into a new group, whatever the zone (Maschine's way).
+    StemsToGroup,
+    /// A stem lane of the focused zone.
+    Lane(usize, LaneAct),
+    /// The lanes folded into one waveform, or stacked.
+    LanesMix(bool),
     Open(bool),
     Tab(usize),
     Stereo,
@@ -737,8 +798,22 @@ fn wave(
     if looped {
         painter.rect_filled(Rect::from_x_y_ranges(fx(la)..=fx(lb), w.y_range()), 0.0, gcol.gamma_multiply(0.18));
     }
-    // The waveform: per column, (min, max) per channel.
-    let chans: Vec<Rect> = if st.stereo {
+    // The waveform: per column, (min, max) per channel; a zone with stem lanes, a row a
+    // lane (mono), in the lane's colour, dimmed when it's silent.
+    let stems = zone
+        .meta
+        .as_ref()
+        .filter(|m| m.has_stems() && !st.lanes_mix)
+        .map(|m| (&m.stems, deckard_model::new_sampler::lane_levels(&m.stems)));
+    let lane_rows: Vec<usize> =
+        stems.as_ref().map_or_else(Vec::new, |(l, _)| (0..4).filter(|&k| l[k].is_some() && st.lanes[k].is_some()).collect());
+    let chans: Vec<Rect> = if !lane_rows.is_empty() {
+        let n = lane_rows.len() as f32;
+        let h = (w.height() - (n - 1.0)) / n;
+        (0..lane_rows.len())
+            .map(|i| Rect::from_min_size(Pos2::new(w.left(), w.top() + i as f32 * (h + 1.0)), Vec2::new(w.width(), h)))
+            .collect()
+    } else if st.stereo {
         let h = (w.height() - 1.0) / 2.0;
         vec![
             Rect::from_min_size(w.min, Vec2::new(w.width(), h)),
@@ -748,11 +823,28 @@ fn wave(
         vec![w]
     };
     let cols = w.width().max(1.0) as usize;
-    let colour = |f: usize| {
+    let colour = |k: usize, f: usize| {
         let inside = (f as f64) >= lo && (f as f64) < hi;
-        if inside || st.selection.is_some_and(|(s0, s1)| f >= s0 && f < s1) { gcol } else { S03 }
+        if !(inside || st.selection.is_some_and(|(s0, s1)| f >= s0 && f < s1)) {
+            return S03;
+        }
+        match (lane_rows.get(k), &stems) {
+            (Some(&lane), Some((_, levels))) => LANE_COLOURS[lane].gamma_multiply(if levels[lane] > 0.0 { 1.0 } else { 0.25 }),
+            _ => gcol,
+        }
     };
-    let level = |p: [(f32, f32); 2], k: usize| if st.stereo { p[k] } else { ((p[0].0 + p[1].0) * 0.5, (p[0].1 + p[1].1) * 0.5) };
+    let mono = |p: [(f32, f32); 2]| ((p[0].0 + p[1].0) * 0.5, (p[0].1 + p[1].1) * 0.5);
+    // Row `k`'s (min, max) over frames [a, b), and its value at frame `f`.
+    let peak = |k: usize, a: usize, b: usize| match lane_rows.get(k) {
+        Some(&lane) => mono(st.lane_column(lane, a, b)),
+        None if st.stereo => st.column(a, b)[k],
+        None => mono(st.column(a, b)),
+    };
+    let point = |k: usize, f: usize| match lane_rows.get(k) {
+        Some(&lane) => st.lanes[lane].as_ref().and_then(|l| l.sample.frames.get(f)).map_or(0.0, |x| (x[0] + x[1]) * 0.5),
+        None if st.stereo => sample.frames[f][k],
+        None => (sample.frames[f][0] + sample.frames[f][1]) * 0.5,
+    };
     let y_of = |cr: &Rect, v: f32| cr.center().y - v.clamp(-1.0, 1.0) * cr.height() * 0.48;
     let mut outlines: Vec<Vec<crate::sampler_ui::WaveCol>> = vec![Vec::with_capacity(cols); chans.len()];
     // Up to a few frames per pixel the signal's shape shows: draw it as a line through
@@ -762,11 +854,9 @@ fn wave(
         let first = (v0.floor() as usize).saturating_sub(2);
         let last = ((v1.ceil() as usize) + 2).min(len - 1);
         for f in first..=last {
-            let fr = sample.frames[f];
-            let p = [(fr[0], fr[0]), (fr[1], fr[1])];
             for (k, cr) in chans.iter().enumerate() {
-                let y = y_of(cr, level(p, k).0);
-                outlines[k].push(crate::sampler_ui::WaveCol { x: fx(f as f64), top: y, bottom: y, color: colour(f) });
+                let y = y_of(cr, point(k, f));
+                outlines[k].push(crate::sampler_ui::WaveCol { x: fx(f as f64), top: y, bottom: y, color: colour(k, f) });
             }
         }
     } else {
@@ -776,15 +866,14 @@ fn wave(
             if a >= len {
                 break;
             }
-            // One frame more, so neighbouring columns overlap and the shape stays joined.
-            let p = st.column(a, b + 1);
             for (k, cr) in chans.iter().enumerate() {
-                let (mn, mx) = level(p, k);
+                // One frame more, so neighbouring columns overlap and the shape stays joined.
+                let (mn, mx) = peak(k, a, b + 1);
                 outlines[k].push(crate::sampler_ui::WaveCol {
                     x: w.left() + c as f32 + 0.5,
                     top: y_of(cr, mx),
                     bottom: y_of(cr, mn),
-                    color: colour(a),
+                    color: colour(k, a),
                 });
             }
         }
@@ -832,6 +921,64 @@ fn wave(
     // Interaction: drag a marker (S/E, loop edges or body, a slice), else select (or,
     // on the Slice tab, add/remove slices).
     let resp = ui.interact(w, ui.id().with("sample-wave"), Sense::click_and_drag());
+    // Stem lanes: each row's name, M (mute), S (solo) and gain (drag it), over its
+    // waveform; LANES / MIX folds them into the one waveform and back.
+    if let Some(m) = zone.meta.as_ref().filter(|m| m.has_stems()) {
+        let small = |ui: &mut Ui, r: Rect, text: &str, on: Option<Color32>, id: (&str, usize), tip: &str| {
+            let resp = ui.interact(r, ui.id().with(id), Sense::click()).on_hover_text(tip.to_string());
+            let fill = on.unwrap_or(if resp.hovered() { S03 } else { S01 });
+            painter.rect_filled(r, 2.0, fill);
+            painter.text(r.center(), Align2::CENTER_CENTER, text, font(9.0), if on.is_some() { Color32::BLACK } else { white(200) });
+            resp.clicked()
+        };
+        for (i, &lane) in lane_rows.iter().enumerate() {
+            let Some(l) = &m.stems[lane] else { continue };
+            let cr = chans[i];
+            let col = LANE_COLOURS[lane];
+            let y = cr.top() + 2.0;
+            let name = Rect::from_min_size(Pos2::new(cr.left() + 18.0, y), Vec2::new(46.0, 14.0));
+            painter.rect_filled(name, 2.0, Color32::from_black_alpha(170));
+            painter.text(name.center(), Align2::CENTER_CENTER, deckard_model::new_sampler::LANE_NAMES[lane].to_uppercase(), font(9.0), col);
+            let mr = Rect::from_min_size(Pos2::new(name.right() + 2.0, y), Vec2::splat(14.0));
+            if small(ui, mr, "M", l.mute.then_some(col), ("lane-m", lane), "Mute this stem") {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Mute)));
+            }
+            let sr = Rect::from_min_size(Pos2::new(mr.right() + 2.0, y), Vec2::splat(14.0));
+            if small(ui, sr, "S", l.solo.then_some(Color32::from_rgb(0xf2, 0xc1, 0x4e)), ("lane-s", lane), "Solo this stem") {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Solo)));
+            }
+            let gr = Rect::from_min_size(Pos2::new(sr.right() + 2.0, y), Vec2::new(44.0, 14.0));
+            let g = ui
+                .interact(gr, ui.id().with(("lane-g", lane)), Sense::click_and_drag())
+                .on_hover_text("This stem's level: drag up or down, double-click for 0 dB");
+            painter.rect_filled(gr, 2.0, if g.hovered() || g.dragged() { S03 } else { Color32::from_black_alpha(170) });
+            let db = if l.gain > 0.0005 { format!("{:+.1} dB", 20.0 * l.gain.log10()).replace('-', "−") } else { "−∞".into() };
+            painter.text(gr.center(), Align2::CENTER_CENTER, db, font(9.0), white(200));
+            if g.double_clicked() {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Gain(1.0))));
+            } else if g.dragged() && g.drag_delta().y != 0.0 {
+                // Half a dB a pixel, down to silence at −60.
+                let now = if l.gain > 0.0005 { 20.0 * l.gain.log10() } else { -60.0 };
+                let to = (now - f64::from(g.drag_delta().y) * 0.5).clamp(-60.0, 6.0);
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Gain(if to <= -60.0 { 0.0 } else { 10f64.powf(to / 20.0) }))));
+            }
+        }
+        let fold = Rect::from_min_size(Pos2::new(w.right() - 18.0 - 44.0, w.bottom() - 16.0), Vec2::new(44.0, 14.0));
+        if small(
+            ui,
+            fold,
+            if st.lanes_mix { "LANES" } else { "MIX" },
+            None,
+            ("lane-fold", 0),
+            "The stems stacked, or folded into one waveform",
+        ) {
+            acts.push(sact(SamplingAct::LanesMix(!st.lanes_mix)));
+        }
+        let rm = Rect::from_min_size(Pos2::new(fold.left() - 60.0, fold.top()), Vec2::new(58.0, 14.0));
+        if small(ui, rm, "NO STEMS", None, ("lane-clear", 0), "Take the stems off this zone (their files stay)") {
+            acts.push(sact(SamplingAct::Lane(0, LaneAct::Clear)));
+        }
+    }
     let drag_id = ui.id().with("sample-wave-drag");
     #[derive(Clone, Copy)]
     enum Grab {
@@ -1287,7 +1434,12 @@ fn edit_tab(
         };
         let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(58.0, 40.0));
         if tool_button(ui, &painter, r, &text, enabled, false, label) {
-            acts.push(sact(if op == EditOp::Stretch { SamplingAct::StretchOpen(true) } else { SamplingAct::Edit(op) }));
+            let to_group = op == EditOp::Stems && stems.is_none() && ui.input(|i| i.modifiers.shift);
+            acts.push(sact(match op {
+                EditOp::Stretch => SamplingAct::StretchOpen(true),
+                _ if to_group => SamplingAct::StemsToGroup,
+                _ => SamplingAct::Edit(op),
+            }));
         }
         x += 62.0;
         if matches!(op, EditOp::Silence | EditOp::Duplicate) {
