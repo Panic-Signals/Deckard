@@ -523,6 +523,8 @@ function global.leds()
     end
   else
     local first = (s.group - 1) // 8 * 8
+    local held_any = false
+    for h = 1, 16 do held_any = held_any or deckard.pad_held(h) end
     for i = 1, 8 do
       local g = first + i
       local group = s.groups[g]
@@ -531,10 +533,10 @@ function global.leds()
         -- (The place after the last group makes a new one.)
         if g == #s.groups + 1 and not muting then deckard.led(name, 16, false) else deckard.led(name, "off") end
       elseif muting then
-        deckard.led(name, group.palette, not group.muted, s.playing and group.playing)
+        deckard.led(name, group.palette, not group.muted, s.playing and group.playing and not held_any)
       else
         -- A group lights while one of its notes sounds.
-        deckard.led(name, group.palette, g == s.group, s.playing and group.playing)
+        deckard.led(name, group.palette, g == s.group, s.playing and group.playing and not held_any)
       end
     end
   end
@@ -590,13 +592,13 @@ function global.leds()
     if not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
       deckard.led(name, "off")
     elseif muting then
-      deckard.led(name, sound.palette, not sound.muted, sound.playing)
+      deckard.led(name, sound.palette, not sound.muted, sound.playing and not deckard.pad_held(i))
     elseif not sound.used then
       -- A selected empty slot: Maschine lights it in its empty-slot colour.
       deckard.led(name, EMPTY_SLOT, true)
     else
       -- Selected pads are fully lit, the others half lit.
-      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen, sound.playing)
+      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen, sound.playing and not deckard.pad_held(i))
     end
   end
 end

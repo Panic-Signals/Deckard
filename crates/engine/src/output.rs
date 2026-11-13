@@ -124,7 +124,7 @@ pub struct Sender {
 }
 
 /// How long a sound shows as played after a note that isn't held (a pad hit).
-pub const FLASH: Duration = Duration::from_millis(120);
+pub const FLASH: Duration = Duration::from_millis(90);
 
 /// Live notes sent, so the UI can light the sounds they play: the pitches held per
 /// (group, sound), and when a note last started.
