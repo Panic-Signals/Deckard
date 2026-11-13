@@ -232,8 +232,35 @@ local function tile(screen, theme, x, y, w, h, t)
     screen:label(x + 6, y + 3, w - 6, 30, t.big, style(theme, "tile_letter", text), "left", "top")
     screen:label(x + 7, y + 33, w - 21, 18, t.name or "", style(theme, "default", text), "left", "top")
   else
-    screen:label(x + 7, y + 4, w - 9, 16, t.name or "", style(theme, "pad_label", text), "left", "top")
+    local st = style(theme, "pad_label", text)
+    local first, second = widgets.wrap(screen, t.name or "", st, w - 9)
+    screen:label(x + 7, y + 4, w - 9, 16, first, st, "left", "top")
+    if second ~= "" then
+      screen:label(x + 7, y + 21, w - 9, 16, second, st, "left", "top")
+    end
   end
+end
+
+-- `s` in two lines `w` wide in style `st`: as it is when it fits, else broken after the
+-- last space, "_" or "-" that fits (within a character, with none), so the end of a long
+-- name ("ClosedHH Bionic 2", "… 3") shows. The second line is cut as a label is.
+function widgets.wrap(screen, s, st, w)
+  if s == "" or screen:text_width(s, st) <= w then return s, "" end
+  local fit = 0
+  for i = 1, #s do
+    if screen:text_width(s:sub(1, i), st) > w then break end
+    fit = i
+  end
+  if fit == 0 then return s, "" end
+  local cut = fit
+  for i = fit, 2, -1 do
+    local c = s:sub(i, i)
+    if c == " " or c == "_" or c == "-" then
+      cut = i
+      break
+    end
+  end
+  return (s:sub(1, cut):gsub("%s+$", "")), (s:sub(cut + 1):gsub("^%s+", ""))
 end
 
 -- Eight group tiles in two rows of four (`tiles[1..8]`, nil for none), from `y`,

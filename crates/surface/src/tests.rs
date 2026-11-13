@@ -3633,3 +3633,29 @@ fn loading_overlays_both_screens() {
     assert_eq!(text.iter().filter(|t| *t == "LOADING…").count(), 2, "{text:?}");
     assert_eq!(text.iter().filter(|t| *t == "Dusty Kit").count(), 2, "{text:?}");
 }
+
+/// A pad's name too long for its tile goes on in a second line, broken after a space,
+/// "_" or "-", so the end that tells pads apart shows ("ClosedHH Bionic 2" and "… 3"
+/// both read "ClosedHH Bionic" cut at the tile's edge). A short one stays one line.
+#[test]
+fn a_long_pad_name_wraps_onto_a_second_line() {
+    let mut s = Surface::new();
+    let mut v = view();
+    v.groups[0].sounds[0].name = "ClosedHH Bionic 2".into();
+    v.groups[0].sounds[1].name = "dt02_kick-punchy_crunch".into();
+    v.groups[0].sounds[2].name = "Kick".into();
+    let now = std::time::Instant::now();
+    s.tick(&v, now);
+    s.event(&deckard_mk3::Event::Button("BUTTON_SELECT", true), &v, now);
+    let texts = s.draw_picture(&v).texts;
+    // Two lines in a row that make the whole name, the first ending at a break.
+    let wrapped = |name: &str| {
+        texts.windows(2).any(|w| {
+            let (a, b) = (w[0].as_str(), w[1].as_str());
+            !a.is_empty() && !b.is_empty() && name.ends_with(b) && name.starts_with(a) && a.len() + b.len() + 1 >= name.len()
+        })
+    };
+    assert!(wrapped("ClosedHH Bionic 2") && !texts.iter().any(|t| t == "ClosedHH Bionic"), "{texts:?}");
+    assert!(wrapped("dt02_kick-punchy_crunch"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Kick"), "a short name, one line: {texts:?}");
+}
