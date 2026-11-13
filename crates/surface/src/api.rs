@@ -141,15 +141,36 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     ("on", false) => leds::ON,
                     ("dim", true) if hw == "LED_SAMPLE" => deckard_mk3::leds::SAMPLE_DIM,
                     ("dim", true) => leds::dim([255; 3]),
-                    ("on", true) => if flash { leds::flash([255; 3]) } else { leds::bright([255; 3]) },
+                    ("on", true) => {
+                        if flash {
+                            leds::flash([255; 3])
+                        } else {
+                            leds::bright([255; 3])
+                        }
+                    }
                     (other, _) => return Err(mlua::Error::runtime(format!("light {name}: \"{other}\"? (off, dim, on)"))),
                 },
                 Value::Table(t) => {
                     let rgb = crate::screen::rgb(t)?;
-                    if flash { leds::flash(rgb) } else if bright.unwrap_or(true) { leds::bright(rgb) } else { leds::dim(rgb) }
+                    if flash {
+                        leds::flash(rgb)
+                    } else if bright.unwrap_or(true) {
+                        leds::bright(rgb)
+                    } else {
+                        leds::dim(rgb)
+                    }
                 }
                 // A palette index (0..17, 16 white), as the project's colours are.
-                Value::Integer(i) => deckard_mk3::leds::palette(*i, if flash { 5 } else if bright.unwrap_or(true) { 4 } else { 2 }),
+                Value::Integer(i) => deckard_mk3::leds::palette(
+                    *i,
+                    if flash {
+                        5
+                    } else if bright.unwrap_or(true) {
+                        4
+                    } else {
+                        2
+                    },
+                ),
                 Value::Nil => 0,
                 _ => return Err(mlua::Error::runtime(format!("light {name}: a level or a colour"))),
             };
