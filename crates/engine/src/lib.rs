@@ -92,6 +92,15 @@ pub struct NoteEvent {
     pub from: Option<usize>,
 }
 
+/// A plug-in's note-off due `offset` frames after `now`, moved to its note's attack when
+/// that is still queued for later: the plug-in played the attack ahead (a quantized key
+/// or an arp step) and then the key was let go before it came, so the off can't come
+/// first, or the note would never end.
+fn after_queued_on(live: &[(u64, Live)], now: u64, offset: u64, same_on: impl Fn(&Live) -> bool) -> u64 {
+    let off = now + offset;
+    live.iter().filter(|(at, e)| *at > off && same_on(e)).map(|(at, _)| at - now).max().unwrap_or(offset)
+}
+
 /// Whether `e` is muted: its sound is, or (a link's note) the sound whose note played it.
 fn note_muted(muted: &[Vec<bool>], e: &NoteEvent) -> bool {
     let of = |s: usize| muted.get(e.group).and_then(|r| r.get(s)).copied().unwrap_or(false);
@@ -4640,7 +4649,15 @@ impl Engine {
             let at = match note {
                 midi_input::NoteOut::On { at, .. } | midi_input::NoteOut::Off { at, .. } => at,
             };
-            let offset = ((at - now) * spt).round().max(0.0) as u64;
+            let mut offset = ((at - now) * spt).round().max(0.0) as u64;
+            if let midi_input::NoteOut::Off { sound, pitch, .. } = note {
+                offset = after_queued_on(
+                    &self.live,
+                    self.time,
+                    offset,
+                    |e| matches!(*e, Live::MidiInputOut { group: g, note: midi_input::NoteOut::On { sound: s, pitch: p, .. } } if (g, s, p) == (group, sound, pitch)),
+                );
+            }
             if offset == 0 {
                 self.play_midi_input_note(group, note);
             } else {
@@ -12801,6 +12818,19 @@ mod tests {
         assert!(left.windows(2).all(|w| w[1] <= w[0] + 1e-6), "it falls steadily: {left:?}");
         assert!(about(left[63], after), "it gets there within the block: {} vs {after}", left[63]);
         assert!(about(x.block(0.5).0.0, after));
+    }
+
+    /// A plug-in's note-off never comes before the attack it queued for the same note
+    /// (a key let go before its quantized or arp attack): it moves to that attack.
+    #[test]
+    fn a_plug_in_off_waits_for_its_queued_attack() {
+        use midi_input::NoteOut::On;
+        let on = |pitch| Live::MidiInputOut { group: 2, note: On { at: 0.0, sound: 0, pitch, velocity: 100, length: None } };
+        let live = vec![(180, on(60)), (150, on(64)), (90, on(60))];
+        let same = |e: &Live| matches!(*e, Live::MidiInputOut { group: 2, note: On { sound: 0, pitch: 60, .. } });
+        assert_eq!(after_queued_on(&live, 100, 0, same), 80, "to its latest queued attack");
+        assert_eq!(after_queued_on(&live, 100, 90, same), 90, "an off already after it stays");
+        assert_eq!(after_queued_on(&[], 100, 0, same), 0);
     }
 
     /// Choke only one Group's sounds: other Groups' voices keep playing.
