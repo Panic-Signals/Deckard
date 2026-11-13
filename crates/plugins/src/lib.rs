@@ -441,6 +441,11 @@ impl Plugin {
         each!(mut self, p => p.pitch_bend(value))
     }
 
+    /// Channel pressure (aftertouch, 0..127), at the next `process`.
+    pub fn channel_pressure(&mut self, value: u8) {
+        each!(mut self, p => p.channel_pressure(value))
+    }
+
     /// Whether this plug-in has a side-chain audio input bus.
     pub fn has_sidechain(&self) -> bool {
         each!(self, p => p.has_sidechain())
@@ -933,12 +938,16 @@ impl Vst3 {
         if self.moved[64] {
             self.control_change(64, 0);
         }
+        if self.moved[128] {
+            self.channel_pressure(0);
+        }
         if self.moved[129] {
             self.pitch_bend(8192);
         }
     }
 
-    /// Whether the plug-in takes MIDI controller `number` (0..=127; 129 = pitch bend).
+    /// Whether the plug-in takes MIDI controller `number` (0..=127; 128 = channel
+    /// pressure, 129 = pitch bend).
     pub fn takes_controller(&self, number: usize) -> bool {
         self.midi_map.get(number).is_some_and(Option::is_some)
     }
@@ -997,6 +1006,15 @@ impl Vst3 {
         if let Some(id) = self.midi_map[129] {
             self.params_in.add(id, value.min(16383) as f64 / 16383.0);
             self.moved[129] = value != 8192;
+        }
+    }
+
+    /// Channel pressure (0..127), at the next `process`: VST3 has it as controller
+    /// `kAfterTouch` (128), a parameter the plug-in's MIDI mapping names.
+    pub fn channel_pressure(&mut self, value: u8) {
+        if let Some(id) = self.midi_map[128] {
+            self.params_in.add(id, value.min(127) as f64 / 127.0);
+            self.moved[128] = value != 0;
         }
     }
 
