@@ -484,6 +484,13 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(0.0) / 2.0, seconds)));
     }
     x += 40.0;
+    // Nudge: a hundredth of a BPM.
+    for (row, label, by, id) in [(0.0, "+", 0.01, "beat-nudge-up"), (1.0, "−", -0.01, "beat-nudge-down")] {
+        if tool_button(ui, &painter, small(x, row, 24.0), label, has, false, id) {
+            acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(120.0) + by, seconds)));
+        }
+    }
+    x += 28.0;
     if tool_button(ui, &painter, small(x, 0.0, 70.0), "TAP", true, false, "beat-tap") {
         acts.push(sact(SamplingAct::Tap(ui.input(|i| i.time))));
     }
@@ -884,7 +891,17 @@ fn wave(
     if resp.dragged()
         && let (Some(Some(grab)), Some(pos)) = (ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)), resp.interact_pointer_pos())
     {
-        let f = xf(pos.x).round();
+        // A zone with a tempo: markers snap to its beats (the finest lines a few pixels
+        // apart); SHIFT moves them freely.
+        let free = ui.input(|i| i.modifiers.shift);
+        let snap = |f: f64| match map.as_ref().filter(|_| !free) {
+            Some(m) => {
+                let div = crate::beat::snap_division(m, f, 8.0 * (v1 - v0) / w.width().max(1.0) as f64);
+                crate::beat::snap(m, f, div).clamp(0.0, len as f64)
+            }
+            None => f,
+        };
+        let f = snap(xf(pos.x).round());
         let last = len as f64 - 1.0;
         match grab {
             Grab::Start => acts.push(Act::SetParam(zt, "play_range/low", f.min(hi - 2.0).max(0.0))),
@@ -893,12 +910,13 @@ fn wave(
             Grab::LoopEnd => acts.push(Act::SetParam(zt, "loop_range/high", (f - 1.0).clamp(la + 1.0, hi - 1.0))),
             Grab::Loop(off) => {
                 let n = lb - la;
-                let a = (f - off).clamp(lo, hi - n);
+                let a = snap(xf(pos.x).round() - off).clamp(lo, hi - n);
                 acts.push(Act::SetParam(zt, "loop_range/low", a));
                 acts.push(Act::SetParam(zt, "loop_range/high", a + n - 1.0));
             }
             Grab::Slice(i) => acts.push(sact(SamplingAct::MoveSlice(i, f as usize))),
             Grab::Select(from) => {
+                let from = snap(from);
                 let (a, b) = (from.min(f) as usize, from.max(f) as usize);
                 acts.push(sact(SamplingAct::Select((b > a).then_some((a, b)))));
             }

@@ -165,7 +165,9 @@ in key, in the New Sampler.
 
 **Built 2026-11-12** (`crates/analysis`: `tempo`, `root`, `root_with_name`;
 `deckard_library::names::note_in_name`; plan `2026-11-12-sample-analysis.md`). Tested on
-synthetic drum loops and tones; a corpus of real loops is still to come.
+synthetic drum loops and tones, and on a corpus of six grooves played by DECKARD's own
+drum synths at nine tempos (72–174), as loops and with silence after them (the app's
+`the_tempo_of_grooves_on_our_own_drums`); loops recorded elsewhere are still to come.
 
 - **Onset novelty:** spectral flux. Reuse and improve `edit.rs::detect_positions`.
 - **Tempo estimate:** a tempogram or autocorrelation, searched over 60–200 BPM, then folded
@@ -259,7 +261,10 @@ waveform's ruler in bars and beats with beat lines. MK3: EDIT's TEMPO / PITCH kn
 (MODE, BPM, ROOT, PLAYS AT), and under SHIFT X2, 1/2, TO PROJECT on the display buttons.
 MATCH KEY (the Tune putting the root on the nearest note of the song's scale root; on
 the MK3 under SHIFT) and START (the Sync grid; the MK3's SYNC knob page) came after.
-Not yet: snapping to beats, ± nudge, SLICE ▸ Grid at the sample's tempo, the
+Then: the waveform's markers (start, end, loop, slices, the selection) snap to the
+sample's beats, SHIFT free; + and − nudge the BPM a hundredth; SLICE ▸ Grid slices on
+the sample's own beats (through its warp markers).
+Not yet: the
 sample-only nudge, Flatten, the key, and Serato's waveform colouring.
 
 - **Header on the EDIT and SLICE pages:**
@@ -286,7 +291,9 @@ MARKERS (on every hit), QUANTIZE (to 1/4–1/32, with STRENGTH), CLEAR; drag a m
 handle to move its beat, double-click it to remove it, double-click the ruler for a new
 one; the bars-and-beats ruler follows the map. Not yet: Serato's tempo markers and
 ADJUST (warp markers cover a piecewise tempo; a tempo-marker UI on top is to come), the
-waveform drawn warped (it stays in sample time, the grid moves instead), and the MK3.
+waveform drawn warped (it stays in sample time, the grid moves instead). On the MK3:
+EDIT's functions go on with WARP MARKERS, QUANTIZE AUDIO and CLEAR WARP, and a WARP knob
+page has GRID and STRENGTH; markers aren't moved one at a time there.
 
 - **Tempo markers:** Serato-style, up to 128, giving a piecewise tempo map. The ADJUST
   control stretches the segment under the playhead.
@@ -302,7 +309,9 @@ or all keys for one take, in Sync at the take's tempo, the plug-in's Tune on eac
 **Convert to Sampler** (Sync, Keys and the analysis go; the status line says so). One
 undo step each. A pattern that played a take (Loop mode) gets its notes: one each time
 the take came round, cut at the pattern's end, the envelope made ADSR so they end with
-it; a Gate-mode plug-in's notes play its lone take in Keys. Not yet: on the MK3; a take
+it; a Gate-mode plug-in's notes play its lone take in Keys. On the MK3, EDIT's last
+function converts a Sampler (TO NEW SAMPLER) and back (TO SAMPLER); an Audio plug-in
+converts from the software only. Not yet: a take
 starting before its pattern loses that first cut-off part.
 
 Audio → New Sampler and Sampler → New Sampler (see Architecture above). The Audio plug-in

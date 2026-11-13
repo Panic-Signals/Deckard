@@ -4,8 +4,10 @@
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), PREVIOUS, NEXT take
 --   EDIT 5-6 / 8      ◀ the edit function ▶, APPLY (STEMS: CANCEL while separating)
---   SHIFT+EDIT 5-7    a New Sampler zone's tempo: X2, 1/2, TO PROJECT (its TEMPO /
---                     PITCH knob page: MODE, BPM, ROOT, PLAYS AT)
+--   SHIFT+EDIT 5-8    a New Sampler zone's tempo: X2, 1/2, TO PROJECT, MATCH KEY (its
+--                     knob pages: TEMPO / PITCH, SYNC, WARP; its edit functions go on
+--                     with WARP MARKERS, QUANTIZE AUDIO, CLEAR WARP; TO (NEW) SAMPLER
+--                     converts the sound's Sampler)
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
@@ -27,6 +29,8 @@ local FUNCTIONS = {
   { "STEMS", "stems" }, { "AUTOLOOP", "auto_loop" },
 }
 local func = 1
+-- A New Sampler zone with a tempo has its warp markers too; a Sampler converts.
+local WARP = { { "WARP MARKERS", "warp_markers" }, { "QUANTIZE AUDIO", "warp_quantize" }, { "CLEAR WARP", "warp_clear" } }
 
 -- The knob page shown on each tab, the slice focused (from 1; none until a pad picks
 -- one: the buttons then act on the first), the knobs touched.
@@ -117,6 +121,26 @@ local function tempo_page(v)
   end
 end
 
+-- The EDIT functions for what's focused.
+local function functions(v)
+  local list = {}
+  for _, f in ipairs(FUNCTIONS) do list[#list + 1] = f end
+  local p = tempo_page(v)
+  if p and p.knobs[2] and p.knobs[2].text ~= "-" then
+    for _, f in ipairs(WARP) do list[#list + 1] = f end
+  end
+  if not (v.sample and v.sample.take) then
+    list[#list + 1] = { p and "TO SAMPLER" or "TO NEW SAMPLER", "convert" }
+  end
+  return list
+end
+
+local function current(v)
+  local list = functions(v)
+  func = math.max(1, math.min(func, #list))
+  return list[func], #list
+end
+
 -- SHIFT on EDIT, for a New Sampler zone with a tempo.
 local function tempo_buttons(v)
   if v.tab ~= 2 or not deckard.held("SHIFT") then return nil end
@@ -167,7 +191,7 @@ local function buttons(v)
   elseif v.tab == 2 then
     local t = tempo_buttons(v)
     if t then return t end
-    local f = FUNCTIONS[func]
+    local f = current(v)
     local cancel = f[2] == "stems" and v.stems and v.stems.focused
     return {
       { arrows = true, text = f[1], disabled = not s },
@@ -218,7 +242,10 @@ function page.button(name, down)
       return true
     end
     if v.tab == 2 and (n == 5 or n == 6) and not tempo_buttons(v) then
-      if v.sample then func = (func + (n == 6 and 1 or -1) - 1) % #FUNCTIONS + 1 end
+      if v.sample then
+        local _, count = current(v)
+        func = (func + (n == 6 and 1 or -1) - 1) % count + 1
+      end
       return true
     end
     local b = buttons(v)[n - 4]
@@ -552,7 +579,7 @@ function page.draw(screen, theme)
 
   local smp = v.sample
   local colour = widgets.colour(theme, smp and smp.palette or (s.groups[s.group] and s.groups[s.group].sounds[s.sound] or {}).palette)
-  if v.tab == 2 and v.stems and v.stems.focused and FUNCTIONS[func][2] == "stems" then
+  if v.tab == 2 and v.stems and v.stems.focused and current(v)[2] == "stems" then
     stems_progress(screen, theme, v)
   elseif v.tab == 1 then
     meters(screen, v, colour)

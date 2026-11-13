@@ -7664,8 +7664,21 @@ impl App {
         st.slices = match st.slice_mode {
             0 => edit::split_positions(r, SPLIT_COUNTS[st.split]),
             1 => {
-                let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
-                edit::grid_positions(s.rate, r, tempo, GRID_DIVS[st.grid].0)
+                // A New Sampler zone with a tempo: on its own beats. Else at the song's.
+                let map = self.doc.as_ref().and_then(|d| {
+                    let d = d.borrow();
+                    let snd = d.project().groups.get(self.group)?.sounds.get(self.sound)?;
+                    snd.new_sampler?;
+                    let m = snd.sampler.as_ref()?.zones.get(self.zone)?.meta.as_ref()?;
+                    deckard_model::new_sampler::BeatMap::of(m, s.rate)
+                });
+                match map {
+                    Some(map) => beat::grid_slices(&map, r, GRID_DIVS[st.grid].0),
+                    None => {
+                        let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
+                        edit::grid_positions(s.rate, r, tempo, GRID_DIVS[st.grid].0)
+                    }
+                }
             }
             2 => edit::detect_positions(&s, r, st.sensitivity, st.zero_x),
             _ => {
@@ -8130,6 +8143,8 @@ impl App {
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
+            Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
+            Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
             Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid)) => {
                 use deckard_model::new_sampler::PlayMode;
                 let Some(doc) = self.doc.clone() else { return };
@@ -8215,6 +8230,22 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::Warp(k) => {
+                use layout::sampling::WarpAct as W;
+                S::Warp([W::Detect, W::Quantize, W::Clear][k.min(2)])
+            }
+            C::Convert => {
+                let Some(doc) = self.doc.clone() else { return };
+                let to_new = doc
+                    .borrow()
+                    .project()
+                    .groups
+                    .get(self.group)
+                    .and_then(|x| x.sounds.get(self.sound))
+                    .is_some_and(|x| x.new_sampler.is_none());
+                self.convert_instrument(to_new);
+                return;
+            }
             C::MatchKey => {
                 let Some(doc) = self.doc.clone() else { return };
                 let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {

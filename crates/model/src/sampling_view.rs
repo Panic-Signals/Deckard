@@ -72,6 +72,10 @@ pub enum SamplingCall {
     ToProject,
     /// Its Tune set so its root is the nearest note of the song's key.
     MatchKey,
+    /// Its warp markers: 0 put on its hits, 1 quantized, 2 cleared.
+    Warp(usize),
+    /// The sound's Sampler made a New Sampler, or back.
+    Convert,
 }
 
 /// A page of the Sampling page's knobs (up to four; knobs 5 and 6 zoom and scroll).

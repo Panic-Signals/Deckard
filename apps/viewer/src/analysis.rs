@@ -313,6 +313,11 @@ mod app_tests {
         assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Quantize Audio"));
         app.warp_act(WarpAct::Clear);
         assert!(warps(&app).is_empty());
+        // SLICE's Grid follows the sample's own beats (120 here), not the song's (90).
+        app.doc.as_ref().unwrap().borrow_mut().set_tempo(90.0).unwrap();
+        (app.sampling.slice_mode, app.sampling.grid) = (1, 0);
+        app.compute_slices();
+        assert_eq!(app.sampling.slices, [0, 24_000, 48_000, 72_000]);
         // The controller's MATCH KEY: a root of A1, 12 cents flat, in a song in C
         // plays at C2 (up 3, its cents back).
         let zone = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].clone();
@@ -327,6 +332,71 @@ mod app_tests {
         app.record_apply.insert("Beat.Start".into(), crate::sampling_hw::Apply::StartGrid);
         app.sampling_knob("Beat.Start", 3.0);
         assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Quarter);
+    }
+
+    /// A groove on DECKARD's own drum synths: (kick, snare, hat) steps of 16 in a bar,
+    /// `bars` long at `bpm`, the off sixteenths `swing` late (0.5: straight).
+    fn groove(steps: (&[usize], &[usize], &[usize]), bpm: f64, bars: usize, swing: f64, rate: u32) -> Vec<[f32; 2]> {
+        use deckard_engine::sampler::{Context, SamplerRt};
+        let step = f64::from(rate) * 60.0 / bpm / 4.0;
+        let len = (step * 16.0 * bars as f64).round() as usize;
+        let mut mix = vec![0f32; len * 2];
+        for (class, at, velocity) in [("Kick", steps.0, 120), ("Snare", steps.1, 105), ("Hihat", steps.2, 80)] {
+            let mut synth = SamplerRt::synth(class, &[], (1.0, 1.0), f64::from(rate)).expect(class);
+            let mut hits: Vec<usize> = (0..bars)
+                .flat_map(|b| at.iter().map(move |&k| (b, k)))
+                .map(|(b, k)| ((b * 16 + k) as f64 * step + if k % 2 == 1 { (swing - 0.5) * 2.0 * step } else { 0.0 }).round() as usize)
+                .collect();
+            hits.push(len);
+            let mut out = vec![0f32; len * 2];
+            let mut from = 0;
+            for (n, &to) in hits.iter().enumerate() {
+                synth.render(&mut out[from * 2..to * 2]);
+                if to < len {
+                    synth.note_on(n as u64 + 1, 60, velocity, &Context { tempo: bpm, beats: 0.0, live: false });
+                }
+                from = to;
+            }
+            for (m, o) in mix.iter_mut().zip(&out) {
+                *m += o * 0.5;
+            }
+        }
+        mix.chunks(2).map(|c| [c[0], c[1]]).collect()
+    }
+
+    /// The tempo corpus (roadmap 1a): grooves played by DECKARD's drum synths at known
+    /// tempos. A loop cut on its bars: exact, or exactly twice or half (the fold into
+    /// 85–170). The same with a second of silence after it (not a loop): within 1 %.
+    #[test]
+    fn the_tempo_of_grooves_on_our_own_drums() {
+        let rate = 44_100u32;
+        let grooves: [(&str, (&[usize], &[usize], &[usize]), f64); 6] = [
+            ("four on the floor", (&[0, 4, 8, 12], &[4, 12], &[2, 6, 10, 14]), 0.5),
+            ("boom bap", (&[0, 7, 10], &[4, 12], &[0, 2, 4, 6, 8, 10, 12, 14]), 0.58),
+            ("break", (&[0, 10], &[4, 7, 9, 12], &[0, 2, 4, 6, 8, 10, 12, 14]), 0.5),
+            ("half time", (&[0, 11], &[8], &[0, 2, 4, 6, 8, 10, 12, 14]), 0.5),
+            ("two step", (&[0, 10], &[4, 12], &[2, 3, 6, 10, 11, 14]), 0.5),
+            ("sixteenths", (&[0, 6, 8], &[4, 12], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]), 0.5),
+        ];
+        let mut wrong = Vec::new();
+        for (name, steps, swing) in grooves {
+            for bpm in [72.0, 86.0, 94.0, 103.0, 120.0, 128.0, 140.0, 160.0, 174.0] {
+                for bars in [2, 4] {
+                    let mut audio = groove(steps, bpm, bars, swing, rate);
+                    let near = |got: f64, by: f64| [bpm, bpm * 2.0, bpm / 2.0].iter().any(|b| (got - b).abs() <= b * by);
+                    let looped = deckard_analysis::tempo(&audio, rate, None);
+                    if !looped.is_some_and(|t| near(t.bpm, 0.0005)) {
+                        wrong.push((name, bpm, bars, "loop", looped.map(|t| t.bpm)));
+                    }
+                    audio.extend(std::iter::repeat_n([0.0; 2], rate as usize));
+                    let free = deckard_analysis::tempo(&audio, rate, None);
+                    if !free.is_some_and(|t| near(t.bpm, 0.01)) {
+                        wrong.push((name, bpm, bars, "free", free.map(|t| t.bpm)));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong: {wrong:?}", wrong.len());
     }
 
     /// An Audio plug-in's take becomes a New Sampler zone in Sync at the take's tempo;

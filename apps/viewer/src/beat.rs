@@ -67,6 +67,42 @@ pub fn beats_in(map: &BeatMap, from: f64, to: f64) -> Vec<(f64, i64, i64)> {
     (b0.ceil() as i64..=b1.floor() as i64).map(|k| (map.frame_at(k as f64), k.div_euclid(4) + 1, k.rem_euclid(4) + 1)).collect()
 }
 
+/// The finest of a bar, a beat, 1/2 … 1/16 of a beat that is at least `min` frames wide
+/// at `frame` (so the grid snapped to is one that can be seen): in beats.
+pub fn snap_division(map: &BeatMap, frame: f64, min: f64) -> f64 {
+    let beat = (map.frame_at(map.beat_at(frame) + 1.0) - frame).abs();
+    [0.0625, 0.125, 0.25, 0.5, 1.0].into_iter().find(|d| beat * d >= min).unwrap_or(4.0)
+}
+
+/// `frame` moved to the nearest multiple of `division` beats of the sample's grid.
+pub fn snap(map: &BeatMap, frame: f64, division: f64) -> f64 {
+    if !(division > 0.0) {
+        return frame;
+    }
+    map.frame_at((map.beat_at(frame) / division).round() * division).round()
+}
+
+/// Grid slices of `[a, b)` on the sample's own beats (through its warp markers): `a`,
+/// then every `division`th note's line after it (4: quarters).
+pub fn grid_slices(map: &BeatMap, (a, b): (usize, usize), division: u32) -> Vec<usize> {
+    let step = 4.0 / f64::from(division.max(1));
+    let mut out = vec![a];
+    let mut k = (map.beat_at(a as f64) / step).floor() + 1.0;
+    // (A line a few frames after the start isn't a slice of its own.)
+    let min = (map.frame_at(step) - map.frame_at(0.0)).abs() / 8.0;
+    while out.len() < 4096 {
+        let f = map.frame_at(k * step).round();
+        if !(f < b as f64) {
+            break;
+        }
+        if f - a as f64 > min {
+            out.push(f as usize);
+        }
+        k += 1.0;
+    }
+    out
+}
+
 /// Quantize grids, beats: 1/4, 1/8, 1/16, 1/32 notes.
 pub const WARP_GRIDS: [(f64, &str); 4] = [(1.0, "1/4"), (0.5, "1/8"), (0.25, "1/16"), (0.125, "1/32")];
 
@@ -111,6 +147,24 @@ mod tests {
         assert_eq!(match_tune(45, 0.0, 64), -5.0);
         assert_eq!(match_tune(45, 0.0, 63), -6.0);
         assert_eq!(match_tune(45, 20.0, 45), -0.2, "in key already: only its cents");
+    }
+
+    #[test]
+    fn snapping_and_grid_slices_follow_the_sample() {
+        // 120 BPM at 48 kHz, the first beat at frame 1 000.
+        let m = ZoneMeta { bpm: Some(120.0), grid_offset: 1000, ..ZoneMeta::default() };
+        let map = BeatMap::of(&m, 48_000).unwrap();
+        assert_eq!(snap(&map, 24_000.0, 1.0), 25_000.0);
+        assert_eq!(snap(&map, 14_000.0, 0.5), 13_000.0);
+        assert_eq!(snap(&map, 14_000.0, 0.0), 14_000.0);
+        // A beat is 24 000 frames: lines 2 000 apart or more are 1/8 beats and up.
+        assert_eq!(snap_division(&map, 0.0, 2_000.0), 0.125);
+        assert_eq!(snap_division(&map, 0.0, 30_000.0), 4.0);
+        // Quarters from the start of the range: the start, then the beats after it.
+        assert_eq!(grid_slices(&map, (0, 60_000), 4), [0, 25_000, 49_000]);
+        assert_eq!(grid_slices(&map, (1000, 40_000), 8), [1000, 13_000, 25_000, 37_000]);
+        // (A line just after the start isn't a slice.)
+        assert_eq!(grid_slices(&map, (990, 30_000), 4), [990, 25_000]);
     }
 
     #[test]

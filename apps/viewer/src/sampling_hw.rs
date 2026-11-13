@@ -51,6 +51,9 @@ pub enum Apply {
     PlaysAt,
     /// A Sync zone's start grid (`StartGrid::ALL`).
     StartGrid,
+    /// QUANTIZE's grid (`beat::WARP_GRIDS`) and strength (0..1).
+    WarpGrid,
+    WarpStrength,
     /// Shown, not set.
     None,
 }
@@ -213,6 +216,24 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             let cur = StartGrid::ALL.iter().position(|g| *g == m.start).unwrap_or(0);
             page(&mut out, 1, "SYNC", vec![(choice("Beat.Start", "START", &grids, cur), Apply::StartGrid)]);
         }
+        // Warp markers (the EDIT functions put them on the hits, quantize and clear them).
+        if m.bpm.is_some() {
+            let grids: Vec<String> = crate::beat::WARP_GRIDS.iter().map(|g| g.1.to_string()).collect();
+            let strength = st.warp_strength;
+            page(
+                &mut out,
+                1,
+                "WARP",
+                vec![
+                    (choice("Warp.Grid", "GRID", &grids, st.warp_grid.min(grids.len() - 1)), Apply::WarpGrid),
+                    (
+                        knob("Warp.Strength", "STRENGTH", format!("{:.0} %", strength * 100.0), strength, (0.0, 1.0), 0.05, 1.0 / 40.0),
+                        Apply::WarpStrength,
+                    ),
+                    (knob("Warp.Count", "MARKERS", m.warps.len().to_string(), 0.0, (0.0, 0.0), 1.0, TURN), Apply::None),
+                ],
+            );
+        }
     }
 
     // ZONE.
@@ -285,7 +306,8 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     // SLICE: the knobs NI's script picks (by its slicer mode's numbers).
     let names = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let ni_names: Vec<String> = (0..4).map(|m| SLICE_MODES[NI_TO_APP_SLICE_MODE[m]].to_string()).collect();
-    let tempo = p.tempo;
+    let own_tempo = z.meta.as_ref().filter(|_| new_sampler).and_then(|m| m.bpm);
+    let tempo = own_tempo.unwrap_or(p.tempo);
     let slice = [
         (choice("Slice.Mode", "MODE", &ni_names, APP_TO_NI_SLICE_MODE[st.slice_mode.min(3)]), Apply::SliceMode),
         (choice("Slice.Split", "SLICES", &SPLIT_COUNTS.map(|c| c.to_string()), st.split), Apply::SplitCount),
@@ -296,8 +318,8 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         ),
         (on_off("Slice.ZeroX", "ZERO-X", st.zero_x), Apply::ZeroX),
         (choice("Slice.Apply", "PATTERN", &names(&PATTERN_MODES), st.pattern_mode), Apply::PatternMode),
-        // Slices follow the song's tempo.
-        (knob("Slice.BpmMode", "BPM", "Song".into(), 0.0, (0.0, 0.0), 1.0, TURN), Apply::None),
+        // Slices follow the song's tempo; a New Sampler zone's with a tempo, its own.
+        (knob("Slice.BpmMode", "BPM", if own_tempo.is_some() { "Sample" } else { "Song" }.into(), 0.0, (0.0, 0.0), 1.0, TURN), Apply::None),
         (knob("Slice.Bpm", "TEMPO", format!("{tempo:.2}"), tempo, (tempo, tempo), 1.0, TURN), Apply::None),
     ];
     for (k, a) in slice {

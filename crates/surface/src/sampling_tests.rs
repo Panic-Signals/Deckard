@@ -156,8 +156,10 @@ fn the_edit_tab_turns_its_pages_and_applies_its_functions() {
     press(&mut s, &v, "BUTTON_SCREEN_6");
     assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Edit(2))]);
-    // Back round past TRUNCATE to the last: AUTOLOOP.
+    // Back round past TRUNCATE to the last: TO NEW SAMPLER, and AUTOLOOP before it.
     press(&mut s, &v, "BUTTON_SCREEN_5");
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Convert)]);
     press(&mut s, &v, "BUTTON_SCREEN_5");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::AutoLoop)]);
 }
@@ -209,6 +211,17 @@ fn a_new_sampler_zone_has_its_tempo_on_edit() {
     // Without SHIFT, the edit functions as ever.
     press(&mut s, &v, "BUTTON_SCREEN_6");
     assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
+    // Back past the first: the New Sampler's own, last. TO SAMPLER, then the warp ones.
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO SAMPLER"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Convert)]);
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert!(s.screen_text(&v).iter().any(|t| t == "CLEAR WARP"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Warp(2))]);
+    // A plain Sampler's zone: no warp functions, and it converts the other way.
+    v.sampling.pages[1].pop();
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO NEW SAMPLER"));
 }
 
 #[test]

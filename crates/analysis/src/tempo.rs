@@ -64,13 +64,15 @@ pub fn tempo(frames: &[[f32; 2]], rate: u32, hint: Option<f64>) -> Option<Tempo>
     }
     // Coarse: every 0.1 BPM, the lags of a beat, two beats and half a beat, weighed by
     // the prior. The half beat keeps 2:3 relatives (a dotted beat) from winning: their
-    // halves fall between the 8ths.
+    // halves fall between the 8ths; and the quarter beat, under straight sixteenths
+    // (where those halves are three sixteenths, on the grid): their quarters fall
+    // between the sixteenths.
     let prior = |bpm: f64| (-0.5 * (bpm / 120.0).log2().powi(2)).exp();
     let mut scores = Vec::new();
     let mut bpm = SEARCH.0;
     while bpm <= SEARCH.1 {
         let l = lag_of(bpm);
-        scores.push((bpm, prior(bpm) * (ac(&env, l) + 0.5 * ac(&env, 2.0 * l) + 0.5 * ac(&env, 0.5 * l))));
+        scores.push((bpm, prior(bpm) * (ac(&env, l) + 0.5 * ac(&env, 2.0 * l) + 0.5 * ac(&env, 0.5 * l) + 0.5 * ac(&env, 0.25 * l))));
         bpm += 0.1;
     }
     let (best, top) = scores.iter().copied().fold((0.0, f64::MIN), |a, b| if b.1 > a.1 { b } else { a });
