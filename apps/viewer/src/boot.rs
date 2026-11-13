@@ -116,10 +116,10 @@ pub fn all_steps(path: Option<PathBuf>) -> Vec<Step> {
     ]
 }
 
-/// Whether this launch shows the splash: not when rendering a screenshot or playing a
-/// scripted run.
+/// Whether this launch shows the splash: only a plain one, with no arguments or one
+/// project path (any `--` flag is a scripted run).
 pub fn splash_wanted(args: &[String]) -> bool {
-    !args.iter().any(|a| a == "--screenshot" || a == "--play")
+    args.len() <= 1 && !args.iter().any(|a| a.starts_with("--"))
 }
 
 fn found(yes: bool) -> Outcome {
@@ -161,7 +161,9 @@ impl App {
             Step::Launchpad => "LAUNCHPAD PRO MK3".into(),
             Step::Surface => "CONTROLLER SURFACE".into(),
             Step::Catalog => "PLUG-IN CATALOG".into(),
-            Step::Project(Some(p)) => format!("OPENING {}", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_uppercase())),
+            Step::Project(Some(p)) => {
+                format!("OPENING {}", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_uppercase()))
+            }
             Step::Project(None) => "NEW PROJECT".into(),
             Step::Plugins => "PLUG-INS".into(),
             Step::AudioOutput => "AUDIO OUTPUT".into(),
@@ -225,7 +227,11 @@ impl App {
                 {
                     self.stems_offer = Some(StemsOffer::Asking);
                 }
-                if self.catalog.scanning() { Outcome::Text("SCANNING".into()) } else { Outcome::Text(format!("{} READY", self.catalog.entries.len())) }
+                if self.catalog.scanning() {
+                    Outcome::Text("SCANNING".into())
+                } else {
+                    Outcome::Text(format!("{} READY", self.catalog.entries.len()))
+                }
             }
             Step::Project(path) => {
                 let name = path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
@@ -241,9 +247,7 @@ impl App {
                 }
             }
             // (Loaded in the main loop, as before; steps for them come with the plug-in queue.)
-            Step::Plugins | Step::AudioOutput | Step::Plugin(_) => {
-                Outcome::Skipped
-            }
+            Step::Plugins | Step::AudioOutput | Step::Plugin(_) => Outcome::Skipped,
             Step::Done => {
                 boot.ready_at = Some(Instant::now());
                 Outcome::Ok
@@ -297,6 +301,8 @@ mod tests {
         assert!(splash_wanted(&["song.mxprj".into()]));
         assert!(!splash_wanted(&["--screenshot".into(), "a.png".into()]));
         assert!(!splash_wanted(&["song.mxprj".into(), "--play".into(), "song".into()]));
+        assert!(!splash_wanted(&["--group".into(), "1".into()]));
+        assert!(!splash_wanted(&["a.mxprj".into(), "b.mxprj".into()]));
     }
 
     #[test]
