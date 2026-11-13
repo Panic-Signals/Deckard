@@ -1,6 +1,7 @@
 //! Finding installed plug-ins: VST3 classes (from a bundle's `moduleinfo.json`, or by
-//! loading it, which callers should do in a separate process), VST2 bundles, and Audio
-//! Units (from the system's component registry).
+//! loading it, which callers should do in a separate process), VST2 plug-ins (by loading
+//! them, likewise, or from an MPC plug-in folder's `plugin.json`), and Audio Units (from
+//! the system's component registry).
 
 use crate::module::{self, Module};
 use std::ffi::{CStr, c_char};
@@ -36,8 +37,8 @@ pub struct Entry {
     pub instrument: bool,
     /// The bundle (VST3/VST2) or "type subtype manufacturer" four-char codes (AU).
     pub location: String,
-    /// The VST3 class id, upper-case hex (VST3), or an AU's type, subtype and
-    /// manufacturer codes, in hex.
+    /// The VST3 class id, upper-case hex (VST3), a VST2's unique id (8 hex digits; empty
+    /// if not read yet), or an AU's type, subtype and manufacturer codes, in hex.
     pub cid: String,
 }
 
@@ -51,8 +52,13 @@ impl Entry {
                 let (kind, sub) = self.au_codes()?;
                 crate::state::au_id(&self.vendor, kind, sub)
             }
-            Kind::Vst2 => None,
+            Kind::Vst2 => Some(format!("{}:VST:{role}:{}", self.vendor, self.vst2_uid()?)),
         }
+    }
+
+    /// A VST2's unique id, if the scan read it.
+    pub fn vst2_uid(&self) -> Option<u32> {
+        (self.kind == Kind::Vst2 && self.cid.len() == 8).then(|| u32::from_str_radix(&self.cid, 16).ok()).flatten()
     }
 
     /// An AU's component type and subtype. (A cache from before AUs could be hosted has
@@ -66,12 +72,13 @@ impl Entry {
         Some((code(self.location.get(..4))?, code(self.location.get(5..9))?))
     }
 
-    /// Whether this build can host it: VST3, and Audio Units on macOS.
+    /// Whether this build can host it: VST3, VST2 whose id the scan read, and Audio Units
+    /// on macOS.
     pub fn hostable(&self) -> bool {
         match self.kind {
             Kind::Vst3 => true,
             Kind::AudioUnit => cfg!(target_os = "macos") && self.maschine_id().is_some(),
-            Kind::Vst2 => false,
+            Kind::Vst2 => self.vst2_uid().is_some(),
         }
     }
 
@@ -222,19 +229,53 @@ pub fn vst3_by_loading(bundle: &Path) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-/// VST2 bundles as entries (name from the bundle; not hostable yet).
-pub fn vst2_entries(dirs: &[PathBuf]) -> Vec<Entry> {
-    vst2_bundles(dirs)
-        .into_iter()
-        .map(|b| Entry {
-            kind: Kind::Vst2,
-            vendor: String::new(),
-            name: b.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned()),
-            instrument: false,
-            location: b.display().to_string(),
-            cid: String::new(),
-        })
-        .collect()
+/// A VST2 plug-in's entry, from what it said about itself.
+fn vst2_entry(info: crate::vst2::Info, location: &Path) -> Entry {
+    let name =
+        if info.name.is_empty() { location.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned()) } else { info.name };
+    Entry {
+        kind: Kind::Vst2,
+        vendor: info.vendor,
+        name,
+        instrument: info.instrument,
+        location: location.display().to_string(),
+        cid: format!("{:08X}", info.unique_id),
+    }
+}
+
+/// A VST2 plug-in's entry, by loading it (do this in a helper process: a plug-in can crash
+/// or hang while loading).
+pub fn vst2_by_loading(path: &Path) -> Result<Vec<Entry>, String> {
+    crate::vst2::probe(path).map(|info| vec![vst2_entry(info, path)])
+}
+
+/// MPC plug-in folders (a `plugin.json` beside the binaries) in `dirs`, their subfolders
+/// and theirs (`<drive>/VST2 Plugins/<folder>`), read without loading anything. Only
+/// folders with a binary for this machine count.
+pub fn mpc_entries(dirs: &[PathBuf]) -> Vec<Entry> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<Entry>) {
+        if dir.join("plugin.json").is_file() {
+            if let Some((info, file)) = crate::vst2::mpc_folder(dir) {
+                out.push(vst2_entry(info, &file));
+            }
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        if depth == 0 {
+            return;
+        }
+        let mut subs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        subs.sort();
+        for p in subs {
+            walk(&p, depth - 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        walk(dir, 2, &mut out);
+    }
+    out.dedup();
+    out
 }
 
 /// The standard VST2 folders.
@@ -401,5 +442,52 @@ mod au_tests {
         );
         assert_eq!(entry("aumf PRTL Outp", "").maschine_id().as_deref(), Some("Output:AU:MF:1347572812"));
         assert_eq!(entry("aumf PRTL Outp", "").hostable(), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn vst2_entries_are_hostable_once_their_id_is_read() {
+        let mut e = Entry {
+            kind: Kind::Vst2,
+            vendor: "Acme".into(),
+            name: "Fake".into(),
+            instrument: true,
+            location: "/x/Fake.so".into(),
+            cid: String::new(),
+        };
+        // From a cache made before VST2 could be hosted: listed, not offered.
+        assert!(!e.hostable());
+        assert_eq!(e.maschine_id(), None);
+        e.cid = "41634662".into();
+        assert!(e.hostable());
+        assert_eq!(e.vst2_uid(), Some(0x4163_4662));
+        // Maschine's id: the unique id in decimal, as it saves VST2 plug-ins.
+        assert_eq!(e.maschine_id().as_deref(), Some("Acme:VST:INSTR:1097025122"));
+        assert_eq!(Entry::from_line(&e.to_line()), Some(e.clone()));
+        // A project naming it finds the id back.
+        let id = crate::PluginId::parse(&e.maschine_id().unwrap(), "Fake").unwrap();
+        assert_eq!(crate::state::vst2_uid(&id.cid), Some(0x4163_4662));
+    }
+
+    #[test]
+    fn mpc_folders_are_found_in_a_vst2_plugins_folder() {
+        let root = std::env::temp_dir().join(format!("deckard-mpc-scan-{}", std::process::id()));
+        let dir = root.join("VST2 Plugins").join("Acme - VST - Fake");
+        std::fs::create_dir_all(dir.join("VST")).unwrap();
+        for f in ["fake-arm64.so", "fake-arm32.so"] {
+            std::fs::write(dir.join("VST").join(f), b"").unwrap();
+        }
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"Fake","manufacturer":"Acme","kind":"effect","uid":"AcFk","file32":"VST/fake-arm32.so","file64":"VST/fake-arm64.so"}"#,
+        )
+        .unwrap();
+        let found = mpc_entries(std::slice::from_ref(&root));
+        if cfg!(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm"))) {
+            assert_eq!(found.len(), 1);
+            assert_eq!((found[0].name.as_str(), found[0].instrument, found[0].cid.as_str()), ("Fake", false, "4163466B"));
+        } else {
+            assert!(found.is_empty(), "MPC binaries don't run here");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -906,6 +906,7 @@ impl Catalog {
         if let Some(text) = file("plugins.txt").and_then(|f| std::fs::read_to_string(f).ok()) {
             c.entries = text.lines().filter(|l| !l.starts_with('#')).filter_map(Entry::from_line).collect();
         }
+        c.publish_vst2();
         if c.entries.is_empty() || settings.scan_on_start {
             c.rescan(settings);
         }
@@ -916,10 +917,18 @@ impl Catalog {
         self.scanning.is_some()
     }
 
-    /// Scan again, in the background. VST3 bundles without a `moduleinfo.json` are
-    /// loaded by a helper process (this program with `--scan-vst3 <bundle>`), so a
-    /// plug-in that crashes can't take the app down; bundles that didn't change since
-    /// the last scan are taken from it.
+    /// Tell the plug-in host which VST2 plug-ins are installed, by unique id: a project
+    /// names a VST2 by its id, and finding a plug-in's id means loading it.
+    fn publish_vst2(&self) {
+        let found = self.entries.iter().filter_map(|e| Some((e.vst2_uid()?, e.name.clone(), PathBuf::from(&e.location)))).collect();
+        deckard_plugins::vst2::set_installed(found);
+    }
+
+    /// Scan again, in the background. VST3 bundles without a `moduleinfo.json`, and VST2
+    /// plug-ins, are loaded by a helper process (this program with `--scan-vst3 <bundle>`
+    /// or `--scan-vst2 <plug-in>`), so a plug-in that crashes can't take the app down;
+    /// ones that didn't change since the last scan are taken from it. MPC plug-in folders
+    /// are read without loading anything.
     pub fn rescan(&mut self, settings: &Settings) {
         if self.scanning.is_some() {
             return;
@@ -959,13 +968,27 @@ impl Catalog {
                 } else if let Some(e) = scan::vst3_from_moduleinfo(&b) {
                     e
                 } else {
-                    scan_in_helper(&b)
+                    scan_in_helper(&b, "--scan-vst3")
+                };
+                bundles.push((key, t));
+                entries.push(found);
+            }
+            for b in scan::vst2_bundles(&dirs) {
+                let key = b.display().to_string();
+                let t = mtime(&b);
+                let _ = tx.send(ScanMsg::Progress(format!(
+                    "Scanning {}",
+                    b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
+                )));
+                let found = match unchanged_scan(&known, &key, t) {
+                    Some(e) => e.clone(),
+                    None => scan_in_helper(&b, "--scan-vst2"),
                 };
                 bundles.push((key, t));
                 entries.push(found);
             }
             let mut all: Vec<Entry> = entries.concat();
-            all.extend(scan::vst2_entries(&dirs));
+            all.extend(scan::mpc_entries(&dirs));
             all.extend(scan::audio_units());
             let _ = tx.send(ScanMsg::Done(all, bundles));
         });
@@ -981,16 +1004,18 @@ impl Catalog {
             match m {
                 ScanMsg::Progress(p) => self.status = p,
                 ScanMsg::Done(entries, bundles) => {
-                    // The cache: per VST3 bundle, its mtime and entries; then the rest.
+                    // The cache: per VST3 bundle or VST2 plug-in, its mtime and entries;
+                    // then the rest.
                     let mut out = String::new();
+                    let scanned = |e: &Entry| matches!(e.kind, Kind::Vst3 | Kind::Vst2) && bundles.iter().any(|(b, _)| e.location == *b);
                     for (b, t) in &bundles {
                         out += &format!("#bundle\t{b}\t{t}\n");
-                        for e in entries.iter().filter(|e| e.kind == Kind::Vst3 && e.location == *b) {
+                        for e in entries.iter().filter(|e| scanned(e) && e.location == *b) {
                             out += &(e.to_line() + "\n");
                         }
                     }
                     out += "#other\t\t0\n";
-                    for e in entries.iter().filter(|e| e.kind != Kind::Vst3) {
+                    for e in entries.iter().filter(|e| !scanned(e)) {
                         out += &(e.to_line() + "\n");
                     }
                     if let Some(f) = file("plugins.txt") {
@@ -1001,6 +1026,7 @@ impl Catalog {
                     }
                     self.status = format!("{} plug-ins found", entries.len());
                     self.entries = entries;
+                    self.publish_vst2();
                     self.scanning = None;
                     changed = true;
                     break;
@@ -1018,13 +1044,14 @@ fn unchanged_scan<'a>(known: &'a [(String, u64, Vec<Entry>)], key: &str, mtime: 
     known.iter().find(|(p, t, e)| p == key && *t == mtime && !e.is_empty()).map(|(_, _, e)| e)
 }
 
-/// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
-/// bundle, which starts Wine). What it printed before it hung or crashed still counts.
-fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
+/// Run `<flag> <bundle>` (`--scan-vst3` or `--scan-vst2`) in a helper process (20 s at
+/// most; 90 s for a yabridge bundle, which starts Wine). What it printed before it hung or
+/// crashed still counts.
+fn scan_in_helper(bundle: &Path, flag: &str) -> Vec<Entry> {
     let limit = if bundle.to_string_lossy().contains("yabridge") { 90 } else { 20 };
     let Ok(exe) = std::env::current_exe() else { return Vec::new() };
     let Ok(mut child) = std::process::Command::new(exe)
-        .arg("--scan-vst3")
+        .arg(flag)
         .arg(bundle)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -1052,9 +1079,11 @@ fn scan_in_helper(bundle: &Path) -> Vec<Entry> {
     text.lines().filter_map(Entry::from_line).collect()
 }
 
-/// `--scan-vst3 <bundle>`: print the bundle's classes, one [`Entry`] line each.
-pub fn scan_vst3_main(bundle: &Path) -> i32 {
-    match scan::vst3_by_loading(bundle) {
+/// `--scan-vst3 <bundle>` or `--scan-vst2 <plug-in>` (`vst2`): print the bundle's
+/// classes, or the plug-in, one [`Entry`] line each.
+pub fn scan_main(bundle: &Path, vst2: bool) -> i32 {
+    let found = if vst2 { scan::vst2_by_loading(bundle) } else { scan::vst3_by_loading(bundle) };
+    match found {
         // Not println!: if the app quit meanwhile, the pipe is closed and println!
         // would panic, and a panic leaves through the plug-ins' exit-time destructors.
         Ok(entries) => {

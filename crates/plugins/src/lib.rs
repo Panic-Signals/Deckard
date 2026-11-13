@@ -1,5 +1,6 @@
 //! Hosting the plug-ins a Maschine project uses (VST3; VST2 plug-ins through their
-//! VST3 versions, see [`state`]; Audio Units on macOS, see [`au`]).
+//! VST3 versions, see [`state`], or directly, see [`vst2`]; Audio Units on macOS, see
+//! [`au`]).
 //!
 //! [`Host`] keeps one [`Plugin`] instance per slot of the project (a sound's
 //! instrument, say), so they survive the engine being rebuilt after every edit.
@@ -23,6 +24,7 @@ mod replicant;
 pub mod runloop;
 pub mod scan;
 pub mod state;
+pub mod vst2;
 
 use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream};
 use module::Module;
@@ -198,8 +200,8 @@ unsafe impl Send for Vst3 {}
 
 pub type Shared = Arc<Mutex<Plugin>>;
 
-/// One running plug-in: a VST3, one of DECKARD's own ([`native`]) or an Audio Unit
-/// ([`au`]).
+/// One running plug-in: a VST3, a VST2 ([`vst2`]), one of DECKARD's own ([`native`]) or
+/// an Audio Unit ([`au`]).
 pub struct Plugin {
     pub name: String,
     pub id: PluginId,
@@ -208,6 +210,7 @@ pub struct Plugin {
 
 enum Kind {
     Vst3(Box<Vst3>),
+    Vst2(Box<vst2::Vst2>),
     Native(Box<native::Instance>),
     #[cfg(target_os = "macos")]
     AudioUnit(Box<au::AudioUnit>),
@@ -218,6 +221,7 @@ macro_rules! each {
     ($self:ident, $p:ident => $e:expr) => {
         match &$self.kind {
             Kind::Vst3($p) => $e,
+            Kind::Vst2($p) => $e,
             Kind::Native($p) => $e,
             #[cfg(target_os = "macos")]
             Kind::AudioUnit($p) => $e,
@@ -226,6 +230,7 @@ macro_rules! each {
     (mut $self:ident, $p:ident => $e:expr) => {
         match &mut $self.kind {
             Kind::Vst3($p) => $e,
+            Kind::Vst2($p) => $e,
             Kind::Native($p) => $e,
             #[cfg(target_os = "macos")]
             Kind::AudioUnit($p) => $e,
@@ -239,6 +244,13 @@ impl Plugin {
     pub fn new(module: &Arc<Module>, id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let v = Vst3::new(module, &id, sample_rate)?;
         Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)) })
+    }
+
+    /// An instance of the VST2 plug-in at `path`, ready to process at `sample_rate`, with
+    /// no state set yet.
+    pub fn vst2(path: &std::path::Path, id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
+        let v = vst2::Vst2::load(path, sample_rate)?;
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst2(Box::new(v)) })
     }
 
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
@@ -474,13 +486,14 @@ impl Plugin {
     /// the instance (so the audio thread never waits on the UI): VST3 controllers run on
     /// the UI thread alongside processing, and an AU's parameters are made for this. Use
     /// it on the thread that made the plug-in.
-    /// None for DECKARD's own plug-ins (reading those under the lock is instant).
+    /// None for DECKARD's own plug-ins and VST2s (reading those under the lock is instant).
     pub fn params(&self) -> Option<Params> {
         match &self.kind {
             Kind::Vst3(p) => {
                 Some(Params(ParamsOf::Vst3 { controller: p.controller.clone()?, edits: p.edits.clone(), bases: p.knob_bases.clone() }))
             }
-            Kind::Native(_) => None,
+            // (Read under the lock, as DECKARD's own are: a VST2 answers at once.)
+            Kind::Native(_) | Kind::Vst2(_) => None,
             #[cfg(target_os = "macos")]
             Kind::AudioUnit(p) => Some(Params(ParamsOf::AudioUnit(p.shared().clone()))),
         }
@@ -1298,14 +1311,10 @@ impl Host {
         let made = if id.format == state::Format::AudioUnit {
             Plugin::audio_unit(id, name, sample_rate)
         } else {
-            let module = self.module_for(&id.cid, name).ok_or_else(|| self.why_not_loaded(&id.cid, name))?;
-            Plugin::new(&module, id, name, sample_rate)
+            self.vst(id, name, sample_rate)?
         };
         #[cfg(not(target_os = "macos"))]
-        let made = {
-            let module = self.module_for(&id.cid, name).ok_or_else(|| self.why_not_loaded(&id.cid, name))?;
-            Plugin::new(&module, id, name, sample_rate)
-        };
+        let made = self.vst(id, name, sample_rate)?;
         let mut p = made.map_err(|e| format!("{name}: {e}"))?;
         p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
         p.warm_up();
@@ -1365,6 +1374,22 @@ impl Host {
 
     /// Why no module has class `cid`: a bundle that should have but wouldn't load says
     /// what went wrong, rather than the plug-in not being there.
+    /// A VST3 instance of `id`; for a VST2 id, its VST3 version if installed, else the
+    /// VST2 itself. (`Err` when it isn't installed; `Ok(Err)` when it won't start.)
+    fn vst(&mut self, id: PluginId, name: &str, sample_rate: f64) -> Result<Result<Plugin, String>, String> {
+        let vst2 =
+            (id.format == state::Format::Vst2).then(|| state::vst2_uid(&id.cid).and_then(|uid| vst2::find_installed(uid, name))).flatten();
+        // With the VST2 installed, a VST3 version counts only if it's found without
+        // loading every bundle that doesn't say what it holds.
+        if let Some(module) = self.module_for(&id.cid, name, vst2.is_none()) {
+            return Ok(Plugin::new(&module, id, name, sample_rate));
+        }
+        if let Some(path) = vst2 {
+            return Ok(Plugin::vst2(&path, id, name, sample_rate));
+        }
+        Err(self.why_not_loaded(&id.cid, name))
+    }
+
     fn why_not_loaded(&self, cid: &[u8; 16], name: &str) -> String {
         let lname = name.to_lowercase();
         let its = |b: &std::path::Path| match module::declared_classes(b) {
@@ -1373,14 +1398,15 @@ impl Host {
         };
         match self.broken.iter().find(|(b, _)| its(b)) {
             Some((b, e)) => format!("{name}: couldn't load {}: {e}", b.display()),
+            None if state::vst2_uid(cid).is_some() => format!("{name}: not installed as VST3 or VST2"),
             None => format!("{name}: not installed as VST3"),
         }
     }
 
     /// The loaded module that has class `cid`, loading it if needed: first bundles that
-    /// declare it, then ones named like the plug-in, then any others that don't
-    /// declare their classes.
-    fn module_for(&mut self, cid: &[u8; 16], name: &str) -> Option<Arc<Module>> {
+    /// declare it, then ones named like the plug-in, then (`thorough`) any others that
+    /// don't declare their classes.
+    fn module_for(&mut self, cid: &[u8; 16], name: &str, thorough: bool) -> Option<Arc<Module>> {
         if let Some(m) = self.modules.iter().find(|m| m.has(cid)) {
             return Some(m.clone());
         }
@@ -1395,7 +1421,8 @@ impl Host {
                     Some(d) if d.iter().any(|c| module::same_class(c, cid)) => 0,
                     Some(_) => return None,
                     None if b.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == lname) => 1,
-                    None => 2,
+                    None if thorough => 2,
+                    None => return None,
                 };
                 Some((rank, b))
             })
@@ -1433,5 +1460,36 @@ mod tests {
         assert!((b.get(42).unwrap() - 0.85).abs() < 1e-6);
         b.remove(42);
         assert_eq!(b.get(42), None);
+    }
+
+    /// A project's VST2 id plays the VST2 itself when it has no VST3 version (with a real
+    /// plug-in, when `DECKARD_VST2_SYNTH` names one).
+    #[test]
+    fn a_vst2_id_is_hosted_directly() {
+        let Some(path) = std::env::var_os("DECKARD_VST2_SYNTH").map(std::path::PathBuf::from) else { return };
+        let info = vst2::probe(&path).unwrap();
+        vst2::set_installed(vec![(info.unique_id, info.name.clone(), path)]);
+        let id = format!("{}:VST:INSTR:{}", info.vendor, info.unique_id);
+        // No VST3 version: the VST2 plays.
+        module::set_search_paths(Vec::new());
+        let mut host = Host::default();
+        let slot = Slot::Sound { group: 0, sound: 0 };
+        // (Made as `instance` makes it; tests don't run on the main thread it insists on.)
+        let made = host.vst(PluginId::parse(&id, &info.name).unwrap(), &info.name, 48000.0).unwrap().unwrap();
+        assert!(matches!(made.kind, Kind::Vst2(_)));
+        let shared = host.insert(slot, made);
+        let mut p = shared.lock().unwrap();
+        p.note_on(60, 110);
+        let mut peak = 0f32;
+        for _ in 0..20 {
+            peak = peak.max(p.process(256, &Transport::default()).0.iter().fold(0f32, |m, s| m.max(s.abs())));
+        }
+        assert!(peak > 0.01, "it plays: {peak}");
+        // What a project saves, and loads again into the same instance.
+        let saved = p.save_chunk();
+        assert!(state::unwrap_chunk(&saved, state::Format::Vst2).is_ok_and(|s| !s.component.is_empty()));
+        drop(p);
+        let again = host.instance(slot, &id, &info.name, &saved, 48000.0).unwrap();
+        assert!(Arc::ptr_eq(&shared, &again));
     }
 }

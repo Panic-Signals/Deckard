@@ -106,6 +106,11 @@ pub fn vst2_cid(unique_id: u32, name: &str) -> [u8; 16] {
     cid
 }
 
+/// The VST2 unique id in what [`vst2_cid`] made, if `cid` is one.
+pub fn vst2_uid(cid: &[u8; 16]) -> Option<u32> {
+    (&cid[..3] == b"VST").then(|| u32::from_be_bytes(cid[3..7].try_into().unwrap()))
+}
+
 pub(crate) fn hex16(s: &str) -> Option<[u8; 16]> {
     if s.len() != 32 {
         return None;

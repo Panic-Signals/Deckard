@@ -181,12 +181,13 @@ fn main() {
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The plug-in scanner's helper process (see settings::Catalog::rescan).
-    if args.first().is_some_and(|a| a == "--scan-vst3")
+    if let Some(flag) = args.first().filter(|a| *a == "--scan-vst3" || *a == "--scan-vst2")
         && let Some(bundle) = args.get(1)
     {
+        let vst2 = flag == "--scan-vst2";
         // Whatever happens (a plug-in panicking us), leave without running the loaded
         // plug-ins' exit-time destructors, which crash in some (Guitar Rig, Kontakt).
-        let code = std::panic::catch_unwind(|| settings::scan_vst3_main(Path::new(bundle))).unwrap_or(101);
+        let code = std::panic::catch_unwind(|| settings::scan_main(Path::new(bundle), vst2)).unwrap_or(101);
         deckard_plugins::exit(code);
     }
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
@@ -3167,7 +3168,7 @@ impl App {
                     ui.checkbox(&mut self.settings.use_au, "Use Audio Units");
                 });
                 ui.checkbox(&mut self.settings.scan_on_start, "Rescan plug-ins at start-up");
-                ui.label(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak());
+                ui.label(egui::RichText::new("VST2 plug-ins have no window in DECKARD yet: their knobs are on the plug-in's pages.").weak());
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;
