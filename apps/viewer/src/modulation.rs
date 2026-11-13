@@ -68,22 +68,29 @@ pub fn register() {
 
 /// The channel and parameter a knob changes, when its movements can be written as
 /// modulation: a continuous knob of a module in a sound's or a group's chain, or a
-/// sound's or group's fader (the master's isn't modulated).
+/// sound's or group's gain or aux send (the master's isn't modulated, nor is a channel
+/// property the engine doesn't play, like its cue or a send's destination).
 pub fn mod_target(e: Edit) -> Option<(Chain, ModTarget)> {
-    let fader = |t: Target, field: &str| {
-        let chain = match t {
+    // A channel's own property (its gain or an aux send): no slot.
+    let channel = |t: Target| -> Option<Chain> {
+        Some(match t {
             Target::Sound(g, s) => Chain::Sound(g, s),
             Target::Group(g) | Target::GroupStrip(g) => Chain::Group(g),
             _ => return None,
-        };
-        Some((chain, ModTarget { slot: None, field: field.into() }))
+        })
+    };
+    let own = |t: Target, field: &str| {
+        let c = channel(t)?;
+        deckard_engine::channel_field(field).then(|| (c, ModTarget { slot: None, field: field.into() }))
     };
     let (t, f) = match e {
-        Edit::Level(t) => return fader(t, "level"),
-        Edit::Pan(t) => return fader(t, "pan"),
+        Edit::Level(t) => return own(t, "level"),
+        Edit::Pan(t) => return own(t, "pan"),
         Edit::PluginIn(c @ (Chain::Sound(..) | Chain::Group(_)), i, id, _) => {
             return Some((c, ModTarget { slot: Some(i), field: id.to_string() }));
         }
+        // (A channel target's knobs are its own properties, not a slot's.)
+        Edit::Param(t, f, ..) | Edit::Log(t, f, ..) | Edit::Int(t, f, ..) if channel(t).is_some() => return own(t, f),
         Edit::Param(t, f, ..) | Edit::Log(t, f, ..) | Edit::Int(t, f, ..) => (t, f),
         _ => return None,
     };
@@ -97,17 +104,26 @@ pub fn mod_target(e: Edit) -> Option<(Chain, ModTarget)> {
 }
 
 /// Where the knob of `target` (a module's parameter in chain `c`, or its channel's
-/// fader) is, 0..1.
+/// fader or send) is, 0..1.
 pub fn knob_travel(p: &Project, c: Chain, target: &ModTarget) -> Option<f64> {
     if target.slot.is_none() {
-        let (level, pan) = match c {
-            Chain::Sound(g, s) => p.groups.get(g)?.sounds.get(s).map(|x| (x.level, x.pan))?,
-            Chain::Group(g) => p.groups.get(g).map(|x| (x.level, x.pan))?,
+        let (level, pan, aux) = match c {
+            Chain::Sound(g, s) => {
+                let x = p.groups.get(g)?.sounds.get(s)?;
+                (x.level, x.pan, x.aux)
+            }
+            Chain::Group(g) => {
+                let x = p.groups.get(g)?;
+                (x.level, x.pan, x.aux)
+            }
             Chain::Master => return None,
         };
         return match target.field.as_str() {
             "level" => Some(level),
             "pan" => Some((pan + 1.0) / 2.0),
+            // (A send's level is its knob's travel, as the fader's is.)
+            "aux1_level" => Some(aux[0]),
+            "aux2_level" => Some(aux[1]),
             _ => None,
         };
     }
