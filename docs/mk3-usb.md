@@ -89,8 +89,9 @@ Single-colour LEDs take a brightness 0..0x7f. Colour LEDs (groups, pads, strip) 
 palette byte, `(colour + 1) << 2 | shade`: colour is the scripts' `LEDColors` index
 (0 red … 15 fuchsia, 16 white); shade 0 dimmest … 3 brightest. Shades 0 and 2 and the
 colours were confirmed on the hardware (`examples/mk3-led-check.rs`); each touch-strip LED
-takes its own colour. DECKARD sends dim as shade 0 and every brighter state as 3, as
-Maschine's MK3 LED table gives bright and flash the full level; button LEDs that are off
+takes its own colour. DECKARD sends dim as shade 0, bright as shade 2 and flash as shade 3,
+ as Maschine's MK3 LED table: bright is the colour's own bright level, flash mixes in
+ white.
 keep a faint backlight (0x09, picked on the hardware) so their labels can be read; dim ones (can be pressed, not
 selected) are 0x22, 30% under Maschine's 0.25. SAMPLING is a colour LED, and its dim white
 doesn't look like the one-colour buttons, so when it isn't selected it gets byte 73, past
