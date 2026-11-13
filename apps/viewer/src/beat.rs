@@ -103,6 +103,24 @@ pub fn grid_slices(map: &BeatMap, (a, b): (usize, usize), division: u32) -> Vec<
     out
 }
 
+/// The stem lane (0 Drums, 1 Vocals, 2 Bass, 3 Leads) a stem file called `name` goes on,
+/// by what its name says; the next free one of `taken` if that one is; none when all
+/// four are.
+pub fn lane_for(name: &str, taken: &[bool; 4]) -> Option<usize> {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    let want = if has(&["drum", "perc", "beat", "kick"]) {
+        0
+    } else if has(&["voc", "vox", "acap", "sing"]) {
+        1
+    } else if has(&["bass", "sub"]) {
+        2
+    } else {
+        3
+    };
+    (0..4).map(|k| (want + k) % 4).find(|&k| !taken[k])
+}
+
 /// Quantize grids, beats: 1/4, 1/8, 1/16, 1/32 notes.
 pub const WARP_GRIDS: [(f64, &str); 4] = [(1.0, "1/4"), (0.5, "1/8"), (0.25, "1/16"), (0.125, "1/32")];
 
@@ -165,6 +183,21 @@ mod tests {
         assert_eq!(grid_slices(&map, (1000, 40_000), 8), [1000, 13_000, 25_000, 37_000]);
         // (A line just after the start isn't a slice.)
         assert_eq!(grid_slices(&map, (990, 30_000), 4), [990, 25_000]);
+    }
+
+    #[test]
+    fn stem_files_find_their_lanes() {
+        let mut taken = [false; 4];
+        for (name, lane) in [("Song (Vocals).wav", 1), ("song_drums.wav", 0), ("SubBass.wav", 2), ("Keys.wav", 3), ("Guitar.wav", 0)] {
+            let got = lane_for(name, &taken);
+            if name == "Guitar.wav" {
+                assert_eq!(got, None, "all four taken");
+            } else {
+                assert_eq!(got, Some(lane), "{name}");
+                taken[lane] = true;
+            }
+        }
+        assert_eq!(lane_for("Pad.wav", &[false, false, false, true]), Some(0), "Leads taken: the next free");
     }
 
     #[test]

@@ -263,6 +263,8 @@ pub struct LaneView {
 pub enum SamplingAct {
     /// STEMS into a new group, whatever the zone (Maschine's way).
     StemsToGroup,
+    /// Pick stem files for the focused zone's lanes.
+    LoadStems,
     /// A stem lane of the focused zone.
     Lane(usize, LaneAct),
     /// The lanes folded into one waveform, or stacked.
@@ -1433,6 +1435,25 @@ fn edit_tab(
             _ => label.to_string(),
         };
         let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(58.0, 40.0));
+        // STEMS, right-clicked: where the stems go, or stems of your own.
+        if op == EditOp::Stems && stems.is_none() {
+            ui.interact(r, ui.id().with("stems-menu"), Sense::click())
+                .on_hover_text("Separate into stems: onto a New Sampler zone's lanes, else a new group (Shift, or right-click for more)")
+                .context_menu(|ui| {
+                    if ui.button("Separate onto the zone's lanes").clicked() {
+                        acts.push(sact(SamplingAct::Edit(EditOp::Stems)));
+                        ui.close();
+                    }
+                    if ui.button("Separate into a new group").clicked() {
+                        acts.push(sact(SamplingAct::StemsToGroup));
+                        ui.close();
+                    }
+                    if ui.button("Load stem files…").clicked() {
+                        acts.push(sact(SamplingAct::LoadStems));
+                        ui.close();
+                    }
+                });
+        }
         if tool_button(ui, &painter, r, &text, enabled, false, label) {
             let to_group = op == EditOp::Stems && stems.is_none() && ui.input(|i| i.modifiers.shift);
             acts.push(sact(match op {

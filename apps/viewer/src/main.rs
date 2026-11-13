@@ -7353,6 +7353,65 @@ impl App {
         }
     }
 
+    /// Stems of your own on the focused New Sampler zone's lanes: up to four files at
+    /// the sample's rate, each on the lane its name says (drums, vocals, bass; else
+    /// Leads, or the next free). One shorter than the sample is padded with silence (a
+    /// copy, in Stems); one longer is refused. One undo step.
+    fn load_stems(&mut self, files: &[PathBuf]) {
+        use deckard_model::new_sampler::StemLane;
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let (Some(mut meta), Some(sample)) = (zone.meta, self.sampling.sample.clone()) else {
+            self.status = "stems go on a New Sampler's zone (once it's analysed)".into();
+            return;
+        };
+        let mut taken: [bool; 4] = std::array::from_fn(|k| meta.stems[k].is_some());
+        let mut left_out = Vec::new();
+        for f in files {
+            let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let stem = match deckard_engine::sample::Sample::load(f) {
+                Ok(s) if s.rate != sample.rate => {
+                    left_out.push(format!("{name} ({} Hz, the sample is {})", s.rate, sample.rate));
+                    continue;
+                }
+                Ok(s) if s.frames.len() > sample.frames.len() => {
+                    left_out.push(format!("{name} (longer than the sample)"));
+                    continue;
+                }
+                Ok(s) => s,
+                Err(e) => {
+                    left_out.push(format!("{name} ({e})"));
+                    continue;
+                }
+            };
+            let Some(lane) = beat::lane_for(&name, &taken) else {
+                left_out.push(format!("{name} (four lanes at most)"));
+                continue;
+            };
+            let mut path = f.clone();
+            if stem.frames.len() < sample.frames.len() {
+                let mut frames = stem.frames;
+                frames.resize(sample.frames.len(), [0.0; 2]);
+                path = deckard_engine::edit::edited_path(&self.sample_dir("Stems"), f);
+                if let Err(e) =
+                    deckard_engine::edit::write_wav_channels(&path, &deckard_engine::sample::Sample { rate: stem.rate, frames }, 2)
+                {
+                    left_out.push(format!("{name} ({e})"));
+                    continue;
+                }
+            }
+            taken[lane] = true;
+            meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
+        }
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Load Stems") {
+            self.status = format!("can't put the stems on the zone: {e}");
+        } else if !left_out.is_empty() {
+            self.status = format!("left out: {}", left_out.join(", "));
+        }
+    }
+
     /// A stem lane of the focused zone muted, soloed, set to a gain, or all removed.
     fn lane_act(&mut self, lane: usize, act: layout::sampling::LaneAct) {
         use layout::sampling::LaneAct as L;
@@ -7540,6 +7599,11 @@ impl App {
             S::StemsToGroup => {
                 if self.stems.is_none() {
                     self.start_stems(true);
+                }
+            }
+            S::LoadStems => {
+                if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "aifc"]).pick_files() {
+                    self.load_stems(&files);
                 }
             }
             S::Lane(k, act) => self.lane_act(k, act),

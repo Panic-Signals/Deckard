@@ -332,6 +332,20 @@ and the Sampler both stay.
 
 ## Phase 2b: Stem lanes in the Sampler
 
+**Built 2026-11-12** (first cut): a zone's meta keeps up to four stems (file, mute, solo,
+gain); a voice reads them with the sample (all on: the sample itself; else their sum,
+crossfaded and ramped over 5 ms on sounding notes); Sync and Keys stretch each lane (the
+root's with the sample, a Keys note's once a lane is off unity). STEMS on a New Sampler
+zone puts the stems on its lanes (Shift, or its right-click menu: a new group; "Load
+stem files…": your own, by name, short ones padded, long ones and other rates left
+out). The Sampling page stacks the lanes (name, M, S, level; MIX folds them; NO STEMS
+takes them off). MK3: EDIT's STEMS knob page has the levels, display buttons 5–8 the
+mutes (SHIFT: solo), the right display the lanes stacked. Slices keep the lanes, each
+with mutes of its own. Not yet: mute and gain as automation and mod-matrix targets;
+analysis from the right lane; dropping files onto lanes (a file picker for now); an
+edit of the sample (truncate, reverse…) drops its lanes; the scripts route's native
+display shows one waveform.
+
 Mute the drums, vocals, bass or leads of a sample right in the New Sampler, without leaving the
 sound. Today STEMS makes a new group of four Audio plug-ins (`docs/stems.md`); this keeps the
 four stems together in one zone, so they share every edit.

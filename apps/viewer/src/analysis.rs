@@ -338,6 +338,29 @@ mod app_tests {
         assert!(lanes(&app).iter().all(Option::is_none));
         app.doc.as_ref().unwrap().borrow_mut().undo();
         assert!(lanes(&app).iter().all(Option::is_some), "back with one undo");
+        // Stems of your own: by name onto their lanes; a short one padded, a long one
+        // and one at another rate left out.
+        app.lane_act(0, LaneAct::Clear);
+        let own = |name: &str, rate: u32, n: usize| {
+            let f = dir.path().join(name);
+            deckard_engine::edit::write_wav_channels(&f, &deckard_engine::sample::Sample { rate, frames: vec![[0.2; 2]; n] }, 2).unwrap();
+            f
+        };
+        app.load_stems(&[
+            own("My Bass.wav", rate, 96_000),
+            own("My Vox.wav", rate, 1000),
+            own("Long.wav", rate, 96_001),
+            own("Slow.wav", 44_100, 100),
+        ]);
+        let l = lanes(&app);
+        assert!(l[0].is_none() && l[3].is_none(), "{l:?}");
+        assert!(l[2].as_ref().unwrap().file.ends_with("My Bass.wav"));
+        let padded = deckard_engine::sample::Sample::load(std::path::Path::new(&l[1].as_ref().unwrap().file)).unwrap();
+        assert_eq!(padded.frames.len(), 96_000, "padded to the sample's length");
+        assert!(app.status.contains("Long.wav") && app.status.contains("Slow.wav"), "{}", app.status);
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        assert!(lanes(&app).iter().all(Option::is_some), "the separated stems again");
         // SLICE's Grid follows the sample's own beats (120 here), not the song's (90).
         app.doc.as_ref().unwrap().borrow_mut().set_tempo(90.0).unwrap();
         (app.sampling.slice_mode, app.sampling.grid) = (1, 0);
@@ -357,6 +380,17 @@ mod app_tests {
         app.record_apply.insert("Beat.Start".into(), crate::sampling_hw::Apply::StartGrid);
         app.sampling_knob("Beat.Start", 3.0);
         assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Quarter);
+        // Slices keep the stems, each with mutes of its own.
+        app.sampling.slices = vec![0, 24_000, 48_000, 72_000];
+        app.sampling.pattern_mode = 2;
+        app.apply_slices();
+        let zones = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones.clone();
+        assert_eq!(zones(&app).len(), 4, "{}", app.status);
+        assert!(zones(&app).iter().all(|z| z.meta.as_ref().is_some_and(|m| m.has_stems())), "each slice has the lanes");
+        app.zone = 1;
+        app.lane_act(0, LaneAct::Mute);
+        let muted: Vec<bool> = zones(&app).iter().map(|z| z.meta.as_ref().unwrap().stems[0].as_ref().unwrap().mute).collect();
+        assert_eq!(muted, [false, true, false, false]);
     }
 
     /// A groove on DECKARD's own drum synths: (kick, snare, hat) steps of 16 in a bar,
