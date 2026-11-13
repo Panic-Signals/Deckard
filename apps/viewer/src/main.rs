@@ -27,6 +27,7 @@ mod arp_ui;
 mod audio_settings;
 mod audio_ui;
 mod blink;
+mod boot;
 mod bounce;
 mod browser;
 #[cfg(test)]
@@ -256,7 +257,6 @@ fn main() {
         options,
         Box::new(move |cc| {
             layout::style(&cc.egui_ctx);
-            let screenshot_wanted = screenshot.clone();
             let mut app = App {
                 midi_devices: midi_devices::MidiDevices::new(menu::settings_dir().map(|d| d.join("controller"))),
                 screenshot,
@@ -269,48 +269,15 @@ fn main() {
                 prop_set: 1,
                 scale: (60, 0, 0),
                 scale_group: None,
-                user_chords: user_chords::UserChords::load(),
-                mk3: Some(mk3_io::Mk3Io::start()),
-                jam: Some(jam_io::JamIo::start()),
                 _running: Some(keep_running::begin()),
+                boot: Some(boot::Boot::new(boot::all_steps(path))),
                 ..Default::default()
             };
-            app.recent = menu::load_recent();
-            app.settings = settings::Settings::load();
-            app.browser.routing = app.settings.load_group_routing;
-            app.browser.patterns = app.settings.load_group_patterns;
-            // (Nothing to open through ASIO before a driver is picked.)
-            if app.settings.asio_device.is_some() {
-                deckard_engine::devices::set_driver(app.settings.audio_driver);
-            }
-            app.update = update::Notice::start(app.settings.check_updates);
-            app.after_update(VERSION);
+            app.boot_to_end();
+            app.boot = None;
             if app.settings.app_icon != icon::Style::default() {
                 // The Dock and the taskbar's big icon, which the window's icon doesn't set.
                 icon::apply(&cc.egui_ctx, app.settings.app_icon);
-            }
-            app.surface = app.new_surface();
-            if let Some(m) = &app.mk3 {
-                m.set_display_brightness(app.settings.display_brightness);
-            }
-            app.recorder = recorder::Recorder::new();
-            deckard_plugins::module::set_search_paths(app.settings.scan_dirs());
-            app.catalog = settings::Catalog::load(&app.settings);
-            app.session_dir = menu::settings_dir();
-            // The first start without the stem separation model: offer it (not when
-            // rendering a screenshot).
-            if screenshot_wanted.is_none()
-                && !app.settings.stems_offered
-                && let Some(dir) = &app.session_dir
-                && !stems::installed(dir)
-            {
-                app.stems_offer = Some(StemsOffer::Asking);
-            }
-            if let Some(p) = path {
-                app.open(&p);
-                app.remember(&p);
-            } else {
-                app.start_project();
             }
             app.group = group;
             app.focus_scene(scene);
@@ -982,6 +949,8 @@ pub struct App {
     /// Load the project's plug-ins once the window has drawn (they take a moment, and
     /// a press that waits for them isn't a click any more).
     preload_plugins: bool,
+    /// Startup in progress, as a queue of steps (`None` once it is over).
+    boot: Option<boot::Boot>,
     /// Frames drawn since the project was opened (plug-ins load after the second).
     frames_drawn: u32,
     /// Open plug-in windows: (group, sound, window).
