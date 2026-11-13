@@ -122,6 +122,7 @@ mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
 mod settings;
+mod splash;
 mod splice;
 mod stems;
 #[cfg(test)]

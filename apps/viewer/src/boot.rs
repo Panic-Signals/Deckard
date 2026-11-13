@@ -53,8 +53,7 @@ pub struct Boot {
     pub ready_at: Option<Instant>,
     /// The last file dropped while loading, opened after.
     pub held: Option<PathBuf>,
-    // (Used by the splash window.)
-    #[allow(dead_code)]
+    /// The splash window was closed by hand.
     pub hidden: bool,
     queue: VecDeque<Step>,
     /// The step whose line is showing as running.
@@ -181,7 +180,9 @@ impl App {
         }
         self.boot_next();
         ui.painter().rect_filled(ui.max_rect(), 0.0, layout::S00);
-        // (The splash window is drawn here.)
+        if let Some(b) = self.boot.as_mut() {
+            crate::splash::show(&ctx, b);
+        }
         if self.boot.as_ref().is_some_and(|b| b.may_close(Instant::now())) {
             let held = self.boot.take().and_then(|b| b.held);
             if let Some(p) = held {
