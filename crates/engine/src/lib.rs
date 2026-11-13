@@ -816,13 +816,20 @@ struct CueBus {
     clicks: Vec<f32>,
     /// Peak (left, right) since the UI last took it.
     peak: (f32, f32),
+    /// [`cue_on_master`]: the output whose `ext` buffer the bus fills, to be added to
+    /// the master's output after the master.
+    post_master: Option<usize>,
+    /// That buffer as the span found it: what the bus adds is the difference.
+    before: Vec<f32>,
 }
 
 impl CueBus {
     fn of(p: &Project) -> CueBus {
         let route = cue_route(p);
+        // The click and the prehear as before: onto the master's mix after its effects,
+        // past its level.
         let clicks_route = match p.cue_output {
-            deckard_model::AudioDest::Ext(n) if (0..OUTPUTS as i64).contains(&n) => route,
+            deckard_model::AudioDest::Ext(n) if (0..OUTPUTS as i64).contains(&n) => ext_route(p, n, channel_gain(p.cue_level, p.cue_pan)),
             _ => (None, (1.0, 1.0)),
         };
         let to_meter = if route.0.is_none() { channel_gain(p.master_level, p.master_pan) } else { (1.0, 1.0) };
@@ -841,6 +848,8 @@ impl CueBus {
             mix: vec![0.0; JOB_FRAMES * 2],
             clicks: vec![0.0; JOB_FRAMES * 2],
             peak: (0.0, 0.0),
+            post_master: cue_on_master(p),
+            before: vec![0.0; JOB_FRAMES * 2],
         }
     }
 
@@ -883,11 +892,22 @@ fn dest_cued(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>,
     }
 }
 
-/// The cue bus, on its output.
+/// The cue bus, on its output. On the master's output it's still its own: the engine
+/// adds it there after the master's effects and level ([`cue_on_master`]), not into
+/// the master's mix, where the master's plug-ins would play it.
 fn cue_route(p: &Project) -> Route {
     match p.cue_output {
+        deckard_model::AudioDest::Ext(n) if cue_on_master(p).is_some() => (Some(n as usize), channel_gain(p.cue_level, p.cue_pan)),
         deckard_model::AudioDest::Ext(n) => ext_route(p, n, channel_gain(p.cue_level, p.cue_pan)),
         _ => SILENT,
+    }
+}
+
+/// The master's output (Out n, from 0), when the cue bus is on it too.
+fn cue_on_master(p: &Project) -> Option<usize> {
+    match p.cue_output {
+        deckard_model::AudioDest::Ext(n) if p.cue_output == p.master_output && (0..OUTPUTS as i64).contains(&n) => Some(n as usize),
+        _ => None,
     }
 }
 
@@ -4948,6 +4968,11 @@ impl Engine {
 
     fn process_span(&mut self, out: &mut [f32], ext: &mut [Vec<f32>], at: usize) {
         out.fill(0.0);
+        if let Some(n) = self.cue.post_master
+            && let Some(was) = ext.get(n).and_then(|b| b.get(at..at + out.len()))
+        {
+            self.cue.before[..was.len()].copy_from_slice(was);
+        }
         let frames = out.len() / 2;
         self.take_input(frames);
         // Players' notes for the frames ahead of this span.
@@ -5146,6 +5171,25 @@ impl Engine {
         }
         if self.tap.as_ref().is_some_and(|t| t.source == TapSource::Master) {
             self.flush_tap(out);
+        }
+        // The cue bus on the master's output: added after the master (its effects, level,
+        // meter and recording), as on an output of its own. (The interface takes the master
+        // from `out` on those channels, so their `ext` is otherwise unheard; a channel that's
+        // CV is the `ext` one, left as it is.)
+        if let Some(n) = self.cue.post_master
+            && let Some(cue) = ext.get_mut(n).and_then(|b| b.get_mut(at..at + out.len()))
+        {
+            for (i, ((o, c), was)) in out.iter_mut().zip(cue).zip(&self.cue.before).enumerate() {
+                let channel = n * 2 + i % 2;
+                if channel < 32 && self.cv_channels >> channel & 1 == 1 {
+                    continue;
+                }
+                // What the bus added this span moves to the master's output; the
+                // buffer is left as it was given.
+                let v = *o + (*c - *was);
+                *c = *was;
+                *o = if v.is_finite() { v.clamp(-4.0, 4.0) } else { 0.0 };
+            }
         }
         // Hand sounds to players or take them back, from the end of this span.
         if self.ahead.is_some() {
@@ -7790,7 +7834,7 @@ mod tests {
         p.groups[0].sounds[0].channel.dest = D::Parent;
         p.groups[0].sounds[0].cue = true;
         assert!(close(sound_gain(&p, 0, 0), (unity, unity)), "the cue bus, on the master's output");
-        assert_eq!(sound_bus(&p, 0, 0), None);
+        assert_eq!(sound_bus(&p, 0, 0), Some(0), "its own way there, past the master");
         p.cue_output = D::Ext(1);
         assert!(close(sound_gain(&p, 0, 0), (unity, unity)), "the cue bus on Out 2");
         assert_eq!(sound_bus(&p, 0, 0), Some(1));
@@ -11972,17 +12016,31 @@ mod tests {
         assert!(near(e.cue.peak.0, 0.5 * g) && near(e.cue.peak.1, 0.5 * g), "{:?}", e.cue.peak);
     }
 
-    /// On the master's output, the meter shows the bus, not what's divided by the master's
-    /// gain to get past it.
+    /// On the master's output, the bus is past the master: its level (and the meter shows
+    /// the bus), and its plug-ins, which a cued channel doesn't go through.
     #[test]
-    fn the_cue_meter_is_past_the_masters_gain() {
+    fn the_cue_on_the_masters_output_is_past_the_master() {
         let mut p = input_project();
+        (p.master_output, p.cue_output) = (deckard_model::AudioDest::Ext(0), deckard_model::AudioDest::Ext(0));
         p.master_level = deckard_model::level_from_db(-12.0);
+        let m = deckard_model::level_gain(p.master_level) as f32;
+        let mut e = input_project_engine(&p);
+        e.sequencing = false;
+        let mut chain = bare_chain(Vec::new(), e.sr);
+        push_half_gain(&mut chain);
+        e.master_fx = Some(chain);
+        let (master, _) = steady_outs(&mut e, 120);
+        assert!(near(master, 0.5 * 0.5 * m), "through the master: {master}");
         p.groups[0].sounds[0].cue = true;
         let mut e = input_project_engine(&p);
         e.sequencing = false;
-        steady(&mut e, 80);
+        let mut chain = bare_chain(Vec::new(), e.sr);
+        push_half_gain(&mut chain);
+        e.master_fx = Some(chain);
+        let (master, _) = steady_outs(&mut e, 120);
+        assert!(near(master, 0.5), "cued: past the master's plug-ins and level: {master}");
         assert!(near(e.cue.peak.0, 0.5), "{:?}", e.cue.peak);
+        assert!(e.master_peak.0 < 0.01, "not on the master's meter: {:?}", e.master_peak);
     }
 
     /// A group is on the bus through its sounds, or with effects, its own bus; a sound
@@ -12011,7 +12069,7 @@ mod tests {
         p.groups[0].cue = true;
         let mut e = input_project_engine(&p);
         e.sequencing = false;
-        steady(&mut e, 400);
+        steady_outs(&mut e, 400);
         assert!(e.cue.peak.0 > 0.1, "{:?}", e.cue.peak);
     }
 
