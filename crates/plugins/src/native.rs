@@ -87,6 +87,11 @@ pub trait Engine: Send {
         let _ = bend;
     }
 
+    /// Channel pressure (aftertouch), 0..1.
+    fn channel_pressure(&mut self, pressure: f32) {
+        let _ = pressure;
+    }
+
     /// Silence everything now (stop, a new state).
     fn reset(&mut self);
 
@@ -424,6 +429,7 @@ impl Instance {
         self.sustained = [false; 128];
         self.pedal = false;
         self.engine.pitch_bend(0.0);
+        self.engine.channel_pressure(0.0);
         self.engine.reset();
     }
 
@@ -449,6 +455,10 @@ impl Instance {
 
     pub(crate) fn pitch_bend(&mut self, value: u16) {
         self.engine.pitch_bend((value.min(16383) as f32 - 8192.0) / 8192.0);
+    }
+
+    pub(crate) fn channel_pressure(&mut self, value: u8) {
+        self.engine.channel_pressure(f32::from(value.min(127)) / 127.0);
     }
 
     pub(crate) fn has_sidechain(&self) -> bool {
@@ -635,6 +645,34 @@ mod tests {
         assert_eq!(q.output_count(), 1);
         assert_eq!(q.output_name(0), "Out 1");
         assert!(q.output_bus(1, 16).is_none());
+    }
+
+    /// Channel pressure reaches a native engine as 0..1, and "all notes off" lets it go.
+    #[test]
+    fn channel_pressure_reaches_a_native_engine_and_all_notes_off_lets_go() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEEN: AtomicU32 = AtomicU32::new(u32::MAX);
+        struct Pressed;
+        impl Engine for Pressed {
+            fn set_param(&mut self, _: u32, _: f64) {}
+            fn note_on(&mut self, _: u8, _: u8) {}
+            fn note_off(&mut self, _: u8) {}
+            fn channel_pressure(&mut self, pressure: f32) {
+                SEEN.store(pressure.to_bits(), Ordering::Relaxed);
+            }
+            fn reset(&mut self) {}
+            fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &Transport) {}
+        }
+        static PRESSED: Class =
+            Class { cid: [9; 16], name: "Pressed", instrument: true, params: &[], pages: &[], make: |_| Box::new(Pressed) };
+        let id = crate::PluginId::parse(&PRESSED.plugin_id(), PRESSED.name).unwrap();
+        let mut p = crate::Plugin::native(&PRESSED, id, "Pressed", 48_000.0);
+        p.channel_pressure(127);
+        assert_eq!(f32::from_bits(SEEN.load(Ordering::Relaxed)), 1.0);
+        p.channel_pressure(200);
+        assert_eq!(f32::from_bits(SEEN.load(Ordering::Relaxed)), 1.0, "clamped");
+        p.all_notes_off();
+        assert_eq!(f32::from_bits(SEEN.load(Ordering::Relaxed)), 0.0);
     }
 
     /// The saved values read from a chunk without making the plug-in; a state from a newer

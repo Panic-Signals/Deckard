@@ -1139,6 +1139,9 @@ impl AudioUnit {
         if self.moved[64] {
             self.control_change(64, 0);
         }
+        if self.moved[128] {
+            self.channel_pressure(0);
+        }
         if self.moved[129] {
             self.pitch_bend(8192);
         }
@@ -1159,6 +1162,12 @@ impl AudioUnit {
         let v = value.min(16383);
         self.moved[129] = v != 8192;
         self.midi(0xE0, (v & 0x7F) as u32, (v >> 7) as u32);
+    }
+
+    pub fn channel_pressure(&mut self, value: u8) {
+        let v = value.min(127);
+        self.moved[128] = v != 0;
+        self.midi(0xD0, v as u32, 0);
     }
 
     pub fn has_sidechain(&self) -> bool {

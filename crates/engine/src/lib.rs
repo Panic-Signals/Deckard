@@ -5613,7 +5613,7 @@ impl Engine {
                 match kind {
                     MidiKind::Controller { number, value } => p.control_change(number, value),
                     MidiKind::PitchBend(v) => p.pitch_bend(v),
-                    MidiKind::ChannelPressure(_) => {}
+                    MidiKind::ChannelPressure(v) => p.channel_pressure(v),
                 }
             }
             return;
@@ -11829,6 +11829,62 @@ mod tests {
         assert!(plain.iter().any(|v| v.abs() > 1e-3), "it plays");
         assert_eq!(plain, with);
         assert_eq!(others, 0.0);
+    }
+
+    /// An instrument that plays the channel pressure it's given, as a level.
+    #[derive(Default)]
+    struct Pressed(f32);
+
+    impl deckard_plugins::native::Engine for Pressed {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, _: u8, _: u8) {}
+        fn note_off(&mut self, _: u8) {}
+        fn channel_pressure(&mut self, pressure: f32) {
+            self.0 = pressure;
+        }
+        fn reset(&mut self) {}
+        fn process(&mut self, left: &mut [f32], right: &mut [f32], _: &Transport) {
+            left.fill(self.0);
+            right.fill(self.0);
+        }
+    }
+
+    static PRESSED: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: [9; 16],
+        name: "Pressed",
+        instrument: true,
+        params: &[],
+        pages: &[],
+        make: |_| Box::new(Pressed::default()),
+    };
+
+    /// Channel pressure reaches a plug-in instrument (the woosh's Z on Pigments), as
+    /// controllers and pitch bend do; it used to stop at the engine.
+    #[test]
+    fn channel_pressure_reaches_a_plugin_instrument() {
+        let mut p = project();
+        p.groups[0].patterns[0].notes.clear();
+        let snd = &mut p.groups[0].sounds[0];
+        snd.sampler = None;
+        snd.plugin = plugin_slot(&PRESSED).plugin;
+        snd.slots = vec![plugin_slot(&PRESSED)];
+        let mut cache = SampleCache::default();
+        cache.test_plugins.push((Slot::Sound { group: 0, sound: 0 }, split_plugin(&PRESSED)));
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        let mut level = |e: &mut Engine| {
+            let mut out = vec![0f32; 512];
+            for _ in 0..8 {
+                e.process(&mut out);
+            }
+            out[510]
+        };
+        assert_eq!(level(&mut e), 0.0, "nothing pressed");
+        e.control_in(0, 0, deckard_model::MidiKind::ChannelPressure(127), false);
+        let full = level(&mut e);
+        assert!(full > 0.1, "pressed: {full}");
+        e.control_in(0, 0, deckard_model::MidiKind::ChannelPressure(0), false);
+        assert!(level(&mut e).abs() < 1e-6, "let go");
     }
 
     /// A fader's lane: a channel's `field`, with no slot.
