@@ -37,6 +37,8 @@ const FOLD: (f64, f64) = (85.0, 170.0);
 /// isn't a loop is seldom that near; a loop cut on its bars is).
 const LOOP_TOLERANCE: f64 = 0.02;
 const LOOP_BEATS: f64 = 0.25;
+/// How much of a long recording the tempo is heard in (seconds).
+const LISTEN: f64 = 120.0;
 
 /// The tempo of `frames` at `rate`, or `None` for one-shots, silence and audio without a
 /// beat. `hint` (the tempo in the file's name) wins over what's heard; the audio still
@@ -65,6 +67,19 @@ pub fn tempo(frames: &[[f32; 2]], rate: u32, hint: Option<f64>) -> Option<Tempo>
     if seconds < 1.0 || onsets(&env) < 4 {
         return None;
     }
+    // A long recording's tempo is heard in two minutes from its middle (a song's intro
+    // may have no beat, and all of it would take many times longer to no better end);
+    // its beat grid is still placed over all of it.
+    let all = env;
+    let window = (LISTEN * f64::from(rate) / hop) as usize;
+    let env: Vec<f32> = if all.len() > window {
+        let from = (all.len() - window) / 2;
+        let part = &all[from..from + window];
+        let mean = part.iter().sum::<f32>() / window as f32;
+        part.iter().map(|v| v - mean).collect()
+    } else {
+        all.clone()
+    };
     // Coarse: every 0.1 BPM, the lags of a beat, two beats and half a beat, weighed by
     // the prior. The half beat keeps 2:3 relatives (a dotted beat) from winning: their
     // halves fall between the 8ths; and the quarter beat, under straight sixteenths
@@ -124,7 +139,7 @@ pub fn tempo(frames: &[[f32; 2]], rate: u32, hint: Option<f64>) -> Option<Tempo>
         bpm = 60.0 * c / seconds;
         source = TempoSource::Loop;
     }
-    Some(make(bpm, offset(&env, lag_of(bpm), hop), confidence, source))
+    Some(make(bpm, offset(&all, lag_of(bpm), hop), confidence, source))
 }
 
 /// `env` smoothed by a short triangle (1 2 3 2 1).
@@ -303,5 +318,18 @@ mod tests {
         let t = tempo(&f[..f.len() - SR as usize / 4], SR, None).expect("a tempo");
         assert!((t.bpm - 120.0).abs() < 0.1, "{t:?}");
         assert_eq!(t.source, TempoSource::Audio);
+    }
+
+    /// A recording of several minutes: its tempo from its middle (silence before it,
+    /// another tempo's bars after), and quickly.
+    #[test]
+    fn a_long_recording_is_heard_in_its_middle() {
+        let mut f = vec![[0f32; 2]; 100 * SR as usize];
+        f.extend(drums(100.0, 75, SR, 0.5)); // 180 s at 100
+        f.extend(drums(140.0, 58, SR, 0.5)); // 99 s at 140
+        let t0 = std::time::Instant::now();
+        let t = tempo(&f, SR, None).expect("a tempo");
+        assert!((t.bpm - 100.0).abs() < 0.1, "{t:?}");
+        assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
     }
 }

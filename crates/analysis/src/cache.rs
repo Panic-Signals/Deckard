@@ -43,6 +43,23 @@ impl Cache {
         Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// The key of a sample's audio: the SHA-256 of its rate and frames, in hex.
+    pub fn audio_key(frames: &[[f32; 2]], rate: u32) -> String {
+        let mut h = Sha256::new();
+        h.update(rate.to_le_bytes());
+        // By the block: a song's millions of frames a few bytes at a time take seconds.
+        let mut bytes = Vec::with_capacity(8 * 16_384);
+        for block in frames.chunks(16_384) {
+            bytes.clear();
+            for f in block {
+                bytes.extend_from_slice(&f[0].to_le_bytes());
+                bytes.extend_from_slice(&f[1].to_le_bytes());
+            }
+            h.update(&bytes);
+        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
     fn path(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.txt"))
     }

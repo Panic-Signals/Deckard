@@ -10,7 +10,6 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use deckard_analysis::{Analysis, Cache, TempoSource, analyse};
 use deckard_engine::sample::Sample;
 use deckard_model::new_sampler::{BpmSource, PlayMode, ZoneMeta};
-use sha2::{Digest, Sha256};
 
 /// A zone's sample to analyse: its path as the zone saves it, its file name, its audio.
 struct Ask {
@@ -90,15 +89,9 @@ impl Default for Jobs {
     }
 }
 
-/// The key of a sample's audio: the SHA-256 of its rate and frames.
+/// The key of a sample's audio (kept by it in the analysis cache).
 pub fn content_key(s: &Sample) -> String {
-    let mut h = Sha256::new();
-    h.update(s.rate.to_le_bytes());
-    for f in &s.frames {
-        h.update(f[0].to_le_bytes());
-        h.update(f[1].to_le_bytes());
-    }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    Cache::audio_key(&s.frames, s.rate)
 }
 
 /// A zone's meta from its analysis. The play mode follows Serato's Auto rule: Sync for a
