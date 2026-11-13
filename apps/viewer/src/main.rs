@@ -1100,6 +1100,8 @@ pub struct App {
     surface: deckard_surface::Surface,
     /// Its last script error, as shown in the status bar.
     surface_error: Option<String>,
+    /// Whether the MK3 showed its Browse page last frame (leaving it stops prehear).
+    surface_was_browsing: bool,
     /// The scripts' last screens sent to the MK3 (their draw count).
     mk3_screens_sent: u64,
     /// Commands sent to the output when the last edit went (see `follow_edits`).
@@ -5016,6 +5018,7 @@ impl App {
                 self.browse(browser::BrowseAct::Toggle);
                 self.browse(browser::BrowseAct::Toggle);
             }
+            self.stop_prehear_after_browse();
             self.browser.poll();
             self.refresh_surface_settings();
             let mut view = self.surface_view();
@@ -5033,6 +5036,7 @@ impl App {
                 self.refresh_surface_settings();
                 view = self.surface_view();
             }
+            self.stop_prehear_after_browse();
             // On the Browse page, the browser has its results to show.
             if self.surface.page() == "browse" && !self.browser.started() {
                 self.browse(browser::BrowseAct::Toggle);
@@ -8981,6 +8985,7 @@ impl App {
             B::Load(i, target) => {
                 let Some(item) = b.results.items.get(i).cloned() else { return };
                 b.selected = Some(i);
+                self.stop_prehear();
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
                 } else {
@@ -9069,6 +9074,7 @@ impl App {
             B::LoadFile(path, target) => {
                 b.file_selected = Some(path.clone());
                 let Some(item) = browser::item_of(&path) else { return };
+                self.stop_prehear();
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
                 } else {
@@ -9091,11 +9097,25 @@ impl App {
         }
     }
 
+    /// Stop whatever the browser is prehearing.
+    fn stop_prehear(&self) {
+        if let Some(Ok(out)) = &self.output {
+            out.prehear(None, 0.0);
+        }
+    }
+
+    /// The MK3 left its Browse page: what it was prehearing stops.
+    fn stop_prehear_after_browse(&mut self) {
+        let browsing = self.surface.page() == "browse";
+        if self.surface_was_browsing && !browsing {
+            self.stop_prehear();
+        }
+        self.surface_was_browsing = browsing;
+    }
+
     pub(crate) fn prehear_item(&mut self, item: &deckard_library::Item) {
         let Some(file) = browser::prehear_file(item) else {
-            if let Some(Ok(out)) = &self.output {
-                out.prehear(None, 0.0);
-            }
+            self.stop_prehear();
             return;
         };
         let gain = self.browser.prehear_gain;
