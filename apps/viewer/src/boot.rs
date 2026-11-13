@@ -1,7 +1,7 @@
 //! Startup as a queue of steps. Each step's line is shown (running) before the step
 //! runs, so a slow step is visible while it works; the outcome then replaces it.
 
-use crate::{App, StemsOffer, jam_io, menu, mk3_io, recorder, settings, stems, update, user_chords};
+use crate::{App, StemsOffer, jam_io, layout, menu, mk3_io, recorder, settings, stems, update, user_chords};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -51,9 +51,9 @@ pub struct Boot {
     pub started: Instant,
     /// When READY was first shown.
     pub ready_at: Option<Instant>,
-    // (Used by the splash window.)
-    #[allow(dead_code)]
+    /// The last file dropped while loading, opened after.
     pub held: Option<PathBuf>,
+    // (Used by the splash window.)
     #[allow(dead_code)]
     pub hidden: bool,
     queue: VecDeque<Step>,
@@ -156,6 +156,39 @@ impl App {
     pub(crate) fn boot_to_end(&mut self) {
         while self.boot.as_ref().is_some_and(|b| !b.finished() && (!b.queue.is_empty() || b.running.is_some())) {
             self.boot_next();
+        }
+    }
+
+    /// One frame of the main window while starting up: input is drained and dropped
+    /// files held, the next step runs, and the window is a plain backdrop. Ends startup
+    /// (and opens a held file) when the screen may go.
+    pub(crate) fn boot_frame(&mut self, ui: &mut eframe::egui::Ui) {
+        let ctx = ui.ctx().clone();
+        // Pad hits while loading are never played later.
+        if let Some(m) = &self.mk3 {
+            m.set_context(&ctx);
+            m.take_events();
+            m.take_pending();
+        }
+        if let Some(m) = &self.jam {
+            m.set_context(&ctx);
+            m.take_events();
+            m.take_pending();
+        }
+        let dropped = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).rfind(|p| !p.as_os_str().is_empty()));
+        if let (Some(p), Some(b)) = (dropped, &mut self.boot) {
+            b.held = Some(p);
+        }
+        self.boot_next();
+        ui.painter().rect_filled(ui.max_rect(), 0.0, layout::S00);
+        // (The splash window is drawn here.)
+        if self.boot.as_ref().is_some_and(|b| b.may_close(Instant::now())) {
+            let held = self.boot.take().and_then(|b| b.held);
+            if let Some(p) = held {
+                self.open_file(p);
+            }
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -322,6 +355,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::egui;
 
     fn app_with_two_plugins() -> crate::App {
         let mut app = crate::App::default();
@@ -431,5 +465,69 @@ mod tests {
         b.done = b.total;
         assert!(!b.may_close(b.started + Duration::from_millis(500)));
         assert!(b.may_close(b.started + Duration::from_millis(1100)));
+    }
+
+    fn booting_harness() -> egui_kittest::Harness<'static, crate::App> {
+        let mut app = crate::App::default();
+        app.boot = Some(Boot::new(vec![Step::Project(None), Step::Done]));
+        egui_kittest::Harness::builder().with_size(egui::vec2(1500.0, 930.0)).build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app)
+    }
+
+    /// Save a new project to `path`, as File > Save As does.
+    fn save_new_project_to(path: &std::path::Path) {
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        doc.save_as(path).unwrap();
+    }
+
+    #[derive(Debug)]
+    struct Dropped(PathBuf);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    #[test]
+    fn space_does_nothing_while_loading() {
+        let mut h = booting_harness();
+        h.step();
+        h.key_press(egui::Key::Space);
+        h.step();
+        assert!(h.state().playing.is_none());
+    }
+
+    #[test]
+    fn a_file_dropped_while_loading_opens_after() {
+        let mut h = booting_harness();
+        // (Held on screen however slow the machine: the clock starts a minute ahead.)
+        h.state_mut().boot.as_mut().unwrap().started += Duration::from_secs(60);
+        h.step();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("dropped.mxprj");
+        save_new_project_to(&p);
+        h.input_mut().dropped_files = vec![std::sync::Arc::new(Dropped(p.clone())) as egui::DroppedFileHandle];
+        h.step();
+        h.input_mut().dropped_files.clear();
+        assert_eq!(h.state().boot.as_ref().unwrap().held.as_deref(), Some(p.as_path()));
+        assert_ne!(h.state().path.as_deref(), Some(p.as_path()));
+        // (Steps run faster than the clock: age the screen past its minimum second.)
+        h.state_mut().boot.as_mut().unwrap().started -= Duration::from_secs(62);
+        h.run_steps(90);
+        assert!(h.state().boot.is_none());
+        assert_eq!(h.state().path.as_deref(), Some(p.as_path()));
+    }
+
+    #[test]
+    fn the_ui_appears_when_loading_ends() {
+        let mut h = booting_harness();
+        // (Steps run faster than the clock: age the screen past its minimum second.)
+        h.state_mut().boot.as_mut().unwrap().started -= Duration::from_secs(2);
+        h.run_steps(90);
+        assert!(h.state().boot.is_none());
+        assert!(h.state().doc.is_some());
     }
 }

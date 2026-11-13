@@ -252,6 +252,7 @@ fn main() {
             .with_icon(std::sync::Arc::new(settings::Settings::load().app_icon.icon_data())),
         ..Default::default()
     };
+    let splash = boot::splash_wanted(&args);
     let result = eframe::run_native(
         "DECKARD",
         options,
@@ -273,6 +274,10 @@ fn main() {
                 boot: Some(boot::Boot::new(boot::all_steps(path))),
                 ..Default::default()
             };
+            if splash {
+                // The frame loop runs startup, a step a frame; there are no flags to apply.
+                return Ok(Box::new(app));
+            }
             app.boot_to_end();
             app.boot = None;
             if app.settings.app_icon != icon::Style::default() {
@@ -11088,7 +11093,7 @@ impl eframe::App for App {
     /// While the window is covered or minimized eframe runs no `ui`, only this: keep the
     /// controller (scripts, LEDs, screens) and MIDI going, as `frame` does when shown.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.finish_quit(ctx) {
+        if self.finish_quit(ctx) || self.boot.is_some() {
             return;
         }
         if ctx.input(|i| i.viewport().visible()) != Some(false) {
@@ -11139,6 +11144,10 @@ impl App {
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         if self.finish_quit(ctx) {
+            return;
+        }
+        if self.boot.is_some() {
+            self.boot_frame(ui);
             return;
         }
         self.poll_group_load();
