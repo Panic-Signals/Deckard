@@ -192,7 +192,8 @@ impl Sender {
             | Live::RepeatPressure { .. }
             | Live::MidiInputOut { .. }
             | Live::ChokeAll
-            | Live::ChokeGroup { .. } => {}
+            | Live::ChokeGroup { .. }
+            | Live::ChokeSound { .. } => {}
         }
     }
 

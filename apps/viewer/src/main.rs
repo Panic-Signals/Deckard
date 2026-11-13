@@ -969,6 +969,8 @@ pub struct App {
     pending_launch: Option<usize>,
     /// The note sounding while the mouse button is down: (group, sound, pitch).
     held: Option<(usize, usize, i64)>,
+    /// The note the Sampling page's PLAY holds (group, sound, pitch), until its STOP.
+    audition: Option<(usize, usize, i64)>,
     /// Scripted pointer input (`--input`): (seconds after start, (m/d/u = move, down,
     /// up, position)).
     input_script: Vec<(f32, (char, egui::Pos2))>,
@@ -6408,6 +6410,40 @@ impl App {
         }
     }
 
+    /// The key the Sampling page's PLAY plays: the focused zone's root (an Audio plug-in's
+    /// take: as its page shows it).
+    fn audition_key(&self) -> Option<i64> {
+        let doc = self.doc.as_ref()?.borrow();
+        layout::sampling::edited(doc.project(), (self.group, self.sound, self.zone)).map(|e| e.1.root_key)
+    }
+
+    /// The Sampling page's PLAY / STOP: the focused sound's note on `pitch` held until
+    /// the next press, which ends it and whatever of the sound still rings (a one-shot
+    /// doesn't end with its note). The song, if it plays, plays on.
+    pub(crate) fn audition_toggle(&mut self, pitch: i64) {
+        let (g, s) = (self.group, self.sound);
+        let sounding = self.sampling.playhead.is_some();
+        if let Some((ag, asnd, ap)) = self.audition.take()
+            && let Some(Ok(out)) = &self.output
+        {
+            out.live(deckard_engine::Live::NoteRelease { group: ag, sound: asnd, pitch: ap });
+            out.live(deckard_engine::Live::ChokeSound { group: ag, sound: asnd });
+            if sounding {
+                return;
+            }
+        } else if sounding {
+            if let Some(Ok(out)) = &self.output {
+                out.live(deckard_engine::Live::ChokeSound { group: g, sound: s });
+            }
+            return;
+        }
+        let before = self.held.take();
+        self.hold_pitch(g, s, pitch);
+        // Not the mouse's: it stays down when the button comes up.
+        self.audition = self.held.take();
+        self.held = before;
+    }
+
     /// Start a note that sounds while the mouse button is held (a piano-roll key, or
     /// a note pressed in the pattern editor); `frame` ends it on release.
     pub fn hold_pitch(&mut self, group: usize, sound: usize, pitch: i64) {
@@ -7067,10 +7103,15 @@ impl App {
                                 let z = z.and_then(|x| x.sampler.as_ref()).and_then(|x| x.zones.get(zi));
                                 self.sampling.selection = z.and_then(|z| layout::sampling::first_selection(z, frames));
                             }
+                            // Zoomed in elsewhere in the file: the zone's own part of it comes into view.
+                            let range =
+                                layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, zi)).map(|e| e.1.play_range);
+                            if let Some((lo, hi)) = range.filter(|r| r.1 > r.0) {
+                                self.sampling.reveal(lo as f64, hi as f64 + 1.0);
+                            }
                         }
                         None => {
-                            self.sampling.sample = None;
-                            self.sampling.sample_key = None;
+                            self.sampling.clear_sample();
                         }
                     }
                 }
@@ -7091,8 +7132,7 @@ impl App {
                 });
             }
             None => {
-                self.sampling.sample = None;
-                self.sampling.sample_key = None;
+                self.sampling.clear_sample();
                 if self.sampling.tab != 0 {
                     self.sampling.tab = 0;
                 }
@@ -7570,7 +7610,6 @@ impl App {
             Ok(()) => {
                 self.status = format!("{label}: {}", target.display());
                 self.sampling.selection = None;
-                self.sampling.view = None;
             }
             Err(e) => self.status = format!("can't edit: {e}"),
         }
@@ -7589,6 +7628,7 @@ impl App {
                 }
             }
             S::Stereo => self.sampling.stereo = !self.sampling.stereo,
+            S::Audition(pitch) => self.audition_toggle(pitch),
             S::View(v) => self.sampling.view = v,
             S::Select(s) => self.sampling.selection = s,
             S::Edit(EditOp::AutoLoop) => self.auto_loop(),
@@ -11526,7 +11566,12 @@ impl App {
 
         self.follow_engine(ctx, std::time::Duration::ZERO);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.toggle_play();
+            // SHIFT+Space on the Sampling page: its sample's PLAY / STOP.
+            let zone_key = (self.sampling_open && ctx.input(|i| i.modifiers.shift)).then(|| self.audition_key()).flatten();
+            match zone_key {
+                Some(pitch) => self.audition_toggle(pitch),
+                None => self.toggle_play(),
+            }
         }
         // The mouse modes' keys (not while the keys play notes).
         if !ctx.egui_wants_keyboard_input() && !self.keys.on && ctx.input(|i| i.modifiers.is_none()) {

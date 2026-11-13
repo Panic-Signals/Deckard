@@ -80,6 +80,8 @@ pub struct SamplingState {
     pub stereo: bool,
     /// Visible frames [start, end), of the sample shown (`None`: all of it).
     pub view: Option<(f64, f64)>,
+    /// What each zone showed when it was last looked at (by `sample_key`).
+    pub views: std::collections::HashMap<(usize, usize, usize, String), (f64, f64)>,
     pub selection: Option<(usize, usize)>,
     pub clipboard: Option<Sample>,
     /// Slice starts (frames), sorted.
@@ -119,6 +121,7 @@ impl Default for SamplingState {
             tab: 1,
             stereo: true,
             view: None,
+            views: Default::default(),
             selection: None,
             clipboard: None,
             slices: Vec::new(),
@@ -188,17 +191,52 @@ fn column_of(frames: &[[f32; 2]], peaks: &[[(f32, f32); 2]], a: usize, b: usize)
 }
 
 impl SamplingState {
-    /// Show `sample` (for `key`), computing its peak blocks.
+    /// Show `sample` (for `key`), computing its peak blocks. The part of it shown stays
+    /// where it was looked at: a zone come back to shows what it showed, another zone of
+    /// the same file (a slice) or of another file the same stretch of frames (as much of
+    /// it as there is); an edit that changes the sample's length shows all of it.
     pub fn set_sample(&mut self, key: (usize, usize, usize, String), sample: Arc<Sample>) {
         let changed = self.sample_key.as_ref().is_none_or(|k| (k.0, k.1, k.2) != (key.0, key.1, key.2));
-        self.peaks = peaks_of(&sample);
+        let len = sample.frames.len();
         if changed {
-            self.view = None;
+            if let (Some(old), Some(v)) = (self.sample_key.take(), self.view) {
+                self.views.insert(old, v);
+            }
+            let fit = |(a, b): (f64, f64)| {
+                let span = (b - a).min(len as f64);
+                let a = a.clamp(0.0, len as f64 - span);
+                (span < len as f64 && span >= 16.0).then_some((a, a + span))
+            };
+            self.view = self.views.get(&key).copied().or(self.view).and_then(fit);
             self.selection = None;
             self.slices.clear();
+        } else if self.len() != len {
+            self.view = None;
         }
+        self.peaks = peaks_of(&sample);
         self.sample = Some(sample);
         self.sample_key = Some(key);
+    }
+
+    /// No sample to show (what the last one showed is kept for when it comes back).
+    pub fn clear_sample(&mut self) {
+        if let (Some(old), Some(v)) = (self.sample_key.take(), self.view) {
+            self.views.insert(old, v);
+        }
+        self.sample = None;
+    }
+
+    /// Frames [lo, hi) (a zone's play range) brought into what's shown, at the same
+    /// zoom, when none of it is there.
+    pub fn reveal(&mut self, lo: f64, hi: f64) {
+        let len = self.len() as f64;
+        if let Some((a, b)) = self.view
+            && (hi <= a || lo >= b)
+        {
+            let span = b - a;
+            let a = (lo - span * 0.1).clamp(0.0, (len - span).max(0.0));
+            self.view = Some((a, a + span));
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -269,6 +307,8 @@ pub enum SamplingAct {
     Lane(usize, LaneAct),
     /// The lanes folded into one waveform, or stacked.
     LanesMix(bool),
+    /// Play the focused zone on this key, or stop it if it sounds.
+    Audition(i64),
     Open(bool),
     Tab(usize),
     Stereo,
@@ -445,12 +485,22 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     let info = Rect::from_min_size(Pos2::new(rect.left(), header.bottom() + 1.0), Vec2::new(rect.width(), 16.0));
     painter.rect_filled(info, 0.0, S00);
     if let (Some(z), Some(s)) = (zone, &st.sample) {
-        let play = Rect::from_min_size(Pos2::new(info.left() + 4.0, info.top()), Vec2::splat(16.0));
-        let resp = ui.interact(play, ui.id().with("samp-play"), Sense::click_and_drag()).on_hover_text("Hold to play the sample");
-        painter.rect_filled(play, 2.0, gcol);
-        triangle(&painter, play.center(), 4.0, Color32::BLACK);
-        if resp.is_pointer_button_down_on() && !app.held.is_some_and(|h| h == (app.group, app.sound, z.root_key)) {
-            acts.push(Act::HoldPitch(app.group, app.sound, z.root_key));
+        // PLAY / STOP: the zone on its own key, as its pad plays it; again to stop it.
+        let play = Rect::from_min_size(Pos2::new(info.left() + 4.0, info.top()), Vec2::new(30.0, 16.0));
+        let sounding = st.playhead.is_some();
+        let resp = ui.interact(play, ui.id().with("samp-play"), Sense::click()).on_hover_text(if sounding {
+            "Stop the sample (Shift+Space)"
+        } else {
+            "Play the sample (Shift+Space)"
+        });
+        painter.rect_filled(play, 2.0, if resp.hovered() { Color32::WHITE } else { gcol });
+        if sounding {
+            painter.rect_filled(Rect::from_center_size(play.center(), Vec2::splat(7.0)), 0.0, Color32::BLACK);
+        } else {
+            triangle(&painter, play.center(), 4.0, Color32::BLACK);
+        }
+        if resp.clicked() {
+            acts.push(sact(SamplingAct::Audition(z.root_key)));
         }
         let name = z.sample.path.rsplit(['/', '\\']).next().unwrap_or("");
         let t = painter.text(Pos2::new(play.right() + 6.0, info.center().y), Align2::LEFT_CENTER, name, font(12.0), gcol);
@@ -612,16 +662,34 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
     sf.tip = "How far QUANTIZE moves the markers toward the grid";
     let warp_fields = [choice_field("GRID", grids, grid, |k| sact(SamplingAct::Warp(WarpAct::Grid(k)))), sf];
     x = group_box(ui, &painter, x, y, if m.warps.is_empty() { "WARP" } else { "WARP (ON)" }, &warp_fields, acts);
-    if tool_button(ui, &painter, small(x, 0.0, 70.0), "MARKERS", has, false, "warp-detect") {
+    // What each does, on hover (the buttons themselves are the tool bar's).
+    let tip = |r: Rect, id: &str, text: &str| {
+        ui.interact(r, ui.id().with(("warp-tip", id)), Sense::hover()).on_hover_text(text.to_string());
+    };
+    let r = small(x, 0.0, 70.0);
+    if tool_button(ui, &painter, r, "MARKERS", has, false, "warp-detect") {
         acts.push(sact(SamplingAct::Warp(WarpAct::Detect)));
     }
-    if tool_button(ui, &painter, small(x, 1.0, 70.0), "QUANTIZE", !m.warps.is_empty(), false, "warp-quantize") {
+    tip(
+        r,
+        "detect",
+        "Put a warp marker on each hit. A marker holds that moment of the sample on a beat; nothing moves until one is dragged or QUANTIZE is pressed",
+    );
+    let r = small(x, 1.0, 70.0);
+    if tool_button(ui, &painter, r, "QUANTIZE", !m.warps.is_empty(), false, "warp-quantize") {
         acts.push(sact(SamplingAct::Warp(WarpAct::Quantize)));
     }
+    tip(
+        r,
+        "quantize",
+        "Move each marker's hit onto the nearest GRID line (by STRENGTH): a loose loop plays in time. Heard in Sync and Keys",
+    );
     x += 74.0;
-    if tool_button(ui, &painter, small(x, 0.0, 50.0), "CLEAR", !m.warps.is_empty(), false, "warp-clear") {
+    let r = small(x, 0.0, 50.0);
+    if tool_button(ui, &painter, r, "CLEAR", !m.warps.is_empty(), false, "warp-clear") {
         acts.push(sact(SamplingAct::Warp(WarpAct::Clear)));
     }
+    tip(r, "clear", "Take every warp marker away: the sample plays at its own timing again");
     x += 54.0;
     // How it plays.
     x += 8.0;
@@ -730,6 +798,8 @@ fn wave(
             }
         }
     }
+    // Where the warp markers' lines go (x, beat): drawn over the waveform, below.
+    let mut warp_lines: Vec<(f32, f64)> = Vec::new();
     // Warp markers: a line through the waveform and a handle on the timeline. Drag a
     // handle to move its beat (the grid moves past it), double-click it to remove it;
     // double-click the timeline for a new one.
@@ -744,7 +814,7 @@ fn wave(
                 continue;
             }
             let x = fx(f);
-            painter.vline(x, w.y_range(), Stroke::new(1.0, warp_col.gamma_multiply(0.6)));
+            warp_lines.push((x, wp.beat));
             let h = Rect::from_center_size(Pos2::new(x, timeline.center().y), Vec2::new(9.0, timeline.height()));
             painter.add(egui::Shape::convex_polygon(
                 vec![Pos2::new(x - 4.5, h.top()), Pos2::new(x + 4.5, h.top()), Pos2::new(x, h.bottom())],
@@ -890,6 +960,20 @@ fn wave(
     }
     for cr in &chans {
         painter.hline(w.x_range(), cr.center().y, Stroke::new(1.0, Color32::from_rgb(30, 30, 30)));
+    }
+    // Warp markers' lines, over the waveform and the selection, each with the beat it
+    // holds (bar.beat) where there's room before the next.
+    let warp_col = Color32::from_rgb(0xf2, 0xc1, 0x4e);
+    for (i, &(x, beat)) in warp_lines.iter().enumerate() {
+        painter.vline(x, w.y_range(), Stroke::new(1.0, warp_col.gamma_multiply(0.85)));
+        if warp_lines.get(i + 1).is_none_or(|n| n.0 - x > 34.0) {
+            let (bar, in_bar) = ((beat / 4.0).floor(), beat.rem_euclid(4.0) + 1.0);
+            let text = format!("{}.{in_bar:.2}", bar as i64 + 1).trim_end_matches('0').trim_end_matches('.').to_string();
+            let at = Pos2::new(x + 3.0, w.bottom() - 13.0);
+            let g = painter.layout_no_wrap(text, font(9.0), warp_col);
+            painter.rect_filled(Rect::from_min_size(at, g.size()).expand(1.0), 2.0, Color32::from_black_alpha(190));
+            painter.galley(at, g, warp_col);
+        }
     }
     // Slice markers.
     if slices {
@@ -2458,5 +2542,49 @@ mod internal_input_tests {
             assert_eq!(v.internal, s);
         }
         assert_eq!(RecorderView::default().internal, TapSource::Master, "the master by default");
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    /// Zoomed in on a zone, another zone looked at and the first come back to: it shows
+    /// what it showed. A zone not yet looked at shows the same stretch of frames, as
+    /// much of it as its sample has; an edit that changes the length shows it all.
+    #[test]
+    fn the_zoom_stays_across_zones() {
+        let sample = |n: usize| Arc::new(Sample { rate: 48_000, frames: vec![[0.0; 2]; n] });
+        let key = |z: usize, f: &str| (0, 0, z, f.to_string());
+        let mut st = SamplingState::default();
+        st.set_sample(key(0, "a.wav"), sample(100_000));
+        assert_eq!(st.view, None);
+        st.view = Some((40_000.0, 50_000.0));
+        // A slice of the same file: the same place.
+        st.set_sample(key(1, "a.wav"), sample(100_000));
+        assert_eq!(st.view, Some((40_000.0, 50_000.0)));
+        // …whose own part of it is elsewhere: brought into view at the same zoom.
+        st.reveal(80_000.0, 90_000.0);
+        assert_eq!(st.view, Some((79_000.0, 89_000.0)));
+        st.reveal(85_000.0, 95_000.0);
+        assert_eq!(st.view, Some((79_000.0, 89_000.0)), "in view already");
+        // A shorter file: the same zoom, as far along as it goes; a tiny one, all of it.
+        st.set_sample(key(2, "b.wav"), sample(30_000));
+        assert_eq!(st.view, Some((20_000.0, 30_000.0)));
+        st.set_sample(key(3, "c.wav"), sample(5_000));
+        assert_eq!(st.view, None);
+        // Back to the first: what it showed. Also after no sample was shown.
+        st.set_sample(key(0, "a.wav"), sample(100_000));
+        assert_eq!(st.view, Some((40_000.0, 50_000.0)));
+        st.view = Some((10_000.0, 12_000.0));
+        st.clear_sample();
+        st.view = None;
+        st.set_sample(key(0, "a.wav"), sample(100_000));
+        assert_eq!(st.view, Some((10_000.0, 12_000.0)));
+        // An edit of it: the same length keeps the view (normalize), another shows all.
+        st.set_sample(key(0, "a - 2.wav"), sample(100_000));
+        assert_eq!(st.view, Some((10_000.0, 12_000.0)));
+        st.set_sample(key(0, "a - 3.wav"), sample(60_000));
+        assert_eq!(st.view, None);
     }
 }

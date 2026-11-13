@@ -239,6 +239,12 @@ pub enum Live {
     ChokeGroup {
         group: usize,
     },
+    /// [`Live::ChokeAll`] for one sound only (the Sampler's STOP: what it auditions ends,
+    /// the song plays on).
+    ChokeSound {
+        group: usize,
+        sound: usize,
+    },
 }
 
 /// Rendering sounds ahead (see [`ahead`]): the players' links, as the audio thread
@@ -2439,7 +2445,14 @@ fn synced_zone(
     };
     let base = job(semitones);
     let Some(made) = renders.get_or_want(base.clone()) else {
-        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new(), note_lanes: Vec::new(), grid: meta.start.beats() });
+        zone.sync = Some(sampler::ZoneSync {
+            tempo: bpm,
+            keys,
+            notes: Vec::new(),
+            note_lanes: Vec::new(),
+            grid: meta.start.beats(),
+            shown: Vec::new(),
+        });
         return;
     };
     let mut notes = Vec::new();
@@ -2471,13 +2484,22 @@ fn synced_zone(
     let at = |f: usize| (base.out_frame(f as f64).round().max(0.0) as usize).min(len);
     let a = zone.play.0;
     let scale = |x: usize| at(a + x) - at(a);
+    // Where the render's frames are in the sample, for the playhead (65 points: between
+    // warp markers the stretch is even).
+    let (from, to) = (zone.play.0 as f64, zone.play.1 as f64);
+    let shown: Vec<(f64, f64)> = (0..=64)
+        .map(|k| {
+            let f = from + (to - from) * f64::from(k) / 64.0;
+            (base.out_frame(f).clamp(0.0, len as f64), f)
+        })
+        .collect();
     zone.looped = zone.looped.map(|(l, r)| (at(l), at(r))).filter(|(l, r)| r > l);
     zone.x_fade = scale(zone.x_fade);
     zone.fade_in = scale(zone.fade_in);
     zone.fade_out = scale(zone.fade_out);
     zone.play = (0, len);
     zone.sample = made;
-    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats() });
+    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats(), shown });
 }
 
 /// Samples shared between engines (e.g. replaying another scene without reloading).
@@ -4889,7 +4911,8 @@ impl Engine {
                 | Live::RepeatPressure { .. }
                 | Live::MidiInputOut { .. }
                 | Live::ChokeAll
-                | Live::ChokeGroup { .. } => None,
+                | Live::ChokeGroup { .. }
+                | Live::ChokeSound { .. } => None,
             };
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
@@ -4929,6 +4952,7 @@ impl Engine {
             Live::RepeatPressure { .. } => {}
             Live::ChokeAll => self.choke_all(),
             Live::ChokeGroup { group } => self.choke_group(group),
+            Live::ChokeSound { group, sound } => self.choke_sound(group, sound),
         }
     }
 
@@ -4941,24 +4965,31 @@ impl Engine {
 
     /// Every voice of one Group's sounds ends, as [`Self::choke_all`] ends them.
     fn choke_group(&mut self, group: usize) {
-        let tps = 1.0 / self.samples_per_tick();
-        let sounds = self.fx.get(group).map_or(0, Vec::len);
-        for sound in 0..sounds {
-            let e = NoteEvent {
-                tick: 0,
-                group,
-                sound,
-                pitch: 0,
-                velocity: 0,
-                length: 0,
-                probability: 100,
-                midi: Some(pads::CHOKE),
-                cue: None,
-                expr: None,
-                from: None,
-            };
-            self.trigger(e, tps);
+        for sound in 0..self.fx.get(group).map_or(0, Vec::len) {
+            self.choke_sound(group, sound);
         }
+    }
+
+    /// Every voice of one sound ends, as [`Self::choke_all`] ends them.
+    fn choke_sound(&mut self, group: usize, sound: usize) {
+        if self.fx.get(group).is_none_or(|g| sound >= g.len()) {
+            return;
+        }
+        let tps = 1.0 / self.samples_per_tick();
+        let e = NoteEvent {
+            tick: 0,
+            group,
+            sound,
+            pitch: 0,
+            velocity: 0,
+            length: 0,
+            probability: 100,
+            midi: Some(pads::CHOKE),
+            cue: None,
+            expr: None,
+            from: None,
+        };
+        self.trigger(e, tps);
     }
 
     /// A live note on `sound`: choke what it chokes, then `play` it and the sounds it
@@ -8279,6 +8310,37 @@ mod tests {
                 assert_eq!(l.levels, [0.0, 0.0, 0.0, 1.0]);
             }
         }
+    }
+
+    /// A Sync zone playing the second half of its file: the playhead is in the sample's
+    /// frames (from the start marker on), not the render's (from 0), before the render
+    /// comes and after.
+    #[test]
+    fn a_sync_zones_playhead_is_in_the_samples_frames() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let half = frames as i64 / 2;
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].play_range = (half, frames as i64 - 1);
+        let mut cache = SampleCache::default();
+        let mut at = |cache: &mut SampleCache, blocks: usize| {
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, cache);
+            e.sequencing = false;
+            e.note_hold(0, 0, 60, 100);
+            let mut out = vec![0f32; 2 * 4800];
+            for _ in 0..blocks {
+                e.process(&mut out);
+            }
+            e.zone_position(0, 0, 0).expect("it plays") as i64
+        };
+        let early = at(&mut cache, 1);
+        assert!((half..half + 9000).contains(&early), "repitched: {early} from {half}");
+        for j in cache.wanted_renders() {
+            cache.add_render(&j, j.run());
+        }
+        // 0.1 s of the render (4800 frames at 120) is 120/94 as much of the sample.
+        let one = at(&mut cache, 1);
+        assert!((one - half - 6128).abs() < 300, "rendered: {one} from {half}");
+        let three = at(&mut cache, 3);
+        assert!((three - half - 3 * 6128).abs() < 400, "rendered: {three} from {half}");
     }
 
     /// Keys asks for the notes' renders around the root, nearest first.
@@ -13058,6 +13120,14 @@ mod tests {
         e.play_live(Live::ChokeGroup { group: 0 });
         e.process(&mut out);
         assert_eq!((voices(&e, 0), voices(&e, 1)), (0, 0), "its own Group's choke ends both");
+        // One sound's choke ends its own voices only.
+        e.play_live(on(0));
+        e.play_live(on(1));
+        e.process(&mut out);
+        e.play_live(Live::ChokeSound { group: 0, sound: 1 });
+        e.play_live(Live::ChokeSound { group: 0, sound: 99 });
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 0), "the sound's choke ends its voices, not its neighbour's");
     }
 
     #[test]

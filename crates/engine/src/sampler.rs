@@ -304,9 +304,23 @@ pub struct ZoneSync {
     /// half a division early waits for the line; a later one starts at once, as far
     /// into the sample as it is late.
     pub grid: f64,
+    /// A render plays in the sample's place: (its frame, the sample's frame there),
+    /// rising, so the playhead shows where in the sample it is. Empty: the sample plays.
+    pub shown: Vec<(f64, f64)>,
 }
 
 impl ZoneSync {
+    /// The sample's frame played at the render's frame `pos`.
+    fn source(&self, pos: f64) -> f64 {
+        let i = self.shown.partition_point(|p| p.0 <= pos);
+        match (i.checked_sub(1).and_then(|j| self.shown.get(j)), self.shown.get(i)) {
+            (Some(a), Some(b)) if b.0 > a.0 => a.1 + (pos - a.0) / (b.0 - a.0) * (b.1 - a.1),
+            (Some(a), _) => a.1,
+            (None, Some(b)) => b.1,
+            (None, None) => pos,
+        }
+    }
+
     /// The render for `offset` semitones from the root, in Keys.
     fn note(&self, offset: i64) -> Option<usize> {
         if self.keys { self.notes.iter().position(|(o, _)| *o == offset) } else { None }
@@ -1209,11 +1223,14 @@ impl SamplerRt {
     /// Where the newest voice playing zone `zone` is in its sample (frames), if any:
     /// the Sample Editor's playhead.
     pub fn play_position(&self, zone: usize) -> Option<usize> {
-        self.voices
-            .iter()
-            .filter(|v| v.zone == zone && !v.stream.done && v.fade.is_none())
-            .max_by_key(|v| v.age)
-            .map(|v| v.stream.pos.max(0) as usize)
+        self.voices.iter().filter(|v| v.zone == zone && !v.stream.done && v.fade.is_none()).max_by_key(|v| v.age).map(|v| {
+            let pos = v.stream.pos.max(0) as f64;
+            // A render's frame, back to the sample's.
+            match self.zones.get(zone).and_then(|z| z.sync.as_ref()) {
+                Some(sync) => sync.source(pos).max(0.0) as usize,
+                None => pos as usize,
+            }
+        })
     }
 
     /// The peak level of the last [`SamplerRt::render`], before the engine's clamp.
