@@ -464,12 +464,18 @@ fn mod_lanes(p: &Project, g: usize, pat: &deckard_model::Pattern) -> Vec<(Option
     out
 }
 
-/// A pattern's modulation of channels' faders, as lanes: (sound, `None` for the group;
-/// field; points from the pattern's start, at their deviations).
+/// A channel's own properties the engine plays modulation on (a lane with no slot): its
+/// gain, and its two aux send levels. The app offers only these as modulation targets.
+pub fn channel_field(field: &str) -> bool {
+    matches!(field, "level" | "pan" | "aux1_level" | "aux2_level")
+}
+
+/// A pattern's modulation of channels' faders and sends, as lanes: (sound, `None` for
+/// the group; field; points from the pattern's start, at their deviations).
 fn fader_lanes(p: &Project, pat: &deckard_model::Pattern) -> Vec<(Option<usize>, String, Vec<(i64, f64)>)> {
     let plen = own_length(p, pat);
     let mut out: Vec<(Option<usize>, String, Vec<(i64, f64)>)> = Vec::new();
-    for m in pat.mods.iter().filter(|m| m.slot.is_none() && matches!(m.field.as_str(), "level" | "pan" | "aux1_level" | "aux2_level")) {
+    for m in pat.mods.iter().filter(|m| m.slot.is_none() && channel_field(&m.field)) {
         let pos = m.position - pat.start;
         if !(0..plen).contains(&pos) {
             continue;

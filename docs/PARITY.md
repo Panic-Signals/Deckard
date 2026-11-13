@@ -104,8 +104,7 @@ then ask for and DECKARD only stubs:
   Missing: MP3, dragging audio or MIDI out of the window, REX and MPC import. (Save
   with samples: done for sounds and groups.)
 - **Modulation** (`docs/modulation.md`): left are the Control Lane's modulation pane
-  (seeing and drawing points), Step mode modulation, instruments' and the Sampler's
-  parameters, channel properties other than level and pan, curves; and host automation.
+  (seeing and drawing points), swing, curves; and host automation.
 - **MIDI:** MIDI mode on the MK3 (as a MIDI controller), MIDI Control of parameters
   (learn), Program Change, Groups/Sounds receiving MIDI notes (partial: `midi_io.rs`).
 - **Plug-in mode** (Maschine as VST3/AU in a DAW) and host sync.

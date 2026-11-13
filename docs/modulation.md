@@ -12,6 +12,12 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
     the whole movement. A selector's or button's point is the value itself.
   - When the pattern starts again, or the song stops, the parameter is back to its own
     value.
+- **What can be modulated.** A module's continuous knob (an internal effect's, the
+  Sampler's, a drum, bass or poly synth's, a plug-in's), or a channel's own gain, pan or
+  aux send levels — a sound's or a group's, not the master's — which are the four
+  channel properties the engine plays (`deckard_engine::channel_field`). A channel's cue,
+  a send's destination and order, its MIDI transpose and its swing are not; Maschine's
+  own Output page offers Level, Pan and the send Levels, and nothing else it modulates.
 - **Recording in the software.**
   - Drag a knob's ring while the song plays.
   - Or switch on Auto-write (the header's bullseye, red while on; the MK3's AUTO),
@@ -133,9 +139,6 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
 ## Not yet
 - The Control Lane's modulation pane: listing lanes, and seeing, drawing and editing
   points.
-- Step mode modulation: holding steps and turning knobs
-  (`ModulationEditingAccess.setModulationStep`).
-- Instruments' (drum synths, Bass/Poly Synth), the Sampler's and plug-ins' parameters;
-  channel properties other than level and pan (sends, tune, swing).
+- Swing (its amount, cycle and invert): a pattern's notes are timed when its spans are
+  built, so a lane through it would re-time them rather than move between values.
 - Curved segments (v1's other coefficients are read as a straight line).
-- Hiding non-modulatable knobs on the MK3 while auto-writing (`Parameter:isAutomatable`).

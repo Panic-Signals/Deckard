@@ -94,6 +94,8 @@ mod midi_monitor;
 mod mk3_io;
 mod mod_slots;
 mod modulation;
+#[cfg(test)]
+mod modulation_tests;
 mod module_ui;
 mod ni_agent;
 mod ni_services;
