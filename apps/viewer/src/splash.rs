@@ -51,7 +51,19 @@ pub fn bar_text(progress: f32, width: usize) -> String {
     format!("[{}{}] {:>3}%", "█".repeat(full), "░".repeat(width - full), (p * 100.0).round() as u32)
 }
 
-/// Open or update the splash window (unless it was closed), centred on the monitor.
+/// Where the splash goes: centred on the main window (`main`, its outer rect, on
+/// whichever display it is), or on the monitor (of `monitor` size) while that isn't
+/// known.
+pub fn splash_position(main: Option<Rect>, monitor: Option<Vec2>) -> Option<Pos2> {
+    match (main, monitor) {
+        (Some(r), _) => Some(r.center() - SIZE / 2.0),
+        (None, Some(m)) => Some(((m - SIZE) / 2.0).to_pos2()),
+        (None, None) => None,
+    }
+}
+
+/// Open or update the splash window (unless it was closed), centred on the main
+/// window.
 pub fn show(ctx: &egui::Context, boot: &mut Boot) {
     if boot.hidden {
         return;
@@ -62,8 +74,9 @@ pub fn show(ctx: &egui::Context, boot: &mut Boot) {
         .with_decorations(false)
         .with_resizable(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop);
-    if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
-        builder = builder.with_position(((monitor - SIZE) / 2.0).to_pos2());
+    let (main, monitor) = ctx.input_for(egui::ViewportId::ROOT, |i| (i.viewport().outer_rect, i.viewport().monitor_size));
+    if let Some(at) = splash_position(main, monitor) {
+        builder = builder.with_position(at);
     }
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("deckard-splash"), builder, |ui, class| {
         let rect =
@@ -326,6 +339,17 @@ mod tests {
     fn release_notes_for_this_version_or_the_latest() {
         assert_eq!(release_notes_link("0.4.2"), "https://github.com/Panic-Signals/Deckard/releases/tag/0.4.2");
         assert_eq!(release_notes_link("0.1.0-dev"), "https://github.com/Panic-Signals/Deckard/releases/latest");
+    }
+
+    #[test]
+    fn centred_on_the_main_window_wherever_it_is() {
+        // The main window on a second display, to the right of the first.
+        let main = Rect::from_min_size(Pos2::new(2261.0, 100.0), Vec2::new(1500.0, 930.0));
+        let at = splash_position(Some(main), Some(Vec2::new(1800.0, 1169.0))).unwrap();
+        assert_eq!(at, main.center() - SIZE / 2.0);
+        // Not known yet: the monitor's middle.
+        assert_eq!(splash_position(None, Some(Vec2::new(1800.0, 1200.0))), Some(Pos2::new(520.0, 360.0)));
+        assert_eq!(splash_position(None, None), None);
     }
 
     #[test]

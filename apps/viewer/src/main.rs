@@ -245,12 +245,13 @@ fn main() {
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
+    let app_icon = settings::Settings::load().app_icon;
     let options = eframe::NativeOptions {
         // The icon picked in Preferences ▸ General, from the start.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([width, 930.0])
             .with_drag_and_drop(true)
-            .with_icon(std::sync::Arc::new(settings::Settings::load().app_icon.icon_data())),
+            .with_icon(std::sync::Arc::new(app_icon.icon_data())),
         ..Default::default()
     };
     let splash = boot::splash_wanted(&args);
@@ -275,16 +276,17 @@ fn main() {
                 boot: Some(boot::Boot::new(boot::all_steps(path))),
                 ..Default::default()
             };
+            if app_icon != icon::Style::default() {
+                // The Dock and the taskbar's big icon, which the window's icon doesn't set
+                // (on every launch, splash or not).
+                icon::apply(&cc.egui_ctx, app_icon);
+            }
             if splash {
                 // The frame loop runs startup, a step a frame; there are no flags to apply.
                 return Ok(Box::new(app));
             }
             app.boot_to_end();
             app.boot = None;
-            if app.settings.app_icon != icon::Style::default() {
-                // The Dock and the taskbar's big icon, which the window's icon doesn't set.
-                icon::apply(&cc.egui_ctx, app.settings.app_icon);
-            }
             app.group = group;
             app.focus_scene(scene);
             if flag("--pattern").is_some() {
@@ -820,6 +822,16 @@ const GROOVE_FIELDS: [&str; 17] = [
 enum StemsOffer {
     Asking,
     Installing(std::sync::mpsc::Receiver<Result<(), String>>),
+}
+
+/// How a start with no project asked for begins (see [`App::start_project`]).
+#[derive(Debug, Clone, PartialEq)]
+enum Start {
+    /// The backup of a session that crashed with unsaved changes.
+    Backup,
+    /// This project (the last one, as saved).
+    Reopen(PathBuf),
+    New,
 }
 
 /// What waits for an answer about unsaved changes.
@@ -1999,23 +2011,44 @@ impl App {
     /// What DECKARD opens with no project asked for: after a crash with unsaved
     /// changes, the backup (as Maschine offers it); else the last project as saved (the
     /// Settings page's RELOAD), or an empty project, like Maschine.
-    pub(crate) fn start_project(&mut self) {
-        let info = self.session_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("session.txt")).ok()).unwrap_or_default();
-        let value = |k: &str| info.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = ").map(str::to_string));
-        let (path, dirty, clean) =
-            (value("path").map(PathBuf::from), value("dirty").as_deref() == Some("true"), value("clean").as_deref() == Some("true"));
-        if dirty && !clean && self.restore_session(path.clone(), dirty) {
+    pub(crate) fn start_project(&mut self) -> Start {
+        let (path, backup) = self.last_session();
+        if backup && self.restore_session(path.clone(), true) {
             self.status = "unsaved changes brought back from the backup".into();
-            return;
+            return Start::Backup;
         }
-        if let Some(p) = path.filter(|p| self.settings.reload_last && p.exists()) {
+        if let Some(p) = self.reopens(path) {
             self.open(&p);
             if self.error.is_none() {
                 self.remember(&p);
-                return;
+                return Start::Reopen(p);
             }
         }
         self.new_project();
+        Start::New
+    }
+
+    /// What [`App::start_project`] will do, as far as can be told without doing it.
+    fn start_plan(&self) -> Start {
+        let (path, backup) = self.last_session();
+        if backup && self.session_dir.as_ref().is_some_and(|d| d.join("session.mxprj").exists()) {
+            return Start::Backup;
+        }
+        self.reopens(path).map_or(Start::New, Start::Reopen)
+    }
+
+    /// The last session's project file, and whether it ended in a crash with unsaved
+    /// changes (so its backup is to be brought back).
+    fn last_session(&self) -> (Option<PathBuf>, bool) {
+        let info = self.session_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("session.txt")).ok()).unwrap_or_default();
+        let value = |k: &str| info.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = ").map(str::to_string));
+        let (dirty, clean) = (value("dirty").as_deref() == Some("true"), value("clean").as_deref() == Some("true"));
+        (value("path").map(PathBuf::from), dirty && !clean)
+    }
+
+    /// The last project, if it is to be opened again (the Settings page's RELOAD).
+    fn reopens(&self, path: Option<PathBuf>) -> Option<PathBuf> {
+        path.filter(|p| self.settings.reload_last && p.exists())
     }
 
     /// Open the backup kept of the last session (saved at `path`, with unsaved edits if
@@ -11094,7 +11127,11 @@ impl eframe::App for App {
     /// While the window is covered or minimized eframe runs no `ui`, only this: keep the
     /// controller (scripts, LEDs, screens) and MIDI going, as `frame` does when shown.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.finish_quit(ctx) || self.boot.is_some() {
+        if self.finish_quit(ctx) {
+            return;
+        }
+        if self.boot.is_some() {
+            self.boot_hidden(ctx);
             return;
         }
         if ctx.input(|i| i.viewport().visible()) != Some(false) {

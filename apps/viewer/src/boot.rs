@@ -91,9 +91,10 @@ impl Boot {
         if self.total == 0 { 1.0 } else { (self.done as f32 / self.total as f32).clamp(0.0, 1.0) }
     }
 
-    /// Whether the last step (READY) has run.
+    /// Whether the last step (READY) has run: the count says so, or nothing is left
+    /// to run (so an over-count can't keep the screen up).
     pub fn finished(&self) -> bool {
-        self.done >= self.total
+        self.done >= self.total || (self.queue.is_empty() && self.running.is_none())
     }
 
     /// Whether the screen may go: everything ran, READY was on screen for a frame, and
@@ -125,6 +126,20 @@ pub fn splash_wanted(args: &[String]) -> bool {
     args.len() <= 1 && !args.iter().any(|a| a.starts_with("--"))
 }
 
+/// `OPENING SONG.MXPRJ`.
+fn opening(p: &std::path::Path) -> String {
+    format!("OPENING {}", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_uppercase()))
+}
+
+/// The Project line for how the project was (or will be) started.
+fn project_label(start: &crate::Start) -> String {
+    match start {
+        crate::Start::Backup => "RESTORING BACKUP".into(),
+        crate::Start::Reopen(p) => opening(p),
+        crate::Start::New => "NEW PROJECT".into(),
+    }
+}
+
 fn found(yes: bool) -> Outcome {
     Outcome::Text(if yes { "FOUND" } else { "NOT CONNECTED" }.into())
 }
@@ -150,10 +165,10 @@ impl App {
         self.boot = Some(boot);
     }
 
-    /// Run startup to the end at once (also when the queue runs dry before the count
-    /// says so, so a miscount can't hang it).
+    /// Run startup to the end at once (finished also when the queue runs dry before
+    /// the count says so, so a miscount can't hang it).
     pub(crate) fn boot_to_end(&mut self) {
-        while self.boot.as_ref().is_some_and(|b| !b.finished() && (!b.queue.is_empty() || b.running.is_some())) {
+        while self.boot.as_ref().is_some_and(|b| !b.finished()) {
             self.boot_next();
         }
     }
@@ -163,6 +178,12 @@ impl App {
     /// (and opens a held file) when the screen may go.
     pub(crate) fn boot_frame(&mut self, ui: &mut eframe::egui::Ui) {
         let ctx = ui.ctx().clone();
+        // Closing the window with unsaved changes (a restored backup) asks first, once
+        // loading ends, as it does after.
+        if ctx.input(|i| i.viewport().close_requested()) && self.asks_on_quit() && !self.quitting {
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::CancelClose);
+            self.confirm = Some(crate::Pending::Quit);
+        }
         // Pad hits while loading are never played later.
         if let Some(m) = &self.mk3 {
             m.set_context(&ctx);
@@ -188,9 +209,21 @@ impl App {
             if let Some(p) = held {
                 self.open_file(p);
             }
-        } else {
-            ctx.request_repaint();
         }
+        // (Also on the frame that ends it, so the UI is drawn without waiting for input.)
+        ctx.request_repaint();
+    }
+
+    /// Startup while the main window is hidden (eframe draws no frames then): go on
+    /// with it, a step at a time, drawing nothing. (Shown, `boot_frame` runs it.)
+    pub(crate) fn boot_hidden(&mut self, ctx: &eframe::egui::Context) {
+        if self.boot.is_none() {
+            return;
+        }
+        if ctx.input(|i| i.viewport().visible()) == Some(false) {
+            self.boot_next();
+        }
+        ctx.request_repaint();
     }
 
     fn step_label(&self, boot: &Boot, step: &Step) -> String {
@@ -202,10 +235,8 @@ impl App {
             Step::Launchpad => "LAUNCHPAD PRO MK3".into(),
             Step::Surface => "CONTROLLER SURFACE".into(),
             Step::Catalog => "PLUG-IN CATALOG".into(),
-            Step::Project(Some(p)) => {
-                format!("OPENING {}", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_uppercase()))
-            }
-            Step::Project(None) => "NEW PROJECT".into(),
+            Step::Project(Some(p)) => opening(p),
+            Step::Project(None) => project_label(&self.start_plan()),
             Step::Plugins => "PLUG-INS".into(),
             Step::AudioOutput => "AUDIO OUTPUT".into(),
             Step::Plugin(i) => {
@@ -278,18 +309,26 @@ impl App {
                 }
             }
             Step::Project(path) => {
-                let name = path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-                if let Some(p) = &path {
-                    self.open(p);
-                    self.remember(p);
+                let started = if let Some(p) = path {
+                    self.open(&p);
+                    self.remember(&p);
+                    crate::Start::Reopen(p)
                 } else {
-                    self.start_project();
+                    self.start_project()
+                };
+                // (What was done, if not what was planned: a backup that wouldn't read.)
+                if let Some(line) = boot.log.last_mut() {
+                    line.label = project_label(&started);
                 }
                 // (The plug-ins load in the steps after, not again once the window is up.)
                 self.preload_plugins = false;
-                match &self.error {
-                    Some(e) => Outcome::Err(e.clone()),
-                    None => Outcome::Text(name.unwrap_or_else(|| "NEW PROJECT".into())),
+                match (&self.error, &started) {
+                    (Some(e), _) => Outcome::Err(e.clone()),
+                    (None, crate::Start::Reopen(p)) => {
+                        Outcome::Text(p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()))
+                    }
+                    (None, crate::Start::Backup) => Outcome::Text("RESTORED".into()),
+                    (None, crate::Start::New) => Outcome::Ok,
                 }
             }
             Step::Plugins => {
@@ -469,7 +508,11 @@ mod tests {
     }
 
     fn booting_harness() -> egui_kittest::Harness<'static, crate::App> {
-        let mut app = crate::App::default();
+        booting_harness_of(crate::App::default())
+    }
+
+    /// `app` starting up, in a window.
+    fn booting_harness_of(mut app: crate::App) -> egui_kittest::Harness<'static, crate::App> {
         app.boot = Some(Boot::new(vec![Step::Project(None), Step::Done]));
         egui_kittest::Harness::builder().with_size(egui::vec2(1500.0, 930.0)).build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app)
     }
@@ -527,6 +570,154 @@ mod tests {
         h.run_steps(90);
         assert!(h.state().boot.is_none());
         assert_eq!(h.state().path.as_deref(), Some(p.as_path()));
+    }
+
+    /// A backup left by a crash, with unsaved changes, in `dir`.
+    fn crashed_session(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        save_new_project_to(&dir.join("session.mxprj"));
+        std::fs::write(dir.join("session.txt"), "dirty = true\nclean = false\n").unwrap();
+    }
+
+    /// The Project line's label while it runs and after.
+    fn project_labels(app: &mut crate::App, path: Option<PathBuf>) -> (String, String) {
+        app.boot = Some(Boot::new(vec![Step::Project(path), Step::Done]));
+        app.boot_next();
+        let running = app.boot.as_ref().unwrap().log[0].label.clone();
+        app.boot_next();
+        (running, app.boot.as_ref().unwrap().log[0].label.clone())
+    }
+
+    #[test]
+    fn the_project_line_says_new_project_only_for_a_new_one() {
+        let mut app = crate::App::default();
+        let (running, done) = project_labels(&mut app, None);
+        assert_eq!((running.as_str(), done.as_str()), ("NEW PROJECT", "NEW PROJECT"));
+    }
+
+    #[test]
+    fn the_project_line_names_a_project_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Song.mxprj");
+        save_new_project_to(&p);
+        let mut app = crate::App::default();
+        let (running, done) = project_labels(&mut app, Some(p));
+        assert_eq!((running.as_str(), done.as_str()), ("OPENING SONG.MXPRJ", "OPENING SONG.MXPRJ"));
+    }
+
+    #[test]
+    fn the_project_line_names_the_last_project_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Last.mxprj");
+        save_new_project_to(&p);
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("session.txt"), format!("dirty = false\nclean = true\npath = {}\n", p.display())).unwrap();
+        let mut app = crate::App { session_dir: Some(session), ..Default::default() };
+        app.settings.reload_last = true;
+        let (running, done) = project_labels(&mut app, None);
+        assert_eq!((running.as_str(), done.as_str()), ("OPENING LAST.MXPRJ", "OPENING LAST.MXPRJ"));
+        assert_eq!(app.path.as_deref(), Some(p.as_path()));
+    }
+
+    #[test]
+    fn the_project_line_says_a_backup_is_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        crashed_session(dir.path());
+        let mut app = crate::App { session_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+        let (running, done) = project_labels(&mut app, None);
+        assert_eq!((running.as_str(), done.as_str()), ("RESTORING BACKUP", "RESTORING BACKUP"));
+        assert!(app.dirty());
+    }
+
+    #[test]
+    fn closing_while_loading_a_restored_backup_asks_first() {
+        let dir = tempfile::tempdir().unwrap();
+        crashed_session(dir.path());
+        let mut h = booting_harness_of(crate::App { session_dir: Some(dir.path().to_path_buf()), ..Default::default() });
+        // (Held on screen however slow the machine.)
+        h.state_mut().boot.as_mut().unwrap().started += Duration::from_secs(60);
+        h.run_steps(3);
+        assert!(h.state().dirty(), "the backup's unsaved changes are back");
+        assert!(h.state().boot.is_some(), "still loading");
+        h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        h.step();
+        let commands = h.output().viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default();
+        assert!(!commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose), "{commands:?}");
+        assert!(matches!(h.state().confirm, Some(crate::Pending::Quit)));
+        assert!(!h.state().quitting);
+    }
+
+    #[test]
+    fn the_frame_that_ends_loading_asks_for_another() {
+        let mut app = crate::App::default();
+        let mut b = Boot::new(vec![Step::Done]);
+        b.started -= Duration::from_secs(2);
+        // (Without the splash, which asks for frames of its own.)
+        b.hidden = true;
+        app.boot = Some(b);
+        app.boot_to_end();
+        app.boot.as_mut().unwrap().ready_at = Some(Instant::now() - Duration::from_secs(1));
+        // (A fresh context: no frame asked for by an earlier one.)
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        }
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.boot_frame(ui));
+        out.textures_delta.clear();
+        assert!(app.boot.is_none(), "this frame ended loading");
+        let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        assert_eq!(delay, Some(Duration::ZERO), "the UI is drawn without waiting for input");
+    }
+
+    #[test]
+    fn loading_goes_on_while_the_window_is_hidden() {
+        let mut app = crate::App::default();
+        app.boot = Some(Boot::new(vec![Step::Project(None), Step::Done]));
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().minimized = Some(true);
+        for _ in 0..4 {
+            ctx.begin_pass(raw.clone());
+            app.boot_hidden(&ctx);
+            let mut out = ctx.end_pass();
+            out.textures_delta.clear();
+            assert_eq!(out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay), Some(Duration::ZERO));
+        }
+        assert!(app.boot.as_ref().unwrap().finished());
+        assert!(app.doc.is_some());
+    }
+
+    #[test]
+    fn loading_isnt_run_twice_a_frame_while_shown() {
+        let mut app = crate::App::default();
+        app.boot = Some(Boot::new(vec![Step::Project(None), Step::Done]));
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        app.boot_hidden(&ctx);
+        ctx.end_pass().textures_delta.clear();
+        assert!(app.boot.as_ref().unwrap().log.is_empty(), "boot_frame runs it when shown");
+    }
+
+    #[test]
+    fn an_overcount_still_finishes() {
+        let mut app = crate::App::default();
+        let mut b = Boot::new(vec![Step::Done]);
+        b.total = 5;
+        app.boot = Some(b);
+        app.boot_next();
+        app.boot_next();
+        assert!(app.boot.as_ref().unwrap().finished());
+    }
+
+    #[test]
+    fn an_overcount_still_closes_the_screen() {
+        let mut h = booting_harness();
+        h.state_mut().boot.as_mut().unwrap().total += 3;
+        h.state_mut().boot.as_mut().unwrap().started -= Duration::from_secs(2);
+        h.run_steps(90);
+        assert!(h.state().boot.is_none());
     }
 
     #[test]
