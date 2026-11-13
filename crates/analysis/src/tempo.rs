@@ -32,8 +32,11 @@ pub struct Tempo {
 /// The range searched, and the one tempos are folded into.
 const SEARCH: (f64, f64) = (60.0, 200.0);
 const FOLD: (f64, f64) = (85.0, 170.0);
-/// How near a whole number of bars the length must be for the tempo to snap to it.
+/// How near a whole number of bars the length must be for the tempo to snap to it: this
+/// share of its beats, and no more than this much of one beat (a long excerpt that
+/// isn't a loop is seldom that near; a loop cut on its bars is).
 const LOOP_TOLERANCE: f64 = 0.02;
+const LOOP_BEATS: f64 = 0.25;
 
 /// The tempo of `frames` at `rate`, or `None` for one-shots, silence and audio without a
 /// beat. `hint` (the tempo in the file's name) wins over what's heard; the audio still
@@ -66,13 +69,18 @@ pub fn tempo(frames: &[[f32; 2]], rate: u32, hint: Option<f64>) -> Option<Tempo>
     // the prior. The half beat keeps 2:3 relatives (a dotted beat) from winning: their
     // halves fall between the 8ths; and the quarter beat, under straight sixteenths
     // (where those halves are three sixteenths, on the grid): their quarters fall
-    // between the sixteenths.
+    // between the sixteenths. The bar (four beats) keeps 4:3 relatives from winning on a
+    // syncopated line without drums (a funk bass in threes of sixteenths): the line
+    // comes round every bar, not every three beats.
     let prior = |bpm: f64| (-0.5 * (bpm / 120.0).log2().powi(2)).exp();
     let mut scores = Vec::new();
     let mut bpm = SEARCH.0;
     while bpm <= SEARCH.1 {
         let l = lag_of(bpm);
-        scores.push((bpm, prior(bpm) * (ac(&env, l) + 0.5 * ac(&env, 2.0 * l) + 0.5 * ac(&env, 0.5 * l) + 0.5 * ac(&env, 0.25 * l))));
+        scores.push((
+            bpm,
+            prior(bpm) * (ac(&env, l) + 0.5 * ac(&env, 2.0 * l) + 0.5 * ac(&env, 0.5 * l) + 0.5 * ac(&env, 0.25 * l) + ac(&env, 4.0 * l)),
+        ));
         bpm += 0.1;
     }
     let (best, top) = scores.iter().copied().fold((0.0, f64::MIN), |a, b| if b.1 > a.1 { b } else { a });
@@ -110,7 +118,7 @@ pub fn tempo(frames: &[[f32; 2]], rate: u32, hint: Option<f64>) -> Option<Tempo>
     let n = seconds * bpm / 60.0;
     let whole = (0..=8).map(|k| f64::from(1u32 << k)).chain((1..=64).map(|m| 4.0 * f64::from(m)));
     if let Some(c) = whole.min_by(|a, b| (n - a).abs().total_cmp(&(n - b).abs()))
-        && ((n - c) / c).abs() < LOOP_TOLERANCE
+        && (n - c).abs() < (LOOP_TOLERANCE * c).min(LOOP_BEATS)
     {
         bpm = 60.0 * c / seconds;
         source = TempoSource::Loop;
@@ -260,5 +268,39 @@ mod tests {
         let t = tempo(&rotated, SR, None).expect("a tempo");
         let hop = 256;
         assert!(t.offset.abs_diff(quarter) <= hop * 3 / 2, "offset {} vs {quarter}", t.offset);
+    }
+
+    /// A bass line alone, its notes three sixteenths apart (the funk figure), coming
+    /// round every bar: the tempo, not four thirds of it (a beat of three sixteenths).
+    #[test]
+    fn a_syncopated_line_without_drums() {
+        for bpm in [93.0, 100.0, 110.0] {
+            let sixteenth = 15.0 / bpm * f64::from(SR);
+            let bars = 6;
+            let mut f = vec![[0f32; 2]; (sixteenth * 16.0 * bars as f64).round() as usize];
+            for bar in 0..bars {
+                for (step, hz) in [(0, 58.27), (3, 69.3), (6, 77.78), (9, 58.27), (12, 51.91), (14, 55.0)] {
+                    let at = ((bar * 16 + step) as f64 * sixteenth).round() as usize;
+                    for (i, v) in crate::test_signals::tone(hz, 0.16, SR, 4).iter().enumerate() {
+                        let fade = (-(i as f32) / (0.06 * SR as f32)).exp();
+                        if let Some(o) = f.get_mut(at + i) {
+                            *o = [o[0] + v[0] * fade, o[1] + v[1] * fade];
+                        }
+                    }
+                }
+            }
+            let t = tempo(&f, SR, None).expect("a tempo");
+            assert!((t.bpm - bpm).abs() < 0.3, "{bpm}: {t:?}");
+        }
+    }
+
+    /// A stretch of a longer recording, half a beat short of twelve bars: the tempo heard,
+    /// not one rounded to make it twelve bars.
+    #[test]
+    fn an_excerpt_is_not_a_loop() {
+        let f = drums(120.0, 12, SR, 0.5);
+        let t = tempo(&f[..f.len() - SR as usize / 4], SR, None).expect("a tempo");
+        assert!((t.bpm - 120.0).abs() < 0.1, "{t:?}");
+        assert_eq!(t.source, TempoSource::Audio);
     }
 }
