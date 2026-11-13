@@ -275,6 +275,10 @@ pub struct ZoneSync {
     pub tempo: f64,
     pub keys: bool,
     pub notes: Vec<(i64, Arc<Sample>)>,
+    /// Sync: notes played live start on this grid (beats; 0: when played). One up to
+    /// half a division early waits for the line; a later one starts at once, as far
+    /// into the sample as it is late.
+    pub grid: f64,
 }
 
 impl ZoneSync {
@@ -917,17 +921,26 @@ struct Voice {
     cutoff: f32,
     cutoff_set: bool,
     eq: Biquad,
+    /// Frames of silence before it starts (a Sync note waiting for its grid line).
+    wait: u32,
+    /// A short fade-in (a Sync note started late, inside its sample): frames left.
+    rise: u32,
     /// Linear fade-out (stolen, CC 120, stop): (frames left, total).
     fade: Option<(u32, u32)>,
     released: bool,
     sustained: bool,
 }
 
+/// The fade-in of a Sync note started inside its sample, frames at most.
+const RISE: u32 = 144;
+
 /// Modulation and transport state shared by the voices of one Sampler.
 pub struct Context {
     pub tempo: f64,
     /// Song position in beats (quarter notes), for the LFO's Lock mode.
     pub beats: f64,
+    /// The note is played live while the song runs (a Sync zone starts it on its grid).
+    pub live: bool,
 }
 
 /// One sound's Sampler: settings, zones, voices and the controllers.
@@ -1337,6 +1350,23 @@ impl SamplerRt {
         let offset = (start * len) as i64;
         let forward = !s.reverse;
         let looping = amp_on && z.looped.is_some();
+        // A Sync note played live starts on its grid: the nearest line, waited for, or
+        // (late) caught up with by starting that far in.
+        let (mut wait, mut rise) = (0u32, 0u32);
+        let mut offset = offset;
+        if let Some(sy) = z.sync.as_ref().filter(|sy| ctx.live && !sy.keys && sy.grid > 0.0 && sy.tempo > 0.0 && ctx.tempo > 0.0) {
+            let late = ctx.beats.rem_euclid(sy.grid);
+            if late > sy.grid / 2.0 {
+                wait = ((sy.grid - late) * 60.0 / ctx.tempo * self.sr).round() as u32;
+            } else {
+                // Beats to frames of the zone's sample (in time at `sy.tempo`).
+                let skip = (late * 60.0 / sy.tempo * z.sample.rate as f64).round() as i64;
+                if skip > (z.sample.rate / 500) as i64 && offset + skip < len as i64 {
+                    offset += skip;
+                    rise = RISE.min((self.sr * 0.003) as u32).max(1);
+                }
+            }
+        }
         let stream = Stream {
             pos: if forward { z.play.0 as i64 + offset } else { z.play.1 as i64 - 1 - offset },
             forward,
@@ -1411,6 +1441,8 @@ impl SamplerRt {
             cutoff: 0.0,
             cutoff_set: false,
             eq: Biquad::default(),
+            wait,
+            rise,
             fade: None,
             released: false,
             sustained: false,
@@ -1566,6 +1598,10 @@ impl SamplerRt {
             let mut l = 0f32;
             let mut rr = 0f32;
             for v in voices.iter_mut() {
+                if v.wait > 0 {
+                    v.wait -= 1;
+                    continue;
+                }
                 let z = &zones[v.zone];
                 // Another filter type starts from rest, as Maschine's separate filters do.
                 if v.filter_mode != s.filter {
@@ -1671,6 +1707,10 @@ impl SamplerRt {
                     *left = left.saturating_sub(1);
                 }
                 let (pl, pr) = if *pm > 0.0 { (1.0 - *pm, 1.0) } else { (1.0, 1.0 + *pm) };
+                if v.rise > 0 {
+                    fade *= 1.0 - v.rise as f32 / RISE as f32;
+                    v.rise -= 1;
+                }
                 let k = amp * fade * engine_gain;
                 l += x[0] * v.gain[0] * pl * k;
                 rr += x[1] * v.gain[1] * pr * k;
@@ -1832,7 +1872,7 @@ mod tests {
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         let buffer = smp.voices.as_ptr();
         let limit = smp.settings.note_limit();
         for n in 0..VOICE_ROOM.min(limit + 4) as i64 {
@@ -1878,7 +1918,7 @@ mod tests {
     fn sync_voices_follow_the_tempo() {
         let mut smp = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
         smp.set_song(0.0, 120.0);
-        smp.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0 });
+        smp.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0, live: false });
         let got = read(&mut smp, 4800);
         assert!((got - 5760).abs() <= 2, "read {got}");
         smp.set_song(0.0, 100.0);
@@ -1887,7 +1927,7 @@ mod tests {
         // Repitch: the zone's Tune (5 semitones) moves the speed.
         let mut plain = synced(None);
         plain.set_song(0.0, 120.0);
-        plain.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0 });
+        plain.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0, live: false });
         let got = read(&mut plain, 4800);
         assert!((got - (4800.0 * 2f64.powf(5.0 / 12.0)) as i64).abs() <= 2, "read {got}");
     }
@@ -1896,13 +1936,13 @@ mod tests {
     /// one (the same length), else by speed.
     #[test]
     fn sync_ignores_the_note_and_keys_plays_its_render() {
-        let ctx = Context { tempo: 100.0, beats: 0.0 };
+        let ctx = Context { tempo: 100.0, beats: 0.0, live: false };
         let mut smp = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
         smp.set_song(0.0, 100.0);
         smp.note_on(1, 72, 100, &ctx);
         assert_eq!((smp.voices[0].octaves, smp.voices[0].variant), (0.0, None));
         let up = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.25; 2]; 96_000] });
-        let mut keys = synced(Some(ZoneSync { tempo: 100.0, keys: true, notes: vec![(12, up)] }));
+        let mut keys = synced(Some(ZoneSync { tempo: 100.0, keys: true, notes: vec![(12, up)], grid: 0.0 }));
         keys.set_song(0.0, 100.0);
         keys.note_on(1, 72, 100, &ctx);
         keys.note_on(2, 67, 100, &ctx);
@@ -1912,11 +1952,39 @@ mod tests {
         assert_eq!(read(&mut keys, 480), 480, "a note's render plays at the tempo's speed");
     }
 
+    /// A Sync note played live starts on its grid: just early, it waits for the line;
+    /// just late, it starts at once that far into the sample. The song's own notes
+    /// (not live) start where they are.
+    #[test]
+    fn live_sync_notes_start_on_the_grid() {
+        // 120 BPM, a 1/16 grid: 6000 frames a division at 48 kHz.
+        let sync = || synced(Some(ZoneSync { tempo: 120.0, grid: 0.25, ..ZoneSync::default() }));
+        // 0.05 beats (1200 frames) before beat 1.
+        let mut early = sync();
+        early.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.95, live: true });
+        assert_eq!((early.voices[0].wait, early.voices[0].stream.pos), (1200, 5), "waits, from the start (5 frames primed)");
+        let mut out = vec![0.0; 2400];
+        early.render(&mut out);
+        assert!(out.iter().all(|x| *x == 0.0), "silent until the line");
+        assert_eq!(early.voices[0].wait, 0);
+        // 0.05 beats after it.
+        let mut late = sync();
+        late.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 1.05, live: true });
+        assert_eq!((late.voices[0].wait, late.voices[0].stream.pos), (0, 1205), "starts 1200 frames in");
+        assert!(late.voices[0].rise > 0, "faded in");
+        // On the line, and from the timeline: as played.
+        for ctx in [Context { tempo: 120.0, beats: 1.0, live: true }, Context { tempo: 120.0, beats: 1.05, live: false }] {
+            let mut on = sync();
+            on.note_on(1, 60, 100, &ctx);
+            assert_eq!((on.voices[0].wait, on.voices[0].rise, on.voices[0].stream.pos), (0, 0, 5));
+        }
+    }
+
     /// A Sync zone given a render for another tempo: its voice carries on from the
     /// same place in the music.
     #[test]
     fn a_new_render_takes_over_where_the_music_is() {
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         let mut old = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
         old.set_song(0.0, 120.0);
         old.note_on(1, 60, 100, &ctx);
@@ -2130,7 +2198,7 @@ mod tests {
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         let mut smp1 = SamplerRt::new(settings.clone(), vec![make_zone(sample1)], (1.0, 1.0), 48_000.0);
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         smp1.note_on(1, 60, 100, &ctx);
         assert_eq!(smp1.voices.len(), 1);
         assert!(smp1.voices[0].fade.is_none());
@@ -2170,7 +2238,7 @@ mod tests {
         settings.polyphony = 0; // Legato
         settings.glide = 0.5;
         let mut smp = SamplerRt::new(settings, vec![zone], (1.0, 1.0), 48_000.0);
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         smp.note_on(1, 60, 100, &ctx);
         assert_eq!(smp.voices.len(), 1);
         assert_eq!(smp.voices[0].note, 60);

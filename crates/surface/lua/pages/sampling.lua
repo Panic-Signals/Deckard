@@ -127,6 +127,7 @@ local function tempo_buttons(v)
     { text = "X2", disabled = not has, act = function() deckard.sampling_call("double_bpm") end },
     { text = "1/2", disabled = not has, act = function() deckard.sampling_call("halve_bpm") end },
     { text = "TO PROJECT", disabled = not has, act = function() deckard.sampling_call("to_project") end },
+    { text = "MATCH KEY", disabled = not (p.knobs[4] ~= nil), act = function() deckard.sampling_call("match_key") end },
   }
 end
 

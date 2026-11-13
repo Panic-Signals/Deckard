@@ -49,6 +49,8 @@ pub enum Apply {
     Bpm,
     Root,
     PlaysAt,
+    /// A Sync zone's start grid (`StartGrid::ALL`).
+    StartGrid,
     /// Shown, not set.
     None,
 }
@@ -205,6 +207,12 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             knobs.push((knob("Beat.PlaysAt", "PLAYS AT", text, at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));
         }
         page(&mut out, 1, "TEMPO / PITCH", knobs);
+        if m.mode == deckard_model::new_sampler::PlayMode::Sync {
+            use deckard_model::new_sampler::StartGrid;
+            let grids: Vec<String> = StartGrid::ALL.iter().map(|g| g.label().to_string()).collect();
+            let cur = StartGrid::ALL.iter().position(|g| *g == m.start).unwrap_or(0);
+            page(&mut out, 1, "SYNC", vec![(choice("Beat.Start", "START", &grids, cur), Apply::StartGrid)]);
+        }
     }
 
     // ZONE.

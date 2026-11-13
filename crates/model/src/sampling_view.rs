@@ -70,6 +70,8 @@ pub enum SamplingCall {
     /// set to it.
     ScaleBpm(bool),
     ToProject,
+    /// Its Tune set so its root is the nearest note of the song's key.
+    MatchKey,
 }
 
 /// A page of the Sampling page's knobs (up to four; knobs 5 and 6 zoom and scroll).

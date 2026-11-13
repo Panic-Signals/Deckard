@@ -120,6 +120,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         cents: a.root.map_or(0.0, |r| r.cents),
         root_locked: false,
         warps: Vec::new(),
+        start: Default::default(),
     }
 }
 
@@ -312,6 +313,20 @@ mod app_tests {
         assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Quantize Audio"));
         app.warp_act(WarpAct::Clear);
         assert!(warps(&app).is_empty());
+        // The controller's MATCH KEY: a root of A1, 12 cents flat, in a song in C
+        // plays at C2 (up 3, its cents back).
+        let zone = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].clone();
+        let m = ZoneMeta { root: Some(45), cents: -12.0, ..zone(&app).meta.unwrap() };
+        app.sampling_act(crate::layout::sampling::SamplingAct::Meta(m));
+        app.scale.0 = 60;
+        app.sampling_call(deckard_lua_host::state::SamplingCall::MatchKey);
+        assert_eq!(zone(&app).tune, 3.12);
+        // Its START knob, on the SYNC page.
+        use deckard_model::new_sampler::StartGrid;
+        assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Sixteenth);
+        app.record_apply.insert("Beat.Start".into(), crate::sampling_hw::Apply::StartGrid);
+        app.sampling_knob("Beat.Start", 3.0);
+        assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Quarter);
     }
 
     /// An Audio plug-in's take becomes a New Sampler zone in Sync at the take's tempo;

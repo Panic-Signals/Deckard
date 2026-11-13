@@ -206,10 +206,12 @@ made on the app's render thread, kept up to ~400 MB, least recently used dropped
 the render comes, and while the tempo moves away from it, the zone reads faster or slower
 so it stays in time (repitched); a new render takes over sounding notes where the music
 is. Keys renders ±12 semitones around the root, nearest first, and transposes by speed
-until a note's render is made. Not yet: the Live engine (Live plays as Rendered),
-grid-quantized starts, target note / Match key / Fine-tune to 0 ct, the root lock in the
-UI, modulated Tune and the pitch envelope in the stretcher (they still repitch), and
-exports waiting for renders.
+until a note's render is made. A Sync note played live while the song runs starts on its
+zone's START grid (off, 1/16 by default, 1/8, 1/4, a bar): up to half a division early
+it waits for the line; later it starts at once, that far into the sample (a 3 ms fade
+in); the song's own notes start where they are. An export makes its renders before it
+plays. Not yet: the Live engine (Live plays as Rendered), and modulated Tune and the
+pitch envelope in the stretcher (they still repitch).
 
 This covers what the Audio plug-in does, and is why the New Sampler can replace it for new work.
 - **Repitch:** today's behaviour, and the default for one-shots.
@@ -255,7 +257,9 @@ and BEATS, linked; ×2, ½, TAP, TO PROJECT), PITCH (ROOT, set by hand and then 
 PLAYS AT, the note its Tune makes, its cents tuned out) and REPITCH / SYNC / KEYS; the
 waveform's ruler in bars and beats with beat lines. MK3: EDIT's TEMPO / PITCH knob page
 (MODE, BPM, ROOT, PLAYS AT), and under SHIFT X2, 1/2, TO PROJECT on the display buttons.
-Not yet: snapping to beats, ± nudge, Match key, SLICE ▸ Grid at the sample's tempo, the
+MATCH KEY (the Tune putting the root on the nearest note of the song's scale root; on
+the MK3 under SHIFT) and START (the Sync grid; the MK3's SYNC knob page) came after.
+Not yet: snapping to beats, ± nudge, SLICE ▸ Grid at the sample's tempo, the
 sample-only nudge, Flatten, the key, and Serato's waveform colouring.
 
 - **Header on the EDIT and SLICE pages:**
@@ -296,8 +300,10 @@ waveform drawn warped (it stays in sample time, the grid moves instead), and the
 (a Sampler keeps its zones; an Audio plug-in's takes become zones, one key each from C3
 or all keys for one take, in Sync at the take's tempo, the plug-in's Tune on each) and
 **Convert to Sampler** (Sync, Keys and the analysis go; the status line says so). One
-undo step each. Not yet: on the MK3, and an Audio plug-in's pattern cues as notes (a
-converted loop plays when its pad is played, not where the pattern cued the take).
+undo step each. A pattern that played a take (Loop mode) gets its notes: one each time
+the take came round, cut at the pattern's end, the envelope made ADSR so they end with
+it; a Gate-mode plug-in's notes play its lone take in Keys. Not yet: on the MK3; a take
+starting before its pattern loses that first cut-off part.
 
 Audio → New Sampler and Sampler → New Sampler (see Architecture above). The Audio plug-in
 and the Sampler both stay.

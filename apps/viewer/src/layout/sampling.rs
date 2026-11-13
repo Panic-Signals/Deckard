@@ -519,6 +519,19 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         pitch.push(tf);
     }
     x = group_box(ui, &painter, x, y, "PITCH", &pitch, acts);
+    let key = app.scale.0;
+    let tip = format!(
+        "Tune it to the song's key: the nearest {}",
+        crate::analysis::note_name(key.rem_euclid(12) as u8 + 60).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-')
+    );
+    let mk = small(x, 0.0, 78.0);
+    if tool_button(ui, &painter, mk, "MATCH KEY", root.is_some(), false, "beat-match-key")
+        && let Some(r) = root
+    {
+        acts.push(Act::SetParam(zt, "tune", beat::match_tune(r, m.cents, key).clamp(-36.0, 36.0)));
+    }
+    ui.interact(mk, ui.id().with("beat-match-key-tip"), Sense::hover()).on_hover_text(tip);
+    x += 86.0;
     // Warp markers: on the hits, quantized, cleared.
     let st = &app.sampling;
     let (grid, strength) = (st.warp_grid, st.warp_strength);
@@ -581,7 +594,18 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
             acts.push(sact(SamplingAct::PlayMode(mode)));
         }
     }
-    let _ = app;
+    x += 3.0 * 74.0 + 4.0;
+    // Sync: the grid notes played live start on.
+    if m.mode == PlayMode::Sync {
+        use deckard_model::new_sampler::StartGrid;
+        let cur = StartGrid::ALL.iter().position(|g| *g == m.start).unwrap_or(0);
+        let m4 = m.clone();
+        let mut gf = choice_field("START", StartGrid::ALL.iter().map(|g| g.label().to_string()).collect(), cur, move |k| {
+            meta(ZoneMeta { start: StartGrid::ALL[k.min(StartGrid::ALL.len() - 1)], ..m4.clone() })
+        });
+        gf.tip = "Notes played while the song runs start on this grid: a little early waits, a little late catches up";
+        group_box(ui, &painter, x, y, "SYNC", &[gf], acts);
+    }
 }
 
 /// Timeline, waveform and zoom bar in `area` (for the Edit, Slice and Zone ▸ Sample

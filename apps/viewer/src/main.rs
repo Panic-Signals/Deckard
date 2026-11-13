@@ -8130,7 +8130,7 @@ impl App {
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
-            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt)) => {
+            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid)) => {
                 use deckard_model::new_sampler::PlayMode;
                 let Some(doc) = self.doc.clone() else { return };
                 let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
@@ -8148,6 +8148,10 @@ impl App {
                     }
                     Apply::Bpm => SamplingAct::Meta(beat::with_bpm(&m, value, seconds)),
                     Apply::Root => SamplingAct::Meta(beat::with_root(&m, at.min(127) as u8)),
+                    Apply::StartGrid => {
+                        use deckard_model::new_sampler::{StartGrid, ZoneMeta};
+                        SamplingAct::Meta(ZoneMeta { start: StartGrid::ALL[at.min(StartGrid::ALL.len() - 1)], ..m })
+                    }
                     _ => {
                         let Some(r) = m.root else { return };
                         let tune = beat::tune_for(r, m.cents, at.min(127) as i64).clamp(-36.0, 36.0);
@@ -8211,6 +8215,16 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::MatchKey => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some((r, cents)) = z.meta.and_then(|m| Some((m.root?, m.cents))) else { return };
+                let tune = beat::match_tune(r, cents, self.scale.0).clamp(-36.0, 36.0);
+                layout::apply_acts(self, vec![layout::Act::SetParam(t, "tune", tune)]);
+                return;
+            }
             C::ScaleBpm(_) | C::ToProject => {
                 let Some(doc) = self.doc.clone() else { return };
                 let Some((_, z, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
@@ -10554,7 +10568,7 @@ impl App {
                 });
                 takes.push(deckard_doc::TakeZone { file, play, bpm, beats: (t.beats > 0.0).then_some(t.beats) });
             }
-            doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune)
+            doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune, a.mode == deckard_model::AudioMode::Gate)
         } else if snd.sampler.is_some() && snd.new_sampler.is_none() {
             doc.borrow_mut().transaction("Convert to New Sampler", |d| d.set_new_sampler(g, s, Some(&Default::default())))
         } else {

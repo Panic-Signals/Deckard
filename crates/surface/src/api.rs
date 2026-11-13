@@ -571,6 +571,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "double_bpm" => C::ScaleBpm(true),
                     "halve_bpm" => C::ScaleBpm(false),
                     "to_project" => C::ToProject,
+                    "match_key" => C::MatchKey,
                     _ => return Err(mlua::Error::runtime(format!("no sampling call \"{what}\""))),
                 };
                 act(&sh, Action::SamplingCall(call));

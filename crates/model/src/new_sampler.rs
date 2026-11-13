@@ -37,6 +37,43 @@ pub enum PlayMode {
     Keys,
 }
 
+/// The grid a Sync zone's notes played live start on (roadmap 1c): a note just before a
+/// grid line waits for it, one just after starts at once, that much into the sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StartGrid {
+    Off,
+    #[default]
+    Sixteenth,
+    Eighth,
+    Quarter,
+    Bar,
+}
+
+impl StartGrid {
+    pub const ALL: [StartGrid; 5] = [StartGrid::Off, StartGrid::Sixteenth, StartGrid::Eighth, StartGrid::Quarter, StartGrid::Bar];
+
+    /// The grid in beats (quarter notes): 0 is off.
+    pub fn beats(self) -> f64 {
+        match self {
+            StartGrid::Off => 0.0,
+            StartGrid::Sixteenth => 0.25,
+            StartGrid::Eighth => 0.5,
+            StartGrid::Quarter => 1.0,
+            StartGrid::Bar => 4.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StartGrid::Off => "OFF",
+            StartGrid::Sixteenth => "1/16",
+            StartGrid::Eighth => "1/8",
+            StartGrid::Quarter => "1/4",
+            StartGrid::Bar => "1 BAR",
+        }
+    }
+}
+
 /// Where a zone's tempo came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BpmSource {
@@ -72,6 +109,8 @@ pub struct ZoneMeta {
     /// Warp markers (roadmap 1e): frames of the sample pinned to beats, in order. None:
     /// the sample's beats are evenly spaced at `bpm` from `grid_offset`.
     pub warps: Vec<Warp>,
+    /// Sync: the grid notes played live start on.
+    pub start: StartGrid,
 }
 
 /// A warp marker: frame `frame` of the sample falls on beat `beat` (from the first, 0).
@@ -174,6 +213,8 @@ fn from_word<T: Copy>(table: &[(T, &'static str)], w: &str) -> Option<T> {
 
 const STRETCH: &[(StretchEngine, &str)] = &[(StretchEngine::Rendered, "rendered"), (StretchEngine::Live, "live")];
 const MODES: &[(PlayMode, &str)] = &[(PlayMode::Repitch, "repitch"), (PlayMode::Sync, "sync"), (PlayMode::Keys, "keys")];
+const STARTS: &[(StartGrid, &str)] =
+    &[(StartGrid::Off, "off"), (StartGrid::Sixteenth, "16"), (StartGrid::Eighth, "8"), (StartGrid::Quarter, "4"), (StartGrid::Bar, "bar")];
 const SOURCES: &[(BpmSource, &str)] =
     &[(BpmSource::Name, "name"), (BpmSource::Loop, "loop"), (BpmSource::Audio, "audio"), (BpmSource::Manual, "manual")];
 
@@ -205,8 +246,9 @@ impl ZoneMeta {
     /// break.
     pub fn to_text(&self) -> String {
         let mut t = format!(
-            "v 1\nmode {}\nbpm_source {}\ngrid_offset {}\ncents {}\nroot_locked {}\n",
+            "v 1\nmode {}\nstart {}\nbpm_source {}\ngrid_offset {}\ncents {}\nroot_locked {}\n",
             word(MODES, self.mode, |a, b| a == b),
+            word(STARTS, self.start, |a, b| a == b),
             word(SOURCES, self.bpm_source, |a, b| a == b),
             self.grid_offset,
             self.cents,
@@ -235,6 +277,7 @@ impl ZoneMeta {
             match k {
                 "file" => file = Some(v.to_string()),
                 "mode" => m.mode = from_word(MODES, v).unwrap_or_default(),
+                "start" => m.start = from_word(STARTS, v).unwrap_or_default(),
                 "bpm_source" => m.bpm_source = from_word(SOURCES, v).unwrap_or_default(),
                 "grid_offset" => m.grid_offset = v.parse().unwrap_or(0),
                 "cents" => m.cents = v.parse().unwrap_or(0.0),
@@ -282,6 +325,7 @@ mod tests {
             cents: -12.5,
             root_locked: true,
             warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 22_050, beat: 1.0625 }],
+            start: StartGrid::Bar,
         };
         assert_eq!(ZoneMeta::from_text(&full.to_text()), Some(full));
         let bare = ZoneMeta { file: "x.wav".into(), ..ZoneMeta::default() };

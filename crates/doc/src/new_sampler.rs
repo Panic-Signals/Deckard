@@ -5,6 +5,7 @@ use super::{Document, Op, Target};
 use crate::chain::{Chain, NewModule};
 use crate::zones::{ZoneFrom, ZoneSpec};
 use deckard_model::new_sampler::{FIELD, NewSampler, PlayMode, ZONE_FIELD, ZoneMeta};
+use deckard_model::{Note, PPQ};
 use mxprj::decode::Value;
 use std::path::PathBuf;
 
@@ -51,12 +52,61 @@ impl Document {
     /// New Sampler"): a zone a take, in Sync at its tempo (Repitch without one), the
     /// plug-in's Tune on each. One take plays on every key from C3; more, one a key
     /// from C3 up.
-    pub fn audio_to_new_sampler(&mut self, g: usize, s: usize, takes: &[TakeZone], tune: f64) -> Result<(), String> {
+    ///
+    /// Where a pattern played a take (Loop mode), it gets the take's notes: one each
+    /// time the take came round in the pattern (from its offset; a part cut off by the
+    /// pattern's start isn't played), as long as the take or what's left of the
+    /// pattern, and the Sampler's envelope made ADSR so they end with it. In Gate mode
+    /// (`gate`) the pattern's notes play it as they did: a lone take in Keys.
+    pub fn audio_to_new_sampler(&mut self, g: usize, s: usize, takes: &[TakeZone], tune: f64, gate: bool) -> Result<(), String> {
         if takes.is_empty() {
             return Err("the Audio plug-in has no takes".into());
         }
         let many = takes.len() > 1;
+        // (pattern, its notes for the takes it played).
+        let mut cued: Vec<(usize, Vec<Note>)> = Vec::new();
+        {
+            let p = self.project();
+            let bar = p.bar_length();
+            for (pi, pat) in p.groups.get(g).map_or(&[][..], |x| &x.patterns).iter().enumerate() {
+                let Some(c) = pat.audio.iter().find(|c| c.sound == s) else { continue };
+                let mut notes = Vec::new();
+                if !gate && let Some(t) = takes.get(c.take) {
+                    let (from, to) = (pat.start, pat.start + if pat.length > 0 { pat.length } else { bar });
+                    let pitch = 60 + if many { c.take as i64 } else { 0 };
+                    let note = |position: i64, length: i64| Note {
+                        sound: s,
+                        position,
+                        length,
+                        pitch,
+                        velocity: 127,
+                        probability: 100,
+                        expr: None,
+                    };
+                    match t.beats.filter(|b| t.bpm.is_some() && *b > 0.0).map(|b| (b * PPQ as f64).round() as i64).filter(|l| *l > 0) {
+                        Some(len) => {
+                            // The first time it starts in the pattern.
+                            let mut at = c.offset + (from - c.offset).div_euclid(len) * len;
+                            if at < from {
+                                at += len;
+                            }
+                            while at < to {
+                                notes.push(note(at, len.min(to - at)));
+                                at += len;
+                            }
+                        }
+                        None if (from..to).contains(&c.offset) => notes.push(note(c.offset, to - c.offset)),
+                        None => {}
+                    }
+                }
+                cued.push((pi, notes));
+            }
+        }
         self.transaction("Convert to New Sampler", |d| {
+            let patterns: Vec<usize> = cued.iter().map(|c| c.0).collect();
+            if !patterns.is_empty() {
+                d.set_audio_in(g, s, &patterns, None, "Audio")?;
+            }
             let c = Chain::Sound(g, s);
             d.remove_slot_in(c, 0)?;
             d.add_slot_in(c, 0, &NewModule::Sampler)?;
@@ -85,13 +135,24 @@ impl Document {
             for (z, (t, file)) in takes.iter().zip(paths).enumerate() {
                 let meta = ZoneMeta {
                     file,
-                    mode: if t.bpm.is_some() { PlayMode::Sync } else { PlayMode::Repitch },
+                    mode: match t.bpm {
+                        Some(_) if gate && !many => PlayMode::Keys,
+                        Some(_) => PlayMode::Sync,
+                        None => PlayMode::Repitch,
+                    },
                     bpm: t.bpm,
                     bpm_source: deckard_model::new_sampler::BpmSource::Manual,
                     beats: t.beats,
                     ..ZoneMeta::default()
                 };
                 d.set_zone_meta(g, s, z, &meta, "Zone Tempo")?;
+            }
+            if cued.iter().any(|c| !c.1.is_empty()) {
+                d.set("Envelope", Target::Sampler(g, s), "envelope_type", Value::Float(2.0))?;
+                d.set("Envelope", Target::Sampler(g, s), "volume_envelope/release", Value::Float(0.1))?;
+                for (pi, notes) in &cued {
+                    d.edit_notes("Notes", g, *pi, &[], notes)?;
+                }
             }
             Ok(())
         })
@@ -226,7 +287,7 @@ mod tests {
             TakeZone { file: "/s/loop 94.wav".into(), play: Some((100, 9_999)), bpm: Some(94.0), beats: Some(4.0) },
             TakeZone { file: "/s/hit.wav".into(), play: None, bpm: None, beats: None },
         ];
-        d.audio_to_new_sampler(0, 0, &takes, 2.0).unwrap();
+        d.audio_to_new_sampler(0, 0, &takes, 2.0, false).unwrap();
         let snd = &d.project().groups[0].sounds[0];
         assert!(snd.new_sampler.is_some());
         assert_eq!(snd.instrument, "Sampler");
@@ -240,6 +301,53 @@ mod tests {
         assert_eq!(d.undo_label(), Some("Convert to New Sampler"));
         assert!(d.undo());
         assert_eq!(d.project().groups[0].sounds[0].instrument, "AudioModule", "one step back");
+    }
+
+    /// Patterns that played a take get its notes: one each time it came round (from
+    /// its offset), cut at the pattern's end; one undo step with the rest.
+    #[test]
+    fn a_converted_audio_plugin_keeps_its_patterns() {
+        use crate::TakeSpec;
+        let mut d = Document::new_project().unwrap();
+        while d.project().groups[0].patterns.len() < 2 {
+            let n = d.project().groups[0].patterns.len();
+            d.add_pattern(0, if n == 0 { usize::MAX } else { 0 }, "P").unwrap();
+        }
+        d.audio_only(0, 0).unwrap();
+        let spec = |beats| TakeSpec { file: "/s/a.wav".into(), frames: 48_000, rate: 48_000, beats };
+        d.set_takes(0, 0, &[spec(1.5), spec(2.0)], "Load").unwrap();
+        d.set_audio_in(0, 0, &[0], Some(0), "Audio").unwrap();
+        d.set_audio_in(0, 0, &[1], Some(1), "Audio").unwrap();
+        // The second pattern's take starts half a beat early.
+        d.set_audio_offset(0, 1, 0, -PPQ / 2, "Move").unwrap();
+        let bar = d.project().bar_length();
+        assert_eq!(bar, 4 * PPQ);
+        let takes = [
+            TakeZone { file: "/s/a.wav".into(), play: None, bpm: Some(90.0), beats: Some(1.5) },
+            TakeZone { file: "/s/b.wav".into(), play: None, bpm: Some(120.0), beats: Some(2.0) },
+        ];
+        d.audio_to_new_sampler(0, 0, &takes, 0.0, false).unwrap();
+        let p = d.project();
+        let got = |pi: usize| -> Vec<(i64, i64, i64)> {
+            p.groups[0].patterns[pi].notes.iter().map(|n| (n.position, n.length, n.pitch)).collect()
+        };
+        let h = PPQ / 2;
+        // 1.5 beats, three times in a bar: the last cut to a beat.
+        assert_eq!(got(0), [(0, 3 * h, 60), (3 * h, 3 * h, 60), (6 * h, 2 * h, 60)]);
+        // 2 beats from half a beat early: whole ones from 1.5 on, the last cut.
+        assert_eq!(got(1), [(3 * h, 4 * h, 61), (7 * h, h, 61)]);
+        assert!(p.groups[0].patterns.iter().all(|x| x.audio.is_empty()), "no audio events left");
+        assert_eq!(p.groups[0].sounds[0].sampler.as_ref().unwrap().envelope_type, 2, "ADSR: the notes end it");
+        assert!(d.undo());
+        let p = d.project();
+        assert_eq!(p.groups[0].sounds[0].instrument, "AudioModule", "one step back");
+        assert_eq!(p.groups[0].patterns[1].audio.len(), 1);
+        assert!(p.groups[0].patterns[0].notes.is_empty());
+        // Gate mode: the pattern's own notes play it, a lone take in Keys.
+        let mut d = Document::new_project().unwrap();
+        d.audio_only(0, 0).unwrap();
+        d.audio_to_new_sampler(0, 0, &takes[..1], 0.0, true).unwrap();
+        assert_eq!(d.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.as_ref().unwrap().mode, PlayMode::Keys);
     }
 
     #[test]

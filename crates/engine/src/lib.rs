@@ -2427,7 +2427,7 @@ fn synced_zone(
     };
     let base = job(semitones);
     let Some(made) = renders.get_or_want(base.clone()) else {
-        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new() });
+        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, notes: Vec::new(), grid: meta.start.beats() });
         return;
     };
     let mut notes = Vec::new();
@@ -2452,7 +2452,7 @@ fn synced_zone(
     zone.fade_out = scale(zone.fade_out);
     zone.play = (0, len);
     zone.sample = made;
-    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes });
+    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, grid: meta.start.beats() });
 }
 
 /// Samples shared between engines (e.g. replaying another scene without reloading).
@@ -4512,6 +4512,7 @@ impl Engine {
                             velocity: e.velocity,
                             gate,
                             beats: frame as f64 / spt / PPQ as f64,
+                            live: false,
                         }
                     }
                 };
@@ -5687,7 +5688,14 @@ impl Engine {
                             a.next_id
                         });
                         let gate = (e.length != HELD).then(|| ((e.length.max(1) as f64) / tps).max(1.0) as u64);
-                        ahead::Ev::NoteOn { id, pitch: e.pitch, velocity: e.velocity, gate, beats: self.position() / PPQ as f64 }
+                        ahead::Ev::NoteOn {
+                            id,
+                            pitch: e.pitch,
+                            velocity: e.velocity,
+                            gate,
+                            beats: self.position() / PPQ as f64,
+                            live: self.sequencing,
+                        }
                     }
                 };
                 self.send_live(e.group, e.sound, ev);
@@ -5725,7 +5733,7 @@ impl Engine {
             }
             return;
         }
-        let ctx = sampler::Context { tempo: self.tempo, beats: self.position() / PPQ as f64 };
+        let ctx = sampler::Context { tempo: self.tempo, beats: self.position() / PPQ as f64, live: self.sequencing && !self.from_timeline };
         let Some(Some(snd)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound)) else { return };
         self.clock += 1;
         let id = self.clock;
@@ -8163,6 +8171,24 @@ mod tests {
         faster.tempo = 130.0;
         let (_e, _) = Engine::new(&faster, None, 48_000, Mode::Arrangement, &mut cache);
         assert_eq!(cache.wanted_renders().len(), 1);
+    }
+
+    /// An export makes the renders it needs before it plays: none are left wanted, and
+    /// what it plays is the stretched loop.
+    #[test]
+    fn an_export_waits_for_its_renders() {
+        for mode in [deckard_model::new_sampler::PlayMode::Sync, deckard_model::new_sampler::PlayMode::Keys] {
+            let (_tmp, p, _) = new_sampler_project(mode);
+            let mut cache = SampleCache::default();
+            let fmt = export::Format { rate: 48_000, ..Default::default() };
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            export::render(&p, None, Mode::Arrangement, 0.0, &fmt, &mut cache, &cancel, &mut |_| {}).unwrap();
+            assert!(cache.wanted_renders().is_empty(), "nothing still wanted");
+            assert!(!cache.renders.is_empty(), "the render was made");
+            let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            assert_eq!(zone0(&e).sync.as_ref().unwrap().tempo, 120.0, "the engine it played had the render");
+            assert!(cache.wanted_renders().is_empty());
+        }
     }
 
     /// Keys asks for the notes' renders around the root, nearest first.

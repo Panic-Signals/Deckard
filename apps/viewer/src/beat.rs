@@ -47,6 +47,13 @@ pub fn tune_for(root: u8, cents: f32, target: i64) -> f64 {
     (t * 100.0).round() / 100.0
 }
 
+/// Match key: the Tune putting a sample of root `root` (`cents` off) on the nearest note
+/// named as `key` (any octave; a tritone away, the one below), its cents tuned out.
+pub fn match_tune(root: u8, cents: f32, key: i64) -> f64 {
+    let up = (key - i64::from(root)).rem_euclid(12);
+    tune_for(root, cents, i64::from(root) + if up < 6 { up } else { up - 12 })
+}
+
 /// The beats of a sample (through its beat map) between frames `from` and `to`:
 /// (frame, bar from 1, beat in it from 1).
 pub fn beats_in(map: &BeatMap, from: f64, to: f64) -> Vec<(f64, i64, i64)> {
@@ -95,6 +102,15 @@ mod tests {
         assert_eq!(target_of(45, 0.0, 0.0), 45);
         let r = with_root(&ZoneMeta { root: Some(45), cents: -12.0, ..ZoneMeta::default() }, 47);
         assert_eq!((r.root, r.cents, r.root_locked), (Some(47), 0.0, true));
+    }
+
+    #[test]
+    fn match_key_takes_the_nearest_note() {
+        // A1 (45) to a song in C: up 3 to C2. To E: down 5. To D# (a tritone): down 6.
+        assert_eq!(match_tune(45, 0.0, 60), 3.0);
+        assert_eq!(match_tune(45, 0.0, 64), -5.0);
+        assert_eq!(match_tune(45, 0.0, 63), -6.0);
+        assert_eq!(match_tune(45, 20.0, 45), -0.2, "in key already: only its cents");
     }
 
     #[test]
