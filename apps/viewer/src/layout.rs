@@ -1495,7 +1495,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
 }
 
 /// The family name of the logo font, and its size.
-const LOGO_FONT: &str = "deckard-logo";
+pub(crate) const LOGO_FONT: &str = "deckard-logo";
 const LOGO_SIZE: f32 = 20.0;
 
 /// The name the emoji font has among the app's fonts.

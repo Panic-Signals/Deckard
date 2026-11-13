@@ -27,6 +27,7 @@ mod arp_ui;
 mod audio_settings;
 mod audio_ui;
 mod blink;
+mod boot;
 mod bounce;
 mod browser;
 #[cfg(test)]
@@ -121,6 +122,7 @@ mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
 mod settings;
+mod splash;
 mod splice;
 mod stems;
 #[cfg(test)]
@@ -243,20 +245,21 @@ fn main() {
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
+    let app_icon = settings::Settings::load().app_icon;
     let options = eframe::NativeOptions {
         // The icon picked in Preferences ▸ General, from the start.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([width, 930.0])
             .with_drag_and_drop(true)
-            .with_icon(std::sync::Arc::new(settings::Settings::load().app_icon.icon_data())),
+            .with_icon(std::sync::Arc::new(app_icon.icon_data())),
         ..Default::default()
     };
+    let splash = boot::splash_wanted(&args);
     let result = eframe::run_native(
         "DECKARD",
         options,
         Box::new(move |cc| {
             layout::style(&cc.egui_ctx);
-            let screenshot_wanted = screenshot.clone();
             let mut app = App {
                 midi_devices: midi_devices::MidiDevices::new(menu::settings_dir().map(|d| d.join("controller"))),
                 screenshot,
@@ -269,49 +272,21 @@ fn main() {
                 prop_set: 1,
                 scale: (60, 0, 0),
                 scale_group: None,
-                user_chords: user_chords::UserChords::load(),
-                mk3: Some(mk3_io::Mk3Io::start()),
-                jam: Some(jam_io::JamIo::start()),
                 _running: Some(keep_running::begin()),
+                boot: Some(boot::Boot::new(boot::all_steps(path))),
                 ..Default::default()
             };
-            app.recent = menu::load_recent();
-            app.settings = settings::Settings::load();
-            app.browser.routing = app.settings.load_group_routing;
-            app.browser.patterns = app.settings.load_group_patterns;
-            // (Nothing to open through ASIO before a driver is picked.)
-            if app.settings.asio_device.is_some() {
-                deckard_engine::devices::set_driver(app.settings.audio_driver);
+            if app_icon != icon::Style::default() {
+                // The Dock and the taskbar's big icon, which the window's icon doesn't set
+                // (on every launch, splash or not).
+                icon::apply(&cc.egui_ctx, app_icon);
             }
-            app.update = update::Notice::start(app.settings.check_updates);
-            app.after_update(VERSION);
-            if app.settings.app_icon != icon::Style::default() {
-                // The Dock and the taskbar's big icon, which the window's icon doesn't set.
-                icon::apply(&cc.egui_ctx, app.settings.app_icon);
+            if splash {
+                // The frame loop runs startup, a step a frame; there are no flags to apply.
+                return Ok(Box::new(app));
             }
-            app.surface = app.new_surface();
-            if let Some(m) = &app.mk3 {
-                m.set_display_brightness(app.settings.display_brightness);
-            }
-            app.recorder = recorder::Recorder::new();
-            deckard_plugins::module::set_search_paths(app.settings.scan_dirs());
-            app.catalog = settings::Catalog::load(&app.settings);
-            app.session_dir = menu::settings_dir();
-            // The first start without the stem separation model: offer it (not when
-            // rendering a screenshot).
-            if screenshot_wanted.is_none()
-                && !app.settings.stems_offered
-                && let Some(dir) = &app.session_dir
-                && !stems::installed(dir)
-            {
-                app.stems_offer = Some(StemsOffer::Asking);
-            }
-            if let Some(p) = path {
-                app.open(&p);
-                app.remember(&p);
-            } else {
-                app.start_project();
-            }
+            app.boot_to_end();
+            app.boot = None;
             app.group = group;
             app.focus_scene(scene);
             if flag("--pattern").is_some() {
@@ -849,6 +824,16 @@ enum StemsOffer {
     Installing(std::sync::mpsc::Receiver<Result<(), String>>),
 }
 
+/// How a start with no project asked for begins (see [`App::start_project`]).
+#[derive(Debug, Clone, PartialEq)]
+enum Start {
+    /// The backup of a session that crashed with unsaved changes.
+    Backup,
+    /// This project (the last one, as saved).
+    Reopen(PathBuf),
+    New,
+}
+
 /// What waits for an answer about unsaved changes.
 #[derive(Debug, Clone)]
 enum Pending {
@@ -982,6 +967,14 @@ pub struct App {
     /// Load the project's plug-ins once the window has drawn (they take a moment, and
     /// a press that waits for them isn't a click any more).
     preload_plugins: bool,
+    /// Startup in progress, as a queue of steps (`None` once it is over).
+    boot: Option<boot::Boot>,
+    /// Test hook: what the AUDIO OUTPUT step returns (the rate, or why not), instead of opening one.
+    #[cfg(test)]
+    boot_output: Option<Result<f64, String>>,
+    /// Test hook: the plug-ins the PLUG-INS step finds, instead of the project's.
+    #[cfg(test)]
+    boot_wanted: Option<Vec<(deckard_plugins::Slot, deckard_model::PluginRef)>>,
     /// Frames drawn since the project was opened (plug-ins load after the second).
     frames_drawn: u32,
     /// Open plug-in windows: (group, sound, window).
@@ -2018,23 +2011,44 @@ impl App {
     /// What DECKARD opens with no project asked for: after a crash with unsaved
     /// changes, the backup (as Maschine offers it); else the last project as saved (the
     /// Settings page's RELOAD), or an empty project, like Maschine.
-    pub(crate) fn start_project(&mut self) {
-        let info = self.session_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("session.txt")).ok()).unwrap_or_default();
-        let value = |k: &str| info.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = ").map(str::to_string));
-        let (path, dirty, clean) =
-            (value("path").map(PathBuf::from), value("dirty").as_deref() == Some("true"), value("clean").as_deref() == Some("true"));
-        if dirty && !clean && self.restore_session(path.clone(), dirty) {
+    pub(crate) fn start_project(&mut self) -> Start {
+        let (path, backup) = self.last_session();
+        if backup && self.restore_session(path.clone(), true) {
             self.status = "unsaved changes brought back from the backup".into();
-            return;
+            return Start::Backup;
         }
-        if let Some(p) = path.filter(|p| self.settings.reload_last && p.exists()) {
+        if let Some(p) = self.reopens(path) {
             self.open(&p);
             if self.error.is_none() {
                 self.remember(&p);
-                return;
+                return Start::Reopen(p);
             }
         }
         self.new_project();
+        Start::New
+    }
+
+    /// What [`App::start_project`] will do, as far as can be told without doing it.
+    fn start_plan(&self) -> Start {
+        let (path, backup) = self.last_session();
+        if backup && self.session_dir.as_ref().is_some_and(|d| d.join("session.mxprj").exists()) {
+            return Start::Backup;
+        }
+        self.reopens(path).map_or(Start::New, Start::Reopen)
+    }
+
+    /// The last session's project file, and whether it ended in a crash with unsaved
+    /// changes (so its backup is to be brought back).
+    fn last_session(&self) -> (Option<PathBuf>, bool) {
+        let info = self.session_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("session.txt")).ok()).unwrap_or_default();
+        let value = |k: &str| info.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(" = ").map(str::to_string));
+        let (dirty, clean) = (value("dirty").as_deref() == Some("true"), value("clean").as_deref() == Some("true"));
+        (value("path").map(PathBuf::from), dirty && !clean)
+    }
+
+    /// The last project, if it is to be opened again (the Settings page's RELOAD).
+    fn reopens(&self, path: Option<PathBuf>) -> Option<PathBuf> {
+        path.filter(|p| self.settings.reload_last && p.exists())
     }
 
     /// Open the backup kept of the last session (saved at `path`, with unsaved edits if
@@ -10620,12 +10634,16 @@ impl App {
         }
     }
 
-    /// Load every plug-in instrument of the project (at the output's rate), so playing
-    /// and editing never wait for one.
-    fn load_plugins(&mut self) {
-        let Some(doc) = self.doc.clone() else { return };
+    /// The plug-ins the project carries: each instrument, then the effects after it, then
+    /// the groups' and the master's effects.
+    pub(crate) fn wanted_plugins(&self) -> Vec<(deckard_plugins::Slot, deckard_model::PluginRef)> {
+        #[cfg(test)]
+        if let Some(w) = &self.boot_wanted {
+            return w.clone();
+        }
+        let Some(doc) = self.doc.clone() else { return Vec::new() };
         let d = doc.borrow();
-        let wanted: Vec<_> = d
+        let mut wanted: Vec<_> = d
             .project()
             .groups
             .iter()
@@ -10645,7 +10663,6 @@ impl App {
             })
             .collect();
         // Groups' and the master's effect plug-ins.
-        let mut wanted = wanted;
         let p = d.project();
         for (g, gr) in p.groups.iter().enumerate() {
             for (i, x) in gr.slots.iter().enumerate() {
@@ -10659,7 +10676,23 @@ impl App {
                 wanted.push((deckard_plugins::Slot::Master { slot: i }, pl));
             }
         }
-        drop(d);
+        wanted
+    }
+
+    /// Load one plug-in at the output's `rate`.
+    pub(crate) fn load_plugin(&mut self, slot: deckard_plugins::Slot, p: &deckard_model::PluginRef, rate: f64) -> Result<(), String> {
+        self.samples.plugins.instance(slot, &p.id, &p.name, &p.chunk, rate).map(|_| ())
+    }
+
+    /// What the status line says once the plug-ins are loaded.
+    pub(crate) fn plugins_loaded_status(n: usize, secs: f64, failed: &[String]) -> String {
+        if failed.is_empty() { format!("{n} plug-ins loaded ({secs:.1} s)") } else { format!("plug-ins failed: {}", failed.join(", ")) }
+    }
+
+    /// Load every plug-in instrument of the project (at the output's rate), so playing
+    /// and editing never wait for one.
+    fn load_plugins(&mut self) {
+        let wanted = self.wanted_plugins();
         if wanted.is_empty() {
             return;
         }
@@ -10670,15 +10703,11 @@ impl App {
         let t = std::time::Instant::now();
         let mut failed = Vec::new();
         for (slot, p) in &wanted {
-            if let Err(e) = self.samples.plugins.instance(*slot, &p.id, &p.name, &p.chunk, rate) {
+            if let Err(e) = self.load_plugin(*slot, p, rate) {
                 failed.push(e);
             }
         }
-        self.status = if failed.is_empty() {
-            format!("{} plug-ins loaded ({:.1} s)", wanted.len(), t.elapsed().as_secs_f64())
-        } else {
-            format!("plug-ins failed: {}", failed.join(", "))
-        };
+        self.status = Self::plugins_loaded_status(wanted.len(), t.elapsed().as_secs_f64(), &failed);
     }
 
     /// Write the state of plug-ins edited in their windows into the document.
@@ -11112,6 +11141,10 @@ impl eframe::App for App {
         if self.finish_quit(ctx) {
             return;
         }
+        if self.boot.is_some() {
+            self.boot_hidden(ctx);
+            return;
+        }
         if ctx.input(|i| i.viewport().visible()) != Some(false) {
             return;
         }
@@ -11160,6 +11193,10 @@ impl App {
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         if self.finish_quit(ctx) {
+            return;
+        }
+        if self.boot.is_some() {
+            self.boot_frame(ui);
             return;
         }
         self.poll_group_load();
