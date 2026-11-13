@@ -115,6 +115,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         warps: Vec::new(),
         start: Default::default(),
         stems: Default::default(),
+        stems_only: false,
     }
 }
 
@@ -446,6 +447,97 @@ mod app_tests {
         app.lane_act(0, LaneAct::Mute);
         let muted: Vec<bool> = zones(&app).iter().map(|z| z.meta.as_ref().unwrap().stems[0].as_ref().unwrap().mute).collect();
         assert_eq!(muted, [false, true, false, false]);
+    }
+
+    /// A zone with stem lanes is four waveforms cut alike: TRUNCATE cuts its lanes with it
+    /// (one undo step), its tempo kept. A lane deleted, the others are all that plays.
+    #[test]
+    fn an_edit_cuts_the_stems_alike() {
+        use crate::layout::sampling::{EditOp, LaneAct, SamplingAct};
+        use deckard_model::new_sampler::ZoneMeta;
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 48_000u32;
+        let file = dir.path().join("Loop.wav");
+        let sample = deckard_engine::sample::Sample { rate, frames: (0..96_000).map(|i| [i as f32 / 96_000.0; 2]).collect() };
+        deckard_engine::edit::write_wav_channels(&file, &sample, 2).unwrap();
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        if doc.project().groups[0].sounds[0].slots.is_empty() {
+            doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        }
+        let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+        doc.set_zones(0, 0, &[spec], "Load").unwrap();
+        doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+        let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+        let meta = ZoneMeta {
+            file: path.clone(),
+            mode: PlayMode::Sync,
+            bpm: Some(120.0),
+            beats: Some(4.0),
+            grid_offset: 1000,
+            ..Default::default()
+        };
+        doc.note_zone_meta(0, 0, 0, &meta).unwrap();
+        let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+        app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+        app.path = Some(dir.path().join("x.mxprj"));
+        app.sampling.set_sample((0, 0, 0, path.clone()), std::sync::Arc::new(sample));
+        let stems = deckard_stems::Kind::ALL
+            .iter()
+            .enumerate()
+            .map(|(k, &kind)| deckard_stems::Stem {
+                kind,
+                frames: (0..96_000).map(|i| [(k + 1) as f32 * i as f32 / 960_000.0; 2]).collect(),
+            })
+            .collect();
+        app.finish_stem_lanes("Loop", rate, stems, (0, 0, 0));
+        let zone = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].clone();
+        let before = zone(&app);
+        assert!(before.meta.as_ref().unwrap().stems.iter().all(Option::is_some), "{}", app.status);
+
+        app.sampling.selection = Some((24_000, 72_000));
+        app.sampling_act(SamplingAct::Edit(EditOp::Truncate));
+        let z = zone(&app);
+        assert_ne!(z.sample.path, before.sample.path, "{}", app.status);
+        assert_eq!(z.play_range, (0, 47_999));
+        let m = z.meta.clone().expect("its meta, on the new file");
+        assert_eq!(m.file, z.sample.path);
+        assert_eq!(
+            (m.bpm, m.beats, m.grid_offset),
+            (Some(120.0), Some(2.0), 1000),
+            "the tempo kept, half the beats, the grid where it was"
+        );
+        for (k, l) in m.stems.iter().enumerate() {
+            let l = l.as_ref().expect("every lane still there");
+            assert_ne!(l.file, before.meta.as_ref().unwrap().stems[k].as_ref().unwrap().file);
+            let cut = deckard_engine::sample::Sample::load(std::path::Path::new(&l.file)).unwrap();
+            assert_eq!(cut.frames.len(), 48_000);
+            // Each lane's own frames from 24 000 on.
+            assert!(
+                cut.frames[0][0] > 0.0 && (cut.frames[24_000][0] / cut.frames[0][0] - 2.0).abs() < 0.01,
+                "lane {k}: {:?}",
+                cut.frames[0]
+            );
+        }
+        assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Truncate"));
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        assert_eq!(zone(&app).meta, before.meta, "one undo step");
+        app.doc.as_ref().unwrap().borrow_mut().redo();
+
+        // A stem deleted: what's left is all that plays, at unity too.
+        app.lane_act(1, LaneAct::Delete);
+        let m = zone(&app).meta.unwrap();
+        assert!(m.stems[1].is_none() && m.stems_only);
+        assert_eq!(m.stems.iter().flatten().count(), 3);
+        assert!(ZoneMeta::from_text(&m.to_text()).unwrap().stems_only, "saved with the zone");
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        let m = zone(&app).meta.unwrap();
+        assert!(m.stems[1].is_some() && !m.stems_only, "undo brings it back");
+        // The last one deleted: the sample itself again.
+        for k in 0..4 {
+            app.lane_act(k, LaneAct::Delete);
+        }
+        let m = zone(&app).meta.unwrap();
+        assert!(!m.has_stems() && !m.stems_only);
     }
 
     /// A groove on DECKARD's own drum synths: (kick, snare, hat) steps of 16 in a bar,

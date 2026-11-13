@@ -274,6 +274,8 @@ pub struct ZoneRt {
 pub struct Lanes {
     pub samples: [Option<Arc<Sample>>; LANES],
     pub levels: [f32; LANES],
+    /// A stem was taken away: the lanes play even at unity (the sample still has it).
+    pub only: bool,
 }
 
 pub const LANES: usize = deckard_model::new_sampler::LANES;
@@ -282,7 +284,7 @@ const LANE_RAMP_MS: f64 = 5.0;
 impl Lanes {
     /// Every lane there is plays at unity: the sample itself is what's heard.
     fn all_on(&self) -> bool {
-        (0..LANES).all(|k| self.samples[k].is_none() || self.levels[k] == 1.0)
+        !self.only && (0..LANES).all(|k| self.samples[k].is_none() || self.levels[k] == 1.0)
     }
 }
 
@@ -2063,7 +2065,7 @@ mod tests {
     #[test]
     fn stem_lanes_mute_on_sounding_notes() {
         let flat = |v: f32| Some(Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[v; 2]; 96_000] }));
-        let lanes = |levels| Lanes { samples: [flat(0.1), flat(0.2), None, flat(0.4)], levels };
+        let lanes = |levels| Lanes { samples: [flat(0.1), flat(0.2), None, flat(0.4)], levels, only: false };
         let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         let level = |smp: &mut SamplerRt, n: usize| {
             let mut out = vec![0.0; n * 2];
@@ -2108,6 +2110,13 @@ mod tests {
         fresh.note_on(1, 60, 127, &ctx);
         let first = level(&mut fresh, 480);
         assert!((first / whole - 0.6 / 0.5).abs() < 1e-3, "{first}");
+        // A stem taken away: the lanes left play, at unity too (0.1 + 0.2 + 0.4), not
+        // the sample, which still has it.
+        let mut left = synced(None);
+        left.zones[0] = muted_zone(&on.zones[0], Lanes { only: true, ..lanes([1.0, 1.0, 0.0, 1.0]) });
+        left.note_on(1, 60, 127, &ctx);
+        let first = level(&mut left, 480);
+        assert!((first / whole - 0.7 / 0.5).abs() < 1e-3, "{first}");
     }
 
     fn muted_zone(z: &ZoneRt, lanes: Lanes) -> ZoneRt {

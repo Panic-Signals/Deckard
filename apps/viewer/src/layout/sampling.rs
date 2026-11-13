@@ -288,6 +288,8 @@ pub enum LaneAct {
     Mute,
     Solo,
     Gain(f64),
+    /// Take this stem away: the others are all that plays.
+    Delete,
     Clear,
 }
 
@@ -1051,6 +1053,10 @@ fn wave(
             painter.rect_filled(gr, 2.0, if g.hovered() || g.dragged() { S03 } else { Color32::from_black_alpha(170) });
             let db = if l.gain > 0.0005 { format!("{:+.1} dB", 20.0 * l.gain.log10()).replace('-', "−") } else { "−∞".into() };
             painter.text(gr.center(), Align2::CENTER_CENTER, db, font(9.0), white(200));
+            let xr = Rect::from_min_size(Pos2::new(gr.right() + 2.0, y), Vec2::splat(14.0));
+            if small(ui, xr, "×", None, ("lane-x", lane), "Delete this stem: the others are all that plays (undo brings it back)") {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Delete)));
+            }
             if g.double_clicked() {
                 acts.push(sact(SamplingAct::Lane(lane, LaneAct::Gain(1.0))));
             } else if g.dragged() && g.drag_delta().y != 0.0 {

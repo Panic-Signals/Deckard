@@ -145,6 +145,9 @@ pub struct ZoneMeta {
     pub start: StartGrid,
     /// Its stem lanes ([`LANE_NAMES`]): none, the sample plays as it is.
     pub stems: [Option<StemLane>; LANES],
+    /// A stem was taken away: the lanes left are all that plays, even at unity (not the
+    /// sample itself, which still has it).
+    pub stems_only: bool,
 }
 
 impl ZoneMeta {
@@ -311,6 +314,9 @@ impl ZoneMeta {
                 t += &format!("stem {k} {}{} {} {}\n", u8::from(l.mute), u8::from(l.solo), l.gain, l.file);
             }
         }
+        if self.stems_only {
+            t += "stems_only 1\n";
+        }
         t + "file " + &self.file
     }
 
@@ -327,6 +333,7 @@ impl ZoneMeta {
                 "grid_offset" => m.grid_offset = v.parse().unwrap_or(0),
                 "cents" => m.cents = v.parse().unwrap_or(0.0),
                 "root_locked" => m.root_locked = v == "1",
+                "stems_only" => m.stems_only = v == "1",
                 "bpm" => m.bpm = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "beats" => m.beats = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "root" => m.root = v.parse().ok().filter(|r| *r < 128),
@@ -390,6 +397,7 @@ mod tests {
                 Some(StemLane { file: "/b.wav".into(), mute: false, solo: true, gain: 1.0 }),
                 None,
             ],
+            stems_only: true,
         };
         assert_eq!(lane_levels(&full.stems), [0.0, 0.0, 1.0, 0.0], "the soloed lane only");
         let mut open = full.stems.clone();

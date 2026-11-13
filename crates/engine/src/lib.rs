@@ -2896,7 +2896,7 @@ impl Engine {
                                         }
                                     }
                                     if samples.iter().any(Option::is_some) {
-                                        zone.lanes = Some(sampler::Lanes { samples, levels });
+                                        zone.lanes = Some(sampler::Lanes { samples, levels, only: m.stems_only });
                                     }
                                 }
                                 // Zones of the same file stretched alike (chops of one sample)

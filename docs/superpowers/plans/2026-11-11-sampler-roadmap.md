@@ -341,10 +341,19 @@ stem files…": your own, by name, short ones padded, long ones and other rates 
 out). The Sampling page stacks the lanes (name, M, S, level; MIX folds them; NO STEMS
 takes them off). MK3: EDIT's STEMS knob page has the levels, display buttons 5–8 the
 mutes (SHIFT: solo), the right display the lanes stacked. Slices keep the lanes, each
-with mutes of its own. Not yet: mute and gain as automation and mod-matrix targets;
-analysis from the right lane; dropping files onto lanes (a file picker for now); an
-edit of the sample (truncate, reverse…) drops its lanes; the scripts route's native
-display shows one waveform.
+with mutes of its own. An edit of the sample (truncate, reverse, normalize, stretch…)
+edits its lanes alike, in one undo step, the tempo and grid kept (2026-11-13; Paste
+alone leaves the zone without lanes: what's pasted has none). A lane's × deletes it:
+the others are then all that plays (`stems_only`), at unity too. Not yet: mute and
+gain as automation and mod-matrix targets; analysis from the right lane; dropping
+files onto lanes (a file picker for now); deleting a lane from the MK3; the scripts
+route's native display shows one waveform.
+
+Also 2026-11-13, from a session with a real recording: MP3 loads everywhere; a song is
+analysed in a second or two (tempo from two minutes of its middle); SLICE ▸ APPLY's
+EACH PLAYS TO ▸ Sample end makes slices start points (a New Sampler's default), and
+chops of one sample share one stretched render; the Sampling page has PLAY / STOP
+(Shift+Space) and keeps its zoom across zones.
 
 Mute the drums, vocals, bass or leads of a sample right in the New Sampler, without leaving the
 sound. Today STEMS makes a new group of four Audio plug-ins (`docs/stems.md`); this keeps the

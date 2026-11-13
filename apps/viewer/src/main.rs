@@ -7387,6 +7387,7 @@ impl App {
             }
             meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
         }
+        meta.stems_only = false;
         match doc.borrow_mut().set_zone_meta(at.0, at.1, at.2, &meta, "Stems") {
             Ok(()) => self.status = format!("{name}: stems on its lanes (M and S on each)"),
             Err(e) => self.status = format!("can't put the stems on the zone: {e}"),
@@ -7463,7 +7464,17 @@ impl App {
         let label = match act {
             L::Clear => {
                 meta.stems = Default::default();
+                meta.stems_only = false;
                 "Remove Stems"
+            }
+            L::Delete => {
+                if meta.stems.get(lane).is_none_or(Option::is_none) {
+                    return;
+                }
+                meta.stems[lane] = None;
+                // What's left is all that plays; with none left, the sample again.
+                meta.stems_only = meta.has_stems();
+                "Delete Stem"
             }
             _ => {
                 let Some(l) = meta.stems.get_mut(lane).and_then(Option::as_mut) else { return };
@@ -7480,7 +7491,7 @@ impl App {
                         l.gain = g.clamp(0.0, 2.0);
                         "Stem Gain"
                     }
-                    L::Clear => return,
+                    L::Clear | L::Delete => return,
                 }
             }
         };
@@ -7581,9 +7592,66 @@ impl App {
         }
     }
 
+    /// A New Sampler zone's meta after an edit of its sample: its stem lanes edited the
+    /// same way by `lane` (each written as a new file), so the zone stays four waveforms
+    /// cut alike; its tempo and grid follow (`stretched`: the tempo changes with the
+    /// length, else the beats do; `shift`: frames taken off the front). `None`: the zone
+    /// has no lanes, or one can't be carried (the edit then leaves the zone without).
+    fn carry_lanes(
+        &mut self,
+        key: &(usize, usize, usize, String),
+        new_len: usize,
+        lane: &dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample,
+        (shift, stretched): (usize, bool),
+    ) -> Option<deckard_model::new_sampler::ZoneMeta> {
+        let doc = self.doc.clone()?;
+        let mut meta = {
+            let d = doc.borrow();
+            let snd = d.project().groups.get(key.0)?.sounds.get(key.1)?;
+            snd.new_sampler.as_ref()?;
+            snd.sampler.as_ref()?.zones.get(key.2)?.meta.clone().filter(|m| m.has_stems())?
+        };
+        let old_len = self.sampling.len();
+        let rate = self.sampling.sample.as_ref()?.rate;
+        let dir = self.sample_dir("Stems");
+        let project = self.path.clone();
+        for k in 0..deckard_model::new_sampler::LANES {
+            let Some(l) = meta.stems[k].as_mut() else { continue };
+            let sref = deckard_model::SampleRef { kind: 0, path: l.file.clone(), ..Default::default() };
+            let src = self.samples.sample(&sref, project.as_deref()).filter(|x| x.frames.len() == old_len)?;
+            let out = lane(&src);
+            if out.frames.len() != new_len {
+                return None;
+            }
+            let path = deckard_engine::edit::edited_path(&dir, Path::new(&l.file));
+            deckard_engine::edit::write_wav(&path, &out).ok()?;
+            l.file = path.to_string_lossy().into();
+        }
+        if new_len != old_len && old_len > 0 {
+            let ratio = new_len as f64 / old_len as f64;
+            meta.warps.clear();
+            if stretched {
+                meta.bpm = meta.bpm.map(|b| b / ratio);
+                meta.grid_offset = (meta.grid_offset as f64 * ratio) as u64;
+            } else {
+                meta.beats = meta.beats.map(|b| b * ratio);
+                if let Some(per) = meta.bpm.map(|b| f64::from(rate) * 60.0 / b).filter(|p| *p >= 1.0) {
+                    meta.grid_offset = (meta.grid_offset as f64 - shift as f64).rem_euclid(per) as u64;
+                }
+            }
+        }
+        Some(meta)
+    }
+
     /// Write `sample` as an edited copy of the focused zone's file and point the zone at
-    /// it (one undo step).
-    fn store_edit(&mut self, sample: deckard_engine::sample::Sample, label: &str) {
+    /// it (one undo step). `lanes`: how the edit goes for a stem lane (see
+    /// [`Self::carry_lanes`]); without it the zone's lanes don't follow.
+    fn store_edit(
+        &mut self,
+        sample: deckard_engine::sample::Sample,
+        label: &str,
+        lanes: Option<(&dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample, (usize, bool))>,
+    ) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(key) = self.sampling.sample_key.clone() else { return };
         let original = PathBuf::from(&key.3);
@@ -7593,6 +7661,7 @@ impl App {
             return;
         }
         let frames = sample.frames.len();
+        let carried = lanes.and_then(|(lane, how)| self.carry_lanes(&key, frames, lane, how));
         // An Audio plug-in's take (its tempo kept), else a Sampler's zone.
         let audio = doc
             .borrow()
@@ -7604,7 +7673,18 @@ impl App {
         let done = if audio {
             doc.borrow_mut().set_take_sample(key.0, key.1, key.2, &target, frames, label)
         } else {
-            doc.borrow_mut().set_zone_sample(key.0, key.1, key.2, &target, frames, label)
+            doc.borrow_mut().transaction(label, |d| {
+                d.set_zone_sample(key.0, key.1, key.2, &target, frames, label)?;
+                // Its lanes, cut alike, on the new file.
+                if let Some(mut meta) = carried {
+                    meta.file = d.project().groups[key.0].sounds[key.1]
+                        .sampler
+                        .as_ref()
+                        .map_or_else(String::new, |x| x.zones[key.2].sample.path.clone());
+                    d.set_zone_meta(key.0, key.1, key.2, &meta, label)?;
+                }
+                Ok(())
+            })
         };
         match done {
             Ok(()) => {
@@ -7650,14 +7730,35 @@ impl App {
             S::LanesMix(on) => self.sampling.lanes_mix = on,
             S::Edit(op) => {
                 let (Some(s), Some(r)) = (self.sampling.sample.clone(), self.edit_range()) else { return };
-                let (out, label) = match op {
-                    EditOp::Truncate => (edit::truncate(&s, r), "Truncate"),
-                    EditOp::Normalize => (edit::normalize(&s, r), "Normalize"),
-                    EditOp::Reverse => (edit::reverse(&s, r), "Reverse"),
-                    EditOp::FadeIn => (edit::fade(&s, r, true), "Fade In"),
-                    EditOp::FadeOut => (edit::fade(&s, r, false), "Fade Out"),
-                    EditOp::Dc => (edit::remove_dc(&s, r), "DC Correction"),
-                    EditOp::Silence => (edit::silence(&s, r), "Silence"),
+                type Lane = Box<dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample>;
+                // The edit, and the same for a stem lane (`None`: the lanes can't follow).
+                let (out, label, lane): (_, _, Option<Lane>) = match op {
+                    EditOp::Truncate => (edit::truncate(&s, r), "Truncate", Some(Box::new(move |l| edit::truncate(l, r)))),
+                    EditOp::Normalize => {
+                        let out = edit::normalize(&s, r);
+                        // The lanes by as much as the sample was (each to its own peak would
+                        // change their balance).
+                        let peak = |x: &deckard_engine::sample::Sample| {
+                            x.frames
+                                .get(r.0..r.1.min(x.frames.len()))
+                                .map_or(0.0, |f| f.iter().flat_map(|f| [f[0].abs(), f[1].abs()]).fold(0.0, f32::max))
+                        };
+                        let gain = if peak(&s) > 0.0 { peak(&out) / peak(&s) } else { 1.0 };
+                        let lane: Lane = Box::new(move |l| {
+                            let mut l = l.clone();
+                            let end = r.1.min(l.frames.len());
+                            for f in l.frames.get_mut(r.0..end).into_iter().flatten() {
+                                *f = [f[0] * gain, f[1] * gain];
+                            }
+                            l
+                        });
+                        (out, "Normalize", Some(lane))
+                    }
+                    EditOp::Reverse => (edit::reverse(&s, r), "Reverse", Some(Box::new(move |l| edit::reverse(l, r)))),
+                    EditOp::FadeIn => (edit::fade(&s, r, true), "Fade In", Some(Box::new(move |l| edit::fade(l, r, true)))),
+                    EditOp::FadeOut => (edit::fade(&s, r, false), "Fade Out", Some(Box::new(move |l| edit::fade(l, r, false)))),
+                    EditOp::Dc => (edit::remove_dc(&s, r), "DC Correction", Some(Box::new(|l| l.clone()))),
+                    EditOp::Silence => (edit::silence(&s, r), "Silence", Some(Box::new(move |l| edit::silence(l, r)))),
                     EditOp::Copy => {
                         self.sampling.clipboard = Some(edit::copy(&s, r));
                         self.status = "copied".into();
@@ -7666,16 +7767,18 @@ impl App {
                     EditOp::Cut => {
                         let (rest, clip) = edit::cut(&s, r);
                         self.sampling.clipboard = Some(clip);
-                        (rest, "Cut")
+                        (rest, "Cut", Some(Box::new(move |l| edit::cut(l, r).0)))
                     }
                     EditOp::Paste => {
                         let Some(clip) = self.sampling.clipboard.clone() else { return };
-                        (edit::paste(&s, r.0, &clip), "Paste")
+                        // What's pasted has no stems of its own.
+                        (edit::paste(&s, r.0, &clip), "Paste", None)
                     }
-                    EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate"),
+                    EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate", Some(Box::new(move |l| edit::duplicate(l, r)))),
                     EditOp::Stretch | EditOp::AutoLoop | EditOp::Stems => return,
                 };
-                self.store_edit(out, label);
+                let shift = if op == EditOp::Truncate { r.0 } else { 0 };
+                self.store_edit(out, label, lane.as_deref().map(|l| (l, (shift, false))));
             }
             S::StretchOpen(on) => {
                 let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
@@ -7688,7 +7791,9 @@ impl App {
                 self.status = "stretching…".into();
                 let out = edit::stretch(&s, r, sx.factor(), sx.tune);
                 self.sampling.stretch = None;
-                self.store_edit(out, "Stretch");
+                let (factor, tune) = (sx.factor(), sx.tune);
+                let lane = move |l: &deckard_engine::sample::Sample| edit::stretch(l, r, factor, tune);
+                self.store_edit(out, "Stretch", Some((&lane, (0, true))));
             }
             S::SliceMode(m) => {
                 self.sampling.slice_mode = m;
