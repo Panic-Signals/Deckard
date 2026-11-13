@@ -148,8 +148,8 @@ pub struct Device {
     checked: Option<Instant>,
     /// `open` ran (and `close` hasn't): a reload opens the new scripts.
     open: bool,
-    /// The last view, for `close` and a reload's `open`.
-    view: View,
+    /// The last view, for `close` and a reload's `open`; the scripts see the same one.
+    view: Rc<View>,
 }
 
 impl Device {
@@ -163,7 +163,7 @@ impl Device {
             epoch: Instant::now(),
             checked: None,
             open: false,
-            view: View::default(),
+            view: Rc::default(),
         };
         d.load();
         d
@@ -269,12 +269,7 @@ impl Device {
         if self.run.is_none() {
             return empty;
         }
-        {
-            let run = self.run.as_ref().expect("checked");
-            let mut sh = run.shared.borrow_mut();
-            sh.view = v.clone();
-            sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
-        }
+        self.see(v, now);
         let run = self.run.as_ref().expect("checked");
         let Ok(Some(f)) = run.handlers.get::<Option<Function>>("pads") else { return empty };
         match f.call::<Option<Table>>(()) {
@@ -315,18 +310,8 @@ impl Device {
     /// Run handler `name` (if the script has it) with what the scripts see set; take
     /// what they asked for.
     fn call(&mut self, v: &View, now: Instant, name: &str, args: impl mlua::IntoLuaMulti) -> Vec<Out> {
-        if self.view != *v {
-            self.view = v.clone();
-        }
+        self.see(v, now);
         let Some(run) = &self.run else { return Vec::new() };
-        {
-            let mut sh = run.shared.borrow_mut();
-            if sh.view != *v {
-                sh.view = v.clone();
-                sh.view_id = sh.view_id.wrapping_add(1);
-            }
-            sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
-        }
         if let Ok(Some(f)) = run.handlers.get::<Option<Function>>(name)
             && let Err(e) = f.call::<Value>(args)
         {
@@ -336,13 +321,26 @@ impl Device {
         out.extend(std::mem::take(&mut run.shared.borrow_mut().actions).into_iter().map(Out::App));
         out
     }
+
+    /// What the scripts see: `v`, at `now`. (Copied once, and only when it changed.)
+    fn see(&mut self, v: &View, now: Instant) {
+        if *self.view != *v {
+            self.view = Rc::new(v.clone());
+        }
+        let Some(run) = &self.run else { return };
+        let mut sh = run.shared.borrow_mut();
+        if !Rc::ptr_eq(&sh.view, &self.view) {
+            sh.set_view(self.view.clone());
+        }
+        sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
+    }
 }
 
 fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
     // No file, process or OS access: the scripts only get the `deckard` API.
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
-        view: View::default(),
+        view: Rc::default(),
         view_id: 1,
         now: 0.0,
         held: HashSet::new(),

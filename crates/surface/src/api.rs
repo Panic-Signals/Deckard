@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Table, Value};
+use mlua::{Function, Lua, Table, Value};
 
 use crate::{Action, Browse, ColorOf, Shared, View, leds, names};
 
@@ -15,6 +15,9 @@ pub fn tempo_in_range(bpm: f64) -> f64 {
 
 pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     let d = lua.create_table()?;
+    // (Lua's own `next`, for the `pairs` of a `deckard.state()` table, whatever the scripts
+    // do to the global.)
+    lua.set_named_registry_value("deckard.next", lua.globals().get::<Function>("next")?)?;
 
     // Reading.
     let sh = shared.clone();
@@ -973,7 +976,6 @@ fn mix(lua: &Lua, t: &Table, m: &crate::MixView) -> mlua::Result<()> {
     t.set("plugins", plugins)
 }
 
-/// The app as the scripts see it (docs/controller-api.md, `deckard.state()`).
 /// The library as BROWSE shows it (counts from 1).
 fn browser(lua: &Lua, b: &crate::BrowserView) -> mlua::Result<Table> {
     let t = lua.create_table()?;
@@ -1039,97 +1041,44 @@ fn scales(lua: &Lua) -> mlua::Result<Table> {
     Ok(t)
 }
 
-fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
-    let rgb = |c: [u8; 3]| lua.create_sequence_from(c);
+/// The parts of `deckard.state()` made only when a script reads them ([`lazy`]).
+const STATE_PARTS: &[&str] = &[
+    "scenes",
+    "lfos",
+    "mod_slots",
+    "sections",
+    "notes",
+    "browser",
+    "recent",
+    "settings",
+    "lock",
+    "sampling",
+    "note_repeat",
+    "groups",
+    "control",
+];
+
+/// The parts of a group's table made only when a script reads them.
+const GROUP_PARTS: &[&str] = &["patterns", "sounds"];
+
+/// The app as the scripts see it (docs/controller-api.md, `deckard.state()`): its values
+/// now, its lists and tables ([`STATE_PARTS`]) when first read.
+fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("project", v.project.as_str())?;
     t.set("scene_name", v.scene_name.as_str())?;
     t.set("scene_palette", v.scene_color)?;
-    let scenes = lua.create_table()?;
-    for (i, sc) in v.scenes.iter().enumerate() {
-        let st = lua.create_table()?;
-        st.set("name", sc.name.as_str())?;
-        st.set("palette", sc.color)?;
-        st.set("color", rgb(sc.rgb)?)?;
-        st.set("default_color", sc.default_color)?;
-        // (By group: the pattern, or `false`.)
-        let patterns = lua.create_table()?;
-        for (g, p) in sc.patterns.iter().enumerate() {
-            patterns.set(g + 1, p.map_or(Value::Boolean(false), |p| Value::Integer(p as i64 + 1)))?;
-        }
-        st.set("patterns", patterns)?;
-        scenes.set(i + 1, st)?;
-    }
-    t.set("scenes", scenes)?;
-    let lfos = lua.create_table()?;
-    for (i, l) in v.lfos.iter().enumerate() {
-        let lt = lua.create_table()?;
-        lt.set("pad", l.pad)?;
-        lt.set("shape", l.shape.as_str())?;
-        lt.set("sync", l.sync)?;
-        lt.set("rate", l.rate.as_str())?;
-        lt.set("phase", l.phase)?;
-        lt.set("level", l.level)?;
-        lt.set("quantize", l.quantize)?;
-        lt.set("trigger", l.trigger.as_str())?;
-        lt.set("fade", l.fade)?;
-        lt.set("muted", l.muted)?;
-        lt.set("env", l.env)?;
-        lt.set("attack", l.attack.as_str())?;
-        lt.set("decay", l.decay.as_str())?;
-        lt.set("release", l.release.as_str())?;
-        lt.set("sustain", l.sustain)?;
-        lt.set("retrigger", l.retrigger)?;
-        lt.set("name", l.name.as_str())?;
-        lt.set("points", lua.create_sequence_from(l.points.iter().copied())?)?;
-        lt.set("marks", lua.create_sequence_from(l.marks.iter().copied())?)?;
-        lt.set("note_off", l.note_off)?;
-        lfos.set(i + 1, lt)?;
-    }
-    t.set("lfos", lfos)?;
     t.set("lfo_focus", v.lfo_focus)?;
-    let slots = lua.create_table()?;
-    for (i, m) in v.mod_slots.iter().enumerate() {
-        let rows = lua.create_sequence_from(m.rows.iter().map(String::as_str))?;
-        rows.set("midi", m.midi)?;
-        rows.set("cv", m.cv)?;
-        slots.set(i + 1, rows)?;
-    }
-    t.set("mod_slots", slots)?;
     t.set("scene", v.scene + 1)?;
     t.set("playing_scene", v.playing_scene.map(|s| s + 1))?;
     t.set("queued_scene", v.queued_scene.map(|s| s + 1))?;
     t.set("song_view", v.song_view)?;
-    let sections = lua.create_table()?;
-    for (i, sec) in v.sections.iter().enumerate() {
-        let st = lua.create_table()?;
-        st.set("scene", sec.scene.map(|s| s + 1))?;
-        st.set("start", sec.start)?;
-        st.set("length", sec.length)?;
-        st.set("auto", sec.auto)?;
-        sections.set(i + 1, st)?;
-    }
-    t.set("sections", sections)?;
     t.set("section", v.section.map(|s| s + 1))?;
     t.set("pattern", v.pattern + 1)?;
     t.set("pattern_start", v.pattern_start)?;
     t.set("pattern_length", v.pattern_length)?;
     t.set("pattern_auto", v.pattern_auto)?;
     t.set("pattern_position", v.pattern_position)?;
-    let notes = lua.create_table()?;
-    for (i, n) in v.notes.iter().enumerate() {
-        let nt = lua.create_table()?;
-        nt.set("sound", n.sound + 1)?;
-        nt.set("position", n.position)?;
-        nt.set("length", n.length)?;
-        nt.set("pitch", n.pitch)?;
-        nt.set("velocity", n.velocity)?;
-        nt.set("probability", n.probability)?;
-        nt.set("selected", n.selected)?;
-        notes.set(i + 1, nt)?;
-    }
-    t.set("notes", notes)?;
-    t.set("browser", browser(lua, &v.browser)?)?;
     t.set("tempo", v.tempo)?;
     t.set("swing", v.swing)?;
     t.set("volume", v.master_volume)?;
@@ -1160,57 +1109,6 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     scale.set("root", v.scale_root)?;
     t.set("scale", scale)?;
     t.set("follow", v.follow)?;
-    t.set("recent", lua.create_sequence_from(v.recent.iter().map(String::as_str))?)?;
-    let settings = lua.create_table()?;
-    settings.set("values", lua.create_table_from(v.settings.values.iter().map(|(k, v)| (k.as_str(), v.as_str())))?)?;
-    for (key, ports) in [("midi_inputs", &v.settings.midi_inputs), ("midi_outputs", &v.settings.midi_outputs)] {
-        let list = lua.create_table()?;
-        for (name, on) in ports {
-            let p = lua.create_table()?;
-            p.set("name", name.as_str())?;
-            p.set("on", *on)?;
-            list.push(p)?;
-        }
-        settings.set(key, list)?;
-    }
-    settings.set("audio_status", lua.create_sequence_from(v.settings.audio_status.iter().map(String::as_str))?)?;
-    settings.set("link", v.settings.link)?;
-    settings.set("link_peers", v.settings.link_peers)?;
-    t.set("settings", settings)?;
-    let lock = lua.create_table()?;
-    lock.set("active", v.lock.active)?;
-    // (Slots and the bank from 1, as the pages count.)
-    lock.set("slots", lua.create_table_from(v.lock.slots.iter().map(|s| (s + 1, true)))?)?;
-    lock.set("focus", v.lock.focus.map(|f| f + 1))?;
-    lock.set("bank", v.lock.bank + 1)?;
-    lock.set("banks", v.lock.banks)?;
-    lock.set("morph", v.lock.morph)?;
-    lock.set("mode", v.lock.mode)?;
-    lock.set("time", v.lock.time)?;
-    lock.set("grid", v.lock.grid)?;
-    t.set("lock", lock)?;
-    t.set("sampling", sampling(lua, &v.sampling)?)?;
-    let nr = lua.create_table()?;
-    let settings = lua.create_table()?;
-    for k in &v.note_repeat.settings {
-        let st = lua.create_table()?;
-        st.set("name", k.name.as_str())?;
-        st.set("text", k.text.as_str())?;
-        st.set("value", k.value)?;
-        st.set("min", k.min)?;
-        st.set("max", k.max)?;
-        st.set("step", k.step)?;
-        st.set("turn", k.turn)?;
-        settings.set(k.key.as_str(), st)?;
-    }
-    nr.set("settings", settings)?;
-    nr.set("presets", lua.create_sequence_from(v.note_repeat.presets.iter().map(String::as_str))?)?;
-    // (The preset from 1, as the display buttons count.)
-    nr.set("preset", v.note_repeat.preset + 1)?;
-    nr.set("hold", v.note_repeat.hold)?;
-    nr.set("locked", v.note_repeat.locked)?;
-    nr.set("active", v.note_repeat.active)?;
-    t.set("note_repeat", nr)?;
     let grid = lua.create_table()?;
     grid.set("perform", v.grid.perform)?;
     grid.set("arrange", v.grid.arrange)?;
@@ -1227,83 +1125,264 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
     t.set("denominator", v.denominator)?;
     t.set("group", v.group + 1)?;
     t.set("sound", v.sound + 1)?;
-    let groups = lua.create_table()?;
-    for (i, g) in v.groups.iter().enumerate() {
-        let gt = lua.create_table()?;
-        gt.set("name", g.name.as_str())?;
-        gt.set("color", rgb(g.rgb)?)?;
-        gt.set("palette", g.color)?;
-        gt.set("muted", g.muted)?;
-        gt.set("default_color", g.default_color)?;
-        gt.set("playing", g.playing)?;
-        if let Some((touched, pos)) = g.perform {
-            let pt = lua.create_table()?;
-            pt.set("touched", touched)?;
-            pt.set("pos", pos)?;
-            if let Some((mode, name)) = &g.perform_mode {
-                pt.set("mode", mode + 1)?;
-                pt.set("name", name.as_str())?;
+    let v = v.clone();
+    lazy(lua, &t, STATE_PARTS, move |lua, part| state_part(lua, &v, part))?;
+    Ok(t)
+}
+
+/// `deckard.state()`'s part `part` (one of [`STATE_PARTS`]).
+fn state_part(lua: &Lua, v: &Rc<View>, part: &str) -> mlua::Result<Value> {
+    let rgb = |c: [u8; 3]| lua.create_sequence_from(c);
+    let t = match part {
+        "scenes" => {
+            let scenes = lua.create_table()?;
+            for (i, sc) in v.scenes.iter().enumerate() {
+                let st = lua.create_table()?;
+                st.set("name", sc.name.as_str())?;
+                st.set("palette", sc.color)?;
+                st.set("color", rgb(sc.rgb)?)?;
+                st.set("default_color", sc.default_color)?;
+                // (By group: the pattern, or `false`.)
+                let patterns = lua.create_table()?;
+                for (g, p) in sc.patterns.iter().enumerate() {
+                    patterns.set(g + 1, p.map_or(Value::Boolean(false), |p| Value::Integer(p as i64 + 1)))?;
+                }
+                st.set("patterns", patterns)?;
+                scenes.set(i + 1, st)?;
             }
-            gt.set("perform", pt)?;
+            scenes
         }
-        mix(lua, &gt, &g.mix)?;
-        let patterns = lua.create_table()?;
-        for (i, pt) in g.patterns.iter().enumerate() {
-            let t = lua.create_table()?;
-            t.set("name", pt.name.as_str())?;
-            t.set("palette", pt.color)?;
-            t.set("color", rgb(pt.rgb)?)?;
-            t.set("default_color", pt.default_color)?;
-            t.set("bars", pt.bars)?;
-            t.set("slot", pt.slot + 1)?;
-            patterns.set(i + 1, t)?;
-        }
-        gt.set("patterns", patterns)?;
-        gt.set("scene_pattern", g.scene_pattern.map(|i| i + 1))?;
-        gt.set("progress", g.progress)?;
-        gt.set("playing_progress", g.playing_progress)?;
-        let sounds = lua.create_table()?;
-        for (j, s) in g.sounds.iter().enumerate() {
-            let st = lua.create_table()?;
-            st.set("name", s.name.as_str())?;
-            st.set("color", rgb(s.rgb)?)?;
-            st.set("palette", s.color)?;
-            st.set("muted", s.muted)?;
-            st.set("used", s.used)?;
-            st.set("playing", s.playing)?;
-            st.set("choke_group", s.choke_group)?;
-            st.set("choke_mode", s.choke_mode)?;
-            st.set("link_group", s.link_group)?;
-            st.set("link_mode", s.link_mode)?;
-            st.set("base_key", s.base_key)?;
-            st.set("default_color", s.default_color)?;
-            st.set("prob_locked", s.prob_locked)?;
-            st.set("selected", s.selected)?;
-            if let Some(a) = &s.audio {
-                let at = lua.create_table()?;
-                // (Flat: min, max, min, max, …; a column a pixel or two.)
-                at.set("peaks", lua.create_sequence_from(a.peaks.iter().flat_map(|&(lo, hi)| [lo, hi]))?)?;
-                at.set("ticks", a.ticks)?;
-                at.set("offset", a.offset)?;
-                at.set("on", a.on)?;
-                at.set("gate", a.gate)?;
-                st.set("audio", at)?;
+        "lfos" => {
+            let lfos = lua.create_table()?;
+            for (i, l) in v.lfos.iter().enumerate() {
+                let lt = lua.create_table()?;
+                lt.set("pad", l.pad)?;
+                lt.set("shape", l.shape.as_str())?;
+                lt.set("sync", l.sync)?;
+                lt.set("rate", l.rate.as_str())?;
+                lt.set("phase", l.phase)?;
+                lt.set("level", l.level)?;
+                lt.set("quantize", l.quantize)?;
+                lt.set("trigger", l.trigger.as_str())?;
+                lt.set("fade", l.fade)?;
+                lt.set("muted", l.muted)?;
+                lt.set("env", l.env)?;
+                lt.set("attack", l.attack.as_str())?;
+                lt.set("decay", l.decay.as_str())?;
+                lt.set("release", l.release.as_str())?;
+                lt.set("sustain", l.sustain)?;
+                lt.set("retrigger", l.retrigger)?;
+                lt.set("name", l.name.as_str())?;
+                lt.set("points", lua.create_sequence_from(l.points.iter().copied())?)?;
+                lt.set("marks", lua.create_sequence_from(l.marks.iter().copied())?)?;
+                lt.set("note_off", l.note_off)?;
+                lfos.set(i + 1, lt)?;
             }
-            let touch = lua.create_table()?;
-            touch.set("mode", s.touch_mode)?;
-            touch.set("cc", s.touch_cc)?;
-            touch.set("curve", s.touch_curve)?;
-            touch.set("min", s.touch_min)?;
-            touch.set("max", s.touch_max)?;
-            st.set("touch", touch)?;
-            mix(lua, &st, &s.mix)?;
-            sounds.set(j + 1, st)?;
+            lfos
         }
-        gt.set("sounds", sounds)?;
-        groups.set(i + 1, gt)?;
+        "mod_slots" => {
+            let slots = lua.create_table()?;
+            for (i, m) in v.mod_slots.iter().enumerate() {
+                let rows = lua.create_sequence_from(m.rows.iter().map(String::as_str))?;
+                rows.set("midi", m.midi)?;
+                rows.set("cv", m.cv)?;
+                slots.set(i + 1, rows)?;
+            }
+            slots
+        }
+        "sections" => {
+            let sections = lua.create_table()?;
+            for (i, sec) in v.sections.iter().enumerate() {
+                let st = lua.create_table()?;
+                st.set("scene", sec.scene.map(|s| s + 1))?;
+                st.set("start", sec.start)?;
+                st.set("length", sec.length)?;
+                st.set("auto", sec.auto)?;
+                sections.set(i + 1, st)?;
+            }
+            sections
+        }
+        "notes" => {
+            let notes = lua.create_table()?;
+            for (i, n) in v.notes.iter().enumerate() {
+                let nt = lua.create_table()?;
+                nt.set("sound", n.sound + 1)?;
+                nt.set("position", n.position)?;
+                nt.set("length", n.length)?;
+                nt.set("pitch", n.pitch)?;
+                nt.set("velocity", n.velocity)?;
+                nt.set("probability", n.probability)?;
+                nt.set("selected", n.selected)?;
+                notes.set(i + 1, nt)?;
+            }
+            notes
+        }
+        "browser" => browser(lua, &v.browser)?,
+        "recent" => lua.create_sequence_from(v.recent.iter().map(String::as_str))?,
+        "settings" => {
+            let settings = lua.create_table()?;
+            settings.set("values", lua.create_table_from(v.settings.values.iter().map(|(k, v)| (k.as_str(), v.as_str())))?)?;
+            for (key, ports) in [("midi_inputs", &v.settings.midi_inputs), ("midi_outputs", &v.settings.midi_outputs)] {
+                let list = lua.create_table()?;
+                for (name, on) in ports {
+                    let p = lua.create_table()?;
+                    p.set("name", name.as_str())?;
+                    p.set("on", *on)?;
+                    list.push(p)?;
+                }
+                settings.set(key, list)?;
+            }
+            settings.set("audio_status", lua.create_sequence_from(v.settings.audio_status.iter().map(String::as_str))?)?;
+            settings.set("link", v.settings.link)?;
+            settings.set("link_peers", v.settings.link_peers)?;
+            settings
+        }
+        "lock" => {
+            let lock = lua.create_table()?;
+            lock.set("active", v.lock.active)?;
+            // (Slots and the bank from 1, as the pages count.)
+            lock.set("slots", lua.create_table_from(v.lock.slots.iter().map(|s| (s + 1, true)))?)?;
+            lock.set("focus", v.lock.focus.map(|f| f + 1))?;
+            lock.set("bank", v.lock.bank + 1)?;
+            lock.set("banks", v.lock.banks)?;
+            lock.set("morph", v.lock.morph)?;
+            lock.set("mode", v.lock.mode)?;
+            lock.set("time", v.lock.time)?;
+            lock.set("grid", v.lock.grid)?;
+            lock
+        }
+        "sampling" => sampling(lua, &v.sampling)?,
+        "note_repeat" => {
+            let nr = lua.create_table()?;
+            let settings = lua.create_table()?;
+            for k in &v.note_repeat.settings {
+                let st = lua.create_table()?;
+                st.set("name", k.name.as_str())?;
+                st.set("text", k.text.as_str())?;
+                st.set("value", k.value)?;
+                st.set("min", k.min)?;
+                st.set("max", k.max)?;
+                st.set("step", k.step)?;
+                st.set("turn", k.turn)?;
+                settings.set(k.key.as_str(), st)?;
+            }
+            nr.set("settings", settings)?;
+            nr.set("presets", lua.create_sequence_from(v.note_repeat.presets.iter().map(String::as_str))?)?;
+            // (The preset from 1, as the display buttons count.)
+            nr.set("preset", v.note_repeat.preset + 1)?;
+            nr.set("hold", v.note_repeat.hold)?;
+            nr.set("locked", v.note_repeat.locked)?;
+            nr.set("active", v.note_repeat.active)?;
+            nr
+        }
+        "groups" => {
+            let groups = lua.create_table()?;
+            for i in 0..v.groups.len() {
+                groups.set(i + 1, group(lua, v, i)?)?;
+            }
+            groups
+        }
+        "control" => control(lua, &v.control)?,
+        _ => return Ok(Value::Nil),
+    };
+    Ok(Value::Table(t))
+}
+
+/// Group `i`'s table: its values now, its patterns and sounds ([`GROUP_PARTS`]) when
+/// first read.
+fn group(lua: &Lua, v: &Rc<View>, i: usize) -> mlua::Result<Table> {
+    let g = &v.groups[i];
+    let gt = lua.create_table()?;
+    gt.set("name", g.name.as_str())?;
+    gt.set("color", lua.create_sequence_from(g.rgb)?)?;
+    gt.set("palette", g.color)?;
+    gt.set("muted", g.muted)?;
+    gt.set("default_color", g.default_color)?;
+    gt.set("playing", g.playing)?;
+    if let Some((touched, pos)) = g.perform {
+        let pt = lua.create_table()?;
+        pt.set("touched", touched)?;
+        pt.set("pos", pos)?;
+        if let Some((mode, name)) = &g.perform_mode {
+            pt.set("mode", mode + 1)?;
+            pt.set("name", name.as_str())?;
+        }
+        gt.set("perform", pt)?;
     }
-    t.set("groups", groups)?;
-    let c = &v.control;
+    mix(lua, &gt, &g.mix)?;
+    gt.set("scene_pattern", g.scene_pattern.map(|i| i + 1))?;
+    gt.set("progress", g.progress)?;
+    gt.set("playing_progress", g.playing_progress)?;
+    let v = v.clone();
+    lazy(lua, &gt, GROUP_PARTS, move |lua, part| group_part(lua, &v.groups[i], part))?;
+    Ok(gt)
+}
+
+/// Group `g`'s part `part` (one of [`GROUP_PARTS`]).
+fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value> {
+    let rgb = |c: [u8; 3]| lua.create_sequence_from(c);
+    let t = match part {
+        "patterns" => {
+            let patterns = lua.create_table()?;
+            for (i, pt) in g.patterns.iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("name", pt.name.as_str())?;
+                t.set("palette", pt.color)?;
+                t.set("color", rgb(pt.rgb)?)?;
+                t.set("default_color", pt.default_color)?;
+                t.set("bars", pt.bars)?;
+                t.set("slot", pt.slot + 1)?;
+                patterns.set(i + 1, t)?;
+            }
+            patterns
+        }
+        "sounds" => {
+            let sounds = lua.create_table()?;
+            for (j, s) in g.sounds.iter().enumerate() {
+                let st = lua.create_table()?;
+                st.set("name", s.name.as_str())?;
+                st.set("color", rgb(s.rgb)?)?;
+                st.set("palette", s.color)?;
+                st.set("muted", s.muted)?;
+                st.set("used", s.used)?;
+                st.set("playing", s.playing)?;
+                st.set("choke_group", s.choke_group)?;
+                st.set("choke_mode", s.choke_mode)?;
+                st.set("link_group", s.link_group)?;
+                st.set("link_mode", s.link_mode)?;
+                st.set("base_key", s.base_key)?;
+                st.set("default_color", s.default_color)?;
+                st.set("prob_locked", s.prob_locked)?;
+                st.set("selected", s.selected)?;
+                if let Some(a) = &s.audio {
+                    let at = lua.create_table()?;
+                    // (Flat: min, max, min, max, …; a column a pixel or two.)
+                    at.set("peaks", lua.create_sequence_from(a.peaks.iter().flat_map(|&(lo, hi)| [lo, hi]))?)?;
+                    at.set("ticks", a.ticks)?;
+                    at.set("offset", a.offset)?;
+                    at.set("on", a.on)?;
+                    at.set("gate", a.gate)?;
+                    st.set("audio", at)?;
+                }
+                let touch = lua.create_table()?;
+                touch.set("mode", s.touch_mode)?;
+                touch.set("cc", s.touch_cc)?;
+                touch.set("curve", s.touch_curve)?;
+                touch.set("min", s.touch_min)?;
+                touch.set("max", s.touch_max)?;
+                st.set("touch", touch)?;
+                mix(lua, &st, &s.mix)?;
+                sounds.set(j + 1, st)?;
+            }
+            sounds
+        }
+        _ => return Ok(Value::Nil),
+    };
+    Ok(Value::Table(t))
+}
+
+/// `deckard.state().control`.
+fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
     let ct = lua.create_table()?;
     ct.set("level", c.level + 1)?;
     ct.set("plugins", c.modules_visible)?;
@@ -1450,8 +1529,76 @@ fn state(lua: &Lua, v: &View) -> mlua::Result<Table> {
         modules.set(i + 1, mt)?;
     }
     ct.set("modules", modules)?;
-    t.set("control", ct)?;
-    Ok(t)
+    Ok(ct)
+}
+
+/// Give `t` the fields `parts`, each made by `make` the first time a script reads it (or
+/// walks `t` with `pairs`), from the view `t` was made for. `deckard.state()` is made
+/// again whenever the app changes, every frame while the song plays, and most handlers
+/// read a few of its fields: the long lists (every group's sounds, the library's results)
+/// are made only for those that read them. To the scripts it's a plain table: a field
+/// they set or clear stays as they left it, and `pairs` sees every part.
+fn lazy(
+    lua: &Lua,
+    t: &Table,
+    parts: &'static [&'static str],
+    make: impl Fn(&Lua, &str) -> mlua::Result<Value> + 'static,
+) -> mlua::Result<()> {
+    debug_assert!(parts.len() <= 32);
+    // (A bit for each part made, or set by the script, which only ever happens once.)
+    let made = Rc::new(std::cell::Cell::new(0u32));
+    let place = move |key: &Value| match key {
+        Value::String(s) => parts.iter().position(|p| s.as_bytes() == p.as_bytes()),
+        _ => None,
+    };
+    let first = {
+        let made = made.clone();
+        move |i: usize| {
+            let fresh = made.get() & 1 << i == 0;
+            made.set(made.get() | 1 << i);
+            fresh
+        }
+    };
+    let make = Rc::new(make);
+    let mt = lua.create_table()?;
+    {
+        let (first, make) = (first.clone(), make.clone());
+        mt.raw_set(
+            "__index",
+            lua.create_function(move |lua, (t, key): (Table, Value)| {
+                let Some(i) = place(&key).filter(|&i| first(i)) else { return Ok(Value::Nil) };
+                let value = make(lua, parts[i])?;
+                t.raw_set(key, &value)?;
+                Ok(value)
+            })?,
+        )?;
+    }
+    {
+        let first = first.clone();
+        mt.raw_set(
+            "__newindex",
+            lua.create_function(move |_, (t, key, value): (Table, Value, Value)| {
+                if let Some(i) = place(&key) {
+                    first(i);
+                }
+                t.raw_set(key, value)
+            })?,
+        )?;
+    }
+    mt.raw_set(
+        "__pairs",
+        lua.create_function(move |lua, t: Table| {
+            for (i, part) in parts.iter().enumerate() {
+                // (Not over one a script `rawset`.)
+                if first(i) && t.raw_get::<Value>(*part)?.is_nil() {
+                    t.raw_set(*part, make(lua, part)?)?;
+                }
+            }
+            let next: Function = lua.named_registry_value("deckard.next")?;
+            Ok((next, t, Value::Nil))
+        })?,
+    )?;
+    t.set_metatable(Some(mt))
 }
 
 /// The Sampling page's view (tabs, pages, slices and zones from 1; frames from 0).
