@@ -135,15 +135,24 @@ pub fn is_colour(name: &str) -> bool {
 
 /// The palette byte of a scripts' colour (`LEDColors` index, 16 white) and LED state
 /// (`LEDHelper.LS_*`: 1 off, 2 dim, 3 dim flash, 4 bright, 5 flash). The low two bits
-/// are the shade, 0 dimmest to 3 brightest; Maschine's MK3 table gives bright, dim flash
-/// and flash the full level (`MaschineStudioController.LEDValues`), so they take 3.
+/// are the shade, 0 dimmest to 3 brightest. Maschine's MK3 (LUT) path sends the LS
+/// state to the hardware, whose own table turns LS_BRIGHT (4) into the colour's bright
+/// shade (2) and LS_FLASH (5) into the colour mixed with white (3). Maschine's RGB
+/// path instead lights the colour with white added to make it bright, but on the MK3
+/// that white mixing is already the flash level: bright pads only need the colour's
+/// bright shade (2), not the white-mixed flash level (3).
 pub fn palette(colour: i64, state: i64) -> u8 {
     if state <= 1 {
         return 0;
     }
     let colour = if (0..=16).contains(&colour) { colour } else { 16 };
-    // LS_DIM and LS_DIM_FLASH (dim until something flashes it) are dim.
-    let shade = if state <= 3 { 0 } else { 3 };
+    // LS_DIM and LS_DIM_FLASH (dim until something flashes it) are dim (shade 0);
+    // LS_BRIGHT is the colour's bright shade (2); LS_FLASH mixes in white (shade 3).
+    let shade = match state {
+        2 | 3 => 0,
+        4 => 2,
+        _ => 3,
+    };
     ((colour as u8 + 1) << 2) | shade
 }
 
@@ -280,8 +289,8 @@ mod tests {
         assert_eq!(palette(0, 2), 0x04, "red dim");
         assert_eq!(palette(16, 3), palette(16, 2), "dim until flashed: dim");
         assert_eq!(button_level(3), DIM);
-        assert_eq!(palette(0, 4), 0x07, "red bright");
-        assert_eq!(palette(16, 4), 0x47, "white bright");
+        assert_eq!(palette(0, 4), 0x06, "red bright");
+        assert_eq!(palette(16, 4), 0x46, "white bright");
         assert_eq!(palette_rgb(127, 0, 0), palette(0, 4));
         assert_eq!(palette_rgb(0, 0, 127), palette(10, 4));
         assert_eq!(palette_rgb(32, 32, 32), palette(16, 2));
