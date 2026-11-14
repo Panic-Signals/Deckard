@@ -44,5 +44,8 @@ fn main() {
             Some(n) => println!("  root {} {:+.0} ct ({:.2})", n.note, n.cents, n.confidence),
             None => println!("  no root"),
         }
+        let t = std::time::Instant::now();
+        let k = deckard_analysis::key(part, rate);
+        eprintln!("key in {:.2} s: {k:?}", t.elapsed().as_secs_f64());
     }
 }

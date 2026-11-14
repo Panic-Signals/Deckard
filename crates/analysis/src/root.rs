@@ -24,13 +24,19 @@ const MIN_RMS: f32 = 0.003_162;
 /// The fewest detections that may name a root, and the least share of the sound.
 const MIN_VOTES: usize = 3;
 const MIN_CONFIDENCE: f32 = 0.4;
-/// How much of a long recording is listened to (seconds): a root is one note's, and a
-/// whole song has none to find however long it is searched.
+/// How much of a long recording is listened to (seconds): one note is found
+/// early or not at all (a song's root is its key's, see `key`).
 const LISTEN: usize = 30;
 
-/// The root of `frames` at `rate`, or `None` when it has no clear pitch (drums, noise,
+/// The root of `frames` at `rate`: the note it plays at, else (chords, a band, a song)
+/// its key's tonic, in the octave from C3. `None` when it has neither (drums, noise,
 /// silence): better unset than a guess.
 pub fn root(frames: &[[f32; 2]], rate: u32) -> Option<Root> {
+    note(frames, rate).or_else(|| crate::key(frames, rate).map(|k| Root { note: 60 + k.tonic, cents: k.cents, confidence: k.confidence }))
+}
+
+/// The one note `frames` plays at, if it's one.
+fn note(frames: &[[f32; 2]], rate: u32) -> Option<Root> {
     if rate == 0 {
         return None;
     }

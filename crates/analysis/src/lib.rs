@@ -5,6 +5,7 @@
 //! samples, so callers run them off the audio thread and keep the answers.
 
 pub mod cache;
+pub mod key;
 mod onset;
 pub mod root;
 pub mod tempo;
@@ -12,6 +13,7 @@ pub mod tempo;
 mod test_signals;
 
 pub use cache::{Analysis, Cache, analyse};
+pub use key::{Key, key};
 pub use root::{Root, root, root_with_name};
 pub use tempo::{Tempo, TempoSource, tempo};
 

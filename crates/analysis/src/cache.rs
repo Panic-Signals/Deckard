@@ -68,7 +68,7 @@ impl Cache {
     pub fn get(&self, key: &str) -> Option<Analysis> {
         let text = std::fs::read_to_string(self.path(key)).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != "v 1" {
+        if lines.next()? != "v 2" {
             return None;
         }
         let mut a = Analysis { tempo: None, root: None, seconds: 0.0 };
@@ -107,7 +107,7 @@ impl Cache {
     /// Keep `a` for `key` (written whole, then renamed into place).
     pub fn put(&self, key: &str, a: &Analysis) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        let mut text = format!("v 1\nseconds {}\n", a.seconds);
+        let mut text = format!("v 2\nseconds {}\n", a.seconds);
         if let Some(t) = &a.tempo {
             let source = SOURCES.iter().find(|s| s.0 == t.source).map_or("audio", |s| s.1);
             text += &format!("tempo {} {} {} {} {source}\n", t.bpm, t.beats, t.offset, t.confidence);
@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(cache.get("nothing"), None);
         std::fs::write(dir.path().join("bad.txt"), "v 9\nseconds 1").unwrap();
         assert_eq!(cache.get("bad"), None);
-        std::fs::write(dir.path().join("worse.txt"), "v 1\ntempo x").unwrap();
+        std::fs::write(dir.path().join("worse.txt"), "v 2\ntempo x").unwrap();
         assert_eq!(cache.get("worse"), None);
     }
 
