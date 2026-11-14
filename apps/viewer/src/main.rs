@@ -4491,7 +4491,22 @@ impl App {
         Some(at as f64 / length as f64)
     }
 
-    fn scene_pattern(&self, group: usize) -> Option<usize> {
+    /// Sound `s` of group `g`'s Audio plug-in loop switched on (its focused take) or off
+    /// in the pattern the group plays (the focused one, for the focused group with none),
+    /// as Maschine's step pad and the pattern editor's double-click do. One undo step.
+    fn toggle_audio_loop(&mut self, g: usize, s: usize) -> Result<(), String> {
+        let doc = self.doc.clone().ok_or("no project")?;
+        let pi = self.scene_pattern(g).or((g == self.group).then_some(self.pattern)).ok_or("the group plays no pattern")?;
+        let mut d = doc.borrow_mut();
+        let p = d.project();
+        let snd = p.groups.get(g).and_then(|x| x.sounds.get(s)).ok_or("no such sound")?;
+        let take = snd.audio.as_ref().ok_or("the sound has no Audio plug-in")?.focused;
+        let pattern = p.groups[g].patterns.get(pi).ok_or("no such pattern")?;
+        let on = pattern.audio.iter().any(|c| c.sound == s);
+        if on { d.set_audio_in(g, s, &[pi], None, "Audio Off") } else { d.set_audio_in(g, s, &[pi], Some(take), "Audio On") }
+    }
+
+    pub(crate) fn scene_pattern(&self, group: usize) -> Option<usize> {
         let d = self.doc.as_ref()?.borrow();
         let s = d.project().scenes.get(self.scene)?;
         s.patterns.iter().find(|(g, _)| *g == group).map(|&(_, pi)| pi)
@@ -6398,6 +6413,8 @@ impl App {
                                 prob_locked: snd.probability_locked,
                                 selected: g == self.group && (s == self.sound || self.sound_selection.contains(&s)),
                                 audio: if g == self.group { self.loop_view(p, g, s) } else { None },
+                                loop_mode: snd.instrument == "AudioModule"
+                                    && snd.audio.as_ref().is_some_and(|a| a.mode == deckard_model::AudioMode::Loop),
                             }
                         })
                         .collect(),
@@ -6747,6 +6764,11 @@ impl App {
             A::DeletePattern { group, pattern } => {
                 if project(self).is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
                     layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
+                }
+            }
+            A::ToggleAudioLoop { group, sound } => {
+                if let Err(e) = self.toggle_audio_loop(group, sound) {
+                    self.status = format!("can't switch the loop: {e}");
                 }
             }
             A::CopyPattern { group, from, to } => {
@@ -15439,6 +15461,38 @@ mod tests {
         let names: Vec<String> = p.groups[groups].sounds[..4].iter().map(|s| s.name.clone()).collect();
         assert!(names[0].ends_with(" Drums") && names[3].ends_with(" Vocal"), "{names:?}");
         let _ = std::fs::remove_dir_all(settings);
+    }
+
+    /// A Loop-mode Audio plug-in's pad (MK3 Pad mode) switches its loop off in the
+    /// pattern the group plays, and on again with its focused take.
+    #[test]
+    fn toggling_an_audio_loop_switches_it_in_the_playing_pattern() {
+        let mut app = App::default();
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "Part").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("Loop 120 bpm.wav");
+        {
+            let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+            let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+            for i in 0..96_000 {
+                w.write_sample(((i as f64 * 0.05).sin() * 8_000.0) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let smp = deckard_engine::sample::Sample::load(&wav).unwrap();
+        app.load_loop(0, 2, &wav, &smp).unwrap();
+        let on = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[0].audio.iter().any(|c| c.sound == 2);
+        assert!(on(&app), "a loop loaded is on in the pattern");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(!on(&app), "the pad switches it off");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(on(&app), "and on again");
+        assert!(app.toggle_audio_loop(0, 3).is_err(), "a sound without an Audio plug-in");
     }
 
     #[test]

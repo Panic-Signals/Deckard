@@ -435,6 +435,9 @@ pub struct SoundView {
     pub selected: bool,
     /// Its Audio plug-in's loop in the focused pattern (focused group only).
     pub audio: Option<LoopView>,
+    /// Its Audio plug-in plays in Loop mode (with the pattern, not with notes): in Pad
+    /// mode its pad switches the loop on or off ([`Action::ToggleAudioLoop`]).
+    pub loop_mode: bool,
 }
 
 /// A sound's Audio plug-in loop as the pattern editors draw it (Maschine's
@@ -1047,6 +1050,12 @@ pub enum Action {
     DeletePattern {
         group: usize,
         pattern: usize,
+    },
+    /// Sound `sound` of group `group` (both from 0): its Audio plug-in's loop switched on
+    /// or off in the pattern the group plays.
+    ToggleAudioLoop {
+        group: usize,
+        sound: usize,
     },
     /// Group `group`'s pattern `to` becomes a copy of its pattern `from`; past the last, a
     /// new pattern goes there.

@@ -294,6 +294,11 @@ function global.pad(n, velocity)
   local s = deckard.state()
   local group = s.groups[s.group]
   if not group or n > #group.sounds then return true end
+  -- A sound whose Audio plug-in is in Loop mode plays with the pattern, not with notes:
+  -- in Pad mode its pad switches the loop on or off (and focuses it, as any pad).
+  if pads.mode == "pad" and not acting and not deckard.held("ERASE") and group.sounds[n].loop_mode then
+    deckard.toggle_audio_loop(s.group, n)
+  end
   if pin.active("SELECT") then
     -- MULTI (Button 8) adds the pad. Off, an unselected pad replaces the selection.
     deckard.select_pad(n, require("pages.hold").multi == true)

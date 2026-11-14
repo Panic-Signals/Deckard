@@ -1021,6 +1021,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     // the values it shows on its strips.
     request!("choke_all", () => Action::ChokeAll);
     request!("delete_pattern", (group: usize, pattern: usize) => Action::DeletePattern { group: index(group, "a group")?, pattern: index(pattern, "a pattern")? });
+    request!("toggle_audio_loop", (group: usize, sound: usize) => Action::ToggleAudioLoop {
+        group: index(group, "a group")?,
+        sound: index(sound, "a sound")?,
+    });
     request!("copy_pattern", (group: usize, from: usize, to: usize) => Action::CopyPattern {
         group: index(group, "a group")?,
         from: index(from, "a pattern")?,
@@ -1488,6 +1492,7 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("default_color", s.default_color)?;
                 st.set("prob_locked", s.prob_locked)?;
                 st.set("selected", s.selected)?;
+                st.set("loop_mode", s.loop_mode)?;
                 if let Some(a) = &s.audio {
                     let at = lua.create_table()?;
                     // (Flat: min, max, min, max, …; a column a pixel or two.)

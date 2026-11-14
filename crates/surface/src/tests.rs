@@ -173,6 +173,21 @@ fn shift_and_erase_show_the_groups() {
     assert_eq!(groups(&s, &v), before, "with ERASE: the groups");
 }
 
+/// A sound whose Audio plug-in is in Loop mode (it plays with the pattern, not with
+/// notes): in Pad mode its pad switches the loop on or off, and focuses it as any pad.
+#[test]
+fn a_loop_mode_sounds_pad_toggles_its_loop() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.groups[v.group].sounds[2].loop_mode = true;
+    let now = Instant::now();
+    let a = s.event(&Event::PadOn(3, 0.8), &v, now);
+    assert_eq!(a, [Action::ToggleAudioLoop { group: v.group, sound: 2 }, Action::FocusSound(2)]);
+    s.event(&Event::PadOff(3), &v, now);
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), [Action::FocusSound(1)], "other sounds just focus");
+    hold(&mut s, &v, "BUTTON_TRANSPORT_ERASE", true);
+    assert!(!s.event(&Event::PadOn(3, 0.8), &v, now).iter().any(|a| matches!(a, Action::ToggleAudioLoop { .. })), "not with ERASE");
+}
+
 #[test]
 fn pads_focus_their_sound() {
     let (mut s, v) = (Surface::new(), view());
