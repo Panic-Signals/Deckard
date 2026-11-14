@@ -110,6 +110,8 @@ mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+#[cfg(test)]
+mod preferences_tests;
 mod preset_load;
 #[cfg(test)]
 mod print_tests;
