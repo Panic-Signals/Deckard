@@ -324,12 +324,17 @@ pub struct ZoneSync {
 const LIVE_ROOM: usize = 12;
 const LIVE_CHUNK: usize = 64;
 const NO_LIVE: u8 = u8::MAX;
+/// Frames between two stretchers' starts: a start costs several blocks' work at once, so
+/// notes that come together start this far apart (a chord of four over 8 ms at 48 kHz).
+const LIVE_APART: u64 = 128;
 /// The most a stretcher is fed for a chunk, and to start.
 const LIVE_IN: usize = 16_384;
 
 /// A voice's stretcher: fed the zone's frames as fast as the song goes, it gives them
 /// at the pitch they were (times `transpose`).
 struct Live {
+    /// The rate it was made for.
+    sr: f64,
     st: deckard_stretch::Stretch,
     /// Input frames it's fed ahead, output frames it comes out behind.
     lat: (usize, usize),
@@ -348,12 +353,61 @@ struct Live {
     left: Option<u32>,
 }
 
+/// Stretchers of samplers no longer playing, by rate: every edit builds the engine
+/// again, and making a sampler's stretchers takes some 15 ms.
+static SPARE_LIVES: std::sync::Mutex<Vec<(u64, Vec<Live>)>> = std::sync::Mutex::new(Vec::new());
+/// The most sets kept.
+const SPARE_ROOM: usize = 32;
+
+/// A sampler's stretchers. Dropped (wherever its sampler is, the audio thread too) they
+/// go to the spare sets while there's room made for them.
+#[derive(Default)]
+struct Lives(Vec<Live>);
+
+impl std::ops::Deref for Lives {
+    type Target = Vec<Live>;
+    fn deref(&self) -> &Vec<Live> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Lives {
+    fn deref_mut(&mut self) -> &mut Vec<Live> {
+        &mut self.0
+    }
+}
+
+impl Drop for Lives {
+    fn drop(&mut self) {
+        if self.0.len() == LIVE_ROOM
+            && let Ok(mut spare) = SPARE_LIVES.try_lock()
+            && spare.len() < spare.capacity().min(SPARE_ROOM)
+            && let Some(l) = self.0.first()
+        {
+            let rate = l.sr.to_bits();
+            spare.push((rate, std::mem::take(&mut self.0)));
+        }
+    }
+}
+
 impl Live {
+    /// A sampler's stretchers: a set left by one before it, else made.
+    fn pool(sr: f64) -> Lives {
+        let kept = SPARE_LIVES.lock().ok().and_then(|mut spare| {
+            // (Room made here, off the audio thread, for the sets dropped on it.)
+            spare.reserve(SPARE_ROOM);
+            let i = spare.iter().position(|(r, _)| *r == sr.to_bits())?;
+            Some(spare.swap_remove(i).1)
+        });
+        Lives(kept.unwrap_or_else(|| (0..LIVE_ROOM).map(|_| Live::new(sr)).collect()))
+    }
+
     fn new(sr: f64) -> Live {
-        let st = deckard_stretch::Stretch::new(sr as f32, false);
+        let st = deckard_stretch::Stretch::spread(sr as f32);
         let lat = st.latency();
         let out = LIVE_CHUNK.max(lat.1);
-        Live {
+        let mut live = Live {
+            sr,
             st,
             lat,
             buf: [vec![0.0; LIVE_IN], vec![0.0; LIVE_IN], vec![0.0; out], vec![0.0; out]],
@@ -364,7 +418,11 @@ impl Live {
             transpose: 1.0,
             fresh: false,
             left: None,
-        }
+        };
+        // Run once here (off the audio thread): its memory is touched before a note
+        // needs it.
+        live.start(&mut || [0.0; 2]);
+        live
     }
 
     /// Start at the frames `pull` gives next: silence before them, the latency run
@@ -1167,7 +1225,10 @@ pub struct SamplerRt {
     tempo: f64,
     /// The stretchers of zones stretched as they play, made with it (off the audio
     /// thread) and given to voices as they start.
-    lives: Vec<Live>,
+    lives: Lives,
+    /// Frames rendered, and the frame the next stretcher may start at.
+    frame: u64,
+    live_from: u64,
 }
 
 impl SamplerRt {
@@ -1175,9 +1236,11 @@ impl SamplerRt {
         let zones_len = zones.len();
         let base = settings.clone();
         let live = zones.iter().any(|z| z.sync.as_ref().is_some_and(|s| s.live.is_some()));
-        let lives = if live { (0..LIVE_ROOM).map(|_| Live::new(sr)).collect() } else { Vec::new() };
+        let lives = if live { Live::pool(sr) } else { Lives::default() };
         SamplerRt {
             lives,
+            frame: 0,
+            live_from: 0,
             settings,
             base,
             hit: false,
@@ -1442,6 +1505,7 @@ impl SamplerRt {
             self.voices.push(v);
         }
         self.clock = old.clock;
+        (self.frame, self.live_from) = (old.frame, old.live_from);
         (self.mod_wheel, self.bend, self.pedal) = (old.mod_wheel, old.bend, old.pedal);
         self.held = old.held;
         (self.glide, self.glide_target, self.glide_step, self.first_note) = (old.glide, old.glide_target, old.glide_step, old.first_note);
@@ -1687,6 +1751,9 @@ impl SamplerRt {
         {
             v.live = i as u8;
             self.lives[i].fresh = true;
+            let at = (self.frame + u64::from(v.wait)).max(self.live_from);
+            v.wait = (at - self.frame) as u32;
+            self.live_from = at + LIVE_APART;
             return v;
         }
         // Prime the interpolator: x[n] .. x[n+4] are the first frames.
@@ -1803,6 +1870,7 @@ impl SamplerRt {
             return peak;
         }
         let frames = out.len() / 2;
+        self.frame += frames as u64;
         let mut peak = (0f32, 0f32);
         self.last_peak = 0.0;
         let s = self.settings.clone();
@@ -2327,21 +2395,38 @@ mod tests {
             });
             smp.zones[0].play = (0, 960_000);
             smp.set_song(0.0, 120.0);
+            if voices == 1 {
+                let t = std::time::Instant::now();
+                let made: Vec<Live> = (0..LIVE_ROOM).map(|_| Live::new(48_000.0)).collect();
+                let t2 = std::time::Instant::now();
+                drop(Lives(made));
+                let again = Live::pool(48_000.0);
+                eprintln!("and had again in {:.3} ms", t2.elapsed().as_secs_f64() * 1000.0);
+                let made = again;
+                eprintln!("{} stretchers made in {:.1} ms", made.len(), t.elapsed().as_secs_f64() * 1000.0);
+            }
             let t = std::time::Instant::now();
             for k in 0..voices {
                 smp.note_on(k + 1, 60, 127, &Context { tempo: 120.0, beats: 0.0, live: false });
             }
-            let mut out = vec![0.0; 512 * 2];
+            // A block of 128 frames lasts 2.67 ms: the worst one is what a device hears.
+            let mut out = vec![0.0; 128 * 2];
             smp.render(&mut out);
             let first = t.elapsed().as_secs_f64();
-            let t = std::time::Instant::now();
-            for _ in 0..(5 * 48_000 / 512) {
+            let (mut worst, mut sum) = (0f64, 0f64);
+            let blocks = 5 * 48_000 / 128;
+            for _ in 0..blocks {
+                let t = std::time::Instant::now();
                 smp.render(&mut out);
+                let d = t.elapsed().as_secs_f64();
+                worst = worst.max(d);
+                sum += d;
             }
             eprintln!(
-                "{voices} voices: the first block {:.2} ms, then {:.1} % of real time",
+                "{voices} voices: the first block {:.2} ms, then {:.1} % of real time, the worst block {:.2} ms of 2.67",
                 first * 1000.0,
-                t.elapsed().as_secs_f64() / 5.0 * 100.0
+                sum / 5.0 * 100.0,
+                worst * 1000.0
             );
         }
     }
@@ -2357,6 +2442,11 @@ mod tests {
         }
         let live = smp.voices.iter().filter(|v| v.live != NO_LIVE).count();
         assert_eq!(live, LIVE_ROOM.min(smp.voices.len()));
+        // Notes that come together start their stretchers a block apart (a start is
+        // several blocks' work); the ones without start at once.
+        let waits: Vec<u64> = smp.voices.iter().filter(|v| v.live != NO_LIVE).map(|v| u64::from(v.wait)).collect();
+        assert_eq!(waits, (0..live as u64).map(|k| k * LIVE_APART).collect::<Vec<_>>());
+        assert!(smp.voices.iter().filter(|v| v.live == NO_LIVE).all(|v| v.wait == 0));
         let mut ids: Vec<u8> = smp.voices.iter().filter(|v| v.live != NO_LIVE).map(|v| v.live).collect();
         ids.sort_unstable();
         ids.dedup();
