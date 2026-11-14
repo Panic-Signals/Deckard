@@ -264,6 +264,8 @@ pub struct ZoneRt {
     pub sync: Option<ZoneSync>,
     /// Its stem lanes, if it has them.
     pub lanes: Option<Lanes>,
+    /// It plays backwards (a sound that does too plays it forwards).
+    pub reverse: bool,
 }
 
 /// A zone's stem lanes (roadmap 2b): each as long as the zone's sample, read at the same
@@ -1426,7 +1428,7 @@ impl SamplerRt {
         let len = (z.play.1 - z.play.0) as f32;
         let start = (s.start + vel * s.vel_start + mw * s.mw_start).clamp(0.0, 1.0);
         let offset = (start * len) as i64;
-        let forward = !s.reverse;
+        let forward = s.reverse == z.reverse;
         let looping = amp_on && z.looped.is_some();
         // A Sync note played live starts on its grid: the nearest line, waited for, or
         // (late) caught up with by starting that far in.
@@ -1975,6 +1977,7 @@ mod tests {
             fade_out: 0,
             sync: None,
             lanes: None,
+            reverse: false,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
@@ -2007,6 +2010,7 @@ mod tests {
             fade_out: 0,
             sync,
             lanes: None,
+            reverse: false,
         };
         SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
     }
@@ -2057,6 +2061,30 @@ mod tests {
         assert_eq!((a.octaves, a.variant), (0.0, Some(0)), "the octave's render");
         assert_eq!((b.octaves, b.variant), (7.0 / 12.0, None), "no render: by speed");
         assert_eq!(read(&mut keys, 480), 480, "a note's render plays at the tempo's speed");
+    }
+
+    /// A zone set to play backwards starts on its last frame and goes down (and a sound
+    /// that plays backwards plays it forwards again).
+    #[test]
+    fn a_reversed_zone_plays_backwards() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        // A ramp: frame f is f / 96,000.
+        let ramp = Arc::new(crate::sample::Sample { rate: 48_000, frames: (0..96_000).map(|f| [f as f32 / 96_000.0; 2]).collect() });
+        let heard = |reverse: bool| {
+            let mut smp = synced(None);
+            smp.zones[0].tune = 0.0;
+            smp.zones[0].sample = ramp.clone();
+            smp.zones[0].play = (24_000, 72_000);
+            smp.zones[0].reverse = reverse;
+            smp.note_on(1, 60, 127, &ctx);
+            let mut out = vec![0.0; 4800 * 2];
+            smp.render(&mut out);
+            (out[2 * 480], out[2 * 4799])
+        };
+        let (a, b) = heard(false);
+        assert!(a > 0.0 && b > a, "forwards it rises: {a} to {b}");
+        let (c, d) = heard(true);
+        assert!(c > b && d < c, "backwards it falls from its end: {c} to {d}");
     }
 
     /// Stem lanes: with them all on a voice plays the sample itself; a muted lane leaves
@@ -2366,6 +2394,7 @@ mod tests {
                 fade_out: 0,
                 sync: None,
                 lanes: None,
+                reverse: false,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
@@ -2406,6 +2435,7 @@ mod tests {
             fade_out: 0,
             sync: None,
             lanes: None,
+            reverse: false,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato

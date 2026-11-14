@@ -7704,7 +7704,14 @@ impl App {
             S::Tab(i) => {
                 self.sampling.tab = i;
                 if i == 2 && self.sampling.slices.is_empty() {
-                    self.compute_slices();
+                    // A sample already sliced shows its slices (Manual keeps them).
+                    match self.chops() {
+                        Some((_, starts, _)) => {
+                            self.sampling.slices = starts;
+                            self.sampling.slice_mode = 3;
+                        }
+                        None => self.compute_slices(),
+                    }
                 }
             }
             S::Stereo => self.sampling.stereo = !self.sampling.stereo,
@@ -7975,7 +7982,7 @@ impl App {
         use deckard_engine::edit;
         use layout::sampling::{GRID_DIVS, SPLIT_COUNTS};
         let Some(s) = self.sampling.sample.clone() else { return };
-        let r = self.play_range_of_focused().unwrap_or((0, s.frames.len()));
+        let r = self.slice_range().unwrap_or((0, s.frames.len()));
         let st = &mut self.sampling;
         st.slices = match st.slice_mode {
             0 => edit::split_positions(r, SPLIT_COUNTS[st.split]),
@@ -8007,6 +8014,34 @@ impl App {
         };
     }
 
+    /// The focused sound's zones of the focused zone's file, when there's more than one
+    /// (the sample was sliced): the frames they play between them, their starts in
+    /// order, and each start's zone.
+    fn chops(&self) -> Option<((usize, usize), Vec<usize>, Vec<usize>)> {
+        let doc = self.doc.as_ref()?.borrow();
+        let zones = &doc.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones;
+        let file = &zones.get(self.zone)?.sample;
+        let len = self.sampling.len();
+        let mut of: Vec<(usize, usize, usize)> = zones
+            .iter()
+            .enumerate()
+            .filter(|(_, z)| &z.sample == file && z.play_range.1 > z.play_range.0)
+            .map(|(i, z)| (z.play_range.0.max(0) as usize, (z.play_range.1 as usize + 1).min(len), i))
+            .collect();
+        of.sort_unstable();
+        of.dedup_by_key(|z| z.0);
+        (of.len() > 1).then(|| {
+            let span = (of[0].0, of.iter().map(|z| z.1).max().unwrap_or(len));
+            (span, of.iter().map(|z| z.0).collect(), of.iter().map(|z| z.2).collect())
+        })
+    }
+
+    /// The frames slicing works on: all a sliced sample's slices play, else the focused
+    /// zone's play range.
+    fn slice_range(&self) -> Option<(usize, usize)> {
+        self.chops().map(|c| c.0).or_else(|| self.play_range_of_focused())
+    }
+
     fn play_range_of_focused(&self) -> Option<(usize, usize)> {
         let doc = self.doc.as_ref()?.borrow();
         let z = doc.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone)?.clone();
@@ -8019,12 +8054,16 @@ impl App {
     fn apply_slices(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(s) = self.sampling.sample.clone() else { return };
-        let end = self.play_range_of_focused().map_or(s.frames.len(), |r| r.1);
+        let end = self.slice_range().map_or(s.frames.len(), |r| r.1);
         let slices = deckard_engine::edit::slices_from(&self.sampling.slices, end);
         if slices.len() < 2 {
             return;
         }
         let zi = self.zone;
+        // Sliced before: a slice still where it was keeps its zone's settings (its lanes'
+        // mutes, its tune), a new or moved one takes the focused zone's.
+        let was = self.chops().map(|c| (c.1, c.2)).unwrap_or_default();
+        let zone_of = |a: usize| was.0.iter().position(|&s| s == a).map_or(zi, |k| was.1[k]);
         let (g, snd) = (self.group, self.sound);
         // Start points: each slice plays on to the end, for as long as its pad is held.
         let new_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(snd)).is_some_and(|x| x.new_sampler.is_some());
@@ -8036,7 +8075,7 @@ impl App {
                 let b = if to_end { end } else { b };
                 let key = (36 + i).min(127) as f64;
                 deckard_doc::ZoneSpec {
-                    from: deckard_doc::ZoneFrom::Zone(zi),
+                    from: deckard_doc::ZoneFrom::Zone(zone_of(a)),
                     file: None,
                     set: vec![
                         ("play_range/low", a as f64),
@@ -16719,6 +16758,25 @@ mod tests {
         h.run_steps(3);
         let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-zone-grid"))).expect("zone map drawn");
         assert!(grid.width() > 100.0);
+        // Back on SLICE, from another slice's zone: the slices applied show, not a new split.
+        h.state_mut().zone = 5;
+        h.run_steps(3);
+        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(2)));
+        h.run_steps(3);
+        let starts: Vec<usize> = zones.iter().map(|z| z.play_range.0 as usize).collect();
+        assert_eq!(h.state().sampling.slices, starts, "the slices it was cut at");
+        assert_eq!(h.state().sampling.slice_mode, 3, "kept as set (Manual)");
+        // Another slice's pad: they stay.
+        h.state_mut().zone = 2;
+        h.run_steps(3);
+        assert_eq!(h.state().sampling.slices, starts);
+        // One taken out and applied again: seven zones, over the same frames.
+        h.state_mut().sampling.slices.remove(3);
+        let r = tool(&h, "apply");
+        click(&mut h, r.center());
+        let again = project_of(&h).groups[0].sounds[0].sampler.clone().unwrap().zones;
+        assert_eq!(again.len(), 7);
+        assert_eq!((again[0].play_range.0, again[6].play_range.1), (zones[0].play_range.0, zones[7].play_range.1));
     }
 
     fn pedal_before(p: &deckard_model::Project, g: usize, pi: usize) -> usize {

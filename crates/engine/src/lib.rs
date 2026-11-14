@@ -2445,7 +2445,13 @@ fn synced_zone(
         made.iter().all(Option::is_some).then(|| made.map(Option::flatten))
     };
     let base = job(semitones);
-    let Some(made) = renders.get_or_want(base.clone()) else {
+    let made = renders.get_or_want(base.clone());
+    // Its lanes are asked for with it. With one muted, turned down or taken away the zone
+    // waits for them all: until then it plays as it is (repitched, its lanes with it), so
+    // a mute holds through a change of tempo.
+    let lanes_made = lane_renders(renders, semitones);
+    let off = lanes.as_ref().is_some_and(|l| l.only || (0..sampler::LANES).any(|k| l.samples[k].is_some() && l.levels[k] != 1.0));
+    let Some(made) = made.filter(|_| !off || lanes_made.is_some()) else {
         zone.sync = Some(sampler::ZoneSync {
             tempo: bpm,
             keys,
@@ -2474,9 +2480,8 @@ fn synced_zone(
             }
         }
     }
-    // The sample's own lanes are rendered with it, so a mute never waits; until they
-    // are, it plays whole.
-    match lane_renders(renders, semitones) {
+    // Lanes all at unity play as the sample does: until they're made it plays whole.
+    match lanes_made {
         Some(samples) => zone.lanes.as_mut().unwrap().samples = samples,
         None => zone.lanes = None,
     }
@@ -2858,8 +2863,16 @@ impl Engine {
                             let Some(sample) = load(&z.sample) else { continue };
                             let len = sample.frames.len();
                             // Ranges are inclusive in the file.
-                            let (lo, hi) = z.play_range;
-                            let play = if hi > lo { ((lo.max(0) as usize).min(len), ((hi + 1) as usize).min(len)) } else { (0, len) };
+                            // What a zone plays of its file `n` frames long. Reversed, a
+                            // start point (it plays to the file's end) plays from there
+                            // back to the beginning.
+                            let play_of = |z: &deckard_model::Zone, n: usize| {
+                                let (lo, hi) = z.play_range;
+                                let p = if hi > lo { ((lo.max(0) as usize).min(n), ((hi + 1) as usize).min(n)) } else { (0, n) };
+                                let back = z.meta.as_ref().is_some_and(|m| m.reverse) && s.new_sampler.is_some();
+                                if back && p.1 == n && p.0 > 0 { (0, p.0) } else { p }
+                            };
+                            let play = play_of(z, len);
                             let (ll, lh) = z.loop_range;
                             let looped = (z.loop_active && lh > ll).then(|| {
                                 let a = (ll.max(0) as usize).clamp(play.0, play.1);
@@ -2880,8 +2893,10 @@ impl Engine {
                                 fade_out: z.fade_out.max(0) as usize,
                                 sync: None,
                                 lanes: None,
+                                reverse: false,
                             };
                             if s.new_sampler.is_some() {
+                                zone.reverse = z.meta.as_ref().is_some_and(|m| m.reverse);
                                 // Its stem lanes: files at the sample's rate.
                                 if let Some(m) = z.meta.as_ref().filter(|m| m.has_stems()) {
                                     let rate = zone.sample.rate;
@@ -2911,12 +2926,8 @@ impl Engine {
                                         && (om.bpm, &om.warps, om.grid_offset) == (m.bpm, &m.warps, m.grid_offset)
                                 };
                                 let span = smp.zones.iter().filter(alike).fold(play, |a, o| {
-                                    let (lo, hi) = o.play_range;
-                                    if hi > lo {
-                                        (a.0.min((lo.max(0) as usize).min(len)), a.1.max(((hi + 1) as usize).min(len)))
-                                    } else {
-                                        (0, len)
-                                    }
+                                    let p = play_of(o, len);
+                                    (a.0.min(p.0), a.1.max(p.1))
                                 });
                                 synced_zone(&mut zone, z.meta.as_ref(), smp.tune, project.tempo, span, &mut renders);
                             }
@@ -7133,6 +7144,7 @@ mod tests {
             fade_out: 0,
             sync: None,
             lanes: None,
+            reverse: false,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -7817,6 +7829,7 @@ mod tests {
                 fade_out: 0,
                 sync: None,
                 lanes: None,
+                reverse: false,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -8242,6 +8255,24 @@ mod tests {
         &e.sounds[0][0].as_ref().unwrap().zones[0]
     }
 
+    /// A start point (a zone that plays to its file's end) set to reverse plays from
+    /// there back to the file's beginning; a slice with an end of its own, its own frames.
+    #[test]
+    fn a_reversed_start_point_plays_back_to_the_beginning() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let half = frames as i64 / 2;
+        let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
+        z.play_range = (half, frames as i64 - 1);
+        z.meta.as_mut().unwrap().reverse = true;
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).reverse);
+        assert_eq!(zone0(&e).play, (0, half as usize));
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].play_range = (half, frames as i64 - 100);
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(zone0(&e).play, (half as usize, frames - 99));
+    }
+
     /// A Sync zone plays its own sample in time (repitched) and asks for its render;
     /// given it, it plays the render: as long as 4 beats at 120, in time at 120.
     #[test]
@@ -8291,7 +8322,7 @@ mod tests {
     }
 
     /// A zone's stem lanes are loaded with it; in Sync each is stretched as the sample
-    /// is (asked for with it; until they're all made the zone plays whole).
+    /// is (asked for with it; with a lane muted the zone waits for them all).
     #[test]
     fn stem_lanes_load_and_stretch_with_the_zone() {
         use deckard_model::new_sampler::{PlayMode, StemLane};
@@ -8314,15 +8345,16 @@ mod tests {
             assert_eq!(l.samples[0].as_ref().unwrap().frames.len(), frames);
             if mode == PlayMode::Sync {
                 let jobs = cache.wanted_renders();
-                assert_eq!(jobs.len(), 1, "the sample's render first");
-                for j in &jobs {
-                    cache.add_render(j, j.run());
-                }
+                assert_eq!(jobs.len(), 3, "the sample's render and a render a lane");
+                // The sample's comes first: a lane is muted, so the zone waits for its
+                // lanes' and plays as it is till then (never whole).
+                cache.add_render(&jobs[0], jobs[0].run());
                 let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
-                assert!(zone0(&e).lanes.is_none(), "whole until its lanes are stretched");
-                let jobs = cache.wanted_renders();
-                assert_eq!(jobs.len(), 2, "a render a lane");
-                for j in &jobs {
+                let z = zone0(&e);
+                assert_eq!(z.sample.frames.len(), frames, "not the render yet");
+                assert_eq!(z.lanes.as_ref().expect("its lanes").levels, [0.0, 0.0, 0.0, 1.0]);
+                assert!(cache.wanted_renders().is_empty(), "asked for once");
+                for j in &jobs[1..] {
                     cache.add_render(j, j.run());
                 }
                 let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);

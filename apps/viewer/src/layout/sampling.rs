@@ -203,6 +203,8 @@ impl SamplingState {
         let changed = self.sample_key.as_ref().is_none_or(|k| (k.0, k.1, k.2) != (key.0, key.1, key.2));
         let len = sample.frames.len();
         if changed {
+            // Another zone of the same file (a slice of it) keeps the slices shown.
+            let same_file = self.sample_key.as_ref().is_some_and(|k| (k.0, k.1, &k.3) == (key.0, key.1, &key.3));
             if let (Some(old), Some(v)) = (self.sample_key.take(), self.view) {
                 self.views.insert(old, v);
             }
@@ -213,7 +215,9 @@ impl SamplingState {
             };
             self.view = self.views.get(&key).copied().or(self.view).and_then(fit);
             self.selection = None;
-            self.slices.clear();
+            if !same_file {
+                self.slices.clear();
+            }
         } else if self.len() != len {
             self.view = None;
         }
@@ -754,6 +758,27 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         }
     }
     x += 3.0 * 74.0 + 4.0;
+    // Backwards, this zone alone.
+    let rv = Rect::from_min_size(Pos2::new(x, y + 14.0), Vec2::new(70.0, 30.0));
+    let resp = ui
+        .interact(rv, ui.id().with("samp-reverse"), Sense::click())
+        .on_hover_text("Play this slice backwards (a start point plays from there back to the sample's beginning)");
+    painter.rect_filled(
+        rv,
+        3.0,
+        if m.reverse {
+            gcol
+        } else if resp.hovered() {
+            S02
+        } else {
+            S01
+        },
+    );
+    painter.text(rv.center(), Align2::CENTER_CENTER, "REVERSE", font(11.0), if m.reverse { Color32::BLACK } else { white(200) });
+    if resp.clicked() {
+        acts.push(meta(ZoneMeta { reverse: !m.reverse, ..m.clone() }));
+    }
+    x += 78.0;
     // Sync: the grid notes played live start on.
     if m.mode == PlayMode::Sync {
         use deckard_model::new_sampler::StartGrid;
