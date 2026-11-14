@@ -364,6 +364,8 @@ pub enum SamplingAct {
     PlayMode(deckard_model::new_sampler::PlayMode),
     /// The focused New Sampler zone's tempo, length or root, set by hand.
     Meta(deckard_model::new_sampler::ZoneMeta),
+    /// What a note does with the focused New Sampler slice: held, a one-shot or a loop.
+    Plays(deckard_model::new_sampler::Plays),
     /// TAP, at this time (seconds).
     Tap(f64),
     /// The song's tempo set to the sample's.
@@ -795,6 +797,16 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         acts.push(meta(ZoneMeta { reverse: !m.reverse, ..m.clone() }));
     }
     x += 78.0;
+    // What a note does with it: held, a one-shot, a loop.
+    {
+        use deckard_model::new_sampler::Plays;
+        let cur = Plays::ALL.iter().position(|p| *p == Plays::of(z)).unwrap_or(0);
+        let mut f = choice_field("PLAYS", Plays::ALL.iter().map(|p| p.label().to_string()).collect(), cur, |k| {
+            sact(SamplingAct::Plays(Plays::ALL[k.min(2)]))
+        });
+        f.tip = "Hold: it plays while the pad is held. One shot: a tap plays it through to its end (E, the next slice at first). Loop: it goes round while the pad is held (the LOOP frame, this slice at first)";
+        x = group_box(ui, &painter, x, y, "SLICE", &[f], acts);
+    }
     // Its own speed against the song's (Sync and Keys: the stretcher's).
     if m.mode != PlayMode::Repitch && has {
         let (m4, sp) = (m.clone(), m.speed_factor());

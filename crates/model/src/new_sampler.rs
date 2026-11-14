@@ -154,12 +154,49 @@ pub struct ZoneMeta {
     /// Sync and Keys: how fast it goes against the song (1: in time; 2: twice as fast, 0.5:
     /// half), its pitch unmoved. 0 is 1.
     pub speed: f64,
+    /// A one-shot: a note plays it through to its end, however short the note.
+    pub once: bool,
 }
 
 impl ZoneMeta {
     /// [`ZoneMeta::speed`] as a factor: 1 when unset, within a quarter to four times.
     pub fn speed_factor(&self) -> f64 {
         if self.speed > 0.0 && self.speed.is_finite() { self.speed.clamp(0.25, 4.0) } else { 1.0 }
+    }
+}
+
+/// What a note does with a slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Plays {
+    /// It plays for as long as the note is held.
+    #[default]
+    Held,
+    /// A one-shot: it plays through to its end, however short the note.
+    Once,
+    /// Its loop goes round for as long as the note is held.
+    Loop,
+}
+
+impl Plays {
+    pub const ALL: [Plays; 3] = [Plays::Held, Plays::Once, Plays::Loop];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Plays::Held => "Hold",
+            Plays::Once => "One shot",
+            Plays::Loop => "Loop",
+        }
+    }
+
+    /// How `zone` plays: its loop when that's on, else a one-shot when its meta says so.
+    pub fn of(zone: &crate::Zone) -> Plays {
+        if zone.loop_active && zone.loop_range.1 > zone.loop_range.0 {
+            Plays::Loop
+        } else if zone.meta.as_ref().is_some_and(|m| m.once) {
+            Plays::Once
+        } else {
+            Plays::Held
+        }
     }
 }
 
@@ -336,6 +373,9 @@ impl ZoneMeta {
         if self.speed_factor() != 1.0 {
             t += &format!("speed {}\n", self.speed_factor());
         }
+        if self.once {
+            t += "once 1\n";
+        }
         t + "file " + &self.file
     }
 
@@ -354,6 +394,7 @@ impl ZoneMeta {
                 "root_locked" => m.root_locked = v == "1",
                 "stems_only" => m.stems_only = v == "1",
                 "reverse" => m.reverse = v == "1",
+                "once" => m.once = v == "1",
                 "speed" => m.speed = v.parse().unwrap_or(0.0),
                 "bpm" => m.bpm = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "beats" => m.beats = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
@@ -421,6 +462,7 @@ mod tests {
             stems_only: true,
             reverse: true,
             speed: 1.5,
+            once: true,
         };
         assert_eq!(lane_levels(&full.stems), [0.0, 0.0, 1.0, 0.0], "the soloed lane only");
         let mut open = full.stems.clone();

@@ -43,6 +43,8 @@ pub enum Apply {
     /// A New Sampler zone's own speed (percent), and whether it plays backwards.
     Speed,
     Reverse,
+    /// Held, a one-shot or a loop.
+    Plays,
     FindCount,
     SplitCount,
     GridDiv,
@@ -252,6 +254,12 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             knobs.push((knob("Play.Speed", "SPEED", format!("{sp:.0} %"), sp, (25.0, 400.0), 1.0, 1.0 / 375.0), Apply::Speed));
         }
         knobs.push((on_off("Play.Reverse", "REVERSE", m.reverse), Apply::Reverse));
+        {
+            use deckard_model::new_sampler::Plays;
+            let names: Vec<String> = Plays::ALL.iter().map(|p| p.label().to_string()).collect();
+            let cur = Plays::ALL.iter().position(|p| *p == Plays::of(&z)).unwrap_or(0);
+            knobs.push((choice("Play.Plays", "PLAYS", &names, cur), Apply::Plays));
+        }
         if let Some(r) = m.root {
             let at = crate::beat::target_of(r, m.cents, z.tune).clamp(0, 127);
             knobs.push((knob("Play.Key", "KEY", crate::analysis::note_name(at as u8), at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));

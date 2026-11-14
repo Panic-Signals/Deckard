@@ -118,6 +118,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         stems_only: false,
         reverse: false,
         speed: 0.0,
+        once: false,
     }
 }
 
@@ -466,6 +467,30 @@ mod app_tests {
         app.lane_act(0, LaneAct::Mute);
         let muted: Vec<bool> = zones(&app).iter().map(|z| z.meta.as_ref().unwrap().stems[0].as_ref().unwrap().mute).collect();
         assert_eq!(muted, [false, true, false, false]);
+        // A slice of its own way with a note: a one-shot stops at the next slice, a loop
+        // goes round the slice, held again it plays on to the end; each one undo step.
+        use deckard_model::new_sampler::Plays;
+        let plays = |app: &App| zones(app).iter().map(Plays::of).collect::<Vec<_>>();
+        app.sampling_act(crate::layout::sampling::SamplingAct::Plays(Plays::Once));
+        assert_eq!(plays(&app), [Plays::Held, Plays::Once, Plays::Held, Plays::Held], "{}", app.status);
+        assert_eq!(ranges(&app)[1], (24_000, 47_999));
+        app.doc.as_ref().unwrap().borrow_mut().undo();
+        assert_eq!((plays(&app)[1], ranges(&app)[1]), (Plays::Held, (24_000, last)), "one undo step");
+        app.doc.as_ref().unwrap().borrow_mut().redo();
+        app.sampling_act(crate::layout::sampling::SamplingAct::Plays(Plays::Loop));
+        let z = zones(&app)[1].clone();
+        assert_eq!((Plays::of(&z), z.loop_range, z.meta.unwrap().once), (Plays::Loop, (24_000, 47_999), false));
+        // (The controller's PLAYS knob.)
+        app.record_apply.insert("Play.Plays".into(), crate::sampling_hw::Apply::Plays);
+        app.sampling_knob("Play.Plays", 0.0);
+        assert_eq!((plays(&app)[1], ranges(&app)[1]), (Plays::Held, (24_000, last)), "no one-shot now, it plays on to the end");
+        app.sampling_knob("Play.Plays", 1.0);
+        app.sampling_knob("Play.Plays", 0.0);
+        assert_eq!((plays(&app)[1], ranges(&app)[1]), (Plays::Held, (24_000, last)), "held after a one-shot: on to the end");
+        // The last slice loops to the sample's end.
+        app.zone = 3;
+        app.sampling_knob("Play.Plays", 2.0);
+        assert_eq!(zones(&app)[3].loop_range, (72_000, last));
     }
 
     /// REANALYZE hears the part selected: a sample that goes from 100 to 140 BPM halfway

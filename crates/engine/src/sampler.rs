@@ -266,6 +266,8 @@ pub struct ZoneRt {
     pub lanes: Option<Lanes>,
     /// It plays backwards (a sound that does too plays it forwards).
     pub reverse: bool,
+    /// A one-shot: a note plays it to its end, whenever the note ends.
+    pub once: bool,
 }
 
 /// A zone's stem lanes (roadmap 2b): each as long as the zone's sample, read at the same
@@ -1083,6 +1085,8 @@ struct Voice {
     variant: Option<usize>,
     /// The stretcher it plays through ([`SamplerRt::lives`]), or [`NO_LIVE`].
     live: u8,
+    /// Its zone is a one-shot: the note's end leaves it playing.
+    once: bool,
     inc: u32,
     /// Static gain (zone gain, velocity → volume) and zone pan, per channel.
     gain: [f32; 2],
@@ -1584,7 +1588,12 @@ impl SamplerRt {
             }
         }
         let stream = Stream {
-            pos: if forward { z.play.0 as i64 + offset } else { z.play.1 as i64 - 1 - offset },
+            pos: match z.looped {
+                _ if forward => z.play.0 as i64 + offset,
+                // A slice of its own that loops backwards starts at its loop's end.
+                Some((a, b)) if looping && z.reverse => (b as i64 - 1 - offset).max(a as i64),
+                _ => z.play.1 as i64 - 1 - offset,
+            },
             forward,
             play: (z.play.0 as i64, z.play.1 as i64),
             looped: if looping { z.looped.map(|(a, b)| (a as i64, b as i64)) } else { None },
@@ -1669,6 +1678,7 @@ impl SamplerRt {
             fade: None,
             released: false,
             sustained: false,
+            once: z.once,
         };
         // A zone stretched as it plays: a stretcher no voice has, if one is left (else
         // it plays repitched).
@@ -2071,6 +2081,9 @@ impl Voice {
     }
 
     fn release(&mut self, pedal: bool) {
+        if self.once {
+            return;
+        }
         if pedal {
             self.sustained = true;
             return;
@@ -2152,6 +2165,7 @@ mod tests {
             sync: None,
             lanes: None,
             reverse: false,
+            once: false,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
@@ -2185,6 +2199,7 @@ mod tests {
             sync,
             lanes: None,
             reverse: false,
+            once: false,
         };
         SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
     }
@@ -2373,6 +2388,45 @@ mod tests {
         assert!(a > 0.0 && b > a, "forwards it rises: {a} to {b}");
         let (c, d) = heard(true);
         assert!(c > b && d < c, "backwards it falls from its end: {c} to {d}");
+    }
+
+    /// A one-shot zone plays on when its note ends; a zone of its own direction that
+    /// loops goes round its loop backwards, from the loop's end.
+    #[test]
+    fn a_slice_plays_once_or_round_its_loop() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let ramp = Arc::new(crate::sample::Sample { rate: 48_000, frames: (0..96_000).map(|f| [f as f32 / 96_000.0; 2]).collect() });
+        let zone = |once: bool| {
+            let mut smp = synced(None);
+            smp.settings.env_type = 2;
+            smp.zones[0].tune = 0.0;
+            smp.zones[0].sample = ramp.clone();
+            smp.zones[0].play = (24_000, 72_000);
+            smp.zones[0].once = once;
+            smp
+        };
+        let after_the_note = |once: bool| {
+            let mut smp = zone(once);
+            smp.note_on(1, 60, 127, &ctx);
+            smp.note_off(1, 60);
+            let mut out = vec![0.0; 24_000 * 2];
+            smp.render(&mut out);
+            out[2 * 23_999]
+        };
+        assert!(after_the_note(true) > 0.4, "the one-shot plays on: {}", after_the_note(true));
+        assert!(after_the_note(false).abs() < 1e-3, "held, it ends with its note: {}", after_the_note(false));
+        // Backwards round frames 30,000 to 31,000: every frame heard is one of the loop's.
+        let mut smp = zone(false);
+        smp.zones[0].reverse = true;
+        smp.zones[0].looped = Some((30_000, 31_000));
+        smp.note_on(1, 60, 127, &ctx);
+        let mut out = vec![0.0; 4800 * 2];
+        smp.render(&mut out);
+        let tail: Vec<f32> = out[2 * 1200..].chunks(2).map(|f| f[0]).collect();
+        let (lo, hi) = tail.iter().fold((f32::MAX, 0f32), |a, x| (a.0.min(*x), a.1.max(*x)));
+        assert!(lo > 0.0 && hi / lo < 1.04, "it stays in its loop: {lo} to {hi}");
+        assert!(out[2 * 600] < out[2 * 300], "going down");
+        assert!(tail.windows(2).filter(|w| w[1] > w[0] * 1.01).count() >= 3, "and round again");
     }
 
     /// Stem lanes: with them all on a voice plays the sample itself; a muted lane leaves
@@ -2683,6 +2737,7 @@ mod tests {
                 sync: None,
                 lanes: None,
                 reverse: false,
+                once: false,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
@@ -2724,6 +2779,7 @@ mod tests {
             sync: None,
             lanes: None,
             reverse: false,
+            once: false,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato

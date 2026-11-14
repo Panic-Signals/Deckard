@@ -7903,6 +7903,7 @@ impl App {
                     self.status = format!("can't change how the zone plays: {e}");
                 }
             }
+            S::Plays(plays) => self.set_plays(plays),
             S::RemoveZone(i) => {
                 let Some(doc) = self.doc.clone() else { return };
                 let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
@@ -8115,6 +8116,72 @@ impl App {
         let z = doc.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone)?.clone();
         let len = self.sampling.len();
         Some(if z.play_range.1 > z.play_range.0 { (z.play_range.0 as usize, (z.play_range.1 as usize + 1).min(len)) } else { (0, len) })
+    }
+
+    /// What a note does with the focused New Sampler slice. A one-shot that would play on
+    /// to the sample's end stops at the next slice instead (its E marker moves from there);
+    /// a loop with no frame of its own takes the slice (its start to the next one's); held
+    /// again, a slice cut short at the next one plays on to the end as it did.
+    fn set_plays(&mut self, plays: deckard_model::new_sampler::Plays) {
+        use deckard_model::new_sampler::{Plays, ZoneMeta};
+        use mxprj::decode::Value;
+        let Some(doc) = self.doc.clone() else { return };
+        let p = doc.borrow().project().clone();
+        let (g, s) = (self.group, self.sound);
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (g, s, self.zone)) else { return };
+        let Some(meta) = zone.meta.clone() else { return };
+        let Some(zones) = p.groups.get(g).and_then(|x| x.sounds.get(s)).and_then(|x| x.sampler.as_ref()).map(|x| &x.zones) else { return };
+        let len = self.sampling.len() as i64;
+        if len < 2 {
+            return;
+        }
+        let (lo, hi) = zone.play_range;
+        let (a, b) = if hi > lo { (lo.max(0), hi.min(len - 1)) } else { (0, len - 1) };
+        // Where this slice ends: the next one's start, or the sample's end.
+        let next = zones
+            .iter()
+            .filter(|z| z.sample == zone.sample && z.play_range.1 > z.play_range.0)
+            .map(|z| z.play_range.0)
+            .filter(|&x| x > a)
+            .min();
+        let slice_end = next.map_or(len - 1, |n| n - 1).max(a + 1);
+        let mut set: Vec<(&str, f64)> = Vec::new();
+        // No longer a one-shot, it plays on past the next slice again.
+        let mut b = b;
+        if plays != Plays::Once && meta.once && b == slice_end {
+            b = len - 1;
+            set.push(("play_range/high", b as f64));
+        }
+        match plays {
+            Plays::Held => set.push(("loop_active", 0.0)),
+            Plays::Once => {
+                set.push(("loop_active", 0.0));
+                if b >= len - 1 {
+                    set.push(("play_range/high", slice_end as f64));
+                }
+            }
+            Plays::Loop => {
+                let (la, lb) = zone.loop_range;
+                // A frame of its own: inside what it plays, and not the whole sample's.
+                let own = lb > la && la >= a && lb <= b && !(la <= 0 && lb >= len - 1 && slice_end < len - 1);
+                if !own {
+                    set.push(("loop_range/low", a as f64));
+                    set.push(("loop_range/high", slice_end.min(b) as f64));
+                }
+                set.push(("loop_active", 1.0));
+            }
+        }
+        let meta = ZoneMeta { once: plays == Plays::Once, ..meta };
+        let label = "Slice Plays";
+        let done = doc.borrow_mut().transaction(label, |d| {
+            for (field, v) in &set {
+                d.set(label, deckard_doc::Target::Zone(g, s, zi), field, Value::Float(*v))?;
+            }
+            d.set_zone_meta(g, s, zi, &meta, label)
+        });
+        if let Err(e) = done {
+            self.status = format!("can't change how the slice plays: {e}");
+        }
     }
 
     /// APPLY: one zone per slice on the same sample, keys from C1 (MIDI 36); with
@@ -8587,6 +8654,7 @@ impl App {
             }
             Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
             Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
+            Some(Apply::Plays) => SamplingAct::Plays(deckard_model::new_sampler::Plays::ALL[at.min(2)]),
             Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid | Apply::Speed | Apply::Reverse)) => {
                 use deckard_model::new_sampler::PlayMode;
                 let Some(doc) = self.doc.clone() else { return };

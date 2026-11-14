@@ -2886,7 +2886,9 @@ impl Engine {
                                 let (lo, hi) = z.play_range;
                                 let p = if hi > lo { ((lo.max(0) as usize).min(n), ((hi + 1) as usize).min(n)) } else { (0, n) };
                                 let back = z.meta.as_ref().is_some_and(|m| m.reverse) && s.new_sampler.is_some();
-                                if back && p.1 == n && p.0 > 0 { (0, p.0) } else { p }
+                                // (One that loops stays where it is: its loop is what goes backwards.)
+                                let looping = z.loop_active && z.loop_range.1 > z.loop_range.0;
+                                if back && !looping && p.1 == n && p.0 > 0 { (0, p.0) } else { p }
                             };
                             let play = play_of(z, len);
                             let (ll, lh) = z.loop_range;
@@ -2910,9 +2912,11 @@ impl Engine {
                                 sync: None,
                                 lanes: None,
                                 reverse: false,
+                                once: false,
                             };
                             if s.new_sampler.is_some() {
                                 zone.reverse = z.meta.as_ref().is_some_and(|m| m.reverse);
+                                zone.once = z.meta.as_ref().is_some_and(|m| m.once);
                                 // Its stem lanes: files at the sample's rate.
                                 if let Some(m) = z.meta.as_ref().filter(|m| m.has_stems()) {
                                     let rate = zone.sample.rate;
@@ -7161,6 +7165,7 @@ mod tests {
             sync: None,
             lanes: None,
             reverse: false,
+            once: false,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -7846,6 +7851,7 @@ mod tests {
                 sync: None,
                 lanes: None,
                 reverse: false,
+                once: false,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -8323,6 +8329,27 @@ mod tests {
         p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].play_range = (half, frames as i64 - 100);
         let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         assert_eq!(zone0(&e).play, (half as usize, frames - 99));
+    }
+
+    /// A slice's one-shot reaches the engine, and a reversed start point that loops keeps
+    /// its place (its loop is what plays backwards).
+    #[test]
+    fn a_slice_is_a_one_shot_or_a_loop() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let half = frames as i64 / 2;
+        let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
+        z.play_range = (half, frames as i64 - 1);
+        z.meta.as_mut().unwrap().once = true;
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).once);
+        let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
+        z.meta.as_mut().unwrap().reverse = true;
+        z.loop_active = true;
+        z.loop_range = (half, half + 999);
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(zone0(&e).play, (half as usize, frames));
+        assert_eq!(zone0(&e).looped, Some((half as usize, half as usize + 1000)));
     }
 
     /// A Sync zone plays its own sample in time (repitched) and asks for its render;
