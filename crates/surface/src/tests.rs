@@ -2514,6 +2514,26 @@ fn the_events_zoom_knobs_show_icons_while_touched() {
     assert!(!boxed(&mut s), "let go: gone");
 }
 
+/// Touching one of the Step page's knobs 5-8 shows what they do in a box over each, as
+/// the Events page does: knob 6 the 16 steps shown, knob 8 (Keyboard mode) the pitches.
+#[test]
+fn the_step_page_knobs_show_icons_while_touched() {
+    let (mut s, v) = (Surface::new(), view());
+    press(&mut s, &v, "BUTTON_STEP");
+    let boxed = |s: &Surface, k: usize| s.picture(&v)[250 * 960 + 480 + (k - 5) * 120 + 46][0] == 0x89;
+    assert!(!boxed(&s, 6), "not before a touch");
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    assert!(boxed(&s, 6), "knob 6: the steps shown");
+    assert!(!boxed(&s, 8), "knob 8 does nothing outside Keyboard mode");
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(!boxed(&s, 6), "let go: gone");
+    press(&mut s, &v, "BUTTON_SCREEN_4");
+    hold(&mut s, &v, "BUTTON_CAP_8", true);
+    assert!(boxed(&s, 6) && boxed(&s, 8), "Keyboard mode: knob 8 the pitches");
+    hold(&mut s, &v, "BUTTON_CAP_8", false);
+    assert_eq!(s.error(), None);
+}
+
 /// With AUTO on, the Control page's knobs are only what can be modulated, each showing
 /// its modulation where the song is as a percentage, as the MK3 manual has it (C31).
 #[test]
