@@ -110,6 +110,8 @@ mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+#[cfg(test)]
+mod preferences_tests;
 mod preset_load;
 #[cfg(test)]
 mod print_tests;
@@ -3111,6 +3113,33 @@ impl App {
                     ui.label("");
                     ui.label(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder.").weak());
                     ui.end_row();
+                    // The two brightnesses are the MK3's own (its LEDs' level report, its
+                    // displays' backlight byte), so they follow the model picked here rather
+                    // than the cable: another controller has different lights
+                    // (`settings::sets_brightness`).
+                    if settings::sets_brightness(&self.model) {
+                        ui.label("LED brightness");
+                        let mut leds = self.settings.led_brightness;
+                        ui.add(egui::Slider::new(&mut leds, 0..=100).suffix(" %"));
+                        self.settings.led_brightness = leds;
+                        ui.end_row();
+                        ui.label("");
+                        ui.label(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak());
+                        ui.end_row();
+                        ui.label("Display brightness");
+                        let mut displays = self.settings.display_brightness;
+                        ui.add(egui::Slider::new(&mut displays, 0..=100).suffix(" %"));
+                        self.settings.display_brightness = displays;
+                        ui.end_row();
+                        ui.label("");
+                        ui.label(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak());
+                        ui.end_row();
+                        if self.mk3.is_none() {
+                            ui.label("");
+                            ui.label(egui::RichText::new("Applies when the MK3 connects.").weak());
+                            ui.end_row();
+                        }
+                    }
                     if cfg!(windows)
                         && let Some(mk3) = &self.mk3
                     {
@@ -3969,6 +3998,28 @@ impl App {
                     });
                     if r.is_ok() {
                         (self.group, self.pattern) = (g, made);
+                    }
+                    r.map(|_| None)
+                }
+                Act::MovePattern(g, p, slot) => {
+                    // The focus stays on the pattern it was on, wherever that went.
+                    let slots = |d: &deckard_doc::Document| {
+                        d.project().groups.get(g).map(|x| x.patterns.iter().map(|p| p.slot).collect::<Vec<_>>())
+                    };
+                    let before = slots(&*d).unwrap_or_default();
+                    let focused = (self.group == g).then(|| before.get(self.pattern).copied()).flatten();
+                    let r = d.move_pattern(g, p, slot);
+                    if let (Ok(_), Some(f), Some(&from)) = (&r, focused, before.get(p)) {
+                        let f = if f == from {
+                            slot
+                        } else if f == slot {
+                            from
+                        } else {
+                            f
+                        };
+                        if let Some(i) = slots(&*d).and_then(|s| s.iter().position(|x| *x == f)) {
+                            self.pattern = i;
+                        }
                     }
                     r.map(|_| None)
                 }
@@ -4962,6 +5013,7 @@ impl App {
             m.set_route(out.route);
             m.set_leds(out.leds);
             m.set_led_brightness(self.settings.led_brightness);
+            m.set_display_brightness(self.settings.display_brightness);
             if let Some((n, frame)) = out.screens {
                 m.set_screens(n, frame);
             }

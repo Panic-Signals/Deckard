@@ -692,6 +692,8 @@ pub enum Act {
     NewPattern(usize, usize),
     /// [`Act::NewPattern`] in an empty place of the group: scene, group, place from 0.
     NewPatternAt(usize, usize, usize),
+    /// Pattern `.1` of group `.0` to place `.2` (from 0); a pattern there swaps with it.
+    MovePattern(usize, usize, usize),
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
@@ -1126,6 +1128,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::AssignPattern(..)
             | Act::NewPattern(..)
             | Act::NewPatternAt(..)
+            | Act::MovePattern(..)
             | Act::AddScene
             | Act::AddGroup
             | Act::InsertScene(_)
@@ -2917,8 +2920,29 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             if !r.intersects(cells) {
                 continue;
             }
-            let resp = ui.interact(r.intersect(cells), ui.id().with(("cell", g, pi)), Sense::click());
+            let resp = ui.interact(r.intersect(cells), ui.id().with(("cell", g, pi)), Sense::click_and_drag());
             let shape = r.shrink2(Vec2::new(3.0, 2.0));
+            // Drag a pattern up or down its group's column to move it to another place: an
+            // outline shows where it goes. A pattern already there takes its old place.
+            if (resp.dragged() || resp.drag_stopped())
+                && let Some(pos) = ui.ctx().pointer_latest_pos()
+            {
+                let from = group.patterns[pi].slot;
+                // Let go outside its own column's places (another group's column too): it
+                // stays. Patterns only move within their group.
+                let to = (cells.y_range().contains(pos.y) && col_rect.x_range().contains(pos.x))
+                    .then(|| ((pos.y - cells.top() - 4.0 + gy) / ROW).floor().max(0.0) as usize)
+                    .filter(|to| *to != from);
+                if let Some(to) = to {
+                    if resp.drag_stopped() {
+                        acts.push(Act::MovePattern(g, pi, to));
+                    } else {
+                        let target = place(to).shrink2(Vec2::new(3.0, 2.0));
+                        let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("pattern-drop")));
+                        fg.with_clip_rect(cells).rect_stroke(target, 3.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+                    }
+                }
+            }
             let col = pattern_color(p, g, pi);
             let assigned = in_scene(g, pi);
             // Patterns of the focused scene are lit; the group's other patterns are dark.
@@ -2967,9 +2991,9 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 acts.push(Act::FocusPattern(g, pi));
             }
             let tip = if assigned {
-                "Click to show this pattern; double-click to take it out of the scene"
+                "Click to show this pattern; double-click to take it out of the scene; drag to move it"
             } else {
-                "Click to use this pattern in the scene and show it"
+                "Click to use this pattern in the scene and show it; drag to move it"
             };
             let resp = resp.on_hover_text(format!("{tip}; right-click for more"));
             if resp.secondary_clicked() {

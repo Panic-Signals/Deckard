@@ -688,6 +688,42 @@ mod tests {
         assert_eq!(d.project().scenes.len(), 1, "with two, one can go");
     }
 
+    /// Moving a pattern to an empty place keeps its notes and the scene playing it; onto
+    /// another pattern, the two swap places. It saves, and undoes in one step.
+    #[test]
+    fn patterns_move_to_other_places() {
+        let mut d = Document::new_project().unwrap();
+        let a = d.add_pattern_in_slot(0, 0, 0, "A").unwrap();
+        let b = d.add_pattern_in_slot(0, 0, 3, "B").unwrap();
+        let start = d.project().groups[0].patterns[a].start;
+        let note = deckard_model::Note { expr: None, sound: 0, position: start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        d.edit_notes("Add", 0, a, &[], &[note]).unwrap();
+        d.assign_pattern(0, 0, Some(a)).unwrap();
+        let places = |d: &Document| d.project().groups[0].patterns.iter().map(|p| (p.name.clone(), p.slot)).collect::<Vec<_>>();
+        assert_eq!((a, b), (0, 1));
+
+        // A to place 5, past B: the list stays in place order.
+        let steps = d.undo_labels().len();
+        assert_eq!(d.move_pattern(0, 0, 5).unwrap(), 1);
+        assert_eq!(places(&d), [("B".to_string(), 3), ("A".to_string(), 5)]);
+        assert_eq!(d.project().groups[0].patterns[1].notes, vec![note]);
+        assert_eq!(d.project().scenes[0].patterns, [(0, 1)], "the scene still plays A");
+        assert_eq!(d.undo_labels().len(), steps + 1);
+
+        // Onto B: they swap.
+        assert_eq!(d.move_pattern(0, 1, 3).unwrap(), 0);
+        assert_eq!(places(&d), [("A".to_string(), 3), ("B".to_string(), 5)]);
+        assert_eq!(d.project().scenes[0].patterns, [(0, 0)]);
+
+        let again = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(places(&again), places(&d));
+        assert_eq!(again.project().groups[0].patterns[0].notes, vec![note]);
+
+        assert!(d.undo() && d.undo());
+        assert_eq!(places(&d), [("A".to_string(), 0), ("B".to_string(), 3)]);
+        assert!(d.move_pattern(0, 7, 1).is_err(), "no such pattern");
+    }
+
     /// Every kind of module, built from scratch.
     fn every_module() -> Vec<crate::NewModule> {
         use crate::NewModule;
