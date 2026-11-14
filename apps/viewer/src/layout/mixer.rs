@@ -582,6 +582,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
     let off = hscroll(ui, "mixer-strips", area, strips.len() as f32 * PITCH);
     let clip = painter.with_clip_rect(area);
     let mut rects = Vec::new();
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("deckard-mixer-slot-targets-next"), Vec::<SlotTarget>::new()));
     for (i, st) in strips.iter().enumerate() {
         let r = Rect::from_min_size(Pos2::new(area.left() + i as f32 * PITCH - off, area.top()), Vec2::new(PITCH - 1.0, area.height()));
         if r.right() < area.left() || r.left() > area.right() {
@@ -607,6 +608,8 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
     strip(ui, app, &painter, inner, inner, &fixed, sounds, acts);
     rects.push((fixed.ch, inner));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-mixer-strips"), rects));
+    let targets: Vec<SlotTarget> = ui.ctx().data(|d| d.get_temp(egui::Id::new("deckard-mixer-slot-targets-next"))).unwrap_or_default();
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("deckard-mixer-slot-targets"), targets));
 }
 
 /// The group tabs, in `row`: a tab per group (its ID and name, in its colour), the
@@ -830,100 +833,17 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         }
         y += 4.0;
     }
-    if app.mixer_sections.extended
-        && app.mixer_sections.plugins
-        && !master
-        && let Channel::Sound(g, s) = st.ch
-    {
-        {
-            for (i, slot) in st.slots.iter().enumerate() {
-                let row = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
-                let sq = Rect::from_min_size(row.min + Vec2::new(2.0, 4.0), Vec2::new(10.0, 11.0));
-                painter.rect_filled(row, 0.0, S01);
-                painter.rect_filled(sq, 1.0, if slot.active { st.color } else { S03 });
-                let p = painter.with_clip_rect(vis(row));
-                p.text(
-                    Pos2::new(sq.right() + 4.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    &slot.name,
-                    font(11.0),
-                    if slot.active { white(220) } else { white(110) },
-                );
-                let chain = deckard_doc::Chain::Sound(g, s);
-                let bypass = ui.interact(vis(sq), id.with(("bypass", i)), Sense::click()).on_hover_text("Bypass");
-                if bypass.clicked() {
-                    acts.push(Act::SlotActiveOf(g, s, i, !slot.active));
-                }
-                bypass.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
-                let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
-                let shown = ui.interact(vis(name), id.with(("slot", i)), Sense::click()).on_hover_text("Show its pages");
-                if shown.clicked() {
-                    acts.push(Act::FocusSlot(g, s, i));
-                }
-                shown.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
-                y += SLOT_ROW;
-            }
-            let add = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
-            let resp = ui.interact(vis(add), id.with("add"), Sense::click()).on_hover_text("Add an instrument, effect or plug-in");
-            painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-            super::plus_glyph(painter, add.center(), 13.0, white(142));
-            // The "+" menu adds to the focused chain: focus this sound's.
-            let chain = deckard_doc::Chain::Sound(g, s);
-            if resp.clicked() && app.chain() != chain {
-                acts.push(Act::FocusChainSlot(chain, usize::MAX));
-            }
-            // A sound has one instrument, in its first slot.
-            let instruments = st.slots.is_empty();
-            egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, instruments, acts));
-        }
-    }
-    // A group's and the master's effects: bypassed with the square, shown (in the
-    // GROUP or MASTER tab) with the name.
     let chain = match st.ch {
+        Channel::Sound(g, s) => Some(deckard_doc::Chain::Sound(g, s)),
         Channel::Group(g) => Some(deckard_doc::Chain::Group(g)),
         Channel::Master => Some(deckard_doc::Chain::Master),
-        _ => None,
+        Channel::Extra(_) => None,
     };
     if app.mixer_sections.extended
         && app.mixer_sections.plugins
         && let Some(chain) = chain
     {
-        for (i, slot) in st.slots.iter().enumerate() {
-            let row = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
-            let sq = Rect::from_min_size(row.min + Vec2::new(2.0, 4.0), Vec2::new(10.0, 11.0));
-            painter.rect_filled(row, 0.0, S01);
-            painter.rect_filled(sq, 1.0, if slot.active { st.color } else { S03 });
-            let p = painter.with_clip_rect(vis(row));
-            p.text(
-                Pos2::new(sq.right() + 4.0, row.center().y),
-                Align2::LEFT_CENTER,
-                &slot.name,
-                font(11.0),
-                if slot.active { white(220) } else { white(110) },
-            );
-            let bypass = ui.interact(vis(sq), id.with(("cbypass", i)), Sense::click()).on_hover_text("Bypass");
-            if bypass.clicked() {
-                acts.push(Act::ChainSlotActive(chain, i, !slot.active));
-            }
-            bypass.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
-            let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
-            let shown = ui.interact(vis(name), id.with(("cslot", i)), Sense::click()).on_hover_text("Show its pages");
-            if shown.clicked() {
-                acts.push(Act::FocusChainSlot(chain, i));
-            }
-            shown.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
-            y += SLOT_ROW;
-        }
-        // "+": add an effect at the end of this chain (the "+" menu, with this chain
-        // focused, so the menu offers what it takes and adds to it).
-        let add = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
-        let resp = ui.interact(vis(add), id.with("cadd"), Sense::click()).on_hover_text("Add an effect");
-        painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
-        painter.text(add.center(), Align2::CENTER_CENTER, "+", font(13.0), white(142));
-        if resp.clicked() && app.chain() != chain {
-            acts.push(Act::FocusChainSlot(chain, usize::MAX));
-        }
-        egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, false, acts));
+        slot_rows(ui, app, painter, id, r, &vis, st, chain, &mut y, acts);
     }
     let _ = y;
     if !app.mixer_sections.extended {
@@ -1254,6 +1174,136 @@ fn headphones(p: &Painter, c: Pos2, ink: Color32) {
     for dx in [-6.0, 4.0] {
         p.rect_filled(Rect::from_min_size(c + Vec2::new(dx, -1.0), Vec2::new(2.5, 6.0)), 1.0, ink);
     }
+}
+
+/// Drop target geometry of a strip's plug-in slot list, recorded each frame so
+/// dragging an effect can land on another strip.
+#[derive(Clone, Copy)]
+struct SlotTarget {
+    chain: deckard_doc::Chain,
+    x_min: f32,
+    x_max: f32,
+    slots_top: f32,
+    slot_count: usize,
+    first_free: usize,
+}
+
+/// Draws a mixer strip's plug-in slots and "+" button: click focuses, double-click opens
+/// a plug-in's window, drag-and-drop moves effects (within or between strips), and the
+/// square bypasses.
+#[allow(clippy::too_many_arguments)]
+fn slot_rows(
+    ui: &mut Ui,
+    app: &App,
+    painter: &Painter,
+    id: egui::Id,
+    r: Rect,
+    vis: &dyn Fn(Rect) -> Rect,
+    st: &Strip,
+    chain: deckard_doc::Chain,
+    y: &mut f32,
+    acts: &mut Vec<Act>,
+) {
+    let slots_top = *y;
+    // An instrument stays first: effects move among themselves, after it.
+    let first_free = usize::from(st.slots.first().is_some_and(|x| x.is_instrument()));
+    let vis_r = vis(r);
+    let own_target = SlotTarget { chain, x_min: vis_r.left(), x_max: vis_r.right(), slots_top, slot_count: st.slots.len(), first_free };
+    ui.ctx().data_mut(|d| {
+        let mut list: Vec<SlotTarget> = d.get_temp(egui::Id::new("deckard-mixer-slot-targets-next")).unwrap_or_default();
+        list.push(own_target);
+        d.insert_temp(egui::Id::new("deckard-mixer-slot-targets-next"), list);
+    });
+    for (i, slot) in st.slots.iter().enumerate() {
+        let row = Rect::from_min_size(Pos2::new(r.left(), *y), Vec2::new(r.width(), SLOT_ROW - 1.0));
+        let sq = Rect::from_min_size(row.min + Vec2::new(2.0, 4.0), Vec2::new(10.0, 11.0));
+        let bypass = ui.interact(vis(sq), id.with(("bypass", i)), Sense::click()).on_hover_text("Bypass");
+        if bypass.clicked() {
+            acts.push(Act::ChainSlotActive(chain, i, !slot.active));
+        }
+        bypass.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
+
+        let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
+        let movable = !slot.is_instrument();
+        let shown = ui.interact(vis(name), id.with(("slot", i)), Sense::click_and_drag());
+        let dragging = movable && (shown.dragged() || shown.drag_stopped());
+        if dragging && let Some(pos) = ui.ctx().pointer_latest_pos() {
+            let targets: Vec<SlotTarget> = ui.ctx().data(|d| d.get_temp(egui::Id::new("deckard-mixer-slot-targets"))).unwrap_or_default();
+            let target = targets.into_iter().find(|t| t.x_min <= pos.x && pos.x <= t.x_max).unwrap_or(own_target);
+            let (to, drop_y, x_range) = if target.chain == chain {
+                let to = (((pos.y - slots_top) / SLOT_ROW).floor().max(0.0) as usize).clamp(first_free, st.slots.len() - 1);
+                let drop_y = slots_top + (if to > i { to + 1 } else { to }) as f32 * SLOT_ROW - 0.5;
+                (to, drop_y, vis_r.x_range())
+            } else {
+                let to = (((pos.y - target.slots_top) / SLOT_ROW).round().max(0.0) as usize).clamp(target.first_free, target.slot_count);
+                let drop_y = target.slots_top + to as f32 * SLOT_ROW - 0.5;
+                (to, drop_y, egui::Rangef::new(target.x_min, target.x_max))
+            };
+            if shown.drag_stopped() {
+                if target.chain != chain {
+                    acts.push(Act::MoveSlotBetween(chain, i, target.chain, to));
+                } else if to != i {
+                    acts.push(Act::MoveSlotIn(chain, i, to));
+                }
+            } else {
+                ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("mixer-slot-drop"))).hline(
+                    x_range,
+                    drop_y,
+                    Stroke::new(2.0, Color32::WHITE),
+                );
+            }
+        }
+
+        painter.rect_filled(row, 0.0, if dragging { S03 } else { S01 });
+        painter.rect_filled(sq, 1.0, if slot.active { st.color } else { S03 });
+        let p = painter.with_clip_rect(vis(row));
+        p.text(
+            Pos2::new(sq.right() + 4.0, row.center().y),
+            Align2::LEFT_CENTER,
+            &slot.name,
+            font(11.0),
+            if dragging {
+                white(245)
+            } else if slot.active {
+                white(220)
+            } else {
+                white(110)
+            },
+        );
+
+        if shown.clicked() {
+            acts.push(match chain {
+                deckard_doc::Chain::Sound(g, s) => Act::FocusSlot(g, s, i),
+                _ => Act::FocusChainSlot(chain, i),
+            });
+        }
+        if slot.plugin.is_some() && shown.double_clicked() {
+            acts.push(Act::OpenSlotEditorIn(chain, i));
+        }
+        let shown = match (slot.plugin.is_some(), movable) {
+            (true, true) => shown.on_hover_text("Click: show pages. Double-click: open window. Drag: move"),
+            (true, false) => shown.on_hover_text("Click: show pages. Double-click: open window"),
+            (false, true) => shown.on_hover_text("Click: show pages. Drag: move"),
+            (false, false) => shown.on_hover_text("Show its pages"),
+        };
+        shown.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
+        *y += SLOT_ROW;
+    }
+
+    let is_sound = matches!(chain, deckard_doc::Chain::Sound(..));
+    let add = Rect::from_min_size(Pos2::new(r.left(), *y), Vec2::new(r.width(), SLOT_ROW - 1.0));
+    let resp = ui.interact(vis(add), id.with("add"), Sense::click()).on_hover_text(if is_sound {
+        "Add an instrument, effect or plug-in"
+    } else {
+        "Add an effect"
+    });
+    painter.rect_stroke(add, 2.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(40) }), StrokeKind::Inside);
+    super::plus_glyph(painter, add.center(), 13.0, white(142));
+    if resp.clicked() && app.chain() != chain {
+        acts.push(Act::FocusChainSlot(chain, usize::MAX));
+    }
+    let instruments = is_sound && st.slots.is_empty();
+    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, instruments, acts));
 }
 
 /// Which optional parts of the strips the Mixer shows.
@@ -1977,5 +2027,166 @@ mod tests {
         h.hover_at(Pos2::new(r.right() - 20.0, r.top() + 11.0));
         h.run_steps(12);
         assert!(h.query_by_label(&why).is_some(), "the reason shows");
+    }
+
+    #[test]
+    fn double_clicking_a_plugin_in_mixer_opens_its_window() {
+        for (sounds, ch, chain) in [
+            (true, Channel::Sound(0, 0), deckard_doc::Chain::Sound(0, 0)),
+            (false, Channel::Group(0), deckard_doc::Chain::Group(0)),
+            (false, Channel::Master, deckard_doc::Chain::Master),
+        ] {
+            let mut app = app_with(Vec::new());
+            app.mixer = true;
+            app.mixer_sounds = sounds;
+            app.mixer_sections.extended = true;
+            app.mixer_sections.plugins = true;
+            app.group = 0;
+            let doc = app.doc.clone().unwrap();
+            let new = deckard_doc::NewModule::Plugin {
+                id: "Native Instruments:VST3:FX:00000000".into(),
+                name: "Absent".into(),
+                chunk: Vec::new(),
+            };
+            let idx = doc.borrow().chain_slots(chain).unwrap().len();
+            doc.borrow_mut().add_slot_in(chain, idx, &new).unwrap();
+
+            let mut h = harness(app);
+            h.state_mut().apply = true;
+            let r = h.state().strips.iter().find(|(c, _)| *c == ch).unwrap().1;
+            let pos = egui::pos2(r.center().x, r.top() + HEAD + 3.0 + 4.0 + idx as f32 * SLOT_ROW + SLOT_ROW / 2.0);
+            clicks(&mut h, pos, 1);
+            assert!(
+                !h.state().app.status.starts_with("plug-in window"),
+                "{ch:?}: single click should not open editor: {}",
+                h.state().app.status
+            );
+            clicks(&mut h, pos, 2);
+            assert!(
+                h.state().app.status.starts_with("plug-in window"),
+                "{ch:?}: double-click should open editor: {}",
+                h.state().app.status
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_a_plugin_in_mixer_reorders_slots() {
+        let drag = |h: &mut egui_kittest::Harness<'static, St>, from: egui::Pos2, to: egui::Pos2| {
+            h.hover_at(from);
+            h.run_steps(1);
+            h.drag_at(from);
+            h.run_steps(1);
+            let mid = egui::pos2(from.x, (from.y + to.y) * 0.5);
+            h.hover_at(mid);
+            h.run_steps(1);
+            h.hover_at(to);
+            h.run_steps(1);
+            h.drop_at(to);
+            h.run_steps(2);
+        };
+
+        for (sounds, ch, chain, has_inst) in [
+            (true, Channel::Sound(0, 0), deckard_doc::Chain::Sound(0, 0), true),
+            (false, Channel::Group(0), deckard_doc::Chain::Group(0), false),
+            (false, Channel::Master, deckard_doc::Chain::Master, false),
+        ] {
+            let mut app = app_with(Vec::new());
+            app.mixer = true;
+            app.mixer_sounds = sounds;
+            app.mixer_sections.extended = true;
+            app.mixer_sections.plugins = true;
+            app.group = 0;
+            let doc = app.doc.clone().unwrap();
+            {
+                let mut d = doc.borrow_mut();
+                while let Some(len) = d.chain_slots(chain).map(|s| s.len())
+                    && len > 0
+                {
+                    d.remove_slot_in(chain, 0).unwrap();
+                }
+                if has_inst {
+                    d.add_slot_in(chain, 0, &deckard_doc::NewModule::Sampler).unwrap();
+                }
+                let base = usize::from(has_inst);
+                d.add_slot_in(chain, base, &deckard_doc::NewModule::Effect("Filter")).unwrap();
+                d.add_slot_in(chain, base + 1, &deckard_doc::NewModule::Effect("Reverb")).unwrap();
+            }
+
+            let mut h = harness(app);
+            h.state_mut().apply = true;
+            let r = h.state().strips.iter().find(|(c, _)| *c == ch).unwrap().1;
+            let slot_y = |i: usize| r.top() + HEAD + 3.0 + 4.0 + i as f32 * SLOT_ROW + SLOT_ROW / 2.0;
+            let base = usize::from(has_inst);
+            // Drag the first effect (base) down to the second effect (base + 1).
+            drag(&mut h, egui::pos2(r.center().x, slot_y(base)), egui::pos2(r.center().x, slot_y(base + 1)));
+
+            let names: Vec<String> = doc.borrow().chain_slots(chain).unwrap().iter().map(|s| s.module.clone()).collect();
+            let expected: Vec<String> =
+                if has_inst { vec!["Sampler".into(), "Reverb".into(), "Filter".into()] } else { vec!["Reverb".into(), "Filter".into()] };
+            assert_eq!(names, expected, "{ch:?}: drag should reorder effects");
+
+            // On a sound with an instrument, dragging an effect onto slot 0 keeps the instrument first.
+            if has_inst {
+                drag(&mut h, egui::pos2(r.center().x, slot_y(2)), egui::pos2(r.center().x, slot_y(0)));
+                let names: Vec<String> = doc.borrow().chain_slots(chain).unwrap().iter().map(|s| s.module.clone()).collect();
+                assert_eq!(names, vec!["Sampler".to_string(), "Filter".into(), "Reverb".into()], "instrument stays at 0");
+            }
+        }
+    }
+
+    #[test]
+    fn dragging_a_plugin_between_mixer_strips_moves_the_effect() {
+        let drag = |h: &mut egui_kittest::Harness<'static, St>, from: egui::Pos2, to: egui::Pos2| {
+            h.hover_at(from);
+            h.step();
+            h.drag_at(from);
+            h.hover_at(to);
+            h.step();
+            h.drop_at(to);
+            h.run_steps(2);
+        };
+
+        let mut app = app_with(Vec::new());
+        app.mixer = true;
+        app.mixer_sounds = true;
+        app.mixer_sections.extended = true;
+        app.mixer_sections.plugins = true;
+        app.group = 0;
+        let doc = app.doc.clone().unwrap();
+        {
+            let mut d = doc.borrow_mut();
+            for chain in [deckard_doc::Chain::Sound(0, 0), deckard_doc::Chain::Group(0)] {
+                while let Some(len) = d.chain_slots(chain).map(|s| s.len())
+                    && len > 0
+                {
+                    d.remove_slot_in(chain, 0).unwrap();
+                }
+            }
+            d.add_slot_in(deckard_doc::Chain::Sound(0, 0), 0, &deckard_doc::NewModule::Sampler).unwrap();
+            d.add_slot_in(deckard_doc::Chain::Sound(0, 0), 1, &deckard_doc::NewModule::Effect("Filter")).unwrap();
+            d.add_slot_in(deckard_doc::Chain::Group(0), 0, &deckard_doc::NewModule::Effect("Reverb")).unwrap();
+        }
+
+        let mut h = harness(app);
+        h.state_mut().apply = true;
+        let strips = h.state().strips.clone();
+        let r0 = strips.iter().find(|(c, _)| *c == Channel::Sound(0, 0)).unwrap().1;
+        let rg = strips.iter().find(|(c, _)| *c == Channel::Group(0)).unwrap().1;
+        let slot_y = |r: Rect, i: usize| r.top() + HEAD + 3.0 + 4.0 + i as f32 * SLOT_ROW + SLOT_ROW / 2.0;
+
+        // Drag Filter from Sound 1 (slot 1) to Group A1 (before Reverb at slot 0).
+        drag(&mut h, egui::pos2(r0.center().x, slot_y(r0, 1)), egui::pos2(rg.center().x, rg.top() + HEAD + 7.0));
+        let s0: Vec<String> = doc.borrow().chain_slots(deckard_doc::Chain::Sound(0, 0)).unwrap().iter().map(|s| s.module.clone()).collect();
+        let sg: Vec<String> = doc.borrow().chain_slots(deckard_doc::Chain::Group(0)).unwrap().iter().map(|s| s.module.clone()).collect();
+        assert_eq!(s0, vec!["Sampler".to_string()]);
+        assert_eq!(sg, vec!["Filter".to_string(), "Reverb".into()]);
+
+        // Drag Reverb from Group A1 (slot 1) back to Sound 1 (onto slot 0; lands after Sampler at slot 1).
+        drag(&mut h, egui::pos2(rg.center().x, slot_y(rg, 1)), egui::pos2(r0.center().x, r0.top() + HEAD + 7.0));
+        let s0: Vec<String> = doc.borrow().chain_slots(deckard_doc::Chain::Sound(0, 0)).unwrap().iter().map(|s| s.module.clone()).collect();
+        let sg: Vec<String> = doc.borrow().chain_slots(deckard_doc::Chain::Group(0)).unwrap().iter().map(|s| s.module.clone()).collect();
+        assert_eq!(s0, vec!["Sampler".to_string(), "Reverb".into()]);
+        assert_eq!(sg, vec!["Filter".to_string()]);
     }
 }

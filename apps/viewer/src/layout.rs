@@ -814,8 +814,14 @@ pub enum Act {
     ReplaceSlotIn(deckard_doc::Chain, usize, AddWhat),
     /// Move slot `.0` of the focused sound's chain to position `.1`.
     MoveSlot(usize, usize),
+    /// Move slot `.1` of chain `.0` to position `.2`.
+    MoveSlotIn(deckard_doc::Chain, usize, usize),
+    /// Move slot `.1` of chain `.0` to position `.3` of chain `.2`.
+    MoveSlotBetween(deckard_doc::Chain, usize, deckard_doc::Chain, usize),
     SlotActive(usize, bool),
     OpenSlotEditor(usize),
+    /// Open the window of the plug-in in slot `.1` of chain `.0`.
+    OpenSlotEditorIn(deckard_doc::Chain, usize),
     /// Set parameter `id` of the plug-in in slot `.0` (normalized).
     PluginParam(usize, u32, f64),
     /// [`Act::PluginParam`] of the plug-in in slot `.1` of chain `.0` (a macro's: any
@@ -1334,6 +1340,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             Act::AddSlot(what) => app.add_slot(what),
             Act::MoveSlot(from, to) => app.move_slot(from, to),
+            Act::MoveSlotIn(c, from, to) => app.move_slot_in(c, from, to),
+            Act::MoveSlotBetween(from, from_at, to, to_at) => app.move_slot_between(from, from_at, to, to_at),
             Act::RemoveSlot(i) => apply(app, vec![Act::RemoveSlotIn(app.chain(), i)]),
             Act::RemoveSlotIn(c, i) => {
                 let key = app.plugin_slot_key(c, i);
@@ -1357,6 +1365,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
+            Act::OpenSlotEditorIn(c, i) => app.open_slot_editor_in(c, i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::Zhora(what) => app.zhora_press(what),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),

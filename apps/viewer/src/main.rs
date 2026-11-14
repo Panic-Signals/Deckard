@@ -10550,19 +10550,31 @@ impl App {
         &self.midi_ports
     }
 
-    /// Move slot `from` of the focused sound's chain to `to`; it stays shown.
+    /// Move slot `from` of the focused chain to `to`; it stays shown.
     fn move_slot(&mut self, from: usize, to: usize) {
+        self.move_slot_in(self.chain(), from, to);
+    }
+
+    /// Move slot `from` of chain `c` to `to`; if `c` is focused, the moved slot stays shown.
+    fn move_slot_in(&mut self, c: deckard_doc::Chain, from: usize, to: usize) {
+        self.move_slot_between(c, from, c, to);
+    }
+
+    /// Move slot `from_at` of chain `from` to `to_at` of chain `to`; if `to` is focused,
+    /// the moved slot stays shown.
+    fn move_slot_between(&mut self, from: deckard_doc::Chain, from_at: usize, to: deckard_doc::Chain, to_at: usize) {
         let Some(doc) = self.doc.clone() else { return };
-        let c = self.chain();
         // Plug-in states edited in their windows first (instances follow positions),
-        // and the chain's windows close.
+        // and both chains' windows close.
         self.store_plugin_states();
-        self.editors.retain(|(ec, ..)| *ec != c);
-        match doc.borrow_mut().move_slot_in(c, from, to) {
+        self.editors.retain(|(ec, ..)| *ec != from && *ec != to);
+        match doc.borrow_mut().move_slot_between(from, from_at, to, to_at) {
             Ok(()) => {
-                self.slot = Some(to);
-                self.slot_of = Some(c);
-                self.plugin_page = 0;
+                if self.chain() == to {
+                    self.slot = Some(to_at);
+                    self.slot_of = Some(to);
+                    self.plugin_page = 0;
+                }
                 self.plugin_views.clear();
             }
             Err(e) => self.status = format!("can't move it: {e}"),
