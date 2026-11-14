@@ -62,11 +62,12 @@ fn window(h: &mut Harness<'static, App>, name: &str, crop: Option<(u32, u32, u32
     eprintln!("{}", path.display());
 }
 
-/// Both of the MK3's screens, after a few frames, in the Maschine theme.
+/// Both of the MK3's screens, after a few frames, in the Maschine theme (or
+/// `$DECKARD_SHOT_THEME`).
 fn mk3(h: &mut Harness<'static, App>, name: &str) {
     h.run_steps(4);
     let app = h.state_mut();
-    app.surface.set_theme("maschine");
+    app.surface.set_theme(&std::env::var("DECKARD_SHOT_THEME").unwrap_or("maschine".into()));
     let px = app.surface.picture(&app.surface_view());
     let path = dir().join(name);
     let f = std::fs::File::create(&path).unwrap();
@@ -381,4 +382,9 @@ fn new_sampler_shots() {
         press(&mut h, name, false);
     }
     mk3(&mut h, "mk3-new-sampler-stems.png");
+    // A slice of it: what it doesn't play shows dim, the ground behind it barely.
+    let doc = h.state().doc.clone().unwrap();
+    doc.borrow_mut().set("Start", deckard_doc::Target::Zone(0, 0, 0), "play_range/low", mxprj::decode::Value::Float((n / 3) as f64)).unwrap();
+    h.state_mut().sampling.selection = Some((n / 3, n));
+    mk3(&mut h, "mk3-new-sampler-slice.png");
 }
