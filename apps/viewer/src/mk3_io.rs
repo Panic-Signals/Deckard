@@ -249,9 +249,13 @@ struct Shared {
     displays_released: bool,
     /// The displays' backlight, 0..=100 (`set_display_brightness`).
     display_brightness: Option<u8>,
+    /// The LEDs' global level, 0..=100 % (`set_led_brightness`): output report `0xf3`.
+    led_brightness: Option<u8>,
     /// Bumped whenever that level must be written again: it changed, or the screens
     /// came back (a driver change leaves the panels at their own 20%).
     brightness_stamp: u64,
+    /// The same for the LEDs' level, which a replug also resets.
+    led_stamp: u64,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
     /// (`shut_down`).
     closing: bool,
@@ -319,6 +323,13 @@ impl Mk3Io {
         let mut s = self.shared.lock().unwrap();
         s.display_brightness = Some(level.min(100));
         s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
+    }
+
+    /// Set the LEDs' global level (0..=100 %), now and whenever an MK3 connects.
+    pub fn set_led_brightness(&self, level: u8) {
+        let mut s = self.shared.lock().unwrap();
+        s.led_brightness = Some(level.min(100));
+        s.led_stamp = s.led_stamp.wrapping_add(1);
     }
 
     pub fn set_context(&self, ctx: &eframe::egui::Context) {
@@ -427,6 +438,9 @@ fn run(shared: &Mutex<Shared>) {
         // screen reconnect (a new stamp) is sent even when the level did not change.
         let mut applied_stamp = 0u64;
         let mut brightness_retry = Instant::now();
+        // The same for the LEDs' level (report `0xf3`), which is not read back.
+        let mut applied_led_stamp = 0u64;
+        let mut led_retry = Instant::now();
         // What each pad started, so it stops the same note however the route changed
         // (a chord's first note; its others in `chord_rest`).
         let mut sounding: [Option<(usize, usize, i64)>; 16] = [None; 16];
@@ -458,6 +472,22 @@ fn run(shared: &Mutex<Shared>) {
                     Err(e) => {
                         shared.lock().unwrap().display_status = format!("display brightness: {e}");
                         brightness_retry = Instant::now() + Duration::from_secs(1);
+                    }
+                }
+            }
+            let (wanted_leds, led_stamp) = {
+                let s = shared.lock().unwrap();
+                (s.led_brightness, s.led_stamp)
+            };
+            if let Some(level) = wanted_leds
+                && led_stamp != applied_led_stamp
+                && Instant::now() >= led_retry
+            {
+                match dev.set_led_brightness(level) {
+                    Ok(()) => applied_led_stamp = led_stamp,
+                    Err(e) => {
+                        shared.lock().unwrap().status = format!("LED brightness: {e}");
+                        led_retry = Instant::now() + Duration::from_secs(1);
                     }
                 }
             }

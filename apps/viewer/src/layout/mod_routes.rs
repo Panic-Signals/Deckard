@@ -77,7 +77,7 @@ pub(super) fn knob_field(
     let text = cur.as_ref().map_or("Assign".to_string(), |r| route_text(lfos, r));
     let mut child = ui.new_child(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)));
     child.spacing_mut().button_padding = Vec2::new(4.0, 1.0);
-    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).style(menu_style);
     egui::containers::menu::MenuButton::new(egui::RichText::new(text).size(10.0)).config(config).ui(&mut child, |ui| {
         let made = ModRoute::new(ModSource::Pressure, slot, &module, param.clone());
         route_editor(ui, g, s, routes, lfos, at, cur.clone(), made, acts);
@@ -287,7 +287,7 @@ pub(super) fn routes_list(ui: &mut Ui, r: Rect, sound: &deckard_model::Sound, lf
     let routes = &sound.mod_routes;
     let mut child = ui.new_child(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)));
     child.spacing_mut().button_padding = Vec2::new(4.0, 1.0);
-    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).style(menu_style);
     let label = format!("ROUTES ({})", routes.len());
     egui::containers::menu::MenuButton::new(egui::RichText::new(label).size(11.0)).config(config).ui(&mut child, |ui| {
         if routes.is_empty() {

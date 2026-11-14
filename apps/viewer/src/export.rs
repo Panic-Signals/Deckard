@@ -322,6 +322,7 @@ impl App {
         let cv_mask = self.settings.cv_mask();
         let s = &mut self.export.settings;
         egui::Window::new(title).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
             ui.add_enabled_ui(running.is_none(), |ui| {
                 ui.heading("Source");
                 egui::Grid::new("export-source").num_columns(2).show(ui, |ui| {
@@ -432,7 +433,7 @@ impl App {
 /// A menu of `choices` for `v`.
 fn combo<T: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, v: &mut T, choices: &[(T, &str)]) {
     let shown = choices.iter().find(|(c, _)| c == v).map_or("", |(_, t)| *t);
-    egui::ComboBox::from_id_salt(id).selected_text(shown).show_ui(ui, |ui| {
+    crate::layout::combo(id).selected_text(shown).show_ui(ui, |ui| {
         for (c, t) in choices {
             ui.selectable_value(v, *c, *t);
         }

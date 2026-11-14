@@ -189,7 +189,7 @@ pub(super) fn lane(ui: &mut Ui, app: &App, p: &Project, vp: &Painter, a: Area, d
         None => release(ui, app, p, vp, &a, drag, acts),
     };
     if let Some(resp) = resp {
-        resp.context_menu(|ui| clear_menu(ui, app, p, &a, dim, acts));
+        resp.menu_on_right_click(|ui| clear_menu(ui, app, p, &a, dim, acts));
     }
 }
 
