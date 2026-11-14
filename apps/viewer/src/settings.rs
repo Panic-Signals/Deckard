@@ -1071,6 +1071,29 @@ pub fn scan_vst3_main(bundle: &Path) -> i32 {
     }
 }
 
+/// Whether DECKARD sets `model`'s LED level and display backlight. Only the MK3 is
+/// measured (`docs/mk3-usb.md`: report `0xf3` for the LEDs, `0xf8`/`0xf9` byte 8 for the
+/// screens). The Jam has no screens and palette-only LEDs, the Mikro MK3 a different panel
+/// set, and the Studio, the Maschine+ and the older models have not been probed.
+pub fn sets_brightness(model: &str) -> bool {
+    model == "M3"
+}
+
+#[cfg(test)]
+mod brightness_model_tests {
+    use super::sets_brightness;
+
+    /// Only the MK3's two brightnesses are DECKARD's to set, and only because they were
+    /// measured: the rest of the models have not been probed (docs/mk3-usb.md).
+    #[test]
+    fn only_the_mk3_sets_brightness() {
+        assert!(sets_brightness("M3"), "the MK3, measured on the rig");
+        for other in ["MH1071", "MS1", "MJ1", "MM3", "M2", "M1", "MM2", "MM1"] {
+            assert!(!sets_brightness(other), "{other} has no brightness DECKARD sets");
+        }
+    }
+}
+
 #[cfg(test)]
 mod routing_tests {
     use super::*;
