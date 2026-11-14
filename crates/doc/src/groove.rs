@@ -177,7 +177,7 @@ impl Document {
 
     /// Fill sound `s`'s part of pattern `p` with new notes from its Generate settings
     /// (Random or Euclidean), replacing its notes there. `polyphonic`: chords in the
-    /// note range (else the sound's root note only). `scale`: whether a pitch is in the
+    /// note range (else the sound's root note only: its base key, as its pad plays). `scale`: whether a pitch is in the
     /// selected scale (none selected: `None`); DECKARD's rule, stricter than Maschine's,
     /// is that every note is then in it.
     #[allow(clippy::too_many_arguments)]
@@ -211,8 +211,9 @@ impl Document {
         let len = if pat.length > 0 { pat.length } else { self.project.bar_length() };
         let (start, end) = (pat.start, pat.start + len);
         let in_scale = |p: i64| scale.is_none_or(|f| f(p));
-        // The root note, up into the scale.
-        let root = (60..72).find(|&p| in_scale(p)).unwrap_or(60);
+        // The root note: the sound's base key (what its pad plays), up into the scale.
+        let base = self.project.groups.get(g).and_then(|x| x.sounds.get(s)).map_or(60, |x| x.channel.base_key).clamp(0, 127);
+        let root = (base..(base + 12).min(128)).find(|&p| in_scale(p)).unwrap_or(base);
         let velocity = 100.0;
         let grid = grid.max(1);
         let note = |position: i64, pitch: i64, vel: i64, length: i64| Note {
@@ -288,6 +289,30 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Euclidean (and Random's single notes) go on the sound's base key, the pitch its
+    /// pad plays, moved up into the scale.
+    #[test]
+    fn generate_writes_the_sounds_base_key() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        d.project.groups[0].sounds[0].channel.base_key = 50;
+        let euclid: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_generation/mode" => Some(1.0),
+            "sequence_generation/steps" => Some(4.0),
+            "sequence_generation/fills" => Some(4.0),
+            "sequence_generation/division" => Some(1.0),
+            _ => None,
+        };
+        d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
+        let pitches = |d: &Document| d.project.groups[0].patterns[0].notes.iter().map(|n| n.pitch).collect::<Vec<_>>();
+        assert!(!pitches(&d).is_empty() && pitches(&d).iter().all(|&p| p == 50), "{:?}", pitches(&d));
+        // D is out of C major: up to E.
+        let major = |p: i64| [0, 2, 4, 5, 7, 9, 11].contains(&p.rem_euclid(12));
+        d.project.groups[0].sounds[0].channel.base_key = 51;
+        d.generate_with(0, 0, 0, 240, false, Some(&major), euclid, &mut Rng::seeded(1)).unwrap();
+        assert!(pitches(&d).iter().all(|&p| p == 52), "{:?}", pitches(&d));
+    }
 
     #[test]
     fn euclidean_rhythms() {

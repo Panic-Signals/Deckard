@@ -269,8 +269,9 @@ pub fn window(ctx: &eframe::egui::Context, open: &mut bool, m: &Monitor, v: &mut
     use eframe::egui;
     m.set_context(ctx);
     egui::Window::new("MIDI Monitor").open(open).resizable(true).default_size([980.0, 420.0]).show(ctx, |ui| {
+        crate::layout::dialog_style(ui);
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("monitor-kind").selected_text(v.kind.map_or("All types", Kind::label)).show_ui(ui, |ui| {
+            crate::layout::combo("monitor-kind").selected_text(v.kind.map_or("All types", Kind::label)).show_ui(ui, |ui| {
                 ui.selectable_value(&mut v.kind, None, "All types");
                 for k in Kind::ALL {
                     ui.selectable_value(&mut v.kind, Some(k), k.label());
@@ -315,7 +316,7 @@ fn side(ui: &mut eframe::egui::Ui, m: &Monitor, dir: Dir, title: &str, all: &str
     }
     ui.horizontal(|ui| {
         ui.strong(title);
-        egui::ComboBox::from_id_salt(("monitor-port", title)).selected_text(pick.as_deref().unwrap_or(all)).show_ui(ui, |ui| {
+        crate::layout::combo(("monitor-port", title)).selected_text(pick.as_deref().unwrap_or(all)).show_ui(ui, |ui| {
             ui.selectable_value(pick, None, all);
             for p in &ports {
                 ui.selectable_value(pick, Some(p.clone()), p);

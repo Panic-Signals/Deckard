@@ -109,6 +109,18 @@ return {
     browse_param_all = ghost,
     browse_row = lift,
     browse_tile = line,
+    -- The Generate page's Euclidean circle and Random roll: hits near the pixel, the
+    -- one playing the pixel itself, the rest of the drawing the field's shades.
+    groove_hit = ghost,
+    groove_now = ink,
+    groove_dim = line,
+    groove_ring = line,
+    groove_text = ink,
+    groove_weak = ghost,
+    groove_field = lift,
+    groove_grid = line,
+    groove_bar = rule,
+    groove_box = lift,
   },
 
   palette = palette,

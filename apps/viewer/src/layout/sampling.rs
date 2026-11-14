@@ -1164,7 +1164,7 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
                     if resp.clicked() {
                         acts.push(sact(SamplingAct::FocusZone(i)));
                     }
-                    resp.context_menu(|ui| {
+                    resp.menu_on_right_click(|ui| {
                         if ui.button("Delete").clicked() {
                             acts.push(sact(SamplingAct::RemoveZone(i)));
                             ui.close();

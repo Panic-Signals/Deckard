@@ -403,8 +403,7 @@ impl Player {
                     match kind {
                         MidiKind::Controller { number, value } => pl.control_change(number, value),
                         MidiKind::PitchBend(v) => pl.pitch_bend(v),
-                        // Plug-ins take no channel pressure yet (part 2 of the expression work).
-                        MidiKind::ChannelPressure(_) => {}
+                        MidiKind::ChannelPressure(v) => pl.channel_pressure(v),
                     }
                 }
             }
