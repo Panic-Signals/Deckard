@@ -572,7 +572,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
 }
 
 /// A New Sampler zone's tempo and pitch (roadmap 1d), Serato's header: its BPM and
-/// length in beats (linked; ×2, ½, TAP, TO PROJECT), its root note (set by hand, it's
+/// length in beats (linked; ×2, ½, TAP, SET PROJECT BPM), its root note (set by hand, it's
 /// locked) and the note it plays at (its Tune), and how it plays (REPITCH, SYNC, KEYS).
 #[allow(clippy::too_many_arguments)]
 fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Target, seconds: f64, gcol: Color32, acts: &mut Vec<Act>) {
@@ -592,7 +592,10 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
     let mut fields = vec![field("BPM", bpm.map_or("—".into(), |b| format!("{b:.2}")), move |n| {
         meta(beat::with_bpm(&m1, bpm.unwrap_or(120.0) + n * 0.1, seconds))
     })];
-    fields[0].tip = "The sample's tempo: drag (Shift: finer)";
+    fields[0].tip = "The sample's tempo: drag (Shift: finer); right-click to set the project's tempo to it";
+    fields[0].menu = bpm.map(|b| -> (String, Box<dyn Fn() -> Act>) {
+        (format!("Set the project's tempo to {b:.2} BPM"), Box::new(move || sact(SamplingAct::ToProject(b))))
+    });
     let beats = m.beats;
     let mut bf = field("BEATS", beats.map_or("—".into(), |b| format!("{}", (b * 100.0).round() / 100.0)), move |n| {
         let b = beats.map_or(4.0, f64::round) + n;
@@ -617,13 +620,18 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         }
     }
     x += 28.0;
-    if tool_button(ui, &painter, small(x, 0.0, 70.0), "TAP", true, false, "beat-tap") {
+    if tool_button(ui, &painter, small(x, 0.0, 112.0), "TAP", true, false, "beat-tap") {
         acts.push(sact(SamplingAct::Tap(ui.input(|i| i.time))));
     }
-    if tool_button(ui, &painter, small(x, 1.0, 70.0), "TO PROJECT", has, false, "beat-to-project") {
+    let tp = small(x, 1.0, 112.0);
+    if tool_button(ui, &painter, tp, "SET PROJECT BPM", has, false, "beat-to-project") {
         acts.push(sact(SamplingAct::ToProject(bpm.unwrap_or(120.0))));
     }
-    x += 82.0;
+    if let Some(b) = bpm {
+        ui.interact(tp, ui.id().with("beat-to-project-tip"), Sense::hover())
+            .on_hover_text(format!("Set the project's tempo to this sample's: {b:.2} BPM"));
+    }
+    x += 124.0;
     // Pitch: the root (detected, or set and locked) and the note it plays at.
     let root = m.root;
     let m3 = m.clone();
@@ -1247,6 +1255,14 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         if let Some(what) = f.typed {
             value_entry::gestures(ui, &resp, what, &f.value, acts);
         }
+        if let Some((text, act)) = &f.menu {
+            resp.context_menu(|ui| {
+                if ui.button(text).clicked() {
+                    acts.push(act());
+                    ui.close();
+                }
+            });
+        }
         if resp.hovered() || resp.dragged() {
             painter.rect_filled(fr, 2.0, white(8));
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
@@ -1332,10 +1348,12 @@ struct Field<'a> {
     choice: Option<Choice<'a>>,
     /// A double-click types it (value_entry).
     typed: Option<value_entry::What>,
+    /// A right-click offers this: its text and what it does.
+    menu: Option<(String, Box<dyn Fn() -> Act + 'a>)>,
 }
 
 fn field<'a>(label: &'a str, value: String, step: impl Fn(f64) -> Act + 'a) -> Field<'a> {
-    Field { label, value, tip: "Drag up or down (Shift: fine)", step: Box::new(step), click: None, choice: None, typed: None }
+    Field { label, value, tip: "Drag up or down (Shift: fine)", step: Box::new(step), click: None, choice: None, typed: None, menu: None }
 }
 
 /// A position in the sample, in samples: dragged, or typed with a double-click. Shift
@@ -1409,6 +1427,7 @@ fn choice_field<'a>(label: &'a str, options: Vec<String>, cur: usize, pick: impl
         click: None,
         choice: Some((options, cur, Box::new(move |k| pick(k)))),
         typed: None,
+        menu: None,
     }
 }
 
@@ -1423,6 +1442,7 @@ fn toggle_field<'a>(label: &'a str, on: bool, act: impl Fn() -> Act + 'a) -> Fie
         click: Some(Box::new(move || a())),
         choice: None,
         typed: None,
+        menu: None,
     }
 }
 

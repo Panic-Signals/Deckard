@@ -255,7 +255,7 @@ This covers what the Audio plug-in does, and is why the New Sampler can replace 
 ### 1d. Analysis UI
 
 **First cut built 2026-11-12:** over a New Sampler zone's EDIT and SLICE pages, TEMPO (BPM
-and BEATS, linked; ×2, ½, TAP, TO PROJECT), PITCH (ROOT, set by hand and then locked;
+and BEATS, linked; ×2, ½, TAP, SET PROJECT BPM, also a right-click on BPM), PITCH (ROOT, set by hand and then locked;
 PLAYS AT, the note its Tune makes, its cents tuned out) and REPITCH / SYNC / KEYS; the
 waveform's ruler in bars and beats with beat lines. MK3: EDIT's TEMPO / PITCH knob page
 (MODE, BPM, ROOT, PLAYS AT), and under SHIFT X2, 1/2, TO PROJECT on the display buttons.
