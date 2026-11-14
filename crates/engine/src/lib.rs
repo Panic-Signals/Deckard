@@ -2428,7 +2428,9 @@ fn synced_zone(
     // Stretched as it plays: the zone stays the file itself (its lanes too), each voice
     // stretches it to whatever the song's tempo is. (Warp markers still take a render.)
     if !renders.ahead && map.is_none() {
-        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, grid: meta.start.beats(), live: Some(semitones), ..Default::default() });
+        // (Its own speed against the song's is a tempo that much lower.)
+        let tempo = bpm / meta.speed_factor();
+        zone.sync = Some(sampler::ZoneSync { tempo, keys, grid: meta.start.beats(), live: Some(semitones), ..Default::default() });
         return;
     }
     let job_of = |sample: &Arc<Sample>, semis: f64| {
@@ -8293,6 +8295,16 @@ mod tests {
         assert!(loud > 0.01, "it sounds");
         let at = e.sounds[0][0].as_ref().unwrap().play_position(0).unwrap() as f64;
         assert!((at - 72_000.0).abs() < 3000.0, "{at}");
+        // The zone's own speed: at half, half as far.
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].meta.as_mut().unwrap().speed = 0.5;
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        e.note_hold(0, 0, 60, 100);
+        for _ in 0..10 {
+            e.process(&mut out);
+        }
+        let at = e.sounds[0][0].as_ref().unwrap().play_position(0).unwrap() as f64;
+        assert!((at - 36_000.0).abs() < 3000.0, "{at}");
     }
 
     /// A start point (a zone that plays to its file's end) set to reverse plays from

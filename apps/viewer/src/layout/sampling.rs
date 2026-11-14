@@ -795,6 +795,17 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         acts.push(meta(ZoneMeta { reverse: !m.reverse, ..m.clone() }));
     }
     x += 78.0;
+    // Its own speed against the song's (Sync and Keys: the stretcher's).
+    if m.mode != PlayMode::Repitch && has {
+        let (m4, sp) = (m.clone(), m.speed_factor());
+        let mut f = field("SPEED", format!("{:.0} %", sp * 100.0), move |n| {
+            meta(ZoneMeta { speed: ((sp * 100.0 + n).round() / 100.0).clamp(0.25, 4.0), ..m4.clone() })
+        });
+        f.tip = "How fast this slice goes against the song, its pitch unmoved: 100 % is in time, 50 % half speed, 200 % double (right-click: back to 100 %)";
+        let m5 = m.clone();
+        f.menu = Some(("Back to 100 % (in time)".to_string(), Box::new(move || meta(ZoneMeta { speed: 1.0, ..m5.clone() }))));
+        x = group_box(ui, &painter, x, y, "STRETCH", &[f], acts);
+    }
     // Sync: the grid notes played live start on.
     if m.mode == PlayMode::Sync {
         use deckard_model::new_sampler::StartGrid;

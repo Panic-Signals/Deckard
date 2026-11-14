@@ -117,6 +117,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         stems: Default::default(),
         stems_only: false,
         reverse: false,
+        speed: 0.0,
     }
 }
 

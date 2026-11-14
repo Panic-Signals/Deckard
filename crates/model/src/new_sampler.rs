@@ -151,6 +151,16 @@ pub struct ZoneMeta {
     /// It plays backwards: a slice from its end to its start, a start point (a zone that
     /// plays to the file's end) from there back to the file's beginning.
     pub reverse: bool,
+    /// Sync and Keys: how fast it goes against the song (1: in time; 2: twice as fast, 0.5:
+    /// half), its pitch unmoved. 0 is 1.
+    pub speed: f64,
+}
+
+impl ZoneMeta {
+    /// [`ZoneMeta::speed`] as a factor: 1 when unset, within a quarter to four times.
+    pub fn speed_factor(&self) -> f64 {
+        if self.speed > 0.0 && self.speed.is_finite() { self.speed.clamp(0.25, 4.0) } else { 1.0 }
+    }
 }
 
 impl ZoneMeta {
@@ -323,6 +333,9 @@ impl ZoneMeta {
         if self.reverse {
             t += "reverse 1\n";
         }
+        if self.speed_factor() != 1.0 {
+            t += &format!("speed {}\n", self.speed_factor());
+        }
         t + "file " + &self.file
     }
 
@@ -341,6 +354,7 @@ impl ZoneMeta {
                 "root_locked" => m.root_locked = v == "1",
                 "stems_only" => m.stems_only = v == "1",
                 "reverse" => m.reverse = v == "1",
+                "speed" => m.speed = v.parse().unwrap_or(0.0),
                 "bpm" => m.bpm = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "beats" => m.beats = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "root" => m.root = v.parse().ok().filter(|r| *r < 128),
@@ -406,6 +420,7 @@ mod tests {
             ],
             stems_only: true,
             reverse: true,
+            speed: 1.5,
         };
         assert_eq!(lane_levels(&full.stems), [0.0, 0.0, 1.0, 0.0], "the soloed lane only");
         let mut open = full.stems.clone();
