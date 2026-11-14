@@ -454,6 +454,26 @@ impl Picture {
         }
     }
 
+    /// The "loading" overlay: both screens dimmed, with LOADING and the name centred on each.
+    pub fn loading(&mut self, name: &str) {
+        let font_idx = font_index("ubuntu").expect("built in");
+        let white = Paint { rgb: [255; 3], alpha: 1.0 };
+        let big = Style { font_idx, font: font_at(font_idx), size: 30.0, colour: white };
+        let small = Style { font_idx, font: font_at(font_idx), size: 16.0, colour: Paint { rgb: [200; 3], alpha: 1.0 } };
+        for screen in 0..2 {
+            let x0 = screen * (WIDTH as i32 / 2);
+            let w = WIDTH as i32 / 2;
+            self.ops.push(DrawOp::Fill { x: x0, y: 0, w, h: HEIGHT as i32, c: Paint { rgb: [0, 0, 0], alpha: 0.78 }, corner: 1.0 });
+            let title = "LOADING…";
+            self.texts.push(title.to_string());
+            self.texts.push(name.to_string());
+            let tw = Self::width(&big, title).min(w - 20);
+            self.record_text(&big, x0 + (w - tw) / 2, HEIGHT as i32 / 2, w - 20, title.to_string());
+            let nw = Self::width(&small, name).min(w - 40);
+            self.record_text(&small, x0 + (w - nw) / 2, HEIGHT as i32 / 2 + 30, w - 40, name.to_string());
+        }
+    }
+
     /// A script error, over the bottom of the left screen.
     pub fn error(&mut self, message: &str) {
         self.ops.push(DrawOp::Fill {

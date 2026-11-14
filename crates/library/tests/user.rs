@@ -152,3 +152,54 @@ fn a_factory_folder_lists_under_factory_with_its_product() {
     assert_eq!(r.products, ["Retro Pack"]);
     assert!(ix.query(&Query { kind: Kind::Sound, user: true, ..Query::default() }).unwrap().items.is_empty());
 }
+
+/// A stand-in for the app's NKS reader: the file's text is the preset's name.
+fn read_preset(p: &Path) -> Option<deckard_library::Item> {
+    let name = String::from_utf8(std::fs::read(p).ok()?).ok()?;
+    Some(deckard_library::Item { kind: Kind::Effect, name, types: vec![vec!["Reverb".into()]], ..Default::default() })
+}
+
+/// Files the index can't read itself (NKS presets) are read by the reader it's given,
+/// in user folders only: under a library folder NI's own index lists them.
+#[test]
+fn a_reader_lists_presets_in_user_folders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let (user, factory) = (d.join("User Content"), d.join("Raum Library"));
+    for (dir, name) in [(&user, "Mine"), (&factory, "Theirs")] {
+        std::fs::create_dir_all(dir.join("Raum")).unwrap();
+        std::fs::write(dir.join(format!("Raum/{name}.nksfx")), name).unwrap();
+    }
+    let roots = [user_root(&user), Root { path: factory.clone(), factory: true, product: Some("Raum".into()) }];
+    let q = Query { kind: Kind::Effect, user: true, ..Query::default() };
+
+    let mut ix = UserIndex::open(&d.join("library.db3")).unwrap();
+    ix.scan(&roots).unwrap();
+    assert!(ix.query(&q).unwrap().items.is_empty(), "no reader, not listed");
+
+    ix.set_reader(read_preset);
+    ix.scan(&roots).unwrap();
+    let r = ix.query(&q).unwrap();
+    assert_eq!(r.items.iter().map(|i| (i.name.as_str(), i.user)).collect::<Vec<_>>(), [("Mine", true)]);
+    assert_eq!(r.items[0].types, [vec!["Reverb".to_string()]]);
+    assert!(ix.query(&Query { kind: Kind::Effect, user: false, ..Query::default() }).unwrap().items.is_empty());
+
+    std::fs::remove_file(user.join("Raum/Mine.nksfx")).unwrap();
+    ix.scan(&roots).unwrap();
+    assert!(ix.query(&q).unwrap().items.is_empty(), "dropped when deleted");
+}
+
+/// A preset DECKARD just saved is read the same way.
+#[test]
+fn a_saved_preset_is_read_by_the_reader() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let file = d.join("User Content/Raum/Mine.nksfx");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "Mine").unwrap();
+    let mut lib = Library::new(None, &d.join("library.db3")).unwrap();
+    lib.set_reader(read_preset);
+    lib.add_saved(&file);
+    let r = lib.query(&Query { kind: Kind::Effect, user: true, ..Query::default() });
+    assert_eq!(r.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Mine"]);
+}

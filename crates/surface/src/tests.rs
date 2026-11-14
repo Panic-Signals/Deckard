@@ -571,10 +571,28 @@ fn edited_user_scripts_reload() {
     assert_eq!(s.event(&Event::Knob(0, 0.1), &v, t0), [Action::Turn { knob: 0, inc: 0.1, fine: false }]);
 }
 
+/// An edit is seen by the file's time and size, not its text: one that keeps the size
+/// still reloads, and a file only touched with no edit reloads too (harmless).
+#[test]
+fn an_edit_of_the_same_size_reloads() {
+    let (_tmp, dir) = user_dir();
+    let page = dir.join("pages/control.lua");
+    std::fs::write(&page, "return { knob = function() deckard.metronome(true) return true end }").unwrap();
+    let mut s = Surface::with_user_dir(Some(dir.clone()));
+    let v = view();
+    assert!(!s.reload(), "nothing changed");
+    std::fs::write(&page, "return { knob = function() deckard.metronome(false) return true end}").unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&page).unwrap().set_modified(later).unwrap();
+    assert!(s.reload(), "same size, newer: reloaded");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, Instant::now()), [Action::Metronome(false)]);
+    assert!(!s.reload(), "and only once");
+}
+
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["maschine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -604,7 +622,7 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "solarized_dark"]);
+    assert_eq!(s.themes(), ["maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
 }
 
 #[test]
@@ -891,6 +909,26 @@ fn song(v: &mut View) {
         SectionView { scene: Some(1), start: 4 * 3840, length: 8 * 3840, auto: false },
     ];
     v.section = Some(0);
+}
+
+/// The Ideas view's display buttons: the scenes that are there can be picked (dim, the
+/// focused one bright), and a button past the last scene is dark — the panel has only two
+/// lit levels, so "dimmer than dim" is nothing (docs/mk3-usb.md).
+#[test]
+fn a_display_button_past_the_last_scene_is_dark() {
+    let (mut s, mut v) = (Surface::new(), view());
+    song(&mut v);
+    // The shape it was reported in: six scenes, so buttons 7 and 8 have none.
+    v.scenes.extend((4..=6).map(|i| SceneView { name: format!("Scene {i}"), ..Default::default() }));
+    press(&mut s, &v, "BUTTON_ARRANGE");
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::ON), "the focused scene");
+    for i in 2..=6 {
+        assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::DIM), "a scene to pick: {i}");
+    }
+    for i in 7..=8 {
+        assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::OFF), "no scene: {i}");
+    }
 }
 
 /// SHIFT on the Ideas view: IDEAS / SONG, and the focused scene's edits; after one,
@@ -1339,7 +1377,7 @@ fn shift_follow_shows_the_grid_while_follow_is_held() {
     assert_eq!(s.page(), "grid", "FOLLOW still held");
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "PERFORM");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(deckard_mk3::leds::BACKLIGHT), "only STEP's");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(deckard_mk3::leds::OFF), "only STEP's");
     assert_eq!(leds.get("LED_PAD_2"), Some(deckard_mk3::leds::palette(16, 4)), "1/16, the second column's first");
     assert_eq!(leds.get("LED_PAD_15"), Some(0), "PERFORM has six values");
     assert!(hold(&mut s, &v, "BUTTON_FOLLOW", false).is_empty());
@@ -1421,7 +1459,7 @@ fn file_shows_the_file_page() {
     assert_eq!(s.page(), "file");
     let leds = s.leds(&v);
     assert_eq!((leds.get("LED_FILE"), leds.get("LED_SCREEN_BUTTON_1")), (Some(crate::leds::ON), Some(crate::leds::ON)));
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::BACKLIGHT), "no recent projects");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::OFF), "no recent projects");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::File("new", 0)]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::File("save_copy", 0)]);
     assert_eq!(s.page(), "control", "back");
@@ -1472,7 +1510,7 @@ fn the_save_page_saves_the_project_a_group_or_a_sound() {
 
 /// Whether `led` is lit (not off).
 fn lit(s: &Surface, v: &View, led: &str) -> bool {
-    s.leds(v).get(led).is_some_and(|c| c != deckard_mk3::leds::BACKLIGHT && c != 0)
+    s.leds(v).get(led).is_some_and(|c| c != 0)
 }
 
 #[test]
@@ -1599,7 +1637,7 @@ fn set_macro_turns_the_pages() {
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     assert_eq!(s.page(), "macro_set");
     let leds = s.leds(&v);
-    assert_eq!((leds.get("LED_LEFT"), leds.get("LED_RIGHT")), (Some(deckard_mk3::leds::BACKLIGHT), Some(deckard_mk3::leds::DIM)));
+    assert_eq!((leds.get("LED_LEFT"), leds.get("LED_RIGHT")), (Some(deckard_mk3::leds::OFF), Some(deckard_mk3::leds::DIM)));
     assert_eq!(press(&mut s, &v, "BUTTON_RIGHT"), [Action::Page(true)]);
     assert_eq!(s.page(), "macro_set", "still setting macros");
     assert!(s.screen_text(&v).contains(&"1/2".to_string()), "the page shown");
@@ -1610,7 +1648,7 @@ fn lock_takes_and_recalls_the_focused_snapshot() {
     let (mut s, mut v) = (Surface::new(), view());
     assert_eq!(press(&mut s, &v, "BUTTON_LOCK"), [Action::Lock("button", 0)]);
     assert_eq!(s.page(), "control", "no page");
-    assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::BACKLIGHT));
+    assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::OFF));
     v.lock.active = true;
     assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::DIM), "dim while locked");
 }
@@ -1625,7 +1663,7 @@ fn shift_lock_shows_the_snapshots() {
     assert_eq!(s.page(), "lock");
     let leds = s.leds(&v);
     assert_eq!((leds.get("LED_LOCK"), leds.get("LED_SCREEN_BUTTON_1")), (Some(crate::leds::ON), Some(crate::leds::ON)));
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::BACKLIGHT), "UPDATE: no snapshot focused");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::OFF), "UPDATE: no snapshot focused");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::DIM), "the next bank");
     assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::Lock("pad", 0)], "a pad takes or recalls");
     assert!(!s.pads(&v).play, "and plays nothing");
@@ -1663,7 +1701,7 @@ fn variation_shows_the_sounds_groove_variation() {
     assert_eq!(s.page(), "control", "from any page");
     assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(crate::leds::ON), "lit while held");
     hold(&mut s, &v, "BUTTON_VARIATION", false);
-    assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(deckard_mk3::leds::BACKLIGHT));
+    assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(deckard_mk3::leds::OFF));
 }
 
 fn event_note(sound: usize, position: i64, selected: bool) -> crate::NoteView {
@@ -2950,7 +2988,7 @@ fn lfo_page_in_envelope_mode() {
     }
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(crate::leds::ON), "ENV lit");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::BACKLIGHT), "the shapes dark");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::OFF), "the shapes dark");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_6"), Some(crate::leds::ON), "RETRIG on");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty(), "no shapes");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Lfo("retrigger", 1, 0.0)]);
@@ -3215,7 +3253,7 @@ fn the_step_grid_places_the_focused_sound_in_pad_mode() {
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::DIM), "empty");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "a note");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::BACKLIGHT), "past the end");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::OFF), "past the end");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
 
@@ -3518,6 +3556,77 @@ fn the_tuner_effect_draws_its_dial_on_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
+/// CHANNEL's Generate page in Euclidean mode: its rhythm as a circle on the right
+/// screen (Fills over Steps in the middle), the step playing lit, and the hand turning
+/// as playback moves.
+#[test]
+fn euclidean_generate_draws_its_circle_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    (v.control.modules_visible, v.control.page_group, v.control.page_groups) = (false, 2, 4);
+    v.control.pages = vec!["Swing".into(), "Variation".into(), "Generate".into()];
+    v.control.page = 2;
+    let plain = s.picture(&v);
+    let hits = vec![true, false, true, false, true, true, false, true];
+    v.control.euclid = Some(crate::EuclidView { hits, fills: 5, rotate: 0, position: None });
+    let stopped = s.picture(&v);
+    assert_ne!(plain, stopped);
+    let text = s.screen_text(&v);
+    for t in ["5", "8", "Euclidean", "ROTATE 0"] {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    let amber = |p: &[u8; 4]| p[0] > 200 && p[1] > 150 && p[2] < 110;
+    let lit = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (i % 960) >= 480 && amber(p)).count();
+    assert_eq!(lit(&stopped), 0, "nothing playing, nothing lit");
+    v.control.euclid.as_mut().unwrap().position = Some(0.25);
+    let first = s.picture(&v);
+    assert!(lit(&first) > 50, "the step playing and the hand: {}", lit(&first));
+    v.control.euclid.as_mut().unwrap().position = Some(4.5);
+    let later = s.picture(&v);
+    assert_ne!(first, later, "the hand turns");
+    v.control.euclid.as_mut().unwrap().hits.rotate_left(1);
+    assert_ne!(later, s.picture(&v), "Rotate turns the hits");
+    assert_eq!(s.error(), None);
+}
+
+/// CHANNEL's Generate page in Random mode: its notes as a piano roll on the right
+/// screen, Probability and how many notes on the bar, the notes under the playhead lit.
+#[test]
+fn random_generate_draws_its_roll_on_the_right_screen() {
+    let (s, mut v) = (Surface::new(), view());
+    (v.control.modules_visible, v.control.page_group, v.control.page_groups) = (false, 2, 4);
+    v.control.pages = vec!["Swing".into(), "Variation".into(), "Generate".into()];
+    v.control.page = 2;
+    let plain = s.picture(&v);
+    let notes = vec![(0, 60, 100), (0, 64, 100), (5, 67, 90), (9, 72, 110)];
+    let r = crate::RandomView {
+        steps: 16,
+        beat: 4,
+        notes,
+        probability: 55.0,
+        velocity_amount: 10.0,
+        distribution: 1,
+        range: (60, 72),
+        ..Default::default()
+    };
+    v.control.random = Some(r);
+    let stopped = s.picture(&v);
+    assert_ne!(plain, stopped);
+    let text = s.screen_text(&v);
+    for t in ["Random", "55 %  ·  4 notes", "C3", "C4", "VELOCITY · NATURAL"] {
+        assert!(text.iter().any(|x| x == t), "{t} in {text:?}");
+    }
+    // (Amber in the roll only, not the corner's curve.)
+    let amber = |p: &[u8; 4]| p[0] > 150 && p[1] > 100 && p[2] < 90;
+    let lit = |px: &[[u8; 4]]| px.iter().enumerate().filter(|(i, p)| (480..826).contains(&(i % 960)) && amber(p)).count();
+    assert_eq!(lit(&stopped), 0, "nothing playing, nothing lit");
+    v.control.random.as_mut().unwrap().position = Some(5.5);
+    let playing = s.picture(&v);
+    assert!(lit(&playing) > 150, "the playhead and the note under it: {}", lit(&playing));
+    v.control.random.as_mut().unwrap().position = Some(12.5);
+    assert_ne!(playing, s.picture(&v), "the playhead moves");
+    assert_eq!(s.error(), None);
+}
+
 /// Zhora's display buttons 5 to 8 are TUNE, CHECK, LIVE and HOLD, lit as the view says.
 #[test]
 fn zhora_display_buttons_5_to_8_are_tune_check_live_hold() {
@@ -3551,4 +3660,40 @@ fn zhora_display_buttons_1_to_4_pick_pages() {
     // Not Zhora: the levels again.
     v.control.zhora = None;
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::Level(0)]);
+}
+
+#[test]
+fn loading_overlays_both_screens() {
+    let (s, mut v) = (Surface::new(), view());
+    assert!(!s.screen_text(&v).contains(&"LOADING…".to_string()));
+    v.loading = Some("Dusty Kit".into());
+    let text = s.screen_text(&v);
+    assert_eq!(text.iter().filter(|t| *t == "LOADING…").count(), 2, "{text:?}");
+    assert_eq!(text.iter().filter(|t| *t == "Dusty Kit").count(), 2, "{text:?}");
+}
+
+/// A pad's name too long for its tile goes on in a second line, broken after a space,
+/// "_" or "-", so the end that tells pads apart shows ("ClosedHH Bionic 2" and "… 3"
+/// both read "ClosedHH Bionic" cut at the tile's edge). A short one stays one line.
+#[test]
+fn a_long_pad_name_wraps_onto_a_second_line() {
+    let mut s = Surface::new();
+    let mut v = view();
+    v.groups[0].sounds[0].name = "ClosedHH Bionic 2".into();
+    v.groups[0].sounds[1].name = "dt02_kick-punchy_crunch".into();
+    v.groups[0].sounds[2].name = "Kick".into();
+    let now = std::time::Instant::now();
+    s.tick(&v, now);
+    s.event(&deckard_mk3::Event::Button("BUTTON_SELECT", true), &v, now);
+    let texts = s.draw_picture(&v).texts;
+    // Two lines in a row that make the whole name, the first ending at a break.
+    let wrapped = |name: &str| {
+        texts.windows(2).any(|w| {
+            let (a, b) = (w[0].as_str(), w[1].as_str());
+            !a.is_empty() && !b.is_empty() && name.ends_with(b) && name.starts_with(a) && a.len() + b.len() + 1 >= name.len()
+        })
+    };
+    assert!(wrapped("ClosedHH Bionic 2") && !texts.iter().any(|t| t == "ClosedHH Bionic"), "{texts:?}");
+    assert!(wrapped("dt02_kick-punchy_crunch"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Kick"), "a short name, one line: {texts:?}");
 }

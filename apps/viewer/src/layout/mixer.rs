@@ -301,7 +301,7 @@ fn remove_modulation(resp: &egui::Response, edit: super::Edit, acts: &mut Vec<Ac
     if modulation::mod_target(edit).is_none() {
         return;
     }
-    resp.context_menu(|ui| {
+    resp.menu_on_right_click(|ui| {
         if ui.button("Remove Modulation").on_hover_text("Remove this fader's modulation from every pattern").clicked() {
             acts.push(Act::ClearModulation(edit));
             ui.close();
@@ -843,13 +843,13 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                 if bypass.clicked() {
                     acts.push(Act::SlotActiveOf(g, s, i, !slot.active));
                 }
-                bypass.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
+                bypass.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
                 let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
                 let shown = ui.interact(vis(name), id.with(("slot", i)), Sense::click()).on_hover_text("Show its pages");
                 if shown.clicked() {
                     acts.push(Act::FocusSlot(g, s, i));
                 }
-                shown.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
+                shown.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
                 y += SLOT_ROW;
             }
             let add = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
@@ -863,7 +863,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             }
             // A sound has one instrument, in its first slot.
             let instruments = st.slots.is_empty();
-            egui::Popup::menu(&resp).show(|ui| super::add_menu(ui, app, instruments, acts));
+            egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, instruments, acts));
         }
     }
     // A group's and the master's effects: bypassed with the square, shown (in the
@@ -894,13 +894,13 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             if bypass.clicked() {
                 acts.push(Act::ChainSlotActive(chain, i, !slot.active));
             }
-            bypass.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
+            bypass.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
             let name = Rect::from_min_max(Pos2::new(sq.right(), row.top()), row.max);
             let shown = ui.interact(vis(name), id.with(("cslot", i)), Sense::click()).on_hover_text("Show its pages");
             if shown.clicked() {
                 acts.push(Act::FocusChainSlot(chain, i));
             }
-            shown.context_menu(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
+            shown.menu_on_right_click(|ui| super::slot_menu(ui, app, chain, i, slot.is_instrument(), acts));
             y += SLOT_ROW;
         }
         // "+": add an effect at the end of this chain (the "+" menu, with this chain
@@ -912,7 +912,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         if resp.clicked() && app.chain() != chain {
             acts.push(Act::FocusChainSlot(chain, usize::MAX));
         }
-        egui::Popup::menu(&resp).show(|ui| super::add_menu(ui, app, false, acts));
+        egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, false, acts));
     }
     let _ = y;
     if !app.mixer_sections.extended {

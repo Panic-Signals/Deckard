@@ -166,9 +166,11 @@ impl RenderPool {
     }
 
     /// A pool sized for this machine: the audio workgroup's suggested parallelism, else
-    /// the cores less one (for the audio thread), at most 8.
+    /// the physical cores less one (for the audio thread), at most 8. Physical, not
+    /// logical: two real-time threads on one core's two hardware threads each run slower,
+    /// and the audio thread waits for the slowest job.
     pub fn for_machine(period_frames: u32, sample_rate: u32) -> RenderPool {
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let cores = rt::physical_cores().unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
         let workers = rt::workgroup_parallelism().unwrap_or(cores).saturating_sub(1).clamp(0, 8);
         RenderPool::new(workers, period_frames, sample_rate)
     }
@@ -377,6 +379,11 @@ mod rt {
         unsafe { os_release(wg) };
         (n > 0).then_some(n as usize)
     }
+
+    /// (The audio workgroup's parallelism sizes the pool on macOS.)
+    pub fn physical_cores() -> Option<usize> {
+        None
+    }
 }
 
 /// Real-time scheduling for the workers, and for the audio thread (which cpal leaves at
@@ -420,6 +427,38 @@ mod rt {
     }
     pub fn workgroup_parallelism() -> Option<usize> {
         None
+    }
+
+    /// The processor cores (not their hardware threads), from Windows' processor
+    /// relationships; `None` if it won't say.
+    pub fn physical_cores() -> Option<usize> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetLogicalProcessorInformationEx(relation: i32, buffer: *mut u8, length: *mut u32) -> i32;
+        }
+        const RELATION_PROCESSOR_CORE: i32 = 0;
+        let mut len = 0u32;
+        // SAFETY: a null buffer asks for the length needed, into `len`.
+        unsafe { GetLogicalProcessorInformationEx(RELATION_PROCESSOR_CORE, std::ptr::null_mut(), &mut len) };
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        // SAFETY: `buf` holds `len` bytes, as asked for.
+        if unsafe { GetLogicalProcessorInformationEx(RELATION_PROCESSOR_CORE, buf.as_mut_ptr(), &mut len) } == 0 {
+            return None;
+        }
+        // Records of variable size, each starting with its relationship and its size (u32s).
+        let (mut at, mut cores) = (0usize, 0usize);
+        while at + 8 <= len as usize {
+            let size = u32::from_le_bytes(buf[at + 4..at + 8].try_into().ok()?) as usize;
+            if size == 0 {
+                break;
+            }
+            cores += 1;
+            at += size;
+        }
+        (cores > 0).then_some(cores)
     }
 
     #[cfg(test)]
@@ -466,11 +505,25 @@ mod rt {
     pub fn workgroup_parallelism() -> Option<usize> {
         None
     }
+    pub fn physical_cores() -> Option<usize> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows reports the cores, which hardware threads only multiply (Intel's hybrid
+    /// parts mix cores of one and two threads, so no exact ratio).
+    #[cfg(windows)]
+    #[test]
+    fn physical_cores_are_the_cores_not_their_threads() {
+        let logical = std::thread::available_parallelism().unwrap().get();
+        let cores = rt::physical_cores().expect("Windows says");
+        assert!(cores >= 1 && cores <= logical, "{cores} cores, {logical} logical");
+        eprintln!("{cores} cores, {logical} logical");
+    }
 
     /// Every job of every batch runs exactly once, whatever the batch sizes and however
     /// the workers wake.

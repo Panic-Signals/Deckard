@@ -127,6 +127,8 @@ pub struct View {
     pub browser: BrowserView,
     /// What the Sampling page (SAMPLE) shows.
     pub sampling: SamplingView,
+    /// A group or sound is loading: the name, shown over both screens until it's in.
+    pub loading: Option<String>,
 }
 
 /// The app's sampler and recorder as the Sampling page's tabs show them.
@@ -545,6 +547,38 @@ pub struct ControlView {
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
+    /// The sound's Generate page in Euclidean mode: its circle on the right screen.
+    pub euclid: Option<EuclidView>,
+    /// The sound's Generate page in Random mode: its notes on the right screen.
+    pub random: Option<RandomView>,
+}
+
+/// What Random Generate made, as the right screen's piano roll draws it: the
+/// pattern's grid steps (`steps`, `beat` of them a beat), the sound's notes there
+/// (step, pitch, velocity), the pitches shown (`range`, low to high), where playback is
+/// (steps, fractional; `None` when stopped), and the knobs that shape the odds:
+/// Probability (%), Velocity's amount (%), Distribution (0 Even, 1 Natural, 2 Skewed).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RandomView {
+    pub steps: usize,
+    pub beat: usize,
+    pub notes: Vec<(usize, i64, i64)>,
+    pub position: Option<f64>,
+    pub probability: f64,
+    pub velocity_amount: f64,
+    pub distribution: usize,
+    pub range: (i64, i64),
+}
+
+/// A Euclidean rhythm as the right screen draws it: which of its steps get a note
+/// (`hits`, already turned by Rotate), its Fills and Rotate, and where playback is in
+/// it (steps from the first, fractional; `None` when stopped).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EuclidView {
+    pub hits: Vec<bool>,
+    pub fills: usize,
+    pub rotate: usize,
+    pub position: Option<f64>,
 }
 
 /// What the Tuner effect's screen shows: the note heard and its `cents` above it
@@ -1082,7 +1116,9 @@ const RELOAD_EVERY: Duration = Duration::from_millis(500);
 
 /// What the scripts and the engine share while a handler runs.
 pub(crate) struct Shared {
-    pub view: View,
+    /// What the scripts see, and a count that goes up when it changes. (Shared: a
+    /// `deckard.state()` table fills in its parts from the view it was made for.)
+    pub view: Rc<View>,
     pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
@@ -1092,6 +1128,14 @@ pub(crate) struct Shared {
     pub actions: Vec<Action>,
     pub page: String,
     pub leds: Leds,
+}
+
+impl Shared {
+    /// A new view for the scripts: `deckard.state()` makes its table again.
+    pub(crate) fn set_view(&mut self, view: Rc<View>) {
+        self.view = view;
+        self.view_id = self.view_id.wrapping_add(1);
+    }
 }
 
 /// The loaded scripts.
@@ -1249,9 +1293,8 @@ impl Surface {
         let run = self.run.as_ref()?;
         {
             let mut sh = run.shared.borrow_mut();
-            if sh.view != *v {
-                sh.view = v.clone();
-                sh.view_id = sh.view_id.wrapping_add(1);
+            if *sh.view != *v {
+                sh.set_view(Rc::new(v.clone()));
             }
             if let Some(now) = now {
                 sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
@@ -1398,7 +1441,7 @@ impl Surface {
         setup
     }
 
-    /// Both LED reports: buttons at their faint backlight, the rest dark, then what
+    /// Both LED reports: every LED dark first, then what
     /// `global.lua`'s `leds()` and the page's set.
     pub fn leds(&self, v: &View) -> Leds {
         let r = self.with(v, None, |run| {
@@ -1500,6 +1543,9 @@ impl Surface {
             }
             None => screen::Picture::new([0, 0, 0]),
         };
+        if let Some(name) = &v.loading {
+            p.loading(name);
+        }
         if let Some(e) = self.error() {
             p.error(&e);
         }
@@ -1564,7 +1610,7 @@ fn start(sources: &sources::Sources, page: String, theme: &str) -> mlua::Result<
     // No file, process or OS access: the scripts only get the `deckard` API.
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
-        view: View::default(),
+        view: Rc::default(),
         view_id: 1,
         now: 0.0,
         held: HashSet::new(),
@@ -1648,3 +1694,6 @@ mod sampling_tests;
 mod tests;
 #[cfg(test)]
 mod tests_support;
+
+#[cfg(test)]
+mod state_tests;

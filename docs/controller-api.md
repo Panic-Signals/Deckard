@@ -357,7 +357,7 @@ and `positions`.
 
 | Call | Sets |
 |---|---|
-| `deckard.led(name, "off" \| "dim" \| "on")` | A button's light. A button left alone, or set `"off"`, keeps a faint backlight so its label reads. |
+| `deckard.led(name, "off" \| "dim" \| "on")` | A button's light. The panel has two lit levels and nothing between (docs/mk3-usb.md): `"off"` is dark, `"dim"` the idle light a button that can be pressed shows, `"on"` the selected one. |
 | `deckard.led(name, palette, bright)` | A pad's, group button's or jog-wheel arrow's colour (a palette index, 16 white), bright or dim. |
 | `deckard.led(name, "off")` | Turns a pad or group button off. |
 
@@ -484,7 +484,7 @@ for. Its driver hands the script decoded events, beside `open`, `close` and `tic
 
 | Function | Sets |
 |---|---|
-| `deckard.led(name, "off" \| "dim" \| "on")` | A one-colour button. `"off"` keeps a faint backlight; `"dark"` is none. |
+| `deckard.led(name, "off" \| "dim" \| "on")` | A one-colour button. `"off"` and `"dark"` are both dark. |
 | `deckard.led(name, palette, bright)` | A `SCENE_n` or `GROUP_x` button's colour. `bright`: `true`, `false` (half-lit), or `"faint"`, `"dim"`, `"bright"`, `"pale"`. |
 | `deckard.pad_led(column, row, palette, bright)`, `deckard.strip_led(n, led, palette, bright)` | The same for a pad and a strip's LED (1–11, from the bottom). |
 | `deckard.meter(column, led, level)` | A meter LED (columns 1–2; LEDs 1–8, from the bottom), level 0..1. |

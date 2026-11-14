@@ -17,8 +17,8 @@ fn mk3_group_led_follows_the_press_in_the_same_pass() {
     let mut app = app();
     let out = app.mk3_events(vec![deckard_mk3::Event::Button("BUTTON_GROUP_B", true)], &mut Vec::new());
     assert_eq!(app.group, 1);
-    assert_eq!(out.leds.get("LED_GROUP_B").unwrap() & 3, 3);
-    assert_ne!(out.leds.get("LED_GROUP_A").unwrap() & 3, 3);
+    assert_eq!(out.leds.get("LED_GROUP_B").unwrap() & 3, 2);
+    assert_ne!(out.leds.get("LED_GROUP_A").unwrap() & 3, 2);
 }
 
 fn summary(values: &[f64]) -> serde_json::Value {

@@ -8,11 +8,20 @@
 # "published" covers both creating a release directly and publishing a draft (drafts
 # themselves don't start workflows). Run it by hand (Actions > Release > Run workflow)
 # to build a version without a release: the builds are kept as workflow artifacts.
+#
+# A push to the `prerelease` branch builds it too, for people to try before a release:
+# the builds replace those of the one GitHub pre-release tagged `pre-release`. Their
+# version is the next patch after the latest release with a suffix (0.5.1-pre.12, the
+# run's number). The update check in the app leaves them alone both ways: it asks for
+# the latest release (never a pre-release), and a build whose version isn't plain
+# numbers doesn't look for updates.
 name: Release
 
 on:
   release:
     types: [published]
+  push:
+    branches: [prerelease]
   workflow_dispatch:
     inputs:
       version:
@@ -22,9 +31,62 @@ on:
 permissions:
   contents: write
 
+# A newer push to `prerelease` replaces the build under way.
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN: ${{ github.run_number }}
+        run: |
+          # The tag, not the release's title: the version must be numbers (1.2.3) for
+          # the update check in the app, and the title is prose.
+          v="${INPUT_VERSION:-$RELEASE_TAG}"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # The patch after the latest release (never a pre-release), marked.
+            latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+            latest="${latest#v}"; latest="${latest#V}"
+            if printf '%s' "$latest" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              v="${latest%.*}.$(( ${latest##*.} + 1 ))-pre.$RUN"
+            else
+              v="0.0.0-pre.$RUN"
+            fi
+          fi
+          v="${v#v}"; v="${v#V}"
+          # Keep it to what file names and bundle versions take.
+          v="$(printf '%s' "$v" | tr ' /' '--' | tr -cd 'A-Za-z0-9._+-')"
+          [ -n "$v" ] || { echo "no version in the release name or tag" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "DECKARD $v"
+
+      # The one pre-release, made again at this commit: the last push's builds go with
+      # it. (A release made with the workflow's token starts no workflow.)
+      - name: The pre-release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release delete pre-release --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create pre-release --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "Pre-release ($VERSION)" \
+            --notes "Builds of the \`prerelease\` branch at ${GITHUB_SHA::7}, to try what's coming before it's released. They're replaced with every push to the branch, they aren't offered by DECKARD's update check, and they don't update themselves: come back here for a newer one. Expect rough edges, and keep copies of projects you care about."
+
   build:
     name: ${{ matrix.name }}
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -44,23 +106,6 @@ jobs:
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
 
-      - name: Version
-        id: version
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          # The tag, not the release's title: the version must be numbers (1.2.3) for
-          # the update check in the app, and the title is prose.
-          v="${INPUT_VERSION:-$RELEASE_TAG}"
-          v="${v#v}"; v="${v#V}"
-          # Keep it to what file names and bundle versions take.
-          v="$(printf '%s' "$v" | tr ' /' '--' | tr -cd 'A-Za-z0-9._+-')"
-          [ -n "$v" ] || { echo "no version in the release name or tag" >&2; exit 1; }
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "DECKARD $v"
-
       - name: Linux packages
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
@@ -72,13 +117,13 @@ jobs:
       - name: Build
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
           TASK: ${{ runner.os == 'macOS' && 'release:macos' || runner.os == 'Linux' && 'release:linux' || 'release:windows' }}
         run: mise run "$TASK" "$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: deckard-${{ steps.version.outputs.version }}-${{ runner.os }}
+          name: deckard-${{ needs.version.outputs.version }}-${{ runner.os }}
           path: |
             dist/*.zip
             dist/*.tar.gz
@@ -88,11 +133,11 @@ jobs:
           if-no-files-found: error
 
       - name: Attach to the release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'push'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || 'pre-release' }}
         run: |
           shopt -s nullglob
           files=(dist/*.zip dist/*.tar.gz dist/*.deb dist/*.rpm dist/*.exe)

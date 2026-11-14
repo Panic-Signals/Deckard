@@ -529,7 +529,7 @@ pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: R
     }
     // A sound has one instrument, in its first slot.
     let instruments = snd.slots.is_empty();
-    egui::Popup::menu(&resp).show(|ui| add_menu(ui, app, instruments, acts));
+    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| add_menu(ui, app, instruments, acts));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-strip-add"), (add, area)));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-strip-panels"), panels));
 }
@@ -575,7 +575,7 @@ fn panel(
     if nr.clicked() {
         acts.push(Act::FocusSlot(g, s, i));
     }
-    nr.context_menu(|ui| super::slot_menu(ui, app, deckard_doc::Chain::Sound(g, s), i, slot.is_instrument(), acts));
+    nr.menu_on_right_click(|ui| super::slot_menu(ui, app, deckard_doc::Chain::Sound(g, s), i, slot.is_instrument(), acts));
     // The body.
     let body = Rect::from_min_max(Pos2::new(r.left(), bar.bottom() + 4.0), r.max);
     painter.rect_filled(body, 3.0, Color32::from_rgb(0x22, 0x22, 0x22));

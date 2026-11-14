@@ -179,6 +179,14 @@ to the crate's and is shown in About DECKARD.
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps
   the builds as workflow artifacts.
+- **Pre-release builds:** a push to the `prerelease` branch builds all three as well and
+  puts them on the one GitHub pre-release tagged
+  [`pre-release`](https://github.com/Panic-Signals/Deckard/releases/tag/pre-release),
+  replacing the last push's. Their version is the next patch after the latest release
+  with a suffix (`0.5.1-pre.12`). The app's update check never offers them (it asks for
+  the latest release, which a pre-release never is) and they don't update themselves (a
+  version that isn't plain numbers doesn't check). To put work in front of testers,
+  merge it into `prerelease` and push.
 - **Pull requests:** fill in `.github/pull_request_template.md`: the type, a one-to-two
   sentence summary, how a reviewer can check it works, and the platforms it's for. In
   Claude Code, the `pull-request` skill (`.claude/skills/pull-request/`) writes it. A
