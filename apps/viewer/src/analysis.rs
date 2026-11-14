@@ -458,6 +458,70 @@ mod app_tests {
         assert_eq!(muted, [false, true, false, false]);
     }
 
+    /// REANALYZE hears the part selected: a sample that goes from 100 to 140 BPM halfway
+    /// takes the second half's tempo, its grid from a beat of that half; a root set by
+    /// hand stays; one undo step.
+    #[test]
+    fn reanalyze_hears_the_part_selected() {
+        use crate::layout::sampling::SamplingAct;
+        use deckard_model::new_sampler::ZoneMeta;
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 48_000u32;
+        let half = 8 * rate as usize;
+        // A click a beat (and a softer one between), eight seconds at each tempo.
+        let mut frames = vec![[0f32; 2]; 2 * half];
+        for (from, bpm) in [(0, 100.0), (half, 140.0)] {
+            let beat = 60.0 / bpm * f64::from(rate);
+            let mut k = 0;
+            while ((k as f64 * beat / 2.0) as usize) < half {
+                let at = from + (k as f64 * beat / 2.0) as usize;
+                let loud = if k % 2 == 0 { 0.8 } else { 0.3 };
+                for i in 0..2000.min(2 * half - at) {
+                    let v = loud * (i as f32 * 0.05).sin() * (-(i as f32) / 300.0).exp();
+                    frames[at + i] = [v, v];
+                }
+                k += 1;
+            }
+        }
+        let file = dir.path().join("Two Tempos.wav");
+        let sample = deckard_engine::sample::Sample { rate, frames };
+        deckard_engine::edit::write_wav_channels(&file, &sample, 2).unwrap();
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        if doc.project().groups[0].sounds[0].slots.is_empty() {
+            doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        }
+        let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+        doc.set_zones(0, 0, &[spec], "Load").unwrap();
+        doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+        let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+        let meta = ZoneMeta {
+            file: path.clone(),
+            mode: PlayMode::Sync,
+            bpm: Some(100.0),
+            beats: Some(26.67),
+            root: Some(57),
+            root_locked: true,
+            ..Default::default()
+        };
+        doc.note_zone_meta(0, 0, 0, &meta).unwrap();
+        let steps = doc.undo_labels().len();
+        let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+        app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+        app.sampling.set_sample((0, 0, 0, path), std::sync::Arc::new(sample));
+        app.sampling.selection = Some((half, 2 * half));
+        app.sampling_act(SamplingAct::Reanalyze);
+        let d = app.doc.as_ref().unwrap().borrow();
+        let m = d.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone().unwrap();
+        assert!((m.bpm.unwrap() - 140.0).abs() < 0.5, "{m:?} {}", app.status);
+        assert!((m.beats.unwrap() - 16.0 * 140.0 / 60.0).abs() < 0.2, "the file's length at that tempo: {m:?}");
+        let beat = 60.0 / 140.0 * f64::from(rate);
+        let off = (m.grid_offset as f64 - half as f64) / beat;
+        assert!(m.grid_offset as usize >= half && (off - off.round()).abs() < 0.08, "on a beat of that half: {}", m.grid_offset);
+        assert_eq!((m.root, m.mode), (Some(57), PlayMode::Sync), "the root set by hand stays");
+        assert_eq!(d.undo_labels().len(), steps + 1);
+        assert!(app.status.contains("BPM"), "{}", app.status);
+    }
+
     /// A zone with stem lanes is four waveforms cut alike: TRUNCATE cuts its lanes with it
     /// (one undo step), its tempo kept. A lane deleted, the others are all that plays.
     #[test]

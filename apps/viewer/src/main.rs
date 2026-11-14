@@ -7886,6 +7886,7 @@ impl App {
                 }
             }
             S::Warp(w) => self.warp_act(w),
+            S::Reanalyze => self.reanalyze(),
             S::ToProject(bpm) => {
                 let Some(doc) = self.doc.clone() else { return };
                 if let Err(e) = doc.borrow_mut().set_tempo(bpm) {
@@ -7978,6 +7979,49 @@ impl App {
                     self.recorder.view.focused = None;
                 }
             },
+        }
+    }
+
+    /// The focused New Sampler zone's tempo and root again, heard in the part selected
+    /// (else the part it plays): a stretch of a song may have a tempo and a key of its
+    /// own. Its root stays if set by hand; its warp markers go (they were the old tempo's).
+    fn reanalyze(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let Some(s) = self.sampling.sample.clone() else { return };
+        let p = doc.borrow().project().clone();
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+        let Some(meta) = zone.meta else { return };
+        let (a, b) = self.sampling.selection.or_else(|| self.play_range_of_focused()).unwrap_or((0, s.frames.len()));
+        let (a, b) = (a.min(s.frames.len()), b.min(s.frames.len()));
+        if b <= a || s.rate == 0 {
+            return;
+        }
+        let found = deckard_analysis::analyse(&s.frames[a..b], s.rate, "");
+        let seconds = s.frames.len() as f64 / f64::from(s.rate);
+        let mut m = meta.clone();
+        if let Some(t) = found.tempo {
+            m = deckard_model::new_sampler::ZoneMeta {
+                bpm_source: deckard_model::new_sampler::BpmSource::Audio,
+                grid_offset: (a + t.offset) as u64,
+                warps: Vec::new(),
+                ..beat::with_bpm(&m, t.bpm, seconds)
+            };
+        }
+        if let Some(r) = found.root.filter(|_| !m.root_locked) {
+            (m.root, m.cents) = (Some(r.note), r.cents);
+        }
+        self.status = match (found.tempo, found.root) {
+            (None, None) => "Reanalyze: no tempo or root heard there".into(),
+            (t, r) => format!(
+                "Reanalyze: {}{}",
+                t.map_or("no tempo".into(), |t| format!("{:.2} BPM", t.bpm)),
+                r.map_or(String::new(), |r| format!(", root {}", analysis::note_name(r.note)))
+            ),
+        };
+        if m != meta
+            && let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &m, "Reanalyze")
+        {
+            self.status = format!("can't change the zone: {e}");
         }
     }
 

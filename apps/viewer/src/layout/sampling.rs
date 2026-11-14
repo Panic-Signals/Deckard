@@ -368,6 +368,8 @@ pub enum SamplingAct {
     Tap(f64),
     /// The song's tempo set to the sample's.
     ToProject(f64),
+    /// Analyse the part selected (else the part the zone plays) again: its tempo and root.
+    Reanalyze,
     /// The focused New Sampler zone's warp markers.
     Warp(WarpAct),
 }
@@ -641,7 +643,15 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         ui.interact(tp, ui.id().with("beat-to-project-tip"), Sense::hover())
             .on_hover_text(format!("Set the project's tempo to this sample's: {b:.2} BPM"));
     }
-    x += 124.0;
+    x += 116.0;
+    let ra = small(x, 0.0, 84.0);
+    if tool_button(ui, &painter, ra, "REANALYZE", true, false, "beat-reanalyze") {
+        acts.push(sact(SamplingAct::Reanalyze));
+    }
+    ui.interact(ra, ui.id().with("beat-reanalyze-tip"), Sense::hover()).on_hover_text(
+        "Work out the tempo and the root again, from the part selected (else the part this slice plays): a section of a song may have its own",
+    );
+    x += 96.0;
     // Pitch: the root (detected, or set and locked) and the note it plays at.
     let root = m.root;
     let m3 = m.clone();
