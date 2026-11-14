@@ -45,12 +45,55 @@ buttons 1–7, 71 encoder touch, 72–79 knob touch 8…1. Unused: 1, 22, 23, 32
 Three-byte entries until an all-zero one: HID pad index, then u16 BE: top nibble = event
 (1 press, 4 pressure update, 3 release; a pad pressed slowly, starting light, comes as
 0 and goes as 2), low 12 bits = pressure (0–4095). HID index i is
-the pad printed `(3 − i/4)·4 + i%4 + 1` (index 12 = pad 1, bottom left). DECKARD takes a
-hit's velocity as the peak pressure over its first three reports, or what came in 4 ms:
-the MK3 reports pressure only as it changes, so a pad pressed and held steady (often,
-with others held) may send no more. Pressure reports from a pad not held are ignored: a
-released pad keeps reporting as it springs back. The pressure goes through the pad sensitivity (Preferences > Hardware) before
-it's a velocity. `examples/mk3-pad-log.rs` prints the raw entries as they come.
+the pad printed `(3 − i/4)·4 + i%4 + 1` (index 12 = pad 1, bottom left). A hit plays at
+once, its velocity from the press's own pressure, through the velocity scaling's curve
+(`mk3_io::pad_velocity`), as Maschine does (below). The reports after it are pressure on
+the held pad. Pressure reports from a pad not held are ignored: a released pad keeps
+reporting as it springs back. The pad sensitivity (Preferences > Hardware) is the
+controller's: DECKARD writes it to feature report `0xd0` (`Device::set_pad_sensitivity`).
+`examples/mk3-pad-log.rs` prints the raw entries as they come.
+
+To measure what Maschine itself does with the pressure, run `examples/mk3-velocity-measure.rs`
+next to Maschine. Maschine's MIDI output goes to a loopback port, and the tool logs the raw pad
+reports and Maschine's note-ons on one clock, one CSV per Pad Sensitivity / Velocity Scaling
+setting. It also snapshots the feature reports, so you can see whether a setting reaches the
+controller. Then `examples/mk3-velocity-fit.py <folder>` finds which reading of a press
+Maschine turns into the velocity, and fits each setting's curve.
+
+### What Maschine does (measured 2026-11-14)
+
+Eleven runs with Maschine 3 on one MK3, pad 1 (about 500 notes, 4 presses with no note; the
+recordings aren't in the repository):
+
+- **Pad Sensitivity is applied in the controller.** Maschine writes it to the MK3 as feature
+  report `0xd0` byte 7, as a percentage (`0x64` at 100, `0x32` at 50, `0x1b` at 27, `0x00` at
+  0). Nothing else in the snapshot changes. The software curve stays the same whatever the
+  sensitivity: Linear at 25, 50 and 100, and Hard 1 at 0 and 50, fit one curve each, so the
+  controller must scale the pressure it reports. What it does to that pressure was not
+  measured, because that would need a known force.
+- **The velocity comes from a press's first pressure report** (the one with event 1 or 0).
+  Taking the peak within 5 ms fits as well, but the peak of the first 3 reports, which
+  DECKARD used before, fits worse. About 3 % of notes don't match the first report the logger saw.
+- **The curves** all have one form. Let u = √(p / 4095), where p is that first report. Then
+
+      v = max(1, round(127 · min(1, m·u + (1 − m)·u^n)))
+
+  Here m is the slope at the light end and n how late the curve bends. The rmse is in
+  velocity steps, leaving out the worst 5 %:
+
+| Velocity Scaling | m | n | rmse |
+|---|---|---|---|
+| Soft 3 | 1.71 | 2.5 | 0.7 |
+| Soft 2 | 1.50 | 2.5 | 0.5 |
+| Soft 1 | 1.26 | 2.5 | 0.6 |
+| Linear | 1 | (any: v = 127·u) | 0.5 |
+| Hard 1 | 0.82 | 4 | 0.2–0.4 |
+| Hard 2 | 0.60 | 4 | 0.5 |
+| Hard 3 | 0.32 | 4 | 0.8–0.9 |
+
+  With n free for each run, the fits come out at 2.5–2.7 for Soft and 3.5–4.6 for Hard, and
+  m hardly moves. So whether one n per side is Maschine's real rule or just close is still
+  open. Every setting is within a velocity step either way.
 
 ## Scripts
 

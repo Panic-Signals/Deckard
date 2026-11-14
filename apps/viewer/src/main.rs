@@ -3111,7 +3111,10 @@ impl App {
                     self.settings.pad_sensitivity = n;
                     ui.end_row();
                     ui.label("");
-                    ui.label(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder.").weak());
+                    ui.label(
+                        egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
+                            .weak(),
+                    );
                     ui.end_row();
                     // The two brightnesses are the MK3's own (its LEDs' level report, its
                     // displays' backlight byte), so they follow the model picked here rather
@@ -5014,6 +5017,8 @@ impl App {
             m.set_leds(out.leds);
             m.set_led_brightness(self.settings.led_brightness);
             m.set_display_brightness(self.settings.display_brightness);
+            // Written to the controller only when it changes (and on connecting).
+            m.set_pad_sensitivity(self.settings.pad_sensitivity);
             if let Some((n, frame)) = out.screens {
                 m.set_screens(n, frame);
             }
@@ -5044,7 +5049,6 @@ impl App {
         // by the scripts, say), for what the scripts see.
         self.update_slot_view();
         self.control_bridge();
-        let sensitivity = f64::from(self.settings.pad_sensitivity) / 100.0;
         // The group's sounds' Pad Touch, for what their held pads' pressure sends.
         let touches = |app: &App, group: usize| {
             let mut t = [deckard_model::pad_touch::PadTouch::default(); 16];
@@ -5071,9 +5075,7 @@ impl App {
                             eprintln!("button {name} {} (page {top:?})", if down { "down" } else { "up" });
                         }
                     }
-                    Event::PadOn(pad, v) => {
-                        c.pad_event(pad, true, mk3_io::pad_velocity(v, sensitivity, self.settings.velocity_scaling), requests)
-                    }
+                    Event::PadOn(pad, v) => c.pad_event(pad, true, mk3_io::pad_velocity(v, self.settings.velocity_scaling), requests),
                     Event::PadOff(pad) => c.pad_event(pad, false, 0.0, requests),
                     Event::PadPressure(..) => {}
                     Event::Knob(k, inc) => {
@@ -5101,8 +5103,7 @@ impl App {
                 screens = c.screens().map(|s| (self.mk3_screens_sent, mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(s.px.clone()))));
             }
             let scaling = self.settings.velocity_scaling;
-            let route =
-                mk3_io::PadRoute { play, group, keys, chords, velocity, sensitivity, scaling, fixed, touches: touches(self, group) };
+            let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: touches(self, group) };
             self.control_bridge();
             Mk3Out { route, leds, screens }
         } else {
@@ -5159,7 +5160,6 @@ impl App {
                 keys: pads.keys,
                 chords: pads.chords,
                 velocity: view.fixed_velocity.then_some(fixed.clamp(0, 127)),
-                sensitivity,
                 scaling: self.settings.velocity_scaling,
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
@@ -16907,27 +16907,48 @@ mod tests {
     }
 
     /// Where the ignored render tests (and others, optionally) save their screenshots.
-    /// Pad sensitivity: 0 takes the pressure as it comes; the default lifts light presses
-    /// (a quarter of the pressure plays at over half velocity); full pressure stays full.
+    /// Pad velocity plays as Maschine does: hits recorded from Maschine 3 on an MK3 (the
+    /// pressure the MK3 reported, the velocity Maschine sent; docs/mk3-usb.md) come out
+    /// within a velocity step, two at each velocity scaling.
     #[test]
-    fn pad_sensitivity_lifts_light_presses() {
-        use mk3_io::pad_velocity;
-        assert!((pad_velocity(0.25, 0.0, 0) - 0.25).abs() < 1e-9);
-        assert!(pad_velocity(0.25, 0.5, 0) > 0.5);
-        assert!(pad_velocity(0.1, 1.0, 0) > pad_velocity(0.1, 0.5, 0));
-        assert_eq!(pad_velocity(1.0, 0.5, 0), 1.0);
-        assert_eq!(settings::Settings::default().pad_sensitivity, 50);
+    fn pad_velocity_matches_maschine() {
+        let velocity = |pressure: u16, scaling| (mk3_io::pad_velocity(f64::from(pressure) / 4095.0, scaling) * 127.0).round() as i64;
+        let heard = [
+            (-3, 275, 53),
+            (-3, 2123, 117),
+            (-2, 331, 51),
+            (-2, 899, 80),
+            (-1, 335, 45),
+            (-1, 2789, 111),
+            (0, 255, 31),
+            (0, 1324, 72),
+            (1, 257, 26),
+            (1, 1557, 67),
+            (2, 229, 19),
+            (2, 1774, 60),
+            (3, 252, 10),
+            (3, 1624, 39),
+        ];
+        for (scaling, pressure, sent) in heard {
+            let v = velocity(pressure, scaling);
+            assert!((v - sent).abs() <= 1, "scaling {scaling}, pressure {pressure}: {v}, Maschine sent {sent}");
+        }
     }
 
     /// Velocity SCALING: Soft lifts every press short of full, Hard holds it back, more
-    /// at each step; full pressure stays full.
+    /// at each step; full pressure stays full. The sensitivity isn't in it: the MK3 applies
+    /// that to the pressure it reports.
     #[test]
     fn velocity_scaling_bends_the_presses() {
         use mk3_io::pad_velocity;
-        let at = |scaling| pad_velocity(0.3, 0.0, scaling);
-        assert!(at(-3) > at(-1) && at(-1) > at(0) && at(0) > at(1) && at(1) > at(3), "{} {} {} {} {}", at(-3), at(-1), at(0), at(1), at(3));
-        assert_eq!(pad_velocity(1.0, 0.0, 3), 1.0);
-        assert_eq!(pad_velocity(1.0, 0.0, -3), 1.0);
+        let at = |scaling| pad_velocity(0.3, scaling);
+        let all: Vec<f64> = (-3..=3).map(at).collect();
+        assert!(all.windows(2).all(|w| w[0] > w[1]), "{all:?}");
+        for scaling in -3..=3 {
+            assert_eq!(pad_velocity(1.0, scaling), 1.0);
+            assert_eq!(pad_velocity(0.0, scaling), 0.0);
+        }
+        assert_eq!(settings::Settings::default().pad_sensitivity, 50);
     }
 
     /// A knob on the controller's plug-in page goes the whole way in one turn, however

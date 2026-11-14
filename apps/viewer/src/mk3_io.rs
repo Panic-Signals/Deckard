@@ -22,9 +22,8 @@ pub struct PadRoute {
     pub chords: Option<[[i64; 16]; 16]>,
     /// Fixed Velocity: every hit plays at this velocity, however hard.
     pub velocity: Option<i64>,
-    /// Pad sensitivity, 0..1, and velocity scaling, -3 (Soft 3) … 3 (Hard 3) (see
-    /// [`pad_velocity`]).
-    pub sensitivity: f64,
+    /// Velocity scaling, -3 (Soft 3) … 3 (Hard 3) (see [`pad_velocity`]). The pad
+    /// sensitivity isn't here: the controller applies it (`Mk3Io::set_pad_sensitivity`).
     pub scaling: i8,
     /// The song's Fixed Velocity value: what hits play at in the pressure pad modes.
     pub fixed: i64,
@@ -39,15 +38,19 @@ impl PadRoute {
     }
 }
 
-/// A pad's pressure (0..1, from the MK3) as velocity (0..1), by the sensitivity (0..1): at
-/// 0 as it comes; higher, light presses count for more (a gain up to ×4, and a curve that
-/// lifts the low end), so a gentle press isn't too quiet to hear. Then the velocity
-/// scaling (-3 … 3) bends it: Soft lifts what's short of full, Hard holds it back (a
-/// power of 1.5 a step).
-pub fn pad_velocity(pressure: f64, sensitivity: f64, scaling: i8) -> f64 {
-    let s = sensitivity.clamp(0.0, 1.0);
-    let v = (pressure.max(0.0) * (1.0 + 3.0 * s)).min(1.0).powf(1.0 - 0.5 * s);
-    v.powf(1.5f64.powi(i32::from(scaling.clamp(-3, 3))))
+/// Each velocity scaling's curve, Soft 3 … Hard 3: (m, n) in [`pad_velocity`].
+const VELOCITY_CURVES: [(f64, f64); 7] = [(1.71, 2.5), (1.50, 2.5), (1.26, 2.5), (1.0, 1.0), (0.82, 4.0), (0.60, 4.0), (0.32, 4.0)];
+
+/// A pad's pressure (0..1, the MK3's report as the pad was hit) as velocity (0..1), by
+/// the velocity scaling (-3 Soft 3 … 3 Hard 3), as Maschine plays it. With u = √pressure,
+/// the velocity is min(1, m·u + (1 − m)·uⁿ): Linear is u itself, and m is the slope at
+/// the light end (Soft above 1, Hard below), n how late it bends to full. Measured
+/// against Maschine 3 on an MK3, within a velocity step at every setting
+/// (docs/mk3-usb.md).
+pub fn pad_velocity(pressure: f64, scaling: i8) -> f64 {
+    let u = pressure.clamp(0.0, 1.0).sqrt();
+    let (m, n) = VELOCITY_CURVES[(scaling.clamp(-3, 3) + 3) as usize];
+    (m * u + (1.0 - m) * u.powf(n)).clamp(0.0, 1.0)
 }
 
 /// A held pad's pressure (0..1) shaped by a curve (0..1, 0.5 straight): above 0.5 light
@@ -151,7 +154,7 @@ impl Touching {
         h.touch = now;
         let (value, live) = match h.touch.mode {
             TouchMode::Velocity => {
-                let v = ((pad_velocity(pressure, route.sensitivity, route.scaling) * 127.0).round() as i64).clamp(1, 127);
+                let v = ((pad_velocity(pressure, route.scaling) * 127.0).round() as i64).clamp(1, 127);
                 (v as u8, Some(Live::RepeatPressure { group: g, sound: s, pitch, velocity: v }))
             }
             TouchMode::PolyAt => {
@@ -256,6 +259,10 @@ struct Shared {
     brightness_stamp: u64,
     /// The same for the LEDs' level, which a replug also resets.
     led_stamp: u64,
+    /// The pads' sensitivity, 0..=100 % (`set_pad_sensitivity`), and a stamp bumped only
+    /// when it changes: it's a feature report read and written back, not worth every frame.
+    pad_sensitivity: Option<u8>,
+    sensitivity_stamp: u64,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
     /// (`shut_down`).
     closing: bool,
@@ -330,6 +337,17 @@ impl Mk3Io {
         let mut s = self.shared.lock().unwrap();
         s.led_brightness = Some(level.min(100));
         s.led_stamp = s.led_stamp.wrapping_add(1);
+    }
+
+    /// Set the pads' sensitivity (0..=100 %), now if it changed and whenever an MK3
+    /// connects. The controller applies it to the pressure it reports, as with Maschine.
+    pub fn set_pad_sensitivity(&self, level: u8) {
+        let mut s = self.shared.lock().unwrap();
+        let level = Some(level.min(100));
+        if s.pad_sensitivity != level {
+            s.pad_sensitivity = level;
+            s.sensitivity_stamp = s.sensitivity_stamp.wrapping_add(1);
+        }
     }
 
     pub fn set_context(&self, ctx: &eframe::egui::Context) {
@@ -441,6 +459,9 @@ fn run(shared: &Mutex<Shared>) {
         // The same for the LEDs' level (report `0xf3`), which is not read back.
         let mut applied_led_stamp = 0u64;
         let mut led_retry = Instant::now();
+        // The same for the pads' sensitivity: written on connecting, then as it changes.
+        let mut applied_sensitivity_stamp = 0u64;
+        let mut sensitivity_retry = Instant::now();
         // What each pad started, so it stops the same note however the route changed
         // (a chord's first note; its others in `chord_rest`).
         let mut sounding: [Option<(usize, usize, i64)>; 16] = [None; 16];
@@ -491,6 +512,22 @@ fn run(shared: &Mutex<Shared>) {
                     }
                 }
             }
+            let (wanted_sensitivity, sensitivity_stamp) = {
+                let s = shared.lock().unwrap();
+                (s.pad_sensitivity, s.sensitivity_stamp)
+            };
+            if let Some(level) = wanted_sensitivity
+                && sensitivity_stamp != applied_sensitivity_stamp
+                && Instant::now() >= sensitivity_retry
+            {
+                match dev.set_pad_sensitivity(level) {
+                    Ok(()) => applied_sensitivity_stamp = sensitivity_stamp,
+                    Err(e) => {
+                        shared.lock().unwrap().status = format!("pad sensitivity: {e}");
+                        sensitivity_retry = Instant::now() + Duration::from_secs(1);
+                    }
+                }
+            }
             let leds = shared.lock().unwrap().leds.clone();
             if leds.is_some() && leds != shown {
                 if let Some(l) = &leds
@@ -517,7 +554,6 @@ fn run(shared: &Mutex<Shared>) {
                 keys: None,
                 chords: None,
                 velocity: None,
-                sensitivity: 0.5,
                 scaling: 0,
                 fixed: 100,
                 touches: [PadTouch::default(); 16],
@@ -554,7 +590,7 @@ fn run(shared: &Mutex<Shared>) {
                     continue;
                 }
                 let (pad, from_pressure) = match *e {
-                    Event::PadOn(p, v) => (p, ((pad_velocity(v, route.sensitivity, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
+                    Event::PadOn(p, v) => (p, ((pad_velocity(v, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
                     Event::PadOff(p) => (p, 0),
                     _ => continue,
                 };
@@ -719,7 +755,7 @@ mod tests {
     fn route(touch: PadTouch) -> PadRoute {
         let mut touches = [PadTouch::default(); 16];
         touches[0] = touch;
-        PadRoute { play: true, group: 0, keys: None, chords: None, velocity: None, sensitivity: 0.5, scaling: 0, fixed: 90, touches }
+        PadRoute { play: true, group: 0, keys: None, chords: None, velocity: None, scaling: 0, fixed: 90, touches }
     }
 
     fn mode(mode: TouchMode) -> PadTouch {
