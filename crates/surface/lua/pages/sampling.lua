@@ -4,6 +4,13 @@
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), PREVIOUS, NEXT take
 --   EDIT 5-6 / 8      ◀ the edit function ▶, APPLY (STEMS: CANCEL while separating)
+--   SHIFT+EDIT 5-8    a New Sampler zone's tempo: X2, 1/2, TO PROJECT, MATCH KEY (its
+--                     knob pages: TEMPO / PITCH, SYNC, WARP; its edit functions go on
+--                     with WARP MARKERS, QUANTIZE AUDIO, CLEAR WARP; TO (NEW) SAMPLER
+--                     converts the sound's Sampler)
+--   EDIT, PLAYBACK    a New Sampler slice: its SPEED against the song, REVERSE, its KEY
+--   EDIT, STEMS page  a zone with stem lanes: knobs 1-4 their levels, 5-8 mute them
+--                     (SHIFT: solo); the right display shows the lanes stacked
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
@@ -25,6 +32,8 @@ local FUNCTIONS = {
   { "STEMS", "stems" }, { "AUTOLOOP", "auto_loop" },
 }
 local func = 1
+-- A New Sampler zone with a tempo has its warp markers too; a Sampler converts.
+local WARP = { { "WARP MARKERS", "warp_markers" }, { "QUANTIZE AUDIO", "warp_quantize" }, { "CLEAR WARP", "warp_clear" } }
 
 -- The knob page shown on each tab, the slice focused (from 1; none until a pad picks
 -- one: the buttons then act on the first), the knobs touched.
@@ -57,6 +66,8 @@ local function slice_pages(v)
     slicer[2], slicer[3] = k["Slice.Density"], k["Slice.ZeroX"]
   elseif mode == "Split" then
     slicer[2] = k["Slice.Split"]
+  elseif mode == "Find" then
+    slicer[2] = k["Slice.Find"]
   elseif mode == "Grid" then
     slicer[2], slicer[3], slicer[4] = k["Slice.Grid"], k["Slice.BpmMode"], k["Slice.Bpm"]
   end
@@ -108,6 +119,68 @@ local function stems_running(v)
   return v.stems ~= nil
 end
 
+-- A New Sampler zone: the app gives its EDIT tab a TEMPO / PITCH page.
+local function tempo_page(v)
+  for _, p in ipairs(v.pages[2] or {}) do
+    if p.name == "TEMPO / PITCH" then return p end
+  end
+end
+
+-- The EDIT functions for what's focused.
+local function functions(v)
+  local list = {}
+  for _, f in ipairs(FUNCTIONS) do list[#list + 1] = f end
+  local p = tempo_page(v)
+  if p and p.knobs[2] and p.knobs[2].text ~= "-" then
+    for _, f in ipairs(WARP) do list[#list + 1] = f end
+  end
+  if not (v.sample and v.sample.take) then
+    list[#list + 1] = { p and "TO SAMPLER" or "TO NEW SAMPLER", "convert" }
+  end
+  return list
+end
+
+local function current(v)
+  local list = functions(v)
+  func = math.max(1, math.min(func, #list))
+  return list[func], #list
+end
+
+-- SHIFT on EDIT, for a New Sampler zone with a tempo.
+local function tempo_buttons(v)
+  if v.tab ~= 2 or not deckard.held("SHIFT") then return nil end
+  local p = tempo_page(v)
+  if not p then return nil end
+  local has = p.knobs[2] and p.knobs[2].text ~= "-"
+  return {
+    { text = "X2", disabled = not has, act = function() deckard.sampling_call("double_bpm") end },
+    { text = "1/2", disabled = not has, act = function() deckard.sampling_call("halve_bpm") end },
+    { text = "TO PROJECT", disabled = not has, act = function() deckard.sampling_call("to_project") end },
+    { text = "MATCH KEY", disabled = not (p.knobs[4] ~= nil), act = function() deckard.sampling_call("match_key") end },
+  }
+end
+
+-- The stem lanes' colours, by lane: Drums, Vocals, Bass, Leads.
+local LANE_COLOURS = { { 242, 162, 60 }, { 232, 88, 138 }, { 90, 156, 242 }, { 98, 199, 138 } }
+
+-- EDIT's STEMS knob page shows (a zone with stem lanes): the display buttons mute its
+-- lanes (lit: heard), SHIFT solos them.
+local function stem_buttons(v)
+  if v.tab ~= 2 or not (v.sample and v.sample.lanes and #v.sample.lanes > 0) then return nil end
+  local p = knob_page(v)
+  if not p or p.name ~= "STEMS" then return nil end
+  local solo = deckard.held("SHIFT")
+  local out = {}
+  for i, l in ipairs(v.sample.lanes) do
+    out[i] = {
+      text = l.name,
+      selected = solo and l.solo or (not solo and l.heard),
+      act = function() deckard.sampling_call(solo and "lane_solo" or "lane_mute", l.lane) end,
+    }
+  end
+  return out
+end
+
 -- RECORD: the takes on the pads (TAKES), and the bank of 16 shown.
 local takes_on_pads, take_bank = false, 0
 
@@ -142,7 +215,9 @@ local function buttons(v)
       { text = "BANK " .. (take_bank + 1), disabled = not takes_on_pads or banks < 2, act = function() take_bank = (take_bank + 1) % banks end },
     }
   elseif v.tab == 2 then
-    local f = FUNCTIONS[func]
+    local t = stem_buttons(v) or tempo_buttons(v)
+    if t then return t end
+    local f = current(v)
     local cancel = f[2] == "stems" and v.stems and v.stems.focused
     return {
       { arrows = true, text = f[1], disabled = not s },
@@ -192,8 +267,11 @@ function page.button(name, down)
       if n <= tab_count(v) then deckard.sampling_tab(n) end
       return true
     end
-    if v.tab == 2 and (n == 5 or n == 6) then
-      if v.sample then func = (func + (n == 6 and 1 or -1) - 1) % #FUNCTIONS + 1 end
+    if v.tab == 2 and (n == 5 or n == 6) and not stem_buttons(v) and not tempo_buttons(v) then
+      if v.sample then
+        local _, count = current(v)
+        func = (func + (n == 6 and 1 or -1) - 1) % count + 1
+      end
       return true
     end
     local b = buttons(v)[n - 4]
@@ -311,7 +389,7 @@ function page.leds()
   -- (WAITING flashes, four times a second.)
   local flash = v.record.waiting and (deckard.now() * 4) % 2 < 1
   for i = 5, 8 do
-    local spec = b[i - 4] or (v.tab == 2 and i == 6 and b[1])
+    local spec = b[i - 4] or (v.tab == 2 and i == 6 and not stem_buttons(v) and not tempo_buttons(v) and b[1])
     local lit = spec and not spec.disabled and (spec.text or spec.arrows)
     deckard.led("SCREEN_" .. i, lit and (((i == 5 and flash) or spec.selected) and "on" or "dim") or "off")
   end
@@ -381,6 +459,9 @@ local function sample_bar(screen, theme, v)
   screen:label(490, 38, 950 - w - lw - 500, 18, s.name, st, "left", "bottom")
 end
 
+-- How bright a waveform is where it plays (of its colour: 1 is all of it).
+local WAVE_LIT = 1
+
 -- A waveform of `peaks` (min, max a column) in (x, y, w, h), showing frames `a` to `b`
 -- of `s`: in `colour` where it plays (or in a slice), faint elsewhere.
 local function wave(screen, theme, s, peaks, x, y, w, h, a, b, colour, slices)
@@ -398,13 +479,15 @@ local function wave(screen, theme, s, peaks, x, y, w, h, a, b, colour, slices)
   if s.selection and not slices then ground(s.selection[1], s.selection[2], "wave_selection") end
   if slices and slice and s.slices[slice] then ground(s.slices[slice], s.slices[slice + 1] or last, "slice_focus") end
   local off = slices and "wave_unsliced" or "wave_off"
+  -- What plays, at this much of its colour's brightness.
+  local lit = type(colour) == "table" and widgets.blend(colour, { 0, 0, 0 }, WAVE_LIT) or colour
   for c = 0, w - 1 do
     local lo, hi = peaks[2 * c + 1], peaks[2 * c + 2]
     if lo then
       local f = a + (c + 0.5) * per
       local top = math.floor(mid - hi * h / 2)
       local bottom = math.ceil(mid - lo * h / 2)
-      screen:rect(x + c, top, 1, math.max(1, bottom - top), (f >= first and f < last) and colour or off)
+      screen:rect(x + c, top, 1, math.max(1, bottom - top), (f >= first and f < last) and lit or off)
     end
   end
   local function mark(f, c, width)
@@ -527,7 +610,7 @@ function page.draw(screen, theme)
 
   local smp = v.sample
   local colour = widgets.colour(theme, smp and smp.palette or (s.groups[s.group] and s.groups[s.group].sounds[s.sound] or {}).palette)
-  if v.tab == 2 and v.stems and v.stems.focused and FUNCTIONS[func][2] == "stems" then
+  if v.tab == 2 and v.stems and v.stems.focused and current(v)[2] == "stems" then
     stems_progress(screen, theme, v)
   elseif v.tab == 1 then
     meters(screen, v, colour)
@@ -539,7 +622,20 @@ function page.draw(screen, theme)
     else
       wave(screen, theme, smp, deckard.peaks("overview"), 0, 60, 480, 144, 0, smp.frames, colour, slices)
     end
-    wave(screen, theme, smp, deckard.peaks("detail"), 480, 60, 480, 212, smp.view[1], smp.view[2], colour, slices)
+    local lanes = smp.lanes or {}
+    if #lanes > 0 and v.tab == 2 then
+      -- Its stem lanes stacked, each in its colour (dim: not heard), its name on it.
+      local h = math.floor(212 / #lanes)
+      for i, l in ipairs(lanes) do
+        local c = LANE_COLOURS[l.lane] or colour
+        if not l.heard then c = widgets.blend(c, { 0, 0, 0 }, 0.3) end
+        local y = 60 + (i - 1) * h
+        wave(screen, theme, smp, deckard.peaks("lane" .. i), 480, y, 480, h - 1, smp.view[1], smp.view[2], c, false)
+        screen:label(486, y + 2, 120, 14, l.name .. (l.solo and "  S" or (l.mute and "  M" or "")), { size = 11, color = "weak" }, "left", "top")
+      end
+    else
+      wave(screen, theme, smp, deckard.peaks("detail"), 480, 60, 480, 212, smp.view[1], smp.view[2], colour, slices)
+    end
     if touched[5] or touched[6] or touched[7] or touched[8] then
       widgets.knob_icon(screen, theme, 5, "zoom")
       widgets.knob_icon(screen, theme, 6, "scroll")

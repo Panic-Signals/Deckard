@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mxprj", "crates/model", "crates/doc", "apps/viewer", "crates/lua-host", "crates/engine", "crates/plugins", "apps/player", "crates/mk3", "crates/jam", "crates/nwl", "crates/mi", "crates/stems", "crates/stretch", "crates/library", "crates/link", "crates/surface"]
+members = ["crates/mxprj", "crates/model", "crates/doc", "apps/viewer", "crates/lua-host", "crates/engine", "crates/plugins", "apps/player", "crates/mk3", "crates/jam", "crates/nwl", "crates/mi", "crates/stems", "crates/stretch", "crates/library", "crates/link", "crates/surface", "crates/analysis"]
 
 # The display renderer runs every time a screen changes: fast even in dev builds.
 [profile.dev.package.deckard-nwl]
@@ -12,6 +12,26 @@ opt-level = 3
 [profile.dev.package.deckard-stretch]
 opt-level = 3
 
+# The audio thread's code: a debug build has to keep up with the device too (a New
+# Sampler's voices each mix four stem lanes into a stretcher).
+[profile.dev.package.deckard-engine]
+opt-level = 2
+
 # Zhora's pitch detector has to keep up with the input, in dev builds too.
 [profile.dev.package.deckard-plugins]
+opt-level = 3
+
+# Tests analyse seconds of audio: fast even in dev builds.
+[profile.dev.package.deckard-analysis]
+opt-level = 3
+
+# Decoding an MP3 and keying a sample by its audio: a song takes a second, not a minute,
+# in dev builds too.
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.symphonia-core]
+opt-level = 3
+
+[profile.dev.package.sha2]
 opt-level = 3

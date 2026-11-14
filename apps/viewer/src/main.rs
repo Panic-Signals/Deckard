@@ -58,8 +58,10 @@ pub const VERSION: &str = match option_env!("DECKARD_VERSION") {
 };
 /// Built by the release scripts (with a version minted on GitHub), not from source.
 pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
+mod analysis;
 #[cfg(test)]
 mod auto_length_tests;
+mod beat;
 #[cfg(test)]
 mod expr_lane_tests;
 #[cfg(test)]
@@ -119,6 +121,7 @@ mod record;
 mod record_knobs;
 mod recorder;
 mod remote;
+mod render_jobs;
 mod sampler_ui;
 mod sampling_hw;
 #[cfg(test)]
@@ -696,7 +699,7 @@ fn parse_list(text: &str) -> Vec<String> {
 }
 
 fn is_sample_file(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["wav", "aif", "aiff", "aifc"].contains(&e.to_ascii_lowercase().as_str()))
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| deckard_engine::sample::EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 fn new_zone(file: &Path, frames: usize, from: deckard_doc::ZoneFrom) -> deckard_doc::ZoneSpec {
@@ -964,6 +967,8 @@ pub struct App {
     pending_launch: Option<usize>,
     /// The note sounding while the mouse button is down: (group, sound, pitch).
     held: Option<(usize, usize, i64)>,
+    /// The note the Sampling page's PLAY holds (group, sound, pitch), until its STOP.
+    audition: Option<(usize, usize, i64)>,
     /// Scripted pointer input (`--input`): (seconds after start, (m/d/u = move, down,
     /// up, position)).
     input_script: Vec<(f32, (char, egui::Pos2))>,
@@ -1217,6 +1222,12 @@ pub struct App {
     hw_sampling_tab: Option<usize>,
     /// The stem separation running (EDIT ▸ STEMS; one at a time).
     stems: Option<stems::Job>,
+    /// The New Sampler's zones being analysed, and the document revision they were
+    /// last looked for at.
+    analysis: analysis::Jobs,
+    analysis_revision: Option<u64>,
+    /// The New Sampler's Sync and Keys renders being made.
+    renders: render_jobs::Renders,
     /// Where audio files dragged from the desktop are over the window, and those
     /// dropped this frame (they go to the sound row there: `drop_samples`).
     file_drag: Option<egui::Pos2>,
@@ -6471,6 +6482,40 @@ impl App {
         }
     }
 
+    /// The key the Sampling page's PLAY plays: the focused zone's root (an Audio plug-in's
+    /// take: as its page shows it).
+    fn audition_key(&self) -> Option<i64> {
+        let doc = self.doc.as_ref()?.borrow();
+        layout::sampling::edited(doc.project(), (self.group, self.sound, self.zone)).map(|e| e.1.root_key)
+    }
+
+    /// The Sampling page's PLAY / STOP: the focused sound's note on `pitch` held until
+    /// the next press, which ends it and whatever of the sound still rings (a one-shot
+    /// doesn't end with its note). The song, if it plays, plays on.
+    pub(crate) fn audition_toggle(&mut self, pitch: i64) {
+        let (g, s) = (self.group, self.sound);
+        let sounding = self.sampling.playhead.is_some();
+        if let Some((ag, asnd, ap)) = self.audition.take()
+            && let Some(Ok(out)) = &self.output
+        {
+            out.live(deckard_engine::Live::NoteRelease { group: ag, sound: asnd, pitch: ap });
+            out.live(deckard_engine::Live::ChokeSound { group: ag, sound: asnd });
+            if sounding {
+                return;
+            }
+        } else if sounding {
+            if let Some(Ok(out)) = &self.output {
+                out.live(deckard_engine::Live::ChokeSound { group: g, sound: s });
+            }
+            return;
+        }
+        let before = self.held.take();
+        self.hold_pitch(g, s, pitch);
+        // Not the mouse's: it stays down when the button comes up.
+        self.audition = self.held.take();
+        self.held = before;
+    }
+
     /// Start a note that sounds while the mouse button is held (a piano-roll key, or
     /// a note pressed in the pattern editor); `frame` ends it on release.
     pub fn hold_pitch(&mut self, group: usize, sound: usize, pitch: i64) {
@@ -7049,6 +7094,8 @@ impl App {
     fn update_sampling(&mut self) {
         self.open_saved_zone();
         self.poll_stems();
+        self.follow_analysis();
+        self.follow_renders();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
         let take_key = self.doc.as_ref().and_then(|doc| {
@@ -7128,10 +7175,15 @@ impl App {
                                 let z = z.and_then(|x| x.sampler.as_ref()).and_then(|x| x.zones.get(zi));
                                 self.sampling.selection = z.and_then(|z| layout::sampling::first_selection(z, frames));
                             }
+                            // Zoomed in elsewhere in the file: the zone's own part of it comes into view.
+                            let range =
+                                layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, zi)).map(|e| e.1.play_range);
+                            if let Some((lo, hi)) = range.filter(|r| r.1 > r.0) {
+                                self.sampling.reveal(lo as f64, hi as f64 + 1.0);
+                            }
                         }
                         None => {
-                            self.sampling.sample = None;
-                            self.sampling.sample_key = None;
+                            self.sampling.clear_sample();
                         }
                     }
                 }
@@ -7139,10 +7191,20 @@ impl App {
                     Some(Ok(out)) => out.zone_position(self.group, self.sound, zi),
                     _ => None,
                 };
+                // Its stem lanes' waveforms.
+                let files: [Option<String>; deckard_model::new_sampler::LANES] = {
+                    let d = doc.borrow();
+                    let z = layout::sampling::edited(d.project(), (self.group, self.sound, self.zone)).filter(|e| !e.3);
+                    let stems = z.and_then(|(_, z, ..)| z.meta).map(|m| m.stems).unwrap_or_default();
+                    stems.map(|l| l.map(|l| l.file))
+                };
+                let samples = &mut self.samples;
+                self.sampling.set_lanes(files, |file| {
+                    samples.sample(&deckard_model::SampleRef { kind: 0, path: file.to_string(), ..Default::default() }, path.as_deref())
+                });
             }
             None => {
-                self.sampling.sample = None;
-                self.sampling.sample_key = None;
+                self.sampling.clear_sample();
                 if self.sampling.tab != 0 {
                     self.sampling.tab = 0;
                 }
@@ -7249,14 +7311,23 @@ impl App {
     }
 
     /// STEMS: separate the focused zone's sample in the background.
-    fn start_stems(&mut self) {
+    fn start_stems(&mut self, to_group: bool) {
         let (Some(sample), Some(dir)) = (self.sampling.sample.clone(), menu::settings_dir()) else { return };
+        // A New Sampler's analysed zone takes the stems as its lanes.
+        let into_lanes = !to_group
+            && self.doc.as_ref().is_some_and(|d| {
+                let d = d.borrow();
+                d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).is_some_and(|snd| {
+                    snd.new_sampler.is_some() && snd.sampler.as_ref().and_then(|x| x.zones.get(self.zone)).is_some_and(|z| z.meta.is_some())
+                })
+            });
         let Some((_, sref, beats)) = self.focused_sample() else { return };
         let file = sref.path.rsplit(['/', '\\']).next().unwrap_or("Sample");
         let name = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string();
         self.status = format!("separating {name} into stems…");
         let mut job = stems::Job::start(sample, name, (self.group, self.sound, self.zone), dir);
         job.beats = beats;
+        job.into_lanes = into_lanes;
         self.stems = Some(job);
     }
 
@@ -7276,14 +7347,228 @@ impl App {
         Some((k, smp.zones[k].sample.clone(), None))
     }
 
+    /// Analyse the New Sampler's zones that aren't yet, and keep what's found in each
+    /// zone still holding that file (no undo step).
+    fn follow_analysis(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let done = self.analysis.poll();
+        if !done.is_empty() {
+            let mut targets = Vec::new();
+            {
+                let d = doc.borrow();
+                for (g, grp) in d.project().groups.iter().enumerate() {
+                    for (s, snd) in grp.sounds.iter().enumerate() {
+                        let Some(smp) = snd.sampler.as_ref().filter(|_| snd.new_sampler.is_some()) else { continue };
+                        for (z, zone) in smp.zones.iter().enumerate() {
+                            if let Some(job) = done.iter().find(|j| zone.meta.is_none() && j.file == zone.sample.path) {
+                                let name = analysis::file_name_of(&zone.sample.path);
+                                targets.push((g, s, z, analysis::meta_from(&job.analysis, &job.file, &name)));
+                            }
+                        }
+                    }
+                }
+            }
+            for (g, s, z, meta) in targets {
+                let _ = doc.borrow_mut().note_zone_meta(g, s, z, &meta);
+            }
+        }
+        let revision = doc.borrow().revision();
+        if self.analysis_revision == Some(revision) {
+            return;
+        }
+        self.analysis_revision = Some(revision);
+        let mut wanted = Vec::new();
+        {
+            let d = doc.borrow();
+            for snd in d.project().groups.iter().flat_map(|g| &g.sounds).filter(|s| s.new_sampler.is_some()) {
+                for zone in snd.sampler.iter().flat_map(|x| &x.zones).filter(|z| z.meta.is_none() && !z.sample.path.is_empty()) {
+                    wanted.push(zone.sample.clone());
+                }
+            }
+        }
+        for sample in wanted {
+            if let Some(audio) = self.samples.sample(&sample, self.path.as_deref()) {
+                self.analysis.want(&sample.path, &analysis::file_name_of(&sample.path), audio);
+            }
+        }
+    }
+
+    /// The Sync and Keys renders engines asked for go to the render thread; those made
+    /// go to the samples, and playback is built again to play them (its voices carry on
+    /// where the music is).
+    fn follow_renders(&mut self) {
+        for job in self.samples.wanted_renders() {
+            self.renders.want(job);
+        }
+        let made = self.renders.poll();
+        if made.is_empty() {
+            return;
+        }
+        for (job, r) in made {
+            self.samples.add_render(&job, r);
+        }
+        // Built in full: the sounds' zones change, not the document.
+        self.built = None;
+        self.seen_revision = u64::MAX;
+    }
+
     /// A finished (or failed, or cancelled) stem separation.
     fn poll_stems(&mut self) {
         let Some(result) = self.stems.as_ref().and_then(stems::Job::poll) else { return };
         let job = self.stems.take().expect("the job polled");
         match result {
+            Ok(stems) if job.into_lanes => self.finish_stem_lanes(&job.name, job.rate, stems, job.source),
             Ok(stems) => self.finish_stems(&job.name, job.rate, stems, job.beats),
             Err(_) if job.cancelled() => self.status = "stem separation cancelled".into(),
             Err(e) => self.status = format!("stem separation failed: {e}"),
+        }
+    }
+
+    /// The stems as the zone's lanes (roadmap 2b): each saved as a sample ("<name>
+    /// Drums", …) and put on zone `at` (still playing the sample they came from), all
+    /// on. One undo step.
+    fn finish_stem_lanes(&mut self, name: &str, rate: u32, stems: Vec<deckard_stems::Stem>, at: (usize, usize, usize)) {
+        use deckard_model::new_sampler::StemLane;
+        use deckard_stems::Kind;
+        let Some(doc) = self.doc.clone() else { return };
+        let meta = doc
+            .borrow()
+            .project()
+            .groups
+            .get(at.0)
+            .and_then(|g| g.sounds.get(at.1))
+            .and_then(|x| x.sampler.as_ref())
+            .and_then(|x| x.zones.get(at.2))
+            .and_then(|z| z.meta.clone());
+        let Some(mut meta) = meta else {
+            self.status = "the zone changed while its stems were made: they weren't kept".into();
+            return;
+        };
+        let dir = self.sample_dir("Stems");
+        for s in stems {
+            let lane = match s.kind {
+                Kind::Drums => 0,
+                Kind::Vocals => 1,
+                Kind::Bass => 2,
+                Kind::Other => 3,
+            };
+            let path = dir.join(format!("{name} {}.wav", s.kind.name()).replace(['/', ':'], "-"));
+            if let Err(e) = deckard_engine::edit::write_wav_channels(&path, &deckard_engine::sample::Sample { rate, frames: s.frames }, 2) {
+                self.status = format!("can't save the stems: {e}");
+                return;
+            }
+            meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
+        }
+        meta.stems_only = false;
+        match doc.borrow_mut().set_zone_meta(at.0, at.1, at.2, &meta, "Stems") {
+            Ok(()) => self.status = format!("{name}: stems on its lanes (M and S on each)"),
+            Err(e) => self.status = format!("can't put the stems on the zone: {e}"),
+        }
+    }
+
+    /// Stems of your own on the focused New Sampler zone's lanes: up to four files at
+    /// the sample's rate, each on the lane its name says (drums, vocals, bass; else
+    /// Leads, or the next free). One shorter than the sample is padded with silence (a
+    /// copy, in Stems); one longer is refused. One undo step.
+    fn load_stems(&mut self, files: &[PathBuf]) {
+        use deckard_model::new_sampler::StemLane;
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let (Some(mut meta), Some(sample)) = (zone.meta, self.sampling.sample.clone()) else {
+            self.status = "stems go on a New Sampler's zone (once it's analysed)".into();
+            return;
+        };
+        let mut taken: [bool; 4] = std::array::from_fn(|k| meta.stems[k].is_some());
+        let mut left_out = Vec::new();
+        for f in files {
+            let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let stem = match deckard_engine::sample::Sample::load(f) {
+                Ok(s) if s.rate != sample.rate => {
+                    left_out.push(format!("{name} ({} Hz, the sample is {})", s.rate, sample.rate));
+                    continue;
+                }
+                Ok(s) if s.frames.len() > sample.frames.len() => {
+                    left_out.push(format!("{name} (longer than the sample)"));
+                    continue;
+                }
+                Ok(s) => s,
+                Err(e) => {
+                    left_out.push(format!("{name} ({e})"));
+                    continue;
+                }
+            };
+            let Some(lane) = beat::lane_for(&name, &taken) else {
+                left_out.push(format!("{name} (four lanes at most)"));
+                continue;
+            };
+            let mut path = f.clone();
+            if stem.frames.len() < sample.frames.len() {
+                let mut frames = stem.frames;
+                frames.resize(sample.frames.len(), [0.0; 2]);
+                path = deckard_engine::edit::edited_path(&self.sample_dir("Stems"), f);
+                if let Err(e) =
+                    deckard_engine::edit::write_wav_channels(&path, &deckard_engine::sample::Sample { rate: stem.rate, frames }, 2)
+                {
+                    left_out.push(format!("{name} ({e})"));
+                    continue;
+                }
+            }
+            taken[lane] = true;
+            meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
+        }
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Load Stems") {
+            self.status = format!("can't put the stems on the zone: {e}");
+        } else if !left_out.is_empty() {
+            self.status = format!("left out: {}", left_out.join(", "));
+        }
+    }
+
+    /// A stem lane of the focused zone muted, soloed, set to a gain, or all removed.
+    fn lane_act(&mut self, lane: usize, act: layout::sampling::LaneAct) {
+        use layout::sampling::LaneAct as L;
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let Some(mut meta) = zone.meta else { return };
+        let label = match act {
+            L::Clear => {
+                meta.stems = Default::default();
+                meta.stems_only = false;
+                "Remove Stems"
+            }
+            L::Delete => {
+                if meta.stems.get(lane).is_none_or(Option::is_none) {
+                    return;
+                }
+                meta.stems[lane] = None;
+                // What's left is all that plays; with none left, the sample again.
+                meta.stems_only = meta.has_stems();
+                "Delete Stem"
+            }
+            _ => {
+                let Some(l) = meta.stems.get_mut(lane).and_then(Option::as_mut) else { return };
+                match act {
+                    L::Mute => {
+                        l.mute = !l.mute;
+                        "Stem Mute"
+                    }
+                    L::Solo => {
+                        l.solo = !l.solo;
+                        "Stem Solo"
+                    }
+                    L::Gain(g) => {
+                        l.gain = g.clamp(0.0, 2.0);
+                        "Stem Gain"
+                    }
+                    L::Clear | L::Delete => return,
+                }
+            }
+        };
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, label) {
+            self.status = format!("can't change the stems: {e}");
         }
     }
 
@@ -7379,9 +7664,66 @@ impl App {
         }
     }
 
+    /// A New Sampler zone's meta after an edit of its sample: its stem lanes edited the
+    /// same way by `lane` (each written as a new file), so the zone stays four waveforms
+    /// cut alike; its tempo and grid follow (`stretched`: the tempo changes with the
+    /// length, else the beats do; `shift`: frames taken off the front). `None`: the zone
+    /// has no lanes, or one can't be carried (the edit then leaves the zone without).
+    fn carry_lanes(
+        &mut self,
+        key: &(usize, usize, usize, String),
+        new_len: usize,
+        lane: &dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample,
+        (shift, stretched): (usize, bool),
+    ) -> Option<deckard_model::new_sampler::ZoneMeta> {
+        let doc = self.doc.clone()?;
+        let mut meta = {
+            let d = doc.borrow();
+            let snd = d.project().groups.get(key.0)?.sounds.get(key.1)?;
+            snd.new_sampler.as_ref()?;
+            snd.sampler.as_ref()?.zones.get(key.2)?.meta.clone().filter(|m| m.has_stems())?
+        };
+        let old_len = self.sampling.len();
+        let rate = self.sampling.sample.as_ref()?.rate;
+        let dir = self.sample_dir("Stems");
+        let project = self.path.clone();
+        for k in 0..deckard_model::new_sampler::LANES {
+            let Some(l) = meta.stems[k].as_mut() else { continue };
+            let sref = deckard_model::SampleRef { kind: 0, path: l.file.clone(), ..Default::default() };
+            let src = self.samples.sample(&sref, project.as_deref()).filter(|x| x.frames.len() == old_len)?;
+            let out = lane(&src);
+            if out.frames.len() != new_len {
+                return None;
+            }
+            let path = deckard_engine::edit::edited_path(&dir, Path::new(&l.file));
+            deckard_engine::edit::write_wav(&path, &out).ok()?;
+            l.file = path.to_string_lossy().into();
+        }
+        if new_len != old_len && old_len > 0 {
+            let ratio = new_len as f64 / old_len as f64;
+            meta.warps.clear();
+            if stretched {
+                meta.bpm = meta.bpm.map(|b| b / ratio);
+                meta.grid_offset = (meta.grid_offset as f64 * ratio) as u64;
+            } else {
+                meta.beats = meta.beats.map(|b| b * ratio);
+                if let Some(per) = meta.bpm.map(|b| f64::from(rate) * 60.0 / b).filter(|p| *p >= 1.0) {
+                    meta.grid_offset = (meta.grid_offset as f64 - shift as f64).rem_euclid(per) as u64;
+                }
+            }
+        }
+        Some(meta)
+    }
+
     /// Write `sample` as an edited copy of the focused zone's file and point the zone at
-    /// it (one undo step).
-    fn store_edit(&mut self, sample: deckard_engine::sample::Sample, label: &str) {
+    /// it (one undo step). `lanes`: how the edit goes for a stem lane (see
+    /// [`Self::carry_lanes`]); without it the zone's lanes don't follow.
+    fn store_edit(
+        &mut self,
+        sample: deckard_engine::sample::Sample,
+        label: &str,
+        lanes: Option<(&dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample, (usize, bool))>,
+    ) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(key) = self.sampling.sample_key.clone() else { return };
         let original = PathBuf::from(&key.3);
@@ -7391,6 +7733,7 @@ impl App {
             return;
         }
         let frames = sample.frames.len();
+        let carried = lanes.and_then(|(lane, how)| self.carry_lanes(&key, frames, lane, how));
         // An Audio plug-in's take (its tempo kept), else a Sampler's zone.
         let audio = doc
             .borrow()
@@ -7402,13 +7745,23 @@ impl App {
         let done = if audio {
             doc.borrow_mut().set_take_sample(key.0, key.1, key.2, &target, frames, label)
         } else {
-            doc.borrow_mut().set_zone_sample(key.0, key.1, key.2, &target, frames, label)
+            doc.borrow_mut().transaction(label, |d| {
+                d.set_zone_sample(key.0, key.1, key.2, &target, frames, label)?;
+                // Its lanes, cut alike, on the new file.
+                if let Some(mut meta) = carried {
+                    meta.file = d.project().groups[key.0].sounds[key.1]
+                        .sampler
+                        .as_ref()
+                        .map_or_else(String::new, |x| x.zones[key.2].sample.path.clone());
+                    d.set_zone_meta(key.0, key.1, key.2, &meta, label)?;
+                }
+                Ok(())
+            })
         };
         match done {
             Ok(()) => {
                 self.status = format!("{label}: {}", target.display());
                 self.sampling.selection = None;
-                self.sampling.view = None;
             }
             Err(e) => self.status = format!("can't edit: {e}"),
         }
@@ -7423,27 +7776,68 @@ impl App {
             S::Tab(i) => {
                 self.sampling.tab = i;
                 if i == 2 && self.sampling.slices.is_empty() {
-                    self.compute_slices();
+                    // A sample already sliced shows its slices (Manual keeps them).
+                    match self.chops() {
+                        Some((_, starts, _)) => {
+                            self.sampling.slices = starts;
+                            self.sampling.slice_mode = 3;
+                        }
+                        None => self.compute_slices(),
+                    }
                 }
             }
             S::Stereo => self.sampling.stereo = !self.sampling.stereo,
+            S::Audition(pitch) => self.audition_toggle(pitch),
             S::View(v) => self.sampling.view = v,
             S::Select(s) => self.sampling.selection = s,
             S::Edit(EditOp::AutoLoop) => self.auto_loop(),
             S::Edit(EditOp::Stems) => match &self.stems {
                 Some(job) => job.cancel(),
-                None => self.start_stems(),
+                None => self.start_stems(false),
             },
+            S::StemsToGroup => {
+                if self.stems.is_none() {
+                    self.start_stems(true);
+                }
+            }
+            S::LoadStems => {
+                if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() {
+                    self.load_stems(&files);
+                }
+            }
+            S::Lane(k, act) => self.lane_act(k, act),
+            S::LanesMix(on) => self.sampling.lanes_mix = on,
             S::Edit(op) => {
                 let (Some(s), Some(r)) = (self.sampling.sample.clone(), self.edit_range()) else { return };
-                let (out, label) = match op {
-                    EditOp::Truncate => (edit::truncate(&s, r), "Truncate"),
-                    EditOp::Normalize => (edit::normalize(&s, r), "Normalize"),
-                    EditOp::Reverse => (edit::reverse(&s, r), "Reverse"),
-                    EditOp::FadeIn => (edit::fade(&s, r, true), "Fade In"),
-                    EditOp::FadeOut => (edit::fade(&s, r, false), "Fade Out"),
-                    EditOp::Dc => (edit::remove_dc(&s, r), "DC Correction"),
-                    EditOp::Silence => (edit::silence(&s, r), "Silence"),
+                type Lane = Box<dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample>;
+                // The edit, and the same for a stem lane (`None`: the lanes can't follow).
+                let (out, label, lane): (_, _, Option<Lane>) = match op {
+                    EditOp::Truncate => (edit::truncate(&s, r), "Truncate", Some(Box::new(move |l| edit::truncate(l, r)))),
+                    EditOp::Normalize => {
+                        let out = edit::normalize(&s, r);
+                        // The lanes by as much as the sample was (each to its own peak would
+                        // change their balance).
+                        let peak = |x: &deckard_engine::sample::Sample| {
+                            x.frames
+                                .get(r.0..r.1.min(x.frames.len()))
+                                .map_or(0.0, |f| f.iter().flat_map(|f| [f[0].abs(), f[1].abs()]).fold(0.0, f32::max))
+                        };
+                        let gain = if peak(&s) > 0.0 { peak(&out) / peak(&s) } else { 1.0 };
+                        let lane: Lane = Box::new(move |l| {
+                            let mut l = l.clone();
+                            let end = r.1.min(l.frames.len());
+                            for f in l.frames.get_mut(r.0..end).into_iter().flatten() {
+                                *f = [f[0] * gain, f[1] * gain];
+                            }
+                            l
+                        });
+                        (out, "Normalize", Some(lane))
+                    }
+                    EditOp::Reverse => (edit::reverse(&s, r), "Reverse", Some(Box::new(move |l| edit::reverse(l, r)))),
+                    EditOp::FadeIn => (edit::fade(&s, r, true), "Fade In", Some(Box::new(move |l| edit::fade(l, r, true)))),
+                    EditOp::FadeOut => (edit::fade(&s, r, false), "Fade Out", Some(Box::new(move |l| edit::fade(l, r, false)))),
+                    EditOp::Dc => (edit::remove_dc(&s, r), "DC Correction", Some(Box::new(|l| l.clone()))),
+                    EditOp::Silence => (edit::silence(&s, r), "Silence", Some(Box::new(move |l| edit::silence(l, r)))),
                     EditOp::Copy => {
                         self.sampling.clipboard = Some(edit::copy(&s, r));
                         self.status = "copied".into();
@@ -7452,16 +7846,18 @@ impl App {
                     EditOp::Cut => {
                         let (rest, clip) = edit::cut(&s, r);
                         self.sampling.clipboard = Some(clip);
-                        (rest, "Cut")
+                        (rest, "Cut", Some(Box::new(move |l| edit::cut(l, r).0)))
                     }
                     EditOp::Paste => {
                         let Some(clip) = self.sampling.clipboard.clone() else { return };
-                        (edit::paste(&s, r.0, &clip), "Paste")
+                        // What's pasted has no stems of its own.
+                        (edit::paste(&s, r.0, &clip), "Paste", None)
                     }
-                    EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate"),
+                    EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate", Some(Box::new(move |l| edit::duplicate(l, r)))),
                     EditOp::Stretch | EditOp::AutoLoop | EditOp::Stems => return,
                 };
-                self.store_edit(out, label);
+                let shift = if op == EditOp::Truncate { r.0 } else { 0 };
+                self.store_edit(out, label, lane.as_deref().map(|l| (l, (shift, false))));
             }
             S::StretchOpen(on) => {
                 let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
@@ -7474,7 +7870,9 @@ impl App {
                 self.status = "stretching…".into();
                 let out = edit::stretch(&s, r, sx.factor(), sx.tune);
                 self.sampling.stretch = None;
-                self.store_edit(out, "Stretch");
+                let (factor, tune) = (sx.factor(), sx.tune);
+                let lane = move |l: &deckard_engine::sample::Sample| edit::stretch(l, r, factor, tune);
+                self.store_edit(out, "Stretch", Some((&lane, (0, true))));
             }
             S::SliceMode(m) => {
                 self.sampling.slice_mode = m;
@@ -7482,6 +7880,10 @@ impl App {
             }
             S::SplitCount(i) => {
                 self.sampling.split = i;
+                self.compute_slices();
+            }
+            S::FindCount(i) => {
+                self.sampling.find = i.min(layout::sampling::FIND_COUNTS.len() - 1);
                 self.compute_slices();
             }
             S::GridDiv(i) => {
@@ -7519,11 +7921,61 @@ impl App {
             }
             S::ClearSlices => self.sampling.slices.clear(),
             S::PatternMode(m) => self.sampling.pattern_mode = m,
+            S::SliceToEnd(on) => self.sampling.slice_to_end = Some(on),
             S::ApplySlices => self.apply_slices(),
             S::FocusZone(i) => self.zone = i,
             S::ZoneMap(on) => self.sampling.zone_map = on,
             S::ZoneList(on) => self.sampling.zone_list = on,
             S::AddZones => self.add_zones(),
+            S::Meta(meta) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, _, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Zone Tempo") {
+                    self.status = format!("can't change the zone: {e}");
+                }
+            }
+            S::Tap(t) => {
+                let taps = &mut self.sampling.taps;
+                if taps.last().is_some_and(|l| t - l > beat::TAP_GAP || t < *l) {
+                    taps.clear();
+                }
+                taps.push(t);
+                let Some(bpm) = beat::tap_bpm(taps) else { return };
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                let (Some(meta), Some(s)) = (zone.meta, self.sampling.sample.as_ref()) else { return };
+                let meta = beat::with_bpm(&meta, bpm, s.frames.len() as f64 / s.rate.max(1) as f64);
+                // The taps of one count are one undo step.
+                let label = "Tap Tempo";
+                let mut d = doc.borrow_mut();
+                if self.sampling.taps.len() > 2 && d.undo_label() == Some(label) {
+                    d.undo();
+                }
+                if let Err(e) = d.set_zone_meta(self.group, self.sound, zi, &meta, label) {
+                    self.status = format!("can't change the zone: {e}");
+                }
+            }
+            S::Warp(w) => self.warp_act(w),
+            S::Reanalyze => self.reanalyze(),
+            S::ToProject(bpm) => {
+                let Some(doc) = self.doc.clone() else { return };
+                if let Err(e) = doc.borrow_mut().set_tempo(bpm) {
+                    self.status = format!("can't set the tempo: {e}");
+                }
+            }
+            S::PlayMode(mode) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                let Some(meta) = zone.meta else { return };
+                let meta = deckard_model::new_sampler::ZoneMeta { mode, ..meta };
+                if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Play Mode") {
+                    self.status = format!("can't change how the zone plays: {e}");
+                }
+            }
+            S::Plays(plays) => self.set_plays(plays),
             S::RemoveZone(i) => {
                 let Some(doc) = self.doc.clone() else { return };
                 let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
@@ -7603,20 +8055,96 @@ impl App {
         }
     }
 
+    /// The focused New Sampler zone's tempo and root again, heard in the part selected
+    /// (else the part it plays): a stretch of a song may have a tempo and a key of its
+    /// own. Its root stays if set by hand; its warp markers go (they were the old tempo's).
+    fn reanalyze(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let Some(s) = self.sampling.sample.clone() else { return };
+        let p = doc.borrow().project().clone();
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+        let Some(meta) = zone.meta else { return };
+        let (a, b) = self.sampling.selection.or_else(|| self.play_range_of_focused()).unwrap_or((0, s.frames.len()));
+        let (a, b) = (a.min(s.frames.len()), b.min(s.frames.len()));
+        if b <= a || s.rate == 0 {
+            return;
+        }
+        let found = deckard_analysis::analyse(&s.frames[a..b], s.rate, "");
+        let seconds = s.frames.len() as f64 / f64::from(s.rate);
+        let mut m = meta.clone();
+        if let Some(t) = found.tempo {
+            m = deckard_model::new_sampler::ZoneMeta {
+                bpm_source: deckard_model::new_sampler::BpmSource::Audio,
+                grid_offset: (a + t.offset) as u64,
+                warps: Vec::new(),
+                ..beat::with_bpm(&m, t.bpm, seconds)
+            };
+        }
+        if let Some(r) = found.root.filter(|_| !m.root_locked) {
+            (m.root, m.cents) = (Some(r.note), r.cents);
+        }
+        self.status = match (found.tempo, found.root) {
+            (None, None) => "Reanalyze: no tempo or root heard there".into(),
+            (t, r) => format!(
+                "Reanalyze: {}{}",
+                t.map_or("no tempo".into(), |t| format!("{:.2} BPM", t.bpm)),
+                r.map_or(String::new(), |r| format!(", root {}", analysis::note_name(r.note)))
+            ),
+        };
+        if m != meta
+            && let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &m, "Reanalyze")
+        {
+            self.status = format!("can't change the zone: {e}");
+        }
+    }
+
     /// Slice positions for the current mode (Manual keeps the ones set by hand).
     fn compute_slices(&mut self) {
         use deckard_engine::edit;
         use layout::sampling::{GRID_DIVS, SPLIT_COUNTS};
         let Some(s) = self.sampling.sample.clone() else { return };
-        let r = self.play_range_of_focused().unwrap_or((0, s.frames.len()));
+        let r = self.slice_range().unwrap_or((0, s.frames.len()));
         let st = &mut self.sampling;
         st.slices = match st.slice_mode {
             0 => edit::split_positions(r, SPLIT_COUNTS[st.split]),
             1 => {
-                let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
-                edit::grid_positions(s.rate, r, tempo, GRID_DIVS[st.grid].0)
+                // A New Sampler zone with a tempo: on its own beats. Else at the song's.
+                let map = self.doc.as_ref().and_then(|d| {
+                    let d = d.borrow();
+                    let snd = d.project().groups.get(self.group)?.sounds.get(self.sound)?;
+                    snd.new_sampler?;
+                    let m = snd.sampler.as_ref()?.zones.get(self.zone)?.meta.as_ref()?;
+                    deckard_model::new_sampler::BeatMap::of(m, s.rate)
+                });
+                match map {
+                    Some(map) => beat::grid_slices(&map, r, GRID_DIVS[st.grid].0),
+                    None => {
+                        let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
+                        edit::grid_positions(s.rate, r, tempo, GRID_DIVS[st.grid].0)
+                    }
+                }
             }
             2 => edit::detect_positions(&s, r, st.sensitivity, st.zero_x),
+            4 => {
+                // Where things start: on the sample's own bars (or beats, of a short one)
+                // when the zone has a tempo, else on its hits.
+                let count = layout::sampling::FIND_COUNTS[st.find.min(3)];
+                let map = self.doc.as_ref().and_then(|d| {
+                    let d = d.borrow();
+                    let m =
+                        d.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone)?.meta.clone()?;
+                    deckard_model::new_sampler::BeatMap::of(&m, s.rate)
+                });
+                let lines = map.map_or(Vec::new(), |map| {
+                    let by = |div| beat::grid_slices(&map, r, div);
+                    [1, 2, 4].into_iter().map(by).find(|l| l.len() >= 2 * count).unwrap_or_else(|| by(8))
+                });
+                let mut found = deckard_analysis::find_samples(&s.frames, s.rate, r, &lines, count);
+                if found.is_empty() {
+                    found.push(r.0);
+                }
+                found
+            }
             _ => {
                 if st.slices.is_empty() {
                     vec![r.0]
@@ -7627,6 +8155,34 @@ impl App {
         };
     }
 
+    /// The focused sound's zones of the focused zone's file, when there's more than one
+    /// (the sample was sliced): the frames they play between them, their starts in
+    /// order, and each start's zone.
+    fn chops(&self) -> Option<((usize, usize), Vec<usize>, Vec<usize>)> {
+        let doc = self.doc.as_ref()?.borrow();
+        let zones = &doc.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones;
+        let file = &zones.get(self.zone)?.sample;
+        let len = self.sampling.len();
+        let mut of: Vec<(usize, usize, usize)> = zones
+            .iter()
+            .enumerate()
+            .filter(|(_, z)| &z.sample == file && z.play_range.1 > z.play_range.0)
+            .map(|(i, z)| (z.play_range.0.max(0) as usize, (z.play_range.1 as usize + 1).min(len), i))
+            .collect();
+        of.sort_unstable();
+        of.dedup_by_key(|z| z.0);
+        (of.len() > 1).then(|| {
+            let span = (of[0].0, of.iter().map(|z| z.1).max().unwrap_or(len));
+            (span, of.iter().map(|z| z.0).collect(), of.iter().map(|z| z.2).collect())
+        })
+    }
+
+    /// The frames slicing works on: all a sliced sample's slices play, else the focused
+    /// zone's play range.
+    fn slice_range(&self) -> Option<(usize, usize)> {
+        self.chops().map(|c| c.0).or_else(|| self.play_range_of_focused())
+    }
+
     fn play_range_of_focused(&self) -> Option<(usize, usize)> {
         let doc = self.doc.as_ref()?.borrow();
         let z = doc.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone)?.clone();
@@ -7634,24 +8190,99 @@ impl App {
         Some(if z.play_range.1 > z.play_range.0 { (z.play_range.0 as usize, (z.play_range.1 as usize + 1).min(len)) } else { (0, len) })
     }
 
+    /// What a note does with the focused New Sampler slice. A one-shot that would play on
+    /// to the sample's end stops at the next slice instead (its E marker moves from there);
+    /// a loop with no frame of its own takes the slice (its start to the next one's); held
+    /// again, a slice cut short at the next one plays on to the end as it did.
+    fn set_plays(&mut self, plays: deckard_model::new_sampler::Plays) {
+        use deckard_model::new_sampler::{Plays, ZoneMeta};
+        use mxprj::decode::Value;
+        let Some(doc) = self.doc.clone() else { return };
+        let p = doc.borrow().project().clone();
+        let (g, s) = (self.group, self.sound);
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (g, s, self.zone)) else { return };
+        let Some(meta) = zone.meta.clone() else { return };
+        let Some(zones) = p.groups.get(g).and_then(|x| x.sounds.get(s)).and_then(|x| x.sampler.as_ref()).map(|x| &x.zones) else { return };
+        let len = self.sampling.len() as i64;
+        if len < 2 {
+            return;
+        }
+        let (lo, hi) = zone.play_range;
+        let (a, b) = if hi > lo { (lo.max(0), hi.min(len - 1)) } else { (0, len - 1) };
+        // Where this slice ends: the next one's start, or the sample's end.
+        let next = zones
+            .iter()
+            .filter(|z| z.sample == zone.sample && z.play_range.1 > z.play_range.0)
+            .map(|z| z.play_range.0)
+            .filter(|&x| x > a)
+            .min();
+        let slice_end = next.map_or(len - 1, |n| n - 1).max(a + 1);
+        let mut set: Vec<(&str, f64)> = Vec::new();
+        // No longer a one-shot, it plays on past the next slice again.
+        let mut b = b;
+        if plays != Plays::Once && meta.once && b == slice_end {
+            b = len - 1;
+            set.push(("play_range/high", b as f64));
+        }
+        match plays {
+            Plays::Held => set.push(("loop_active", 0.0)),
+            Plays::Once => {
+                set.push(("loop_active", 0.0));
+                if b >= len - 1 {
+                    set.push(("play_range/high", slice_end as f64));
+                }
+            }
+            Plays::Loop => {
+                let (la, lb) = zone.loop_range;
+                // A frame of its own: inside what it plays, and not the whole sample's.
+                let own = lb > la && la >= a && lb <= b && !(la <= 0 && lb >= len - 1 && slice_end < len - 1);
+                if !own {
+                    set.push(("loop_range/low", a as f64));
+                    set.push(("loop_range/high", slice_end.min(b) as f64));
+                }
+                set.push(("loop_active", 1.0));
+            }
+        }
+        let meta = ZoneMeta { once: plays == Plays::Once, ..meta };
+        let label = "Slice Plays";
+        let done = doc.borrow_mut().transaction(label, |d| {
+            for (field, v) in &set {
+                d.set(label, deckard_doc::Target::Zone(g, s, zi), field, Value::Float(*v))?;
+            }
+            d.set_zone_meta(g, s, zi, &meta, label)
+        });
+        if let Err(e) = done {
+            self.status = format!("can't change how the slice plays: {e}");
+        }
+    }
+
     /// APPLY: one zone per slice on the same sample, keys from C1 (MIDI 36); with
     /// "Create/Replace Pattern", a note per slice at its time in the focused pattern.
     fn apply_slices(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(s) = self.sampling.sample.clone() else { return };
-        let end = self.play_range_of_focused().map_or(s.frames.len(), |r| r.1);
+        let end = self.slice_range().map_or(s.frames.len(), |r| r.1);
         let slices = deckard_engine::edit::slices_from(&self.sampling.slices, end);
         if slices.len() < 2 {
             return;
         }
         let zi = self.zone;
+        // Sliced before: a slice still where it was keeps its zone's settings (its lanes'
+        // mutes, its tune), a new or moved one takes the focused zone's.
+        let was = self.chops().map(|c| (c.1, c.2)).unwrap_or_default();
+        let zone_of = |a: usize| was.0.iter().position(|&s| s == a).map_or(zi, |k| was.1[k]);
+        let (g, snd) = (self.group, self.sound);
+        // Start points: each slice plays on to the end, for as long as its pad is held.
+        let new_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(snd)).is_some_and(|x| x.new_sampler.is_some());
+        let to_end = self.sampling.slices_to_end(new_sampler);
         let specs: Vec<deckard_doc::ZoneSpec> = slices
             .iter()
             .enumerate()
             .map(|(i, &(a, b))| {
+                let b = if to_end { end } else { b };
                 let key = (36 + i).min(127) as f64;
                 deckard_doc::ZoneSpec {
-                    from: deckard_doc::ZoneFrom::Zone(zi),
+                    from: deckard_doc::ZoneFrom::Zone(zone_of(a)),
                     file: None,
                     set: vec![
                         ("play_range/low", a as f64),
@@ -7666,8 +8297,17 @@ impl App {
                 }
             })
             .collect();
-        let (g, snd) = (self.group, self.sound);
-        if let Err(e) = doc.borrow_mut().set_zones(g, snd, &specs, "Apply Slices") {
+        let done = doc.borrow_mut().transaction("Apply Slices", |d| {
+            d.set_zones(g, snd, &specs, "Apply Slices")?;
+            // A one-shot would play on to the end whatever the pad does: the notes end it.
+            let one_shot = d.project().groups[g].sounds[snd].sampler.as_ref().is_some_and(|x| x.envelope_type == 0);
+            if to_end && one_shot {
+                d.set("Apply Slices", deckard_doc::Target::Sampler(g, snd), "envelope_type", mxprj::decode::Value::Float(2.0))?;
+                d.set("Apply Slices", deckard_doc::Target::Sampler(g, snd), "volume_envelope/release", mxprj::decode::Value::Float(0.1))?;
+            }
+            Ok(())
+        });
+        if let Err(e) = done {
             self.status = format!("can't apply the slices: {e}");
             return;
         }
@@ -7706,7 +8346,7 @@ impl App {
     /// Zone list "+": load samples as new zones (each over all keys and velocities).
     fn add_zones(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "aifc"]).pick_files() else { return };
+        let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() else { return };
         let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
         let mut specs: Vec<deckard_doc::ZoneSpec> =
             (0..n).map(|k| deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Zone(k), file: None, set: Vec::new() }).collect();
@@ -8076,10 +8716,66 @@ impl App {
             }
             Some(Apply::SliceMode) => SamplingAct::SliceMode(sampling_hw::app_slice_mode(value)),
             Some(Apply::SplitCount) => SamplingAct::SplitCount(at),
+            Some(Apply::FindCount) => SamplingAct::FindCount(at),
             Some(Apply::GridDiv) => SamplingAct::GridDiv(at),
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
+            Some(Apply::LaneGain(k)) => {
+                let gain = if value <= -60.0 { 0.0 } else { 10f64.powf(value.min(6.0) / 20.0) };
+                SamplingAct::Lane(k, layout::sampling::LaneAct::Gain(gain))
+            }
+            Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
+            Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
+            Some(Apply::LoopLength) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some(rate) = self.sampling.sample.as_ref().map(|s| s.rate) else { return };
+                let (unit, step, _) = sampling_hw::loop_unit(z.meta.as_ref().and_then(|m| m.bpm), rate);
+                // On the step's lines: a loop of an odd length takes the nearest.
+                let n = ((value / step).round().max(1.0) * step * unit).round() as i64;
+                let last = if z.play_range.1 > z.play_range.0 { z.play_range.1 } else { self.sampling.len() as i64 - 1 };
+                let end = (z.loop_range.0 + n - 1).clamp(z.loop_range.0 + 1, last.max(z.loop_range.0 + 1));
+                layout::apply_acts(self, vec![layout::Act::SetParam(t, "loop_range/high", end as f64)]);
+                return;
+            }
+            Some(Apply::Plays) => SamplingAct::Plays(deckard_model::new_sampler::Plays::ALL[at.min(2)]),
+            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid | Apply::Speed | Apply::Reverse)) => {
+                use deckard_model::new_sampler::PlayMode;
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some(m) = z.meta else { return };
+                let seconds = self.sampling.sample.as_ref().map_or(0.0, |s| s.frames.len() as f64 / s.rate.max(1) as f64);
+                match a {
+                    Apply::PlayMode => {
+                        let mode = [PlayMode::Repitch, PlayMode::Sync, PlayMode::Keys][at.min(2)];
+                        if mode != PlayMode::Repitch && m.bpm.is_none() {
+                            return;
+                        }
+                        SamplingAct::PlayMode(mode)
+                    }
+                    Apply::Bpm => SamplingAct::Meta(beat::with_bpm(&m, value, seconds)),
+                    Apply::Root => SamplingAct::Meta(beat::with_root(&m, at.min(127) as u8)),
+                    Apply::Speed => {
+                        SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { speed: (value.round() / 100.0).clamp(0.25, 4.0), ..m })
+                    }
+                    Apply::Reverse => SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { reverse: value >= 0.5, ..m }),
+                    Apply::StartGrid => {
+                        use deckard_model::new_sampler::{StartGrid, ZoneMeta};
+                        SamplingAct::Meta(ZoneMeta { start: StartGrid::ALL[at.min(StartGrid::ALL.len() - 1)], ..m })
+                    }
+                    _ => {
+                        let Some(r) = m.root else { return };
+                        let tune = beat::tune_for(r, m.cents, at.min(127) as i64).clamp(-36.0, 36.0);
+                        layout::apply_acts(self, vec![layout::Act::SetParam(t, "tune", tune)]);
+                        return;
+                    }
+                }
+            }
             Some(Apply::None) | None => return,
         };
         self.sampling_act(act);
@@ -8135,12 +8831,63 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::LaneMute(k) => S::Lane(k, layout::sampling::LaneAct::Mute),
+            C::LaneSolo(k) => S::Lane(k, layout::sampling::LaneAct::Solo),
+            C::Warp(k) => {
+                use layout::sampling::WarpAct as W;
+                S::Warp([W::Detect, W::Quantize, W::Clear][k.min(2)])
+            }
+            C::Convert => {
+                let Some(doc) = self.doc.clone() else { return };
+                let to_new = doc
+                    .borrow()
+                    .project()
+                    .groups
+                    .get(self.group)
+                    .and_then(|x| x.sounds.get(self.sound))
+                    .is_some_and(|x| x.new_sampler.is_none());
+                self.convert_instrument(to_new);
+                return;
+            }
+            C::MatchKey => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some((r, cents)) = z.meta.and_then(|m| Some((m.root?, m.cents))) else { return };
+                let tune = beat::match_tune(r, cents, self.scale.0).clamp(-36.0, 36.0);
+                layout::apply_acts(self, vec![layout::Act::SetParam(t, "tune", tune)]);
+                return;
+            }
+            C::ScaleBpm(_) | C::ToProject => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some((m, bpm)) = z.meta.and_then(|m| Some((m.clone(), m.bpm?))) else { return };
+                match c {
+                    C::ScaleBpm(up) => {
+                        let seconds = self.sampling.sample.as_ref().map_or(0.0, |s| s.frames.len() as f64 / s.rate.max(1) as f64);
+                        S::Meta(beat::with_bpm(&m, if up { bpm * 2.0 } else { bpm / 2.0 }, seconds))
+                    }
+                    _ => S::ToProject(bpm),
+                }
+            }
             // A slice's pad: hear the slice (C63).
             C::Prehear(a, b) => {
                 if let Some(part) = self.sampling_part(a, b) {
                     self.ensure_engine();
+                    // As loud as the sound is in the mix: its level, its group's, the master's
+                    // (the prehear itself goes round all three).
+                    let gain = self.doc.as_ref().map_or(1.0, |d| {
+                        let d = d.borrow();
+                        let p = d.project();
+                        let g = p.groups.get(self.group);
+                        let s = g.and_then(|g| g.sounds.get(self.sound));
+                        deckard_model::level_gain(p.master_level) * g.map_or(1.0, |g| g.level) * s.map_or(1.0, |s| s.level)
+                    });
                     if let Some(Ok(out)) = &self.output {
-                        out.prehear(Some(std::sync::Arc::new(part)), 1.0);
+                        out.prehear(Some(std::sync::Arc::new(part)), gain as f32);
                     }
                 }
                 return;
@@ -10510,7 +11257,11 @@ impl App {
             (PluginEntry { name: name.to_string(), instrument, format: PluginFormat::Internal, vendor: "Native Instruments".into() }, what)
         };
         let native = |instrument: bool| deckard_plugins::native::CLASSES.iter().filter(move |c| c.instrument == instrument);
-        let mut out = vec![internal("Sampler", true, AddWhat::Sampler), internal("Audio", true, AddWhat::Audio)];
+        let mut out = vec![
+            internal("Sampler", true, AddWhat::Sampler),
+            internal("New Sampler", true, AddWhat::NewSampler),
+            internal("Audio", true, AddWhat::Audio),
+        ];
         for class in deckard_model::INTERNAL_INSTRUMENTS {
             out.push(internal(deckard_model::module_label(class), true, AddWhat::Instrument(class)));
         }
@@ -10573,9 +11324,122 @@ impl App {
         doc.borrow_mut().end_take();
     }
 
+    /// The focused New Sampler zone's warp markers (roadmap 1e): one undo step each.
+    fn warp_act(&mut self, w: layout::sampling::WarpAct) {
+        use deckard_model::new_sampler::{Warp, quantize, warps_at};
+        use layout::sampling::WarpAct as W;
+        match w {
+            W::Strength(v) => return self.sampling.warp_strength = v,
+            W::Grid(k) => return self.sampling.warp_grid = k.min(beat::WARP_GRIDS.len() - 1),
+            _ => {}
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let (Some(meta), Some(sample)) = (zone.meta.clone(), self.sampling.sample.clone()) else { return };
+        let mut warps = meta.warps.clone();
+        let label = match w {
+            W::Detect => {
+                let len = sample.frames.len();
+                let (lo, hi) = if zone.play_range.1 > zone.play_range.0 {
+                    (zone.play_range.0 as usize, zone.play_range.1 as usize + 1)
+                } else {
+                    (0, len)
+                };
+                // Every hit (detection merges those closer than 50 ms).
+                let hits = deckard_engine::edit::detect_positions(&sample, (lo, hi.min(len)), 1.0, false);
+                warps = warps_at(&meta, sample.rate, &hits);
+                "Warp Markers"
+            }
+            W::Quantize => {
+                let (div, _) = beat::WARP_GRIDS[self.sampling.warp_grid.min(beat::WARP_GRIDS.len() - 1)];
+                warps = quantize(&warps, div, self.sampling.warp_strength);
+                "Quantize Audio"
+            }
+            W::Clear => {
+                warps.clear();
+                "Clear Warp Markers"
+            }
+            W::Add(frame) => {
+                let Some(map) = deckard_model::new_sampler::BeatMap::of(&meta, sample.rate) else { return };
+                let at = warps.partition_point(|x| x.frame < frame as u64);
+                if warps.get(at).is_some_and(|x| x.frame == frame as u64) {
+                    return;
+                }
+                warps.insert(at, Warp { frame: frame as u64, beat: map.beat_at(frame as f64) });
+                "Add Warp Marker"
+            }
+            W::Remove(i) => {
+                if i >= warps.len() {
+                    return;
+                }
+                warps.remove(i);
+                "Remove Warp Marker"
+            }
+            W::Move(i, beat) => {
+                // Between its neighbours' beats.
+                let lo = i.checked_sub(1).and_then(|k| warps.get(k)).map_or(f64::MIN, |x| x.beat + 1e-3);
+                let hi = warps.get(i + 1).map_or(f64::MAX, |x| x.beat - 1e-3);
+                let Some(x) = warps.get_mut(i) else { return };
+                x.beat = beat.clamp(lo, hi.max(lo));
+                "Move Warp Marker"
+            }
+            W::Strength(_) | W::Grid(_) => return,
+        };
+        let meta = deckard_model::new_sampler::ZoneMeta { warps, ..meta };
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, label) {
+            self.status = format!("can't change the warp markers: {e}");
+        }
+    }
+
+    /// The focused sound's instrument made a New Sampler (`to_new`: a Sampler keeps its
+    /// zones; an Audio plug-in's takes become zones in Sync at their tempos), or a New
+    /// Sampler made a plain Sampler (roadmap 1f). One undo step.
+    fn convert_instrument(&mut self, to_new: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (g, s) = (self.group, self.sound);
+        let Some(snd) = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(s)).cloned() else { return };
+        let result = if !to_new {
+            let synced = snd
+                .sampler
+                .iter()
+                .flat_map(|x| &x.zones)
+                .any(|z| z.meta.as_ref().is_some_and(|m| m.mode != deckard_model::new_sampler::PlayMode::Repitch));
+            let r = doc.borrow_mut().new_sampler_to_sampler(g, s);
+            if r.is_ok() && synced {
+                self.status = "converted to a Sampler: its loops play at their own speed now (no Sync or Keys)".into();
+            }
+            r
+        } else if let Some(a) = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule") {
+            let mut takes = Vec::new();
+            for t in &a.takes {
+                let Some(file) = self.samples.path_of(&t.sample, self.path.as_deref()) else {
+                    self.status = format!("can't convert: {} is missing", t.sample.path);
+                    return;
+                };
+                let audio = self.samples.sample(&t.sample, self.path.as_deref());
+                let play = (t.play_range.1 > t.play_range.0).then_some(t.play_range);
+                let bpm = audio.filter(|_| t.beats > 0.0).map(|x| {
+                    let frames = play.map_or(x.frames.len(), |(lo, hi)| (hi - lo).max(1) as usize);
+                    t.tempo(frames, x.rate)
+                });
+                takes.push(deckard_doc::TakeZone { file, play, bpm, beats: (t.beats > 0.0).then_some(t.beats) });
+            }
+            doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune, a.mode == deckard_model::AudioMode::Gate)
+        } else if snd.sampler.is_some() && snd.new_sampler.is_none() {
+            doc.borrow_mut().transaction("Convert to New Sampler", |d| d.set_new_sampler(g, s, Some(&Default::default())))
+        } else {
+            return;
+        };
+        if let Err(e) = result {
+            self.status = format!("can't convert it: {e}");
+        }
+    }
+
     fn is_instrument(what: &layout::AddWhat) -> bool {
         match what {
-            layout::AddWhat::Sampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,
+            layout::AddWhat::Sampler | layout::AddWhat::NewSampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,
             layout::AddWhat::Plugin(e) => e.instrument,
             layout::AddWhat::Effect(_) | layout::AddWhat::PerformFx(_) => false,
         }
@@ -10600,7 +11464,7 @@ impl App {
             return;
         }
         let module = match &what {
-            layout::AddWhat::Sampler => deckard_doc::NewModule::Sampler,
+            layout::AddWhat::Sampler | layout::AddWhat::NewSampler => deckard_doc::NewModule::Sampler,
             layout::AddWhat::Audio => deckard_doc::NewModule::Audio,
             layout::AddWhat::Effect(class) => deckard_doc::NewModule::Effect(class),
             layout::AddWhat::PerformFx(_) => return,
@@ -10639,8 +11503,12 @@ impl App {
             deckard_doc::NewModule::Effect(_) => "Load Effect",
             _ => "Load Module",
         };
+        let label = if matches!(what, layout::AddWhat::NewSampler) { "Add New Sampler" } else { label };
         let added = doc.borrow_mut().transaction(label, |d| {
             d.add_slot_in(c, at, &module)?;
+            if let (layout::AddWhat::NewSampler, deckard_doc::Chain::Sound(g, s)) = (&what, c) {
+                d.set_new_sampler(g, s, Some(&deckard_model::new_sampler::NewSampler::default()))?;
+            }
             if let deckard_doc::Chain::Sound(g, s) = c
                 && at == 0
                 && instrument
@@ -11333,7 +12201,12 @@ impl App {
 
         self.follow_engine(ctx, std::time::Duration::ZERO);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.toggle_play();
+            // SHIFT+Space on the Sampling page: its sample's PLAY / STOP.
+            let zone_key = (self.sampling_open && ctx.input(|i| i.modifiers.shift)).then(|| self.audition_key()).flatten();
+            match zone_key {
+                Some(pitch) => self.audition_toggle(pitch),
+                None => self.toggle_play(),
+            }
         }
         // The mouse modes' keys (not while the keys play notes).
         if !ctx.egui_wants_keyboard_input() && !self.keys.on && ctx.input(|i| i.modifiers.is_none()) {
@@ -16352,6 +17225,25 @@ mod tests {
         h.run_steps(3);
         let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-zone-grid"))).expect("zone map drawn");
         assert!(grid.width() > 100.0);
+        // Back on SLICE, from another slice's zone: the slices applied show, not a new split.
+        h.state_mut().zone = 5;
+        h.run_steps(3);
+        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(2)));
+        h.run_steps(3);
+        let starts: Vec<usize> = zones.iter().map(|z| z.play_range.0 as usize).collect();
+        assert_eq!(h.state().sampling.slices, starts, "the slices it was cut at");
+        assert_eq!(h.state().sampling.slice_mode, 3, "kept as set (Manual)");
+        // Another slice's pad: they stay.
+        h.state_mut().zone = 2;
+        h.run_steps(3);
+        assert_eq!(h.state().sampling.slices, starts);
+        // One taken out and applied again: seven zones, over the same frames.
+        h.state_mut().sampling.slices.remove(3);
+        let r = tool(&h, "apply");
+        click(&mut h, r.center());
+        let again = project_of(&h).groups[0].sounds[0].sampler.clone().unwrap().zones;
+        assert_eq!(again.len(), 7);
+        assert_eq!((again[0].play_range.0, again[6].play_range.1), (zones[0].play_range.0, zones[7].play_range.1));
     }
 
     fn pedal_before(p: &deckard_model::Project, g: usize, pi: usize) -> usize {

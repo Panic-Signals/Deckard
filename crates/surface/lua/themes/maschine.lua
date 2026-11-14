@@ -89,8 +89,8 @@ return {
     -- lines between keys.
     wave_off = { 34, 34, 34 },
     wave_unsliced = { 89, 89, 89 },
-    wave_selection = { 16, 16, 16 },
-    slice_focus = { 41, 41, 41 },
+    wave_selection = { 11, 11, 11 },
+    slice_focus = { 14, 14, 14 },
     slice_marker = { 255, 255, 255, 153 },
     meter_empty = { 38, 38, 38 },
     marker = { 255, 255, 255 },

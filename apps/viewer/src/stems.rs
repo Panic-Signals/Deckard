@@ -28,6 +28,8 @@ pub struct Job {
     /// The source's length in beats, when it's an Audio plug-in's take (the stems keep
     /// it).
     pub beats: Option<f64>,
+    /// The stems go onto the zone as its lanes (a New Sampler's); else into a new group.
+    pub into_lanes: bool,
     progress: Arc<AtomicU32>,
     installing: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -49,7 +51,7 @@ impl Job {
                 let _ = tx.send(run(&sample, &settings, &p, &inst, &c));
             })
             .expect("a thread for the stems");
-        Job { source, name, rate, beats: None, progress, installing, cancel, done }
+        Job { source, name, rate, beats: None, into_lanes: false, progress, installing, cancel, done }
     }
 
     /// How far it is, 0..1.

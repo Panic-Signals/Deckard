@@ -593,6 +593,16 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "remove_zone" => C::RemoveZone(n(a, "a zone")?),
                     "focus_zone" => C::FocusZone(n(a, "a zone")?),
                     "prehear" => C::Prehear(frame(a) as usize, frame(b) as usize),
+                    "double_bpm" => C::ScaleBpm(true),
+                    "halve_bpm" => C::ScaleBpm(false),
+                    "to_project" => C::ToProject,
+                    "match_key" => C::MatchKey,
+                    "lane_mute" => C::LaneMute(n(a, "a stem lane")?),
+                    "lane_solo" => C::LaneSolo(n(a, "a stem lane")?),
+                    "warp_markers" => C::Warp(0),
+                    "warp_quantize" => C::Warp(1),
+                    "warp_clear" => C::Warp(2),
+                    "convert" => C::Convert,
                     _ => return Err(mlua::Error::runtime(format!("no sampling call \"{what}\""))),
                 };
                 act(&sh, Action::SamplingCall(call));
@@ -620,7 +630,13 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             lua.create_function(move |lua, which: String| {
                 let v = &sh.borrow().view;
                 let Some(s) = &v.sampling.sample else { return lua.create_table() };
-                let peaks = if which == "detail" { &s.detail } else { &s.overview };
+                // ("lane<n>": the nth stem lane shown, over the frames shown.)
+                let lane = which.strip_prefix("lane").and_then(|n| n.parse::<usize>().ok()).and_then(|n| s.lanes.get(n.wrapping_sub(1)));
+                let peaks = match lane {
+                    Some(l) => &l.detail,
+                    None if which == "detail" => &s.detail,
+                    None => &s.overview,
+                };
                 lua.create_sequence_from(peaks.iter().flat_map(|&(lo, hi)| [lo, hi]))
             })?,
         )?;
@@ -1678,6 +1694,17 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
         st.set("focus_zone", s.focus_zone + 1)?;
         st.set("palette", s.color)?;
         st.set("take", s.take)?;
+        let lanes = lua.create_table()?;
+        for (i, l) in s.lanes.iter().enumerate() {
+            let lt = lua.create_table()?;
+            lt.set("lane", l.lane + 1)?;
+            lt.set("name", l.name.as_str())?;
+            lt.set("mute", l.mute)?;
+            lt.set("solo", l.solo)?;
+            lt.set("heard", l.heard)?;
+            lanes.set(i + 1, lt)?;
+        }
+        st.set("lanes", lanes)?;
         t.set("sample", st)?;
     }
     let r = lua.create_table()?;

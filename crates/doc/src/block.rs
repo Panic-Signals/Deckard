@@ -14,8 +14,9 @@ pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
 /// CC routes), 7 (before scene settings), 8 (before extra outputs), 9 (before the
-/// app's view), 10 (before CV routes) and 11 (before audio offsets) still read.
-const VERSION: u32 = 12;
+/// app's view), 10 (before CV routes), 11 (before audio offsets) and 12 (before the New
+/// Sampler) still read.
+const VERSION: u32 = 13;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -84,6 +85,10 @@ pub(crate) struct Block {
     pub cv_routes: String,
     /// The patterns' Audio offsets (group, pattern, sound, ticks), those not 0 (version 12).
     pub audio_offsets: Vec<(usize, usize, usize, i64)>,
+    /// New Sampler sounds (group, sound, settings as text) (version 13).
+    pub new_samplers: Vec<(usize, usize, String)>,
+    /// Zones' analysis (group, sound, zone, meta as text) (version 13).
+    pub zone_metas: Vec<(usize, usize, usize, String)>,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -293,6 +298,25 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
         w.u32(s);
         w.i64(ticks);
     }
+    let text = |w: &mut W, t: &str| {
+        w.u32(t.len());
+        for &c in t.as_bytes() {
+            w.u8(c);
+        }
+    };
+    w.u32(b.new_samplers.len());
+    for (g, s, t) in &b.new_samplers {
+        w.u32(*g);
+        w.u32(*s);
+        text(&mut w, t);
+    }
+    w.u32(b.zone_metas.len());
+    for (g, s, z, t) in &b.zone_metas {
+        w.u32(*g);
+        w.u32(*s);
+        w.u32(*z);
+        text(&mut w, t);
+    }
     w.0
 }
 
@@ -419,6 +443,23 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
     if version >= 12 {
         for _ in 0..r.count(20)? {
             b.audio_offsets.push((r.u32()?, r.u32()?, r.u32()?, r.i64()?));
+        }
+    }
+    if version >= 13 {
+        let text = |r: &mut R| -> Result<String, String> {
+            let mut t = Vec::new();
+            for _ in 0..r.count(1)? {
+                t.push(r.u8()?);
+            }
+            Ok(String::from_utf8_lossy(&t).into_owned())
+        };
+        for _ in 0..r.count(12)? {
+            let (g, s) = (r.u32()?, r.u32()?);
+            b.new_samplers.push((g, s, text(&mut r)?));
+        }
+        for _ in 0..r.count(16)? {
+            let (g, s, z) = (r.u32()?, r.u32()?, r.u32()?);
+            b.zone_metas.push((g, s, z, text(&mut r)?));
         }
     }
     Ok(b)
@@ -570,6 +611,18 @@ impl Document {
         b.audio_offsets = patterns(&self.project)
             .flat_map(|(g, p, pt)| pt.audio.iter().filter(|c| c.offset != 0).map(move |c| (g, p, c.sound, c.offset)))
             .collect();
+        for (g, grp) in self.project.groups.iter().enumerate() {
+            for (s, snd) in grp.sounds.iter().enumerate() {
+                if let Some(n) = &snd.new_sampler {
+                    b.new_samplers.push((g, s, n.to_text()));
+                }
+                for (z, zone) in snd.sampler.iter().flat_map(|x| x.zones.iter()).enumerate() {
+                    if let Some(m) = &zone.meta {
+                        b.zone_metas.push((g, s, z, m.to_text()));
+                    }
+                }
+            }
+        }
         let payload = (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
@@ -581,7 +634,9 @@ impl Document {
             || !b.scene_settings.is_empty()
             || !b.extra_outs.is_empty()
             || !b.cv_routes.is_empty()
-            || !b.audio_offsets.is_empty())
+            || !b.audio_offsets.is_empty()
+            || !b.new_samplers.is_empty()
+            || !b.zone_metas.is_empty())
         .then(|| encode(&b));
         payload
     }
@@ -674,6 +729,20 @@ impl Document {
         for (g, p, s, ticks) in b.audio_offsets {
             // A pattern or sound with no audio now: the error is ignored on purpose.
             if let Ok(ops) = self.audio_offset_ops(g, p, s, ticks) {
+                let _ = self.run(&ops);
+            }
+        }
+        for (g, s, t) in b.new_samplers {
+            let n = deckard_model::new_sampler::NewSampler::from_text(&t);
+            if let Ok(ops) = self.new_sampler_ops(g, s, Some(&n)) {
+                let _ = self.run(&ops);
+            }
+        }
+        for (g, s, z, t) in b.zone_metas {
+            // A zone that isn't there: dropped.
+            if let Some(m) = deckard_model::new_sampler::ZoneMeta::from_text(&t)
+                && let Ok(ops) = self.zone_meta_ops(g, s, z, Some(&m))
+            {
                 let _ = self.run(&ops);
             }
         }
@@ -785,6 +854,18 @@ mod tests {
         d.set_screen(Some(screen.clone()));
         assert_eq!(reopen(&d).screen(), Some(&screen));
         assert_eq!(reopen(&doc_with(&[])).screen(), None);
+    }
+
+    #[test]
+    fn version_12_blocks_still_read() {
+        let b = Block { audio_offsets: vec![(0, 1, 3, -960)], ..Block::default() };
+        let full = Block { new_samplers: vec![(0, 2, "v 1".into())], zone_metas: vec![(0, 2, 1, "file a".into())], ..b.clone() };
+        assert_eq!(decode(&encode(&full)).unwrap(), full);
+        let mut bytes = encode(&b);
+        // Version 12: no New Sampler counts (two u32 zeros) at the end.
+        bytes[..4].copy_from_slice(&12u32.to_le_bytes());
+        bytes.truncate(bytes.len() - 8);
+        assert_eq!(decode(&bytes).unwrap(), b);
     }
 
     #[test]
@@ -970,13 +1051,13 @@ mod tests {
         assert!(old.audio_offsets.is_empty());
         assert_eq!(old, b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
-        // A project carrying that version 11 block saves it as version 12.
+        // A project carrying that version 11 block saves it as the current version.
         let mut v11 = encode(&Block { prob_locked: vec![(0, 1)], ..Block::default() });
         v11[..4].copy_from_slice(&11u32.to_le_bytes());
         v11.truncate(v11.len() - 4);
         let file = set_root_child(&doc_with(&[]).to_bytes().unwrap(), DOMAIN, ITEM, FRAME, Some(&v11)).unwrap();
         let saved = Document::from_bytes(file, None).unwrap().to_bytes().unwrap();
-        assert_eq!(root_child(&saved, DOMAIN, ITEM).unwrap()[..4], 12u32.to_le_bytes());
+        assert_eq!(root_child(&saved, DOMAIN, ITEM).unwrap()[..4], VERSION.to_le_bytes());
     }
 
     #[test]

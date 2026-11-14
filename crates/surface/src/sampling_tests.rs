@@ -156,8 +156,10 @@ fn the_edit_tab_turns_its_pages_and_applies_its_functions() {
     press(&mut s, &v, "BUTTON_SCREEN_6");
     assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Edit(2))]);
-    // Back round past TRUNCATE to the last: AUTOLOOP.
+    // Back round past TRUNCATE to the last: TO NEW SAMPLER, and AUTOLOOP before it.
     press(&mut s, &v, "BUTTON_SCREEN_5");
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Convert)]);
     press(&mut s, &v, "BUTTON_SCREEN_5");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::AutoLoop)]);
 }
@@ -174,6 +176,90 @@ fn knobs_5_and_6_zoom_and_scroll_the_sample() {
     assert!(c > a && ((d - c) - (b - a)).abs() < 1.0, "on, as wide: {c}..{d}");
     // Touched, their icons show.
     assert!(s.event(&Event::Button("CAP_5", true), &v, now).is_empty());
+}
+
+/// A New Sampler zone's EDIT tab: its TEMPO / PITCH page, and under SHIFT the
+/// display buttons double or halve its tempo or give it to the song.
+#[test]
+fn a_new_sampler_zone_has_its_tempo_on_edit() {
+    let (mut s, mut v) = (Surface::new(), sampled(1));
+    let k = |key: &str, name: &str, text: &str, value: f64| SamplingKnob {
+        key: key.into(),
+        name: name.into(),
+        text: text.into(),
+        value,
+        min: 0.0,
+        max: 999.0,
+        step: 1.0,
+        turn: 0.01,
+    };
+    v.sampling.pages[1].push(KnobPage {
+        name: "TEMPO / PITCH".into(),
+        knobs: vec![k("Beat.Mode", "MODE", "Sync", 1.0), k("Beat.Bpm", "BPM", "120.00", 120.0), k("Beat.Root", "ROOT", "A1", 45.0)],
+    });
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    assert!(s.screen_text(&v).iter().any(|t| t == "TEMPO / PITCH"));
+    assert_eq!(s.event(&Event::Knob(1, 0.01), &v, Instant::now()), [Action::SamplingKnob { page: 2, knob: 1, value: 121.0 }]);
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, Instant::now());
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO PROJECT"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SamplingCall(SamplingCall::ScaleBpm(true))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::ScaleBpm(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::ToProject)]);
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
+    // Without SHIFT, the edit functions as ever.
+    press(&mut s, &v, "BUTTON_SCREEN_6");
+    assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
+    // Back past the first: the New Sampler's own, last. TO SAMPLER, then the warp ones.
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO SAMPLER"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Convert)]);
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert!(s.screen_text(&v).iter().any(|t| t == "CLEAR WARP"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Warp(2))]);
+    // A plain Sampler's zone: no warp functions, and it converts the other way.
+    v.sampling.pages[1].pop();
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO NEW SAMPLER"));
+}
+
+/// A zone with stem lanes: on EDIT's STEMS knob page the knobs are the lanes' levels,
+/// display buttons 5-8 mute them and, with SHIFT, solo them.
+#[test]
+fn stem_lanes_have_their_mutes_on_the_display_buttons() {
+    use deckard_model::sampling_view::LaneView;
+    let (mut s, mut v) = (Surface::new(), sampled(1));
+    let lane =
+        |lane: usize, name: &str| LaneView { lane, name: name.into(), heard: true, detail: vec![(-0.2, 0.2); 480], ..Default::default() };
+    v.sampling.sample.as_mut().unwrap().lanes = vec![lane(0, "DRUMS"), lane(1, "VOCALS"), lane(3, "LEADS")];
+    v.sampling.pages[1].push(KnobPage {
+        name: "STEMS".into(),
+        knobs: vec![SamplingKnob {
+            key: "Stem.Gain0".into(),
+            name: "DRUMS".into(),
+            text: "+0.0 dB".into(),
+            value: 0.0,
+            min: -60.0,
+            max: 6.0,
+            step: 0.5,
+            turn: 0.01,
+        }],
+    });
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    // Off the STEMS page the buttons are the edit functions'.
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Edit(1))], "APPLY (TRUNCATE)");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    press(&mut s, &v, "BUTTON_RIGHT");
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "STEMS") && text.iter().any(|t| t == "LEADS"), "{text:?}");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SamplingCall(SamplingCall::LaneMute(0))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::LaneMute(3))], "the third shown is Leads");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "no fourth lane");
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, Instant::now());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::LaneSolo(1))]);
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
+    assert_eq!(s.event(&Event::Knob(0, -0.01), &v, Instant::now()), [Action::SamplingKnob { page: 2, knob: 0, value: -0.5 }]);
 }
 
 #[test]
