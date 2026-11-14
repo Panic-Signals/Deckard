@@ -8610,8 +8610,17 @@ impl App {
             C::Prehear(a, b) => {
                 if let Some(part) = self.sampling_part(a, b) {
                     self.ensure_engine();
+                    // As loud as the sound is in the mix: its level, its group's, the master's
+                    // (the prehear itself goes round all three).
+                    let gain = self.doc.as_ref().map_or(1.0, |d| {
+                        let d = d.borrow();
+                        let p = d.project();
+                        let g = p.groups.get(self.group);
+                        let s = g.and_then(|g| g.sounds.get(self.sound));
+                        deckard_model::level_gain(p.master_level) * g.map_or(1.0, |g| g.level) * s.map_or(1.0, |s| s.level)
+                    });
                     if let Some(Ok(out)) = &self.output {
-                        out.prehear(Some(std::sync::Arc::new(part)), 1.0);
+                        out.prehear(Some(std::sync::Arc::new(part)), gain as f32);
                     }
                 }
                 return;
