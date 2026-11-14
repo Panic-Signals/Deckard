@@ -244,8 +244,16 @@ mod app_tests {
         assert_eq!(meta.mode, PlayMode::Sync);
         assert_eq!(app.doc.as_ref().unwrap().borrow().undo_labels().len(), steps);
 
-        // In Sync, playback asks for its render at the song's tempo; made on the render
-        // thread, it goes to the samples and playback is built again to play it.
+        // In Sync it's stretched as it plays: nothing is asked for.
+        {
+            let d = app.doc.as_ref().unwrap().clone();
+            drop(deckard_engine::Engine::new(d.borrow().project(), None, 48_000, deckard_engine::Mode::Arrangement, &mut app.samples));
+            assert!(app.samples.wanted_renders().is_empty());
+        }
+        // Where renders are made ahead (a zone with warp markers): playback asks for its
+        // render at the song's tempo; made on the render thread, it goes to the samples
+        // and playback is built again to play it.
+        app.samples.stretch_ahead(true);
         let build = |app: &mut App| {
             let d = app.doc.as_ref().unwrap().clone();
             let mut p = d.borrow().project().clone();

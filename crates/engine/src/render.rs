@@ -155,6 +155,8 @@ pub struct Renders {
     clock: u64,
     /// The clock when the engine was last built: what's used since is in use.
     built: u64,
+    /// Zones play renders ([`crate::SampleCache::stretch_ahead`]), not stretched as they play.
+    pub ahead: bool,
 }
 
 impl Renders {

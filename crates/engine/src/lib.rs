@@ -2425,6 +2425,12 @@ fn synced_zone(
     let semitones = zone.tune as f64 + sound_tune;
     // Warp markers: the range plays through its beat map.
     let map = (!meta.warps.is_empty()).then(|| deckard_model::new_sampler::BeatMap::of(meta, zone.sample.rate).map(Arc::new)).flatten();
+    // Stretched as it plays: the zone stays the file itself (its lanes too), each voice
+    // stretches it to whatever the song's tempo is. (Warp markers still take a render.)
+    if !renders.ahead && map.is_none() {
+        zone.sync = Some(sampler::ZoneSync { tempo: bpm, keys, grid: meta.start.beats(), live: Some(semitones), ..Default::default() });
+        return;
+    }
     let job_of = |sample: &Arc<Sample>, semis: f64| {
         let j = render::RenderJob::new(sample, span, bpm, tempo, semis);
         match &map {
@@ -2459,6 +2465,7 @@ fn synced_zone(
             note_lanes: Vec::new(),
             grid: meta.start.beats(),
             shown: Vec::new(),
+            live: None,
         });
         return;
     };
@@ -2507,7 +2514,7 @@ fn synced_zone(
     zone.fade_out = scale(zone.fade_out);
     zone.play = (at(zone.play.0), at(zone.play.1));
     zone.sample = made;
-    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats(), shown });
+    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats(), shown, live: None });
 }
 
 /// Samples shared between engines (e.g. replaying another scene without reloading).
@@ -2538,6 +2545,13 @@ impl SampleCache {
     /// [`SampleCache::add_render`], and build the engine again to play them.
     pub fn wanted_renders(&mut self) -> Vec<render::RenderJob> {
         self.renders.take_wanted()
+    }
+
+    /// Sync and Keys zones play renders made ahead (asked for here, played once made)
+    /// instead of being stretched as they play (a stretcher a voice: nothing to wait for
+    /// or keep, at more work a note), which is how they play unless this is set.
+    pub fn stretch_ahead(&mut self, on: bool) {
+        self.renders.ahead = on;
     }
 
     /// A render made for `job`.
@@ -8255,6 +8269,32 @@ mod tests {
         &e.sounds[0][0].as_ref().unwrap().zones[0]
     }
 
+    /// A Sync zone is stretched as it plays: it stays its file, asks for no render, and a
+    /// change of tempo is only the engine's (a second at 141 BPM goes through half as much
+    /// again of a 94 BPM loop, at its pitch).
+    #[test]
+    fn a_sync_zone_is_stretched_as_it_plays() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        p.tempo = 141.0;
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(cache.wanted_renders().is_empty(), "nothing made ahead");
+        let z = zone0(&e);
+        assert_eq!(z.sample.frames.len(), frames, "the file itself");
+        assert_eq!(z.sync.as_ref().and_then(|s| s.live), Some(0.0));
+        e.sequencing = false;
+        e.note_hold(0, 0, 60, 100);
+        let mut out = vec![0f32; 2 * 4800];
+        let mut loud = 0f32;
+        for _ in 0..10 {
+            e.process(&mut out);
+            loud = out.iter().fold(loud, |m, v| m.max(v.abs()));
+        }
+        assert!(loud > 0.01, "it sounds");
+        let at = e.sounds[0][0].as_ref().unwrap().play_position(0).unwrap() as f64;
+        assert!((at - 72_000.0).abs() < 3000.0, "{at}");
+    }
+
     /// A start point (a zone that plays to its file's end) set to reverse plays from
     /// there back to the file's beginning; a slice with an end of its own, its own frames.
     #[test]
@@ -8279,6 +8319,7 @@ mod tests {
     fn a_sync_zone_asks_then_plays_its_render() {
         let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
         let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
         let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         let z = zone0(&e);
         assert_eq!((z.sample.frames.len(), z.sync.as_ref().unwrap().tempo), (frames, 94.0), "its own sample, in time at 94");
@@ -8310,6 +8351,7 @@ mod tests {
         for mode in [deckard_model::new_sampler::PlayMode::Sync, deckard_model::new_sampler::PlayMode::Keys] {
             let (_tmp, p, _) = new_sampler_project(mode);
             let mut cache = SampleCache::default();
+            cache.stretch_ahead(true);
             let fmt = export::Format { rate: 48_000, ..Default::default() };
             let cancel = std::sync::atomic::AtomicBool::new(false);
             export::render(&p, None, Mode::Arrangement, 0.0, &fmt, &mut cache, &cancel, &mut |_| {}).unwrap();
@@ -8338,6 +8380,7 @@ mod tests {
             meta.stems[3] = Some(StemLane::new(stem("l.wav")));
             meta.stems[1] = Some(StemLane::new("/nowhere/v.wav".into()));
             let mut cache = SampleCache::default();
+            cache.stretch_ahead(true);
             let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
             let l = zone0(&e).lanes.clone().expect("lanes");
             assert_eq!(l.samples.iter().map(Option::is_some).collect::<Vec<_>>(), [true, false, false, true], "a missing file is no lane");
@@ -8375,7 +8418,8 @@ mod tests {
         let half = frames as i64 / 2;
         p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].play_range = (half, frames as i64 - 1);
         let mut cache = SampleCache::default();
-        let mut at = |cache: &mut SampleCache, blocks: usize| {
+        cache.stretch_ahead(true);
+        let at = |cache: &mut SampleCache, blocks: usize| {
             let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, cache);
             e.sequencing = false;
             e.note_hold(0, 0, 60, 100);
@@ -8409,6 +8453,7 @@ mod tests {
         zones[0].key_range = (60, 60);
         zones.push(chop);
         let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
         let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         let jobs = cache.wanted_renders();
         assert_eq!(jobs.len(), 1, "one render for both");
@@ -8429,6 +8474,7 @@ mod tests {
     fn keys_asks_for_its_notes() {
         let (_tmp, p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Keys);
         let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
         let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         let base = cache.wanted_renders();
         assert_eq!(base.len(), 1, "the root's render first");
