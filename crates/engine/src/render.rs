@@ -153,9 +153,17 @@ pub struct Renders {
     /// Asked for and not made yet (each is asked for once).
     asked: HashSet<RenderKey>,
     clock: u64,
+    /// The clock when the engine was last built: what's used since is in use.
+    built: u64,
 }
 
 impl Renders {
+    /// An engine is about to be built: the renders it asks for are the ones in use, the
+    /// rest may go.
+    pub fn begin(&mut self) {
+        self.built = self.clock;
+    }
+
     /// The render for `job`, if made; asked for (once) if not.
     pub fn get_or_want(&mut self, job: RenderJob) -> Option<Arc<Sample>> {
         self.clock += 1;
@@ -179,15 +187,25 @@ impl Renders {
         std::mem::take(&mut self.wanted)
     }
 
-    /// Keep a finished render; the least recently used go past [`MAX_FRAMES`].
+    /// Keep a finished render; past [`MAX_FRAMES`] the least recently used go, but none
+    /// the engine now plays (a zone and its stem lanes are all there or it plays whole:
+    /// dropping one to make room for the next would have them made over and over).
     pub fn add(&mut self, job: &RenderJob, render: Arc<Sample>) {
         self.clock += 1;
         self.asked.remove(&job.key);
         self.made.insert(job.key, (render, job.sample.clone(), self.clock));
         let mut total: usize = self.made.values().map(|(r, _, _)| r.frames.len()).sum();
-        while total > MAX_FRAMES && self.made.len() > 1 {
-            let (oldest, n) =
-                self.made.iter().min_by_key(|(_, (_, _, used))| *used).map(|(k, (r, _, _))| (*k, r.frames.len())).expect("not empty");
+        while total > MAX_FRAMES {
+            let built = self.built;
+            let Some((oldest, n)) = self
+                .made
+                .iter()
+                .filter(|(_, (_, _, used))| *used <= built)
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(k, (r, _, _))| (*k, r.frames.len()))
+            else {
+                break;
+            };
             self.made.remove(&oldest);
             total -= n;
         }
@@ -311,7 +329,9 @@ mod tests {
         let src = Arc::new(Sample { rate: RATE, frames: vec![[0.0; 2]; 10] });
         let mut r = Renders::default();
         let big = MAX_FRAMES / 3 + 1;
+        // Five engines, each wanting another render.
         for t in 0..5 {
+            r.begin();
             let job = RenderJob::new(&src, (0, 10), 100.0, 100.0 + t as f64, 0.0);
             assert!(r.get_or_want(job.clone()).is_none());
             r.add(&job, Arc::new(Sample { rate: RATE, frames: vec![[0.0; 2]; big] }));
@@ -322,5 +342,32 @@ mod tests {
         let newest = RenderJob::new(&src, (0, 10), 100.0, 104.0, 0.0);
         assert!(r.get_or_want(newest).is_some());
         assert!(r.take_wanted().is_empty());
+    }
+
+    /// What one engine plays is all kept, however much it is: a zone and its stem lanes
+    /// are more than the cap between them, and none is dropped for the next.
+    #[test]
+    fn renders_in_use_are_kept_past_the_cap() {
+        let src = Arc::new(Sample { rate: RATE, frames: vec![[0.0; 2]; 10] });
+        let mut r = Renders::default();
+        let big = MAX_FRAMES / 3 + 1;
+        let jobs: Vec<RenderJob> = (0..5).map(|t| RenderJob::new(&src, (0, 10), 100.0, 100.0 + t as f64, 0.0)).collect();
+        // The engine is built again as each render comes, asking for all five.
+        for made in 0..5 {
+            r.begin();
+            for j in &jobs {
+                r.get_or_want(j.clone());
+            }
+            r.add(&jobs[made], Arc::new(Sample { rate: RATE, frames: vec![[0.0; 2]; big] }));
+        }
+        r.begin();
+        assert!(jobs.iter().all(|j| r.get_or_want(j.clone()).is_some()), "{} kept", r.len());
+        // Another tempo's renders come: the old ones, no longer asked for, go.
+        r.begin();
+        let next = RenderJob::new(&src, (0, 10), 100.0, 140.0, 0.0);
+        r.get_or_want(next.clone());
+        r.add(&next, Arc::new(Sample { rate: RATE, frames: vec![[0.0; 2]; big] }));
+        assert!(r.len() <= 2, "{} kept", r.len());
+        assert!(r.get_or_want(next).is_some());
     }
 }

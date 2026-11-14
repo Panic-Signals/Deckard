@@ -2796,6 +2796,7 @@ impl Engine {
             Some(sample)
         };
         let mut renders = std::mem::take(&mut cache.renders);
+        renders.begin();
         let sounds: Vec<Vec<Option<SamplerRt>>> = project
             .groups
             .iter()
