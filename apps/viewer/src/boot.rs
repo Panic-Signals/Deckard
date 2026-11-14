@@ -511,9 +511,16 @@ mod tests {
         booting_harness_of(crate::App::default())
     }
 
-    /// `app` starting up, in a window.
+    /// How far ahead a test's startup clock starts. Building the harness runs frames,
+    /// enough to finish startup, and on a slow machine they can take longer than the
+    /// screen's minimum second: until a test ages it by this, the screen stays up.
+    const AHEAD: Duration = Duration::from_secs(60);
+
+    /// `app` starting up, in a window (held on screen until aged by [`AHEAD`]).
     fn booting_harness_of(mut app: crate::App) -> egui_kittest::Harness<'static, crate::App> {
-        app.boot = Some(Boot::new(vec![Step::Project(None), Step::Done]));
+        let mut boot = Boot::new(vec![Step::Project(None), Step::Done]);
+        boot.started += AHEAD;
+        app.boot = Some(boot);
         egui_kittest::Harness::builder().with_size(egui::vec2(1500.0, 930.0)).build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app)
     }
 
@@ -554,8 +561,6 @@ mod tests {
     #[test]
     fn a_file_dropped_while_loading_opens_after() {
         let mut h = booting_harness();
-        // (Held on screen however slow the machine: the clock starts a minute ahead.)
-        h.state_mut().boot.as_mut().unwrap().started += Duration::from_secs(60);
         h.step();
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("dropped.mxprj");
@@ -566,7 +571,7 @@ mod tests {
         assert_eq!(h.state().boot.as_ref().unwrap().held.as_deref(), Some(p.as_path()));
         assert_ne!(h.state().path.as_deref(), Some(p.as_path()));
         // (Steps run faster than the clock: age the screen past its minimum second.)
-        h.state_mut().boot.as_mut().unwrap().started -= Duration::from_secs(62);
+        h.state_mut().boot.as_mut().unwrap().started -= AHEAD + Duration::from_secs(2);
         h.run_steps(90);
         assert!(h.state().boot.is_none());
         assert_eq!(h.state().path.as_deref(), Some(p.as_path()));
@@ -635,8 +640,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crashed_session(dir.path());
         let mut h = booting_harness_of(crate::App { session_dir: Some(dir.path().to_path_buf()), ..Default::default() });
-        // (Held on screen however slow the machine.)
-        h.state_mut().boot.as_mut().unwrap().started += Duration::from_secs(60);
         h.run_steps(3);
         assert!(h.state().dirty(), "the backup's unsaved changes are back");
         assert!(h.state().boot.is_some(), "still loading");
@@ -715,7 +718,7 @@ mod tests {
     fn an_overcount_still_closes_the_screen() {
         let mut h = booting_harness();
         h.state_mut().boot.as_mut().unwrap().total += 3;
-        h.state_mut().boot.as_mut().unwrap().started -= Duration::from_secs(2);
+        h.state_mut().boot.as_mut().unwrap().started -= AHEAD + Duration::from_secs(2);
         h.run_steps(90);
         assert!(h.state().boot.is_none());
     }
@@ -724,7 +727,7 @@ mod tests {
     fn the_ui_appears_when_loading_ends() {
         let mut h = booting_harness();
         // (Steps run faster than the clock: age the screen past its minimum second.)
-        h.state_mut().boot.as_mut().unwrap().started -= Duration::from_secs(2);
+        h.state_mut().boot.as_mut().unwrap().started -= AHEAD + Duration::from_secs(2);
         h.run_steps(90);
         assert!(h.state().boot.is_none());
         assert!(h.state().doc.is_some());
