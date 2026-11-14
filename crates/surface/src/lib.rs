@@ -1432,7 +1432,7 @@ impl Surface {
         setup
     }
 
-    /// Both LED reports: buttons at their faint backlight, the rest dark, then what
+    /// Both LED reports: every LED dark first, then what
     /// `global.lua`'s `leds()` and the page's set.
     pub fn leds(&self, v: &View) -> Leds {
         let r = self.with(v, None, |run| {

@@ -85,23 +85,54 @@ Learned with `crates/mk3/examples/mk3-led-learn.rs`; the byte order is in
 - **0x81** (42 bytes): report id, then the touch strip's 25 LEDs (left to right), then the
   16 pads from the top row (13–16, 9–12, 5–8, 1–4).
 
-Single-colour LEDs take a brightness 0..0x7f. Colour LEDs (groups, pads, strip) take a
+Single-colour LEDs don't take a brightness, and the panel has fewer levels than the NI
+protocol suggests. A byte under `0x80` is read as a 2-bit index (`byte & 3`) rather than a
+fraction of `0x7f`, and over `0x80` a byte is a duty that the protocol describes as
+`258 - percent` — but measured on the MK3 (`examples/mk3-led-probe.rs`), the hardware only
+renders two of them:
+
+| bytes | what the panel shows |
+|---|---|
+| `0x00`, `0x01`–`0x03` | dark |
+| `0xb0`–`0xfc` | dim — every one of them the same light |
+| `0x9e`, and `0xff` (max drive) | bright |
+
+So a button has three states, not a ladder: bright, dim and dark. Checked by eye on the
+buttons above the screens, held side by side and then flashed against each other — a
+flashing button always reads as blinking, at any ratio, so a flash can't pass for a third
+steady level. The earlier sweep that suggested a `0xE4`/`0x9E` "dim"/"bright" pair with
+`208` between them was too coarse to see that `0xb0`–`0xfc` are one level.
+
+DECKARD sends `0x9e` for a selected button, `0xd0` for one that can be pressed (any byte in
+the dim band would do; `0xd0` is what the sweep called the middle) and `0x00` for a button
+with nothing to do — a page's `"off"`: DECKARD's mapping, since the panel has no level
+between off and dim and a button still has to say "this does nothing".
+
+The smooth brightness Maschine offers is **not** in those bytes: it is the LEDs' global
+level, output report `0xf3`, one byte, 0..=127, which scales everything the panel draws.
+Maschine's Hardware ▸ LEDs ▸ Brightness slider drives it, and it is why the per-LED bytes
+look stepped while the slider glides. DECKARD writes it from `led_brightness` (0..=100 %)
+as `percent * 127 / 100` (`Device::set_led_brightness`, `brightness_level`), on change and
+whenever an MK3 connects, and leaves the per-LED bytes alone.
+
+SAMPLING is one of those colour LEDs sitting among the one-colour buttons: a brightness
+byte reads as a palette entry there, so it takes palette bytes, and byte 73 (past the
+palette) for its unselected dim white, which matches the buttons around it.
+
+Colour LEDs (groups, pads, strip) take a
 palette byte, `(colour + 1) << 2 | shade`: colour is the scripts' `LEDColors` index
 (0 red … 15 fuchsia, 16 white); shade 0 dimmest … 3 brightest. Shades 0 and 2 and the
 colours were confirmed on the hardware (`examples/mk3-led-check.rs`); each touch-strip LED
 takes its own colour. DECKARD sends dim as shade 0 and every brighter state as 3, as
-Maschine's MK3 LED table gives bright and flash the full level; button LEDs that are off
-keep a faint backlight (0x09, picked on the hardware) so their labels can be read; dim ones (can be pressed, not
-selected) are 0x22, 30% under Maschine's 0.25. SAMPLING is a colour LED, and its dim white
-doesn't look like the one-colour buttons, so when it isn't selected it gets byte 73, past
-the palette, picked on the hardware to match them.
+Maschine's MK3 LED table gives bright and flash the full level.
 
 ## Other reports (from the HID report descriptor)
 
 `examples/mk3-hid-reports.rs` lists them; `examples/mk3-hid-features.rs` reads the feature
 reports (reading changes nothing).
 
-- **Output:** 0x80 and 0x81 (the LEDs, above); 0xf3 (1 byte) and 0xf4 (32 bytes), unknown.
+- **Output:** 0x80 and 0x81 (the LEDs, above); **0xf3 (1 byte): the LEDs' global level**, 0..=127,
+  smooth (measured: `examples/mk3-led-probe.rs --ramp-report f3`); 0xf4 (32 bytes), unknown.
 - **Feature 0xf8 / 0xf9:** the left and right display's settings, read as
   `e0 01 10 01 60 01 14 32 00`: width 480 and height 272 (u16 LE), then single bytes.
   **Byte 8 is the backlight, 0..100**; the controller starts at 20. Writing it to either

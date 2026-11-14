@@ -4906,7 +4906,8 @@ impl App {
         }
         if let Some(m) = &self.mk3 {
             m.set_route(out.route);
-            m.set_leds(out.leds.scaled(self.settings.led_brightness));
+            m.set_leds(out.leds);
+            m.set_led_brightness(self.settings.led_brightness);
             if let Some((n, frame)) = out.screens {
                 m.set_screens(n, frame);
             }
@@ -17884,10 +17885,7 @@ fn mk3_leds(host: &deckard_lua_host::Host) -> deckard_mk3::leds::Leds {
         // (Maschine's MK3 Events page lights its button by the Studio's name.)
         let l = host.led(name).or_else(|| (*name == "LED_EVENTS").then(|| host.led("LED_TRANSPORT_EVENTS")).flatten());
         let Some(l) = l else {
-            // Buttons the scripts leave alone still show their labels.
-            if !leds::is_colour(name) {
-                out.set(name, leds::BACKLIGHT);
-            }
+            // Buttons the scripts leave alone stay dark (their labels are printed).
             continue;
         };
         let byte = if leds::is_colour(name) {

@@ -322,6 +322,14 @@ impl Decoder {
     }
 }
 
+/// The output report holding the LEDs' global level, one byte (0..=127).
+pub const LED_LEVEL_REPORT: u8 = 0xf3;
+
+/// A percent (0..=100) as the LED level report takes it (0..=127).
+pub fn brightness_level(percent: u8) -> u8 {
+    (u16::from(percent.min(100)) * 127 / 100) as u8
+}
+
 /// Where the backlight level sits in a display's settings report.
 const DISPLAY_BRIGHTNESS_BYTE: usize = 8;
 
@@ -377,6 +385,31 @@ impl Device {
         self.write(&l.pads)
     }
 
+    /// A feature report as the controller holds it (`get_feature_report`), for reading a
+    /// setting back: the displays' settings are `0xf8`/`0xf9`.
+    pub fn read_feature(&self, id: u8) -> Result<Vec<u8>, String> {
+        let mut buf = [0u8; 64];
+        buf[0] = id;
+        let n = self.hid.get_feature_report(&mut buf).map_err(|e| e.to_string())?;
+        Ok(buf[..n].to_vec())
+    }
+
+    /// Write a feature report back as read (its bytes already set), e.g. one
+    /// [`read_feature`](Self::read_feature) returned with a byte changed.
+    pub fn write_feature(&self, report: &[u8]) -> Result<(), String> {
+        self.hid.send_feature_report(report).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// The LEDs' global level, 0..=100 % of the report's 0..=127: output report `0xf3`,
+    /// one byte, measured on the hardware (`examples/mk3-led-probe.rs`, `--ramp-report`).
+    /// It scales every LED the panel draws, smoothly — the byte in the LED reports only
+    /// picks how many of the two LEDs under a button light (docs/mk3-usb.md). It is
+    /// output-only, so it can't be read back, and the controller keeps its last value
+    /// until it's powered off.
+    pub fn set_led_brightness(&self, level: u8) -> Result<(), String> {
+        self.write(&[LED_LEVEL_REPORT, brightness_level(level)])
+    }
+
     /// The displays' backlight, 0..=100. Each display's settings are a feature report
     /// (0xf8 left, 0xf9 right: width, height, then single bytes); the brightness is
     /// byte 8, which the controller starts at 20 (`examples/mk3-display-brightness.rs`).
@@ -392,6 +425,20 @@ impl Device {
             self.hid.send_feature_report(&buf[..n]).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod brightness_tests {
+    use super::*;
+
+    /// The LEDs' global level report takes 0..=127, the setting is a percent.
+    #[test]
+    fn the_led_level_is_a_percent_of_the_report() {
+        assert_eq!(brightness_level(0), 0);
+        assert_eq!(brightness_level(100), 127);
+        assert_eq!(brightness_level(50), 63);
+        assert_eq!(brightness_level(150), 127, "clamped, never past the report's range");
     }
 }
 
