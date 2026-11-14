@@ -38,6 +38,12 @@ pub struct Stats {
     /// Underruns the device reported ("A buffer underrun or overrun occurred"): also
     /// at start and restart, when the device itself takes a moment.
     pub device_errors: AtomicU64,
+    /// The last late block: how long it took and lasts (µs), how long of that went on
+    /// what other threads asked for (edits, notes), and how many of those there were.
+    pub late_busy_us: AtomicU64,
+    pub late_audio_us: AtomicU64,
+    pub late_apply_us: AtomicU64,
+    pub late_commands: AtomicU64,
 }
 
 impl Stats {
@@ -599,8 +605,10 @@ impl Output {
                     // What other threads asked for since the last block.
                     let period = Duration::from_secs_f64(frames as f64 / rate as f64);
                     let exact = exact.load(Ordering::Relaxed);
+                    let mut asked = 0u64;
                     while let Some(cmd) = commands.pop() {
                         applied += 1;
+                        asked += 1;
                         let cmd = match cmd {
                             Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
                             cmd => cmd,
@@ -612,6 +620,7 @@ impl Output {
                             drop(back);
                         }
                     }
+                    let apply_us = started.elapsed().as_micros() as u64;
                     let ext_len = (frames * 2).min(16_384);
                     for b in &mut ext {
                         b[..ext_len].fill(0.0);
@@ -681,6 +690,10 @@ impl Output {
                     stats.audio_us.fetch_add(audio, Ordering::Relaxed);
                     if busy > audio {
                         stats.late.fetch_add(1, Ordering::Relaxed);
+                        stats.late_busy_us.store(busy, Ordering::Relaxed);
+                        stats.late_audio_us.store(audio, Ordering::Relaxed);
+                        stats.late_apply_us.store(apply_us, Ordering::Relaxed);
+                        stats.late_commands.store(asked, Ordering::Relaxed);
                     }
                     if let Some(load) = (busy * 1000).checked_div(audio) {
                         stats.peak_load.fetch_max(load, Ordering::Relaxed);
@@ -701,11 +714,17 @@ impl Output {
                     }
                     // (With how the engine has done: none late means the device or the system
                     // was behind, not the engine.)
+                    let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+                    let ms = |a: &AtomicU64| l(a) as f64 / 1000.0;
                     eprintln!(
-                        "audio error: {e} (after {} blocks; {} computed late, peak load {:.0} %)",
-                        err_stats.callbacks.load(Ordering::Relaxed),
-                        err_stats.late.load(Ordering::Relaxed),
-                        err_stats.peak_load.load(Ordering::Relaxed) as f64 / 10.0
+                        "audio error: {e} (after {} blocks; {} computed late, peak load {:.0} %; the last late one took {:.2} ms of {:.2}, {:.2} ms of it on {} edits or notes)",
+                        l(&err_stats.callbacks),
+                        l(&err_stats.late),
+                        l(&err_stats.peak_load) as f64 / 10.0,
+                        ms(&err_stats.late_busy_us),
+                        ms(&err_stats.late_audio_us),
+                        ms(&err_stats.late_apply_us),
+                        l(&err_stats.late_commands)
                     );
                 },
             )
