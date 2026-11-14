@@ -44,6 +44,16 @@ fn main() {
             Some(n) => println!("  root {} {:+.0} ct ({:.2})", n.note, n.cents, n.confidence),
             None => println!("  no root"),
         }
+        // Find: sixteen starts, on the bars when there's a tempo.
+        let t = std::time::Instant::now();
+        let lines: Vec<usize> = a.tempo.map_or(Vec::new(), |tp| {
+            let bar = 4.0 * 60.0 / tp.bpm * f64::from(rate);
+            (0..).map(|k| tp.offset as f64 + k as f64 * bar).take_while(|f| *f < part.len() as f64).map(|f| f as usize).collect()
+        });
+        let found = deckard_analysis::find_samples(part, rate, (0, part.len()), &lines, 16);
+        let times: Vec<String> =
+            found.iter().map(|f| format!("{}:{:04.1}", f / rate as usize / 60, (*f as f64 / f64::from(rate)) % 60.0)).collect();
+        eprintln!("found in {:.2} s: {}", t.elapsed().as_secs_f64(), times.join("  "));
         let t = std::time::Instant::now();
         let k = deckard_analysis::key(part, rate);
         eprintln!("key in {:.2} s: {k:?}", t.elapsed().as_secs_f64());

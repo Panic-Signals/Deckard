@@ -14,7 +14,7 @@
 //!
 //! Frame knobs move across the part of the sample shown in a turn (a hundredth a step).
 
-use crate::layout::sampling::{GRID_DIVS, PATTERN_MODES, SLICE_MODES, SPLIT_COUNTS, SamplingState};
+use crate::layout::sampling::{FIND_COUNTS, GRID_DIVS, PATTERN_MODES, SLICE_MODES, SPLIT_COUNTS, SamplingState};
 use crate::record_knobs::{self, Knobs};
 use deckard_lua_host::state::{KnobPage, SampleView, SamplingKnob};
 use deckard_model::{Color, Project};
@@ -26,8 +26,9 @@ const TURN: f64 = 1.0 / 32.0;
 const FRAME_STEPS: f64 = 100.0;
 /// NI's slicer modes (`NI.DATA.MODE_DETECT` 0, SPLIT 1, GRID 2, MANUAL 3) as the app's
 /// (`SLICE_MODES`: Split, Grid, Detect, Manual), and back.
-const NI_TO_APP_SLICE_MODE: [usize; 4] = [2, 0, 1, 3];
-const APP_TO_NI_SLICE_MODE: [usize; 4] = [1, 2, 0, 3];
+/// DECKARD's own Find comes after them.
+const NI_TO_APP_SLICE_MODE: [usize; 5] = [2, 0, 1, 3, 4];
+const APP_TO_NI_SLICE_MODE: [usize; 5] = [1, 2, 0, 3, 4];
 
 /// What turning one of these knobs sets.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +39,7 @@ pub enum Apply {
     /// The selection's start (false) or end.
     Selection(bool),
     SliceMode,
+    FindCount,
     SplitCount,
     GridDiv,
     Sensitivity,
@@ -347,12 +349,13 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
 
     // SLICE: the knobs NI's script picks (by its slicer mode's numbers).
     let names = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let ni_names: Vec<String> = (0..4).map(|m| SLICE_MODES[NI_TO_APP_SLICE_MODE[m]].to_string()).collect();
+    let ni_names: Vec<String> = (0..5).map(|m| SLICE_MODES[NI_TO_APP_SLICE_MODE[m]].to_string()).collect();
     let own_tempo = z.meta.as_ref().filter(|_| new_sampler).and_then(|m| m.bpm);
     let tempo = own_tempo.unwrap_or(p.tempo);
     let slice = [
-        (choice("Slice.Mode", "MODE", &ni_names, APP_TO_NI_SLICE_MODE[st.slice_mode.min(3)]), Apply::SliceMode),
+        (choice("Slice.Mode", "MODE", &ni_names, APP_TO_NI_SLICE_MODE[st.slice_mode.min(4)]), Apply::SliceMode),
         (choice("Slice.Split", "SLICES", &SPLIT_COUNTS.map(|c| c.to_string()), st.split), Apply::SplitCount),
+        (choice("Slice.Find", "SAMPLES", &FIND_COUNTS.map(|c| c.to_string()), st.find), Apply::FindCount),
         (choice("Slice.Grid", "SLICES", &GRID_DIVS.map(|d| d.1.to_string()), st.grid), Apply::GridDiv),
         (
             knob("Slice.Density", "SENSITIVITY", format!("{:.0} %", st.sensitivity * 100.0), st.sensitivity, (0.0, 1.0), 0.01, 1.0 / 100.0),
@@ -373,5 +376,5 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
 
 /// What NI's slicer mode `ni` is in the app (`SLICE_MODES`).
 pub fn app_slice_mode(ni: f64) -> usize {
-    NI_TO_APP_SLICE_MODE[(ni.round().max(0.0) as usize).min(3)]
+    NI_TO_APP_SLICE_MODE[(ni.round().max(0.0) as usize).min(4)]
 }

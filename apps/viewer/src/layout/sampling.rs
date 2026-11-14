@@ -27,7 +27,9 @@ const EDIT_BUTTONS: [(&str, EditOp); 14] = [
     ("STEMS", EditOp::Stems),
     ("AUTO LOOP", EditOp::AutoLoop),
 ];
-pub const SLICE_MODES: [&str; 4] = ["Split", "Grid", "Detect", "Manual"];
+pub const SLICE_MODES: [&str; 5] = ["Split", "Grid", "Detect", "Manual", "Find"];
+/// How many starts Find looks for.
+pub const FIND_COUNTS: [usize; 4] = [4, 8, 16, 32];
 pub const SPLIT_COUNTS: [usize; 4] = [4, 8, 16, 32];
 pub const GRID_DIVS: [(u32, &str); 4] = [(4, "1/4"), (8, "1/8"), (16, "1/16"), (32, "1/32")];
 pub const PATTERN_MODES: [&str; 3] = ["Create Pattern", "Replace Pattern", "No Pattern"];
@@ -87,6 +89,8 @@ pub struct SamplingState {
     /// Slice starts (frames), sorted.
     pub slices: Vec<usize>,
     pub slice_mode: usize,
+    /// Find's count (`FIND_COUNTS`).
+    pub find: usize,
     pub split: usize,
     pub grid: usize,
     pub sensitivity: f64,
@@ -129,6 +133,7 @@ impl Default for SamplingState {
             clipboard: None,
             slices: Vec::new(),
             slice_mode: 0,
+            find: 2,
             split: 1,
             grid: 2,
             sensitivity: 0.5,
@@ -335,6 +340,7 @@ pub enum SamplingAct {
     StretchApply,
     SliceMode(usize),
     SplitCount(usize),
+    FindCount(usize),
     GridDiv(usize),
     Sensitivity(f64),
     ZeroX(bool),
@@ -1725,6 +1731,12 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
             }));
             let z = st.zero_x;
             fields.push(toggle_field("ZERO-X", z, move || sact(SamplingAct::ZeroX(!z))));
+        }
+        4 => {
+            let i = st.find;
+            let mut f = choice_field("SAMPLES", FIND_COUNTS.map(|c| c.to_string()).to_vec(), i, |k| sact(SamplingAct::FindCount(k)));
+            f.tip = "How many starts to find: where something comes in, on the sample's bars and beats when it has a tempo";
+            fields.push(f);
         }
         _ => {}
     }

@@ -65,6 +65,8 @@ local function slice_pages(v)
     slicer[2], slicer[3] = k["Slice.Density"], k["Slice.ZeroX"]
   elseif mode == "Split" then
     slicer[2] = k["Slice.Split"]
+  elseif mode == "Find" then
+    slicer[2] = k["Slice.Find"]
   elseif mode == "Grid" then
     slicer[2], slicer[3], slicer[4] = k["Slice.Grid"], k["Slice.BpmMode"], k["Slice.Bpm"]
   end

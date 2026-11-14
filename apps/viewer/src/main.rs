@@ -7810,6 +7810,10 @@ impl App {
                 self.sampling.split = i;
                 self.compute_slices();
             }
+            S::FindCount(i) => {
+                self.sampling.find = i.min(layout::sampling::FIND_COUNTS.len() - 1);
+                self.compute_slices();
+            }
             S::GridDiv(i) => {
                 self.sampling.grid = i;
                 self.compute_slices();
@@ -8004,6 +8008,26 @@ impl App {
                 }
             }
             2 => edit::detect_positions(&s, r, st.sensitivity, st.zero_x),
+            4 => {
+                // Where things start: on the sample's own bars (or beats, of a short one)
+                // when the zone has a tempo, else on its hits.
+                let count = layout::sampling::FIND_COUNTS[st.find.min(3)];
+                let map = self.doc.as_ref().and_then(|d| {
+                    let d = d.borrow();
+                    let m =
+                        d.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone)?.meta.clone()?;
+                    deckard_model::new_sampler::BeatMap::of(&m, s.rate)
+                });
+                let lines = map.map_or(Vec::new(), |map| {
+                    let by = |div| beat::grid_slices(&map, r, div);
+                    [1, 2, 4].into_iter().map(by).find(|l| l.len() >= 2 * count).unwrap_or_else(|| by(8))
+                });
+                let mut found = deckard_analysis::find_samples(&s.frames, s.rate, r, &lines, count);
+                if found.is_empty() {
+                    found.push(r.0);
+                }
+                found
+            }
             _ => {
                 if st.slices.is_empty() {
                     vec![r.0]
@@ -8508,6 +8532,7 @@ impl App {
             }
             Some(Apply::SliceMode) => SamplingAct::SliceMode(sampling_hw::app_slice_mode(value)),
             Some(Apply::SplitCount) => SamplingAct::SplitCount(at),
+            Some(Apply::FindCount) => SamplingAct::FindCount(at),
             Some(Apply::GridDiv) => SamplingAct::GridDiv(at),
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
