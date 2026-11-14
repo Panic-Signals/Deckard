@@ -22,6 +22,15 @@ const IN_TUNE: f32 = 5.0;
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/// The Control area's title for Zhora, saying what it's for.
+pub const TITLE: &str = "Zhora - CV Control for Modular Synths";
+
+/// The Control area's title for the plug-in `pr`: Zhora's says what it's for (unless
+/// it was given a name of its own); others are their names.
+pub fn heading(pr: &deckard_model::PluginRef) -> String {
+    if is_zhora(&pr.id) && pr.name == deckard_plugins::zhora::CLASS.name { TITLE.into() } else { pr.name.clone() }
+}
+
 /// Whether a sound of `p` is played by Zhora.
 pub fn zhora_in(p: &Project) -> bool {
     p.groups.iter().flat_map(|g| &g.sounds).any(|s| s.plugin.as_ref().is_some_and(|pr| is_zhora(&pr.id)))
@@ -796,5 +805,17 @@ mod tests {
         let back = z.lock().unwrap().readout().unwrap();
         assert_eq!(back.tuned_at, r.tuned_at, "the table is in the saved project");
         assert_eq!(back.worst_cents, r.worst_cents);
+    }
+
+    #[test]
+    fn zhoras_title_says_what_its_for() {
+        let class = &deckard_plugins::zhora::CLASS;
+        let zhora = deckard_model::PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
+        assert_eq!(heading(&zhora), "Zhora - CV Control for Modular Synths");
+        // Named by hand, or another plug-in: its name.
+        let named = deckard_model::PluginRef { name: "Moog".into(), ..zhora.clone() };
+        assert_eq!(heading(&named), "Moog");
+        let other = deckard_model::PluginRef { id: "VST3:0123".into(), name: "Zhora".into(), ..Default::default() };
+        assert_eq!(heading(&other), "Zhora");
     }
 }

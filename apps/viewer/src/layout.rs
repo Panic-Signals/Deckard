@@ -4538,7 +4538,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                         Some(v) if v.error.is_none() => {
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
-                            heading = pr.name.clone();
+                            heading = crate::zhora_ui::heading(pr);
                             // Named pages (DECKARD's plug-ins and NKS/saved pages with sections) by name, else by number.
                             let mut names: Vec<String> = v
                                 .pages
