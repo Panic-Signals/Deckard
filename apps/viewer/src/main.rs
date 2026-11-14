@@ -8587,7 +8587,7 @@ impl App {
             }
             Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
             Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
-            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid)) => {
+            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid | Apply::Speed | Apply::Reverse)) => {
                 use deckard_model::new_sampler::PlayMode;
                 let Some(doc) = self.doc.clone() else { return };
                 let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
@@ -8605,6 +8605,10 @@ impl App {
                     }
                     Apply::Bpm => SamplingAct::Meta(beat::with_bpm(&m, value, seconds)),
                     Apply::Root => SamplingAct::Meta(beat::with_root(&m, at.min(127) as u8)),
+                    Apply::Speed => {
+                        SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { speed: (value.round() / 100.0).clamp(0.25, 4.0), ..m })
+                    }
+                    Apply::Reverse => SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { reverse: value >= 0.5, ..m }),
                     Apply::StartGrid => {
                         use deckard_model::new_sampler::{StartGrid, ZoneMeta};
                         SamplingAct::Meta(ZoneMeta { start: StartGrid::ALL[at.min(StartGrid::ALL.len() - 1)], ..m })

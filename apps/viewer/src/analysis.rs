@@ -426,6 +426,15 @@ mod app_tests {
         app.record_apply.insert("Beat.Start".into(), crate::sampling_hw::Apply::StartGrid);
         app.sampling_knob("Beat.Start", 3.0);
         assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Quarter);
+        // The PLAYBACK page: its SPEED (percent) and REVERSE.
+        app.record_apply.insert("Play.Speed".into(), crate::sampling_hw::Apply::Speed);
+        app.record_apply.insert("Play.Reverse".into(), crate::sampling_hw::Apply::Reverse);
+        app.sampling_knob("Play.Speed", 50.0);
+        app.sampling_knob("Play.Reverse", 1.0);
+        let m = zone(&app).meta.unwrap();
+        assert_eq!((m.speed, m.reverse), (0.5, true));
+        app.sampling_knob("Play.Speed", 100.0);
+        app.sampling_knob("Play.Reverse", 0.0);
         // Slices to the next slice (a Sampler's way): each its own piece, one undo step.
         let zones = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones.clone();
         let envelope = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().envelope_type;

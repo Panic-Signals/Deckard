@@ -4,7 +4,8 @@
 //! each sets, as the Sampling view's footers have them:
 //!
 //! - EDIT: PLAY RANGE (START, END), SELECTION RANGE (START, END); the MK3 manual's two
-//!   pages. A New Sampler zone's also TEMPO / PITCH (MODE, BPM, ROOT, PLAYS AT).
+//!   pages. A New Sampler zone's also TEMPO / PITCH (MODE, BPM, ROOT, PLAYS AT) and
+//!   PLAYBACK (SPEED, REVERSE, KEY).
 //! - ZONE: PLAY RANGE, LOOP (ACTIVE, START, END, XFADE), TUNE / MIX (TUNE, GAIN, PAN,
 //!   ROOT KEY), ENVELOPE (ATTACK, DECAY), MAP (KEY LO, KEY HI, VEL LO, VEL HI); the
 //!   manual's five pages.
@@ -39,6 +40,9 @@ pub enum Apply {
     /// The selection's start (false) or end.
     Selection(bool),
     SliceMode,
+    /// A New Sampler zone's own speed (percent), and whether it plays backwards.
+    Speed,
+    Reverse,
     FindCount,
     SplitCount,
     GridDiv,
@@ -240,6 +244,19 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             knobs.push((knob("Beat.PlaysAt", "PLAYS AT", text, at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));
         }
         page(&mut out, 1, "TEMPO / PITCH", knobs);
+        // How this slice plays: its own speed against the song (Sync and Keys), backwards,
+        // and the note it plays at.
+        let mut knobs = Vec::new();
+        if m.mode != PlayMode::Repitch && m.bpm.is_some() {
+            let sp = m.speed_factor() * 100.0;
+            knobs.push((knob("Play.Speed", "SPEED", format!("{sp:.0} %"), sp, (25.0, 400.0), 1.0, 1.0 / 375.0), Apply::Speed));
+        }
+        knobs.push((on_off("Play.Reverse", "REVERSE", m.reverse), Apply::Reverse));
+        if let Some(r) = m.root {
+            let at = crate::beat::target_of(r, m.cents, z.tune).clamp(0, 127);
+            knobs.push((knob("Play.Key", "KEY", crate::analysis::note_name(at as u8), at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));
+        }
+        page(&mut out, 1, "PLAYBACK", knobs);
         if m.mode == deckard_model::new_sampler::PlayMode::Sync {
             use deckard_model::new_sampler::StartGrid;
             let grids: Vec<String> = StartGrid::ALL.iter().map(|g| g.label().to_string()).collect();
