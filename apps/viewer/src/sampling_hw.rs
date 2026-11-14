@@ -45,6 +45,8 @@ pub enum Apply {
     Reverse,
     /// Held, a one-shot or a loop.
     Plays,
+    /// The loop's length: sixteenths of the sample's tempo, or (no tempo) milliseconds.
+    LoopLength,
     FindCount,
     SplitCount,
     GridDiv,
@@ -87,6 +89,16 @@ fn choice(key: &str, name: &str, options: &[String], at: usize) -> SamplingKnob 
 
 fn on_off(key: &str, name: &str, on: bool) -> SamplingKnob {
     choice(key, name, &["Off".into(), "On".into()], usize::from(on))
+}
+
+/// What a loop's length is counted in for a sample at `bpm` and `rate`: frames a unit,
+/// the knob's step in units, and the unit's name. Beats (a sixteenth a step), or
+/// milliseconds (10 a step) without a tempo.
+pub fn loop_unit(bpm: Option<f64>, rate: u32) -> (f64, f64, &'static str) {
+    match bpm.filter(|b| b.is_finite() && *b > 0.0) {
+        Some(b) => (f64::from(rate) * 60.0 / b, 0.25, "beats"),
+        None => (f64::from(rate) / 1000.0, 10.0, "ms"),
+    }
 }
 
 fn page(pages: &mut Pages, tab: usize, name: &str, knobs: Vec<(SamplingKnob, Apply)>) {
@@ -259,6 +271,16 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             let names: Vec<String> = Plays::ALL.iter().map(|p| p.label().to_string()).collect();
             let cur = Plays::ALL.iter().position(|p| *p == Plays::of(&z)).unwrap_or(0);
             knobs.push((choice("Play.Plays", "PLAYS", &names, cur), Apply::Plays));
+            // A loop's length, from its start: a sixteenth a step where the sample has a
+            // tempo, else 10 ms.
+            if Plays::of(&z) == Plays::Loop {
+                let (la, lb) = z.loop_range;
+                let (unit, step, name) = loop_unit(m.bpm, rate);
+                let room = ((if z.play_range.1 > z.play_range.0 { z.play_range.1 } else { len as i64 - 1 }) - la + 1).max(2) as f64 / unit;
+                let now = (lb - la + 1).max(1) as f64 / unit;
+                let text = if name == "ms" { format!("{now:.0} ms") } else { format!("{:.2} {name}", now) };
+                knobs.push((knob("Play.Loop", "LOOP LENGTH", text, now, (step.min(room), room), step, 1.0 / 64.0), Apply::LoopLength));
+            }
         }
         if let Some(r) = m.root {
             let at = crate::beat::target_of(r, m.cents, z.tune).clamp(0, 127);

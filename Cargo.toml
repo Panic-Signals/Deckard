@@ -12,6 +12,11 @@ opt-level = 3
 [profile.dev.package.deckard-stretch]
 opt-level = 3
 
+# The audio thread's code: a debug build has to keep up with the device too (a New
+# Sampler's voices each mix four stem lanes into a stretcher).
+[profile.dev.package.deckard-engine]
+opt-level = 2
+
 # Zhora's pitch detector has to keep up with the input, in dev builds too.
 [profile.dev.package.deckard-plugins]
 opt-level = 3

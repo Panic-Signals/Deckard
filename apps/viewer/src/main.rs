@@ -8654,6 +8654,20 @@ impl App {
             }
             Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
             Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
+            Some(Apply::LoopLength) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some(rate) = self.sampling.sample.as_ref().map(|s| s.rate) else { return };
+                let (unit, step, _) = sampling_hw::loop_unit(z.meta.as_ref().and_then(|m| m.bpm), rate);
+                // On the step's lines: a loop of an odd length takes the nearest.
+                let n = ((value / step).round().max(1.0) * step * unit).round() as i64;
+                let last = if z.play_range.1 > z.play_range.0 { z.play_range.1 } else { self.sampling.len() as i64 - 1 };
+                let end = (z.loop_range.0 + n - 1).clamp(z.loop_range.0 + 1, last.max(z.loop_range.0 + 1));
+                layout::apply_acts(self, vec![layout::Act::SetParam(t, "loop_range/high", end as f64)]);
+                return;
+            }
             Some(Apply::Plays) => SamplingAct::Plays(deckard_model::new_sampler::Plays::ALL[at.min(2)]),
             Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid | Apply::Speed | Apply::Reverse)) => {
                 use deckard_model::new_sampler::PlayMode;

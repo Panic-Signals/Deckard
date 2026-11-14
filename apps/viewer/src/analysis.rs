@@ -491,6 +491,12 @@ mod app_tests {
         app.zone = 3;
         app.sampling_knob("Play.Plays", 2.0);
         assert_eq!(zones(&app)[3].loop_range, (72_000, last));
+        // Its LOOP LENGTH knob, in beats of the sample's tempo (120: 24,000 frames a beat).
+        app.record_apply.insert("Play.Loop".into(), crate::sampling_hw::Apply::LoopLength);
+        app.sampling_knob("Play.Loop", 0.5);
+        assert_eq!(zones(&app)[3].loop_range, (72_000, 83_999), "{}", app.status);
+        app.sampling_knob("Play.Loop", 9.0);
+        assert_eq!(zones(&app)[3].loop_range, (72_000, last), "no further than it plays");
     }
 
     /// REANALYZE hears the part selected: a sample that goes from 100 to 140 BPM halfway
