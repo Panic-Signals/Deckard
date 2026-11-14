@@ -2242,6 +2242,7 @@ name = "deckard-mk3"
 version = "0.1.0"
 dependencies = [
  "hidapi",
+ "midir",
  "nusb",
  "png",
 ]
