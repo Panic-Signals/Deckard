@@ -384,7 +384,10 @@ fn new_sampler_shots() {
     mk3(&mut h, "mk3-new-sampler-stems.png");
     // A slice of it: what it doesn't play shows dim, the ground behind it barely.
     let doc = h.state().doc.clone().unwrap();
-    doc.borrow_mut().set("Start", deckard_doc::Target::Zone(0, 0, 0), "play_range/low", mxprj::decode::Value::Float((n / 3) as f64)).unwrap();
+    let (g, snd, z) = (h.state().group, h.state().sound, h.state().zone);
+    doc.borrow_mut()
+        .set("Start", deckard_doc::Target::Zone(g, snd, z), "play_range/low", mxprj::decode::Value::Float((n / 3) as f64))
+        .unwrap();
     h.state_mut().sampling.selection = Some((n / 3, n));
     mk3(&mut h, "mk3-new-sampler-slice.png");
 }
