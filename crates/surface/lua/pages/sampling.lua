@@ -458,6 +458,9 @@ local function sample_bar(screen, theme, v)
   screen:label(490, 38, 950 - w - lw - 500, 18, s.name, st, "left", "bottom")
 end
 
+-- How bright a waveform is where it plays (of its colour: 1 is all of it).
+local WAVE_LIT = 0.5
+
 -- A waveform of `peaks` (min, max a column) in (x, y, w, h), showing frames `a` to `b`
 -- of `s`: in `colour` where it plays (or in a slice), faint elsewhere.
 local function wave(screen, theme, s, peaks, x, y, w, h, a, b, colour, slices)
@@ -475,13 +478,16 @@ local function wave(screen, theme, s, peaks, x, y, w, h, a, b, colour, slices)
   if s.selection and not slices then ground(s.selection[1], s.selection[2], "wave_selection") end
   if slices and slice and s.slices[slice] then ground(s.slices[slice], s.slices[slice + 1] or last, "slice_focus") end
   local off = slices and "wave_unsliced" or "wave_off"
+  -- What plays is drawn at part of its colour's brightness: a whole song's waveform is
+  -- a solid block, and at full brightness it glares.
+  local lit = type(colour) == "table" and widgets.blend(colour, { 0, 0, 0 }, WAVE_LIT) or colour
   for c = 0, w - 1 do
     local lo, hi = peaks[2 * c + 1], peaks[2 * c + 2]
     if lo then
       local f = a + (c + 0.5) * per
       local top = math.floor(mid - hi * h / 2)
       local bottom = math.ceil(mid - lo * h / 2)
-      screen:rect(x + c, top, 1, math.max(1, bottom - top), (f >= first and f < last) and colour or off)
+      screen:rect(x + c, top, 1, math.max(1, bottom - top), (f >= first and f < last) and lit or off)
     end
   end
   local function mark(f, c, width)
