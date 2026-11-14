@@ -101,6 +101,15 @@ fn after_queued_on(live: &[(u64, Live)], now: u64, offset: u64, same_on: impl Fn
     live.iter().filter(|(at, e)| *at > off && same_on(e)).map(|(at, _)| at - now).max().unwrap_or(offset)
 }
 
+/// A MIDI input plug-in starts a note at frame `on`: an off it queued before for the same
+/// note (`same_off`) that would come after `on` belonged to the note before, and goes. An
+/// instrument knows a note only by its pitch, so that off would end the new note. A plug-in
+/// plays the offs due within a block as the block starts, so a note's end can be queued
+/// before a note-on that comes earlier in the same block.
+fn drop_later_offs(live: &mut Vec<(u64, Live)>, on: u64, same_off: impl Fn(&Live) -> bool) {
+    live.retain(|(at, e)| *at <= on || !same_off(e));
+}
+
 /// Whether `e` is muted: its sound is, or (a link's note) the sound whose note played it.
 fn note_muted(muted: &[Vec<bool>], e: &NoteEvent) -> bool {
     let of = |s: usize| muted.get(e.group).and_then(|r| r.get(s)).copied().unwrap_or(false);
@@ -4683,6 +4692,14 @@ impl Engine {
                     offset,
                     |e| matches!(*e, Live::MidiInputOut { group: g, note: midi_input::NoteOut::On { sound: s, pitch: p, .. } } if (g, s, p) == (group, sound, pitch)),
                 );
+            }
+            if let midi_input::NoteOut::On { sound, pitch, .. } = note {
+                drop_later_offs(&mut self.live, self.time + offset, |e| match *e {
+                    Live::MidiInputOut { group: g, note: midi_input::NoteOut::Off { sound: s, pitch: p, .. } } => {
+                        (g, s, p) == (group, sound, pitch)
+                    }
+                    _ => false,
+                });
             }
             if offset == 0 {
                 self.play_midi_input_note(group, note);
@@ -12895,6 +12912,28 @@ mod tests {
         assert_eq!(after_queued_on(&live, 100, 0, same), 80, "to its latest queued attack");
         assert_eq!(after_queued_on(&live, 100, 90, same), 90, "an off already after it stays");
         assert_eq!(after_queued_on(&[], 100, 0, same), 0);
+    }
+
+    /// A new attack for a pitch removes that pitch's off still queued from the note before
+    /// (a plug-in plays a block's offs first), or the old off would end the new note.
+    #[test]
+    fn a_plug_ins_new_attack_drops_the_stale_off_queued_after_it() {
+        use midi_input::NoteOut::{Off, On};
+        let mut e = click_engine_for(&project(), 1000);
+        e.sequencing = false;
+        let off = |at, pitch| Off { at, sound: 0, pitch };
+        e.play_midi_input_out(0, 0.0, &[off(8.0, 60), off(8.0, 64)]);
+        assert_eq!(e.live.len(), 2);
+        e.play_midi_input_out(0, 0.0, &[On { at: 4.0, sound: 0, pitch: 60, velocity: 100, length: None }]);
+        let pitches: Vec<i64> = e
+            .live
+            .iter()
+            .filter_map(|(_, l)| match l {
+                Live::MidiInputOut { note: Off { pitch, .. }, .. } => Some(*pitch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pitches, [64], "the later off for 60 is gone; another pitch's stays");
     }
 
     /// Choke only one Group's sounds: other Groups' voices keep playing.
