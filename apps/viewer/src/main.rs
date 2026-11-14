@@ -3942,6 +3942,28 @@ impl App {
                     }
                     r.map(|_| None)
                 }
+                Act::MovePattern(g, p, slot) => {
+                    // The focus stays on the pattern it was on, wherever that went.
+                    let slots = |d: &deckard_doc::Document| {
+                        d.project().groups.get(g).map(|x| x.patterns.iter().map(|p| p.slot).collect::<Vec<_>>())
+                    };
+                    let before = slots(&*d).unwrap_or_default();
+                    let focused = (self.group == g).then(|| before.get(self.pattern).copied()).flatten();
+                    let r = d.move_pattern(g, p, slot);
+                    if let (Ok(_), Some(f), Some(&from)) = (&r, focused, before.get(p)) {
+                        let f = if f == from {
+                            slot
+                        } else if f == slot {
+                            from
+                        } else {
+                            f
+                        };
+                        if let Some(i) = slots(&*d).and_then(|s| s.iter().position(|x| *x == f)) {
+                            self.pattern = i;
+                        }
+                    }
+                    r.map(|_| None)
+                }
                 Act::AddScene => d.add_scene().map(|s| Some((Some(s), None))),
                 Act::AddGroup => d.add_group().map(|g| {
                     (self.group, self.sound, self.pattern) = (g, 0, 0);

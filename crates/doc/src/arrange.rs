@@ -377,6 +377,28 @@ impl Document {
         Ok(at)
     }
 
+    /// Move pattern `p` of `group` to place `slot` (from 0). A pattern already there takes
+    /// `p`'s old place. Scenes keep playing the same patterns. Returns `p`'s new index in
+    /// the group's list.
+    pub fn move_pattern(&mut self, group: usize, p: usize, slot: usize) -> Result<usize, String> {
+        let items_path = self.pattern_items_path(group)?;
+        let mut items = self.items(&items_path)?;
+        let from = items.get(p).and_then(super::sounds::entry_id).ok_or("no such pattern")?;
+        let to = slot as i64;
+        if from == to {
+            return Ok(p);
+        }
+        if let Some(other) = items.iter().position(|e| super::sounds::entry_id(e) == Some(to)) {
+            super::sounds::set_entry_id(&mut items[other], from);
+        }
+        super::sounds::set_entry_id(&mut items[p], to);
+        // The list stays in place order.
+        items.sort_by_key(|e| super::sounds::entry_id(e).unwrap_or(i64::MAX));
+        let at = items.iter().position(|e| super::sounds::entry_id(e) == Some(to)).ok_or("pattern lost")?;
+        self.apply("Move Pattern", vec![Op::Set { path: items_path, value: Value::List(items) }])?;
+        Ok(at)
+    }
+
     /// A new pattern's entry for group `group`, whose list is `items`: empty, like pattern
     /// `from`. Its id is still to be set.
     fn new_pattern_entry(&mut self, group: usize, from: usize, items: &[Value], name: &str) -> Result<Value, String> {

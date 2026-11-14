@@ -1196,6 +1196,30 @@ fn a_controller_makes_a_pattern_in_the_place_it_asks_for() {
     assert_eq!(v.groups[0].scene_pattern, Some(1), "and plays in the scene");
 }
 
+/// Dragging a pattern in the Ideas view moves it to the place it's dropped on, and the
+/// focus stays on the pattern it was on.
+#[test]
+fn a_dragged_pattern_moves_and_keeps_the_focus() {
+    use crate::layout::Act;
+    let mut app = crate::App::default();
+    app.new_project();
+    (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
+    crate::layout::apply_acts(&mut app, vec![Act::NewPatternAt(0, 0, 0), Act::NewPatternAt(0, 0, 2)]);
+    let places = |app: &crate::App| {
+        app.doc.as_ref().unwrap().borrow().project().groups[0].patterns.iter().map(|p| (p.name.clone(), p.slot)).collect::<Vec<_>>()
+    };
+    assert_eq!(places(&app), [("Pattern 1".to_string(), 0), ("Pattern 3".to_string(), 2)]);
+    app.pattern = 0;
+    // Pattern 1 below Pattern 3: still focused, now second in the list.
+    crate::layout::apply_acts(&mut app, vec![Act::MovePattern(0, 0, 4)]);
+    assert_eq!(places(&app), [("Pattern 3".to_string(), 2), ("Pattern 1".to_string(), 4)]);
+    assert_eq!(app.pattern, 1);
+    // Pattern 3 dropped on Pattern 1: they swap, and the focus follows Pattern 1.
+    crate::layout::apply_acts(&mut app, vec![Act::MovePattern(0, 0, 4)]);
+    assert_eq!(places(&app), [("Pattern 1".to_string(), 2), ("Pattern 3".to_string(), 4)]);
+    assert_eq!(app.pattern, 0);
+}
+
 /// The MK3's own layer, for the tests below: an app playing with a Filter on sound 1.
 fn mk3_playing() -> Option<crate::App> {
     use deckard_doc::NewModule;
