@@ -123,6 +123,8 @@ fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3], Option<[u8
         // Solarized's field and text. Palenight's writing on black.
         "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1], None)),
         "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff], None)),
+        // Palenight on its blue-grey field.
+        "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff], None)),
         _ => None,
     }
 }
@@ -7819,6 +7821,18 @@ mod header_icon_tests {
             let right_overhang = knob_r - line_r;
             assert!((left_overhang - right_overhang).abs() < 1e-4, "left overhang {left_overhang} != right overhang {right_overhang}");
             assert!(left_overhang >= 1.5);
+        }
+    }
+}
+
+#[cfg(test)]
+mod desktop_theme_tests {
+    /// Every controller theme DECKARD ships is offered as the desktop theme, so each
+    /// one but Maschine (the ordinary dark window) restyles the window.
+    #[test]
+    fn every_shipped_theme_but_maschine_restyles_the_window() {
+        for t in deckard_surface::Surface::new().themes() {
+            assert_eq!(super::desktop_look(&t, "yellow").is_some(), t != "maschine", "{t}");
         }
     }
 }
