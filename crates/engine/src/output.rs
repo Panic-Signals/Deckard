@@ -217,6 +217,44 @@ impl Sender {
     }
 }
 
+/// What plays: the audio system's stream.
+enum Playing {
+    Cpal(#[allow(dead_code)] cpal::Stream),
+    #[cfg(native_asio)]
+    Native(#[allow(dead_code)] crate::native_asio::Session),
+}
+
+/// What an output opens: a cpal device, or (ASIO without the SDK) a driver planned.
+enum Target {
+    Cpal(cpal::Device, cpal::SupportedStreamConfig),
+    #[cfg(native_asio)]
+    Native(crate::native_asio::Planned),
+}
+
+impl Target {
+    fn open(name: Option<&str>, asio: bool) -> Result<Target, String> {
+        #[cfg(native_asio)]
+        if asio {
+            return crate::native_asio::plan(name).map(Target::Native);
+        }
+        let _ = asio;
+        let (device, config) = crate::devices::open_output(name)?;
+        if !crate::devices::format_ok(config.sample_format()) {
+            return Err(format!("output sample format {:?} is not supported (need f32)", config.sample_format()));
+        }
+        Ok(Target::Cpal(device, config))
+    }
+
+    /// The sample rate and the channels it opens with.
+    fn format(&self) -> (u32, usize) {
+        match self {
+            Target::Cpal(_, config) => (config.sample_rate(), config.channels() as usize),
+            #[cfg(native_asio)]
+            Target::Native(p) => (p.rate, p.channels),
+        }
+    }
+}
+
 pub struct Output {
     /// Device sample rate; create engines at this rate.
     pub rate: u32,
@@ -270,7 +308,7 @@ pub struct Output {
     midi_inputs: Mutex<std::collections::BTreeMap<usize, crate::midi_input::Info>>,
     /// Plug-ins put in with no engine playing, for the next one played.
     midi_inputs_waiting: Mutex<std::collections::BTreeMap<usize, Box<dyn crate::midi_input::MidiInput>>>,
-    _stream: cpal::Stream,
+    _stream: Playing,
     /// ASIO: see [`crate::devices::hold_asio_inputs`].
     _inputs: Option<cpal::Stream>,
 }
@@ -517,14 +555,10 @@ impl Output {
     /// [`Output::with_options`] on the output device called `device` (see
     /// [`output_devices`]); `None`: the system's default.
     pub fn with_device(device: Option<&str>, frames: u32, multicore: bool) -> Result<Output, String> {
-        let (device, config) = crate::devices::open_output(device)?;
         let driver = crate::devices::driver();
         let asio = driver == crate::devices::AudioDriver::Asio;
-        if !crate::devices::format_ok(config.sample_format()) {
-            return Err(format!("output sample format {:?} is not supported (need f32)", config.sample_format()));
-        }
-        let rate = config.sample_rate();
-        let channels = config.channels() as usize;
+        let target = Target::open(device, asio)?;
+        let (rate, channels) = target.format();
         let block = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let latency_us: Arc<AtomicU64> = Arc::default();
         let invalidated: Arc<AtomicBool> = Arc::default();
@@ -545,21 +579,13 @@ impl Output {
         let defaults: Vec<Option<usize>> = (0..OUT_CHANNELS).map(|i| usize::try_from(default_route(i)).ok()).collect();
         let connected = Arc::new(AtomicU16::new(connected_outputs(&defaults, channels)));
         let cv_mask = Arc::new(AtomicU32::new(0));
-        // Small buffers keep pads and keys immediate (256 frames is ~5.3 ms at 48 kHz);
-        // fall back to the device's default if the size is refused.
-        let wanted = match config.buffer_size() {
-            cpal::SupportedBufferSize::Range { min, max } => Some(frames.clamp(*min, *max)),
-            cpal::SupportedBufferSize::Unknown => None,
-        };
-        crate::devices::note_asio_buffer(wanted.map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed));
-        let inputs = if asio { crate::devices::hold_asio_inputs(&device) } else { None };
-        let build = |size: cpal::BufferSize| {
+        // The audio callback: `ahead` is how long before a block is heard. Each audio system
+        // wraps it for its own callback below.
+        let make_render = || {
             let block = block.clone();
             let latency_us = latency_us.clone();
-            let invalidated = invalidated.clone();
             let monitor = monitor.clone();
             let stats = stats.clone();
-            let err_stats = stats.clone();
             let telemetry = telemetry.clone();
             let (commands, garbage) = (sender.commands.clone(), sender.garbage.clone());
             let exact = sample_accurate.clone();
@@ -568,153 +594,191 @@ impl Output {
             let cv_mask = cv_mask.clone();
             // Out 1–16 (other than the master's), as the engine fills them.
             let mut ext = vec![vec![0f32; 16_384]; crate::OUTPUTS];
-            let mut stream_config: cpal::StreamConfig = config.into();
-            stream_config.buffer_size = size;
             let mut stereo = vec![0f32; 16_384];
             let mut engine: Option<Box<Engine>> = None;
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
             #[cfg(windows)]
             let mut promoted = false;
-            crate::devices::build_output(
-                &device,
-                stream_config,
-                config.sample_format(),
-                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    let started = Instant::now();
-                    let frames = out.len() / channels;
-                    // The audio thread is cpal's, so this is the first chance to raise it.
-                    #[cfg(windows)]
-                    if !promoted {
-                        promoted = true;
-                        crate::pool::promote_current(frames as u32, rate);
-                    }
-                    block.store(frames, std::sync::atomic::Ordering::Relaxed);
-                    if stereo.len() < frames * 2 {
-                        stereo.resize(frames * 2, 0.0); // only for unusually large host blocks
-                    }
-                    let buf = &mut stereo[..frames * 2];
-                    buf.fill(0.0);
-                    // What other threads asked for since the last block.
-                    let period = Duration::from_secs_f64(frames as f64 / rate as f64);
-                    let exact = exact.load(Ordering::Relaxed);
-                    while let Some(cmd) = commands.pop() {
-                        applied += 1;
-                        let cmd = match cmd {
-                            Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
-                            cmd => cmd,
-                        };
-                        if let Some(back) = apply(&mut engine, cmd, started, period, rate as f64, frames, exact)
-                            && let Err(back) = garbage.push(back)
-                        {
-                            // Nobody is collecting: free it here rather than leak.
-                            drop(back);
-                        }
-                    }
-                    let ext_len = (frames * 2).min(16_384);
-                    for b in &mut ext {
-                        b[..ext_len].fill(0.0);
-                    }
-                    let master_bus = engine.as_ref().map_or(Some(0), |e| e.master_bus());
-                    // When this block is heard: as the device says, else a block on.
-                    let ts = info.timestamp();
-                    let ahead = ts.playback.duration_since(ts.callback);
-                    latency_us.store(ahead.as_micros() as u64, Ordering::Relaxed);
-                    if let Some(engine) = engine.as_mut() {
-                        before_block(engine, &mut clock, started, if ahead.is_zero() { period } else { ahead });
-                        engine.set_connected_outputs(connected.load(Ordering::Relaxed));
-                        engine.set_cv_channels(cv_mask.load(Ordering::Relaxed));
-                        engine.process_outputs(buf, &mut ext);
-                        // What its players sent back is freed off this thread.
-                        while let Some(j) = engine.take_junk() {
-                            if let Err(back) = garbage.push(Command::Junk(j)) {
-                                drop(back);
-                                break;
-                            }
-                        }
-                    }
-                    // Never waits: if the UI is reading, the next block publishes
-                    // (peaks keep adding up meanwhile).
-                    if let Ok(mut t) = telemetry.try_lock() {
-                        match engine.as_mut() {
-                            Some(e) => e.publish(&mut t),
-                            None => t.finished = true,
-                        }
-                        t.has_engine = engine.is_some();
-                        t.actions = applied;
-                    }
-                    if let Ok(mut m) = monitor.try_lock()
-                        && !m.is_empty()
+            move |out: &mut [f32], ahead: Duration| {
+                let started = Instant::now();
+                let frames = out.len() / channels;
+                // The audio thread is cpal's, so this is the first chance to raise it.
+                #[cfg(windows)]
+                if !promoted {
+                    promoted = true;
+                    crate::pool::promote_current(frames as u32, rate);
+                }
+                block.store(frames, std::sync::atomic::Ordering::Relaxed);
+                if stereo.len() < frames * 2 {
+                    stereo.resize(frames * 2, 0.0); // only for unusually large host blocks
+                }
+                let buf = &mut stereo[..frames * 2];
+                buf.fill(0.0);
+                // What other threads asked for since the last block.
+                let period = Duration::from_secs_f64(frames as f64 / rate as f64);
+                let exact = exact.load(Ordering::Relaxed);
+                while let Some(cmd) = commands.pop() {
+                    applied += 1;
+                    let cmd = match cmd {
+                        Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
+                        cmd => cmd,
+                    };
+                    if let Some(back) = apply(&mut engine, cmd, started, period, rate as f64, frames, exact)
+                        && let Err(back) = garbage.push(back)
                     {
-                        let n = m.len().min(buf.len());
-                        for (o, v) in buf.iter_mut().zip(m.drain(..n)) {
-                            *o = (*o + v).clamp(-4.0, 4.0);
-                        }
-                        // Don't let it fall behind (more than ~0.1 s).
-                        if m.len() > 9_600 {
-                            let extra = m.len() - 9_600;
-                            m.drain(..extra);
+                        // Nobody is collecting: free it here rather than leak.
+                        drop(back);
+                    }
+                }
+                let ext_len = (frames * 2).min(16_384);
+                for b in &mut ext {
+                    b[..ext_len].fill(0.0);
+                }
+                let master_bus = engine.as_ref().map_or(Some(0), |e| e.master_bus());
+                // When this block is heard: as the device says, else a block on.
+                latency_us.store(ahead.as_micros() as u64, Ordering::Relaxed);
+                if let Some(engine) = engine.as_mut() {
+                    before_block(engine, &mut clock, started, if ahead.is_zero() { period } else { ahead });
+                    engine.set_connected_outputs(connected.load(Ordering::Relaxed));
+                    engine.set_cv_channels(cv_mask.load(Ordering::Relaxed));
+                    engine.process_outputs(buf, &mut ext);
+                    // What its players sent back is freed off this thread.
+                    while let Some(j) = engine.take_junk() {
+                        if let Err(back) = garbage.push(Command::Junk(j)) {
+                            drop(back);
+                            break;
                         }
                     }
-                    // Each of DECKARD's output channels (Out 1 L … Out 16 R) onto the
-                    // interface channel it's routed to.
-                    out.fill(0.0);
-                    let cv = cv_mask.load(Ordering::Relaxed);
-                    for (i, to) in routing.iter().enumerate() {
-                        let to = to.load(Ordering::Relaxed);
-                        if to < 0 || to as usize >= channels {
-                            continue;
-                        }
-                        let (bus, side) = (i / 2, i % 2);
-                        let src: &[f32] = if channel_uses_master(i, master_bus, cv) { buf } else { &ext[bus][..ext_len] };
-                        for (f, frame) in out.chunks_mut(channels).enumerate() {
-                            if let Some(v) = src.get(f * 2 + side) {
-                                frame[to as usize] += *v;
-                            }
-                        }
+                }
+                // Never waits: if the UI is reading, the next block publishes
+                // (peaks keep adding up meanwhile).
+                if let Ok(mut t) = telemetry.try_lock() {
+                    match engine.as_mut() {
+                        Some(e) => e.publish(&mut t),
+                        None => t.finished = true,
                     }
-                    let busy = started.elapsed().as_micros() as u64;
-                    let audio = frames as u64 * 1_000_000 / rate as u64;
-                    stats.callbacks.fetch_add(1, Ordering::Relaxed);
-                    stats.busy_us.fetch_add(busy, Ordering::Relaxed);
-                    stats.audio_us.fetch_add(audio, Ordering::Relaxed);
-                    if busy > audio {
-                        stats.late.fetch_add(1, Ordering::Relaxed);
+                    t.has_engine = engine.is_some();
+                    t.actions = applied;
+                }
+                if let Ok(mut m) = monitor.try_lock()
+                    && !m.is_empty()
+                {
+                    let n = m.len().min(buf.len());
+                    for (o, v) in buf.iter_mut().zip(m.drain(..n)) {
+                        *o = (*o + v).clamp(-4.0, 4.0);
                     }
-                    if let Some(load) = (busy * 1000).checked_div(audio) {
-                        stats.peak_load.fetch_max(load, Ordering::Relaxed);
+                    // Don't let it fall behind (more than ~0.1 s).
+                    if m.len() > 9_600 {
+                        let extra = m.len() - 9_600;
+                        m.drain(..extra);
                     }
-                },
-                move |e: cpal::Error| {
-                    err_stats.device_errors.fetch_add(1, Ordering::Relaxed);
-                    if asio {
-                        // An overload arrives on the driver's thread: nothing there that can wait.
-                        if e.kind() == cpal::ErrorKind::Xrun {
-                            return;
-                        }
-                        // The driver reset, changed its rate or went away (the rest of the
-                        // app reopens it, off this thread).
-                        if matches!(e.kind(), cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable) {
-                            invalidated.store(true, Ordering::Relaxed);
+                }
+                // Each of DECKARD's output channels (Out 1 L … Out 16 R) onto the
+                // interface channel it's routed to.
+                out.fill(0.0);
+                let cv = cv_mask.load(Ordering::Relaxed);
+                for (i, to) in routing.iter().enumerate() {
+                    let to = to.load(Ordering::Relaxed);
+                    if to < 0 || to as usize >= channels {
+                        continue;
+                    }
+                    let (bus, side) = (i / 2, i % 2);
+                    let src: &[f32] = if channel_uses_master(i, master_bus, cv) { buf } else { &ext[bus][..ext_len] };
+                    for (f, frame) in out.chunks_mut(channels).enumerate() {
+                        if let Some(v) = src.get(f * 2 + side) {
+                            frame[to as usize] += *v;
                         }
                     }
-                    eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
-                },
-            )
-        };
-        let stream = match wanted.map(|n| build(cpal::BufferSize::Fixed(n))) {
-            Some(Ok(s)) => s,
-            _ => {
-                crate::devices::note_asio_buffer(cpal::BufferSize::Default);
-                build(cpal::BufferSize::Default).map_err(|e| e.to_string())?
+                }
+                let busy = started.elapsed().as_micros() as u64;
+                let audio = frames as u64 * 1_000_000 / rate as u64;
+                stats.callbacks.fetch_add(1, Ordering::Relaxed);
+                stats.busy_us.fetch_add(busy, Ordering::Relaxed);
+                stats.audio_us.fetch_add(audio, Ordering::Relaxed);
+                if busy > audio {
+                    stats.late.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(load) = (busy * 1000).checked_div(audio) {
+                    stats.peak_load.fetch_max(load, Ordering::Relaxed);
+                }
             }
         };
-        stream.play().map_err(|e| e.to_string())?;
+        let (playing, inputs, device_label, format) = match target {
+            Target::Cpal(device, config) => {
+                let sample_format = config.sample_format();
+                // Small buffers keep pads and keys immediate (256 frames is ~5.3 ms at 48 kHz);
+                // fall back to the device's default if the size is refused.
+                let wanted = match config.buffer_size() {
+                    cpal::SupportedBufferSize::Range { min, max } => Some(frames.clamp(*min, *max)),
+                    cpal::SupportedBufferSize::Unknown => None,
+                };
+                crate::devices::note_asio_buffer(wanted.map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed));
+                let inputs = if asio { crate::devices::hold_asio_inputs(&device) } else { None };
+                let build = |size: cpal::BufferSize| {
+                    let mut stream_config: cpal::StreamConfig = config.into();
+                    stream_config.buffer_size = size;
+                    let mut render = make_render();
+                    let (err_stats, invalidated) = (stats.clone(), invalidated.clone());
+                    crate::devices::build_output(
+                        &device,
+                        stream_config,
+                        sample_format,
+                        move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                            let ts = info.timestamp();
+                            render(out, ts.playback.duration_since(ts.callback));
+                        },
+                        move |e: cpal::Error| {
+                            err_stats.device_errors.fetch_add(1, Ordering::Relaxed);
+                            if asio {
+                                // An overload arrives on the driver's thread: nothing there that can wait.
+                                if e.kind() == cpal::ErrorKind::Xrun {
+                                    return;
+                                }
+                                // The driver reset, changed its rate or went away (the rest of the
+                                // app reopens it, off this thread).
+                                if matches!(e.kind(), cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable) {
+                                    invalidated.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
+                        },
+                    )
+                };
+                let stream = match wanted.map(|n| build(cpal::BufferSize::Fixed(n))) {
+                    Some(Ok(s)) => s,
+                    _ => {
+                        crate::devices::note_asio_buffer(cpal::BufferSize::Default);
+                        build(cpal::BufferSize::Default).map_err(|e| e.to_string())?
+                    }
+                };
+                stream.play().map_err(|e| e.to_string())?;
+                (Playing::Cpal(stream), inputs, device_name(&device), sample_format)
+            }
+            // ASIO without the SDK: transit's backend opens the driver's input with its output.
+            #[cfg(native_asio)]
+            Target::Native(planned) => {
+                let fault: Arc<dyn Fn(crate::native_asio::Fault) + Send + Sync> = {
+                    let (err_stats, invalidated) = (stats.clone(), invalidated.clone());
+                    Arc::new(move |fault| {
+                        err_stats.device_errors.fetch_add(1, Ordering::Relaxed);
+                        // The driver reset, changed its rate, stopped or went away (the rest of
+                        // the app reopens it, off this thread).
+                        if fault == crate::native_asio::Fault::Reset {
+                            invalidated.store(true, Ordering::Relaxed);
+                        }
+                    })
+                };
+                let name = planned.name.clone();
+                let session = planned.open(frames, || Box::new(make_render()), fault)?;
+                (Playing::Native(session), None, name, cpal::SampleFormat::F32)
+            }
+        };
         Ok(Output {
             rate,
-            device: device_name(&device),
+            device: device_label,
             driver,
-            format: config.sample_format(),
+            format,
             block,
             latency_us,
             invalidated,
@@ -739,7 +803,7 @@ impl Output {
             connected,
             cv_mask,
             channels,
-            _stream: stream,
+            _stream: playing,
             _inputs: inputs,
         })
     }

@@ -760,22 +760,17 @@ fn open_live_input(
     live: deckard_engine::LiveIn,
     inputs: std::sync::Arc<input_levels::InputBus>,
     rate: u32,
-) -> Result<cpal::Stream, String> {
-    use cpal::traits::StreamTrait;
-    let (dev, config) = deckard_engine::devices::open_input(device.as_deref())?;
-    if !deckard_engine::devices::format_ok(config.sample_format()) {
-        return Err(format!("input format {:?} is not supported", config.sample_format()));
+) -> Result<deckard_engine::devices::InputStream, String> {
+    let format = deckard_engine::devices::input_format(device.as_deref())?;
+    if format.rate != rate {
+        return Err(format!("the input runs at {} Hz and the output at {rate} Hz", format.rate));
     }
-    if config.sample_rate() != rate {
-        return Err(format!("the input runs at {} Hz and the output at {rate} Hz", config.sample_rate()));
-    }
-    let channels = config.channels() as usize;
+    let channels = format.channels;
     let map: Vec<Option<usize>> = (0..32).map(|i| routing.get(i).copied().unwrap_or(Some(i)).filter(|&c| c < channels)).collect();
     // Room up front: on ASIO this callback runs on the output's thread.
     live.lock().unwrap().reserve(2 * 8192);
-    let stream = deckard_engine::devices::build_input(
-        &dev,
-        config,
+    deckard_engine::devices::open_input_stream(
+        device.as_deref(),
         move |data: &[f32]| {
             if let Ok(mut q) = live.try_lock() {
                 for f in data.chunks(channels) {
@@ -789,9 +784,6 @@ fn open_live_input(
         },
         |e| eprintln!("audio input error: {e}"),
     )
-    .map_err(|e| e.to_string())?;
-    stream.play().map_err(|e| e.to_string())?;
-    Ok(stream)
 }
 
 /// A live Variation's start: (group, pattern, sound), the notes it started from, the
@@ -1112,7 +1104,7 @@ pub struct App {
     sync: transport_sync::Sync,
     /// The interface input, open while a sound takes audio from it (Input ▸ Audio),
     /// for (device, routing).
-    live_input: Option<(cpal::Stream, InputKey)>,
+    live_input: Option<(deckard_engine::devices::InputStream, InputKey)>,
     /// The inputs' levels and meters, shared with the input streams; and the meters as
     /// shown.
     input_bus: std::sync::Arc<input_levels::InputBus>,
@@ -11231,6 +11223,7 @@ impl eframe::App for App {
         // The app leaves without running destructors: an ASIO driver is let go of here.
         if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
             self.close_output();
+            deckard_engine::devices::shut_down();
         }
     }
 

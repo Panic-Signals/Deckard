@@ -42,6 +42,10 @@ windows-sys = { version = "0.59", features = ["Win32_System_Services", "Win32_Sy
 [features]
 # Windows: ASIO as well as WASAPI (Preferences ▸ Audio). See DEVELOPMENT.md for what it needs.
 asio = ["deckard-engine/asio"]
+# Windows: ASIO through transit's native backend, no SDK needed. On by default; `asio` (the
+# real SDK) takes over when it is on too, and `--no-default-features` leaves ASIO out.
+asio-native = ["deckard-engine/asio-native"]
+default = ["asio-native"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -28,6 +28,8 @@ pub mod midi;
 pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
+#[cfg(native_asio)]
+pub(crate) mod native_asio;
 pub mod note_echo;
 #[cfg(feature = "output")]
 pub mod output;
