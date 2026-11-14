@@ -103,10 +103,12 @@ flashing button always reads as blinking, at any ratio, so a flash can't pass fo
 steady level. The earlier sweep that suggested a `0xE4`/`0x9E` "dim"/"bright" pair with
 `208` between them was too coarse to see that `0xb0`–`0xfc` are one level.
 
-DECKARD sends `0x9e` for a selected button, `0xd0` for one that can be pressed (any byte in
-the dim band would do; `0xd0` is what the sweep called the middle) and `0x00` for a button
-with nothing to do — a page's `"off"`: DECKARD's mapping, since the panel has no level
-between off and dim and a button still has to say "this does nothing".
+DECKARD sends `0x7f` for a selected button, `0x22` for one that can be pressed and `0x09`
+for a button that's off (a page's `"off"`, and any button the scripts leave alone), so its
+printed label still reads in low light. These are the levels picked by eye on the MK3 at
+the same time as SAMPLING's dim (below). The dim band above (`0xd0`) was tried as the
+default and was much too bright for buttons that are off. A page that wants a button fully
+dark asks for `"dark"` (`0x00`).
 
 The smooth brightness Maschine offers is **not** in those bytes: it is the LEDs' global
 level, output report `0xf3`, one byte, 0..=127, which scales everything the panel draws.

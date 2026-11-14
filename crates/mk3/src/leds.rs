@@ -2,11 +2,9 @@
 //! the buttons, 0x81 the touch strip and pads, one byte an LED, named here as the
 //! scripts name them (`NI.HW.<name>`).
 //!
-//! Single-colour LEDs don't take a brightness. A byte under 0x80 is read as a 2-bit index
-//! instead (`byte & 3`), so a plain 0..0x7f ramp lights nothing like it looks — and over
-//! 0x80 the panel has exactly two levels, measured on the hardware (docs/mk3-usb.md):
-//! bright ([`ON`]: `0x9e`, and `0xff`) and dim ([`DIM`]: `0xb0`–`0xfc`, every byte the same
-//! light). [`OFF`] is the third state a page needs for a button with nothing to do.
+//! Single-colour LEDs take a level byte: DECKARD sends [`BACKLIGHT`] for a button that's
+//! off (a faint light, so its label reads), [`DIM`] for one that can be pressed and [`ON`]
+//! for a selected one (docs/mk3-usb.md).
 //! Colour LEDs (groups, pads, touch strip, the 4-D encoder's
 //! arrows) take a palette byte: colour 1..17 (the scripts' `LEDColors` index + 1, 17
 //! white) times four, plus 0 dim, 1 dim flash, 2 bright, 3 flash.
@@ -156,58 +154,40 @@ pub fn palette(colour: i64, state: i64) -> u8 {
     ((colour as u8 + 1) << 2) | shade
 }
 
-/// A button LED's byte for an LED state (`LEDHelper.LS_*`): off is dark, dim ones (LS_DIM,
-/// and LS_DIM_FLASH, dim until something flashes it: SAMPLE while its page is hidden) take
-/// [`DIM`], the rest [`ON`].
+/// A button LED's byte for an LED state (`LEDHelper.LS_*`): off buttons keep a faint
+/// [`BACKLIGHT`] so their labels can be read, dim ones (LS_DIM, and LS_DIM_FLASH, dim until
+/// something flashes it: SAMPLE while its page is hidden) take [`DIM`], the rest [`ON`].
 pub fn button_level(state: i64) -> u8 {
     match state {
-        ..=1 => OFF,
+        ..=1 => BACKLIGHT,
         2 | 3 => DIM,
         _ => ON,
     }
 }
 
-/// A one-colour LED's byte for a percentage of its drive: the NI protocol's duty,
-/// `258 - percent`, active-low (a higher byte is dimmer). 100 % is `0x9e`; every value
-/// stays above 0x80, out of the 2-bit index trap below it.
-const fn duty(percent: u8) -> u8 {
-    // 3 % is the floor: 2 % would be 256, which wraps to 0, and a byte under 0x80 isn't a
-    // duty at all but an index (see [`OFF`]), so a level never lands there.
-    let percent = if percent < 3 {
-        3
-    } else if percent > 100 {
-        100
-    } else {
-        percent
-    };
-    (258u16 - percent as u16) as u8
-}
+/// The faint light of a button that's off, so its printed label reads in low light. These
+/// levels (backlight, dim, on) are the ones picked by eye on the MK3 alongside
+/// [`SAMPLE_DIM`]; the panel-wide level is report `0xf3` (`Device::set_led_brightness`).
+pub const BACKLIGHT: u8 = 0x09;
 
-/// A button that can be pressed but isn't selected: the dim level (50 %).
-pub const DIM: u8 = duty(50);
+/// A button that can be pressed but isn't selected.
+pub const DIM: u8 = 0x22;
 
 /// SAMPLING not selected. It's a colour LED, whose dim white doesn't look like the
 /// one-colour buttons around it; this byte, past the palette, does (picked on the hardware).
 pub const SAMPLE_DIM: u8 = 73;
 
-/// The selected button: full drive, both the LEDs under it (100 %).
-pub const ON: u8 = duty(100);
+/// The selected button.
+pub const ON: u8 = 0x7f;
 
-/// Dark. The hardware has two steady levels and this is the third state a page needs for a
-/// button with nothing to do — a scene that isn't there, a page that isn't shown (the rig
-/// has no level between off and [`DIM`], and `0x01`–`0x03` are dark too).
+/// Fully dark: only for a page that asks for it (`"dark"`); "off" is [`BACKLIGHT`].
 pub const OFF: u8 = 0;
 
-/// A one-colour button's byte for a level the scripts set (0..1): 0.5 and over the [`ON`]
-/// level, any light at all [`DIM`], none dark.
+/// A one-colour button's byte for a level the scripts set (0..1): full stays full;
+/// anything less is a dim button, 30% under the level, but never below the backlight.
 pub fn button_brightness(level: f64) -> u8 {
-    if level >= 0.5 {
-        ON
-    } else if level > 0.0 {
-        DIM
-    } else {
-        OFF
-    }
+    let b = (level.clamp(0.0, 1.0) * 127.0).round() as u8;
+    if b >= ON { b } else { ((b as f64 * 0.7).round() as u8).max(BACKLIGHT) }
 }
 
 /// The palette byte nearest an RGB colour (0..127 a channel): its hue picks the
@@ -289,6 +269,7 @@ mod tests {
         assert_eq!(palette(0, 2), 0x04, "red dim");
         assert_eq!(palette(16, 3), palette(16, 2), "dim until flashed: dim");
         assert_eq!(button_level(3), DIM);
+        assert_eq!(button_level(1), BACKLIGHT, "off buttons keep a faint light");
         assert_eq!(palette(0, 4), 0x06, "red bright");
         assert_eq!(palette(16, 4), 0x46, "white bright");
         assert_eq!(palette_rgb(127, 0, 0), palette(0, 4));
@@ -304,5 +285,13 @@ mod tests {
         assert!(l.set("LED_TRANSPORT_PLAY", ON));
         assert_eq!(l.buttons[42], ON);
         assert!(!l.set("LED_NOPE", 1));
+    }
+
+    /// The scripts' levels: full is full, the rest dim, and nothing under the backlight.
+    #[test]
+    fn button_brightness_keeps_the_backlight() {
+        assert_eq!(button_brightness(1.0), ON);
+        assert_eq!(button_brightness(0.25), 22);
+        assert_eq!(button_brightness(0.0), BACKLIGHT);
     }
 }

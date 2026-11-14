@@ -138,7 +138,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             let byte = match &how {
                 Value::String(s) => match (s.to_str()?.as_ref(), deckard_mk3::leds::is_colour(&hw)) {
                     ("off", true) => 0,
-                    ("off" | "dark", false) => leds::OFF,
+                    ("off", false) => leds::BACKLIGHT,
+                    ("dark", false) => leds::OFF,
                     ("dark", _) => 0,
                     ("dim", false) => leds::DIM,
                     ("on", false) => leds::ON,

@@ -912,10 +912,9 @@ fn song(v: &mut View) {
 }
 
 /// The Ideas view's display buttons: the scenes that are there can be picked (dim, the
-/// focused one bright), and a button past the last scene is dark — the panel has only two
-/// lit levels, so "dimmer than dim" is nothing (docs/mk3-usb.md).
+/// focused one bright), and a button past the last scene is off (its faint backlight).
 #[test]
-fn a_display_button_past_the_last_scene_is_dark() {
+fn a_display_button_past_the_last_scene_is_off() {
     let (mut s, mut v) = (Surface::new(), view());
     song(&mut v);
     // The shape it was reported in: six scenes, so buttons 7 and 8 have none.
@@ -927,7 +926,7 @@ fn a_display_button_past_the_last_scene_is_dark() {
         assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::DIM), "a scene to pick: {i}");
     }
     for i in 7..=8 {
-        assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::OFF), "no scene: {i}");
+        assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::BACKLIGHT), "no scene: {i}");
     }
 }
 
@@ -1377,7 +1376,7 @@ fn shift_follow_shows_the_grid_while_follow_is_held() {
     assert_eq!(s.page(), "grid", "FOLLOW still held");
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "PERFORM");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(deckard_mk3::leds::OFF), "only STEP's");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(deckard_mk3::leds::BACKLIGHT), "only STEP's");
     assert_eq!(leds.get("LED_PAD_2"), Some(deckard_mk3::leds::palette(16, 4)), "1/16, the second column's first");
     assert_eq!(leds.get("LED_PAD_15"), Some(0), "PERFORM has six values");
     assert!(hold(&mut s, &v, "BUTTON_FOLLOW", false).is_empty());
@@ -1459,7 +1458,7 @@ fn file_shows_the_file_page() {
     assert_eq!(s.page(), "file");
     let leds = s.leds(&v);
     assert_eq!((leds.get("LED_FILE"), leds.get("LED_SCREEN_BUTTON_1")), (Some(crate::leds::ON), Some(crate::leds::ON)));
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::OFF), "no recent projects");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::BACKLIGHT), "no recent projects");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::File("new", 0)]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::File("save_copy", 0)]);
     assert_eq!(s.page(), "control", "back");
@@ -1509,8 +1508,10 @@ fn the_save_page_saves_the_project_a_group_or_a_sound() {
 }
 
 /// Whether `led` is lit (not off).
+/// Lit: a colour LED not dark, a one-colour button above its backlight.
 fn lit(s: &Surface, v: &View, led: &str) -> bool {
-    s.leds(v).get(led).is_some_and(|c| c != 0)
+    let hw = deckard_mk3::leds::is_colour(led);
+    s.leds(v).get(led).is_some_and(|c| if hw { c != 0 } else { c > deckard_mk3::leds::BACKLIGHT })
 }
 
 #[test]
@@ -1637,7 +1638,7 @@ fn set_macro_turns_the_pages() {
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     assert_eq!(s.page(), "macro_set");
     let leds = s.leds(&v);
-    assert_eq!((leds.get("LED_LEFT"), leds.get("LED_RIGHT")), (Some(deckard_mk3::leds::OFF), Some(deckard_mk3::leds::DIM)));
+    assert_eq!((leds.get("LED_LEFT"), leds.get("LED_RIGHT")), (Some(deckard_mk3::leds::BACKLIGHT), Some(deckard_mk3::leds::DIM)));
     assert_eq!(press(&mut s, &v, "BUTTON_RIGHT"), [Action::Page(true)]);
     assert_eq!(s.page(), "macro_set", "still setting macros");
     assert!(s.screen_text(&v).contains(&"1/2".to_string()), "the page shown");
@@ -1648,7 +1649,7 @@ fn lock_takes_and_recalls_the_focused_snapshot() {
     let (mut s, mut v) = (Surface::new(), view());
     assert_eq!(press(&mut s, &v, "BUTTON_LOCK"), [Action::Lock("button", 0)]);
     assert_eq!(s.page(), "control", "no page");
-    assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::OFF));
+    assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::BACKLIGHT));
     v.lock.active = true;
     assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::DIM), "dim while locked");
 }
@@ -1663,7 +1664,7 @@ fn shift_lock_shows_the_snapshots() {
     assert_eq!(s.page(), "lock");
     let leds = s.leds(&v);
     assert_eq!((leds.get("LED_LOCK"), leds.get("LED_SCREEN_BUTTON_1")), (Some(crate::leds::ON), Some(crate::leds::ON)));
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::OFF), "UPDATE: no snapshot focused");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::BACKLIGHT), "UPDATE: no snapshot focused");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::DIM), "the next bank");
     assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::Lock("pad", 0)], "a pad takes or recalls");
     assert!(!s.pads(&v).play, "and plays nothing");
@@ -1701,7 +1702,7 @@ fn variation_shows_the_sounds_groove_variation() {
     assert_eq!(s.page(), "control", "from any page");
     assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(crate::leds::ON), "lit while held");
     hold(&mut s, &v, "BUTTON_VARIATION", false);
-    assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(deckard_mk3::leds::OFF));
+    assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(deckard_mk3::leds::BACKLIGHT));
 }
 
 fn event_note(sound: usize, position: i64, selected: bool) -> crate::NoteView {
@@ -3025,7 +3026,7 @@ fn lfo_page_in_envelope_mode() {
     }
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(crate::leds::ON), "ENV lit");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::OFF), "the shapes dark");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::BACKLIGHT), "the shapes dark");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_6"), Some(crate::leds::ON), "RETRIG on");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty(), "no shapes");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Lfo("retrigger", 1, 0.0)]);
@@ -3290,7 +3291,7 @@ fn the_step_grid_places_the_focused_sound_in_pad_mode() {
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::DIM), "empty");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "a note");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::OFF), "past the end");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::BACKLIGHT), "past the end");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
 
