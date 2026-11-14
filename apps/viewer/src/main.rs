@@ -3116,6 +3116,24 @@ impl App {
                             .weak(),
                     );
                     ui.end_row();
+                    // Velocity SCALING, as the MK3's own Settings page has it (Soft 3 … Hard 3):
+                    // Maschine's measured curves (`mk3_io::pad_velocity`).
+                    ui.label("Velocity scaling");
+                    let mut scaling = self.settings.velocity_scaling.clamp(-3, 3);
+                    let names = surface_settings::VELOCITY_SCALINGS;
+                    egui::ComboBox::from_id_salt("velocity-scaling").selected_text(names[(scaling + 3) as usize]).show_ui(ui, |ui| {
+                        for (s, name) in (-3i8..=3).zip(names) {
+                            ui.selectable_value(&mut scaling, s, name);
+                        }
+                    });
+                    self.settings.velocity_scaling = scaling;
+                    ui.end_row();
+                    ui.label("");
+                    ui.label(
+                        egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
+                            .weak(),
+                    );
+                    ui.end_row();
                     // The two brightnesses are the MK3's own (its LEDs' level report, its
                     // displays' backlight byte), so they follow the model picked here rather
                     // than the cable: another controller has different lights

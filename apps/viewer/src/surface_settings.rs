@@ -17,7 +17,7 @@ const COUNT_INS: [u32; 4] = [0, 1, 2, 4];
 const DENOMINATORS: [i64; 6] = [1, 2, 4, 8, 16, 32];
 /// HARDWARE's velocity SCALING (-3 … 3) and Smart Strip SHOW POSITION (0 … 2), as the
 /// MK3 manual names them.
-const VELOCITY_SCALINGS: [&str; 7] = ["Soft 3", "Soft 2", "Soft 1", "Linear", "Hard 1", "Hard 2", "Hard 3"];
+pub(crate) const VELOCITY_SCALINGS: [&str; 7] = ["Soft 3", "Soft 2", "Soft 1", "Linear", "Hard 1", "Hard 2", "Hard 3"];
 const STRIP_POSITIONS: [&str; 3] = ["Off", "Rec. Only", "On"];
 
 fn on_off(on: bool) -> String {
