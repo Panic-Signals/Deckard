@@ -699,7 +699,14 @@ impl Output {
                             invalidated.store(true, Ordering::Relaxed);
                         }
                     }
-                    eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
+                    // (With how the engine has done: none late means the device or the system
+                    // was behind, not the engine.)
+                    eprintln!(
+                        "audio error: {e} (after {} blocks; {} computed late, peak load {:.0} %)",
+                        err_stats.callbacks.load(Ordering::Relaxed),
+                        err_stats.late.load(Ordering::Relaxed),
+                        err_stats.peak_load.load(Ordering::Relaxed) as f64 / 10.0
+                    );
                 },
             )
         };
