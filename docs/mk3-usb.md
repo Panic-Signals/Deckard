@@ -123,8 +123,9 @@ Colour LEDs (groups, pads, strip) take a
 palette byte, `(colour + 1) << 2 | shade`: colour is the scripts' `LEDColors` index
 (0 red … 15 fuchsia, 16 white); shade 0 dimmest … 3 brightest. Shades 0 and 2 and the
 colours were confirmed on the hardware (`examples/mk3-led-check.rs`); each touch-strip LED
-takes its own colour. DECKARD sends dim as shade 0 and every brighter state as 3, as
-Maschine's MK3 LED table gives bright and flash the full level.
+takes its own colour. DECKARD sends dim as shade 0, bright as shade 2 and flash as shade 3,
+as Maschine's MK3 LED table does: bright is the colour's own bright level, flash mixes in
+white.
 
 ## Other reports (from the HID report descriptor)
 

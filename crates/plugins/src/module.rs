@@ -26,8 +26,15 @@ pub struct ClassInfo {
     pub name: String,
 }
 
+/// Held while a module loads. A plug-in's entry points (`InitDll`, `bundleEntry`) and
+/// first factory calls assume one thread: the app loads on its main thread only, but
+/// each test has a host of its own on its own thread, and two of them loading the same
+/// plug-in at once crashed inside it (an access violation in its `InitDll`).
+static LOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Module {
     pub fn load(path: &Path) -> Result<Module, String> {
+        let _one_at_a_time = LOADING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let factory = unsafe { platform::load(path)? };
         let factory = unsafe { ComPtr::from_raw(factory) }.ok_or("the plug-in has no factory")?;
         let host = ComWrapper::new(crate::com::HostApp);

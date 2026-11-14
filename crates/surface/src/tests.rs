@@ -571,6 +571,24 @@ fn edited_user_scripts_reload() {
     assert_eq!(s.event(&Event::Knob(0, 0.1), &v, t0), [Action::Turn { knob: 0, inc: 0.1, fine: false }]);
 }
 
+/// An edit is seen by the file's time and size, not its text: one that keeps the size
+/// still reloads, and a file only touched with no edit reloads too (harmless).
+#[test]
+fn an_edit_of_the_same_size_reloads() {
+    let (_tmp, dir) = user_dir();
+    let page = dir.join("pages/control.lua");
+    std::fs::write(&page, "return { knob = function() deckard.metronome(true) return true end }").unwrap();
+    let mut s = Surface::with_user_dir(Some(dir.clone()));
+    let v = view();
+    assert!(!s.reload(), "nothing changed");
+    std::fs::write(&page, "return { knob = function() deckard.metronome(false) return true end}").unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&page).unwrap().set_modified(later).unwrap();
+    assert!(s.reload(), "same size, newer: reloaded");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, Instant::now()), [Action::Metronome(false)]);
+    assert!(!s.reload(), "and only once");
+}
+
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());

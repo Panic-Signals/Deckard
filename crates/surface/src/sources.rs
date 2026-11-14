@@ -4,6 +4,7 @@
 //! controllers share the pages and change only what differs (their screens, buttons).
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use mlua::{Lua, Table};
 
@@ -63,6 +64,9 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("themes/solarized_dark.lua", include_str!("../lua/themes/solarized_dark.lua")),
 ];
 
+/// A user file as last seen: its path, when it was last written and its size.
+type Stamp = (PathBuf, Option<SystemTime>, u64);
+
 #[derive(Clone, Default)]
 pub struct Sources {
     user: Option<PathBuf>,
@@ -71,8 +75,8 @@ pub struct Sources {
     /// A MIDI device's scripts (`devices/<id>/`): they see their own folder and `lib/`,
     /// never the MK3's pages.
     midi: bool,
-    /// The user's files as last loaded (path, text), to see edits.
-    seen: Vec<(PathBuf, String)>,
+    /// The user's files as last loaded (path, modified time, size), to see edits.
+    seen: Vec<Stamp>,
 }
 
 impl Sources {
@@ -129,18 +133,20 @@ impl Sources {
         changed
     }
 
-    /// Every `.lua` file in the user's folder (four folders deep), sorted.
-    fn user_files(&self) -> Vec<(PathBuf, String)> {
-        fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, String)>) {
+    /// Every `.lua` file in the user's folder (four folders deep), sorted, as when it was
+    /// last written and its size. That's what an edit changes, and it comes with the
+    /// folder listing: polled twice a second per controller on the UI thread, reading
+    /// every script's text took tens of milliseconds a time.
+    fn user_files(&self) -> Vec<Stamp> {
+        fn walk(dir: &Path, depth: usize, out: &mut Vec<Stamp>) {
             let Ok(entries) = std::fs::read_dir(dir) else { return };
             for e in entries.flatten() {
                 let p = e.path();
-                if p.is_dir() && depth > 0 {
+                let Ok(meta) = e.metadata() else { continue };
+                if meta.is_dir() && depth > 0 {
                     walk(&p, depth - 1, out);
-                } else if p.extension().is_some_and(|x| x == "lua")
-                    && let Ok(text) = std::fs::read_to_string(&p)
-                {
-                    out.push((p, text));
+                } else if meta.is_file() && p.extension().is_some_and(|x| x == "lua") {
+                    out.push((p, meta.modified().ok(), meta.len()));
                 }
             }
         }
@@ -150,7 +156,7 @@ impl Sources {
             // (A MIDI device reloads for its own files and the shared ones only.)
             if self.midi {
                 let (own, lib) = (dir.join("devices").join(&self.device), dir.join("lib"));
-                out.retain(|(p, _)| p.starts_with(&own) || p.starts_with(&lib));
+                out.retain(|(p, ..)| p.starts_with(&own) || p.starts_with(&lib));
             }
         }
         out.sort();

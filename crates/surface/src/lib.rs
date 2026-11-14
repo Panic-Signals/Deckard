@@ -1116,7 +1116,9 @@ const RELOAD_EVERY: Duration = Duration::from_millis(500);
 
 /// What the scripts and the engine share while a handler runs.
 pub(crate) struct Shared {
-    pub view: View,
+    /// What the scripts see, and a count that goes up when it changes. (Shared: a
+    /// `deckard.state()` table fills in its parts from the view it was made for.)
+    pub view: Rc<View>,
     pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
@@ -1126,6 +1128,14 @@ pub(crate) struct Shared {
     pub actions: Vec<Action>,
     pub page: String,
     pub leds: Leds,
+}
+
+impl Shared {
+    /// A new view for the scripts: `deckard.state()` makes its table again.
+    pub(crate) fn set_view(&mut self, view: Rc<View>) {
+        self.view = view;
+        self.view_id = self.view_id.wrapping_add(1);
+    }
 }
 
 /// The loaded scripts.
@@ -1283,9 +1293,8 @@ impl Surface {
         let run = self.run.as_ref()?;
         {
             let mut sh = run.shared.borrow_mut();
-            if sh.view != *v {
-                sh.view = v.clone();
-                sh.view_id = sh.view_id.wrapping_add(1);
+            if *sh.view != *v {
+                sh.set_view(Rc::new(v.clone()));
             }
             if let Some(now) = now {
                 sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
@@ -1601,7 +1610,7 @@ fn start(sources: &sources::Sources, page: String, theme: &str) -> mlua::Result<
     // No file, process or OS access: the scripts only get the `deckard` API.
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
-        view: View::default(),
+        view: Rc::default(),
         view_id: 1,
         now: 0.0,
         held: HashSet::new(),
@@ -1685,3 +1694,6 @@ mod sampling_tests;
 mod tests;
 #[cfg(test)]
 mod tests_support;
+
+#[cfg(test)]
+mod state_tests;
