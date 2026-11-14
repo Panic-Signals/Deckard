@@ -187,7 +187,8 @@ impl Document {
         })
     }
 
-    /// A copy of pattern `p` (its notes too) right after it; returns its index.
+    /// A copy of pattern `p` (its notes and modulation too) right after it; returns its
+    /// index.
     pub fn duplicate_pattern(&mut self, g: usize, p: usize) -> Result<usize, String> {
         let pat = self.project.groups.get(g).and_then(|x| x.patterns.get(p)).ok_or("no such pattern")?.clone();
         let mut at = 0;
@@ -201,13 +202,40 @@ impl Document {
             if !ops.is_empty() {
                 d.apply("Duplicate Pattern", ops)?;
             }
-            Ok(())
+            d.copy_pattern_modulation(g, &pat, at, start - pat.start)
         })?;
         Ok(at)
     }
 
+    /// Pattern `pat`'s modulation (every lane: the sounds', the group's) written into
+    /// pattern `at` of group `g`, `shift` ticks on, in place of what `at` had. (Part of a
+    /// pattern copy, in its undo step.)
+    fn copy_pattern_modulation(&mut self, g: usize, pat: &deckard_model::Pattern, at: usize, shift: i64) -> Result<(), String> {
+        if !self.project.groups[g].patterns[at].mods.is_empty() {
+            self.clear_pattern_modulation(crate::Chain::Group(g), at)?;
+            for s in 0..self.project.groups[g].sounds.len() {
+                self.clear_pattern_modulation(crate::Chain::Sound(g, s), at)?;
+            }
+        }
+        let mut lanes: Vec<((Option<usize>, Option<usize>, String), Vec<(i64, f64)>)> = Vec::new();
+        for m in &pat.mods {
+            let key = (m.sound, m.slot, m.field.clone());
+            let point = (m.position + shift, m.value);
+            match lanes.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, points)) => points.push(point),
+                None => lanes.push((key, vec![point])),
+            }
+        }
+        for ((sound, slot, field), points) in lanes {
+            let chain = sound.map_or(crate::Chain::Group(g), |s| crate::Chain::Sound(g, s));
+            let target = deckard_model::ModTarget { slot, field };
+            self.set_modulation(chain, &target, at, (i64::MIN / 2, i64::MAX / 2), &points)?;
+        }
+        Ok(())
+    }
+
     /// The pattern in slot `to` of group `g` becomes a copy of the one in slot `from`: its
-    /// notes and length (the scenes that play it go on playing it). In an empty slot, a new
+    /// notes, modulation and length (the scenes that play it go on playing it). In an empty slot, a new
     /// pattern is made there. Returns the index of the copy. One undo step.
     pub fn copy_pattern(&mut self, g: usize, from: usize, to: usize) -> Result<usize, String> {
         let group = self.project.groups.get(g).ok_or("no such group")?;
@@ -238,7 +266,7 @@ impl Document {
             if pat.length > 0 && pat.length != target.length {
                 d.set_pattern_length(g, at, pat.length)?;
             }
-            Ok(())
+            d.copy_pattern_modulation(g, &pat, at, target.start - pat.start)
         })?;
         Ok(at)
     }

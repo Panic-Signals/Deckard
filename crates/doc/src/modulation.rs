@@ -233,6 +233,39 @@ mod tests {
             .collect()
     }
 
+    /// Copying a pattern to another slot (DUPLICATE onto a pad) copies its modulation
+    /// with its notes: the sounds' lanes and the group's, in place of what the destination
+    /// had, as one undo step. Duplicating it does too.
+    #[test]
+    fn copying_a_pattern_carries_every_lane_and_replaces_the_destinations() {
+        let mut d = project();
+        d.set_modulation(Chain::Sound(0, 0), &cutoff(), 0, (0, 960), &[(0, 0.1), (480, -0.2)]).unwrap();
+        d.set_modulation(Chain::Group(0), &cutoff(), 0, (0, 960), &[(240, 0.3)]).unwrap();
+        let sorted = |mods: &[ModPoint]| {
+            let mut m = mods.to_vec();
+            m.sort_by(|a, b| (a.sound, a.slot, &a.field, a.position).cmp(&(b.sound, b.slot, &b.field, b.position)));
+            m
+        };
+        let source = sorted(&d.project().groups[0].patterns[0].mods);
+        assert_eq!(source.len(), 3);
+        let slot = d.project().groups[0].patterns[0].slot;
+        // Into an empty slot, then over a pattern with modulation of its own.
+        let at = d.copy_pattern(0, slot, slot + 3).unwrap();
+        assert_eq!(sorted(&d.project().groups[0].patterns[at].mods), source, "into an empty slot");
+        d.set_modulation(Chain::Sound(0, 0), &cutoff(), at, (0, 960), &[(720, 0.9)]).unwrap();
+        let before = d.project().clone();
+        let steps = d.undo_labels().len();
+        let at = d.copy_pattern(0, slot, slot + 3).unwrap();
+        assert_eq!(sorted(&d.project().groups[0].patterns[at].mods), source, "the destination's own lane replaced");
+        assert_eq!(sorted(&d.project().groups[0].patterns[0].mods), source, "the source untouched");
+        assert_eq!(d.undo_labels().len(), steps + 1, "one undo step");
+        d.undo();
+        assert_eq!(d.project(), &before);
+        let copy = d.duplicate_pattern(0, 0).unwrap();
+        assert_eq!(sorted(&d.project().groups[0].patterns[copy].mods), source, "duplicated");
+        let again = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(sorted(&again.project().groups[0].patterns[copy].mods), source, "saved and opened again");
+    }
     #[test]
     fn points_are_written_with_their_lane_and_read_back() {
         let mut d = project();
