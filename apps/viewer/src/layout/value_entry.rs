@@ -23,12 +23,13 @@ pub enum What {
 
 impl What {
     fn reset(self) -> Act {
-        match self {
+        let inner = match self {
             What::Edit(e) => e.reset(),
             What::Tempo => Act::SetTempo(120.0),
             What::Aux(t, k) => Act::SetAux(t, k, 0.75),
-            What::Selection(..) => Act::Sampling(super::sampling::SamplingAct::Select(None)),
-        }
+            What::Selection(..) => return Act::Sampling(super::sampling::SamplingAct::Select(None)),
+        };
+        Act::Exact(Box::new(inner))
     }
 
     /// On/off switches have nothing to type.
@@ -293,5 +294,13 @@ mod tests {
         assert_eq!(pan("25"), Some(0.25));
         assert_eq!(pan("R200"), Some(1.0));
         assert_eq!(pan("x"), None);
+    }
+
+    #[test]
+    fn reset_wraps_sound_edits_in_exact() {
+        let act = What::Edit(Edit::Level(deckard_doc::Target::Sound(0, 1))).reset();
+        assert!(matches!(act, Act::Exact(_)));
+        let aux = What::Aux(deckard_doc::Target::Sound(0, 1), 0).reset();
+        assert!(matches!(aux, Act::Exact(_)));
     }
 }
