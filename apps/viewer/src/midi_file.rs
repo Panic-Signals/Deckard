@@ -76,13 +76,17 @@ fn track_events(
         let (c, pitch) = note_map(n);
         let ch = u4::new(c.min(15));
         let key = u7::new(pitch.clamp(0, 127) as u8);
-        let vel = u7::new(n.velocity.clamp(1, 127) as u8);
-        events.push((n.position, 2, TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOn { key, vel } }));
-        events.push((
-            n.position + n.length.max(1),
-            1,
-            TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOff { key, vel: u7::new(0) } },
-        ));
+        // A ratcheted note is written as its hits; an ordinary one is its one hit.
+        for hit in n.ratchet.hits(n.length, n.velocity) {
+            let vel = u7::new(hit.velocity.clamp(1, 127) as u8);
+            let at = n.position + hit.offset;
+            events.push((at, 2, TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOn { key, vel } }));
+            events.push((
+                at + hit.length.max(1),
+                1,
+                TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOff { key, vel: u7::new(0) } },
+            ));
+        }
     }
     for m in midi {
         let message = match m.kind {
@@ -232,6 +236,21 @@ mod tests {
         assert_eq!(n, notes);
         assert_eq!(m, midi);
         assert_eq!(end, 1440);
+    }
+
+    /// A ratcheted note goes out as its hits, each a note of its own.
+    #[test]
+    fn a_ratchet_exports_as_its_hits() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let ratchet = Ratchet { repeats: 4, shape: Shape::Down, floor: 0, ceiling: 127 };
+        let note = Note { ratchet, expr: None, sound: 3, position: 0, length: 480, pitch: 60, velocity: 100, probability: 100 };
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ratchet.mid");
+        export_mapped(&path, &[note], &[], 120.0, 4, 4, &|n| (0, n.pitch), &|_| 0).unwrap();
+        let (n, _, _) = import(&path, 3).unwrap();
+        let got: Vec<(i64, i64, i64, Ratchet)> = n.iter().map(|n| (n.position, n.length, n.velocity, n.ratchet)).collect();
+        let plain = Ratchet::default();
+        assert_eq!(got, [(0, 120, 100, plain), (120, 120, 75, plain), (240, 120, 50, plain), (360, 120, 25, plain)]);
     }
 
     /// A group's (or the song's) file: type 1, a tempo track then a track per sound
