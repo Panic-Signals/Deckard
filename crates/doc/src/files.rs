@@ -220,6 +220,8 @@ impl Document {
         let Some(Value::Obj(old)) = self.tree.at(&path).cloned() else { return Err("no such group".into()) };
         let mut new = self.fresh_obj(root)?;
         take_id(&mut new, &old);
+        let group_oid = old.oid;
+        let (keep_kit_out, keep_kit_aux) = if !routing { inspect_kit_routing(&old, &new, group_oid) } else { Default::default() };
         let old_sounds: Vec<Option<(mxprj::decode::Path, Obj)>> = (0..16)
             .map(|s| {
                 let sp = self.owner(Target::Sound(g, s))?;
@@ -236,7 +238,8 @@ impl Document {
             && let Some(Value::List(items)) = objs.get_mut("items")
         {
             for (s, item) in items.iter_mut().enumerate() {
-                let (Some((sp, old_s)), Some(new_s)) = (old_sounds.get(s).and_then(Option::as_ref), crate::arrange::px_mut(item)) else {
+                let Some(new_s) = crate::arrange::px_mut(item) else { continue };
+                let Some((sp, old_s)) = old_sounds.get(s).and_then(Option::as_ref) else {
                     continue;
                 };
                 if let (Some(from), Some(to)) = (new_s.oid, old_s.oid) {
@@ -254,7 +257,13 @@ impl Document {
                     }
                 }
                 if !routing {
+                    let keep_aux = keep_kit_aux.get(s).copied().unwrap_or([false; 2]);
                     for f in SOUND_ROUTING_FIELDS {
+                        if (keep_aux[0] && matches!(*f, "aux1_level" | "aux1_order"))
+                            || (keep_aux[1] && matches!(*f, "aux2_level" | "aux2_order"))
+                        {
+                            continue;
+                        }
                         copy_field_repoint(old_s, new_s, f, &mut repoints);
                     }
                 }
@@ -301,9 +310,22 @@ impl Document {
             && let (Some(Value::Obj(oc)), Some(Value::Obj(nc))) = (old.get("sound_configs"), new.get_mut("sound_configs"))
             && let (Some(Value::List(oi)), Some(Value::List(ni))) = (oc.get("items"), nc.get_mut("items"))
         {
-            for (from_cfg, to_cfg) in oi.iter().zip(ni.iter_mut()) {
+            for (s, (from_cfg, to_cfg)) in oi.iter().zip(ni.iter_mut()).enumerate() {
                 if let (Value::Obj(from_cfg), Value::Obj(to_cfg)) = (from_cfg, to_cfg) {
+                    let keep_out = keep_kit_out.get(s).copied().unwrap_or(false);
+                    let keep_aux = keep_kit_aux.get(s).copied().unwrap_or([false; 2]);
+                    let self_oid = old_sounds.get(s).and_then(Option::as_ref).and_then(|(_, o)| o.oid);
+                    let self_loop = self_oid.is_some_and(|id| {
+                        route_kind(from_cfg, "audio_output")
+                            .is_some_and(|(k, g_ref, s_ref)| k == 5 && g_ref == group_oid && s_ref == Some(id))
+                    });
                     for f in CONFIG_ROUTING_FIELDS {
+                        if (*f == "audio_output" && (keep_out || self_loop))
+                            || (keep_aux[0] && matches!(*f, "aux1_output" | "aux1_level" | "aux1_order"))
+                            || (keep_aux[1] && matches!(*f, "aux2_output" | "aux2_level" | "aux2_order"))
+                        {
+                            continue;
+                        }
                         copy_field(from_cfg, to_cfg, f);
                     }
                 }
@@ -535,6 +557,71 @@ const SOUND_ROUTING_FIELDS: &[&str] = &[
     "transpose",
     "cue_enabled",
 ];
+
+fn route_kind(o: &Obj, field: &str) -> Option<(i64, Option<u64>, Option<u64>)> {
+    let v = match o.find(field)? {
+        Value::Obj(p) if p.type_name.ends_with("Parameter") => match p.find("value")? {
+            Value::Obj(inner) => inner,
+            _ => return None,
+        },
+        Value::Obj(inner) => inner,
+        _ => return None,
+    };
+    let kind = v.find("type").and_then(Value::as_int)?;
+    let oid = |k: &str| match v.find(k) {
+        Some(Value::Ref(id)) => Some(*id),
+        Some(Value::Obj(obj)) => obj.oid,
+        _ => None,
+    };
+    Some((kind, oid("group"), oid("sound")))
+}
+
+fn inspect_kit_routing(old: &Obj, new: &Obj, group_oid: Option<u64>) -> (Vec<bool>, Vec<[bool; 2]>) {
+    fn cfg_list(g: &Obj) -> Vec<&Obj> {
+        let Some(Value::Obj(sc)) = g.find("sound_configs") else { return Vec::new() };
+        let Some(Value::List(items)) = sc.find("items") else { return Vec::new() };
+        items
+            .iter()
+            .filter_map(|v| match v {
+                Value::Obj(o) => Some(o),
+                _ => None,
+            })
+            .collect()
+    }
+    fn snd_list(g: &Obj) -> Vec<&Obj> {
+        let Some(Value::Obj(s)) = g.find("sounds") else { return Vec::new() };
+        let Some(Value::Obj(o)) = s.find("objects") else { return Vec::new() };
+        let Some(Value::List(items)) = o.find("items") else { return Vec::new() };
+        items.iter().filter_map(crate::arrange::px).collect()
+    }
+    let old_cfgs = cfg_list(old);
+    let new_cfgs = cfg_list(new);
+    let new_snds = snd_list(new);
+    let n = new_snds.len().max(new_cfgs.len());
+    let mut keep_out = Vec::with_capacity(n);
+    let mut keep_aux = Vec::with_capacity(n);
+    for s in 0..n {
+        let nc = new_cfgs.get(s).copied();
+        let oc = old_cfgs.get(s).copied();
+        let ns = new_snds.get(s).copied();
+        let self_oid = ns.and_then(|x| x.oid);
+        let out_rk = nc.and_then(|c| route_kind(c, "audio_output")).or_else(|| ns.and_then(|x| route_kind(x, "audio_output")));
+        let kit_internal_out =
+            out_rk.is_some_and(|(k, g_ref, s_ref)| k == 5 && g_ref == group_oid && s_ref.is_some_and(|id| Some(id) != self_oid));
+        let old_parent = oc.and_then(|c| route_kind(c, "audio_output")).is_none_or(|(k, _, _)| k == 1);
+        keep_out.push(old_parent && kit_internal_out);
+        let mut aux_flags = [false; 2];
+        for (k, field) in ["aux1_output", "aux2_output"].into_iter().enumerate() {
+            let aux_rk = nc.and_then(|c| route_kind(c, field)).or_else(|| ns.and_then(|x| route_kind(x, field)));
+            let kit_internal_aux =
+                aux_rk.is_some_and(|(kind, g_ref, s_ref)| kind == 5 && g_ref == group_oid && s_ref.is_some_and(|id| Some(id) != self_oid));
+            let old_none = oc.and_then(|c| route_kind(c, field)).is_none_or(|(kind, _, _)| kind == 0);
+            aux_flags[k] = old_none && kit_internal_aux;
+        }
+        keep_aux.push(aux_flags);
+    }
+    (keep_out, keep_aux)
+}
 const CONFIG_ROUTING_FIELDS: &[&str] = &[
     "midi_source",
     "midi_channel",
@@ -1255,5 +1342,105 @@ mod tests {
 
         assert!(d.undo());
         assert_eq!(d.project().groups[0].sounds[0].name, "");
+    }
+
+    #[test]
+    fn load_group_file_without_routing_loads_group_and_sound_levels_as_saved() {
+        use crate::SoundRoute;
+        use crate::chain::NewModule;
+        use deckard_model::{AudioDest, level_db, level_from_db};
+
+        let mut src = Document::new_project().unwrap();
+        src.set_level(crate::Target::Group(0), level_from_db(6.0)).unwrap();
+        src.set_pan(crate::Target::Group(0), -0.35).unwrap();
+        src.rename(crate::Target::Sound(0, 0), "Kick").unwrap();
+        src.add_slot(0, 0, 0, &NewModule::Effect("Filter")).unwrap();
+        src.set_level(crate::Target::Sound(0, 0), level_from_db(-3.0)).unwrap();
+        src.set_pan(crate::Target::Sound(0, 0), -0.15).unwrap();
+        src.rename(crate::Target::Sound(0, 1), "Hat").unwrap();
+        src.add_slot(0, 1, 0, &NewModule::Effect("Filter")).unwrap();
+        src.set_level(crate::Target::Sound(0, 1), level_from_db(-12.0)).unwrap();
+        src.set_pan(crate::Target::Sound(0, 1), 0.20).unwrap();
+        src.rename(crate::Target::Sound(0, 2), "Clap").unwrap();
+        src.add_slot(0, 2, 0, &NewModule::Effect("Filter")).unwrap();
+        src.set_level(crate::Target::Sound(0, 2), level_from_db(0.0)).unwrap();
+        let bytes = src.file_bytes(FileItem::Group(0), &tagged("HotKit")).unwrap();
+
+        let mut d = Document::new_project().unwrap();
+        d.add_group().unwrap();
+        d.add_group().unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Output(AudioDest::Sound(1, 0))).unwrap();
+        d.set_level(crate::Target::Group(2), 0.5).unwrap();
+        d.set_pan(crate::Target::Group(2), 0.25).unwrap();
+
+        d.load_group_file_with(0, &bytes, false, false).unwrap();
+        let check = |doc: &Document| {
+            let g0 = &doc.project().groups[0];
+            assert!((level_db(g0.level) - 6.0).abs() < 0.05, "group level comes from the kit (+6 dB)");
+            assert!((g0.pan - -0.35).abs() < 1e-6, "group pan comes from the kit");
+            assert_eq!(g0.sounds[0].channel.dest, AudioDest::Sound(1, 0), "bypassed Kick route is kept");
+            assert_eq!(g0.sounds[1].channel.dest, AudioDest::Parent);
+            assert!((level_db(g0.sounds[0].level) - -3.0).abs() < 0.05, "Kick keeps kit -3 dB");
+            assert!((g0.sounds[0].pan - -0.15).abs() < 1e-6, "Kick keeps kit pan");
+            assert!((level_db(g0.sounds[1].level) - -12.0).abs() < 0.05, "Hat keeps kit -12 dB");
+            assert!((g0.sounds[1].pan - 0.20).abs() < 1e-6, "Hat keeps kit pan");
+            assert!((level_db(g0.sounds[2].level) - 0.0).abs() < 0.05, "Clap keeps kit 0 dB");
+            assert!((g0.sounds[3].level - 0.75).abs() < 1e-6, "empty pad stays at 0 dB");
+        };
+        check(&d);
+        check(&reload(&d));
+
+        d.load_group_file_with(2, &bytes, false, false).unwrap();
+        let g2 = &d.project().groups[2];
+        assert!((level_db(g2.level) - 6.0).abs() < 0.05, "Group 2 also loads the kit's group level");
+        assert!((g2.pan - -0.35).abs() < 1e-6, "Group 2 also loads the kit's group pan");
+        assert!((level_db(g2.sounds[0].level) - -3.0).abs() < 0.05);
+        assert!((level_db(g2.sounds[1].level) - -12.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn load_group_file_without_routing_keeps_internal_kit_bus_and_aux_and_exact_levels() {
+        use crate::SoundRoute;
+        use crate::chain::NewModule;
+        use deckard_model::{AudioDest, level_db, level_from_db};
+
+        let mut src = Document::new_project().unwrap();
+        src.set_level(crate::Target::Group(0), level_from_db(3.0)).unwrap();
+        src.rename(crate::Target::Sound(0, 0), "Perc").unwrap();
+        src.add_slot(0, 0, 0, &NewModule::Effect("Filter")).unwrap();
+        src.set_level(crate::Target::Sound(0, 0), level_from_db(-2.0)).unwrap();
+        src.set_sound_route(0, 0, SoundRoute::Output(AudioDest::Sound(0, 15))).unwrap();
+        src.set_sound_route(0, 0, SoundRoute::Aux(0, AudioDest::Sound(0, 14))).unwrap();
+        src.set("Aux Send", crate::Target::Sound(0, 0), "aux1_level", mxprj::decode::Value::Float(0.42)).unwrap();
+        src.set("Aux Order", crate::Target::Sound(0, 0), "aux1_order", mxprj::decode::Value::Int(1)).unwrap();
+        src.set_sound_route(0, 0, SoundRoute::Aux(1, AudioDest::Sound(0, 13))).unwrap();
+        src.set("Aux Send", crate::Target::Sound(0, 0), "aux2_level", mxprj::decode::Value::Float(0.31)).unwrap();
+        src.rename(crate::Target::Sound(0, 14), "Kit Verb").unwrap();
+        src.add_slot(0, 14, 0, &NewModule::Effect("Filter")).unwrap();
+        src.rename(crate::Target::Sound(0, 15), "Drum Bus").unwrap();
+        src.add_slot(0, 15, 0, &NewModule::Effect("Filter")).unwrap();
+        src.set_level(crate::Target::Sound(0, 15), level_from_db(-4.0)).unwrap();
+        let bytes = src.file_bytes(FileItem::Group(0), &tagged("BusKit")).unwrap();
+
+        let mut d = Document::new_project().unwrap();
+        d.add_group().unwrap();
+        d.set_sound_route(0, 1, SoundRoute::Output(AudioDest::Group(1))).unwrap();
+
+        d.load_group_file_with(0, &bytes, false, false).unwrap();
+        let check = |doc: &Document| {
+            let g0 = &doc.project().groups[0];
+            assert!((level_db(g0.level) - 3.0).abs() < 0.05, "group level comes from the kit (+3 dB)");
+            assert_eq!(g0.sounds[0].channel.dest, AudioDest::Sound(0, 15), "internal kit bus route is kept");
+            assert_eq!(g0.sounds[0].channel.aux_dest[0], AudioDest::Sound(0, 14), "internal kit aux1 bus route is kept");
+            assert!((g0.sounds[0].aux[0] - 0.42).abs() < 1e-6, "internal kit aux1 level is kept");
+            assert!(g0.sounds[0].channel.aux_pre[0], "internal kit aux1 pre/post order is kept");
+            assert_eq!(g0.sounds[0].channel.aux_dest[1], AudioDest::Sound(0, 13), "internal kit aux2 bus route is kept");
+            assert!((g0.sounds[0].aux[1] - 0.31).abs() < 1e-6, "internal kit aux2 level is kept");
+            assert_eq!(g0.sounds[1].channel.dest, AudioDest::Group(1), "explicit project route is kept");
+            assert!((level_db(g0.sounds[0].level) - -2.0).abs() < 0.05, "Perc keeps kit -2 dB");
+            assert!((level_db(g0.sounds[15].level) - -4.0).abs() < 0.05, "Drum Bus keeps kit -4 dB");
+        };
+        check(&d);
+        check(&reload(&d));
     }
 }
