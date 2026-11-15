@@ -88,6 +88,14 @@ pub(crate) fn set_expr_field(te: &mut mxprj::decode::Obj, expr: Option<ExprId>) 
     }
 }
 
+/// A note's `TimedEvent` with its ratchet set (none kept for an ordinary note).
+pub(crate) fn set_ratchet_field(te: &mut mxprj::decode::Obj, r: deckard_model::ratchet::Ratchet) {
+    te.fields.retain(|(f, _)| f != deckard_model::ratchet::FIELD);
+    if r != Default::default() {
+        te.fields.push((deckard_model::ratchet::FIELD.into(), Value::Int(r.to_int())));
+    }
+}
+
 /// Take every DECKARD-only field out of `v` (before it's written as Maschine's archive).
 pub(crate) fn strip_deckard_fields(v: &mut Value) {
     v.walk_mut(&mut |o| o.fields.retain(|(f, _)| !f.starts_with("deckard:")));

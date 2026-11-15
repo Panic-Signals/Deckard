@@ -284,7 +284,15 @@ impl Document {
                                 .and_then(Value::as_int)
                                 .or_else(|| ev.find("muted").and_then(Value::as_int).map(|m| if m != 0 { 0 } else { 100 }))
                                 .unwrap_or(100);
-                            notes.push(Note { ratchet: Default::default(), expr, sound, position, length, pitch, velocity, probability });
+                            let ratchet = if let Value::Obj(te) = &item.event {
+                                te.get(deckard_model::ratchet::FIELD)
+                                    .and_then(Value::as_int)
+                                    .map(deckard_model::ratchet::Ratchet::from_int)
+                                    .unwrap_or_default()
+                            } else {
+                                Default::default()
+                            };
+                            notes.push(Note { ratchet, expr, sound, position, length, pitch, velocity, probability });
                         }
                     }
                 }
@@ -358,6 +366,7 @@ impl Document {
         let Value::Obj(t) = &mut te else { unreachable!() };
         *t.get_mut("position").ok_or("TimedEvent without position")? = Value::Int(n.position);
         super::expression::set_expr_field(t, n.expr);
+        super::expression::set_ratchet_field(t, n.ratchet);
         let Some(Value::Obj(ev)) = t.get_mut("event") else { unreachable!() };
         set_int(ev, "length", n.length.max(1));
         set_int(ev, "note", n.pitch.clamp(0, 127));
