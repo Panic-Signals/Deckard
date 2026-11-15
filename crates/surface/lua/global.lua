@@ -623,8 +623,9 @@ function global.leds()
       -- A selected empty slot: Maschine lights it in its empty-slot colour.
       deckard.led(name, EMPTY_SLOT, true)
     else
-      -- Selected pads are fully lit, the others half lit.
-      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen, sound.playing and not deckard.pad_held(i))
+      -- Selected pads (and loops playing now) are fully lit, the others half lit.
+      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen or sound.loop_playing or false,
+        sound.playing and not deckard.pad_held(i))
     end
   end
 end

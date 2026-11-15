@@ -6326,6 +6326,8 @@ impl App {
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
                 let noted = doc_cache.group_noted.get(g);
+                let scene_pattern = p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi));
+                let loop_pattern = scene_pattern.or((g == self.group).then_some(self.pattern)).and_then(|pi| grp.patterns.get(pi));
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -6363,7 +6365,7 @@ impl App {
                             slot: pt.slot,
                         })
                         .collect(),
-                    scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
+                    scene_pattern,
                     progress: head.and_then(|_| layout::group_progress(p, head, self.scene, g)).map(|(bars, played)| played / bars as f64),
                     playing_progress: head
                         .and_then(|h| {
@@ -6374,6 +6376,8 @@ impl App {
                     sounds: (0..grp.sounds.len())
                         .map(|s| {
                             let snd = &grp.sounds[s];
+                            let loop_mode = snd.instrument == "AudioModule"
+                                && snd.audio.as_ref().is_some_and(|a| a.mode == deckard_model::AudioMode::Loop);
                             SoundView {
                                 name: snd.name.clone(),
                                 rgb: layout::rgb(p, g, Some(s)),
@@ -6413,8 +6417,10 @@ impl App {
                                 prob_locked: snd.probability_locked,
                                 selected: g == self.group && (s == self.sound || self.sound_selection.contains(&s)),
                                 audio: if g == self.group { self.loop_view(p, g, s) } else { None },
-                                loop_mode: snd.instrument == "AudioModule"
-                                    && snd.audio.as_ref().is_some_and(|a| a.mode == deckard_model::AudioMode::Loop),
+                                loop_mode,
+                                loop_playing: loop_mode
+                                    && v.playing
+                                    && loop_pattern.is_some_and(|pt| pt.audio.iter().any(|c| c.sound == s)),
                             }
                         })
                         .collect(),
@@ -15487,11 +15493,22 @@ mod tests {
         let smp = deckard_engine::sample::Sample::load(&wav).unwrap();
         app.load_loop(0, 2, &wav, &smp).unwrap();
         let on = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[0].audio.iter().any(|c| c.sound == 2);
+        let loop_playing = |app: &App| app.surface_view().groups[0].sounds[2].loop_playing;
         assert!(on(&app), "a loop loaded is on in the pattern");
+        assert!(!loop_playing(&app), "stopped: not playing");
+        app.playing = Some(deckard_engine::Mode::Scene(0));
+        assert!(loop_playing(&app), "song playing and on in the group's pattern");
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "another sound");
         app.toggle_audio_loop(0, 2).unwrap();
         assert!(!on(&app), "the pad switches it off");
+        assert!(!loop_playing(&app), "off in the pattern: no longer playing");
         app.toggle_audio_loop(0, 2).unwrap();
         assert!(on(&app), "and on again");
+        assert!(loop_playing(&app), "on again while song plays");
+        let slot =
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[2].slots.iter().position(|x| x.module == "AudioModule").unwrap();
+        layout::apply_acts(&mut app, vec![layout::Act::SetParam(deckard_doc::Target::Module(0, 2, slot), "mode", 1.0)]);
+        assert!(!loop_playing(&app), "Gate mode plays with notes, not the pattern");
         assert!(app.toggle_audio_loop(0, 3).is_err(), "a sound without an Audio plug-in");
     }
 

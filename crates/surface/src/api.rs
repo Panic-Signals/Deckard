@@ -1493,6 +1493,7 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("prob_locked", s.prob_locked)?;
                 st.set("selected", s.selected)?;
                 st.set("loop_mode", s.loop_mode)?;
+                st.set("loop_playing", s.loop_playing)?;
                 if let Some(a) = &s.audio {
                     let at = lua.create_table()?;
                     // (Flat: min, max, min, max, …; a column a pixel or two.)

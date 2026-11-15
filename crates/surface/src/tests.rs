@@ -189,6 +189,20 @@ fn a_loop_mode_sounds_pad_toggles_its_loop() {
 }
 
 #[test]
+fn a_playing_loops_pad_stays_bright() {
+    let (mut s, mut v) = (Surface::new(), view());
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 2)), "unfocused and idle: dim");
+    v.groups[v.group].sounds[2].loop_playing = true;
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 4)), "loop playing: bright");
+    v.groups[v.group].sounds[2].muted = true;
+    hold(&mut s, &v, "BUTTON_MUTE", true);
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 2)), "MUTE held still shows muted");
+    hold(&mut s, &v, "BUTTON_MUTE", false);
+    v.groups[v.group].sounds[2].loop_playing = false;
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 2)), "stopped or off: dim again");
+}
+
+#[test]
 fn pads_focus_their_sound() {
     let (mut s, v) = (Surface::new(), view());
     let now = Instant::now();
