@@ -319,6 +319,7 @@ fn main() {
             match lane.as_deref() {
                 Some("velocity") | None => {}
                 Some("probability") => app.lane = layout::Lane::Probability,
+                Some("ratchet") => app.lane = layout::Lane::Ratchet,
                 Some("bend") => app.lane = layout::Lane::PitchBend,
                 Some(n) => {
                     if let Ok(n) = n.parse::<u8>() {
@@ -14360,6 +14361,44 @@ mod tests {
 
     /// ⌘C / ⌘V: a copy pastes after itself; ⌘X cuts. The event area's right-click
     /// menu: Paste at the mouse, the mouse modes, the Nudge Grid, Delete.
+    /// The note menu's Ratchet items change every selected note's ratchet, an undo
+    /// step each.
+    #[test]
+    fn the_ratchet_menu_sets_the_selected_notes_ratchets() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+        app.output = Some(Err("no audio in this test".into()));
+        app.new_project();
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        let (a, b, other) = (note(0), note(480), note(960));
+        layout::apply_acts(&mut app, vec![layout::Act::EditNotes { g: 0, p: 0, label: "t", remove: Vec::new(), add: vec![a, b, other] }]);
+        app.selected = vec![a, b];
+        let notes = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[app.pattern].notes.clone();
+        let changes: [fn(Ratchet) -> Ratchet; 3] =
+            [|r| Ratchet { repeats: 4, ..r }, |r| Ratchet { shape: Shape::Down, ..r }, |r| Ratchet { floor: 30, ..r }];
+        for change in changes {
+            let act = layout::ratchet_edit(&app, change).expect("a change");
+            layout::apply_acts(&mut app, vec![act]);
+        }
+        let want = Ratchet { repeats: 4, shape: Shape::Down, floor: 30, ceiling: 127 };
+        assert_eq!(notes(&app).iter().map(|n| n.ratchet).collect::<Vec<_>>(), [want, want, Ratchet::default()]);
+        assert!(app.selected.iter().all(|n| n.ratchet == want) && app.selected.len() == 2, "the selection follows");
+        assert!(layout::ratchet_edit(&app, |r| r).is_none(), "nothing to change, no edit");
+        for _ in 0..3 {
+            app.undo();
+        }
+        assert_eq!(notes(&app), [a, b, other]);
+    }
+
     #[test]
     fn copy_paste_and_the_event_menu() {
         let Some(mut h) = harness(false, true) else { return };

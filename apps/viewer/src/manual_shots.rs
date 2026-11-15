@@ -283,3 +283,36 @@ fn manual_shots() {
     feed(h.state_mut(), Chain::Sound(0, 0), 0, flat_e, 6, true);
     window(&mut h, "tuner.png", Some(CONTROL));
 }
+
+/// Ratcheted notes in the pattern editor, with the Ratchet lane and then the Velocity
+/// lane under them; and the MK3's Step page, its second knob page.
+#[test]
+#[ignore]
+fn ratchet_shots() {
+    use deckard_model::Note;
+    use deckard_model::ratchet::{Ratchet, Shape};
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let note = |position, length, velocity, ratchet| Note {
+        ratchet,
+        expr: None,
+        sound: 0,
+        position,
+        length,
+        pitch: 60,
+        velocity,
+        probability: 100,
+    };
+    let down = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+    let up = Ratchet { repeats: 8, shape: Shape::Up, floor: 0, ceiling: 127 };
+    let notes = vec![note(0, 960, 110, down), note(1920, 1920, 40, up), note(1440, 240, 100, Ratchet::default())];
+    apply_acts(&mut app, vec![Act::EditNotes { g: 0, p: 0, label: "t", remove: Vec::new(), add: notes.clone() }]);
+    app.selected = vec![notes[0]];
+    let mut h = harness(app);
+    // (The first frame shows the sound's saved lane.)
+    h.state_mut().lane = crate::layout::Lane::Ratchet;
+    window(&mut h, "ratchet-lane.png", Some((0, 520, 1950, 410)));
+    h.state_mut().lane = crate::layout::Lane::Velocity;
+    window(&mut h, "ratchet-velocity.png", Some((0, 520, 1950, 410)));
+}

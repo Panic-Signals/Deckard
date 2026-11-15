@@ -6,6 +6,7 @@ use crate::remote::{AssignTab, RemoteAct};
 use crate::{App, Playhead, modulation, sampler_ui};
 use deckard_doc::Target;
 use deckard_engine::Mode;
+use deckard_model::ratchet::{self, Ratchet, Shape};
 use deckard_model::{Color, LaneRef, MidiEvent, MidiKind, Note, PPQ, Project, SWING_CYCLES, Swing};
 use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use mxprj::decode::Value;
@@ -3427,12 +3428,70 @@ fn event_menu(ui: &mut Ui, app: &App, at: crate::clipboard::PasteAt, acts: &mut 
         acts,
     );
     ui.separator();
+    ratchet_menu(ui, app, acts);
     ui.menu_button("Nudge Grid", |ui| {
         for (i, name) in deckard_lua_host::api::pattern_editor::NUDGE_GRIDS.iter().enumerate() {
             if ui.add(egui::Button::new(*name).selected(app.nudge.0 == i)).clicked() {
                 acts.push(Act::NudgeGrid(i));
                 ui.close();
             }
+        }
+    });
+}
+
+/// The selected notes with `change` made to each one's ratchet, as one "Ratchet" edit
+/// (none when nothing changes).
+pub(crate) fn ratchet_edit(app: &App, change: impl Fn(Ratchet) -> Ratchet) -> Option<Act> {
+    let (remove, add): (Vec<Note>, Vec<Note>) =
+        app.selected.iter().map(|n| (*n, Note { ratchet: change(n.ratchet), ..*n })).filter(|(a, b)| a != b).unzip();
+    (!remove.is_empty()).then_some(Act::EditNotes { g: app.group, p: app.pattern, label: "Ratchet", remove, add })
+}
+
+/// A number in a menu, dragged or typed: its new value once the drag ends or the typing
+/// is done (so a drag is one edit, not one a frame).
+fn menu_number(ui: &mut Ui, name: &str, now: i64, range: std::ops::RangeInclusive<i64>) -> Option<i64> {
+    let id = ui.id().with(("menu-number", name));
+    let mut v = ui.data(|d| d.get_temp::<i64>(id)).unwrap_or(now);
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(name);
+            ui.add(egui::DragValue::new(&mut v).range(range).speed(0.2))
+        })
+        .inner;
+    let done = resp.drag_stopped() || resp.lost_focus();
+    if resp.dragged() || resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, v));
+    } else {
+        ui.data_mut(|d| d.remove_temp::<i64>(id));
+    }
+    (done && v != now).then_some(v)
+}
+
+/// The selected notes' ratchet: how many hits each plays inside its length, and how
+/// their velocities run.
+fn ratchet_menu(ui: &mut Ui, app: &App, acts: &mut Vec<Act>) {
+    let Some(first) = app.selected.first().map(|n| n.ratchet) else {
+        ui.add_enabled(false, egui::Button::new("Ratchet"));
+        return;
+    };
+    ui.menu_button("Ratchet", |ui| {
+        ui.set_min_width(140.0);
+        if let Some(v) = menu_number(ui, "Repeats", i64::from(first.repeats), 1..=i64::from(ratchet::MOST)) {
+            acts.extend(ratchet_edit(app, |r| Ratchet { repeats: v as u8, ..r }));
+        }
+        ui.separator();
+        for shape in Shape::ALL {
+            if ui.add(egui::Button::new(shape.label()).selected(first.shape == shape)).clicked() {
+                acts.extend(ratchet_edit(app, |r| Ratchet { shape, ..r }));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if let Some(v) = menu_number(ui, "Floor", i64::from(first.floor), 0..=127) {
+            acts.extend(ratchet_edit(app, |r| Ratchet { floor: v as u8, ..r }));
+        }
+        if let Some(v) = menu_number(ui, "Ceiling", i64::from(first.ceiling), 0..=127) {
+            acts.extend(ratchet_edit(app, |r| Ratchet { ceiling: v as u8, ..r }));
         }
     });
 }
@@ -6521,6 +6580,16 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             // Muted notes: Maschine's grey.
             let c = if deckard_doc::note_tools::muted(n) { Color32::from_rgb(128, 128, 128) } else { sound_color(p, app.group, n.sound) };
             gp.rect_filled(r, 1.0, with_alpha(c, a));
+            // A ratcheted note: a tick where each later hit starts.
+            if !n.ratchet.is_plain() {
+                let hits = n.ratchet.hits(n.length, n.velocity);
+                if r.width() / hits.len() as f32 >= 3.0 {
+                    for hit in hits.iter().skip(1) {
+                        let x = (r.left() + r.width() * hit.offset as f32 / n.length.max(1) as f32).round();
+                        gp.vline(x, r.y_range(), Stroke::new(1.0, black(140)));
+                    }
+                }
+            }
             if let Some(c) = outline {
                 gp.rect_filled(r, 1.0, white(90));
                 gp.rect_stroke(r, 1.0, Stroke::new(1.0, S00), StrokeKind::Inside);
@@ -7001,6 +7070,17 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 let h = lane_in.height() * v.clamp(0, max) as f32 / max as f32;
                 let col = if edited.is_some() || app.selected.contains(n) { Color32::WHITE } else { scol };
                 vp.rect_filled(Rect::from_min_max(Pos2::new(x, lane_in.bottom() - h), Pos2::new(x + 3.0, lane_in.bottom())), 0.0, col);
+                // A ratcheted note: its later hits' velocities, fainter; or its count.
+                if kind == LaneKind::Velocity {
+                    for hit in LaneKind::Velocity.with(*n, v).ratchet.hits(n.length, v).iter().skip(1) {
+                        let x = bar_x(&Note { position: n.position + hit.offset, ..*n });
+                        let h = lane_in.height() * hit.velocity.clamp(0, max) as f32 / max as f32;
+                        let r = Rect::from_min_max(Pos2::new(x, lane_in.bottom() - h), Pos2::new(x + 2.0, lane_in.bottom()));
+                        vp.rect_filled(r, 0.0, with_alpha(col, 110));
+                    }
+                } else if kind == LaneKind::Ratchet && v > 1 {
+                    vp.text(Pos2::new(x + 5.0, lane_in.bottom() - h), Align2::LEFT_TOP, v.to_string(), font(9.0), white(164));
+                }
             }
             if pat.is_none() {
                 break 'notes;
@@ -7375,6 +7455,8 @@ enum NoteDrag {
 enum LaneKind {
     Velocity,
     Probability,
+    /// How many hits the note plays (its ratchet's repeats).
+    Ratchet,
 }
 
 impl LaneKind {
@@ -7382,6 +7464,7 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => "Velocity",
             LaneKind::Probability => "Probability",
+            LaneKind::Ratchet => "Ratchet",
         }
     }
 
@@ -7389,6 +7472,7 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => n.velocity,
             LaneKind::Probability => n.probability,
+            LaneKind::Ratchet => i64::from(n.ratchet.repeats),
         }
     }
 
@@ -7396,12 +7480,13 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => Note { velocity: v, ..n },
             LaneKind::Probability => Note { probability: v, ..n },
+            LaneKind::Ratchet => Note { ratchet: Ratchet { repeats: v.clamp(1, i64::from(ratchet::MOST)) as u8, ..n.ratchet }, ..n },
         }
     }
 
     fn min(self) -> i64 {
         match self {
-            LaneKind::Velocity => 1,
+            LaneKind::Velocity | LaneKind::Ratchet => 1,
             LaneKind::Probability => 0,
         }
     }
@@ -7410,6 +7495,7 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => 127,
             LaneKind::Probability => 100,
+            LaneKind::Ratchet => i64::from(ratchet::MOST),
         }
     }
 }
@@ -7420,6 +7506,8 @@ pub enum Lane {
     #[default]
     Velocity,
     Probability,
+    /// Each note's ratchet: how many hits it plays (DECKARD's own).
+    Ratchet,
     Controller(u8),
     PitchBend,
     /// Channel pressure (Maschine's "Aftertouch" lane).
@@ -7435,6 +7523,7 @@ impl Lane {
         match self {
             Lane::Velocity => "Velocity".into(),
             Lane::Probability => "Probability".into(),
+            Lane::Ratchet => "Ratchet".into(),
             Lane::PitchBend => "Pitch Bend".into(),
             Lane::ChannelPressure => "Aftertouch".into(),
             Lane::Expr(d) => d.name().into(),
@@ -7450,6 +7539,7 @@ impl Lane {
         match self {
             Lane::Velocity => Some(LaneKind::Velocity),
             Lane::Probability => Some(LaneKind::Probability),
+            Lane::Ratchet => Some(LaneKind::Ratchet),
             _ => None,
         }
     }
@@ -7606,11 +7696,11 @@ fn cc_name(n: u8) -> Option<&'static str> {
     })
 }
 
-/// The lanes the list offers: velocity, probability, then the sound's saved MIDI
+/// The lanes the list offers: velocity, probability, ratchet, then the sound's saved MIDI
 /// lanes in their order, and any others it has events in.
 fn lane_list(app: &App, p: &Project, midi: &[MidiEvent]) -> Vec<Lane> {
     let saved = p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).map_or(&[][..], |s| &s.lanes[..]);
-    let mut out = vec![Lane::Velocity, Lane::Probability];
+    let mut out = vec![Lane::Velocity, Lane::Probability, Lane::Ratchet];
     // The Expression editor's lanes the sound's notes here have (BUGS #18).
     let pat = p.groups.get(app.group).and_then(|g| g.patterns.get(app.pattern));
     let exprs: Vec<deckard_model::Expression> = pat.map_or(Vec::new(), |pt| {
@@ -7859,5 +7949,32 @@ mod desktop_theme_tests {
         for t in deckard_surface::Surface::new().themes() {
             assert_eq!(super::desktop_look(&t, "yellow").is_some(), t != "maschine", "{t}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ratchet_tests {
+    use super::*;
+
+    /// The Ratchet lane shows a note's repeats and sets them, kept within 1–16.
+    #[test]
+    fn the_ratchet_lane_is_a_notes_repeats() {
+        let n = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        let k = Lane::Ratchet.note_kind().unwrap();
+        assert_eq!((k.label(), k.min(), k.max(), k.get(&n)), ("Ratchet", 1, 16, 1));
+        assert_eq!(k.get(&k.with(n, 4)), 4);
+        assert_eq!((k.with(n, 99).ratchet.repeats, k.with(n, 0).ratchet.repeats), (16, 1));
+        let down = Note { ratchet: Ratchet { repeats: 2, shape: Shape::Down, floor: 30, ceiling: 127 }, ..n };
+        assert_eq!(k.with(down, 8).ratchet, Ratchet { repeats: 8, ..down.ratchet }, "only the repeats change");
+        assert_eq!(Lane::Ratchet.name(), "Ratchet");
     }
 }
