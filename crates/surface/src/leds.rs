@@ -1,20 +1,15 @@
 //! Light bytes for the scripts' `deckard.led`.
 
-use deckard_mk3::leds::{self, BACKLIGHT, Leds};
+use deckard_mk3::leds::{self, Leds};
 
-/// Full brightness for a one-colour button.
-pub const ON: u8 = 0x7f;
+/// A one-colour button's three states (dark, dim, bright), as the driver has them: the
+/// panel has two lit levels and nothing between (docs/mk3-usb.md).
+pub use deckard_mk3::leds::{DIM, OFF, ON};
 
-/// Before the scripts set any: buttons at their faint backlight (so their labels read),
-/// pads, groups and the strip dark.
+/// Before the scripts set any: every LED dark, then what `global.lua`'s `leds()` and the
+/// page's set.
 pub fn blank() -> Leds {
-    let mut out = Leds::default();
-    for name in leds::BUTTON_LEDS {
-        if !leds::is_colour(name) {
-            out.set(name, BACKLIGHT);
-        }
-    }
-    out
+    Leds::default()
 }
 
 /// The palette byte nearest a colour (0..255 a channel), bright.
@@ -28,6 +23,11 @@ pub fn bright(rgb: [u8; 3]) -> u8 {
 /// The same colour, dim.
 pub fn dim(rgb: [u8; 3]) -> u8 {
     bright(rgb) & !3
+}
+
+/// The same colour, flashing (white mixed in): what sounds while the transport runs.
+pub fn flash(rgb: [u8; 3]) -> u8 {
+    bright(rgb) | 3
 }
 
 #[cfg(test)]
@@ -51,9 +51,9 @@ mod tests {
         let (s, mut v) = (Surface::new(), view());
         let l = s.leds(&v);
         assert_eq!(s.error(), None);
-        // (Stopped, PLAY and REC keep their backlight, as Maschine's.)
-        assert_eq!(byte(&l, "LED_TRANSPORT_PLAY"), BACKLIGHT);
-        assert_eq!(byte(&l, "LED_TRANSPORT_RECORD"), BACKLIGHT);
+        // (Stopped, PLAY and REC are dark, and their printed labels read.)
+        assert_eq!(byte(&l, "LED_TRANSPORT_PLAY"), OFF);
+        assert_eq!(byte(&l, "LED_TRANSPORT_RECORD"), OFF);
         v.playing = true;
         v.recording = true;
         v.auto_write = true;
@@ -74,6 +74,25 @@ mod tests {
     }
 
     #[test]
+    fn the_lcd_theme_lights_pads_and_groups_in_one_colour() {
+        let (mut s, v) = (Surface::new(), view());
+        s.set_lcd("red");
+        s.set_theme("lcd");
+        assert_eq!(s.theme(), "lcd");
+        assert_eq!(s.error(), None);
+        let l = s.leds(&v);
+        let bright = leds::palette(0, 4);
+        let dim = leds::palette(0, 2);
+        assert_eq!(byte(&l, "LED_GROUP_A"), bright, "the focused group");
+        assert_eq!(byte(&l, "LED_GROUP_B"), dim, "another group, still red");
+        assert_eq!(byte(&l, "LED_GROUP_D"), 0, "no group stays dark");
+        assert_eq!(byte(&l, "LED_PAD_1"), bright);
+        assert_eq!(byte(&l, "LED_PAD_2"), dim);
+        assert_eq!(byte(&l, "LED_PAD_9"), 0, "an empty pad stays dark");
+        assert_eq!(byte(&l, "LED_TS_01"), 0, "the strip is not a pad");
+    }
+
+    #[test]
     fn pads_light_by_sound() {
         let (mut s, v) = (Surface::new(), view());
         let l = s.leds(&v);
@@ -88,10 +107,11 @@ mod tests {
     fn held_mute_shows_muted_pads() {
         let (mut s, mut v) = (Surface::new(), view());
         v.groups[0].sounds[1].muted = true;
+        v.groups[0].sounds[2].playing = true;
         s.event(&Event::Button("BUTTON_MUTE", true), &v, Instant::now());
         let l = s.leds(&v);
         assert_eq!(byte(&l, "LED_PAD_2"), leds::palette(0, 2), "muted: dim");
-        assert_eq!(byte(&l, "LED_PAD_3"), leds::palette(0, 4), "playing: bright");
+        assert_eq!(byte(&l, "LED_PAD_3"), leds::palette(0, 5), "playing: flash");
         assert_eq!(byte(&l, "LED_MUTE"), ON);
     }
 
@@ -104,5 +124,37 @@ mod tests {
         assert_eq!(byte(&l, "LED_PAD_13"), leds::palette(0, 4), "C4");
         assert_eq!(byte(&l, "LED_PAD_2"), leds::palette(0, 2));
         assert_eq!(byte(&l, "LED_KEYBOARD"), ON);
+    }
+    #[test]
+    fn every_button_byte_is_a_hardware_level() {
+        // A byte under 0x80 is a 2-bit index to the firmware, so every page uses one of the
+        // panel's own levels: dark, dim or bright (docs/mk3-usb.md).
+        let (mut s, v) = (Surface::new(), view());
+        let held = [
+            "BUTTON_CHANNEL",
+            "BUTTON_STEP",
+            "BUTTON_KEYBOARD",
+            "BUTTON_MIX",
+            "BUTTON_ARRANGE",
+            "BUTTON_BROWSE",
+            "BUTTON_PATTERN",
+            "BUTTON_SCENE",
+            "BUTTON_MUTE",
+            "BUTTON_SAMPLE",
+            "BUTTON_SETTINGS",
+        ];
+        for button in held {
+            s.event(&Event::Button(button, true), &v, Instant::now());
+            let l = s.leds(&v);
+            assert_eq!(s.error(), None, "{button}");
+            for name in leds::BUTTON_LEDS {
+                if leds::is_colour(name) {
+                    continue;
+                }
+                let b = byte(&l, name);
+                assert!([OFF, DIM, ON].contains(&b), "{button}: {name} is {b:#04x} (an index the firmware decides)");
+            }
+            s.event(&Event::Button(button, false), &v, Instant::now());
+        }
     }
 }

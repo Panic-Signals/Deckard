@@ -315,7 +315,7 @@ function page.draw(screen, theme)
     if snd then
       screen:rect(480, top, LIST_W, editor.LANE, widgets.colour(theme, snd.palette))
       screen:label(482, top, LIST_W - 2, editor.LANE, tostring(s.sound),
-        { font = theme.styles.default.font, size = 11, color = { 0, 0, 0 } }, "left", "center")
+        { font = theme.styles.default.font, size = 11, color = theme.colors.on_colour }, "left", "center")
     end
     local small = { font = theme.styles.default.font, size = 9, color = { 150, 150, 150 } }
     local marks = probability and { 100, 75, 50, 25, 0 } or { 127, 96, 64, 32, 0 }

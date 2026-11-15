@@ -19,6 +19,7 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value};
 
 mod api;
 pub mod device;
+pub mod lcd;
 mod leds;
 mod names;
 mod screen;
@@ -127,6 +128,8 @@ pub struct View {
     pub browser: BrowserView,
     /// What the Sampling page (SAMPLE) shows.
     pub sampling: SamplingView,
+    /// A group or sound is loading: the name, shown over both screens until it's in.
+    pub loading: Option<String>,
 }
 
 /// The app's sampler and recorder as the Sampling page's tabs show them.
@@ -545,6 +548,38 @@ pub struct ControlView {
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
+    /// The sound's Generate page in Euclidean mode: its circle on the right screen.
+    pub euclid: Option<EuclidView>,
+    /// The sound's Generate page in Random mode: its notes on the right screen.
+    pub random: Option<RandomView>,
+}
+
+/// What Random Generate made, as the right screen's piano roll draws it: the
+/// pattern's grid steps (`steps`, `beat` of them a beat), the sound's notes there
+/// (step, pitch, velocity), the pitches shown (`range`, low to high), where playback is
+/// (steps, fractional; `None` when stopped), and the knobs that shape the odds:
+/// Probability (%), Velocity's amount (%), Distribution (0 Even, 1 Natural, 2 Skewed).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RandomView {
+    pub steps: usize,
+    pub beat: usize,
+    pub notes: Vec<(usize, i64, i64)>,
+    pub position: Option<f64>,
+    pub probability: f64,
+    pub velocity_amount: f64,
+    pub distribution: usize,
+    pub range: (i64, i64),
+}
+
+/// A Euclidean rhythm as the right screen draws it: which of its steps get a note
+/// (`hits`, already turned by Rotate), its Fills and Rotate, and where playback is in
+/// it (steps from the first, fractional; `None` when stopped).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EuclidView {
+    pub hits: Vec<bool>,
+    pub fills: usize,
+    pub rotate: usize,
+    pub position: Option<f64>,
 }
 
 /// What the Tuner effect's screen shows: the note heard and its `cents` above it
@@ -1082,7 +1117,9 @@ const RELOAD_EVERY: Duration = Duration::from_millis(500);
 
 /// What the scripts and the engine share while a handler runs.
 pub(crate) struct Shared {
-    pub view: View,
+    /// What the scripts see, and a count that goes up when it changes. (Shared: a
+    /// `deckard.state()` table fills in its parts from the view it was made for.)
+    pub view: Rc<View>,
     pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
@@ -1092,6 +1129,14 @@ pub(crate) struct Shared {
     pub actions: Vec<Action>,
     pub page: String,
     pub leds: Leds,
+}
+
+impl Shared {
+    /// A new view for the scripts: `deckard.state()` makes its table again.
+    pub(crate) fn set_view(&mut self, view: Rc<View>) {
+        self.view = view;
+        self.view_id = self.view_id.wrapping_add(1);
+    }
 }
 
 /// The loaded scripts.
@@ -1104,6 +1149,8 @@ pub struct Surface {
     sources: sources::Sources,
     /// The theme's name (`themes/<name>.lua`).
     theme: String,
+    /// LCD colour (`yellow`, `red` or `blue`). Read by `themes/lcd.lua`.
+    lcd_mode: String,
     run: Option<Run>,
     /// The last script error, shown in the app and on the screens.
     error: RefCell<Option<String>>,
@@ -1136,6 +1183,7 @@ impl Surface {
         let mut s = Surface {
             sources: sources::Sources::new(user),
             theme: THEME.to_string(),
+            lcd_mode: "yellow".to_string(),
             run: None,
             error: RefCell::new(None),
             epoch: Instant::now(),
@@ -1159,6 +1207,19 @@ impl Surface {
         let old = std::mem::replace(&mut self.theme, name.to_string());
         if !self.load() {
             self.theme = old;
+        }
+    }
+
+    /// The LCD's colour. Reloads when that theme is the one showing, so the screens
+    /// pick the pair up.
+    pub fn set_lcd(&mut self, mode: &str) {
+        let mode = lcd::mode(mode).to_string();
+        if self.lcd_mode == mode {
+            return;
+        }
+        let old_mode = std::mem::replace(&mut self.lcd_mode, mode);
+        if self.theme == "lcd" && !self.load() {
+            self.lcd_mode = old_mode;
         }
     }
 
@@ -1188,7 +1249,7 @@ impl Surface {
     /// Load the scripts; on an error the last working ones stay.
     fn load(&mut self) -> bool {
         let page = self.run.as_ref().map_or(FIRST_PAGE.to_string(), |r| r.shared.borrow().page.clone());
-        match start(&self.sources, page, &self.theme) {
+        match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode)) {
             Ok(run) => {
                 self.run = Some(run);
                 *self.error.borrow_mut() = None;
@@ -1249,9 +1310,8 @@ impl Surface {
         let run = self.run.as_ref()?;
         {
             let mut sh = run.shared.borrow_mut();
-            if sh.view != *v {
-                sh.view = v.clone();
-                sh.view_id = sh.view_id.wrapping_add(1);
+            if *sh.view != *v {
+                sh.set_view(Rc::new(v.clone()));
             }
             if let Some(now) = now {
                 sh.now = now.saturating_duration_since(self.epoch).as_secs_f64();
@@ -1398,7 +1458,7 @@ impl Surface {
         setup
     }
 
-    /// Both LED reports: buttons at their faint backlight, the rest dark, then what
+    /// Both LED reports: every LED dark first, then what
     /// `global.lua`'s `leds()` and the page's set.
     pub fn leds(&self, v: &View) -> Leds {
         let r = self.with(v, None, |run| {
@@ -1411,7 +1471,13 @@ impl Surface {
             }
             run.shared.borrow().leds.clone()
         });
-        r.map_or_else(leds::blank, |(l, _)| l)
+        let mut out = r.map_or_else(leds::blank, |(l, _)| l);
+        // Pads and groups are one colour on an LCD: the mode's hue, keeping whatever
+        // shade the page chose (bright, dim, or off). The strip still shows play position.
+        if self.theme == "lcd" {
+            one_colour(&mut out, lcd::look(&self.lcd_mode).led);
+        }
+        out
     }
 
     /// Both screens' drawing commands, if they changed since the last call: a count that
@@ -1483,7 +1549,13 @@ impl Surface {
             run.lua.set_app_data(self.pictures.clone());
             let theme: Table = run.lua.named_registry_value("deckard.theme")?;
             let colors: Table = theme.get("colors")?;
-            let ud = run.lua.create_userdata(screen::Picture::new(screen::colour(&run.lua, &colors.get::<Value>("background")?)?))?;
+            let field = screen::colour(&run.lua, &colors.get::<Value>("background")?)?;
+            let mut pic = screen::Picture::new(field);
+            pic.restyle_plugs = true;
+            pic.plug_field = field;
+            pic.plug_ink = screen::colour(&run.lua, &colors.get::<Value>("text")?)?;
+            pic.plug_accent = screen::colour(&run.lua, &colors.get::<Value>("accent")?)?;
+            let ud = run.lua.create_userdata(pic)?;
             for t in self.tables(run).into_iter().rev() {
                 let Ok(Some(f)) = t.get::<Option<Function>>("draw") else { continue };
                 if let Err(e) = f.call::<()>((ud.clone(), theme.clone())) {
@@ -1500,6 +1572,9 @@ impl Surface {
             }
             None => screen::Picture::new([0, 0, 0]),
         };
+        if let Some(name) = &v.loading {
+            p.loading(name);
+        }
         if let Some(e) = self.error() {
             p.error(&e);
         }
@@ -1560,11 +1635,40 @@ fn merge(lua: &Lua, base: &Table, over: &Table, deep: bool) -> mlua::Result<Valu
     Ok(Value::Table(out))
 }
 
-fn start(sources: &sources::Sources, page: String, theme: &str) -> mlua::Result<Run> {
+/// `{r, g, b}` as a Lua array (1-based), which `themes/lcd.lua` mixes.
+fn rgb_table(lua: &Lua, c: [u8; 3]) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set(1, c[0])?;
+    t.set(2, c[1])?;
+    t.set(3, c[2])?;
+    Ok(t)
+}
+
+/// Pads and group buttons take `colour` (an MK3 palette index). A lit one keeps its
+/// shade; one that was off stays off.
+fn one_colour(leds: &mut Leds, colour: i64) {
+    let names = deckard_mk3::leds::PAD_LEDS.iter().copied().chain(deckard_mk3::leds::BUTTON_LEDS);
+    for name in names {
+        let pad = name.strip_prefix("LED_PAD_").is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()));
+        if !pad && !name.starts_with("LED_GROUP_") {
+            continue;
+        }
+        let Some(b) = leds.get(name) else { continue };
+        if b == 0 {
+            continue;
+        }
+        // The low two bits are the shade: 0 dim, 2 bright, 3 flash (mixed with white,
+        // a second colour): bright and flash are both the hue's bright shade.
+        let state = if b & 3 >= 2 { 4 } else { 2 };
+        leds.set(name, deckard_mk3::leds::palette(colour, state));
+    }
+}
+
+fn start(sources: &sources::Sources, page: String, theme: &str, look: lcd::Look) -> mlua::Result<Run> {
     // No file, process or OS access: the scripts only get the `deckard` API.
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
-        view: View::default(),
+        view: Rc::default(),
         view_id: 1,
         now: 0.0,
         held: HashSet::new(),
@@ -1575,6 +1679,9 @@ fn start(sources: &sources::Sources, page: String, theme: &str) -> mlua::Result<
     }));
     api::install(&lua, &shared)?;
     sources::install_require(&lua, sources.clone())?;
+    // themes/lcd.lua reads these. Other themes ignore them.
+    lua.globals().set("LCD_PAPER", rgb_table(&lua, look.paper)?)?;
+    lua.globals().set("LCD_INK", rgb_table(&lua, look.ink)?)?;
     let global: Table = sources::run(&lua, sources, "global.lua")?;
     lua.set_named_registry_value("deckard.global", global)?;
     let theme = load_theme(&lua, sources, theme, 0)?;
@@ -1648,3 +1755,6 @@ mod sampling_tests;
 mod tests;
 #[cfg(test)]
 mod tests_support;
+
+#[cfg(test)]
+mod state_tests;

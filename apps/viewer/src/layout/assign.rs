@@ -108,9 +108,10 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                 }
                 // The target selector.
                 egui::Popup::menu(&resp)
+                    .style(crate::layout::menu_style)
                     .id(ui.id().with(("macro-target", *page, i)))
                     .show(|ui| super::macro_target_menu(ui, app, *level, slot, targets, acts));
-                resp.context_menu(|ui| macro_slot_menu(ui, app, slot, m.target.is_some(), acts));
+                resp.menu_on_right_click(|ui| macro_slot_menu(ui, app, slot, m.target.is_some(), acts));
             }
         }
         (AssignTab::Mod, _) => {
@@ -177,7 +178,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                         }));
                     }
                     if let (Some(_), Some(param)) = (key, param) {
-                        resp.context_menu(|ui| {
+                        resp.menu_on_right_click(|ui| {
                             if ui.button("Unlearn").clicked() {
                                 acts.push(Act::Remote(RemoteAct::Unlearn(param)));
                                 ui.close();

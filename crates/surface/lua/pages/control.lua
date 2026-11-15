@@ -7,7 +7,9 @@
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
 --   LEFT / RIGHT      the previous / next page
---   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages
+--   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages;
+--                     CHANNEL's Generate page: Euclidean, its rhythm as a circle; Random,
+--                     its notes along the pattern
 --
 -- Zhora focused, its own buttons and tuner instead (lib/zhora.lua). The Tuner effect
 -- focused, its dial on the right screen under A4's pitch.
@@ -187,9 +189,9 @@ local function channel_tiles(screen, c)
     if i > c.page_groups then break end
     local x = 36 + (i - 1) * 104
     local on = i == c.page_group
-    local colour = on and "text" or { 0x7a, 0x7a, 0x7a }
+    local colour = on and "text" or "weak"
     if on then screen:rect(x, 108, 96, 52, "bar") end
-    screen:frame(x, 108, 96, 52, on and { 0xb9, 0xb9, 0xb9 } or { 0x66, 0x66, 0x66 })
+    screen:frame(x, 108, 96, 52, on and "text" or "button")
     channel_icon(screen, i, x + 48, 124, 8, colour, on and "bar" or "background")
     local title = name:sub(1, 1) .. name:sub(2):lower()
     screen:label(x, 138, 96, 18, title, { size = 12, color = colour })
@@ -246,20 +248,23 @@ end
 -- (20 Hz to 20 kHz, ±12 dB; the EQ and the Filter), law (input along the bottom,
 -- output up the side), time (level over time), or dots (a cloud). Several freq bands
 -- are numbered. The corner holds an LFO or envelope when one is sent.
-local function eq_curve(screen, eq)
+--
+-- The plot uses the theme: the curve is its accent, the handles its record colour,
+-- the grid its buttons. Palenight's curve is blue; the LCD's is its one ink.
+local function eq_curve(screen, theme, eq)
   local wave = eq.lfo or {}
   local show_lfo = #wave >= 2
   local kind = eq.kind or "freq"
   if kind == "" then kind = "freq" end
   -- With the modulator shape in the bottom right, the plot stops short of it.
   local x0, y0, w, h = 488, 66, show_lfo and 336 or 456, 132
-  screen:rect(x0, y0, w, h, { 0x12, 0x12, 0x14 })
+  screen:rect(x0, y0, w, h, "panel")
   local function px(t) return x0 + t * (w - 1) end
   local function py(v) return y0 + (1 - v) * (h - 1) end
   local function freq_x(hz)
     return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
   end
-  local grid = { 0x2c, 0x2c, 0x30 }
+  local grid = "button"
   if kind == "freq" then
     for _, hz in ipairs({ 100, 1000, 10000 }) do
       local x = px(freq_x(hz))
@@ -267,16 +272,16 @@ local function eq_curve(screen, eq)
     end
     for _, db in ipairs({ -6, 0, 6 }) do
       local y = py(db / 24 + 0.5)
-      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and { 0x48, 0x48, 0x4e } or grid)
+      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and "separator" or grid)
     end
   elseif kind == "law" then
-    screen:line(px(0), py(0), px(1), py(1), 1, { 0x48, 0x48, 0x4e })
+    screen:line(px(0), py(0), px(1), py(1), 1, "separator")
     for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
       screen:line(x0 + 1, py(t), x0 + w - 1, py(t), 1, grid)
       screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
     end
   else
-    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, { 0x48, 0x48, 0x4e })
+    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, "separator")
     for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
       screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
     end
@@ -288,45 +293,186 @@ local function eq_curve(screen, eq)
       screen:line(px((i - 1) / (n - 1)), py(pts[i]), px(i / (n - 1)), py(pts[i + 1]), width, ink)
     end
   end
-  stroke(eq.extent, 1, { 0x2a, 0x6a, 0x78 })
-  stroke(eq.side, 1.5, eq.side_live and { 0xe6, 0xc2, 0x6a } or { 0x5c, 0x50, 0x3a })
-  local curve_ink = eq.dim and { 0x2a, 0x6a, 0x78 } or { 0x3d, 0xc8, 0xe6 }
-  stroke(eq.points, 2, curve_ink)
+  stroke(eq.extent, 1, "muted")
+  stroke(eq.side, 1.5, eq.side_live and "marker" or "weak")
+  stroke(eq.points, 2, eq.dim and "muted" or "accent")
   local bands = eq.bands or {}
   local radius = kind == "freq" and 7 or 4
   for i, b in ipairs(bands) do
     local cx, cy = px(b.x), py(b.y)
     if kind == "time" then
-      screen:line(cx, py(0), cx, cy, 1.5, { 0xff, 0xc2, 0x3a })
+      screen:line(cx, py(0), cx, cy, 1.5, "record")
     end
-    screen:circle(cx, cy, radius, { 0xff, 0xc2, 0x3a })
+    screen:circle(cx, cy, radius, "record")
     if kind == "freq" and #bands > 1 then
-      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = { 0x14, 0x14, 0x16 } })
+      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = "on_colour" })
     end
   end
   if kind == "freq" then
     for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
       local x = px(freq_x(hz[1]))
-      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = "weak" })
     end
   end
   if eq.preview then
-    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = { 0x8a, 0x8a, 0x90 } })
+    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = "weak" })
   end
   if show_lfo then
     -- Bottom right of the right screen, beside the curve.
     local bx, by, bw, bh = 832, y0 + h - 40, 112, 40
-    screen:rect(bx, by, bw, bh, { 0x0c, 0x0c, 0x0e })
-    screen:frame(bx, by, bw, bh, { 0x3a, 0x3a, 0x40 })
+    screen:rect(bx, by, bw, bh, "background")
+    screen:frame(bx, by, bw, bh, "button")
     local m = #wave
     for i = 1, m - 1 do
       local x1 = bx + 4 + (i - 1) / (m - 1) * (bw - 8)
       local x2 = bx + 4 + i / (m - 1) * (bw - 8)
       local y1 = by + 4 + (1 - wave[i]) * (bh - 8)
       local y2 = by + 4 + (1 - wave[i + 1]) * (bh - 8)
-      screen:line(x1, y1, x2, y2, 1.5, { 0xff, 0xc2, 0x3a })
+      screen:line(x1, y1, x2, y2, 1.5, "accent")
     end
   end
+end
+
+-- The Generate page's Euclidean rhythm on the right screen: a dot for each step round
+-- a circle (the first at the top, clockwise), each hit an arc along the rim the length
+-- of its step, Fills over Steps in the middle and, while playing, a hand out from the
+-- middle at where playback is, turning with the beat. Rotate turns the hits round.
+-- The Euclidean and Random views' colours: the theme's (the LCD sets them), else
+-- these. `hit` a step or note, `now` the one playing, `dim` a rest, `ring` the
+-- circle, `text`/`weak` the numbers and names, `field` and `grid`/`bar` the roll,
+-- `box` the velocity box.
+local function groove_colours(theme)
+  local c = theme.colors
+  return {
+    hit = c.groove_hit or { 0x3d, 0xc8, 0xe6 },
+    now = c.groove_now or { 0xff, 0xc2, 0x3a },
+    dim = c.groove_dim or { 0x48, 0x48, 0x4e },
+    ring = c.groove_ring or { 0x2c, 0x2c, 0x30 },
+    text = c.groove_text or { 0xe0, 0xe0, 0xe4 },
+    weak = c.groove_weak or { 0x8a, 0x8a, 0x90 },
+    field = c.groove_field or { 0x12, 0x12, 0x14 },
+    grid = c.groove_grid or { 0x2c, 0x2c, 0x30 },
+    bar = c.groove_bar or { 0x3a, 0x3a, 0x40 },
+    box = c.groove_box or { 0x0c, 0x0c, 0x0e },
+  }
+end
+
+local function euclid_circle(screen, theme, e)
+  local n = #e.hits
+  if n == 0 then return end
+  local cx, cy, r = 720, 133, 60
+  local function angle(i) return -90 + 360 * i / n end
+  local function point(i, radius)
+    local a = math.rad(angle(i))
+    return cx + radius * math.cos(a), cy + radius * math.sin(a)
+  end
+  local gc = groove_colours(theme)
+  local dim, hit, lit = gc.dim, gc.hit, gc.now
+  local now = e.position and math.floor(e.position) % n or nil
+  screen:circle(cx, cy, r, gc.ring, 1)
+  -- (A gap at each arc's end, so hits side by side read as two.)
+  local gap = math.min(4, 120 / n)
+  for i = 0, n - 1 do
+    if e.hits[i + 1] then
+      screen:circle(cx, cy, r + 2.5, i == now and lit or hit, 5, angle(i), angle(i + 1) - gap)
+    end
+  end
+  for i = 0, n - 1 do
+    local x, y = point(i, r)
+    local on = e.hits[i + 1]
+    local ink = (i == now and lit) or (on and hit) or dim
+    screen:circle(x, y, (i == now and 5) or (on and 4) or 2.5, ink)
+  end
+  -- Fills over Steps.
+  local text = gc.text
+  screen:label(cx - 30, cy - 24, 60, 22, tostring(e.fills), { size = 18, color = text })
+  screen:line(cx - 14, cy, cx + 14, cy, 1.5, gc.weak)
+  screen:label(cx - 30, cy + 2, 60, 22, tostring(n), { size = 18, color = text })
+  if e.position then
+    local a = math.rad(-90 + 360 * e.position / n)
+    local c, s = math.cos(a), math.sin(a)
+    screen:line(cx + 26 * c, cy + 26 * s, cx + (r - 7) * c, cy + (r - 7) * s, 2, lit)
+  end
+  screen:label(830, 180, 120, 20, "ROTATE " .. e.rotate, { size = 11, color = gc.weak }, "right", "center")
+end
+
+-- The Generate page's Random notes on the right screen: a piano roll of the
+-- pattern's grid steps, left to right, and its pitches from Note Lo to Note Hi (a
+-- chord a stack in one column), each note as bright as its velocity. While playing,
+-- an amber line at where playback is, the notes under it amber. In the corner, the
+-- velocities Generate draws from: Velocity's range around 100, shaped by Distribution.
+local NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }
+local function random_view(screen, theme, r)
+  local n = math.max(1, r.steps)
+  -- (A gutter at the left for the note names.)
+  local x0, y0, w, h = 512, 66, 312, 132
+  local cw = w / n
+  local gc = groove_colours(theme)
+  local hit, lit = gc.hit, gc.now
+  local now = r.position and math.floor(r.position) % n or nil
+  local grid = gc.grid
+  screen:rect(x0, y0, w, h, gc.field)
+  local beat = math.max(1, r.beat or 4)
+  for i = 0, n, beat do
+    local x = x0 + i * cw
+    screen:line(x, y0 + 1, x, y0 + h - 1, 1, i % (beat * 4) == 0 and gc.bar or grid)
+  end
+  local lo, hi = math.min(r.low, r.high), math.max(r.low, r.high)
+  local rh = (h - 2) / (hi - lo + 1)
+  local function row_y(p) return y0 + 1 + (hi - p) * rh end
+  for p = lo, hi do
+    if p % 12 == 0 then
+      local y = row_y(p) + rh
+      screen:line(x0, y, x0 + w - 1, y, 1, grid)
+    end
+    if p % 12 == 0 or p == lo or p == hi then
+      local name = NOTE_NAMES[p % 12 + 1] .. (p // 12 - 2)
+      screen:label(x0 - 26, math.floor(row_y(p) + rh / 2 - 6), 23, 12, name, { size = 9, color = gc.weak }, "right", "center")
+    end
+  end
+  for _, note in ipairs(r.notes) do
+    if note.pitch >= lo and note.pitch <= hi then
+      local ink = note.step == now and lit or hit
+      local a = 0.35 + 0.65 * math.max(0, math.min(1, note.velocity / 127))
+      ink = { math.floor(ink[1] * a), math.floor(ink[2] * a), math.floor(ink[3] * a) }
+      screen:rect(math.floor(x0 + note.step * cw + 1), math.floor(row_y(note.pitch)), math.max(1, math.floor(cw - 1)), math.max(2, math.floor(rh - 1)), ink)
+    end
+  end
+  if r.position then
+    local x = x0 + (r.position % n) * cw
+    screen:line(x, y0, x, y0 + h - 1, 2, lit)
+  end
+  -- The velocities drawn from: 1 to 127 across the box, Velocity's range about 100.
+  local bx, by, bw, bh = 832, 158, 112, 40
+  screen:rect(bx, by, bw, bh, gc.box)
+  screen:frame(bx, by, bw, bh, gc.bar)
+  local spread = (r.velocity_amount or 0) / 100 * 63.5
+  local lo_v, hi_v = 100 - spread, 100 + spread
+  local function vx(v) return bx + 4 + (math.max(1, math.min(127, v)) - 1) / 126 * (bw - 8) end
+  local function vy(t) return by + bh - 4 - t * (bh - 10) end
+  screen:line(vx(100), by + 3, vx(100), by + bh - 3, 1, grid)
+  if spread < 0.5 then
+    screen:line(vx(100), vy(0), vx(100), vy(1), 2, lit)
+  else
+    local m, prev = 24, nil
+    for k = 0, m do
+      local t = k / m
+      local v = lo_v + t * (hi_v - lo_v)
+      local d = r.distribution or 1
+      local y
+      if d == 0 then y = 0.7
+      elseif d == 1 then y = math.exp(-((t - 0.5) / 0.25) ^ 2 / 2)
+      else y = math.exp(-(t / 0.25) ^ 2 / 2) end
+      -- (Draws past 127 or under 1 are drawn again: they pile up at the ends.)
+      local pt = { vx(v), vy(y) }
+      if v >= 1 and v <= 127 then
+        if prev then screen:line(prev[1], prev[2], pt[1], pt[2], 1.5, lit) end
+        prev = pt
+      end
+    end
+  end
+  local names = { "EVEN", "NATURAL", "SKEWED" }
+  screen:label(bx, by - 16, bw, 14, "VELOCITY · " .. (names[(r.distribution or 1) + 1] or ""), { size = 9, color = gc.weak }, "left", "center")
 end
 
 function control.draw(screen, theme, opts)
@@ -386,19 +532,30 @@ function control.draw(screen, theme, opts)
         local t = c.tuner
         screen:label(490, 36, 300, 24, t.reference .. (t.muted and "  ·  Muted" or ""), "default", "left", "center")
         zhora.dial(screen, t)
-      elseif c.eq then eq_curve(screen, c.eq)
-      elseif c.filter then eq_curve(screen, c.filter)
-      elseif c.picture then eq_curve(screen, c.picture)
-      else chain.thumbnail(screen, 480, 68, 240, 136, slot, false) end
+      elseif c.eq then eq_curve(screen, theme, c.eq)
+      elseif c.filter then eq_curve(screen, theme, c.filter)
+      elseif c.picture then eq_curve(screen, theme, c.picture)
+      else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
     end
-    chain.draw(screen, c)
+    chain.draw(screen, theme, c)
   else
     widgets.buttons(screen, theme, {
       [5] = { arrows = true, text = PAGE_GROUPS[c.page_group] or "", left = can_step(c, false), right = can_step(c, true) },
     })
     channel_tiles(screen, c)
     screen:rect(480, 35, 480, 25, "bar")
-    channel_icon(screen, c.page_group, 720, 126, 37, { 0x3a, 0x3a, 0x3a }, "background")
+    if c.euclid then
+      screen:label(490, 36, 300, 24, "Euclidean", "default", "left", "center")
+      euclid_circle(screen, theme, c.euclid)
+    elseif c.random then
+      local r = c.random
+      screen:label(490, 36, 200, 24, "Random", "default", "left", "center")
+      local made = #r.notes .. (#r.notes == 1 and " note" or " notes")
+      screen:label(700, 36, 250, 24, string.format("%.0f %%  ·  %s", r.probability, made), "default", "right", "center")
+      random_view(screen, theme, r)
+    else
+      channel_icon(screen, c.page_group, 720, 126, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
+    end
   end
   knobs(screen, theme, c, false, knob_of)
 end

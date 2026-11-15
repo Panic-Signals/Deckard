@@ -2,10 +2,14 @@
 //! the buttons, 0x81 the touch strip and pads, one byte an LED, named here as the
 //! scripts name them (`NI.HW.<name>`).
 //!
-//! Single-colour LEDs take a brightness, 0..0x7f. Colour LEDs (groups, pads, touch
-//! strip, the 4-D encoder's arrows) take a palette byte: colour 1..17 (the scripts'
-//! `LEDColors` index + 1, 17 white) times four, plus 0 dim, 1 dim flash, 2 bright,
-//! 3 flash.
+//! Single-colour LEDs don't take a brightness. A byte under 0x80 is read as a 2-bit index
+//! instead (`byte & 3`), so a plain 0..0x7f ramp lights nothing like it looks — and over
+//! 0x80 the panel has exactly two levels, measured on the hardware (docs/mk3-usb.md):
+//! bright ([`ON`]: `0x9e`, and `0xff`) and dim ([`DIM`]: `0xb0`–`0xfc`, every byte the same
+//! light). [`OFF`] is the third state a page needs for a button with nothing to do.
+//! Colour LEDs (groups, pads, touch strip, the 4-D encoder's
+//! arrows) take a palette byte: colour 1..17 (the scripts' `LEDColors` index + 1, 17
+//! white) times four, plus 0 dim, 1 dim flash, 2 bright, 3 flash.
 
 /// Report 0x80, bytes 1..=62.
 pub const BUTTON_LEDS: [&str; 62] = [
@@ -125,53 +129,85 @@ pub const PAD_LEDS: [&str; 41] = [
 pub fn is_colour(name: &str) -> bool {
     // The pads are LED_PAD_1..16; LED_PAD_MODE is a one-colour button.
     let pad = name.strip_prefix("LED_PAD_").is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()));
-    // SAMPLING is a multicolour button: a brightness byte reads as a palette entry
-    // there, so the 0x09 backlight lit it orange.
+    // SAMPLING is a multicolour button: a brightness byte reads as a palette entry there.
     pad || name == "LED_SAMPLE" || name.starts_with("LED_GROUP_") || name.starts_with("LED_TS_") || name.starts_with("LED_WHEEL_BUTTON_")
 }
 
 /// The palette byte of a scripts' colour (`LEDColors` index, 16 white) and LED state
 /// (`LEDHelper.LS_*`: 1 off, 2 dim, 3 dim flash, 4 bright, 5 flash). The low two bits
-/// are the shade, 0 dimmest to 3 brightest; Maschine's MK3 table gives bright, dim flash
-/// and flash the full level (`MaschineStudioController.LEDValues`), so they take 3.
+/// are the shade, 0 dimmest to 3 brightest. Maschine's MK3 (LUT) path sends the LS
+/// state to the hardware, whose own table turns LS_BRIGHT (4) into the colour's bright
+/// shade (2) and LS_FLASH (5) into the colour mixed with white (3). Maschine's RGB
+/// path instead lights the colour with white added to make it bright, but on the MK3
+/// that white mixing is already the flash level: bright pads only need the colour's
+/// bright shade (2), not the white-mixed flash level (3).
 pub fn palette(colour: i64, state: i64) -> u8 {
     if state <= 1 {
         return 0;
     }
     let colour = if (0..=16).contains(&colour) { colour } else { 16 };
-    // LS_DIM and LS_DIM_FLASH (dim until something flashes it) are dim.
-    let shade = if state <= 3 { 0 } else { 3 };
+    // LS_DIM and LS_DIM_FLASH (dim until something flashes it) are dim (shade 0);
+    // LS_BRIGHT is the colour's bright shade (2); LS_FLASH mixes in white (shade 3).
+    let shade = match state {
+        2 | 3 => 0,
+        4 => 2,
+        _ => 3,
+    };
     ((colour as u8 + 1) << 2) | shade
 }
 
-/// A button LED's brightness for an LED state (`LEDHelper.LS_*`): off buttons keep a
-/// faint backlight so their labels can be read, dim ones (LS_DIM, and LS_DIM_FLASH, dim
-/// until something flashes it: SAMPLE while its page is hidden) a little more, the
-/// rest full.
+/// A button LED's byte for an LED state (`LEDHelper.LS_*`): off is dark, dim ones (LS_DIM,
+/// and LS_DIM_FLASH, dim until something flashes it: SAMPLE while its page is hidden) take
+/// [`DIM`], the rest [`ON`].
 pub fn button_level(state: i64) -> u8 {
     match state {
-        ..=1 => BACKLIGHT,
+        ..=1 => OFF,
         2 | 3 => DIM,
-        _ => 0x7f,
+        _ => ON,
     }
 }
 
-/// The faint light of a button that's off.
-pub const BACKLIGHT: u8 = 0x09;
+/// A one-colour LED's byte for a percentage of its drive: the NI protocol's duty,
+/// `258 - percent`, active-low (a higher byte is dimmer). 100 % is `0x9e`; every value
+/// stays above 0x80, out of the 2-bit index trap below it.
+const fn duty(percent: u8) -> u8 {
+    // 3 % is the floor: 2 % would be 256, which wraps to 0, and a byte under 0x80 isn't a
+    // duty at all but an index (see [`OFF`]), so a level never lands there.
+    let percent = if percent < 3 {
+        3
+    } else if percent > 100 {
+        100
+    } else {
+        percent
+    };
+    (258u16 - percent as u16) as u8
+}
 
-/// A dim button: one that can be pressed but isn't selected.
-pub const DIM: u8 = 0x22;
+/// A button that can be pressed but isn't selected: the dim level (50 %).
+pub const DIM: u8 = duty(50);
 
 /// SAMPLING not selected. It's a colour LED, whose dim white doesn't look like the
 /// one-colour buttons around it; this byte, past the palette, does (picked on the hardware).
 pub const SAMPLE_DIM: u8 = 73;
 
-/// A one-colour button's brightness for a level the scripts set (0..1): full stays
-/// full; anything less is a dim button, 30% under the level (dim is 0.25 on the MK3),
-/// but never below the backlight.
+/// The selected button: full drive, both the LEDs under it (100 %).
+pub const ON: u8 = duty(100);
+
+/// Dark. The hardware has two steady levels and this is the third state a page needs for a
+/// button with nothing to do — a scene that isn't there, a page that isn't shown (the rig
+/// has no level between off and [`DIM`], and `0x01`–`0x03` are dark too).
+pub const OFF: u8 = 0;
+
+/// A one-colour button's byte for a level the scripts set (0..1): 0.5 and over the [`ON`]
+/// level, any light at all [`DIM`], none dark.
 pub fn button_brightness(level: f64) -> u8 {
-    let b = brightness(level);
-    if b >= 0x7f { b } else { ((b as f64 * 0.7).round() as u8).max(BACKLIGHT) }
+    if level >= 0.5 {
+        ON
+    } else if level > 0.0 {
+        DIM
+    } else {
+        OFF
+    }
 }
 
 /// The palette byte nearest an RGB colour (0..127 a channel): its hue picks the
@@ -200,11 +236,6 @@ pub fn palette_rgb(r: u8, g: u8, b: u8) -> u8 {
     let dist = |a: f64| (h - a).abs().min(360.0 - (h - a).abs());
     let colour = (0..16).min_by(|&a, &b| dist(HUES[a]).total_cmp(&dist(HUES[b]))).unwrap_or(0);
     palette(colour as i64, state)
-}
-
-/// The brightness byte of a level 0..1.
-pub fn brightness(level: f64) -> u8 {
-    (level.clamp(0.0, 1.0) * 127.0).round() as u8
 }
 
 /// Both LED reports.
@@ -236,22 +267,6 @@ impl Leds {
         true
     }
 
-    /// The one-colour LEDs at `level` % of their brightness (a lit one stays lit); the
-    /// colour LEDs, which take a palette byte, as they are.
-    pub fn scaled(&self, level: u8) -> Leds {
-        let mut out = self.clone();
-        if level >= 100 {
-            return out;
-        }
-        let dim = |b: u8| if b == 0 { 0 } else { ((u16::from(b) * u16::from(level) + 99) / 100).max(1) as u8 };
-        for (i, name) in BUTTON_LEDS.iter().enumerate() {
-            if !is_colour(name) {
-                out.buttons[1 + i] = dim(self.buttons[1 + i]);
-            }
-        }
-        out
-    }
-
     /// An LED's byte by name.
     pub fn get(&self, name: &str) -> Option<u8> {
         if let Some(i) = BUTTON_LEDS.iter().position(|n| *n == name) {
@@ -274,26 +289,11 @@ mod tests {
         assert_eq!(palette(0, 2), 0x04, "red dim");
         assert_eq!(palette(16, 3), palette(16, 2), "dim until flashed: dim");
         assert_eq!(button_level(3), DIM);
-        assert_eq!(palette(0, 4), 0x07, "red bright");
-        assert_eq!(palette(16, 4), 0x47, "white bright");
+        assert_eq!(palette(0, 4), 0x06, "red bright");
+        assert_eq!(palette(16, 4), 0x46, "white bright");
         assert_eq!(palette_rgb(127, 0, 0), palette(0, 4));
         assert_eq!(palette_rgb(0, 0, 127), palette(10, 4));
         assert_eq!(palette_rgb(32, 32, 32), palette(16, 2));
-    }
-
-    #[test]
-    fn scaled_dims_the_one_colour_leds() {
-        let mut l = Leds::default();
-        l.set("LED_TRANSPORT_PLAY", 0x7f);
-        l.set("LED_SHIFT", BACKLIGHT);
-        l.set("LED_GROUP_A", palette(0, 4));
-        l.set("LED_PAD_1", palette(3, 4));
-        let half = l.scaled(50);
-        assert_eq!(half.get("LED_TRANSPORT_PLAY"), Some(0x40));
-        assert_eq!(half.get("LED_SHIFT"), Some(5), "the backlight dims too");
-        assert_eq!((half.get("LED_GROUP_A"), half.get("LED_PAD_1")), (l.get("LED_GROUP_A"), l.get("LED_PAD_1")), "colours kept");
-        assert_eq!(l.scaled(1).get("LED_SHIFT"), Some(1), "lit stays lit");
-        assert!(l.scaled(100) == l);
     }
 
     #[test]
@@ -301,8 +301,8 @@ mod tests {
         let mut l = Leds::default();
         assert!(l.set("LED_PAD_1", 5));
         assert_eq!(l.pads[38], 5, "pad 1 is bottom left: byte 38");
-        assert!(l.set("LED_TRANSPORT_PLAY", 0x7f));
-        assert_eq!(l.buttons[42], 0x7f);
+        assert!(l.set("LED_TRANSPORT_PLAY", ON));
+        assert_eq!(l.buttons[42], ON);
         assert!(!l.set("LED_NOPE", 1));
     }
 }

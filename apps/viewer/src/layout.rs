@@ -100,14 +100,129 @@ fn dim(c: Color32, f: f32) -> Color32 {
     Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
 }
 
+thread_local! {
+    /// The LCD's field, while that theme is on. `None` is the ordinary dark window.
+    static LCD_PAPER: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
+    /// The LCD's pixel, the colour that reads on the field.
+    static LCD_INK: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
+    /// Pads and groups: the mode's one colour.
+    static LCD_HUE: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
+    /// The pair last given to egui, and whether groups collapsed to one hue.
+    static LCD_APPLIED: std::cell::Cell<Option<([u8; 3], [u8; 3], bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The software window for `theme`: field, writing, and the LCD's one group colour.
+/// Maschine (and anything unknown) is `None`, the ordinary dark window, so an LCD
+/// controller does not restyle the software.
+fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3], Option<[u8; 3]>)> {
+    match theme {
+        "lcd" => {
+            let look = deckard_surface::lcd::look(mode);
+            Some((look.paper, look.ink, Some(look.hue)))
+        }
+        // Solarized's field and text. Palenight's writing on black.
+        "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1], None)),
+        "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff], None)),
+        // Palenight on its blue-grey field.
+        "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff], None)),
+        _ => None,
+    }
+}
+
+/// Text that sits on `fill` while the LCD theme is on: the field or the pixel,
+/// whichever stands further from the fill. `None` when that theme is off.
+fn lcd_readable(fill: Color32) -> Option<Color32> {
+    let paper = LCD_PAPER.with(|c| c.get())?;
+    let ink = LCD_INK.with(|c| c.get())?;
+    let apart = |a: Color32, b: Color32| {
+        let dr = a.r() as i32 - b.r() as i32;
+        let dg = a.g() as i32 - b.g() as i32;
+        let db = a.b() as i32 - b.b() as i32;
+        dr * dr + dg * dg + db * db
+    };
+    let choice = if apart(fill, ink) >= apart(fill, paper) { ink } else { paper };
+    // The field brown does not read on a bright yellow or red segment.
+    let y = |c: Color32| 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
+    Some(if y(choice) < 40.0 && y(fill) > 140.0 { Color32::BLACK } else { choice })
+}
+
+/// The window's ground: the LCD's field, or the ordinary dark surface.
+fn field() -> Color32 {
+    LCD_PAPER.with(|c| c.get()).unwrap_or(S00)
+}
+
 /// A sound row that SELECT has, besides the focused one.
 fn sound_base(app: &App, sound: usize) -> Color32 {
-    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { S00 }
+    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { field() }
+}
+
+/// The software window follows the desktop theme. The controller keeps its own.
+/// Maschine restores the ordinary dark window.
+fn sync_lcd(ctx: &egui::Context, app: &App) {
+    let Some((paper, ink, hue)) = desktop_look(&app.settings.desktop_theme, &app.settings.lcd_mode) else {
+        LCD_PAPER.with(|c| c.set(None));
+        LCD_INK.with(|c| c.set(None));
+        LCD_HUE.with(|c| c.set(None));
+        if LCD_APPLIED.with(|c| c.take()).is_some() {
+            dark_style(ctx);
+        }
+        return;
+    };
+    LCD_PAPER.with(|c| c.set(Some(Color32::from_rgb(paper[0], paper[1], paper[2]))));
+    LCD_INK.with(|c| c.set(Some(Color32::from_rgb(ink[0], ink[1], ink[2]))));
+    LCD_HUE.with(|c| c.set(hue.map(|h| Color32::from_rgb(h[0], h[1], h[2]))));
+    let key = (paper, ink, hue.is_some());
+    if LCD_APPLIED.with(|c| c.replace(Some(key))) != Some(key) {
+        apply_lcd(ctx, Color32::from_rgb(paper[0], paper[1], paper[2]), Color32::from_rgb(ink[0], ink[1], ink[2]));
+    }
+}
+
+fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
+    let y_of = |c: Color32| 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
+    ctx.set_theme(egui::Theme::Dark);
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = paper;
+    v.window_fill = paper;
+    v.extreme_bg_color = paper;
+    v.faint_bg_color = paper;
+    v.code_bg_color = paper;
+    v.override_text_color = Some(ink);
+    v.hyperlink_color = ink;
+    // Half-brightness amber and red are the muddy middle. Chrome stays near the pixel.
+    v.selection.bg_fill = dim(ink, 0.72);
+    v.selection.stroke = Stroke::new(1.0, ink);
+    let edge = Stroke::new(1.0, dim(ink, 0.78));
+    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.bg_fill = paper;
+        w.weak_bg_fill = paper;
+        w.bg_stroke = edge;
+        w.fg_stroke = Stroke::new(1.0, ink);
+    }
+    v.widgets.active.bg_fill = ink;
+    // Brown field-colour on a bright segment does not read. Black does.
+    let on_fill = if y_of(ink) > y_of(paper) { Color32::BLACK } else { paper };
+    v.widgets.active.fg_stroke = Stroke::new(1.0, on_fill);
+    v.widgets.hovered.weak_bg_fill = dim(ink, 0.4);
+    ctx.set_visuals(v);
+    ctx.all_styles_mut(|s| {
+        use egui::TextStyle::*;
+        s.text_styles.insert(Body, font(12.0));
+        s.text_styles.insert(Button, font(12.0));
+        s.text_styles.insert(Small, font(10.0));
+        s.text_styles.insert(Heading, font(15.0));
+        s.text_styles.insert(Monospace, FontId::monospace(12.0));
+        s.visuals.panel_fill = paper;
+        s.visuals.window_fill = paper;
+        s.visuals.override_text_color = Some(ink);
+    });
 }
 
 /// A colour slot; `Default` falls back to `default_slot` (our guess at Maschine's
-/// default, two slots per index).
+/// default, two slots per index). On the LCD every slot is the mode's one colour.
 fn palette(c: Color, default_slot: usize) -> Color32 {
+    if let Some(hue) = LCD_HUE.with(|cell| cell.get()) {
+        return hue;
+    }
     let i = match c {
         Color::Palette(i) => i as usize,
         Color::Default => default_slot % 16,
@@ -117,7 +232,7 @@ fn palette(c: Color, default_slot: usize) -> Color32 {
 }
 
 fn group_color(p: &Project, g: usize) -> Color32 {
-    palette(p.groups[g].color, g * 2)
+    palette(p.groups[g].color, g * 2 + 1)
 }
 
 /// Group `g`'s colour, or its sound `s`'s, as a palette index (0..17, 16 white): what
@@ -127,7 +242,7 @@ pub(crate) fn colour_index(p: &Project, g: usize, s: Option<usize>) -> usize {
         Color::Palette(i) => (i as usize).min(16),
         Color::Default => default % 16,
     };
-    let group = slot(p.groups[g].color, g * 2);
+    let group = slot(p.groups[g].color, g * 2 + 1);
     match s.and_then(|s| p.groups[g].sounds.get(s)) {
         Some(snd) if snd.color != Color::Default => slot(snd.color, 0),
         _ => group,
@@ -138,7 +253,7 @@ pub(crate) fn colour_index(p: &Project, g: usize, s: Option<usize>) -> usize {
 pub(crate) fn scene_index(p: &Project, s: usize) -> usize {
     match p.scenes[s].color {
         Color::Palette(i) => (i as usize).min(16),
-        Color::Default => (s * 2) % 16,
+        Color::Default => (s + 4) % 16,
     }
 }
 
@@ -174,7 +289,7 @@ fn pattern_color(p: &Project, g: usize, pi: usize) -> Color32 {
 }
 
 fn scene_color(p: &Project, s: usize) -> Color32 {
-    palette(p.scenes[s].color, s * 2)
+    palette(p.scenes[s].color, s + 4)
 }
 
 /// Group ID as Maschine shows it: A1..H1, then A2.. for the next bank of eight.
@@ -577,6 +692,8 @@ pub enum Act {
     NewPattern(usize, usize),
     /// [`Act::NewPattern`] in an empty place of the group: scene, group, place from 0.
     NewPatternAt(usize, usize, usize),
+    /// Pattern `.1` of group `.0` to place `.2` (from 0); a pattern there swaps with it.
+    MovePattern(usize, usize, usize),
     AddScene,
     /// A new empty group after the last one (the "+" after the groups), focused.
     AddGroup,
@@ -1016,6 +1133,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::AssignPattern(..)
             | Act::NewPattern(..)
             | Act::NewPatternAt(..)
+            | Act::MovePattern(..)
             | Act::AddScene
             | Act::AddGroup
             | Act::InsertScene(_)
@@ -1443,7 +1561,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     continue;
                 }
                 if let Target::Sound(g, s) = t
-                    && field.starts_with("sequence_")
+                    && (field.starts_with("sequence_") || field == "base_key")
                 {
                     app.live_groove(g, s, field);
                 }
@@ -1501,7 +1619,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
 }
 
 /// The family name of the logo font, and its size.
-const LOGO_FONT: &str = "deckard-logo";
+pub(crate) const LOGO_FONT: &str = "deckard-logo";
 const LOGO_SIZE: f32 = 20.0;
 
 /// The name the emoji font has among the app's fonts.
@@ -1569,7 +1687,49 @@ fn dark_style(ctx: &egui::Context) {
         s.text_styles.insert(Monospace, FontId::monospace(12.0));
         s.visuals.panel_fill = Color32::BLACK;
         s.visuals.override_text_color = Some(white(245));
+        // Room inside windows, dialogs, popups and tooltips.
+        s.spacing.window_margin = egui::Margin::same(16);
+        s.spacing.menu_margin = egui::Margin::same(6);
     });
+}
+
+/// Every menu's style: egui's (no frames on the items), with room around each item's
+/// text and between the items.
+pub fn menu_style(s: &mut egui::Style) {
+    egui::containers::menu::menu_style(s);
+    // Most of the room is the frame's, so items line up with the labels, fields and
+    // checkboxes some menus have (whose text isn't padded like a button's).
+    s.spacing.menu_margin = egui::Margin::symmetric(14, 8);
+    s.spacing.button_padding = Vec2::new(4.0, 4.0);
+    s.spacing.interact_size.y = 26.0;
+    s.spacing.item_spacing = Vec2::new(8.0, 2.0);
+    s.spacing.icon_spacing = 8.0;
+}
+
+/// A menu that opens on a right-click, in [`menu_style`].
+pub trait ContextMenu {
+    fn menu_on_right_click(&self, add: impl FnOnce(&mut Ui)) -> Option<egui::InnerResponse<()>>;
+}
+
+impl ContextMenu for Response {
+    fn menu_on_right_click(&self, add: impl FnOnce(&mut Ui)) -> Option<egui::InnerResponse<()>> {
+        egui::Popup::context_menu(self).style(menu_style).show(add)
+    }
+}
+
+/// A drop-down list whose items are spaced like a menu's.
+pub fn combo(id: impl egui::AsIdSalt) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id).popup_style(menu_style.into())
+}
+
+/// Preferences and the other windows: room between their rows and inside their buttons
+/// and fields.
+pub fn dialog_style(ui: &mut Ui) {
+    let s = ui.spacing_mut();
+    s.item_spacing = Vec2::new(10.0, 8.0);
+    s.button_padding = Vec2::new(10.0, 4.0);
+    s.interact_size.y = 24.0;
+    s.icon_spacing = 6.0;
 }
 
 /// Draws the browser header icon (three equidistant shelf lines on the left and a magnifying glass on the right).
@@ -1622,10 +1782,11 @@ fn triangle(p: &Painter, c: Pos2, r: f32, color: Color32) {
 // Header
 
 pub fn header(app: &mut App, ui: &mut Ui) {
+    sync_lcd(ui.ctx(), app);
     let mut acts = Vec::new();
     egui::Panel::top("header")
         .exact_size(HEADER)
-        .frame(egui::Frame::new().fill(S00).inner_margin(egui::Margin { left: 6, right: 6, top: 0, bottom: 0 }))
+        .frame(egui::Frame::new().fill(field()).inner_margin(egui::Margin { left: 6, right: 6, top: 0, bottom: 0 }))
         .show_separator_line(false)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
@@ -1658,7 +1819,7 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 ));
                 let menus = crate::menu::menus(app);
                 let mut chosen = Vec::new();
-                egui::Popup::menu(&resp).show(|ui| {
+                egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| {
                     ui.set_min_width(150.0);
                     for (title, items) in &menus {
                         ui.menu_button(*title, |ui| crate::menu::show(ui, items, &mut chosen));
@@ -2156,7 +2317,7 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
         painter.rect_filled(sig.shrink(3.0), 3.0, white(16));
     }
     value(sig, &format!("{}/{}", p.numerator, p.denominator), "SIG");
-    egui::Popup::menu(&sig_resp).show(|ui| time_signature_menu(ui, p, acts));
+    egui::Popup::menu(&sig_resp).style(crate::layout::menu_style).show(|ui| time_signature_menu(ui, p, acts));
     painter.text(Pos2::new(position.left() + 8.0, y), Align2::LEFT_CENTER, position_string(p, pos), font(12.0), white(245));
     label(&painter, scene_cell, 2.0, &scene, 12.0, scene_col);
 }
@@ -2181,12 +2342,11 @@ fn pill_menu_at(ui: &mut Ui, rect: Rect, text: String, chevron: bool, stay_open:
         }
     }
     let rt = egui::RichText::new(text.clone()).size(11.0).color(Color32::TRANSPARENT);
-    let mut resp = if stay_open {
-        let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        MenuButton::new(rt).config(config).ui(&mut child, add).0
-    } else {
-        child.menu_button(rt, add).response
-    };
+    let mut config = MenuConfig::new().style(menu_style);
+    if stay_open {
+        config = config.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    }
+    let mut resp = MenuButton::new(rt).config(config).ui(&mut child, add).0;
     resp.rect = pill;
     let p = ui.painter();
     let hot = resp.hovered() || resp.has_focus();
@@ -2305,7 +2465,9 @@ fn time_signature_menu(ui: &mut Ui, p: &Project, acts: &mut Vec<Act>) {
 // Body
 
 pub fn body(app: &mut App, ui: &mut Ui) {
-    egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK).inner_margin(3.0)).show(ui, |ui| {
+    sync_lcd(ui.ctx(), app);
+    let ground = LCD_PAPER.with(|c| c.get()).unwrap_or(Color32::BLACK);
+    egui::CentralPanel::default().frame(egui::Frame::new().fill(ground).inner_margin(3.0)).show(ui, |ui| {
         let Some(doc) = app.doc.clone() else {
             let r = ui.max_rect();
             ui.painter().text(r.center(), Align2::CENTER_CENTER, "Drop a .mxprj file here", font(15.0), white(142));
@@ -2621,7 +2783,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     view_switch(ui, app, rect, acts);
     let area = Rect::from_min_max(Pos2::new(rect.left() + STRIP + 1.0, rect.top()), rect.max);
     let painter = ui.painter_at(area);
-    painter.rect_filled(area, 0.0, S00);
+    painter.rect_filled(area, 0.0, field());
     let time = ui.input(|i| i.time);
     let playing_scene = head.and_then(|h| match h.mode {
         Mode::Scene(s) => Some(s),
@@ -2727,6 +2889,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         );
         // (Stays open for Scene Tempo's checkbox and BPM; its other items close it.)
         egui::Popup::context_menu(&resp)
+            .style(menu_style)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| scene_menu(ui, p, s, app.scene_tempo_available(), acts));
     }
@@ -2763,14 +2926,37 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             if !r.intersects(cells) {
                 continue;
             }
-            let resp = ui.interact(r.intersect(cells), ui.id().with(("cell", g, pi)), Sense::click());
+            let resp = ui.interact(r.intersect(cells), ui.id().with(("cell", g, pi)), Sense::click_and_drag());
             let shape = r.shrink2(Vec2::new(3.0, 2.0));
+            // Drag a pattern up or down its group's column to move it to another place: an
+            // outline shows where it goes. A pattern already there takes its old place.
+            if (resp.dragged() || resp.drag_stopped())
+                && let Some(pos) = ui.ctx().pointer_latest_pos()
+            {
+                let from = group.patterns[pi].slot;
+                // Let go outside its own column's places (another group's column too): it
+                // stays. Patterns only move within their group.
+                let to = (cells.y_range().contains(pos.y) && col_rect.x_range().contains(pos.x))
+                    .then(|| ((pos.y - cells.top() - 4.0 + gy) / ROW).floor().max(0.0) as usize)
+                    .filter(|to| *to != from);
+                if let Some(to) = to {
+                    if resp.drag_stopped() {
+                        acts.push(Act::MovePattern(g, pi, to));
+                    } else {
+                        let target = place(to).shrink2(Vec2::new(3.0, 2.0));
+                        let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("pattern-drop")));
+                        fg.with_clip_rect(cells).rect_stroke(target, 3.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+                    }
+                }
+            }
             let col = pattern_color(p, g, pi);
             let assigned = in_scene(g, pi);
             // Patterns of the focused scene are lit; the group's other patterns are dark.
             cell_painter.rect_filled(shape, 3.0, if assigned { col } else { dim(col, 0.3) });
             if g == app.group && pi == app.pattern {
-                cell_painter.rect_stroke(shape, 3.0, Stroke::new(2.0, white(235)), StrokeKind::Outside);
+                // The outline has to read on the cell. White disappears on a light LCD.
+                let edge = lcd_readable(col).unwrap_or(white(235));
+                cell_painter.rect_stroke(shape, 3.0, Stroke::new(2.0, edge), StrokeKind::Outside);
             } else if resp.hovered() {
                 cell_painter.rect_stroke(shape, 3.0, Stroke::new(1.0, white(41)), StrokeKind::Outside);
             }
@@ -2811,15 +2997,15 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 acts.push(Act::FocusPattern(g, pi));
             }
             let tip = if assigned {
-                "Click to show this pattern; double-click to take it out of the scene"
+                "Click to show this pattern; double-click to take it out of the scene; drag to move it"
             } else {
-                "Click to use this pattern in the scene and show it"
+                "Click to use this pattern in the scene and show it; drag to move it"
             };
             let resp = resp.on_hover_text(format!("{tip}; right-click for more"));
             if resp.secondary_clicked() {
                 acts.push(Act::FocusPattern(g, pi));
             }
-            resp.context_menu(|ui| pattern_menu(ui, p, g, pi, acts));
+            resp.menu_on_right_click(|ui| pattern_menu(ui, p, g, pi, acts));
         }
         // The empty places, between the group's patterns and below them: double-click for
         // a new one there.
@@ -2844,7 +3030,13 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let tile = Rect::from_min_size(Pos2::new(x, tiles.top()), Vec2::new(IDEA_W - 1.0, TILE_H)).shrink(1.0);
         let resp = ui.interact(tile.intersect(tiles), ui.id().with(("tile", g)), Sense::click());
         note_rect(ui, &format!("group tile {g}"), tile);
-        let gcol = if group.muted { Color32::from_gray(0x7D) } else { group_color(p, g) };
+        let gcol = if group.muted && LCD_HUE.with(|c| c.get()).is_none() {
+            Color32::from_gray(0x7D)
+        } else if group.muted {
+            dim(group_color(p, g), 0.45)
+        } else {
+            group_color(p, g)
+        };
         let focused = g == app.group;
         let tp = painter.with_clip_rect(tiles);
         if focused {
@@ -2852,13 +3044,13 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         } else if resp.hovered() {
             tp.rect_filled(tile, 2.0, white(20));
         }
-        let ink = if focused { black(245) } else { gcol };
+        let ink = if focused { lcd_readable(gcol).unwrap_or(black(245)) } else { gcol };
         let letter = Pos2::new(tile.center().x, tile.top() + 12.0);
         let id = group_tab(g);
         tp.text(letter, Align2::CENTER_CENTER, &id, bold_font(ui.ctx(), 16.0), ink);
         let name_rect = Rect::from_min_size(Pos2::new(tile.left() + 6.0, tile.top() + 20.0), Vec2::new(86.0, 20.0));
         let name_ink = if focused {
-            black(245)
+            lcd_readable(gcol).unwrap_or(black(245))
         } else if group.muted {
             white(142)
         } else {
@@ -2892,7 +3084,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         } else if resp.clicked() || resp.secondary_clicked() {
             acts.push(Act::FocusGroup(g));
         }
-        resp.context_menu(|ui| group_menu(ui, app, p, g, acts));
+        resp.menu_on_right_click(|ui| group_menu(ui, app, p, g, acts));
     }
     // "+" after the last group: a new empty group (MK3 manual, "Creating Groups").
     let plus = Rect::from_min_size(Pos2::new(tiles.left() + p.groups.len() as f32 * IDEA_W - gx, tiles.top()), Vec2::new(27.0, TILE_H));
@@ -3089,21 +3281,24 @@ fn group_row(
     // grey where there is none).
     let id_ink = match (lit, focused, muted, color) {
         (true, ..) => {
-            painter.rect_filled(idr, 0.0, lighter(color.unwrap_or(Color32::from_gray(0x9B))));
-            S00
+            let fill = lighter(color.unwrap_or(Color32::from_gray(0x9B)));
+            painter.rect_filled(idr, 0.0, fill);
+            lcd_readable(fill).unwrap_or_else(field)
         }
         (_, true, _, Some(c)) => {
             painter.rect_filled(idr, 0.0, c);
-            S00
+            lcd_readable(c).unwrap_or_else(field)
         }
         (_, _, true, _) => Color32::from_gray(0x66),
-        _ => white(164),
+        _ => lcd_readable(base).unwrap_or(white(164)),
     };
     painter.text(idr.center(), Align2::CENTER_CENTER, id, font(12.0), id_ink);
-    let name_ink = if muted {
-        white(61)
-    } else if focused {
+    let name_ink = if focused {
         Color32::WHITE
+    } else if let Some(ink) = lcd_readable(base) {
+        if muted { dim(ink, 0.82) } else { ink }
+    } else if muted {
+        white(61)
     } else {
         white(142)
     };
@@ -3198,7 +3393,7 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
     } else if resp.clicked() || resp.secondary_clicked() {
         acts.push(focus);
     }
-    resp.context_menu(|ui| match target {
+    resp.menu_on_right_click(|ui| match target {
         Target::Sound(g, s) => sound_menu(ui, app, p, g, s, acts),
         Target::Group(g) => group_menu(ui, app, p, g, acts),
         _ => {}
@@ -3611,7 +3806,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         } else if resp.clicked() {
             acts.push(Act::LaunchSection(i));
         }
-        resp.context_menu(|ui| section_menu(ui, p, i, acts));
+        resp.menu_on_right_click(|ui| section_menu(ui, p, i, acts));
     }
     clip_lanes(ui, app, p, tracks, rows_top - y0, &x_of, ppb, acts);
     // Section ends, over the headers: drag to make a section longer or shorter.
@@ -3743,7 +3938,7 @@ fn clip_lanes(ui: &mut Ui, app: &App, p: &Project, tracks: Rect, top: f32, x_of:
                     );
                 }
             }
-            body.on_hover_text("A clip: drag to move it, drag its end to resize, right-click for more").context_menu(|ui| {
+            body.on_hover_text("A clip: drag to move it, drag its end to resize, right-click for more").menu_on_right_click(|ui| {
                 ui.set_min_width(150.0);
                 item(ui, "Duplicate", true, || Act::Clip(g, c, ClipAct::Duplicate), acts);
                 item(ui, "Double", true, || Act::Clip(g, c, ClipAct::Double), acts);
@@ -4502,7 +4697,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                         Some(v) if v.error.is_none() => {
                             // The page names are the tabs beside this. The title stays the
                             // plug-in, so the bar doesn't jump when the page changes.
-                            heading = pr.name.clone();
+                            heading = crate::zhora_ui::heading(pr);
                             // Named pages (DECKARD's plug-ins and NKS/saved pages with sections) by name, else by number.
                             let mut names: Vec<String> = v
                                 .pages
@@ -4678,7 +4873,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         if macro_tabs && let Some((level, ..)) = &macro_view {
             let ch = channel::macro_channel(*level);
             for (i, resp) in tab_resps.iter().enumerate().take(names.len() - 1) {
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     let id = ui.id().with(("macro-page-name", i));
                     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| names[i].clone());
                     ui.label("Name");
@@ -4764,7 +4959,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             let ch = channel::macro_channel(*level);
             let (page, slot) = (*page, i);
             let assigned = doc.macro_pages(ch).get(page).and_then(|p| p.macros.get(slot)).is_some_and(|m| m.target.is_some());
-            strip_resp.context_menu(|ui| assign::macro_slot_menu(ui, app, (ch, page, slot), assigned, acts));
+            strip_resp.menu_on_right_click(|ui| assign::macro_slot_menu(ui, app, (ch, page, slot), assigned, acts));
             if !assigned {
                 // An empty macro: a click picks what it controls.
                 let body = Rect::from_min_max(Pos2::new(r.left(), strip.bottom()), r.max);
@@ -4777,13 +4972,15 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name.as_ref(), font(10.0), white(90));
                 painter.circle_stroke(Pos2::new(r.center().x, r.top() + 42.0), 18.0, Stroke::new(1.0, white(30)));
                 plus_glyph(&painter, Pos2::new(r.center().x, r.top() + 42.0), 14.0, white(if resp.hovered() { 200 } else { 70 }));
-                egui::Popup::menu(&resp).show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
+                egui::Popup::menu(&resp)
+                    .style(crate::layout::menu_style)
+                    .show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
                 continue;
             }
         } else if let Some((t, f)) = edit.as_ref().and_then(channel::knob_param) {
-            strip_resp.context_menu(|ui| param_macro_menu(ui, doc, t, f, acts));
+            strip_resp.menu_on_right_click(|ui| param_macro_menu(ui, doc, t, f, acts));
         } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginIn(_, slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
-            strip_resp.context_menu(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
+            strip_resp.menu_on_right_click(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
         }
         // A parameter a macro controls: the macro icon at the top right.
         if macro_view.is_none() && edit.and_then(|e| edit_param_oid(app, doc, e)).is_some_and(|id| macro_targets.contains(&id)) {
@@ -4887,7 +5084,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             // modulation.
             if modulation::mod_target(*edit).is_some() {
                 let e = *edit;
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     if ui.button("Remove Modulation").on_hover_text("Remove this knob's modulation from every pattern").clicked() {
                         acts.push(Act::ClearModulation(e));
                         ui.close();
@@ -5276,7 +5473,7 @@ fn selector(
 /// returns the one picked.
 pub fn choice_list<'a>(resp: &egui::Response, options: impl IntoIterator<Item = &'a str>, cur: usize) -> Option<usize> {
     let mut picked = None;
-    egui::Popup::menu(resp).show(|ui| {
+    egui::Popup::menu(resp).style(crate::layout::menu_style).show(|ui| {
         ui.set_min_width(resp.rect.width().max(110.0));
         for (k, o) in options.into_iter().enumerate() {
             let text = egui::RichText::new(o).size(12.0);
@@ -5428,7 +5625,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let active = slot.active;
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     if plugin && ui.button("Open Plug-in Window").clicked() {
                         acts.push(Act::OpenSlotEditor(i));
                         ui.close();
@@ -5490,7 +5687,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let resp = resp.on_hover_text("Add an instrument, effect or plug-in");
                 // A sound has one instrument, in its first slot.
                 let instruments = slots.is_empty();
-                egui::Popup::menu(&resp).show(|ui| add_menu(ui, app, instruments, acts));
+                egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| add_menu(ui, app, instruments, acts));
             }
         }
     }
@@ -5709,7 +5906,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     match strip(
         ui,
         strip_rect,
-        S00,
+        field(),
         6.0,
         &[
             (!app.piano_roll, "Drum grid", grid_icon),
@@ -5733,8 +5930,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let col = Rect::from_min_size(Pos2::new(rect.left() + STRIP + 1.0, rect.top()), Vec2::new(COLUMN, rect.height()));
     let ed = Rect::from_min_max(Pos2::new(col.right() + 1.0, rect.top()), rect.max);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(col, 0.0, S00);
-    painter.rect_filled(ed, 0.0, S00);
+    painter.rect_filled(col, 0.0, field());
+    painter.rect_filled(ed, 0.0, field());
     let Some(group) = p.groups.get(app.group) else { return };
     let gcol = group_color(p, app.group);
     let pat = group.patterns.get(app.pattern);
@@ -6652,7 +6849,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let paste_at = ui.data(|d| d.get_temp::<Pos2>(menu_id)).map_or(crate::clipboard::PasteAt::Keys, |pos| {
         crate::clipboard::PasteAt::Mouse { tick: tick_at(pos.x) as i64, pitch: app.piano_roll.then(|| hi - row_at(pos.y)) }
     });
-    resp.context_menu(|ui| event_menu(ui, app, paste_at, acts));
+    resp.menu_on_right_click(|ui| event_menu(ui, app, paste_at, acts));
     // ⌘X / ⌘C / ⌘V (macOS sends them as Cut, Copy and Paste).
     if !ui.ctx().egui_wants_keyboard_input() && app.key_focus == KeyFocus::Events {
         let (cut, copy, paste) = ui.input_mut(|i| {
@@ -7078,6 +7275,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         egui::Window::new("MIDI Lanes").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(
             ui.ctx(),
             |ui| {
+                dialog_style(ui);
                 ui.label(egui::RichText::new(format!("Lanes for {sound}")).weak());
                 ui.add_space(4.0);
                 let shown: Vec<Lane> =
@@ -7675,6 +7873,18 @@ mod header_icon_tests {
             let right_overhang = knob_r - line_r;
             assert!((left_overhang - right_overhang).abs() < 1e-4, "left overhang {left_overhang} != right overhang {right_overhang}");
             assert!(left_overhang >= 1.5);
+        }
+    }
+}
+
+#[cfg(test)]
+mod desktop_theme_tests {
+    /// Every controller theme DECKARD ships is offered as the desktop theme, so each
+    /// one but Maschine (the ordinary dark window) restyles the window.
+    #[test]
+    fn every_shipped_theme_but_maschine_restyles_the_window() {
+        for t in deckard_surface::Surface::new().themes() {
+            assert_eq!(super::desktop_look(&t, "yellow").is_some(), t != "maschine", "{t}");
         }
     }
 }

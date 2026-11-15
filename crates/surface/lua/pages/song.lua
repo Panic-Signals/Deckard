@@ -171,7 +171,10 @@ local function pattern_colours(theme, s, g, p)
   local palette = p.default_color and s.groups[g].palette or p.palette
   local fill = widgets.colour(theme, palette)
   if s.groups[g].muted then fill = widgets.blend(fill, { 0, 0, 0 }, 0.35) end
-  return fill, widgets.blend(fill, { 0, 0, 0 }, 0.14)
+  -- Maschine writes the name a little darker than the block. An LCD's block is the
+  -- pixel itself, so `song_ink` is the field and the name does not match the block.
+  local text = theme.colors.song_ink or widgets.blend(fill, { 0, 0, 0 }, 0.14)
+  return fill, text
 end
 
 -- Section `i`'s scene colour, dimmed unless it's the focused one.

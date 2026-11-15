@@ -34,9 +34,9 @@ local KEY_ROWS, KEY_ROW = 16, 8
 local LANES_H = 145
 
 -- The colours of the rows and keys: out of the scale (red, as the software's piano
--- roll), and picked.
+-- roll). A picked key uses the theme's text colour, so it stays visible on a light LCD.
 local ROW_OUT, ROW_PICKED = { 58, 22, 22 }, { 96, 96, 96 }
-local KEY_OUT, KEY_PICKED = { 130, 50, 50 }, { 255, 255, 255 }
+local KEY_OUT = { 130, 50, 50 }
 
 -- The eight steps shown (in eights from the first), the buttons down (the step's tick,
 -- when, and whether held long enough), the pads down, what's picked, the highest pitch
@@ -373,7 +373,7 @@ function page.draw(screen, theme)
       end,
     })
     editor.keys(screen, theme, 480, y + editor.HEADER, LIST_W, KEY_ROW, KEY_ROWS, high, pads.note_name, function(pitch)
-      if is_picked(pitch) then return KEY_PICKED end
+      if is_picked(pitch) then return theme.colors.text end
       if bound and not pads.in_scale(pitch) then return KEY_OUT end
     end)
     widgets.params(screen, theme, 480, {}, nil, keys_params(s, high))
@@ -383,7 +383,7 @@ function page.draw(screen, theme)
     if snd then
       screen:rect(480, y + editor.HEADER, LIST_W, editor.LANE, widgets.colour(theme, snd.palette))
       screen:label(482, y + editor.HEADER, LIST_W - 2, editor.LANE, tostring(s.sound),
-        { font = theme.styles.default.font, size = 11, color = { 0, 0, 0 } }, "left", "center")
+        { font = theme.styles.default.font, size = 11, color = theme.colors.on_colour }, "left", "center")
     end
   end
 end

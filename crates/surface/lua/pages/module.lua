@@ -261,7 +261,7 @@ function module.draw(screen, theme)
       { text = s.scene_name, palette = s.scene_palette },
     },
   })
-  chain.draw(screen, c)
+  chain.draw(screen, theme, c)
   local k = settle(c)
   local params = {
     [2] = { name = "FORMAT", value = format },

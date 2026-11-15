@@ -281,6 +281,7 @@ impl App {
         let mut todo = Vec::new();
         let active = self.lock_active;
         egui::Window::new("Lock").open(&mut open).resizable(false).show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 if ui.selectable_label(active, "LOCK").on_hover_text("Take a snapshot; again: recall it").clicked() {
                     todo.push(Do::Lock);
@@ -332,7 +333,7 @@ impl App {
                 }
                 ui.add_enabled_ui(l.morph, |ui| {
                     let mut choose = |ui: &mut egui::Ui, id: &str, field: &'static str, list: &[&str], at: usize| {
-                        egui::ComboBox::from_id_salt(id).selected_text(list[at.min(list.len() - 1)]).show_ui(ui, |ui| {
+                        crate::layout::combo(id).selected_text(list[at.min(list.len() - 1)]).show_ui(ui, |ui| {
                             for (i, name) in list.iter().enumerate() {
                                 if ui.selectable_label(i == at, *name).clicked() {
                                     todo.push(Do::Set(field, i as f64));
@@ -378,6 +379,7 @@ impl App {
         };
         let mut recall: Vec<(&'static str, &'static str, Value)> = Vec::new();
         egui::Window::new("MIDI Change").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
             let lock = deckard_model::MidiRecall { trigger: l.midi_trigger, source: l.midi_source.clone(), channel: l.midi_channel };
             let blocks = [
                 ("Scene", "scene_recall", &scene, "Notes 0–127 (C-2 up) or programs 1–128 pick scenes 1–128."),
@@ -400,7 +402,7 @@ impl App {
                 egui::Grid::new(format!("midi-change-{salt}")).num_columns(2).show(ui, |ui| {
                     ui.label("Trigger");
                     let shown = deckard_model::MIDI_TRIGGERS[r.trigger.min(2)];
-                    let c = egui::ComboBox::from_id_salt(format!("{salt}-trigger")).selected_text(shown).show_ui(ui, |ui| {
+                    let c = crate::layout::combo(format!("{salt}-trigger")).selected_text(shown).show_ui(ui, |ui| {
                         for (i, label) in deckard_model::MIDI_TRIGGERS.iter().enumerate() {
                             if ui.selectable_label(i == r.trigger, *label).clicked() {
                                 change("trigger", Value::Int(i as i64));
@@ -414,7 +416,7 @@ impl App {
                         ui.label("Source");
                     });
                     ui.add_enabled_ui(r.trigger != 0, |ui| {
-                        egui::ComboBox::from_id_salt(format!("{salt}-source")).selected_text(&r.source).show_ui(ui, |ui| {
+                        crate::layout::combo(format!("{salt}-source")).selected_text(&r.source).show_ui(ui, |ui| {
                             for port in std::iter::once("None".to_string()).chain(ports.iter().cloned()) {
                                 if ui.selectable_label(port == r.source, &port).clicked() {
                                     change("input", Value::Str(port.clone()));
@@ -427,7 +429,7 @@ impl App {
                         ui.label("Channel");
                     });
                     ui.add_enabled_ui(r.trigger != 0, |ui| {
-                        egui::ComboBox::from_id_salt(format!("{salt}-channel")).selected_text(r.channel.to_string()).show_ui(ui, |ui| {
+                        crate::layout::combo(format!("{salt}-channel")).selected_text(r.channel.to_string()).show_ui(ui, |ui| {
                             for ch in 1..=16 {
                                 if ui.selectable_label(ch == r.channel, ch.to_string()).clicked() {
                                     change("midi_channel", Value::Int(ch));

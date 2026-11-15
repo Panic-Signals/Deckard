@@ -160,6 +160,10 @@ pub struct Settings {
     pub controller: ControllerChoice,
     /// The MK3 screens' theme under DECKARD's own layer (Preferences > Hardware).
     pub controller_theme: String,
+    /// The software window's theme (Preferences > Hardware). Independent of the controller.
+    pub desktop_theme: String,
+    /// LCD colour while that theme is on: `yellow`, `red` or `blue`.
+    pub lcd_mode: String,
     /// Ableton Link (the header's LINK): joined, and starting and stopping with the
     /// session (Start Stop Sync).
     pub link: bool,
@@ -395,6 +399,8 @@ impl Default for Settings {
             touch_auto_write: false,
             controller: ControllerChoice::default(),
             controller_theme: CONTROLLER_THEME.to_string(),
+            desktop_theme: "maschine".to_string(),
+            lcd_mode: "yellow".to_string(),
             link: false,
             link_start_stop: false,
             midi_sync: MidiSync::Off,
@@ -546,6 +552,8 @@ impl Settings {
                 "clock_receive_offset_ms" => s.clock_receive_offset_ms = v.parse::<i32>().map_or(0, |n| n.clamp(-100, 100)),
                 "exact_timing" => s.exact_timing = v != "false",
                 "controller_theme" if !v.is_empty() => s.controller_theme = v.to_string(),
+                "desktop_theme" if !v.is_empty() => s.desktop_theme = v.to_string(),
+                "lcd_mode" => s.lcd_mode = deckard_surface::lcd::mode(v).to_string(),
                 "controller" => {
                     s.controller = match v {
                         "automatic" => ControllerChoice::Automatic,
@@ -826,6 +834,12 @@ impl Settings {
         if self.controller_theme != CONTROLLER_THEME {
             out += &format!("controller_theme = {}\n", self.controller_theme);
         }
+        if self.desktop_theme != "maschine" {
+            out += &format!("desktop_theme = {}\n", self.desktop_theme);
+        }
+        if self.lcd_mode != "yellow" {
+            out += &format!("lcd_mode = {}\n", self.lcd_mode);
+        }
         let sync = match self.midi_sync {
             MidiSync::Off => "off",
             MidiSync::Send => "send",
@@ -1071,6 +1085,29 @@ pub fn scan_vst3_main(bundle: &Path) -> i32 {
     }
 }
 
+/// Whether DECKARD sets `model`'s LED level and display backlight. Only the MK3 is
+/// measured (`docs/mk3-usb.md`: report `0xf3` for the LEDs, `0xf8`/`0xf9` byte 8 for the
+/// screens). The Jam has no screens and palette-only LEDs, the Mikro MK3 a different panel
+/// set, and the Studio, the Maschine+ and the older models have not been probed.
+pub fn sets_brightness(model: &str) -> bool {
+    model == "M3"
+}
+
+#[cfg(test)]
+mod brightness_model_tests {
+    use super::sets_brightness;
+
+    /// Only the MK3's two brightnesses are DECKARD's to set, and only because they were
+    /// measured: the rest of the models have not been probed (docs/mk3-usb.md).
+    #[test]
+    fn only_the_mk3_sets_brightness() {
+        assert!(sets_brightness("M3"), "the MK3, measured on the rig");
+        for other in ["MH1071", "MS1", "MJ1", "MM3", "M2", "M1", "MM2", "MM1"] {
+            assert!(!sets_brightness(other), "{other} has no brightness DECKARD sets");
+        }
+    }
+}
+
 #[cfg(test)]
 mod routing_tests {
     use super::*;
@@ -1208,6 +1245,7 @@ mod routing_tests {
         assert_eq!(Settings::default().controller, ControllerChoice::Deckard);
         assert_eq!(Settings::parse("").controller, ControllerChoice::Deckard);
         assert_eq!(Settings::parse("").controller_theme, "palenight");
+        assert_eq!(Settings::parse("").desktop_theme, "maschine");
         for c in [ControllerChoice::Automatic, ControllerChoice::Deckard, ControllerChoice::Scripts] {
             let s = Settings { controller: c, ..Settings::default() };
             assert_eq!(Settings::parse(&s.to_text()).controller, c);
@@ -1216,6 +1254,12 @@ mod routing_tests {
             let s = Settings { controller_theme: theme.into(), ..Settings::default() };
             assert_eq!(Settings::parse(&s.to_text()).controller_theme, theme);
         }
+        let lcd = Settings { lcd_mode: "blue".into(), desktop_theme: "lcd".into(), ..Settings::default() };
+        assert_eq!(Settings::parse(&lcd.to_text()).lcd_mode, "blue");
+        assert_eq!(Settings::parse(&lcd.to_text()).desktop_theme, "lcd");
+        assert_eq!(Settings::parse(&lcd.to_text()).controller_theme, "palenight", "the window's theme does not change the controller");
+        assert_eq!(Settings::parse("lcd_mode = white").lcd_mode, "yellow");
+        assert_eq!(Settings::parse("lcd_mode = purple").lcd_mode, "yellow");
     }
 
     /// Settings saved before devices kept their own routing: the input device's routes

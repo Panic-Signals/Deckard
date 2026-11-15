@@ -26,6 +26,24 @@ function widgets.colour(theme, palette, dim, text)
   return c
 end
 
+-- WCAG contrast. RGB distance treats amber-on-amber as "different" while it is
+-- unreadable, and would also trip colours that are far apart in hue but fine.
+local function channel(v)
+  v = (v or 0) / 255
+  if v <= 0.04045 then return v / 12.92 end
+  return ((v + 0.055) / 1.055) ^ 2.4
+end
+
+local function contrast(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return 21 end
+  local function y(c)
+    return 0.2126 * channel(c[1]) + 0.7152 * channel(c[2]) + 0.0722 * channel(c[3])
+  end
+  local l1, l2 = y(a), y(b)
+  if l1 < l2 then l1, l2 = l2, l1 end
+  return (l1 + 0.05) / (l2 + 0.05)
+end
+
 -- Colour `c` at `a` (0..1) over `base` (both {r, g, b}).
 function widgets.blend(c, base, a)
   local mix = function(i) return math.floor(c[i] * a + base[i] * (1 - a) + 0.5) end
@@ -228,12 +246,40 @@ local function tile(screen, theme, x, y, w, h, t)
   end
   screen:rect(x, y, w, h, fill, theme.corner)
   local text = t.on and theme.colors.on_colour or widgets.colour(theme, t.palette, false, true)
+  if not t.on and contrast(text, fill) < 3 then text = theme.colors.on_colour end
   if t.big then
     screen:label(x + 6, y + 3, w - 6, 30, t.big, style(theme, "tile_letter", text), "left", "top")
     screen:label(x + 7, y + 33, w - 21, 18, t.name or "", style(theme, "default", text), "left", "top")
   else
-    screen:label(x + 7, y + 4, w - 9, 16, t.name or "", style(theme, "pad_label", text), "left", "top")
+    local st = style(theme, "pad_label", text)
+    local first, second = widgets.wrap(screen, t.name or "", st, w - 9)
+    screen:label(x + 7, y + 4, w - 9, 16, first, st, "left", "top")
+    if second ~= "" then
+      screen:label(x + 7, y + 21, w - 9, 16, second, st, "left", "top")
+    end
   end
+end
+
+-- `s` in two lines `w` wide in style `st`: as it is when it fits, else broken after the
+-- last space, "_" or "-" that fits (within a character, with none), so the end of a long
+-- name ("ClosedHH Bionic 2", "… 3") shows. The second line is cut as a label is.
+function widgets.wrap(screen, s, st, w)
+  if s == "" or screen:text_width(s, st) <= w then return s, "" end
+  local fit = 0
+  for i = 1, #s do
+    if screen:text_width(s:sub(1, i), st) > w then break end
+    fit = i
+  end
+  if fit == 0 then return s, "" end
+  local cut = fit
+  for i = fit, 2, -1 do
+    local c = s:sub(i, i)
+    if c == " " or c == "_" or c == "-" then
+      cut = i
+      break
+    end
+  end
+  return (s:sub(1, cut):gsub("%s+$", "")), (s:sub(cut + 1):gsub("^%s+", ""))
 end
 
 -- Eight group tiles in two rows of four (`tiles[1..8]`, nil for none), from `y`,

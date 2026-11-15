@@ -206,6 +206,7 @@ impl App {
             egui::Window::new("Bounce").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
                 ctx,
                 |ui| {
+                    crate::layout::dialog_style(ui);
                     ui.label(
                         "Bouncing renders the sound's patterns to audio and replaces its plug-ins with an Audio plug-in playing them.",
                     );
@@ -234,6 +235,7 @@ impl App {
             egui::Window::new(format!("{what}…")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
                 ctx,
                 |ui| {
+                    crate::layout::dialog_style(ui);
                     ui.horizontal(|ui| {
                         ui.add(egui::ProgressBar::new(f).desired_width(220.0).show_percentage());
                         cancel = ui.button("Cancel").clicked();

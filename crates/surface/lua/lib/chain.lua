@@ -25,8 +25,8 @@ end
 
 -- A hosted plug-in's picture, as DECKARD has none of its own: a synthesizer for an
 -- instrument, an effect pedal for an effect.
-local function generic(screen, x, y, w, h, instrument)
-  local body, edge, knob = { 0x2a, 0x2a, 0x2e }, { 0x55, 0x55, 0x5c }, { 0xc8, 0xc8, 0xc8 }
+local function generic(screen, theme, x, y, w, h, instrument)
+  local body, edge, knob = "panel", "button", "text"
   if instrument then
     -- A synth: a panel of knobs over a keyboard.
     local sw = math.min(w, math.floor(h * 3.2))
@@ -41,11 +41,11 @@ local function generic(screen, x, y, w, h, instrument)
     local ky, kh = y + math.floor(h * 0.45), h - math.floor(h * 0.45) - 3
     local keys = math.max(7, sw // 9)
     local kw = (sw - 6) / keys
-    screen:rect(sx + 3, ky, sw - 6, kh, { 0xe8, 0xe8, 0xe8 })
+    screen:rect(sx + 3, ky, sw - 6, kh, "text")
     for k = 1, keys - 1 do
-      screen:line(sx + 3 + k * kw, ky, sx + 3 + k * kw, ky + kh, 1, { 0x60, 0x60, 0x60 })
+      screen:line(sx + 3 + k * kw, ky, sx + 3 + k * kw, ky + kh, 1, "button")
       if k % 7 ~= 3 and k % 7 ~= 0 then
-        screen:rect(math.floor(sx + 3 + k * kw - kw * 0.3), ky, math.max(1, math.floor(kw * 0.6)), math.floor(kh * 0.6), { 0x18, 0x18, 0x18 })
+        screen:rect(math.floor(sx + 3 + k * kw - kw * 0.3), ky, math.max(1, math.floor(kw * 0.6)), math.floor(kh * 0.6), "background")
       end
     end
   else
@@ -57,7 +57,7 @@ local function generic(screen, x, y, w, h, instrument)
     for k = 0, 1 do
       screen:circle(px + pw * (0.3 + k * 0.4), y + h * 0.2, math.max(2, pw * 0.1), knob, 1.2)
     end
-    screen:circle(px + pw / 2, y + h * 0.42, math.max(1, pw * 0.05), { 0xe0, 0x40, 0x30 })
+    screen:circle(px + pw / 2, y + h * 0.42, math.max(1, pw * 0.05), "record")
     screen:circle(px + pw / 2, y + h * 0.72, math.max(2, pw * 0.16), knob, 1.4)
   end
 end
@@ -65,23 +65,29 @@ end
 -- A slot's picture: DECKARD's own of the plug-in where it has one, else a drawing (of
 -- a synthesizer or pedal for a hosted plug-in; a panel for DECKARD's own). `thumb`:
 -- the chain's (else the right display's logo).
-function chain.thumbnail(screen, x, y, w, h, slot, thumb)
+-- `weak` on Palenight and Solarized is a comment colour. These marks used to be a
+-- light grey on every theme; only a theme that sets the name (the LCD) replaces it.
+local function paint(theme, name, fallback)
+  return theme.colors[name] or fallback
+end
+
+function chain.thumbnail(screen, theme, x, y, w, h, slot, thumb)
   local instrument = slot.instrument
   if slot.picture then
     if screen:image(x, y, w, h, slot.picture, thumb ~= false) then return end
     if screen:image(x, y, w, h, slot.picture, thumb == false) then return end
   end
-  if slot.plugin then return generic(screen, x, y, w, h, instrument) end
-  screen:rect(x, y, w, h, { 0x1e, 0x1e, 0x1e })
-  screen:frame(x, y, w, h, { 0x3a, 0x3a, 0x3a })
-  screen:rect(x + 1, y + 1, w - 2, 6, { 0x2c, 0x2c, 0x2c })
-  screen:rect(x + 3, y + 3, math.min(24, w // 4), 2, { 0x8a, 0x8a, 0x8a })
+  if slot.plugin then return generic(screen, theme, x, y, w, h, instrument) end
+  screen:rect(x, y, w, h, "panel")
+  screen:frame(x, y, w, h, "button")
+  screen:rect(x + 1, y + 1, w - 2, 6, "button")
+  screen:rect(x + 3, y + 3, math.min(24, w // 4), 2, paint(theme, "chain_mark", { 0x8a, 0x8a, 0x8a }))
   if instrument then
-    screen:rect(x + 4, y + 10, w - 8, h - 14, { 0x24, 0x24, 0x24 })
+    screen:rect(x + 4, y + 10, w - 8, h - 14, "background")
   else
     local n = math.max(2, (w - 8) // 14)
     for k = 0, n - 1 do
-      screen:circle(x + 9 + k * 14, y + h - 12, 4, { 0x9a, 0x9a, 0x9a }, 1.4)
+      screen:circle(x + 9 + k * 14, y + h - 12, 4, paint(theme, "chain_mark", { 0x9a, 0x9a, 0x9a }), 1.4)
     end
   end
 end
@@ -91,15 +97,15 @@ end
 local SIZES = { Sampler = { 160, 42 }, EQ = { 90, 40 }, Compressor = { 62, 40 } }
 
 -- A slot's kind, as a small icon: keys for an instrument, FX for an effect.
-local function kind_icon(screen, x, y, instrument)
+local function kind_icon(screen, x, y, instrument, fx)
   if instrument then
     for k = 0, 2 do
       screen:rect(x + k * 4, y, 2, 7, "text")
       screen:rect(x + k * 4, y + 7, 3, 5, "text")
     end
   else
-    screen:frame(x, y, 12, 12, { 0xaa, 0xaa, 0xaa }, 0.5)
-    screen:label(x, y + 1, 12, 11, "FX", { size = 8, color = { 0xaa, 0xaa, 0xaa } })
+    screen:frame(x, y, 12, 12, fx, 0.5)
+    screen:label(x, y + 1, 12, 11, "FX", { size = 8, color = fx })
   end
 end
 
@@ -116,7 +122,7 @@ end
 -- The chain along the left screen: each slot's kind, name and picture, the focused
 -- one framed, then a "+" for a new one. Longer than the screen, it scrolls to keep the
 -- focused slot (or the "+") in view, showing only whole slots.
-function chain.draw(screen, c)
+function chain.draw(screen, theme, c)
   local widths = {}
   for i, slot in ipairs(c.chain) do
     local _, _, w = slot_size(screen, slot)
@@ -143,14 +149,14 @@ function chain.draw(screen, c)
     local size, name_w, w = slot_size(screen, slot)
     if x + w > SCREEN_W then overflow(i - 1); return end
     local focused = i == c.slot_index
-    kind_icon(screen, x + 13, 72, slot.instrument)
-    local colour = focused and "text" or { 0xb1, 0xb1, 0xb1 }
+    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
+    local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
     screen:label(x + 29, 71, name_w, 17, slot.name, { color = colour }, "left", "center")
     if focused then
       screen:frame(x + 9, 91, size[1] + 6, size[2] + 6, "text", 0.76)
       screen:frame(x + 10, 92, size[1] + 4, size[2] + 4, "text")
     end
-    chain.thumbnail(screen, x + 12, 94, size[1], size[2], slot)
+    chain.thumbnail(screen, theme, x + 12, 94, size[1], size[2], slot)
     x = x + w
   end
   overflow(#c.chain)
@@ -160,8 +166,9 @@ function chain.draw(screen, c)
     screen:frame(x + 9, 91, 46, 46, "text", 0.76)
     screen:frame(x + 10, 92, 44, 44, "text")
   end
-  screen:rect(x + 12 + 11, 113, 18, 2, { 0xbb, 0xbb, 0xbb })
-  screen:rect(x + 12 + 19, 105, 2, 18, { 0xbb, 0xbb, 0xbb })
+  local mark = paint(theme, "chain_mark", { 0xbb, 0xbb, 0xbb })
+  screen:rect(x + 12 + 11, 113, 18, 2, mark)
+  screen:rect(x + 12 + 19, 105, 2, 18, mark)
 end
 
 return chain

@@ -4,7 +4,7 @@
 //! (docs/superpowers/specs/2026-10-22-browser-design.md). The LIBRARY tab starts with
 //! a Splice button (DECKARD's referral link, see `splice`).
 
-use super::{Act, S00, S01, S02, S03, apply, font, white};
+use super::{Act, ContextMenu, S00, S01, S02, S03, apply, font, white};
 use crate::App;
 use crate::browser::{BrowseAct, Tab};
 use deckard_library::Kind;
@@ -96,7 +96,7 @@ fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
     });
     if !b.results.products.is_empty() {
         let shown = q.product.clone().unwrap_or_else(|| "All libraries".into());
-        egui::ComboBox::from_id_salt("browser-product").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
+        crate::layout::combo("browser-product").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
             if ui.selectable_label(q.product.is_none(), "All libraries").clicked() {
                 acts.push(Act::Browse(BrowseAct::Product(None)));
             }
@@ -291,7 +291,7 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                 if resp.drag_started() {
                     resp.dnd_set_drag_payload(Dragged(i));
                 }
-                resp.context_menu(|ui| {
+                resp.menu_on_right_click(|ui| {
                     let label = if item.favorite { "Remove from Favorites" } else { "Add to Favorites" };
                     if ui.button(label).clicked() {
                         acts.push(Act::Browse(BrowseAct::Favorite(i, !item.favorite)));
@@ -321,7 +321,7 @@ fn files(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             if resp.clicked() {
                 acts.push(Act::Browse(BrowseAct::Folder(d.clone())));
             }
-            resp.context_menu(|ui| {
+            resp.menu_on_right_click(|ui| {
                 if ui.button("Remove from Favorites").clicked() {
                     acts.push(Act::Browse(BrowseAct::PinFolder(d.clone(), false)));
                     ui.close();

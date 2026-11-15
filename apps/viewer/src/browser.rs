@@ -100,7 +100,10 @@ impl Browser {
             .name("library".into())
             .spawn(move || {
                 let mut lib = match Library::new(ni, &own) {
-                    Ok(l) => l,
+                    Ok(mut l) => {
+                        l.set_reader(nks_item);
+                        l
+                    }
                     Err(e) => {
                         // Answer every query with the error.
                         while let Ok(job) = rx.recv() {
@@ -407,6 +410,27 @@ pub fn list_folder(dir: &Path) -> Vec<Entry> {
         .collect();
     out.sort_by_key(|e| (!e.dir, e.path.file_name().map(|n| n.to_string_lossy().to_lowercase())));
     out
+}
+
+/// An NKS preset as the library lists it: its tags, and its plug-in as product.
+fn nks_item(path: &Path) -> Option<Item> {
+    use deckard_plugins::nks;
+    let p = nks::parse(&std::fs::read(path).ok()?).ok()?;
+    let fx = p.info.device_type == "FX" || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("nksfx"));
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    Some(Item {
+        vendor: if p.info.vendor.is_empty() { p.vendor.unwrap_or_default() } else { p.info.vendor },
+        kind: if fx { deckard_library::Kind::Effect } else { deckard_library::Kind::Instrument },
+        user: true,
+        name: if p.info.name.is_empty() { stem } else { p.info.name },
+        path: path.to_path_buf(),
+        product: p.name,
+        bank: p.info.bankchain.into_iter().filter(|b| !b.is_empty()).collect(),
+        types: p.info.types,
+        characters: p.info.characters,
+        author: p.info.author,
+        ..Item::default()
+    })
 }
 
 /// A file as a library item (its kind from its extension or name).
