@@ -2514,6 +2514,44 @@ fn the_events_zoom_knobs_show_icons_while_touched() {
     assert!(!boxed(&mut s), "let go: gone");
 }
 
+/// Browse: touching or turning knob 5, 6 or 7 shows all its values over the right
+/// screen, as Maschine's; it goes when let go, when the 4D wheel turns, or a moment
+/// after the last turn.
+#[test]
+fn browse_attribute_knobs_show_their_values() {
+    let (mut s, mut v) = (Surface::new(), view());
+    library(&mut v);
+    v.browser.attributes[0].1 = Some(1);
+    press(&mut s, &v, "BUTTON_BROWSE");
+    let shown = |s: &Surface, v: &View| {
+        let t = s.screen_text(v);
+        t.contains(&"TYPES".to_string()) && t.contains(&"Drums".to_string()) && t.contains(&"Bass".to_string())
+    };
+    assert!(!shown(&s, &v), "not before a touch");
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    assert!(shown(&s, &v), "touched: the Types");
+    hold(&mut s, &v, "BUTTON_CAP_8", true);
+    assert!(!shown(&s, &v), "knob 8 touched closes it");
+    hold(&mut s, &v, "BUTTON_CAP_8", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(!shown(&s, &v), "let go: gone");
+    hold(&mut s, &v, "BUTTON_CAP_6", true);
+    assert!(!s.screen_text(&v).contains(&"SUB-TYPES".to_string()), "no Sub-types to show");
+    hold(&mut s, &v, "BUTTON_CAP_6", false);
+    let now = Instant::now();
+    s.event(&Event::Knob(4, 0.01), &v, now);
+    assert!(shown(&s, &v), "turned: the Types");
+    s.event(&Event::Wheel(1), &v, now);
+    assert!(!shown(&s, &v), "turning the 4D wheel closes it");
+    s.event(&Event::Knob(4, 0.01), &v, now);
+    assert!(shown(&s, &v), "turned again: the Types");
+    s.tick(&v, now + std::time::Duration::from_millis(500));
+    assert!(shown(&s, &v), "still, half a second on");
+    s.tick(&v, now + std::time::Duration::from_secs(2));
+    assert!(!shown(&s, &v), "gone a moment after the last turn");
+    assert_eq!(s.error(), None);
+}
+
 /// With AUTO on, the Control page's knobs are only what can be modulated, each showing
 /// its modulation where the song is as a percentage, as the MK3 manual has it (C31).
 #[test]
