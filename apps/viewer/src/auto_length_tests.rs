@@ -79,6 +79,7 @@ fn an_empty_auto_pattern_records_from_one_bar() {
     assert_eq!(length(&app), 3 * bar);
     app.set_recording(false, false);
     assert_eq!(length(&app), before, "nothing played: as it was");
+    assert!(app.surface_view().pattern_auto, "still empty: still Auto");
 }
 
 /// An empty bar doesn't stop it: it grows on until REC is off, then keeps the bars
@@ -100,6 +101,8 @@ fn an_auto_pattern_grows_until_rec_is_off() {
     assert_eq!(length(&app), 3 * bar, "to the last note's bar");
     let doc = app.doc.clone().unwrap();
     assert_eq!(doc.borrow().project().groups[0].patterns[0].notes.len(), 2);
+    assert!(!doc.borrow().length_is_auto(0, 0), "settled length is no longer Auto");
+    assert!(!app.surface_view().pattern_auto, "controller Pattern page shows settled length, not Auto");
 }
 
 /// A note in the last bar adds the next too (before the song gets there).

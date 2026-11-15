@@ -5975,12 +5975,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "LENGTH", font(10.0), white(120));
             let at = Rect::from_min_size(Pos2::new(r.right() + 6.0, y - 10.0), Vec2::new(64.0, 20.0));
             // Auto (no length chosen): an empty pattern grows as it's recorded into.
-            let auto = app.doc.as_ref().is_some_and(|d| d.borrow().length_is_auto(g, pi));
-            let text = if auto && pt.notes.is_empty() {
-                "Auto".to_string()
-            } else {
-                format!("{}:{}:{}", len / bar, len % bar / beat, len % beat / (PPQ / 4))
-            };
+            let auto = pt.notes.is_empty() && app.doc.as_ref().is_some_and(|d| d.borrow().length_is_auto(g, pi));
+            let text = if auto { "Auto".to_string() } else { format!("{}:{}:{}", len / bar, len % bar / beat, len % beat / (PPQ / 4)) };
             let len_drawn = menu_at(ui, at, text, |ui| {
                 if ui
                     .selectable_label(auto, "Auto")

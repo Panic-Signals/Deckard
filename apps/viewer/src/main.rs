@@ -4674,6 +4674,9 @@ impl App {
                 let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
                 let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
                 drop(d);
+                if end.is_some() {
+                    doc.borrow_mut().set_length_auto(g, pi, false);
+                }
                 let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
             }
             // First takes in fixed-length empty patterns follow the same start
@@ -4686,6 +4689,7 @@ impl App {
                 let leading = (first - pat.start).max(0) / bar * bar;
                 let (start, length) = (pat.start + leading, (pat.length - leading).max(bar));
                 drop(d);
+                doc.borrow_mut().set_length_auto(g, pi, false);
                 if leading > 0 {
                     let _ = doc.borrow_mut().set_pattern_span(g, pi, start, length);
                 }
@@ -5437,7 +5441,7 @@ impl App {
         if let Some(pt) = p.groups.get(self.group).and_then(|grp| grp.patterns.get(self.pattern)) {
             v.pattern_start = pt.start;
             v.pattern_length = if pt.length > 0 { pt.length } else { p.bar_length() };
-            v.pattern_auto = d.length_is_auto(self.group, self.pattern);
+            v.pattern_auto = d.length_is_auto(self.group, self.pattern) && pt.notes.is_empty();
             v.notes = pt
                 .notes
                 .iter()
