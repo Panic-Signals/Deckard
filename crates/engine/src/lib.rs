@@ -90,6 +90,10 @@ pub struct NoteEvent {
     /// A note a link added ([`pads`]): the sound whose note played it. Muting that sound
     /// silences this too (#21).
     pub from: Option<usize>,
+    /// A hit of a ratcheted note: what its chance is rolled by instead of the event's
+    /// place in the timeline, the same for all the note's hits, so they play or stay
+    /// silent together.
+    pub roll: Option<u64>,
 }
 
 /// A plug-in's note-off due `offset` frames after `now`, moved to its note's attack when
@@ -316,6 +320,10 @@ enum Seen<'a> {
     /// switch; `playing` false once the sequence has ended).
     Position { t: u64, frame: u64, playing: bool },
 }
+
+/// Where the rolls of ratcheted notes ([`NoteEvent::roll`]) start: past any event's place
+/// in a timeline.
+const RATCHET_ROLLS: u64 = 1 << 40;
 
 /// Whether timeline event `idx` plays on pass `pass` (`probability` in %): decided by a
 /// hash of the event, so it comes out the same whenever and wherever it's asked
@@ -549,6 +557,7 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
             let at = start + rep;
             let end = start + rep + plen.min(length - rep);
             let cue = |tick: i64, cue: Cue| NoteEvent {
+                roll: None,
                 tick,
                 group: g,
                 sound: c.sound,
@@ -569,19 +578,30 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
             if pos < 0 || pos >= plen || rep + pos >= length {
                 continue;
             }
-            out.push(NoteEvent {
-                tick: swung(p, g, n.sound, start + rep + pos),
-                group: g,
-                sound: n.sound,
-                pitch: n.pitch,
-                velocity: n.velocity,
-                length: n.length,
-                probability: n.probability,
-                midi: None,
-                cue: None,
-                expr: n.expr,
-                from: None,
-            });
+            // A ratchet's hits: the swing moves the note's start, the hits keep their even
+            // spacing after it; one that would start at or past the pattern's (or the
+            // pass's) end doesn't play. An ordinary note is its one hit.
+            let at = swung(p, g, n.sound, start + rep + pos);
+            let roll = (!n.ratchet.is_plain()).then(|| RATCHET_ROLLS + out.len() as u64);
+            for hit in n.ratchet.hits(n.length, n.velocity) {
+                if pos + hit.offset >= plen || rep + pos + hit.offset >= length {
+                    break;
+                }
+                out.push(NoteEvent {
+                    tick: at + hit.offset,
+                    group: g,
+                    sound: n.sound,
+                    pitch: n.pitch,
+                    velocity: hit.velocity,
+                    length: hit.length,
+                    probability: n.probability,
+                    midi: None,
+                    cue: None,
+                    expr: n.expr,
+                    from: None,
+                    roll,
+                });
+            }
         }
         for m in &pat.midi {
             let pos = m.position - pat.start;
@@ -589,6 +609,7 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
                 continue;
             }
             out.push(NoteEvent {
+                roll: None,
                 tick: swung(p, g, m.sound, start + rep + pos),
                 group: g,
                 sound: m.sound,
@@ -3621,7 +3642,8 @@ impl Engine {
                         fire(Seen::Event {
                             t,
                             e,
-                            plays: chance(e.probability, next, tl.chance_pass(e, pass), self.rng) && !self.repeat_replaces(e),
+                            plays: chance(e.probability, e.roll.map_or(next, |k| k as usize), tl.chance_pass(e, pass), self.rng)
+                                && !self.repeat_replaces(e),
                             frame,
                             pass,
                         });
@@ -3964,6 +3986,7 @@ impl Engine {
             || self.instruments.get(group).and_then(|r| r.get(sound)).is_some_and(Option::is_some);
         let tps = 1.0 / self.samples_per_tick();
         let e = NoteEvent {
+            roll: None,
             tick: 0,
             group,
             sound,
@@ -3983,6 +4006,7 @@ impl Engine {
     pub fn control_in(&mut self, group: usize, sound: usize, kind: MidiKind, thru: bool) {
         let tps = 1.0 / self.samples_per_tick();
         let e = NoteEvent {
+            roll: None,
             tick: 0,
             group,
             sound,
@@ -4003,7 +4027,20 @@ impl Engine {
     pub fn note_on(&mut self, group: usize, sound: usize, pitch: i64, velocity: i64, length: i64) {
         let tps = 1.0 / self.samples_per_tick();
         self.trigger(
-            NoteEvent { tick: 0, group, sound, pitch, velocity, length, probability: 100, midi: None, cue: None, expr: None, from: None },
+            NoteEvent {
+                roll: None,
+                tick: 0,
+                group,
+                sound,
+                pitch,
+                velocity,
+                length,
+                probability: 100,
+                midi: None,
+                cue: None,
+                expr: None,
+                from: None,
+            },
             tps,
         );
     }
@@ -4852,6 +4889,7 @@ impl Engine {
         let sounds = self.fx.get(group).map_or(0, Vec::len);
         for sound in 0..sounds {
             let e = NoteEvent {
+                roll: None,
                 tick: 0,
                 group,
                 sound,
@@ -4875,6 +4913,7 @@ impl Engine {
         let tps = 1.0 / self.samples_per_tick();
         for s in pads::bits(chokes) {
             let e = NoteEvent {
+                roll: None,
                 tick: 0,
                 group,
                 sound: s,
@@ -5028,7 +5067,9 @@ impl Engine {
                     }
                     let idx = self.next;
                     self.next += 1;
-                    let plays = chance(e.probability, idx, self.timeline.chance_pass(&e, self.pass), self.rng) && !self.repeat_replaces(&e);
+                    let plays =
+                        chance(e.probability, e.roll.map_or(idx, |k| k as usize), self.timeline.chance_pass(&e, self.pass), self.rng)
+                            && !self.repeat_replaces(&e);
                     #[cfg(test)]
                     self.fired.push((self.time, e.tick, e.sound, e.pitch, plays));
                     if plays {
@@ -7131,6 +7172,7 @@ mod tests {
         set_sample(&mut e, ramp, &[], false);
         e.timeline = Timeline {
             events: vec![NoteEvent {
+                roll: None,
                 tick: 0,
                 group: 0,
                 sound: 0,
@@ -7166,6 +7208,7 @@ mod tests {
         set_sample(&mut e, ramp, &[], false);
         e.timeline = Timeline {
             events: vec![NoteEvent {
+                roll: None,
                 tick: 0,
                 group: 0,
                 sound: 0,
@@ -7775,6 +7818,7 @@ mod tests {
         let mut e = click_engine(1000);
         let events: Vec<NoteEvent> = (0..400)
             .map(|i| NoteEvent {
+                roll: None,
                 tick: i * 240,
                 group: 0,
                 sound: 0,
@@ -7803,6 +7847,7 @@ mod tests {
             e.looping = true;
             let events: Vec<NoteEvent> = (0..32)
                 .map(|i| NoteEvent {
+                    roll: None,
                     tick: i * 240,
                     group: 0,
                     sound: 0,
@@ -9741,6 +9786,7 @@ mod tests {
         let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         let tps = 1.0 / e.samples_per_tick();
         let choke = NoteEvent {
+            roll: None,
             tick: 0,
             group: 0,
             sound: 1,
@@ -9880,6 +9926,7 @@ mod tests {
         e.note_hold(0, 1, 60, 100);
         blocks(&mut e, 10);
         let choke = NoteEvent {
+            roll: None,
             tick: 0,
             group: 0,
             sound: 1,
@@ -12854,6 +12901,63 @@ mod tests {
         let engine = click_engine_for(&p, 1000);
         assert_eq!(engine.expression(deckard_model::ExprId(0)).as_deref(), Some(&e));
         assert!(engine.expression(deckard_model::ExprId(9)).is_none());
+    }
+
+    /// The first pass's hits of the test project's one pattern with `note` its only note.
+    fn ratchet_hits(note: Note) -> Vec<NoteEvent> {
+        let mut p = project();
+        p.groups[0].patterns[0].notes = vec![note];
+        let t = timeline(&p, Mode::Arrangement);
+        let bar = own_length(&p, &p.groups[0].patterns[0]);
+        t.events.into_iter().filter(|e| e.midi.is_none() && e.cue.is_none() && e.tick < bar).collect()
+    }
+
+    fn ratcheted(position: i64, length: i64, velocity: i64, ratchet: deckard_model::ratchet::Ratchet) -> Note {
+        Note { ratchet, expr: None, sound: 0, position, length, pitch: 60, velocity, probability: 100 }
+    }
+
+    #[test]
+    fn a_ratcheted_note_plays_its_hits() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let down = Ratchet { repeats: 4, shape: Shape::Down, floor: 0, ceiling: 127 };
+        let hits = ratchet_hits(ratcheted(0, PPQ, 100, down));
+        let got: Vec<(i64, i64, i64)> = hits.iter().map(|e| (e.tick, e.length, e.velocity)).collect();
+        assert_eq!(got, [(0, PPQ / 4, 100), (PPQ / 4, PPQ / 4, 75), (PPQ / 2, PPQ / 4, 50), (3 * PPQ / 4, PPQ / 4, 25)]);
+        assert!(hits[0].roll.is_some() && hits.iter().all(|e| e.roll == hits[0].roll), "one roll for the note");
+        // An ordinary note is the one event it always was.
+        let plain = ratchet_hits(ratcheted(0, PPQ, 100, Ratchet::default()));
+        assert_eq!(plain.iter().map(|e| (e.tick, e.length, e.velocity, e.roll)).collect::<Vec<_>>(), [(0, PPQ, 100, None)]);
+    }
+
+    #[test]
+    fn hits_past_the_patterns_end_do_not_play() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let mut p = project();
+        let bar = own_length(&p, &p.groups[0].patterns[0]);
+        // From a quarter before the end, two quarters long, a hit every eighth: two fit.
+        let r = Ratchet { repeats: 4, shape: Shape::Flat, floor: 0, ceiling: 127 };
+        p.groups[0].patterns[0].notes = vec![ratcheted(bar - PPQ, 2 * PPQ, 100, r)];
+        let t = timeline(&p, Mode::Arrangement);
+        let ticks: Vec<i64> = t.events.iter().filter(|e| e.midi.is_none() && e.cue.is_none() && e.tick < 2 * bar).map(|e| e.tick).collect();
+        let first: Vec<i64> = ticks.iter().copied().filter(|&x| x < bar).collect();
+        assert_eq!(first, [bar - PPQ, bar - PPQ / 2]);
+        assert!(ticks.iter().all(|&x| x % bar >= bar - PPQ), "none fires into the next pass: {ticks:?}");
+    }
+
+    #[test]
+    fn a_ratchets_hits_take_one_roll() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let r = Ratchet { repeats: 8, shape: Shape::Flat, floor: 0, ceiling: 127 };
+        let hits = ratchet_hits(Note { probability: 50, ..ratcheted(0, PPQ, 100, r) });
+        assert_eq!(hits.len(), 8);
+        let mut seen = [false; 2];
+        for pass in 0..64u64 {
+            let plays: Vec<bool> =
+                hits.iter().enumerate().map(|(i, e)| chance(e.probability, e.roll.map_or(i, |k| k as usize), pass, 7)).collect();
+            assert!(plays.iter().all(|&x| x == plays[0]), "pass {pass}: {plays:?}");
+            seen[usize::from(plays[0])] = true;
+        }
+        assert_eq!(seen, [true, true], "it plays on some passes and not on others");
     }
 
     /// Pressure on a held note sent out (a pad, or a key passed thru) goes out with it
