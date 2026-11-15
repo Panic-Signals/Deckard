@@ -9103,8 +9103,8 @@ impl App {
             }
             B::Favorite(i, on) => {
                 if let Some(item) = b.results.items.get(i) {
-                    let p = item.path.clone();
-                    b.set_favorite(&p, on);
+                    let key = item.favorite_key();
+                    b.set_favorite(&key, on);
                 }
                 return;
             }
@@ -9257,8 +9257,9 @@ impl App {
                 return self.load_nks_preset(&item.name, (g, s), &bytes);
             }
             if !matches!(ext.as_str(), "mxinst" | "mxfx") {
-                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                if let Some(res) = deckard_plugins::nks::native_preset(&ext, &bytes, &self.catalog.entries) {
+                if let Some(res) =
+                    deckard_plugins::nks::native_preset_file(path, item.uuid.as_deref(), item.kind == Kind::Effect, &self.catalog.entries)
+                {
                     let plugin = res.map_err(|e| format!("{}: {e}", item.name))?;
                     return self.load_resolved_preset(&item.name, (g, s), plugin);
                 }
@@ -17121,7 +17122,9 @@ mod tests {
         let omni_art = tmp.path().join("omnisphere");
         let omni_vendor = tmp.path().join("spectrasonics").join("omnisphere");
         let kontakt = tmp.path().join("kontakt");
-        for d in [&omni_art, &omni_vendor, &kontakt] {
+        let monark = tmp.path().join("monark");
+        let prism = tmp.path().join("prism");
+        for d in [&omni_art, &omni_vendor, &kontakt, &monark, &prism] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(omni_art.join("MST_artwork.png"), thumb_png).unwrap();
@@ -17129,6 +17132,10 @@ mod tests {
         std::fs::write(omni_vendor.join("MST_logo.png"), logo_png).unwrap();
         std::fs::write(kontakt.join("MST_artwork.png"), thumb_png).unwrap();
         std::fs::write(kontakt.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(monark.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(monark.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(prism.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(prism.join("MST_logo.png"), logo_png).unwrap();
 
         let prev = std::env::var_os("DECKARD_NI_IMAGE_DIR");
         // SAFETY: scoped to this unit test; `with_ni_pictures` rescans when the path changes.
@@ -17138,6 +17145,27 @@ mod tests {
         assert!(s.has_picture("omnisphere", true) && s.has_picture("omnisphere", false));
         assert_eq!(plugin_pictures::slot_key(&s, "Kontakt 7").as_deref(), Some("kontakt7"));
         assert!(s.has_picture("kontakt7", true) && s.has_picture("kontakt7", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Monark").as_deref(), Some("monark"));
+        assert!(s.has_picture("monark", true) && s.has_picture("monark", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Prism FX").as_deref(), Some("prismfx"));
+        assert!(s.has_picture("prismfx", true) && s.has_picture("prismfx", false));
+        let mut app = App::default();
+        app.new_project();
+        app.load_resolved_preset(
+            "Bass Sting",
+            (0, 0),
+            deckard_plugins::nks::Resolved {
+                id: "Native Instruments:VST3:INSTR:5653544E6952367265616B746F722036".into(),
+                name: "Monark".into(),
+                chunk: Vec::new(),
+                pages: Vec::new(),
+            },
+        )
+        .unwrap();
+        let doc = app.doc.as_ref().unwrap().borrow();
+        let slot = &doc.project().groups[0].sounds[0].slots[0];
+        assert_eq!(slot.name, "Monark");
+        assert_eq!(plugin_pictures::slot_key(&s, &slot.name).as_deref(), Some("monark"));
         plugin_pictures::ensure_browser_product(&s, "Omnisphere");
         assert!(s.has_picture("artwork:omnisphere", true) && s.has_picture("artwork:omnisphere", false));
         match prev {
