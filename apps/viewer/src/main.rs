@@ -11624,7 +11624,7 @@ impl App {
                 egui::Panel::right("controller")
                     .resizable(false)
                     .exact_size(layout::CONTROLLER_WIDTH)
-                    .frame(egui::Frame::new().fill(layout::S00).inner_margin(8.0))
+                    .frame(egui::Frame::new().fill(layout::s00()).inner_margin(8.0))
                     .show(ui, |ui| match c {
                         Ok(c) => {
                             c.tick(&mut requests);

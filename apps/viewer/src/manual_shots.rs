@@ -329,3 +329,31 @@ fn ratchet_shots() {
     }
     mk3(&mut h, "mk3-ratchet.png");
 }
+
+/// The whole window in the desktop theme `$DECKARD_SHOT_DESKTOP` (LCD: `$DECKARD_SHOT_LCD`):
+/// the Ideas, Song, Mix and LFO views, and the Sampling page.
+#[test]
+#[ignore]
+fn desktop_theme_shots() {
+    let theme = std::env::var("DECKARD_SHOT_DESKTOP").unwrap_or("palenight".into());
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    app.settings.desktop_theme = theme.clone();
+    if let Ok(mode) = std::env::var("DECKARD_SHOT_LCD") {
+        app.settings.lcd_mode = mode;
+    }
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+    window(&mut h, &format!("desktop-{theme}-ideas.png"), None);
+    h.state_mut().song_view = true;
+    window(&mut h, &format!("desktop-{theme}-song.png"), None);
+    h.state_mut().song_view = false;
+    h.state_mut().mixer = true;
+    window(&mut h, &format!("desktop-{theme}-mix.png"), None);
+    h.state_mut().mixer = false;
+    h.state_mut().lfos = true;
+    window(&mut h, &format!("desktop-{theme}-lfos.png"), None);
+    h.state_mut().lfos = false;
+    h.state_mut().sampling_open = true;
+    window(&mut h, &format!("desktop-{theme}-sampling.png"), None);
+}

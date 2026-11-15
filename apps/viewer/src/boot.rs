@@ -200,7 +200,7 @@ impl App {
             b.held = Some(p);
         }
         self.boot_next();
-        ui.painter().rect_filled(ui.max_rect(), 0.0, layout::S00);
+        ui.painter().rect_filled(ui.max_rect(), 0.0, layout::s00());
         if let Some(b) = self.boot.as_mut() {
             crate::splash::show(&ctx, b);
         }

@@ -56,7 +56,7 @@ fn tabs(ui: &mut Ui, painter: &Painter, body: Rect, id: egui::Id, names: &[&str]
         x = r.left() - 6.0;
         let resp = ui.interact(r, id.with(k), Sense::click());
         let ink = if k == cur {
-            Color32::WHITE
+            crate::layout::ink()
         } else if resp.hovered() {
             white(200)
         } else {
@@ -108,7 +108,7 @@ fn numeric(ui: &mut Ui, painter: &Painter, r: Rect, label: Option<&str>, size: f
         painter.text(Pos2::new(r.center().x, y + 7.0), Align2::CENTER_CENTER, label, font(12.0), white(160));
         y += 18.0;
     }
-    let ink = if resp.hovered() || resp.dragged() { Color32::WHITE } else { white(230) };
+    let ink = if resp.hovered() || resp.dragged() { crate::layout::ink() } else { white(230) };
     painter.text(Pos2::new(r.center().x, y + size * 0.6), Align2::CENTER_CENTER, &k.1, font(size), ink);
     if let Some(edit) = k.3 {
         drag(ui, &resp, id.with("drag"), (k.2, k.1.as_str()), 300.0, edit, acts);
@@ -121,7 +121,7 @@ fn bipolar_slider(ui: &mut Ui, painter: &Painter, r: Rect, label: &str, k: &Knob
     let track = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 6.0), Vec2::new(r.width(), 4.0));
     let resp =
         ui.interact(r, id, Sense::click_and_drag()).on_hover_text("Drag (Shift: fine); double-click: type a value; ⌘-click: default");
-    painter.rect_filled(track, 2.0, Color32::from_rgb(0x3a, 0x3a, 0x3a));
+    painter.rect_filled(track, 2.0, crate::layout::grey(0x3a));
     let a = k.2.clamp(0.0, 1.0);
     let (x0, x1) = (track.center().x, track.left() + track.width() * a);
     painter.rect_filled(Rect::from_x_y_ranges(x0.min(x1)..=x0.max(x1), track.y_range()), 2.0, color);
@@ -149,7 +149,7 @@ fn bipolar_slider(ui: &mut Ui, painter: &Painter, r: Rect, label: &str, k: &Knob
 /// The decay's shape (Maschine's DecayVisualizer): a falling curve whose length follows
 /// Decay.
 fn decay_curve(painter: &Painter, r: Rect, decay: f32, color: Color32) {
-    painter.rect_filled(r, 2.0, Color32::from_rgb(0x1a, 0x1a, 0x1a));
+    painter.rect_filled(r, 2.0, crate::layout::grey(0x1a));
     let tau = 0.04 + 0.5 * decay.clamp(0.0, 1.0).powi(2);
     let n = 48;
     let pts: Vec<Pos2> = (0..=n)
@@ -191,7 +191,7 @@ fn main_tab(
     let rect = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(at(x, y), Vec2::new(w, h) * k);
     let ctl = |field: &str| drum_ui::control(slot, g, s, i, field);
     let engine = slot.param(drum_ui::engine_field(module)).unwrap_or(0.0).round() as i32;
-    let line = Color32::from_rgb(0x32, 0x32, 0x32);
+    let line = crate::layout::grey(0x32);
     for r in [rect(174.0, 43.0, 1.0, 157.0), rect(459.0, 43.0, 1.0, 157.0), rect(21.0, 158.0, 145.0, 1.0), rect(468.0, 158.0, 145.0, 1.0)] {
         painter.rect_filled(r, 0.0, line);
     }

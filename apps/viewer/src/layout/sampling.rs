@@ -288,7 +288,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
 
     // Header: the tabs (only RECORD until the sound has a sample).
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 37.0));
-    painter.rect_filled(header, 0.0, S00);
+    painter.rect_filled(header, 0.0, s00());
     let mut x = header.left() + 12.0;
     for (i, name) in TABS.iter().enumerate() {
         if i > 0 && zone.is_none() || i > 1 && take {
@@ -312,7 +312,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             },
         );
         if on {
-            painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), r.bottom(), Stroke::new(2.0, Color32::WHITE));
+            painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), r.bottom(), Stroke::new(2.0, crate::layout::ink()));
         }
         if resp.clicked() {
             acts.push(sact(SamplingAct::Tab(i)));
@@ -331,11 +331,11 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
                 r,
                 2.0,
                 if on {
-                    S03
+                    s03()
                 } else if resp.hovered() {
-                    S02
+                    s02()
                 } else {
-                    S01
+                    s01()
                 },
             );
             painter.text(r.center(), Align2::CENTER_CENTER, label, font(10.0), if on { white(245) } else { white(142) });
@@ -346,7 +346,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     }
     // Info bar: play, name, duration, stereo/mono.
     let info = Rect::from_min_size(Pos2::new(rect.left(), header.bottom() + 1.0), Vec2::new(rect.width(), 16.0));
-    painter.rect_filled(info, 0.0, S00);
+    painter.rect_filled(info, 0.0, s00());
     if let (Some(z), Some(s)) = (zone, &st.sample) {
         let play = Rect::from_min_size(Pos2::new(info.left() + 4.0, info.top()), Vec2::splat(16.0));
         let resp = ui.interact(play, ui.id().with("samp-play"), Sense::click_and_drag()).on_hover_text("Hold to play the sample");
@@ -418,8 +418,8 @@ fn wave(
     let (v0, v1) = st.view();
     let fx = |f: f64| w.left() + ((f - v0) / (v1 - v0)) as f32 * w.width();
     let xf = |x: f32| (v0 + ((x - w.left()) / w.width()) as f64 * (v1 - v0)).clamp(0.0, len as f64);
-    painter.rect_filled(timeline, 0.0, S00);
-    painter.rect_filled(w, 0.0, S00);
+    painter.rect_filled(timeline, 0.0, s00());
+    painter.rect_filled(w, 0.0, s00());
     // Timeline: seconds.
     let secs = (v1 - v0) / sample.rate.max(1) as f64;
     let step =
@@ -441,7 +441,7 @@ fn wave(
     let (lo, hi) =
         if zone.play_range.1 > zone.play_range.0 { (zone.play_range.0 as f64, zone.play_range.1 as f64 + 1.0) } else { (0.0, len as f64) };
     if let Some((a, b)) = st.selection {
-        painter.rect_filled(Rect::from_x_y_ranges(fx(a as f64)..=fx(b as f64), w.y_range()), 0.0, S02);
+        painter.rect_filled(Rect::from_x_y_ranges(fx(a as f64)..=fx(b as f64), w.y_range()), 0.0, s02());
     }
     let looped = zone.loop_active && zone.loop_range.1 > zone.loop_range.0;
     let (la, lb) = (zone.loop_range.0 as f64, zone.loop_range.1 as f64 + 1.0);
@@ -461,7 +461,7 @@ fn wave(
     let cols = w.width().max(1.0) as usize;
     let colour = |f: usize| {
         let inside = (f as f64) >= lo && (f as f64) < hi;
-        if inside || st.selection.is_some_and(|(s0, s1)| f >= s0 && f < s1) { gcol } else { S03 }
+        if inside || st.selection.is_some_and(|(s0, s1)| f >= s0 && f < s1) { gcol } else { s03() }
     };
     let level = |p: [(f32, f32); 2], k: usize| if st.stereo { p[k] } else { ((p[0].0 + p[1].0) * 0.5, (p[0].1 + p[1].1) * 0.5) };
     let y_of = |cr: &Rect, v: f32| cr.center().y - v.clamp(-1.0, 1.0) * cr.height() * 0.48;
@@ -509,7 +509,7 @@ fn wave(
         }
     }
     for cr in &chans {
-        painter.hline(w.x_range(), cr.center().y, Stroke::new(1.0, Color32::from_rgb(30, 30, 30)));
+        painter.hline(w.x_range(), cr.center().y, Stroke::new(1.0, crate::layout::grey(30)));
     }
     // Slice markers.
     if slices {
@@ -522,9 +522,9 @@ fn wave(
     // Loop frame and S/E markers.
     if looped {
         let r = Rect::from_x_y_ranges(fx(la)..=fx(lb), w.y_range());
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Inside);
+        painter.rect_stroke(r, 0.0, Stroke::new(1.0, crate::layout::ink()), StrokeKind::Inside);
         let tab = Rect::from_min_size(r.min, Vec2::new(r.width(), 12.0));
-        painter.rect_filled(tab, 0.0, Color32::WHITE);
+        painter.rect_filled(tab, 0.0, crate::layout::ink());
         painter.text(tab.left_center() + Vec2::new(4.0, 0.0), Align2::LEFT_CENTER, "LOOP", font(9.0), Color32::BLACK);
     }
     // The S and E flags at the top of their lines (grabbed with them).
@@ -532,8 +532,8 @@ fn wave(
     let flag_e = Rect::from_min_size(Pos2::new(fx(hi) - 14.0, w.top()), Vec2::splat(14.0));
     for (f, label, flag) in [(lo, "S", flag_s), (hi, "E", flag_e)] {
         let x = fx(f);
-        painter.vline(x, w.y_range(), Stroke::new(3.0, Color32::WHITE));
-        painter.rect_filled(flag, 0.0, Color32::WHITE);
+        painter.vline(x, w.y_range(), Stroke::new(3.0, crate::layout::ink()));
+        painter.rect_filled(flag, 0.0, crate::layout::ink());
         painter.text(flag.center(), Align2::CENTER_CENTER, label, font(10.0), Color32::BLACK);
     }
     // Playhead.
@@ -676,14 +676,14 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
     let widths: Vec<f32> = fields
         .iter()
         .map(|f| {
-            let w = |t: &str, size: f32| painter.layout_no_wrap(t.to_string(), font(size), Color32::WHITE).size().x;
+            let w = |t: &str, size: f32| painter.layout_no_wrap(t.to_string(), font(size), crate::layout::ink()).size().x;
             let arrow = if f.choice.is_some() { 12.0 } else { 0.0 };
             (w(&f.value, 12.0).max(w(f.label, 9.0)) + 8.0 + arrow).clamp(70.0, FIELD_MAX_W)
         })
         .collect();
     let inner: f32 = widths.iter().map(|w| w + 4.0).sum();
     let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new((inner + 4.0).max(80.0), 54.0));
-    painter.rect_filled(r, 2.0, S01);
+    painter.rect_filled(r, 2.0, s01());
     painter.text(Pos2::new(r.left() + 6.0, r.top() + 9.0), Align2::LEFT_CENTER, title, font(10.0), white(142));
     let mut fx = r.left() + 4.0;
     for (i, f) in fields.iter().enumerate() {
@@ -707,14 +707,14 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
             Align2::LEFT_CENTER,
             &value,
             font(12.0),
-            if hot { Color32::WHITE } else { white(220) },
+            if hot { crate::layout::ink() } else { white(220) },
         );
         if f.choice.is_some() {
             // A small down arrow: a click lists the choices.
             let c = Pos2::new(fr.right() - 6.0, fr.top() + 22.0);
             painter.add(egui::Shape::convex_polygon(
                 vec![c + Vec2::new(-3.5, -2.0), c + Vec2::new(3.5, -2.0), c + Vec2::new(0.0, 2.5)],
-                if hot { Color32::WHITE } else { white(142) },
+                if hot { crate::layout::ink() } else { white(142) },
                 Stroke::NONE,
             ));
         }
@@ -754,7 +754,7 @@ const FIELD_MAX_W: f32 = 200.0;
 
 /// `text` cut with "…" to fit `width` at `size`.
 fn elide(painter: &Painter, text: &str, size: f32, width: f32) -> String {
-    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font(size), Color32::WHITE).size().x <= width;
+    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font(size), crate::layout::ink()).size().x <= width;
     if fits(text) {
         return text.to_string();
     }
@@ -881,11 +881,11 @@ fn tool_button(ui: &Ui, painter: &Painter, r: Rect, label: &str, enabled: bool, 
     ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-tool", id.to_string())), r));
     let resp = ui.interact(r, ui.id().with(("tool", id)), Sense::click());
     let fill = if on {
-        S03
+        s03()
     } else if resp.hovered() && enabled {
-        S02
+        s02()
     } else {
-        S01
+        s01()
     };
     painter.rect_filled(r, 3.0, fill);
     painter.text(
@@ -926,7 +926,7 @@ fn edit_tab(
     let area = Rect::from_min_max(body.min, Pos2::new(body.right(), body.bottom() - tools_h));
     wave(ui, app, area, zone, zt, gcol, false, acts);
     let tools = Rect::from_min_max(Pos2::new(body.left(), area.bottom() + 1.0), body.max);
-    painter.rect_filled(tools, 0.0, S00);
+    painter.rect_filled(tools, 0.0, s00());
     let has_sel = st.selection.is_some();
     let y = tools.top() + 6.0;
     if let Some(sx) = st.stretch {
@@ -1036,7 +1036,7 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
     let area = Rect::from_min_max(body.min, Pos2::new(body.right(), body.bottom() - 120.0));
     wave(ui, app, area, zone, Target::Zone(app.group, app.sound, zi), gcol, true, acts);
     let tools = Rect::from_min_max(Pos2::new(body.left(), area.bottom() + 1.0), body.max);
-    painter.rect_filled(tools, 0.0, S00);
+    painter.rect_filled(tools, 0.0, s00());
     let y = tools.top() + 6.0;
     let mut x = tools.left() + 12.0;
     let manual = st.slice_mode == 3;
@@ -1132,7 +1132,7 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
     let mut left = main.left();
     if st.zone_list {
         let list = Rect::from_min_size(main.min, Vec2::new(160.0, main.height()));
-        painter.rect_filled(list, 0.0, S00);
+        painter.rect_filled(list, 0.0, s00());
         let lp = painter.with_clip_rect(list);
         for i in 0..=smp.zones.len() {
             let r =
@@ -1146,7 +1146,7 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
                     let name = z.sample.path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
                     let on = i == zi;
                     if on {
-                        lp.rect_filled(r, 2.0, S02);
+                        lp.rect_filled(r, 2.0, s02());
                     }
                     lp.text(
                         Pos2::new(r.left() + 6.0, r.center().y),
@@ -1195,7 +1195,7 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
     // Footer: the focused zone's parameters.
     let Some(z) = smp.zones.get(zi) else { return };
     let footer = Rect::from_min_max(Pos2::new(body.left(), main.bottom() + 1.0), body.max);
-    painter.rect_filled(footer, 0.0, S00);
+    painter.rect_filled(footer, 0.0, s00());
     let zt = Target::Zone(app.group, app.sound, zi);
     let last = st.len().max(1) as i64 - 1;
     let per_step = frame_step(ui, last);
@@ -1253,20 +1253,20 @@ fn zone_map(ui: &mut Ui, app: &App, smp: &deckard_model::Sampler, view: Rect, zi
         painter.rect_filled(
             Rect::from_x_y_ranges(kx(k as f32)..=kx(k as f32 + 1.0), grid.y_range()),
             0.0,
-            if black { Color32::from_rgb(47, 47, 47) } else { Color32::from_rgb(53, 53, 53) },
+            if black { crate::layout::grey(47) } else { crate::layout::grey(53) },
         );
         if k % 12 == 0 {
             painter.vline(kx(k as f32), grid.y_range(), Stroke::new(1.0, Color32::BLACK));
         }
         // Keyboard.
         let kr = Rect::from_x_y_ranges(kx(k as f32)..=kx(k as f32 + 1.0), keyboard.y_range());
-        painter.rect_filled(kr, 0.0, if black { Color32::from_rgb(28, 28, 28) } else { Color32::from_rgb(134, 134, 134) });
+        painter.rect_filled(kr, 0.0, if black { crate::layout::grey(28) } else { crate::layout::grey(134) });
     }
     if let Some(z) = smp.zones.get(zi) {
         painter.rect_filled(Rect::from_x_y_ranges(kx(z.root_key as f32)..=kx(z.root_key as f32 + 1.0), keyboard.y_range()), 0.0, gcol);
     }
     for v in [32, 64, 96] {
-        painter.hline(grid.x_range(), vy(v as f32), Stroke::new(1.0, Color32::from_rgb(38, 38, 38)));
+        painter.hline(grid.x_range(), vy(v as f32), Stroke::new(1.0, crate::layout::grey(38)));
     }
     for (i, z) in smp.zones.iter().enumerate() {
         let r = Rect::from_x_y_ranges(
@@ -1279,9 +1279,9 @@ fn zone_map(ui: &mut Ui, app: &App, smp: &deckard_model::Sampler, view: Rect, zi
             0.0,
             if focused { gcol.gamma_multiply(0.47) } else { Color32::from_rgba_unmultiplied(0x84, 0x84, 0x84, 32) },
         );
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, if focused { Color32::WHITE } else { white(102) }), StrokeKind::Inside);
+        painter.rect_stroke(r, 0.0, Stroke::new(1.0, if focused { crate::layout::ink() } else { white(102) }), StrokeKind::Inside);
         let name = z.sample.path.rsplit(['/', '\\']).next().unwrap_or("");
-        painter.with_clip_rect(r).text(r.left_top() + Vec2::new(4.0, 3.0), Align2::LEFT_TOP, name, font(10.0), Color32::WHITE);
+        painter.with_clip_rect(r).text(r.left_top() + Vec2::new(4.0, 3.0), Align2::LEFT_TOP, name, font(10.0), crate::layout::ink());
     }
     // Interaction.
     let resp = ui.interact(grid, ui.id().with("zone-map"), Sense::click_and_drag());
@@ -1399,7 +1399,7 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
     let rec = &app.recorder.view;
     let busy = rec.status != RecStatus::Idle;
     let painter = ui.painter_at(body);
-    painter.rect_filled(body, 0.0, S00);
+    painter.rect_filled(body, 0.0, s00());
     let top = Rect::from_min_size(body.min + Vec2::new(15.0, 10.0), Vec2::new(body.width() - 30.0, 70.0));
     // Input meters (L, R) with the threshold slider (Detect, while idle).
     let meter = Rect::from_min_size(top.min, Vec2::new(200.0, 30.0));
@@ -1418,7 +1418,7 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
     let detect = rec.mode == 0;
     if detect {
         let thr_x = meter.left() + meter.width() * ((rec.threshold + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
-        painter.vline(thr_x, meter.y_range(), Stroke::new(2.0, if busy { white(90) } else { Color32::WHITE }));
+        painter.vline(thr_x, meter.y_range(), Stroke::new(2.0, if busy { white(90) } else { crate::layout::ink() }));
         let tr = ui
             .interact(meter, ui.id().with("rec-threshold"), Sense::click_and_drag())
             .on_hover_text("Threshold: recording starts when the input passes it (double-click: -12 dB)");
@@ -1461,9 +1461,9 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         if rec.status == RecStatus::Recording {
             REC_ON
         } else if resp.hovered() && can {
-            S03
+            s03()
         } else {
-            S02
+            s02()
         },
     );
     painter.text(start.center(), Align2::CENTER_CENTER, label, font(11.0), if can { white(245) } else { white(80) });
@@ -1506,8 +1506,8 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         if resp.drag_started() {
             resp.dnd_set_drag_payload(DraggedTake(take.clone()));
         }
-        painter.rect_filled(rr, 2.0, Color32::from_rgb(32, 32, 32));
-        painter.rect_stroke(rr, 2.0, Stroke::new(1.0, if rec.focused == Some(i) { gcol } else { S03 }), StrokeKind::Inside);
+        painter.rect_filled(rr, 2.0, crate::layout::grey(32));
+        painter.rect_stroke(rr, 2.0, Stroke::new(1.0, if rec.focused == Some(i) { gcol } else { s03() }), StrokeKind::Inside);
         // Its waveform, the name over it.
         if let Some(wave) = rec.take_waves.get(take).filter(|w| !w.is_empty()) {
             let inner = rr.shrink2(Vec2::new(3.0, 4.0));
