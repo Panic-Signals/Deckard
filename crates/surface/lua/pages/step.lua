@@ -16,6 +16,7 @@
 --                     LENGTH of the selected notes; page 2 PROBABILITY
 --   knob 6            the next or previous 16 steps; knob 8 Keyboard mode's pitches
 --   4-D encoder       as the Events page's (lib/notes.lua)
+--   knob 5            zoom the right screen (double-tap: 16 steps)
 
 local widgets = require("lib.widgets")
 local knobs = require("lib.knobs")
@@ -27,11 +28,15 @@ local notes = require("lib.notes")
 local page = {}
 
 -- The 16 steps shown (from 0), following the playhead, the knob page, probability
--- shown, Keyboard mode's highest pitch shown, and the pads held (their velocities).
+-- shown, the zoomed view (nil: the 16 steps), Keyboard mode's highest pitch shown,
+-- and the pads held (their velocities).
 local segment = 0
 local follow = false
 local knob_page = 1
 local probability = false
+local view_from, view_to = nil, nil
+local in_detent = false
+local detent_turn = 0
 local top_pitch = nil
 local held = {}
 
@@ -68,12 +73,42 @@ local function step_time(s, pad)
   return (pad - 1 + 16 * segment) * step(s)
 end
 
+-- The 16 steps of the current segment.
+local function segment_span(s)
+  local from = first_step(s) + segment * 16 * step(s)
+  return from, from + 16 * step(s)
+end
+
+-- Keep the zoomed view aligned with the current segment when paging.
+local function shift_view(s)
+  if not view_from then return end
+  local a, b = notes.span(s)
+  local width = view_to - view_from
+  local seg_from = first_step(s) + segment * 16 * step(s)
+  local from = util.clamp(seg_from, a, math.max(a, b - width))
+  view_from, view_to = from, from + width
+end
+
+-- What the right screen shows: the zoomed view (kept inside the pattern), or the 16
+-- steps of the current segment.
+local function view_span(s)
+  local seg_from, seg_to = segment_span(s)
+  if not view_from then return seg_from, seg_to end
+  local a, b = notes.span(s)
+  local max_w = math.max(b - a, 16 * step(s))
+  local width = util.clamp(view_to - view_from, 1, max_w)
+  local from = util.clamp(view_from, a, math.max(a, b - width))
+  return from, from + width
+end
+
 -- The segment shown: kept in the pattern, and with FOLLOW on where the playhead is.
 local function sync(s)
+  local old = segment
   if follow and s.playing and s.pattern_position then
     segment = (s.pattern_position - s.pattern_start) // (step(s) * 16)
   end
   segment = util.clamp(segment, 0, segments(s) - 1)
+  if segment ~= old then shift_view(s) end
 end
 
 -- Whether step `pad` has a note of the focused sound starting in it.
@@ -91,11 +126,17 @@ end
 
 function page.shown()
   knob_page, probability, held, held_at, modding = 1, false, {}, {}, false
+  in_detent, detent_turn = false, 0
 end
 
 function page.button(name, down)
+  if name == "CAP_5" and not down then
+    in_detent, detent_turn = false, 0
+  end
   local tapped = knobs.double_tap(name, down)
-  if tapped and not (knob_page == 1 and tapped == 3 and deckard.state().fixed_velocity) then
+  if tapped == 5 then
+    view_from, view_to, in_detent, detent_turn = nil, nil, false, 0
+  elseif tapped and tapped <= 4 and not (knob_page == 1 and tapped == 3 and deckard.state().fixed_velocity) then
     notes.reset_knob(tapped, knob_page)
   end
   local n = tonumber(name:match("^SCREEN_(%d)$"))
@@ -127,15 +168,77 @@ local function pitch_top(s)
   return top_pitch or editor.pitch_top(s, KEY_ROWS)
 end
 
+-- How far knob 5 zooms a tenth of a turn (same curve as Events), and the turn
+-- absorbed at the 16-step (1-bar) snap detent before continuing past it.
+local ZOOM = 1.6
+local SNAP_HOLD = 0.06
+
+-- Store `[from, from + width)` without ever jumping `from`; switch back to aligned
+-- segment mode (`view_from = nil`) only when `from` already sits on a 16-step bar.
+local function set_view(s, from, width, seg_w)
+  local rel = from - first_step(s)
+  if width == seg_w and rel >= 0 and rel % seg_w == 0 then
+    local k = rel // seg_w
+    if k >= 0 and k < segments(s) then
+      segment = k
+      view_from, view_to = nil, nil
+      return
+    end
+  end
+  view_from, view_to = from, from + width
+  local anchor = from + math.min(width, seg_w) // 2
+  segment = util.clamp((anchor - first_step(s)) // seg_w, 0, segments(s) - 1)
+end
+
 function page.knob(n, amount)
   local s = deckard.state()
-  if n == 6 then
+  if n == 5 then
+    if amount == 0 then return true end
+    if follow and s.playing then follow = false end
+    sync(s)
+    if in_detent then
+      detent_turn = detent_turn + amount
+      if math.abs(detent_turn) < SNAP_HOLD then return true end
+      amount = detent_turn - (detent_turn > 0 and SNAP_HOLD or -SNAP_HOLD)
+      in_detent, detent_turn = false, 0
+      if amount == 0 then return true end
+    end
+    local a, b = notes.span(s)
+    local seg_w = 16 * step(s)
+    local from, to = view_span(s)
+    local width = math.max(1, to - from)
+    local min_w = math.min(960, seg_w, b - a)
+    local max_w = math.max(b - a, seg_w)
+    local new = math.floor(width / ZOOM ^ (amount * 10) + 0.5)
+    if new == width then new = width + (amount > 0 and -1 or 1) end
+    new = util.clamp(new, min_w, max_w)
+    local crossed = (width < seg_w and amount < 0 and new >= seg_w)
+      or (width > seg_w and amount > 0 and new <= seg_w)
+    if crossed then
+      new = seg_w
+      in_detent, detent_turn = true, 0
+    end
+    from = util.clamp(from, a, math.max(a, b - new))
+    set_view(s, from, new, seg_w)
+  elseif n == 6 then
     -- (Moving by hand ends FOLLOW while the pattern plays.)
-    local steps = knobs.gather(n, amount)
-    if steps ~= 0 then
+    local a, b = notes.span(s)
+    if view_from and view_to - view_from < b - a then
       if follow and s.playing then follow = false end
       sync(s)
-      segment = util.clamp(segment + steps, 0, segments(s) - 1)
+      local from, to = view_span(s)
+      local width = to - from
+      local seg_w = 16 * step(s)
+      from = util.clamp(math.floor(from + amount * width + 0.5), a, math.max(a, b - width))
+      set_view(s, from, width, seg_w)
+    else
+      local steps = knobs.gather(n, amount)
+      if steps ~= 0 then
+        if follow and s.playing then follow = false end
+        sync(s)
+        segment = util.clamp(segment + steps, 0, segments(s) - 1)
+        shift_view(s)
+      end
     end
   elseif n == 8 then
     local steps = knobs.gather(n, amount, 0.05)
@@ -276,10 +379,9 @@ function page.draw(screen, theme)
   })
   widgets.info_bar(screen, theme, widgets.focus_info(s))
 
-  -- The left screen: the whole pattern, the 16 steps shown framed.
+  -- The left screen: the whole pattern, the right screen's view framed.
   local a, b = notes.span(s)
-  local from = first_step(s) + segment * 16 * step(s)
-  local to = from + 16 * step(s)
+  local from, to = view_span(s)
   editor.draw(screen, theme, s, 0, 60, 480, 145, false)
   local function x_of(t) return math.floor((t - a) / math.max(1, b - a) * 480 + 0.5) end
   local x0, x1 = x_of(from), math.min(x_of(to), 480)

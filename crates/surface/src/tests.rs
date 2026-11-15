@@ -2547,6 +2547,48 @@ fn a_knob_a_macro_controls_shows_the_macro_icon() {
     assert!(changed.iter().all(|&(x, y)| (330..360).contains(&x) && (231..250).contains(&y)), "{changed:?}");
 }
 
+/// Turning knob 5 on the Step page zooms the right screen and updates the left screen's
+/// overview frame; knob 6 pans smoothly when zoomed in and pages 16 steps otherwise.
+#[test]
+fn the_step_page_knob_5_zooms_the_right_screen() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (4 * 3840, 240);
+    v.notes.clear();
+    let now = Instant::now();
+    press(&mut s, &v, "BUTTON_STEP");
+    let has = |s: &Surface, label: &str| s.screen_text(&v).iter().any(|t| t == label);
+    assert!(has(&s, "1.2") && has(&s, "1.3"), "default 16 steps: 1 bar on the right screen");
+    // Tiny encoder steps leaving 1-bar zoom never chatter back into the snap.
+    for _ in 0..20 {
+        s.event(&Event::Knob(4, 0.01), &v, now);
+    }
+    assert!(!has(&s, "1.3"), "small knob 5 steps zoom in smoothly past 1.3 without snap chatter");
+    s.event(&Event::Knob(5, 0.25), &v, now);
+    assert!(has(&s, "1.2") && !has(&s, "2.1"), "knob 6 pans smoothly within bar 1 when zoomed in");
+    // Crossing 1-bar width while panned off-bar holds 1-bar width without jumping `from`.
+    s.event(&Event::Knob(4, -0.25), &v, now);
+    assert!(has(&s, "1.2") && has(&s, "2.1"), "1-bar width from panned position keeps window start without jumping");
+    // Releasing CAP_5 clears the detent; double-tapping CAP_5 resets to aligned 1-bar view.
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(has(&s, "1.2") && has(&s, "1.4") && !has(&s, "2.1"), "double-tapping knob 5 resets to bar 1");
+    // Paging to bar 2, zooming out to full pattern (window at start), and zooming back in
+    // to 1 bar keeps the window at bar 1 instead of jumping to bar 2.
+    s.event(&Event::Knob(5, 0.1), &v, now);
+    assert!(has(&s, "2.2") && !has(&s, "1.2"), "knob 6 paged to bar 2");
+    s.event(&Event::Knob(4, -0.6), &v, now);
+    assert!(!has(&s, "2.2"), "zoomed out to whole pattern");
+    // Pads stay on bar 1 when zoomed out to the whole pattern rather than jumping to bar 3.
+    s.event(&Event::PadOn(1, 0.5), &v, now);
+    assert_eq!(s.event(&Event::PadOff(1), &v, now), [Action::StepToggle { at: 0, length: 240, velocity: 64 }]);
+    s.event(&Event::Knob(4, 0.6), &v, now);
+    assert!(has(&s, "1.2") && !has(&s, "2.2"), "zooming in from full pattern stays at start instead of jumping to bar 2");
+    assert_eq!(s.error(), None);
+}
+
 #[test]
 fn show_position_keeps_the_strip_dark_unless_recording() {
     let (s, mut v) = (Surface::new(), view());
