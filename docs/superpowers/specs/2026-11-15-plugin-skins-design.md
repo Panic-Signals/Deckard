@@ -27,6 +27,8 @@ Goals:
 - Scripts stay declarative. Drawing, animation and timing are Rust's, so a skin can't make
   the screens slow or ugly, and the UI thread never runs Lua per frame.
 - One path: DECKARD's own curves become shipped skins.
+- DECKARD comes with skins for its own plug-ins and some common free ones, and users can
+  write, install and share their own.
 
 ## The short version
 
@@ -47,6 +49,9 @@ Goals:
   live spectrum under it. If a skin has the plug-in wrong, it shows.
 - **Modulation is visible.** The curve shows where the knob is and where modulation has
   moved it, with a fading trail of its sweep.
+- **Shipped and user skins.** DECKARD ships skins for its own plug-ins and a set of common
+  free ones. Users add their own by dropping a file in, and a skin is one file (plus
+  optional pictures), so it's easy to share.
 
 ## What DECKARD already gives, and the gaps
 
@@ -63,12 +68,18 @@ Goals:
 ## Where skins live and how one is found
 
 ```
-crates/surface/lua/skins/            shipped with DECKARD
+crates/surface/lua/skins/            shipped with DECKARD (built into the binary)
   builtin/filter.lua  builtin/eq.lua  builtin/compressor.lua  ...
-<settings>/controller/skins/         the user's; a file at the same path replaces the shipped one
+  vst3/surge-synth-team/surge-xt.lua  vst3/vital-audio/vital.lua  ...
+<settings>/controller/skins/         the user's
   vst3/<vendor>/<plugin>.lua
+  vst3/<vendor>/<plugin>/            the skin's pictures, if it has any
   au/<manufacturer>/<plugin>.lua
 ```
+
+Where a skin sits doesn't decide what it matches; its `match` does. The paths are only
+tidy. "Distribution" below covers which skins ship, how users add their own and which one
+wins.
 
 A skin is matched, most specific first:
 
@@ -87,6 +98,78 @@ to the script-error report scripts already have.
 Skins reload when saved, as controller scripts do, and `defaults/skins/` is refreshed with
 the other defaults when the folder is opened.
 
+## Distribution
+
+### What DECKARD ships
+
+- **Every DECKARD plug-in:** its effects, instruments and drum synths. These replace
+  today's special-case curves, and a DECKARD plug-in with no skin yet gets the `generic`
+  template, never nothing.
+- **A set of common third-party plug-ins,** chosen so anyone can check them: **free,
+  available on macOS, Linux and Windows, widely used, and with stable parameter IDs.** The
+  first set *(builder's call made in design)*: Surge XT, Vital, Dexed, OB-Xd,
+  TAL-NoiseMaker, and Valhalla Supermassive. More can be added on the same terms, by
+  anyone, as a pull request.
+- **No vendor artwork.** A shipped third-party skin uses only parameter IDs, names and
+  units, never the vendor's logos, panel images or fonts. Its identity on screen is the
+  plug-in's name in DECKARD's own type and the group's colour.
+- Shipped skins are built into the binary with the other scripts, and update with
+  DECKARD's releases.
+
+**Tests without the plug-in.** Each shipped third-party skin comes with a **parameter dump**
+(`crates/surface/tests/skins/<plugin>.json`): the plug-in's version, every parameter's id,
+name and range, and its text at 64 points. CI loads the skin against the dump, checks that
+every name resolves and every calibration parses, and renders its golden images. So a
+skin's pull request can be reviewed and tested on any machine, and a plug-in update that
+renames a parameter shows up as a failing dump once its dump is refreshed.
+
+### How users add their own
+
+- **Write one:** **Controller ▸ Open Controller Scripts Folder**, then `skins/`. The
+  shipped skins are in `defaults/skins/` to copy from, as pages are today.
+- **Start from the plug-in:** **Controller ▸ Dump Plug-in Parameters** writes the focused
+  plug-in's parameter dump (the same JSON as the tests use) and a starter skin with every
+  parameter listed and the `generic` template, into `skins/`. Most of a skin is then
+  naming parameters and picking a template.
+- **Install one someone shared:** drop a `.lua`, or a `.zip` of a `.lua` and its picture
+  folder, onto DECKARD's window, or use **Controller ▸ Install Skin…**. DECKARD checks it,
+  says which plug-in it's for, and copies it into `skins/` at its `match` path. A skin
+  that doesn't check isn't installed, and the error says why.
+- **Safe to share.** A skin gets the same Lua as controller scripts: no file, process or
+  network access. Pictures are PNG only, at most 480 × 272 and 512 KB each. A shared skin
+  can draw on the screens and move the plug-in's parameters, nothing else.
+
+### Which skin wins
+
+Several skins can match one plug-in: a shipped one, a user's copy of it, and one
+downloaded from someone else.
+
+1. The most specific `match` wins (plug-in identity, then vendor and name, then built-in
+   key).
+2. At equal specificity, the user's folder wins over the shipped skins.
+3. Among the user's own, the newest `skin_version`.
+
+**Preferences ▸ Hardware ▸ Skins** lists the plug-ins that have skins, and for each one
+every matching skin, where it comes from (shipped or the user's) and which is in use. It
+can pick another, or **None** to keep the plain Control page for that plug-in. The choice
+is a preference, not part of any project.
+
+### Versions
+
+- **`api`:** each skin says which version of the skin format it's written for
+  (`api = 1`). DECKARD loads skins written for its own version or older, and refuses a
+  newer one with an error naming the DECKARD version it needs. New widgets and fields
+  only ever add to the format, so an old skin keeps working.
+- **`skin_version`** and **`author`** say which version of the skin this is and who made
+  it. They show in **Preferences ▸ Hardware ▸ Skins**.
+- **Plug-in updates:** `match.version` limits a skin to the plug-in versions it was
+  written for. If an update renames or removes a parameter, its knob shows `?` and the
+  script-error report names it; the rest of the skin keeps working.
+- **A user's copy of a shipped skin** records the shipped `skin_version` it started from
+  (`based_on`), which **Dump Plug-in Parameters** and copying from `defaults/` fill in.
+  When a release ships a newer one, the script-error report says the user's copy is
+  behind, so they can merge in the changes or delete their copy.
+
 ## What a skin says
 
 A skin returns one table. Nothing in it runs per frame: the only functions are optional
@@ -95,6 +178,8 @@ event hooks.
 ```lua
 -- skins/vst3/acme/ladder.lua (illustrative)
 return {
+  api    = 1,                        -- the skin format it's written for
+  skin_version = 3, author = "A. Name",
   match  = { vendor = "Acme", name = "Ladder" },
   kind   = "filter",                 -- picks the template (pictures, focus behaviour)
   accent = "group",                  -- the group's colour, as Push uses the track's
@@ -385,8 +470,10 @@ doesn't fit the budget.
 ## Documentation
 
 `docs/controller-api.md` gains a **Skins** chapter: where they live, matching, `params`,
-tapers and calibration, value maps, templates, every widget's inputs, hooks, and a worked
-example. `docs/controller-plugins.md` points to it.
+tapers and calibration, value maps, templates, every widget's inputs, hooks, installing,
+sharing, which skin wins, versions, and a worked example. `CONTRIBUTING` (or
+`DEVELOPMENT.md`) says how to add a shipped third-party skin: the criteria, the parameter
+dump, and the golden images. `docs/controller-plugins.md` points to it.
 
 ## Build order
 
@@ -399,11 +486,15 @@ example. `docs/controller-plugins.md` points to it.
 | 5 | Slot tap, FFT worker, measured response, `spectrum`, `sweep`, `scope`, `meter` | No allocation on the audio thread; the built-in Filter's measured response matches its model within 1 dB where there's signal |
 | 6 | Modulation: modulated position, trail, depth band; envelope playheads | Route tests; check with an LFO on cutoff |
 | 7 | `wavetable`, `taps`, `space`, `xy`, `gr`, `steps`, `roll`; shipped skins for the rest of DECKARD's effects and instruments | Golden images |
+| 8 | Distribution: **Dump Plug-in Parameters** and starter skins; **Install Skin…** and drop to install; **Preferences ▸ Hardware ▸ Skins**; `api`, `skin_version`, `based_on`; parameter dumps in CI; the first shipped third-party skins | Install, override and precedence tests; every shipped skin passes against its dump |
 
 Phases 1–3 give DECKARD's effects their pictures and every plug-in a clean face. Phases 5
 and 6 make it look alive.
 
 ## Later
+
+- A shared skin repository that **Preferences ▸ Hardware ▸ Skins** can browse and install
+  from, so a skin someone writes for a plug-in reaches everyone who has it.
 
 - The same `SkinScene` could draw in the app's own Control area, so a plug-in has the same
   face on screen as on the controller.
