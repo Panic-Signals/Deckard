@@ -196,9 +196,29 @@ crashes takes only the probe with it.
 |---|---|
 | `plugin-probe list` | The installed plug-ins DECKARD can host, with their identities (VST3 class ID, AU type/subtype/manufacturer), vendor, name and version |
 | `plugin-probe dump <plugin>` | The **parameter dump**: every parameter's id, name, units string, steps, flags (automatable, bypass, program change), its unit or section (VST3 units), its default, and its text at 64 points. This is the same JSON the tests and **Dump Plug-in Parameters** use |
-| `plugin-probe response <plugin> [--set id=value …]` | For an effect: its frequency response (a log sine sweep, deconvolved), its impulse response, and its level in and out, at the parameter values given (others at their defaults) |
+| `plugin-probe response <plugin> [--set id=value …]` | For an effect, at the parameter values given (others at their defaults), from two test signals: a **log sine sweep**, deconvolved into a frequency and impulse response (clean, low noise), and a **real impulse**, a single-sample click at −12, −24 and −36 dBFS, recorded as it comes out. It reports the frequency response, both impulse responses, the level in and out, and what comparing them shows (below) |
 | `plugin-probe sweep <plugin> <id> [--points 16] [--set …]` | The response at each of `points` values of one parameter, plus what changed between them, already classified: a corner frequency moving (cutoff, with Hz at each point), a peak rising (resonance, with its height and Q), the slope changing (filter mode or slope), overall gain (drive, output), the dry part changing (mix), the impulse response's taps moving (delay time) or its decay changing (reverb decay, damping), nothing measurable (a parameter only the plug-in's UI uses) |
 | `plugin-probe note <plugin> [--note 48] [--set …]` | For an instrument: a held note and its release, giving the level envelope (attack, decay, sustain and release fitted), the pitch, and the spectrum over time. With `sweep`, this finds an instrument's envelope times and its filter |
+
+**Why both a sweep and an impulse.** For a linear, steady plug-in (an EQ, a static filter, a
+plain delay) the two impulse responses match, and the sweep's is the cleaner one. Where
+they differ, that difference is information:
+
+- **They differ, and the impulse's shape changes with its level:** the plug-in is
+  nonlinear (drive, saturation, a compressor or gate acting on the click). The skill
+  then probes it as dynamics or distortion rather than as a filter.
+- **They differ, and repeated impulses differ from each other:** the plug-in moves on its
+  own (chorus, phaser, an internal LFO, a random delay). Its picture gets the modulation
+  trail, and its rate is measured from the impulses' spacing.
+- **Latency:** where the impulse comes out, against the latency the plug-in reports.
+  A mismatch is reported, since it would also put the slot tap's measured response out
+  of step.
+- **Pre-ringing** before the impulse's arrival: a linear-phase EQ or filter, drawn as
+  such.
+- **A gate or expander** passes the loud impulse and swallows the quiet ones, which gives
+  its threshold.
+- **Transients:** the impulse's peak against its body shows a transient shaper's attack
+  and sustain, which a sweep can't see.
 
 Everything goes through the plug-in's ordinary parameters and audio. The probe never reads
 a plug-in's files or code, and never takes anything from its UI: it treats every plug-in
@@ -213,7 +233,10 @@ plug-in name, it:
    already matches (unless asked to replace it).
 2. **Dumps it,** and reads the names, units and sections to form a first guess: the
    `kind`, which parameter is which role, how they group into pages.
-3. **Checks every guess by measuring.** For each candidate role it runs `sweep`: a
+3. **Checks every guess by measuring.** It first runs `response` once at the defaults: the
+   sweep against the impulse says whether the plug-in is linear and steady, nonlinear or
+   moving on its own, which decides how the rest is measured. For each candidate role it
+   then runs `sweep`: a
    "Cutoff" that doesn't move a corner frequency isn't the cutoff. For a filter it finds
    the cutoff's Hz at each point (that becomes the taper, or `calibrate` if the text
    already matches), resonance's peak against its value, and each mode's slope and shape,
@@ -564,7 +587,7 @@ it. `docs/controller-plugins.md` points to it.
 | 6 | Modulation: modulated position, trail, depth band; envelope playheads | Route tests; check with an LFO on cutoff |
 | 7 | `wavetable`, `taps`, `space`, `xy`, `gr`, `steps`, `roll`; shipped skins for the rest of DECKARD's effects and instruments | Golden images |
 | 8 | Distribution: **Dump Plug-in Parameters** and starter skins; **Install Skin…** and drop to install; **Preferences ▸ Hardware ▸ Skins**; `api`, `skin_version`, `based_on`; parameter dumps in CI | Install, override and precedence tests; every shipped skin passes against its dump |
-| 9 | `plugin-probe` (`list`, `dump`, `response`, `sweep`, `note`); the `plugin-skin` skill; `model = "measured"`; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
+| 9 | `plugin-probe` (`list`, `dump`, `response`, `sweep`, `note`); the `plugin-skin` skill; `model = "measured"`; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known, and its sweep-against-impulse check calls the EQ linear, the Compressor and Saturator nonlinear and the Chorus moving; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
 
 Phases 1–3 give DECKARD's effects their pictures and every plug-in a clean face. Phases 5
 and 6 make it look alive.
