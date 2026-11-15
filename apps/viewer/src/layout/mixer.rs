@@ -264,7 +264,7 @@ fn strip_out_field(c: &channel::Ctx, i: usize) -> IoField {
 /// A routing selector: a click lists the choices.
 fn io_button(ui: &Ui, painter: &Painter, b: Rect, id: egui::Id, f: &IoField, acts: &mut Vec<Act>) {
     let resp = ui.interact(b, id, Sense::click()).on_hover_text(f.names.get(f.cur).cloned().unwrap_or_default());
-    painter.rect_filled(b, 2.0, if resp.hovered() { S03 } else { S02 });
+    painter.rect_filled(b, 2.0, if resp.hovered() { s03() } else { s02() });
     let text = painter.layout_no_wrap(f.text.clone(), font(10.0), white(200));
     let w = b.width() - 10.0;
     let shown = if text.size().x > w {
@@ -371,10 +371,10 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
         midi_input: &|g| app.midi_input(g),
     };
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, S00);
+    painter.rect_filled(rect, 0.0, s00());
     // Sidebar: extend/collapse, IO, plug-ins, aux.
     let side = Rect::from_min_size(rect.min, Vec2::new(STRIP, rect.height()));
-    painter.rect_filled(side, 0.0, S05);
+    painter.rect_filled(side, 0.0, s05());
     painter.vline(side.right() - 0.5, side.y_range(), Stroke::new(1.0, Color32::BLACK));
     let toggles: [(bool, &str, &str, MixerSection); 4] = [
         (app.mixer_sections.extended, "⇕", "Extend or collapse the strips", MixerSection::Extended),
@@ -387,7 +387,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
         let r = Rect::from_min_size(Pos2::new(side.left() + 3.0, y), Vec2::new(STRIP - 6.0, 20.0));
         let resp = ui.interact(r, ui.id().with(("mix-side", i)), Sense::click()).on_hover_text(tip);
         if on {
-            painter.rect_filled(r, 3.0, S03);
+            painter.rect_filled(r, 3.0, s03());
         } else if resp.hovered() {
             painter.rect_filled(r, 3.0, white(20));
         }
@@ -561,7 +561,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             name: "Master".into(),
             plugin: String::new(),
             owner: String::new(),
-            color: Color32::WHITE,
+            color: crate::layout::ink(),
             level: p.master_level,
             pan: p.master_pan,
             muted: false,
@@ -597,7 +597,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
     if content > area.width() {
         let w = bar.width() * area.width() / content;
         let x = bar.left() + (bar.width() - w) * off / (content - area.width());
-        painter.rect_filled(Rect::from_min_size(Pos2::new(x, bar.top() + 3.0), Vec2::new(w, bar.height() - 6.0)), 3.0, S03);
+        painter.rect_filled(Rect::from_min_size(Pos2::new(x, bar.top() + 3.0), Vec2::new(w, bar.height() - 6.0)), 3.0, s03());
     }
     // The master column, with its shadow over the strips.
     for k in 0..8 {
@@ -614,7 +614,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
 /// the groups. The row scrolls on its own (wheel over it) and brings the focused tab
 /// into view when the focus moves.
 fn group_tabs(ui: &mut Ui, app: &App, p: &deckard_model::Project, painter: &Painter, row: Rect, acts: &mut Vec<Act>) {
-    painter.rect_filled(row, 0.0, S05);
+    painter.rect_filled(row, 0.0, s05());
     painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, Color32::BLACK));
     let n = p.groups.len();
     let tabs = row.shrink2(Vec2::new(4.0, 0.0));
@@ -646,9 +646,9 @@ fn group_tabs(ui: &mut Ui, app: &App, p: &deckard_model::Project, painter: &Pain
         let fill = if selected {
             col
         } else if resp.hovered() {
-            S03
+            s03()
         } else {
-            S01
+            s01()
         };
         clip.rect_filled(inner, 2.0, fill);
         let (id_ink, name_ink) = if selected {
@@ -689,15 +689,15 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let body = Rect::from_min_max(Pos2::new(r.left(), r.top() + HEAD + 4.0), r.max);
     let body_fill = match (extra, st.focused) {
         (Some(_), _) => EXTRA_BG,
-        (None, true) => Color32::from_rgb(0x14, 0x14, 0x14),
-        (None, false) => S05,
+        (None, true) => crate::layout::grey(0x14),
+        (None, false) => s05(),
     };
     painter.rect_filled(if extra.is_some() { r } else { body }, 0.0, body_fill);
     painter.vline(r.right() + 0.5, r.y_range(), Stroke::new(1.0, Color32::BLACK));
 
     // Header: ID and mini meter, then the name.
     let head = Rect::from_min_size(r.min, Vec2::new(r.width(), HEAD));
-    let mute_col = MUTE_COL;
+    let mute_col = mute_col();
     let (bg, id_ink, name_ink) = match (st.focused && !master, st.muted) {
         _ if extra.is_some() => (EXTRA_BG, EXTRA_INK, if st.muted { white(142) } else { white(245) }),
         (true, false) => {
@@ -708,8 +708,8 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             let on = super::lcd_readable(mute_col).unwrap_or(Color32::from_black_alpha(245));
             (mute_col, on, on)
         }
-        (false, true) => (if sounds { S00 } else { S05 }, mute_col, white(142)),
-        (false, false) => (if matches!(st.ch, Channel::Sound(..)) { S00 } else { S05 }, st.color, white(245)),
+        (false, true) => (if sounds { s00() } else { s05() }, mute_col, white(142)),
+        (false, false) => (if matches!(st.ch, Channel::Sound(..)) { s00() } else { s05() }, st.color, white(245)),
     };
     painter.rect_filled(head, 0.0, bg);
     let row1 = Rect::from_min_size(Pos2::new(head.left() + 4.0, head.top()), Vec2::new(37.0, 20.0));
@@ -839,8 +839,8 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             for (i, slot) in st.slots.iter().enumerate() {
                 let row = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
                 let sq = Rect::from_min_size(row.min + Vec2::new(2.0, 4.0), Vec2::new(10.0, 11.0));
-                painter.rect_filled(row, 0.0, S01);
-                painter.rect_filled(sq, 1.0, if slot.active { st.color } else { S03 });
+                painter.rect_filled(row, 0.0, s01());
+                painter.rect_filled(sq, 1.0, if slot.active { st.color } else { s03() });
                 let p = painter.with_clip_rect(vis(row));
                 p.text(
                     Pos2::new(sq.right() + 4.0, row.center().y),
@@ -891,8 +891,8 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         for (i, slot) in st.slots.iter().enumerate() {
             let row = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), SLOT_ROW - 1.0));
             let sq = Rect::from_min_size(row.min + Vec2::new(2.0, 4.0), Vec2::new(10.0, 11.0));
-            painter.rect_filled(row, 0.0, S01);
-            painter.rect_filled(sq, 1.0, if slot.active { st.color } else { S03 });
+            painter.rect_filled(row, 0.0, s01());
+            painter.rect_filled(sq, 1.0, if slot.active { st.color } else { s03() });
             let p = painter.with_clip_rect(vis(row));
             p.text(
                 Pos2::new(sq.right() + 4.0, row.center().y),
@@ -960,7 +960,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             match &st.io[3 + k] {
                 Some(f) => io_button(ui, painter, dest.intersect(clip), ui.id().with(("mixer-io", st.ch, 3 + k)), f, acts),
                 None => {
-                    painter.rect_filled(row, 2.0, S02);
+                    painter.rect_filled(row, 2.0, s02());
                 }
             }
             // The send level: a small knob.
@@ -1006,9 +1006,9 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
                 let fill = if pre {
                     st.color.gamma_multiply(0.35)
                 } else if ord_resp.hovered() {
-                    S03
+                    s03()
                 } else {
-                    S01
+                    s01()
                 };
                 painter.rect_filled(ord_r, 1.5, fill);
                 painter.text(
@@ -1031,7 +1031,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let target = st.ch.target();
     // Pan: a bipolar bar.
     let pan_r = Rect::from_min_size(Pos2::new(lm.left() + 5.0, lm.top() + 6.0), Vec2::new(61.0, 5.0));
-    painter.rect_filled(pan_r, 0.0, S01);
+    painter.rect_filled(pan_r, 0.0, s01());
     let cx = pan_r.center().x;
     let px = cx + st.pan as f32 * pan_r.width() / 2.0;
     painter.rect_filled(
@@ -1039,7 +1039,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         0.0,
         st.color,
     );
-    painter.vline(cx, pan_r.y_range(), Stroke::new(1.0, S00));
+    painter.vline(cx, pan_r.y_range(), Stroke::new(1.0, s00()));
     // Modulated: where it has the pan now, a mark.
     if let Some(m) = app.mod_amount(super::Edit::Pan(target)) {
         painter.vline(cx + (m * 2.0 - 1.0) * pan_r.width() / 2.0, pan_r.y_range(), Stroke::new(1.5, MODULATED));
@@ -1088,7 +1088,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let peak = app.headroom.get(&key).copied().unwrap_or(0.0);
     let clipped = peak > 1.0;
     let text = if peak <= 1e-6 { "-inf".to_string() } else { format!("{:.1}", to_db(peak)) };
-    painter.text(hr.center(), Align2::CENTER_CENTER, text, font(9.0), if clipped { Color32::WHITE } else { white(61) });
+    painter.text(hr.center(), Align2::CENTER_CENTER, text, font(9.0), if clipped { crate::layout::ink() } else { white(61) });
     if ui.interact(vis(hr), id.with("headroom"), Sense::click()).on_hover_text("Peak level since the last click; click to reset").clicked()
     {
         acts.push(Act::ResetHeadroom(key));
@@ -1100,10 +1100,10 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         painter.text(Pos2::new(sm.left() + 15.0, yy), Align2::RIGHT_CENTER, label, font(8.0), white(70));
     }
     painter.hline((sm.left() + 18.0)..=(sm.left() + 22.0 + METER_STEP + METER_W + 2.0), sm.top() + 25.0, Stroke::new(1.0, white(41)));
-    let meter_col = if master { Color32::WHITE } else { st.color };
+    let meter_col = if master { crate::layout::ink() } else { st.color };
     for (k, v) in [st.meter.0, st.meter.1].into_iter().enumerate() {
         let m = Rect::from_min_size(Pos2::new(sm.left() + 22.0 + k as f32 * METER_STEP, sm.top() + 1.0), Vec2::new(METER_W, 96.0));
-        painter.rect_filled(m, 0.0, S00);
+        painter.rect_filled(m, 0.0, s00());
         let top = sm.top() + db_y(to_db(v)).min(95.0);
         if v > 1e-5 {
             painter.rect_filled(Rect::from_min_max(Pos2::new(m.left(), top), m.max), 0.0, meter_col);
@@ -1124,7 +1124,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let hx = sm.left() + 22.0 + METER_STEP + METER_W + 2.0;
     painter.add(egui::Shape::convex_polygon(
         vec![Pos2::new(hx, hy), Pos2::new(hx + 6.0, hy - 4.0), Pos2::new(hx + 6.0, hy + 4.0)],
-        Color32::from_rgb(0xF2, 0xF2, 0xF2),
+        crate::layout::grey(0xF2),
         Stroke::NONE,
     ));
     // Modulated: where it has the level now, a mark beside the handle.
@@ -1184,7 +1184,7 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
             painter,
             cue.center(),
             if st.cue {
-                Color32::WHITE
+                crate::layout::ink()
             } else if cr.hovered() {
                 white(200)
             } else {
@@ -1232,16 +1232,18 @@ fn dashed_edge(painter: &Painter, r: Rect, col: Color32) {
 }
 
 /// A muted strip's grey.
-const MUTE_COL: Color32 = Color32::from_rgb(0x84, 0x84, 0x84);
+fn mute_col() -> Color32 {
+    crate::layout::grey(0x84)
+}
 
 /// A mute button's face in `m`: "M", grey when `muted`.
 pub(super) fn mute_face(painter: &Painter, m: Rect, muted: bool, hovered: bool) {
     let fill = if muted {
-        MUTE_COL
+        mute_col()
     } else if hovered {
-        S03
+        s03()
     } else {
-        S02
+        s02()
     };
     painter.rect_filled(m, 2.0, fill);
     painter.text(m.center(), Align2::CENTER_CENTER, "M", font(11.0), if muted { Color32::BLACK } else { white(142) });

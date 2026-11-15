@@ -266,7 +266,7 @@ fn curves(
         let (x0, x1) = ((a.x_of)(n.position as f64), (a.x_of)((n.position + n.length.max(1)) as f64));
         let on = app.selected.contains(n);
         let col = if on {
-            Color32::WHITE
+            crate::layout::ink()
         } else if any_selected {
             with_alpha(a.color, 120)
         } else {
@@ -425,7 +425,7 @@ fn curves(
             }
             _ => readout(Some(d), value(pos)),
         };
-        vp.text(Pos2::new(a.lane.left() + 8.0, a.lane.top() + 10.0), Align2::LEFT_CENTER, text, font(11.0), Color32::WHITE);
+        vp.text(Pos2::new(a.lane.left() + 8.0, a.lane.top() + 10.0), Align2::LEFT_CENTER, text, font(11.0), crate::layout::ink());
     }
     if resp.drag_stopped()
         && let Some(NoteDrag::Expr(x)) = drag.take()
@@ -486,7 +486,7 @@ fn release(
     for n in a.notes {
         let edited = editing.iter().find(|(m, _)| m == n).map(|(_, v)| *v);
         let x = bar_x(n);
-        let col = if edited.is_some() || app.selected.contains(n) { Color32::WHITE } else { a.color };
+        let col = if edited.is_some() || app.selected.contains(n) { crate::layout::ink() } else { a.color };
         match edited.or(expression_of(p, n).release_velocity) {
             Some(v) => {
                 let h = inner.height() * f32::from(v) / 127.0;
@@ -533,7 +533,7 @@ fn release(
             Align2::LEFT_CENTER,
             readout(None, f32::from(value_at(pos.y))),
             font(11.0),
-            Color32::WHITE,
+            crate::layout::ink(),
         );
     }
     let to_edits = |values: Vec<(Note, u8)>| -> Vec<(Note, Expression)> {
