@@ -29,6 +29,8 @@ Goals:
 - One path: DECKARD's own curves become shipped skins.
 - DECKARD comes with skins for its own plug-ins and some common free ones, and users can
   write, install and share their own.
+- Making a skin for a new plug-in is mostly automatic: a probe measures what each
+  parameter really does, and a Claude Code skill turns that into a checked skin.
 
 ## The short version
 
@@ -52,6 +54,10 @@ Goals:
 - **Shipped and user skins.** DECKARD ships skins for its own plug-ins and a set of common
   free ones. Users add their own by dropping a file in, and a skin is one file (plus
   optional pictures), so it's easy to share.
+- **Automated analysis.** A headless probe treats a plug-in as a black box: it dumps its
+  parameters and measures how its sound changes as each one moves. The `plugin-skin`
+  Claude Code skill uses those measurements to write the skin, its test data and
+  previews.
 
 ## What DECKARD already gives, and the gaps
 
@@ -117,8 +123,9 @@ the other defaults when the folder is opened.
   DECKARD's releases.
 
 **Tests without the plug-in.** Each shipped third-party skin comes with a **parameter dump**
-(`crates/surface/tests/skins/<plugin>.json`): the plug-in's version, every parameter's id,
-name and range, and its text at 64 points. CI loads the skin against the dump, checks that
+(`crates/surface/tests/skins/<plugin>.json`, made by `plugin-probe dump`): the plug-in's
+version, every parameter's id, name and range, and its text at 64 points, plus the
+measured responses its model was chosen from (see "Automated plug-in analysis"). CI loads the skin against the dump, checks that
 every name resolves and every calibration parses, and renders its golden images. So a
 skin's pull request can be reviewed and tested on any machine, and a plug-in update that
 renames a parameter shows up as a failing dump once its dump is refreshed.
@@ -169,6 +176,75 @@ is a preference, not part of any project.
   (`based_on`), which **Dump Plug-in Parameters** and copying from `defaults/` fill in.
   When a release ships a newer one, the script-error report says the user's copy is
   behind, so they can merge in the changes or delete their copy.
+
+## Automated plug-in analysis
+
+Writing a good skin by hand means finding out what each parameter really does: which knob
+is the cutoff, how its 0..1 maps to Hz, which filter shape each mode is. A plug-in's names
+are a hint, not the answer. So DECKARD gets a probe that measures it, and a Claude Code
+skill that uses the probe to write the skin. Contributors use it to make shipped skins;
+users with Claude Code use it for their own plug-ins.
+
+### The probe
+
+`plugin-probe`, a binary in `crates/plugins` (`src/bin/plugin-probe.rs`). It hosts one
+plug-in **offline in its own process**, at 48 kHz with a fixed block size and a time limit,
+and prints JSON. It never opens a project or touches DECKARD's settings, so a plug-in that
+crashes takes only the probe with it.
+
+| Command | What it gives |
+|---|---|
+| `plugin-probe list` | The installed plug-ins DECKARD can host, with their identities (VST3 class ID, AU type/subtype/manufacturer), vendor, name and version |
+| `plugin-probe dump <plugin>` | The **parameter dump**: every parameter's id, name, units string, steps, flags (automatable, bypass, program change), its unit or section (VST3 units), its default, and its text at 64 points. This is the same JSON the tests and **Dump Plug-in Parameters** use |
+| `plugin-probe response <plugin> [--set id=value …]` | For an effect: its frequency response (a log sine sweep, deconvolved), its impulse response, and its level in and out, at the parameter values given (others at their defaults) |
+| `plugin-probe sweep <plugin> <id> [--points 16] [--set …]` | The response at each of `points` values of one parameter, plus what changed between them, already classified: a corner frequency moving (cutoff, with Hz at each point), a peak rising (resonance, with its height and Q), the slope changing (filter mode or slope), overall gain (drive, output), the dry part changing (mix), the impulse response's taps moving (delay time) or its decay changing (reverb decay, damping), nothing measurable (a parameter only the plug-in's UI uses) |
+| `plugin-probe note <plugin> [--note 48] [--set …]` | For an instrument: a held note and its release, giving the level envelope (attack, decay, sustain and release fitted), the pitch, and the spectrum over time. With `sweep`, this finds an instrument's envelope times and its filter |
+
+Everything goes through the plug-in's ordinary parameters and audio. The probe never reads
+a plug-in's files or code, and never takes anything from its UI: it treats every plug-in
+as a black box, as a listener with a test signal would.
+
+### The skill
+
+`.claude/skills/plugin-skin/SKILL.md`, beside the existing `pull-request` skill. Given a
+plug-in name, it:
+
+1. **Finds the plug-in** with `plugin-probe list`, and stops if a shipped or user skin
+   already matches (unless asked to replace it).
+2. **Dumps it,** and reads the names, units and sections to form a first guess: the
+   `kind`, which parameter is which role, how they group into pages.
+3. **Checks every guess by measuring.** For each candidate role it runs `sweep`: a
+   "Cutoff" that doesn't move a corner frequency isn't the cutoff. For a filter it finds
+   the cutoff's Hz at each point (that becomes the taper, or `calibrate` if the text
+   already matches), resonance's peak against its value, and each mode's slope and shape,
+   then picks the model shape (`svf_lp`, `ladder4`…) whose analytic response fits the
+   measurement best. It does the same for delay times, reverb decay, compressor
+   threshold and ratio, and instruments' envelopes.
+4. **Lays out the pages:** the most-used parameters first, a picture's parameters on the
+   knobs under its screen, sections kept together, buttons for small choices (filter
+   mode, on/off).
+5. **Writes the skin,** with `skin_version = 1` and a comment on each parameter saying
+   how its role was established: *measured* (and how well the model fits) or *named
+   only* (nothing to measure, such as a UI-only parameter).
+6. **Writes the test data:** the parameter dump, plus the measured responses behind each
+   choice (`crates/surface/tests/skins/<plugin>.json`). CI then checks the skin's model
+   against those measurements, without the plug-in, and fails if a later change to a
+   widget's maths moves the model away from what the plug-in really does.
+7. **Renders the previews** (default values, extremes, touch focus on each knob), looks at
+   them, and fixes what's wrong: an empty knob, a curve off the plot, a label that doesn't
+   fit.
+8. **Reports** what's measured and what's only named, the fit of each model in dB, and
+   anything left unresolved. Then, as the user asks, it installs the skin in their
+   `skins/` folder or prepares it for a pull request as a shipped skin (the
+   `pull-request` skill takes it from there).
+
+**When nothing fits.** If no model shape fits a filter within 2 dB where the measurement is
+reliable, the skill doesn't pretend: it gives the picture `model = "measured"`, which draws
+the measured response stored with the skin and interpolates between the measured values,
+and says so in its report. The live slot tap still shows what's really happening.
+
+**What the skill doesn't do.** It doesn't take a vendor's artwork, read a plug-in's files or
+take a plug-in apart. The public-docs rule about NI's software applies to every plug-in.
 
 ## What a skin says
 
@@ -473,7 +549,8 @@ doesn't fit the budget.
 tapers and calibration, value maps, templates, every widget's inputs, hooks, installing,
 sharing, which skin wins, versions, and a worked example. `CONTRIBUTING` (or
 `DEVELOPMENT.md`) says how to add a shipped third-party skin: the criteria, the parameter
-dump, and the golden images. `docs/controller-plugins.md` points to it.
+dump, the golden images, and the `plugin-skin` skill and `plugin-probe` that make most of
+it. `docs/controller-plugins.md` points to it.
 
 ## Build order
 
@@ -486,7 +563,8 @@ dump, and the golden images. `docs/controller-plugins.md` points to it.
 | 5 | Slot tap, FFT worker, measured response, `spectrum`, `sweep`, `scope`, `meter` | No allocation on the audio thread; the built-in Filter's measured response matches its model within 1 dB where there's signal |
 | 6 | Modulation: modulated position, trail, depth band; envelope playheads | Route tests; check with an LFO on cutoff |
 | 7 | `wavetable`, `taps`, `space`, `xy`, `gr`, `steps`, `roll`; shipped skins for the rest of DECKARD's effects and instruments | Golden images |
-| 8 | Distribution: **Dump Plug-in Parameters** and starter skins; **Install Skin…** and drop to install; **Preferences ▸ Hardware ▸ Skins**; `api`, `skin_version`, `based_on`; parameter dumps in CI; the first shipped third-party skins | Install, override and precedence tests; every shipped skin passes against its dump |
+| 8 | Distribution: **Dump Plug-in Parameters** and starter skins; **Install Skin…** and drop to install; **Preferences ▸ Hardware ▸ Skins**; `api`, `skin_version`, `based_on`; parameter dumps in CI | Install, override and precedence tests; every shipped skin passes against its dump |
+| 9 | `plugin-probe` (`list`, `dump`, `response`, `sweep`, `note`); the `plugin-skin` skill; `model = "measured"`; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
 
 Phases 1–3 give DECKARD's effects their pictures and every plug-in a clean face. Phases 5
 and 6 make it look alive.
