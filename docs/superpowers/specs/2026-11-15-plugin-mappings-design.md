@@ -5,7 +5,7 @@ A plug-in can come with a small Lua file, its **mapping**. It holds two things, 
 - **Declarations:** what the plug-in is and what its parameters mean. This one is the
   cutoff, in Hz on a log taper; that one is the filter mode, with these four choices.
 - **Mappings:** where those parameters go on the MK3. Knob pages eight at a time, choices
-  on the display buttons, and which picture each screen shows.
+  on the display buttons, and which pictures sit above which knobs.
 
 It's how Ableton's Push works with Live's devices: each device's parameters are declared
 and banked eight at a time, and Push draws the device's picture (EQ Eight's curve, Auto
@@ -55,9 +55,10 @@ Goals:
   delay taps, reverb decay, knob cells…) is drawn on the MK3 screens thread. Every widget
   has a flat look made from the theme's colours; glow and soft fills are extras a theme can
   turn on.
-- **One picture per screen.** The two screens have a physical gap between them, so nothing
-  crosses it. Each screen has its own picture, and the four knobs under a screen move what
-  that screen shows.
+- **Pictures span the knobs they draw.** A picture sits directly above the knobs whose
+  parameters it shows, two to four knob cells wide: a filter curve over Cutoff and Reso,
+  an envelope over Attack to Release beside it on the same screen. The two screens have a
+  physical gap between them, so no picture crosses it.
 - **Following the knobs.** The slot's pages, whatever filled them (an NKS preset, the
   user, automapping), are the one source of knob assignments. Pictures find their inputs
   on the knobs as they are now, so they change when the pages change and never disagree
@@ -344,16 +345,50 @@ real mapping needs it.
 `pictures` names the pictures a mapping can show. Each has a widget, its inputs, and
 `needs`: the inputs it can't do without.
 
-- **A mapping's own pages** say which picture each screen shows (`left`, `right`) and what
-  the eight knobs are. An empty knob is `false`, since a `nil` would end the Lua list.
-  They're shown when the slot has no pages of its own, or the user asks for them
-  ("Following the knobs").
+**A picture spans knobs.** The picture band above the knobs is split into spans of whole
+knob cells (120 px each), and each span shows one picture, directly above the knobs whose
+parameters it draws. A span is two to four cells wide on one screen, never across the gap
+between knobs 4 and 5. Knobs no picture covers keep their plain cells, with the band above
+them left empty.
+
+- **A mapping's own pages** place pictures by knob range, or by screen as shorthand:
+
+  ```lua
+  { name = "FILTER", knobs = { "cutoff", "reso", "attack", "decay", "env", false, false, "mix" },
+    pictures = { { "response", knobs = { 1, 2 } }, { "contour", knobs = { 3, 4 } },
+                 { "motion", knobs = { 5, 8 } } } },
+  { name = "ENV", left = "contour", right = "response", knobs = { ... } },  -- left = knobs 1-4, right = 5-8
+  ```
+
+  An empty knob is `false`, since a `nil` would end the Lua list. A mapping's pages are
+  shown when the slot has no pages of its own, or the user asks for them ("Following the
+  knobs").
 - **The slot's pages** (an NKS preset's, the user's, automapping) say nothing about
-  pictures, so each screen shows the first of the mapping's pictures whose `needs` are all
-  on the four knobs under that screen ("Following the knobs").
+  pictures, so the layout finds them from the knobs ("Laying out pictures on any page").
 
 That's the only way to place a picture. Templates fill `pictures` and `pages` for a
 `kind`, and a mapping can override any of it.
+
+### Laying out pictures on any page
+
+For a page that doesn't place its own pictures, each screen's four knobs are laid out on
+their own:
+
+1. **Find candidates.** Each of the mapping's pictures, and each of `generic`'s patterns,
+   is a candidate wherever its `needs` sit on **adjacent knobs** of one screen. Its span
+   is the run from its first to its last bound knob, widened to the widget's minimum width
+   ("Widgets") where the screen has room.
+2. **Pick.** Candidates that bind more knobs win, then the mapping's own pictures over
+   `generic`'s, then the leftmost. Picked spans can't overlap. *(builder's call made in
+   design)*
+3. **Across the gap.** A pattern split over knobs 4 and 5 (Cutoff on 4, Reso on 5) gets
+   its picture on the screen that holds its first input (here the cutoff), if that screen
+   has room for the widget's minimum width; the knob on the other screen still lights it
+   on touch. Otherwise both knobs keep their cells.
+4. **Nothing found:** the screen keeps the plain cells, as today.
+
+The layout runs when the page or the slot's pages change, not per frame, so a picture never
+jumps while a knob turns.
 
 ### Templates
 
@@ -368,13 +403,23 @@ That's the only way to place a picture. Templates fill `pictures` and `pages` fo
 | `drum` | the voice's shape (pitch and amplitude envelopes) | its main parameters large |
 | `generic` | knob cells, plus a picture where it recognises the knobs | the same |
 
-**`generic` recognises common knob names** on the page it shows *(builder's call made in
-design)*: a screen whose knobs include a cutoff and a resonance ("Cutoff", "Freq",
-"Resonance", "Reso", "Q") shows a filter curve, and one whose knobs include an attack,
-decay, sustain and release shows an envelope. Each needs its parameters to calibrate from
-their text, since `generic` declares no tapers; where they don't, the cells stay. This is
-what gives an NKS plug-in with no mapping of its own pictures on the pages its presets map,
-which is most of the value for the least work.
+**`generic` recognises common patterns** of adjacent knob names on the page it shows
+*(builder's call made in design)*, and gives each a picture spanning those knobs:
+
+| Pattern (adjacent knobs) | Picture |
+|---|---|
+| a cutoff ("Cutoff", "Freq", "Frequency") next to a resonance ("Resonance", "Reso", "Res", "Q"), optionally with a drive or envelope amount beside them | `filter` |
+| attack, decay, sustain and release in order, or attack and decay, or attack and release | `envelope` |
+| a band's frequency, gain and Q | `band` |
+| threshold next to ratio | `transfer` |
+| an LFO's rate next to its depth or shape | `lfo` |
+
+Names match ignoring case, with the knobs' section as context (two "Attack" knobs in
+"Filter Env" and "Amp Env" are two envelopes). Each picture needs its parameters to
+calibrate from their text, since `generic` declares no tapers; where they don't, the cells
+stay. This is what gives an NKS plug-in with no mapping of its own pictures on the pages
+its presets map, which is most of the value for the least work. NKS pages often mix
+sections on one screen, which is why pictures span knobs rather than whole screens.
 
 ### Widgets
 
@@ -384,22 +429,28 @@ the two-tone `lcd` one included. Glow, soft fills and accent tints are a theme's
 (`themes/maschine.lua` turns them on), never needed to read a picture. Each widget draws
 at most three layers at once.
 
+Every picture widget draws at **every width it can span**: two, three or four knob cells
+(240, 360 or 480 px) by the 172 px picture band, each with its own golden image. Narrower
+spans drop secondary detail (axis labels thin out), never the picture itself. The minimum
+width, in knob cells, is in brackets below; one cell is too narrow for a curve to read, so
+only `value` and `image` go that small.
+
 | Widget | Inputs | How it reads |
 |---|---|---|
-| `filter` | shape, cutoff, resonance, drive, slope, mix | Analytic response for SVF and ladder shapes, written for the widget (the engine's own filters are biquads). The curve with a flat fill under it, and the modulated curve over it while modulated |
-| `motion` | a parameter | Its base value as a line and its modulated value as a second line over the last few seconds, newest on the right |
-| `eq` | bands: frequency, gain, Q, type, on | Each band a dot sized by Q, the sum curve; a band's own curve only while its knob is touched |
-| `band` | one band's parameters | Large numbers and the band's own curve |
-| `envelope` | ADSR, DAHDSR or breakpoints, curvature, amount | The shape, with its times on the axis |
-| `lfo` | shape, rate, phase, depth, sync | One cycle of the shape, the rate under it |
-| `oscillators` | up to four sources: waveform, octave, tune, pulse width, level; noise level | Each source's cycle faint, their sum bright |
-| `transfer` | threshold, ratio, knee, makeup | The curve, the threshold marked |
-| `taps` | time, feedback, spread, sync | Repeats as decaying bars |
-| `decay` | pre-delay, size, decay | Level over time on a dB scale |
-| `damping` | damping, tone | A curve over frequency |
-| `value` | one parameter | Large numerals, the unit small |
+| `filter` (2) | shape, cutoff, resonance, drive, slope, mix | Analytic response for SVF and ladder shapes, written for the widget (the engine's own filters are biquads). The curve with a flat fill under it, and the modulated curve over it while modulated |
+| `motion` (2) | a parameter | Its base value as a line and its modulated value as a second line over the last few seconds, newest on the right |
+| `eq` (3) | bands: frequency, gain, Q, type, on | Each band a dot sized by Q, the sum curve; a band's own curve only while its knob is touched |
+| `band` (2) | one band's parameters | Large numbers and the band's own curve |
+| `envelope` (2) | ADSR, DAHDSR or breakpoints, curvature, amount | The shape, with its times on the axis |
+| `lfo` (2) | shape, rate, phase, depth, sync | One cycle of the shape, the rate under it |
+| `oscillators` (2) | up to four sources: waveform, octave, tune, pulse width, level; noise level | Each source's cycle faint, their sum bright |
+| `transfer` (2) | threshold, ratio, knee, makeup | The curve, the threshold marked |
+| `taps` (2) | time, feedback, spread, sync | Repeats as decaying bars |
+| `decay` (2) | pre-delay, size, decay | Level over time on a dB scale |
+| `damping` (2) | damping, tone | A curve over frequency |
+| `value` (1) | one parameter | Large numerals, the unit small |
 | `knobs` | the page's knobs | The cells over the knobs. Always drawn ("Knob cells") |
-| `image` | a PNG beside the mapping | For a user's own mappings. Shipped mappings have none |
+| `image` (1) | a PNG beside the mapping | For a user's own mappings. Shipped mappings have none |
 
 Adding a widget is a Rust change with a golden-image test. That's on purpose: it keeps the
 look consistent.
@@ -407,7 +458,8 @@ look consistent.
 ## The screens
 
 The MK3 has four knobs under each screen and four display buttons above it. So each screen
-has three bands, lined up with the hardware, and its own picture:
+has three bands, lined up with the hardware. Here a filter page from a mapping, one picture
+full width over each screen's four knobs:
 
 ```
  ┌─────────── left screen 480 ───────────┐   ┌─────────── right screen 480 ──────────┐
@@ -427,9 +479,25 @@ has three bands, lined up with the hardware, and its own picture:
 ```
 
 - **Nothing crosses the gap.** Each screen is its own 480 × 272 picture.
-- **The knobs under a screen move what that screen shows.** A mapping's pages put a
-  picture's parameters on the knobs beneath it, as Push 3 groups a device's sections. On
-  the slot's own pages, pictures are chosen to fit the knobs ("Following the knobs").
+- **A picture sits above the knobs that move it,** two to four cells wide, as Push 3
+  groups a device's sections. On a page that mixes sections, one screen holds two
+  pictures:
+
+```
+ ┌─────────── left screen 480 ───────────┐
+ │ MASTER   GROUP   [SOUND]               │  28  buttons
+ │ SYNTH · PAGE 3          RESO 42 %      │
+ │ ────────────╮      │    ╱╲             │
+ │             │╲     │   ╱  ╲______      │ 172  two pictures: filter over knobs 1-2,
+ │ ████████████│ ╲    │  ╱          ╲     │      envelope over knobs 3-4
+ │ 20   1k   10k      │ A    D   S   R    │
+ ├─────────┬─────────┬─────────┬─────────┤
+ │ FILTER            │ AMP ENV           │  72  knob cells
+ │ CUTOFF  │ RESO    │ ATTACK  │ RELEASE │
+ │ ▰▰▰▰▰▱▱ │ ▰▰▰▱▱▱▱ │ ▰▱▱▱▱▱▱ │ ▰▰▰▱▱▱▱ │
+ │ 1.20 k  │ 42 %    │ 4 ms    │ 380 ms  │
+ └─────────┴─────────┴─────────┴─────────┘
+```
 - **The header** has the page's name and source on the right (`MAP 1/2`, or the slot's
   page name as today), and the touched knob's value large ("Touch focus").
 - **Button labels sit exactly over the buttons,** filled when chosen.
@@ -548,10 +616,10 @@ they are at that moment:
   slot's own pages even while the mapping's pages are shown, so a mapping for a host
   plug-in can lay out its own pages from what an NKS preset's knobs are. When the slot's
   pages change (another preset loaded, the user's edit), everything resolves again.
-- **Pictures follow the knobs.** On the slot's own pages, each screen shows the first of
-  the mapping's pictures whose `needs` are all on the four knobs under it, so the picture
-  above the knobs always shows what those knobs move. A screen whose knobs fit no picture
-  shows `generic`'s, or the plain cells.
+- **Pictures follow the knobs.** On the slot's own pages, pictures are laid out over the
+  runs of adjacent knobs that carry their inputs ("Laying out pictures on any page"), so
+  a picture always sits above the knobs that move it. Knobs no picture fits keep their
+  plain cells.
 - **The knobs never disagree with the pictures,** because both come from the same pages.
 
 **Which pages the knobs show.** A mapping's pages are knob pages that make sense for the
@@ -570,8 +638,8 @@ sections, so every parameter stays reachable. The header says `MAP` on them.
 
 **Otherwise the slot's own pages are shown exactly as they are:** an NKS preset's pages in
 the preset's order, or the user's in theirs, as today. The mapping adds no pages, removes
-none and reorders none. It still gives them the visual treatment: each screen gets the
-picture that fits the knobs under it, touch focus lights what a knob moves, and the knob
+none and reorders none. It still gives them the visual treatment: pictures over the runs
+of knobs they fit, touch focus lights what a knob moves, and the knob
 cells, units and modulation are drawn as on the mapping's own pages. So an NKS plug-in
 looks as good as one on its mapping's pages; what it gives up is only the mapping's
 choice of what goes where.
@@ -599,7 +667,7 @@ program changes is "Later".
 
 ## Synths
 
-Effects mostly do one thing, so one picture per screen covers them. A synth is a voice
+Effects mostly do one thing, so a picture or two covers them. A synth is a voice
 made of sections (oscillators, a mixer, a filter, an amp, envelopes and LFOs moving them,
 effects after), with tens to hundreds of parameters. Push 3 handles this by showing one
 section at a time with an overview to move between them. The `synth` template does the
@@ -628,7 +696,7 @@ sections = {
 - **NKS presets.** The overview and sections are the mapping's pages, so they follow the
   same rule as any mapping's ("Following the knobs"). A synth loaded from an NKS preset
   shows the preset's pages in the preset's order, with no overview or sections added,
-  each screen with the picture that fits its knobs, unless the user ticks **Use the
+  with pictures over the knobs they fit, unless the user ticks **Use the
   mapping's pages** for it.
 
 **What a host can't see isn't drawn.** A synth's own internal modulation (Vital's
@@ -698,8 +766,8 @@ mapping: the criteria, the parameter dump, the golden images, the black-box rule
 | Phase | Delivers | Proof |
 |---|---|---|
 | 0 | Measure the MK3's display link: full and partial transfer rates, and how long transfers block; rectangle transfers in `deckard_mk3::Displays` | Numbers recorded in this document; a moving 120 × 72 cell costs its own pixels, not the screen's |
-| 1 | Drawing on the screens thread with dirty rectangles; parameter cells; golden-image tests; `filter`, `eq`, `band`, `transfer`, `envelope`, `lfo`, `value` and knob cells, on every theme; touch focus from `BUTTON_CAP_n`. DECKARD's own Filter, EQ and Compressor pictures move to it, from the data `ControlView` already has, and `eq_curve`'s special cases go | Built-in pictures match on default and `lcd` themes; frame time under 4 ms; nothing sent when still; surface tests that a `BUTTON_CAP_n` press and release focus and unfocus while still reaching the page (Set Macro, double tap), and that three touches light nothing |
-| 2 | Mappings: loader, matching, checking, `params` by `knob`, `id` and title, resolved again on page changes; calibration from `Params::text`, in memory; declared tapers; choice maps; pictures and `needs`; following the knobs; **Preferences ▸ Hardware ▸ Mappings** (the checkbox and Off); `buttons` on display 4 and 7; `generic` with name recognition; modulation marks and `motion`; the remaining templates and widgets (`taps`, `decay`, `damping`, `oscillators`, `synth` sections and overview); shipped mappings for every DECKARD plug-in | Unit tests on resolution, calibration and choice maps, including an NKS preset's pages replacing the slot's and the checkbox swapping mapping and slot pages; recorded text dumps from several plug-ins calibrate; an NKS plug-in with no mapping shows a filter picture on its filter page; MK3 check with one hosted plug-in |
+| 1 | Drawing on the screens thread with dirty rectangles; parameter cells; golden-image tests; `filter`, `eq`, `band`, `transfer`, `envelope`, `lfo`, `value` and knob cells, on every theme and at every width they span; touch focus from `BUTTON_CAP_n`. DECKARD's own Filter, EQ and Compressor pictures move to it, from the data `ControlView` already has, and `eq_curve`'s special cases go | Built-in pictures match on default and `lcd` themes; frame time under 4 ms; nothing sent when still; surface tests that a `BUTTON_CAP_n` press and release focus and unfocus while still reaching the page (Set Macro, double tap), and that three touches light nothing |
+| 2 | Mappings: loader, matching, checking, `params` by `knob`, `id` and title, resolved again on page changes; calibration from `Params::text`, in memory; declared tapers; choice maps; pictures, `needs` and knob spans; laying out pictures on any page; following the knobs; **Preferences ▸ Hardware ▸ Mappings** (the checkbox and Off); `buttons` on display 4 and 7; `generic` with its patterns; modulation marks and `motion`; the remaining templates and widgets (`taps`, `decay`, `damping`, `oscillators`, `synth` sections and overview); shipped mappings for every DECKARD plug-in | Unit tests on resolution, calibration and choice maps, including an NKS preset's pages replacing the slot's and the checkbox swapping mapping and slot pages; recorded text dumps from several plug-ins calibrate; layout tests on recorded NKS pages (a page mixing filter and envelope knobs gets both pictures; a pair split over the gap goes to the cutoff's screen); an NKS plug-in with no mapping shows a filter picture on its filter page; MK3 check with one hosted plug-in |
 | 3 | `plugin-probe` `list` and `dump`; **Dump Plug-in Parameters** and starter mappings; dumps in CI; the `plugin-mapping` skill; shipped mappings for Surge XT, Vital, Dexed and OB-Xd | Every shipped mapping passes against its dump; the skill drafts a mapping for each of the four that a person then only has to adjust |
 
 Phase 1 gives DECKARD's own effects their new pictures with nothing new to learn; phase 2
