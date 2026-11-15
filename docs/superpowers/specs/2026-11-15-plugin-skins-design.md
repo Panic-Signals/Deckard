@@ -242,10 +242,12 @@ plug-in name, it:
    already matches), resonance's peak against its value, and each mode's slope and shape,
    then picks the model shape (`svf_lp`, `ladder4`…) whose analytic response fits the
    measurement best. It does the same for delay times, reverb decay, compressor
-   threshold and ratio, and instruments' envelopes.
-4. **Lays out the pages:** the most-used parameters first, a picture's parameters on the
-   knobs under its screen, sections kept together, buttons for small choices (filter
-   mode, on/off).
+   threshold and ratio. For a synth it follows "Measuring a synth": isolate, then
+   oscillators, filter, envelopes and modal tables.
+4. **Lays out the pages:** starting from the plug-in's NKS pages where it has them, the
+   most-used parameters first, a picture's parameters on the knobs under its screen,
+   sections kept together, buttons for small choices (filter mode, on/off). For a synth,
+   the sections, their pictures and the overview (see "Synths").
 5. **Writes the skin,** with `skin_version = 1` and a comment on each parameter saying
    how its role was established: *measured* (and how well the model fits) or *named
    only* (nothing to measure, such as a UI-only parameter).
@@ -372,7 +374,7 @@ parameter lights on touch. A skin may override any part.
 | `dynamics` | transfer curve, the input level riding it | gain reduction history scrolling, the needle dropping from the top |
 | `delay` | the repeats as a timeline, left and right lanes, each flashing as it fires | the feedback path: its filter curve and how fast repeats die |
 | `reverb` | the space: early reflections, then the tail's energy over time | damping and the tail's tone |
-| `synth` | per page: oscillator or wavetable | per page: filter or envelope |
+| `synth` | per page (see "Synths"): the voice's path, oscillators, filter, envelopes | per page: the mod sources, the mix, the filter's envelope, the live output |
 | `drum` | the voice's shape (pitch and amplitude envelopes) | hit history |
 | `utility` | meters and phase | stereo width |
 | `generic` | big knob cells, four a screen | big knob cells, four a screen |
@@ -391,7 +393,11 @@ Every widget takes bound inputs and its colours and type from the theme.
 | `lfo` | shape, rate, phase, depth, sync | The shape scrolls under a fixed cursor, which leaves a short tail |
 | `scope` | the slot tap | Phosphor persistence, the last frames fading |
 | `spectrum` | the slot tap, pre or post | Log frequency, smoothed, with peak hold |
-| `wavetable` | frames (from the plug-in if it shares them, else declared), position | A stack in slight perspective, the current frame lit, its neighbours fading |
+| `wavetable` | frames (captured, see "Synths"), position | A stack in slight perspective, the current frame lit, its neighbours fading. Until frames are captured, the live output's pitch-locked cycle stands in |
+| `oscillators` | up to four sources: waveform, octave, tune, pulse width, level; noise level | Each source's cycle drawn faint, their sum bright. Detuned sources visibly beat, because the sum is drawn over a few hundred milliseconds of their phases |
+| `partials` | a modal or additive model: partial frequencies, levels and decays (declared or measured tables) | Each partial a vertical line that flares on a note and dies at its own rate, so a struck modal sound shows its ring |
+| `path` | the voice's sections and which are on | Cards for oscillators → mix → filter → amp → effects, each with a tiny live version of its picture; the section the page edits is lit |
+| `mods` | the synth's envelopes and LFOs (its own, by parameter) and DECKARD's routes to it | Small multiples: each source's shape with its playhead, and DECKARD's routes drawn as lines to the knobs they move |
 | `transfer` | threshold, ratio, knee, makeup | The input level as a dot riding the curve |
 | `gr` | gain reduction (published by the plug-in, else measured) | A history scrolling beside a needle |
 | `taps` | time, feedback, spread, sync | Repeats as decaying bars, each flashing as it fires (from tempo and the slot's notes) |
@@ -524,6 +530,121 @@ To measure a plug-in, the engine needs the audio just before and just after it.
 - **MIDI plug-ins** (`docs/midi-input-plugins.md`) get `steps` and `roll` fed from those
   note events.
 
+## Synths
+
+Effects mostly do one thing, so one picture per screen covers them. A synth is a voice made
+of sections (oscillators, a mixer, a filter, an amp, envelopes and LFOs moving them,
+effects after), with tens to hundreds of parameters. Push 3 handles this by showing one
+section at a time with an overview to move between them. The `synth` template does the
+same.
+
+### Sections and pages
+
+A synth skin declares its sections, each with its parameters and its picture:
+
+```lua
+kind = "synth",
+sections = {
+  { name = "OSC",    left = { widget = "oscillators", sources = { ... } }, right = { widget = "spectrum", tap = "post" } },
+  { name = "FILTER", left = { widget = "filter", model = { ... } },       right = { widget = "envelope", model = { ... } } },
+  { name = "AMP",    left = { widget = "envelope", model = { ... } },     right = { widget = "scope" } },
+  { name = "MOD",    left = { widget = "mods" },                          right = { widget = "lfo", model = { ... } } },
+},
+```
+
+- **The overview** is the first page: `path` on the left, `mods` on the right, and the
+  knobs on the synth's eight most-played parameters (cutoff, resonance, envelope amount,
+  attack, decay, the macros…). A display button over each section opens it.
+- **A section's pages** follow, with that section's pictures and knobs. LEFT and RIGHT
+  page through sections, as `lib/paged.lua` does today.
+- **Everything else** stays reachable: after the designed sections come the plug-in's
+  remaining parameters, eight to a page by section, as the Control page shows them now.
+  A synth with 700 parameters gets designed pages for the ones played live and plain
+  pages for the rest.
+- **NKS pages.** Many plug-ins come with NKS controller pages (eight knobs a page, named,
+  by section), which DECKARD already reads (`crates/plugins/src/nks.rs`). Where they
+  exist, they're the starting point for a skin's pages and its overview, since they're the
+  plug-in maker's own choice of what matters, and Maschine users know them.
+
+### Three hard cases
+
+These three show what a synth skin has to deal with, and they're the probe's and the
+skill's test cases.
+
+**A classic subtractive synth (Monark).** Three oscillators, a mixer, a four-pole ladder
+filter with its contour envelope, an amp envelope, glide. Its pictures are the easy kind:
+`oscillators` draws the three waveforms and their sum from the waveform, octave and tune
+parameters (the beating of a slightly detuned third oscillator is right there), `filter`
+is the ladder curve with the contour envelope's sweep as its modulation fan, and the
+envelopes are Minimoog-style attack, decay, sustain (with the decay switch acting as a
+release). It's hosted inside Reaktor, so DECKARD sees Reaktor's plug-in, not Monark's:
+see "Plug-ins that host other products" below.
+
+**A modal synth (Prism).** A struck or bowed exciter rings a bank of resonant modes. There's
+no textbook formula from its knobs to its sound, so a model would be a guess. Instead its
+`partials` picture uses **measured tables**: the probe plays notes across each of the
+modal parameters (shape, inharmonicity, damping, brightness) and records each partial's
+frequency, level and decay, and the widget interpolates between them. Live, each note's
+partials flare and ring down. The skin says `model = "measured"` for it, so no one takes
+it for the plug-in's own maths. Also hosted inside Reaktor.
+
+**A wavetable synth (Vital).** Its wavetables are part of the preset, not parameters, and its
+own envelopes, LFOs (drawable shapes) and modulation matrix live inside it, invisible to a
+host. So:
+
+- **Wavetable frames are captured, not read.** When a preset loads and the skin asks for
+  it (`frames = "capture"`), DECKARD renders the frames offline in a worker: a second,
+  silent instance in the `plugin-probe` process gets the same state, the skin's declared
+  isolation settings (other oscillators off, filter open, sustain full, effects off), and
+  one note at 16 wavetable positions; one cycle of each, pitch-locked, is a frame. It
+  takes a second or two. Until then, and if it fails, the stack shows the live output's
+  cycle. It costs a second instance's memory for that time, so it's per skin, not
+  automatic.
+- **Its own modulation is invisible,** and the skin says so rather than inventing it:
+  `mods` shows Vital's envelopes and LFOs only through the parameters that set their
+  times and rates, plus DECKARD's own routes. The live tap (spectrum, scope) shows the
+  result of everything, including what can't be seen.
+- **Macros** are its parameters like any other, and go on the overview's knobs.
+
+### Plug-ins that host other products
+
+Reaktor and Kontakt are one plug-in to a host, whatever is loaded in them, so their
+parameters, and the skin that fits, depend on the product inside. A skin can match the
+product as well as the plug-in:
+
+```lua
+match = { vendor = "Native Instruments", name = "Reaktor 6", product = "Monark" },
+```
+
+DECKARD knows the product when the slot was loaded from an NKS preset whose metadata names
+it (its bank chain, in `NISI`), and keeps it with the slot for the session. When it can't tell, only a skin for the host plug-in itself
+matches (normally `generic`). Product skins are matched by name only; a product has no
+identity of its own to a host.
+
+### Measuring a synth
+
+The probe's `note` does for instruments what `response` does for effects, with more care,
+because a synth's sections hide each other:
+
+- **Isolate first.** The skill measures in an order that lets it isolate each section: amp
+  envelope first (sustain to full, so later notes hold steady), then the mixer (each
+  source alone), then each oscillator, then the filter, then the modulation. Each step
+  uses `--set` to hold the others still. It starts from the plug-in's initial state, or a
+  preset given with `--state`, and records which in the test data.
+- **Oscillators:** one cycle of a held note, pitch-locked, at each waveform choice and
+  pulse width, checked against the `oscillators` widget's shapes. Tune and octave from the
+  measured pitch.
+- **Filters inside a synth** have no input to sweep. The probe plays a sawtooth (its
+  harmonics fall at a known 1/n) or a noise source if the synth has one, and reads the
+  filter's response from the output spectrum against that, at each cutoff and resonance
+  value. The model is fitted as for an effect.
+- **Envelopes:** level over time of held notes at each time value, which gives the taper in
+  milliseconds, or confirms the plug-in's text.
+- **Modal and additive models:** each partial's frequency, level and decay, as tables
+  (Prism, above).
+- **Polyphony and glide:** two overlapping notes say whether it's mono or poly, and
+  whether it glides between them.
+
 ## Threads and data flow
 
 ```
@@ -585,9 +706,9 @@ it. `docs/controller-plugins.md` points to it.
 | 4 | Calibration from `Params::text` and its cache | Tests on recorded text dumps from several hosted plug-ins |
 | 5 | Slot tap, FFT worker, measured response, `spectrum`, `sweep`, `scope`, `meter` | No allocation on the audio thread; the built-in Filter's measured response matches its model within 1 dB where there's signal |
 | 6 | Modulation: modulated position, trail, depth band; envelope playheads | Route tests; check with an LFO on cutoff |
-| 7 | `wavetable`, `taps`, `space`, `xy`, `gr`, `steps`, `roll`; shipped skins for the rest of DECKARD's effects and instruments | Golden images |
+| 7 | `wavetable`, `taps`, `space`, `xy`, `gr`, `steps`, `roll`; the `synth` template with sections, overview, `oscillators`, `partials`, `path`, `mods`; NKS pages as page sources; shipped skins for the rest of DECKARD's effects and instruments | Golden images; DECKARD's own synths' skins against their known parameters |
 | 8 | Distribution: **Dump Plug-in Parameters** and starter skins; **Install Skin…** and drop to install; **Preferences ▸ Hardware ▸ Skins**; `api`, `skin_version`, `based_on`; parameter dumps in CI | Install, override and precedence tests; every shipped skin passes against its dump |
-| 9 | `plugin-probe` (`list`, `dump`, `response`, `sweep`, `note`); the `plugin-skin` skill; `model = "measured"`; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known, and its sweep-against-impulse check calls the EQ linear, the Compressor and Saturator nonlinear and the Chorus moving; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
+| 9 | `plugin-probe` (`list`, `dump`, `response`, `sweep`, `note`, with `--state`); the `plugin-skin` skill; `model = "measured"` and measured tables; wavetable frame capture; `product` matching; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known, and its sweep-against-impulse check calls the EQ linear, the Compressor and Saturator nonlinear and the Chorus moving; it finds DECKARD's Bass Synth's oscillator shapes, filter and envelope times; Vital's skin (free, so CI-able) captures frames and fits its filters; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
 
 Phases 1–3 give DECKARD's effects their pictures and every plug-in a clean face. Phases 5
 and 6 make it look alive.
