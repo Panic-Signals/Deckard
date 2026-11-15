@@ -866,7 +866,16 @@ fn long_notes_stay_in_the_pattern_editor() {
     v.pattern_start = 0;
     v.pattern_length = 3840;
     hold(&mut s, &v, "BUTTON_PATTERN", true);
-    let note = |length| NoteView { sound: 1, position: 1920, length, pitch: 60, velocity: 100, probability: 100, selected: false };
+    let note = |length| NoteView {
+        sound: 1,
+        position: 1920,
+        length,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+        selected: false,
+        ratchet: Default::default(),
+    };
     v.notes = vec![note(1920)];
     let cut = s.picture(&v);
     v.notes = vec![note(30_000)];
@@ -1089,7 +1098,16 @@ fn notes_side_by_side_are_drawn_apart() {
     press(&mut s, &v, "BUTTON_STEP");
     let empty = s.picture(&v);
     v.notes = (0..16)
-        .map(|i| NoteView { sound: v.sound, position: i * 240, length: 240, pitch: 60, velocity: 100, probability: 100, selected: false })
+        .map(|i| NoteView {
+            sound: v.sound,
+            position: i * 240,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+            selected: false,
+            ratchet: Default::default(),
+        })
         .collect();
     let notes = s.picture(&v);
     // The row with the most changed runs: the notes.
@@ -1705,7 +1723,7 @@ fn variation_shows_the_sounds_groove_variation() {
 }
 
 fn event_note(sound: usize, position: i64, selected: bool) -> crate::NoteView {
-    crate::NoteView { sound, position, length: 240, pitch: 60, velocity: 100, probability: 100, selected }
+    crate::NoteView { sound, position, length: 240, pitch: 60, velocity: 100, probability: 100, selected, ratchet: Default::default() }
 }
 
 #[test]
@@ -1749,6 +1767,29 @@ fn events_held_edits_the_selected_notes() {
     assert!(lit(&s, &v, "LED_LEFT") && !lit(&s, &v, "LED_RIGHT"));
     assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::Events("probability", 1)]);
     assert!(s.screen_text(&v).join("|").contains("PROBABILITY"));
+    // And the selected notes' ratchet: RATCHET, SHAPE, and where the shape heads.
+    use deckard_model::ratchet::{Ratchet, Shape};
+    assert_eq!(s.event(&Event::Knob(1, 0.1), &v, now), [Action::Events("ratchet", 1)]);
+    assert_eq!(s.event(&Event::Knob(2, 0.2), &v, now), [Action::Events("ratchet_shape", 1)]);
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::Events("ratchet_target", -1)]);
+    let params = |s: &Surface, v: &View| s.screen_text(v).join("|");
+    let flat = params(&s, &v);
+    assert!(flat.contains("RATCHET") && flat.contains("SHAPE") && flat.contains("Flat"), "{flat}");
+    assert!(!flat.contains("FLOOR") && !flat.contains("CEILING") && !flat.contains("TARGET"), "Flat heads nowhere: {flat}");
+    v.notes[1].ratchet = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+    let down = params(&s, &v);
+    assert!(down.contains("Down") && down.contains("FLOOR") && down.contains("20") && !down.contains("CEILING"), "{down}");
+    v.notes[1].ratchet.shape = Shape::Up;
+    let up = params(&s, &v);
+    assert!(up.contains("Up") && up.contains("CEILING") && up.contains("127") && !up.contains("FLOOR"), "{up}");
+    // A Down note and an Up note selected: one knob for each one's own target.
+    v.notes[0].selected = true;
+    v.notes[0].ratchet = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+    let mixed = params(&s, &v);
+    assert!(mixed.contains("TARGET") && !mixed.contains("FLOOR") && !mixed.contains("CEILING"), "{mixed}");
+    v.notes[0].selected = false;
+    v.notes[0].ratchet = Ratchet::default();
+    v.notes[1].ratchet = Ratchet::default();
     // The 4-D encoder: a note after another, nudges, other sounds.
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Events("select_step", 1)]);
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Events("nudge_shown", 1)]);

@@ -8,8 +8,9 @@
 --   display 8         PROB LOCK (the focused sound's chances rolled once and kept)
 --   display 7 / 8     selecting, UP / DOWN (the sound before or after)
 --   knobs 1-4         POSITION, PITCH, VELOCITY, LENGTH of the selected notes (page 2:
---                     PROBABILITY); selecting, START and END of the time selected, LOW
---                     and HIGH of the pitches (Keyboard mode) or the EVENT alone
+--                     PROBABILITY, RATCHET, SHAPE, FLOOR / CEILING); selecting, START
+--                     and END of the time selected, LOW and HIGH of the pitches (Keyboard
+--                     mode) or the EVENT alone
 --   knobs 5-8         zoom and scroll the editor (8: the pitches, in Keyboard mode)
 --   4-D encoder       turned, the note before or after (pressed: its length); left /
 --                     right nudge (SHIFT finer), up / down the sound before or after
@@ -100,7 +101,7 @@ end
 
 -- The knobs' names and values.
 local function params(s)
-  if knob_page == 2 then return { notes.probability_param(s) } end
+  if knob_page == 2 then return notes.page2_params(s) end
   if selecting then
     local function pos(t) return util.bar_beat(t, s.numerator, s.denominator) end
     sync(s, false)
@@ -241,8 +242,8 @@ function events.knob(n, amount)
     return true
   end
   if knob_page == 2 then
-    local steps = knobs.gather(n, amount, 0.05)
-    if n == 1 and steps ~= 0 then deckard.events("probability", steps) end
+    -- (The shape has three values: a slower knob.)
+    notes.page2_knob(n, knobs.gather(n, amount, n == 3 and 0.15 or 0.05))
     return true
   end
   if selecting then

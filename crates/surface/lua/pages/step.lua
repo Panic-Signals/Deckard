@@ -13,7 +13,8 @@
 --                     held a moment, the Step Mod page (pages/step_mod.lua) for the steps
 --                     held
 --   knobs 1-4         POSITION, PITCH, VELOCITY (FIXEDVELOCITY: the fixed velocity),
---                     LENGTH of the selected notes; page 2 PROBABILITY
+--                     LENGTH of the selected notes; page 2 PROBABILITY, RATCHET, SHAPE,
+--                     FLOOR / CEILING
 --   knob 6            the next or previous 16 steps; knob 8 Keyboard mode's pitches
 --   4-D encoder       as the Events page's (lib/notes.lua)
 
@@ -142,8 +143,7 @@ function page.knob(n, amount)
     if pads.keyboard() and steps ~= 0 then top_pitch = util.clamp(pitch_top(s) + steps, KEY_ROWS - 1, 127) end
   elseif n <= 4 then
     if knob_page == 2 then
-      local steps = knobs.gather(n, amount, 0.05)
-      if n == 1 and steps ~= 0 then deckard.events("probability", steps) end
+      notes.page2_knob(n, knobs.gather(n, amount, n == 3 and 0.15 or 0.05))
     elseif n == 3 and s.fixed_velocity then
       local steps = knobs.each(amount)
       if steps ~= 0 then deckard.velocity(util.clamp(s.velocity + steps, 0, 127)) end
@@ -286,7 +286,7 @@ function page.draw(screen, theme)
   screen:frame(x0, 60 + editor.HEADER, math.max(1, x1 - x0), 145 - editor.HEADER, "text")
   local p
   if knob_page == 2 then
-    p = { notes.probability_param(s) }
+    p = notes.page2_params(s)
   else
     p = notes.edit_params(s)
     if s.fixed_velocity then p[3] = { name = "FIXEDVELOCITY", value = tostring(s.velocity) } end

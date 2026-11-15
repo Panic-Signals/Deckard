@@ -237,3 +237,35 @@ fn a_new_pattern_from_a_controller_leaves_the_focus_alone() {
     app.surface_act(A::NewPatternIn(9));
     assert_eq!((app.group, app.sound), (0, 3), "no such group");
 }
+
+/// The MK3's RATCHET, SHAPE and FLOOR / CEILING knobs on the selected notes: the count
+/// within 1–16, the shape without wrapping, and each note's own target (Flat has none).
+#[test]
+fn the_knobs_set_the_selected_notes_ratchets() {
+    use deckard_model::ratchet::{Ratchet, Shape};
+    let r = |repeats, shape, floor, ceiling| Ratchet { repeats, shape, floor, ceiling };
+    let with = |position, ratchet| Note { ratchet, ..note(0, position, 60) };
+    let start = [with(0, r(1, Shape::Flat, 0, 127)), with(480, r(1, Shape::Down, 10, 127)), with(960, r(1, Shape::Up, 0, 100))];
+    let mut app = app(&[start[0], start[1], start[2], note(1, 500, 60)]);
+    app.surface_act(A::Events("select_sound", 0));
+    let got = |app: &crate::App| notes(app).iter().filter(|n| n.sound == 0).map(|n| n.ratchet).collect::<Vec<_>>();
+    app.surface_act(A::Events("ratchet", 3));
+    assert_eq!(got(&app), [r(4, Shape::Flat, 0, 127), r(4, Shape::Down, 10, 127), r(4, Shape::Up, 0, 100)]);
+    app.surface_act(A::Events("ratchet_target", 5));
+    assert_eq!(got(&app), [r(4, Shape::Flat, 0, 127), r(4, Shape::Down, 15, 127), r(4, Shape::Up, 0, 105)]);
+    app.surface_act(A::Events("ratchet_target", 99));
+    assert_eq!(got(&app)[1..], [r(4, Shape::Down, 114, 127), r(4, Shape::Up, 0, 127)]);
+    app.surface_act(A::Events("ratchet_shape", 1));
+    assert_eq!(got(&app).iter().map(|x| x.shape).collect::<Vec<_>>(), [Shape::Down, Shape::Up, Shape::Up]);
+    app.surface_act(A::Events("ratchet", -99));
+    assert!(got(&app).iter().all(|x| x.repeats == 1));
+    assert_eq!(notes(&app)[3], note(1, 500, 60), "not selected: as it was");
+    // Each knob move was one undo step: five back is the start.
+    for _ in 0..5 {
+        app.undo();
+    }
+    assert_eq!(notes(&app)[..3], start);
+    // The MK3 sees a note's ratchet.
+    let seen: Vec<Ratchet> = app.surface_view().notes.iter().filter(|n| n.sound == 0).map(|n| n.ratchet).collect();
+    assert_eq!(seen, start.map(|n| n.ratchet));
+}

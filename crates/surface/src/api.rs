@@ -767,7 +767,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set(
         "events",
         lua.create_function(move |_, (what, n): (String, Option<i64>)| {
-            const WHAT: [&str; 22] = [
+            const WHAT: [&str; 25] = [
                 "nudge",
                 "nudge_fine",
                 "pitch",
@@ -775,6 +775,9 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                 "length",
                 "length_fine",
                 "probability",
+                "ratchet",
+                "ratchet_shape",
+                "ratchet_target",
                 "nudge_shown",
                 "nudge_shown_fine",
                 "transpose",
@@ -1234,6 +1237,10 @@ fn state_part(lua: &Lua, v: &Rc<View>, part: &str) -> mlua::Result<Value> {
                 nt.set("pitch", n.pitch)?;
                 nt.set("velocity", n.velocity)?;
                 nt.set("probability", n.probability)?;
+                nt.set("ratchet", n.ratchet.repeats)?;
+                nt.set("ratchet_shape", deckard_model::ratchet::Shape::ALL.iter().position(|&x| x == n.ratchet.shape).unwrap_or(0))?;
+                nt.set("ratchet_floor", n.ratchet.floor)?;
+                nt.set("ratchet_ceiling", n.ratchet.ceiling)?;
                 nt.set("selected", n.selected)?;
                 notes.set(i + 1, nt)?;
             }

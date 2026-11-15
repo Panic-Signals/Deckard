@@ -5451,6 +5451,7 @@ impl App {
                     velocity: n.velocity,
                     probability: n.probability,
                     selected: self.selected.contains(n),
+                    ratchet: n.ratchet,
                 })
                 .collect();
             // (Playback's place in it while it's the focused scene's.)

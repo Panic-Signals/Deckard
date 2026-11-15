@@ -315,4 +315,17 @@ fn ratchet_shots() {
     window(&mut h, "ratchet-lane.png", Some((0, 520, 1950, 410)));
     h.state_mut().lane = crate::layout::Lane::Velocity;
     window(&mut h, "ratchet-velocity.png", Some((0, 520, 1950, 410)));
+    // The MK3: STEP, then the second knob page.
+    use deckard_mk3::Event;
+    for name in ["BUTTON_STEP", "BUTTON_RIGHT"] {
+        for down in [true, false] {
+            let app = h.state_mut();
+            let v = app.surface_view();
+            for a in app.surface.event(&Event::Button(name, down), &v, Instant::now()) {
+                app.surface_act(a);
+            }
+            h.run_steps(2);
+        }
+    }
+    mk3(&mut h, "mk3-ratchet.png");
 }

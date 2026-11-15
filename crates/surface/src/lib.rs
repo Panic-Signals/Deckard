@@ -496,6 +496,8 @@ pub struct NoteView {
     pub velocity: i64,
     pub probability: i64,
     pub selected: bool,
+    /// Played as several hits inside its length (DECKARD's own).
+    pub ratchet: deckard_model::ratchet::Ratchet,
 }
 
 /// A channel as the Mixer shows it.
