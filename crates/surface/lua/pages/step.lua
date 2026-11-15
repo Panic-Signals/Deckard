@@ -169,9 +169,16 @@ local function pitch_top(s)
 end
 
 -- How far knob 5 zooms a tenth of a turn (same curve as Events), and the turn
--- absorbed at the 16-step (1-bar) snap detent before continuing past it.
+-- absorbed at each power-of-two bar snap detent (1, 2, 4, ... bars) before continuing.
 local ZOOM = 1.6
 local SNAP_HOLD = 0.06
+
+-- Whether `w` is a power-of-two multiple of `seg_w` (1 bar, 2 bars, 4 bars, ...).
+local function is_snap_width(w, seg_w)
+  if w < seg_w or w % seg_w ~= 0 then return false end
+  local m = w // seg_w
+  return (m & (m - 1)) == 0
+end
 
 -- Store `[from, from + width)` without ever jumping `from`; switch back to aligned
 -- segment mode (`view_from = nil`) only when `from` already sits on a 16-step bar.
@@ -212,10 +219,29 @@ function page.knob(n, amount)
     local new = math.floor(width / ZOOM ^ (amount * 10) + 0.5)
     if new == width then new = width + (amount > 0 and -1 or 1) end
     new = util.clamp(new, min_w, max_w)
-    local crossed = (width < seg_w and amount < 0 and new >= seg_w)
-      or (width > seg_w and amount > 0 and new <= seg_w)
-    if crossed then
-      new = seg_w
+    local snap = nil
+    if amount < 0 and new > width then
+      local t = seg_w
+      while t < max_w do
+        if width < t and new >= t then
+          snap = t
+          break
+        end
+        t = t * 2
+      end
+    elseif amount > 0 and new < width then
+      local t = seg_w
+      while t * 2 < max_w do t = t * 2 end
+      while t >= seg_w do
+        if width > t and new <= t then
+          snap = t
+          break
+        end
+        t = t // 2
+      end
+    end
+    if snap then
+      new = snap
       in_detent, detent_turn = true, 0
     end
     from = util.clamp(from, a, math.max(a, b - new))
@@ -223,14 +249,25 @@ function page.knob(n, amount)
   elseif n == 6 then
     -- (Moving by hand ends FOLLOW while the pattern plays.)
     local a, b = notes.span(s)
+    local seg_w = 16 * step(s)
     if view_from and view_to - view_from < b - a then
-      if follow and s.playing then follow = false end
       sync(s)
       local from, to = view_span(s)
       local width = to - from
-      local seg_w = 16 * step(s)
-      from = util.clamp(math.floor(from + amount * width + 0.5), a, math.max(a, b - width))
-      set_view(s, from, width, seg_w)
+      if is_snap_width(width, seg_w) then
+        local steps = knobs.gather(n, amount)
+        if steps ~= 0 then
+          if follow and s.playing then follow = false end
+          local rel = from - a
+          local page_idx = steps > 0 and (rel // width + steps) or (-(-rel // width) + steps)
+          from = util.clamp(a + page_idx * width, a, math.max(a, b - width))
+          set_view(s, from, width, seg_w)
+        end
+      else
+        if follow and s.playing then follow = false end
+        from = util.clamp(math.floor(from + amount * width + 0.5), a, math.max(a, b - width))
+        set_view(s, from, width, seg_w)
+      end
     else
       local steps = knobs.gather(n, amount)
       if steps ~= 0 then

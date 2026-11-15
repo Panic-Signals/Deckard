@@ -2556,36 +2556,62 @@ fn the_step_page_knob_5_zooms_the_right_screen() {
     v.notes.clear();
     let now = Instant::now();
     press(&mut s, &v, "BUTTON_STEP");
-    let has = |s: &Surface, label: &str| s.screen_text(&v).iter().any(|t| t == label);
-    assert!(has(&s, "1.2") && has(&s, "1.3"), "default 16 steps: 1 bar on the right screen");
+    let has = |s: &Surface, v: &View, label: &str| s.screen_text(v).iter().any(|t| t == label);
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "1.3"), "default 16 steps: 1 bar on the right screen");
     // Tiny encoder steps leaving 1-bar zoom never chatter back into the snap.
     for _ in 0..20 {
         s.event(&Event::Knob(4, 0.01), &v, now);
     }
-    assert!(!has(&s, "1.3"), "small knob 5 steps zoom in smoothly past 1.3 without snap chatter");
+    assert!(!has(&s, &v, "1.3"), "small knob 5 steps zoom in smoothly past 1.3 without snap chatter");
     s.event(&Event::Knob(5, 0.25), &v, now);
-    assert!(has(&s, "1.2") && !has(&s, "2.1"), "knob 6 pans smoothly within bar 1 when zoomed in");
+    assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.1"), "knob 6 pans smoothly within bar 1 when zoomed in");
     // Crossing 1-bar width while panned off-bar holds 1-bar width without jumping `from`.
     s.event(&Event::Knob(4, -0.25), &v, now);
-    assert!(has(&s, "1.2") && has(&s, "2.1"), "1-bar width from panned position keeps window start without jumping");
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "2.1"), "1-bar width from panned position keeps window start without jumping");
     // Releasing CAP_5 clears the detent; double-tapping CAP_5 resets to aligned 1-bar view.
     hold(&mut s, &v, "BUTTON_CAP_5", false);
     hold(&mut s, &v, "BUTTON_CAP_5", true);
     hold(&mut s, &v, "BUTTON_CAP_5", false);
     hold(&mut s, &v, "BUTTON_CAP_5", true);
     hold(&mut s, &v, "BUTTON_CAP_5", false);
-    assert!(has(&s, "1.2") && has(&s, "1.4") && !has(&s, "2.1"), "double-tapping knob 5 resets to bar 1");
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "1.4") && !has(&s, &v, "2.1"), "double-tapping knob 5 resets to bar 1");
     // Paging to bar 2, zooming out to full pattern (window at start), and zooming back in
     // to 1 bar keeps the window at bar 1 instead of jumping to bar 2.
     s.event(&Event::Knob(5, 0.1), &v, now);
-    assert!(has(&s, "2.2") && !has(&s, "1.2"), "knob 6 paged to bar 2");
+    assert!(has(&s, &v, "2.2") && !has(&s, &v, "1.2"), "knob 6 paged to bar 2");
     s.event(&Event::Knob(4, -0.6), &v, now);
-    assert!(!has(&s, "2.2"), "zoomed out to whole pattern");
+    s.event(&Event::Knob(4, -0.6), &v, now);
+    assert!(!has(&s, &v, "2.2"), "zoomed out to whole pattern");
     // Pads stay on bar 1 when zoomed out to the whole pattern rather than jumping to bar 3.
     s.event(&Event::PadOn(1, 0.5), &v, now);
     assert_eq!(s.event(&Event::PadOff(1), &v, now), [Action::StepToggle { at: 0, length: 240, velocity: 64 }]);
     s.event(&Event::Knob(4, 0.6), &v, now);
-    assert!(has(&s, "1.2") && !has(&s, "2.2"), "zooming in from full pattern stays at start instead of jumping to bar 2");
+    s.event(&Event::Knob(4, 0.6), &v, now);
+    assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.2"), "zooming in from full pattern stays at start instead of jumping to bar 2");
+
+    // Multi-bar snaps: in an 8-bar pattern, zooming out from 1 bar snaps to 2 bars and
+    // 4 bars, and knob 6 pages by 2 bars (or 4 bars) per gather step just like 1 bar.
+    v.pattern_length = 8 * 3840;
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.1"), "reset to 1 bar");
+    s.event(&Event::Knob(4, -0.3), &v, now);
+    assert!(has(&s, &v, "2.1") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "zooming out snaps to 2 bars (bars 1-2)");
+    s.event(&Event::Knob(5, 0.1), &v, now);
+    assert!(has(&s, &v, "3.1") && has(&s, &v, "4.3") && !has(&s, &v, "2.1") && !has(&s, &v, "5.1"), "knob 6 pages 2 bars (bars 3-4)");
+    s.event(&Event::Knob(5, -0.1), &v, now);
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "knob 6 pages back to bars 1-2");
+    let right_has = |s: &Surface, v: &View, label: &str| {
+        s.draw_picture(v).ops.iter().any(|o| matches!(o, screen::DrawOp::Text { x, text, .. } if *x >= 480 && text == label))
+    };
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    s.event(&Event::Knob(4, -0.5), &v, now);
+    assert!(right_has(&s, &v, "1") && right_has(&s, &v, "4") && !right_has(&s, &v, "5"), "zooming out snaps to 4 bars (bars 1-4)");
+    s.event(&Event::Knob(5, 0.1), &v, now);
+    assert!(right_has(&s, &v, "5") && right_has(&s, &v, "8") && !right_has(&s, &v, "4"), "knob 6 pages 4 bars (bars 5-8)");
     assert_eq!(s.error(), None);
 }
 
