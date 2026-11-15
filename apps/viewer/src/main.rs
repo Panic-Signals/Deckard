@@ -14769,7 +14769,7 @@ mod tests {
         (h.state_mut().group, h.state_mut().pattern, h.state_mut().sound) = (g, pi, sound);
         h.run_steps(3);
         let listed: Vec<Lane> = lane_list(&h).iter().map(|(l, _)| *l).collect();
-        assert_eq!(listed[..3], [Lane::Velocity, Lane::Probability, Lane::Controller(64)], "{listed:?}");
+        assert_eq!(listed[..4], [Lane::Velocity, Lane::Probability, Lane::Ratchet, Lane::Controller(64)], "{listed:?}");
         pick_lane(&mut h, Lane::Controller(64));
 
         // "+" opens the dialog; add the mod wheel.
