@@ -12,6 +12,7 @@ const FLASH: Duration = deckard_engine::output::FLASH;
 
 fn note(tick: i64, sound: usize, length: i64) -> NoteEvent {
     NoteEvent {
+        expr_at: 0,
         roll: None,
         tick,
         group: 0,
