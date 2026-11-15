@@ -101,59 +101,45 @@ fn remap(v: &Value, map: &HashMap<u64, u64>) -> Value {
     }
 }
 
-/// Object ids referenced but defined nowhere.
-fn dangling(root: &Value) -> Vec<u64> {
-    // A reference may come before its object's definition (a side-chain set to a group
-    // further on): saving defines the object there. Dangling is defined nowhere.
-    fn walk(v: &Value, defined: &mut HashSet<u64>, refs: &mut Vec<u64>) {
+/// For each `id` in `candidates`, finds whether it still has a definition in
+/// `root` and records the archive-order path of its first reference in `root`.
+fn scan_candidates(root: &Value, candidates: &HashSet<u64>) -> (Vec<u64>, HashMap<u64, Path>) {
+    fn walk(v: &Value, path: &mut Vec<u32>, candidates: &HashSet<u64>, defined: &mut HashSet<u64>, first_refs: &mut HashMap<u64, Path>) {
         match v {
-            Value::Ref(o) => refs.push(*o),
-            Value::List(items) => items.iter().for_each(|i| walk(i, defined, refs)),
-            Value::Obj(o) => {
-                if let Some(id) = o.oid {
-                    defined.insert(id);
-                }
-                o.fields.iter().for_each(|(_, v)| walk(v, defined, refs));
-            }
-            _ => {}
-        }
-    }
-    let mut defined = HashSet::new();
-    let mut refs = Vec::new();
-    walk(root, &mut defined, &mut refs);
-    let mut bad: Vec<u64> = refs.into_iter().filter(|o| !defined.contains(o)).collect();
-    bad.sort_unstable();
-    bad.dedup();
-    bad
-}
-
-/// Path of the first reference to each of `ids`, in archive order.
-fn ref_paths(root: &Value, ids: &[u64]) -> HashMap<u64, Path> {
-    fn walk(v: &Value, path: &mut Vec<u32>, ids: &[u64], out: &mut HashMap<u64, Path>) {
-        match v {
-            Value::Ref(o) if ids.contains(o) => {
-                out.entry(*o).or_insert_with(|| path.clone());
+            Value::Ref(o) if candidates.contains(o) => {
+                first_refs.entry(*o).or_insert_with(|| path.clone());
             }
             Value::List(items) => {
                 for (i, item) in items.iter().enumerate() {
                     path.push(i as u32);
-                    walk(item, path, ids, out);
+                    walk(item, path, candidates, defined, first_refs);
                     path.pop();
                 }
             }
             Value::Obj(o) => {
+                if let Some(id) = o.oid
+                    && candidates.contains(&id)
+                {
+                    defined.insert(id);
+                }
                 for (i, (_, f)) in o.fields.iter().enumerate() {
                     path.push(i as u32);
-                    walk(f, path, ids, out);
+                    walk(f, path, candidates, defined, first_refs);
                     path.pop();
                 }
             }
             _ => {}
         }
     }
-    let mut out = HashMap::new();
-    walk(root, &mut Vec::new(), ids, &mut out);
-    out
+    if candidates.is_empty() {
+        return (Vec::new(), HashMap::new());
+    }
+    let mut defined = HashSet::new();
+    let mut first_refs = HashMap::new();
+    let mut path = Vec::with_capacity(32);
+    walk(root, &mut path, candidates, &mut defined, &mut first_refs);
+    let bad: Vec<u64> = first_refs.keys().copied().filter(|id| !defined.contains(id)).collect();
+    (bad, first_refs)
 }
 
 impl Document {
@@ -219,46 +205,124 @@ impl Document {
     /// object moves to its next reference instead, as saving would place it. A side-chain
     /// is such a place: a project read back has a group defined in the first side-chain
     /// listening to it.
+    #[cfg(test)]
     pub(crate) fn rehomed(&mut self, label: &str, mut ops: Vec<Op>) -> Result<Vec<Op>, String> {
-        for _ in 0..4 {
-            let undo = self.run(&ops)?;
-            let bad = dangling(&self.tree);
-            let first_refs = if bad.is_empty() { HashMap::new() } else { ref_paths(&self.tree, &bad) };
-            self.run(&undo).expect("undo of ops just applied");
-            if bad.is_empty() {
-                return Ok(ops);
-            }
-            // Move each removed definition to its first remaining reference.
-            let mut originals = HashMap::new();
-            self.tree.walk(&mut |o| {
-                if let Some(id) = o.oid
-                    && bad.contains(&id)
-                {
-                    originals.entry(id).or_insert_with(|| o.clone());
+        let initial_undo = self.run(&ops)?;
+        let lost = crate::lost_referenced_ids(&initial_undo, &ops, self.references.as_ref().unwrap());
+        if lost.is_empty() {
+            self.run(&initial_undo).expect("undo of ops just applied");
+            return Ok(ops);
+        }
+        match self.rehome_applied(label, &initial_undo, &ops, lost) {
+            Ok((extra_ops, extra_undo)) => {
+                if !extra_undo.is_empty() {
+                    self.run(&extra_undo).expect("undo of rehome ops just applied");
                 }
-            });
+                self.run(&initial_undo).expect("undo of ops just applied");
+                ops.extend(extra_ops);
+                Ok(ops)
+            }
+            Err(e) => {
+                self.run(&initial_undo).expect("undo of ops just applied");
+                Err(e)
+            }
+        }
+    }
+
+    /// With `ops` already applied (producing `undo`), incrementally move any removed
+    /// definitions that are still referenced in `self.tree` to their first remaining
+    /// reference. Returns `(extra_ops, extra_undo)` in apply / undo order.
+    pub(crate) fn rehome_applied(&mut self, label: &str, undo: &[Op], ops: &[Op], lost: Vec<u64>) -> Result<(Vec<Op>, Vec<Op>), String> {
+        fn ids_in(v: &Value, out: &mut HashSet<u64>) {
+            match v {
+                Value::Obj(o) => {
+                    out.extend(o.oid);
+                    o.fields.iter().for_each(|(_, f)| ids_in(f, out));
+                }
+                Value::List(items) => items.iter().for_each(|i| ids_in(i, out)),
+                _ => {}
+            }
+        }
+        fn collect_removed<'a>(undo: &'a [Op], ops: &[Op]) -> HashMap<u64, &'a Obj> {
+            let mut removed: HashMap<u64, &'a Obj> = HashMap::new();
+            for op in undo.iter().rev() {
+                if let Some(v) = crate::op_value(op) {
+                    v.walk(&mut |o| {
+                        if let Some(id) = o.oid {
+                            removed.entry(id).or_insert(o);
+                        }
+                    });
+                }
+            }
+            for op in ops {
+                if let Some(v) = crate::op_value(op) {
+                    v.walk(&mut |o| {
+                        if let Some(id) = o.oid {
+                            removed.remove(&id);
+                        }
+                    });
+                }
+            }
+            removed
+        }
+
+        let mut extra_ops = Vec::new();
+        let mut extra_undo = Vec::new();
+        let mut removed: Option<HashMap<u64, &Obj>> = None;
+        let mut candidates: HashSet<u64> = lost.into_iter().collect();
+
+        for _ in 0..4 {
+            if candidates.is_empty() {
+                return Ok((extra_ops, extra_undo));
+            }
+            let (bad, first_refs) = scan_candidates(&self.tree, &candidates);
+            if bad.is_empty() {
+                return Ok((extra_ops, extra_undo));
+            }
+            let removed_map = removed.get_or_insert_with(|| collect_removed(undo, ops));
             // Only the outermost: what's defined inside a moved object moves with it (a
             // group carries its patterns).
-            fn ids_in(v: &Value, out: &mut HashSet<u64>) {
-                match v {
-                    Value::Obj(o) => {
-                        out.extend(o.oid);
-                        o.fields.iter().for_each(|(_, f)| ids_in(f, out));
-                    }
-                    Value::List(items) => items.iter().for_each(|i| ids_in(i, out)),
-                    _ => {}
+            let mut inner = HashSet::new();
+            for id in &bad {
+                if let Some(&o) = removed_map.get(id) {
+                    o.fields.iter().for_each(|(_, f)| ids_in(f, &mut inner));
                 }
             }
-            let mut inner = HashSet::new();
-            for o in originals.values() {
-                o.fields.iter().for_each(|(_, f)| ids_in(f, &mut inner));
-            }
+            let mut step_ops = Vec::new();
+            let mut moved_ids = HashSet::new();
             for id in bad.iter().filter(|id| !inner.contains(id)) {
-                let (Some(path), Some(obj)) = (first_refs.get(id), originals.get(id)) else {
+                let (Some(path), Some(&obj)) = (first_refs.get(id), removed_map.get(id)) else {
+                    if !extra_undo.is_empty() {
+                        self.run(&extra_undo).expect("undo of rehome ops just applied");
+                    }
                     return Err(format!("{label}: object #{id} would still be referenced after the edit"));
                 };
-                ops.push(Op::Set { path: path.clone(), value: Value::Obj(obj.clone()) });
+                moved_ids.insert(*id);
+                obj.fields.iter().for_each(|(_, f)| ids_in(f, &mut moved_ids));
+                step_ops.push(Op::Set { path: path.clone(), value: Value::Obj(obj.clone()) });
             }
+            let step_undo = match self.run(&step_ops) {
+                Ok(u) => u,
+                Err(e) => {
+                    if !extra_undo.is_empty() {
+                        self.run(&extra_undo).expect("undo of rehome ops just applied");
+                    }
+                    return Err(e);
+                }
+            };
+            for id in moved_ids {
+                removed_map.remove(&id);
+            }
+            let mut next_undo = step_undo;
+            next_undo.extend(extra_undo);
+            extra_undo = next_undo;
+            extra_ops.extend(step_ops);
+
+            let refs = self.references.as_ref().unwrap();
+            candidates = removed_map.keys().copied().filter(|id| refs.get(id).copied().unwrap_or(0) > 0).collect();
+        }
+        if !extra_undo.is_empty() {
+            self.run(&extra_undo).expect("undo of rehome ops just applied");
         }
         Err(format!("{label}: references could not be kept consistent"))
     }

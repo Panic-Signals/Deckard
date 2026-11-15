@@ -741,6 +741,7 @@ impl Document {
         if upgrade_notes(&mut self.tree) == 0 {
             return false;
         }
+        self.classes = None;
         for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             for op in step.undo.iter_mut().chain(step.redo.iter_mut()) {
                 if let Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } = op {

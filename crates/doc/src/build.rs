@@ -641,10 +641,28 @@ impl crate::Document {
         crate::Document::from_bytes(file, None)
     }
 
+    /// The project's class version/tracking table, cached across edits.
+    pub(crate) fn cached_classes(&mut self) -> &HashMap<String, (u32, bool)> {
+        if self.classes.is_none() {
+            self.classes = Some(class_table(Some(self.root())));
+        }
+        self.classes.as_ref().unwrap()
+    }
+
+    /// Record any class versions introduced by a newly inserted subtree.
+    pub(crate) fn note_classes(&mut self, obj: &Obj) {
+        let Some(classes) = self.classes.as_mut() else { return };
+        obj.walk_paths(&mut |o, _| {
+            if !o.type_name.is_empty() {
+                classes.entry(o.type_name.clone()).or_insert((o.version, o.oid.is_some()));
+            }
+        });
+    }
+
     /// Run `f` with a [`Builder`] for new objects in this project (its class versions,
     /// ids above every id in use).
     pub(crate) fn build<T>(&mut self, f: impl FnOnce(&mut Builder) -> Result<T, String>) -> Result<T, String> {
-        let classes = class_table(Some(self.root()));
+        let classes = self.cached_classes().clone();
         let mut b = Builder::new(&self.types, classes, self.next_oid);
         let r = f(&mut b);
         let next = b.next_oid;
