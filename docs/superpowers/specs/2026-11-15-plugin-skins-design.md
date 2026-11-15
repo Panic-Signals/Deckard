@@ -198,6 +198,7 @@ crashes takes only the probe with it.
 | `plugin-probe dump <plugin>` | The **parameter dump**: every parameter's id, name, units string, steps, flags (automatable, bypass, program change), its unit or section (VST3 units), its default, and its text at 64 points. This is the same JSON the tests and **Dump Plug-in Parameters** use |
 | `plugin-probe response <plugin> [--set id=value …]` | For an effect, at the parameter values given (others at their defaults), from two test signals: a **log sine sweep**, deconvolved into a frequency and impulse response (clean, low noise), and a **real impulse**, a single-sample click at −12, −24 and −36 dBFS, recorded as it comes out. It reports the frequency response, both impulse responses, the level in and out, and what comparing them shows (below) |
 | `plugin-probe sweep <plugin> <id> [--points 16] [--set …]` | The response at each of `points` values of one parameter, plus what changed between them, already classified: a corner frequency moving (cutoff, with Hz at each point), a peak rising (resonance, with its height and Q), the slope changing (filter mode or slope), overall gain (drive, output), the dry part changing (mix), the impulse response's taps moving (delay time) or its decay changing (reverb decay, damping), nothing measurable (a parameter only the plug-in's UI uses) |
+| `plugin-probe nks <plugin> [--presets <dir>]` | Reads the plug-in's NKS presets on disk and compares their pages: **fixed** (every preset maps the same ids and names) or **per preset**, which names recur for which roles, in which sections, and which presets break the pattern |
 | `plugin-probe note <plugin> [--note 48] [--set …]` | For an instrument: a held note and its release, giving the level envelope (attack, decay, sustain and release fitted), the pitch, and the spectrum over time. With `sweep`, this finds an instrument's envelope times and its filter |
 
 **Why both a sweep and an impulse.** For a linear, steady plug-in (an EQ, a static filter, a
@@ -232,7 +233,12 @@ plug-in name, it:
 1. **Finds the plug-in** with `plugin-probe list`, and stops if a shipped or user skin
    already matches (unless asked to replace it).
 2. **Dumps it,** and reads the names, units and sections to form a first guess: the
-   `kind`, which parameter is which role, how they group into pages.
+   `kind`, which parameter is which role, how they group into pages. If it's an NKS
+   plug-in it runs `plugin-probe nks`: mapped **the same everywhere** means binding by id
+   and starting from those pages; mapped **per preset** means binding roles by the names
+   its presets use (see "NKS and non-NKS plug-ins"), and measuring on a spread of presets
+   (ten or so, across its banks) to check each name means the same thing in all of them.
+   A name that doesn't is left out, and the report says so.
 3. **Checks every guess by measuring.** It first runs `response` once at the defaults: the
    sweep against the impulse says whether the plug-in is linear and steady, nonlinear or
    moving on its own, which decides how the rest is measured. For each candidate role it
@@ -329,7 +335,9 @@ return {
 A skin names the parameters it uses once, under its own names, and the rest of the file
 uses those. Each binds by **id** (a VST3 ParamID, an Audio Unit parameter ID, or a built-in
 field) or by **name** as a fallback, resolved when the slot is focused or the plug-in
-reloads. A name that doesn't resolve leaves its widget input at its default and its knob
+reloads. For a plug-in whose NKS mapping changes from preset to preset, roles bind by the
+names its presets use and are resolved again on every preset change (see "NKS and non-NKS
+plug-ins"). A name that doesn't resolve leaves its widget input at its default and its knob
 cell showing `?`. Nothing is guessed.
 
 Every write goes through `layout::Edit::PluginIn` or `Edit::Param`, as a knob turn does
@@ -606,6 +614,70 @@ host. So:
   result of everything, including what can't be seen.
 - **Macros** are its parameters like any other, and go on the overview's knobs.
 
+### NKS and non-NKS plug-ins
+
+Plug-ins arrive with three kinds of knob pages, and a skin has to work with each:
+
+- **NKS, mapped per preset.** Each NKS preset carries its own controller pages (`NICA`,
+  read by `crates/plugins/src/nks.rs`): eight knobs a page, named, by section. In Kontakt
+  libraries and Reaktor products the mapping, and even what a parameter id means, changes
+  from one preset to the next. Many synths' presets also put preset-specific macros
+  ("Grit", "Air") on page 1.
+- **NKS, mapped the same in every preset.** The pages are curated but fixed, so ids keep
+  their meaning.
+- **Not NKS.** Only the parameter list: the slot's pages are DECKARD's automapping (the
+  first 128 automatable parameters in order, eight to a page), which is often poor, plus
+  sections where the plug-in reports them (VST3 units, AU parameter groups).
+
+The slot's pages are saved in the project, as Maschine saves them, and a user can edit
+them. Skins don't change that. What they decide is **which pages the knobs show on the
+controller** and **how pictures find their parameters**.
+
+**Which pages the knobs show,** first match wins:
+
+1. **Pages the user edited on this slot.** Their edits are deliberate; a skin never
+   overrides them.
+2. **The preset's own NKS pages,** when the plug-in is mapped per preset. The preset's
+   maker chose them for that sound, and they change with it.
+3. **The skin's designed pages.**
+4. **The plug-in's fixed NKS pages.**
+5. **Automapping,** grouped by section where the plug-in has sections.
+
+A skin can say `knobs = "nks"` (always the preset's pages where they exist) or
+`knobs = "skin"`; the default is the order above. **Preferences ▸ Hardware ▸ Skins** can
+flip it per plug-in. Whatever pages the knobs show, the skin's designed sections stay one
+press away (the overview's section buttons), so the pictures are never lost.
+
+**How pictures find their parameters:**
+
+- **By id** where ids keep their meaning: non-NKS plug-ins and fixed NKS ones. Resolved
+  once per plug-in load.
+- **By name** where they don't. A skin for a plug-in mapped per preset names each role by
+  what its presets call it, optionally within a section:
+
+  ```lua
+  cutoff = { nks = { "Cutoff", "Filter Cutoff", "Cut" }, section = "Filter", unit = "hz", calibrate = true },
+  ```
+
+  It's resolved against the preset's pages, then the parameter titles, **again every time
+  the preset changes.** A picture lists the inputs it can't do without (`needs = { "cutoff" }`).
+  In a preset where those don't resolve, that picture gives way to the template's
+  fallback (a `value` readout or plain knob cells) instead of drawing something wrong.
+- **Units per preset.** A role found by name can't carry a taper measured once, so it
+  uses `calibrate`: the 64 text reads run in the background after each preset change,
+  spread over UI frames, and the picture draws flat until they're done (a few frames).
+- **Macros.** Where the preset's page 1 is macros, the overview's knobs are those, with
+  the preset's names, instead of the skin's choice.
+
+**When the preset changes inside the plug-in.** DECKARD knows a preset's NKS pages when it
+loaded that preset. If the plug-in then reports a program change, or renames its
+parameters (VST3 `kParamTitlesChanged`), those pages may no longer fit. For a plug-in
+mapped per preset, DECKARD drops them for that slot and falls back to the next source in
+the list, with a small `NKS` hint in the header until a preset is loaded through DECKARD
+again. For a non-NKS plug-in that renames parameters (macro labels following the preset),
+the knob cells take the new names and by-name roles are resolved again; by-id bindings
+don't change.
+
 ### Plug-ins that host other products
 
 Reaktor and Kontakt are one plug-in to a host, whatever is loaded in them, so their
@@ -700,7 +772,7 @@ it. `docs/controller-plugins.md` points to it.
 
 | Phase | Delivers | Proof |
 |---|---|---|
-| 1 | Loader, matching, checking, parameter resolution, value maps; the `generic` template (big knob cells, button labels); fallback and `SKIN` badge | Unit tests on resolution and maps; golden images; MK3 check with one hosted plug-in |
+| 1 | Loader, matching, checking, parameter resolution (by id and by name, re-resolved on preset change), value maps, `needs`; which pages the knobs show (user-edited, preset NKS, skin, fixed NKS, automap); the `generic` template (big knob cells, button labels); fallback and `SKIN` badge | Unit tests on resolution and maps; golden images; MK3 check with one hosted plug-in |
 | 2 | Compositor thread, parameter cells, easing, dithering, page slides | Frame time under 4 ms; no USB traffic when still |
 | 3 | `filter`, `eq`, `band`, `envelope`, `lfo`, `transfer`, `value`; templates; touch focus from `BUTTON_CAP_n`; DECKARD's Filter, EQ and Compressor curves move to shipped skins, and `eq_curve`'s special cases go | Built-in curves match today's golden images; surface tests that a `BUTTON_CAP_n` press and release focus and unfocus while still reaching the page (Set Macro, double tap) |
 | 4 | Calibration from `Params::text` and its cache | Tests on recorded text dumps from several hosted plug-ins |
@@ -708,7 +780,7 @@ it. `docs/controller-plugins.md` points to it.
 | 6 | Modulation: modulated position, trail, depth band; envelope playheads | Route tests; check with an LFO on cutoff |
 | 7 | `wavetable`, `taps`, `space`, `xy`, `gr`, `steps`, `roll`; the `synth` template with sections, overview, `oscillators`, `partials`, `path`, `mods`; NKS pages as page sources; shipped skins for the rest of DECKARD's effects and instruments | Golden images; DECKARD's own synths' skins against their known parameters |
 | 8 | Distribution: **Dump Plug-in Parameters** and starter skins; **Install Skin…** and drop to install; **Preferences ▸ Hardware ▸ Skins**; `api`, `skin_version`, `based_on`; parameter dumps in CI | Install, override and precedence tests; every shipped skin passes against its dump |
-| 9 | `plugin-probe` (`list`, `dump`, `response`, `sweep`, `note`, with `--state`); the `plugin-skin` skill; `model = "measured"` and measured tables; wavetable frame capture; `product` matching; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known, and its sweep-against-impulse check calls the EQ linear, the Compressor and Saturator nonlinear and the Chorus moving; it finds DECKARD's Bass Synth's oscillator shapes, filter and envelope times; Vital's skin (free, so CI-able) captures frames and fits its filters; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
+| 9 | `plugin-probe` (`list`, `dump`, `nks`, `response`, `sweep`, `note`, with `--state`); the `plugin-skin` skill; `model = "measured"` and measured tables; wavetable frame capture; `product` matching; CI checks models against stored measurements; the first shipped third-party skins made with it | The probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly, with their answers known, and its sweep-against-impulse check calls the EQ linear, the Compressor and Saturator nonlinear and the Chorus moving; it finds DECKARD's Bass Synth's oscillator shapes, filter and envelope times; Vital's skin (free, so CI-able) captures frames and fits its filters; the skill writes a skin for each of the first third-party plug-ins whose models fit their measurements |
 
 Phases 1–3 give DECKARD's effects their pictures and every plug-in a clean face. Phases 5
 and 6 make it look alive.
