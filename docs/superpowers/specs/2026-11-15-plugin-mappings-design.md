@@ -60,8 +60,9 @@ Goals:
 - **Following the knobs.** The slot's pages, whatever filled them (an NKS preset, the
   user, automapping), are the one source of knob assignments. Pictures find their inputs
   on the knobs as they are now, so they change when the pages change and never disagree
-  with what the knobs do. A mapping's own knob pages apply when the slot has no NKS or
-  user pages, or when the user ticks an override for that plug-in in the preferences.
+  with what the knobs do. NKS and user pages keep their own order and still get the
+  pictures; a mapping's own pages, in its order, apply when the slot has neither, or when
+  the user ticks an override for that plug-in in the preferences.
 - **Touch focus.** A resting finger on a knob lights the part of its screen's picture it
   moves and puts its value large in the header.
 - **Model and measurement.** For effects, the curve drawn from the parameters is the
@@ -629,14 +630,22 @@ plug-in, written once in the mapping file. They apply in two cases:
 
 - **The slot has no pages of its own** (no NKS preset was loaded, and the user hasn't
   edited any): the mapping's pages replace automapping.
-- **The user ticks "Use the mapping's pages" for that plug-in** (one checkbox per plug-in) in **Preferences ▸
-  Hardware ▸ Mappings**: the mapping's pages replace the slot's own on every slot of that
-  plug-in, NKS pages included. It's off by default *(builder's call made in design)*.
+- **The user ticks "Use the mapping's pages" for that plug-in** (one checkbox per
+  plug-in) in **Preferences ▸ Hardware ▸ Mappings**: the mapping's pages replace the
+  slot's own on every slot of that plug-in, NKS pages included. It's off by default
+  *(builder's call made in design)*.
 
-Otherwise the knobs show the slot's own pages, as today, with pictures chosen to fit them.
-Whichever pages are shown, automapping's remaining parameters follow them, eight a page by
-section where the plug-in reports sections, so every parameter stays reachable. The header
-says `MAP` on the mapping's pages.
+When the mapping's pages are shown, the mapping controls their order, and automapping's
+remaining parameters follow them, eight a page by section where the plug-in reports
+sections, so every parameter stays reachable. The header says `MAP` on them.
+
+**Otherwise the slot's own pages are shown exactly as they are:** an NKS preset's pages in
+the preset's order, or the user's in theirs, as today. The mapping adds no pages, removes
+none and reorders none. It still gives them the visual treatment: each screen gets the
+picture that fits the knobs under it, touch focus lights what a knob moves, and the knob
+cells, units and modulation are drawn as on the mapping's own pages. So an NKS plug-in
+looks as good as one on its mapping's pages; what it gives up is only the mapping's
+choice of what goes where.
 
 Nothing about this is saved in the project. The checkbox is a preference; the slot's own
 pages stay saved as they are, and come back when it's unticked. Editing a page on a slot
@@ -722,8 +731,9 @@ sections = {
   uses.
 - **NKS presets.** The overview and sections are the mapping's pages, so they follow the
   same rule as any mapping's ("Following the knobs"). A synth loaded from an NKS preset
-  shows the preset's pages, with pictures chosen to fit their knobs, unless the user ticks
-  **Use the mapping's pages** for it.
+  shows the preset's pages in the preset's order, with no overview or sections added,
+  each screen with the picture that fits its knobs, unless the user ticks **Use the
+  mapping's pages** for it.
 
 ### Three hard cases
 
