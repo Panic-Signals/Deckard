@@ -8167,6 +8167,54 @@ mod tests {
         assert!(after > 1.0, "heard at once: {after}");
     }
 
+    /// A take switched off while playing (the pad's toggle) fades out without a jump,
+    /// whether rendered live or ahead, across all engines.
+    #[test]
+    fn a_loop_switched_off_while_playing_fades_without_clicking() {
+        for engine in [deckard_model::AudioEngine::Stretch, deckard_model::AudioEngine::Repitch, deckard_model::AudioEngine::Formant] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("sine.wav");
+            let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+            let frames = 96_000usize; // 4 beats at 120 BPM
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            for i in 0..frames {
+                let v = (i as f32 / 48_000.0 * 220.0 * std::f32::consts::TAU).sin() * 0.8;
+                w.write_sample(v).unwrap();
+                w.write_sample(v).unwrap();
+            }
+            w.finalize().unwrap();
+            let mut on = project();
+            let take = deckard_model::Take {
+                sample: deckard_model::SampleRef { kind: 0, path: path.to_string_lossy().into(), ..Default::default() },
+                beats: 4.0,
+                play_range: (0, 0),
+            };
+            let snd = &mut on.groups[0].sounds[0];
+            snd.instrument = "AudioModule".into();
+            snd.sampler = None;
+            snd.audio = Some(deckard_model::AudioLoop { takes: vec![take], engine, pitchbend: 0.5, fade: 0.1222, ..Default::default() });
+            on.groups[0].patterns[0] =
+                Pattern { length: 8 * PPQ, audio: vec![deckard_model::AudioCue { sound: 0, take: 0, offset: PPQ }], ..Default::default() };
+            on.sections = vec![Section { scene: Some(0), length: 16 * PPQ, auto: false }];
+            let mut off = on.clone();
+            off.groups[0].patterns[0].audio.clear();
+            let chains = Engine::new(&on, None, 48_000, Mode::Arrangement, &mut SampleCache::default()).1.chains;
+            for ahead in [None, Some(700)] {
+                let out = render_with(&on, ahead, 256, 2.0, |k, e, cache| {
+                    if k == 48_000 / 256 {
+                        let (fresh, _) = Engine::new_after(&off, Some((&on, chains.as_slice())), None, 48_000, e.mode(), cache);
+                        drop(e.adopt(fresh, &off));
+                    }
+                });
+                let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+                let max_step = left[47_000..52_000].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+                assert!(max_step < 0.06, "{engine:?} ahead={ahead:?}: click at loop off (max step {max_step})");
+                let tail: f32 = left[52_000..].iter().map(|v| v * v).sum();
+                assert!(tail < 1e-6, "{engine:?} ahead={ahead:?}: not silent after fade-out: {tail}");
+            }
+        }
+    }
+
     /// Edited while the transport is stopped, a loop stays silent until the pattern plays.
     #[test]
     fn an_edit_while_stopped_does_not_start_a_loop() {
