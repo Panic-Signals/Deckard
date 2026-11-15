@@ -10,13 +10,17 @@ A plug-in can come with a small Lua file, its **mapping**. It holds two things, 
 It's how Ableton's Push works with Live's devices: each device's parameters are declared
 and banked eight at a time, and Push draws the device's picture (EQ Eight's curve, Auto
 Filter's response) from them with its own code. Here too, DECKARD's Rust code does all the
-drawing: a filter's curve moving, an EQ's bands, a compressor's transfer curve and gain
-reduction. A mapping only says what to draw from.
+drawing: a filter's curve moving, an EQ's bands, a compressor's transfer curve. A mapping
+only says what to draw from.
 
 Design only: nothing here is built. No project-format change: mappings are files beside
 the controller scripts, and nothing about them is saved in a project. **Nothing is stored
 per preset either:** a mapping works from the slot's knob assignments as they are at that
 moment (see "Following the knobs").
+
+The scope is kept to what pays for itself: pictures drawn from parameters, touch focus,
+and mappings that follow the knobs. Measuring plug-ins, most synth-specific pictures and
+install tooling are in "Later", each with the reason it waits.
 
 Items marked *(builder's call made in design)* were chosen while writing this and were not
 asked for directly. The user reviews them when reading this document.
@@ -28,21 +32,18 @@ own Filter, EQ and a few other effects get a curve on the right screen, each as 
 case in the app (`ControlView::eq`, `filter`, `picture`) and in `control.lua`'s
 `eq_curve`. Hardware like Ableton's Push 3 shows that a screen over the knobs is most
 useful when it shows what the sound is doing: the filter's curve under the cutoff knob, a
-band's dot under its frequency knob, the envelope as it plays.
+band's dot under its frequency knob, the envelope's shape under its times.
 
 Goals:
 
 - Any plug-in, built-in or hosted, can have a visual face, from one file a user can write.
+- NKS plug-ins get pictures with no mapping at all, from the knob names their presets
+  already carry.
 - It reads at a glance and responds the moment a hand moves, on every theme, including the
   two-tone `lcd` one.
-- Scripts stay declarative. Drawing, animation and timing are Rust's, so a mapping can't
-  make the screens slow or ugly, and the UI thread never runs Lua per frame.
+- Mappings stay declarative. Drawing and timing are Rust's, so a mapping can't make the
+  screens slow or ugly, and nothing runs Lua per frame.
 - One path: DECKARD's own curves become shipped mappings.
-- DECKARD comes with mappings for its own plug-ins and some common free ones, and users
-  can write, install and share their own.
-- Making a mapping for a new plug-in is mostly automatic: a probe measures what each
-  parameter does, and a Claude Code skill turns that into a mapping, checked as far as
-  measurement can check it.
 
 ## The short version
 
@@ -50,10 +51,10 @@ Goals:
   declares what the plug-in is (`kind = "filter"`) and the parameters it uses, with names
   and units of its own, then maps them: a widget for each screen with its inputs bound to
   those parameters, knob pages and button choices.
-- **Rust draws.** A fixed set of widgets (filter curve, EQ, envelope, LFO, scope,
-  spectrum, transfer curve, delay taps, reverb decay, meters, knob cells…) is drawn by a
-  compositor thread. Every widget has a flat look made from the theme's colours; glow and
-  gradients are extras a theme can turn on.
+- **Rust draws.** A small set of widgets (filter curve, EQ, envelope, LFO, transfer curve,
+  delay taps, reverb decay, knob cells…) is drawn on the MK3 screens thread. Every widget
+  has a flat look made from the theme's colours; glow and soft fills are extras a theme can
+  turn on.
 - **One picture per screen.** The two screens have a physical gap between them, so nothing
   crosses it. Each screen has its own picture, and the four knobs under a screen move what
   that screen shows.
@@ -63,18 +64,18 @@ Goals:
   with what the knobs do. NKS and user pages keep their own order and still get the
   pictures; a mapping's own pages, in its order, apply when the slot has neither, or when
   the user ticks an override for that plug-in in the preferences.
+- **Real units from the plug-in's own text.** Most plug-ins already say "1.20 kHz" or
+  "-6.0 dB"; DECKARD reads that to learn each parameter's taper, so few mappings need to
+  declare one.
 - **Touch focus.** A resting finger on a knob lights the part of its screen's picture it
   moves and puts its value large in the header.
-- **Model and measurement.** For effects, the curve drawn from the parameters is the
-  model, and a tap before and after the slot gives the measured response and the live
-  spectrum. If a mapping has the plug-in wrong, it shows.
-- **Modulation is visible.** The curve shows where the knob is and where modulation has
-  moved it.
-- **Shipped and user mappings.** DECKARD ships mappings for its own plug-ins and a set of
-  free, open-source ones. Users add their own by dropping a file in.
-- **Automated analysis.** A headless probe measures a plug-in as a black box, and the
-  `plugin-mapping` Claude Code skill uses its measurements to write a mapping, its test
-  data and previews.
+- **Modulation is visible.** Pictures and knob cells show where the knob is and where
+  modulation has moved it.
+- **Shipped and user mappings.** DECKARD ships mappings for its own plug-ins and a few
+  open-source ones. Users add their own to a folder, and theirs win.
+- **A parameter dump and a skill** make writing one quick: `plugin-probe dump` lists a
+  plug-in's parameters and their text, and the `plugin-mapping` Claude Code skill drafts a
+  mapping from it.
 
 ## What DECKARD already gives, and the gaps
 
@@ -85,24 +86,23 @@ Goals:
 | Plug-in parameters | `KnobView` (name, section, text, 0..1 value); `Params::value`, `Params::text`; `ParamInfo` (id, title, short title, units string, steps, default); `layout::Edit::PluginIn` | Values arrive normalised: a curve needs Hz, dB and ms, and a hosted plug-in's taper is unknown. `ParamInfo` has no flags and no section (VST3 unit), and the bypass and program-change parameters are filtered out before anything sees them |
 | Knob assignments | The slot's pages, saved with it (`PluginRef::pages`: each knob's parameter id, section and name). Loading an NKS preset through the browser writes its pages there; the user can edit them; when there are none, automapping (the first 128 automatable parameters, eight to a page) | Enough: pictures resolve against it ("Following the knobs") |
 | Modulation | `mod_rt.rs` publishes route travels (`meters::RouteTravels`) for each sound's routes; `App::mod_position` turns one into a knob's modulated position | Sounds only: a plug-in on a group or the master shows no modulation until route travels cover those chains |
-| Audio inside a chain | The recording `Tap` (kept for Sampling); master and channel meters | No tap around one slot, so no pre/post per plug-in. Needs one ("The slot tap") |
 | Knob touch | The MK3's knobs are touch sensitive, and report 0x01's bits 72–79 already arrive as `BUTTON_CAP_1`…`BUTTON_CAP_8` (`deckard_mk3::BUTTONS`). Pages use them for Set Macro and double taps | Nothing reads them for display. The mapping layer watches them too ("Touch focus") |
-| Sandbox, hot reload, user folder | Safe stdlib only, `<settings>/controller` replaces built-in files by path, reload on save | Reused as is. There is no time limit on scripts, so mappings have no per-frame or per-event code in the first version ("What a mapping says") |
-| Screen tests | `screen.rs`'s `render_screens` test draws pages without a device | No golden-image comparison yet. Widgets need one (phase 2) |
+| Sandbox, hot reload, user folder | Safe stdlib only, `<settings>/controller` replaces built-in files by path, reload on save | Reused as is. There is no time limit on scripts, so mappings have no code that runs ("What a mapping says") |
+| Screen tests | `screen.rs`'s `render_screens` test draws pages without a device | No golden-image comparison yet. Widgets need one (phase 1) |
 
 ## Where mappings live and how one is found
 
 ```
-crates/surface/lua/mappings/            shipped with DECKARD (built into the binary)
+crates/surface/lua/mappings/         shipped with DECKARD (built into the binary)
   builtin/filter.lua  builtin/eq.lua  builtin/compressor.lua  ...
-  vst3/surge-synth-team/surge-xt.lua  vst3/vital-audio/vital.lua  ...
-<settings>/controller/mappings/         the user's
+  surge-synth-team/surge-xt.lua  vital-audio/vital.lua  ...
+<settings>/controller/mappings/      the user's
   <vendor>/<plugin>.lua
   <vendor>/<plugin>/                 the mapping's pictures, if it has any
 ```
 
 Where a mapping sits doesn't decide what it matches; its `match` does. The paths are only
-tidy. One mapping can serve a plug-in in both formats ("Matching").
+tidy.
 
 ### Matching
 
@@ -121,11 +121,12 @@ A plug-in matches on its identity in its own format (the VST3 class ID or the Au
 Unit's three codes), else on vendor and name. A built-in matches on its key
 (`match = { builtin = "filter" }`), the key `plugin_pictures.rs` already uses. Parameter
 ids differ between a plug-in's VST3 and Audio Unit versions, so a parameter can give both
-(`id = { vst3 = 3, au = 1003 }`, "Parameters").
+(`id = { vst3 = 3, au = 1003 }`, "Parameters"), and one mapping serves both formats.
 
-No match: today's Control page, unchanged. A mapping that fails to load or check falls
-back the same way, shows a small `MAP` badge in the header, and its error, with its line,
-goes to the script-error report scripts already have.
+No match: the `generic` template ("Templates"), which is today's Control page plus
+pictures where it recognises the knobs. A mapping that fails to load or check falls back
+the same way, shows a small `MAP` badge in the header, and its error, with its line, goes
+to the script-error report scripts already have.
 
 Mappings reload when saved, as controller scripts do, and `defaults/mappings/` is
 refreshed with the other defaults when the folder is opened.
@@ -135,167 +136,106 @@ refreshed with the other defaults when the folder is opened.
 ### What DECKARD ships
 
 - **Every DECKARD plug-in:** its effects, instruments and drum synths. These replace
-  today's special-case curves, and a DECKARD plug-in with no mapping yet gets the
-  `generic` template, never nothing.
-- **A set of third-party plug-ins,** chosen so anyone can check them and so measuring
-  them raises no question: **open source, free, available on macOS, Linux and Windows,
-  widely used, and with stable parameter IDs.** The first set *(builder's call made in
-  design)*: Surge XT, Vital, Dexed and OB-Xd. More can be added on the same terms, by
-  anyone, as a pull request. Mappings for commercial plug-ins are for users to write and
-  share themselves, not to ship.
+  today's special-case curves. A DECKARD plug-in with no mapping yet gets `generic`.
+- **A few third-party plug-ins,** chosen so anyone can check them: **open source, free,
+  available on macOS, Linux and Windows, widely used, and with stable parameter IDs.** The
+  first set *(builder's call made in design)*: Surge XT, Vital, Dexed and OB-Xd. More can
+  be added on the same terms, as a pull request. Mappings for commercial plug-ins are for
+  users to write and share themselves, not to ship.
 - **No vendor artwork.** A shipped mapping uses only parameter IDs, names and units, never
-  a vendor's logos, panel images or fonts. Its identity on screen is the plug-in's name in
-  DECKARD's own type and the group's colour.
-- Shipped mappings are built into the binary with the other scripts, and update with
-  DECKARD's releases.
+  a vendor's logos, panel images or fonts.
 
 **Tests without the plug-in.** Each shipped third-party mapping comes with a **parameter
 dump** (`crates/surface/tests/mappings/<plugin>.json`, made by `plugin-probe dump`): the
-plug-in's version, every parameter's id, name and range, and its text at 64 points, plus
-the measured responses its model was chosen from ("Automated plug-in analysis"). CI loads
-the mapping against the dump, checks that every name resolves and every calibration
-parses, and renders its golden images. So a mapping's pull request can be reviewed and
-tested on any machine, and a plug-in update that renames a parameter shows up as a failing
-test once its dump is refreshed. Dumps are made only from the plug-in itself: never from
-NKS presets or other files of a commercial library.
+plug-in's version, every parameter's id, name and range, and its text at 64 points. CI
+loads the mapping against the dump, checks that every name resolves and every calibration
+parses, and renders its golden images. So a mapping's pull request can be checked on any
+machine. Dumps are made only by hosting the plug-in itself, never from NKS presets or other
+files of a commercial library.
 
 ### How users add their own
 
 - **Write one:** **Controller ▸ Open Controller Scripts Folder**, then `mappings/`. The
   shipped mappings are in `defaults/mappings/` to copy from, as pages are today.
 - **Start from the plug-in:** **Controller ▸ Dump Plug-in Parameters** writes the focused
-  plug-in's parameter dump (the same JSON as the tests use) and a starter mapping with
-  every parameter listed and the `generic` template, into `mappings/`. Most of a mapping
-  is then naming parameters and picking a template.
-- **Install one someone shared:** drop a `.lua`, or a `.zip` of a `.lua` and its picture
-  folder, onto DECKARD's window, or use **Controller ▸ Install Mapping…**. DECKARD checks
-  it, says which plug-in it's for, and copies it into `mappings/`. A mapping that doesn't
-  check isn't installed, and the error says why.
-- **Safe to share.** A mapping is a table of data: it has no code that runs (see "What a
-  mapping says"), and is loaded with the same safe Lua as controller scripts, with no
-  file, process or network access. Pictures are PNG only, at most 480 × 272 and 512 KB
-  each. A shared mapping can draw on the screens and move the plug-in's parameters,
-  nothing else.
+  plug-in's parameter dump and a starter mapping with every parameter listed and the
+  `generic` template, into `mappings/`. Most of a mapping is then naming parameters and
+  picking a template.
+- **Share one** by sharing the file (and its picture folder, if it has one). The receiver
+  puts it in `mappings/`.
+- **Safe to share.** A mapping is a table of data with no code that runs, loaded with the
+  same safe Lua as controller scripts: no file, process or network access. Pictures are
+  PNG only, at most 480 × 272 and 512 KB each. A shared mapping can draw on the screens and
+  move the plug-in's parameters, nothing else.
 
-### Which mapping wins
+### Which mapping is used
 
-Several mappings can match one plug-in: a shipped one, a user's copy of it, and one
-downloaded from someone else.
-
-1. **The user's folder wins over the shipped mappings,** whatever their match. A user who
-   wrote or installed a mapping meant it.
+1. **The user's folder wins over the shipped mappings.** A user who wrote or copied a
+   mapping meant it.
 2. Within one place, the most specific match wins: the plug-in's identity, then vendor and
    name.
-3. Then the newest `mapping_version`.
 
-**Preferences ▸ Hardware ▸ Mappings** lists the plug-ins that have mappings, and for each
-one every matching mapping, where it comes from (shipped or the user's) and which is in
-use. It can pick another, or **None** to keep the plain Control page for that plug-in, and
-has the **Use the mapping's pages** checkbox ("Following the knobs"). These are
-preferences, not part of any project.
+**Preferences ▸ Hardware ▸ Mappings** lists the plug-ins that have a mapping, with two
+settings each, both preferences rather than part of any project:
+
+- **Use the mapping's pages** ("Following the knobs").
+- **Off:** keep the plain Control page for that plug-in.
 
 ### Versions
 
 - **`api`:** each mapping says which version of the mapping format it's written for
   (`api = 1`). DECKARD loads mappings written for its own version or older, and refuses a
-  newer one with an error naming the DECKARD version it needs. New widgets and fields
-  only ever add to the format, so an old mapping keeps working.
-- **`mapping_version`** and **`author`** say which version of the mapping this is and who
-  made it. They show in **Preferences ▸ Hardware ▸ Mappings**.
+  newer one with an error naming the DECKARD version it needs. New widgets and fields only
+  ever add to the format, so an old mapping keeps working.
+- **`mapping_version`** and **`author`** are for people: they show in the script-error
+  report and the preferences.
 - **Plug-in updates:** `match.version` limits a mapping to the plug-in versions it was
   written for. If an update renames or removes a parameter, its knob shows `?` and the
   script-error report names it; the rest of the mapping keeps working.
-- **A user's copy of a shipped mapping** records the shipped `mapping_version` it started
-  from (`based_on`), which **Dump Plug-in Parameters** and copying from `defaults/` fill
-  in. When a release ships a newer one, the script-error report says the user's copy is
-  behind, so they can merge in the changes or delete their copy.
 
-## Automated plug-in analysis
+## Writing mappings quickly
 
-Writing a good mapping by hand means finding out what each parameter does: which knob is
-the cutoff, how its 0..1 maps to Hz, which filter shape each mode is. A plug-in's names
-are a hint, not the answer. So DECKARD gets a probe that measures it, and a Claude Code
-skill that uses the probe to draft the mapping. Contributors use it to make shipped
-mappings; users with Claude Code use it for their own plug-ins.
-
-**The black-box rule.** The probe and the skill learn about a plug-in only by hosting it
-and listening to it: its parameters and its audio, as a listener with a test signal would.
-They never read a plug-in's files, code, presets' private data or artwork, never take one
-apart, and never look at how any vendor's software works inside. This applies to every
-plug-in, Native Instruments' included.
+**The black-box rule.** Everything here learns about a plug-in only by hosting it: its
+parameter list and the text it gives for each value. Nothing reads a plug-in's files,
+code, presets' private data or artwork, takes one apart, or looks at how any vendor's
+software works inside. This applies to every plug-in, Native Instruments' included.
 
 ### The probe
 
-`plugin-probe`, a binary in `crates/plugins` (`src/bin/plugin-probe.rs`), is a measurement
-tool. It hosts one plug-in **offline in its own process**, at 48 kHz with a fixed block
-size and a time limit, and prints JSON. It never opens a project or touches DECKARD's
-settings, so a plug-in that crashes takes only the probe with it.
+`plugin-probe`, a binary in `crates/plugins` (`src/bin/plugin-probe.rs`). It hosts one
+plug-in **in its own process**, with a time limit, and prints JSON. It never opens a
+project or touches DECKARD's settings, so a plug-in that crashes takes only the probe with
+it.
 
 | Command | What it gives |
 |---|---|
 | `plugin-probe list` | The installed plug-ins DECKARD can host, with their identities (VST3 class ID, AU type/subtype/manufacturer), vendor, name and version |
 | `plugin-probe dump <plugin>` | The **parameter dump**: every parameter's id, name, units string, steps, default, flags (automatable, bypass, program change) and section (VST3 unit) where the plug-in reports them, and its text at 64 points. The probe reads flags and sections itself; DECKARD's `ParamInfo` doesn't carry them yet. This is the same JSON the tests and **Dump Plug-in Parameters** use |
-| `plugin-probe response <plugin> [--set id=value …]` | For an effect, at the parameter values given (others at their defaults), from two test signals: a **log sine sweep**, deconvolved into a frequency and impulse response, and a **real impulse**, a single-sample click at −12, −24 and −36 dBFS, recorded as it comes out. It reports the frequency response, both impulse responses, the level in and out, and what comparing them shows (below) |
-| `plugin-probe sweep <plugin> <id> [--points 16] [--set …]` | The response at each of `points` values of one parameter, plus what changed between them: a corner frequency moving (with Hz at each point), a peak rising (with its height and Q), the slope changing, overall gain, the dry part changing, the impulse response's taps moving or its decay changing, or nothing measurable |
-| `plugin-probe note <plugin> [--note 48] [--set …]` | For an instrument: a held note and its release, giving the level envelope (attack, decay, sustain and release fitted), the pitch, and the spectrum over time |
-
-**Why both a sweep and an impulse.** For a linear, steady plug-in (an EQ, a static filter,
-a plain delay) the two impulse responses match, and the sweep's is the cleaner one. Where
-they differ, that difference is information:
-
-- **They differ, and the impulse's shape changes with its level:** the plug-in is
-  nonlinear (drive, saturation, a compressor or gate acting on the click). The skill then
-  probes it as dynamics or distortion rather than as a filter, and the mapping turns off
-  the measured response for it.
-- **They differ, and repeated impulses differ from each other:** the plug-in moves on its
-  own (chorus, phaser, an internal LFO). Its rate is measured from the impulses' spacing.
-- **Latency:** where the impulse comes out, against the latency the plug-in reports. A
-  mismatch is reported, since the slot tap aligns its two rings by the reported latency.
-- **Pre-ringing** before the impulse's arrival: a linear-phase EQ or filter.
-- **A gate or expander** passes the loud impulse and swallows the quiet ones, which gives
-  its threshold.
 
 ### The skill
 
-`.claude/skills/plugin-mapping/SKILL.md`, beside the existing `pull-request` skill. Its
-classification is best-effort: it says what it measured and what it only guessed from
-names. Given a plug-in name, it:
+`.claude/skills/plugin-mapping/SKILL.md`, beside the existing `pull-request` skill. It
+works from the dump: names, units, sections and value text. Its guesses are best-effort,
+and it says which roles it's sure of and which it only guessed. Given a plug-in name, it:
 
 1. **Finds the plug-in** with `plugin-probe list`, and stops if a shipped or user mapping
    already matches (unless asked to replace it).
-2. **Dumps it,** and reads the names, units and sections to form a first guess: the
-   `kind`, which parameter is which role, how they group into pages.
-3. **Checks each guess by measuring.** It first runs `response` once at the defaults: the
-   sweep against the impulse says whether the plug-in is linear and steady, nonlinear or
-   moving on its own, which decides how the rest is measured. For each candidate role it
-   then runs `sweep`: a "Cutoff" that doesn't move a corner frequency isn't the cutoff.
-   For a filter it finds the cutoff's Hz at each point (that becomes the taper, or
-   `calibrate` if the text already matches), resonance's peak against its value, and each
-   mode's slope, then picks the model shape (`svf_lp`, `ladder4`…) that fits best. It does
-   the same for delay times, reverb decay, compressor threshold and ratio. For a synth it
-   follows "Measuring a synth".
+2. **Dumps it,** and reads the names, units and sections: the `kind`, which parameter is
+   which role, how they group into pages.
+3. **Checks the units.** Where a role's text parses ("1.20 kHz" at one end, "20.0 kHz" at
+   the other), it uses `calibrate`; where it doesn't, it says so and leaves the picture
+   out rather than guess a taper.
 4. **Lays out the pages:** the most-used parameters first, a picture's parameters on the
-   knobs under its screen, sections kept together, buttons for small choices (filter
-   mode, on/off). For a synth, the sections and the overview ("Synths").
-5. **Writes the mapping,** with `mapping_version = 1` and a comment on each parameter
-   saying how its role was established: *measured* (and how well the model fits) or *named
-   only*.
-6. **Writes the test data:** the parameter dump, plus the measured responses behind each
-   choice (`crates/surface/tests/mappings/<plugin>.json`). CI then checks the mapping's
-   model against those measurements without the plug-in, and fails if a later change to a
-   widget's maths moves the model away from them.
-7. **Renders the previews** (default values, extremes, touch focus on each knob), looks at
+   knobs under its screen, sections kept together, display buttons 4 and 7 for a small
+   choice.
+5. **Writes the mapping,** with a comment on each parameter saying how its role was
+   chosen, and the dump as its test data.
+6. **Renders the previews** (default values, extremes, touch focus on each knob), looks at
    them, and fixes what's wrong: an empty knob, a curve off the plot, a label that doesn't
    fit.
-8. **Reports** what's measured and what's only named, the fit of each model in dB, and
-   anything left unresolved. Then, as the user asks, it installs the mapping in their
+7. **Reports** what it's unsure of. Then, as the user asks, it puts the mapping in their
    `mappings/` folder or prepares it for a pull request as a shipped mapping (the
    `pull-request` skill takes it from there).
-
-**When nothing fits.** If no model shape fits a filter within 2 dB where the measurement
-is reliable, the skill gives the picture `model = "measured"`, which draws the measured
-response stored with the mapping and interpolates between the measured parameter values,
-and says so in its report.
 
 ## What a mapping says
 
@@ -326,8 +266,7 @@ return {
     response = { widget = "filter", needs = { "cutoff" },
                  model = { shape = { from = "mode", map = { LP24 = "ladder4", LP12 = "svf_lp",
                                                             BP = "svf_bp", HP = "svf_hp" } },
-                           cutoff = "cutoff", resonance = "reso", drive = "drive" },
-                 measured = true },
+                           cutoff = "cutoff", resonance = "reso", drive = "drive" } },
     motion   = { widget = "motion", needs = { "cutoff" }, param = "cutoff" },
     contour  = { widget = "envelope", needs = { "attack", "decay" },
                  model = { a = "attack", d = "decay" }, amount = "env" },
@@ -366,18 +305,19 @@ input at its default and its knob cell showing `?`. Nothing is guessed.
 Every write goes through `layout::Edit::PluginIn` or `Edit::Param`, as a knob turn does
 today, so Auto-write, Lock, macros and undo all see it. A mapping adds no write path.
 
-### Real units: taper or calibration
+### Real units: calibration or taper
 
 A curve needs 1.2 kHz, not 0.43. Two ways:
 
-- **A declared taper:** `{ "log", 20, 20000 }`, `{ "lin", a, b }`, `{ "exp", a, b, curve
-  }`, `{ "db", "-inf", 12 }` (minus infinity written as a string, since Lua has no literal
-  for it), or `{ "table", {0, 20}, {0.5, 800}, {1, 20000} }`.
 - **`calibrate = true`:** when the parameter resolves, DECKARD reads its `Params::text` at
   64 normalised points, spread over UI frames, and parses the numbers and units
   (`"1.20 kHz"`, `"-6.0 dB"`, `"120 ms"`, `"1/8 D"`). The table is kept in memory with the
   binding and read again when the binding changes. It isn't written anywhere. If the text
-  doesn't parse, the mapping is reported and must declare a taper.
+  doesn't parse, the mapping is reported and must declare a taper. This covers most
+  plug-ins, which is why measuring them can wait ("Later").
+- **A declared taper:** `{ "log", 20, 20000 }`, `{ "lin", a, b }`, `{ "exp", a, b, curve
+  }`, `{ "db", "-inf", 12 }` (minus infinity written as a string, since Lua has no literal
+  for it), or `{ "table", {0, 20}, {0.5, 800}, {1, 20000} }`.
 
 Until a calibration is done (a few frames), a picture that needs it uses its parameter's
 declared taper if it has one as well, and otherwise shows the plain knob cells on that
@@ -387,18 +327,17 @@ The knob cell always shows the plug-in's own text, so a wrong taper bends the pi
 never the number. The text is the knob's base value; the modulated position shows on the
 cell's bar ("Modulation").
 
-### Value maps
+### Widget inputs
 
-A widget input is a parameter's name, a constant, or a small table expression:
+A widget input is a parameter's name, a constant, or a choice map:
 
 ```lua
-cutoff = { "add", "cutoff", { "mul", "env", 0.5 } }     -- in the input's unit: here Hz
-shape  = { from = "mode", map = { ... } }
+shape = { from = "mode", map = { LP24 = "ladder4", LP12 = "svf_lp" } }
 ```
 
-Arithmetic works on real units, after the taper: `"cutoff"` above is in Hz, and `"env"`
-in its own unit (−1..1). Operators: `add mul min max clamp lerp map choose`. They compile
-to a small expression tree that Rust evaluates each frame.
+That's all the first version needs: a filter's mode picking its shape is the common case.
+Arithmetic on inputs (an envelope amount added to the cutoff, say) is "Later", for when a
+real mapping needs it.
 
 ### Pictures and pages
 
@@ -420,22 +359,22 @@ That's the only way to place a picture. Templates fill `pictures` and `pages` fo
 
 | `kind` | Left screen | Right screen |
 |---|---|---|
-| `filter` | response curve | what is moving the cutoff: its base and modulated position over the last few seconds, and the routes doing it |
-| `eq` | the whole curve with its bands; the encoder picks a band | the chosen band close up: its frequency, gain and Q large, the spectrum around it |
-| `dynamics` | transfer curve, the input level riding it | gain reduction history |
-| `delay` | the repeats as a timeline, left and right lanes | the feedback path: its filter curve and how fast repeats die |
+| `filter` | response curve | what is moving the cutoff: its base and modulated position over the last few seconds |
+| `eq` | the whole curve with its bands; the encoder picks a band | the chosen band close up: its frequency, gain and Q large, its own curve |
+| `dynamics` | transfer curve | threshold, ratio and makeup large |
+| `delay` | the repeats as a timeline, left and right lanes | the feedback path: how fast repeats die |
 | `reverb` | the decay: level over time, pre-delay as a gap before it | damping: the tail's tone as a curve over frequency |
 | `synth` | per section ("Synths") | per section |
-| `drum` | the voice's shape (pitch and amplitude envelopes) | hit history |
-| `utility` | meters and phase | stereo width |
-| `generic` | big knob cells, four a screen | big knob cells, four a screen |
+| `drum` | the voice's shape (pitch and amplitude envelopes) | its main parameters large |
+| `generic` | knob cells, plus a picture where it recognises the knobs | the same |
 
-`generic` also recognises common knob names on the page it shows *(builder's call made in
+**`generic` recognises common knob names** on the page it shows *(builder's call made in
 design)*: a screen whose knobs include a cutoff and a resonance ("Cutoff", "Freq",
 "Resonance", "Reso", "Q") shows a filter curve, and one whose knobs include an attack,
 decay, sustain and release shows an envelope. Each needs its parameters to calibrate from
-their text, since `generic` declares no tapers; where they don't, the cells stay. So an
-NKS plug-in with no mapping of its own still gets pictures for the pages its presets map.
+their text, since `generic` declares no tapers; where they don't, the cells stay. This is
+what gives an NKS plug-in with no mapping of its own pictures on the pages its presets map,
+which is most of the value for the least work.
 
 ### Widgets
 
@@ -447,28 +386,19 @@ at most three layers at once.
 
 | Widget | Inputs | How it reads |
 |---|---|---|
-| `filter` | shape, cutoff, resonance, drive, slope, mix | Analytic response for SVF and ladder shapes, written for the widget (the engine's own filters are biquads). Three layers at most: the curve with a flat fill under it; the post spectrum under that; and one more, the modulated curve while modulated, else the measured response while the cutoff knob is touched or where it differs from the model by more than 3 dB |
-| `motion` | a parameter | Its base value as a line and its modulated value as a second line over the last few seconds, newest on the right, with the routes moving it named beside |
+| `filter` | shape, cutoff, resonance, drive, slope, mix | Analytic response for SVF and ladder shapes, written for the widget (the engine's own filters are biquads). The curve with a flat fill under it, and the modulated curve over it while modulated |
+| `motion` | a parameter | Its base value as a line and its modulated value as a second line over the last few seconds, newest on the right |
 | `eq` | bands: frequency, gain, Q, type, on | Each band a dot sized by Q, the sum curve; a band's own curve only while its knob is touched |
-| `band` | one band's parameters, the slot tap | Large numbers, the spectrum around the band, the band's own curve |
-| `envelope` | ADSR, DAHDSR or breakpoints, curvature, amount | A dot per sounding note moving along it ("Modulation") |
-| `lfo` | shape, rate, phase, depth, sync | The shape scrolls under a fixed cursor |
-| `scope` | the slot tap | The last frame, steady when the pitch is |
-| `spectrum` | the slot tap, pre or post | Log frequency, smoothed, with peak hold |
+| `band` | one band's parameters | Large numbers and the band's own curve |
+| `envelope` | ADSR, DAHDSR or breakpoints, curvature, amount | The shape, with its times on the axis |
+| `lfo` | shape, rate, phase, depth, sync | One cycle of the shape, the rate under it |
 | `oscillators` | up to four sources: waveform, octave, tune, pulse width, level; noise level | Each source's cycle faint, their sum bright |
-| `wavetable` | position | The live output's pitch-locked cycle, with the position as a bar under it |
-| `partials` | partial frequencies, levels and decays (declared or measured tables) | Each partial a vertical line that rises on a note and falls at its own rate |
-| `path` | the voice's sections and which are on | Labelled blocks for oscillators → mix → filter → amp → effects, the section the page edits filled |
-| `mods` | the synth's envelopes and LFOs (by parameter) and DECKARD's routes to it | Small multiples, one per source, each with its shape and playhead |
-| `transfer` | threshold, ratio, knee, makeup | The input level as a dot riding the curve |
-| `gr` | gain reduction (from the slot tap: level in against level out) | A history scrolling beside a bar |
+| `transfer` | threshold, ratio, knee, makeup | The curve, the threshold marked |
 | `taps` | time, feedback, spread, sync | Repeats as decaying bars |
 | `decay` | pre-delay, size, decay | Level over time on a dB scale |
 | `damping` | damping, tone | A curve over frequency |
-| `meter` | the slot tap | Peak hold |
 | `value` | one parameter | Large numerals, the unit small |
 | `knobs` | the page's knobs | The cells over the knobs. Always drawn ("Knob cells") |
-| `steps`, `euclid`, `roll` | as `EuclidView` and `RandomView` show today | Ported as widgets so a MIDI plug-in's mapping can use them |
 | `image` | a PNG beside the mapping | For a user's own mappings. Shipped mappings have none |
 
 Adding a widget is a Rust change with a golden-image test. That's on purpose: it keeps the
@@ -485,8 +415,8 @@ has three bands, lined up with the hardware, and its own picture:
  │ LADDER · FILTER        CUTOFF 1.20 kHz │   │ CUTOFF MOTION              MAP 1/2    │
  │ ──────────────────╮                    │   │ ────────╮      ╭──────╮      ╭──      │
  │                   │╲                   │   │          ╰────╯        ╰────╯   mod    │ 172  picture
- │  ▁▂▃▅▆▅▃ spectrum ▂ ╲                  │   │ ─────────────────────────────── base   │
- │ ████████████████████╲____              │   │ LFO 1 → cutoff                        │
+ │                   │ ╲                  │   │ ─────────────────────────────── base   │
+ │ ████████████████████╲____              │   │                                       │
  │ 20     100     1k      10k             │   │                          now ┘         │
  ├─────────┬─────────┬─────────┬─────────┤   ├─────────┬─────────┬─────────┬─────────┤
  │ FILTER                                │   │ FILTER          │         │ OUTPUT    │  72  knob cells
@@ -522,7 +452,7 @@ Touching a knob, after the finger has rested for about 120 ms:
 
 1. The bound part of that screen's picture lights: the cutoff gets a guide line down to
    the axis, the resonance peak shows its Q as a bracket, a band's dot becomes a ring and
-   its own curve appears, and a filter shows its measured response.
+   its own curve appears.
 2. The rest of the picture dims to about 50 %. Names, values and the axis never dim.
 3. The header shows the parameter's name and value large, where it covers nothing.
 4. On letting go, it returns after 180 ms.
@@ -556,8 +486,8 @@ last turn.
   curve's), which reads on the `lcd` theme, doesn't band on the screens' 16-bit colour,
   and keeps the MK3's run-length encoding effective. A theme can ask for soft fills;
   they're drawn without dithering, which would break the encoding's runs.
-- **Still when nothing moves.** With no audio, modulation or touch, the frame doesn't
-  change and nothing is sent.
+- **Still when nothing moves.** With no modulation or touch, the frame doesn't change and
+  nothing is sent.
 
 ### Getting frames to the screens
 
@@ -567,13 +497,12 @@ both screens could need tens of MB/s, more than the MK3's link is known to susta
 
 - **Measure first** (phase 0): the real rate of full-screen and partial transfers on an
   MK3, and how long each transfer blocks the screens thread.
-- **Send only what changed:** the compositor tracks dirty rectangles (the picture area,
-  each knob cell, the header), and the screens thread sends each as its own transfer with
-  its x, y, width and height, which the display protocol already supports.
-- **30 fps for pictures** *(builder's call made in design)*, which a curve and two
-  knob cells fit easily. Knob cells and touch focus are drawn on the next frame after a
-  change, so the hand never waits more than 33 ms. If phase 0 shows more room, the rate
-  goes up.
+- **Send only what changed:** drawing tracks dirty rectangles (the picture area, each knob
+  cell, the header), and each is sent as its own transfer with its x, y, width and height,
+  which the display protocol already supports.
+- **30 fps for pictures** *(builder's call made in design)*, which a curve and two knob
+  cells fit easily. Knob cells and touch focus are drawn on the next frame after a change,
+  so the hand never waits more than 33 ms. If phase 0 shows more room, the rate goes up.
 
 ## Controls
 
@@ -598,9 +527,9 @@ its own modes. A mapping keeps all of that and takes no button away from it:
 
 ## Following the knobs
 
-The slot's pages are the knob assignments DECKARD already keeps for every
-plug-in slot, saved with the project as Maschine saves it: each knob's parameter id,
-section and name. Something fills them, and that's all a mapping needs to know:
+The slot's pages are the knob assignments DECKARD already keeps for every plug-in slot,
+saved with the project as Maschine saves it: each knob's parameter id, section and name.
+Something fills them, and that's all a mapping needs to know:
 
 - **An NKS preset loaded through the browser** writes its own pages, eight named knobs a
   page by section. In some products (Kontakt libraries, Reaktor ensembles) what a
@@ -659,30 +588,6 @@ products report nothing. The knobs keep the slot's pages, and the pictures follo
 knobs, so the two still agree with each other. Acting on `kParamTitlesChanged` and
 program changes is "Later".
 
-## The slot tap
-
-To measure an effect, the engine needs the audio just before and just after it.
-
-- A new engine module, `slot_tap.rs`, keeps two stereo rings (before and after) of 4096
-  frames, written with stores to atomics only: no lock, no allocation. It has nothing to
-  do with the recording `Tap`, which stays free for Sampling.
-- **One slot is tapped at a time:** the one the MK3 shows. The UI thread sets the chain
-  and slot in an atomic. The engine compares it once per block, and only that slot copies
-  its input and output.
-- A worker thread (neither the UI thread nor the screens thread) gives the spectrum
-  before, the spectrum after, and the **measured response**: the cross-spectrum of before
-  and after over the spectrum before, averaged over about a second of overlapping 4096-
-  point windows, with the after ring shifted back by the plug-in's reported latency so the
-  two line up. It's drawn only where there's signal before and the two stay coherent;
-  elsewhere it isn't drawn at all, rather than drawing noise.
-- **Effects only.** An instrument has nothing before it to compare. A plug-in the mapping
-  or the probe marks nonlinear or moving (`measured = false`) shows only the spectrum.
-- A plug-in's own Mix knob shows in the measured curve. That's intended: the picture shows
-  what really happens.
-- The tap runs only while a picture that uses it (`measured`, `spectrum`, `scope`,
-  `meter`, `band`, `gr`) is on screen, and costs nothing otherwise. *(builder's call made
-  in design)* No button turns it on or off.
-
 ## Modulation
 
 - **Where the parameter really is:** route travels give each bound parameter's modulated
@@ -691,12 +596,6 @@ To measure an effect, the engine needs the audio just before and just after it.
 - **Knob cells** show it as a second mark on the bar.
 - **Chains:** route travels cover sounds' routes today, so a plug-in on a group or the
   master shows its base only, until they cover those chains too.
-- **Envelope playheads:** DECKARD's own instruments and the Sampler can publish their
-  envelopes' phase. A hosted plug-in can't, so its playheads are modelled from the slot's
-  note events and the declared times, and drawn hollow, so they never pretend to be the
-  plug-in's own envelope.
-- **MIDI plug-ins** (`docs/midi-input-plugins.md`) get `steps` and `roll` fed from those
-  note events.
 
 ## Synths
 
@@ -704,25 +603,22 @@ Effects mostly do one thing, so one picture per screen covers them. A synth is a
 made of sections (oscillators, a mixer, a filter, an amp, envelopes and LFOs moving them,
 effects after), with tens to hundreds of parameters. Push 3 handles this by showing one
 section at a time with an overview to move between them. The `synth` template does the
-same.
-
-### Sections and pages
-
-A synth mapping declares its sections, each with its parameters and its pictures:
+same, with the widgets effects already use: `filter`, `envelope`, `lfo`, plus
+`oscillators`.
 
 ```lua
 kind = "synth",
 sections = {
-  { name = "OSC",    left = "oscillators", right = "spectrum", knobs = { ... } },
+  { name = "OSC",    left = "oscillators", right = "osc_mix",  knobs = { ... } },
   { name = "FILTER", left = "response",    right = "contour",  knobs = { ... } },
-  { name = "AMP",    left = "amp_env",     right = "scope",    knobs = { ... } },
-  { name = "MOD",    left = "mods",        right = "lfo1",     knobs = { ... } },
+  { name = "AMP",    left = "amp_env",     right = "amp_levels", knobs = { ... } },
+  { name = "LFO",    left = "lfo1",        right = "lfo2",     knobs = { ... } },
 },
 ```
 
-- **The overview** is the mapping's first page: `path` on the left, `mods` on the right,
-  and the knobs on the synth's eight most-played parameters (cutoff, resonance, envelope
-  amount, attack, decay, the macros…).
+- **The overview** is the mapping's first page: the filter's response on the left, the
+  amp envelope on the right, and the knobs on the synth's eight most-played parameters
+  (cutoff, resonance, envelope amount, attack, decay, the macros…).
 - **A section's pages** follow it, with that section's pictures and knobs.
 - **Getting around:** LEFT and RIGHT step page by page, through the overview, the sections
   and then the rest, as on any plug-in. The header names the section and the page within
@@ -735,97 +631,46 @@ sections = {
   each screen with the picture that fits its knobs, unless the user ticks **Use the
   mapping's pages** for it.
 
-### Three hard cases
+**What a host can't see isn't drawn.** A synth's own internal modulation (Vital's
+envelopes, LFOs and matrix, say) and its wavetables aren't parameters, so a mapping shows
+them only through the parameters that set them (times, rates, position), plus DECKARD's
+own routes. It never invents them.
 
-These three show what a synth mapping has to deal with, and they're the probe's and the
-skill's test cases. All three are open source, so their mappings can ship and CI can
-measure them.
+**Products inside a host plug-in.** Kontakt and Reaktor are one plug-in to a host,
+whatever is loaded in them, and their parameter ids mean different things in different
+products. A mapping can't match the product (DECKARD doesn't keep which one is loaded),
+and doesn't need to: an NKS preset's pages say what each knob is, and `generic`'s name
+recognition, or a mapping for the host plug-in that binds by `knob` names only, gives it
+pictures where its pages have the knobs a picture needs.
 
-**A classic subtractive synth (OB-Xd).** Oscillators, a mixer, a multimode filter with its
-envelope, an amp envelope. Its pictures are the easy kind: `oscillators` draws the
-waveforms and their sum from the waveform, octave and tune parameters, `filter` is the
-curve with the filter envelope's amount as its modulation, and the envelopes are plain
-ADSR.
-
-**An FM synth (Dexed).** Six operators, their ratios and levels, an algorithm. There's no
-filter, and no one knob moves the spectrum in a way a formula from the knobs would draw
-fairly. Its picture is `partials` from **measured tables**: the probe plays notes across
-the operators' levels and ratios and records the partials' frequencies and levels, and the
-widget interpolates between them. The mapping says `model = "measured"`, so no one takes
-it for the synth's own maths. `path` shows the algorithm as labelled blocks.
-
-**A wavetable synth (Vital).** Its wavetables are part of the preset, not parameters, and
-its own envelopes, LFOs and modulation matrix live inside it, invisible to a host. So:
-
-- **The wavetable picture is the live output's cycle,** pitch-locked, with the position as
-  a bar. A stack of the table's frames is "Later": it would need the frames, and rendering
-  them takes a second instance of the synth.
-- **Its own modulation is invisible,** and the mapping says so rather than inventing it:
-  `mods` shows Vital's envelopes and LFOs only through the parameters that set their
-  times and rates, plus DECKARD's own routes. The live tap (spectrum, scope) shows the
-  result of everything.
-- **Macros** are parameters like any other, and go on the overview's knobs.
-
-### Products inside a host plug-in
-
-Kontakt and Reaktor are one plug-in to a host, whatever is loaded in them, and their
-parameter ids mean different things in different products. A mapping can't match the
-product (DECKARD doesn't keep which one is loaded), and doesn't need to: an NKS preset's
-pages say what each knob is, and a mapping for the host plug-in binds by `knob` names
-only, with no ids. `generic` does the same for the commonest names. So a product loaded
-from an NKS preset gets pictures where its pages have the knobs a picture needs, and plain
-cells elsewhere.
-
-### Measuring a synth
-
-The probe's `note` does for instruments what `response` does for effects, with more care,
-because a synth's sections hide each other:
-
-- **Isolate first.** The skill measures in an order that lets it isolate each section: amp
-  envelope first (sustain to full, so later notes hold steady), then the mixer (each
-  source alone), then each oscillator, then the filter, then the modulation. Each step
-  uses `--set` to hold the others still. It starts from the plug-in's initial state, or a
-  preset given with `--state`, and records which in the test data.
-- **Oscillators:** one cycle of a held note, pitch-locked, at each waveform choice and
-  pulse width, checked against the `oscillators` widget's shapes. Tune and octave from the
-  measured pitch.
-- **Filters inside a synth** have no input to sweep. The probe plays a sawtooth (its
-  harmonics fall at a known 1/n) or a noise source if the synth has one, and reads the
-  filter's response from the output spectrum against that, at each cutoff and resonance
-  value.
-- **Envelopes:** level over time of held notes at each time value, which gives the taper
-  in milliseconds, or confirms the plug-in's text.
-- **FM and additive models:** the partials' frequencies and levels, as tables.
-
-## Threads and data flow
+## Drawing and data flow
 
 ```
- UI thread                          compositor thread                    MK3 screens thread
- ─────────                          ─────────────────                    ──────────────────
- on focus, reload or page change:   each frame (up to 30 a second):      each dirty rectangle
-   load and check the mapping         read the parameter cells, route      → its own transfer
-   resolve parameters                 travels, slot tap spectra
-   compile value maps                 evaluate value maps
-   → Arc<PluginScene> ────────────►   lay out, draw widgets ─────────────► frame + dirty list
- each UI frame:                       over the page's own layer
+ UI thread                                 MK3 screens thread
+ ─────────                                 ──────────────────
+ on focus, reload or page change:          each frame (up to 30 a second):
+   load and check the mapping                read the parameter cells and route travels
+   resolve parameters, calibrate             lay out and draw widgets over the page's layer
+   → Arc<PluginScene>  ─────────────────►    send each dirty rectangle as its own transfer
+ each UI frame:
    publish bound parameters'
    values and text (64 at most)
 ```
 
 - **Hosted plug-ins are read on the UI thread,** where their reads belong. It writes the
   bound values into a small array of atomics and their text into a double buffer, once per
-  UI frame. The compositor never touches a plug-in.
+  UI frame. The screens thread never touches a plug-in.
 - **The page still draws around the mapping** with Lua `draw()` (anything the page adds).
-  That picture becomes the static layer, and the compositor draws the pictures, header
-  readout and knob cells over it. With no mapping focused, the compositor doesn't run.
-- **Budget:** about 4 ms of CPU a frame for 960 × 272. Over budget, the compositor lowers
-  its rate and logs it once.
-
-### CPU, not GPU
-
-The MK3 needs pixels on the CPU for the USB encoder anyway, a GPU readback each frame adds
-latency, and 260,000 pixels is small. The existing rasteriser, extended, or `tiny-skia`
-will do. *(builder's call made in design)*
+  That picture becomes the static layer, and the widgets, header readout and knob cells
+  are drawn over it.
+- **Drawn on the existing screens thread** *(builder's call made in design)*. Dirty
+  rectangles are needed for USB anyway, and a curve and a few cells are small. A separate
+  drawing thread is "Later", only if phase 1 shows drawing and sending don't fit together.
+- **Budget:** about 4 ms of CPU a frame for 960 × 272. Over budget, the rate drops and it's
+  logged once.
+- **CPU, not GPU** *(builder's call made in design)*. The MK3 needs pixels on the CPU for
+  the USB encoder anyway, and 260,000 pixels is small. The existing rasteriser, extended,
+  or `tiny-skia` will do.
 
 ## Checking a mapping
 
@@ -836,47 +681,67 @@ will do. *(builder's call made in design)*
   `lcd` themes, into a directory given by an environment variable. It loads a mapping
   against a saved parameter dump, so a mapping can be checked without the plug-in
   installed.
-- **Golden images per widget** in `crates/surface`: new infrastructure (phase 2), built on
+- **Golden images per widget** in `crates/surface`: new infrastructure (phase 1), built on
   `render_screens`.
 
 ## Documentation
 
 `docs/controller-api.md` gains a **Mappings** chapter: where they live, matching,
-`params`, tapers and calibration, value maps, pictures and pages, following the knobs,
-templates, every widget's inputs, the buttons a mapping may use, installing, sharing, which mapping wins,
+`params`, calibration and tapers, widget inputs, pictures and pages, following the knobs,
+templates, every widget's inputs, the buttons a mapping may use, which mapping is used,
 versions, and a worked example. `DEVELOPMENT.md` says how to add a shipped third-party
 mapping: the criteria, the parameter dump, the golden images, the black-box rule, and the
-`plugin-mapping` skill and `plugin-probe` that make most of it.
-`docs/controller-plugins.md` points to it.
+`plugin-mapping` skill. `docs/controller-plugins.md` points to it.
 
 ## Build order
 
 | Phase | Delivers | Proof |
 |---|---|---|
 | 0 | Measure the MK3's display link: full and partial transfer rates, and how long transfers block; rectangle transfers in `deckard_mk3::Displays` | Numbers recorded in this document; a moving 120 × 72 cell costs its own pixels, not the screen's |
-| 1 | Compositor thread, parameter cells, dirty rectangles, golden-image tests; `filter`, `eq`, `band`, `transfer`, `value` and knob cells drawn in Rust from the data `ControlView` already has, on every theme; touch focus from `BUTTON_CAP_n`. DECKARD's own Filter, EQ and Compressor pictures move to it, and `eq_curve`'s special cases go | Built-in pictures match on default and `lcd` themes; frame time under 4 ms; nothing sent when still; surface tests that a `BUTTON_CAP_n` press and release focus and unfocus while still reaching the page (Set Macro, double tap), and that three touches light nothing |
-| 2 | Mappings for hosted plug-ins: loader, matching, checking, `params` by `knob`, `id` and title, resolved again on page changes; declared tapers; value maps; pictures and `needs`; mapping pages when the slot has none of its own or **Use the mapping's pages** is ticked; `buttons` on display 4 and 7; `generic`; fallback and `MAP` badge | Unit tests on resolution and maps, including an NKS preset's pages replacing the slot's and the checkbox swapping mapping and slot pages; MK3 check with one hosted plug-in |
-| 3 | `plugin-probe` `list` and `dump`; calibration from `Params::text`, in memory | Tests on recorded text dumps from the shipped third-party plug-ins |
-| 4 | Slot tap, worker, measured response, `spectrum`, `scope`, `meter`, `gr` | No allocation on the audio thread; the built-in Filter's measured response matches its model within 1 dB where there's signal; latency alignment tested with a delayed copy |
-| 5 | Everything else: modulation and `motion`; `envelope`, `lfo`, `taps`, `decay`, `damping`, `steps`, `roll`; the `synth` template, sections, overview, `oscillators`, `wavetable`, `partials`, `path`, `mods`; distribution (**Dump Plug-in Parameters**, **Install Mapping…**, **Preferences ▸ Hardware ▸ Mappings**, `api`, `mapping_version`, `based_on`, dumps in CI); the probe's `response`, `sweep` and `note`; the `plugin-mapping` skill; `model = "measured"`; the first shipped third-party mappings | Golden images; install and precedence tests; every shipped mapping passes against its dump; the probe classifies DECKARD's own Filter, EQ, Delay and Compressor parameters correctly and calls the EQ linear, the Compressor nonlinear and the Chorus moving; the skill writes mappings for OB-Xd, Dexed and Vital whose models fit their measurements |
+| 1 | Drawing on the screens thread with dirty rectangles; parameter cells; golden-image tests; `filter`, `eq`, `band`, `transfer`, `envelope`, `lfo`, `value` and knob cells, on every theme; touch focus from `BUTTON_CAP_n`. DECKARD's own Filter, EQ and Compressor pictures move to it, from the data `ControlView` already has, and `eq_curve`'s special cases go | Built-in pictures match on default and `lcd` themes; frame time under 4 ms; nothing sent when still; surface tests that a `BUTTON_CAP_n` press and release focus and unfocus while still reaching the page (Set Macro, double tap), and that three touches light nothing |
+| 2 | Mappings: loader, matching, checking, `params` by `knob`, `id` and title, resolved again on page changes; calibration from `Params::text`, in memory; declared tapers; choice maps; pictures and `needs`; following the knobs; **Preferences ▸ Hardware ▸ Mappings** (the checkbox and Off); `buttons` on display 4 and 7; `generic` with name recognition; modulation marks and `motion`; the remaining templates and widgets (`taps`, `decay`, `damping`, `oscillators`, `synth` sections and overview); shipped mappings for every DECKARD plug-in | Unit tests on resolution, calibration and choice maps, including an NKS preset's pages replacing the slot's and the checkbox swapping mapping and slot pages; recorded text dumps from several plug-ins calibrate; an NKS plug-in with no mapping shows a filter picture on its filter page; MK3 check with one hosted plug-in |
+| 3 | `plugin-probe` `list` and `dump`; **Dump Plug-in Parameters** and starter mappings; dumps in CI; the `plugin-mapping` skill; shipped mappings for Surge XT, Vital, Dexed and OB-Xd | Every shipped mapping passes against its dump; the skill drafts a mapping for each of the four that a person then only has to adjust |
 
 Phase 1 gives DECKARD's own effects their new pictures with nothing new to learn; phase 2
-opens it to every plug-in.
+opens it to every plug-in, NKS ones included with no mapping needed; phase 3 makes
+mappings quick to write.
 
 ## Later
 
+Each of these was in an earlier draft and was cut because its cost is high for what it
+adds now. They can come back when a real need shows up.
+
+- **A tap around one slot** (a new engine module, one post-slot ring) for a spectrum under
+  the filter curve, a scope, meters and gain reduction history. The spectrum is the part
+  people would notice; it needs an audio-thread change, so it waits until the pictures
+  above are in use.
+- **A measured response** (comparing audio before and after a slot, averaged and aligned
+  by latency). Effects only, linear ones only, and mostly a check on a curve the model
+  already draws.
+- **Measuring plug-ins with the probe** (a sweep and an impulse through an effect, notes
+  through a synth, fitting filter models, `model = "measured"` tables). The biggest piece
+  of work in the earlier draft, for the few plug-ins whose value text doesn't give their
+  units.
+- **More synth pictures:** `partials` for FM and modal synths, a `path` of the voice's
+  sections, `mods` for a synth's own envelopes and LFOs, and a wavetable picture.
+- **Envelope playheads** for DECKARD's own instruments and the Sampler, and modelled ones
+  for hosted plug-ins.
+- **Arithmetic on widget inputs** (`add`, `mul`, `lerp`…), once a mapping needs more than
+  a choice map.
+- **Installing from the app** (drop a file or `.zip`, **Install Mapping…**), choosing
+  between several matching mappings, and tracking a user's copy against the shipped one it
+  came from.
+- **`steps`, `euclid` and `roll` as widgets** for MIDI plug-ins' mappings.
+- **A separate drawing thread**, if drawing and sending don't fit on the screens thread.
 - Acting on a plug-in's `kParamTitlesChanged` and program changes, so knob names follow a
   preset chosen inside the plug-in's own window.
 - Route travels for groups and the master, so their plug-ins show modulation.
 - The Smart Strip as a mapping's control, alongside its PITCH, MOD, PERFORM and NOTES
   modes.
-- A wavetable stack drawn from the table's frames, once there's a way to get them without
-  a second instance.
 - Event hooks, if a mapping ever needs one that a field can't express, once scripts have a
   time limit.
-- A shared mapping repository that **Preferences ▸ Hardware ▸ Mappings** can browse and
-  install from.
-- The same `PluginScene` could draw in the app's own Control area, so a plug-in has the
-  same face on screen as on the controller.
-- Other controllers with screens get mappings by giving the compositor their screen sizes
-  and knob positions.
+- A shared mapping repository the preferences can browse and install from.
+- The same `PluginScene` drawn in the app's own Control area, so a plug-in has the same
+  face on screen as on the controller.
+- Other controllers with screens, by giving the drawing their screen sizes and knob
+  positions.
