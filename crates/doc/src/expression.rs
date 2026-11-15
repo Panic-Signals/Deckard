@@ -108,7 +108,16 @@ mod tests {
         let mut d = Document::new_project().unwrap();
         d.add_pattern(0, 0, "Pattern 1").unwrap();
         let id = d.add_expression(ramp(960));
-        let n = Note { sound: 0, position: 0, length: 960, pitch: 60, velocity: 100, probability: 100, expr: Some(id) };
+        let n = Note {
+            ratchet: Default::default(),
+            sound: 0,
+            position: 0,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+            expr: Some(id),
+        };
         d.edit_notes("t", 0, 0, &[], &[n]).unwrap();
         (d, n)
     }

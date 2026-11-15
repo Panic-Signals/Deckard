@@ -217,6 +217,7 @@ impl Document {
         let velocity = 100.0;
         let grid = grid.max(1);
         let note = |position: i64, pitch: i64, vel: i64, length: i64| Note {
+            ratchet: Default::default(),
             expr: None,
             sound: s,
             position,

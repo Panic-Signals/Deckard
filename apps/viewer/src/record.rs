@@ -394,6 +394,7 @@ impl Grow {
 
 fn note(on: &Recorded, position: i64, length: i64) -> Note {
     Note {
+        ratchet: Default::default(),
         expr: None,
         sound: on.sound,
         position,
@@ -488,7 +489,7 @@ mod tests {
     const FREE: Placing = Placing { quantize: None };
 
     fn note(sound: usize, pitch: i64, position: i64, length: i64) -> Note {
-        Note { sound, pitch, position, length, velocity: 90, probability: 100, expr: None }
+        Note { ratchet: Default::default(), sound, pitch, position, length, velocity: 90, probability: 100, expr: None }
     }
 
     /// Pattern 0 of group 0 (1 bar from tick 960) holding `notes`.

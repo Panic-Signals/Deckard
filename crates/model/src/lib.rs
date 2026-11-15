@@ -12,6 +12,7 @@ pub mod extra_out;
 pub mod lfo;
 pub mod mod_matrix;
 pub mod pad_touch;
+pub mod ratchet;
 pub mod sampling_view;
 pub mod scale_tables;
 pub mod scales;
@@ -877,6 +878,8 @@ pub struct Note {
     pub probability: i64,
     /// Its expression (MPE), in the document's table; DECKARD only.
     pub expr: Option<ExprId>,
+    /// Played as several hits inside its length; DECKARD only.
+    pub ratchet: ratchet::Ratchet,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -2378,6 +2381,7 @@ fn pattern(
             let int = |k: &str| ev.find(k).and_then(Value::as_int).unwrap_or(0);
             out.notes.push(Note {
                 expr: te.get(expression::EXPR_FIELD).and_then(Value::as_int).map(|i| ExprId(i as u32)),
+                ratchet: te.get(ratchet::FIELD).and_then(Value::as_int).map(ratchet::Ratchet::from_int).unwrap_or_default(),
                 sound,
                 position: te.get("position").and_then(Value::as_int).unwrap_or(0),
                 length: int("length"),

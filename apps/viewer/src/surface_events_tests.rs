@@ -5,7 +5,7 @@ use deckard_model::Note;
 use deckard_surface::Action as A;
 
 fn note(sound: usize, position: i64, pitch: i64) -> Note {
-    Note { expr: None, sound, position, length: 240, pitch, velocity: 100, probability: 100 }
+    Note { ratchet: Default::default(), expr: None, sound, position, length: 240, pitch, velocity: 100, probability: 100 }
 }
 
 /// A new project whose focused pattern (a bar) has these notes.

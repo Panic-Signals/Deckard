@@ -1181,7 +1181,16 @@ mod tests {
         let mut d = Document::new_project().unwrap();
         d.add_pattern(0, 0, "My Groove").unwrap();
         d.assign_pattern(0, 0, Some(0)).unwrap();
-        let note = deckard_model::Note { expr: None, sound: 0, position: 240, length: 480, pitch: 60, velocity: 100, probability: 100 };
+        let note = deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 240,
+            length: 480,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         d.add_note(0, 0, note).unwrap();
 
         d.load_group_file_with(0, &bytes, true, false).unwrap();

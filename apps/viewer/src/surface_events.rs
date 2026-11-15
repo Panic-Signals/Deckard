@@ -216,7 +216,8 @@ impl App {
         else {
             return;
         };
-        let n = Note { expr: None, sound: self.sound, position: at, length, pitch, velocity, probability: 100 };
+        let n =
+            Note { ratchet: Default::default(), expr: None, sound: self.sound, position: at, length, pitch, velocity, probability: 100 };
         let mut acts = Vec::new();
         if self.scene_pattern(self.group).is_none() {
             acts.push(Act::AssignPattern(self.scene, self.group, Some(self.pattern)));
@@ -251,8 +252,10 @@ impl App {
             return;
         }
         let sound = self.sound;
-        let add: Vec<Note> =
-            missing.into_iter().map(|pitch| Note { expr: None, sound, position: at, length, pitch, velocity, probability: 100 }).collect();
+        let add: Vec<Note> = missing
+            .into_iter()
+            .map(|pitch| Note { ratchet: Default::default(), expr: None, sound, position: at, length, pitch, velocity, probability: 100 })
+            .collect();
         let mut chosen = there;
         chosen.extend_from_slice(&add);
         let mut acts = Vec::new();

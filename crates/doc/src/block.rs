@@ -748,7 +748,7 @@ mod tests {
     }
 
     fn note(position: i64, expr: Option<ExprId>) -> Note {
-        Note { sound: 0, position, length: 960, pitch: 60, velocity: 100, probability: 100, expr }
+        Note { ratchet: Default::default(), sound: 0, position, length: 960, pitch: 60, velocity: 100, probability: 100, expr }
     }
 
     fn doc_with(exprs: &[Expression]) -> Document {

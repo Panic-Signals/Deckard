@@ -3791,6 +3791,7 @@ impl App {
                     None => (sound, i64::from(n.pitch)),
                 };
                 Some(Note {
+                    ratchet: Default::default(),
                     sound,
                     position: (n.start * PPQ as f64).round() as i64,
                     length: ((n.length * PPQ as f64).round() as i64).max(1),
@@ -7769,6 +7770,7 @@ impl App {
                 .iter()
                 .enumerate()
                 .map(|(i, &(a, b))| Note {
+                    ratchet: Default::default(),
                     expr: None,
                     sound: snd,
                     position: pat.start + ((a - a0) as f64 * ticks_per_frame) as i64,
@@ -8486,7 +8488,16 @@ impl App {
             self.status = format!("can't lengthen the pattern: {e}");
         }
         let old: Vec<Note> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
-        let note = Note { expr: None, sound: s, position: pat.start, length: ticks, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: s,
+            position: pat.start,
+            length: ticks,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         if let Err(e) = d.edit_notes("Record Loop", g, pi, &old, &[note]) {
             self.status = format!("the take isn't in the pattern: {e}");
         }
@@ -12064,6 +12075,7 @@ mod tests {
                 &[],
                 &[
                     deckard_model::Note {
+                        ratchet: Default::default(),
                         position: first,
                         length: bar / 2,
                         sound: 0,
@@ -12073,6 +12085,7 @@ mod tests {
                         expr: None,
                     },
                     deckard_model::Note {
+                        ratchet: Default::default(),
                         position: 4 * bar,
                         length: bar,
                         sound: 1,
@@ -12106,6 +12119,7 @@ mod tests {
             }
             let bar = doc.borrow().project().bar_length();
             let note = deckard_model::Note {
+                ratchet: Default::default(),
                 position: bar + bar / 4,
                 length: bar / 4,
                 sound: 0,
@@ -12161,7 +12175,16 @@ mod tests {
             d.assign_pattern(0, 0, Some(0)).unwrap();
             d.set_pattern_length(0, 0, 4 * bar).unwrap();
             d.set_length_auto(0, 0, false);
-            let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+            let n = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 1,
+                position: 0,
+                length: 100,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            };
             d.edit_notes("t", 0, 0, &[], &[n]).unwrap();
         }
         (app.group, app.pattern, app.scene, app.sound) = (0, 0, 0, 0);
@@ -14072,7 +14095,16 @@ mod tests {
         let before = &p.groups[g].patterns[pi].notes;
         let sound = (0..p.groups[g].sounds.len().min(8)).find(|s| before.iter().all(|n| n.sound != *s))?;
         let start = p.groups[g].patterns[pi].start;
-        let n = Note { expr: None, sound, position: start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let n = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("t", g, pi, &[], &[n]).unwrap();
         h.state_mut().sound = sound;
         h.run_steps(3);
@@ -14183,7 +14215,16 @@ mod tests {
         // Click an empty step: a note.
         let pos = grid_pos(&h, sound, 2 * 240 + 120);
         click(&mut h, pos);
-        let added = Note { expr: None, sound, position: start + 480, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let added = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start + 480,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         assert!(notes_of(&h).contains(&added), "click adds a note");
         assert_eq!(h.state().sound, sound, "and focuses its sound");
 
@@ -14250,7 +14291,16 @@ mod tests {
         assert_eq!(h.state().mouse, M::Select, "not while Keys plays notes");
         h.state_mut().keys.on = false;
 
-        let note = Note { expr: None, sound, position: start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().add_note(g, pi, note).unwrap();
         h.run_steps(2);
         let mine = |h: &Harness<'static, App>| notes_of(h).into_iter().filter(|n| n.sound == sound).collect::<Vec<_>>();
@@ -14317,7 +14367,16 @@ mod tests {
         let (g, pi) = (h.state().group, h.state().pattern);
         let start = p.groups[g].patterns[pi].start;
         let Some(sound) = (0..p.groups[g].sounds.len().min(8)).find(|s| notes_of(&h).iter().all(|n| n.sound != *s)) else { return };
-        let note = Note { expr: None, sound, position: start, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().add_note(g, pi, note).unwrap();
         h.state_mut().sound = sound;
         h.state_mut().selected = vec![note];
@@ -15746,7 +15805,16 @@ mod tests {
             h.state().doc.as_ref().unwrap().borrow_mut().set_audio_in(0, s, &[pi], Some(0), "t").unwrap();
         }
         let start = project_of(&h).groups[0].patterns[pi].start;
-        let n = Note { expr: None, sound: s, position: start, length: PPQ, pitch: 60, velocity: 100, probability: 100 };
+        let n = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: s,
+            position: start,
+            length: PPQ,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("t", 0, pi, &[], &[n]).unwrap();
         h.run_steps(3);
         // The note: it moves a beat on, the audio stays.
@@ -16451,8 +16519,26 @@ mod tests {
         let start = project_of(&h).groups[g].patterns[pi].start;
         // Two notes of the focused sound, on the 16th grid.
         let sound = h.state().sound;
-        let a = Note { expr: None, sound, position: start + 960, length: 240, pitch: 60, velocity: 100, probability: 100 };
-        let b = Note { expr: None, sound, position: start + 2880, length: 240, pitch: 60, velocity: 80, probability: 100 };
+        let a = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start + 960,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        let b = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position: start + 2880,
+            length: 240,
+            pitch: 60,
+            velocity: 80,
+            probability: 100,
+        };
         let existing: Vec<Note> = notes_of(&h).into_iter().filter(|n| n.sound == sound).collect();
         h.state().doc.as_ref().unwrap().borrow_mut().edit_notes("setup", g, pi, &existing, &[a, b]).unwrap();
         h.state_mut().selected = vec![a, b];
@@ -16740,6 +16826,7 @@ mod tests {
         let start = project_of(&h).groups[g].patterns[0].start;
         let extra: Vec<Note> = (1..4)
             .map(|s| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: s,
                 position: start + s as i64 * 240,

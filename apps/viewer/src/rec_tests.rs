@@ -664,6 +664,7 @@ fn step_undo_from_the_keyboard() {
             d.add_pattern(0, 0, "P").unwrap();
         }
         let note = |k: i64| deckard_model::Note {
+            ratchet: Default::default(),
             expr: None,
             sound: 0,
             position: k * 960,
@@ -754,8 +755,16 @@ fn copies_reach_the_system_clipboard_so_paste_events_arrive() {
     assert!(copied_text(&send(&mut app, Event::Paste("Kick".into()))).is_none());
 
     // Notes: the same, through the event area's copy.
-    let note =
-        |k: i64| deckard_model::Note { expr: None, sound: 2, position: k * 240, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let note = |k: i64| deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 2,
+        position: k * 240,
+        length: 120,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note(0), note(1), note(2)]).unwrap();
     crate::layout::apply_acts(&mut app, vec![Act::KeyFocus(KeyFocus::Events), Act::CopyNotes { cut: false }]);
     assert_eq!(app.note_clip.as_ref().map(|c| c.notes.len()), Some(3));
@@ -771,8 +780,16 @@ fn notes_paste_onto_the_sound_clicked_in_the_sound_list() {
     use eframe::egui::Event;
     let mut app = perform_app();
     let doc = app.doc.clone().unwrap();
-    let note =
-        |k: i64| deckard_model::Note { expr: None, sound: 2, position: k * 240, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let note = |k: i64| deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 2,
+        position: k * 240,
+        length: 120,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note(0), note(1)]).unwrap();
     crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Events), Act::CopyNotes { cut: false }]);
     assert_eq!(app.note_clip.as_ref().map(|c| c.notes.len()), Some(2));
@@ -798,8 +815,16 @@ fn notes_paste_into_a_group_clicked_in_the_group_list() {
     // A second group, with no pattern yet.
     let g = doc.borrow_mut().add_group().unwrap();
     assert!(doc.borrow().project().groups[g].patterns.is_empty());
-    let note =
-        |k: i64| deckard_model::Note { expr: None, sound: 2, position: k * 240, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let note = |k: i64| deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 2,
+        position: k * 240,
+        length: 120,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note(0), note(1)]).unwrap();
     crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Events), Act::CopyNotes { cut: false }]);
     crate::layout::apply_acts(&mut app, vec![Act::FocusGroup(g), Act::KeyFocus(KeyFocus::Groups)]);
@@ -825,7 +850,16 @@ fn selecting_notes_moves_the_keys_to_the_pattern_editor() {
     use eframe::egui::Event;
     let mut app = perform_app();
     let doc = app.doc.clone().unwrap();
-    let note = deckard_model::Note { expr: None, sound: 2, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let note = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 2,
+        position: 0,
+        length: 120,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("Add", 0, 0, &[], &[note]).unwrap();
     crate::layout::apply_acts(&mut app, vec![Act::FocusSound(2), Act::KeyFocus(KeyFocus::Sounds), Act::SelectNotes(vec![note])]);
     assert_eq!(app.key_focus, KeyFocus::Events);

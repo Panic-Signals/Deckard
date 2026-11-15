@@ -126,7 +126,16 @@ fn a_new_pattern_after_a_long_one_grows_past_it() {
     let doc = app.doc.clone().unwrap();
     doc.borrow_mut().set_pattern_length(0, 0, 4 * bar).unwrap();
     doc.borrow_mut().set_length_auto(0, 0, false);
-    let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+    let n = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 1,
+        position: 0,
+        length: 100,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("t", 0, 0, &[], &[n]).unwrap();
     apply_acts(&mut app, vec![Act::NewPattern(0, 0)]);
     assert_eq!(app.pattern, 1);
@@ -166,7 +175,16 @@ fn a_pattern_with_notes_doesnt_grow() {
     let bar = bar(&app);
     let doc = app.doc.clone().unwrap();
     doc.borrow_mut().set_pattern_length(0, 0, 2 * bar).unwrap();
-    let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+    let n = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 1,
+        position: 0,
+        length: 100,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("t", 0, 0, &[], &[n]).unwrap();
     app.set_recording(true, false);
     assert_eq!(length(&app), 2 * bar);

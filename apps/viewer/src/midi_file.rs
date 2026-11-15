@@ -149,6 +149,7 @@ pub fn import_channels(path: &Path) -> Result<Channels, String> {
                     notes.push((
                         c,
                         Note {
+                            ratchet: Default::default(),
                             expr: None,
                             sound,
                             position: start,
@@ -189,9 +190,36 @@ mod tests {
     #[test]
     fn notes_survive_export_and_import() {
         let notes = vec![
-            Note { expr: None, sound: 3, position: 0, length: 240, pitch: 60, velocity: 100, probability: 100 },
-            Note { expr: None, sound: 3, position: 480, length: 960, pitch: 64, velocity: 90, probability: 100 },
-            Note { expr: None, sound: 3, position: 480, length: 120, pitch: 67, velocity: 127, probability: 100 },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 480,
+                length: 960,
+                pitch: 64,
+                velocity: 90,
+                probability: 100,
+            },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 480,
+                length: 120,
+                pitch: 67,
+                velocity: 127,
+                probability: 100,
+            },
         ];
         let midi = vec![
             MidiEvent { sound: 3, position: 0, kind: MidiKind::Controller { number: 64, value: 127 } },
@@ -210,7 +238,16 @@ mod tests {
     /// in order, named, the empty ones kept; each on its channel, transposed.
     #[test]
     fn tracks_export_as_type_1_with_empty_tracks_kept() {
-        let note = |position, pitch| Note { expr: None, sound: 0, position, length: 240, pitch, velocity: 100, probability: 100 };
+        let note = |position, pitch| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: 240,
+            pitch,
+            velocity: 100,
+            probability: 100,
+        };
         let tracks = vec![
             Track { name: "Kick".into(), notes: vec![note(0, 36)], midi: vec![], channel: 9, transpose: 0 },
             Track { name: "Empty".into(), notes: vec![], midi: vec![], channel: 0, transpose: 0 },

@@ -15,7 +15,16 @@ fn app_with_expression() -> crate::App {
     let pressure = Curve { points: vec![Point { at: 0, value: 0.5, curve: 0.0 }] };
     let a = d.add_expression(Expression { pressure: Some(pressure), release_velocity: Some(30), ..Expression::default() });
     let b = d.add_expression(Expression { release_velocity: Some(40), ..Expression::default() });
-    let note = |position, expr| Note { sound: 0, position, length: 240, pitch: 60, velocity: 100, probability: 100, expr: Some(expr) };
+    let note = |position, expr| Note {
+        ratchet: Default::default(),
+        sound: 0,
+        position,
+        length: 240,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+        expr: Some(expr),
+    };
     d.edit_notes("t", g, pi, &[], &[note(0, a), note(480, b)]).unwrap();
     drop(d);
     app

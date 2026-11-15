@@ -856,7 +856,16 @@ fn mk3_events_erase_pad_removes_its_sounds_notes() {
         let st = host.state.borrow();
         (st.focus.group, st.focus.pattern.unwrap())
     };
-    let extra = deckard_model::Note { expr: None, sound: 1, position: 0, length: 240, pitch: 60, velocity: 100, probability: 100 };
+    let extra = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 1,
+        position: 0,
+        length: 240,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("test", g, p, &[], &[extra]).unwrap();
     let kicks = sound_notes(&host, &doc, 0);
     host.button("BUTTON_EVENTS", true).unwrap();
@@ -1913,8 +1922,16 @@ fn mk3_shift_pads_undo_a_take_or_one_step() {
     doc.borrow_mut().add_pattern(0, 0, "P").unwrap();
     let Some(mut host) = boot("M3", Some(doc.clone())) else { return };
     host.tick();
-    let note =
-        |k: i64| deckard_model::Note { expr: None, sound: 0, position: k * 960, length: 240, pitch: 60, velocity: 90, probability: 100 };
+    let note = |k: i64| deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 0,
+        position: k * 960,
+        length: 240,
+        pitch: 60,
+        velocity: 90,
+        probability: 100,
+    };
     {
         let mut d = doc.borrow_mut();
         d.begin_take("Record");
@@ -1946,7 +1963,16 @@ fn mk3_shift_pads_undo_a_take_or_one_step() {
 fn mk3_shift_pads_nudge_by_the_nudge_grid() {
     let doc = deckard_doc::Document::new_project().unwrap().shared();
     doc.borrow_mut().add_pattern(0, 0, "P").unwrap();
-    let note = deckard_model::Note { expr: None, sound: 0, position: 960, length: 240, pitch: 60, velocity: 90, probability: 100 };
+    let note = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 0,
+        position: 960,
+        length: 240,
+        pitch: 60,
+        velocity: 90,
+        probability: 100,
+    };
     doc.borrow_mut().add_note(0, 0, note).unwrap();
     let Some(mut host) = boot("M3", Some(doc.clone())) else { return };
     host.tick();

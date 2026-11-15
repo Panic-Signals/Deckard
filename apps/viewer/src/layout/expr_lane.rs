@@ -566,7 +566,7 @@ mod tests {
     use deckard_model::expression::Point;
 
     fn note(position: i64, pitch: i64) -> Note {
-        Note { sound: 0, position, length: 960, pitch, velocity: 100, probability: 100, expr: None }
+        Note { ratchet: Default::default(), sound: 0, position, length: 960, pitch, velocity: 100, probability: 100, expr: None }
     }
 
     fn flat(v: f32) -> Curve {

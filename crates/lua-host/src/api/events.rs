@@ -152,6 +152,7 @@ fn note_event(lua: &Lua, n: &Note) -> mlua::Result<Value> {
 
 fn note_of(t: &Table) -> Option<Note> {
     Some(Note {
+        ratchet: Default::default(),
         expr: None,
         sound: t.get("sound").ok()?,
         position: t.get("position").ok()?,
@@ -394,6 +395,7 @@ pub fn install(lua: &Lua, impl_t: &Table) -> mlua::Result<()> {
         let Some(s) = sound_arg(lua, &args) else { return Ok(()) };
         let Some((g, p)) = pattern_arg(lua, &args) else { return Ok(()) };
         let n = Note {
+            ratchet: Default::default(),
             expr: None,
             sound: s,
             position: int(&args, 3).unwrap_or(0),

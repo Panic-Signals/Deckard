@@ -6454,6 +6454,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         };
         let rel = snapped(pos.x);
         (0..view).contains(&rel).then_some(Note {
+            ratchet: Default::default(),
             expr: None,
             sound,
             position: rel,

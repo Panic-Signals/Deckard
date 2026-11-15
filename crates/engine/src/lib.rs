@@ -6598,7 +6598,16 @@ mod tests {
 
     pub(crate) fn project() -> Project {
         let notes = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * PPQ, length: 240, pitch: 60, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * PPQ,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         Project {
             tempo: 120.0,
@@ -6648,7 +6657,16 @@ mod tests {
     #[test]
     fn clips_play_in_place_of_patterns() {
         let mut p = project();
-        let clip_note = Note { expr: None, sound: 0, position: 0, length: 240, pitch: 72, velocity: 100, probability: 100 };
+        let clip_note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 240,
+            pitch: 72,
+            velocity: 100,
+            probability: 100,
+        };
         p.groups[0].clip_patterns = vec![Pattern { length: 2 * PPQ, notes: vec![clip_note], ..Default::default() }];
         p.groups[0].clips = vec![deckard_model::Clip { position: 4 * PPQ, length: 4 * PPQ, pattern: 0 }];
         let t = timeline(&p, Mode::Arrangement);
@@ -7323,7 +7341,16 @@ mod tests {
         // Scene 0: quarters for a bar; scene 1: half notes for a bar.
         let mut p = project();
         let halves = (0..2)
-            .map(|i| Note { expr: None, sound: 0, position: i * 2 * PPQ, length: 240, pitch: 60, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * 2 * PPQ,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         p.groups[0].patterns.push(Pattern { length: 4 * PPQ, notes: halves, ..Default::default() });
         p.scenes.push(Scene { patterns: vec![(0, 1)], ..Default::default() });
@@ -7919,6 +7946,7 @@ mod tests {
         let notes = |k: i64| -> Vec<Note> {
             (0..12)
                 .map(|i| Note {
+                    ratchet: Default::default(),
                     expr: None,
                     sound: 0,
                     position: i * 160 + k,
@@ -8029,6 +8057,7 @@ mod tests {
             .collect();
         p.groups[0].patterns[0].notes = (0..48)
             .map(|i| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: i % 8,
                 position: i as i64 * 79,
@@ -8273,6 +8302,7 @@ mod tests {
         gated.groups[0].patterns[0].length = 4 * PPQ;
         gated.groups[0].patterns[0].notes = (0..16)
             .map(|step| deckard_model::Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: 0,
                 position: step * (PPQ / 4),
@@ -10378,6 +10408,7 @@ mod tests {
         p.groups[0].sounds[1].slots[1].active = false;
         steps.push((100, p.clone()));
         p.groups[0].patterns[0].notes.push(Note {
+            ratchet: Default::default(),
             expr: None,
             sound: 6,
             position: 1000,
@@ -10515,6 +10546,7 @@ mod tests {
             .collect();
         p.groups[0].patterns[0].notes = (0..32)
             .map(|i| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: i % 8,
                 position: i as i64 * 37,
@@ -12401,7 +12433,16 @@ mod tests {
         let mut p = project();
         p.groups[0].sounds[0].channel.midi_out = deckard_model::MidiDest::Port("Synth".into());
         p.groups[0].sounds[0].channel.midi_out_channel = 2;
-        let n = Note { expr: Some(deckard_model::ExprId(0)), sound: 0, position: 0, length, pitch: 60, velocity: 100, probability: 100 };
+        let n = Note {
+            ratchet: Default::default(),
+            expr: Some(deckard_model::ExprId(0)),
+            sound: 0,
+            position: 0,
+            length,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         p.groups[0].patterns[0].notes = vec![n];
         p.expressions = vec![std::sync::Arc::new(e)];
         let mut engine = click_engine_for(&p, 1000);
@@ -12442,7 +12483,16 @@ mod tests {
     }
 
     fn note_at(position: i64, length: i64, pitch: i64, expr: Option<u32>) -> Note {
-        Note { expr: expr.map(deckard_model::ExprId), sound: 0, position, length, pitch, velocity: 100, probability: 100 }
+        Note {
+            ratchet: Default::default(),
+            expr: expr.map(deckard_model::ExprId),
+            sound: 0,
+            position,
+            length,
+            pitch,
+            velocity: 100,
+            probability: 100,
+        }
     }
 
     fn sent(e: &mut Engine, rx: &std::sync::mpsc::Receiver<midi::MidiOut>, frames: usize) -> Vec<Vec<u8>> {
@@ -12834,7 +12884,16 @@ mod tests {
         let mut p = project();
         // Sixteenths on beat 1: ticks 0, 240, 480, 720.
         p.groups[0].patterns[0].notes = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * 240, length: 60, pitch: 60, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * 240,
+                length: 60,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         p.groups[0].swing = deckard_model::Swing { amount: 100.0, ..Default::default() };
         let ticks: Vec<i64> = timeline(&p, Mode::Pattern(0, 0)).events.iter().take(4).map(|e| e.tick).collect();
@@ -13332,7 +13391,16 @@ mod native_tests {
         let class = deckard_plugins::native::CLASSES[0];
         let plugin = PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
         let notes = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * PPQ, length: 240, pitch: 48 + i, velocity: 110, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * PPQ,
+                length: 240,
+                pitch: 48 + i,
+                velocity: 110,
+                probability: 100,
+            })
             .collect();
         let p = Project {
             tempo: 120.0,
@@ -13386,7 +13454,16 @@ mod native_tests {
         let class = deckard_plugins::native::CLASSES[0];
         let plugin = PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
         let notes: Vec<Note> = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * PPQ, length: 240, pitch: 48 + i, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * PPQ,
+                length: 240,
+                pitch: 48 + i,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         let comp = |threshold: f64| SlotInfo {
             module: "Compressor".into(),
