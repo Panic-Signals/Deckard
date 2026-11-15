@@ -883,6 +883,8 @@ pub struct App {
     sound: usize,
     /// SELECT's other sounds in the focused group (the focused one is always selected).
     sound_selection: Vec<usize>,
+    /// Anchor sound in the focused group for Shift+click range selection.
+    sound_anchor: Option<usize>,
     scene: usize,
     /// The section picked in the Song view: the song plays from it, or jumps to it
     /// when the playing section ends.
@@ -1508,6 +1510,8 @@ impl App {
 
     /// Let go of what belongs to the open document (playback, caches, plug-in views).
     fn leave_document(&mut self) {
+        self.sound_selection.clear();
+        self.sound_anchor = None;
         self.zone_of = None;
         self.lock_morph = None;
         self.lock_active = false;
@@ -1562,6 +1566,8 @@ impl App {
             self.doc = Some(doc);
             self.error = None;
             (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
+            self.sound_selection.clear();
+            self.sound_anchor = None;
             self.section = None;
             self.focus_scene(0);
             self.restore_screen();
@@ -1635,18 +1641,39 @@ impl App {
             Act::DeleteGroup(g) => self.delete_group(g),
             Act::MoveGroup(g, to) => self.move_group(g, to),
             Act::ResetSound(g, s) => {
-                let r = doc.borrow_mut().reset_sound(g, s);
-                if r.is_ok() {
-                    self.samples.plugins.retain(|slot| {
-                        !matches!(
-                            slot,
-                            deckard_plugins::Slot::Sound { group, sound }
-                                | deckard_plugins::Slot::Chain { group, sound, .. }
-                                if *group == g && *sound == s
-                        )
+                let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+                if let Some(sounds) = self.selected_sounds_for(g, s, count) {
+                    let r = doc.borrow_mut().transaction("Reset Sounds", |d| {
+                        for &si in &sounds {
+                            d.reset_sound(g, si)?;
+                        }
+                        Ok(())
                     });
+                    if r.is_ok() {
+                        self.samples.plugins.retain(|slot| {
+                            !matches!(
+                                slot,
+                                deckard_plugins::Slot::Sound { group, sound }
+                                    | deckard_plugins::Slot::Chain { group, sound, .. }
+                                    if *group == g && sounds.contains(sound)
+                            )
+                        });
+                    }
+                    r
+                } else {
+                    let r = doc.borrow_mut().reset_sound(g, s);
+                    if r.is_ok() {
+                        self.samples.plugins.retain(|slot| {
+                            !matches!(
+                                slot,
+                                deckard_plugins::Slot::Sound { group, sound }
+                                    | deckard_plugins::Slot::Chain { group, sound, .. }
+                                    if *group == g && *sound == s
+                            )
+                        });
+                    }
+                    r
                 }
-                r
             }
             Act::ExportMidi(g, s) => self.export_midi(g, s),
             Act::ImportMidi(g, s) => self.import_midi(g, s),
@@ -3867,6 +3894,119 @@ impl App {
     fn focus_sound(&mut self, sound: usize) {
         self.sound = sound;
         self.sound_selection.clear();
+        self.sound_anchor = Some(sound);
+    }
+
+    /// Whether `sound` in `group` is part of the active sound selection (focused or secondary).
+    pub(crate) fn is_sound_selected(&self, group: usize, sound: usize) -> bool {
+        group == self.group && (sound == self.sound || self.sound_selection.contains(&sound))
+    }
+
+    /// When two or more sounds in `group` are selected and `sound` is among them, returns
+    /// all selected sound indices in `0..count` in pad order.
+    pub(crate) fn selected_sounds_for(&self, group: usize, sound: usize, count: usize) -> Option<Vec<usize>> {
+        if group != self.group || self.sound_selection.is_empty() || !self.is_sound_selected(group, sound) {
+            return None;
+        }
+        let out: Vec<usize> = (0..count).filter(|&s| s == self.sound || self.sound_selection.contains(&s)).collect();
+        (out.len() > 1).then_some(out)
+    }
+
+    /// Click a sound in the Sound list or Mixer strip header:
+    /// Shift+click selects the inclusive range from `sound_anchor` (or `self.sound`) to `sound`;
+    /// Cmd/Ctrl+click (`toggle`) adds or removes `sound`; plain click focuses `sound`.
+    pub(crate) fn click_sound(&mut self, sound: usize, shift: bool, toggle: bool) {
+        let n = self.group_len();
+        if sound >= n {
+            return;
+        }
+        if shift {
+            let anchor = self.sound_anchor.filter(|&a| a < n).unwrap_or(self.sound);
+            let (lo, hi) = (anchor.min(sound), anchor.max(sound));
+            self.sound = sound;
+            self.sound_selection = (lo..=hi).filter(|&s| s != sound).collect();
+            self.sound_anchor = Some(anchor);
+        } else if toggle {
+            if sound == self.sound {
+                if let Some(next) = self.sound_selection.pop() {
+                    self.sound = next;
+                    self.sound_anchor = Some(next);
+                }
+            } else if self.sound_selection.contains(&sound) {
+                self.sound_selection.retain(|&s| s != sound);
+            } else {
+                if !self.sound_selection.contains(&self.sound) {
+                    self.sound_selection.push(self.sound);
+                }
+                self.sound_selection.retain(|&s| s != sound);
+                self.sound = sound;
+                self.sound_anchor = Some(sound);
+            }
+        } else {
+            self.focus_sound(sound);
+        }
+    }
+
+    /// Move focus to `sound` while keeping the current multi-selection when `sound` is
+    /// already selected (e.g. opening a context menu on a selected sound).
+    pub(crate) fn focus_selected_sound(&mut self, sound: usize) {
+        let n = self.group_len();
+        if sound >= n {
+            return;
+        }
+        if self.is_sound_selected(self.group, sound) {
+            if sound != self.sound {
+                if !self.sound_selection.contains(&self.sound) {
+                    self.sound_selection.push(self.sound);
+                }
+                self.sound_selection.retain(|&s| s != sound);
+                self.sound = sound;
+            }
+        } else {
+            self.focus_sound(sound);
+        }
+    }
+
+    /// Apply a sound swing edit across all selected sounds when `s` is part of a multi-selection.
+    pub(crate) fn set_multi_sound_swing(&mut self, g: usize, s: usize, sw: deckard_model::Swing, exact: bool) -> bool {
+        use deckard_doc::Target;
+        use mxprj::decode::Value;
+        let Some(doc) = self.doc.clone() else { return false };
+        let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+        let Some(sounds) = self.selected_sounds_for(g, s, count) else { return false };
+        let edits: Vec<(Target, &str, Value)> = {
+            let d = doc.borrow();
+            let p = d.project();
+            let Some(old) = p.groups.get(g).and_then(|gr| gr.sounds.get(s)).map(|snd| snd.swing) else { return false };
+            let mut out = Vec::new();
+            if exact || (sw.amount - old.amount).abs() > 1e-9 {
+                let delta = sw.amount - old.amount;
+                for &si in &sounds {
+                    let cur = p.groups[g].sounds[si].swing.amount;
+                    let amount = if exact { sw.amount } else { cur + delta }.clamp(0.0, 100.0);
+                    out.push((Target::Sound(g, si), "swing_amount", Value::Float(amount)));
+                }
+            }
+            if exact || sw.cycle != old.cycle {
+                let cycle = sw.cycle.clamp(0, 7);
+                for &si in &sounds {
+                    out.push((Target::Sound(g, si), "swing_cycle", Value::Int(cycle)));
+                }
+            }
+            if exact || sw.invert != old.invert {
+                let inv = sw.invert as i64;
+                for &si in &sounds {
+                    out.push((Target::Sound(g, si), "swing_invert", Value::Int(inv)));
+                }
+            }
+            out
+        };
+        if !edits.is_empty()
+            && let Err(e) = doc.borrow_mut().set_many("Swing", &edits)
+        {
+            self.status = format!("can't set swing: {e}");
+        }
+        true
     }
 
     fn group_len(&self) -> usize {
@@ -3889,14 +4029,20 @@ impl App {
             } else {
                 self.sound_selection.push(index);
             }
+            if self.sound_anchor.is_none() {
+                self.sound_anchor = Some(self.sound);
+            }
         } else if selected {
             if index != self.sound && !self.sound_selection.contains(&self.sound) {
                 self.sound_selection.push(self.sound);
             }
+            self.sound_selection.retain(|&s| s != index);
             self.sound = index;
+            self.sound_anchor = Some(index);
         } else {
             self.sound = index;
             self.sound_selection.clear();
+            self.sound_anchor = Some(index);
         }
     }
 
@@ -3904,11 +4050,15 @@ impl App {
     fn select_all_sounds(&mut self) {
         let n = self.group_len();
         self.sound_selection = (0..n).filter(|&s| s != self.sound).collect();
+        if self.sound_anchor.is_none() {
+            self.sound_anchor = Some(self.sound);
+        }
     }
 
     /// SELECT + NONE: only the focused sound stays selected.
     fn select_no_sounds(&mut self) {
         self.sound_selection.clear();
+        self.sound_anchor = Some(self.sound);
     }
 
     /// The pattern `group` plays in the focused scene.
@@ -5695,14 +5845,20 @@ impl App {
             }
             A::PatternSpan { start, length } => layout::apply_acts(self, vec![Act::PatternSpan(g, self.pattern, start, length)]),
             A::Color { of, color } => {
-                let t = match of {
-                    deckard_surface::ColorOf::Pattern => Target::Pattern(g, self.pattern),
-                    deckard_surface::ColorOf::Scene => Target::Scene(self.scene),
-                    deckard_surface::ColorOf::Group => Target::Group(g),
-                    deckard_surface::ColorOf::Sound => Target::Sound(g, self.sound),
+                let targets = match of {
+                    deckard_surface::ColorOf::Pattern => vec![Target::Pattern(g, self.pattern)],
+                    deckard_surface::ColorOf::Scene => vec![Target::Scene(self.scene)],
+                    deckard_surface::ColorOf::Group => vec![Target::Group(g)],
+                    deckard_surface::ColorOf::Sound => {
+                        let count = self.group_len();
+                        self.selected_sounds_for(g, self.sound, count).map_or_else(
+                            || vec![Target::Sound(g, self.sound)],
+                            |ss| ss.into_iter().map(|si| Target::Sound(g, si)).collect(),
+                        )
+                    }
                 };
                 let c = color.map_or(deckard_model::Color::Default, deckard_model::Color::Palette);
-                layout::apply_acts(self, vec![Act::SetColor(vec![t], c)]);
+                layout::apply_acts(self, vec![Act::SetColor(targets, c)]);
             }
             A::PatternEdit(what) => {
                 let a = match what {
@@ -6102,9 +6258,16 @@ impl App {
                     "link_group" => "Link Group",
                     _ => "Link Mode",
                 };
-                if let Some(doc) = &self.doc
-                    && let Err(e) = doc.borrow_mut().set(label, Target::Sound(g, self.sound), field, mxprj::decode::Value::Int(v))
-                {
+                let count = self.group_len();
+                let res = if let Some(sounds) = self.selected_sounds_for(g, self.sound, count) {
+                    let edits: Vec<_> = sounds.into_iter().map(|si| (Target::Sound(g, si), field, mxprj::decode::Value::Int(v))).collect();
+                    self.doc.as_ref().map(|doc| doc.borrow_mut().set_many(label, &edits))
+                } else {
+                    self.doc
+                        .as_ref()
+                        .map(|doc| doc.borrow_mut().set(label, Target::Sound(g, self.sound), field, mxprj::decode::Value::Int(v)))
+                };
+                if let Some(Err(e)) = res {
                     self.status = format!("{label}: {e}");
                 }
             }
@@ -10131,9 +10294,29 @@ impl App {
     /// Make a routing choice from the channel properties.
     fn set_route(&mut self, r: layout::RouteSet) {
         let Some(doc) = self.doc.clone() else { return };
+        let count = doc.borrow().project().groups.get(self.group).map_or(0, |gr| gr.sounds.len());
         let mut d = doc.borrow_mut();
         let done = match r {
-            layout::RouteSet::Sound(g, s, route) => d.set_sound_route(g, s, route),
+            layout::RouteSet::Sound(g, s, route) => {
+                if let Some(sounds) = self.selected_sounds_for(g, s, count) {
+                    d.transaction("Sound Routing", |d| {
+                        for &si in &sounds {
+                            let self_route = matches!(
+                                &route,
+                                deckard_doc::SoundRoute::Output(deckard_model::AudioDest::Sound(dg, ds))
+                                    | deckard_doc::SoundRoute::Aux(_, deckard_model::AudioDest::Sound(dg, ds))
+                                    if (*dg, *ds) == (g, si)
+                            );
+                            if !self_route {
+                                d.set_sound_route(g, si, route.clone())?;
+                            }
+                        }
+                        Ok(())
+                    })
+                } else {
+                    d.set_sound_route(g, s, route)
+                }
+            }
             layout::RouteSet::Group(g, aux, dest) => d.set_group_route(g, aux, dest),
             layout::RouteSet::GroupMidiInput(g, name) => {
                 drop(d);
@@ -10350,6 +10533,28 @@ impl App {
             }));
         }
         if self.key_focus == KeyFocus::Sounds {
+            if cmd(egui::Key::A) {
+                self.select_all_sounds();
+            }
+            if !self.sound_selection.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.select_no_sounds();
+            }
+            let arrow = |m: egui::Modifiers, k: egui::Key| ctx.input_mut(|i| i.consume_key(m, k));
+            if arrow(egui::Modifiers::SHIFT, egui::Key::ArrowUp) {
+                if s > 0 {
+                    acts.push(Act::ClickSound { sound: s - 1, shift: true, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                if s > 0 {
+                    acts.push(Act::ClickSound { sound: s - 1, shift: false, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::SHIFT, egui::Key::ArrowDown) {
+                if s + 1 < self.group_len() {
+                    acts.push(Act::ClickSound { sound: s + 1, shift: true, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::NONE, egui::Key::ArrowDown) && s + 1 < self.group_len() {
+                acts.push(Act::ClickSound { sound: s + 1, shift: false, toggle: false });
+            }
             if cmd(egui::Key::X) || ev(|e| matches!(e, egui::Event::Cut)) {
                 acts.push(Act::CutSound(g, s));
             }
