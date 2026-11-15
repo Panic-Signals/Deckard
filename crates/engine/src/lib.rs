@@ -2427,6 +2427,152 @@ pub(crate) fn ext_channels(n: i64) -> Option<(usize, usize)> {
     (r < 32).then_some((l, r))
 }
 
+type FoundKey = (i64, String, String, String, Option<std::path::PathBuf>);
+
+/// Read-only snapshot of [`SampleCache`]'s known paths and already-cached files,
+/// so background group preparation can skip files already in memory.
+#[derive(Default, Clone)]
+pub struct SampleCacheSnapshot {
+    library_dirs: Vec<std::path::PathBuf>,
+    found: HashMap<FoundKey, std::path::PathBuf>,
+    cached: std::collections::HashSet<std::path::PathBuf>,
+}
+
+/// Samples resolved and decoded ahead of [`Engine::new_after`] (e.g. on a group-load
+/// worker thread).
+#[derive(Default)]
+pub struct PreloadedSamples {
+    found: Vec<(FoundKey, std::path::PathBuf)>,
+    decoded: Vec<(std::path::PathBuf, Arc<Sample>)>,
+}
+
+fn collect_sound_sample_refs(s: &deckard_model::Sound, out: &mut Vec<deckard_model::SampleRef>) {
+    if synth_of(s).is_some() {
+        return;
+    }
+    if s.instrument == "AudioModule" {
+        if let Some(a) = s.audio.as_ref() {
+            out.extend(a.takes.iter().map(|t| t.sample.clone()));
+        }
+        return;
+    }
+    let Some(smp) = s.sampler.as_ref() else { return };
+    for z in &smp.zones {
+        out.push(z.sample.clone());
+    }
+}
+
+fn parallel_preload_samples<F>(
+    refs: Vec<deckard_model::SampleRef>,
+    project_path: Option<&Path>,
+    library_dirs: &[std::path::PathBuf],
+    known_found: &HashMap<FoundKey, std::path::PathBuf>,
+    is_cached: F,
+) -> PreloadedSamples
+where
+    F: Fn(&Path) -> bool + Sync,
+{
+    enum Work {
+        ResolveAndDecode(FoundKey, deckard_model::SampleRef),
+        DecodeOnly(std::path::PathBuf),
+    }
+
+    let proj_buf = project_path.map(Path::to_path_buf);
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut claimed = std::collections::HashSet::new();
+    let mut work = Vec::new();
+    for r in refs {
+        if r.path.is_empty() {
+            continue;
+        }
+        let key: FoundKey = (r.kind, r.path.clone(), r.library.clone(), r.library_root.clone(), proj_buf.clone());
+        if !seen_keys.insert(key.clone()) {
+            continue;
+        }
+        if let Some(p) = known_found.get(&key) {
+            if !is_cached(p) && claimed.insert(p.clone()) {
+                work.push(Work::DecodeOnly(p.clone()));
+            }
+        } else {
+            work.push(Work::ResolveAndDecode(key, r));
+        }
+    }
+    if work.is_empty() {
+        return PreloadedSamples::default();
+    }
+    let decode_valid = |p: &Path| Sample::load(p).ok().filter(|s| !s.frames.is_empty() && s.rate > 0).map(Arc::new);
+    if work.len() == 1 {
+        let mut out = PreloadedSamples::default();
+        match work.into_iter().next().unwrap() {
+            Work::DecodeOnly(p) => {
+                if let Some(s) = decode_valid(&p) {
+                    out.decoded.push((p, s));
+                }
+            }
+            Work::ResolveAndDecode(key, r) => {
+                let mut resolver = library::Resolver::new(project_path);
+                resolver.set_extra(library_dirs);
+                if let Some(p) = resolver.resolve(&r) {
+                    if !is_cached(&p)
+                        && let Some(s) = decode_valid(&p)
+                    {
+                        out.decoded.push((p.clone(), s));
+                    }
+                    out.found.push((key, p));
+                }
+            }
+        }
+        return out;
+    }
+
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(work.len());
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let claimed = Mutex::new(claimed);
+    let mut out = PreloadedSamples::default();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(|| {
+                let mut resolver: Option<library::Resolver> = None;
+                let mut local = PreloadedSamples::default();
+                loop {
+                    let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = work.get(i) else { break };
+                    match item {
+                        Work::DecodeOnly(p) => {
+                            if let Some(s) = decode_valid(p) {
+                                local.decoded.push((p.clone(), s));
+                            }
+                        }
+                        Work::ResolveAndDecode(key, r) => {
+                            let res = resolver.get_or_insert_with(|| {
+                                let mut res = library::Resolver::new(project_path);
+                                res.set_extra(library_dirs);
+                                res
+                            });
+                            if let Some(p) = res.resolve(r) {
+                                let should_decode = !is_cached(&p) && claimed.lock().unwrap().insert(p.clone());
+                                if should_decode && let Some(s) = decode_valid(&p) {
+                                    local.decoded.push((p.clone(), s));
+                                }
+                                local.found.push((key.clone(), p));
+                            }
+                        }
+                    }
+                }
+                local
+            }));
+        }
+        for h in handles {
+            if let Ok(part) = h.join() {
+                out.found.extend(part.found);
+                out.decoded.extend(part.decoded);
+            }
+        }
+    });
+    out
+}
+
 /// Samples shared between engines (e.g. replaying another scene without reloading).
 #[derive(Default)]
 pub struct SampleCache {
@@ -2435,7 +2581,7 @@ pub struct SampleCache {
     pub library_dirs: Vec<std::path::PathBuf>,
     /// Where samples were found (by how the project refers to them, and the project's
     /// folder): each edit doesn't search the disk again. Only files found are kept.
-    found: HashMap<(i64, String, String, String, Option<std::path::PathBuf>), std::path::PathBuf>,
+    found: HashMap<FoundKey, std::path::PathBuf>,
     /// Plug-in instances, kept across engines (they are slow to load and hold state).
     pub plugins: deckard_plugins::Host,
     /// Where the engines made with it note plug-ins' extra pairs making sound (one board,
@@ -2475,6 +2621,44 @@ impl SampleCache {
             .entry(path.clone())
             .or_insert_with(|| Sample::load(&path).ok().filter(|s| !s.frames.is_empty() && s.rate > 0).map(Arc::new))
             .clone()
+    }
+
+    /// Whether `path` has already been decoded and stored in this cache.
+    pub fn has_cached(&self, path: &Path) -> bool {
+        matches!(self.by_path.get(path), Some(Some(_)))
+    }
+
+    /// Snapshot known sample paths and cached entries so a background worker can resolve
+    /// and decode uncached samples without holding [`SampleCache`].
+    pub fn known_sample_state(&self) -> SampleCacheSnapshot {
+        SampleCacheSnapshot {
+            library_dirs: self.library_dirs.clone(),
+            found: self.found.clone(),
+            cached: self.by_path.keys().cloned().collect(),
+        }
+    }
+
+    /// Resolve and decode every sample referenced by `group`'s sounds in parallel.
+    pub fn preload_group_samples(
+        group: &deckard_model::Group,
+        project_path: Option<&Path>,
+        snapshot: &SampleCacheSnapshot,
+    ) -> PreloadedSamples {
+        let mut refs = Vec::new();
+        for s in &group.sounds {
+            collect_sound_sample_refs(s, &mut refs);
+        }
+        parallel_preload_samples(refs, project_path, &snapshot.library_dirs, &snapshot.found, |p| snapshot.cached.contains(p))
+    }
+
+    /// Merge samples resolved and decoded off-thread into this cache.
+    pub fn ingest_preloaded(&mut self, preloaded: PreloadedSamples) {
+        for (key, path) in preloaded.found {
+            self.found.entry(key).or_insert(path);
+        }
+        for (path, sample) in preloaded.decoded {
+            self.by_path.entry(path).or_insert(Some(sample));
+        }
     }
 }
 
@@ -2667,6 +2851,21 @@ impl Engine {
         let has_fx = |g: usize, s: usize| {
             fx.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some) || (kept(g, s, |r| r.chain) && had_chain(g, s))
         };
+        {
+            let mut refs = Vec::new();
+            for (gi, g) in project.groups.iter().enumerate() {
+                for (si, s) in g.sounds.iter().enumerate() {
+                    if !kept(gi, si, |r| r.sampler) && !muting(project, gi, si).silent {
+                        collect_sound_sample_refs(s, &mut refs);
+                    }
+                }
+            }
+            if refs.len() >= 2 {
+                let preloaded =
+                    parallel_preload_samples(refs, project_path, &cache.library_dirs, &cache.found, |p| cache.by_path.contains_key(p));
+                cache.ingest_preloaded(preloaded);
+            }
+        }
         // A sample a zone or take names: found (remembered), loaded once, counted.
         let mut load = |r: &deckard_model::SampleRef| -> Option<Arc<Sample>> {
             let key = (r.kind, r.path.clone(), r.library.clone(), r.library_root.clone(), project_path.map(Path::to_path_buf));
@@ -13452,5 +13651,48 @@ mod native_tests {
         assert!(gr > 6.0, "gain reduction {gr} dB");
         let (_, gr, _) = take(0.0); // 0 dB: nothing to reduce
         assert!(gr < 0.5, "gain reduction {gr} dB");
+    }
+
+    #[test]
+    fn preload_group_samples_decodes_all_sounds_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sounds = Vec::new();
+        let mut wavs = Vec::new();
+        for i in 0..8 {
+            let path = dir.path().join(format!("pad_{i}.wav"));
+            let val = (i as f32 + 1.0) * 0.05;
+            edit::write_wav(&path, &Sample { rate: 48_000, frames: vec![[val, -val]; 256] }).unwrap();
+            wavs.push(path.clone());
+            sounds.push(Sound {
+                name: format!("Pad {i}"),
+                level: 1.0,
+                instrument: "Sampler".into(),
+                sampler: Some(deckard_model::Sampler {
+                    zones: vec![deckard_model::Zone {
+                        sample: deckard_model::SampleRef { kind: 0, path: path.display().to_string(), ..Default::default() },
+                        root_key: 60,
+                        key_range: (0, 127),
+                        velocity_range: (0, 127),
+                        gain: 1.0,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        let group = Group { name: "Kit".into(), level: 1.0, sounds, ..Default::default() };
+        let mut cache = SampleCache::default();
+        let snap = cache.known_sample_state();
+        let preloaded = SampleCache::preload_group_samples(&group, None, &snap);
+        assert_eq!(preloaded.decoded.len(), 8);
+        cache.ingest_preloaded(preloaded);
+        for wav in &wavs {
+            assert!(cache.has_cached(wav), "{} should be preloaded into SampleCache", wav.display());
+        }
+        // Once cached, a second snapshot skips re-decoding every file.
+        let snap2 = cache.known_sample_state();
+        let preloaded2 = SampleCache::preload_group_samples(&group, None, &snap2);
+        assert!(preloaded2.decoded.is_empty());
     }
 }
