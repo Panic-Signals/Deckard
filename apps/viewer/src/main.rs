@@ -92,6 +92,7 @@ mod midi_devices;
 mod midi_file;
 mod midi_io;
 mod midi_monitor;
+mod midi_ports;
 mod mk3_io;
 mod mod_slots;
 mod modulation;
@@ -1059,9 +1060,11 @@ pub struct App {
     page_key: Option<(deckard_doc::Chain, Option<usize>)>,
     /// MIDI learn, host automation and macro editing (the Assignment area).
     remote: remote::Remote,
-    /// MIDI ports (inputs, outputs) and when they were last looked up.
+    /// MIDI ports (inputs, outputs), backed by a PnP/refresh watcher when running.
     midi_ports: (Vec<String>, Vec<String>),
     midi_ports_at: Option<std::time::Instant>,
+    midi_port_watch: Option<midi_ports::Watcher>,
+    midi_prefs_shown: bool,
     /// Variation and Generate settings of sounds whose project can't keep them (from
     /// before Maschine 3): (group, sound, field) → value, for this session.
     groove_settings: std::collections::HashMap<(usize, usize, String), f64>,
@@ -1299,14 +1302,21 @@ pub struct App {
     session_retired: bool,
     /// Goes up with each project opened or made.
     doc_generation: u64,
-    /// Cached `(doc_generation, revision, macro_targets, group_noted)` for `surface_view`.
-    surface_doc_cache: std::cell::RefCell<(u64, u64, std::collections::HashSet<u64>, Vec<std::collections::HashSet<usize>>)>,
+    /// Cached document summary for `surface_view` and `layout::chain_area`.
+    surface_doc_cache: std::cell::RefCell<SurfaceDocCache>,
     /// The focused Zhora (group, sound, slot) as last shown, while the audio thread has it.
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
     /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
+}
+
+#[derive(Default)]
+pub(crate) struct SurfaceDocCache {
+    key: Option<(u64, u64)>,
+    pub(crate) macro_targets: std::collections::HashSet<u64>,
+    group_noted: Vec<std::collections::HashSet<usize>>,
 }
 
 /// Launch time (a newtype so `App` can derive `Default`).
@@ -2804,6 +2814,12 @@ impl App {
             "While recording, MIDI going into another group makes it the focused group, and so does picking a pattern on a JAM's Project View. Off: the focus stays where you put it, and the MIDI still records into its group and the pattern still plays.",
         );
         ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Ports").strong());
+            if ui.button("Refresh").on_hover_text("Scan MIDI ports again (for software ports like loopMIDI).").clicked() {
+                self.refresh_midi_ports();
+            }
+        });
         let (ins, outs) = self.midi_ports().clone();
         for (title, ports, prefix) in [("Inputs", &ins, "in:"), ("Outputs", &outs, "out:")] {
             ui.label(egui::RichText::new(title).strong());
@@ -3046,6 +3062,9 @@ impl App {
             } else if tab == 7 {
                 self.general_preferences(ui);
             } else if tab == 3 {
+                if !self.midi_prefs_shown {
+                    self.refresh_midi_ports();
+                }
                 self.midi_preferences(ui);
             } else if tab == 6 {
                 egui::Grid::new("recording-prefs").num_columns(2).spacing([20.0, 12.0]).show(ui, |ui| {
@@ -3371,6 +3390,7 @@ impl App {
             self.browse(browser::BrowseAct::LibraryFolder(dir, on));
         }
         self.prefs = open.then_some(tab);
+        self.midi_prefs_shown = open && tab == 3;
         if !open {
             // Looked at again when the window next opens.
             self.wine_status = None;
@@ -4931,10 +4951,11 @@ impl App {
         if matches!(self.controller, Some(Ok(_))) {
             return None;
         }
+        let pace = controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering());
         Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
-            std::time::Duration::from_millis(30)
+            pace.min(std::time::Duration::from_millis(30))
         } else {
-            controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering())
+            pace
         })
     }
 
@@ -5152,7 +5173,7 @@ impl App {
             }
             let fixed =
                 self.doc.as_ref().and_then(|d| d.borrow().num(deckard_doc::Target::Song, "fixed_velocity")).map_or(100, |v| v as i64);
-            let pads = self.surface.pads(&view);
+            let (pads, leds, screens) = self.surface.outputs(&view);
             let route = mk3_io::PadRoute {
                 play: pads.play,
                 group: self.group,
@@ -5164,11 +5185,7 @@ impl App {
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
             };
-            Mk3Out {
-                route,
-                leds: self.surface.leds(&view),
-                screens: self.surface.screen_picture(&view).map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))),
-            }
+            Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))) }
         };
         if let Some(on) = mixer_on {
             self.set_mixer(on);
@@ -5234,6 +5251,25 @@ impl App {
         })
     }
 
+    fn refresh_doc_cache(&self, d: &deckard_doc::Document) {
+        let rev = d.revision();
+        let mut cache = self.surface_doc_cache.borrow_mut();
+        if cache.key != Some((self.doc_generation, rev)) {
+            let group_noted = d
+                .project()
+                .groups
+                .iter()
+                .map(|grp| grp.patterns.iter().flat_map(|pt| pt.notes.iter().map(|n| n.sound)).collect())
+                .collect();
+            *cache = SurfaceDocCache { key: Some((self.doc_generation, rev)), macro_targets: d.macro_targets(), group_noted };
+        }
+    }
+
+    pub(crate) fn doc_cache(&self, d: &deckard_doc::Document) -> std::cell::Ref<'_, SurfaceDocCache> {
+        self.refresh_doc_cache(d);
+        self.surface_doc_cache.borrow()
+    }
+
     /// What DECKARD's own MK3 layer shows of the app now.
     fn surface_view(&self) -> deckard_surface::View {
         use deckard_surface::{ControlView, GroupView, KnobView, SoundView, View};
@@ -5244,17 +5280,7 @@ impl App {
         let on_macros = self.channel && self.prop_set == 3;
         if let Some(doc) = &self.doc {
             let d = doc.borrow();
-            let rev = d.revision();
-            let mut cache = self.surface_doc_cache.borrow_mut();
-            if (cache.0, cache.1) != (self.doc_generation, rev) {
-                let noted = d
-                    .project()
-                    .groups
-                    .iter()
-                    .map(|grp| grp.patterns.iter().flat_map(|pt| pt.notes.iter().map(|n| n.sound)).collect())
-                    .collect();
-                *cache = (self.doc_generation, rev, d.macro_targets(), noted);
-            }
+            self.refresh_doc_cache(&d);
         }
         let doc_cache = self.surface_doc_cache.borrow();
         // A Zhora's outputs by the channels' names (their aliases).
@@ -5299,7 +5325,7 @@ impl App {
                         modulatable: edits.get(i).copied().flatten().and_then(modulation::mod_target).is_some(),
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
                         auto_mod: self.auto_mod_text(edits.get(i).copied().flatten()),
-                        in_macro: !on_macros && k.param.is_some_and(|p| doc_cache.2.contains(&p)),
+                        in_macro: !on_macros && k.param.is_some_and(|p| doc_cache.macro_targets.contains(&p)),
                     })
                 })
                 .collect(),
@@ -5498,7 +5524,7 @@ impl App {
                 let grp = &p.groups[g];
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
-                let noted = doc_cache.3.get(g);
+                let noted = doc_cache.group_noted.get(g);
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -6577,6 +6603,9 @@ impl App {
     /// notes that came while no engine ran.
     fn midi_sync(&mut self, ctx: &egui::Context) {
         self.midi.set_context(ctx);
+        if let Some(w) = &self.midi_port_watch {
+            w.set_context(ctx);
+        }
         let all = self.midi_ports().0.clone();
         // (Not a MIDI controller's own port: its presses aren't notes.)
         let ins = midi_devices::note_inputs(&all, &self.settings.midi_off, &self.midi_devices);
@@ -10535,17 +10564,23 @@ impl App {
         }
     }
 
-    /// The MIDI ports, looked up again every few seconds.
+    /// Ask the background watcher to scan MIDI ports again (e.g. for virtual ports).
+    pub(crate) fn refresh_midi_ports(&self) {
+        if let Some(w) = &self.midi_port_watch {
+            w.request_refresh();
+        }
+    }
+
+    /// The MIDI ports, kept current by the background watcher (or probed once if no
+    /// watcher was started).
     fn midi_ports(&mut self) -> &(Vec<String>, Vec<String>) {
-        if self.midi_ports_at.is_none_or(|t| t.elapsed().as_secs() >= 3) {
+        if let Some(w) = &self.midi_port_watch {
+            if let Some(ports) = w.try_take() {
+                self.midi_ports = ports;
+            }
+        } else if self.midi_ports_at.is_none() {
             self.midi_ports_at = Some(std::time::Instant::now());
-            let ins = midir::MidiInput::new("DECKARD ports")
-                .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
-                .unwrap_or_default();
-            let outs = midir::MidiOutput::new("DECKARD ports")
-                .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
-                .unwrap_or_default();
-            self.midi_ports = (ins, outs);
+            self.midi_ports = midi_ports::probe();
         }
         &self.midi_ports
     }
@@ -11233,6 +11268,7 @@ impl eframe::App for App {
     /// Leave the MK3 dark, as it was before DECKARD started.
     fn on_exit(&mut self) {
         self.end_session();
+        self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
             m.shut_down(goodbye::picture());
@@ -12307,6 +12343,8 @@ mod tests {
         app.playing = Some(Mode::Scene(0));
         assert_eq!(app.mk3_wake(), Some(controller::tick_every(true)));
         app.surface.set_theme("palenight");
+        assert_eq!(app.mk3_wake(), Some(controller::tick_every(true)));
+        app.playing = None;
         assert_eq!(app.mk3_wake(), Some(std::time::Duration::from_millis(30)));
     }
 

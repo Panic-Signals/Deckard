@@ -272,6 +272,7 @@ struct Shared {
 
 pub struct Mk3Io {
     shared: Arc<Mutex<Shared>>,
+    display_wake: Arc<std::sync::Condvar>,
 }
 
 /// The pitch pads play: a sound's base key (Maschine's default, C3).
@@ -292,11 +293,13 @@ impl Mk3Io {
     /// Start looking for an MK3 (and keep looking: it may be plugged in later).
     pub fn start() -> Mk3Io {
         let shared: Arc<Mutex<Shared>> = Arc::default();
+        let display_wake = Arc::new(std::sync::Condvar::new());
         let s = shared.clone();
         std::thread::Builder::new().name("DECKARD MK3".into()).spawn(move || run(&s)).ok();
         let s = shared.clone();
-        std::thread::Builder::new().name("DECKARD MK3 displays".into()).spawn(move || run_displays(&s)).ok();
-        Mk3Io { shared }
+        let w = display_wake.clone();
+        std::thread::Builder::new().name("DECKARD MK3 displays".into()).spawn(move || run_displays(&s, &w)).ok();
+        Mk3Io { shared, display_wake }
     }
 
     /// Leave the controller dark but for `picture` on the displays (both, 960 × 272
@@ -307,6 +310,7 @@ impl Mk3Io {
             s.goodbye = Some(Arc::new(picture));
             s.closing = true;
         }
+        self.display_wake.notify_all();
         let until = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < until {
             let s = self.shared.lock().unwrap();
@@ -372,6 +376,7 @@ impl Mk3Io {
         let mut s = self.shared.lock().unwrap();
         if s.screens.as_ref().is_none_or(|(m, _)| *m != n) {
             s.screens = Some((n, frame));
+            self.display_wake.notify_one();
         }
     }
 
@@ -396,6 +401,7 @@ impl Mk3Io {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn release_displays(&self, released: bool) {
         self.shared.lock().unwrap().displays_released = released;
+        self.display_wake.notify_one();
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -622,11 +628,26 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
-fn run_displays(shared: &Mutex<Shared>) {
+fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
     use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
+    let mut left = vec![0u16; WIDTH * HEIGHT];
+    let mut right = vec![0u16; WIDTH * HEIGHT];
+    // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
+    let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let [r, g, b, _] = px.get(y * WIDTH * 2 + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
+                out[y * WIDTH + x] = rgb565(r, g, b);
+            }
+        }
+    };
     loop {
         {
             let mut s = shared.lock().unwrap();
+            if s.closing {
+                s.displays_closed = true;
+                return;
+            }
             if s.displays_released {
                 set_agent_holding(&mut s, false);
                 drop(s);
@@ -657,51 +678,53 @@ fn run_displays(shared: &Mutex<Shared>) {
         let mut shown = None;
         let mut last_px: Vec<[u8; 4]> = Vec::new();
         loop {
-            // One display's half of a 960-wide picture, as the display takes it.
-            let half = |px: &[[u8; 4]], x0: usize| -> Vec<u16> {
-                let mut out = Vec::with_capacity(WIDTH * HEIGHT);
-                for y in 0..HEIGHT {
-                    for x in x0..x0 + WIDTH {
-                        let [r, g, b, _] = px.get(y * WIDTH * 2 + x).copied().unwrap_or([0, 0, 0, 255]);
-                        out.push(rgb565(r, g, b));
+            let (closing, released, next_screen) = {
+                let mut s = shared.lock().unwrap();
+                loop {
+                    if s.closing {
+                        break (Some(s.goodbye.clone()), s.displays_released, None);
                     }
+                    if s.displays_released {
+                        break (None, true, None);
+                    }
+                    if let Some((n, frame)) = &s.screens
+                        && shown != Some(*n)
+                    {
+                        break (None, false, Some((*n, frame.clone())));
+                    }
+                    s = wake.wait(s).unwrap();
                 }
-                out
             };
-            let (closing, released) = {
-                let s = shared.lock().unwrap();
-                (s.closing.then(|| s.goodbye.clone()), s.displays_released)
-            };
-            if released && closing.is_none() {
-                // Clear both screens before letting go. Otherwise the panels keep the
-                // last picture after the driver changes.
-                let black = vec![0u16; WIDTH * HEIGHT];
-                let _ = d.show(0, &black).and_then(|_| d.show(1, &black));
-                shared.lock().unwrap().displays_connected = false;
-                break;
-            }
             if let Some(goodbye) = closing {
                 let px = goodbye.map_or_else(Vec::new, |p| p.to_vec());
-                let _ = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH)));
+                fill_half(&px, 0, &mut left);
+                fill_half(&px, WIDTH, &mut right);
+                let _ = d.show(0, &left).and_then(|_| d.show(1, &right));
                 shared.lock().unwrap().displays_closed = true;
                 return;
             }
-            let latest = shared.lock().unwrap().screens.clone();
-            match latest {
-                Some((n, frame)) if shown != Some(n) => {
-                    let px = frame.into_pixels();
-                    if px != last_px {
-                        if let Err(e) = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH))) {
-                            let mut s = shared.lock().unwrap();
-                            s.display_status = e;
-                            s.displays_connected = false;
-                            break;
-                        }
-                        last_px = px;
+            if released {
+                // Clear both screens before letting go. Otherwise the panels keep the
+                // last picture after the driver changes.
+                left.fill(0);
+                let _ = d.show(0, &left).and_then(|_| d.show(1, &left));
+                shared.lock().unwrap().displays_connected = false;
+                break;
+            }
+            if let Some((n, frame)) = next_screen {
+                let px = frame.into_pixels();
+                if px != last_px {
+                    fill_half(&px, 0, &mut left);
+                    fill_half(&px, WIDTH, &mut right);
+                    if let Err(e) = d.show(0, &left).and_then(|_| d.show(1, &right)) {
+                        let mut s = shared.lock().unwrap();
+                        s.display_status = e;
+                        s.displays_connected = false;
+                        break;
                     }
-                    shown = Some(n);
+                    last_px = px;
                 }
-                _ => std::thread::sleep(Duration::from_millis(8)),
+                shown = Some(n);
             }
         }
         // Let go now: the screens' driver may be about to change.

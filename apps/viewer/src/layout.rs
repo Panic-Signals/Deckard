@@ -4942,7 +4942,6 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     // Where the knobs are, for tests to point at.
     #[cfg(test)]
     ui.data_mut(|d| d.insert_temp(egui::Id::new("knob-rects"), knob_rects.clone()));
-    let macro_targets = if macro_view.is_none() { doc.macro_targets() } else { Default::default() };
     for (i, k) in params.iter().enumerate() {
         let Some((name, value, amount, edit)) = k else { continue };
         let r = Rect::from_min_size(Pos2::new(slot_x(i), knob_y), Vec2::new(70.0, 84.0));
@@ -4977,7 +4976,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             strip_resp.menu_on_right_click(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
         }
         // A parameter a macro controls: the macro icon at the top right.
-        if macro_view.is_none() && edit.and_then(|e| edit_param_oid(app, doc, e)).is_some_and(|id| macro_targets.contains(&id)) {
+        if macro_view.is_none()
+            && let Some(id) = edit.and_then(|e| edit_param_oid(app, doc, e))
+            && app.doc_cache(doc).macro_targets.contains(&id)
+        {
             macro_icon(&painter, Pos2::new(r.right() - 7.0, r.top() + 8.0), white(142));
         }
         if let Some(Edit::Choice(t, f, options, cur, _)) = *edit {

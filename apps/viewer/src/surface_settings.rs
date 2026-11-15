@@ -42,6 +42,7 @@ impl App {
             return;
         }
         self.surface_settings_at = Some(std::time::Instant::now());
+        self.refresh_midi_ports();
         self.surface_settings = self.settings_view();
     }
 

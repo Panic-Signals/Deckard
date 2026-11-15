@@ -1251,6 +1251,7 @@ impl Surface {
         let page = self.run.as_ref().map_or(FIRST_PAGE.to_string(), |r| r.shared.borrow().page.clone());
         match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode)) {
             Ok(run) => {
+                run.lua.set_app_data(self.pictures.clone());
                 self.run = Some(run);
                 *self.error.borrow_mut() = None;
                 self.picture = None;
@@ -1276,9 +1277,7 @@ impl Surface {
     /// Whether the theme moves by itself (a `chase` border): the screens want drawing
     /// often, even with nothing happening.
     pub fn animates(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| {
-            r.lua.named_registry_value::<Table>("deckard.theme").and_then(|t| t.get::<Value>("chase")).is_ok_and(|c| !c.is_nil())
-        })
+        self.run.as_ref().is_some_and(|r| r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates))
     }
 
     /// The pages' timer: `tick()` for the page shown, then `global.lua` (as for events),
@@ -1435,24 +1434,29 @@ impl Surface {
     /// neither, every pad plays its sound.
     pub fn pads(&self, v: &View) -> PadSetup {
         let all = PadSetup { play: true, keys: None, chords: None };
-        let r = self.with(v, None, |run| {
-            for t in self.tables(run) {
-                let Ok(Some(f)) = t.get::<Option<Function>>("pads") else { continue };
-                match f.call::<Option<Table>>(()) {
-                    Ok(Some(p)) => return pad_setup(&p).unwrap_or(all),
-                    Ok(None) => {}
-                    Err(e) => {
-                        self.set_error(e);
-                        return all;
-                    }
+        let r = self.with(v, None, |run| self.pads_in(run, all));
+        r.map_or(all, |(p, _)| p)
+    }
+
+    fn pads_in(&self, run: &Run, all: PadSetup) -> PadSetup {
+        let mut setup = all;
+        for t in self.tables(run) {
+            let Ok(Some(f)) = t.get::<Option<Function>>("pads") else { continue };
+            match f.call::<Option<Table>>(()) {
+                Ok(Some(p)) => {
+                    setup = pad_setup(&p).unwrap_or(all);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.set_error(e);
+                    break;
                 }
             }
-            all
-        });
-        let mut setup = r.map_or(all, |(p, _)| p);
+        }
         // (With SHIFT held the pads run the shortcuts printed under them, never playing:
         // nothing is heard or recorded.)
-        if self.run.as_ref().is_some_and(|run| run.shared.borrow().held.contains("SHIFT")) {
+        if run.shared.borrow().held.contains("SHIFT") {
             setup.play = false;
         }
         setup
@@ -1461,17 +1465,19 @@ impl Surface {
     /// Both LED reports: every LED dark first, then what
     /// `global.lua`'s `leds()` and the page's set.
     pub fn leds(&self, v: &View) -> Leds {
-        let r = self.with(v, None, |run| {
-            run.shared.borrow_mut().leds = leds::blank();
-            for t in self.tables(run).into_iter().rev() {
-                let Ok(Some(f)) = t.get::<Option<Function>>("leds") else { continue };
-                if let Err(e) = f.call::<()>(()) {
-                    self.set_error(e);
-                }
+        let r = self.with(v, None, |run| self.leds_in(run));
+        r.map_or_else(leds::blank, |(l, _)| l)
+    }
+
+    fn leds_in(&self, run: &Run) -> Leds {
+        run.shared.borrow_mut().leds = leds::blank();
+        for t in self.tables(run).into_iter().rev() {
+            let Ok(Some(f)) = t.get::<Option<Function>>("leds") else { continue };
+            if let Err(e) = f.call::<()>(()) {
+                self.set_error(e);
             }
-            run.shared.borrow().leds.clone()
-        });
-        let mut out = r.map_or_else(leds::blank, |(l, _)| l);
+        }
+        let mut out = run.shared.borrow().leds.clone();
         // Pads and groups are one colour on an LCD: the mode's hue, keeping whatever
         // shade the page chose (bright, dim, or off). The strip still shows play position.
         if self.theme == "lcd" {
@@ -1480,28 +1486,46 @@ impl Surface {
         out
     }
 
+    /// Pads, LEDs and screens together for one view (comparing [`View`] once instead of
+    /// three times).
+    pub fn outputs(&mut self, v: &View) -> (PadSetup, Leds, Option<(u64, screen::Picture)>) {
+        let all = PadSetup { play: true, keys: None, chords: None };
+        let Some((pads, leds, p)) =
+            self.with(v, None, |run| (self.pads_in(run, all), self.leds_in(run), self.draw_picture_in(run, v))).map(|(res, _)| res)
+        else {
+            return (all, leds::blank(), None);
+        };
+        (pads, leds, self.changed_picture(p))
+    }
+
+    fn changed_picture(&mut self, p: screen::Picture) -> Option<(u64, screen::Picture)> {
+        let changed =
+            self.pictures_changed.replace(false) || self.last_ops.as_ref().is_none_or(|(bg, ops)| *bg != p.background || *ops != p.ops);
+        if !changed {
+            return None;
+        }
+        self.last_ops = Some((p.background, p.ops.clone()));
+        self.frames += 1;
+        Some((self.frames, p))
+    }
+
     /// Both screens' drawing commands, if they changed since the last call: a count that
     /// goes up with each new picture, and the picture to rasterize off the UI thread.
     pub fn screen_picture(&mut self, v: &View) -> Option<(u64, screen::Picture)> {
         let p = self.draw_picture(v);
-        let key = (p.background, p.ops.clone());
-        if !self.pictures_changed.replace(false) && self.last_ops.as_ref() == Some(&key) {
-            return None;
-        }
-        self.last_ops = Some(key);
-        self.frames += 1;
-        Some((self.frames, p))
+        self.changed_picture(p)
     }
 
     /// Both screens, if they changed since the last call: a count that goes up with each
     /// new picture, and the picture (960 × 272 RGBA, the left screen first).
     pub fn screens(&mut self, v: &View) -> Option<(u64, Vec<[u8; 4]>)> {
         let mut p = self.draw_picture(v);
-        let key = (p.background, p.ops.clone());
-        if !self.pictures_changed.replace(false) && self.last_ops.as_ref() == Some(&key) {
+        let changed =
+            self.pictures_changed.replace(false) || self.last_ops.as_ref().is_none_or(|(bg, ops)| *bg != p.background || *ops != p.ops);
+        if !changed {
             return None;
         }
-        self.last_ops = Some(key);
+        self.last_ops = Some((p.background, p.ops.clone()));
         p.rasterize();
         let px = p.px;
         if self.picture.as_ref() == Some(&px) {
@@ -1545,16 +1569,38 @@ impl Surface {
     }
 
     fn draw_picture(&self, v: &View) -> screen::Picture {
-        let r = self.with(v, None, |run| -> mlua::Result<screen::Picture> {
-            run.lua.set_app_data(self.pictures.clone());
+        let Some(p) = self.with(v, None, |run| self.draw_picture_in(run, v)).map(|(p, _)| p) else {
+            let mut p = screen::Picture::new([0, 0, 0]);
+            if let Some(name) = &v.loading {
+                p.loading(name);
+            }
+            if let Some(e) = self.error() {
+                p.error(&e);
+            }
+            return p;
+        };
+        p
+    }
+
+    fn draw_picture_in(&self, run: &Run, v: &View) -> screen::Picture {
+        let res: mlua::Result<screen::Picture> = (|| {
             let theme: Table = run.lua.named_registry_value("deckard.theme")?;
-            let colors: Table = theme.get("colors")?;
-            let field = screen::colour(&run.lua, &colors.get::<Value>("background")?)?;
+            let (field, ink, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
+                Some(cache) => (cache.background, cache.text, cache.accent),
+                None => {
+                    let colors: Table = theme.get("colors")?;
+                    (
+                        screen::colour(&run.lua, &colors.get::<Value>("background")?)?,
+                        screen::colour(&run.lua, &colors.get::<Value>("text")?)?,
+                        screen::colour(&run.lua, &colors.get::<Value>("accent")?)?,
+                    )
+                }
+            };
             let mut pic = screen::Picture::new(field);
             pic.restyle_plugs = true;
             pic.plug_field = field;
-            pic.plug_ink = screen::colour(&run.lua, &colors.get::<Value>("text")?)?;
-            pic.plug_accent = screen::colour(&run.lua, &colors.get::<Value>("accent")?)?;
+            pic.plug_ink = ink;
+            pic.plug_accent = accent;
             let ud = run.lua.create_userdata(pic)?;
             for t in self.tables(run).into_iter().rev() {
                 let Ok(Some(f)) = t.get::<Option<Function>>("draw") else { continue };
@@ -1563,14 +1609,13 @@ impl Surface {
                 }
             }
             ud.take::<screen::Picture>()
-        });
-        let mut p = match r {
-            Some((Ok(p), _)) => p,
-            Some((Err(e), _)) => {
+        })();
+        let mut p = match res {
+            Ok(p) => p,
+            Err(e) => {
                 self.set_error(e);
                 screen::Picture::new([0, 0, 0])
             }
-            None => screen::Picture::new([0, 0, 0]),
         };
         if let Some(name) = &v.loading {
             p.loading(name);
@@ -1685,6 +1730,7 @@ fn start(sources: &sources::Sources, page: String, theme: &str, look: lcd::Look)
     let global: Table = sources::run(&lua, sources, "global.lua")?;
     lua.set_named_registry_value("deckard.global", global)?;
     let theme = load_theme(&lua, sources, theme, 0)?;
+    lua.set_app_data(screen::ThemeCache::from_theme(&theme)?);
     lua.set_named_registry_value("deckard.theme", theme)?;
     lua.set_named_registry_value("deckard.pages", lua.create_table()?)?;
     // The first page loads now, so its errors show at once.
