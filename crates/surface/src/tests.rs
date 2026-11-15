@@ -2590,7 +2590,7 @@ fn the_step_page_knob_5_zooms_the_right_screen() {
     assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.2"), "zooming in from full pattern stays at start instead of jumping to bar 2");
 
     // Multi-bar snaps: in an 8-bar pattern, zooming out from 1 bar snaps to 2 bars and
-    // 4 bars, and knob 6 pages by 2 bars (or 4 bars) per gather step just like 1 bar.
+    // 4 bars, and knob 6 still pans 1 bar at a time per gather step.
     v.pattern_length = 8 * 3840;
     hold(&mut s, &v, "BUTTON_CAP_5", false);
     hold(&mut s, &v, "BUTTON_CAP_5", true);
@@ -2601,17 +2601,20 @@ fn the_step_page_knob_5_zooms_the_right_screen() {
     s.event(&Event::Knob(4, -0.3), &v, now);
     assert!(has(&s, &v, "2.1") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "zooming out snaps to 2 bars (bars 1-2)");
     s.event(&Event::Knob(5, 0.1), &v, now);
-    assert!(has(&s, &v, "3.1") && has(&s, &v, "4.3") && !has(&s, &v, "2.1") && !has(&s, &v, "5.1"), "knob 6 pages 2 bars (bars 3-4)");
+    assert!(has(&s, &v, "2.1") && has(&s, &v, "3.3") && !has(&s, &v, "1.2") && !has(&s, &v, "4.1"), "knob 6 pans 1 bar (bars 2-3)");
     s.event(&Event::Knob(5, -0.1), &v, now);
-    assert!(has(&s, &v, "1.2") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "knob 6 pages back to bars 1-2");
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "knob 6 pans back to bars 1-2");
     let right_has = |s: &Surface, v: &View, label: &str| {
-        s.draw_picture(v).ops.iter().any(|o| matches!(o, screen::DrawOp::Text { x, text, .. } if *x >= 480 && text == label))
+        s.draw_picture(v).ops.iter().any(|o| matches!(o, screen::DrawOp::Text { x, text, .. } if *x >= 500 && text == label))
     };
     hold(&mut s, &v, "BUTTON_CAP_5", false);
     s.event(&Event::Knob(4, -0.5), &v, now);
     assert!(right_has(&s, &v, "1") && right_has(&s, &v, "4") && !right_has(&s, &v, "5"), "zooming out snaps to 4 bars (bars 1-4)");
     s.event(&Event::Knob(5, 0.1), &v, now);
-    assert!(right_has(&s, &v, "5") && right_has(&s, &v, "8") && !right_has(&s, &v, "4"), "knob 6 pages 4 bars (bars 5-8)");
+    assert!(
+        right_has(&s, &v, "2") && right_has(&s, &v, "5") && !right_has(&s, &v, "1") && !right_has(&s, &v, "6"),
+        "knob 6 pans 1 bar (bars 2-5)"
+    );
     assert_eq!(s.error(), None);
 }
 

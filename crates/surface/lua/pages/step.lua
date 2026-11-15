@@ -259,8 +259,8 @@ function page.knob(n, amount)
         if steps ~= 0 then
           if follow and s.playing then follow = false end
           local rel = from - a
-          local page_idx = steps > 0 and (rel // width + steps) or (-(-rel // width) + steps)
-          from = util.clamp(a + page_idx * width, a, math.max(a, b - width))
+          local bar_idx = steps > 0 and (rel // seg_w + steps) or (-(-rel // seg_w) + steps)
+          from = util.clamp(a + bar_idx * seg_w, a, math.max(a, b - width))
           set_view(s, from, width, seg_w)
         end
       else
