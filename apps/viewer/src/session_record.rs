@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// The default file name for a session recording: `session-<project>-<stamp>.wav`, or
 /// `session-<stamp>.wav` when there is no project name.
@@ -16,6 +17,22 @@ pub fn session_stamp() -> String {
     // `recorder::timestamp` is `YYYYMMDDTHHMMSS`; reorder its pieces.
     let ts = crate::recorder::timestamp();
     format!("{}-{}-{}-{}", &ts[0..4], &ts[4..6], &ts[6..8], &ts[9..13])
+}
+
+/// The local clock time a recording started, like `9:04:18 PM`, from the same clock as
+/// `recorder::timestamp` (12-hour, with AM/PM).
+pub fn started_label() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let secs = secs + crate::recorder::local_offset(secs);
+    let rem = secs.rem_euclid(86_400);
+    let (h24, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    let (h12, period) = match h24 {
+        0 => (12, "AM"),
+        1..=11 => (h24, "AM"),
+        12 => (12, "PM"),
+        _ => (h24 - 12, "PM"),
+    };
+    format!("{h12}:{m:02}:{s:02} {period}")
 }
 
 /// Replaces each character outside `[A-Za-z0-9._-]` with `-`, collapsing runs of `-`.
@@ -132,6 +149,9 @@ struct SessionRun {
     wav: SessionWav,
     rate: u32,
     written: u64,
+    /// When `start` opened the file, so `poll` can keep the file's length equal to
+    /// wall-clock elapsed time.
+    started: Instant,
 }
 
 /// A snapshot of the recorder for the UI: everything a window needs to draw, and nothing
@@ -185,7 +205,7 @@ impl SessionRecorder {
         started_label: String,
     ) -> Result<(), String> {
         let wav = SessionWav::create(&path, rate)?;
-        self.run = Some(SessionRun { wav, rate, written: 0 });
+        self.run = Some(SessionRun { wav, rate, written: 0, started: Instant::now() });
         self.view = SessionView {
             recording: true,
             rate,
@@ -203,6 +223,34 @@ impl SessionRecorder {
         let buf = Arc::new(Mutex::new(Vec::new()));
         self.tap = Some(buf.clone());
         buf
+    }
+
+    /// The real-time wrapper, called every frame: drains the tap, reads the output's rate,
+    /// computes elapsed wall-clock time and the free space on the recording's disk, then
+    /// drives `poll_at`. On a clean/auto stop it releases the engine tap.
+    pub fn poll(&mut self, output: Option<&deckard_engine::output::Output>) {
+        if !self.recording() {
+            return;
+        }
+        let Some(output) = output else { return };
+        let rate = output.rate;
+        // The engine's tap holds interleaved stereo; chunk it back into frames.
+        let new: Vec<[f32; 2]> = match &self.tap {
+            Some(tap) => {
+                let raw = std::mem::take(&mut *tap.lock().unwrap());
+                raw.as_chunks::<2>().0.to_vec()
+            }
+            None => Vec::new(),
+        };
+        let elapsed = self.run.as_ref().map_or(0.0, |r| r.started.elapsed().as_secs_f64());
+        let free = self
+            .view
+            .path
+            .as_ref()
+            .map_or(u64::MAX, |p| free_bytes(p.parent().unwrap_or(p)).unwrap_or(u64::MAX));
+        if self.poll_at(elapsed, rate, &new, free) {
+            output.set_tap(None);
+        }
     }
 
     /// The testable core. Pads silent frames so the file reaches `floor(elapsed * rate)` total

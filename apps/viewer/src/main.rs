@@ -1239,6 +1239,10 @@ pub struct App {
     rec_base: Option<usize>,
     sampling: layout::sampling::SamplingState,
     recorder: recorder::Recorder,
+    /// Records the master output to a WAV file (File ▸ Session Record).
+    session: session_record::SessionRecorder,
+    /// The live session Recorder window is shown.
+    session_window_open: bool,
     /// The Mixer is shown (instead of the work views), at sound level (the focused
     /// group's sounds) or group level, with its optional sections.
     mixer: bool,
@@ -2298,6 +2302,8 @@ impl App {
                     self.status = format!("can't export MIDI: {e}");
                 }
             }
+            C::SessionRecord => self.toggle_session_record(),
+            C::SessionRecorderWindow => self.session_window_open = !self.session_window_open,
             C::ShowController => self.show_controller = !self.show_controller,
             C::FullScreen => {
                 let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -7250,7 +7256,11 @@ impl App {
         // Sampling page), before recording too.
         let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0)
             || (self.mk3.is_some() && self.surface.page() == "sampling" && self.sampling.tab == 0);
-        let listen = self.meter_inputs && ((self.sampling_open && self.sampling.tab == 0) || hw_record);
+        // A session recording holds the master tap, so internal Sampling metering must not
+        // grab it at the same time (mutual exclusion).
+        let listen = self.meter_inputs
+            && ((self.sampling_open && self.sampling.tab == 0) || hw_record)
+            && !(self.session.recording() && self.recorder.view.source == 2);
         self.recorder.meter(
             listen,
             recorder::StartWith {
@@ -7267,6 +7277,14 @@ impl App {
         if let Some(rec) = self.recorder.poll(output, clock) {
             self.finish_recording(rec);
         }
+        // The session recorder takes up its tap and keeps the file's length true to
+        // wall-clock time; it releases the tap itself on an auto-stop. (Re-borrow the
+        // output: `finish_recording` above needed `self` mutably.)
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        self.session.poll(output);
         self.silence_while_recording();
         self.sync_sampling_page();
         self.sync_browse_page();
@@ -7731,7 +7749,14 @@ impl App {
                 }
             }
             S::Record(r) => match r {
-                RecordAct::Start => self.start_recording(),
+                RecordAct::Start => {
+                    if self.session.recording() && self.recorder.view.source == 2 {
+                        self.recorder.view.error =
+                            Some("Can't record from an internal source while a session recording is running. Stop it first.".into());
+                    } else {
+                        self.start_recording();
+                    }
+                }
                 RecordAct::Stop => {
                     let clock = self.record_clock();
                     let output = match &self.output {
@@ -8319,6 +8344,55 @@ impl App {
             }
         };
         self.sampling_act(act);
+    }
+
+    /// Start a session recording of the master output, or stop the running one. Refuses
+    /// when the Sampling recorder already holds the engine tap (mutual exclusion).
+    fn toggle_session_record(&mut self) {
+        if self.session.recording() {
+            self.session.stop();
+            if let Some(Ok(o)) = &self.output {
+                o.set_tap(None);
+            }
+            self.session_window_open = false;
+            return;
+        }
+        if self.recorder.is_internal_active() {
+            self.error = Some("Can't start a session recording while Sampling is recording from an internal source. Stop it first.".into());
+            return;
+        }
+        let rate = match &self.output {
+            Some(Ok(o)) => o.rate,
+            _ => {
+                self.error = Some("No audio output to record from.".into());
+                return;
+            }
+        };
+        let project = self.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned());
+        let default = session_record::session_filename(project.as_deref(), &session_record::session_stamp());
+        let mut dialog = rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(default);
+        if let Some(dir) = &self.settings.session_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        let reserve = self.settings.session_reserve_mb as u64 * 1024 * 1024;
+        let free = session_record::free_bytes(path.parent().unwrap_or(&path)).unwrap_or(u64::MAX);
+        if !session_record::can_start(free, reserve) {
+            self.error = Some("Not enough free disk space to start a session recording.".into());
+            return;
+        }
+        let buffer = self.session.attach_tap();
+        match self.session.start(path.clone(), rate, reserve, session_record::started_label()) {
+            Ok(()) => {
+                if let Some(Ok(o)) = &self.output {
+                    o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
+                }
+                self.settings.session_dir = path.parent().map(Path::to_path_buf);
+                self.settings.save();
+                self.session_window_open = true;
+            }
+            Err(e) => self.error = Some(e),
+        }
     }
 
     fn start_recording(&mut self) {
@@ -11453,8 +11527,10 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed, recording, or metering.
-        if self.recorder.busy() || self.recorder.is_metering() {
+        // The recorder takes up its audio every frame while armed, recording, or metering;
+        // a session recording must keep rendering too, or its silence-pad grows between
+        // polls and the meters freeze.
+        if self.recorder.busy() || self.recorder.is_metering() || self.session.recording() {
             ctx.request_repaint();
         }
         self.update_slot_view();
@@ -11736,6 +11812,19 @@ impl App {
         self.bounce_windows(ctx);
         if self.export.open {
             self.export_window(ctx);
+        }
+        if self.session_window_open {
+            match session_window::show(ctx, &self.session.view) {
+                session_window::WindowAction::Stop => {
+                    self.session.stop();
+                    if let Some(Ok(o)) = &self.output {
+                        o.set_tap(None);
+                    }
+                    self.session_window_open = false;
+                }
+                session_window::WindowAction::Hide => self.session_window_open = false,
+                session_window::WindowAction::None => {}
+            }
         }
         if (self.group, self.sound, self.scene, self.section, self.song_view) != before {
             self.sync_controller();

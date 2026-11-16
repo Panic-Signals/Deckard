@@ -59,6 +59,11 @@ pub enum Command {
     ExportAudio,
     /// File ▸ Export MIDI… (the song, or the focused scene).
     ExportMidi,
+    /// Start or stop a session recording of the master output. (Menu item added by a
+    /// later task; dispatched from main.rs now.)
+    SessionRecord,
+    /// Show or hide the session Recorder window. (Menu item added by a later task.)
+    SessionRecorderWindow,
 }
 
 /// ⌘ + `key` (+ Shift).
