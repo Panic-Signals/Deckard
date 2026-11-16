@@ -1162,6 +1162,9 @@ pub struct App {
     /// Where STOP left the song: shown there, and PLAY goes on from it (RESTART: from
     /// the start).
     parked: Option<Playhead>,
+    /// The playhead was put in the pattern (clicked while stopped) and nothing has
+    /// played since: ⌘V pastes there.
+    placed_head: bool,
     status: String,
     /// Scripts directory and controller model for the controller panel.
     scripts: Option<PathBuf>,
@@ -3628,6 +3631,7 @@ impl App {
     /// Play `mode` from tick `start`.
     fn play_from(&mut self, mode: Mode, start: i64) {
         let Some(doc) = self.doc.clone() else { return };
+        self.placed_head = false;
         let looping = self.loops(mode);
         let synced = self.sync_start();
         // Each channel's peak (its headroom) counts from the start of playback.
@@ -4310,6 +4314,7 @@ impl App {
         };
         drop(d);
         self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.placed_head = true;
         self.sync_transport();
     }
 
@@ -4321,6 +4326,7 @@ impl App {
         let to = tick.max(0);
         let mode = Mode::Arrangement;
         self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.placed_head = true;
         self.sync_transport();
     }
 
@@ -10507,6 +10513,9 @@ impl App {
         let (Some(clip), Some(doc)) = (self.note_clip.clone(), self.doc.clone()) else { return };
         let (g, focused, scene, song_view) = (self.group, self.pattern, self.scene, self.song_view);
         let (sound, keyboard, grid) = (self.sound, self.piano_roll, self.grid);
+        // Stopped with the playhead put in the pattern: ⌘V pastes there.
+        let mode = if song_view { Mode::Arrangement } else { Mode::Scene(scene) };
+        let head = self.parked.filter(|h| self.placed_head && self.playing.is_none() && h.mode == mode);
         let mut pasted = None;
         let r = doc.borrow_mut().transaction("Paste Notes", |d| {
             // The focused pattern; a group without one (clicked in the Group list)
@@ -10526,6 +10535,11 @@ impl App {
             let p = d.project();
             let group = &p.groups[g];
             let pat = &group.patterns[pi];
+            let plen = layout::pattern_len(p, g, pi).max(1);
+            let at = match (at, head) {
+                (clipboard::PasteAt::Keys, Some(h)) => clipboard::PasteAt::Playhead(parked_tick(p, h, plen)),
+                (at, _) => at,
+            };
             let add = clipboard::paste(&clip, at, sound, keyboard, pat.start, grid, group.sounds.len());
             if add.is_empty() {
                 return Ok(());
@@ -18193,6 +18207,43 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert_eq!(app.parked.expect("parked unchanged").position as i64, 2 * PPQ);
     }
 
+    /// ⌘V while stopped, with the playhead put in the pattern, pastes at the playhead
+    /// (not after the copied notes, which would make the pattern longer); once played,
+    /// it pastes after them again.
+    #[test]
+    fn keys_paste_at_the_playhead_put_in_the_pattern() {
+        let mut app = App { grid: PPQ / 4, ..App::default() };
+        app.new_project();
+        app.controller = None;
+        let doc = app.doc.clone().unwrap();
+        doc.borrow_mut().add_pattern(0, 0, "P").unwrap();
+        doc.borrow_mut().assign_pattern(0, 0, Some(0)).unwrap();
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: PPQ / 2,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        doc.borrow_mut().edit_notes("t", 0, 0, &[], &[note(0), note(PPQ)]).unwrap();
+        let len = layout::pattern_len(doc.borrow().project(), 0, 0);
+        let at = || -> Vec<i64> { doc.borrow().project().groups[0].patterns[0].notes.iter().map(|n| n.position).collect() };
+        app.pattern = 0;
+        app.copy_notes(false);
+        app.seek_pattern(2 * PPQ);
+        app.paste_notes(clipboard::PasteAt::Keys);
+        assert_eq!(at(), [0, PPQ, 2 * PPQ, 3 * PPQ]);
+        assert_eq!(layout::pattern_len(doc.borrow().project(), 0, 0), len, "no longer");
+        // Not placed (played since): after the copied notes, on the grid.
+        app.placed_head = false;
+        doc.borrow_mut().undo();
+        app.paste_notes(clipboard::PasteAt::Keys);
+        assert_eq!(at(), [0, PPQ, 3 * PPQ / 2, 5 * PPQ / 2]);
+    }
+
     /// Drawing or adding notes in the Pattern Editor when the focused group has no active
     /// pattern creates `"Pattern 1"` with the default pattern length, assigns it to the
     /// active scene, and adds the drawn notes in a single undo step.
@@ -18388,4 +18439,24 @@ fn confirmed_quit_bypasses_periodic_work_and_keeps_close_requested() {
     assert!(
         output.viewport_output[&eframe::egui::ViewportId::ROOT].commands.iter().any(|c| matches!(c, eframe::egui::ViewportCommand::Close))
     );
+}
+
+/// Where the parked playhead `h` is in a pattern `plen` ticks long, from its start (as
+/// [`App::seek_pattern`] put it there): in Song view, from its section's start.
+fn parked_tick(p: &deckard_model::Project, h: Playhead, plen: i64) -> i64 {
+    let pos = h.position.max(0.0) as i64;
+    let from = match h.mode {
+        Mode::Arrangement => {
+            let mut start = 0i64;
+            for sec in &p.sections {
+                if pos < start + sec.length {
+                    break;
+                }
+                start += sec.length;
+            }
+            start
+        }
+        _ => 0,
+    };
+    (pos - from).max(0).rem_euclid(plen.max(1))
 }
