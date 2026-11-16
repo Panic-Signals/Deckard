@@ -197,23 +197,10 @@ impl SessionRecorder {
 
     /// Opens the WAV file and arms the recorder. Does not touch any `Output`; the caller wires
     /// the tap via `attach_tap`.
-    pub fn start(
-        &mut self,
-        path: PathBuf,
-        rate: u32,
-        reserve: u64,
-        started_label: String,
-    ) -> Result<(), String> {
+    pub fn start(&mut self, path: PathBuf, rate: u32, reserve: u64, started_label: String) -> Result<(), String> {
         let wav = SessionWav::create(&path, rate)?;
         self.run = Some(SessionRun { wav, rate, written: 0, started: Instant::now() });
-        self.view = SessionView {
-            recording: true,
-            rate,
-            reserve,
-            path: Some(path),
-            started_label,
-            ..SessionView::default()
-        };
+        self.view = SessionView { recording: true, rate, reserve, path: Some(path), started_label, ..SessionView::default() };
         Ok(())
     }
 
@@ -243,11 +230,7 @@ impl SessionRecorder {
             None => Vec::new(),
         };
         let elapsed = self.run.as_ref().map_or(0.0, |r| r.started.elapsed().as_secs_f64());
-        let free = self
-            .view
-            .path
-            .as_ref()
-            .map_or(u64::MAX, |p| free_bytes(p.parent().unwrap_or(p)).unwrap_or(u64::MAX));
+        let free = self.view.path.as_ref().map_or(u64::MAX, |p| free_bytes(p.parent().unwrap_or(p)).unwrap_or(u64::MAX));
         if self.poll_at(elapsed, rate, &new, free) {
             output.set_tap(None);
         }
@@ -289,9 +272,7 @@ impl SessionRecorder {
         }
 
         // Update the view for the UI.
-        let peak = new
-            .iter()
-            .fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
+        let peak = new.iter().fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
         self.view.elapsed = elapsed;
         self.view.bytes = self.run.as_ref().expect("run present").wav.data_bytes();
         self.view.free = free;
@@ -443,7 +424,7 @@ mod tests {
     fn played_audio_lands_near_its_wall_clock_time() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = started(dir.path());
-        s.poll_at(1.0, 48_000, &[], u64::MAX);                 // 1s silence
+        s.poll_at(1.0, 48_000, &[], u64::MAX); // 1s silence
         s.poll_at(1.5, 48_000, &[[0.8, 0.8]; 24_000], u64::MAX); // 0.5s of signal at ~1s mark
         s.stop();
         let mut r = hound::WavReader::open(dir.path().join("s.wav")).unwrap();

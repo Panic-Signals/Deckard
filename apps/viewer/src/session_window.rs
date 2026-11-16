@@ -70,7 +70,13 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView) -> WindowAction {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
         // Pulses while recording.
         let on = view.recording && ui.input(|i| i.time).fract() < 0.6;
-        let color = if !view.recording { egui::Color32::GRAY } else if on { RED } else { RED.gamma_multiply(0.4) };
+        let color = if !view.recording {
+            egui::Color32::GRAY
+        } else if on {
+            RED
+        } else {
+            RED.gamma_multiply(0.4)
+        };
         ui.painter().circle_filled(rect.center(), 6.0, color);
         ui.label(egui::RichText::new(if view.recording { "RECORDING SESSION" } else { "SESSION RECORDER" }).strong());
     });
