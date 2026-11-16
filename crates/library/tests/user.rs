@@ -203,3 +203,61 @@ fn a_saved_preset_is_read_by_the_reader() {
     let r = lib.query(&Query { kind: Kind::Effect, user: true, ..Query::default() });
     assert_eq!(r.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Mine"]);
 }
+
+/// Multi-snapshot ensembles (.ens/.rkplr) share one file path across hundreds of presets.
+/// Favoriting or unfavoriting one snapshot must not smear onto siblings sharing the same path,
+/// and NI's per-row favorite status must survive Library::query merging.
+#[test]
+fn ensemble_favorites_are_per_snapshot_without_smearing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let product = d.join("Maschine 3");
+    std::fs::create_dir_all(&product).unwrap();
+    let ni_path = testing::fixture(&product);
+    let db = rusqlite::Connection::open(&ni_path).unwrap();
+    db.execute_batch(
+        "ALTER TABLE k_content_path ADD COLUMN upid TEXT;
+         ALTER TABLE k_sound_info ADD COLUMN uuid TEXT;
+         INSERT INTO k_content_path (id, path, content_type, alias, upid)
+             VALUES (3, 'C:/Users/Public/Documents/Monark', 2, 'Monark', 'monark-upid');
+         INSERT INTO k_sound_info (id, name, author, tempo, content_path_id, file_name, hidden_for, uuid)
+             VALUES
+             (40, 'Bass Sting', 'Native Instruments', 0, 3, 'C:/Users/Public/Documents/Monark/Monark.ens', 0, '6d63bc67-8fd2-9fb4-786f-75f05c168407'),
+             (41, 'Bello', 'Native Instruments', 0, 3, 'C:/Users/Public/Documents/Monark/Monark.ens', 0, 'aaaa1111-2222-3333-4444-555566667777');
+         INSERT INTO p_sound_info_Instrument_2 (id, name, entry1, entry2, entry3, content_path_id, favorite_id)
+             VALUES
+             (40, 'Bass Sting', 'Monark', NULL, NULL, 3, 'fav-bass-sting'),
+             (41, 'Bello', 'Monark', NULL, NULL, 3, 'fav-bello');",
+    )
+    .unwrap();
+    drop(db);
+
+    let shared = d.join("Shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let fav_db = shared.join("favorites.db3");
+    let fdb = rusqlite::Connection::open(&fav_db).unwrap();
+    fdb.execute_batch("CREATE TABLE favorites (id TEXT PRIMARY KEY); INSERT INTO favorites VALUES ('fav-bello');").unwrap();
+    drop(fdb);
+
+    let mut lib = Library::new(Some(ni_path), &d.join("library.db3")).unwrap();
+    let q = Query { kind: Kind::Instrument, ..Query::default() };
+
+    let r = lib.query(&q);
+    assert_eq!(r.items.len(), 2);
+    assert!(!r.items[0].favorite, "Bass Sting must not inherit Bello's NI favorite");
+    assert!(r.items[1].favorite, "Bello should retain NI favorite");
+
+    // Toggle Bass Sting ON via its per-snapshot favorite key: Bello stays true, Bass Sting becomes true.
+    let key_sting = r.items[0].favorite_key();
+    let key_bello = r.items[1].favorite_key();
+    lib.set_favorite_key(&key_sting, true);
+    let r = lib.query(&q);
+    assert!(r.items[0].favorite);
+    assert!(r.items[1].favorite);
+
+    // Toggle Bello OFF: Bass Sting stays true, Bello becomes false via not_favorites key.
+    lib.set_favorite_key(&key_bello, false);
+    let r = lib.query(&q);
+    assert!(r.items[0].favorite);
+    assert!(!r.items[1].favorite);
+}
