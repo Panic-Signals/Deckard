@@ -202,3 +202,73 @@ fn shift_rec_when_armed_counts_in() {
     assert!(app.recording);
     assert!(app.playing.is_some() || app.count_in_next == 1, "counted in and started");
 }
+
+/// During recording into an empty Auto-length pattern, the MK3 touchstrip LED dots reset
+/// every bar when nothing was recorded during that bar, and keep spanning bars when
+/// notes or controls (such as pitch bend) are recorded.
+#[test]
+fn mk3_strip_resets_every_bar_during_recording_when_nothing_was_recorded() {
+    let mut app = app();
+    app.controller = None;
+    let bar = bar(&app);
+    let at = |app: &mut crate::App, pos: i64| {
+        app.playing = Some(Mode::Scene(0));
+        app.parked = None;
+        app.auto_grow_at(Mode::Scene(0), pos as f64);
+        let head = Some(crate::Playhead { mode: Mode::Scene(0), queued: None, position: pos as f64, played: pos as f64 });
+        let p = app.strip_progress(head).unwrap();
+        let out = {
+            let mut v = app.surface_view();
+            v.progress = Some(p);
+            app.surface.leds(&v)
+        };
+        let lit = (1..=25)
+            .filter(|i| {
+                let name = format!("LED_TS_{i:02}");
+                let idx = deckard_mk3::leds::PAD_LEDS.iter().position(|n| *n == name).unwrap();
+                out.pads[1 + idx] != 0
+            })
+            .count();
+        (p, lit)
+    };
+
+    app.set_recording(true, false);
+
+    // Bar 0: empty, fills 1..25 across the bar despite grow extending pattern length.
+    let (p, lit) = at(&mut app, 0);
+    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 0 start: {p} / {lit}");
+    let (p, lit) = at(&mut app, bar / 2);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 0 mid: {p} / {lit}");
+
+    // Bar 1: nothing recorded in bar 0 -> resets back to dot 1.
+    let (p, lit) = at(&mut app, bar);
+    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 1 reset: {p} / {lit}");
+    let (p, lit) = at(&mut app, bar + bar / 2);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 1 mid: {p} / {lit}");
+
+    // Record pitch bend in bar 1 -> bar 2 continues without resetting.
+    app.take_in_all(
+        Vec::new(),
+        Vec::new(),
+        vec![deckard_engine::RecordedControl {
+            group: 0,
+            sound: 0,
+            kind: deckard_model::MidiKind::PitchBend(12000),
+            tick: (bar + bar / 2) as f64,
+            mode: Mode::Scene(0),
+            seq: 1,
+        }],
+        std::time::Instant::now(),
+    );
+    let (p, lit) = at(&mut app, 2 * bar);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 2 continues after pitch bend in bar 1: {p} / {lit}");
+
+    // Nothing recorded in bar 2 -> bar 3 resets back to dot 1.
+    let (p, lit) = at(&mut app, 3 * bar);
+    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 3 reset after empty bar 2: {p} / {lit}");
+
+    // Record a note in bar 3 -> bar 4 continues without resetting.
+    play(&mut app, (3 * bar + bar / 4) as f64, 120.0);
+    let (p, lit) = at(&mut app, 4 * bar);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 4 continues after note in bar 3: {p} / {lit}");
+}

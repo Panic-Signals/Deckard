@@ -3931,6 +3931,21 @@ impl App {
         Some(((head.position as i64).rem_euclid(bar), bar))
     }
 
+    /// Progress (0..1) shown on the MK3 touchstrip: the focused group's pattern (or,
+    /// while growing an empty Auto-length take, resetting every bar when nothing was
+    /// recorded during that bar), or the current bar with no pattern.
+    fn strip_progress(&self, head: Option<Playhead>) -> Option<f64> {
+        let (at, length) = self.pattern_at(self.group, head).or_else(|| self.bar_at(head))?;
+        if self.recording
+            && let Some(grow) = &self.grow
+            && self.group == grow.group
+            && self.scene_pattern(self.group) == Some(grow.pattern)
+        {
+            return Some(grow.strip_progress(at));
+        }
+        Some(at as f64 / length as f64)
+    }
+
     fn scene_pattern(&self, group: usize) -> Option<usize> {
         let d = self.doc.as_ref()?.borrow();
         let s = d.project().scenes.get(self.scene)?;
@@ -4326,6 +4341,14 @@ impl App {
         if let Some(take) = self.mod_takes.iter_mut().find(|t| t.chain == chain && t.target == target) {
             take.moved = std::time::Instant::now();
         }
+        if self.recording
+            && let Some(grow) = &mut self.grow
+            && g == grow.group
+            && pi == grow.pattern
+        {
+            let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
+            grow.record_at(pos - start);
+        }
         self.touch_write_for(chain, &target, pos, dev);
         if done {
             self.end_mod_take_for(chain, &target);
@@ -4711,6 +4734,28 @@ impl App {
         self.take_in_all(recs, Vec::new(), Vec::new(), std::time::Instant::now());
     }
 
+    fn mark_grow_recorded(&mut self, doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>, group: usize, mode: Mode, tick: f64) {
+        let Some(len) = self.grow.as_mut().and_then(|grow| {
+            if group != grow.group {
+                return None;
+            }
+            let d = doc.borrow();
+            let p = d.project();
+            let (pi, pos) = record::pattern_at(p, mode, tick, group).filter(|x| x.0 == grow.pattern)?;
+            let start = p.groups[group].patterns.get(pi).map_or(0, |pt| pt.start);
+            let at = pos - start;
+            grow.record_at(at);
+            grow.reach(at)
+        }) else {
+            return;
+        };
+        if let Some(grow) = &self.grow
+            && let Err(e) = doc.borrow_mut().set_pattern_length(grow.group, grow.pattern, len)
+        {
+            self.status = format!("can't grow the pattern: {e}");
+        }
+    }
+
     /// What the engine recorded (notes, the expression on them, controllers), taken in
     /// the order it was played.
     fn take_in_all(
@@ -4725,10 +4770,12 @@ impl App {
             let r = match r {
                 record::Rec::Note(r) => r,
                 record::Rec::Expr(r) => {
+                    self.mark_grow_recorded(&doc, r.group, r.mode, r.tick);
                     self.take.add_expr(r);
                     continue;
                 }
                 record::Rec::Control(r) => {
+                    self.mark_grow_recorded(&doc, r.group, r.mode, r.tick);
                     self.controls.add(&mut doc.borrow_mut(), r, now);
                     continue;
                 }
@@ -4739,18 +4786,8 @@ impl App {
                 self.sound = r.sound;
             }
             // A note into a growing pattern's last bar adds the next.
-            if r.velocity > 0
-                && let Some(grow) = &mut self.grow
-                && r.group == grow.group
-            {
-                let at = record::pattern_at(doc.borrow().project(), r.mode, r.tick, r.group);
-                let start = doc.borrow().project().groups[grow.group].patterns.get(grow.pattern).map_or(0, |p| p.start);
-                if let Some((pi, pos)) = at.filter(|x| x.0 == grow.pattern)
-                    && let Some(len) = grow.reach(pos - start)
-                    && let Err(e) = doc.borrow_mut().set_pattern_length(r.group, pi, len)
-                {
-                    self.status = format!("can't grow the pattern: {e}");
-                }
+            if r.velocity > 0 {
+                self.mark_grow_recorded(&doc, r.group, r.mode, r.tick);
             }
             self.take_played = self.take_played.max(r.played);
             let at = record::Placing { quantize: (self.settings.input_quantize && self.grid > 0).then_some(self.grid) };
@@ -4855,11 +4892,14 @@ impl App {
         let (g, pi) = (grow.group, grow.pattern);
         let at = record::pattern_at(doc.borrow().project(), mode, tick, g).filter(|x| x.0 == pi);
         let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
-        if let Some((_, pos)) = at
-            && let Some(len) = grow.reach(pos - start)
-            && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
-        {
-            self.status = format!("can't grow the pattern: {e}");
+        if let Some((_, pos)) = at {
+            let rel = pos - start;
+            grow.advance_bar(rel);
+            if let Some(len) = grow.reach(rel)
+                && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
+            {
+                self.status = format!("can't grow the pattern: {e}");
+            }
         }
     }
 
@@ -5333,7 +5373,7 @@ impl App {
             relative_strips: self.settings.relative_strips,
             follow: self.follow,
             position: head.map(|h| h.position as i64),
-            progress: self.pattern_at(self.group, head).or_else(|| self.bar_at(head)).map(|(at, length)| at as f64 / length as f64),
+            progress: self.strip_progress(head),
             group: self.group,
             sound: self.sound,
             control,
