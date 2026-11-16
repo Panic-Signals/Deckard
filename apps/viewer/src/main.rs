@@ -127,6 +127,7 @@ mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
 mod session_backup;
+mod session_record;
 mod settings;
 mod splash;
 mod splice;
