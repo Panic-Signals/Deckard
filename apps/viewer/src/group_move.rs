@@ -45,8 +45,6 @@ impl App {
             }
             let cached = self.plugin_params.get_mut();
             *cached = std::mem::take(cached).into_iter().map(|((c, s), v)| ((chain(c), s), v)).collect();
-            self.groove_settings =
-                std::mem::take(&mut self.groove_settings).into_iter().map(|((g, s, f), v)| ((remap(g, a, b), s, f), v)).collect();
             self.fx_meter_view =
                 std::mem::take(&mut self.fx_meter_view).into_iter().map(|((g, s, i), v)| ((remap(g, a, b), s, i), v)).collect();
             let channel = |c| match c {
@@ -99,12 +97,12 @@ mod tests {
         app.new_project();
         let doc = app.doc.clone().unwrap();
         doc.borrow_mut().add_group().unwrap();
-        app.groove_settings.insert((0, 0, "test".into()), 0.75);
+        doc.borrow_mut().set_groove_page(0, 0, 2);
         app.headroom.insert(crate::layout::Channel::Group(0), 0.4);
         app.zone_of = Some((0, 2));
         app.lit.insert((0, 2));
         app.move_group(0, 1).unwrap();
-        assert_eq!(app.groove_settings[&(1, 0, "test".into())], 0.75);
+        assert_eq!(doc.borrow().groove_page(1, 0), Some(2), "kept with the sound");
         assert_eq!(app.headroom[&crate::layout::Channel::Group(1)], 0.4);
         assert_eq!(app.zone_of, Some((1, 2)));
         assert!(app.lit.contains(&(1, 2)));

@@ -496,10 +496,37 @@ pub struct Sound {
     /// PROB LOCK: its notes' chances rolled once and kept (DECKARD's [`PROB_LOCK`]
     /// field; Maschine's sound has its own, not in its saved projects).
     pub probability_locked: bool,
+    /// What DECKARD keeps of its Groove pages ([`GROOVE`]): the Variation and Generate
+    /// settings when the project's format has no place for them, and the page it shows.
+    /// By field, sorted.
+    pub groove: Vec<(String, f64)>,
 }
 
 /// The sound object's field that has PROB LOCK on (`Int(1)`; absent when off).
 pub const PROB_LOCK: &str = "deckard:prob_lock";
+
+/// The sound object's field with [`Sound::groove`], as text: `<field> <value>` a line
+/// (`page` is the Groove page shown). Absent when there is nothing to keep.
+pub const GROOVE: &str = "deckard:groove";
+
+/// [`Sound::groove`] from its text; lines that don't read are skipped.
+pub fn groove_from_text(t: &str) -> Vec<(String, f64)> {
+    let mut v: Vec<(String, f64)> = t
+        .lines()
+        .filter_map(|l| {
+            let (k, x) = l.trim().rsplit_once(' ')?;
+            Some((k.to_string(), x.parse::<f64>().ok().filter(|x| x.is_finite())?))
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v.dedup_by(|a, b| a.0 == b.0);
+    v
+}
+
+/// [`Sound::groove`]'s text.
+pub fn groove_to_text(v: &[(String, f64)]) -> String {
+    v.iter().map(|(k, x)| format!("{k} {x}\n")).collect()
+}
 
 /// A lane of the pattern editor, as saved (`NI::MASCHINE::DATA::MidiAutomator`):
 /// `kind` is a MIDI event type (4 = control change, `number` the controller; 3 =
@@ -1643,6 +1670,10 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
             _ => Vec::new(),
         },
         probability_locked: s.get(PROB_LOCK).and_then(Value::as_int).is_some_and(|v| v != 0),
+        groove: match s.get(GROOVE) {
+            Some(Value::Str(t)) => groove_from_text(t),
+            _ => Vec::new(),
+        },
     }
 }
 

@@ -1639,15 +1639,18 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     Target::Module(..) | Target::ChainModule(..) => "Effect Parameter",
                     _ => "Channel Property",
                 };
-                // Variation and Generate settings of a project from before Maschine 3:
-                // kept for the session.
+                // Variation and Generate settings of a sound from before Maschine 3:
+                // kept in DECKARD's field on the sound.
                 if let Target::Sound(g, s) = t
                     && field.starts_with("sequence_")
                     && !doc.borrow().has_groove_settings(g, s)
                 {
                     const WHOLE: [&str; 9] = ["mode", "distribution", "division", "steps", "fills", "rotate", "note_count", "low", "high"];
                     let v = if WHOLE.iter().any(|w| field.ends_with(w)) { v.round() } else { v };
-                    app.groove_settings.insert((g, s, field.to_string()), v);
+                    if let Err(e) = doc.borrow_mut().set_groove_setting(g, s, field, v) {
+                        app.status = format!("can't change {field}: {e}");
+                        continue;
+                    }
                     app.live_groove(g, s, field);
                     continue;
                 }
@@ -4793,7 +4796,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 && page > 0
                 && !doc.has_groove_settings(g, s)
             {
-                hint = Some("Kept for this session (this project's format has no place for them)".into());
+                hint = Some("Kept by DECKARD (this sound's format has no place for them)".into());
             }
         }
     } else {

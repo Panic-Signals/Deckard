@@ -378,7 +378,7 @@ fn main() {
 
 /// Where a chain was left: its focused slot, the page each of its slots showed, and the
 /// page each property set (Input, Output, Groove, Macro) showed. (A sound's Groove
-/// page is the app's, `App::groove_page`, not the chain's.)
+/// page is kept with the sound, `Document::groove_page`.)
 #[derive(Debug, Default, Clone)]
 pub struct ChainPages {
     slot: Option<usize>,
@@ -1043,9 +1043,6 @@ pub struct App {
     channel: bool,
     prop_set: usize,
     prop_page: usize,
-    /// The Groove page (Swing, Variation, Generate) last shown on any sound: every
-    /// sound's Groove shows it, and VARIATION goes back to it. `None` before one shows.
-    groove_page: Option<usize>,
     /// Where each chain was left, shown again on coming back to it. `pages_of` is the
     /// chain the fields above were last kept for, `page_key` the slot `plugin_page` is for.
     chain_pages: std::collections::HashMap<deckard_doc::Chain, ChainPages>,
@@ -1058,9 +1055,6 @@ pub struct App {
     midi_ports_at: Option<std::time::Instant>,
     midi_port_watch: Option<midi_ports::Watcher>,
     midi_prefs_shown: bool,
-    /// Variation and Generate settings of sounds whose project can't keep them (from
-    /// before Maschine 3): (group, sound, field) → value, for this session.
-    groove_settings: std::collections::HashMap<(usize, usize, String), f64>,
     /// MIDI input and output, and what its routing was built from (revision, focus,
     /// Default = focus); whether the output knows it.
     midi: midi_io::MidiIo,
@@ -6568,13 +6562,17 @@ impl App {
                 self.send_live(surface_strip::strip_note(group, sound, pitch, velocity, on));
                 return;
             }
-            // VARIATION: the Groove page last shown (Swing, Variation or Generate, on
-            // any sound), else page `n`.
+            // VARIATION: the Groove page the focused sound was left on (Swing,
+            // Variation or Generate), else page `n`.
             R::GroovePage(n) => {
                 layout::apply_acts(self, vec![Act::ChainTab(layout::ChainTab::Sound)]);
                 self.channel = true;
                 self.prop_set = 2;
-                let page = *self.groove_page.get_or_insert(n.min(2));
+                let (g, s) = (self.group, self.sound);
+                let page = self.sound_groove_page(deckard_doc::Chain::Sound(g, s)).unwrap_or(n.min(2));
+                if let Some(doc) = &self.doc {
+                    doc.borrow_mut().set_groove_page(g, s, page);
+                }
                 self.prop_page = page;
                 return;
             }
@@ -9815,7 +9813,7 @@ impl App {
         if self.pages_of != Some(chain) {
             let kept = self.chain_pages.get(&chain);
             self.prop_page = kept.map_or(0, |k| k.prop_pages[self.prop_set.min(3)]);
-            if let (2, deckard_doc::Chain::Sound(..), Some(p)) = (self.prop_set, chain, self.groove_page) {
+            if let (2, Some(p)) = (self.prop_set, self.sound_groove_page(chain)) {
                 self.prop_page = p;
             }
             if self.slot_of != Some(chain) {
@@ -9910,8 +9908,8 @@ impl App {
         let kept = self.chain_pages.entry(chain).or_default();
         kept.slot = self.slot;
         kept.prop_pages[self.prop_set.min(3)] = self.prop_page;
-        if self.prop_set == 2 && self.channel && matches!(chain, deckard_doc::Chain::Sound(..)) {
-            self.groove_page = Some(self.prop_page);
+        if let (2, true, deckard_doc::Chain::Sound(g, s), Some(doc)) = (self.prop_set, self.channel, chain, &self.doc) {
+            doc.borrow_mut().set_groove_page(g, s, self.prop_page.min(2));
         }
         if let Some(i) = self.slot {
             kept.slot_pages.insert(i, self.plugin_page);
@@ -9930,9 +9928,6 @@ impl App {
             "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\n",
             self.song_view as u8, self.mixer as u8, self.mixer_sounds as u8, self.piano_roll as u8, self.prop_set
         );
-        if let Some(p) = self.groove_page {
-            t += &format!("groove_page {p}\n");
-        }
         let mut chains: Vec<_> = self.chain_pages.iter().collect();
         chains.sort_by_key(|(c, _)| format!("{c:?}"));
         for (c, k) in chains {
@@ -9961,11 +9956,6 @@ impl App {
                 Some("mixer") => self.mixer = flag(1).unwrap_or(self.mixer),
                 Some("mixer_sounds") => self.mixer_sounds = flag(1).unwrap_or(self.mixer_sounds),
                 Some("piano_roll") => self.piano_roll = flag(1).unwrap_or(self.piano_roll),
-                Some("groove_page") => {
-                    if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
-                        self.groove_page = Some(n.min(2));
-                    }
-                }
                 Some("props") => {
                     if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
                         self.prop_set = n.min(3);
@@ -10025,10 +10015,16 @@ impl App {
         }
     }
 
+    /// The Groove page sound `chain` was left on (kept with the sound), if it was.
+    fn sound_groove_page(&self, chain: deckard_doc::Chain) -> Option<usize> {
+        let deckard_doc::Chain::Sound(g, s) = chain else { return None };
+        self.doc.as_ref()?.borrow().groove_page(g, s)
+    }
+
     /// The page property set `set` of the chain shown was left on (0 if never shown).
     pub(crate) fn kept_prop_page(&self, set: usize) -> usize {
         let chain = self.chain();
-        if let (2, deckard_doc::Chain::Sound(..), Some(p)) = (set, chain, self.groove_page) {
+        if let (2, Some(p)) = (set, self.sound_groove_page(chain)) {
             return p;
         }
         self.chain_pages.get(&chain).map_or(0, |k| k.prop_pages[set.min(3)])
@@ -10251,12 +10247,8 @@ impl App {
         let (g, s, p) = (self.group, self.sound, self.pattern);
         let grid = self.grid;
         let polyphonic = self.piano_roll;
-        let kept = self.groove_settings.clone();
-        let saved = doc.borrow().has_groove_settings(g, s);
-        let lookup = |f: &str| -> Option<f64> {
-            if saved { doc.borrow().groove_setting(g, s, f) } else { kept.get(&(g, s, f.to_string())).copied() }
-        };
-        let settings: Vec<(String, f64)> = GROOVE_FIELDS.iter().filter_map(|f| lookup(f).map(|v| (f.to_string(), v))).collect();
+        let settings: Vec<(String, f64)> =
+            GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         // The scale selected (the pattern editor's, which is the controller's Keyboard
         // scale too; Chromatic is none): Generate keeps to it.
@@ -10299,15 +10291,8 @@ impl App {
             Some((k, base, made)) if *k == (g, p, s) && *made == now => base.clone(),
             _ => now,
         };
-        let kept = self.groove_settings.clone();
-        let saved = doc.borrow().has_groove_settings(g, s);
-        let settings: Vec<(String, f64)> = GROOVE_FIELDS
-            .iter()
-            .filter_map(|f| {
-                let v = if saved { doc.borrow().groove_setting(g, s, f) } else { kept.get(&(g, s, f.to_string())).copied() };
-                v.map(|v| (f.to_string(), v))
-            })
-            .collect();
+        let settings: Vec<(String, f64)> =
+            GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let grid = self.grid;
         if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, &get, &base) {
@@ -10620,12 +10605,7 @@ impl App {
     }
 
     pub fn groove_setting(&self, g: usize, s: usize, field: &str) -> Option<f64> {
-        let doc = self.doc.as_ref()?.borrow();
-        if doc.has_groove_settings(g, s) {
-            doc.groove_setting(g, s, field)
-        } else {
-            self.groove_settings.get(&(g, s, field.to_string())).copied()
-        }
+        self.doc.as_ref()?.borrow().groove_setting(g, s, field)
     }
 
     /// Ask the background watcher to scan MIDI ports again (e.g. for virtual ports).

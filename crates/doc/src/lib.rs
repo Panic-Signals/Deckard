@@ -959,6 +959,9 @@ impl Document {
         if field == "plugin_chunk" {
             return self.patch_plugin_chunk(target);
         }
+        if field == deckard_model::GROOVE {
+            return self.patch_groove(target);
+        }
         let Ok(path) = self.param_path(target, field) else { return false };
         let value = match self.tree.at(&path) {
             Some(v) => v.clone(),

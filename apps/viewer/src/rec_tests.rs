@@ -465,11 +465,12 @@ fn the_mk3_variation_button_shows_the_grooves_variation() {
     assert_eq!(names.get(cur).map(String::as_str), Some("Variation"));
 }
 
-/// The Groove page last shown is every sound's: other sounds show it, and VARIATION
-/// goes back to it after other pages (the Keyboard's or the Pads'). It's saved with
-/// the project.
+/// Each sound shows the Groove page it was left on: other sounds show their own, and
+/// VARIATION goes back to the focused sound's after other pages (the Keyboard's or the
+/// Pads'). The page is copied with the sound and saved with the project.
 #[test]
-fn the_groove_page_last_shown_is_every_sounds_and_variations() {
+fn each_sound_keeps_its_groove_page() {
+    use crate::layout::Act;
     use deckard_lua_host::state::ControlRequest::GroovePage;
     let mut app = crate::App::default();
     app.new_project();
@@ -477,37 +478,39 @@ fn the_groove_page_last_shown_is_every_sounds_and_variations() {
     app.control_request(GroovePage(1));
     app.update_slot_view();
     assert_eq!(app.prop_page, 1, "Variation the first time");
-    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(2)]);
+    crate::layout::apply_acts(&mut app, vec![Act::PropPage(2)]);
     app.update_slot_view();
-    // Another sound: Generate still.
+    // Another sound: its own page (never shown: the first).
     app.sound = 1;
     app.update_slot_view();
-    assert_eq!((app.prop_set, app.prop_page), (2, 2));
-    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(0)]);
+    assert_eq!((app.prop_set, app.prop_page), (2, 0));
+    crate::layout::apply_acts(&mut app, vec![Act::PropPage(1)]);
     app.update_slot_view();
-    // Away to the plug-ins (as the Keyboard or Pads would leave it), back to the
-    // first sound, and VARIATION: Swing, the page last shown.
-    app.channel = false;
     app.sound = 0;
     app.update_slot_view();
-    app.control_request(GroovePage(1));
+    assert_eq!(app.prop_page, 2, "the first sound's Generate");
+    // Away to the plug-ins (as the Keyboard or Pads would leave it), and VARIATION:
+    // the focused sound's page.
+    app.channel = false;
+    app.sound = 1;
     app.update_slot_view();
-    assert_eq!((app.prop_set, app.prop_page), (2, 0));
-    // The Groove set picked in the software: the same page.
-    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropSet(0)]);
+    app.control_request(GroovePage(2));
     app.update_slot_view();
-    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropSet(2)]);
-    assert_eq!(app.prop_page, 0);
+    assert_eq!((app.prop_set, app.prop_page), (2, 1));
+    // Copied with the sound.
+    crate::layout::apply_acts(&mut app, vec![Act::CopySound(0, 0), Act::PasteSound(0, 3)]);
+    app.sound = 3;
+    app.update_slot_view();
+    assert_eq!(app.prop_page, 2, "the copy's Generate");
     // Saved with the project.
-    crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PropPage(2)]);
-    app.update_slot_view();
     app.store_screen();
     let bytes = app.doc.as_ref().unwrap().borrow().to_bytes().unwrap();
     let mut again = crate::App::default();
     again.show_document(deckard_doc::Document::from_bytes(bytes, None));
+    again.sound = 1;
     again.update_slot_view();
-    again.control_request(GroovePage(1));
-    assert_eq!(again.prop_page, 2);
+    again.control_request(GroovePage(2));
+    assert_eq!(again.prop_page, 1);
 }
 
 /// The Groove knobs follow small turns as the MK3 sends them (a thousandth of the
