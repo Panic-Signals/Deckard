@@ -105,6 +105,7 @@ mod ni_services;
 mod pad_blink_tests;
 #[cfg(test)]
 mod pad_light_tests;
+mod panic_log;
 #[cfg(test)]
 mod parity_tests;
 mod plugin_macros;
@@ -180,10 +181,12 @@ fn play_in_scene(d: &mut deckard_doc::Document, scene: usize, g: usize, pi: usiz
 
 fn main() {
     deckard_plugins::mark_main_thread();
+    deckard_plugins::set_fault_logger(panic_log::record_plugin_fault);
     // A panic would leave through the loaded plug-ins' exit-time destructors (which
     // crash in Massive, Guitar Rig, Kontakt); report it and end the process instead.
     let report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        panic_log::record(info);
         report(info);
         deckard_plugins::exit(101)
     }));
