@@ -23,7 +23,7 @@ fn plugin_state_saves_and_undoes() {
         .groups
         .iter()
         .enumerate()
-        .find_map(|(g, gr)| gr.sounds.iter().enumerate().find_map(|(s, snd)| snd.plugin.as_ref().map(|p| (g, s, p.chunk.clone()))))
+        .find_map(|(g, gr)| gr.sounds.iter().enumerate().find_map(|(s, snd)| snd.plugin.as_ref().map(|p| (g, s, p.chunk.to_vec()))))
     else {
         return;
     };

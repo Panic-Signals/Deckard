@@ -200,7 +200,8 @@ impl Document {
             let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
             let ops = d.event_ops(g, at, &[], &notes, &[], &midi)?;
             if !ops.is_empty() {
-                d.apply("Duplicate Pattern", ops)?;
+                let params = vec![Some((crate::Target::Group(g), "__events".into())); ops.len()];
+                d.apply_with("Duplicate Pattern", ops, params)?;
             }
             d.copy_pattern_modulation(g, &pat, at, start - pat.start)
         })?;
@@ -261,7 +262,8 @@ impl Document {
             let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
             let ops = d.event_ops(g, at, &target.notes, &notes, &target.midi, &midi)?;
             if !ops.is_empty() {
-                d.apply("Duplicate Pattern", ops)?;
+                let params = vec![Some((crate::Target::Group(g), "__events".into())); ops.len()];
+                d.apply_with("Duplicate Pattern", ops, params)?;
             }
             if pat.length > 0 && pat.length != target.length {
                 d.set_pattern_length(g, at, pat.length)?;

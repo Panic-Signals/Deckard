@@ -532,6 +532,88 @@ impl SlotInfo {
     }
 }
 
+/// Reference-counted plug-in state bytes so cloning or comparing [`Project`]s on edits
+/// never copies or scans megabytes of unchanged VST3/CLAP chunks.
+#[derive(Clone, Default)]
+pub struct PluginChunk(std::sync::Arc<[u8]>);
+
+impl PluginChunk {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for PluginChunk {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for PluginChunk {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PluginChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PartialEq for PluginChunk {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0[..] == other.0[..]
+    }
+}
+
+impl Eq for PluginChunk {}
+
+impl PartialEq<[u8]> for PluginChunk {
+    fn eq(&self, other: &[u8]) -> bool {
+        &self.0[..] == other
+    }
+}
+
+impl PartialEq<&[u8]> for PluginChunk {
+    fn eq(&self, other: &&[u8]) -> bool {
+        &self.0[..] == *other
+    }
+}
+
+impl PartialEq<Vec<u8>> for PluginChunk {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        &self.0[..] == other.as_slice()
+    }
+}
+
+impl PartialEq<PluginChunk> for Vec<u8> {
+    fn eq(&self, other: &PluginChunk) -> bool {
+        self.as_slice() == &other.0[..]
+    }
+}
+
+impl<'a> IntoIterator for &'a PluginChunk {
+    type Item = &'a u8;
+    type IntoIter = std::slice::Iter<'a, u8>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl From<Vec<u8>> for PluginChunk {
+    fn from(v: Vec<u8>) -> Self {
+        Self(v.into())
+    }
+}
+
+impl From<&[u8]> for PluginChunk {
+    fn from(s: &[u8]) -> Self {
+        Self(s.into())
+    }
+}
+
 /// A hosted plug-in (a `PluginHost` module): which plug-in, and its saved state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginRef {
@@ -539,7 +621,7 @@ pub struct PluginRef {
     pub id: String,
     pub name: String,
     /// The saved state, as stored (`[u32 1][u32 1][u32 n][n bytes]`).
-    pub chunk: Vec<u8>,
+    pub chunk: PluginChunk,
     /// Parameter pages saved with it (eight knobs each; empty when Maschine maps them
     /// automatically).
     pub pages: Vec<PluginPage>,
@@ -1680,7 +1762,7 @@ fn plugin_ref(m: &Obj) -> PluginRef {
         },
         _ => Vec::new(),
     };
-    PluginRef { id: text("plugin_id"), name: text("plugin_name"), chunk, pages: plugin_pages(m) }
+    PluginRef { id: text("plugin_id"), name: text("plugin_name"), chunk: chunk.into(), pages: plugin_pages(m) }
 }
 
 /// A `PluginHost`'s saved parameter pages (`parameters.unknown_48`).
