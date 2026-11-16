@@ -212,16 +212,23 @@ function page.button(name, down)
 end
 
 -- Turn setting `k` (a knob's, as the app gives it) by `amount`: a step each time the
--- turns make its `turn`.
+-- turns make its `turn`. With SHIFT held, multi-frame steps subdivide down to single
+-- frames so fine turns move smoothly instead of waiting for a coarse jump.
 local function turn(k, amount, send)
-  local fine = deckard.held("SHIFT") and 0.1 or 1
+  local shift = deckard.held("SHIFT")
+  local step, each = k.step, k.turn
+  if shift and step > 1 and step == math.floor(step) and each <= 0.01 then
+    each = each / step
+    step = 1
+  end
+  local fine = shift and 0.1 or 1
   local g = (turns[k.key] or 0) + amount * fine
-  local steps = g >= 0 and math.floor(g / k.turn + 1e-9) or -math.floor(-g / k.turn + 1e-9)
-  turns[k.key] = g - steps * k.turn
+  local steps = g >= 0 and math.floor(g / each + 1e-9) or -math.floor(-g / each + 1e-9)
+  turns[k.key] = g - steps * each
   if steps == 0 then return end
   local a = asked[k.key]
   local from = (a and a.shown == k.value) and a.value or k.value
-  local to = math.max(k.min, math.min(k.max, from + steps * k.step))
+  local to = math.max(k.min, math.min(k.max, from + steps * step))
   if to == from then return end
   asked[k.key] = { value = to, shown = k.value }
   send(to)
@@ -264,7 +271,7 @@ function page.knob(n, amount)
     slice = math.max(1, math.min(count, (slice or 0) + step))
   elseif k.move then
     local s = v.sample
-    local t = { key = "Slice.Move" .. k.move, value = k.frame, min = 0, max = s.frames - 1, step = math.max(1, math.floor((s.view[2] - s.view[1]) / 100)), turn = 0.01 }
+    local t = { key = "Slice.Move" .. k.move, value = k.frame, min = 0, max = s.frames - 1, step = 1, turn = 1 / math.max(100, s.view[2] - s.view[1]) }
     turn(t, amount, function(to) deckard.sampling_call("move_slice", k.move, to) end)
   elseif k.key then
     local knob, kpage = n, pn

@@ -1509,6 +1509,10 @@ fn mk3_sampling_edit_slice_and_zone_screens() {
     assert!(texts(&host).iter().any(|t| t == "Kick 1"), "the sample's name");
     host.encoder("ENCODER_SCREEN_1", 0.02).unwrap();
     assert_eq!(std::mem::take(&mut host.state.borrow_mut().sampling_edits), [("Edit.Start".to_string(), 960.0)]);
+    host.button("BUTTON_SHIFT", true).unwrap();
+    host.encoder("ENCODER_SCREEN_1", 0.02).unwrap();
+    assert_eq!(std::mem::take(&mut host.state.borrow_mut().sampling_edits), [("Edit.Start".to_string(), 960.0 + 96.0)]);
+    host.button("BUTTON_SHIFT", false).unwrap();
     host.press("BUTTON_SCREEN_8").unwrap();
     assert_eq!(std::mem::take(&mut host.state.borrow_mut().sampling_calls), [SamplingCall::Edit(1)]);
     // AUTO LOOP (the function after STRETCH) asks the app to loop the focused zone.

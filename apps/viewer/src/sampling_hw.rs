@@ -139,12 +139,14 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     let Some(sample) = st.sample.as_ref() else { return out };
     let (len, rate) = (sample.frames.len().max(1) as f64, sample.rate);
     let (v0, v1) = st.view();
-    let step = ((v1 - v0) / FRAME_STEPS).max(1.0).round();
+    let frame_turn = 1.0 / (v1 - v0).max(FRAME_STEPS);
     let last = len - 1.0;
-    let frames = |key: &str, name: &str, v: i64, apply: Apply| {
-        (knob(key, name, v.max(0).to_string(), v as f64, (0.0, last), step, 1.0 / FRAME_STEPS), apply)
+    let frames = |key: &str, name: &str, v: i64, (min, max): (f64, f64), apply: Apply| {
+        (knob(key, name, v.max(0).to_string(), v as f64, (min, max), 1.0, frame_turn), apply)
     };
     let (lo, hi) = if z.play_range.1 > z.play_range.0 { z.play_range } else { (0, last as i64) };
+    let start_max = (hi - 1).max(0) as f64;
+    let end_min = (lo + 1).min(last as i64) as f64;
     let (sa, sb) = st.selection.map_or((lo, hi), |(a, b)| (a as i64, b as i64));
 
     // EDIT.
@@ -153,15 +155,18 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         1,
         "PLAY RANGE",
         vec![
-            frames("Edit.Start", "START", lo, Apply::Zone("play_range/low")),
-            frames("Edit.End", "END", hi, Apply::Zone("play_range/high")),
+            frames("Edit.Start", "START", lo, (0.0, start_max), Apply::Zone("play_range/low")),
+            frames("Edit.End", "END", hi, (end_min, last), Apply::Zone("play_range/high")),
         ],
     );
     page(
         &mut out,
         1,
         "SELECTION RANGE",
-        vec![frames("Sel.Start", "START", sa, Apply::Selection(false)), frames("Sel.End", "END", sb, Apply::Selection(true))],
+        vec![
+            frames("Sel.Start", "START", sa, (0.0, last), Apply::Selection(false)),
+            frames("Sel.End", "END", sb, (0.0, last), Apply::Selection(true)),
+        ],
     );
 
     // An Audio plug-in's take has no zones or slices.
@@ -175,8 +180,8 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         3,
         "PLAY RANGE",
         vec![
-            frames("Zone.Start", "START", lo, Apply::Zone("play_range/low")),
-            frames("Zone.End", "END", hi, Apply::Zone("play_range/high")),
+            frames("Zone.Start", "START", lo, (0.0, start_max), Apply::Zone("play_range/low")),
+            frames("Zone.End", "END", hi, (end_min, last), Apply::Zone("play_range/high")),
         ],
     );
     let (la, lb) = z.loop_range;
@@ -187,10 +192,10 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         "LOOP",
         vec![
             (on_off("Zone.Loop", "ACTIVE", z.loop_active), Apply::Zone("loop_active")),
-            frames("Zone.LoopStart", "START", la, Apply::Zone("loop_range/low")),
-            frames("Zone.LoopEnd", "END", lb, Apply::Zone("loop_range/high")),
+            frames("Zone.LoopStart", "START", la, (0.0, last), Apply::Zone("loop_range/low")),
+            frames("Zone.LoopEnd", "END", lb, (0.0, last), Apply::Zone("loop_range/high")),
             (
-                knob("Zone.XFade", "XFADE", z.x_fade.max(0).to_string(), z.x_fade as f64, (0.0, xfade_max), step, 1.0 / FRAME_STEPS),
+                knob("Zone.XFade", "XFADE", z.x_fade.max(0).to_string(), z.x_fade as f64, (0.0, xfade_max), 1.0, frame_turn),
                 Apply::Zone("x_fade"),
             ),
         ],
