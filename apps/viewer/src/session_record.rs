@@ -78,6 +78,50 @@ pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
     path.ancestors().find(|p| p.exists()).and_then(|p| fs4::available_space(p).ok())
 }
 
+/// A 24-bit stereo WAV that stays a valid file while it is being written: the header is
+/// flushed about once per second of audio, so a crash loses at most that last second.
+pub struct SessionWav {
+    writer: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    rate: u32,
+    data_bytes: u64,
+    frames_since_flush: u32,
+}
+
+impl SessionWav {
+    pub fn create(path: &std::path::Path, rate: u32) -> Result<SessionWav, String> {
+        let rate = rate.max(1);
+        let spec = hound::WavSpec { channels: 2, sample_rate: rate, bits_per_sample: 24, sample_format: hound::SampleFormat::Int };
+        let writer = hound::WavWriter::create(path, spec).map_err(|e| e.to_string())?;
+        Ok(SessionWav { writer, rate, data_bytes: 0, frames_since_flush: 0 })
+    }
+
+    /// Appends stereo frames, flushing the header once a second's worth has accumulated.
+    pub fn write(&mut self, frames: &[[f32; 2]]) -> Result<(), String> {
+        for frame in frames {
+            for &c in frame {
+                let v = (c.clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
+                self.writer.write_sample(v).map_err(|e| e.to_string())?;
+            }
+        }
+        self.data_bytes += frames.len() as u64 * 6;
+        self.frames_since_flush = self.frames_since_flush.saturating_add(frames.len().min(u32::MAX as usize) as u32);
+        if self.frames_since_flush >= self.rate {
+            self.writer.flush().map_err(|e| e.to_string())?;
+            self.frames_since_flush = 0;
+        }
+        Ok(())
+    }
+
+    /// Audio bytes written so far.
+    pub fn data_bytes(&self) -> u64 {
+        self.data_bytes
+    }
+
+    pub fn finalize(self) -> Result<(), String> {
+        self.writer.finalize().map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +166,32 @@ mod tests {
     fn free_bytes_reads_the_temp_dir() {
         let got = free_bytes(&std::env::temp_dir());
         assert!(got.is_some_and(|b| b > 0));
+    }
+
+    #[test]
+    fn writes_a_readable_24bit_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.wav");
+        let mut w = SessionWav::create(&path, 48_000).unwrap();
+        let frames = [[0.5f32, -0.5], [1.0, -1.0], [0.0, 0.0]];
+        w.write(&frames).unwrap();
+        assert_eq!(w.data_bytes(), 3 /*frames*/ * 2 /*ch*/ * 3 /*bytes*/);
+        w.finalize().unwrap();
+        let r = hound::WavReader::open(&path).unwrap();
+        assert_eq!(r.spec().bits_per_sample, 24);
+        assert_eq!(r.spec().channels, 2);
+        assert_eq!(r.spec().sample_rate, 48_000);
+        assert_eq!(r.len(), 6); // samples = 3 frames * 2 ch
+    }
+
+    #[test]
+    fn file_is_valid_wav_before_finalize() {
+        // Flush-as-you-go: after writing, the file already opens as a valid WAV.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.wav");
+        let mut w = SessionWav::create(&path, 48_000).unwrap();
+        w.write(&vec![[0.1f32, 0.1]; 48_000]).unwrap(); // ~1s, forces a flush
+        assert!(hound::WavReader::open(&path).is_ok());
+        w.finalize().unwrap();
     }
 }
