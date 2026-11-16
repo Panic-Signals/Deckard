@@ -1660,8 +1660,19 @@ impl App {
             }
             Act::DeletePattern(g, p) => {
                 let r = doc.borrow_mut().delete_pattern(g, p);
-                if r.is_ok() && self.group == g && self.pattern >= p {
-                    self.pattern = self.pattern.saturating_sub(1);
+                if r.is_ok() {
+                    if self.group == g && self.pattern >= p {
+                        self.pattern = self.pattern.saturating_sub(1);
+                    }
+                    if let Some(grow) = &mut self.grow
+                        && grow.group == g
+                    {
+                        if grow.pattern == p {
+                            self.grow = None;
+                        } else if grow.pattern > p {
+                            grow.pattern -= 1;
+                        }
+                    }
                 }
                 r
             }
@@ -1687,6 +1698,7 @@ impl App {
     /// the one before.
     fn delete_group(&mut self, g: usize) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Ok(()) };
+        let was_last = doc.borrow().project().groups.len() == 1;
         doc.borrow_mut().delete_group(g)?;
         self.samples.plugins.retain(|slot| {
             !matches!(
@@ -1698,6 +1710,13 @@ impl App {
             )
         });
         let n = doc.borrow().project().groups.len();
+        if let Some(grow) = &mut self.grow {
+            if was_last || grow.group == g {
+                self.grow = None;
+            } else if grow.group > g {
+                grow.group -= 1;
+            }
+        }
         let focus = if self.group > g { self.group - 1 } else { self.group.min(n.saturating_sub(1)) };
         if focus != self.group || self.group == g {
             (self.group, self.sound, self.pattern) = (focus, 0, 0);
@@ -4381,7 +4400,7 @@ impl App {
             && g == grow.group
             && pi == grow.pattern
         {
-            let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
+            let start = doc.borrow().project().groups.get(g).and_then(|gr| gr.patterns.get(pi)).map_or(0, |p| p.start);
             grow.record_at(pos - start);
         }
         self.touch_write_for(chain, &target, pos, dev);
@@ -4723,19 +4742,24 @@ impl App {
             // A grown pattern: the bars played, or as it was.
             if let Some(grow) = self.grow.take() {
                 let (g, pi) = (grow.group, grow.pattern);
-                let d = doc.borrow();
-                let p = d.project();
-                let bar = p.bar_length();
-                let pat = &p.groups[g].patterns[pi];
-                let first = pat.notes.iter().map(|n| n.position).min();
-                let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
-                let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
-                let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
-                drop(d);
-                if end.is_some() {
-                    doc.borrow_mut().set_length_auto(g, pi, false);
+                let settle = {
+                    let d = doc.borrow();
+                    let p = d.project();
+                    let bar = p.bar_length();
+                    p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).map(|pat| {
+                        let first = pat.notes.iter().map(|n| n.position).min();
+                        let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
+                        let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
+                        let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
+                        (start, to, end.is_some())
+                    })
+                };
+                if let Some((start, to, has_notes)) = settle {
+                    if has_notes {
+                        doc.borrow_mut().set_length_auto(g, pi, false);
+                    }
+                    let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
                 }
-                let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
             }
             // First takes in fixed-length empty patterns follow the same start
             // rule. Overdubs retain the existing pattern's deliberate space.
@@ -4781,7 +4805,7 @@ impl App {
             let d = doc.borrow();
             let p = d.project();
             let (pi, pos) = record::pattern_at(p, mode, tick, group).filter(|x| x.0 == grow.pattern)?;
-            let start = p.groups[group].patterns.get(pi).map_or(0, |pt| pt.start);
+            let start = p.groups.get(group).and_then(|gr| gr.patterns.get(pi)).map_or(0, |pt| pt.start);
             let at = pos - start;
             grow.record_at(at);
             grow.reach(at)
@@ -4929,8 +4953,15 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let Some(grow) = &mut self.grow else { return };
         let (g, pi) = (grow.group, grow.pattern);
-        let at = record::pattern_at(doc.borrow().project(), mode, tick, g).filter(|x| x.0 == pi);
-        let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
+        let (at, start) = {
+            let d = doc.borrow();
+            let p = d.project();
+            let Some(pat) = p.groups.get(g).and_then(|gr| gr.patterns.get(pi)) else {
+                self.grow = None;
+                return;
+            };
+            (record::pattern_at(p, mode, tick, g).filter(|x| x.0 == pi), pat.start)
+        };
         if let Some((_, pos)) = at {
             let rel = pos - start;
             grow.advance_bar(rel);

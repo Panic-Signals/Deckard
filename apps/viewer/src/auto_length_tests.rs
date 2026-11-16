@@ -293,3 +293,62 @@ fn mk3_strip_resets_every_bar_during_recording_when_nothing_was_recorded() {
     let (p, lit) = at(&mut app, 4 * bar);
     assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 4 continues after note in bar 3: {p} / {lit}");
 }
+
+/// Deleting or clearing the growing pattern, deleting an earlier pattern in the same
+/// group, or deleting/moving groups during auto-length recording does not panic when
+/// playback advances or REC turns off.
+#[test]
+fn deleting_or_moving_patterns_and_groups_while_growing_does_not_panic() {
+    // 1. Deleting the growing pattern itself clears `grow` cleanly.
+    let mut a = app();
+    a.set_recording(true, false);
+    assert!(a.grow.is_some());
+    a.menu_act(crate::layout::Act::DeletePattern(0, 0));
+    assert!(a.grow.is_none());
+    a.auto_grow_at(Mode::Scene(0), 200.0);
+    a.set_recording(false, false);
+
+    // 2. Direct document pattern removal (e.g. undo / clear group) also settles safely.
+    let mut a = app();
+    a.set_recording(true, false);
+    a.doc.as_ref().unwrap().borrow_mut().delete_pattern(0, 0).unwrap();
+    a.auto_grow_at(Mode::Scene(0), 200.0);
+    assert!(a.grow.is_none());
+    a.set_recording(true, false);
+    let doc = a.doc.clone().unwrap();
+    doc.borrow_mut().add_pattern(0, 0, "Pattern 1").unwrap();
+    doc.borrow_mut().assign_pattern(0, 0, Some(0)).unwrap();
+    (a.group, a.pattern) = (0, 0);
+    a.set_recording(true, false);
+    doc.borrow_mut().delete_pattern(0, 0).unwrap();
+    a.set_recording(false, false);
+
+    // 3. Deleting an earlier pattern in the same group shifts `grow.pattern` down.
+    let mut a = app();
+    let bar = bar(&a);
+    let doc = a.doc.clone().unwrap();
+    doc.borrow_mut().add_pattern(0, 0, "Pattern 2").unwrap();
+    doc.borrow_mut().assign_pattern(0, 0, Some(1)).unwrap();
+    (a.group, a.pattern) = (0, 1);
+    a.set_recording(true, false);
+    assert_eq!(a.grow.as_ref().map(|g| g.pattern), Some(1));
+    a.menu_act(crate::layout::Act::DeletePattern(0, 0));
+    assert_eq!(a.grow.as_ref().map(|g| g.pattern), Some(0));
+    play(&mut a, 120.0, 240.0);
+    a.auto_grow_at(Mode::Scene(0), 100.0);
+    play(&mut a, (bar + 120) as f64, 240.0);
+    a.set_recording(false, false);
+    assert_eq!(length(&a), 2 * bar);
+
+    // 4. Moving or deleting a group while growing updates or drops `grow.group` cleanly.
+    let mut a = app();
+    a.doc.as_ref().unwrap().borrow_mut().add_group().unwrap();
+    a.follow_group_moves();
+    a.set_recording(true, false);
+    a.move_group(0, 1).unwrap();
+    assert_eq!(a.grow.as_ref().map(|g| g.group), Some(1));
+    a.delete_group(1).unwrap();
+    assert!(a.grow.is_none());
+    a.auto_grow_at(Mode::Scene(0), 200.0);
+    a.set_recording(false, false);
+}
