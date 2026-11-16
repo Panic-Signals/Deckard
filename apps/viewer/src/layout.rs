@@ -6891,7 +6891,11 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let paste_at = ui.data(|d| d.get_temp::<Pos2>(menu_id)).map_or(crate::clipboard::PasteAt::Keys, |pos| {
         crate::clipboard::PasteAt::Mouse { tick: tick_at(pos.x) as i64, pitch: app.piano_roll.then(|| hi - row_at(pos.y)) }
     });
-    resp.menu_on_right_click(|ui| event_menu(ui, app, paste_at, acts));
+    // (Stays open for Ratchet's numbers; its other items close it.)
+    egui::Popup::context_menu(&resp)
+        .style(menu_style)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| event_menu(ui, app, paste_at, acts));
     // ⌘X / ⌘C / ⌘V (macOS sends them as Cut, Copy and Paste).
     if !ui.ctx().egui_wants_keyboard_input() && app.key_focus == KeyFocus::Events {
         let (cut, copy, paste) = ui.input_mut(|i| {

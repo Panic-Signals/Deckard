@@ -14400,6 +14400,69 @@ mod tests {
         assert_eq!(notes(&app), [a, b, other]);
     }
 
+    /// The note menu stays open while its Ratchet numbers are clicked, dragged and
+    /// typed into; choosing a shape closes it.
+    #[test]
+    fn the_ratchet_menu_stays_open_for_its_numbers() {
+        use deckard_model::ratchet::Shape;
+        let mut h = blank_harness(false);
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        layout::apply_acts(h.state_mut(), vec![layout::Act::EditNotes { g: 0, p: 0, label: "t", remove: Vec::new(), add: vec![note] }]);
+        h.state_mut().selected = vec![note];
+        h.run_steps(2);
+        let pos = grid_pos(&h, 0, 60);
+        right_click(&mut h, pos);
+        h.get_by_label("Ratchet ⏵").hover();
+        h.run_steps(3);
+        // A drag on Repeats' number sets the repeats, once, when it ends.
+        let at = h.get_by_label("Repeats").rect().right_center() + egui::vec2(20.0, 0.0);
+        let button = |h: &mut Harness<'static, App>, pos: Pos2, pressed: bool| {
+            h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        };
+        h.hover_at(at);
+        h.step();
+        button(&mut h, at, true);
+        for dx in [10.0, 20.0, 30.0] {
+            h.hover_at(at + egui::vec2(dx, 0.0));
+            h.step();
+            assert_eq!(notes_of(&h)[0].ratchet.repeats, 1, "nothing changes until the drag ends");
+        }
+        button(&mut h, at + egui::vec2(30.0, 0.0), false);
+        h.run_steps(3);
+        let repeats = notes_of(&h)[0].ratchet.repeats;
+        assert!(repeats > 1, "the drag set the repeats: {repeats}");
+        assert!(h.query_by_label("Repeats").is_some(), "still open after the drag");
+        // A click on it makes it a text field: type a number, Enter sets it.
+        h.hover_at(at);
+        h.step();
+        button(&mut h, at, true);
+        button(&mut h, at, false);
+        h.run_steps(3);
+        assert!(h.query_by_label("Repeats").is_some(), "still open after a click on the number");
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        h.event(Event::Text("7".into()));
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(notes_of(&h)[0].ratchet.repeats, 7, "typed");
+        assert!(h.query_by_label("Repeats").is_some(), "still open after typing");
+        h.get_by_label("Down").click();
+        h.run_steps(3);
+        assert_eq!(notes_of(&h)[0].ratchet.shape, Shape::Down);
+        assert!(h.query_by_label("Repeats").is_none(), "a shape closes the menu");
+    }
+
     #[test]
     fn copy_paste_and_the_event_menu() {
         let Some(mut h) = harness(false, true) else { return };
