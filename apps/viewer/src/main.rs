@@ -128,6 +128,7 @@ mod sampling_hw;
 mod scene_tempo_tests;
 mod session_backup;
 mod session_record;
+mod session_window;
 mod settings;
 mod splash;
 mod splice;
