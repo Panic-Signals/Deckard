@@ -6,6 +6,7 @@
 -- docs/controller-api.md for the `deckard` API.
 
 local util = require("lib.util")
+local knobs = require("lib.knobs")
 local pads = require("lib.pads")
 local wheel = require("lib.wheel")
 local pin = require("lib.pin")
@@ -381,12 +382,20 @@ end
 
 -- Where the pads play: Step mode enters steps instead.
 -- Touch Auto-write: the Control page's knobs held write their modulation while
--- Auto-write is on and the song plays.
+-- Auto-write is on and the song plays (not a touch that erased the knob).
 function global.tick()
-  local s = deckard.state()
-  if not (s.touch_auto_write and s.auto_write and s.playing) or deckard.page() ~= "control" then return end
+  local erase = deckard.held("ERASE")
   for k = 1, 8 do
-    if deckard.held("CAP_" .. k) then
+    if not deckard.held("CAP_" .. k) then
+      knobs.erased[k] = nil
+    elseif erase then
+      knobs.erased[k] = true
+    end
+  end
+  local s = deckard.state()
+  if erase or not (s.touch_auto_write and s.auto_write and s.playing) or deckard.page() ~= "control" then return end
+  for k = 1, 8 do
+    if deckard.held("CAP_" .. k) and not knobs.erased[k] then
       if global.auto_held then global.auto_used = true end
       deckard.touch_write(k)
     end

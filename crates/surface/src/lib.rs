@@ -686,6 +686,9 @@ pub struct KnobView {
     pub auto_mod: Option<String>,
     /// A macro controls its parameter (the macro icon at the top right of its name).
     pub in_macro: bool,
+    /// Its parameter has modulation in the active pattern (an indicator at the top right
+    /// of its name).
+    pub modulated: bool,
 }
 
 pub use deckard_model::sampling_view::{KnobPage, RecordPress, RecordState, SampleView, SamplingCall, SamplingKnob, StemsRun};
@@ -749,6 +752,8 @@ pub enum Action {
         inc: f64,
         fine: bool,
     },
+    /// ERASE + Control knob `.0` (0..8): remove its modulation.
+    EraseKnob(usize),
     /// The next (true) or previous page.
     Page(bool),
     /// The focused plug-in's page `.0` (from 0).

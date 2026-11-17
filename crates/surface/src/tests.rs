@@ -2698,6 +2698,72 @@ fn the_step_page_knob_5_zooms_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
+/// An automated knob shows an indicator dot at the top right of its name (beside the
+/// macro icon when both apply, and while AUTO is on too), and disappears when cleared.
+#[test]
+fn an_automated_knob_shows_an_indicator_beside_its_name() {
+    let (mut s, mut v) = (Surface::new(), view());
+    for k in v.control.knobs.iter_mut().flatten() {
+        k.modulatable = true;
+        k.auto_mod = Some("0%".into());
+    }
+    let plain = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = true;
+    let with_auto = s.picture(&v);
+    let diff = |a: &[[u8; 4]], b: &[[u8; 4]]| -> Vec<(usize, usize)> {
+        (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| (i % 960, i / 960)).collect()
+    };
+    let changed = diff(&plain, &with_auto);
+    assert!(!changed.is_empty(), "modulated indicator drawn");
+    assert!(changed.iter().all(|&(x, y)| (340..360).contains(&x) && (234..247).contains(&y)), "{changed:?}");
+
+    // Alongside the macro icon: both show without colliding.
+    v.control.knobs[2].as_mut().unwrap().in_macro = true;
+    let both = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = false;
+    let macro_only = s.picture(&v);
+    let shifted = diff(&macro_only, &both);
+    assert!(!shifted.is_empty(), "modulated indicator beside macro icon");
+    assert!(shifted.iter().all(|&(x, y)| (330..343).contains(&x) && (234..247).contains(&y)), "{shifted:?}");
+
+    // Still shown while Auto-write is on, and on the monotone LCD theme.
+    v.auto_write = true;
+    let auto_plain = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = true;
+    assert!(!diff(&auto_plain, &s.picture(&v)).is_empty(), "shown while AUTO is on");
+
+    s.set_lcd("yellow");
+    s.set_theme("lcd");
+    let lcd_with = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = false;
+    assert!(!diff(&s.picture(&v), &lcd_with).is_empty(), "shown on LCD theme");
+}
+
+/// ERASE + tapping (or turning) a knob on the Control page removes its modulation, and
+/// doesn't trigger Touch Auto-write while the finger lifts.
+#[test]
+fn erase_and_tapping_a_knob_removes_its_modulation() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.playing, v.auto_write, v.touch_auto_write) = (true, true, true);
+    hold(&mut s, &v, "BUTTON_ERASE", true);
+    assert_eq!(hold(&mut s, &v, "BUTTON_CAP_3", true), [Action::EraseKnob(2)], "ERASE + tap");
+    assert!(s.tick(&v, now).is_empty(), "no TouchWrite while ERASE is held");
+    // Even if ERASE comes up before the finger leaves the knob, that tap doesn't write.
+    hold(&mut s, &v, "BUTTON_ERASE", false);
+    assert!(s.tick(&v, now).is_empty(), "no TouchWrite before CAP_3 lifts");
+    assert!(hold(&mut s, &v, "BUTTON_CAP_3", false).is_empty());
+    // Next plain touch writes as usual.
+    hold(&mut s, &v, "BUTTON_CAP_3", true);
+    assert!(s.tick(&v, now).contains(&Action::TouchWrite(2)));
+    hold(&mut s, &v, "BUTTON_CAP_3", false);
+
+    // ERASE + turning a knob also erases instead of turning.
+    hold(&mut s, &v, "BUTTON_ERASE", true);
+    assert_eq!(s.event(&Event::Knob(4, 0.05), &v, now), [Action::EraseKnob(4)], "ERASE + turn");
+    hold(&mut s, &v, "BUTTON_ERASE", false);
+}
+
 #[test]
 fn show_position_keeps_the_strip_dark_unless_recording() {
     let (s, mut v) = (Surface::new(), view());
