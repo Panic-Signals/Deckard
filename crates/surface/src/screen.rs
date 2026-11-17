@@ -99,6 +99,8 @@ pub struct ThemeCache {
     pub text: [u8; 3],
     pub accent: [u8; 3],
     pub animates: bool,
+    /// The theme asks widgets for soft fills (`widgets_soft = true`).
+    pub soft: bool,
 }
 
 impl ThemeCache {
@@ -178,7 +180,18 @@ impl ThemeCache {
         let text = colors.get("text").map_or([255; 3], |p| p.rgb);
         let accent = colors.get("accent").map_or([0xff, 0xa5, 0x2a], |p| p.rgb);
         let animates = theme.get::<Value>("chase").is_ok_and(|c| !c.is_nil());
-        Ok(ThemeCache { colors, fonts, styles, default_style, background, text, accent, animates })
+        let soft = theme.get::<Option<bool>>("widgets_soft").ok().flatten().unwrap_or(false);
+        Ok(ThemeCache { colors, fonts, styles, default_style, background, text, accent, animates, soft })
+    }
+
+    /// The theme's colour `name`, if it has one.
+    pub(crate) fn color(&self, name: &str) -> Option<Paint> {
+        self.colors.get(name).copied()
+    }
+
+    /// The theme's style `name`, else its default style.
+    pub(crate) fn style(&self, name: &str) -> Style {
+        self.styles.get(name).copied().unwrap_or(self.default_style)
     }
 }
 
@@ -214,14 +227,14 @@ pub fn paint(lua: &Lua, v: &Value) -> mlua::Result<Paint> {
 /// (a font, or the name of one of the theme's `fonts`), `size` and `color`; missing ones
 /// come from the theme's `styles.default`.
 #[derive(Clone, Copy)]
-struct Style {
-    font_idx: usize,
-    font: &'static Font,
-    size: f32,
-    colour: Paint,
+pub struct Style {
+    pub(crate) font_idx: usize,
+    pub(crate) font: &'static Font,
+    pub(crate) size: f32,
+    pub(crate) colour: Paint,
 }
 
-fn font_index(name: &str) -> mlua::Result<usize> {
+pub(crate) fn font_index(name: &str) -> mlua::Result<usize> {
     match FONTS.iter().position(|(n, _)| *n == name) {
         Some(i) => Ok(i),
         None => {
@@ -231,7 +244,7 @@ fn font_index(name: &str) -> mlua::Result<usize> {
     }
 }
 
-fn font_at(i: usize) -> &'static Font {
+pub(crate) fn font_at(i: usize) -> &'static Font {
     static LOADED: OnceLock<Vec<Font>> = OnceLock::new();
     let all = LOADED.get_or_init(|| FONTS.iter().map(|(n, bytes)| Font::from_bytes(*bytes, FontSettings::default()).expect(n)).collect());
     &all[i]
@@ -641,7 +654,7 @@ impl Picture {
     /// `valign` "top", "center" or "bottom" (the font's ascent to descent). Returns its
     /// width.
     #[allow(clippy::too_many_arguments)]
-    fn record_label(&mut self, s: &Style, x: i32, y: i32, w: i32, h: i32, text: String, align: &str, valign: &str) -> i32 {
+    pub(crate) fn record_label(&mut self, s: &Style, x: i32, y: i32, w: i32, h: i32, text: String, align: &str, valign: &str) -> i32 {
         let width = Self::width(s, &text).min(w);
         let x0 = match align {
             "left" => x,
@@ -701,7 +714,7 @@ impl Picture {
         pen.round() as i32
     }
 
-    fn width(s: &Style, text: &str) -> i32 {
+    pub(crate) fn width(s: &Style, text: &str) -> i32 {
         let mut w = 0.0f32;
         let mut prev = None;
         for ch in text.chars() {
@@ -848,6 +861,12 @@ impl UserData for Picture {
             Ok(true)
         });
         m.add_method("text_width", |lua, _, (text, st): (String, Value)| Ok(Picture::width(&style(lua, &st)?, &text)));
+        // widget(kind, x, y, w, h, inputs): one of the Rust widgets (`crate::widget`), drawn
+        // in the box from the inputs table, in the theme's colours.
+        m.add_method_mut("widget", |lua, p, (kind, x, y, w, h, inputs): (String, i32, i32, i32, i32, Table)| {
+            let look = crate::widget::Look::of(lua);
+            crate::widget::draw_lua(&kind, p, crate::widget::Rect { x, y, w, h }, &inputs, &look)
+        });
     }
 }
 

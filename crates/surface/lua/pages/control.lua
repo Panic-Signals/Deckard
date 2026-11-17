@@ -271,94 +271,14 @@ local function auto_knob(knob)
   }
 end
 
--- The built-in effect on the right screen, the same on every page. `kind` is freq
+-- The built-in effect on the right screen, the same on every page, in the picture
+-- band: the Rust `curve` widget (crates/surface/src/widget/curve.rs). `kind` is freq
 -- (20 Hz to 20 kHz, ±12 dB; the EQ and the Filter), law (input along the bottom,
 -- output up the side), time (level over time), or dots (a cloud). Several freq bands
--- are numbered. The corner holds an LFO or envelope when one is sent.
---
--- The plot uses the theme: the curve is its accent, the handles its record colour,
--- the grid its buttons. Palenight's curve is blue; the LCD's is its one ink.
+-- are numbered. The corner holds an LFO or envelope when one is sent. It draws in the
+-- theme: the curve its accent, the handles its record colour, the grid its buttons.
 local function eq_curve(screen, theme, eq)
-  local wave = eq.lfo or {}
-  local show_lfo = #wave >= 2
-  local kind = eq.kind or "freq"
-  if kind == "" then kind = "freq" end
-  -- In the picture band. With the modulator shape in the bottom right, the plot stops
-  -- short of it.
-  local x0, y0, w, h = 488, widgets.BAND_Y, show_lfo and 336 or 456, widgets.BAND_H
-  screen:rect(x0, y0, w, h, "panel")
-  local function px(t) return x0 + t * (w - 1) end
-  local function py(v) return y0 + (1 - v) * (h - 1) end
-  local function freq_x(hz)
-    return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
-  end
-  local grid = "button"
-  if kind == "freq" then
-    for _, hz in ipairs({ 100, 1000, 10000 }) do
-      local x = px(freq_x(hz))
-      screen:line(x, y0 + 1, x, y0 + h - 1, 1, grid)
-    end
-    for _, db in ipairs({ -6, 0, 6 }) do
-      local y = py(db / 24 + 0.5)
-      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and "separator" or grid)
-    end
-  elseif kind == "law" then
-    screen:line(px(0), py(0), px(1), py(1), 1, "separator")
-    for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
-      screen:line(x0 + 1, py(t), x0 + w - 1, py(t), 1, grid)
-      screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
-    end
-  else
-    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, "separator")
-    for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
-      screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
-    end
-  end
-  local function stroke(pts, width, ink)
-    local n = pts and #pts or 0
-    if n < 2 then return end
-    for i = 1, n - 1 do
-      screen:line(px((i - 1) / (n - 1)), py(pts[i]), px(i / (n - 1)), py(pts[i + 1]), width, ink)
-    end
-  end
-  stroke(eq.extent, 1, "muted")
-  stroke(eq.side, 1.5, eq.side_live and "marker" or "weak")
-  stroke(eq.points, 2, eq.dim and "muted" or "accent")
-  local bands = eq.bands or {}
-  local radius = kind == "freq" and 7 or 4
-  for i, b in ipairs(bands) do
-    local cx, cy = px(b.x), py(b.y)
-    if kind == "time" then
-      screen:line(cx, py(0), cx, cy, 1.5, "record")
-    end
-    screen:circle(cx, cy, radius, "record")
-    if kind == "freq" and #bands > 1 then
-      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = "on_colour" })
-    end
-  end
-  if kind == "freq" then
-    for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
-      local x = px(freq_x(hz[1]))
-      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = "weak" })
-    end
-  end
-  if eq.preview then
-    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = "weak" })
-  end
-  if show_lfo then
-    -- Bottom right of the right screen, beside the curve.
-    local bx, by, bw, bh = 832, y0 + h - 40, 112, 40
-    screen:rect(bx, by, bw, bh, "background")
-    screen:frame(bx, by, bw, bh, "button")
-    local m = #wave
-    for i = 1, m - 1 do
-      local x1 = bx + 4 + (i - 1) / (m - 1) * (bw - 8)
-      local x2 = bx + 4 + i / (m - 1) * (bw - 8)
-      local y1 = by + 4 + (1 - wave[i]) * (bh - 8)
-      local y2 = by + 4 + (1 - wave[i + 1]) * (bh - 8)
-      screen:line(x1, y1, x2, y2, 1.5, "accent")
-    end
-  end
+  screen:widget("curve", 488, widgets.BAND_Y, 456, widgets.BAND_H, eq)
 end
 
 -- The focused synth's preview beside its picture, on the right screen: the wave's
