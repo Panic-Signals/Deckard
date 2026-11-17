@@ -2940,7 +2940,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         painter.rect_filled(inner, 2.0, fill);
         if queued_scene == Some(s) {
             painter.rect_stroke(inner, 2.0, Stroke::new(1.0, col), StrokeKind::Inside);
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
         }
         let text = if focused && !blink { black(245) } else { col };
         let mut text_rect = inner;
@@ -2969,7 +2969,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 let strip = Rect::from_min_size(Pos2::new(inner.left() + 8.0, inner.bottom() - 6.0), Vec2::new(inner.width() - 16.0, 3.0));
                 let (filled, unfilled) = if focused && !blink { (black(245), black(61)) } else { (col, with_alpha(col, 64)) };
                 progress_strip(&painter, strip, bars, gap, played, filled, unfilled);
-                ui.ctx().request_repaint();
+                ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
             }
         }
         if app.renaming == Some(Target::Scene(s)) {
@@ -3902,7 +3902,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
             },
         );
         if queued == Some(i) {
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
         }
         if playing_section == Some(i) {
             triangle(&ep, Pos2::new(r.left() + 8.0, r.center().y), 3.5, white(245));

@@ -138,7 +138,7 @@ impl ParamDesc {
 /// A plug-in's parameter and where it is now, as `Output` keeps them for whoever shows them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
-    pub desc: ParamDesc,
+    pub desc: std::sync::Arc<ParamDesc>,
     pub value: f64,
 }
 
@@ -157,7 +157,7 @@ impl Info {
             .into_iter()
             .map(|desc| {
                 let value = desc.fit(desc.default);
-                Param { desc, value }
+                Param { desc: std::sync::Arc::new(desc), value }
             })
             .collect();
         Info { name: plugin.name(), params }

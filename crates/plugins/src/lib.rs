@@ -268,8 +268,19 @@ impl Plugin {
     /// a 128-frame block's time). Only for an instance nothing else plays yet.
     pub fn warm_up(&mut self) {
         let silence = [0f32; MAX_BLOCK];
-        for _ in 0..4 {
+        for _ in 0..2 {
             self.process_input(MAX_BLOCK, &Transport::default(), Some((&silence, &silence)));
+        }
+        let running = Transport { tempo: 120.0, playing: true, quarters: 0.0, numerator: 4, denominator: 4 };
+        let stopped = Transport { playing: false, ..running };
+        for _ in 0..2 {
+            self.process_input(256, &running, Some((&silence[..256], &silence[..256])));
+        }
+        for _ in 0..2 {
+            self.process_input(256, &stopped, Some((&silence[..256], &silence[..256])));
+        }
+        if let Kind::Vst3(v) = &mut self.kind {
+            v.clock = 0;
         }
     }
 
@@ -1288,12 +1299,17 @@ impl Host {
             return Err(format!("{name}: plug-in format not supported ({plugin_id})"));
         }
         if let Some(shared) = self.instances.get(&slot) {
+            // `self.instances` holds the sole Arc when no live Engine/player shares it yet.
+            let unshared = Arc::strong_count(shared) == 1;
             let mut p = shared.lock().unwrap();
             if p.id.cid == id.cid && p.sample_rate() == sample_rate {
                 p.name = name.to_string();
                 p.id = id;
                 if p.chunk() != chunk {
                     p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
+                    if unshared {
+                        p.warm_up();
+                    }
                 }
                 drop(p);
                 return Ok(shared.clone());

@@ -283,7 +283,7 @@ impl Ramp {
 }
 
 /// A group of four delay lines (`Delay4`, +0x6b0 + 0x80·group).
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 struct Lines {
     /// The preset's delay times in samples.
     base: V,
@@ -293,7 +293,8 @@ struct Lines {
     w: [i32; 4],
     wrapped: [bool; 4],
     len: [i32; 4],
-    buf: [Vec<f32>; 4],
+    /// Start offset of each lane inside `Reverb::delay_buf`.
+    off: [usize; 4],
 }
 
 pub struct Reverb {
@@ -356,6 +357,15 @@ pub struct Reverb {
     gain_t: V,
     gain_c: f32,
     lines: [Lines; GROUPS],
+    /// Contiguous storage for all 28 delay lines (`Lines::off[j]..off[j] + len[j]`).
+    delay_buf: Vec<f32>,
+    /// True when all delay lines and filter states are identically zero.
+    silent: bool,
+    /// True once `mat_l`, `mat_r` and `in_pan` have landed on `prog == 1` in `tick`.
+    ramps_settled: bool,
+    /// Consecutive sub-threshold silent samples, and the count needed to sleep.
+    quiet_samples: usize,
+    quiet_limit: usize,
 }
 
 impl Reverb {
@@ -405,7 +415,12 @@ impl Reverb {
             gain: [0.0; 4],
             gain_t: [0.0; 4],
             gain_c: 0.0,
-            lines: Default::default(),
+            lines: [Lines::default(); GROUPS],
+            delay_buf: Vec::new(),
+            silent: true,
+            ramps_settled: false,
+            quiet_samples: 0,
+            quiet_limit: 4096,
         };
         r.set_sample_rate(44100.0);
         r
@@ -425,6 +440,8 @@ impl Reverb {
                 depth = p.lfo_depth;
             }
         }
+        let mut total_len = 0usize;
+        let mut max_len = 0usize;
         for (g, lines) in self.lines.iter_mut().enumerate() {
             for j in 0..4 {
                 let mut d = PRESETS[0].delay[g][j];
@@ -437,9 +454,15 @@ impl Reverb {
                 let len = (rnd(m + 1.0) + 0x13) & !0xf;
                 lines.max[j] = m;
                 lines.len[j] = len;
-                lines.buf[j] = vec![0.0; len as usize];
+                lines.off[j] = total_len;
+                let len_u = len.max(0) as usize;
+                total_len += len_u;
+                max_len = max_len.max(len_u);
             }
         }
+        self.delay_buf.clear();
+        self.delay_buf.resize(total_len, 0.0);
+        self.quiet_limit = (max_len * 2).max(1024);
 
         let t = sr * 0.02;
         self.gain_c = if t < 1.0 { LN2 } else { LN2 / t };
@@ -478,6 +501,9 @@ impl Reverb {
         self.mat_l.prog = [1.0; 4];
         self.mat_r.prog = [1.0; 4];
         self.in_pan.prog = [1.0; 4];
+        self.silent = true;
+        self.ramps_settled = false;
+        self.quiet_samples = 0;
     }
 
     /// The output tone filter: a first-order shelf at 800 Hz / 2 kHz, flat at `color` 0.5.
@@ -586,6 +612,7 @@ impl Reverb {
 
     /// `setSource` (Pan), first half: the input balance, ramped.
     fn pan_ramp(&mut self) {
+        self.ramps_settled = false;
         let r = &mut self.in_pan;
         let target = [if 0.0 > self.pan { 1.0 } else { 1.0 - self.pan }, if self.pan > 0.0 { 1.0 } else { self.pan + 1.0 }];
         for (i, t) in target.into_iter().enumerate() {
@@ -601,6 +628,7 @@ impl Reverb {
     /// `x = clamp(spread·Stereo + 0.707·Pan, ±1)`, weights `(1−x)(3+x)/4` left and
     /// `(1+x)(3−x)/4` right, ramped. `sr_init`: the redundant `+0·Δ` of `setSampleRate`.
     fn width(&mut self, sr_init: bool) {
+        self.ramps_settled = false;
         let p = self.pan * PAN_K;
         for j in 0..4 {
             let x = (self.spread[j] * self.stereo + p).clamp(-1.0, 1.0);
@@ -639,8 +667,64 @@ impl Reverb {
         self.width(false);
     }
 
+    #[inline]
+    fn can_fast_skip(&self) -> bool {
+        self.silent && !self.frozen && self.freeze_count < 0 && self.ramps_settled && self.gain == self.gain_t
+    }
+
+    /// Advance LFO phase, control counter and circular write pointers over `k` silent
+    /// samples when all delay lines and filter states are already zero (bit-identical to
+    /// calling `tick(0.0, 0.0)` `k` times).
+    fn skip_silent(&mut self, k: usize) {
+        if k == 0 {
+            return;
+        }
+        let period = self.ctl_period.max(1) as isize;
+        let rem = (k % period as usize) as isize;
+        self.ctl_count = ((self.ctl_count as isize - 1 - rem).rem_euclid(period) + 1) as i32;
+        let inc = self.lfo_inc;
+        let mut p = self.phase;
+        for _ in 0..k {
+            p += inc;
+            p -= p.round();
+        }
+        self.phase = p;
+        for l in &mut self.lines {
+            for j in 0..4 {
+                let len = l.len[j] as usize;
+                if len > 0 {
+                    let total = l.w[j] as usize + k;
+                    if total >= len {
+                        l.wrapped[j] = true;
+                        l.w[j] = (total % len) as i32;
+                    } else {
+                        l.w[j] = total as i32;
+                    }
+                }
+            }
+        }
+    }
+
+    fn enter_sleep(&mut self) {
+        self.delay_buf.fill(0.0);
+        self.tone_s = [0.0; 4];
+        for s in &mut self.shelves {
+            s.x = [0.0; 4];
+            s.low_s = [0.0; 4];
+            s.high_s = [0.0; 4];
+        }
+        self.gain = self.gain_t;
+        self.silent = true;
+        self.quiet_samples = 0;
+    }
+
     /// One sample (`FDN28ReverbImpl::processAudio`).
     fn tick(&mut self, xl: f32, xr: f32) -> (f32, f32) {
+        let has_input = xl != 0.0 || xr != 0.0;
+        if has_input {
+            self.silent = false;
+            self.quiet_samples = 0;
+        }
         // A freeze change takes effect after its wait; then the input fades out or in.
         if self.freeze_count >= 0 {
             if self.freeze_count == 0 {
@@ -655,6 +739,7 @@ impl Reverb {
             self.mat_r.tick(self.ramp_step);
             self.ctl_count = self.ctl_period;
             self.in_pan.tick(self.ramp_step);
+            self.ramps_settled = self.mat_l.prog == [1.0; 4] && self.mat_r.prog == [1.0; 4] && self.in_pan.prog == [1.0; 4];
         }
 
         // Quadrature parabolic-sine LFO: lanes 0/2 at phase p, 1/3 a quarter ahead.
@@ -712,13 +797,20 @@ impl Reverb {
         // the input on alternate lanes (L,R,L,R; the next group R,L,R,L; …).
         let h = total * self.house;
         let mut feed = [bal[0] * inl + h, bal[1] * inr + h, bal[0] * inl + h, bal[1] * inr + h];
+        let mut peak = out_l.abs().max(out_r.abs());
+        let buf_ptr = self.delay_buf.as_mut_ptr();
         for (g, l) in self.lines.iter_mut().enumerate() {
             for j in 0..4 {
                 let v = feed[j] + ys[g][j] * self.fb;
+                peak = peak.max(v.abs());
                 let d = (m[j] + l.base[j] + 3.0).max(4.0).min(l.max[j]);
                 let len = l.len[j];
-                let buf = &mut l.buf[j];
-                buf[l.w[j] as usize] = v;
+                let base = l.off[j];
+                // SAFETY: `base..base + len` is this lane's disjoint slice in `delay_buf`,
+                // `0 <= l.w[j] < len`, `0 <= r < len`, and `d <= l.max[j] < len - 3`.
+                unsafe {
+                    *buf_ptr.add(base + l.w[j] as usize) = v;
+                }
                 let mut w = l.w[j] + 1;
                 let wrap = w >= len;
                 if wrap {
@@ -731,10 +823,12 @@ impl Reverb {
                 let raw = w - di;
                 let r = if raw < 0 { raw + len } else { raw };
                 // Past the end the read continues at the start, unless nothing is there yet.
-                let at = |i: i32| match r + i {
-                    k if k < len => buf[k as usize],
-                    k if wrapped => buf[(k - len) as usize],
-                    _ => 0.0,
+                let at = |i: i32| unsafe {
+                    match r + i {
+                        k if k < len => *buf_ptr.add(base + k as usize),
+                        k if wrapped => *buf_ptr.add(base + (k - len) as usize),
+                        _ => 0.0,
+                    }
                 };
                 let (s0, s1, s2, s3) = (at(0), at(1), at(2), at(3));
                 let f = d - di as f32;
@@ -747,9 +841,21 @@ impl Reverb {
                 let c0 = c0 + c2;
                 let b = a + c0;
                 let y = s2 + f * (c1 + f * (f * c0 - b));
-                self.shelves[g].x[j] = if wrapped || raw >= 0 { y } else { 0.0 };
+                let out_y = if wrapped || raw >= 0 { y } else { 0.0 };
+                peak = peak.max(out_y.abs());
+                self.shelves[g].x[j] = out_y;
             }
             feed = [feed[1], feed[0], feed[3], feed[2]];
+        }
+        if !self.silent {
+            if !has_input && !self.frozen && self.freeze_count < 0 && peak < 1e-15 {
+                self.quiet_samples += 1;
+                if self.quiet_samples >= self.quiet_limit {
+                    self.enter_sleep();
+                }
+            } else {
+                self.quiet_samples = 0;
+            }
         }
         (out_l, out_r)
     }
@@ -813,8 +919,24 @@ impl Effect for Reverb {
     }
 
     fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
-        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
-            (*a, *b) = self.tick(*a, *b);
+        let n = l.len().min(r.len());
+        let mut i = 0;
+        while i < n {
+            if self.can_fast_skip() {
+                let mut end = i;
+                while end < n && l[end] == 0.0 && r[end] == 0.0 {
+                    end += 1;
+                }
+                if end > i {
+                    self.skip_silent(end - i);
+                    i = end;
+                    continue;
+                }
+            }
+            let (ol, or) = self.tick(l[i], r[i]);
+            l[i] = ol;
+            r[i] = or;
+            i += 1;
         }
     }
 }
@@ -976,5 +1098,34 @@ mod tests {
         let x: Vec<f32> = noise(96_000).iter().map(|v| v * 20.0).collect();
         let (l, r) = run(&mut fx, &x, &x);
         assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() < 1000.0));
+    }
+
+    #[test]
+    fn silent_skip_matches_tick_bit_for_bit_and_decayed_tail_sleeps() {
+        let params = p(&[("room", 2.0), ("size", 0.35), ("mix", 0.6), ("pan", -0.2), ("stereo", 0.4)]);
+        let mut a = Reverb::new(48_000.0);
+        let mut b = Reverb::new(48_000.0);
+        a.set(&params);
+        b.set(&params);
+        // Leading silence (exercises `skip_silent`), then a burst of audio.
+        let mut xl = vec![0.0f32; 12_345];
+        let mut xr = vec![0.0f32; 12_345];
+        xl.extend(noise(4096));
+        xr.extend(noise(4096).into_iter().rev());
+        let (mut al, mut ar) = (xl.clone(), xr.clone());
+        a.process(&mut al, &mut ar);
+        let (mut bl, mut br) = (xl, xr);
+        for (x, y) in bl.iter_mut().zip(br.iter_mut()) {
+            (*x, *y) = b.tick(*x, *y);
+        }
+        assert_eq!((al, ar), (bl, br), "fast silent skip is bit-identical to sample-by-sample tick");
+
+        // Feed silence until the tail decays below -300 dBFS and enters auto-sleep, then wake again.
+        let z = vec![0.0f32; 48_000 * 6];
+        run(&mut a, &z, &z);
+        assert!(a.can_fast_skip(), "decayed tail transitions back to zero-cost sleep");
+        let wake = noise(2048);
+        let (wl, wr) = run(&mut a, &wake, &wake);
+        assert!(energy(&wl) > 1.0 && energy(&wr) > 1.0);
     }
 }
