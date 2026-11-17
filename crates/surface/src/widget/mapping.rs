@@ -223,9 +223,14 @@ impl Mapping {
         if let Some(pt) = t.raw_get::<Option<Table>>("params")? {
             for pair in pt.pairs::<String, Table>() {
                 let (name, p) = pair.map_err(|e| err(path, format!("params: {e}")))?;
+                // (As an integer: ids are 32-bit, past what an f32 holds exactly.)
                 let id = match p.raw_get::<Value>("id")? {
                     Value::Nil => None,
-                    v => Some(number(&v).filter(|n| *n >= 0.0).ok_or_else(|| err(path, format!("param {name}: id is a number")))? as u32),
+                    Value::Integer(n) => {
+                        Some(u32::try_from(n).map_err(|_| err(path, format!("param {name}: id {n} isn't a parameter id")))?)
+                    }
+                    Value::Number(n) if n.fract() == 0.0 && (0.0..=u32::MAX as f64).contains(&n) => Some(n as u32),
+                    _ => return Err(err(path, format!("param {name}: id is a whole number"))),
                 };
                 params.push(Param {
                     id,
@@ -620,6 +625,12 @@ mod tests {
 
     fn knob(name: &str, text: &str, value: f32) -> Option<Knob> {
         Some(Knob { name: name.into(), text: text.into(), value, ..Default::default() })
+    }
+
+    #[test]
+    fn ids_past_an_f32s_precision_stay_exact() {
+        let m = load(&MONARKISH.replace("id = 33,", "id = 1295090177,")).unwrap();
+        assert_eq!(m.params.iter().find(|p| p.name == "cutoff").and_then(|p| p.id), Some(1295090177));
     }
 
     #[test]
