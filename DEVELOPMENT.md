@@ -142,7 +142,10 @@ Run the full suite once, at the end of a branch. CI runs it on all three systems
     expression editor, LFOs, LFO envelopes).
 - **Controllers:**
   - [docs/controller-api.md](docs/controller-api.md): the Lua API for DECKARD's
-    controller scripts (MK3 pages, themes, MIDI devices).
+    controller scripts (MK3 pages, themes, MIDI devices), and its "Plug-in mappings"
+    chapter: pictures on the MK3 from a plug-in's parameters.
+  - `docs/superpowers/specs/2026-11-15-plugin-mappings-design.md`: the plug-in mappings
+    and MK3 widgets design, with the display measurements.
   - [docs/launchpad-pro-mk3.md](docs/launchpad-pro-mk3.md): the Launchpad Pro MK3 script
     and its hardware checklist.
   - [docs/mk3-usb.md](docs/mk3-usb.md): the MK3's USB protocol.
@@ -458,6 +461,46 @@ cargo run --release --offline -p deckard-plugins --example plugin-state file.mxp
 ./target/release/deckard file.mxprj --group 7 --sound 0 --plugin-window
 ```
 
+### plugin-probe
+
+`plugin-probe` (`crates/plugins/src/bin/plugin-probe.rs`) hosts one plug-in in its own
+process, with a time limit (`--timeout`, 60 s by default), and prints JSON, so a plug-in
+that crashes or hangs takes only the probe with it. It never opens a project or touches
+DECKARD's settings. It's for writing plug-in mappings
+([docs/controller-api.md](docs/controller-api.md#plug-in-mappings)).
+
+```sh
+cargo run --release -p deckard-plugins --bin plugin-probe -- list
+cargo run --release -p deckard-plugins --bin plugin-probe -- dump "Acme Ladder" --out ladder.json
+cargo run --release -p deckard-plugins --bin plugin-probe -- measure "Acme Ladder" --recipe recipe.json
+```
+
+- **`list`:** the installed plug-ins DECKARD can host.
+- **`dump <name or plugin_id>`:** each parameter's id, title, units, steps and default, and its
+  text at 64 evenly spaced values, so a mapping can check what a knob says in real units.
+  `--state <file>` loads an NKS preset or ensemble first.
+- **`measure <plugin> --recipe <file>`:** plays an instrument and measures what its knobs do,
+  for a plug-in whose text gives no units (a knob reading "0-10"). A recipe is JSON:
+  `note`, a `setup` of parameter ids to normalised values, and `steps`, each with a `name`,
+  a `kind`, a `param` and the `points` to sweep it over, and a `setup` of its own. The
+  output lists each point and a `{ "table", ... }` taper for a mapping. The kinds:
+  - `cutoff`: the frequency where the output's spectrum peaks (set noise through the filter
+    with high resonance);
+  - `attack`: the time to reach 90% of the level the note holds with the parameter at 0;
+  - `decay`: the time from the peak to 10% of it, up to 40 s;
+  - `bright_attack`, `bright_decay`: the same measured on the output above about 2 kHz, for a
+    filter envelope's times. A ballpark.
+
+**The black-box rule.** Everything about a plug-in is learned only by hosting it: its
+parameter list, the text it gives for each value, and what its audio does. Never from its
+files, from the private data inside presets, or from its artwork, and never by taking the
+plug-in apart. That holds for every plug-in, Native Instruments' included. Shipped mappings
+use only parameter ids, names and units.
+
+The `plugin-mapping` Claude Code skill (`.claude/skills/plugin-mapping/`) drafts a mapping from
+a dump, and `scripts/mapping-check.sh` renders a mapping's pages against a saved dump and
+checks its names.
+
 ### DECKARD's own plug-ins
 
 Replicant (`replicant.rs`), Plaits (`plaits.rs`, around `crates/mi`) and Zhora
@@ -494,6 +537,27 @@ Pro MK3).
   Folder) overrides any file by path, and DECKARD reloads a script when it's saved.
 - **API:** see [docs/controller-api.md](docs/controller-api.md).
 - **Tests:** Rust tests drive the shipped scripts with made-up MK3 events.
+
+#### Widgets and mappings
+
+The MK3's pictures (a filter's response, an envelope, an EQ) are drawn in Rust, in
+`crates/surface/src/widget/`: one file per widget, `layout.rs` (the generic patterns that
+put pictures over any page's knobs) and `mapping.rs` (the plug-in mapping format). Scripts
+reach them through `screen:widget` and `screen:pictures`. The user-facing format is in
+[docs/controller-api.md](docs/controller-api.md#plug-in-mappings); the design, and the
+measurements of the MK3's display link behind the rectangles `crates/mk3` sends, are in
+`docs/superpowers/specs/2026-11-15-plugin-mappings-design.md`.
+
+- **Golden images:** each widget is drawn on the `maschine` and `lcd` themes at every width it
+  can span, and compared with the PNGs in `crates/surface/tests/golden/`. After changing a
+  widget, refresh them with `DECKARD_GOLDEN=update cargo test -p deckard-surface widget::`,
+  look at the changed images, and commit them with the change.
+- **Adding a widget:** a Rust file in `widget/` (a doc comment table of its inputs, `from_lua`
+  and `draw`, flat look first, `focus` and `<input>_mod` handled), a line in `draw_lua`,
+  and golden cases for each width and for each focus name.
+- **Writing a mapping:** the `plugin-mapping` Claude Code skill
+  (`.claude/skills/plugin-mapping/`) and `scripts/mapping-check.sh` (renders a mapping's
+  pages against a saved parameter dump and checks its names) help; see "plugin-probe" below.
 
 ### Maschine's own scripts (`crates/lua-host`)
 
