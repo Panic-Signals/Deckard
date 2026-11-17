@@ -291,6 +291,8 @@ mod measure {
         let Some(m) = v.as_object() else { return Ok(Vec::new()) };
         let mut out: Vec<(u32, f64)> = m
             .iter()
+            // (Keys starting with `_` are notes for whoever fills the recipe in.)
+            .filter(|(k, _)| !k.starts_with('_'))
             .map(|(k, v)| {
                 Ok((
                     k.parse().map_err(|_| format!("setup: \"{k}\" isn't a parameter id"))?,
@@ -551,6 +553,8 @@ mod tests {
         .unwrap();
         let r = measure::Recipe::parse(&v).unwrap();
         assert_eq!(r.note, 60);
+        let noted: Value = serde_json::from_str(r#"{ "setup": { "_why": "", "18": 1 }, "steps": [] }"#).unwrap();
+        assert_eq!(measure::Recipe::parse(&noted).unwrap().setup, [(18, 1.0)], "notes are skipped");
         assert_eq!(r.setup, [(18, 1.0)]);
         assert_eq!(r.steps[0].kind, measure::Kind::Cutoff);
         assert_eq!(r.steps[0].setup, [(34, 0.9)]);

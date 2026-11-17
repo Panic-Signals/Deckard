@@ -33,6 +33,8 @@ pub mod value;
 
 #[cfg(test)]
 pub(crate) mod golden;
+#[cfg(test)]
+mod mapping_check;
 
 /// One knob cell's width: a screen's 480 pixels over its four knobs.
 pub const CELL_W: i32 = 120;

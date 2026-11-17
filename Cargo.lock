@@ -2344,6 +2344,7 @@ dependencies = [
  "fontdue",
  "mlua",
  "png",
+ "serde_json",
  "tempfile",
 ]
 
