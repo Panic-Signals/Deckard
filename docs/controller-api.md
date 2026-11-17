@@ -502,7 +502,7 @@ never the number.
 
 ```lua
 response = { widget = "filter", needs = { "cutoff" },
-             model = { shape = { from = "mode", map = { LP24 = "ladder4", HP = "svf_hp" } },
+             model = { shape = { from = "mode", map = { LP24 = { const = "ladder4" }, HP = { const = "svf_hp" } } },
                        cutoff = "cutoff", resonance = "reso",
                        decay_floor = { const = 5 } } },
 ```
@@ -514,7 +514,7 @@ response = { widget = "filter", needs = { "cutoff" },
 - `model`: each of the widget's inputs, from one of three things:
   - a declared parameter's name: the parameter's value in real units (`cutoff = "cutoff"`);
   - a number or text constant, `{ const = 5 }` or `{ const = "bp" }`;
-  - a choice map, `{ from = "mode", map = { LP24 = "ladder4", HP = "svf_hp" } }`: the
+  - a choice map, `{ from = "mode", map = { LP24 = { const = "ladder4" }, HP = { const = "svf_hp" } } }`: the
     choice the `from` parameter's text reads (ignoring case) picks the entry. An entry is
     again any of these three, so a switch can pick another parameter:
     `release = { from = "rel_on", map = { On = "decay", Off = { const = 5 } } }`.
@@ -647,8 +647,8 @@ return {
 
   pictures = {
     response = { widget = "filter", needs = { "cutoff", "reso" },
-                 model = { shape = { from = "mode", map = { LP24 = "ladder4", LP12 = "svf_lp",
-                                                            BP = "svf_bp", HP = "svf_hp" } },
+                 model = { shape = { from = "mode", map = { LP24 = { const = "ladder4" }, LP12 = { const = "svf_lp" },
+                                                            BP = { const = "svf_bp" }, HP = { const = "svf_hp" } } },
                            cutoff = "cutoff", resonance = "reso", drive = "drive" } },
     contour  = { widget = "envelope", needs = { "attack", "decay" },
                  model = { attack = "attack", decay = "decay",

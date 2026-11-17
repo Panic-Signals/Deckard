@@ -241,6 +241,26 @@ mod tests {
         assert!(files.iter().all(|f| f.exists()));
     }
 
+    /// The worked example in `docs/controller-api.md` ("Example: Acme Ladder") loads.
+    #[test]
+    fn the_documented_example_loads() {
+        let doc = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/controller-api.md")).unwrap();
+        let from = doc.find("### Example: Acme Ladder").expect("the example");
+        let code = &doc[from..];
+        let start = code
+            .find(
+                "```lua
+",
+            )
+            .expect("its code")
+            + 7;
+        let end = start + code[start..].find("```").expect("its end");
+        let lua = mlua::Lua::new();
+        let t: mlua::Table = lua.load(&code[start..end]).eval().unwrap();
+        let m = Mapping::from_lua("docs", true, &t).unwrap();
+        assert!(!m.pages.is_empty() && !m.pictures.is_empty());
+    }
+
     /// Every mapping DECKARD ships passes its checks against its plug-in's dump.
     #[test]
     fn shipped_mappings_check_against_their_dumps() {
