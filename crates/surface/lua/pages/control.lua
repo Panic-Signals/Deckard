@@ -283,8 +283,9 @@ local function eq_curve(screen, theme, eq)
   local show_lfo = #wave >= 2
   local kind = eq.kind or "freq"
   if kind == "" then kind = "freq" end
-  -- With the modulator shape in the bottom right, the plot stops short of it.
-  local x0, y0, w, h = 488, 66, show_lfo and 336 or 456, 132
+  -- In the picture band. With the modulator shape in the bottom right, the plot stops
+  -- short of it.
+  local x0, y0, w, h = 488, widgets.BAND_Y, show_lfo and 336 or 456, widgets.BAND_H
   screen:rect(x0, y0, w, h, "panel")
   local function px(t) return x0 + t * (w - 1) end
   local function py(v) return y0 + (1 - v) * (h - 1) end
@@ -433,7 +434,7 @@ end
 local function euclid_circle(screen, theme, e)
   local n = #e.hits
   if n == 0 then return end
-  local cx, cy, r = 720, 133, 60
+  local cx, cy, r = 720, widgets.BAND_Y + widgets.BAND_H // 2, widgets.BAND_H // 2 - 8
   local function angle(i) return -90 + 360 * i / n end
   local function point(i, radius)
     local a = math.rad(angle(i))
@@ -466,7 +467,7 @@ local function euclid_circle(screen, theme, e)
     local c, s = math.cos(a), math.sin(a)
     screen:line(cx + 26 * c, cy + 26 * s, cx + (r - 7) * c, cy + (r - 7) * s, 2, lit)
   end
-  screen:label(830, 180, 120, 20, "ROTATE " .. e.rotate, { size = 11, color = gc.weak }, "right", "center")
+  screen:label(830, widgets.BAND_Y + widgets.BAND_H - 20, 120, 20, "ROTATE " .. e.rotate, { size = 11, color = gc.weak }, "right", "center")
 end
 
 -- The Generate page's Random notes on the right screen: a piano roll of the
@@ -478,7 +479,7 @@ local NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#",
 local function random_view(screen, theme, r)
   local n = math.max(1, r.steps)
   -- (A gutter at the left for the note names.)
-  local x0, y0, w, h = 512, 66, 312, 132
+  local x0, y0, w, h = 512, widgets.BAND_Y, 312, widgets.BAND_H
   local cw = w / n
   local gc = groove_colours(theme)
   local hit, lit = gc.hit, gc.now
@@ -516,7 +517,7 @@ local function random_view(screen, theme, r)
     screen:line(x, y0, x, y0 + h - 1, 2, lit)
   end
   -- The velocities drawn from: 1 to 127 across the box, Velocity's range about 100.
-  local bx, by, bw, bh = 832, 158, 112, 40
+  local bx, by, bw, bh = 832, widgets.BAND_Y + widgets.BAND_H - 40, 112, 40
   screen:rect(bx, by, bw, bh, gc.box)
   screen:frame(bx, by, bw, bh, gc.bar)
   local spread = (r.velocity_amount or 0) / 100 * 63.5
@@ -609,7 +610,7 @@ function control.draw(screen, theme, opts)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
       else
-        chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false)
+        chain.thumbnail(screen, theme, 600, widgets.BAND_Y, 240, widgets.BAND_H, slot, false)
         if c.scope then scope_view(screen, c.scope) end
       end
     end
@@ -630,7 +631,7 @@ function control.draw(screen, theme, opts)
       screen:label(700, 36, 250, 24, string.format("%.0f %%  ·  %s", r.probability, made), "default", "right", "center")
       random_view(screen, theme, r)
     else
-      channel_icon(screen, c.page_group, 720, 126, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
+      channel_icon(screen, c.page_group, 720, widgets.BAND_Y + widgets.BAND_H // 2, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
     end
   end
   knobs(screen, theme, c, false, knob_of)

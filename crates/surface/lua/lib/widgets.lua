@@ -14,6 +14,12 @@ end
 
 local BUTTON_W, BUTTON_H, BUTTON_Y = 115, 24, 4
 
+-- Each screen's rows: the display buttons' labels (to 28), the info bar (35-59), then
+-- on the left the chain strip (lib/chain.lua) and on the right the header, then the
+-- picture band, then the knobs' section names (207) and parameters (233-271). The band
+-- is the same on both screens, so pictures over the knobs line up across the gap.
+widgets.BAND_Y, widgets.BAND_H = 100, 104
+
 -- A palette colour (0..16) from the theme, as a fill or (`text`) as text; `dim` for
 -- what's not chosen.
 function widgets.colour(theme, palette, dim, text)

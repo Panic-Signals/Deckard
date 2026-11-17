@@ -1968,7 +1968,8 @@ fn plugin_pictures_show_on_the_plugin_page() {
     let count =
         |px: &[[u8; 4]], c: [u8; 4], right: bool| px.iter().enumerate().filter(|(i, p)| **p == c && ((i % 960) >= 480) == right).count();
     let px = s.picture(&v);
-    assert!(count(&px, thumb, false) > 2000, "the thumbnail in the chain: {}", count(&px, thumb, false));
+    // (Small: the chain strip leaves the picture band free.)
+    assert!(count(&px, thumb, false) > 400, "the thumbnail in the chain: {}", count(&px, thumb, false));
     assert!(count(&px, logo, true) > 5000, "the logo on the right: {}", count(&px, logo, true));
     // Without the picture: a drawing. A few of its pixels can land on the same grey.
     v.control.chain[0].picture = Some("nothing".into());
@@ -3688,17 +3689,19 @@ fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
 fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
     let (surface, mut v) = (Surface::new(), view());
     v.control.modules_visible = true;
-    v.control.chain = (0..3)
+    v.control.chain = (0..6)
         .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
         .collect();
-    for (slot, direction, range) in [(0, "right", "1-2 / 3"), (2, "left", "2-3 / 3")] {
+    // (The chain strip: the range at the right, small arrows at the edges.)
+    for (slot, direction, starts, ends) in [(0, "right", "1-", " / 6"), (5, "left", "", "-6 / 6")] {
         v.control.slot_index = Some(slot);
         let picture = surface.draw_picture(&v);
-        assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
+        assert!(picture.texts.iter().any(|s| s.starts_with(starts) && s.ends_with(ends) && s.contains(" / ")), "{:?}", picture.texts);
         assert!(picture.ops.iter().any(
-            |o| matches!(o, screen::DrawOp::Triangle { x, y: 143, w: 18, h: 28, dir, .. } if (*x == 4 || *x == 458) && dir == direction)
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 74, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
         ));
     }
+    v.control.chain.truncate(3);
     for slot in &mut v.control.chain {
         slot.instrument = false;
         slot.name = "FX".into();

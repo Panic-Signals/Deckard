@@ -1,5 +1,5 @@
 -- A chain's slots as the Control page and the plug-in browser draw them: the MASTER /
--- GROUP / SOUND tabs, and the slots along the left screen.
+-- GROUP / SOUND tabs, and the slots along the top of the left screen.
 
 local widgets = require("lib.widgets")
 
@@ -92,9 +92,16 @@ function chain.thumbnail(screen, theme, x, y, w, h, slot, thumb)
   end
 end
 
--- The thumbnail sizes of Maschine's own plug-ins (others: an effect's or an
--- instrument's).
-local SIZES = { Sampler = { 160, 42 }, EQ = { 90, 40 }, Compressor = { 62, 40 } }
+-- The thumbnail sizes of Maschine's own plug-ins in the chain strip (others: an
+-- effect's or an instrument's). The strip is short, to leave the picture band
+-- (`widgets.BAND_Y`) free above the knobs.
+local SIZES = { Sampler = { 72, 19 }, EQ = { 40, 18 }, Compressor = { 28, 18 } }
+local INSTRUMENT, EFFECT = { 72, 19 }, { 40, 18 }
+
+-- The strip: names at NAME_Y, pictures at PIC_Y (at most 19 high, so the focus frame
+-- ends above the band).
+local NAME_Y, PIC_Y = 63, 78
+local NAME_STYLE = { size = 11 }
 
 -- A slot's kind, as a small icon: keys for an instrument, FX for an effect.
 local function kind_icon(screen, x, y, instrument, fx)
@@ -109,66 +116,78 @@ local function kind_icon(screen, x, y, instrument, fx)
   end
 end
 
--- How wide the "+" for a new slot is, and the left screen.
-local NEW_W, SCREEN_W = 58, 480
+-- How wide the "+" for a new slot is; the strip's edges (room at each side for the
+-- arrows), and how much the "2-4 / 6" takes from its right while it scrolls.
+local NEW_W, LEFT, RIGHT, RANGE_W = 34, 12, 468, 48
 
 -- Slot `slot`'s picture size and how wide it is in the chain.
 local function slot_size(screen, slot)
-  local size = SIZES[slot.name] or (slot.instrument and { 160, 42 } or { 90, 40 })
-  local name_w = math.max(54, screen:text_width(slot.name, "default"))
-  return size, name_w, 4 + math.max(size[1] + 16 + 3, 28 + name_w) + 3
+  local size = SIZES[slot.name] or (slot.instrument and INSTRUMENT or EFFECT)
+  local name_w = math.max(30, screen:text_width(slot.name, NAME_STYLE))
+  return size, name_w, math.max(size[1] + 12, 20 + name_w) + 6
 end
 
--- The chain along the left screen: each slot's kind, name and picture, the focused
--- one framed, then a "+" for a new one. Longer than the screen, it scrolls to keep the
--- focused slot (or the "+") in view, showing only whole slots.
-function chain.draw(screen, theme, c)
-  local widths = {}
-  for i, slot in ipairs(c.chain) do
-    local _, _, w = slot_size(screen, slot)
-    widths[i] = w
-  end
-  widths[#c.chain + 1] = NEW_W
-  local focus = c.slot_index or #c.chain + 1
+-- The slots from the focused one back as far as fit in `room`, and then on.
+local function first_shown(widths, focus, room)
   local first, span = focus, widths[focus]
-  while first > 1 and span + widths[first - 1] <= SCREEN_W do
+  while first > 1 and span + widths[first - 1] <= room do
     first = first - 1
     span = span + widths[first]
   end
-  local x = 0
+  return first
+end
+
+-- The chain along the top of the left screen, under the info bar: each slot's kind,
+-- name and a small picture, the focused one framed, then a "+" for a new one. Longer
+-- than the screen, it scrolls to keep the focused slot (or the "+") in view, showing
+-- only whole slots, with arrows at the sides and the range shown at the right.
+function chain.draw(screen, theme, c)
+  local widths, total = {}, NEW_W
+  for i, slot in ipairs(c.chain) do
+    local _, _, w = slot_size(screen, slot)
+    widths[i] = w
+    total = total + w
+  end
+  widths[#c.chain + 1] = NEW_W
+  local focus = c.slot_index or #c.chain + 1
+  local room = RIGHT - LEFT
+  local scrolls = total > room
+  if scrolls then room = room - RANGE_W end
+  local first = scrolls and first_shown(widths, focus, room) or 1
+  local x = LEFT
   local function overflow(last)
     if first > 1 or last < #c.chain then
       local range = last >= first and (first == last and tostring(first) or first .. "-" .. last) or "+"
-      screen:label(16, 174, 448, 18, range .. " / " .. #c.chain, { size = 12, color = "text" }, "right", "center")
-      if first > 1 then screen:triangle(4, 143, 18, 28, "left", "text") end
-      if last < #c.chain then screen:triangle(458, 143, 18, 28, "right", "text") end
+      screen:label(RIGHT - RANGE_W, NAME_Y, RANGE_W, 14, range .. " / " .. #c.chain, { size = 10, color = "text" }, "right", "center")
+      if first > 1 then screen:triangle(1, PIC_Y - 4, 8, 16, "left", "text") end
+      if last < #c.chain then screen:triangle(471, PIC_Y - 4, 8, 16, "right", "text") end
     end
   end
   for i = first, #c.chain do
     local slot = c.chain[i]
     local size, name_w, w = slot_size(screen, slot)
-    if x + w > SCREEN_W then overflow(i - 1); return end
+    if x + w > LEFT + room then overflow(i - 1); return end
     local focused = i == c.slot_index
-    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
+    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
-    screen:label(x + 29, 71, name_w, 17, slot.name, { color = colour }, "left", "center")
+    screen:label(x + 20, NAME_Y, name_w, 14, slot.name, { size = 11, color = colour }, "left", "center")
     if focused then
-      screen:frame(x + 9, 91, size[1] + 6, size[2] + 6, "text", 0.76)
-      screen:frame(x + 10, 92, size[1] + 4, size[2] + 4, "text")
+      screen:frame(x + 3, PIC_Y - 3, size[1] + 6, size[2] + 6, "text", 0.76)
+      screen:frame(x + 4, PIC_Y - 2, size[1] + 4, size[2] + 4, "text")
     end
-    chain.thumbnail(screen, theme, x + 12, 94, size[1], size[2], slot)
+    chain.thumbnail(screen, theme, x + 6, PIC_Y, size[1], size[2], slot)
     x = x + w
   end
   overflow(#c.chain)
-  if x + NEW_W > SCREEN_W then return end
+  if x + NEW_W > LEFT + room then return end
   -- A new slot, framed while it's the one focused (the plug-in browser loads into it).
   if not c.slot_index then
-    screen:frame(x + 9, 91, 46, 46, "text", 0.76)
-    screen:frame(x + 10, 92, 44, 44, "text")
+    screen:frame(x + 3, PIC_Y - 3, 26, 25, "text", 0.76)
+    screen:frame(x + 4, PIC_Y - 2, 24, 23, "text")
   end
   local mark = paint(theme, "chain_mark", { 0xbb, 0xbb, 0xbb })
-  screen:rect(x + 12 + 11, 113, 18, 2, mark)
-  screen:rect(x + 12 + 19, 105, 2, 18, mark)
+  screen:rect(x + 11, PIC_Y + 9, 10, 2, mark)
+  screen:rect(x + 15, PIC_Y + 5, 2, 10, mark)
 end
 
 return chain
