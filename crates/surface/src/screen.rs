@@ -871,14 +871,11 @@ impl UserData for Picture {
         // in the picture band of both screens; `touched` the knob numbers a finger rests on.
         // pictures(knobs, touched, plugin, no_right_dials): `no_right_dials` when the page
         // draws its own picture in the right screen's band.
-        m.add_method_mut(
-            "pictures",
-            |lua, p, (knobs, touched, plugin, no_right): (Table, Option<Table>, Option<String>, Option<bool>)| {
-                let look = crate::widget::Look::of(lua);
-                let touched: Vec<usize> = touched.map(|t| t.sequence_values::<usize>().filter_map(Result::ok).collect()).unwrap_or_default();
-                crate::widget::draw_pictures(lua, p, &knobs, &touched, plugin.as_deref(), !no_right.unwrap_or(false), &look)
-            },
-        );
+        m.add_method_mut("pictures", |lua, p, (knobs, touched, plugin, no_right): (Table, Option<Table>, Option<String>, Option<bool>)| {
+            let look = crate::widget::Look::of(lua);
+            let touched: Vec<usize> = touched.map(|t| t.sequence_values::<usize>().filter_map(Result::ok).collect()).unwrap_or_default();
+            crate::widget::draw_pictures(lua, p, &knobs, &touched, plugin.as_deref(), !no_right.unwrap_or(false), &look)
+        });
     }
 }
 
