@@ -691,7 +691,7 @@ pub fn sound_bus(p: &Project, g: usize, s: usize) -> Option<usize> {
 /// [`sound_gain`] and [`sound_bus`].
 fn sound_route(p: &Project, g: usize, s: usize) -> Route {
     let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return SILENT };
-    if !snd.cue && has_sound_bus(snd) && reaches_main(p, snd.channel.dest, (g, Some(s)), Some(g), 0) {
+    if !snd.cue && has_sound_bus(p, g, s) && reaches_main(p, snd.channel.dest, (g, Some(s)), Some(g), 0) {
         return SILENT;
     }
     let own = fader_gain(snd.level, snd.pan, &snd.modulators);
@@ -800,7 +800,7 @@ fn channel_faders(p: &Project) -> (Vec<Fader>, Vec<Vec<Vec<usize>>>, Vec<Vec<usi
             }
             D::Group(g) => into(g, out),
             D::Sound(g, s) => {
-                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|bus| !has_sound_bus(bus)) {
+                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|_| !has_sound_bus(p, g, s)) {
                     out.extend(place(g, Some(s)));
                     if !bus.cue {
                         after_dest(p, bus.channel.dest, Some(g), depth + 1, place, out);
@@ -947,7 +947,7 @@ fn dest_cued(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>,
             .groups
             .get(g)
             .and_then(|x| x.sounds.get(s))
-            .is_some_and(|bus| !has_sound_bus(bus) && (bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))),
+            .is_some_and(|bus| !has_sound_bus(p, g, s) && (bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))),
         D::None | D::Master | D::Ext(_) => false,
     }
 }
@@ -1121,15 +1121,18 @@ fn has_bus(grp: &deckard_model::Group) -> bool {
     !grp.slots.is_empty() || grp.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
 }
 
-/// Whether sound `snd` has a bus: active effects in its chain, or an Aux send.
-fn has_sound_bus(snd: &deckard_model::Sound) -> bool {
-    !effect_slots(snd).is_empty() || snd.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
+/// Whether sound (`g`, `s`) needs its own bus buffer when fed by another channel:
+/// active effects in its chain, an Aux send, or a side-chain tap listening to it.
+fn has_sound_bus(p: &Project, g: usize, s: usize) -> bool {
+    let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(s)) else { return false };
+    !effect_slots(snd).is_empty()
+        || snd.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
+        || sound_feeds_sidechain(p, g, s)
 }
 
 /// Whether sound (`g`, `s`) has a bus and another channel routes or sends audio into it.
 fn is_sound_bus(p: &Project, g: usize, s: usize) -> bool {
-    let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(s)) else { return false };
-    if !has_sound_bus(snd) {
+    if !has_sound_bus(p, g, s) {
         return false;
     }
     let target = deckard_model::AudioDest::Sound(g, s);
@@ -1146,10 +1149,10 @@ fn is_sound_bus(p: &Project, g: usize, s: usize) -> bool {
 
 fn sound_in_route(p: &Project, g: usize, s: usize, depth: u8) -> Route {
     let Some((grp, bus)) = p.groups.get(g).and_then(|grp| Some((grp, grp.sounds.get(s)?))) else { return SILENT };
-    if (grp.muted || (bus.muted && bus.channel.audio_mute)) && !(has_sound_bus(bus) && sound_feeds_strip(p, g, s)) {
+    if (grp.muted || (bus.muted && bus.channel.audio_mute)) && !(has_sound_bus(p, g, s) && sound_feeds_strip(p, g, s)) {
         return SILENT;
     }
-    if has_sound_bus(bus) {
+    if has_sound_bus(p, g, s) {
         return (Some(sound_bus_id(g, s)), (1.0, 1.0));
     }
     let (to, gain) = if bus.cue { cue_route(p) } else { dest_route(p, bus.channel.dest, Some(g), depth) };
@@ -3093,6 +3096,8 @@ impl Engine {
         }
         // Sounds that must play live: they take audio or MIDI input, feed or hear a
         // side-chain, or pass notes to another sound.
+        let listeners = sidechain_listeners(project);
+        let sound_buses = sound_buses_of(project, &listeners);
         let routes = midi::out_routes(project);
         let routed_to = |g: usize, s: usize| routes.get(g).is_some_and(|r| r.iter().any(|x| x == &Some(midi::OutRoute::Sound(s))));
         let explicit = |src: &str| !matches!(src, "Default" | "Focus" | "None" | "");
@@ -3119,8 +3124,8 @@ impl Engine {
                             || (gr.channel.key_mode == 2 && explicit(&gr.channel.midi_source))
                             // Its strips are mixed where it plays.
                             || sound_has_strip(project, g, s)
-                            // A sound bus waits for the channels that feed it.
-                            || is_sound_bus(project, g, s)
+                            // A sound bus (or a sound listening to one) waits for the channels that feed it.
+                            || sound_buses[g][s]
                             // Its CV leaves with the outputs.
                             || zhora_rt::is_zhora(snd)
                     })
@@ -3142,7 +3147,7 @@ impl Engine {
                         let has = sounds.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || instruments.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || takes_in
-                            || is_sound_bus(project, g, s);
+                            || sound_buses[g][s];
                         let smp_gain = if has_fx(g, s) {
                             (1.0, 1.0)
                         } else if muting(project, g, s).hushed {
@@ -3226,15 +3231,9 @@ impl Engine {
         let (sound_aux, group_aux) = aux::build(project, &faders);
         let sound_routes: Vec<Vec<Option<usize>>> =
             project.groups.iter().enumerate().map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect()).collect();
-        let sound_buses: Vec<Vec<bool>> = project
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(g, grp)| (0..grp.sounds.len()).map(|s| is_sound_bus(project, g, s)).collect())
-            .collect();
         let strips: Vec<(Owner, usize, Channels, StripRoute)> =
             project.extra_outs.iter().map(|x| (x.owner, x.bus, x.channels, strip_route(project, x))).collect();
-        let order = aux::order(&buses, &group_aux, &sound_buses, &sound_routes, &sound_aux, &strips);
+        let order = aux::order(&buses, &group_aux, &sound_buses, &sound_routes, &sound_aux, &strips, &listeners);
         let engine = Engine {
             sr: sr_f,
             tempo: project.tempo,
@@ -6430,6 +6429,82 @@ fn sidechain_sources(project: &Project, src: deckard_model::ScSource) -> Vec<(us
             .map(|(gi, si, _)| (gi, si, true))
             .collect(),
     }
+}
+
+/// Side-chain links between buses, as `(source, listener)` bus ids (a group's index, or
+/// [`sound_bus_id`]): a sound that feeds a side-chain, and each group or sound whose
+/// active effects listen to it. Computed directly from `project` rather than `fresh.fx`,
+/// because incremental [`Engine::new_after`] edits leave reused sound chains as `None`
+/// in `fresh.fx` until [`Engine::keep_parts`] runs.
+fn sidechain_listeners(project: &Project) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (lg, grp) in project.groups.iter().enumerate() {
+        for &(slot, src) in &grp.channel.sidechain {
+            if src != deckard_model::ScSource::Group(lg) && grp.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                for (sg, ss, _) in sidechain_sources(project, src) {
+                    out.push((sound_bus_id(sg, ss), lg));
+                }
+            }
+        }
+        for (ls, snd) in grp.sounds.iter().enumerate() {
+            for &(slot, src) in &snd.channel.sidechain {
+                if snd.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                    for (sg, ss, _) in sidechain_sources(project, src) {
+                        if (sg, ss) != (lg, ls) {
+                            out.push((sound_bus_id(sg, ss), sound_bus_id(lg, ls)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Which sounds run in [`Engine::run_buses`] rather than [`Engine::render_pass`]: bus
+/// Sounds ([`is_sound_bus`]), plus any non-silent sound whose side-chain listens
+/// (directly or transitively) to one, so its source bus Sound fills `sc_bufs` first.
+fn sound_buses_of(project: &Project, listeners: &[(usize, usize)]) -> Vec<Vec<bool>> {
+    let mut buses: Vec<Vec<bool>> =
+        project.groups.iter().enumerate().map(|(g, grp)| (0..grp.sounds.len()).map(|s| is_sound_bus(project, g, s)).collect()).collect();
+    let cap = project.groups.iter().map(|g| g.sounds.len()).sum::<usize>();
+    for _ in 0..cap {
+        let mut changed = false;
+        for &(src, dst) in listeners {
+            let (Some((sg, ss)), Some((lg, ls))) = (decode_sound_bus(src), decode_sound_bus(dst)) else { continue };
+            if buses.get(sg).and_then(|r| r.get(ss)).copied().unwrap_or(false)
+                && let Some(cell) = buses.get_mut(lg).and_then(|r| r.get_mut(ls))
+                && !*cell
+                && !muting(project, lg, ls).silent
+            {
+                *cell = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    buses
+}
+
+/// Whether sound (`g`, `s`) feeds any active effect's side-chain.
+fn sound_feeds_sidechain(project: &Project, g: usize, s: usize) -> bool {
+    let feeds = |src| sidechain_sources(project, src).into_iter().any(|(sg, ss, _)| (sg, ss) == (g, s));
+    project.groups.iter().enumerate().any(|(gi, grp)| {
+        grp.channel.sidechain.iter().any(|&(slot, src)| {
+            src != deckard_model::ScSource::Group(gi) && grp.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) && feeds(src)
+        }) || grp.sounds.iter().enumerate().any(|(si, snd)| {
+            (gi, si) != (g, s)
+                && snd
+                    .channel
+                    .sidechain
+                    .iter()
+                    .any(|&(slot, src)| snd.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) && feeds(src))
+        })
+    })
 }
 
 /// Which sounds feed side-chains, each with its buffer: keys (group, sound, after the
@@ -13563,6 +13638,119 @@ mod tests {
             slots: vec![passive_fx_slot()],
             channel: deckard_model::SoundChannel { dest: deckard_model::AudioDest::Master, ..Default::default() },
             ..Default::default()
+        }
+    }
+
+    /// A sound plays into a bus Sound, which goes to the master; a group's or sound's
+    /// Limiter is side-chained from that bus Sound. The bus Sound runs with the buses,
+    /// so it must run before its listeners both initially and after incremental edits.
+    #[test]
+    fn sidechain_from_a_bus_sound_ducks_groups_and_sounds_across_edits() {
+        let mut p = project();
+        let click = p.groups[0].sounds[0].clone();
+        let mut bus = bus_sound_with_fx();
+        bus.slots[0].active = true;
+        bus.level = 0.0;
+        let mut kick = click.clone();
+        kick.channel.dest = deckard_model::AudioDest::Sound(0, 1);
+        p.groups[0].sounds = vec![click, bus, kick];
+        let lim = vec![("mode".into(), 1.0), ("threshold".into(), -30.0), ("release".into(), 0.5), ("ceiling".into(), 1.0)];
+        p.groups[0].slots = vec![deckard_model::SlotInfo {
+            module: "Limiter".into(),
+            name: "Limiter".into(),
+            active: true,
+            plugin: None,
+            params: lim.clone(),
+        }];
+        p.groups[0].channel.sidechain = vec![(0, deckard_model::ScSource::Sound(0, 1))];
+
+        for bare_bus in [false, true] {
+            for incremental in [false, true] {
+                let mut base = p.clone();
+                if bare_bus {
+                    base.groups[0].sounds[1].slots.clear();
+                }
+                let run = |with_source: bool| {
+                    let mut cache = SampleCache::default();
+                    let (mut e, rep) = Engine::new(&base, None, 48_000, Mode::Arrangement, &mut cache);
+                    let mut frames = vec![[0f32; 2]; 100];
+                    frames[0] = [1.0, 1.0];
+                    set_sample(&mut e, frames, &[], false);
+                    if incremental {
+                        let mut edited = base.clone();
+                        edited.master_level = 0.78;
+                        let (fresh, _) =
+                            Engine::new_after(&edited, Some((&base, rep.chains.as_slice())), None, 48_000, Mode::Arrangement, &mut cache);
+                        drop(e.adopt(fresh, &edited));
+                    }
+                    let at = |n: usize| e.bus_order.iter().position(|&x| x == n);
+                    assert!(
+                        at(sound_bus_id(0, 1)).is_some() && at(sound_bus_id(0, 1)) < at(0),
+                        "bare_bus={bare_bus} incremental={incremental}: {:?}",
+                        e.bus_order
+                    );
+                    e.sequencing = false;
+                    e.note_on(0, 0, 60, 127, 960);
+                    if with_source {
+                        e.note_on(0, 2, 60, 127, 960);
+                    }
+                    let mut out = vec![0f32; 2 * 4800];
+                    e.process(&mut out);
+                    out.iter().fold(0f32, |m, v| m.max(v.abs()))
+                };
+                let (alone, ducked) = (run(false), run(true));
+                assert!(alone > 0.4, "bare_bus={bare_bus} incremental={incremental}: alone={alone}");
+                assert!(ducked < alone * 0.1, "bare_bus={bare_bus} incremental={incremental}: ducked={ducked} vs {alone}");
+            }
+        }
+
+        let mut sp = project();
+        let mut listener = sp.groups[0].sounds[0].clone();
+        listener.slots.push(deckard_model::SlotInfo {
+            module: "Limiter".into(),
+            name: "Limiter".into(),
+            active: true,
+            plugin: None,
+            params: lim,
+        });
+        let listen_slot = listener.slots.len() - 1;
+        listener.channel.sidechain = vec![(listen_slot, deckard_model::ScSource::Sound(0, 1))];
+        let mut bus = bus_sound_with_fx();
+        bus.slots[0].active = true;
+        bus.level = 0.0;
+        let mut kick = sp.groups[0].sounds[0].clone();
+        kick.channel.dest = deckard_model::AudioDest::Sound(0, 1);
+        sp.groups[0].sounds = vec![listener, bus, kick];
+        sp.groups[0].slots =
+            vec![deckard_model::SlotInfo { module: "EQ".into(), name: "EQ".into(), active: true, plugin: None, params: Vec::new() }];
+        for incremental in [false, true] {
+            let run = |with_source: bool| {
+                let mut cache = SampleCache::default();
+                let (mut e, rep) = Engine::new(&sp, None, 48_000, Mode::Arrangement, &mut cache);
+                let mut frames = vec![[0f32; 2]; 100];
+                frames[0] = [1.0, 1.0];
+                set_sample(&mut e, frames, &[], false);
+                if incremental {
+                    let mut edited = sp.clone();
+                    edited.master_level = 0.78;
+                    let (fresh, _) =
+                        Engine::new_after(&edited, Some((&sp, rep.chains.as_slice())), None, 48_000, Mode::Arrangement, &mut cache);
+                    drop(e.adopt(fresh, &edited));
+                }
+                let at = |n: usize| e.bus_order.iter().position(|&x| x == n);
+                assert!(at(sound_bus_id(0, 1)) < at(sound_bus_id(0, 0)) && at(sound_bus_id(0, 0)) < at(0));
+                e.sequencing = false;
+                e.note_on(0, 0, 60, 127, 960);
+                if with_source {
+                    e.note_on(0, 2, 60, 127, 960);
+                }
+                let mut out = vec![0f32; 2 * 4800];
+                e.process(&mut out);
+                out.iter().fold(0f32, |m, v| m.max(v.abs()))
+            };
+            let (alone, ducked) = (run(false), run(true));
+            assert!(alone > 0.4, "incremental={incremental}: sound alone={alone}");
+            assert!(ducked < alone * 0.1, "incremental={incremental}: sound ducked={ducked} vs {alone}");
         }
     }
 
