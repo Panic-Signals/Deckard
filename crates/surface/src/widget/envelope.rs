@@ -101,7 +101,10 @@ impl Envelope {
         if self.hold > 0.0 {
             times.push(("hold", self.hold, 1.0, 1.0, 1.0));
         }
-        times.push(("decay", self.decay.max(0.5), 1.0, end, 1.0));
+        // (A decay of 0 with a sustain is left out: an AR envelope, held at full.)
+        if self.decay > 0.0 || sus.is_none() {
+            times.push(("decay", self.decay.max(0.5), 1.0, end, 1.0));
+        }
         let release = sus.is_some() && self.release > 0.0;
         let tail = if release { Some(("release", self.release, sus.unwrap_or(0.0), 0.0, 1.0)) } else { None };
         let sus_share = if sus.is_some() { SUSTAIN_SHARE } else { 0.0 };
@@ -118,15 +121,11 @@ impl Envelope {
             *x += w;
         };
         for (i, t) in times.iter().enumerate() {
-            if t.0 == "decay" {
-                // (The sustain follows the decay.)
-                push(t.0, share(i), t.2, t.3, t.4, &mut x);
-                if let Some(s) = sus {
-                    push("sustain", SUSTAIN_SHARE, s, s, 1.0, &mut x);
-                }
-            } else {
-                push(t.0, share(i), t.2, t.3, t.4, &mut x);
-            }
+            push(t.0, share(i), t.2, t.3, t.4, &mut x);
+        }
+        // (The sustain follows the decay, or the attack in an AR envelope.)
+        if let Some(s) = sus {
+            push("sustain", SUSTAIN_SHARE, s, s, 1.0, &mut x);
         }
         if let Some(t) = tail {
             push(t.0, share(times.len()), t.2, t.3, t.4, &mut x);
@@ -239,6 +238,13 @@ mod tests {
 
     fn adsr() -> Envelope {
         Envelope { attack: 20.0, decay: 400.0, sustain: Some(0.55), release: 800.0, ..Default::default() }
+    }
+
+    #[test]
+    fn an_ar_envelope_has_no_decay() {
+        let e = Envelope { attack: 4.0, decay: 0.0, sustain: Some(1.0), release: 380.0, ..Default::default() };
+        let names: Vec<_> = e.segments().iter().map(|s| s.name).collect();
+        assert_eq!(names, ["attack", "sustain", "release"]);
     }
 
     #[test]

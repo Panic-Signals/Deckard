@@ -4069,4 +4069,101 @@ fn pinned_events_screen_persists_across_reloads_and_restarts() {
     press(&mut s3, &v, "BUTTON_EVENTS");
     assert_eq!(s3.page(), "events");
     assert_eq!(s3.pinned_open().as_deref(), Some("EVENTS"));
+/// The Control page draws pictures over the knobs they draw: a filter over Cutoff and
+/// Reso (knobs 1-2) in the left screen's picture band, nothing over knobs that match no
+/// picture.
+#[test]
+fn a_filter_picture_sits_over_cutoff_and_reso() {
+    let (s, mut v) = (Surface::new(), view());
+    let set = |v: &mut View, k: usize, name: &str, text: &str| {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    };
+    set(&mut v, 0, "Cutoff", "1.20 kHz");
+    set(&mut v, 1, "Reso", "42 %");
+    let px = s.picture(&v);
+    let lit = |x0: usize, x1: usize| (100..204).flat_map(|y| (x0..x1).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    assert!(lit(0, 240) > 200, "the filter's curve over knobs 1-2: {}", lit(0, 240));
+    assert!(lit(240, 480) < 5, "nothing over knobs 3-4");
+    assert_eq!(s.error(), None);
+}
+
+/// Touching a knob lights what it moves in its picture and shows its name and value
+/// large in the right screen's header; three fingers (a resting hand) light nothing.
+#[test]
+fn touching_a_knob_focuses_its_picture() {
+    let (mut s, mut v) = (Surface::new(), view());
+    for (k, name, text) in [(0, "Cutoff", "1.20 kHz"), (1, "Reso", "42 %")] {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    }
+    let before = s.picture(&v);
+    hold(&mut s, &v, "BUTTON_CAP_1", true);
+    let picture = s.draw_picture(&v);
+    assert!(picture.texts.iter().any(|t| t == "1.20 kHz"), "the value whole in the header: {:?}", picture.texts);
+    let touched = s.picture(&v);
+    let band = |px: &[[u8; 4]]| (100..204).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    assert_ne!(band(&before), band(&touched), "the cutoff lights in the picture");
+    hold(&mut s, &v, "BUTTON_CAP_2", true);
+    hold(&mut s, &v, "BUTTON_CAP_3", true);
+    assert!(!s.draw_picture(&v).texts.iter().any(|t| t == "1.20 kHz"), "a resting hand shows nothing");
+    for n in ["BUTTON_CAP_1", "BUTTON_CAP_2", "BUTTON_CAP_3"] {
+        hold(&mut s, &v, n, false);
+    }
+    assert_eq!(band(&s.picture(&v)), band(&before));
+    assert_eq!(s.error(), None);
+}
+
+/// Writes the Control page with pictures over its knobs (both screens) to the folder
+/// in `DECKARD_RENDER_DIR` (else the temporary folder), on every theme, to look at
+/// (`--ignored`): plain, and with knob 2 touched.
+#[test]
+#[ignore]
+fn render_control_pictures() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let page = [
+        ("Filter", "Cutoff", "1.20 kHz", 0.55),
+        ("Filter", "Resonance", "42 %", 0.42),
+        ("Amp Env", "Attack", "4.0 ms", 0.1),
+        ("Amp Env", "Release", "380 ms", 0.4),
+        ("Comp", "Threshold", "-18.0 dB", 0.6),
+        ("Comp", "Ratio", "4.0:1", 0.3),
+        ("Comp", "Knee", "6.0 dB", 0.5),
+        ("Comp", "Makeup", "2.0 dB", 0.4),
+    ];
+    v.control.knobs = page
+        .iter()
+        .map(|(section, name, text, value)| {
+            Some(KnobView {
+                name: name.to_string(),
+                section: section.to_string(),
+                text: text.to_string(),
+                value: *value,
+                ..Default::default()
+            })
+        })
+        .collect();
+    v.control.chain = ["Pigments", "EQ", "Compressor", "Raum"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| crate::SlotView { name: n.to_string(), instrument: i == 0, active: true, plugin: i != 1 && i != 2, picture: None })
+        .collect();
+    (v.control.slot_count, v.control.slot_index, v.control.slot) = (4, Some(0), Some("Pigments".into()));
+    let dir = std::env::var("DECKARD_RENDER_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    for theme in s.themes() {
+        s.set_theme(&theme);
+        for touched in [false, true] {
+            hold(&mut s, &v, "BUTTON_CAP_2", touched);
+            let px = s.picture(&v);
+            let path = dir.join(format!("control-pictures-{theme}{}.png", if touched { "-touch2" } else { "" }));
+            let f = std::fs::File::create(&path).unwrap();
+            let mut e = png::Encoder::new(f, 960, 272);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+            eprintln!("{}", path.display());
+        }
+        hold(&mut s, &v, "BUTTON_CAP_2", false);
+    }
+    assert_eq!(s.error(), None);
 }
