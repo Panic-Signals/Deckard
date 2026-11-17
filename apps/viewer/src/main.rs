@@ -3985,6 +3985,29 @@ impl App {
         s.patterns.iter().find(|(g, _)| *g == group).map(|&(_, pi)| pi)
     }
 
+    /// Group `g`'s active pattern for recording or clearing modulation: the playing
+    /// pattern at the playhead when running, else its scene pattern, else the focused one.
+    pub(crate) fn active_modulation_pattern(&self, g: usize) -> usize {
+        if let Some(doc) = &self.doc {
+            let d = doc.borrow();
+            if let Some(h) = self.playhead()
+                && let Some((pi, _)) = record::pattern_at(d.project(), h.mode, h.position, g)
+            {
+                return pi;
+            }
+            drop(d);
+            if let Some(Mode::Pattern(pg, pi)) = self.playing
+                && pg == g
+            {
+                return pi;
+            }
+            if let Some(pi) = self.scene_pattern(g) {
+                return pi;
+            }
+        }
+        if g == self.group { self.pattern } else { 0 }
+    }
+
     /// With Follow on, the focus follows playback: the playing scene (or the
     /// playing section's scene) and its patterns.
     fn follow_playback(&mut self, head: Playhead) {
