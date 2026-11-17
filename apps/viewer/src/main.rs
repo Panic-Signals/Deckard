@@ -2552,6 +2552,14 @@ impl App {
     /// Close the audio output and whatever else holds the driver: playback stops.
     fn close_output(&mut self) {
         self.stop();
+        // Tearing down the `Output` drops the session recording's master tap. A device or
+        // buffer change at the SAME sample rate fires no RateChange, so clean-stop the
+        // session here (before the old `Output` is dropped) rather than let it pad pure
+        // silence for the rest of the set. `set_tap(None)` is moot: the `Output` is going.
+        if self.session.recording() {
+            self.session.abort(session_record::StopReason::DeviceChange);
+            // The window stays open so it can show the "audio device changed" reason.
+        }
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
@@ -2721,6 +2729,18 @@ impl App {
                     self.settings.save();
                 }
             }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("Session recording").on_hover_text("File ▸ Record Session to File… records the master output to a WAV.");
+            ui.label("Keep free");
+            let mut mb = self.settings.session_reserve_mb;
+            let drag = egui::DragValue::new(&mut mb).range(0..=1_000_000).speed(64).suffix(" MB");
+            if ui.add(drag).changed() {
+                self.settings.session_reserve_mb = mb;
+                self.settings.save();
+            }
+            ui.label(egui::RichText::new("the recording auto-stops before the drive drops below this (1 GB = 1024 MB)").weak());
         });
         ui.separator();
         ui.horizontal(|ui| {
@@ -8390,6 +8410,10 @@ impl App {
                 self.settings.session_dir = path.parent().map(Path::to_path_buf);
                 self.settings.save();
                 self.session_window_open = true;
+                // Surface the time-available estimate once at start (the OS save dialog can't
+                // carry it); the window then shows it live.
+                let left = session_record::seconds_available(free, reserve, rate);
+                self.status = format!("Recording session — {}", session_window::format_time_left(left));
             }
             Err(e) => self.error = Some(e),
         }

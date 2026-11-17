@@ -50,9 +50,6 @@ fn sanitize(name: &str) -> String {
 /// The largest data payload a WAV file can hold (RIFF sizes are 32-bit), kept under 4 GiB.
 pub const WAV_CEILING_BYTES: u64 = 4_000_000_000;
 
-/// Free space that must remain on the disk; recording stops before it is used up.
-pub const DEFAULT_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// Bytes written per second of 24-bit stereo audio at `rate`.
 pub fn bytes_per_second(rate: u32) -> u64 {
     rate as u64 * 6
@@ -78,6 +75,8 @@ pub enum StopReason {
     Disk,
     Ceiling,
     RateChange,
+    /// The audio output was torn down/rebuilt (device or buffer change) while recording.
+    DeviceChange,
     WriteError,
     Manual,
 }
@@ -152,6 +151,10 @@ struct SessionRun {
     /// When `start` opened the file, so `poll` can keep the file's length equal to
     /// wall-clock elapsed time.
     started: Instant,
+    /// The last free-space reading and when it was taken, so `poll` can throttle the
+    /// `statvfs` syscall to about once a second instead of running it every frame.
+    free_cache: u64,
+    free_checked: Option<Instant>,
 }
 
 /// A snapshot of the recorder for the UI: everything a window needs to draw, and nothing
@@ -176,6 +179,11 @@ pub struct SessionView {
 /// How many wave buckets to keep for the scrolling meter display.
 const WAVE_BUCKETS: usize = 240;
 
+/// The most silence one `poll_at` will pad in a single call: a clock jump beyond this
+/// (e.g. the machine sleeping) is caught up over the following polls instead of allocating
+/// one enormous silent buffer.
+const MAX_PAD_SECONDS: u64 = 4;
+
 /// Records the master output to a WAV file, filling silent gaps so the file's length always
 /// equals wall-clock elapsed time. The real-time `poll` wrapper (drain tap, read rate, compute
 /// elapsed) is wired in a later task; the testable core is `poll_at`.
@@ -199,7 +207,7 @@ impl SessionRecorder {
     /// the tap via `attach_tap`.
     pub fn start(&mut self, path: PathBuf, rate: u32, reserve: u64, started_label: String) -> Result<(), String> {
         let wav = SessionWav::create(&path, rate)?;
-        self.run = Some(SessionRun { wav, rate, written: 0, started: Instant::now() });
+        self.run = Some(SessionRun { wav, rate, written: 0, started: Instant::now(), free_cache: u64::MAX, free_checked: None });
         self.view = SessionView { recording: true, rate, reserve, path: Some(path), started_label, ..SessionView::default() };
         Ok(())
     }
@@ -230,10 +238,26 @@ impl SessionRecorder {
             None => Vec::new(),
         };
         let elapsed = self.run.as_ref().map_or(0.0, |r| r.started.elapsed().as_secs_f64());
-        let free = self.view.path.as_ref().map_or(u64::MAX, |p| free_bytes(p.parent().unwrap_or(p)).unwrap_or(u64::MAX));
+        let free = self.free_throttled();
         if self.poll_at(elapsed, rate, &new, free) {
             output.set_tap(None);
         }
+    }
+
+    /// Free space on the recording's disk, re-read from the OS at most about once a second
+    /// and otherwise served from the cached value (a `statvfs` every display frame is waste).
+    fn free_throttled(&mut self) -> u64 {
+        let now = Instant::now();
+        let fresh = self.run.as_ref().and_then(|r| r.free_checked).is_some_and(|t| now.duration_since(t).as_secs_f64() < 1.0);
+        if fresh {
+            return self.run.as_ref().map_or(u64::MAX, |r| r.free_cache);
+        }
+        let free = self.view.path.as_ref().map_or(u64::MAX, |p| free_bytes(p.parent().unwrap_or(p)).unwrap_or(u64::MAX));
+        if let Some(run) = self.run.as_mut() {
+            run.free_cache = free;
+            run.free_checked = Some(now);
+        }
+        free
     }
 
     /// The testable core. Pads silent frames so the file reaches `floor(elapsed * rate)` total
@@ -250,26 +274,43 @@ impl SessionRecorder {
         let target = (elapsed * rate as f64) as u64;
 
         // Do the pad/write work against the `run` borrow, capturing any write error, then drop
-        // the borrow before calling `self.fail`/`self.clean_stop`.
-        let write_result = {
+        // the borrow before calling `self.fail`/`self.clean_stop`. Returns whether the WAV
+        // ceiling was reached mid-write (so we clean-stop with Ceiling below).
+        let write_result: Result<bool, String> = {
             let run = self.run.as_mut().expect("run present: checked above");
-            let have = run.written + new.len() as u64;
-            let pad = target.saturating_sub(have); // silent frames to keep length true
-            let mut write = || -> Result<(), String> {
+            // Frames that still fit under the 4 GB ceiling (6 bytes per stereo frame).
+            let ceiling_frames = WAV_CEILING_BYTES / 6;
+            // Silent frames to keep length true, but clamped so a clock jump (e.g. a laptop
+            // sleeping mid-record) can't force a multi-GB allocation in one poll: the next
+            // poll catches up, or the ceiling clean-stops first.
+            let max_pad = (rate as u64).saturating_mul(MAX_PAD_SECONDS);
+            let want_pad = target.saturating_sub(run.written + new.len() as u64);
+            let pad = want_pad.min(max_pad);
+            (|| -> Result<bool, String> {
+                let mut room = ceiling_frames.saturating_sub(run.written);
+                // Silent pad first (to keep the timeline), never past the ceiling.
+                let pad = pad.min(room);
                 if pad > 0 {
                     run.wav.write(&vec![[0.0, 0.0]; pad as usize])?;
+                    run.written += pad;
+                    room -= pad;
                 }
-                if !new.is_empty() {
-                    run.wav.write(new)?;
+                if room == 0 {
+                    return Ok(true); // ceiling hit while padding
                 }
-                run.written = run.written.max(have).max(target);
-                Ok(())
-            };
-            write()
+                // Then the new signal, also capped at the ceiling.
+                let take = (new.len() as u64).min(room) as usize;
+                if take > 0 {
+                    run.wav.write(&new[..take])?;
+                    run.written += take as u64;
+                }
+                Ok(take < new.len()) // couldn't fit all of `new`: ceiling reached
+            })()
         };
-        if let Err(e) = write_result {
-            return self.fail(e);
-        }
+        let hit_ceiling = match write_result {
+            Ok(hit) => hit,
+            Err(e) => return self.fail(e),
+        };
 
         // Update the view for the UI.
         let peak = new.iter().fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
@@ -285,6 +326,10 @@ impl SessionRecorder {
             }
         }
 
+        // A write that reached the 4 GB ceiling: finalize the (valid) file now.
+        if hit_ceiling {
+            return self.clean_stop(StopReason::Ceiling);
+        }
         // Auto-stop when the disk is down to the reserve or the WAV is full.
         if let Some(reason) = autostop_reason(self.view.bytes, free, self.view.reserve) {
             return self.clean_stop(reason);
@@ -294,11 +339,19 @@ impl SessionRecorder {
 
     /// Manual stop: finalize, clear `run`, return the file path.
     pub fn stop(&mut self) -> Option<PathBuf> {
+        self.abort(StopReason::Manual)
+    }
+
+    /// Stop with an explicit reason, finalizing the file. Used when the caller must stop the
+    /// session for a reason the `poll` loop can't see — e.g. the audio `Output` is being torn
+    /// down and rebuilt (a device or buffer change) at the same sample rate, which no
+    /// `RateChange` would catch. Returns the file path if a recording was in flight.
+    pub fn abort(&mut self, reason: StopReason) -> Option<PathBuf> {
         if self.run.is_none() {
             return None;
         }
         let path = self.view.path.clone();
-        self.clean_stop(StopReason::Manual);
+        self.clean_stop(reason);
         path
     }
 
@@ -453,6 +506,41 @@ mod tests {
         assert!(stopped);
         assert_eq!(s.view.stopped, Some(StopReason::RateChange));
         assert!(!s.recording());
+    }
+
+    #[test]
+    fn abort_device_change_finalizes_and_records_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = started(dir.path());
+        s.poll_at(1.0, 48_000, &[[0.3, 0.3]; 24_000], u64::MAX); // half a second of signal
+        let path = s.abort(StopReason::DeviceChange);
+        assert_eq!(path, Some(dir.path().join("s.wav")), "abort returns the file path");
+        assert!(!s.recording());
+        assert!(!s.view.recording);
+        assert_eq!(s.view.stopped, Some(StopReason::DeviceChange));
+        // The partial file was finalized and opens as a valid, non-empty WAV.
+        let mut r = hound::WavReader::open(dir.path().join("s.wav")).unwrap();
+        assert!(r.samples::<i32>().count() > 0);
+    }
+
+    #[test]
+    fn clock_jump_past_ceiling_stops_cleanly_without_overrunning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = started(dir.path()); // 48 kHz
+        // Pretend the file is already just shy of the 4 GB ceiling, without writing 4 GB:
+        // the test lives in this module, so it can position the frame counter directly.
+        let ceiling_frames = WAV_CEILING_BYTES / 6;
+        s.run.as_mut().unwrap().written = ceiling_frames - 100;
+        // The machine slept: `elapsed` leaps hours past the ceiling in a single poll, with
+        // some signal arriving too. Before the fix this padded multi-GB of silence and
+        // overran the RIFF size; now it writes only up to the ceiling and clean-stops.
+        let stopped = s.poll_at(100_000.0, 48_000, &[[0.5, 0.5]; 10_000], u64::MAX);
+        assert!(stopped, "a jump past the ceiling clean-stops");
+        assert!(!s.recording());
+        assert_eq!(s.view.stopped, Some(StopReason::Ceiling));
+        let path = dir.path().join("s.wav");
+        assert!(std::fs::metadata(&path).unwrap().len() < WAV_CEILING_BYTES, "file stayed under the ceiling");
+        assert!(hound::WavReader::open(&path).is_ok(), "file opens as a valid WAV");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The session Recorder window: a live view of the master-output recording.
 
-use crate::session_record::SessionView;
+use crate::session_record::{SessionView, StopReason, seconds_available};
 use eframe::egui;
 
 /// What the user did in the window this frame.
@@ -38,6 +38,30 @@ pub fn show(ctx: &egui::Context, view: &SessionView) -> WindowAction {
 pub fn format_elapsed(secs: f64) -> String {
     let t = secs.max(0.0) as u64;
     format!("{:02}:{:02}:{:02}", t / 3600, t % 3600 / 60, t % 60)
+}
+
+/// A rough "time remaining" label from a count of seconds, e.g. `~2h 30m left`,
+/// `~45m left`, or `~30s left`.
+pub fn format_time_left(secs: u64) -> String {
+    let (h, m) = (secs / 3600, secs % 3600 / 60);
+    if h > 0 {
+        format!("~{h}h {m:02}m left")
+    } else if m > 0 {
+        format!("~{m}m left")
+    } else {
+        format!("~{secs}s left")
+    }
+}
+
+/// The message shown after an automatic stop, or `None` when the reason needs no line of
+/// its own (a manual stop, or a write error that already shows `view.error`).
+fn reason_text(reason: StopReason) -> Option<&'static str> {
+    match reason {
+        StopReason::Disk => Some("Stopped: disk reserve reached"),
+        StopReason::Ceiling => Some("Stopped: 4 GB file limit"),
+        StopReason::RateChange | StopReason::DeviceChange => Some("Stopped: audio device changed"),
+        StopReason::WriteError | StopReason::Manual => None,
+    }
 }
 
 /// `bytes` as MB or GB.
@@ -88,6 +112,8 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView) -> WindowAction {
         if view.recording {
             ui.label(format!("started {}", view.started_label));
             ui.label(format!("{} on disk", format_bytes(view.bytes)));
+            // How much longer it can record before it auto-stops (disk reserve or 4 GB).
+            ui.label(format_time_left(seconds_available(view.free, view.reserve, view.rate)));
         }
     });
     ui.add_space(6.0);
@@ -113,6 +139,12 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView) -> WindowAction {
     }
     if let Some(e) = &view.error {
         ui.colored_label(RED, e);
+    }
+    // After an automatic stop, say why (a write error already shows above).
+    if !view.recording
+        && let Some(text) = view.stopped.and_then(reason_text)
+    {
+        ui.colored_label(AMBER, text);
     }
     ui.add_space(6.0);
     if ui.add_enabled(view.recording, egui::Button::new("Stop")).clicked() {
@@ -148,6 +180,24 @@ mod tests {
         assert_eq!(format_elapsed(0.0), "00:00:00");
         assert_eq!(format_elapsed(3661.9), "01:01:01");
         assert_eq!(format_elapsed(-3.0), "00:00:00");
+    }
+
+    #[test]
+    fn time_left_reads_naturally() {
+        assert_eq!(format_time_left(9_000), "~2h 30m left"); // 2h 30m
+        assert_eq!(format_time_left(2_700), "~45m left");
+        assert_eq!(format_time_left(30), "~30s left");
+        assert_eq!(format_time_left(3_600), "~1h 00m left");
+    }
+
+    #[test]
+    fn stopped_reason_line_appears() {
+        let view = SessionView { recording: false, stopped: Some(StopReason::Disk), ..SessionView::default() };
+        let mut h = Harness::new_ui(|ui| {
+            body(ui, &view);
+        });
+        h.run();
+        assert!(h.query_by_label("Stopped: disk reserve reached").is_some(), "the auto-stop reason is shown");
     }
 
     #[test]
