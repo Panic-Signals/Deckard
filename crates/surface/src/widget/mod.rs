@@ -389,7 +389,8 @@ pub fn draw_pictures(
     });
     let ids: [Option<u32>; 8] = std::array::from_fn(|i| {
         let t = knobs.raw_get::<Option<Table>>(i + 1).ok().flatten()?;
-        num(&t, "id").map(|n| n as u32)
+        // (An integer: ids are 32-bit, past what an f32 holds exactly.)
+        t.raw_get::<Option<i64>>("id").ok().flatten().and_then(|n| u32::try_from(n).ok())
     });
     let mut spans = Vec::new();
     if let Some(name) = plugin
