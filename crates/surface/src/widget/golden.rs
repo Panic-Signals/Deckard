@@ -64,7 +64,7 @@ fn path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden").join(format!("{name}.png"))
 }
 
-fn write_png(path: &std::path::Path, w: u32, h: u32, px: &[[u8; 4]]) {
+pub(crate) fn write_png(path: &std::path::Path, w: u32, h: u32, px: &[[u8; 4]]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let f = std::fs::File::create(path).unwrap();
     let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
