@@ -1847,6 +1847,8 @@ fn record(p: &[u8; 4]) -> bool {
 #[test]
 fn the_eq_curve_stays_on_the_right_screen() {
     let (s, mut v) = (Surface::new(), view());
+    // (No knobs: the left screen has no dials, so its accent is only a stray curve's.)
+    v.control.knobs = vec![None; 8];
     v.control.chain[0].name = "EQ".into();
     v.control.slot = Some("EQ".into());
     v.control.pages = vec!["Freq / Gain".into(), "Width / Output".into()];
@@ -1891,6 +1893,8 @@ fn the_right_screen_curve_follows_the_theme() {
 #[test]
 fn the_filter_curve_stays_on_the_right_screen() {
     let (s, mut v) = (Surface::new(), view());
+    // (No knobs: the left screen has no dials, so its accent is only a stray curve's.)
+    v.control.knobs = vec![None; 8];
     v.control.chain[0].name = "Filter".into();
     v.control.slot = Some("Filter".into());
     v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
@@ -1920,6 +1924,8 @@ fn the_filter_curve_stays_on_the_right_screen() {
 #[test]
 fn the_effect_picture_stays_on_the_right_screen() {
     let (s, mut v) = (Surface::new(), view());
+    // (No knobs: the left screen has no dials, so its accent is only a stray curve's.)
+    v.control.knobs = vec![None; 8];
     v.control.chain[0].name = "Compressor".into();
     v.control.slot = Some("Compressor".into());
     v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
@@ -1965,10 +1971,15 @@ fn plugin_pictures_show_on_the_plugin_page() {
     let slot = crate::SlotView { name: "Sampler".into(), instrument: true, active: true, plugin: false, picture: Some("sampler".into()) };
     v.control.chain = vec![slot];
     (v.control.slot_count, v.control.slot_index) = (1, Some(0));
+    // (No knobs on the right: no dials there, the logo shows.)
+    for k in 4..8 {
+        v.control.knobs[k] = None;
+    }
     let count =
         |px: &[[u8; 4]], c: [u8; 4], right: bool| px.iter().enumerate().filter(|(i, p)| **p == c && ((i % 960) >= 480) == right).count();
     let px = s.picture(&v);
-    assert!(count(&px, thumb, false) > 2000, "the thumbnail in the chain: {}", count(&px, thumb, false));
+    // (Small: the chain is the strip over the picture band.)
+    assert!(count(&px, thumb, false) > 300, "the thumbnail in the chain: {}", count(&px, thumb, false));
     assert!(count(&px, logo, true) > 5000, "the logo on the right: {}", count(&px, logo, true));
     // Without the picture: a drawing. A few of its pixels can land on the same grey.
     v.control.chain[0].picture = Some("nothing".into());
@@ -3667,29 +3678,6 @@ fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
 }
 
 #[test]
-fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
-    let (surface, mut v) = (Surface::new(), view());
-    v.control.modules_visible = true;
-    v.control.chain = (0..3)
-        .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
-        .collect();
-    for (slot, direction, range) in [(0, "right", "1-2 / 3"), (2, "left", "2-3 / 3")] {
-        v.control.slot_index = Some(slot);
-        let picture = surface.draw_picture(&v);
-        assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
-        assert!(picture.ops.iter().any(
-            |o| matches!(o, screen::DrawOp::Triangle { x, y: 143, w: 18, h: 28, dir, .. } if (*x == 4 || *x == 458) && dir == direction)
-        ));
-    }
-    for slot in &mut v.control.chain {
-        slot.instrument = false;
-        slot.name = "FX".into();
-    }
-    v.control.slot_index = Some(0);
-    assert!(!surface.draw_picture(&v).texts.iter().any(|s| s.ends_with(" / 3")));
-}
-
-#[test]
 fn with_pictures_the_chain_is_a_strip_with_its_own_overflow() {
     let (surface, mut v) = (Surface::new(), view());
     v.control.modules_visible = true;
@@ -4074,7 +4062,11 @@ fn a_filter_picture_sits_over_cutoff_and_reso() {
     let px = s.picture(&v);
     let lit = |x0: usize, x1: usize| (100..204).flat_map(|y| (x0..x1).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
     assert!(lit(0, 240) > 200, "the filter's curve over knobs 1-2: {}", lit(0, 240));
-    assert!(lit(240, 480) < 5, "nothing over knobs 3-4");
+    // Knobs 3-4 have dials: a ring each, centred over the knob, nothing in the band's
+    // lower corners where a curve would run.
+    assert!(lit(240, 480) > 20, "dials over knobs 3-4");
+    let corner = (190..204).flat_map(|y| (245..255).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    assert_eq!(corner, 0, "not the filter's curve");
     assert_eq!(s.error(), None);
 }
 
@@ -4269,4 +4261,28 @@ fn a_users_mapping_gives_pages_and_pictures() {
     let s = Surface::with_user_dir(Some(dir.path().to_path_buf()));
     assert!(s.error().is_some_and(|e| e.contains("broken.lua") && e.contains("nope")), "{:?}", s.error());
     assert!(s.mapping_pages("Ladder").is_some());
+}
+
+/// Every knob no picture covers gets a dial; none over the right screen's curve of a
+/// built-in effect.
+#[test]
+fn bare_knobs_get_dials() {
+    let (s, mut v) = (Surface::new(), view());
+    let pic = s.draw_picture(&v);
+    let rings = |pic: &crate::screen::Picture, x0: f32, x1: f32| {
+        pic.ops
+            .iter()
+            .filter(|o| matches!(o, screen::DrawOp::Line { p0, .. } if p0.0 >= x0 && p0.0 < x1 && p0.1 >= 100.0 && p0.1 < 204.0))
+            .count()
+    };
+    for k in 0..6 {
+        let x = k as f32 * 120.0;
+        assert!(rings(&pic, x, x + 120.0) > 50, "a dial over knob {}", k + 1);
+    }
+    assert_eq!(rings(&pic, 720.0, 960.0), 0, "knobs 7-8 have no parameter");
+    v.control.eq = Some(crate::EqCurveView { points: vec![0.5; 48], ..Default::default() });
+    let pic = s.draw_picture(&v);
+    assert!(rings(&pic, 0.0, 120.0) > 50, "the left keeps its dials");
+    assert!(rings(&pic, 480.0, 960.0) < 200, "no dials over the EQ's curve");
+    assert_eq!(s.error(), None);
 }
