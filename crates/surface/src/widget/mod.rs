@@ -27,6 +27,7 @@ pub mod eq;
 pub mod filter;
 pub mod layout;
 pub mod lfo;
+pub mod mapping;
 pub mod transfer;
 pub mod value;
 
@@ -360,7 +361,18 @@ pub fn ms_text(ms: f32) -> String {
 /// there's none), each in the picture band over the knobs it draws ([`layout`]), with
 /// touch focus from `touched` (knob numbers 1..8; three or more is a resting hand and
 /// lights nothing). Returns the spans drawn: `{ first = 1..8, cells = n, kind = "filter" }`.
-pub fn draw_pictures(lua: &Lua, pic: &mut Picture, knobs: &Table, touched: &[usize], look: &Look) -> mlua::Result<Table> {
+///
+/// `plugin` names the focused slot's plug-in: its mapping's pictures (`mapping`, from
+/// the controller scripts' `mappings/`) come first, and the generic patterns fill the
+/// knobs they leave.
+pub fn draw_pictures(
+    lua: &Lua,
+    pic: &mut Picture,
+    knobs: &Table,
+    touched: &[usize],
+    plugin: Option<&str>,
+    look: &Look,
+) -> mlua::Result<Table> {
     let page: [Option<layout::Knob>; 8] = std::array::from_fn(|i| {
         let t = knobs.raw_get::<Option<Table>>(i + 1).ok().flatten()?;
         Some(layout::Knob {
@@ -372,13 +384,39 @@ pub fn draw_pictures(lua: &Lua, pic: &mut Picture, knobs: &Table, touched: &[usi
             mod_value: num(&t, "mod_position"),
         })
     });
+    let ids: [Option<u32>; 8] = std::array::from_fn(|i| {
+        let t = knobs.raw_get::<Option<Table>>(i + 1).ok().flatten()?;
+        num(&t, "id").map(|n| n as u32)
+    });
+    let mut spans = Vec::new();
+    if let Some(name) = plugin
+        && let Some(all) = lua.app_data_ref::<Mappings>()
+        && let Some(m) = mapping::find(&all.0, name, "", "")
+    {
+        spans = m.spans(&page, &ids);
+    }
+    let mut taken = [false; 8];
+    for s in &spans {
+        for k in s.first..s.first + s.cells {
+            taken[k] = true;
+        }
+        for (k, _) in &s.knobs {
+            taken[*k] = true;
+        }
+    }
+    for s in layout::layout(&page) {
+        if !(s.first..s.first + s.cells).any(|k| taken[k]) && !s.knobs.iter().any(|(k, _)| taken[*k]) {
+            spans.push(s);
+        }
+    }
+    spans.sort_by_key(|s| s.first);
     let out = lua.create_table()?;
-    for span in layout::layout(&page) {
+    for span in spans {
         let inputs = lua.create_table()?;
         for (k, v) in &span.inputs {
             match v {
-                layout::Input::Num(n) => inputs.raw_set(*k, *n)?,
-                layout::Input::Text(s) => inputs.raw_set(*k, s.as_str())?,
+                layout::Input::Num(n) => inputs.raw_set(k.as_str(), *n)?,
+                layout::Input::Text(s) => inputs.raw_set(k.as_str(), s.as_str())?,
             }
         }
         if touched.len() < 3
@@ -392,15 +430,18 @@ pub fn draw_pictures(lua: &Lua, pic: &mut Picture, knobs: &Table, touched: &[usi
             w: span.cells as i32 * CELL_W,
             h: BAND_H,
         };
-        draw_lua(span.kind, pic, r, &inputs, look)?;
+        draw_lua(&span.kind, pic, r, &inputs, look)?;
         let s = lua.create_table()?;
         s.raw_set("first", span.first + 1)?;
         s.raw_set("cells", span.cells)?;
-        s.raw_set("kind", span.kind)?;
+        s.raw_set("kind", span.kind.as_str())?;
         out.raw_push(s)?;
     }
     Ok(out)
 }
+
+/// The plug-in mappings the scripts loaded (Lua app data).
+pub struct Mappings(pub std::rc::Rc<Vec<mapping::Mapping>>);
 
 /// Draw widget `kind` from a script's inputs table.
 pub fn draw_lua(kind: &str, pic: &mut Picture, r: Rect, t: &Table, look: &Look) -> mlua::Result<()> {

@@ -488,9 +488,14 @@ fn saved_page_name(pg: &deckard_model::PluginPage) -> String {
 }
 
 /// The plug-in's own pages (DECKARD's: they follow the plug-in, even once saved for a
-/// macro), the pages saved with it, or Maschine's automatic ones: its first 128
+/// macro), the pages saved with it, or else its mapping's pages (`mapped`, from the
+/// controller scripts' `mappings/`) followed by Maschine's automatic ones: its first 128
 /// automatable parameters, eight per page.
-fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) -> Vec<ViewPage> {
+fn view_pages(
+    p: &deckard_plugins::Plugin,
+    saved: &[deckard_model::PluginPage],
+    mapped: Option<&[deckard_surface::widget::mapping::PageParams]>,
+) -> Vec<ViewPage> {
     let own = p.pages();
     if !own.is_empty() {
         let all = p.parameter_list(false);
@@ -531,13 +536,38 @@ fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) 
             .filter(|pg| !pg.knobs.is_empty())
             .collect()
     } else {
-        p.parameters()
-            .into_iter()
-            .take(128)
-            .collect::<Vec<_>>()
-            .chunks(8)
-            .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
-            .collect()
+        let mut params = p.parameters();
+        // The mapping's pages first, in its order (each knob found by id, title or name);
+        // the parameters they leave follow, eight a page.
+        let mut pages = Vec::new();
+        for pg in mapped.unwrap_or_default() {
+            let knobs: Vec<_> = pg
+                .knobs
+                .iter()
+                .flatten()
+                .filter_map(|r| {
+                    let found =
+                        r.id.and_then(|id| params.iter().position(|i| i.id == id))
+                            .or_else(|| r.title.as_ref().and_then(|t| params.iter().position(|i| i.title.eq_ignore_ascii_case(t))))
+                            .or_else(|| params.iter().position(|i| r.knob.iter().any(|n| n.eq_ignore_ascii_case(&i.title))))?;
+                    let info = params.remove(found);
+                    Some((info.clone(), info.title.clone(), pg.name.clone()))
+                })
+                .collect();
+            if !knobs.is_empty() {
+                pages.push(ViewPage::new(p, pg.name.clone(), knobs));
+            }
+        }
+        let rest = 128usize.saturating_sub(pages.len() * 8);
+        pages.extend(
+            params
+                .into_iter()
+                .take(rest)
+                .collect::<Vec<_>>()
+                .chunks(8)
+                .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect())),
+        );
+        pages
     };
     name_unnamed_pages(&mut pages);
     pages
@@ -5664,6 +5694,14 @@ impl App {
                     k.as_ref().map(|k| KnobView {
                         mod_position: mod_at[i],
                         mod_text: mod_at[i].and_then(|at| edits.get(i).copied().flatten().and_then(|e| self.mod_text(e, i, at))),
+                        param_id: match edits.get(i).copied().flatten() {
+                            Some(
+                                layout::Edit::Plugin(_, id, _)
+                                | layout::Edit::PluginChoice(_, id, ..)
+                                | layout::Edit::PluginIn(_, _, id, _),
+                            ) => Some(id),
+                            _ => None,
+                        },
                         name: k.name.clone(),
                         section: k.section.clone(),
                         text: knob_text(i, &k.text),
@@ -10390,7 +10428,7 @@ impl App {
             let cid = deckard_plugins::state::PluginId::parse(&pr.id, &pr.name).map(|i| i.cid);
             let (pages, sc) = match p.try_lock() {
                 // (Still the slot's old plug-in: once it's replaced.)
-                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved), sidechain(&g)),
+                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g)),
                 Ok(_) | Err(std::sync::TryLockError::WouldBlock) => return None,
                 Err(_) => (Vec::new(), false),
             };
@@ -10409,7 +10447,7 @@ impl App {
                             let _ = g.load_chunk(&nks.chunk);
                             g.mark_saved(Vec::new());
                         }
-                        (view_pages(&g, &saved), sidechain(&g))
+                        (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g))
                     })
                     .unwrap_or_default();
                 Some(view(pages, sc, std::sync::Arc::downgrade(&p), None))

@@ -72,7 +72,7 @@ impl crate::App {
         let Some(doc) = &self.doc else { return Vec::new() };
         let saved = doc.borrow().chain_slots(chain).and_then(|s| Some(s.get(slot)?.plugin.as_ref()?.pages.clone())).unwrap_or_default();
         let Some(p) = self.samples.plugins.existing(self.plugin_slot_key(chain, slot)) else { return Vec::new() };
-        p.try_lock().map(|p| crate::view_pages(&p, &saved)).unwrap_or_default()
+        p.try_lock().map(|p| crate::view_pages(&p, &saved, self.surface.mapping_pages(&p.name).as_deref())).unwrap_or_default()
     }
 
     /// The plug-ins' parameters a macro of `level` can control (its own chain's, and

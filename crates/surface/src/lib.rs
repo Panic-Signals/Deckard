@@ -674,6 +674,8 @@ pub struct KnobView {
     pub mod_position: Option<f64>,
     /// The knob's text with its parameter at `mod_position` (set with it).
     pub mod_text: Option<String>,
+    /// Its plug-in parameter's id, if it's a plug-in's (mappings find parameters by it).
+    pub param_id: Option<u32>,
     pub name: String,
     /// The section of the plug-in it's in ("Voice Settings").
     pub section: String,
@@ -1280,8 +1282,12 @@ impl Surface {
         match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode), self.pinned.clone(), self.shown_pin.clone()) {
             Ok(run) => {
                 run.lua.set_app_data(self.pictures.clone());
+                let mapping_error = run.lua.app_data_ref::<MappingErrors>().and_then(|e| e.0.first().cloned());
                 self.run = Some(run);
                 *self.error.borrow_mut() = None;
+                if let Some(e) = mapping_error {
+                    self.set_error(e);
+                }
                 self.picture = None;
                 self.last_ops = None;
                 true
@@ -1682,6 +1688,15 @@ impl Surface {
         self.pictures.borrow().contains_key(&(key.to_string(), thumb))
     }
 
+    /// The knob pages of the mapping for plug-in `name`, if one matches and has pages
+    /// (`mappings/` in the controller scripts; the user's win).
+    pub fn mapping_pages(&self, name: &str) -> Option<Vec<widget::mapping::PageParams>> {
+        let run = self.run.as_ref()?;
+        let all = run.lua.app_data_ref::<widget::Mappings>()?;
+        let pages = widget::mapping::find(&all.0, name, "", "")?.page_params();
+        (!pages.is_empty()).then_some(pages)
+    }
+
     /// The widgets' look in the theme shown now (for the widgets' golden tests).
     #[cfg(test)]
     pub(crate) fn widget_look(&self) -> Option<widget::Look> {
@@ -1863,6 +1878,9 @@ fn sync_lua_pin(lua: &Lua, shown: Option<&(String, String)>) -> mlua::Result<()>
     Ok(())
 }
 
+/// The plug-in mappings that didn't load (Lua app data), first shown as the error.
+struct MappingErrors(Vec<String>);
+
 fn start(
     sources: &sources::Sources,
     page: String,
@@ -1895,6 +1913,10 @@ fn start(
     lua.set_named_registry_value("deckard.global", global)?;
     let theme = load_theme(&lua, sources, theme, 0)?;
     lua.set_app_data(screen::ThemeCache::from_theme(&theme)?);
+    // The plug-in mappings; one that doesn't load is reported and left out.
+    let (mappings, errors) = widget::mapping::load_all(&lua, sources);
+    lua.set_app_data(widget::Mappings(std::rc::Rc::new(mappings)));
+    lua.set_app_data(MappingErrors(errors));
     lua.set_named_registry_value("deckard.theme", theme)?;
     lua.set_named_registry_value("deckard.pages", lua.create_table()?)?;
     // The first page loads now, so its errors show at once.
