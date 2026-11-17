@@ -1661,6 +1661,8 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
                 kt.set("text", knob.text.as_str())?;
                 kt.set("value", knob.value)?;
                 kt.set("modulatable", knob.modulatable)?;
+                kt.set("mod_position", knob.mod_position)?;
+                kt.set("mod_text", knob.mod_text.as_deref())?;
                 kt.set("step_mod", knob.step_mod.as_deref())?;
                 kt.set("auto_mod", knob.auto_mod.as_deref())?;
                 kt.set("macro", knob.in_macro)?;

@@ -685,6 +685,10 @@ pub struct SlotView {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KnobView {
+    /// Where its parameter is with modulation applied (0..1), when it is modulated.
+    pub mod_position: Option<f64>,
+    /// The knob's text with its parameter at `mod_position` (set with it).
+    pub mod_text: Option<String>,
     pub name: String,
     /// The section of the plug-in it's in ("Voice Settings").
     pub section: String,

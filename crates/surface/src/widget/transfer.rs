@@ -10,6 +10,7 @@
 //! | `ratio` | `n:1` above the threshold (default 4, at least 1; 20 or more reads "LIMIT") |
 //! | `knee` | soft knee width in dB (default 0: a corner) |
 //! | `makeup` | gain added after, in dB (default 0) |
+//! | `threshold_mod`, `ratio_mod` | the modulated threshold and ratio: drawn in the accent over the base curve, muted |
 //! | `level` | the current input level in dB: a dot on the curve there |
 //! | `reduction` | the gain being taken off now, in dB (0 or more): a bar at the right edge |
 //!
@@ -28,11 +29,22 @@ pub struct Transfer {
     pub makeup: f32,
     pub level: Option<f32>,
     pub reduction: Option<f32>,
+    pub threshold_mod: Option<f32>,
+    pub ratio_mod: Option<f32>,
 }
 
 impl Default for Transfer {
     fn default() -> Self {
-        Transfer { threshold: -18.0, ratio: 4.0, knee: 0.0, makeup: 0.0, level: None, reduction: None }
+        Transfer {
+            threshold: -18.0,
+            ratio: 4.0,
+            knee: 0.0,
+            makeup: 0.0,
+            level: None,
+            reduction: None,
+            threshold_mod: None,
+            ratio_mod: None,
+        }
     }
 }
 
@@ -52,6 +64,8 @@ impl Transfer {
             makeup: num(t, "makeup").unwrap_or(d.makeup),
             level: num(t, "level"),
             reduction: num(t, "reduction"),
+            threshold_mod: num(t, "threshold_mod"),
+            ratio_mod: num(t, "ratio_mod"),
         })
     }
 
@@ -72,6 +86,19 @@ impl Transfer {
     }
 
     pub fn draw(&self, c: &mut Canvas) {
+        if self.threshold_mod.is_none() && self.ratio_mod.is_none() {
+            return self.draw_shown(c, None);
+        }
+        let shown = Transfer {
+            threshold: self.threshold_mod.unwrap_or(self.threshold),
+            ratio: self.ratio_mod.unwrap_or(self.ratio),
+            ..self.clone()
+        };
+        shown.draw_shown(c, Some(self));
+    }
+
+    /// Draw this curve, with `base` (where modulation moved it from) as a muted curve.
+    fn draw_shown(&self, c: &mut Canvas, base: Option<&Transfer>) {
         let look = *c.look;
         let side = SIDE as f32;
         let (x0, y0) = (PX0 as f32, PY0 as f32);
@@ -100,6 +127,10 @@ impl Transfer {
                 })
                 .collect()
         };
+        if let Some(b) = base {
+            let pts: Vec<(f32, f32)> = (0..=60).map(|i| DB_MIN + -DB_MIN * i as f32 / 60.0).map(|x| (cx(x), cy(b.out(x)))).collect();
+            c.polyline(&pts, 1.5, look.muted);
+        }
         let below = c.ink(look.accent, &["threshold", "knee", "makeup"]);
         let above = c.ink(look.accent, &["threshold", "ratio", "knee", "makeup"]);
         c.polyline(&run(DB_MIN, lo), 2.0, below);
@@ -204,6 +235,12 @@ mod tests {
     fn transfer_compressor() {
         let t = comp();
         golden::check("transfer-compressor", 2, None, |cv| t.draw(cv));
+    }
+
+    #[test]
+    fn transfer_modulated() {
+        let t = Transfer { threshold: -12.0, ratio: 2.0, threshold_mod: Some(-30.0), ratio_mod: Some(8.0), ..Default::default() };
+        golden::check("transfer-mod", 2, None, |cv| t.draw(cv));
     }
 
     #[test]

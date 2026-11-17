@@ -9,6 +9,7 @@
 //! | `rate_text` | the rate as the plug-in writes it ("1/8", "2.00 Hz"); shown instead of `rate` |
 //! | `phase` | 0..1, where the cycle starts (default 0) |
 //! | `depth` | 0..1 (default 1): scales the wave around the middle line |
+//! | `depth_mod` | 0..1: the modulated depth; the base wave is drawn muted under it |
 //! | `position` | 0..1: where in the cycle it is now, a dot on the wave |
 //!
 //! Touch focus on `rate` writes the rate larger in the text colour and dims the wave;
@@ -27,11 +28,12 @@ pub struct Lfo {
     pub phase: f32,
     pub depth: f32,
     pub position: Option<f32>,
+    pub depth_mod: Option<f32>,
 }
 
 impl Default for Lfo {
     fn default() -> Lfo {
-        Lfo { shape: "sine".into(), rate: None, rate_text: None, phase: 0.0, depth: 1.0, position: None }
+        Lfo { shape: "sine".into(), rate: None, rate_text: None, phase: 0.0, depth: 1.0, position: None, depth_mod: None }
     }
 }
 
@@ -85,6 +87,7 @@ impl Lfo {
             phase: num(t, "phase").unwrap_or(0.0).rem_euclid(1.0),
             depth: num(t, "depth").unwrap_or(1.0).clamp(0.0, 1.0),
             position: num(t, "position").map(|p| p.clamp(0.0, 1.0)),
+            depth_mod: num(t, "depth_mod").map(|d| d.clamp(0.0, 1.0)),
         })
     }
 
@@ -98,6 +101,12 @@ impl Lfo {
     }
 
     pub fn draw(&self, c: &mut Canvas) {
+        let Some(m) = self.depth_mod else { return self.draw_shown(c, None) };
+        Lfo { depth: m, depth_mod: None, ..self.clone() }.draw_shown(c, Some(self));
+    }
+
+    /// Draw this wave, with `base` (where modulation moved its depth from) muted under it.
+    fn draw_shown(&self, c: &mut Canvas, base: Option<&Lfo>) {
         let look = *c.look;
         let (w, h) = (c.r.w, c.r.h);
         c.fill(0, 0, w, h, look.panel);
@@ -123,6 +132,15 @@ impl Lfo {
                 (px(x), py(self.level(x)))
             })
             .collect();
+        if let Some(b) = base {
+            let under: Vec<(f32, f32)> = (0..=n)
+                .map(|i| {
+                    let x = i as f32 / n as f32;
+                    (px(x), py(b.level(x)))
+                })
+                .collect();
+            c.polyline(&under, 1.5, c.ink(look.muted, &["shape", "phase", "depth"]));
+        }
         c.polyline(&pts, 2.0, c.ink(look.accent, &["shape", "phase", "depth"]));
         if let Some(p) = self.position {
             let (x, y) = (px(p), py(self.level(p)));
@@ -200,6 +218,12 @@ mod tests {
     fn lfo_square_text() {
         let l = Lfo { shape: "square".into(), rate_text: Some("1/8".into()), depth: 0.6, phase: 0.25, ..Default::default() };
         golden::check("lfo-square", 2, None, |cv| l.draw(cv));
+    }
+
+    #[test]
+    fn lfo_depth_modulated() {
+        let l = Lfo { rate: Some(2.0), depth: 0.3, depth_mod: Some(0.9), ..Default::default() };
+        golden::check("lfo-depth-mod", 2, None, |cv| l.draw(cv));
     }
 
     #[test]

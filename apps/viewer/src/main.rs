@@ -5085,6 +5085,44 @@ impl App {
         self.mod_amount(edit).map(f64::from)
     }
 
+    /// What knob `k` of the page shows with its parameter at `at` (0..1): the plug-in's
+    /// own text for a hosted one, the module's for a built-in one. `None` where it can't say.
+    fn mod_text(&self, edit: layout::Edit, k: usize, at: f64) -> Option<String> {
+        use layout::Edit;
+        let (chain, target) = modulation::mod_target(edit)?;
+        let slot_i = target.slot?;
+        if let Edit::PluginIn(c, i, id, _) = edit {
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(c, i))?;
+            let text = inst.try_lock().ok()?.param_text(id, at);
+            let units = self
+                .plugin_views
+                .get(&(c, i))
+                .and_then(|v| v.pages.get(v.page)?.knobs.iter().find(|(info, ..)| info.id == id))
+                .map(|(info, ..)| info.units.clone())
+                .unwrap_or_default();
+            return Some(if units.is_empty() || text.ends_with(&units) { text } else { format!("{text} {units}") });
+        }
+        let layout::Act::SetParam(t, field, value) = edit.to_act(at as f32) else { return None };
+        let doc = self.doc.as_ref()?.borrow();
+        let p = doc.project();
+        let slots = match chain {
+            deckard_doc::Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.slots,
+            deckard_doc::Chain::Group(g) => &p.groups.get(g)?.slots,
+            deckard_doc::Chain::Master => return None,
+        };
+        let pg = if let deckard_doc::Target::Sampler(g, s) = t {
+            let mut smp = p.groups.get(g)?.sounds.get(s)?.sampler.clone()?;
+            smp.set(field, value);
+            sampler_ui::page(&smp, g, s, self.sampler_page.min(sampler_ui::PAGES.len() - 1))
+        } else {
+            let mut slot = slots.get(slot_i)?.clone();
+            slot.params.iter_mut().find(|(f, _)| f == field)?.1 = value;
+            let names = crate::module_ui::pages(&slot.module)?;
+            module_ui::page_for(&slot, t, self.plugin_page.min(names.len().saturating_sub(1)))
+        };
+        pg.slots.into_iter().nth(k).flatten().map(|knob| knob.1)
+    }
+
     /// Auto-write: the MK3's AUTO and the header's are one switch. The knob being
     /// written is let go when it goes off or the song stops.
     fn sync_auto_write(&mut self) {
@@ -6073,6 +6111,9 @@ impl App {
             }
             _ => text.to_string(),
         };
+        let mod_at: Vec<Option<f64>> = (0..8)
+            .map(|i| edits.get(i).copied().flatten().and_then(|e| self.mod_position(e)))
+            .collect();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -6100,6 +6141,8 @@ impl App {
                 .enumerate()
                 .map(|(i, k)| {
                     k.as_ref().map(|k| KnobView {
+                        mod_position: mod_at[i],
+                        mod_text: mod_at[i].and_then(|at| edits.get(i).copied().flatten().and_then(|e| self.mod_text(e, i, at))),
                         name: k.name.clone(),
                         section: k.section.clone(),
                         text: knob_text(i, &k.text),
