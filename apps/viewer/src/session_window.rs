@@ -11,6 +11,26 @@ pub enum WindowAction {
     Stop,
     /// The window's close button.
     Hide,
+    /// The pin control: float the window above others, or stop doing so.
+    TogglePin,
+}
+
+/// Whether the Recorder window floats above other windows. On by default so a
+/// glance at the laptop always shows the timer during a set.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Pin {
+    #[default]
+    On,
+    Off,
+}
+
+impl Pin {
+    pub fn on(self) -> bool {
+        self == Pin::On
+    }
+    pub fn toggled(self) -> Pin {
+        if self == Pin::On { Pin::Off } else { Pin::On }
+    }
 }
 
 const SIZE: egui::Vec2 = egui::vec2(440.0, 400.0);
@@ -19,14 +39,23 @@ const AMBER: egui::Color32 = egui::Color32::from_rgb(0xe0, 0xa0, 0x30);
 const OK: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc0, 0x70);
 
 /// Open or update the Recorder window; `Hide` when its close button was pressed.
-pub fn show(ctx: &egui::Context, view: &SessionView) -> WindowAction {
-    let builder = egui::ViewportBuilder::default().with_title("DECKARD Recorder").with_inner_size(SIZE);
+/// `pinned` floats it above other windows. The window is a fixed size and cannot be
+/// resized — it is a glanceable readout, not a panel to arrange.
+pub fn show(ctx: &egui::Context, view: &SessionView, pinned: bool) -> WindowAction {
+    let level = if pinned { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+    let builder = egui::ViewportBuilder::default()
+        .with_title("DECKARD Recorder")
+        .with_inner_size(SIZE)
+        .with_min_inner_size(SIZE)
+        .with_max_inner_size(SIZE)
+        .with_resizable(false)
+        .with_window_level(level);
     let mut action = WindowAction::None;
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("deckard-session-recorder"), builder, |ui, class| {
         if class == egui::ViewportClass::EmbeddedWindow {
             ui.set_min_size(SIZE);
         }
-        action = body(ui, view);
+        action = body(ui, view, pinned);
         if ui.ctx().input(|i| i.viewport().close_requested()) {
             action = WindowAction::Hide;
         }
@@ -87,7 +116,7 @@ fn tint(free: u64, reserve: u64) -> egui::Color32 {
 }
 
 /// The window's contents.
-pub fn body(ui: &mut egui::Ui, view: &SessionView) -> WindowAction {
+pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction {
     let mut action = WindowAction::None;
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -103,6 +132,13 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView) -> WindowAction {
         };
         ui.painter().circle_filled(rect.center(), 6.0, color);
         ui.label(egui::RichText::new(if view.recording { "RECORDING SESSION" } else { "SESSION RECORDER" }).strong());
+        // Pin control (floats the window on top), right-aligned.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let hint = if pinned { "Unpin — stop floating above other windows" } else { "Pin — keep this window on top" };
+            if ui.selectable_label(pinned, "📌 Pin").on_hover_text(hint).clicked() {
+                action = WindowAction::TogglePin;
+            }
+        });
     });
     if view.recording {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -194,17 +230,43 @@ mod tests {
     fn stopped_reason_line_appears() {
         let view = SessionView { recording: false, stopped: Some(StopReason::Disk), ..SessionView::default() };
         let mut h = Harness::new_ui(|ui| {
-            body(ui, &view);
+            body(ui, &view, true);
         });
         h.run();
         assert!(h.query_by_label("Stopped: disk reserve reached").is_some(), "the auto-stop reason is shown");
     }
 
     #[test]
+    fn pin_logic_toggles() {
+        assert!(Pin::default().on(), "pinned by default");
+        assert!(!Pin::On.toggled().on());
+        assert!(Pin::Off.toggled().on());
+    }
+
+    #[test]
+    fn pin_control_renders_and_toggles() {
+        let view = SessionView::default();
+        // Latch any non-None action: `run()` settles over several frames and `clicked()`
+        // is true on only one of them.
+        let action = std::cell::Cell::new(WindowAction::None);
+        let mut h = Harness::new_ui(|ui| {
+            let a = body(ui, &view, true);
+            if a != WindowAction::None {
+                action.set(a);
+            }
+        });
+        h.run();
+        assert!(h.query_by_label("📌 Pin").is_some(), "the pin control is shown");
+        h.get_by_label("📌 Pin").click();
+        h.run();
+        assert_eq!(action.get(), WindowAction::TogglePin, "clicking the pin control toggles the pin");
+    }
+
+    #[test]
     fn window_renders_idle_and_recording() {
         let mut view = SessionView::default();
         let mut h = Harness::new_ui(|ui| {
-            body(ui, &view);
+            body(ui, &view, true);
         });
         h.run();
         assert!(h.query_by_label("00:00:00").is_some(), "idle shows a zero timer");
@@ -222,7 +284,7 @@ mod tests {
         view.path = Some("/tmp/session.wav".into());
         view.wave = (0..50).map(|i| (i as f32 / 50.0, i as f32 / 100.0)).collect();
         let mut h = Harness::new_ui(|ui| {
-            body(ui, &view);
+            body(ui, &view, true);
         });
         // (It repaints while recording, so step rather than run to rest.)
         h.run_steps(2);

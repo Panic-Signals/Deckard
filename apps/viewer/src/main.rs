@@ -1243,6 +1243,8 @@ pub struct App {
     session: session_record::SessionRecorder,
     /// The live session Recorder window is shown.
     session_window_open: bool,
+    /// Whether the Recorder window floats above other windows (on by default).
+    session_window_pin: session_window::Pin,
     /// The Mixer is shown (instead of the work views), at sound level (the focused
     /// group's sounds) or group level, with its optional sections.
     mixer: bool,
@@ -11838,7 +11840,7 @@ impl App {
             self.export_window(ctx);
         }
         if self.session_window_open {
-            match session_window::show(ctx, &self.session.view) {
+            match session_window::show(ctx, &self.session.view, self.session_window_pin.on()) {
                 session_window::WindowAction::Stop => {
                     self.session.stop();
                     if let Some(Ok(o)) = &self.output {
@@ -11847,6 +11849,7 @@ impl App {
                     self.session_window_open = false;
                 }
                 session_window::WindowAction::Hide => self.session_window_open = false,
+                session_window::WindowAction::TogglePin => self.session_window_pin = self.session_window_pin.toggled(),
                 session_window::WindowAction::None => {}
             }
         }
