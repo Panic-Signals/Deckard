@@ -433,19 +433,6 @@ local function touched()
   return touch.focused(deckard.now())
 end
 
--- Touch focus: a knob touched (one or two; three or more is a resting hand) has its
--- name and value large in the right screen's header, under the slot's name.
-local function touch_header(screen, theme, c)
-  local t = touched()
-  if #t == 0 or #t > 2 then return end
-  local knob = c.knobs[t[1]]
-  if not knob then return end
-  local name = (knob.name or ""):upper()
-  local nw = screen:text_width(name, "param_name")
-  screen:label(490, 64, nw, 30, name, "param_name", "left", "center")
-  screen:label(490 + nw + 12, 62, 450 - nw - 12, 34, knob.text or "", "param_value", "left", "center")
-end
-
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -498,10 +485,11 @@ function control.draw(screen, theme, opts)
     screen:rect(480, 35, 480, 25, "bar")
     -- Pictures over the knobs they draw (a filter over Cutoff and Reso, an envelope
     -- over its times...), in the band on either screen; the right screen's own picture
-    -- only where the band there is free.
-    local right_free = true
+    -- only where the band there is free. The chain shrinks to a strip only while the
+    -- left screen has pictures.
+    local left_free, right_free = true, true
     for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name)) do
-      if span.first > 4 then right_free = false end
+      if span.first > 4 then right_free = false else left_free = false end
     end
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
@@ -515,9 +503,9 @@ function control.draw(screen, theme, opts)
       elseif c.eq then eq_curve(screen, theme, c.eq)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
-      else chain.thumbnail(screen, theme, 600, widgets.BAND_Y, 240, widgets.BAND_H, slot, false) end
+      else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
     end
-    chain.draw(screen, theme, c)
+    chain.draw(screen, theme, c, not left_free)
   else
     widgets.buttons(screen, theme, {
       [5] = { arrows = true, text = PAGE_GROUPS[c.page_group] or "", left = can_step(c, false), right = can_step(c, true) },
@@ -538,7 +526,6 @@ function control.draw(screen, theme, opts)
     end
   end
   knobs(screen, theme, c, false, knob_of)
-  touch_header(screen, theme, c)
 end
 
 -- The knobs' row as the page draws it (Set Macro shows it too).

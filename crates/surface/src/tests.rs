@@ -1968,8 +1968,7 @@ fn plugin_pictures_show_on_the_plugin_page() {
     let count =
         |px: &[[u8; 4]], c: [u8; 4], right: bool| px.iter().enumerate().filter(|(i, p)| **p == c && ((i % 960) >= 480) == right).count();
     let px = s.picture(&v);
-    // (Small: the chain strip leaves the picture band free.)
-    assert!(count(&px, thumb, false) > 400, "the thumbnail in the chain: {}", count(&px, thumb, false));
+    assert!(count(&px, thumb, false) > 2000, "the thumbnail in the chain: {}", count(&px, thumb, false));
     assert!(count(&px, logo, true) > 5000, "the logo on the right: {}", count(&px, logo, true));
     // Without the picture: a drawing. A few of its pixels can land on the same grey.
     v.control.chain[0].picture = Some("nothing".into());
@@ -3671,6 +3670,34 @@ fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
 fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
     let (surface, mut v) = (Surface::new(), view());
     v.control.modules_visible = true;
+    v.control.chain = (0..3)
+        .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
+        .collect();
+    for (slot, direction, range) in [(0, "right", "1-2 / 3"), (2, "left", "2-3 / 3")] {
+        v.control.slot_index = Some(slot);
+        let picture = surface.draw_picture(&v);
+        assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
+        assert!(picture.ops.iter().any(
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 143, w: 18, h: 28, dir, .. } if (*x == 4 || *x == 458) && dir == direction)
+        ));
+    }
+    for slot in &mut v.control.chain {
+        slot.instrument = false;
+        slot.name = "FX".into();
+    }
+    v.control.slot_index = Some(0);
+    assert!(!surface.draw_picture(&v).texts.iter().any(|s| s.ends_with(" / 3")));
+}
+
+#[test]
+fn with_pictures_the_chain_is_a_strip_with_its_own_overflow() {
+    let (surface, mut v) = (Surface::new(), view());
+    v.control.modules_visible = true;
+    // (A filter picture over knobs 1-2: the chain shrinks to a strip.)
+    for (k, name, text) in [(0, "Cutoff", "1.20 kHz"), (1, "Reso", "42 %")] {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    }
     v.control.chain = (0..6)
         .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
         .collect();
@@ -3680,7 +3707,7 @@ fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
         let picture = surface.draw_picture(&v);
         assert!(picture.texts.iter().any(|s| s.starts_with(starts) && s.ends_with(ends) && s.contains(" / ")), "{:?}", picture.texts);
         assert!(picture.ops.iter().any(
-            |o| matches!(o, screen::DrawOp::Triangle { x, y: 74, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 72, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
         ));
     }
     v.control.chain.truncate(3);
@@ -4051,8 +4078,8 @@ fn a_filter_picture_sits_over_cutoff_and_reso() {
     assert_eq!(s.error(), None);
 }
 
-/// Touching a knob lights what it moves in its picture and shows its name and value
-/// large in the right screen's header; three fingers (a resting hand) light nothing.
+/// Touching a knob lights what it moves in its picture (the filter writes the cutoff's
+/// value); three fingers (a resting hand) light nothing.
 #[test]
 fn touching_a_knob_focuses_its_picture() {
     let (mut s, mut v) = (Surface::new(), view());
@@ -4066,7 +4093,7 @@ fn touching_a_knob_focuses_its_picture() {
     s.event(&Event::Button("BUTTON_CAP_1", true), &v, t0);
     s.tick(&v, ms(150));
     let picture = s.draw_picture(&v);
-    assert!(picture.texts.iter().any(|t| t == "1.20 kHz"), "the value whole in the header: {:?}", picture.texts);
+    assert!(picture.texts.iter().any(|t| t == "1.20 kHz"), "the cutoff's value in the picture: {:?}", picture.texts);
     let touched = s.picture(&v);
     let band = |px: &[[u8; 4]]| (100..204).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
     assert_ne!(band(&before), band(&touched), "the cutoff lights in the picture");
@@ -4093,6 +4120,7 @@ fn touch_focus_waits_and_lingers() {
     let (mut s, mut v) = (Surface::new(), view());
     let knob = v.control.knobs[0].as_mut().unwrap();
     (knob.name, knob.text) = ("Cutoff".into(), "1.20 kHz".into());
+    v.control.knobs[1].as_mut().unwrap().name = "Reso".into();
     let t0 = Instant::now();
     let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
     // A brush: down and up within 100 ms lights nothing.
@@ -4127,6 +4155,7 @@ fn an_untouched_turn_focuses_for_a_second() {
     let (mut s, mut v) = (Surface::new(), view());
     let knob = v.control.knobs[0].as_mut().unwrap();
     (knob.name, knob.text) = ("Cutoff".into(), "1.20 kHz".into());
+    v.control.knobs[1].as_mut().unwrap().name = "Reso".into();
     let t0 = Instant::now();
     let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
     s.event(&Event::Knob(0, 0.05), &v, ms(10));
