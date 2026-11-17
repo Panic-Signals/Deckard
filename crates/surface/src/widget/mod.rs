@@ -368,6 +368,8 @@ pub fn draw_pictures(lua: &Lua, pic: &mut Picture, knobs: &Table, touched: &[usi
             section: text(&t, "section").unwrap_or_default(),
             text: text(&t, "text").unwrap_or_default(),
             value: num(&t, "value").unwrap_or(0.0),
+            mod_text: text(&t, "mod_text"),
+            mod_value: num(&t, "mod_position"),
         })
     });
     let out = lua.create_table()?;

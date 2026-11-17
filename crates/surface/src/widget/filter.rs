@@ -13,6 +13,7 @@
 //! | `drive` | dB (0): lifts the whole response a little |
 //! | `mix` | 0..1 (1): dry/wet blend of the magnitude |
 //! | `cutoff_mod` | Hz: the modulated cutoff; the base curve is drawn muted under it |
+//! | `resonance_mod` | 0..1: the modulated resonance, drawn the same way |
 //!
 //! Touch focus on `cutoff` draws a guide from the curve to the axis, a handle and the
 //! cutoff's value; on `resonance` it rings the peak and writes the Q.
@@ -38,11 +39,21 @@ pub struct Filter {
     pub drive: f32,
     pub mix: f32,
     pub cutoff_mod: Option<f32>,
+    pub resonance_mod: Option<f32>,
 }
 
 impl Default for Filter {
     fn default() -> Filter {
-        Filter { shape: Shape::Lp, cutoff: 1000.0, resonance: 0.0, slope: 12.0, drive: 0.0, mix: 1.0, cutoff_mod: None }
+        Filter {
+            shape: Shape::Lp,
+            cutoff: 1000.0,
+            resonance: 0.0,
+            slope: 12.0,
+            drive: 0.0,
+            mix: 1.0,
+            cutoff_mod: None,
+            resonance_mod: None,
+        }
     }
 }
 
@@ -97,12 +108,17 @@ impl Filter {
             drive: num(t, "drive").unwrap_or(0.0),
             mix: num(t, "mix").unwrap_or(1.0).clamp(0.0, 1.0),
             cutoff_mod: num(t, "cutoff_mod").map(|m| m.clamp(20.0, 20000.0)),
+            resonance_mod: num(t, "resonance_mod").map(|m| m.clamp(0.0, 1.0)),
         })
     }
 
     /// The shown response at `f` for cutoff `cutoff`: with drive and mix.
     pub fn db_at(&self, cutoff: f32, f: f32) -> f32 {
-        let wet = 10f32.powf(response_db(self.shape, cutoff, self.resonance, self.slope >= 18.0, f) / 20.0);
+        self.db_with(cutoff, self.resonance, f)
+    }
+
+    fn db_with(&self, cutoff: f32, resonance: f32, f: f32) -> f32 {
+        let wet = 10f32.powf(response_db(self.shape, cutoff, resonance, self.slope >= 18.0, f) / 20.0);
         let mag = (1.0 - self.mix) + self.mix * wet;
         20.0 * mag.max(1e-6).log10() + (self.drive * 0.25).clamp(0.0, 6.0)
     }
@@ -121,21 +137,22 @@ impl Filter {
         c.line(1.0, py(0.0), (w - 1) as f32, py(0.0), 1.0, look.separator);
 
         let all = ["cutoff", "resonance", "shape", "slope", "drive", "mix"];
-        let curve = |cutoff: f32| -> Vec<(f32, f32)> {
+        let curve = |cutoff: f32, resonance: f32| -> Vec<(f32, f32)> {
             let n = ((w - 4) / 3).clamp(40, 160);
             (0..=n)
                 .map(|i| {
                     let t = i as f32 / n as f32;
                     let f = 20.0 * 1000f32.powf(t);
-                    (px(t), py(self.db_at(cutoff, f)))
+                    (px(t), py(self.db_with(cutoff, resonance, f)))
                 })
                 .collect()
         };
         let eff = self.cutoff_mod.unwrap_or(self.cutoff);
-        let main = curve(eff);
-        c.area(&main, bottom, c.ink(look.fill_of(if self.cutoff_mod.is_some() { look.accent } else { look.accent }), &all));
-        if self.cutoff_mod.is_some() {
-            let base = curve(self.cutoff);
+        let eff_res = self.resonance_mod.unwrap_or(self.resonance);
+        let main = curve(eff, eff_res);
+        c.area(&main, bottom, c.ink(look.fill_of(look.accent), &all));
+        if self.cutoff_mod.is_some() || self.resonance_mod.is_some() {
+            let base = curve(self.cutoff, self.resonance);
             c.polyline(&base, 1.5, c.ink(look.muted, &all));
         }
         c.polyline(&main, 2.0, c.ink(look.accent, &all));
@@ -148,7 +165,7 @@ impl Filter {
             c.text(3, (py(0.0) as i32 - 12).max(0), 24, 11, "0 dB", look.small, look.weak, Align::Left);
         }
 
-        let y_at = |f: f32| py(self.db_at(eff, f));
+        let y_at = |f: f32| py(self.db_with(eff, eff_res, f));
         if c.lit("cutoff") {
             let (x, y) = (px(freq_t(eff)), y_at(eff));
             c.line(x, y, x, bottom - 1.0, 1.5, look.record);
@@ -167,7 +184,7 @@ impl Filter {
                 }
             }
             c.ring(best.0, best.1.clamp(7.0, h as f32 - 7.0), 6.0, 1.5, look.record);
-            let label = format!("Q {:.1}", q_of(self.resonance));
+            let label = format!("Q {:.1}", q_of(eff_res));
             let tw = c.text_width(&label, look.small) + 6;
             let tx = if best.0 > w as f32 / 2.0 { 3 } else { w - tw - 3 };
             c.text(tx, 3, tw, 12, &label, look.small, look.text, Align::Center);
@@ -221,6 +238,13 @@ mod tests {
     fn filter_band_pass_modulated() {
         let f = Filter { shape: Shape::Bp, cutoff: 2000.0, resonance: 0.4, cutoff_mod: Some(4500.0), ..Default::default() };
         golden::check("filter-bp-mod", 2, None, |cv| f.draw(cv));
+    }
+
+    #[test]
+    fn filter_resonance_modulated() {
+        let f = Filter { cutoff: 1200.0, resonance: 0.2, resonance_mod: Some(0.85), ..Default::default() };
+        assert!(f.db_with(1200.0, 0.85, 1200.0) > f.db_with(1200.0, 0.2, 1200.0) + 6.0);
+        golden::check("filter-resonance-mod", 2, None, |cv| f.draw(cv));
     }
 
     #[test]

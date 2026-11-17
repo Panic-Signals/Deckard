@@ -9,6 +9,7 @@
 //! | `gain` | dB (0) |
 //! | `q` | 0.707 |
 //! | `type` | `"bell"` (default), `"low_shelf"`, `"high_shelf"`, `"low_cut"`, `"high_cut"` |
+//! | `freq_mod`, `gain_mod` | the modulated frequency (Hz) and gain (dB): drawn in the accent over the base curve, muted |
 //! | `on` | false draws everything muted (true) |
 //!
 //! Touch focus on `freq` draws a guide line at the frequency, on `gain` a line at the
@@ -34,11 +35,13 @@ pub struct Band {
     pub q: f32,
     pub kind: Kind,
     pub on: bool,
+    pub freq_mod: Option<f32>,
+    pub gain_mod: Option<f32>,
 }
 
 impl Default for Band {
     fn default() -> Band {
-        Band { freq: 1000.0, gain: 0.0, q: 0.707, kind: Kind::Bell, on: true }
+        Band { freq: 1000.0, gain: 0.0, q: 0.707, kind: Kind::Bell, on: true, freq_mod: None, gain_mod: None }
     }
 }
 
@@ -100,6 +103,8 @@ impl Band {
             q: num(t, "q").unwrap_or(0.707).clamp(0.1, 18.0),
             kind,
             on,
+            freq_mod: num(t, "freq_mod").map(|m| m.clamp(20.0, 20000.0)),
+            gain_mod: num(t, "gain_mod").map(|m| m.clamp(-RANGE, RANGE)),
         })
     }
 
@@ -108,6 +113,15 @@ impl Band {
     }
 
     pub fn draw(&self, c: &mut Canvas) {
+        if self.freq_mod.is_none() && self.gain_mod.is_none() {
+            return self.draw_shown(c, None);
+        }
+        let shown = Band { freq: self.freq_mod.unwrap_or(self.freq), gain: self.gain_mod.unwrap_or(self.gain), ..self.clone() };
+        shown.draw_shown(c, Some(self));
+    }
+
+    /// Draw this band, with `base` (where modulation moved it from) as a muted curve.
+    fn draw_shown(&self, c: &mut Canvas, base: Option<&Band>) {
         let look = *c.look;
         let (w, h) = (c.r.w, c.r.h);
         let num_w = if w <= 240 { 112 } else { 132 };
@@ -135,6 +149,15 @@ impl Band {
             })
             .collect();
         c.area(&pts, py(0.0), c.ink(look.fill_of(accent), &all));
+        if let Some(b) = base {
+            let under: Vec<(f32, f32)> = (0..=n)
+                .map(|i| {
+                    let t = i as f32 / n as f32;
+                    (px(t), py(b.db_at(20.0 * 1000f32.powf(t))))
+                })
+                .collect();
+            c.polyline(&under, 1.5, c.ink(look.muted, &all));
+        }
         c.polyline(&pts, 2.0, c.ink(accent, &all));
 
         let hx = px(freq_t(self.freq));
@@ -234,8 +257,14 @@ mod tests {
 
     #[test]
     fn band_shelf_off() {
-        let b = Band { freq: 120.0, gain: -6.0, q: 0.9, kind: Kind::LowShelf, on: false };
+        let b = Band { freq: 120.0, gain: -6.0, q: 0.9, kind: Kind::LowShelf, on: false, ..Default::default() };
         golden::check("band-low-shelf-off", 2, None, |cv| b.draw(cv));
+    }
+
+    #[test]
+    fn band_modulated() {
+        let b = Band { freq: 1500.0, gain: 3.0, q: 1.2, freq_mod: Some(4000.0), gain_mod: Some(9.0), ..Default::default() };
+        golden::check("band-bell-mod", 2, None, |cv| b.draw(cv));
     }
 
     #[test]

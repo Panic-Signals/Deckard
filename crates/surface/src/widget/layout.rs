@@ -30,6 +30,9 @@ pub struct Knob {
     pub text: String,
     /// 0..1.
     pub value: f32,
+    /// The knob's text with modulation at work, and where it has the knob (0..1).
+    pub mod_text: Option<String>,
+    pub mod_value: Option<f32>,
 }
 
 /// An input a picture is drawn from.
@@ -110,12 +113,35 @@ pub fn ratio(text: &str) -> Option<f32> {
     (u.is_empty() || u.starts_with(':')).then_some(v)
 }
 
-/// A 0..1 level: from percent or dB text, else the knob's position.
-fn level(k: &Knob) -> f32 {
-    match number_unit(&k.text) {
+/// A 0..1 level: from percent or dB text, else the position.
+fn level_of(text: &str, value: f32) -> f32 {
+    match number_unit(text) {
         Some((v, u)) if u == "%" => (v / 100.0).clamp(0.0, 1.0),
         Some((v, u)) if u == "db" => 10f32.powf(v / 20.0).clamp(0.0, 1.0),
-        _ => k.value.clamp(0.0, 1.0),
+        _ => value.clamp(0.0, 1.0),
+    }
+}
+
+fn level(k: &Knob) -> f32 {
+    level_of(&k.text, k.value)
+}
+
+/// The modulated level of a knob, if modulation moves it.
+fn level_mod(k: &Knob) -> Option<f32> {
+    let value = k.mod_value?;
+    Some(level_of(k.mod_text.as_deref().unwrap_or(""), value))
+}
+
+/// The modulated text of a knob read with `parse` (`None` if it isn't modulated or the
+/// text isn't in the unit).
+fn mod_of(k: &Knob, parse: fn(&str) -> Option<f32>) -> Option<f32> {
+    k.mod_text.as_deref().and_then(parse)
+}
+
+/// Push `name_mod` when there is a modulated value.
+fn push_mod(inputs: &mut Vec<(&'static str, Input)>, name: &'static str, v: Option<f32>) {
+    if let Some(v) = v {
+        inputs.push((name, Input::Num(v)));
     }
 }
 
@@ -218,12 +244,10 @@ fn find(knobs: &[Option<Knob>; 8]) -> Vec<Found> {
             && let (Some(f), Some(g)) = (hz(&knob(knobs, s).text), db(&knob(knobs, s + 1).text))
         {
             let q = number_unit(&knob(knobs, s + 2).text).map_or(0.707, |(v, _)| v.clamp(0.1, 40.0));
-            out.push(Found {
-                kind: "band",
-                min_cells: 2,
-                inputs: vec![("freq", Input::Num(f)), ("gain", Input::Num(g)), ("q", Input::Num(q))],
-                knobs: vec![(s, "freq"), (s + 1, "gain"), (s + 2, "q")],
-            });
+            let mut inputs = vec![("freq", Input::Num(f)), ("gain", Input::Num(g)), ("q", Input::Num(q))];
+            push_mod(&mut inputs, "freq_mod", mod_of(knob(knobs, s), hz));
+            push_mod(&mut inputs, "gain_mod", mod_of(knob(knobs, s + 1), db));
+            out.push(Found { kind: "band", min_cells: 2, inputs, knobs: vec![(s, "freq"), (s + 1, "gain"), (s + 2, "q")] });
         }
         // A filter: a cutoff (or a frequency) and a resonance, either way round, and a
         // drive beside them.
@@ -237,6 +261,8 @@ fn find(knobs: &[Option<Knob>; 8]) -> Vec<Found> {
             }
             let Some(f) = hz(&knob(knobs, c).text) else { continue };
             let mut inputs = vec![("cutoff", Input::Num(f)), ("resonance", Input::Num(knob(knobs, r).value))];
+            push_mod(&mut inputs, "cutoff_mod", mod_of(knob(knobs, c), hz));
+            push_mod(&mut inputs, "resonance_mod", knob(knobs, r).mod_value);
             let mut bound = vec![(c, "cutoff"), (r, "resonance")];
             let after = s + 2;
             if after < 8 && roles[after] == Some(Role::Drive) && same_section(s, after) {
@@ -262,8 +288,15 @@ fn find(knobs: &[Option<Knob>; 8]) -> Vec<Found> {
                 let k = knob(knobs, s + i);
                 if *name == "sustain" {
                     inputs.push(("sustain", Input::Num(level(k))));
+                    push_mod(&mut inputs, "sustain_mod", level_mod(k));
                 } else if let Some(t) = ms(&k.text) {
                     inputs.push((*name, Input::Num(t)));
+                    let key = match *name {
+                        "attack" => "attack_mod",
+                        "decay" => "decay_mod",
+                        _ => "release_mod",
+                    };
+                    push_mod(&mut inputs, key, mod_of(k, ms));
                 } else {
                     ok = false;
                 }
@@ -285,6 +318,8 @@ fn find(knobs: &[Option<Knob>; 8]) -> Vec<Found> {
             && let (Some(t), Some(r)) = (db(&knob(knobs, s).text), ratio(&knob(knobs, s + 1).text))
         {
             let mut inputs = vec![("threshold", Input::Num(t)), ("ratio", Input::Num(r.max(1.0)))];
+            push_mod(&mut inputs, "threshold_mod", mod_of(knob(knobs, s), db));
+            push_mod(&mut inputs, "ratio_mod", mod_of(knob(knobs, s + 1), ratio).map(|r| r.max(1.0)));
             let mut bound = vec![(s, "threshold"), (s + 1, "ratio")];
             for i in s + 2..(s + 4).min(8) {
                 let name = match roles[i] {
@@ -306,6 +341,9 @@ fn find(knobs: &[Option<Knob>; 8]) -> Vec<Found> {
             let other = knob(knobs, s + 1);
             if roles[s + 1] == Some(Role::Depth) {
                 inputs.push(("depth", Input::Num(level(other))));
+                if let Some(m) = level_mod(other) {
+                    inputs.push(("depth_mod", Input::Num(m)));
+                }
                 out.push(Found { kind: "lfo", min_cells: 2, inputs, knobs: vec![(s, "rate"), (s + 1, "depth")] });
             } else {
                 inputs.push(("shape", Input::Text(other.text.to_ascii_lowercase())));
@@ -370,6 +408,7 @@ mod tests {
                 section: String::new(),
                 text: t.to_string(),
                 value: 0.5,
+                ..Default::default()
             })
         })
     }
@@ -425,6 +464,56 @@ mod tests {
         let mut p = page(&[("Attack", "4 ms"), ("Decay", "200 ms")]);
         p[1].as_mut().unwrap().section = "Amp Env".into();
         assert!(layout(&p).is_empty());
+    }
+
+    fn modded(mut p: [Option<Knob>; 8], k: usize, text: &str, value: f32) -> [Option<Knob>; 8] {
+        let kn = p[k].as_mut().unwrap();
+        kn.mod_text = Some(text.to_string());
+        kn.mod_value = Some(value);
+        p
+    }
+
+    fn num(s: &Span, name: &str) -> Option<f32> {
+        s.inputs.iter().find_map(|(k, v)| match v {
+            Input::Num(n) if *k == name => Some(*n),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn modulated_text_gives_the_mod_inputs() {
+        let p = page(&[("Cutoff", "1.00 kHz"), ("Resonance", "42 %")]);
+        let p = modded(modded(p, 0, "2.50 kHz", 0.7), 1, "60 %", 0.6);
+        let s = &layout(&p)[0];
+        assert_eq!((num(s, "cutoff_mod"), num(s, "resonance_mod")), (Some(2500.0), Some(0.6)));
+
+        let p = page(&[("Freq", "800 Hz"), ("Gain", "-3.0 dB"), ("Q", "1.4")]);
+        let s = &layout(&modded(modded(p, 0, "1.6 kHz", 0.6), 1, "4.5 dB", 0.7))[0];
+        assert_eq!((num(s, "freq_mod"), num(s, "gain_mod")), (Some(1600.0), Some(4.5)));
+
+        let p = page(&[("Threshold", "-18 dB"), ("Ratio", "4.0:1")]);
+        let s = &layout(&modded(modded(p, 0, "-30 dB", 0.3), 1, "8.0:1", 0.6))[0];
+        assert_eq!((num(s, "threshold_mod"), num(s, "ratio_mod")), (Some(-30.0), Some(8.0)));
+
+        let p = page(&[("Attack", "4 ms"), ("Decay", "200 ms"), ("Sustain", "60 %"), ("Release", "1.2 s")]);
+        let p = modded(modded(modded(p, 0, "0.5 s", 0.5), 2, "20 %", 0.2), 3, "300 ms", 0.3);
+        let s = &layout(&p)[0];
+        assert_eq!(
+            (num(s, "attack_mod"), num(s, "sustain_mod"), num(s, "release_mod"), num(s, "decay_mod")),
+            (Some(500.0), Some(0.2), Some(300.0), None)
+        );
+
+        let p = page(&[("Rate", "2 Hz"), ("Depth", "50 %")]);
+        let s = &layout(&modded(p, 1, "80 %", 0.8))[0];
+        assert_eq!(num(s, "depth_mod"), Some(0.8));
+    }
+
+    #[test]
+    fn mod_text_in_the_wrong_unit_is_left_out() {
+        let p = page(&[("Cutoff", "1.00 kHz"), ("Resonance", "42 %")]);
+        let s = &layout(&modded(p, 0, "64 %", 0.5))[0];
+        assert_eq!(num(s, "cutoff_mod"), None);
+        assert_eq!(num(s, "resonance_mod"), None, "an unmodulated knob has none");
     }
 
     #[test]

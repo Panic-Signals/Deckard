@@ -19,6 +19,9 @@
 //! | `curve` | -1..1 (default 0, linear); positive: decays and releases fall fast first, attacks rise slowly first |
 //! | `amount` | -1..1 (default 1); negative draws the shape flipped from the top |
 //!
+//! `attack_mod`, `decay_mod`, `sustain_mod`, `release_mod` (any of them): where modulation
+//! has the envelope; its shape is drawn in the accent over the base shape, muted.
+//!
 //! Touch focus on `attack`, `decay`, `sustain`, `release`, `delay` or `hold` lights that
 //! segment and shows its value larger beside it, dimming the rest; `amount` and `curve`
 //! light the whole shape and show their value.
@@ -38,11 +41,23 @@ pub struct Envelope {
     pub release: f32,
     pub curve: f32,
     pub amount: f32,
+    /// The shape with modulation applied, when any `_mod` input is given.
+    pub modulated: Option<Box<Envelope>>,
 }
 
 impl Default for Envelope {
     fn default() -> Envelope {
-        Envelope { delay: 0.0, attack: 10.0, hold: 0.0, decay: 200.0, sustain: Some(0.6), release: 300.0, curve: 0.0, amount: 1.0 }
+        Envelope {
+            delay: 0.0,
+            attack: 10.0,
+            hold: 0.0,
+            decay: 200.0,
+            sustain: Some(0.6),
+            release: 300.0,
+            curve: 0.0,
+            amount: 1.0,
+            modulated: None,
+        }
     }
 }
 
@@ -77,7 +92,7 @@ impl Envelope {
             None if num(t, "release").is_none() && (num(t, "attack").is_some() || num(t, "decay").is_some()) => None,
             None => d.sustain,
         };
-        Ok(Envelope {
+        let mut e = Envelope {
             delay: ms("delay", d.delay),
             attack: ms("attack", d.attack),
             hold: ms("hold", d.hold),
@@ -86,7 +101,21 @@ impl Envelope {
             release: ms("release", d.release),
             curve: num(t, "curve").unwrap_or(0.0).clamp(-1.0, 1.0),
             amount: num(t, "amount").unwrap_or(1.0).clamp(-1.0, 1.0),
-        })
+            modulated: None,
+        };
+        let m = |k: &str| num(t, k).map(|v| v.max(0.0));
+        let (a, d, s, r) = (m("attack_mod"), m("decay_mod"), m("sustain_mod"), m("release_mod"));
+        if a.is_some() || d.is_some() || s.is_some() || r.is_some() {
+            e.modulated = Some(Box::new(Envelope {
+                attack: a.unwrap_or(e.attack),
+                decay: d.unwrap_or(e.decay),
+                sustain: e.sustain.map(|base| s.map_or(base, |s| s.clamp(0.0, 1.0))),
+                release: r.unwrap_or(e.release),
+                modulated: None,
+                ..e.clone()
+            }));
+        }
+        Ok(e)
     }
 
     /// The segments present, with their x spans (0..1) and levels (0..1).
@@ -175,6 +204,14 @@ impl Envelope {
     }
 
     pub fn draw(&self, c: &mut Canvas) {
+        match &self.modulated {
+            Some(m) => m.draw_shown(c, Some(self)),
+            None => self.draw_shown(c, None),
+        }
+    }
+
+    /// Draw this shape, with `under` (where modulation moved it from) as a muted outline.
+    fn draw_shown(&self, c: &mut Canvas, under: Option<&Envelope>) {
         let look = *c.look;
         let (w, h) = (c.r.w, c.r.h);
         c.fill(0, 0, w, h, look.panel);
@@ -193,6 +230,10 @@ impl Envelope {
         c.line(x0, base, x0 + pw, base, 1.0, look.separator);
         for s in segs.iter().skip(1) {
             c.line(px(s.x0), top, px(s.x0), base, 1.0, look.grid);
+        }
+        if let Some(b) = under {
+            let pts: Vec<(f32, f32)> = b.points().iter().map(|&(x, l)| (px(x), py(l))).collect();
+            c.polyline(&pts, 1.5, c.ink(look.muted, &["attack", "decay", "sustain", "release", "amount", "curve"]));
         }
         for s in &segs {
             let names = [s.name, "amount", "curve"];
@@ -287,6 +328,16 @@ mod tests {
     fn envelope_adsr() {
         let e = adsr();
         golden::check("envelope-adsr", 2, None, |cv| e.draw(cv));
+    }
+
+    #[test]
+    fn envelope_modulated() {
+        let lua = mlua::Lua::new();
+        let t: Table = lua.load("return { attack = 20, decay = 400, sustain = 0.55, release = 800, attack_mod = 150, sustain_mod = 0.25, release_mod = 300 }").eval().unwrap();
+        let e = Envelope::from_lua(&t).unwrap();
+        let m = e.modulated.as_deref().expect("modulated shape");
+        assert_eq!((m.attack, m.decay, m.sustain, m.release), (150.0, 400.0, Some(0.25), 300.0));
+        golden::check("envelope-mod", 2, None, |cv| e.draw(cv));
     }
 
     #[test]
