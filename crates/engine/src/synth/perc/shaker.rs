@@ -315,6 +315,7 @@ impl Shaker {
         m.set_x(BLK_M + 0x30, 0);
         m.set_u(GATE + 0xc, 0);
         m.set_u(PERF + 0xc, 0);
+        m.set_u(PERF, 0);
         m.set_x(PERF + 0x58, 0);
         m.set_x(PERF + 0x68, 0);
         m.set_u(PERF + 0x74, 0);
@@ -561,6 +562,12 @@ impl Shaker {
         }
     }
 
+    pub fn all_notes_off(&mut self) {
+        let m = &mut self.m;
+        m.set_u(PERF + 0xc, 0);
+        m.set_u(PERF, 0);
+    }
+
     pub fn choke(&mut self) {
         let m = &mut self.m;
         if m.u(GATE) == 1 {
@@ -568,6 +575,7 @@ impl Shaker {
             m.set_f(GATE + 0xc, 1.0);
         }
         m.set_u(PERF + 0xc, 0);
+        m.set_u(PERF, 0);
     }
 
     /// `onBPMChanged` (`PercProcessor`'s inlined copy).

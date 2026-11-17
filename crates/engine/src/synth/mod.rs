@@ -28,6 +28,9 @@ pub trait Synth: Send {
     fn note_on(&mut self, note: i64, velocity: i64);
     /// End a note.
     fn note_off(&mut self, note: i64);
+    /// Release every held note (when the sound is muted), letting envelopes and one-shots
+    /// finish naturally.
+    fn all_notes_off(&mut self) {}
     /// Mod wheel, sustain pedal, pitch bend, …
     fn control(&mut self, kind: MidiKind) {
         let _ = kind;
@@ -125,5 +128,30 @@ mod tests {
             }
         }
         assert!(silent.is_empty(), "silent: {silent:?}");
+    }
+
+    #[test]
+    fn all_notes_off_releases_held_synths() {
+        for &module in &CLASSES {
+            let mut params: Vec<(String, f64)> = defaults(module).unwrap().into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            if module == "BassSynth" {
+                params.retain(|(k, _)| k != "glide" && k != "decay");
+                params.push(("glide".into(), 1.0));
+                params.push(("decay".into(), 0.0));
+            }
+            let mut s = make(module, &params, 48_000.0).unwrap();
+            s.note_on(60, 110);
+            let (mut l, mut r) = (vec![0f32; 512], vec![0f32; 512]);
+            s.process(&mut l, &mut r);
+            s.all_notes_off();
+            for _ in 0..800 {
+                s.process(&mut l, &mut r);
+            }
+            if module == "PolySynth" {
+                assert_eq!(s.voices(), 0, "{module}");
+            } else if module == "BassSynth" {
+                assert!(l.iter().all(|v| v.abs() < 1e-4), "{module}");
+            }
+        }
     }
 }

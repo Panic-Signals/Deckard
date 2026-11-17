@@ -3512,6 +3512,13 @@ impl Engine {
         std::mem::swap(&mut self.sound_muted, &mut fresh.sound_muted);
         std::mem::swap(&mut self.silent, &mut fresh.silent);
         std::mem::swap(&mut self.pads, &mut fresh.pads);
+        for g in 0..self.sound_muted.len() {
+            for s in 0..self.sound_muted[g].len() {
+                if self.sound_muted[g][s] {
+                    self.release_muted_sound(g, s);
+                }
+            }
+        }
         // Gains glide on from where they are.
         for (row, old) in fresh.bufs.iter_mut().zip(&self.bufs) {
             for (b, ob) in row.iter_mut().zip(old) {
@@ -3728,6 +3735,7 @@ impl Engine {
                     }
                 }
                 (parts.smp, parts.inst, parts.chain) = (smp, inst, chain);
+                parts.muted = fresh.sound_muted.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
                 // From a frame its player can't have rendered yet (as live input), so the
                 // edit lands at the same frame every time.
                 if let Err(ahead::Msg::Adopt(_, parts)) = link.inbox.push(ahead::Msg::Adopt(edit_at, parts)) {
@@ -4472,6 +4480,7 @@ impl Engine {
                         parts.smp = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take);
                         parts.inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take);
                         parts.chain = self.fx.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take);
+                        parts.muted = self.sound_muted.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
                         let smp_gain =
                             self.bufs.get(g).and_then(|r| r.get(s)).and_then(Option::as_deref).map_or((1.0, 1.0), |b| b.smp_gain);
                         link.gains[0] = parts.chain.as_ref().map_or(smp_gain, |c| c.gain);
@@ -4902,6 +4911,51 @@ impl Engine {
         self.midi_inputs_unsettled |= 1 << group;
         self.play_midi_input_out(group, clock.now, &out);
         self.midi_input_out = out;
+    }
+
+    fn mute_midi_input_sound(&mut self, group: usize, sound: usize) {
+        self.live.retain(|(_, e)| {
+            !matches!(
+                e,
+                Live::MidiInputOut {
+                    group: g,
+                    note: midi_input::NoteOut::On { sound: s, .. } | midi_input::NoteOut::Off { sound: s, .. },
+                } if (*g, *s) == (group, sound)
+            )
+        });
+        let Some(mut p) = self.midi_inputs.get_mut(group).and_then(Option::take) else { return };
+        let clock = self.midi_input_clock(0.0);
+        let mut out = std::mem::take(&mut self.midi_input_out);
+        p.mute_sound(sound, clock, &mut midi_input::Outbox::new(&mut out));
+        self.midi_inputs[group] = Some(p);
+        self.play_midi_input_out(group, clock.now, &out);
+        self.midi_input_out = out;
+    }
+
+    /// Release every held note of a sound that is now muted, leaving one-shot tails and
+    /// effect echoes to ring out naturally. No allocating: runs on the audio thread.
+    fn release_muted_sound(&mut self, group: usize, sound: usize) {
+        if self.has_midi_input(group) {
+            self.mute_midi_input_sound(group, sound);
+        }
+        let mut i = 0;
+        while i < self.midi_offs.len() {
+            let (g, s, _) = self.midi_offs[i].held;
+            if (g, s) == (group, sound) {
+                let n = self.midi_offs.remove(i);
+                self.end_midi_note(n);
+            } else {
+                i += 1;
+            }
+        }
+        self.lfo_release(group, sound, None);
+        self.touch.retain(|t| (t.group, t.sound) != (group, sound));
+        self.note_offs.retain(|&(_, g, s, ..)| (g, s) != (group, sound));
+        if self.link_ahead(group, sound).is_none()
+            && let Some(Some(smp)) = self.sounds.get_mut(group).and_then(|r| r.get_mut(sound))
+        {
+            smp.all_notes_off();
+        }
     }
 
     /// Every note due at this instant is in: the plug-ins that had one work on them.
@@ -7390,6 +7444,153 @@ mod tests {
         };
         assert!(!heard(0), "the Send muted: its link is silent too");
         assert!(heard(1), "the Receive muted: the Send still plays");
+    }
+
+    #[test]
+    fn shaker_performer_and_held_notes_release_on_mute() {
+        let mut playing = project();
+        playing.groups[0].sounds[0].sampler = None;
+        playing.groups[0].sounds[0].instrument = "Perc".into();
+        playing.groups[0].sounds[0].slots = vec![deckard_model::SlotInfo {
+            module: "Perc".into(),
+            name: "Perc".into(),
+            active: true,
+            plugin: None,
+            params: vec![("mode".into(), 2.0), ("shaker_env_mode".into(), 2.0), ("shaker_release".into(), 0.1)],
+        }];
+        playing.groups[0].patterns[0] = Pattern {
+            length: 4 * PPQ,
+            notes: vec![Note { sound: 0, position: 0, length: 4 * PPQ, pitch: 60, velocity: 127, probability: 100, ..Default::default() }],
+            ..Default::default()
+        };
+        let mut muted = playing.clone();
+        muted.groups[0].sounds[0].muted = true;
+
+        let peak_of = |buf: &[f32]| buf.iter().fold(0f32, |m, v| m.max(v.abs()));
+
+        for (with_echo, ahead) in [(false, None), (true, None), (false, Some(512u64))] {
+            let mut cache = SampleCache::default();
+            let (mut e, _) = Engine::new(&playing, None, 48_000, Mode::Scene(0), &mut cache);
+            if with_echo {
+                e.set_midi_input(0, midi_input::built_in(note_echo::NAME));
+            }
+            if let Some(la) = ahead {
+                e.set_focus(Some(1));
+                e.render_ahead(la, 1, 256, true);
+            }
+            e.jump(&playing, Mode::Scene(0));
+            e.looping = true;
+
+            // 1) Play ~250 ms into the 1-bar Performer note, stop transport mid-note, then
+            // restart: Performer must not latch its held-note count across the stop.
+            let mut buf = vec![0f32; 2 * 256];
+            let mut pre_peak = 0f32;
+            for _ in 0..48 {
+                e.process(&mut buf);
+                pre_peak = pre_peak.max(peak_of(&buf));
+            }
+            assert!(pre_peak > 0.01, "Performer shaking before stop ({with_echo}, {ahead:?}): {pre_peak}");
+
+            e.stop();
+            for _ in 0..20 {
+                e.process(&mut buf);
+            }
+            e.jump(&playing, Mode::Scene(0));
+            if with_echo {
+                e.note_hold(0, 0, 64, 100);
+            }
+            let mut resumed = 0f32;
+            for _ in 0..48 {
+                e.process(&mut buf);
+                resumed = resumed.max(peak_of(&buf));
+            }
+            assert!(resumed > 0.01, "Performer shaking after restart ({with_echo}, {ahead:?}): {resumed}");
+
+            // 2) Mute mid-bar: Performer releases immediately and queued Note Echo repeats
+            // are cancelled instead of shaking through the rest of the bar.
+            let (fresh, _) = Engine::new_after(&muted, Some((&playing, &[])), None, 48_000, Mode::Scene(0), &mut cache);
+            drop(e.adopt(fresh, &muted));
+            for _ in 0..40 {
+                e.process(&mut buf);
+            }
+            let mut muted_peak = 0f32;
+            for _ in 0..120 {
+                e.process(&mut buf);
+                muted_peak = muted_peak.max(peak_of(&buf));
+            }
+            assert!(muted_peak < 1e-4, "Performer silent while muted across bar ({with_echo}, {ahead:?}): {muted_peak}");
+        }
+
+        // 3) Gated Sampler, AudioModule Gate mode, and MIDI-out sounds also release held
+        // notes on mute while one-shot Sampler voices ring out naturally.
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("tone.wav");
+        edit::write_wav(&wav, &sample::Sample { rate: 1000, frames: vec![[0.6, 0.6]; 2000] }).unwrap();
+
+        let mut smp_proj = project();
+        smp_proj.groups[0].patterns[0].notes.clear();
+        let other = smp_proj.groups[0].sounds[0].clone();
+        smp_proj.groups[0].sounds.push(other.clone());
+        smp_proj.groups[0].sounds.push(other);
+        // Sound 0: ADSR gated looped Sampler; Sound 1: One-shot Sampler; Sound 2: AudioModule Gate + MIDI out.
+        {
+            let smp = smp_proj.groups[0].sounds[0].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, 1999);
+            smp.zones[0].loop_active = true;
+            smp.zones[0].loop_range = (0, 1999);
+            smp.set("envelope_type", 2.0);
+            smp.set("volume_envelope/sustain", 1.0);
+            smp.set("volume_envelope/release", 0.0);
+        }
+        {
+            let smp = smp_proj.groups[0].sounds[1].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, 1999);
+            smp.set("envelope_type", 0.0);
+        }
+        {
+            let s2 = &mut smp_proj.groups[0].sounds[2];
+            s2.sampler = None;
+            s2.instrument = "AudioModule".into();
+            s2.audio = Some(deckard_model::AudioLoop {
+                mode: deckard_model::AudioMode::Gate,
+                takes: vec![deckard_model::Take {
+                    sample: deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() },
+                    beats: 4.0,
+                    play_range: (0, 0),
+                }],
+                pitchbend: 0.5,
+                fade: 0.0,
+                ..Default::default()
+            });
+            s2.channel.midi_out = deckard_model::MidiDest::Port("Synth".into());
+            s2.channel.midi_out_channel = 0;
+        }
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&smp_proj, None, 1000, Mode::Scene(0), &mut cache);
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        e.midi_tx = Some(tx);
+        e.note_hold(0, 0, 60, 127);
+        e.note_on(0, 1, 60, 127, 200);
+        e.note_hold(0, 2, 60, 100);
+        let mut b = vec![0f32; 2 * 50];
+        e.process(&mut b);
+        assert_eq!(rx.try_iter().map(|m| m.bytes().to_vec()).collect::<Vec<_>>(), vec![vec![0x90, 60, 100]]);
+
+        let mut smp_muted = smp_proj.clone();
+        smp_muted.groups[0].sounds[0].muted = true;
+        smp_muted.groups[0].sounds[1].muted = true;
+        smp_muted.groups[0].sounds[2].muted = true;
+        let (fresh, _) = Engine::new_after(&smp_muted, Some((&smp_proj, &[])), None, 1000, Mode::Scene(0), &mut cache);
+        drop(e.adopt(fresh, &smp_muted));
+        assert_eq!(rx.try_iter().map(|m| m.bytes().to_vec()).collect::<Vec<_>>(), vec![vec![0x80, 60, 0]], "MIDI out note ended on mute");
+
+        let mut after = vec![0f32; 2 * 200];
+        e.process(&mut after);
+        assert_eq!(e.sounds[0][0].as_ref().unwrap().voices(), 0, "gated ADSR sampler released");
+        assert_eq!(e.sounds[0][2].as_ref().unwrap().voices(), 0, "AudioModule gate released");
+        assert_eq!(e.sounds[0][1].as_ref().unwrap().voices(), 1, "one-shot sampler keeps ringing out");
     }
 
     #[test]
