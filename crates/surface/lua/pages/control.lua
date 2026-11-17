@@ -422,6 +422,28 @@ local function random_view(screen, theme, r)
   screen:label(bx, by - 16, bw, 14, "VELOCITY · " .. (names[(r.distribution or 1) + 1] or ""), { size = 9, color = gc.weak }, "left", "center")
 end
 
+-- The knobs a finger rests on (CAP_1..8), for touch focus.
+local function touched()
+  local out = {}
+  for n = 1, 8 do
+    if deckard.held("CAP_" .. n) then out[#out + 1] = n end
+  end
+  return out
+end
+
+-- Touch focus: a knob touched (one or two; three or more is a resting hand) has its
+-- name and value large in the right screen's header, under the slot's name.
+local function touch_header(screen, theme, c)
+  local t = touched()
+  if #t == 0 or #t > 2 then return end
+  local knob = c.knobs[t[1]]
+  if not knob then return end
+  local name = (knob.name or ""):upper()
+  local nw = screen:text_width(name, "param_name")
+  screen:label(490, 64, nw, 30, name, "param_name", "left", "center")
+  screen:label(490 + nw + 12, 62, 450 - nw - 12, 34, knob.text or "", "param_value", "left", "center")
+end
+
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -472,6 +494,13 @@ function control.draw(screen, theme, opts)
       return
     end
     screen:rect(480, 35, 480, 25, "bar")
+    -- Pictures over the knobs they draw (a filter over Cutoff and Reso, an envelope
+    -- over its times...), in the band on either screen; the right screen's own picture
+    -- only where the band there is free.
+    local right_free = true
+    for _, span in ipairs(screen:pictures(c.knobs, touched())) do
+      if span.first > 4 then right_free = false end
+    end
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
       if c.tuner then
@@ -479,6 +508,8 @@ function control.draw(screen, theme, opts)
         local t = c.tuner
         screen:label(490, 36, 300, 24, t.reference .. (t.muted and "  ·  Muted" or ""), "default", "left", "center")
         zhora.dial(screen, t)
+      elseif not right_free then
+        -- (The band holds the knobs' pictures.)
       elseif c.eq then eq_curve(screen, theme, c.eq)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
@@ -505,6 +536,7 @@ function control.draw(screen, theme, opts)
     end
   end
   knobs(screen, theme, c, false, knob_of)
+  touch_header(screen, theme, c)
 end
 
 -- The knobs' row as the page draws it (Set Macro shows it too).
