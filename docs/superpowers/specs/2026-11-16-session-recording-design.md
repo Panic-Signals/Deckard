@@ -196,3 +196,28 @@ feature inside the viewer and leaves the engine crate untouched.
   or audio).
 - The exact wording and placement of the mutual-exclusion message (the rule itself is
   decided above).
+
+---
+
+## Update (2026-11-17): play/pause and a stereo waveform
+
+Added after the first version shipped, at the user's request.
+
+- **Arm, then play.** Choosing **File ▸ Record Session to File…** no longer starts
+  recording immediately. It *arms*: it picks the file, opens the Recorder window with
+  live meters/waveform, and holds the master tap — but writes nothing. The window's
+  **Play ▸ / Pause ⏸** control (and the **Space** bar while the window is focused)
+  starts, pauses and resumes. The header shows **READY / RECORDING SESSION / PAUSED**.
+- **Pause cuts the time out.** While paused the timer holds and nothing is written;
+  resuming appends to the *same* file, so the file's length always equals the recorded
+  (played) time — paused spans are simply absent. Recorded time is tracked from
+  per-span `Instant`s (`played_before` + the live span), not wall-clock-since-start.
+- **No file until the first Play.** The WAV is created lazily on the first write, at the
+  live rate, so arming and then stopping leaves no file behind. (A device/rate change is
+  therefore detected only after the file exists.)
+- **Mutual exclusion starts at arm.** The tap is held from arm through stop, so the
+  internal Sampler is blocked for the whole armed/recording/paused span, not just while
+  writing (`SessionRecorder::active()`).
+- **Stereo waveform.** The window draws the captured per-channel peaks as two lanes —
+  left on top, right on the bottom, each mirrored around its lane centre — like the
+  Sampler, replacing the earlier single combined trace (which mis-plotted the two peaks).

@@ -1,12 +1,14 @@
 //! The session Recorder window: a live view of the master-output recording.
 
-use crate::session_record::{SessionView, StopReason, seconds_available};
+use crate::session_record::{SessionPhase, SessionView, StopReason, seconds_available};
 use eframe::egui;
 
 /// What the user did in the window this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
     None,
+    /// The Play/Pause control (or the Space bar): start/resume, or pause.
+    TogglePlay,
     /// The Stop button.
     Stop,
     /// The window's close button.
@@ -120,20 +122,25 @@ fn tint(free: u64, reserve: u64) -> egui::Color32 {
 /// The window's contents.
 pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction {
     let mut action = WindowAction::None;
+    let recording = view.phase == SessionPhase::Recording;
+    let paused = view.phase == SessionPhase::Paused;
+    let has_file = recording || paused;
+    let active = view.phase != SessionPhase::Idle;
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-        // Pulses while recording.
-        let on = view.recording && ui.input(|i| i.time).fract() < 0.6;
-        let color = if !view.recording {
-            egui::Color32::GRAY
-        } else if on {
-            RED
-        } else {
-            RED.gamma_multiply(0.4)
+        // The status light: a pulsing red while recording, a steady amber while paused,
+        // otherwise a dim grey.
+        let (label, dot, pulse) = match view.phase {
+            SessionPhase::Recording => ("RECORDING SESSION", RED, true),
+            SessionPhase::Paused => ("PAUSED", AMBER, false),
+            SessionPhase::Armed => ("READY", egui::Color32::GRAY, false),
+            SessionPhase::Idle => ("SESSION RECORDER", egui::Color32::GRAY, false),
         };
+        let lit = !pulse || ui.input(|i| i.time).fract() < 0.6;
+        let color = if lit { dot } else { dot.gamma_multiply(0.4) };
         ui.painter().circle_filled(rect.center(), 6.0, color);
-        ui.label(egui::RichText::new(if view.recording { "RECORDING SESSION" } else { "SESSION RECORDER" }).strong());
+        ui.label(egui::RichText::new(label).strong());
         // Pin control (floats the window on top), right-aligned.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let hint = if pinned { "Unpin — stop floating above other windows" } else { "Pin — keep this window on top" };
@@ -142,13 +149,13 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction
             }
         });
     });
-    if view.recording {
+    if active {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
     // The timer, centered above the waveform, with the recording stats beneath it.
     ui.vertical_centered(|ui| {
         ui.label(egui::RichText::new(format_elapsed(view.elapsed)).size(48.0).monospace());
-        if view.recording {
+        if has_file {
             ui.horizontal(|ui| {
                 ui.label(format!("started {}", view.started_label));
                 ui.label(format!("{} on disk", format_bytes(view.bytes)));
@@ -185,30 +192,56 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction
         ui.colored_label(RED, e);
     }
     // After an automatic stop, say why (a write error already shows above).
-    if !view.recording
-        && let Some(text) = view.stopped.and_then(reason_text)
-    {
+    if !active && let Some(text) = view.stopped.and_then(reason_text) {
         ui.colored_label(AMBER, text);
     }
     ui.add_space(6.0);
-    if ui.add_enabled(view.recording, egui::Button::new("Stop")).clicked() {
-        action = WindowAction::Stop;
+    ui.horizontal(|ui| {
+        // Play while armed or paused; pause while recording.
+        let (play_label, play_hint) = if recording {
+            ("⏸ Pause", "Pause — hold the recording (Space)")
+        } else {
+            ("▶ Play", "Play — start or resume recording (Space)")
+        };
+        if ui.add_enabled(active, egui::Button::new(play_label)).on_hover_text(play_hint).clicked() {
+            action = WindowAction::TogglePlay;
+        }
+        if ui.add_enabled(active, egui::Button::new("Stop")).clicked() {
+            action = WindowAction::Stop;
+        }
+    });
+    // Space toggles Play/Pause when this window has focus (and nothing is being clicked).
+    if action == WindowAction::None && active && ui.input(|i| i.focused && i.key_pressed(egui::Key::Space)) {
+        action = WindowAction::TogglePlay;
     }
     action
 }
 
-/// The scrolling waveform: one min/max bar per bucket, newest on the right.
+/// The scrolling stereo waveform: the left channel in the top lane and the right in the
+/// bottom lane, each a bar mirrored around its lane centre, newest on the right. Each
+/// bucket in `view.wave` is that bucket's (left peak, right peak).
 fn wave(ui: &mut egui::Ui, view: &SessionView) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, egui::Color32::from_gray(0x16));
     let n = view.wave.len().max(1);
     let step = rect.width() / n as f32;
-    let mid = rect.center().y;
-    for (i, (lo, hi)) in view.wave.iter().enumerate() {
+    let lane = rect.height() / 2.0;
+    let l_mid = rect.top() + lane * 0.5;
+    let r_mid = rect.top() + lane * 1.5;
+    // A faint line between the two lanes.
+    painter.line_segment(
+        [egui::pos2(rect.left(), rect.center().y), egui::pos2(rect.right(), rect.center().y)],
+        egui::Stroke::new(1.0, egui::Color32::from_gray(0x2a)),
+    );
+    let stroke = egui::Stroke::new(step.max(1.0), RED);
+    for (i, (l, r)) in view.wave.iter().enumerate() {
         let x = rect.left() + (i as f32 + 0.5) * step;
-        let (top, bottom) = (mid - hi.clamp(-1.0, 1.0) * rect.height() / 2.0, mid - lo.clamp(-1.0, 1.0) * rect.height() / 2.0);
-        painter.line_segment([egui::pos2(x, top), egui::pos2(x, bottom.max(top + 1.0))], egui::Stroke::new(step.max(1.0), RED));
+        // Each channel mirrored around its lane centre, leaving a hair of gap at the line.
+        let lh = (l.clamp(0.0, 1.0) * (lane * 0.5 - 1.0)).max(0.5);
+        let rh = (r.clamp(0.0, 1.0) * (lane * 0.5 - 1.0)).max(0.5);
+        painter.line_segment([egui::pos2(x, l_mid - lh), egui::pos2(x, l_mid + lh)], stroke);
+        painter.line_segment([egui::pos2(x, r_mid - rh), egui::pos2(x, r_mid + rh)], stroke);
     }
 }
 
@@ -236,7 +269,7 @@ mod tests {
 
     #[test]
     fn stopped_reason_line_appears() {
-        let view = SessionView { recording: false, stopped: Some(StopReason::Disk), ..SessionView::default() };
+        let view = SessionView { phase: SessionPhase::Idle, stopped: Some(StopReason::Disk), ..SessionView::default() };
         let mut h = Harness::new_ui(|ui| {
             body(ui, &view, true);
         });
@@ -280,7 +313,7 @@ mod tests {
         assert!(h.query_by_label("00:00:00").is_some(), "idle shows a zero timer");
         drop(h);
 
-        view.recording = true;
+        view.phase = SessionPhase::Recording;
         view.elapsed = 767.0;
         view.started_label = "14:02".into();
         view.rate = 48_000;
@@ -299,5 +332,36 @@ mod tests {
         assert!(h.query_by_label("00:12:47").is_some(), "timer text is rendered");
         assert!(h.query_by_label("48 kHz · 24-bit · stereo").is_some());
         assert!(h.query_by_label("session.wav").is_some());
+    }
+
+    #[test]
+    fn armed_shows_ready_and_a_play_button() {
+        let view = SessionView { phase: SessionPhase::Armed, ..SessionView::default() };
+        let mut h = Harness::new_ui(|ui| {
+            body(ui, &view, true);
+        });
+        h.run_steps(2);
+        assert!(h.query_by_label("READY").is_some(), "armed shows READY");
+        assert!(h.query_by_label("▶ Play").is_some(), "armed offers Play");
+    }
+
+    #[test]
+    fn play_pause_control_toggles() {
+        for (phase, label) in [(SessionPhase::Armed, "▶ Play"), (SessionPhase::Recording, "⏸ Pause"), (SessionPhase::Paused, "▶ Play")]
+        {
+            let view = SessionView { phase, ..SessionView::default() };
+            let action = std::cell::Cell::new(WindowAction::None);
+            let mut h = Harness::new_ui(|ui| {
+                let a = body(ui, &view, true);
+                if a != WindowAction::None {
+                    action.set(a);
+                }
+            });
+            h.run_steps(2);
+            assert!(h.query_by_label(label).is_some(), "{phase:?} shows {label}");
+            h.get_by_label(label).click();
+            h.run_steps(2);
+            assert_eq!(action.get(), WindowAction::TogglePlay, "{phase:?}: the control toggles play/pause");
+        }
     }
 }

@@ -69,6 +69,18 @@ pub fn can_start(free: u64, reserve: u64) -> bool {
     free > reserve
 }
 
+/// Where a session recording is in its life: armed (file chosen, metering, nothing
+/// written), recording (writing), paused (holding — the paused time is left out of the
+/// file), or idle (no session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionPhase {
+    #[default]
+    Idle,
+    Armed,
+    Recording,
+    Paused,
+}
+
 /// Why a recording ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -148,9 +160,6 @@ struct SessionRun {
     wav: SessionWav,
     rate: u32,
     written: u64,
-    /// When `start` opened the file, so `poll` can keep the file's length equal to
-    /// wall-clock elapsed time.
-    started: Instant,
     /// The last free-space reading and when it was taken, so `poll` can throttle the
     /// `statvfs` syscall to about once a second instead of running it every frame.
     free_cache: u64,
@@ -161,7 +170,7 @@ struct SessionRun {
 /// that outlives a stop. `Default` is the idle state (not recording, no file).
 #[derive(Default)]
 pub struct SessionView {
-    pub recording: bool,
+    pub phase: SessionPhase,
     pub elapsed: f64,
     pub started_label: String,
     pub meter: (f32, f32),
@@ -171,6 +180,7 @@ pub struct SessionView {
     pub reserve: u64,
     pub rate: u32,
     pub path: Option<PathBuf>,
+    /// One entry per scrolling bucket: that bucket's (left peak, right peak), each ≥ 0.
     pub wave: VecDeque<(f32, f32)>,
     pub error: Option<String>,
     pub stopped: Option<StopReason>,
@@ -189,27 +199,91 @@ const MAX_PAD_SECONDS: u64 = 4;
 /// elapsed) is wired in a later task; the testable core is `poll_at`.
 pub struct SessionRecorder {
     pub view: SessionView,
+    phase: SessionPhase,
     run: Option<SessionRun>,
     tap: Option<Arc<Mutex<Vec<f32>>>>,
+    /// Recorded seconds accumulated before the current play span (grows at each pause); the
+    /// current span's seconds are added live from `play_started`. Paused time is never
+    /// counted, so the file's length always equals the recorded time.
+    played_before: f64,
+    play_started: Option<Instant>,
 }
 
 impl SessionRecorder {
     pub fn new() -> SessionRecorder {
-        SessionRecorder { view: SessionView::default(), run: None, tap: None }
+        SessionRecorder {
+            view: SessionView::default(),
+            phase: SessionPhase::Idle,
+            run: None,
+            tap: None,
+            played_before: 0.0,
+            play_started: None,
+        }
     }
 
-    /// Whether a recording is currently in flight.
+    /// Whether the session is actively writing audio.
     pub fn recording(&self) -> bool {
-        self.run.is_some()
+        self.phase == SessionPhase::Recording
     }
 
-    /// Opens the WAV file and arms the recorder. Does not touch any `Output`; the caller wires
-    /// the tap via `attach_tap`.
+    /// Whether a session is live at all (armed, recording or paused) — i.e. it holds the tap.
+    pub fn active(&self) -> bool {
+        self.phase != SessionPhase::Idle
+    }
+
+    pub fn phase(&self) -> SessionPhase {
+        self.phase
+    }
+
+    /// Arms the recorder: remembers the file to record to and shows live metering, but writes
+    /// nothing until `play`. Does not touch any `Output`; the caller wires the tap via
+    /// `attach_tap`. The WAV file is only created on the first `play`, so arming and then
+    /// stopping leaves no file behind.
+    pub fn arm(&mut self, path: PathBuf, rate: u32, reserve: u64) {
+        self.run = None;
+        self.played_before = 0.0;
+        self.play_started = None;
+        self.phase = SessionPhase::Armed;
+        self.view = SessionView { phase: SessionPhase::Armed, rate, reserve, path: Some(path), ..SessionView::default() };
+    }
+
+    /// Begins or resumes recording. The WAV file is created lazily on the first write (in
+    /// `poll_at`, at the live rate). On the first play it stamps the start time.
+    pub fn play(&mut self, started_label: String) {
+        if matches!(self.phase, SessionPhase::Armed | SessionPhase::Paused) {
+            if self.phase == SessionPhase::Armed {
+                self.view.started_label = started_label;
+            }
+            self.phase = SessionPhase::Recording;
+            self.view.phase = SessionPhase::Recording;
+            self.play_started = Some(Instant::now());
+        }
+    }
+
+    /// Pauses recording: freezes the recorded-time clock and stops writing. The file stays
+    /// open; `play` resumes appending to it, and the paused span is simply absent from it.
+    pub fn pause(&mut self) {
+        if self.phase == SessionPhase::Recording {
+            if let Some(t) = self.play_started.take() {
+                self.played_before += t.elapsed().as_secs_f64();
+            }
+            self.phase = SessionPhase::Paused;
+            self.view.phase = SessionPhase::Paused;
+            self.view.elapsed = self.played_before;
+        }
+    }
+
+    /// Opens the file and begins recording immediately (arm + play). Used by tests and as a
+    /// convenience; the file is still created lazily on the first `poll_at`.
     pub fn start(&mut self, path: PathBuf, rate: u32, reserve: u64, started_label: String) -> Result<(), String> {
-        let wav = SessionWav::create(&path, rate)?;
-        self.run = Some(SessionRun { wav, rate, written: 0, started: Instant::now(), free_cache: u64::MAX, free_checked: None });
-        self.view = SessionView { recording: true, rate, reserve, path: Some(path), started_label, ..SessionView::default() };
+        self.arm(path, rate, reserve);
+        self.play(started_label);
         Ok(())
+    }
+
+    /// Recorded seconds so far: the played time, with any paused spans left out.
+    fn recorded_elapsed(&self) -> f64 {
+        self.played_before + self.play_started.map_or(0.0, |t| t.elapsed().as_secs_f64())
     }
 
     /// Creates the shared sample buffer the caller hands to `Output::set_tap`, keeping a clone
@@ -224,7 +298,7 @@ impl SessionRecorder {
     /// computes elapsed wall-clock time and the free space on the recording's disk, then
     /// drives `poll_at`. On a clean/auto stop it releases the engine tap.
     pub fn poll(&mut self, output: Option<&deckard_engine::output::Output>) {
-        if !self.recording() {
+        if !self.active() {
             return;
         }
         let Some(output) = output else { return };
@@ -237,7 +311,7 @@ impl SessionRecorder {
             }
             None => Vec::new(),
         };
-        let elapsed = self.run.as_ref().map_or(0.0, |r| r.started.elapsed().as_secs_f64());
+        let elapsed = self.recorded_elapsed();
         let free = self.free_throttled();
         if self.poll_at(elapsed, rate, &new, free) {
             output.set_tap(None);
@@ -263,14 +337,32 @@ impl SessionRecorder {
     /// The testable core. Pads silent frames so the file reaches `floor(elapsed * rate)` total
     /// frames, then writes `new`. Returns `true` when it just auto- or clean-stopped.
     pub fn poll_at(&mut self, elapsed: f64, rate: u32, new: &[[f32; 2]], free: u64) -> bool {
-        // A rate different from the one `start` opened at: the device switched under us.
-        match self.run.as_ref() {
-            None => return false,
-            Some(run) if rate != run.rate => return self.clean_stop(StopReason::RateChange),
-            Some(_) => {}
+        match self.phase {
+            SessionPhase::Idle => return false,
+            // Armed or paused: keep the meters and waveform alive, but write nothing and let
+            // no time pass — so paused spans never reach the file.
+            SessionPhase::Armed | SessionPhase::Paused => {
+                self.update_meters(new, free);
+                return false;
+            }
+            SessionPhase::Recording => {}
         }
 
-        // Target total frames so the file length equals wall-clock elapsed.
+        // The file is created on the first write, at the live rate; a later rate change (the
+        // device switched under us) then clean-stops.
+        match self.run.as_ref() {
+            Some(run) if rate != run.rate => return self.clean_stop(StopReason::RateChange),
+            Some(_) => {}
+            None => {
+                let Some(path) = self.view.path.clone() else { return false };
+                match SessionWav::create(&path, rate) {
+                    Ok(wav) => self.run = Some(SessionRun { wav, rate, written: 0, free_cache: u64::MAX, free_checked: None }),
+                    Err(e) => return self.fail(e),
+                }
+            }
+        }
+
+        // Target total frames so the file length equals the recorded (played) time.
         let target = (elapsed * rate as f64) as u64;
 
         // Do the pad/write work against the `run` borrow, capturing any write error, then drop
@@ -313,18 +405,9 @@ impl SessionRecorder {
         };
 
         // Update the view for the UI.
-        let peak = new.iter().fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
+        self.update_meters(new, free);
         self.view.elapsed = elapsed;
         self.view.bytes = self.run.as_ref().expect("run present").wav.data_bytes();
-        self.view.free = free;
-        self.view.meter = peak;
-        self.view.peak = (self.view.peak.0.max(peak.0), self.view.peak.1.max(peak.1));
-        if !new.is_empty() {
-            self.view.wave.push_back(peak);
-            while self.view.wave.len() > WAVE_BUCKETS {
-                self.view.wave.pop_front();
-            }
-        }
 
         // A write that reached the 4 GB ceiling: finalize the (valid) file now.
         if hit_ceiling {
@@ -337,7 +420,22 @@ impl SessionRecorder {
         false
     }
 
-    /// Manual stop: finalize, clear `run`, return the file path.
+    /// Updates the live meters, peak hold and scrolling waveform from the latest frames.
+    fn update_meters(&mut self, new: &[[f32; 2]], free: u64) {
+        let peak = new.iter().fold((0f32, 0f32), |p, f| (p.0.max(f[0].abs()), p.1.max(f[1].abs())));
+        self.view.free = free;
+        self.view.meter = peak;
+        self.view.peak = (self.view.peak.0.max(peak.0), self.view.peak.1.max(peak.1));
+        if !new.is_empty() {
+            self.view.wave.push_back(peak);
+            while self.view.wave.len() > WAVE_BUCKETS {
+                self.view.wave.pop_front();
+            }
+        }
+    }
+
+    /// Manual stop: finalize, clear `run`, return the file path (or `None` if nothing was
+    /// recorded — armed but never played leaves no file behind).
     pub fn stop(&mut self) -> Option<PathBuf> {
         self.abort(StopReason::Manual)
     }
@@ -347,15 +445,16 @@ impl SessionRecorder {
     /// down and rebuilt (a device or buffer change) at the same sample rate, which no
     /// `RateChange` would catch. Returns the file path if a recording was in flight.
     pub fn abort(&mut self, reason: StopReason) -> Option<PathBuf> {
-        if self.run.is_none() {
+        if self.phase == SessionPhase::Idle {
             return None;
         }
-        let path = self.view.path.clone();
+        // A file exists only once recording has actually written to one.
+        let path = self.run.is_some().then(|| self.view.path.clone()).flatten();
         self.clean_stop(reason);
         path
     }
 
-    /// Finalizes the `SessionWav`, records the stop reason, drops `run`. Returns `true`.
+    /// Finalizes the `SessionWav` (if any), records the stop reason, returns to idle. Returns `true`.
     fn clean_stop(&mut self, reason: StopReason) -> bool {
         if let Some(run) = self.run.take() {
             if let Err(e) = run.wav.finalize() {
@@ -365,7 +464,9 @@ impl SessionRecorder {
             }
         }
         self.view.stopped = Some(reason);
-        self.view.recording = false;
+        self.phase = SessionPhase::Idle;
+        self.view.phase = SessionPhase::Idle;
+        self.play_started = None;
         true
     }
 
@@ -501,11 +602,59 @@ mod tests {
     #[test]
     fn autostops_on_rate_change() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = started(dir.path()); // opened at 48_000
+        let mut s = started(dir.path());
+        s.poll_at(0.1, 48_000, &[], u64::MAX); // first poll opens the file at 48 kHz
         let stopped = s.poll_at(0.5, 44_100, &[], u64::MAX); // device switched
         assert!(stopped);
         assert_eq!(s.view.stopped, Some(StopReason::RateChange));
         assert!(!s.recording());
+    }
+
+    #[test]
+    fn arming_writes_nothing_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.wav");
+        let mut s = SessionRecorder::new();
+        s.arm(path.clone(), 48_000, 1_000_000_000);
+        assert_eq!(s.phase(), SessionPhase::Armed);
+        assert!(s.active() && !s.recording());
+        // Metering runs while armed, but nothing is written and no file is created.
+        s.poll_at(0.0, 48_000, &[[0.5, 0.4]; 1000], u64::MAX);
+        assert_eq!(s.view.meter, (0.5, 0.4), "armed metering updates");
+        assert_eq!(s.view.bytes, 0);
+        assert!(!path.exists(), "no file yet");
+        // Stopping while only armed leaves no file behind.
+        assert_eq!(s.stop(), None);
+        assert_eq!(s.phase(), SessionPhase::Idle);
+        assert!(!path.exists(), "still no file after a stop from armed");
+    }
+
+    #[test]
+    fn pausing_keeps_the_paused_audio_out_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.wav");
+        let mut s = SessionRecorder::new();
+        s.arm(path.clone(), 48_000, 1_000_000_000);
+        s.play("now".into());
+        s.poll_at(1.0, 48_000, &[[0.5, 0.5]; 48_000], u64::MAX); // ~1s recorded
+        let after_first = s.view.bytes;
+        assert!(after_first >= bytes_per_second(48_000) - 6);
+        // Pause: polling while paused updates the meter but writes nothing.
+        s.pause();
+        assert_eq!(s.phase(), SessionPhase::Paused);
+        s.poll_at(1.0, 48_000, &[[0.9, 0.9]; 48_000], u64::MAX);
+        assert_eq!(s.view.bytes, after_first, "paused audio is not written");
+        assert_eq!(s.view.meter, (0.9, 0.9), "paused metering still updates");
+        // Resume: appends to the same file; the paused span is simply absent.
+        s.play("now".into());
+        assert_eq!(s.phase(), SessionPhase::Recording);
+        s.poll_at(1.5, 48_000, &[[0.5, 0.5]; 24_000], u64::MAX); // recorded time 1.5s total
+        assert!(s.view.bytes > after_first, "recording resumed into the same file");
+        s.stop();
+        // The file holds ~1.5s of recorded audio — the paused second is not in it.
+        let r = hound::WavReader::open(&path).unwrap();
+        let secs = r.len() as f64 / 2.0 / 48_000.0;
+        assert!((1.4..1.6).contains(&secs), "file holds the recorded time only, got {secs}s");
     }
 
     #[test]
@@ -516,7 +665,7 @@ mod tests {
         let path = s.abort(StopReason::DeviceChange);
         assert_eq!(path, Some(dir.path().join("s.wav")), "abort returns the file path");
         assert!(!s.recording());
-        assert!(!s.view.recording);
+        assert_eq!(s.view.phase, SessionPhase::Idle);
         assert_eq!(s.view.stopped, Some(StopReason::DeviceChange));
         // The partial file was finalized and opens as a valid, non-empty WAV.
         let mut r = hound::WavReader::open(dir.path().join("s.wav")).unwrap();
@@ -527,6 +676,7 @@ mod tests {
     fn clock_jump_past_ceiling_stops_cleanly_without_overrunning() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = started(dir.path()); // 48 kHz
+        s.poll_at(0.0, 48_000, &[], u64::MAX); // open the file (lazily created on first poll)
         // Pretend the file is already just shy of the 4 GB ceiling, without writing 4 GB:
         // the test lives in this module, so it can position the frame counter directly.
         let ceiling_frames = WAV_CEILING_BYTES / 6;

@@ -173,7 +173,7 @@ pub fn menus(app: &App) -> Vec<(&'static str, Vec<Item>)> {
         Item::Separator,
         cmd("Export Audio…", Command::ExportAudio).enabled(has),
         cmd("Export MIDI…", Command::ExportMidi).enabled(has),
-        cmd(if app.session.recording() { "Stop Session Recording" } else { "Record Session to File…" }, Command::SessionRecord),
+        cmd(if app.session.active() { "Stop Session Recording" } else { "Record Session to File…" }, Command::SessionRecord),
         Item::Separator,
         cmd("Preferences…", Command::Preferences).key(Key::Comma, false),
         Item::Separator,

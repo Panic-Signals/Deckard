@@ -336,7 +336,7 @@ fn ratchet_shots() {
 #[test]
 #[ignore]
 fn session_recorder_shots() {
-    use crate::session_record::{SessionView, bytes_per_second};
+    use crate::session_record::{SessionPhase, SessionView, bytes_per_second};
     use std::collections::VecDeque;
 
     let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
@@ -344,21 +344,22 @@ fn session_recorder_shots() {
     app.new_project();
     let mut h = harness(app);
 
-    // A believable mid-set waveform: a gently pulsing envelope with some detail.
+    // A believable mid-set stereo waveform: per-bucket (left peak, right peak), the two
+    // channels pulsing a little differently.
     let rate = 48_000u32;
     let mut wave: VecDeque<(f32, f32)> = VecDeque::new();
     for i in 0..180u32 {
         let t = i as f32 / 180.0;
         let env = 0.30 + 0.55 * (t * std::f32::consts::TAU * 3.0).sin().abs() * (0.6 + 0.4 * (t * 37.0).sin().abs());
-        let hi = (env * (0.7 + 0.3 * (t * 101.0).sin()).abs()).min(0.97);
-        let lo = -(env * (0.7 + 0.3 * (t * 61.0).cos()).abs()).min(0.97);
-        wave.push_back((lo, hi));
+        let l = (env * (0.7 + 0.3 * (t * 101.0).sin()).abs()).min(0.97);
+        let r = (env * (0.7 + 0.3 * (t * 61.0).cos()).abs()).min(0.97);
+        wave.push_back((l, r));
     }
 
     let app = h.state_mut();
     app.session_window_open = true;
     app.session.view = SessionView {
-        recording: true,
+        phase: SessionPhase::Recording,
         elapsed: 2537.0, // 00:42:17
         started_label: "22:14".into(),
         meter: (0.62, 0.48),

@@ -2558,7 +2558,7 @@ impl App {
         // buffer change at the SAME sample rate fires no RateChange, so clean-stop the
         // session here (before the old `Output` is dropped) rather than let it pad pure
         // silence for the rest of the set. `set_tap(None)` is moot: the `Output` is going.
-        if self.session.recording() {
+        if self.session.active() {
             self.session.abort(session_record::StopReason::DeviceChange);
             // The window stays open so it can show the "audio device changed" reason.
         }
@@ -7282,7 +7282,7 @@ impl App {
         // grab it at the same time (mutual exclusion).
         let listen = self.meter_inputs
             && ((self.sampling_open && self.sampling.tab == 0) || hw_record)
-            && !(self.session.recording() && self.recorder.view.source == 2);
+            && !(self.session.active() && self.recorder.view.source == 2);
         self.recorder.meter(
             listen,
             recorder::StartWith {
@@ -7772,7 +7772,7 @@ impl App {
             }
             S::Record(r) => match r {
                 RecordAct::Start => {
-                    if self.session.recording() && self.recorder.view.source == 2 {
+                    if self.session.active() && self.recorder.view.source == 2 {
                         self.recorder.view.error =
                             Some("Can't record from an internal source while a session recording is running. Stop it first.".into());
                     } else {
@@ -8368,15 +8368,12 @@ impl App {
         self.sampling_act(act);
     }
 
-    /// Start a session recording of the master output, or stop the running one. Refuses
-    /// when the Sampling recorder already holds the engine tap (mutual exclusion).
+    /// Arm a session recording of the master output (pick the file and open the Recorder
+    /// window, metering but not yet writing — Play begins it), or stop/cancel a live one.
+    /// Refuses when the Sampling recorder already holds the engine tap (mutual exclusion).
     fn toggle_session_record(&mut self) {
-        if self.session.recording() {
-            self.session.stop();
-            if let Some(Ok(o)) = &self.output {
-                o.set_tap(None);
-            }
-            self.session_window_open = false;
+        if self.session.active() {
+            self.stop_session_record();
             return;
         }
         if self.recorder.is_internal_active() {
@@ -8403,22 +8400,40 @@ impl App {
             self.error = Some("Not enough free disk space to start a session recording.".into());
             return;
         }
+        // Arm: attach the master tap now so the window meters live, but write nothing until Play.
         let buffer = self.session.attach_tap();
-        match self.session.start(path.clone(), rate, reserve, session_record::started_label()) {
-            Ok(()) => {
-                if let Some(Ok(o)) = &self.output {
-                    o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
-                }
-                self.settings.session_dir = path.parent().map(Path::to_path_buf);
-                self.settings.save();
-                self.session_window_open = true;
-                // Surface the time-available estimate once at start (the OS save dialog can't
-                // carry it); the window then shows it live.
-                let left = session_record::seconds_available(free, reserve, rate);
-                self.status = format!("Recording session — {}", session_window::format_time_left(left));
-            }
-            Err(e) => self.error = Some(e),
+        self.session.arm(path.clone(), rate, reserve);
+        if let Some(Ok(o)) = &self.output {
+            o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
         }
+        self.settings.session_dir = path.parent().map(Path::to_path_buf);
+        self.settings.save();
+        self.session_window_open = true;
+        // Surface the time-available estimate once (the OS save dialog can't carry it); the
+        // window then shows it live once recording starts.
+        let left = session_record::seconds_available(free, reserve, rate);
+        self.status = format!("Session armed — press Play ({})", session_window::format_time_left(left));
+    }
+
+    /// Resume/begin recording, or pause it, from the window's Play/Pause control.
+    fn toggle_session_play(&mut self) {
+        match self.session.phase() {
+            session_record::SessionPhase::Armed | session_record::SessionPhase::Paused => {
+                self.session.play(session_record::started_label());
+            }
+            session_record::SessionPhase::Recording => self.session.pause(),
+            session_record::SessionPhase::Idle => {}
+        }
+    }
+
+    /// Stop and finalize a session recording (or cancel an armed one), releasing the tap and
+    /// closing the window.
+    fn stop_session_record(&mut self) {
+        self.session.stop();
+        if let Some(Ok(o)) = &self.output {
+            o.set_tap(None);
+        }
+        self.session_window_open = false;
     }
 
     fn start_recording(&mut self) {
@@ -11556,7 +11571,7 @@ impl App {
         // The recorder takes up its audio every frame while armed, recording, or metering;
         // a session recording must keep rendering too, or its silence-pad grows between
         // polls and the meters freeze.
-        if self.recorder.busy() || self.recorder.is_metering() || self.session.recording() {
+        if self.recorder.busy() || self.recorder.is_metering() || self.session.active() {
             ctx.request_repaint();
         }
         self.update_slot_view();
@@ -11841,13 +11856,8 @@ impl App {
         }
         if self.session_window_open {
             match session_window::show(ctx, &self.session.view, self.session_window_pin.on()) {
-                session_window::WindowAction::Stop => {
-                    self.session.stop();
-                    if let Some(Ok(o)) = &self.output {
-                        o.set_tap(None);
-                    }
-                    self.session_window_open = false;
-                }
+                session_window::WindowAction::TogglePlay => self.toggle_session_play(),
+                session_window::WindowAction::Stop => self.stop_session_record(),
                 session_window::WindowAction::Hide => self.session_window_open = false,
                 session_window::WindowAction::TogglePin => self.session_window_pin = self.session_window_pin.toggled(),
                 session_window::WindowAction::None => {}
