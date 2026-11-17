@@ -22,6 +22,7 @@ use crate::screen::{DrawOp, Paint, Picture, Style};
 
 pub mod band;
 pub mod curve;
+pub mod dial;
 pub mod envelope;
 pub mod eq;
 pub mod filter;
@@ -470,6 +471,7 @@ pub fn draw_lua(kind: &str, pic: &mut Picture, r: Rect, t: &Table, look: &Look) 
     c.focus = text(t, "focus");
     match kind {
         "curve" => curve::Curve::from_lua(t)?.draw(&mut c),
+        "dial" => dial::Dial::from_lua(t)?.draw(&mut c),
         "filter" => filter::Filter::from_lua(t)?.draw(&mut c),
         "band" => band::Band::from_lua(t)?.draw(&mut c),
         "eq" => eq::Eq::from_lua(t)?.draw(&mut c),
