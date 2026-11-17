@@ -28,6 +28,7 @@ pub mod filter;
 pub mod layout;
 pub mod lfo;
 pub mod mapping;
+pub mod oscillators;
 pub mod transfer;
 pub mod value;
 
@@ -456,6 +457,7 @@ pub fn draw_lua(kind: &str, pic: &mut Picture, r: Rect, t: &Table, look: &Look) 
         "eq" => eq::Eq::from_lua(t)?.draw(&mut c),
         "envelope" => envelope::Envelope::from_lua(t)?.draw(&mut c),
         "lfo" => lfo::Lfo::from_lua(t)?.draw(&mut c),
+        "oscillators" => oscillators::Oscillators::from_lua(t)?.draw(&mut c),
         "transfer" => transfer::Transfer::from_lua(t)?.draw(&mut c),
         "value" => value::Value::from_lua(t)?.draw(&mut c),
         _ => return Err(mlua::Error::runtime(format!("no widget \"{kind}\""))),
