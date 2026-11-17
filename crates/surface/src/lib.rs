@@ -24,6 +24,7 @@ mod leds;
 mod names;
 mod screen;
 mod sources;
+pub mod widget;
 
 pub use screen::{FONTS, Picture};
 pub use sources::SHIPPED;
@@ -1667,6 +1668,12 @@ impl Surface {
     /// Whether the surface already has picture `key` (`thumb`: thumbnail, else logo).
     pub fn has_picture(&self, key: &str, thumb: bool) -> bool {
         self.pictures.borrow().contains_key(&(key.to_string(), thumb))
+    }
+
+    /// The widgets' look in the theme shown now (for the widgets' golden tests).
+    #[cfg(test)]
+    pub(crate) fn widget_look(&self) -> Option<widget::Look> {
+        self.run.as_ref().and_then(|r| r.lua.app_data_ref::<screen::ThemeCache>().map(|c| widget::Look::from_cache(&c)))
     }
 
     fn draw_picture(&self, v: &View) -> screen::Picture {
