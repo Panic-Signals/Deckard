@@ -3695,7 +3695,7 @@ fn with_pictures_the_chain_is_a_strip_with_its_own_overflow() {
         let picture = surface.draw_picture(&v);
         assert!(picture.texts.iter().any(|s| s.starts_with(starts) && s.ends_with(ends) && s.contains(" / ")), "{:?}", picture.texts);
         assert!(picture.ops.iter().any(
-            |o| matches!(o, screen::DrawOp::Triangle { x, y: 72, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 76, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
         ));
     }
     v.control.chain.truncate(3);
@@ -4060,7 +4060,7 @@ fn a_filter_picture_sits_over_cutoff_and_reso() {
     set(&mut v, 0, "Cutoff", "1.20 kHz");
     set(&mut v, 1, "Reso", "42 %");
     let px = s.picture(&v);
-    let lit = |x0: usize, x1: usize| (100..204).flat_map(|y| (x0..x1).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    let lit = |x0: usize, x1: usize| (106..200).flat_map(|y| (x0..x1).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
     assert!(lit(0, 240) > 200, "the filter's curve over knobs 1-2: {}", lit(0, 240));
     // Knobs 3-4 have dials: a ring each, centred over the knob, nothing in the band's
     // lower corners where a curve would run.
@@ -4087,7 +4087,7 @@ fn touching_a_knob_focuses_its_picture() {
     let picture = s.draw_picture(&v);
     assert!(picture.texts.iter().any(|t| t == "1.20 kHz"), "the cutoff's value in the picture: {:?}", picture.texts);
     let touched = s.picture(&v);
-    let band = |px: &[[u8; 4]]| (100..204).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    let band = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
     assert_ne!(band(&before), band(&touched), "the cutoff lights in the picture");
     s.event(&Event::Button("BUTTON_CAP_2", true), &v, ms(160));
     s.event(&Event::Button("BUTTON_CAP_3", true), &v, ms(160));
@@ -4250,7 +4250,7 @@ fn a_users_mapping_gives_pages_and_pictures() {
         (knob.name, knob.text, knob.param_id) = (name.into(), "5.1".into(), Some(id));
     }
     let px = s.picture(&v);
-    let lit = (100..204).flat_map(|y| (0..240).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    let lit = (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
     assert!(lit > 200, "the mapping's filter over knobs 1-2: {lit}");
     // A broken mapping: the error names it, the scripts still run.
     std::fs::write(
@@ -4272,7 +4272,7 @@ fn bare_knobs_get_dials() {
     let rings = |pic: &crate::screen::Picture, x0: f32, x1: f32| {
         pic.ops
             .iter()
-            .filter(|o| matches!(o, screen::DrawOp::Line { p0, .. } if p0.0 >= x0 && p0.0 < x1 && p0.1 >= 100.0 && p0.1 < 204.0))
+            .filter(|o| matches!(o, screen::DrawOp::Line { p0, .. } if p0.0 >= x0 && p0.0 < x1 && p0.1 >= 106.0 && p0.1 < 200.0))
             .count()
     };
     for k in 0..6 {

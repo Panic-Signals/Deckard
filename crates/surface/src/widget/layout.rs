@@ -33,6 +33,8 @@ pub struct Knob {
     /// The knob's text with modulation at work, and where it has the knob (0..1).
     pub mod_text: Option<String>,
     pub mod_value: Option<f32>,
+    /// The values it picks among, if it's a choice (a type, a waveform, a switch).
+    pub choices: Vec<String>,
 }
 
 /// An input a picture is drawn from.
@@ -40,6 +42,7 @@ pub struct Knob {
 pub enum Input {
     Num(f32),
     Text(String),
+    List(Vec<String>),
 }
 
 /// A picture over knobs `first .. first + cells` (0..8, all on one screen).

@@ -582,6 +582,20 @@ pub fn load_all(lua: &mlua::Lua, sources: &crate::sources::Sources) -> (Vec<Mapp
     (out, errors)
 }
 
+impl Mapping {
+    /// The knobs on a page whose parameters the mapping declares `choices` for, and
+    /// those choices.
+    pub fn choices_on(&self, knobs: &[Option<Knob>; 8], ids: &[Option<u32>; 8]) -> Vec<(usize, Vec<String>)> {
+        self.find_on(knobs, ids)
+            .into_iter()
+            .filter_map(|(name, k)| {
+                let p = self.param(&name)?;
+                (!p.choices.is_empty()).then(|| (k, p.choices.clone()))
+            })
+            .collect()
+    }
+}
+
 /// The best mapping for a plug-in: the user's over DECKARD's, then the most specific.
 pub fn find<'a>(all: &'a [Mapping], name: &str, vendor: &str, plugin_id: &str) -> Option<&'a Mapping> {
     all.iter().filter_map(|m| m.score(name, vendor, plugin_id).map(|s| (m, (m.user, s)))).max_by_key(|(_, k)| *k).map(|(m, _)| m)

@@ -179,9 +179,9 @@ end
 local STRIP_SIZES = { Sampler = { 64, 16 }, EQ = { 36, 16 }, Compressor = { 26, 16 } }
 local INSTRUMENT, EFFECT = { 64, 16 }, { 36, 16 }
 
--- The strip: names at NAME_Y, pictures at PIC_Y (16 high: the focus frame ends at 95,
--- a gap above the band at 100).
-local NAME_Y, PIC_Y = 61, 76
+-- The strip: names at NAME_Y, pictures at PIC_Y (16 high: the focus frame ends at 98,
+-- a gap above the band at 106).
+local NAME_Y, PIC_Y = 62, 80
 local NAME_STYLE = { size = 11 }
 
 -- How wide the "+" for a new slot is; the strip's edges (room at each side for the

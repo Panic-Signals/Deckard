@@ -21,6 +21,7 @@ use mlua::{Lua, Table, Value};
 use crate::screen::{DrawOp, Paint, Picture, Style};
 
 pub mod band;
+pub mod choices;
 pub mod curve;
 pub mod dial;
 pub mod envelope;
@@ -42,8 +43,8 @@ mod mapping_check;
 pub const CELL_W: i32 = 120;
 /// The picture band, the same on both screens (`widgets.BAND_Y`, `widgets.BAND_H` in
 /// `lib/widgets.lua`): under the left screen's chain strip, above the knobs' section names.
-pub const BAND_Y: i32 = 100;
-pub const BAND_H: i32 = 104;
+pub const BAND_Y: i32 = 106;
+pub const BAND_H: i32 = 94;
 
 /// A box on the screens (960 × 272, the right screen from x = 480).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -388,6 +389,10 @@ pub fn draw_pictures(
             value: num(&t, "value").unwrap_or(0.0),
             mod_text: text(&t, "mod_text"),
             mod_value: num(&t, "mod_position"),
+            choices: match t.raw_get::<Option<Table>>("choices") {
+                Ok(Some(list)) => list.sequence_values::<String>().filter_map(Result::ok).collect(),
+                _ => Vec::new(),
+            },
         })
     });
     let ids: [Option<u32>; 8] = std::array::from_fn(|i| {
@@ -395,12 +400,19 @@ pub fn draw_pictures(
         // (An integer: ids are 32-bit, past what an f32 holds exactly.)
         t.raw_get::<Option<i64>>("id").ok().flatten().and_then(|n| u32::try_from(n).ok())
     });
+    let mut page = page;
     let mut spans = Vec::new();
     if let Some(name) = plugin
         && let Some(all) = lua.app_data_ref::<Mappings>()
         && let Some(m) = mapping::find(&all.0, name, "", "")
     {
         spans = m.spans(&page, &ids);
+        // (A mapping's choices name what a plug-in that hides them picks among.)
+        for (k, choices) in m.choices_on(&page, &ids) {
+            if let Some(knob) = page[k].as_mut().filter(|kn| kn.choices.is_empty()) {
+                knob.choices = choices;
+            }
+        }
     }
     let mut taken = [false; 8];
     for s in &spans {
@@ -419,10 +431,28 @@ pub fn draw_pictures(
             spans.push(s);
         }
     }
-    // A dial over each knob still bare.
+    // Over each knob still bare: a choice's few values (one lit), else a dial; a choice
+    // of many, or a value that isn't a number ("Off", "LP24"), gets nothing.
     for (k, knob) in page.iter().enumerate() {
         let Some(knob) = knob else { continue };
         if taken[k] || (k >= 4 && !right_dials) {
+            continue;
+        }
+        if !knob.choices.is_empty() {
+            let n = knob.choices.len();
+            if (2..=choices::MAX).contains(&n) {
+                let at = knob.choices.iter().position(|c| c.trim().eq_ignore_ascii_case(knob.text.trim()));
+                let active = at.unwrap_or_else(|| (knob.value.clamp(0.0, 1.0) * (n - 1) as f32).round() as usize);
+                let inputs = vec![
+                    ("items".to_string(), layout::Input::List(knob.choices.clone())),
+                    ("active".to_string(), layout::Input::Num((active + 1) as f32)),
+                ];
+                spans.push(layout::Span { first: k, cells: 1, kind: "choices".into(), inputs, knobs: vec![(k, "value".into())] });
+            }
+            continue;
+        }
+        let numeric = knob.text.trim().chars().next().is_none_or(|ch| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | '∞'));
+        if !numeric {
             continue;
         }
         let mut inputs = vec![("value".to_string(), layout::Input::Num(knob.value))];
@@ -439,6 +469,7 @@ pub fn draw_pictures(
             match v {
                 layout::Input::Num(n) => inputs.raw_set(k.as_str(), *n)?,
                 layout::Input::Text(s) => inputs.raw_set(k.as_str(), s.as_str())?,
+                layout::Input::List(l) => inputs.raw_set(k.as_str(), lua.create_sequence_from(l.iter().map(String::as_str))?)?,
             }
         }
         if touched.len() < 3
@@ -446,11 +477,13 @@ pub fn draw_pictures(
         {
             inputs.raw_set("focus", f)?;
         }
-        let r = Rect {
-            x: (span.first / 4) as i32 * 480 + (span.first % 4) as i32 * CELL_W,
-            y: BAND_Y,
-            w: span.cells as i32 * CELL_W,
-            h: BAND_H,
+        let x = (span.first / 4) as i32 * 480 + (span.first % 4) as i32 * CELL_W;
+        // (A dial's box: lined up with its knob's name and value, which start 11 px into
+        // the cell, rather than centred in the cell.)
+        let r = if span.kind == "dial" {
+            Rect { x: x + 6, y: BAND_Y, w: 54, h: BAND_H }
+        } else {
+            Rect { x, y: BAND_Y, w: span.cells as i32 * CELL_W, h: BAND_H }
         };
         draw_lua(&span.kind, pic, r, &inputs, look)?;
         let s = lua.create_table()?;
@@ -472,6 +505,7 @@ pub fn draw_lua(kind: &str, pic: &mut Picture, r: Rect, t: &Table, look: &Look) 
     match kind {
         "curve" => curve::Curve::from_lua(t)?.draw(&mut c),
         "dial" => dial::Dial::from_lua(t)?.draw(&mut c),
+        "choices" => choices::Choices::from_lua(t)?.draw(&mut c),
         "filter" => filter::Filter::from_lua(t)?.draw(&mut c),
         "band" => band::Band::from_lua(t)?.draw(&mut c),
         "eq" => eq::Eq::from_lua(t)?.draw(&mut c),
