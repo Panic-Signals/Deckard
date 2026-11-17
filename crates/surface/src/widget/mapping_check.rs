@@ -291,7 +291,9 @@ mod tests {
     fn check_a_mapping() {
         let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
         let (Some(path), Some(dump_path)) = (var("DECKARD_MAPPING"), var("DECKARD_DUMP")) else {
-            panic!("set DECKARD_MAPPING (a mapping .lua) and DECKARD_DUMP (its plugin-probe dump)");
+            // (Run with every ignored test, as rig runs do: nothing to check.)
+            eprintln!("check_a_mapping: set DECKARD_MAPPING (a mapping .lua) and DECKARD_DUMP (its plugin-probe dump); nothing checked");
+            return;
         };
         let out = var("DECKARD_RENDER_DIR").unwrap_or_else(|| std::env::temp_dir().join("deckard-mapping-check"));
         let m = read_mapping(&path).unwrap_or_else(|e| panic!("{e}"));
