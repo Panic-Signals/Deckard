@@ -58,6 +58,18 @@ pub const VERSION: &str = match option_env!("DECKARD_VERSION") {
 };
 /// Built by the release scripts (with a version minted on GitHub), not from source.
 pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
+pub(crate) type SurfaceViewStamp = (
+    Option<(usize, u64)>,
+    usize,
+    usize,
+    usize,
+    Option<usize>,
+    bool,
+    Option<usize>,
+    Option<deckard_doc::Chain>,
+    Option<((deckard_doc::Chain, usize), usize, std::time::Instant)>,
+    bool,
+);
 #[cfg(test)]
 mod auto_length_tests;
 #[cfg(test)]
@@ -252,12 +264,17 @@ fn main() {
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
     let app_icon = settings::Settings::load().app_icon;
+    let vsync = std::env::var_os("DECKARD_VSYNC").is_some();
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    wgpu_options.surface.present_mode = if vsync { eframe::wgpu::PresentMode::AutoVsync } else { eframe::wgpu::PresentMode::AutoNoVsync };
+    wgpu_options.surface.desired_maximum_frame_latency = Some(1);
     let options = eframe::NativeOptions {
         // The icon picked in Preferences ▸ General, from the start.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([width, 930.0])
             .with_drag_and_drop(true)
             .with_icon(std::sync::Arc::new(app_icon.icon_data())),
+        wgpu_options,
         ..Default::default()
     };
     let splash = boot::splash_wanted(&args);
@@ -1073,6 +1090,9 @@ pub struct App {
     jam_settings_wanted: bool,
     /// The last JAM script error shown.
     jam_error: Option<String>,
+    /// Same-frame `View` built by `mk3_events` and handed off to `jam_events` when
+    /// nothing changed in between, avoiding building `surface_view()` multiple times/frame.
+    frame_surface_view: Option<(SurfaceViewStamp, deckard_surface::View)>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.
     midi_devices: midi_devices::MidiDevices,
     /// The last MIDI controller script error shown.
@@ -1365,7 +1385,7 @@ const PEAK_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
 /// How often [`App::background`] comes back while the song plays or the meters move:
 /// nothing is drawn then to hold it to the display's rate, so an immediate repaint would
 /// spin. The MK3's pace while playing (C46).
-const BACKGROUND_PACE: std::time::Duration = std::time::Duration::from_millis(16);
+pub(crate) const BACKGROUND_PACE: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// How long after an edit the session is kept ([`App::keep_session`]).
 const SESSION_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
@@ -5110,6 +5130,21 @@ impl App {
         }
     }
 
+    pub(crate) fn surface_view_stamp(&self) -> SurfaceViewStamp {
+        (
+            self.doc.as_ref().map(|d| (std::rc::Rc::as_ptr(d) as usize, d.borrow().revision())),
+            self.group,
+            self.sound,
+            self.scene,
+            self.section,
+            self.song_view,
+            self.slot,
+            self.slot_of,
+            self.plugin_focus.and_then(|k| self.plugin_views.get(&k)).map(|v| (v.key, v.shown, v.refreshed)),
+            !self.surface_settings.values.is_empty(),
+        )
+    }
+
     /// Maschine's scripts are showing their Mixer page, when that page id exists.
     fn hardware_shows_mixer(host: &deckard_lua_host::Host) -> Option<bool> {
         let page = host.constant("NI.HW.PAGE_MIXER").ok()?;
@@ -5129,7 +5164,9 @@ impl App {
         // The group's sounds' Pad Touch, for what their held pads' pressure sends.
         let touches = |app: &App, group: usize| {
             let mut t = [deckard_model::pad_touch::PadTouch::default(); 16];
-            if let Some(g) = app.doc.as_ref().and_then(|d| d.borrow().project().groups.get(group).cloned()) {
+            if let Some(d) = &app.doc
+                && let Some(g) = d.borrow().project().groups.get(group)
+            {
                 for (t, s) in t.iter_mut().zip(&g.sounds) {
                     *t = s.pad_touch;
                 }
@@ -5241,7 +5278,8 @@ impl App {
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
             };
-            Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))) }
+            self.frame_surface_view = Some((self.surface_view_stamp(), view));
+            Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(std::sync::Arc::new(p)))) }
         };
         if let Some(on) = mixer_on {
             self.set_mixer(on);
@@ -10198,7 +10236,7 @@ impl App {
 
     /// Add a module or plug-in at the end of the focused sound's chain, and show it.
     /// The MIDI input plug-in on `group`, as the audio output has it.
-    pub(crate) fn midi_input(&self, group: usize) -> Option<deckard_engine::midi_input::Info> {
+    pub(crate) fn midi_input(&self, group: usize) -> Option<std::sync::Arc<deckard_engine::midi_input::Info>> {
         match &self.output {
             Some(Ok(out)) => out.midi_input(group),
             _ => None,
@@ -10905,11 +10943,37 @@ impl App {
         if failed.is_empty() { format!("{n} plug-ins loaded ({secs:.1} s)") } else { format!("plug-ins failed: {}", failed.join(", ")) }
     }
 
+    /// Ensure a stopped live engine is running on the audio output so plug-ins, buses,
+    /// worker threads and direct controller-thread pad hits are warm before the first Play.
+    pub(crate) fn ensure_idle_engine(&mut self) {
+        if self.screenshot.is_some() || self.playing.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        #[cfg(not(test))]
+        if self.output.is_none() {
+            self.output = Some(open_output(&self.settings, &mut self.output_fallback));
+        }
+        let Some(Ok(out)) = &self.output else { return };
+        if out.has_engine() {
+            return;
+        }
+        self.remember_libraries();
+        let d = doc.borrow();
+        let Some(Ok(out)) = &self.output else { return };
+        let (mut engine, report) = Engine::new(d.project(), self.path.as_deref(), out.rate, Mode::Arrangement, &mut self.samples);
+        engine.sequencing = false;
+        out.play(engine);
+        self.seen_revision = d.revision();
+        self.built = Some((out.plays(), d.project().clone(), report.chains));
+    }
+
     /// Load every plug-in instrument of the project (at the output's rate), so playing
     /// and editing never wait for one.
     fn load_plugins(&mut self) {
         let wanted = self.wanted_plugins();
         if wanted.is_empty() {
+            self.ensure_idle_engine();
             return;
         }
         let rate = match self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) {
@@ -10924,6 +10988,7 @@ impl App {
             }
         }
         self.status = Self::plugins_loaded_status(wanted.len(), t.elapsed().as_secs_f64(), &failed);
+        self.ensure_idle_engine();
     }
 
     /// Write the state of plug-ins edited in their windows into the document.
@@ -11267,8 +11332,10 @@ impl App {
             c.tick(&mut requests);
             ctx.request_repaint_after(undrawn(ctx, c.interval()));
         }
+        self.frame_surface_view = None;
         self.mk3_sync(ctx, &mut requests, true);
         self.jam_sync(ctx, true);
+        self.frame_surface_view = None;
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
@@ -11372,6 +11439,22 @@ impl eframe::App for App {
     /// `--input FILE`: feed scripted pointer input to the running app, for reproducing
     /// what a user does with plug-ins loaded (which tests can't, off the main thread).
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        #[cfg(not(test))]
+        {
+            static VSYNC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            static ACCESSKIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !*VSYNC.get_or_init(|| std::env::var_os("DECKARD_VSYNC").is_some()) {
+                // With AutoNoVsync, present() does not block for 16.67 ms; egui's default
+                // predicted_dt (1/60s) would subtract 16.67 ms from request_repaint_after(16ms)
+                // and spin the UI thread without pacing.
+                raw.predicted_dt = 0.002;
+            }
+            if !*ACCESSKIT.get_or_init(|| std::env::var_os("DECKARD_ACCESSKIT").is_some()) {
+                // Remote-desktop / shell WM_GETOBJECT probes otherwise enable full AccessKit
+                // widget-tree building and diffing on every 60 Hz frame.
+                ctx.disable_accesskit();
+            }
+        }
         let t = self.started.elapsed().as_secs_f32();
         while let Some(&(at, ev)) = self.input_script.first()
             && at <= t
@@ -11445,9 +11528,9 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed, recording, or metering.
+        // The recorder takes up its audio while armed, recording, or metering (buffer holds ~340 ms).
         if self.recorder.busy() || self.recorder.is_metering() {
-            ctx.request_repaint();
+            ctx.request_repaint_after(BACKGROUND_PACE);
         }
         self.update_slot_view();
         if self.catalog.poll() {
@@ -11521,7 +11604,7 @@ impl App {
             self.launch_scene(scene);
         }
 
-        self.follow_engine(ctx, std::time::Duration::ZERO);
+        self.follow_engine(ctx, BACKGROUND_PACE);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.toggle_play();
         }
@@ -11539,7 +11622,7 @@ impl App {
         if self.lock_morph.is_some() {
             let tick = self.playhead().map(|h| h.position);
             self.lock_tick(lock::clock(), tick);
-            ctx.request_repaint();
+            ctx.request_repaint_after(BACKGROUND_PACE);
         }
         self.menu_frame(ctx);
         if self.finish_quit(ctx) {
@@ -11566,6 +11649,7 @@ impl App {
             self.pending_editor = false;
             self.open_plugin_editor(self.group, self.sound);
         }
+
         // Plug-ins' timers, which this app's repainting would otherwise starve.
         deckard_plugins::editor::serve_timers();
         self.poll_wine();
@@ -11589,7 +11673,7 @@ impl App {
         if let Some(Ok(out)) = &self.output {
             out.set_focus(Some(self.group));
         }
-        self.update_meters(ctx, std::time::Duration::ZERO);
+        self.update_meters(ctx, BACKGROUND_PACE);
 
         let before = (self.group, self.sound, self.scene, self.section, self.song_view);
         layout::header(self, ui);
@@ -11635,8 +11719,10 @@ impl App {
                 ctx.request_repaint_after(c.interval());
             }
         }
+        self.frame_surface_view = None;
         self.mk3_sync(ui.ctx(), &mut requests, false);
         self.jam_sync(ui.ctx(), false);
+        self.frame_surface_view = None;
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
@@ -12480,6 +12566,47 @@ mod tests {
         let asked = asked.lock().unwrap();
         assert!(!asked.is_empty(), "it asks to come back");
         assert!(asked.iter().all(|d| *d >= BACKGROUND_PACE), "{asked:?}");
+    }
+
+    /// With `AutoNoVsync`, a visible playing frame must never schedule an immediate (`0 ms`)
+    /// repaint on its own (such as the playing scene tab's progress strip), or the UI thread
+    /// spins unthrottled at 400+ FPS.
+    #[test]
+    fn visible_frame_paces_repaints_while_playing() {
+        let mut app = App::default();
+        app.new_project();
+        app.preload_plugins = false;
+        if let Some(doc) = &app.doc {
+            let mut d = doc.borrow_mut();
+            let p = d.add_pattern(0, 0, "Pattern 1").unwrap();
+            let _ = play_in_scene(&mut d, 0, 0, p);
+        }
+        app.metronome = true;
+        app.transport_play();
+        if !matches!(app.output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let ctx = egui::Context::default();
+        // Settle initial two layout passes (egui requests one immediate pass on new widgets).
+        for _ in 0..3 {
+            let mut raw = egui::RawInput::default();
+            raw.predicted_dt = 0.002;
+            ctx.run_ui(raw, |ui| app.frame(ui)).textures_delta.clear();
+        }
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        ctx.set_request_repaint_callback(move |info| log.lock().unwrap().push(info.delay));
+        for _ in 0..4 {
+            let mut raw = egui::RawInput::default();
+            raw.predicted_dt = 0.002;
+            ctx.run_ui(raw, |ui| app.frame(ui)).textures_delta.clear();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.stop();
+        let asked = asked.lock().unwrap();
+        assert!(!asked.is_empty(), "playing frame schedules next tick");
+        assert!(asked.iter().all(|d| *d >= std::time::Duration::from_millis(10)), "unexpected unthrottled repaint: {asked:?}");
     }
 
     /// #15: with the window covered, the meters (the MK3's Mixer shows them) still move.

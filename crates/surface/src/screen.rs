@@ -237,6 +237,36 @@ fn font_at(i: usize) -> &'static Font {
     &all[i]
 }
 
+fn gamma_lut() -> &'static [f32; 256] {
+    static LUT: OnceLock<[f32; 256]> = OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|b| if b == 0 { 0.0 } else { (b as f32 / 255.0).powf(1.0 / 1.45) }))
+}
+
+type GlyphKey = (usize, u32, char);
+type GlyphEntry = (fontdue::Metrics, std::rc::Rc<[u8]>);
+
+thread_local! {
+    static GLYPH_CACHE: std::cell::RefCell<HashMap<GlyphKey, GlyphEntry>> =
+        std::cell::RefCell::new(HashMap::with_capacity(512));
+}
+
+fn cached_glyph(font_idx: usize, font: &Font, size: f32, ch: char) -> GlyphEntry {
+    let key = (font_idx, size.to_bits(), ch);
+    GLYPH_CACHE.with(|cache| {
+        if let Some(hit) = cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let (m, bmp) = font.rasterize(ch, size);
+        let entry = (m, std::rc::Rc::<[u8]>::from(bmp));
+        let mut map = cache.borrow_mut();
+        if map.len() >= 4096 {
+            map.clear();
+        }
+        map.insert(key, entry.clone());
+        entry
+    })
+}
+
 fn style(lua: &Lua, v: &Value) -> mlua::Result<Style> {
     if let Some(cache) = lua.app_data_ref::<ThemeCache>() {
         match v {
@@ -383,8 +413,23 @@ impl Picture {
     }
 
     pub fn rasterize(&mut self) {
+        let mut px = std::mem::take(&mut self.px);
+        self.rasterize_into(&mut px);
+        self.px = px;
+    }
+
+    /// Rasterize all recorded drawing operations into `out` (`WIDTH * HEIGHT` RGBA),
+    /// reusing `out`'s existing allocation when already sized.
+    pub fn rasterize_into(&mut self, out: &mut Vec<[u8; 4]>) {
         let [r, g, b] = self.background;
-        self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
+        let bg = [r, g, b, 255];
+        if out.len() == WIDTH * HEIGHT {
+            out.fill(bg);
+        } else {
+            out.clear();
+            out.resize(WIDTH * HEIGHT, bg);
+        }
+        std::mem::swap(&mut self.px, out);
         let ops = std::mem::take(&mut self.ops);
         for op in &ops {
             match op {
@@ -405,6 +450,7 @@ impl Picture {
             }
         }
         self.ops = ops;
+        std::mem::swap(&mut self.px, out);
     }
 
     pub fn into_pixels(mut self) -> Vec<[u8; 4]> {
@@ -412,6 +458,7 @@ impl Picture {
         self.px
     }
 
+    #[inline]
     fn blend(&mut self, x: i32, y: i32, c: [u8; 3], a: f32) {
         if x < 0 || y < 0 || x as usize >= WIDTH || y as usize >= HEIGHT || a <= 0.0 {
             return;
@@ -421,16 +468,57 @@ impl Picture {
             self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
         }
         let d = &mut self.px[y as usize * WIDTH + x as usize];
+        if a >= 1.0 {
+            *d = [c[0], c[1], c[2], 255];
+            return;
+        }
+        let inv = 1.0 - a;
         for k in 0..3 {
-            d[k] = (d[k] as f32 * (1.0 - a) + c[k] as f32 * a).round() as u8;
+            d[k] = (d[k] as f32 * inv + c[k] as f32 * a + 0.5) as u8;
         }
     }
 
     /// A filled rectangle; its four corner pixels at `corner` of its opacity (a little
     /// rounding).
     fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, c: Paint, corner: f32) {
+        if w <= 0 || h <= 0 || c.alpha <= 0.0 {
+            return;
+        }
         let (x0, y0) = (x.max(0), y.max(0));
         let (x1, y1) = ((x.saturating_add(w)).min(WIDTH as i32), (y.saturating_add(h)).min(HEIGHT as i32));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        if c.alpha >= 1.0 && !self.px.is_empty() {
+            let px = [c.rgb[0], c.rgb[1], c.rgb[2], 255];
+            if corner >= 1.0 {
+                for yy in y0 as usize..y1 as usize {
+                    self.px[yy * WIDTH + x0 as usize..yy * WIDTH + x1 as usize].fill(px);
+                }
+                return;
+            }
+            for yy in y0..y1 {
+                let edge_y = yy == y || yy == y + h - 1;
+                if !edge_y {
+                    self.px[yy as usize * WIDTH + x0 as usize..yy as usize * WIDTH + x1 as usize].fill(px);
+                } else {
+                    let mut span_x0 = x0;
+                    let mut span_x1 = x1;
+                    if span_x0 == x {
+                        self.blend(span_x0, yy, c.rgb, corner);
+                        span_x0 += 1;
+                    }
+                    if span_x1 - 1 == x + w - 1 && span_x1 > span_x0 {
+                        self.blend(span_x1 - 1, yy, c.rgb, corner);
+                        span_x1 -= 1;
+                    }
+                    if span_x0 < span_x1 {
+                        self.px[yy as usize * WIDTH + span_x0 as usize..yy as usize * WIDTH + span_x1 as usize].fill(px);
+                    }
+                }
+            }
+            return;
+        }
         for yy in y0..y1 {
             for xx in x0..x1 {
                 let at_corner = (xx == x || xx == x + w - 1) && (yy == y || yy == y + h - 1);
@@ -585,11 +673,12 @@ impl Picture {
 
     /// Text with its baseline at `y`, cut at `max_w` pixels; returns its width.
     fn text(&mut self, s: &Style, x: i32, y: i32, max_w: i32, text: &str) -> i32 {
+        let lut = gamma_lut();
         let mut pen = 0.0f32;
         let mut prev = None;
         for ch in text.chars() {
             let kern = prev.and_then(|p| s.font.horizontal_kern(p, ch, s.size)).unwrap_or(0.0);
-            let (m, bitmap) = s.font.rasterize(ch, s.size);
+            let (m, bitmap) = cached_glyph(s.font_idx, s.font, s.size, ch);
             if (pen + kern + m.advance_width) as i32 > max_w {
                 break;
             }
@@ -597,10 +686,13 @@ impl Picture {
             let x0 = x + (pen + m.xmin as f32).round() as i32;
             let y0 = y - m.height as i32 - m.ymin;
             for row in 0..m.height {
+                let row_off = row * m.width;
                 for col in 0..m.width {
-                    let cov = bitmap[row * m.width + col] as f32 / 255.0;
-                    let a = if cov > 0.0 { cov.powf(1.0 / 1.45) } else { 0.0 };
-                    self.blend(x0 + col as i32, y0 + row as i32, s.colour.rgb, a * s.colour.alpha);
+                    let raw = bitmap[row_off + col];
+                    if raw == 0 {
+                        continue;
+                    }
+                    self.blend(x0 + col as i32, y0 + row as i32, s.colour.rgb, lut[raw as usize] * s.colour.alpha);
                 }
             }
             pen += m.advance_width;
@@ -664,8 +756,11 @@ impl Picture {
             let w = WIDTH as i32 / 2;
             self.ops.push(DrawOp::Fill { x: x0, y: 0, w, h: HEIGHT as i32, c: Paint { rgb: [0, 0, 0], alpha: 0.78 }, corner: 1.0 });
             let title = "LOADING…";
-            self.texts.push(title.to_string());
-            self.texts.push(name.to_string());
+            #[cfg(test)]
+            {
+                self.texts.push(title.to_string());
+                self.texts.push(name.to_string());
+            }
             let tw = Self::width(&big, title).min(w - 20);
             self.record_text(&big, x0 + (w - tw) / 2, HEIGHT as i32 / 2, w - 20, title.to_string());
             let nw = Self::width(&small, name).min(w - 40);
@@ -724,12 +819,14 @@ impl UserData for Picture {
             "label",
             |lua, p, (x, y, w, h, text, st, align, valign): (i32, i32, i32, i32, String, Value, Option<String>, Option<String>)| {
                 let s = style(lua, &st)?;
+                #[cfg(test)]
                 p.texts.push(text.clone());
                 Ok(p.record_label(&s, x, y, w, h, text, align.as_deref().unwrap_or("center"), valign.as_deref().unwrap_or("center")))
             },
         );
         m.add_method_mut("text", |lua, p, (x, y, text, st, max_w): (i32, i32, String, Value, Option<i32>)| {
             let s = style(lua, &st)?;
+            #[cfg(test)]
             p.texts.push(text.clone());
             Ok(p.record_text(&s, x, y, max_w.unwrap_or(WIDTH as i32), text))
         });
