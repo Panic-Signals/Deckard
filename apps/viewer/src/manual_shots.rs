@@ -330,6 +330,52 @@ fn ratchet_shots() {
     mk3(&mut h, "mk3-ratchet.png");
 }
 
+/// The Session Recorder window (manual: "Session recording"), mid-set: a running set
+/// timer, the scrolling waveform and the L/R meters, in the default Maschine theme. The
+/// window reads `session.view`, so no audio engine is needed — the state is set directly.
+#[test]
+#[ignore]
+fn session_recorder_shots() {
+    use crate::session_record::{SessionView, bytes_per_second};
+    use std::collections::VecDeque;
+
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+
+    // A believable mid-set waveform: a gently pulsing envelope with some detail.
+    let rate = 48_000u32;
+    let mut wave: VecDeque<(f32, f32)> = VecDeque::new();
+    for i in 0..180u32 {
+        let t = i as f32 / 180.0;
+        let env = 0.30 + 0.55 * (t * std::f32::consts::TAU * 3.0).sin().abs() * (0.6 + 0.4 * (t * 37.0).sin().abs());
+        let hi = (env * (0.7 + 0.3 * (t * 101.0).sin()).abs()).min(0.97);
+        let lo = -(env * (0.7 + 0.3 * (t * 61.0).cos()).abs()).min(0.97);
+        wave.push_back((lo, hi));
+    }
+
+    let app = h.state_mut();
+    app.session_window_open = true;
+    app.session.view = SessionView {
+        recording: true,
+        elapsed: 2537.0, // 00:42:17
+        started_label: "22:14".into(),
+        meter: (0.62, 0.48),
+        peak: (0.86, 0.74),
+        bytes: 2537 * bytes_per_second(rate),
+        free: 212_000_000_000,
+        reserve: 1_000_000_000,
+        rate,
+        path: Some(std::path::PathBuf::from("session-night-run-2026-11-17-2214.wav")),
+        wave,
+        error: None,
+        stopped: None,
+    };
+    // Cropped to the Recorder window, which egui lays out at the top-left.
+    window(&mut h, "session-recorder.png", Some((6, 14, 406, 383)));
+}
+
 /// The whole window in the desktop theme `$DECKARD_SHOT_DESKTOP` (LCD: `$DECKARD_SHOT_LCD`):
 /// the Ideas, Song, Mix and LFO views, and the Sampling page.
 #[test]
