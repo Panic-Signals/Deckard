@@ -1663,6 +1663,9 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
                 kt.set("modulatable", knob.modulatable)?;
                 kt.set("mod_position", knob.mod_position)?;
                 kt.set("id", knob.param_id)?;
+                if !knob.choices.is_empty() {
+                    kt.set("choices", lua.create_sequence_from(knob.choices.iter().map(String::as_str))?)?;
+                }
                 kt.set("mod_text", knob.mod_text.as_deref())?;
                 kt.set("step_mod", knob.step_mod.as_deref())?;
                 kt.set("auto_mod", knob.auto_mod.as_deref())?;

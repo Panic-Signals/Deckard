@@ -48,8 +48,7 @@ impl Default for Transfer {
     }
 }
 
-/// The plot's side, and its margins in the box.
-const SIDE: i32 = 96;
+/// The plot's margins in the box; its side is the box's height less the margins.
 const PX0: i32 = 3;
 const PY0: i32 = 4;
 const DB_MIN: f32 = -60.0;
@@ -100,13 +99,13 @@ impl Transfer {
     /// Draw this curve, with `base` (where modulation moved it from) as a muted curve.
     fn draw_shown(&self, c: &mut Canvas, base: Option<&Transfer>) {
         let look = *c.look;
-        let side = SIDE as f32;
+        let side = (c.r.h - 2 * PY0) as f32;
         let (x0, y0) = (PX0 as f32, PY0 as f32);
         let px = |db: f32| x0 + (db - DB_MIN) / -DB_MIN * side;
         let py = |db: f32| y0 + side - (db - DB_MIN) / -DB_MIN * side;
         let cx = |db: f32| px(db).clamp(x0 + 1.5, x0 + side - 1.5);
         let cy = |db: f32| py(db).clamp(y0 + 1.5, y0 + side - 1.5);
-        c.fill(PX0, PY0, SIDE, SIDE, look.panel);
+        c.fill(PX0, PY0, c.r.h - 2 * PY0, c.r.h - 2 * PY0, look.panel);
         for db in [-48.0, -36.0, -24.0, -12.0] {
             c.line(px(db), y0 + 1.0, px(db), y0 + side - 1.0, 1.0, look.grid);
             c.line(x0 + 1.0, py(db), x0 + side - 1.0, py(db), 1.0, look.grid);
@@ -171,7 +170,7 @@ impl Transfer {
         }
 
         if w >= 2 * super::CELL_W {
-            let x = PX0 + SIDE + 14;
+            let x = PX0 + c.r.h - 2 * PY0 + 14;
             let room = w - x - 14;
             let weak_or = |c: &Canvas, name: &str| {
                 if c.focus.is_none() || c.lit(name) { look.text } else { look.weak }
@@ -179,15 +178,15 @@ impl Transfer {
             let ratio = self.ratio.max(1.0);
             let ratio_text = if ratio >= 20.0 { "LIMIT".to_string() } else { format!("{ratio:.1}:1") };
             let col = weak_or(c, "threshold");
-            c.text(x, 2, room, 12, "threshold", look.label, look.weak, Align::Left);
-            c.text(x, 14, room, 22, &db_text(self.threshold), look.big, col, Align::Left);
+            c.text(x, 0, room, 12, "threshold", look.label, look.weak, Align::Left);
+            c.text(x, 12, room, 22, &db_text(self.threshold), look.big, col, Align::Left);
             let col = weak_or(c, "ratio");
-            c.text(x, 38, room, 12, "ratio", look.label, look.weak, Align::Left);
-            c.text(x, 50, room, 16, &ratio_text, look.label, col, Align::Left);
+            c.text(x, 34, room, 12, "ratio", look.label, look.weak, Align::Left);
+            c.text(x, 46, room, 16, &ratio_text, look.label, col, Align::Left);
             if self.makeup.abs() >= 0.05 || c.lit("makeup") {
                 let col = weak_or(c, "makeup");
-                c.text(x, 70, room, 12, "makeup", look.label, look.weak, Align::Left);
-                c.text(x, 82, room, 16, &db_text(self.makeup), look.label, col, Align::Left);
+                c.text(x, 62, room, 12, "makeup", look.label, look.weak, Align::Left);
+                c.text(x, 74, room, 16, &db_text(self.makeup), look.label, col, Align::Left);
             }
         }
     }

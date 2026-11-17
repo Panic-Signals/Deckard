@@ -5117,6 +5117,37 @@ impl App {
 
     /// What knob `k` of the page shows with its parameter at `at` (0..1): the plug-in's
     /// own text for a hosted one, the module's for a built-in one. `None` where it can't say.
+    /// The values a knob's parameter picks among, if it's a choice of a few (at most
+    /// six): DECKARD's choices and switches by name, a plug-in's stepped parameter by its
+    /// text at each step. Empty otherwise (the MK3 draws a dial, or nothing, over it).
+    fn knob_choices(&self, edit: layout::Edit) -> Vec<String> {
+        use layout::Edit;
+        const MAX: usize = 6;
+        let stepped = |chain: deckard_doc::Chain, slot: usize, id: u32| -> Option<Vec<String>> {
+            let v = self.plugin_views.get(&(chain, slot))?;
+            let page = v.pages.get(v.page)?;
+            let i = page.knobs.iter().position(|(info, ..)| info.id == id)?;
+            if let Some(names) = page.choices.get(i).filter(|c| !c.is_empty()) {
+                return Some(names.clone());
+            }
+            let steps = page.knobs[i].0.steps;
+            if !(1..MAX as i32).contains(&steps) {
+                return None;
+            }
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, slot))?;
+            let p = inst.try_lock().ok()?;
+            Some((0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect())
+        };
+        let names = match edit {
+            Edit::Choice(_, _, names, ..) => Some(names.iter().map(|s| s.to_string()).collect()),
+            Edit::Toggle(..) => Some(vec!["Off".to_string(), "On".to_string()]),
+            Edit::PluginChoice(slot, id, ..) | Edit::Plugin(slot, id, _) => stepped(self.chain(), slot, id),
+            Edit::PluginIn(c, i, id, _) => stepped(c, i, id),
+            _ => None,
+        };
+        names.filter(|n: &Vec<String>| (2..=MAX).contains(&n.len())).unwrap_or_default()
+    }
+
     fn mod_text(&self, edit: layout::Edit, k: usize, at: f64) -> Option<String> {
         use layout::Edit;
         let (chain, target) = modulation::mod_target(edit)?;
@@ -6173,6 +6204,7 @@ impl App {
                     k.as_ref().map(|k| KnobView {
                         mod_position: mod_at[i],
                         mod_text: mod_at[i].and_then(|at| edits.get(i).copied().flatten().and_then(|e| self.mod_text(e, i, at))),
+                        choices: edits.get(i).copied().flatten().map(|e| self.knob_choices(e)).unwrap_or_default(),
                         param_id: match edits.get(i).copied().flatten() {
                             Some(
                                 layout::Edit::Plugin(_, id, _)

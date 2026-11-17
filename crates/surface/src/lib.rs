@@ -691,6 +691,8 @@ pub struct KnobView {
     pub mod_text: Option<String>,
     /// Its plug-in parameter's id, if it's a plug-in's (mappings find parameters by it).
     pub param_id: Option<u32>,
+    /// The values it picks among, if it's a choice of a few (a filter type, a switch).
+    pub choices: Vec<String>,
     pub name: String,
     /// The section of the plug-in it's in ("Voice Settings").
     pub section: String,

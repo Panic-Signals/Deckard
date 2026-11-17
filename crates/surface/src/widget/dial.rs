@@ -3,7 +3,9 @@
 //! the value, so the dial has no text.
 //!
 //! The ring is open at the bottom: its track sweeps 270 degrees clockwise from the lower
-//! left, through the top, to the lower right.
+//! left, through the top, to the lower right. It's at most 20 px in radius, and placed so
+//! the shape you see (the open ring, not the whole circle) is centred in the box: with
+//! the gap at the bottom, the circle's own centre would leave it looking high.
 //!
 //! Inputs (all optional):
 //!
@@ -67,13 +69,15 @@ impl Dial {
     pub fn draw(&self, c: &mut Canvas) {
         let look = *c.look;
         let focused = c.lit("value");
-        let centre = (c.w() / 2.0, c.h() / 2.0);
-        let r = (c.r.w.min(c.r.h) as f32 / 2.0 - 12.0).max(8.0);
+        let r = (c.r.w.min(c.r.h) as f32 / 2.0 - 7.0).clamp(8.0, 20.0);
+        // (The ring's lowest point is at r·sin 45° below the centre, not r: lower the
+        // centre by half the difference so the visible ring sits in the middle.)
+        let centre = (c.w() / 2.0, c.h() / 2.0 + r * (1.0 - std::f32::consts::FRAC_1_SQRT_2) / 2.0);
         let value = self.value.clamp(0.0, 1.0);
         let from: f32 = if self.bipolar { 0.5 } else { 0.0 };
         let track = c.ink(if focused { look.separator } else { look.grid }, &["value"]);
         let accent = c.ink(look.accent, &["value"]);
-        let arc_w = if focused { 6.0 } else { 4.0 };
+        let arc_w = if focused { 5.0 } else { 3.0 };
         let (lo, hi) = (from.min(value), from.max(value));
         match self.steps {
             Some(n) => {
@@ -83,11 +87,11 @@ impl Dial {
                     // A segment is lit when its middle lies in the arc.
                     let mid = (i as f32 + 0.5) / n as f32;
                     let on = mid >= lo && mid <= hi && (lo < hi);
-                    arc(c, centre, r, s0, s1, if on { arc_w } else { 4.0 }, if on { accent } else { track });
+                    arc(c, centre, r, s0, s1, if on { arc_w } else { 3.0 }, if on { accent } else { track });
                 }
             }
             None => {
-                arc(c, centre, r, angle(0.0), angle(1.0), 4.0, track);
+                arc(c, centre, r, angle(0.0), angle(1.0), 3.0, track);
                 if hi > lo {
                     arc(c, centre, r, angle(lo), angle(hi), arc_w, accent);
                 }
@@ -97,15 +101,15 @@ impl Dial {
             let m = m.clamp(0.0, 1.0);
             let fill = c.ink(look.fill_of(look.accent), &["value", "value_mod"]);
             if (m - value).abs() > 1e-4 {
-                arc(c, centre, r, angle(value), angle(m), 2.0, fill);
+                arc(c, centre, r, angle(value), angle(m), 1.5, fill);
             }
             let (x, y) = point(centre.0, centre.1, r, angle(m));
-            c.dot(x, y, 3.0, c.ink(look.marker, &["value", "value_mod"]));
+            c.dot(x, y, 2.5, c.ink(look.marker, &["value", "value_mod"]));
         }
         let a = angle(value);
-        let (x0, y0) = point(centre.0, centre.1, r - 10.0, a);
-        let (x1, y1) = point(centre.0, centre.1, r + 2.0, a);
-        c.line(x0, y0, x1, y1, 2.0, c.ink(look.text, &["value"]));
+        let (x0, y0) = point(centre.0, centre.1, r - 7.0, a);
+        let (x1, y1) = point(centre.0, centre.1, r + 1.5, a);
+        c.line(x0, y0, x1, y1, 1.5, c.ink(look.text, &["value"]));
     }
 }
 
