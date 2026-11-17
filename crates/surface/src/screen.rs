@@ -770,6 +770,13 @@ impl UserData for Picture {
             let look = crate::widget::Look::of(lua);
             crate::widget::draw_lua(&kind, p, crate::widget::Rect { x, y, w, h }, &inputs, &look)
         });
+        // pictures(knobs, touched): the pictures over a page's knobs (`crate::widget::layout`),
+        // in the picture band of both screens; `touched` the knob numbers a finger rests on.
+        m.add_method_mut("pictures", |lua, p, (knobs, touched): (Table, Option<Table>)| {
+            let look = crate::widget::Look::of(lua);
+            let touched: Vec<usize> = touched.map(|t| t.sequence_values::<usize>().filter_map(Result::ok).collect()).unwrap_or_default();
+            crate::widget::draw_pictures(lua, p, &knobs, &touched, &look)
+        });
     }
 }
 
