@@ -352,3 +352,97 @@ fn deleting_or_moving_patterns_and_groups_while_growing_does_not_panic() {
     a.auto_grow_at(Mode::Scene(0), 200.0);
     a.set_recording(false, false);
 }
+
+/// Recording from the third bar into an empty Auto-length pattern (whether REC was
+/// started in bar 3 or earlier, or armed when a note arrives on an unfocused empty Auto
+/// group, or when a new pattern is created while REC is already on) never wraps or jumps
+/// the playhead back to bar 3 at the end of bar 4; it continues into bar 5 and settles
+/// on `[2 * bar, 2 * bar + 4 * bar)` when REC turns off after bar 6.
+#[test]
+fn recording_from_third_bar_continues_past_fourth_bar_without_jumping_back() {
+    use crate::layout::{Act, apply_acts};
+
+    // 1. Pressing REC while focused on a populated group, then creating a new Auto-length
+    // pattern and recording from bar 3 through bar 6.
+    let mut a = app();
+    let bar = bar(&a);
+    let doc = a.doc.clone().unwrap();
+    doc.borrow_mut().set_pattern_length(0, 0, 4 * bar).unwrap();
+    doc.borrow_mut().set_length_auto(0, 0, false);
+    let seed = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 0,
+        position: 0,
+        length: 120,
+        pitch: 36,
+        velocity: 100,
+        probability: 100,
+    };
+    doc.borrow_mut().edit_notes("seed", 0, 0, &[], &[seed]).unwrap();
+    doc.borrow_mut().add_group().unwrap();
+    a.follow_group_moves();
+
+    a.set_recording(true, false);
+    assert!(a.grow.is_none());
+
+    apply_acts(&mut a, vec![Act::NewPattern(0, 1)]);
+    assert_eq!(a.grow.as_ref().map(|g| (g.group, g.pattern)), Some((1, 0)));
+    assert_eq!(doc.borrow().project().groups[1].patterns[0].start, 0);
+
+    let play_in_g1 = |app: &mut crate::App, tick: i64| {
+        let on = Recorded {
+            midi: true,
+            group: 1,
+            sound: 0,
+            pitch: 60,
+            velocity: 100,
+            length: i64::MAX,
+            tick: tick as f64,
+            mode: Mode::Scene(0),
+            seq: 0,
+            played: tick as f64,
+        };
+        app.take_in_recorded(vec![on, Recorded { velocity: 0, tick: (tick + 240) as f64, played: (tick + 240) as f64, ..on }]);
+    };
+
+    for b in 0..6 {
+        let tick = b * bar + 120;
+        a.auto_grow_at(Mode::Scene(0), tick as f64);
+        let head = Some(crate::Playhead { mode: Mode::Scene(0), queued: None, position: tick as f64, played: tick as f64 });
+        let (pos, len) = a.pattern_at(1, head).unwrap();
+        assert_eq!(pos / bar, b, "at bar {}: playhead stayed in bar {} (pos={pos}, len={len})", b + 1, b + 1);
+        if b >= 2 {
+            play_in_g1(&mut a, b * bar + 240);
+        }
+    }
+    a.set_recording(false, false);
+    let pat = doc.borrow().project().groups[1].patterns[0].clone();
+    assert_eq!((pat.start, pat.length), (2 * bar, 4 * bar));
+    assert_eq!(pat.notes.len(), 4);
+
+    // 2. Playing MIDI directly into an unfocused empty Auto-length group starting in bar 3
+    // (`focus_follows = false`), after a previous pattern in that group had `start = 2 * bar`.
+    apply_acts(&mut a, vec![Act::NewPattern(0, 1)]);
+    assert_eq!(doc.borrow().project().groups[1].patterns[1].start, 0, "new pattern after bar-3 pattern still starts at 0");
+    a.focus_group(0);
+    a.settings.focus_follows = false;
+    a.set_recording(true, false);
+    assert!(a.grow.is_none(), "Group 0 has notes");
+
+    play_in_g1(&mut a, 2 * bar + 240);
+    assert_eq!(a.grow.as_ref().map(|g| (g.group, g.pattern)), Some((1, 1)));
+    assert_eq!(doc.borrow().project().groups[1].patterns[1].length, 4 * bar, "grown ahead of bar 3 immediately");
+
+    a.auto_grow_at(Mode::Scene(0), (3 * bar + 120) as f64);
+    play_in_g1(&mut a, 3 * bar + 240);
+    assert_eq!(doc.borrow().project().scene_length(0), 5 * bar, "scene extended past 4 bars before end of bar 4");
+    a.auto_grow_at(Mode::Scene(0), (4 * bar + 120) as f64);
+    let head_bar5 =
+        Some(crate::Playhead { mode: Mode::Scene(0), queued: None, position: (4 * bar + 120) as f64, played: (4 * bar + 120) as f64 });
+    assert_eq!(a.pattern_at(1, head_bar5).unwrap().0 / bar, 4, "at end of 4th bar, playhead is in 5th bar (not back at 3rd)");
+    play_in_g1(&mut a, 4 * bar + 240);
+    a.set_recording(false, false);
+    let pat2 = doc.borrow().project().groups[1].patterns[1].clone();
+    assert_eq!((pat2.start, pat2.length), (2 * bar, 3 * bar));
+}

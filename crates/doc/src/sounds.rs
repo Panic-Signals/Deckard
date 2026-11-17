@@ -194,6 +194,9 @@ impl Document {
         let mut at = 0;
         self.transaction("Duplicate Pattern", |d| {
             at = d.insert_pattern(g, p, p + 1, &pat.name)?;
+            if pat.start != 0 {
+                d.set_pattern_span(g, at, pat.start, pat.length)?;
+            }
             let start = d.project.groups[g].patterns[at].start;
             let shift = |pos: i64| pos - pat.start + start;
             let notes: Vec<Note> = pat.notes.iter().map(|n| Note { position: shift(n.position), ..*n }).collect();
@@ -254,6 +257,9 @@ impl Document {
         self.transaction("Duplicate Pattern", |d| {
             if existing.is_none() {
                 at = d.add_pattern_in_slot(g, from_idx, to, &pat.name)?;
+                if pat.start != 0 {
+                    d.set_pattern_span(g, at, pat.start, pat.length)?;
+                }
             }
             let target = d.project.groups[g].patterns[at].clone();
             let shift = |pos: i64| pos - pat.start + target.start;
