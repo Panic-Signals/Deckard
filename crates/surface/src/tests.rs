@@ -4098,19 +4098,81 @@ fn touching_a_knob_focuses_its_picture() {
         (knob.name, knob.text) = (name.into(), text.into());
     }
     let before = s.picture(&v);
-    hold(&mut s, &v, "BUTTON_CAP_1", true);
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+    s.event(&Event::Button("BUTTON_CAP_1", true), &v, t0);
+    s.tick(&v, ms(150));
     let picture = s.draw_picture(&v);
     assert!(picture.texts.iter().any(|t| t == "1.20 kHz"), "the value whole in the header: {:?}", picture.texts);
     let touched = s.picture(&v);
     let band = |px: &[[u8; 4]]| (100..204).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
     assert_ne!(band(&before), band(&touched), "the cutoff lights in the picture");
-    hold(&mut s, &v, "BUTTON_CAP_2", true);
-    hold(&mut s, &v, "BUTTON_CAP_3", true);
+    s.event(&Event::Button("BUTTON_CAP_2", true), &v, ms(160));
+    s.event(&Event::Button("BUTTON_CAP_3", true), &v, ms(160));
+    s.tick(&v, ms(400));
     assert!(!s.draw_picture(&v).texts.iter().any(|t| t == "1.20 kHz"), "a resting hand shows nothing");
     for n in ["BUTTON_CAP_1", "BUTTON_CAP_2", "BUTTON_CAP_3"] {
-        hold(&mut s, &v, n, false);
+        s.event(&Event::Button(n, false), &v, ms(410));
     }
+    s.tick(&v, ms(900));
     assert_eq!(band(&s.picture(&v)), band(&before));
+    assert_eq!(s.error(), None);
+}
+
+fn shows_cutoff(s: &Surface, v: &View) -> bool {
+    s.draw_picture(v).texts.iter().any(|t| t == "1.20 kHz")
+}
+
+/// A finger must rest 120 ms before a knob takes focus, and focus stays 180 ms after
+/// it lifts; the screens are asked to keep drawing while that is pending.
+#[test]
+fn touch_focus_waits_and_lingers() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let knob = v.control.knobs[0].as_mut().unwrap();
+    (knob.name, knob.text) = ("Cutoff".into(), "1.20 kHz".into());
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+    // A brush: down and up within 100 ms lights nothing.
+    s.event(&Event::Button("BUTTON_CAP_1", true), &v, t0);
+    assert!(!shows_cutoff(&s, &v));
+    assert!(s.animates(), "a pending timer keeps the screens drawn");
+    s.tick(&v, ms(100));
+    assert!(!shows_cutoff(&s, &v));
+    s.event(&Event::Button("BUTTON_CAP_1", false), &v, ms(100));
+    s.tick(&v, ms(400));
+    assert!(!shows_cutoff(&s, &v), "a brush lights nothing, not even later");
+    // A rest: focus at 120 ms, held 180 ms past the lift, then gone.
+    s.event(&Event::Button("BUTTON_CAP_1", true), &v, ms(1000));
+    s.tick(&v, ms(1119));
+    assert!(!shows_cutoff(&s, &v));
+    s.tick(&v, ms(1125));
+    assert!(shows_cutoff(&s, &v));
+    s.event(&Event::Button("BUTTON_CAP_1", false), &v, ms(1500));
+    s.tick(&v, ms(1670));
+    assert!(shows_cutoff(&s, &v), "still lit 170 ms after the lift");
+    assert!(s.animates());
+    s.tick(&v, ms(1690));
+    assert!(!shows_cutoff(&s, &v), "gone after 180 ms");
+    s.tick(&v, ms(1800));
+    assert!(!s.animates(), "nothing pending any more");
+    assert_eq!(s.error(), None);
+}
+
+/// A knob turned with no touch registered has focus for a second after its last turn.
+#[test]
+fn an_untouched_turn_focuses_for_a_second() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let knob = v.control.knobs[0].as_mut().unwrap();
+    (knob.name, knob.text) = ("Cutoff".into(), "1.20 kHz".into());
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+    s.event(&Event::Knob(0, 0.05), &v, ms(10));
+    assert!(shows_cutoff(&s, &v));
+    s.event(&Event::Knob(0, 0.05), &v, ms(600));
+    s.tick(&v, ms(1500));
+    assert!(shows_cutoff(&s, &v), "a second counts from the last turn");
+    s.tick(&v, ms(1650));
+    assert!(!shows_cutoff(&s, &v));
     assert_eq!(s.error(), None);
 }
 

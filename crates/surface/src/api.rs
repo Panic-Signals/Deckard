@@ -117,6 +117,17 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set("device", lua.create_function(|_, ()| Ok(crate::sources::DEVICE))?)?;
     let sh = shared.clone();
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
+    // A page's timer that ends with no event (a touch focus fading): the screens are
+    // drawn often until `t` (on the `now` clock), as with a moving border.
+    let sh = shared.clone();
+    d.set(
+        "redraw_until",
+        lua.create_function(move |_, t: f64| {
+            let mut sh = sh.borrow_mut();
+            sh.redraw_until = sh.redraw_until.max(t);
+            Ok(())
+        })?,
+    )?;
     let sh = shared.clone();
     d.set("page", lua.create_function(move |_, ()| Ok(sh.borrow().page.clone()))?)?;
     {

@@ -52,6 +52,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("lib/notes.lua", include_str!("../lua/lib/notes.lua")),
     ("lib/strip.lua", include_str!("../lua/lib/strip.lua")),
     ("lib/wheel.lua", include_str!("../lua/lib/wheel.lua")),
+    ("lib/touch.lua", include_str!("../lua/lib/touch.lua")),
     ("lib/widgets.lua", include_str!("../lua/lib/widgets.lua")),
     ("devices/launchpad_pro_mk3/device.lua", include_str!("../lua/devices/launchpad_pro_mk3/device.lua")),
     ("devices/launchpad_pro_mk3/main.lua", include_str!("../lua/devices/launchpad_pro_mk3/main.lua")),
