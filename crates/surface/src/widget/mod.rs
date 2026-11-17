@@ -25,6 +25,7 @@ pub mod curve;
 pub mod envelope;
 pub mod eq;
 pub mod filter;
+pub mod layout;
 pub mod lfo;
 pub mod transfer;
 pub mod value;
@@ -353,6 +354,50 @@ pub fn ms_text(ms: f32) -> String {
     } else {
         format!("{ms:.1} ms")
     }
+}
+
+/// The pictures for a page of knobs (`knobs`, the Control page's eight, `false` where
+/// there's none), each in the picture band over the knobs it draws ([`layout`]), with
+/// touch focus from `touched` (knob numbers 1..8; three or more is a resting hand and
+/// lights nothing). Returns the spans drawn: `{ first = 1..8, cells = n, kind = "filter" }`.
+pub fn draw_pictures(lua: &Lua, pic: &mut Picture, knobs: &Table, touched: &[usize], look: &Look) -> mlua::Result<Table> {
+    let page: [Option<layout::Knob>; 8] = std::array::from_fn(|i| {
+        let t = knobs.raw_get::<Option<Table>>(i + 1).ok().flatten()?;
+        Some(layout::Knob {
+            name: text(&t, "name").unwrap_or_default(),
+            section: text(&t, "section").unwrap_or_default(),
+            text: text(&t, "text").unwrap_or_default(),
+            value: num(&t, "value").unwrap_or(0.0),
+        })
+    });
+    let out = lua.create_table()?;
+    for span in layout::layout(&page) {
+        let inputs = lua.create_table()?;
+        for (k, v) in &span.inputs {
+            match v {
+                layout::Input::Num(n) => inputs.raw_set(*k, *n)?,
+                layout::Input::Text(s) => inputs.raw_set(*k, s.as_str())?,
+            }
+        }
+        if touched.len() < 3
+            && let Some(f) = touched.iter().find_map(|&k| k.checked_sub(1).and_then(|k| span.focus_of(k)))
+        {
+            inputs.raw_set("focus", f)?;
+        }
+        let r = Rect {
+            x: (span.first / 4) as i32 * 480 + (span.first % 4) as i32 * CELL_W,
+            y: BAND_Y,
+            w: span.cells as i32 * CELL_W,
+            h: BAND_H,
+        };
+        draw_lua(span.kind, pic, r, &inputs, look)?;
+        let s = lua.create_table()?;
+        s.raw_set("first", span.first + 1)?;
+        s.raw_set("cells", span.cells)?;
+        s.raw_set("kind", span.kind)?;
+        out.raw_push(s)?;
+    }
+    Ok(out)
 }
 
 /// Draw widget `kind` from a script's inputs table.
