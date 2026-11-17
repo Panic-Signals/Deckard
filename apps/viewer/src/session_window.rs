@@ -33,7 +33,9 @@ impl Pin {
     }
 }
 
-const SIZE: egui::Vec2 = egui::vec2(440.0, 400.0);
+// Sized to the waveform: the window is as wide as the scrolling wave (edge to edge) and
+// just tall enough for the readout, so there is no dead space below the buttons.
+const SIZE: egui::Vec2 = egui::vec2(380.0, 334.0);
 const RED: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x3c, 0x3c);
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xe0, 0xa0, 0x30);
 const OK: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc0, 0x70);
@@ -143,13 +145,16 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction
     if view.recording {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
-    ui.label(egui::RichText::new(format_elapsed(view.elapsed)).size(48.0).monospace());
-    ui.horizontal(|ui| {
+    // The timer, centered above the waveform, with the recording stats beneath it.
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new(format_elapsed(view.elapsed)).size(48.0).monospace());
         if view.recording {
-            ui.label(format!("started {}", view.started_label));
-            ui.label(format!("{} on disk", format_bytes(view.bytes)));
-            // How much longer it can record before it auto-stops (disk reserve or 4 GB).
-            ui.label(format_time_left(seconds_available(view.free, view.reserve, view.rate)));
+            ui.horizontal(|ui| {
+                ui.label(format!("started {}", view.started_label));
+                ui.label(format!("{} on disk", format_bytes(view.bytes)));
+                // How much longer it can record before it auto-stops (disk reserve or 4 GB).
+                ui.label(format_time_left(seconds_available(view.free, view.reserve, view.rate)));
+            });
         }
     });
     ui.add_space(6.0);
@@ -159,11 +164,14 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction
     for (name, level, peak) in [("L", view.meter.0, view.peak.0), ("R", view.meter.1, view.peak.1)] {
         ui.horizontal(|ui| {
             ui.label(name);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(260.0, 10.0), egui::Sense::hover());
+            let peak_label = format!("peak {} dB", db_text(peak));
+            // The bar fills the row: full width minus the channel letter and the peak readout.
+            let bar_w = (ui.available_width() - 96.0).max(40.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, 10.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 2.0, egui::Color32::from_gray(0x22));
             let fill = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * level.clamp(0.0, 1.0), rect.height()));
             ui.painter().rect_filled(fill, 2.0, tint);
-            ui.label(format!("peak {} dB", db_text(peak)));
+            ui.label(peak_label);
         });
     }
     ui.add_space(6.0);
@@ -191,7 +199,7 @@ pub fn body(ui: &mut egui::Ui, view: &SessionView, pinned: bool) -> WindowAction
 
 /// The scrolling waveform: one min/max bar per bucket, newest on the right.
 fn wave(ui: &mut egui::Ui, view: &SessionView) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(400.0), 70.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 70.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, egui::Color32::from_gray(0x16));
     let n = view.wave.len().max(1);
