@@ -2,14 +2,20 @@
 
 use deckard_mk3::leds::{self, Leds};
 
-/// A one-colour button's three states (dark, dim, bright), as the driver has them: the
-/// panel has two lit levels and nothing between (docs/mk3-usb.md).
-pub use deckard_mk3::leds::{DIM, OFF, ON};
+/// A one-colour button's levels, as the driver has them: off (a faint backlight), dim,
+/// bright, and fully dark for a page that asks for it.
+pub use deckard_mk3::leds::{BACKLIGHT, DIM, OFF, ON};
 
-/// Before the scripts set any: every LED dark, then what `global.lua`'s `leds()` and the
-/// page's set.
+/// Before the scripts set any: buttons at their faint backlight (so their labels read),
+/// pads, groups and the strip dark; then what `global.lua`'s `leds()` and the page's set.
 pub fn blank() -> Leds {
-    Leds::default()
+    let mut out = Leds::default();
+    for name in leds::BUTTON_LEDS {
+        if !leds::is_colour(name) {
+            out.set(name, BACKLIGHT);
+        }
+    }
+    out
 }
 
 /// The palette byte nearest a colour (0..255 a channel), bright.
@@ -51,9 +57,9 @@ mod tests {
         let (s, mut v) = (Surface::new(), view());
         let l = s.leds(&v);
         assert_eq!(s.error(), None);
-        // (Stopped, PLAY and REC are dark, and their printed labels read.)
-        assert_eq!(byte(&l, "LED_TRANSPORT_PLAY"), OFF);
-        assert_eq!(byte(&l, "LED_TRANSPORT_RECORD"), OFF);
+        // (Stopped, PLAY and REC keep their backlight, as Maschine's.)
+        assert_eq!(byte(&l, "LED_TRANSPORT_PLAY"), BACKLIGHT);
+        assert_eq!(byte(&l, "LED_TRANSPORT_RECORD"), BACKLIGHT);
         v.playing = true;
         v.recording = true;
         v.auto_write = true;
@@ -126,9 +132,9 @@ mod tests {
         assert_eq!(byte(&l, "LED_KEYBOARD"), ON);
     }
     #[test]
-    fn every_button_byte_is_a_hardware_level() {
-        // A byte under 0x80 is a 2-bit index to the firmware, so every page uses one of the
-        // panel's own levels: dark, dim or bright (docs/mk3-usb.md).
+    fn every_button_byte_is_a_driver_level() {
+        // Every page uses one of the driver's levels: dark, backlight, dim or bright
+        // (docs/mk3-usb.md), never a byte of its own.
         let (mut s, v) = (Surface::new(), view());
         let held = [
             "BUTTON_CHANNEL",
@@ -152,7 +158,7 @@ mod tests {
                     continue;
                 }
                 let b = byte(&l, name);
-                assert!([OFF, DIM, ON].contains(&b), "{button}: {name} is {b:#04x} (an index the firmware decides)");
+                assert!([OFF, BACKLIGHT, DIM, ON].contains(&b), "{button}: {name} is {b:#04x}, not one of the driver's levels");
             }
             s.event(&Event::Button(button, false), &v, Instant::now());
         }

@@ -30,7 +30,16 @@ fn main() {
         ("new-sound", |d| {
             let (p, s) = target(d);
             let notes: Vec<Note> = (0..4)
-                .map(|i| Note { expr: None, sound: s, position: i * 960, length: 240, pitch: 60, velocity: 90, probability: 100 })
+                .map(|i| Note {
+                    ratchet: Default::default(),
+                    expr: None,
+                    sound: s,
+                    position: i * 960,
+                    length: 240,
+                    pitch: 60,
+                    velocity: 90,
+                    probability: 100,
+                })
                 .collect();
             d.edit_notes("Draw Notes", 0, p, &[], &notes)
         }),

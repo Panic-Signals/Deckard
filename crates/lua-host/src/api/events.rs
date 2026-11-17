@@ -152,6 +152,7 @@ fn note_event(lua: &Lua, n: &Note) -> mlua::Result<Value> {
 
 fn note_of(t: &Table) -> Option<Note> {
     Some(Note {
+        ratchet: Default::default(),
         expr: None,
         sound: t.get("sound").ok()?,
         position: t.get("position").ok()?,
@@ -394,6 +395,7 @@ pub fn install(lua: &Lua, impl_t: &Table) -> mlua::Result<()> {
         let Some(s) = sound_arg(lua, &args) else { return Ok(()) };
         let Some((g, p)) = pattern_arg(lua, &args) else { return Ok(()) };
         let n = Note {
+            ratchet: Default::default(),
             expr: None,
             sound: s,
             position: int(&args, 3).unwrap_or(0),
@@ -476,7 +478,10 @@ pub fn install(lua: &Lua, impl_t: &Table) -> mlua::Result<()> {
         let st = state(lua);
         let st = st.borrow();
         let (g, p) = (st.focus.group, st.focus.pattern);
-        Ok(p.zip(st.doc.as_ref()).is_some_and(|(p, d)| d.borrow().length_is_auto(g, p)))
+        Ok(p.zip(st.doc.as_ref()).is_some_and(|(p, d)| {
+            let d = d.borrow();
+            d.length_is_auto(g, p) && d.project().groups.get(g).and_then(|gr| gr.patterns.get(p)).is_some_and(|pt| pt.notes.is_empty())
+        }))
     })?;
     set_fn(lua, &access, "setExplicitLength", |lua, args: MultiValue| {
         let Some((g, p)) = pattern_arg(lua, &args) else { return Ok(()) };

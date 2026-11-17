@@ -712,7 +712,16 @@ mod tests {
     /// holding the samples.
     fn project() -> (tempfile::TempDir, Project) {
         let tmp = tempfile::tempdir().unwrap();
-        let note = |position| Note { expr: None, sound: 0, position, length: PPQ / 2, pitch: 60, velocity: 127, probability: 100 };
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: PPQ / 2,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+        };
         let short = tone(tmp.path(), 0.1);
         let long = tone(tmp.path(), 1.5);
         let group = |name: &str, snd: Sound, at: i64| Group {

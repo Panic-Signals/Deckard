@@ -3,6 +3,12 @@ use super::*;
 use deckard_library::Item;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+pub(crate) struct PreparedGroup {
+    edit: deckard_doc::PreparedEdit,
+    samples: deckard_engine::PreloadedSamples,
+    natives: Vec<(deckard_plugins::Slot, deckard_model::PluginRef, deckard_plugins::Shared)>,
+}
+
 pub(crate) struct GroupLoad {
     doc: deckard_doc::Shared,
     pub(super) group: usize,
@@ -10,7 +16,7 @@ pub(crate) struct GroupLoad {
     pub(super) item: Item,
     routing: bool,
     patterns: bool,
-    pub(super) ready: Option<Receiver<Result<deckard_doc::PreparedEdit, String>>>,
+    pub(super) ready: Option<Receiver<Result<PreparedGroup, String>>>,
 }
 
 /// A sound/preset/effect load waiting for the controller screens to show "loading".
@@ -115,6 +121,99 @@ mod tests {
         assert!(d.undo());
         assert_eq!(d.project().tempo, 120.);
     }
+
+    #[test]
+    fn group_load_preloads_all_sound_samples_off_the_ui_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Document::new_project().unwrap();
+        source.rename(deckard_doc::Target::Group(0), "Multi-Pad Kit").unwrap();
+        let mut wavs = Vec::new();
+        for s in 0..8 {
+            let wav = dir.path().join(format!("sound_{s}.wav"));
+            deckard_engine::edit::write_wav(&wav, &deckard_engine::sample::Sample { rate: 48_000, frames: vec![[0.25; 2]; 256] }).unwrap();
+            source.sampler_only(0, s).unwrap();
+            source
+                .set_zones(
+                    0,
+                    s,
+                    &[deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(wav.clone()), set: Vec::new() }],
+                    "Zone",
+                )
+                .unwrap();
+            wavs.push(wav);
+        }
+        let bytes = source.file_bytes(deckard_doc::FileItem::Group(0), &mxprj::sound_info::SoundInfo::default()).unwrap();
+        let path = dir.path().join("Multi-Pad Kit.mxgrp");
+        std::fs::write(&path, bytes).unwrap();
+
+        let d = Document::new_project().unwrap();
+        let mut app = App { doc: Some(std::rc::Rc::new(std::cell::RefCell::new(d))), ..Default::default() };
+        let item = Item { kind: deckard_library::Kind::Group, name: "Multi-Pad Kit".into(), path, ..Default::default() };
+        app.queue_group_load(&item, 0).unwrap();
+        finish(&mut app);
+        for wav in &wavs {
+            assert!(app.samples.has_cached(wav), "sample {} should be decoded before follow_edits runs", wav.display());
+        }
+    }
+}
+
+fn prepare_group_natives(
+    group: usize,
+    grp: &deckard_model::Group,
+    rate: f64,
+) -> Vec<(deckard_plugins::Slot, deckard_model::PluginRef, deckard_plugins::Shared)> {
+    let mut wanted: Vec<(deckard_plugins::Slot, deckard_model::PluginRef)> = Vec::new();
+    for (s, snd) in grp.sounds.iter().enumerate() {
+        if let Some(p) = &snd.plugin {
+            wanted.push((deckard_plugins::Slot::Sound { group, sound: s }, p.clone()));
+        }
+        for (i, x) in snd.slots.iter().enumerate().filter(|(_, x)| !x.is_instrument()) {
+            if let Some(p) = x.plugin.as_ref().filter(|p| deckard_engine::is_effect(&p.id)) {
+                wanted.push((deckard_plugins::Slot::Chain { group, sound: s, slot: i }, p.clone()));
+            }
+        }
+    }
+    for (i, x) in grp.slots.iter().enumerate() {
+        if let Some(p) = x.plugin.as_ref().filter(|p| deckard_engine::is_effect(&p.id)) {
+            wanted.push((deckard_plugins::Slot::Group { group, slot: i }, p.clone()));
+        }
+    }
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    if wanted.len() == 1 {
+        let (slot, p) = wanted.into_iter().next().unwrap();
+        return match deckard_plugins::Host::prepare_native(&p.id, &p.name, &p.chunk, rate) {
+            Some(Ok(shared)) => vec![(slot, p, shared)],
+            _ => Vec::new(),
+        };
+    }
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(wanted.len());
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let mut indexed = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(|| {
+                let mut local = Vec::new();
+                loop {
+                    let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((slot, p)) = wanted.get(i) else { break };
+                    if let Some(Ok(shared)) = deckard_plugins::Host::prepare_native(&p.id, &p.name, &p.chunk, rate) {
+                        local.push((i, *slot, p.clone(), shared));
+                    }
+                }
+                local
+            }));
+        }
+        for h in handles {
+            if let Ok(part) = h.join() {
+                indexed.extend(part);
+            }
+        }
+    });
+    indexed.sort_by_key(|(i, ..)| *i);
+    indexed.into_iter().map(|(_, slot, p, shared)| (slot, p, shared)).collect()
 }
 
 impl App {
@@ -183,12 +282,29 @@ impl App {
             // A separate frame can submit the acknowledged controller screen before
             // taking a snapshot. Undo history is deliberately excluded from the snapshot.
             let snapshot = job.doc.borrow().edit_snapshot();
+            let sample_snap = self.samples.known_sample_state();
+            let project_path = self.path.clone();
+            let rate = self.output.as_ref().and_then(|r| r.as_ref().ok()).map(|o| o.rate as f64);
             let (tx, rx) = mpsc::sync_channel(1);
             let (item, g, routing, patterns) = (job.item.clone(), job.group, job.routing, job.patterns);
             match std::thread::Builder::new().name("deckard-group-load".into()).spawn(move || {
                 let result = std::fs::read(&item.path)
                     .map_err(|e| e.to_string())
-                    .and_then(|bytes| snapshot.prepare("Load Group", |d| d.load_group_file_with(g, &bytes, routing, patterns)));
+                    .and_then(|bytes| snapshot.prepare("Load Group", |d| d.load_group_file_with(g, &bytes, routing, patterns)))
+                    .map(|edit| {
+                        let (samples, natives) = match edit.project().groups.get(g) {
+                            Some(grp) => std::thread::scope(|s| {
+                                let samples_h = s.spawn(|| {
+                                    deckard_engine::SampleCache::preload_group_samples(grp, project_path.as_deref(), &sample_snap)
+                                });
+                                let natives = rate.map_or_else(Vec::new, |r| prepare_group_natives(g, grp, r));
+                                let samples = samples_h.join().unwrap_or_default();
+                                (samples, natives)
+                            }),
+                            None => (deckard_engine::PreloadedSamples::default(), Vec::new()),
+                        };
+                        PreparedGroup { edit, samples, natives }
+                    });
                 let _ = tx.send(result);
             }) {
                 Ok(_) => {
@@ -212,9 +328,10 @@ impl App {
                 self.status = format!("{}: {e}", job.item.name);
                 return;
             }
-            Ok(Ok(edit)) => edit,
+            Ok(Ok(prepared)) => prepared,
         };
-        let applied = job.doc.borrow_mut().apply_prepared(prepared).is_ok();
+        self.samples.ingest_preloaded(prepared.samples);
+        let applied = job.doc.borrow_mut().apply_prepared(prepared.edit).is_ok();
         if !applied {
             // Preserve edits made while preparing (including recording). Use the
             // existing addressed loader against the latest document rather than
@@ -233,6 +350,12 @@ impl App {
             self.slot_of = None;
             self.plugin_page = 0;
             self.plugin_views.clear();
+        }
+        if let Some(Ok(out)) = &self.output {
+            let rate = out.rate as f64;
+            for (slot, p, shared) in prepared.natives {
+                self.samples.plugins.adopt_prepared(slot, &p.id, &p.name, &p.chunk, rate, shared);
+            }
         }
         if self.output.is_some() {
             self.load_plugins();

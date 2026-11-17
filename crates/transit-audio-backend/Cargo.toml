@@ -1,0 +1,9 @@
+[package]
+name = "transit-audio-backend"
+description = "transit's audio backend trait (vendored from transit-audio/transit, MIT OR Apache-2.0; see NOTICE.md)"
+version = "0.7.2"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

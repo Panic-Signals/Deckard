@@ -118,8 +118,9 @@ pub struct Settings {
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
     /// to where the finger lands (Preferences > Hardware).
     pub relative_strips: bool,
-    /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware): 0
-    /// takes the pressure as it comes; higher, light presses play louder.
+    /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware):
+    /// higher, light presses play louder. The MK3 applies it to the pressure it reports,
+    /// as Maschine has it do (`Mk3Io::set_pad_sensitivity`).
     pub pad_sensitivity: u8,
     /// The metronome's volume, 0..=100 %, and whether it clicks while recording though
     /// it's off (the Settings page's VOLUME and AUTOENABLE).

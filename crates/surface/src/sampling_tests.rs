@@ -165,6 +165,30 @@ fn the_edit_tab_turns_its_pages_and_applies_its_functions() {
 }
 
 #[test]
+fn play_range_start_and_end_turn_finely_with_shift() {
+    for tab in [1, 3] {
+        let (mut s, v) = (Surface::new(), sampled(tab));
+        let now = Instant::now();
+        press(&mut s, &v, "BUTTON_SAMPLE");
+        s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
+        // Without SHIFT, 0.02 of a turn moves 882 frames (2 * 441); with SHIFT, a tenth (88 frames)
+        // and even a single encoder tick (0.001) moves 4 frames immediately.
+        assert_eq!(
+            s.event(&Event::Knob(0, 0.001), &v, now),
+            [Action::SamplingKnob { page: 0, knob: 0, value: 4.0 }],
+            "tab {tab} START tick"
+        );
+        assert_eq!(s.event(&Event::Knob(0, 0.02), &v, now), [Action::SamplingKnob { page: 0, knob: 0, value: 92.0 }], "tab {tab} START");
+        assert_eq!(
+            s.event(&Event::Knob(1, -0.02), &v, now),
+            [Action::SamplingKnob { page: 0, knob: 1, value: 44_099.0 - 88.0 }],
+            "tab {tab} END",
+        );
+        s.event(&Event::Button("BUTTON_SHIFT", false), &v, now);
+    }
+}
+
+#[test]
 fn knobs_5_and_6_zoom_and_scroll_the_sample() {
     let (mut s, mut v) = (Surface::new(), sampled(1));
     let now = Instant::now();

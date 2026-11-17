@@ -282,6 +282,7 @@ impl App {
                 let jam = jam_io::JamIo::start();
                 let outcome = found(jam.connected());
                 self.jam = Some(jam);
+                self.midi_port_watch = Some(crate::midi_ports::Watcher::start());
                 outcome
             }
             Step::Surface => {

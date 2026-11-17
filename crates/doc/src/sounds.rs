@@ -339,7 +339,16 @@ mod tests {
     #[test]
     fn a_pattern_is_copied_onto_another_or_past_the_last() {
         let mut d = Document::new_project().unwrap();
-        let note = |position| Note { expr: None, sound: 2, position, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 2,
+            position,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         let first = d.add_pattern(0, usize::MAX, "A").unwrap_or(0);
         d.edit_notes("Add", 0, first, &[], &[note(480)]).unwrap();
         d.set_pattern_length(0, first, 7680).unwrap();
@@ -448,6 +457,7 @@ mod tests {
         for p in 0..3 {
             let start = d.project().groups[0].patterns[p].start;
             let note = |sound, at: i64| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound,
                 position: start + at,

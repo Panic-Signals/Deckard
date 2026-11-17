@@ -2,6 +2,7 @@
 name = "deckard-engine"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 description = "Sample playback engine for Maschine projects"
 
 [dependencies]
@@ -27,3 +28,10 @@ output = ["dep:cpal", "dep:alsa"]
 # Windows: ASIO as well as WASAPI. Building it needs the ASIO SDK and libclang (see
 # DEVELOPMENT.md).
 asio = ["output", "cpal/asio"]
+# Windows (x86_64): ASIO through transit's native backend, which needs no SDK (see
+# DEVELOPMENT.md and crates/transit-audio-asio/NOTICE.md). With `asio` also on, the SDK's wins.
+asio-native = ["output", "dep:transit-audio-asio", "dep:transit-audio-backend"]
+
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+transit-audio-asio = { path = "../transit-audio-asio", optional = true }
+transit-audio-backend = { path = "../transit-audio-backend", optional = true }

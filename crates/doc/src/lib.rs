@@ -1233,6 +1233,7 @@ mod tests {
         d.begin_take("Record");
         for k in 0..3 {
             let note = deckard_model::Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: 2,
                 position: 100 + k * 960,
@@ -1270,8 +1271,16 @@ mod tests {
     fn an_edit_during_a_take_is_its_own_step() {
         let mut d = Document::new_project().unwrap();
         d.add_pattern(0, 0, "P").unwrap();
-        let note =
-            |position| deckard_model::Note { expr: None, sound: 0, position, length: 240, pitch: 60, velocity: 90, probability: 100 };
+        let note = |position| deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: 240,
+            pitch: 60,
+            velocity: 90,
+            probability: 100,
+        };
         let positions = |d: &Document| d.project().groups[0].patterns[0].notes.iter().map(|n| n.position).collect::<Vec<_>>();
         d.begin_take("Record");
         d.edit_notes("Record", 0, 0, &[], &[note(10)]).unwrap();
@@ -1297,8 +1306,16 @@ mod tests {
         let steps = d.undo_labels().len();
         d.begin_take("Record");
         for k in 0..3 {
-            let note =
-                deckard_model::Note { expr: None, sound: 0, position: k * 960, length: 240, pitch: 60, velocity: 90, probability: 100 };
+            let note = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: k * 960,
+                length: 240,
+                pitch: 60,
+                velocity: 90,
+                probability: 100,
+            };
             d.add_note(0, 0, note).unwrap();
             if let Some(last) = d.undo.last_mut() {
                 last.at -= MERGE_WINDOW * 2;
@@ -1327,8 +1344,21 @@ mod tests {
         assert_eq!(notes(&d), 0);
         assert!(d.redo());
         // Outside a take, a step is an undo.
-        d.add_note(0, 0, deckard_model::Note { expr: None, sound: 1, position: 0, length: 240, pitch: 60, velocity: 90, probability: 100 })
-            .unwrap();
+        d.add_note(
+            0,
+            0,
+            deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 1,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 90,
+                probability: 100,
+            },
+        )
+        .unwrap();
         assert_eq!(notes(&d), 4);
         assert!(d.undo_step());
         assert_eq!(notes(&d), 3);
@@ -1374,7 +1404,16 @@ mod tests {
         // Empty, and its notes are its own.
         assert!(p.notes.is_empty());
         let before = d.project().groups[0].patterns[0].notes.clone();
-        let note = deckard_model::Note { expr: None, sound: 0, position: p.start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let note = deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: p.start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         d.edit_notes("Add", 0, i, &[], &[note]).unwrap();
         assert_eq!(d.project().groups[0].patterns[i].notes, vec![note]);
         assert_eq!(d.project().groups[0].patterns[0].notes, before);

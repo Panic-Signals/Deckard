@@ -38,11 +38,15 @@ objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Services", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_System_Services", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 # Windows: ASIO as well as WASAPI (Preferences ▸ Audio). See DEVELOPMENT.md for what it needs.
 asio = ["deckard-engine/asio"]
+# Windows: ASIO through transit's native backend, no SDK needed. On by default; `asio` (the
+# real SDK) takes over when it is on too, and `--no-default-features` leaves ASIO out.
+asio-native = ["deckard-engine/asio-native"]
+default = ["asio-native"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -79,6 +79,7 @@ fn an_empty_auto_pattern_records_from_one_bar() {
     assert_eq!(length(&app), 3 * bar);
     app.set_recording(false, false);
     assert_eq!(length(&app), before, "nothing played: as it was");
+    assert!(app.surface_view().pattern_auto, "still empty: still Auto");
 }
 
 /// An empty bar doesn't stop it: it grows on until REC is off, then keeps the bars
@@ -100,6 +101,8 @@ fn an_auto_pattern_grows_until_rec_is_off() {
     assert_eq!(length(&app), 3 * bar, "to the last note's bar");
     let doc = app.doc.clone().unwrap();
     assert_eq!(doc.borrow().project().groups[0].patterns[0].notes.len(), 2);
+    assert!(!doc.borrow().length_is_auto(0, 0), "settled length is no longer Auto");
+    assert!(!app.surface_view().pattern_auto, "controller Pattern page shows settled length, not Auto");
 }
 
 /// A note in the last bar adds the next too (before the song gets there).
@@ -126,7 +129,16 @@ fn a_new_pattern_after_a_long_one_grows_past_it() {
     let doc = app.doc.clone().unwrap();
     doc.borrow_mut().set_pattern_length(0, 0, 4 * bar).unwrap();
     doc.borrow_mut().set_length_auto(0, 0, false);
-    let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+    let n = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 1,
+        position: 0,
+        length: 100,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("t", 0, 0, &[], &[n]).unwrap();
     apply_acts(&mut app, vec![Act::NewPattern(0, 0)]);
     assert_eq!(app.pattern, 1);
@@ -166,7 +178,16 @@ fn a_pattern_with_notes_doesnt_grow() {
     let bar = bar(&app);
     let doc = app.doc.clone().unwrap();
     doc.borrow_mut().set_pattern_length(0, 0, 2 * bar).unwrap();
-    let n = deckard_model::Note { expr: None, sound: 1, position: 0, length: 100, pitch: 60, velocity: 100, probability: 100 };
+    let n = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 1,
+        position: 0,
+        length: 100,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
     doc.borrow_mut().edit_notes("t", 0, 0, &[], &[n]).unwrap();
     app.set_recording(true, false);
     assert_eq!(length(&app), 2 * bar);
@@ -201,4 +222,74 @@ fn shift_rec_when_armed_counts_in() {
     app.set_recording(true, true);
     assert!(app.recording);
     assert!(app.playing.is_some() || app.count_in_next == 1, "counted in and started");
+}
+
+/// During recording into an empty Auto-length pattern, the MK3 touchstrip LED dots reset
+/// every bar when nothing was recorded during that bar, and keep spanning bars when
+/// notes or controls (such as pitch bend) are recorded.
+#[test]
+fn mk3_strip_resets_every_bar_during_recording_when_nothing_was_recorded() {
+    let mut app = app();
+    app.controller = None;
+    let bar = bar(&app);
+    let at = |app: &mut crate::App, pos: i64| {
+        app.playing = Some(Mode::Scene(0));
+        app.parked = None;
+        app.auto_grow_at(Mode::Scene(0), pos as f64);
+        let head = Some(crate::Playhead { mode: Mode::Scene(0), queued: None, position: pos as f64, played: pos as f64 });
+        let p = app.strip_progress(head).unwrap();
+        let out = {
+            let mut v = app.surface_view();
+            v.progress = Some(p);
+            app.surface.leds(&v)
+        };
+        let lit = (1..=25)
+            .filter(|i| {
+                let name = format!("LED_TS_{i:02}");
+                let idx = deckard_mk3::leds::PAD_LEDS.iter().position(|n| *n == name).unwrap();
+                out.pads[1 + idx] != 0
+            })
+            .count();
+        (p, lit)
+    };
+
+    app.set_recording(true, false);
+
+    // Bar 0: empty, fills 1..25 across the bar despite grow extending pattern length.
+    let (p, lit) = at(&mut app, 0);
+    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 0 start: {p} / {lit}");
+    let (p, lit) = at(&mut app, bar / 2);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 0 mid: {p} / {lit}");
+
+    // Bar 1: nothing recorded in bar 0 -> resets back to dot 1.
+    let (p, lit) = at(&mut app, bar);
+    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 1 reset: {p} / {lit}");
+    let (p, lit) = at(&mut app, bar + bar / 2);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 1 mid: {p} / {lit}");
+
+    // Record pitch bend in bar 1 -> bar 2 continues without resetting.
+    app.take_in_all(
+        Vec::new(),
+        Vec::new(),
+        vec![deckard_engine::RecordedControl {
+            group: 0,
+            sound: 0,
+            kind: deckard_model::MidiKind::PitchBend(12000),
+            tick: (bar + bar / 2) as f64,
+            mode: Mode::Scene(0),
+            seq: 1,
+        }],
+        std::time::Instant::now(),
+    );
+    let (p, lit) = at(&mut app, 2 * bar);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 2 continues after pitch bend in bar 1: {p} / {lit}");
+
+    // Nothing recorded in bar 2 -> bar 3 resets back to dot 1.
+    let (p, lit) = at(&mut app, 3 * bar);
+    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 3 reset after empty bar 2: {p} / {lit}");
+
+    // Record a note in bar 3 -> bar 4 continues without resetting.
+    play(&mut app, (3 * bar + bar / 4) as f64, 120.0);
+    let (p, lit) = at(&mut app, 4 * bar);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 4 continues after note in bar 3: {p} / {lit}");
 }

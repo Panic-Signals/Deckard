@@ -2211,6 +2211,8 @@ dependencies = [
  "plist",
  "symphonia",
  "tempfile",
+ "transit-audio-asio",
+ "transit-audio-backend",
 ]
 
 [[package]]
@@ -2261,6 +2263,7 @@ name = "deckard-mk3"
 version = "0.1.0"
 dependencies = [
  "hidapi",
+ "midir",
  "nusb",
  "png",
 ]
@@ -7342,6 +7345,20 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
 ]
+
+[[package]]
+name = "transit-audio-asio"
+version = "0.7.2"
+dependencies = [
+ "log",
+ "transit-audio-backend",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
+name = "transit-audio-backend"
+version = "0.7.2"
 
 [[package]]
 name = "transpose"

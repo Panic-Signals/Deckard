@@ -228,7 +228,7 @@ mod tests {
     use deckard_model::{Clip, Note, PPQ};
 
     fn note(sound: usize, position: i64, pitch: i64) -> Note {
-        Note { expr: None, sound, position, length: PPQ / 2, pitch, velocity: 100, probability: 100 }
+        Note { ratchet: Default::default(), expr: None, sound, position, length: PPQ / 2, pitch, velocity: 100, probability: 100 }
     }
 
     /// A new project: pattern 1 of group 1 with notes on two sounds, in scene 1, and

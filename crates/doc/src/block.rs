@@ -3,8 +3,9 @@
 //! project with it and ignores it). Format: `docs/deckard-block.md`.
 
 use super::Document;
-use super::expression::set_expr_field;
+use super::expression::{set_expr_field, set_ratchet_field};
 use deckard_model::pad_touch::PadTouch;
+use deckard_model::ratchet::Ratchet;
 use deckard_model::{Curve, Dim, ExprId, Expression, MidiKind, Note, Point, Project};
 use mxprj::decode::{Obj, Value};
 
@@ -14,9 +15,9 @@ pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
 /// CC routes), 7 (before scene settings), 8 (before extra outputs), 9 (before the
-/// app's view), 10 (before CV routes), 11 (before audio offsets) and 12 (before the New
-/// Sampler) still read.
-const VERSION: u32 = 13;
+/// app's view), 10 (before CV routes), 11 (before audio offsets), 12 (before ratchets)
+/// and 13 (before the New Sampler) still read.
+const VERSION: u32 = 14;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -47,6 +48,19 @@ pub(crate) struct Entry {
     /// Among the pattern's notes with this sound, position and pitch, in note order.
     pub ordinal: usize,
     pub expr: Expression,
+}
+
+/// A note's ratchet as the block keys it (as [`Entry`] keys expression).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RatchetEntry {
+    pub group: usize,
+    /// Its pattern (clips as `CLIP + k`).
+    pub pattern: usize,
+    pub sound: usize,
+    pub position: i64,
+    pub pitch: i64,
+    pub ordinal: usize,
+    pub ratchet: Ratchet,
 }
 
 /// A sound's channel-pressure events in a pattern.
@@ -85,9 +99,11 @@ pub(crate) struct Block {
     pub cv_routes: String,
     /// The patterns' Audio offsets (group, pattern, sound, ticks), those not 0 (version 12).
     pub audio_offsets: Vec<(usize, usize, usize, i64)>,
-    /// New Sampler sounds (group, sound, settings as text) (version 13).
+    /// The notes that ratchet (version 13).
+    pub ratchets: Vec<RatchetEntry>,
+    /// New Sampler sounds (group, sound, settings as text) (version 14).
     pub new_samplers: Vec<(usize, usize, String)>,
-    /// Zones' analysis (group, sound, zone, meta as text) (version 13).
+    /// Zones' analysis (group, sound, zone, meta as text) (version 14).
     pub zone_metas: Vec<(usize, usize, usize, String)>,
 }
 
@@ -139,6 +155,9 @@ pub(crate) fn block_of(p: &Project, exprs: &dyn Fn(ExprId) -> Option<Expression>
         if !entries.is_empty() {
             b.patterns.push((g, i, entries));
         }
+        b.ratchets.extend(with_ordinals(&pt.notes).into_iter().filter(|(_, n)| n.ratchet != Ratchet::default()).map(|(ordinal, n)| {
+            RatchetEntry { group: g, pattern: i, sound: n.sound, position: n.position, pitch: n.pitch, ordinal, ratchet: n.ratchet }
+        }));
         let mut lanes: Vec<PressureLane> = Vec::new();
         for m in &pt.midi {
             let MidiKind::ChannelPressure(v) = m.kind else { continue };
@@ -298,6 +317,16 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
         w.u32(s);
         w.i64(ticks);
     }
+    w.u32(b.ratchets.len());
+    for e in &b.ratchets {
+        w.u32(e.group);
+        w.u32(e.pattern);
+        w.u32(e.sound);
+        w.i64(e.position);
+        w.i32(e.pitch);
+        w.u32(e.ordinal);
+        w.u32(e.ratchet.to_int() as usize);
+    }
     let text = |w: &mut W, t: &str| {
         w.u32(t.len());
         for &c in t.as_bytes() {
@@ -445,24 +474,55 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             b.audio_offsets.push((r.u32()?, r.u32()?, r.u32()?, r.i64()?));
         }
     }
-    if version >= 13 {
-        let text = |r: &mut R| -> Result<String, String> {
-            let mut t = Vec::new();
-            for _ in 0..r.count(1)? {
-                t.push(r.u8()?);
-            }
-            Ok(String::from_utf8_lossy(&t).into_owned())
-        };
-        for _ in 0..r.count(12)? {
-            let (g, s) = (r.u32()?, r.u32()?);
-            b.new_samplers.push((g, s, text(&mut r)?));
+    if version == 13 {
+        // 13 is the ratchets'. (On the way to the New Sampler it was, for a while, the
+        // New Sampler's: such a block doesn't end where its ratchets would, and is read
+        // as that.)
+        let at = r.0;
+        if ratchets(&mut r, &mut b).is_err() || !r.0.is_empty() {
+            r.0 = at;
+            b.ratchets.clear();
+            new_samplers(&mut r, &mut b)?;
         }
-        for _ in 0..r.count(16)? {
-            let (g, s, z) = (r.u32()?, r.u32()?, r.u32()?);
-            b.zone_metas.push((g, s, z, text(&mut r)?));
-        }
+    } else if version >= 14 {
+        ratchets(&mut r, &mut b)?;
+        new_samplers(&mut r, &mut b)?;
     }
     Ok(b)
+}
+
+fn ratchets(r: &mut R, b: &mut Block) -> Result<(), String> {
+    for _ in 0..r.count(32)? {
+        b.ratchets.push(RatchetEntry {
+            group: r.u32()?,
+            pattern: r.u32()?,
+            sound: r.u32()?,
+            position: r.i64()?,
+            pitch: r.i32()?,
+            ordinal: r.u32()?,
+            ratchet: Ratchet::from_int(r.u32()? as i64),
+        });
+    }
+    Ok(())
+}
+
+fn new_samplers(r: &mut R, b: &mut Block) -> Result<(), String> {
+    let text = |r: &mut R| -> Result<String, String> {
+        let mut t = Vec::new();
+        for _ in 0..r.count(1)? {
+            t.push(r.u8()?);
+        }
+        Ok(String::from_utf8_lossy(&t).into_owned())
+    };
+    for _ in 0..r.count(12)? {
+        let (g, s) = (r.u32()?, r.u32()?);
+        b.new_samplers.push((g, s, text(r)?));
+    }
+    for _ in 0..r.count(16)? {
+        let (g, s, z) = (r.u32()?, r.u32()?, r.u32()?);
+        b.zone_metas.push((g, s, z, text(r)?));
+    }
+    Ok(())
 }
 
 /// Marks the `TimedEvent` of channel pressure DECKARD made; Maschine's own (read from
@@ -635,6 +695,7 @@ impl Document {
             || !b.extra_outs.is_empty()
             || !b.cv_routes.is_empty()
             || !b.audio_offsets.is_empty()
+            || !b.ratchets.is_empty()
             || !b.new_samplers.is_empty()
             || !b.zone_metas.is_empty())
         .then(|| encode(&b));
@@ -672,10 +733,13 @@ impl Document {
         for (g, p, entries) in b.patterns {
             for e in entries {
                 let id = self.add_expression(e.expr.clone());
-                if self.set_note_expr(g, p, &e, id, &paths).is_err() {
-                    // Its note isn't there: dropped.
-                }
+                // (Its note isn't there: dropped.)
+                let _ = self.set_note_field(g, p, (e.sound, e.position, e.pitch, e.ordinal), &paths, |te| set_expr_field(te, Some(id)));
             }
+        }
+        for e in b.ratchets {
+            let key = (e.sound, e.position, e.pitch, e.ordinal);
+            let _ = self.set_note_field(e.group, e.pattern, key, &paths, |te| set_ratchet_field(te, e.ratchet));
         }
         for l in b.pressure {
             // Not those Maschine's own data has already (read as channel pressure too).
@@ -760,28 +824,29 @@ impl Document {
         self.revision = 0;
     }
 
-    /// Give the note the block's `e` names its expression id, straight in the tree.
-    fn set_note_expr(
+    /// Change the `TimedEvent` of the note the block names (sound, position, pitch,
+    /// ordinal), straight in the tree.
+    fn set_note_field(
         &mut self,
         g: usize,
         p: usize,
-        e: &Entry,
-        id: ExprId,
+        (sound, position, pitch, ordinal): (usize, i64, i64, usize),
         paths: &std::collections::HashMap<u64, mxprj::decode::Path>,
+        set: impl FnOnce(&mut Obj),
     ) -> Result<(), String> {
-        let (_, _, seq) = self.sequence_of(g, p, e.sound, paths)?;
+        let (_, _, seq) = self.sequence_of(g, p, sound, paths)?;
         let events_path = self.field_path(&seq.ok_or("no notes")?, &["events"])?;
         let Some(Value::Obj(events)) = self.tree.at(&events_path).cloned() else { return Err("no events".into()) };
         let mut items = super::notes::items_of(&events)?;
         let mut seen = 0;
         let mut target = None;
         for (i, it) in items.iter().enumerate() {
-            let is_it = it.position() == e.position
+            let is_it = it.position() == position
                 && self
                     .event_obj(&it.event, paths)
-                    .is_some_and(|ev| ev.type_name.ends_with("NoteEvent") && ev.find("note").and_then(Value::as_int) == Some(e.pitch));
+                    .is_some_and(|ev| ev.type_name.ends_with("NoteEvent") && ev.find("note").and_then(Value::as_int) == Some(pitch));
             if is_it {
-                if seen == e.ordinal {
+                if seen == ordinal {
                     target = Some(i);
                     break;
                 }
@@ -790,7 +855,7 @@ impl Document {
         }
         let i = target.ok_or("no such note")?;
         let Value::Obj(te) = &mut items[i].event else { return Err("not an event".into()) };
-        set_expr_field(te, Some(id));
+        set(te);
         let events = super::notes::events_with(&events, &items);
         *self.tree.at_mut(&events_path).ok_or("events")? = Value::Obj(events);
         Ok(())
@@ -817,7 +882,7 @@ mod tests {
     }
 
     fn note(position: i64, expr: Option<ExprId>) -> Note {
-        Note { sound: 0, position, length: 960, pitch: 60, velocity: 100, probability: 100, expr }
+        Note { ratchet: Default::default(), sound: 0, position, length: 960, pitch: 60, velocity: 100, probability: 100, expr }
     }
 
     fn doc_with(exprs: &[Expression]) -> Document {
@@ -857,15 +922,53 @@ mod tests {
     }
 
     #[test]
-    fn version_12_blocks_still_read() {
-        let b = Block { audio_offsets: vec![(0, 1, 3, -960)], ..Block::default() };
+    fn version_13_blocks_still_read() {
+        let ratchet = RatchetEntry {
+            group: 0,
+            pattern: 1,
+            sound: 2,
+            position: 480,
+            pitch: 60,
+            ordinal: 0,
+            ratchet: Ratchet { repeats: 4, ..Ratchet::default() },
+        };
+        let b = Block { audio_offsets: vec![(0, 1, 3, -960)], ratchets: vec![ratchet], ..Block::default() };
         let full = Block { new_samplers: vec![(0, 2, "v 1".into())], zone_metas: vec![(0, 2, 1, "file a".into())], ..b.clone() };
         assert_eq!(decode(&encode(&full)).unwrap(), full);
         let mut bytes = encode(&b);
-        // Version 12: no New Sampler counts (two u32 zeros) at the end.
-        bytes[..4].copy_from_slice(&12u32.to_le_bytes());
+        // Version 13: no New Sampler counts (two u32 zeros) at the end.
+        bytes[..4].copy_from_slice(&13u32.to_le_bytes());
         bytes.truncate(bytes.len() - 8);
         assert_eq!(decode(&bytes).unwrap(), b);
+    }
+
+    /// On the way to the New Sampler, version 13 was its sounds and zones (no ratchets):
+    /// projects saved then still open, with or without any.
+    #[test]
+    fn a_version_13_block_of_the_new_samplers_reads() {
+        let old = |b: &Block| {
+            let mut w = encode(&Block { new_samplers: Vec::new(), zone_metas: Vec::new(), ..b.clone() });
+            // As written then: the ratchets' count (a u32) wasn't there.
+            w.truncate(w.len() - 12);
+            w[..4].copy_from_slice(&13u32.to_le_bytes());
+            let whole = encode(b);
+            let tail = encode(&Block { new_samplers: Vec::new(), zone_metas: Vec::new(), ..b.clone() }).len() - 8;
+            w.extend_from_slice(&whole[tail..]);
+            w
+        };
+        let base = Block { audio_offsets: vec![(0, 1, 3, -960)], ..Block::default() };
+        for b in [
+            base.clone(),
+            Block { new_samplers: vec![(0, 2, "v 1".into())], ..base.clone() },
+            Block {
+                new_samplers: vec![(0, 2, "v 1".into()), (1, 0, "v 1\nengine live".into())],
+                zone_metas: vec![(0, 2, 1, "file a.wav\nbpm 120".into())],
+                ..base.clone()
+            },
+            Block { zone_metas: vec![(3, 2, 1, "file a".into()); 5], ..base.clone() },
+        ] {
+            assert_eq!(decode(&old(&b)).unwrap(), b);
+        }
     }
 
     #[test]
@@ -1051,10 +1154,11 @@ mod tests {
         assert!(old.audio_offsets.is_empty());
         assert_eq!(old, b);
         assert_eq!(decode(&encode(&full)).unwrap(), full);
-        // A project carrying that version 11 block saves it as the current version.
+        // A project carrying that version 11 block saves it as the version written now.
         let mut v11 = encode(&Block { prob_locked: vec![(0, 1)], ..Block::default() });
         v11[..4].copy_from_slice(&11u32.to_le_bytes());
-        v11.truncate(v11.len() - 4);
+        // (Without the Audio offsets' count, the ratchets' and the New Sampler's two.)
+        v11.truncate(v11.len() - 16);
         let file = set_root_child(&doc_with(&[]).to_bytes().unwrap(), DOMAIN, ITEM, FRAME, Some(&v11)).unwrap();
         let saved = Document::from_bytes(file, None).unwrap().to_bytes().unwrap();
         assert_eq!(root_child(&saved, DOMAIN, ITEM).unwrap()[..4], VERSION.to_le_bytes());
@@ -1140,6 +1244,84 @@ mod tests {
         let again = reopen(&doc_with(&[full()])).to_bytes().unwrap();
         let root = mxprj::container::Item::parse(&again).unwrap();
         assert_eq!(root.children.iter().filter(|c| c.domain == DOMAIN).count(), 1);
+    }
+
+    #[test]
+    fn a_ratchet_round_trips_through_a_save() {
+        use deckard_model::ratchet::Shape;
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "Pattern 1").unwrap();
+        let down = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+        // Two notes on one key: the ordinal tells them apart. A third elsewhere, plain.
+        let notes = [note(0, None), Note { ratchet: down, velocity: 90, ..note(0, None) }, note(960, None)];
+        d.edit_notes("t", 0, 0, &[], &notes).unwrap();
+        let back = reopen(&d);
+        let got: Vec<(i64, i64, Ratchet)> =
+            back.project().groups[0].patterns[0].notes.iter().map(|n| (n.position, n.velocity, n.ratchet)).collect();
+        assert_eq!(got, [(0, 100, Ratchet::default()), (0, 90, down), (960, 100, Ratchet::default())]);
+        assert!(!back.is_dirty(), "reading the block is no edit");
+        assert_eq!(reopen(&back).project().groups[0].patterns[0].notes, back.project().groups[0].patterns[0].notes);
+    }
+
+    #[test]
+    fn no_ratchet_no_block_and_an_older_block_reads() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "Pattern 1").unwrap();
+        d.edit_notes("t", 0, 0, &[], &[note(0, None)]).unwrap();
+        assert_eq!(root_child(&d.to_bytes().unwrap(), DOMAIN, ITEM), None);
+        // A ratchet set and taken off again leaves nothing to keep.
+        let n = d.project().groups[0].patterns[0].notes[0];
+        let r = Note { ratchet: Ratchet { repeats: 3, ..Ratchet::default() }, ..n };
+        d.edit_notes("t", 0, 0, &[n], &[r]).unwrap();
+        assert!(root_child(&d.to_bytes().unwrap(), DOMAIN, ITEM).is_some());
+        d.edit_notes("t", 0, 0, &[r], &[n]).unwrap();
+        assert_eq!(root_child(&d.to_bytes().unwrap(), DOMAIN, ITEM), None);
+        // Version 12: the same bytes without the ratchets' section.
+        let b = Block { lfos: "x".into(), ..Block::default() };
+        let mut old = encode(&b);
+        // (And without the New Sampler's two counts, which came after.)
+        old.truncate(old.len() - 12);
+        old[..4].copy_from_slice(&12u32.to_le_bytes());
+        assert_eq!(decode(&old).unwrap(), b);
+    }
+
+    /// Ruling in the plan: this lives here, on a new project, not in `tests/notes.rs`
+    /// (whose tests need Maschine's reference files).
+    #[test]
+    fn edits_keep_a_notes_ratchet() {
+        use deckard_model::ratchet::Shape;
+        let up = Ratchet { repeats: 5, shape: Shape::Up, floor: 0, ceiling: 110 };
+        let all = |d: &Document, p: usize| d.project().groups[0].patterns[p].notes.clone();
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "Pattern 1").unwrap();
+        let n = Note { ratchet: up, ..note(0, None) };
+        d.edit_notes("t", 0, 0, &[], &[n]).unwrap();
+        // Moved, then copied a beat on.
+        let moved = Note { position: 240, ..n };
+        d.change_note(0, 0, n, moved).unwrap();
+        d.edit_notes("Paste", 0, 0, &[], &[Note { position: 1200, ..moved }]).unwrap();
+        assert!(all(&d, 0).iter().all(|x| x.ratchet == up), "{:?}", all(&d, 0));
+        // Nudged and split by the note tools.
+        let (gone, made) = crate::note_tools::nudge(&all(&d, 0), 120, 0, 3840);
+        d.edit_notes("Nudge", 0, 0, &gone, &made).unwrap();
+        let first = all(&d, 0)[0];
+        let (gone, made) = crate::note_tools::split(&[first], first.position + 480);
+        d.edit_notes("Split", 0, 0, &gone, &made).unwrap();
+        assert_eq!(all(&d, 0).len(), 3);
+        assert!(all(&d, 0).iter().all(|x| x.ratchet == up), "{:?}", all(&d, 0));
+        // The pattern doubled and duplicated.
+        d.double_pattern(0, 0).unwrap();
+        assert_eq!(all(&d, 0).len(), 6);
+        let copy = d.duplicate_pattern(0, 0).unwrap();
+        assert!(all(&d, 0).iter().chain(&all(&d, copy)).all(|x| x.ratchet == up));
+        // Undone to the first edit and back.
+        for _ in 0..6 {
+            assert!(d.undo());
+        }
+        assert_eq!(all(&d, 0), [n]);
+        while d.redo() {}
+        assert!(all(&d, 0).iter().all(|x| x.ratchet == up));
+        assert_eq!(reopen(&d).project().groups[0].patterns[0].notes, all(&d, 0));
     }
 
     #[test]

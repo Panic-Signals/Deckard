@@ -82,7 +82,7 @@ mod tests {
     use super::*;
 
     fn n(sound: usize, position: i64, pitch: i64) -> Note {
-        Note { expr: None, sound, position, length: 240, pitch, velocity: 100, probability: 100 }
+        Note { ratchet: Default::default(), expr: None, sound, position, length: 240, pitch, velocity: 100, probability: 100 }
     }
 
     #[test]

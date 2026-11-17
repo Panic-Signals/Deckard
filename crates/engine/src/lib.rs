@@ -28,6 +28,8 @@ pub mod midi;
 pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
+#[cfg(native_asio)]
+pub(crate) mod native_asio;
 pub mod note_echo;
 #[cfg(feature = "output")]
 pub mod output;
@@ -88,9 +90,16 @@ pub struct NoteEvent {
     pub cue: Option<Cue>,
     /// A pattern note's per-note expression ([`Timeline::exprs`]).
     pub expr: Option<deckard_model::ExprId>,
+    /// Where in that expression's curves it starts (ticks): a ratchet's later hits start
+    /// where they do in the note, so the curves run over the whole note.
+    pub expr_at: i64,
     /// A note a link added ([`pads`]): the sound whose note played it. Muting that sound
     /// silences this too (#21).
     pub from: Option<usize>,
+    /// A hit of a ratcheted note: what its chance is rolled by instead of the event's
+    /// place in the timeline, the same for all the note's hits, so they play or stay
+    /// silent together.
+    pub roll: Option<u64>,
 }
 
 /// A plug-in's note-off due `offset` frames after `now`, moved to its note's attack when
@@ -100,6 +109,15 @@ pub struct NoteEvent {
 fn after_queued_on(live: &[(u64, Live)], now: u64, offset: u64, same_on: impl Fn(&Live) -> bool) -> u64 {
     let off = now + offset;
     live.iter().filter(|(at, e)| *at > off && same_on(e)).map(|(at, _)| at - now).max().unwrap_or(offset)
+}
+
+/// A MIDI input plug-in starts a note at frame `on`: an off it queued before for the same
+/// note (`same_off`) that would come after `on` belonged to the note before, and goes. An
+/// instrument knows a note only by its pitch, so that off would end the new note. A plug-in
+/// plays the offs due within a block as the block starts, so a note's end can be queued
+/// before a note-on that comes earlier in the same block.
+fn drop_later_offs(live: &mut Vec<(u64, Live)>, on: u64, same_off: impl Fn(&Live) -> bool) {
+    live.retain(|(at, e)| *at <= on || !same_off(e));
 }
 
 /// Whether `e` is muted: its sound is, or (a link's note) the sound whose note played it.
@@ -135,6 +153,9 @@ pub struct Timeline {
     /// From each tick on, in order: the scene's own tempo, or `None` for the song's. Empty:
     /// the song's throughout.
     pub tempos: Vec<(i64, Option<f64>)>,
+    /// How many ratcheted notes have been put in: each takes the next roll
+    /// ([`NoteEvent::roll`]).
+    pub ratchets: u64,
 }
 
 impl Timeline {
@@ -323,6 +344,10 @@ enum Seen<'a> {
     /// switch; `playing` false once the sequence has ended).
     Position { t: u64, frame: u64, playing: bool },
 }
+
+/// Where the rolls of ratcheted notes ([`NoteEvent::roll`]) start: past any event's place
+/// in a timeline.
+const RATCHET_ROLLS: u64 = 1 << 40;
 
 /// Whether timeline event `idx` plays on pass `pass` (`probability` in %): decided by a
 /// hash of the event, so it comes out the same whenever and wherever it's asked
@@ -518,6 +543,7 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
     let lanes = mod_lanes(p, g, pat);
     let fader_lanes = fader_lanes(p, pat);
     let out = &mut t.events;
+    let ratchets = &mut t.ratchets;
     let mut rep = 0;
     while rep < length {
         let pass = (start + rep, start + rep + plen.min(length - rep));
@@ -556,6 +582,8 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
             let at = start + rep;
             let end = start + rep + plen.min(length - rep);
             let cue = |tick: i64, cue: Cue| NoteEvent {
+                expr_at: 0,
+                roll: None,
                 tick,
                 group: g,
                 sound: c.sound,
@@ -576,19 +604,34 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
             if pos < 0 || pos >= plen || rep + pos >= length {
                 continue;
             }
-            out.push(NoteEvent {
-                tick: swung(p, g, n.sound, start + rep + pos),
-                group: g,
-                sound: n.sound,
-                pitch: n.pitch,
-                velocity: n.velocity,
-                length: n.length,
-                probability: n.probability,
-                midi: None,
-                cue: None,
-                expr: n.expr,
-                from: None,
+            // A ratchet's hits: the swing moves the note's start, the hits keep their even
+            // spacing after it; one that would start at or past the pattern's (or the
+            // pass's) end doesn't play. An ordinary note is its one hit.
+            let at = swung(p, g, n.sound, start + rep + pos);
+            let roll = (!n.ratchet.is_plain()).then(|| {
+                *ratchets += 1;
+                RATCHET_ROLLS + *ratchets
             });
+            for hit in n.ratchet.hits(n.length, n.velocity) {
+                if pos + hit.offset >= plen || rep + pos + hit.offset >= length {
+                    break;
+                }
+                out.push(NoteEvent {
+                    tick: at + hit.offset,
+                    group: g,
+                    sound: n.sound,
+                    pitch: n.pitch,
+                    velocity: hit.velocity,
+                    length: hit.length,
+                    probability: n.probability,
+                    midi: None,
+                    cue: None,
+                    expr: n.expr,
+                    expr_at: hit.offset,
+                    from: None,
+                    roll,
+                });
+            }
         }
         for m in &pat.midi {
             let pos = m.position - pat.start;
@@ -596,6 +639,8 @@ fn fill_with(p: &Project, g: usize, pat: &deckard_model::Pattern, start: i64, le
                 continue;
             }
             out.push(NoteEvent {
+                expr_at: 0,
+                roll: None,
                 tick: swung(p, g, m.sound, start + rep + pos),
                 group: g,
                 sound: m.sound,
@@ -2366,8 +2411,10 @@ struct MidiNote {
     /// ([`Engine::flush_waiting`]).
     waiting: Option<u8>,
     expr: Option<Arc<deckard_model::Expression>>,
-    /// When it started (`time`), and ticks per sample then: where it is in its curves.
+    /// When it started (`time`), and ticks per sample then: where it is in its curves,
+    /// which it entered `from` ticks in.
     started: u64,
+    from: i64,
     tps: f64,
     /// The value last sent for each dimension ([`Dim::ALL`]'s order), and when.
     sent: [Option<u16>; 3],
@@ -2554,6 +2601,152 @@ fn synced_zone(
     zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats(), shown, live: None });
 }
 
+type FoundKey = (i64, String, String, String, Option<std::path::PathBuf>);
+
+/// Read-only snapshot of [`SampleCache`]'s known paths and already-cached files,
+/// so background group preparation can skip files already in memory.
+#[derive(Default, Clone)]
+pub struct SampleCacheSnapshot {
+    library_dirs: Vec<std::path::PathBuf>,
+    found: HashMap<FoundKey, std::path::PathBuf>,
+    cached: std::collections::HashSet<std::path::PathBuf>,
+}
+
+/// Samples resolved and decoded ahead of [`Engine::new_after`] (e.g. on a group-load
+/// worker thread).
+#[derive(Default)]
+pub struct PreloadedSamples {
+    found: Vec<(FoundKey, std::path::PathBuf)>,
+    decoded: Vec<(std::path::PathBuf, Arc<Sample>)>,
+}
+
+fn collect_sound_sample_refs(s: &deckard_model::Sound, out: &mut Vec<deckard_model::SampleRef>) {
+    if synth_of(s).is_some() {
+        return;
+    }
+    if s.instrument == "AudioModule" {
+        if let Some(a) = s.audio.as_ref() {
+            out.extend(a.takes.iter().map(|t| t.sample.clone()));
+        }
+        return;
+    }
+    let Some(smp) = s.sampler.as_ref() else { return };
+    for z in &smp.zones {
+        out.push(z.sample.clone());
+    }
+}
+
+fn parallel_preload_samples<F>(
+    refs: Vec<deckard_model::SampleRef>,
+    project_path: Option<&Path>,
+    library_dirs: &[std::path::PathBuf],
+    known_found: &HashMap<FoundKey, std::path::PathBuf>,
+    is_cached: F,
+) -> PreloadedSamples
+where
+    F: Fn(&Path) -> bool + Sync,
+{
+    enum Work {
+        ResolveAndDecode(FoundKey, deckard_model::SampleRef),
+        DecodeOnly(std::path::PathBuf),
+    }
+
+    let proj_buf = project_path.map(Path::to_path_buf);
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut claimed = std::collections::HashSet::new();
+    let mut work = Vec::new();
+    for r in refs {
+        if r.path.is_empty() {
+            continue;
+        }
+        let key: FoundKey = (r.kind, r.path.clone(), r.library.clone(), r.library_root.clone(), proj_buf.clone());
+        if !seen_keys.insert(key.clone()) {
+            continue;
+        }
+        if let Some(p) = known_found.get(&key) {
+            if !is_cached(p) && claimed.insert(p.clone()) {
+                work.push(Work::DecodeOnly(p.clone()));
+            }
+        } else {
+            work.push(Work::ResolveAndDecode(key, r));
+        }
+    }
+    if work.is_empty() {
+        return PreloadedSamples::default();
+    }
+    let decode_valid = |p: &Path| Sample::load(p).ok().filter(|s| !s.frames.is_empty() && s.rate > 0).map(Arc::new);
+    if work.len() == 1 {
+        let mut out = PreloadedSamples::default();
+        match work.into_iter().next().unwrap() {
+            Work::DecodeOnly(p) => {
+                if let Some(s) = decode_valid(&p) {
+                    out.decoded.push((p, s));
+                }
+            }
+            Work::ResolveAndDecode(key, r) => {
+                let mut resolver = library::Resolver::new(project_path);
+                resolver.set_extra(library_dirs);
+                if let Some(p) = resolver.resolve(&r) {
+                    if !is_cached(&p)
+                        && let Some(s) = decode_valid(&p)
+                    {
+                        out.decoded.push((p.clone(), s));
+                    }
+                    out.found.push((key, p));
+                }
+            }
+        }
+        return out;
+    }
+
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(work.len());
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let claimed = Mutex::new(claimed);
+    let mut out = PreloadedSamples::default();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            handles.push(scope.spawn(|| {
+                let mut resolver: Option<library::Resolver> = None;
+                let mut local = PreloadedSamples::default();
+                loop {
+                    let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = work.get(i) else { break };
+                    match item {
+                        Work::DecodeOnly(p) => {
+                            if let Some(s) = decode_valid(p) {
+                                local.decoded.push((p.clone(), s));
+                            }
+                        }
+                        Work::ResolveAndDecode(key, r) => {
+                            let res = resolver.get_or_insert_with(|| {
+                                let mut res = library::Resolver::new(project_path);
+                                res.set_extra(library_dirs);
+                                res
+                            });
+                            if let Some(p) = res.resolve(r) {
+                                let should_decode = !is_cached(&p) && claimed.lock().unwrap().insert(p.clone());
+                                if should_decode && let Some(s) = decode_valid(&p) {
+                                    local.decoded.push((p.clone(), s));
+                                }
+                                local.found.push((key.clone(), p));
+                            }
+                        }
+                    }
+                }
+                local
+            }));
+        }
+        for h in handles {
+            if let Ok(part) = h.join() {
+                out.found.extend(part.found);
+                out.decoded.extend(part.decoded);
+            }
+        }
+    });
+    out
+}
+
 /// Samples shared between engines (e.g. replaying another scene without reloading).
 #[derive(Default)]
 pub struct SampleCache {
@@ -2562,7 +2755,7 @@ pub struct SampleCache {
     pub library_dirs: Vec<std::path::PathBuf>,
     /// Where samples were found (by how the project refers to them, and the project's
     /// folder): each edit doesn't search the disk again. Only files found are kept.
-    found: HashMap<(i64, String, String, String, Option<std::path::PathBuf>), std::path::PathBuf>,
+    found: HashMap<FoundKey, std::path::PathBuf>,
     /// Plug-in instances, kept across engines (they are slow to load and hold state).
     pub plugins: deckard_plugins::Host,
     /// Where the engines made with it note plug-ins' extra pairs making sound (one board,
@@ -2630,6 +2823,44 @@ impl SampleCache {
             .entry(path.clone())
             .or_insert_with(|| Sample::load(&path).ok().filter(|s| !s.frames.is_empty() && s.rate > 0).map(Arc::new))
             .clone()
+    }
+
+    /// Whether `path` has already been decoded and stored in this cache.
+    pub fn has_cached(&self, path: &Path) -> bool {
+        matches!(self.by_path.get(path), Some(Some(_)))
+    }
+
+    /// Snapshot known sample paths and cached entries so a background worker can resolve
+    /// and decode uncached samples without holding [`SampleCache`].
+    pub fn known_sample_state(&self) -> SampleCacheSnapshot {
+        SampleCacheSnapshot {
+            library_dirs: self.library_dirs.clone(),
+            found: self.found.clone(),
+            cached: self.by_path.keys().cloned().collect(),
+        }
+    }
+
+    /// Resolve and decode every sample referenced by `group`'s sounds in parallel.
+    pub fn preload_group_samples(
+        group: &deckard_model::Group,
+        project_path: Option<&Path>,
+        snapshot: &SampleCacheSnapshot,
+    ) -> PreloadedSamples {
+        let mut refs = Vec::new();
+        for s in &group.sounds {
+            collect_sound_sample_refs(s, &mut refs);
+        }
+        parallel_preload_samples(refs, project_path, &snapshot.library_dirs, &snapshot.found, |p| snapshot.cached.contains(p))
+    }
+
+    /// Merge samples resolved and decoded off-thread into this cache.
+    pub fn ingest_preloaded(&mut self, preloaded: PreloadedSamples) {
+        for (key, path) in preloaded.found {
+            self.found.entry(key).or_insert(path);
+        }
+        for (path, sample) in preloaded.decoded {
+            self.by_path.entry(path).or_insert(Some(sample));
+        }
     }
 }
 
@@ -2822,6 +3053,21 @@ impl Engine {
         let has_fx = |g: usize, s: usize| {
             fx.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some) || (kept(g, s, |r| r.chain) && had_chain(g, s))
         };
+        {
+            let mut refs = Vec::new();
+            for (gi, g) in project.groups.iter().enumerate() {
+                for (si, s) in g.sounds.iter().enumerate() {
+                    if !kept(gi, si, |r| r.sampler) && !muting(project, gi, si).silent {
+                        collect_sound_sample_refs(s, &mut refs);
+                    }
+                }
+            }
+            if refs.len() >= 2 {
+                let preloaded =
+                    parallel_preload_samples(refs, project_path, &cache.library_dirs, &cache.found, |p| cache.by_path.contains_key(p));
+                cache.ingest_preloaded(preloaded);
+            }
+        }
         // A sample a zone or take names: found (remembered), loaded once, counted.
         let mut load = |r: &deckard_model::SampleRef| -> Option<Arc<Sample>> {
             let key = (r.kind, r.path.clone(), r.library.clone(), r.library_root.clone(), project_path.map(Path::to_path_buf));
@@ -3831,7 +4077,8 @@ impl Engine {
                         fire(Seen::Event {
                             t,
                             e,
-                            plays: chance(e.probability, next, tl.chance_pass(e, pass), self.rng) && !self.repeat_replaces(e),
+                            plays: chance(e.probability, e.roll.map_or(next, |k| k as usize), tl.chance_pass(e, pass), self.rng)
+                                && !self.repeat_replaces(e),
                             frame,
                             pass,
                         });
@@ -4152,7 +4399,7 @@ impl Engine {
             if n.at <= now {
                 continue;
             }
-            let tick = (now.saturating_sub(n.started) as f64 * n.tps) as i64;
+            let tick = n.from + (now.saturating_sub(n.started) as f64 * n.tps) as i64;
             let range = if n.mpe { mpe.get(&*n.port).map(|m| m.range) } else { None };
             for (i, d) in Dim::ALL.into_iter().enumerate() {
                 let Some(c) = e.curve(d) else { continue };
@@ -4174,6 +4421,8 @@ impl Engine {
             || self.instruments.get(group).and_then(|r| r.get(sound)).is_some_and(Option::is_some);
         let tps = 1.0 / self.samples_per_tick();
         let e = NoteEvent {
+            expr_at: 0,
+            roll: None,
             tick: 0,
             group,
             sound,
@@ -4193,6 +4442,8 @@ impl Engine {
     pub fn control_in(&mut self, group: usize, sound: usize, kind: MidiKind, thru: bool) {
         let tps = 1.0 / self.samples_per_tick();
         let e = NoteEvent {
+            expr_at: 0,
+            roll: None,
             tick: 0,
             group,
             sound,
@@ -4213,7 +4464,21 @@ impl Engine {
     pub fn note_on(&mut self, group: usize, sound: usize, pitch: i64, velocity: i64, length: i64) {
         let tps = 1.0 / self.samples_per_tick();
         self.trigger(
-            NoteEvent { tick: 0, group, sound, pitch, velocity, length, probability: 100, midi: None, cue: None, expr: None, from: None },
+            NoteEvent {
+                expr_at: 0,
+                roll: None,
+                tick: 0,
+                group,
+                sound,
+                pitch,
+                velocity,
+                length,
+                probability: 100,
+                midi: None,
+                cue: None,
+                expr: None,
+                from: None,
+            },
             tps,
         );
     }
@@ -4895,6 +5160,14 @@ impl Engine {
                     |e| matches!(*e, Live::MidiInputOut { group: g, note: midi_input::NoteOut::On { sound: s, pitch: p, .. } } if (g, s, p) == (group, sound, pitch)),
                 );
             }
+            if let midi_input::NoteOut::On { sound, pitch, .. } = note {
+                drop_later_offs(&mut self.live, self.time + offset, |e| match *e {
+                    Live::MidiInputOut { group: g, note: midi_input::NoteOut::Off { sound: s, pitch: p, .. } } => {
+                        (g, s, p) == (group, sound, pitch)
+                    }
+                    _ => false,
+                });
+            }
             if offset == 0 {
                 self.play_midi_input_note(group, note);
             } else {
@@ -5073,6 +5346,8 @@ impl Engine {
         }
         let tps = 1.0 / self.samples_per_tick();
         let e = NoteEvent {
+            expr_at: 0,
+            roll: None,
             tick: 0,
             group,
             sound,
@@ -5095,6 +5370,8 @@ impl Engine {
         let tps = 1.0 / self.samples_per_tick();
         for s in pads::bits(chokes) {
             let e = NoteEvent {
+                expr_at: 0,
+                roll: None,
                 tick: 0,
                 group,
                 sound: s,
@@ -5248,7 +5525,9 @@ impl Engine {
                     }
                     let idx = self.next;
                     self.next += 1;
-                    let plays = chance(e.probability, idx, self.timeline.chance_pass(&e, self.pass), self.rng) && !self.repeat_replaces(&e);
+                    let plays =
+                        chance(e.probability, e.roll.map_or(idx, |k| k as usize), self.timeline.chance_pass(&e, self.pass), self.rng)
+                            && !self.repeat_replaces(&e);
                     #[cfg(test)]
                     self.fired.push((self.time, e.tick, e.sound, e.pitch, plays));
                     if plays {
@@ -5793,7 +6072,7 @@ impl Engine {
             self.lfo_release(e.group, e.sound, None);
         }
         if e.midi.is_none() {
-            self.touch_start(e.group, e.sound, e.pitch, frames, tps, e.expr);
+            self.touch_start(e.group, e.sound, e.pitch, frames, tps, e.expr, e.expr_at);
         }
         if midi_out && let Some(route) = self.midi_routes.get(e.group).and_then(|r| r.get(e.sound)).cloned().flatten() {
             match route {
@@ -5823,7 +6102,7 @@ impl Engine {
                                 Some(range) => {
                                     // A member channel of its own, set to where the note starts.
                                     let ch = self.mpe_channel(&port);
-                                    let start = |d: Dim| expr.as_ref().and_then(|x| x.curve(d)).map(|c| c.value_at(0));
+                                    let start = |d: Dim| expr.as_ref().and_then(|x| x.curve(d)).map(|c| c.value_at(e.expr_at));
                                     let bend = midi::bend_14(start(Dim::Pitch).unwrap_or(0.0), range);
                                     let slide = start(Dim::Slide).map_or(64, |v| (v.clamp(0.0, 1.0) * 127.0).round() as u16);
                                     let pressure = start(Dim::Pressure).map_or(0, |v| (v.clamp(0.0, 1.0) * 127.0).round() as u16);
@@ -5860,6 +6139,7 @@ impl Engine {
                                 waiting: wait.then_some(velocity),
                                 expr,
                                 started: self.time,
+                                from: e.expr_at,
                                 tps,
                                 sent,
                                 sent_at: [self.time; 3],
@@ -6825,7 +7105,16 @@ mod tests {
 
     pub(crate) fn project() -> Project {
         let notes = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * PPQ, length: 240, pitch: 60, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * PPQ,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         Project {
             tempo: 120.0,
@@ -6875,7 +7164,16 @@ mod tests {
     #[test]
     fn clips_play_in_place_of_patterns() {
         let mut p = project();
-        let clip_note = Note { expr: None, sound: 0, position: 0, length: 240, pitch: 72, velocity: 100, probability: 100 };
+        let clip_note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 240,
+            pitch: 72,
+            velocity: 100,
+            probability: 100,
+        };
         p.groups[0].clip_patterns = vec![Pattern { length: 2 * PPQ, notes: vec![clip_note], ..Default::default() }];
         p.groups[0].clips = vec![deckard_model::Clip { position: 4 * PPQ, length: 4 * PPQ, pattern: 0 }];
         let t = timeline(&p, Mode::Arrangement);
@@ -7343,7 +7641,10 @@ mod tests {
         let ramp: Vec<[f32; 2]> = (0..100).map(|i| [i as f32 / 100.0, i as f32 / 100.0]).collect();
         set_sample(&mut e, ramp, &[], false);
         e.timeline = Timeline {
+            ratchets: 0,
             events: vec![NoteEvent {
+                expr_at: 0,
+                roll: None,
                 tick: 0,
                 group: 0,
                 sound: 0,
@@ -7378,7 +7679,10 @@ mod tests {
         let ramp: Vec<[f32; 2]> = (0..100).map(|i| [i as f32 / 100.0, i as f32 / 100.0]).collect();
         set_sample(&mut e, ramp, &[], false);
         e.timeline = Timeline {
+            ratchets: 0,
             events: vec![NoteEvent {
+                expr_at: 0,
+                roll: None,
                 tick: 0,
                 group: 0,
                 sound: 0,
@@ -7554,7 +7858,16 @@ mod tests {
         // Scene 0: quarters for a bar; scene 1: half notes for a bar.
         let mut p = project();
         let halves = (0..2)
-            .map(|i| Note { expr: None, sound: 0, position: i * 2 * PPQ, length: 240, pitch: 60, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * 2 * PPQ,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         p.groups[0].patterns.push(Pattern { length: 4 * PPQ, notes: halves, ..Default::default() });
         p.scenes.push(Scene { patterns: vec![(0, 1)], ..Default::default() });
@@ -7983,6 +8296,8 @@ mod tests {
         let mut e = click_engine(1000);
         let events: Vec<NoteEvent> = (0..400)
             .map(|i| NoteEvent {
+                expr_at: 0,
+                roll: None,
                 tick: i * 240,
                 group: 0,
                 sound: 0,
@@ -8011,6 +8326,8 @@ mod tests {
             e.looping = true;
             let events: Vec<NoteEvent> = (0..32)
                 .map(|i| NoteEvent {
+                    expr_at: 0,
+                    roll: None,
                     tick: i * 240,
                     group: 0,
                     sound: 0,
@@ -8154,6 +8471,7 @@ mod tests {
         let notes = |k: i64| -> Vec<Note> {
             (0..12)
                 .map(|i| Note {
+                    ratchet: Default::default(),
                     expr: None,
                     sound: 0,
                     position: i * 160 + k,
@@ -8264,6 +8582,7 @@ mod tests {
             .collect();
         p.groups[0].patterns[0].notes = (0..48)
             .map(|i| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: i % 8,
                 position: i as i64 * 79,
@@ -8685,6 +9004,54 @@ mod tests {
         assert!(after > 1.0, "heard at once: {after}");
     }
 
+    /// A take switched off while playing (the pad's toggle) fades out without a jump,
+    /// whether rendered live or ahead, across all engines.
+    #[test]
+    fn a_loop_switched_off_while_playing_fades_without_clicking() {
+        for engine in [deckard_model::AudioEngine::Stretch, deckard_model::AudioEngine::Repitch, deckard_model::AudioEngine::Formant] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("sine.wav");
+            let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+            let frames = 96_000usize; // 4 beats at 120 BPM
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            for i in 0..frames {
+                let v = (i as f32 / 48_000.0 * 220.0 * std::f32::consts::TAU).sin() * 0.8;
+                w.write_sample(v).unwrap();
+                w.write_sample(v).unwrap();
+            }
+            w.finalize().unwrap();
+            let mut on = project();
+            let take = deckard_model::Take {
+                sample: deckard_model::SampleRef { kind: 0, path: path.to_string_lossy().into(), ..Default::default() },
+                beats: 4.0,
+                play_range: (0, 0),
+            };
+            let snd = &mut on.groups[0].sounds[0];
+            snd.instrument = "AudioModule".into();
+            snd.sampler = None;
+            snd.audio = Some(deckard_model::AudioLoop { takes: vec![take], engine, pitchbend: 0.5, fade: 0.1222, ..Default::default() });
+            on.groups[0].patterns[0] =
+                Pattern { length: 8 * PPQ, audio: vec![deckard_model::AudioCue { sound: 0, take: 0, offset: PPQ }], ..Default::default() };
+            on.sections = vec![Section { scene: Some(0), length: 16 * PPQ, auto: false }];
+            let mut off = on.clone();
+            off.groups[0].patterns[0].audio.clear();
+            let chains = Engine::new(&on, None, 48_000, Mode::Arrangement, &mut SampleCache::default()).1.chains;
+            for ahead in [None, Some(700)] {
+                let out = render_with(&on, ahead, 256, 2.0, |k, e, cache| {
+                    if k == 48_000 / 256 {
+                        let (fresh, _) = Engine::new_after(&off, Some((&on, chains.as_slice())), None, 48_000, e.mode(), cache);
+                        drop(e.adopt(fresh, &off));
+                    }
+                });
+                let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+                let max_step = left[47_000..52_000].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+                assert!(max_step < 0.06, "{engine:?} ahead={ahead:?}: click at loop off (max step {max_step})");
+                let tail: f32 = left[52_000..].iter().map(|v| v * v).sum();
+                assert!(tail < 1e-6, "{engine:?} ahead={ahead:?}: not silent after fade-out: {tail}");
+            }
+        }
+    }
+
     /// Edited while the transport is stopped, a loop stays silent until the pattern plays.
     #[test]
     fn an_edit_while_stopped_does_not_start_a_loop() {
@@ -8791,6 +9158,7 @@ mod tests {
         gated.groups[0].patterns[0].length = 4 * PPQ;
         gated.groups[0].patterns[0].notes = (0..16)
             .map(|step| deckard_model::Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: 0,
                 position: step * (PPQ / 4),
@@ -10229,6 +10597,8 @@ mod tests {
         let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         let tps = 1.0 / e.samples_per_tick();
         let choke = NoteEvent {
+            expr_at: 0,
+            roll: None,
             tick: 0,
             group: 0,
             sound: 1,
@@ -10368,6 +10738,8 @@ mod tests {
         e.note_hold(0, 1, 60, 100);
         blocks(&mut e, 10);
         let choke = NoteEvent {
+            expr_at: 0,
+            roll: None,
             tick: 0,
             group: 0,
             sound: 1,
@@ -10896,6 +11268,7 @@ mod tests {
         p.groups[0].sounds[1].slots[1].active = false;
         steps.push((100, p.clone()));
         p.groups[0].patterns[0].notes.push(Note {
+            ratchet: Default::default(),
             expr: None,
             sound: 6,
             position: 1000,
@@ -11033,6 +11406,7 @@ mod tests {
             .collect();
         p.groups[0].patterns[0].notes = (0..32)
             .map(|i| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: i % 8,
                 position: i as i64 * 37,
@@ -12919,7 +13293,16 @@ mod tests {
         let mut p = project();
         p.groups[0].sounds[0].channel.midi_out = deckard_model::MidiDest::Port("Synth".into());
         p.groups[0].sounds[0].channel.midi_out_channel = 2;
-        let n = Note { expr: Some(deckard_model::ExprId(0)), sound: 0, position: 0, length, pitch: 60, velocity: 100, probability: 100 };
+        let n = Note {
+            ratchet: Default::default(),
+            expr: Some(deckard_model::ExprId(0)),
+            sound: 0,
+            position: 0,
+            length,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         p.groups[0].patterns[0].notes = vec![n];
         p.expressions = vec![std::sync::Arc::new(e)];
         let mut engine = click_engine_for(&p, 1000);
@@ -12960,7 +13343,16 @@ mod tests {
     }
 
     fn note_at(position: i64, length: i64, pitch: i64, expr: Option<u32>) -> Note {
-        Note { expr: expr.map(deckard_model::ExprId), sound: 0, position, length, pitch, velocity: 100, probability: 100 }
+        Note {
+            ratchet: Default::default(),
+            expr: expr.map(deckard_model::ExprId),
+            sound: 0,
+            position,
+            length,
+            pitch,
+            velocity: 100,
+            probability: 100,
+        }
     }
 
     fn sent(e: &mut Engine, rx: &std::sync::mpsc::Receiver<midi::MidiOut>, frames: usize) -> Vec<Vec<u8>> {
@@ -13324,6 +13716,100 @@ mod tests {
         assert!(engine.expression(deckard_model::ExprId(9)).is_none());
     }
 
+    /// The first pass's hits of the test project's one pattern with `note` its only note.
+    fn ratchet_hits(note: Note) -> Vec<NoteEvent> {
+        let mut p = project();
+        p.groups[0].patterns[0].notes = vec![note];
+        let t = timeline(&p, Mode::Arrangement);
+        let bar = own_length(&p, &p.groups[0].patterns[0]);
+        t.events.into_iter().filter(|e| e.midi.is_none() && e.cue.is_none() && e.tick < bar).collect()
+    }
+
+    fn ratcheted(position: i64, length: i64, velocity: i64, ratchet: deckard_model::ratchet::Ratchet) -> Note {
+        Note { ratchet, expr: None, sound: 0, position, length, pitch: 60, velocity, probability: 100 }
+    }
+
+    #[test]
+    fn a_ratcheted_note_plays_its_hits() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let down = Ratchet { repeats: 4, shape: Shape::Down, floor: 0, ceiling: 127 };
+        let hits = ratchet_hits(ratcheted(0, PPQ, 100, down));
+        let got: Vec<(i64, i64, i64)> = hits.iter().map(|e| (e.tick, e.length, e.velocity)).collect();
+        assert_eq!(got, [(0, PPQ / 4, 100), (PPQ / 4, PPQ / 4, 75), (PPQ / 2, PPQ / 4, 50), (3 * PPQ / 4, PPQ / 4, 25)]);
+        assert!(hits[0].roll.is_some() && hits.iter().all(|e| e.roll == hits[0].roll), "one roll for the note");
+        // An ordinary note is the one event it always was.
+        let plain = ratchet_hits(ratcheted(0, PPQ, 100, Ratchet::default()));
+        assert_eq!(plain.iter().map(|e| (e.tick, e.length, e.velocity, e.roll)).collect::<Vec<_>>(), [(0, PPQ, 100, None)]);
+    }
+
+    /// Each ratcheted note has a roll of its own, whatever has been taken out of the
+    /// timeline before it is filled in (a clip's span is, before the clip's notes go in).
+    #[test]
+    fn two_ratcheted_notes_never_share_a_roll() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let mut p = project();
+        let r = Ratchet { repeats: 2, shape: Shape::Flat, floor: 0, ceiling: 127 };
+        p.groups[0].patterns[0].notes = vec![ratcheted(0, PPQ, 100, r)];
+        let bar = own_length(&p, &p.groups[0].patterns[0]);
+        let mut t = Timeline::default();
+        fill_with(&p, 0, &p.groups[0].patterns[0], 0, bar, &mut t);
+        let first = t.events.iter().find_map(|e| e.roll).unwrap();
+        t.events.clear();
+        fill_with(&p, 0, &p.groups[0].patterns[0], bar, bar, &mut t);
+        let second = t.events.iter().find_map(|e| e.roll).unwrap();
+        assert_ne!(first, second);
+    }
+
+    /// A ratcheted note's expression runs over the whole note: each hit starts in the
+    /// curves where it starts in the note, and a sound's sources read them from there.
+    #[test]
+    fn a_ratchets_hits_read_their_own_stretch_of_the_notes_expression() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        use deckard_model::{Curve, ExprId, Expression, Point};
+        let r = Ratchet { repeats: 4, shape: Shape::Flat, floor: 0, ceiling: 127 };
+        let hits = ratchet_hits(Note { expr: Some(ExprId(0)), ..ratcheted(0, PPQ, 100, r) });
+        assert_eq!(hits.iter().map(|e| e.expr_at).collect::<Vec<_>>(), [0, PPQ / 4, PPQ / 2, 3 * PPQ / 4]);
+        // Pressure rising 0 to 1 over the note: a hit from halfway reads a half.
+        let mut p = project();
+        let ramp = vec![Point { at: 0, value: 0.0, curve: 0.0 }, Point { at: PPQ, value: 1.0, curve: 0.0 }];
+        p.expressions = vec![std::sync::Arc::new(Expression { pressure: Some(Curve { points: ramp }), ..Default::default() })];
+        let mut e = click_engine_for(&p, 1000);
+        e.touch_start(0, 0, 60, Some(1000), 1.0, Some(ExprId(0)), PPQ / 2);
+        let pressure = e.sources(0, 0)[2].unwrap();
+        assert!((pressure - 0.5).abs() < 0.01, "{pressure}");
+    }
+
+    #[test]
+    fn hits_past_the_patterns_end_do_not_play() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let mut p = project();
+        let bar = own_length(&p, &p.groups[0].patterns[0]);
+        // From a quarter before the end, two quarters long, a hit every eighth: two fit.
+        let r = Ratchet { repeats: 4, shape: Shape::Flat, floor: 0, ceiling: 127 };
+        p.groups[0].patterns[0].notes = vec![ratcheted(bar - PPQ, 2 * PPQ, 100, r)];
+        let t = timeline(&p, Mode::Arrangement);
+        let ticks: Vec<i64> = t.events.iter().filter(|e| e.midi.is_none() && e.cue.is_none() && e.tick < 2 * bar).map(|e| e.tick).collect();
+        let first: Vec<i64> = ticks.iter().copied().filter(|&x| x < bar).collect();
+        assert_eq!(first, [bar - PPQ, bar - PPQ / 2]);
+        assert!(ticks.iter().all(|&x| x % bar >= bar - PPQ), "none fires into the next pass: {ticks:?}");
+    }
+
+    #[test]
+    fn a_ratchets_hits_take_one_roll() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let r = Ratchet { repeats: 8, shape: Shape::Flat, floor: 0, ceiling: 127 };
+        let hits = ratchet_hits(Note { probability: 50, ..ratcheted(0, PPQ, 100, r) });
+        assert_eq!(hits.len(), 8);
+        let mut seen = [false; 2];
+        for pass in 0..64u64 {
+            let plays: Vec<bool> =
+                hits.iter().enumerate().map(|(i, e)| chance(e.probability, e.roll.map_or(i, |k| k as usize), pass, 7)).collect();
+            assert!(plays.iter().all(|&x| x == plays[0]), "pass {pass}: {plays:?}");
+            seen[usize::from(plays[0])] = true;
+        }
+        assert_eq!(seen, [true, true], "it plays on some passes and not on others");
+    }
+
     /// Pressure on a held note sent out (a pad, or a key passed thru) goes out with it
     /// as poly aftertouch on its key; a note not sent out, or released, sends none.
     #[test]
@@ -13352,7 +13838,16 @@ mod tests {
         let mut p = project();
         // Sixteenths on beat 1: ticks 0, 240, 480, 720.
         p.groups[0].patterns[0].notes = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * 240, length: 60, pitch: 60, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * 240,
+                length: 60,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         p.groups[0].swing = deckard_model::Swing { amount: 100.0, ..Default::default() };
         let ticks: Vec<i64> = timeline(&p, Mode::Pattern(0, 0)).events.iter().take(4).map(|e| e.tick).collect();
@@ -13413,6 +13908,28 @@ mod tests {
         assert_eq!(after_queued_on(&live, 100, 0, same), 80, "to its latest queued attack");
         assert_eq!(after_queued_on(&live, 100, 90, same), 90, "an off already after it stays");
         assert_eq!(after_queued_on(&[], 100, 0, same), 0);
+    }
+
+    /// A new attack for a pitch removes that pitch's off still queued from the note before
+    /// (a plug-in plays a block's offs first), or the old off would end the new note.
+    #[test]
+    fn a_plug_ins_new_attack_drops_the_stale_off_queued_after_it() {
+        use midi_input::NoteOut::{Off, On};
+        let mut e = click_engine_for(&project(), 1000);
+        e.sequencing = false;
+        let off = |at, pitch| Off { at, sound: 0, pitch };
+        e.play_midi_input_out(0, 0.0, &[off(8.0, 60), off(8.0, 64)]);
+        assert_eq!(e.live.len(), 2);
+        e.play_midi_input_out(0, 0.0, &[On { at: 4.0, sound: 0, pitch: 60, velocity: 100, length: None }]);
+        let pitches: Vec<i64> = e
+            .live
+            .iter()
+            .filter_map(|(_, l)| match l {
+                Live::MidiInputOut { note: Off { pitch, .. }, .. } => Some(*pitch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pitches, [64], "the later off for 60 is gone; another pitch's stays");
     }
 
     /// Choke only one Group's sounds: other Groups' voices keep playing.
@@ -13858,7 +14375,16 @@ mod native_tests {
         let class = deckard_plugins::native::CLASSES[0];
         let plugin = PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
         let notes = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * PPQ, length: 240, pitch: 48 + i, velocity: 110, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * PPQ,
+                length: 240,
+                pitch: 48 + i,
+                velocity: 110,
+                probability: 100,
+            })
             .collect();
         let p = Project {
             tempo: 120.0,
@@ -13912,7 +14438,16 @@ mod native_tests {
         let class = deckard_plugins::native::CLASSES[0];
         let plugin = PluginRef { id: class.plugin_id(), name: class.name.into(), ..Default::default() };
         let notes: Vec<Note> = (0..4)
-            .map(|i| Note { expr: None, sound: 0, position: i * PPQ, length: 240, pitch: 48 + i, velocity: 127, probability: 100 })
+            .map(|i| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: i * PPQ,
+                length: 240,
+                pitch: 48 + i,
+                velocity: 127,
+                probability: 100,
+            })
             .collect();
         let comp = |threshold: f64| SlotInfo {
             module: "Compressor".into(),
@@ -13978,5 +14513,48 @@ mod native_tests {
         assert!(gr > 6.0, "gain reduction {gr} dB");
         let (_, gr, _) = take(0.0); // 0 dB: nothing to reduce
         assert!(gr < 0.5, "gain reduction {gr} dB");
+    }
+
+    #[test]
+    fn preload_group_samples_decodes_all_sounds_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sounds = Vec::new();
+        let mut wavs = Vec::new();
+        for i in 0..8 {
+            let path = dir.path().join(format!("pad_{i}.wav"));
+            let val = (i as f32 + 1.0) * 0.05;
+            edit::write_wav(&path, &Sample { rate: 48_000, frames: vec![[val, -val]; 256] }).unwrap();
+            wavs.push(path.clone());
+            sounds.push(Sound {
+                name: format!("Pad {i}"),
+                level: 1.0,
+                instrument: "Sampler".into(),
+                sampler: Some(deckard_model::Sampler {
+                    zones: vec![deckard_model::Zone {
+                        sample: deckard_model::SampleRef { kind: 0, path: path.display().to_string(), ..Default::default() },
+                        root_key: 60,
+                        key_range: (0, 127),
+                        velocity_range: (0, 127),
+                        gain: 1.0,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        let group = Group { name: "Kit".into(), level: 1.0, sounds, ..Default::default() };
+        let mut cache = SampleCache::default();
+        let snap = cache.known_sample_state();
+        let preloaded = SampleCache::preload_group_samples(&group, None, &snap);
+        assert_eq!(preloaded.decoded.len(), 8);
+        cache.ingest_preloaded(preloaded);
+        for wav in &wavs {
+            assert!(cache.has_cached(wav), "{} should be preloaded into SampleCache", wav.display());
+        }
+        // Once cached, a second snapshot skips re-decoding every file.
+        let snap2 = cache.known_sample_state();
+        let preloaded2 = SampleCache::preload_group_samples(&group, None, &snap2);
+        assert!(preloaded2.decoded.is_empty());
     }
 }

@@ -82,6 +82,7 @@ impl Document {
                         velocity: 127,
                         probability: 100,
                         expr: None,
+                        ratchet: Default::default(),
                     };
                     match t.beats.filter(|b| t.bpm.is_some() && *b > 0.0).map(|b| (b * PPQ as f64).round() as i64).filter(|l| *l > 0) {
                         Some(len) => {

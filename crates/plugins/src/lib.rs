@@ -1332,6 +1332,31 @@ impl Host {
         Ok(shared)
     }
 
+    /// Build and warm up a Deckard-native plug-in off the main thread (`None` for VST3/AU).
+    pub fn prepare_native(plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64) -> Option<Result<Shared, String>> {
+        let id = PluginId::parse(plugin_id, name)?;
+        let class = native::find(&id.cid)?;
+        let mut p = Plugin::native(class, id, name, sample_rate);
+        if let Err(e) = p.load_chunk(chunk) {
+            return Some(Err(format!("{name}: {e}")));
+        }
+        p.warm_up();
+        Some(Ok(Arc::new(Mutex::new(p))))
+    }
+
+    /// Install a pre-built native instance into `slot`, keeping an unchanged existing one.
+    pub fn adopt_prepared(&mut self, slot: Slot, plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64, prepared: Shared) {
+        if let Some(id) = PluginId::parse(plugin_id, name)
+            && let Some(shared) = self.instances.get(&slot)
+        {
+            let p = shared.lock().unwrap();
+            if module::same_class(&p.id.cid, &id.cid) && p.sample_rate() == sample_rate && p.chunk() == chunk {
+                return;
+            }
+        }
+        self.instances.insert(slot, prepared);
+    }
+
     /// The instance already playing `slot` as plug-in `plugin_id`, if one is loaded
     /// (nothing is loaded here).
     pub fn loaded(&self, slot: Slot, plugin_id: &str, name: &str) -> Option<Shared> {

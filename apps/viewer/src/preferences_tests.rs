@@ -39,3 +39,18 @@ fn another_controller_has_neither() {
     assert!(h.query_by_label("LED brightness").is_none());
     assert!(h.query_by_label("Display brightness").is_none());
 }
+
+/// The pads' velocity curve is picked here too, as on the MK3's Settings page: Linear to
+/// begin with, and choosing another sets it.
+#[test]
+fn velocity_scaling_is_picked_from_a_list() {
+    let mut h = hardware("M3");
+    assert!(h.query_by_label("Velocity scaling").is_some());
+    // The list shows what's chosen as its value; its entries are labels.
+    h.get_by_value("Linear").click();
+    h.run_steps(3);
+    h.get_by_label("Hard 2").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings.velocity_scaling, 2);
+    assert!(h.query_by_value("Hard 2").is_some(), "shown as chosen");
+}
