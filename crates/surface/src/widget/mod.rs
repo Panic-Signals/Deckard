@@ -366,14 +366,16 @@ pub fn ms_text(ms: f32) -> String {
 /// lights nothing). Returns the spans drawn: `{ first = 1..8, cells = n, kind = "filter" }`.
 ///
 /// `plugin` names the focused slot's plug-in: its mapping's pictures (`mapping`, from
-/// the controller scripts' `mappings/`) come first, and the generic patterns fill the
-/// knobs they leave.
+/// the controller scripts' `mappings/`) come first, the generic patterns fill the knobs
+/// they leave, and every knob still bare gets a `dial` of its own (on the right screen
+/// only if `right_dials`: not over a picture the page draws there itself).
 pub fn draw_pictures(
     lua: &Lua,
     pic: &mut Picture,
     knobs: &Table,
     touched: &[usize],
     plugin: Option<&str>,
+    right_dials: bool,
     look: &Look,
 ) -> mlua::Result<Table> {
     let page: [Option<layout::Knob>; 8] = std::array::from_fn(|i| {
@@ -410,8 +412,23 @@ pub fn draw_pictures(
     }
     for s in layout::layout(&page) {
         if !(s.first..s.first + s.cells).any(|k| taken[k]) && !s.knobs.iter().any(|(k, _)| taken[*k]) {
+            for k in s.first..s.first + s.cells {
+                taken[k] = true;
+            }
             spans.push(s);
         }
+    }
+    // A dial over each knob still bare.
+    for (k, knob) in page.iter().enumerate() {
+        let Some(knob) = knob else { continue };
+        if taken[k] || (k >= 4 && !right_dials) {
+            continue;
+        }
+        let mut inputs = vec![("value".to_string(), layout::Input::Num(knob.value))];
+        if let Some(m) = knob.mod_value {
+            inputs.push(("value_mod".to_string(), layout::Input::Num(m)));
+        }
+        spans.push(layout::Span { first: k, cells: 1, kind: "dial".into(), inputs, knobs: vec![(k, "value".into())] });
     }
     spans.sort_by_key(|s| s.first);
     let out = lua.create_table()?;

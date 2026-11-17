@@ -484,12 +484,12 @@ function control.draw(screen, theme, opts)
     end
     screen:rect(480, 35, 480, 25, "bar")
     -- Pictures over the knobs they draw (a filter over Cutoff and Reso, an envelope
-    -- over its times...), in the band on either screen; the right screen's own picture
-    -- only where the band there is free. The chain shrinks to a strip only while the
-    -- left screen has pictures.
-    local left_free, right_free = true, true
-    for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name)) do
-      if span.first > 4 then right_free = false else left_free = false end
+    -- over its times...) and a dial over every other knob, in the band on both screens;
+    -- not over the right screen's own picture of a built-in effect.
+    local own = slot and (c.tuner or c.eq or c.filter or c.picture)
+    local right_free = true
+    for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false)) do
+      if span.first > 4 then right_free = false end
     end
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
@@ -505,7 +505,8 @@ function control.draw(screen, theme, opts)
       elseif c.picture then eq_curve(screen, theme, c.picture)
       else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
     end
-    chain.draw(screen, theme, c, not left_free)
+    -- (The band below always has pictures: the chain is the short strip.)
+    chain.draw(screen, theme, c, true)
   else
     widgets.buttons(screen, theme, {
       [5] = { arrows = true, text = PAGE_GROUPS[c.page_group] or "", left = can_step(c, false), right = can_step(c, true) },
