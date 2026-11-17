@@ -22,6 +22,7 @@ local widgets = require("lib.widgets")
 local chain = require("lib.chain")
 local knob_lib = require("lib.knobs")
 local zhora = require("lib.zhora")
+local touch = require("lib.touch")
 
 local control = {}
 
@@ -83,11 +84,15 @@ end
 function control.button(name, down)
   local cap = tonumber(name:match("^CAP_(%d)$"))
   if cap then
-    if not down then knob_lib.erased[cap] = nil end
+    if not down then
+      knob_lib.erased[cap] = nil
+      touch.up(cap, deckard.now())
+    end
     if deckard.held("ERASE") then
       if down then knob_lib.erase(cap) end
       return true
     end
+    if down then touch.down(cap, deckard.now()) end
   end
   if not down then return end
   local s = deckard.state()
@@ -124,6 +129,7 @@ function control.knob(n, amount)
     knob_lib.erase(n)
     return true
   end
+  touch.turned(n, deckard.now())
   deckard.turn_knob(n, amount, deckard.held("SHIFT"))
   return true
 end
@@ -422,13 +428,9 @@ local function random_view(screen, theme, r)
   screen:label(bx, by - 16, bw, 14, "VELOCITY · " .. (names[(r.distribution or 1) + 1] or ""), { size = 9, color = gc.weak }, "left", "center")
 end
 
--- The knobs a finger rests on (CAP_1..8), for touch focus.
+-- The knobs in touch focus (CAP_1..8 rested on, just lifted from, or just turned).
 local function touched()
-  local out = {}
-  for n = 1, 8 do
-    if deckard.held("CAP_" .. n) then out[#out + 1] = n end
-  end
-  return out
+  return touch.focused(deckard.now())
 end
 
 -- Touch focus: a knob touched (one or two; three or more is a resting hand) has its

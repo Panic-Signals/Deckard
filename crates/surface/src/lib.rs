@@ -1131,6 +1131,9 @@ pub(crate) struct Shared {
     pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
+    /// Until when (seconds on the `now` clock) the page asked for the screens to keep
+    /// being redrawn (`deckard.redraw_until`), for a timer that ends with no event.
+    pub redraw_until: f64,
     /// Buttons held (the scripts' names: `SHIFT`, `PLAY`…), and pads held (0..16).
     pub held: HashSet<String>,
     pub pads: [bool; 16],
@@ -1361,7 +1364,12 @@ impl Surface {
     /// Whether the theme moves by itself (a `chase` border): the screens want drawing
     /// often, even with nothing happening.
     pub fn animates(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates))
+        self.run.as_ref().is_some_and(|r| {
+            r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates) || {
+                let sh = r.shared.borrow();
+                sh.redraw_until > sh.now
+            }
+        })
     }
 
     /// The pages' timer: `tick()` for the page shown, then `global.lua` (as for events),
@@ -1865,6 +1873,7 @@ fn start(
         view: Rc::default(),
         view_id: 1,
         now: 0.0,
+        redraw_until: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
         actions: Vec::new(),
