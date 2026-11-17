@@ -547,7 +547,7 @@ function control.draw(screen, theme, opts)
     -- over its times...), in the band on either screen; the right screen's own picture
     -- only where the band there is free.
     local right_free = true
-    for _, span in ipairs(screen:pictures(c.knobs, touched())) do
+    for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name)) do
       if span.first > 4 then right_free = false end
     end
     if slot then

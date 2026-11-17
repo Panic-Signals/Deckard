@@ -127,6 +127,35 @@ impl Sources {
         out
     }
 
+    /// The plug-in mappings (`mappings/<vendor>/<plugin>.lua`, two folders deep at
+    /// most): their paths, and whether each is the user's (which replaces DECKARD's of
+    /// the same path).
+    pub fn mapping_files(&self) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> =
+            SHIPPED.iter().filter(|(p, _)| p.starts_with("mappings/")).map(|(p, _)| (p.to_string(), false)).collect();
+        if let Some(user) = &self.user {
+            let root = user.join("mappings");
+            let mut dirs = vec![(root.clone(), 0)];
+            while let Some((dir, depth)) = dirs.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                for e in entries.flatten() {
+                    let path = e.path();
+                    if path.is_dir() && depth < 2 {
+                        dirs.push((path, depth + 1));
+                    } else if path.extension().is_some_and(|x| x == "lua")
+                        && let Ok(rel) = path.strip_prefix(user)
+                    {
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        out.retain(|(p, _)| *p != rel);
+                        out.push((rel, true));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Whether the user's files changed since the last call (or since they were found).
     pub fn changed(&mut self) -> bool {
         let now = self.user_files();

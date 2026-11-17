@@ -47,16 +47,16 @@ pub enum Input {
 pub struct Span {
     pub first: usize,
     pub cells: usize,
-    pub kind: &'static str,
-    pub inputs: Vec<(&'static str, Input)>,
+    pub kind: String,
+    pub inputs: Vec<(String, Input)>,
     /// Each bound knob and the input it moves (for touch focus).
-    pub knobs: Vec<(usize, &'static str)>,
+    pub knobs: Vec<(usize, String)>,
 }
 
 impl Span {
     /// The input lit by touching knob `k`, if this picture draws it.
-    pub fn focus_of(&self, k: usize) -> Option<&'static str> {
-        self.knobs.iter().find(|(i, _)| *i == k).map(|(_, n)| *n)
+    pub fn focus_of(&self, k: usize) -> Option<&str> {
+        self.knobs.iter().find(|(i, _)| *i == k).map(|(_, n)| n.as_str())
     }
 }
 
@@ -391,7 +391,13 @@ pub fn layout(knobs: &[Option<Knob>; 8]) -> Vec<Span> {
         for (k, _) in &f.knobs {
             used[*k] = true;
         }
-        out.push(Span { first, cells, kind: f.kind, inputs: f.inputs, knobs: f.knobs });
+        out.push(Span {
+            first,
+            cells,
+            kind: f.kind.to_string(),
+            inputs: f.inputs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            knobs: f.knobs.into_iter().map(|(k, n)| (k, n.to_string())).collect(),
+        });
     }
     out.sort_by_key(|s| s.first);
     out
@@ -431,7 +437,7 @@ mod tests {
     fn a_cutoff_beside_a_resonance_gets_a_filter() {
         let spans = layout(&page(&[("Cutoff", "1.20 kHz"), ("Reso", "42 %"), ("Drive", "3.0 dB"), ("Mode", "LP24")]));
         assert_eq!(spans.len(), 1);
-        assert_eq!((spans[0].kind, spans[0].first, spans[0].cells), ("filter", 0, 3));
+        assert_eq!((spans[0].kind.as_str(), spans[0].first, spans[0].cells), ("filter", 0, 3));
         assert_eq!(spans[0].focus_of(1), Some("resonance"));
         assert_eq!(spans[0].focus_of(3), None);
     }
@@ -439,7 +445,7 @@ mod tests {
     #[test]
     fn a_page_mixing_filter_and_envelope_gets_both() {
         let spans = layout(&page(&[("Cutoff", "1.20 kHz"), ("Resonance", "42 %"), ("Attack", "4 ms"), ("Release", "380 ms")]));
-        let kinds: Vec<_> = spans.iter().map(|s| (s.kind, s.first, s.cells)).collect();
+        let kinds: Vec<_> = spans.iter().map(|s| (s.kind.as_str(), s.first, s.cells)).collect();
         assert_eq!(kinds, [("filter", 0, 2), ("envelope", 2, 2)]);
     }
 
@@ -460,7 +466,7 @@ mod tests {
     #[test]
     fn adsr_wins_over_ad_and_sections_keep_envelopes_apart() {
         let spans = layout(&page(&[("Attack", "4 ms"), ("Decay", "200 ms"), ("Sustain", "60 %"), ("Release", "1.2 s")]));
-        assert_eq!((spans[0].kind, spans[0].cells), ("envelope", 4));
+        assert_eq!((spans[0].kind.as_str(), spans[0].cells), ("envelope", 4));
         let mut p = page(&[("Attack", "4 ms"), ("Decay", "200 ms")]);
         p[1].as_mut().unwrap().section = "Amp Env".into();
         assert!(layout(&p).is_empty());
@@ -528,7 +534,7 @@ mod tests {
             ("Knee", "6 dB"),
             ("Makeup", "2.0 dB"),
         ]));
-        let kinds: Vec<_> = spans.iter().map(|s| (s.kind, s.first, s.cells)).collect();
+        let kinds: Vec<_> = spans.iter().map(|s| (s.kind.as_str(), s.first, s.cells)).collect();
         assert_eq!(kinds, [("band", 0, 3), ("transfer", 4, 4)]);
     }
 }

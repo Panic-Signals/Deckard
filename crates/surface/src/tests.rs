@@ -4229,3 +4229,52 @@ fn render_control_pictures() {
     }
     assert_eq!(s.error(), None);
 }
+
+/// A plug-in mapping in the user's folder gives the plug-in knob pages (for the app)
+/// and draws its pictures over the knobs it finds by parameter id; a broken one is
+/// reported and left out.
+#[test]
+fn a_users_mapping_gives_pages_and_pictures() {
+    let dir = tempfile::tempdir().unwrap();
+    let maps = dir.path().join("mappings").join("acme");
+    std::fs::create_dir_all(&maps).unwrap();
+    std::fs::write(
+        maps.join("ladder.lua"),
+        r#"return {
+          api = 1,
+          match = { name = "Ladder" },
+          params = {
+            cut = { id = 7, taper = { "log", 20, 20000 } },
+            res = { id = 8, taper = { "lin", 0, 1 } },
+          },
+          pictures = { response = { widget = "filter", needs = { "cut" }, model = { cutoff = "cut", resonance = "res" } } },
+          pages = { { name = "MAIN", knobs = { "cut", "res" } } },
+        }"#,
+    )
+    .unwrap();
+    let s = Surface::with_user_dir(Some(dir.path().to_path_buf()));
+    assert_eq!(s.error(), None);
+    let pages = s.mapping_pages("Ladder").expect("the mapping's pages");
+    assert_eq!(pages[0].name, "MAIN");
+    assert_eq!(pages[0].knobs[0].as_ref().and_then(|r| r.id), Some(7));
+    assert!(s.mapping_pages("Other").is_none());
+    // Knobs that say nothing in Hz: the mapping's taper gives the picture its units.
+    let mut v = view();
+    v.control.chain[0].name = "Ladder".into();
+    for (k, id, name) in [(0, 7, "Freq Dial"), (1, 8, "Peak Dial")] {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text, knob.param_id) = (name.into(), "5.1".into(), Some(id));
+    }
+    let px = s.picture(&v);
+    let lit = (100..204).flat_map(|y| (0..240).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    assert!(lit > 200, "the mapping's filter over knobs 1-2: {lit}");
+    // A broken mapping: the error names it, the scripts still run.
+    std::fs::write(
+        maps.join("broken.lua"),
+        "return { api = 1, match = { name = 'B' }, pictures = { p = { widget = 'filter', needs = { 'nope' } } } }",
+    )
+    .unwrap();
+    let s = Surface::with_user_dir(Some(dir.path().to_path_buf()));
+    assert!(s.error().is_some_and(|e| e.contains("broken.lua") && e.contains("nope")), "{:?}", s.error());
+    assert!(s.mapping_pages("Ladder").is_some());
+}
