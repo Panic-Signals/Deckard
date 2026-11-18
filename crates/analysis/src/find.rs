@@ -28,9 +28,26 @@ const SNAP: f64 = 0.04;
 /// Up to `count` starts (frames, in order) in `range` of `frames`, among `lines` (bar or
 /// beat lines in frames; none: among its hits).
 pub fn find_samples(frames: &[[f32; 2]], rate: u32, range: (usize, usize), lines: &[usize], count: usize) -> Vec<usize> {
+    find_samples_keeping(frames, rate, range, lines, count, &[])
+}
+
+/// [`find_samples`] with some starts decided already: the `kept` ones in `range` as they
+/// are, and as many found beside them as make `count` in all, apart from them and unlike
+/// them.
+pub fn find_samples_keeping(
+    frames: &[[f32; 2]],
+    rate: u32,
+    range: (usize, usize),
+    lines: &[usize],
+    count: usize,
+    kept: &[usize],
+) -> Vec<usize> {
     let (a, b) = (range.0.min(frames.len()), range.1.min(frames.len()));
-    if rate == 0 || count == 0 || b < a + 4 * WINDOW {
-        return Vec::new();
+    let mut kept: Vec<usize> = kept.iter().copied().filter(|&f| f >= a && f < b).collect();
+    kept.sort_unstable();
+    kept.dedup();
+    if rate == 0 || count <= kept.len() || b < a + 4 * WINDOW {
+        return kept;
     }
     let x = mono(&frames[a..b]);
     let hann: Vec<f32> = (0..WINDOW).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / WINDOW as f32).cos()).collect();
@@ -81,10 +98,13 @@ pub fn find_samples(frames: &[[f32; 2]], rate: u32, range: (usize, usize), lines
             }
         }
     }
+    // (The kept ones are candidates too: what's found is weighed against them.)
+    let held: Vec<usize> = kept.iter().map(|&f| window_of(f)).collect();
+    cands.extend(&held);
     cands.sort_unstable();
     cands.dedup();
     if cands.is_empty() {
-        return Vec::new();
+        return kept;
     }
     // Each candidate's passage: the band levels after it and before it.
     let per = |seconds: f64| (seconds * f64::from(rate) / HOP as f64) as usize;
@@ -122,9 +142,9 @@ pub fn find_samples(frames: &[[f32; 2]], rate: u32, range: (usize, usize), lines
         of.push(Cand { at: k, level: level(&after), change: apart(&after, &before), attack: (attack / strong).min(2.0) / 2.0, after });
     }
     let top = of.iter().map(|c| c.level).fold(f32::MIN, f32::max);
-    of.retain(|c| c.level > top - FLOOR);
+    of.retain(|c| c.level > top - FLOOR || held.contains(&c.at));
     if of.is_empty() {
-        return Vec::new();
+        return kept;
     }
     // How open: the middle of the levels heard is best, the ends (thin, or everything) least.
     let mut levels: Vec<f32> = of.iter().map(|c| c.level).collect();
@@ -136,9 +156,12 @@ pub fn find_samples(frames: &[[f32; 2]], rate: u32, range: (usize, usize), lines
     // The best first, each later one worth less the more it sounds like one taken, and
     // none within a passage's length of one taken (while others are left).
     let gap = per(SPAN.0).max(1);
-    let mut taken: Vec<usize> = Vec::new();
+    let mut taken: Vec<usize> = (0..of.len()).filter(|&i| held.contains(&of[i].at)).collect();
+    let had = taken.len();
+    // (Kept ones sharing a window are one candidate, and each still a start.)
+    let want = (count - kept.len() + had).min(of.len());
     for spaced in [true, false] {
-        while taken.len() < count.min(of.len()) {
+        while taken.len() < want {
             let best = (0..of.len())
                 .filter(|i| !taken.contains(i))
                 .filter(|&i| !spaced || taken.iter().all(|&t| of[i].at.abs_diff(of[t].at) >= gap))
@@ -155,7 +178,7 @@ pub fn find_samples(frames: &[[f32; 2]], rate: u32, range: (usize, usize), lines
     }
     // Each on the hit nearest it, if one is near, and then on where that hit begins.
     let near = per(SNAP).max(1);
-    let mut starts: Vec<usize> = taken
+    let mut starts: Vec<usize> = taken[had..]
         .iter()
         .map(|&i| {
             let k = of[i].at;
@@ -166,6 +189,7 @@ pub fn find_samples(frames: &[[f32; 2]], rate: u32, range: (usize, usize), lines
             }
         })
         .collect();
+    starts.extend(&kept);
     starts.sort_unstable();
     starts.dedup();
     starts
@@ -258,5 +282,30 @@ mod tests {
         assert!(find_samples(&vec![[0.0; 2]; 10 * SR as usize], SR, (0, 10 * SR as usize), &[], 8).is_empty());
         assert!(find_samples(&f, SR, (0, 100), &[], 8).is_empty());
         assert!(find_samples(&f, 0, (0, f.len()), &[], 8).is_empty());
+    }
+
+    #[test]
+    fn kept_starts_stay_and_the_rest_are_found() {
+        use super::find_samples_keeping;
+        let (f, bar) = song();
+        let lines: Vec<usize> = (0..24).map(|k| k * bar).collect();
+        let kept = [3 * bar + 100];
+        let found = find_samples_keeping(&f, SR, (0, f.len()), &lines, 4, &kept);
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(found.contains(&kept[0]), "kept where it was: {found:?}");
+        assert!(found.iter().all(|&s| s == kept[0] || s.abs_diff(kept[0]) > SR as usize), "the rest apart from it: {found:?}");
+        assert!(found.windows(2).all(|w| w[0] < w[1]), "in order");
+        // One kept on a line: there once.
+        let found = find_samples_keeping(&f, SR, (0, f.len()), &lines, 4, &[8 * bar]);
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert_eq!(found.iter().filter(|&&s| s.abs_diff(8 * bar) < SR as usize).count(), 1, "{found:?}");
+        // Outside the range: not kept. More kept than asked for: those.
+        let found = find_samples_keeping(&f, SR, (4 * bar, 12 * bar), &lines, 3, &[bar + 7, 5 * bar + 7]);
+        assert!(found.contains(&(5 * bar + 7)) && !found.contains(&(bar + 7)), "{found:?}");
+        assert_eq!(found.len(), 3);
+        let many: Vec<usize> = (1..6).map(|k| k * bar + 50).collect();
+        assert_eq!(find_samples_keeping(&f, SR, (0, f.len()), &lines, 4, &many), many);
+        // Nothing to find: the kept ones still.
+        assert_eq!(find_samples_keeping(&f, SR, (0, 100), &[], 8, &[40]), [40]);
     }
 }

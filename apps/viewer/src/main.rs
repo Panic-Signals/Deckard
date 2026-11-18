@@ -62,6 +62,7 @@ mod analysis;
 #[cfg(test)]
 mod auto_length_tests;
 mod beat;
+mod chop;
 #[cfg(test)]
 mod expr_lane_tests;
 #[cfg(test)]
