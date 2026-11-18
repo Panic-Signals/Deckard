@@ -56,6 +56,9 @@ pub fn random_picks(cands: &[usize], kept: &[usize], count: usize, seed: u64, ne
 /// Where frames `a..b` of a sample at `rate`, heard from `start` on, are at `now`: None
 /// once they have played.
 pub fn heard(start: Instant, now: Instant, (a, b): (usize, usize), rate: u32) -> Option<usize> {
+    if rate == 0 {
+        return None;
+    }
     let at = a + (now.saturating_duration_since(start).as_secs_f64() * f64::from(rate)) as usize;
     (at < b).then_some(at)
 }
@@ -120,5 +123,6 @@ mod tests {
         assert_eq!(heard(t, t + Duration::from_millis(500), (100, 48_100), 48_000), Some(24_100));
         assert_eq!(heard(t, t + Duration::from_secs(1), (100, 48_100), 48_000), None);
         assert_eq!(heard(t + Duration::from_secs(1), t, (100, 48_100), 48_000), Some(100));
+        assert_eq!(heard(t, t, (100, 48_100), 0), None, "no sample");
     }
 }

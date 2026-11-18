@@ -69,18 +69,34 @@ fn a_caught_slice_lands_on_the_samples_eighths() {
 #[test]
 fn split_starts_at_the_playhead() {
     let (mut app, _tmp) = app();
+    // A slice's pad sounding (or the song playing the sound): from the start as ever.
     app.sampling.playhead = Some(11_025);
     app.sampling_act(S::SliceMode(0));
     app.sampling_act(S::SplitCount(0));
-    assert_eq!(app.sampling.slices.len(), 4);
-    assert_eq!(app.sampling.slices[0], 11_025);
-    // Stopped: all of it again; a part selected: from there.
-    app.sampling.playhead = None;
+    assert_eq!((app.sampling.slices.len(), app.sampling.slices[0]), (4, 0));
+    // PLAY plays it: from where it is.
+    app.audition = Some((app.group, app.sound, 60));
+    app.sampling_act(S::SplitCount(0));
+    assert_eq!((app.sampling.slices.len(), app.sampling.slices[0]), (4, 11_025));
+    app.sampling_act(S::SliceMode(1));
+    assert_eq!(app.sampling.slices[0], 11_025, "Grid too");
+    app.sampling_act(S::SliceMode(0));
+    // Stopped: all of it again.
+    (app.audition, app.sampling.playhead) = (None, None);
     app.sampling_act(S::SplitCount(0));
     assert_eq!(app.sampling.slices[0], 0);
+    // The selection a sample comes up with isn't a place to start; one made on EDIT is.
     app.sampling.selection = Some((22_050, 30_000));
     app.sampling_act(S::SplitCount(0));
+    assert_eq!(app.sampling.slices[0], 0);
+    app.sampling_act(S::Tab(1));
+    app.sampling_act(S::Select(Some((22_050, 30_000))));
+    app.sampling_act(S::Tab(2));
+    app.sampling_act(S::SplitCount(0));
     assert_eq!(app.sampling.slices[0], 22_050);
+    app.sampling_act(S::Select(None));
+    app.sampling_act(S::SplitCount(0));
+    assert_eq!(app.sampling.slices[0], 0);
 }
 
 #[test]
@@ -94,6 +110,15 @@ fn random_rerolls_and_keeps() {
     // A slice kept stays through re-rolls and another count; the rest change.
     app.sampling_act(S::KeepSlice(3));
     let kept = first[3];
+    assert_eq!(app.sampling.kept, [kept]);
+    // Dragged, the mark goes with it.
+    app.sampling_act(S::MoveSlice(3, kept + 10));
+    assert_eq!(app.sampling.kept, [kept + 10]);
+    app.sampling_act(S::MoveSlice(3, kept));
+    assert_eq!(app.sampling.kept, [kept]);
+    // One kept where slicing no longer reaches is forgotten.
+    app.sampling.kept.push(100_000_000);
+    app.sampling_act(S::Reroll);
     assert_eq!(app.sampling.kept, [kept]);
     let mut seen = vec![first.clone()];
     for _ in 0..4 {
@@ -114,14 +139,13 @@ fn random_rerolls_and_keeps() {
     app.sampling_act(S::SliceMode(4));
     app.sampling_act(S::FindCount(0));
     assert!(app.sampling.slices.contains(&kept) && app.sampling.slices.len() == 4, "{:?}", app.sampling.slices);
-    // Dragged, the mark goes with it; again, it's let go; removed, the mark goes.
-    let i = app.sampling.slices.iter().position(|f| *f == kept).unwrap();
-    if i > 0 {
-        app.sampling_act(S::MoveSlice(i, kept + 10));
-        assert_eq!(app.sampling.kept, [kept + 10]);
-        app.sampling_act(S::RemoveSliceAt(kept + 20));
-        assert!(app.sampling.kept.is_empty());
-    }
+    // Removed, its mark goes.
+    app.sampling.kept.clear();
+    let second = app.sampling.slices[1];
+    app.sampling_act(S::KeepSlice(1));
+    assert_eq!(app.sampling.kept, [second]);
+    app.sampling_act(S::RemoveSliceAt(second + 5));
+    assert!(app.sampling.kept.is_empty() && !app.sampling.slices.contains(&second));
     app.sampling_act(S::KeepSlice(1));
     assert_eq!(app.sampling.kept.len(), 1);
     app.sampling_act(S::KeepSlice(1));
@@ -131,6 +155,12 @@ fn random_rerolls_and_keeps() {
     assert!(app.sampling.kept.is_empty(), "Split keeps none");
     app.sampling_act(S::KeepSlice(1));
     assert!(app.sampling.kept.is_empty(), "nor can one be kept there");
+    // APPLY: the kept marks are done with.
+    app.sampling_act(S::SliceMode(5));
+    app.sampling_act(S::KeepSlice(1));
+    assert_eq!(app.sampling.kept.len(), 1);
+    app.sampling_act(S::ApplySlices);
+    assert!(app.sampling.kept.is_empty());
 }
 
 #[test]
@@ -172,6 +202,10 @@ fn key_shift_puts_a_slice_on_the_next_empty_sound() {
     assert_eq!((zones[0].play_range, zones[0].key_range, zones[0].root_key), ((11_025, 22_049), (0, 127), 60));
     assert_eq!(zones[0].sample.path, before[app.sound].sampler.as_ref().unwrap().zones[0].sample.path);
     assert!(new.new_sampler.is_some(), "a New Sampler");
+    // A Sampler's zone has no tempo: said to play as a sampler does (left unsaid, the
+    // analysis of a New Sampler zone would put a loop in Sync).
+    let m = zones[0].meta.clone().expect("how it plays is set");
+    assert_eq!((m.mode, m.file.as_str()), (PlayMode::Repitch, zones[0].sample.path.as_str()));
     assert!(new.name.ends_with(" keys"), "{}", new.name);
     assert_eq!(focus, (app.group, app.sound, app.zone), "the focus stays");
     assert_eq!(app.sampling.slices, [0, 11_025, 22_050], "and the slices");

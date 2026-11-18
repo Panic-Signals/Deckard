@@ -7340,6 +7340,8 @@ impl App {
             Some((zi, sref)) => {
                 let key = (self.group, self.sound, zi, sref.path.clone());
                 if self.sampling.sample_key.as_ref() != Some(&key) {
+                    // (A slice's pad was playing the sample before: not this one.)
+                    self.prehear_from = None;
                     match self.samples.sample(&sref, path.as_deref()) {
                         Some(s) => {
                             let frames = s.frames.len();
@@ -7967,6 +7969,7 @@ impl App {
                         Some((_, starts, _)) => {
                             self.sampling.slices = starts;
                             self.sampling.slice_mode = 3;
+                            self.sampling.kept.clear();
                         }
                         None => self.compute_slices(),
                     }
@@ -7975,7 +7978,10 @@ impl App {
             S::Stereo => self.sampling.stereo = !self.sampling.stereo,
             S::Audition(pitch) => self.audition_toggle(pitch),
             S::View(v) => self.sampling.view = v,
-            S::Select(s) => self.sampling.selection = s,
+            S::Select(s) => {
+                self.sampling.selected = s.is_some() && self.sampling.tab == 1;
+                self.sampling.selection = s;
+            }
             S::Edit(EditOp::AutoLoop) => self.auto_loop(),
             S::Edit(EditOp::Stems) => match &self.stems {
                 Some(job) => job.cancel(),
@@ -8317,8 +8323,10 @@ impl App {
         self.sampling.kept.retain(|k| (r.0..r.1).contains(k));
         // Split and Grid go from the playhead on while the sample plays, or from where a
         // selection starts (a sliced sample's is its focused slice: not that).
-        let selection = self.sampling.selection.filter(|_| self.chops().is_none());
-        let from = chop::slicer_range(r, self.sampling.playhead, selection);
+        let selection = self.sampling.selection.filter(|_| self.sampling.selected && self.chops().is_none());
+        // (PLAY's playhead: not a slice pad's, nor the song's notes.)
+        let playhead = self.sampling.playhead.filter(|_| self.audition.is_some());
+        let from = chop::slicer_range(r, playhead, selection);
         let st = &self.sampling;
         let slices = match st.slice_mode {
             0 => edit::split_positions(from, SPLIT_COUNTS[st.split]),
@@ -8529,6 +8537,7 @@ impl App {
         }
         self.zone = 0;
         self.sampling.slices.clear();
+        self.sampling.kept.clear();
         self.sampling.tab = 3;
         if self.sampling.pattern_mode < 2 {
             // A note per slice, at the slice's time at the song tempo.
@@ -10114,6 +10123,7 @@ impl App {
     }
 
     pub(crate) fn prehear_item(&mut self, item: &deckard_library::Item) {
+        self.prehear_from = None;
         let Some(file) = browser::prehear_file(item) else {
             self.stop_prehear();
             return;

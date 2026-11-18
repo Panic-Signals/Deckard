@@ -85,6 +85,9 @@ pub struct SamplingState {
     /// What each zone showed when it was last looked at (by `sample_key`).
     pub views: std::collections::HashMap<(usize, usize, usize, String), (f64, f64)>,
     pub selection: Option<(usize, usize)>,
+    /// The selection was made by hand on EDIT (not the one a sample comes up with):
+    /// Split and Grid start from it.
+    pub selected: bool,
     pub clipboard: Option<Sample>,
     /// Slice starts (frames), sorted.
     pub slices: Vec<usize>,
@@ -136,6 +139,7 @@ impl Default for SamplingState {
             view: None,
             views: Default::default(),
             selection: None,
+            selected: false,
             clipboard: None,
             slices: Vec::new(),
             slice_mode: 0,
@@ -229,6 +233,7 @@ impl SamplingState {
             };
             self.view = self.views.get(&key).copied().or(self.view).and_then(fit);
             self.selection = None;
+            self.selected = false;
             if !same_file {
                 self.slices.clear();
                 self.kept.clear();
@@ -1087,7 +1092,7 @@ fn wave(
             painter.vline(x, w.y_range(), Stroke::new(1.0, white(164)));
             painter.text(Pos2::new(x + 3.0, w.top() + 2.0), Align2::LEFT_TOP, (i + 1).to_string(), font(9.0), white(142));
             // A kept slice (it stays through re-rolls): a block on its line.
-            if st.kept.contains(&s) {
+            if matches!(st.slice_mode, 4 | 5) && st.kept.contains(&s) {
                 painter.rect_filled(Rect::from_min_size(Pos2::new(x - 3.0, w.top() + 15.0), Vec2::splat(7.0)), 1.0, white(230));
             }
         }
@@ -1218,13 +1223,14 @@ fn wave(
         Grab::Loop(_) => Some(egui::CursorIcon::Grab),
         Grab::Select(_) => None,
     };
-    if resp.drag_started()
+    if resp.drag_started_by(egui::PointerButton::Primary)
         && let Some(pos) = ui.input(|i| i.pointer.press_origin())
     {
         ui.data_mut(|d| d.insert_temp(drag_id, Some(grab_at(pos))));
     }
     // The pointer shows what can be dragged (and keeps showing it while dragging).
-    let held = if resp.dragged() { ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)).flatten() } else { None };
+    let held =
+        if resp.dragged_by(egui::PointerButton::Primary) { ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)).flatten() } else { None };
     let shown = match (held, resp.hover_pos()) {
         (Some(Grab::Loop(_)), _) => Some(egui::CursorIcon::Grabbing),
         (Some(g), _) => cursor(g),
@@ -1234,7 +1240,7 @@ fn wave(
     if let Some(c) = shown {
         ui.ctx().set_cursor_icon(c);
     }
-    if resp.dragged()
+    if resp.dragged_by(egui::PointerButton::Primary)
         && let (Some(Some(grab)), Some(pos)) = (ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)), resp.interact_pointer_pos())
     {
         // A zone with a tempo: markers snap to its beats (the finest lines a few pixels

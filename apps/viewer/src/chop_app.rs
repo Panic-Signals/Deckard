@@ -83,7 +83,13 @@ impl App {
             self.status = "Key Shift needs an empty sound in the group".into();
             return;
         };
-        let meta = zone.meta.clone().map(|m| ZoneMeta { mode: if m.mode == PlayMode::Sync { PlayMode::Keys } else { m.mode }, ..m });
+        // Its tempo comes along, in Keys where it was in Sync. With none (a Sampler's zone,
+        // or one not yet analysed) it plays as a sampler does: said here, or the analysis of
+        // a New Sampler zone would put a loop in Sync.
+        let meta = match zone.meta.clone() {
+            Some(m) => ZoneMeta { mode: if m.mode == PlayMode::Sync { PlayMode::Keys } else { m.mode }, ..m },
+            None => ZoneMeta { file: zone.sample.path.clone(), mode: PlayMode::Repitch, ..ZoneMeta::default() },
+        };
         let settings = src.new_sampler.clone().unwrap_or_default();
         let spec = deckard_doc::ZoneSpec {
             from: deckard_doc::ZoneFrom::Zone(zi),
@@ -106,9 +112,7 @@ impl App {
             d.paste_sounds(g, target, &[clip])?;
             d.set_zones(g, target, &[spec], label)?;
             d.set_new_sampler(g, target, Some(&settings))?;
-            if let Some(m) = &meta {
-                d.set_zone_meta(g, target, 0, m, label)?;
-            }
+            d.set_zone_meta(g, target, 0, &meta, label)?;
             d.rename(deckard_doc::Target::Sound(g, target), &name)
         });
         self.status = match done {
