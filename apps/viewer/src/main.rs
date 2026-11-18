@@ -63,6 +63,9 @@ mod analysis;
 mod auto_length_tests;
 mod beat;
 mod chop;
+mod chop_app;
+#[cfg(test)]
+mod chop_tests;
 #[cfg(test)]
 mod expr_lane_tests;
 #[cfg(test)]
@@ -966,6 +969,9 @@ pub struct App {
     held: Option<(usize, usize, i64)>,
     /// The note the Sampling page's PLAY holds (group, sound, pitch), until its STOP.
     audition: Option<(usize, usize, i64)>,
+    /// The slice a pad plays (the prehear, which tells no position): when it started
+    /// and its frames.
+    prehear_from: Option<(std::time::Instant, usize, usize)>,
     /// Scripted pointer input (`--input`): (seconds after start, (m/d/u = move, down,
     /// up, position)).
     input_script: Vec<(f32, (char, egui::Pos2))>,
@@ -7361,6 +7367,16 @@ impl App {
                     Some(Ok(out)) => out.zone_position(self.group, self.sound, zi),
                     _ => None,
                 };
+                // A slice's pad plays it: where that is by now.
+                if self.sampling.playhead.is_none()
+                    && let Some((start, a, b)) = self.prehear_from
+                {
+                    let rate = self.sampling.sample.as_ref().map_or(0, |s| s.rate);
+                    self.sampling.playhead = chop::heard(start, std::time::Instant::now(), (a, b), rate);
+                    if self.sampling.playhead.is_none() {
+                        self.prehear_from = None;
+                    }
+                }
                 // Its stem lanes' waveforms.
                 let files: [Option<String>; deckard_model::new_sampler::LANES] = {
                     let d = doc.borrow();
@@ -8056,6 +8072,17 @@ impl App {
                 self.sampling.find = i.min(layout::sampling::FIND_COUNTS.len() - 1);
                 self.compute_slices();
             }
+            S::RandomCount(i) => {
+                self.sampling.random = i.min(layout::sampling::FIND_COUNTS.len() - 1);
+                self.compute_slices();
+            }
+            S::Reroll => {
+                self.sampling.seed = self.sampling.seed.wrapping_add(1);
+                self.compute_slices();
+            }
+            S::KeepSlice(i) => self.keep_slice(i),
+            S::Catch(free) => self.catch_slice(free),
+            S::KeyShift(i) => self.key_shift(i),
             S::GridDiv(i) => {
                 self.sampling.grid = i;
                 self.compute_slices();
@@ -8078,7 +8105,8 @@ impl App {
             S::RemoveSliceAt(f) => {
                 // The slice containing `f` joins the previous one.
                 if let Some(i) = self.sampling.slices.iter().rposition(|&s| s <= f).filter(|&i| i > 0) {
-                    self.sampling.slices.remove(i);
+                    let gone = self.sampling.slices.remove(i);
+                    self.sampling.kept.retain(|k| *k != gone);
                 }
             }
             S::MoveSlice(i, f) => {
@@ -8086,10 +8114,18 @@ impl App {
                 if i > 0 && i < s.len() {
                     let lo = s[i - 1] + 1;
                     let hi = s.get(i + 1).map_or(usize::MAX, |n| n - 1);
-                    s[i] = f.clamp(lo, hi);
+                    let was = std::mem::replace(&mut s[i], f.clamp(lo, hi));
+                    // (Kept, it stays kept where it goes.)
+                    let now = s[i];
+                    if let Some(k) = self.sampling.kept.iter_mut().find(|k| **k == was) {
+                        *k = now;
+                    }
                 }
             }
-            S::ClearSlices => self.sampling.slices.clear(),
+            S::ClearSlices => {
+                self.sampling.slices.clear();
+                self.sampling.kept.clear();
+            }
             S::PatternMode(m) => self.sampling.pattern_mode = m,
             S::SliceToEnd(on) => self.sampling.slice_to_end = Some(on),
             S::ApplySlices => self.apply_slices(),
@@ -8271,12 +8307,21 @@ impl App {
     /// Slice positions for the current mode (Manual keeps the ones set by hand).
     fn compute_slices(&mut self) {
         use deckard_engine::edit;
-        use layout::sampling::{GRID_DIVS, SPLIT_COUNTS};
+        use layout::sampling::{FIND_COUNTS, GRID_DIVS, SPLIT_COUNTS};
         let Some(s) = self.sampling.sample.clone() else { return };
         let r = self.slice_range().unwrap_or((0, s.frames.len()));
-        let st = &mut self.sampling;
-        st.slices = match st.slice_mode {
-            0 => edit::split_positions(r, SPLIT_COUNTS[st.split]),
+        // Kept slices are Find's and Random's, and only where slicing still reaches.
+        if !matches!(self.sampling.slice_mode, 4 | 5) {
+            self.sampling.kept.clear();
+        }
+        self.sampling.kept.retain(|k| (r.0..r.1).contains(k));
+        // Split and Grid go from the playhead on while the sample plays, or from where a
+        // selection starts (a sliced sample's is its focused slice: not that).
+        let selection = self.sampling.selection.filter(|_| self.chops().is_none());
+        let from = chop::slicer_range(r, self.sampling.playhead, selection);
+        let st = &self.sampling;
+        let slices = match st.slice_mode {
+            0 => edit::split_positions(from, SPLIT_COUNTS[st.split]),
             1 => {
                 // A New Sampler zone with a tempo: on its own beats. Else at the song's.
                 let map = self.doc.as_ref().and_then(|d| {
@@ -8287,10 +8332,10 @@ impl App {
                     deckard_model::new_sampler::BeatMap::of(m, s.rate)
                 });
                 match map {
-                    Some(map) => beat::grid_slices(&map, r, GRID_DIVS[st.grid].0),
+                    Some(map) => beat::grid_slices(&map, from, GRID_DIVS[st.grid].0),
                     None => {
                         let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
-                        edit::grid_positions(s.rate, r, tempo, GRID_DIVS[st.grid].0)
+                        edit::grid_positions(s.rate, from, tempo, GRID_DIVS[st.grid].0)
                     }
                 }
             }
@@ -8298,22 +8343,22 @@ impl App {
             4 => {
                 // Where things start: on the sample's own bars (or beats, of a short one)
                 // when the zone has a tempo, else on its hits.
-                let count = layout::sampling::FIND_COUNTS[st.find.min(3)];
-                let map = self.doc.as_ref().and_then(|d| {
-                    let d = d.borrow();
-                    let m =
-                        d.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone)?.meta.clone()?;
-                    deckard_model::new_sampler::BeatMap::of(&m, s.rate)
-                });
-                let lines = map.map_or(Vec::new(), |map| {
-                    let by = |div| beat::grid_slices(&map, r, div);
-                    [1, 2, 4].into_iter().map(by).find(|l| l.len() >= 2 * count).unwrap_or_else(|| by(8))
-                });
-                let mut found = deckard_analysis::find_samples(&s.frames, s.rate, r, &lines, count);
+                let count = FIND_COUNTS[st.find.min(3)];
+                let lines = self.find_lines(s.rate, r, count);
+                let mut found = deckard_analysis::find_samples_keeping(&s.frames, s.rate, r, &lines, count, &st.kept);
                 if found.is_empty() {
                     found.push(r.0);
                 }
                 found
+            }
+            5 => {
+                // Any of the places Find weighs, the kept ones staying.
+                let count = FIND_COUNTS[st.random.min(3)];
+                let mut picked = chop::random_picks(&self.slice_candidates(&s, r, count), &st.kept, count, st.seed, s.rate as usize / 25);
+                if picked.is_empty() {
+                    picked.push(r.0);
+                }
+                picked
             }
             _ => {
                 if st.slices.is_empty() {
@@ -8323,6 +8368,7 @@ impl App {
                 }
             }
         };
+        self.sampling.slices = slices;
     }
 
     /// The focused sound's zones of the focused zone's file, when there's more than one
@@ -8888,6 +8934,7 @@ impl App {
             Some(Apply::SliceMode) => SamplingAct::SliceMode(sampling_hw::app_slice_mode(value)),
             Some(Apply::SplitCount) => SamplingAct::SplitCount(at),
             Some(Apply::FindCount) => SamplingAct::FindCount(at),
+            Some(Apply::RandomCount) => SamplingAct::RandomCount(at),
             Some(Apply::GridDiv) => SamplingAct::GridDiv(at),
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
@@ -8987,6 +9034,7 @@ impl App {
                 if end > a + 1 {
                     s.insert(i + 1, (a + end) / 2);
                     self.sampling.slice_mode = 3;
+                    self.sampling.kept.clear();
                 }
                 return;
             }
@@ -8994,6 +9042,7 @@ impl App {
                 if i > 0 && i < self.sampling.slices.len() {
                     self.sampling.slices.remove(i);
                     self.sampling.slice_mode = 3;
+                    self.sampling.kept.clear();
                 }
                 return;
             }
@@ -9059,6 +9108,7 @@ impl App {
                     });
                     if let Some(Ok(out)) = &self.output {
                         out.prehear(Some(std::sync::Arc::new(part)), gain as f32);
+                        self.prehear_from = Some((std::time::Instant::now(), a, b.min(self.sampling.len())));
                     }
                 }
                 return;

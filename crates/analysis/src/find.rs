@@ -160,6 +160,10 @@ pub fn find_samples_keeping(
     let had = taken.len();
     // (Kept ones sharing a window are one candidate, and each still a start.)
     let want = (count - kept.len() + had).min(of.len());
+    // (All of them: none to choose between.)
+    if want == of.len() {
+        taken.extend((0..of.len()).filter(|&i| !held.contains(&of[i].at)));
+    }
     for spaced in [true, false] {
         while taken.len() < want {
             let best = (0..of.len())

@@ -27,7 +27,7 @@ const EDIT_BUTTONS: [(&str, EditOp); 14] = [
     ("STEMS", EditOp::Stems),
     ("AUTO LOOP", EditOp::AutoLoop),
 ];
-pub const SLICE_MODES: [&str; 5] = ["Split", "Grid", "Detect", "Manual", "Find"];
+pub const SLICE_MODES: [&str; 6] = ["Split", "Grid", "Detect", "Manual", "Find", "Random"];
 /// How many starts Find looks for.
 pub const FIND_COUNTS: [usize; 4] = [4, 8, 16, 32];
 pub const SPLIT_COUNTS: [usize; 4] = [4, 8, 16, 32];
@@ -91,6 +91,12 @@ pub struct SamplingState {
     pub slice_mode: usize,
     /// Find's count (`FIND_COUNTS`).
     pub find: usize,
+    /// Random's count (`FIND_COUNTS`), and what its picks come from: RE-ROLL moves it on.
+    pub random: usize,
+    pub seed: u64,
+    /// Find's and Random's slices that stay through a re-roll or another count (frames,
+    /// each one of `slices`).
+    pub kept: Vec<usize>,
     pub split: usize,
     pub grid: usize,
     pub sensitivity: f64,
@@ -134,6 +140,9 @@ impl Default for SamplingState {
             slices: Vec::new(),
             slice_mode: 0,
             find: 2,
+            random: 2,
+            seed: 0,
+            kept: Vec::new(),
             split: 1,
             grid: 2,
             sensitivity: 0.5,
@@ -222,6 +231,7 @@ impl SamplingState {
             self.selection = None;
             if !same_file {
                 self.slices.clear();
+                self.kept.clear();
             }
         } else if self.len() != len {
             self.view = None;
@@ -341,6 +351,16 @@ pub enum SamplingAct {
     SliceMode(usize),
     SplitCount(usize),
     FindCount(usize),
+    RandomCount(usize),
+    /// Random picks again (the kept slices stay).
+    Reroll,
+    /// Keep slice `.0` through re-rolls, or no longer (Find and Random).
+    KeepSlice(usize),
+    /// A slice at the playhead (Manual, while the sample plays); `true`: exactly there,
+    /// not on the sample's nearest 1/8 note.
+    Catch(bool),
+    /// Slice `.0` onto the group's next empty sound, over all its keys.
+    KeyShift(usize),
     GridDiv(usize),
     Sensitivity(f64),
     ZeroX(bool),
