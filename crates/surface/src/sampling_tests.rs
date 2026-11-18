@@ -321,6 +321,48 @@ fn the_slice_pads_pick_slices_and_the_buttons_edit_them() {
 }
 
 #[test]
+fn the_slice_pads_catch_keep_and_key_shift() {
+    let (mut s, mut v) = (Surface::new(), sampled(2));
+    let now = Instant::now();
+    let call = |c| vec![Action::SamplingCall(c)];
+    let mode = |v: &mut View, m: &str| v.sampling.slice[0].text = m.into();
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    // Manual, the sample playing: an empty pad drops a slice there; one with a slice plays it.
+    mode(&mut v, "Manual");
+    assert!(s.event(&Event::PadOn(9, 0.8), &v, now).is_empty(), "nothing plays: nothing caught");
+    v.sampling.sample.as_mut().unwrap().playhead = Some(5000);
+    assert_eq!(s.event(&Event::PadOn(9, 0.8), &v, now), call(SamplingCall::CatchSlice(false)));
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), call(SamplingCall::Prehear(11_025, 22_050)));
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
+    assert_eq!(s.event(&Event::PadOn(9, 0.8), &v, now), call(SamplingCall::CatchSlice(true)), "SHIFT: exactly there");
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), call(SamplingCall::Prehear(11_025, 22_050)), "Manual keeps none");
+    // SHIFT + display 5: the focused slice key shifted. No RE-ROLL outside Random.
+    assert!(s.screen_text(&v).iter().any(|t| t == "KEY SHIFT"));
+    assert!(!s.screen_text(&v).iter().any(|t| t == "RE-ROLL"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), call(SamplingCall::KeyShift(1)));
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_6").is_empty());
+    // Find and Random: SHIFT + a slice's pad keeps it; an empty pad does nothing.
+    for m in ["Find", "Random"] {
+        mode(&mut v, m);
+        assert_eq!(s.event(&Event::PadOn(3, 0.8), &v, now), call(SamplingCall::KeepSlice(2)), "{m}");
+        assert!(s.event(&Event::PadOn(9, 0.8), &v, now).is_empty(), "{m}");
+    }
+    assert!(s.screen_text(&v).iter().any(|t| t == "RE-ROLL"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), call(SamplingCall::Reroll));
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, now);
+    assert!(s.event(&Event::PadOn(9, 0.8), &v, now).is_empty(), "Random: no catching");
+    // A kept slice's pad is lit as the focused one is.
+    let lit = |s: &mut Surface, v: &View, pad: &str| s.leds(v).get(pad);
+    let dim = lit(&mut s, &v, "LED_PAD_4");
+    v.sampling.sample.as_mut().unwrap().kept = vec![3];
+    assert_ne!(lit(&mut s, &v, "LED_PAD_4"), dim, "kept: bright");
+    // Split: SHIFT + a pad neither keeps nor undoes.
+    mode(&mut v, "Split");
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), call(SamplingCall::Prehear(11_025, 22_050)));
+}
+
+#[test]
 fn the_zone_buttons_go_through_the_zones() {
     let (mut s, mut v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");

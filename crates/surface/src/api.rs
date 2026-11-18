@@ -590,6 +590,11 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "split_slice" => C::SplitSlice(n(a, "a slice")?),
                     "remove_slice" => C::RemoveSlice(n(a, "a slice")?),
                     "clear_slices" => C::ClearSlices,
+                    // (1: exactly at the playhead, not on the sample's nearest 1/8 note.)
+                    "catch_slice" => C::CatchSlice(a.is_some_and(|x| x >= 0.5)),
+                    "keep_slice" => C::KeepSlice(n(a, "a slice")?),
+                    "key_shift" => C::KeyShift(n(a, "a slice")?),
+                    "reroll" => C::Reroll,
                     "move_slice" => C::MoveSlice(n(a, "a slice")?, frame(b) as usize),
                     "apply_slices" => C::ApplySlices,
                     "remove_zone" => C::RemoveZone(n(a, "a zone")?),
@@ -1739,6 +1744,7 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
         st.set("looped", s.looped.map(|(a, b)| lua.create_sequence_from([a, b])).transpose()?)?;
         st.set("selection", s.selection.map(|(a, b)| lua.create_sequence_from([a, b])).transpose()?)?;
         st.set("slices", lua.create_sequence_from(s.slices.iter().copied())?)?;
+        st.set("kept", lua.create_sequence_from(s.kept.iter().map(|i| i + 1))?)?;
         st.set("focus_slice", s.focus_slice.map(|i| i + 1))?;
         st.set("playhead", s.playhead)?;
         let zones = lua.create_table()?;

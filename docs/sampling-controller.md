@@ -228,6 +228,20 @@ units.
 
 All four are enabled only when there is a sample. Without one, presses do nothing.
 
+DECKARD's own page adds, on SLICE:
+
+- **Catching.** In Manual mode, while the sample plays (a slice's pad was pressed, or
+  PLAY in the software), an empty pad drops a slice at the play position, on the
+  sample's nearest 1/8 note when the zone has a tempo. With SHIFT, exactly there.
+- **Keeping.** In Find and Random, SHIFT + a slice's pad keeps that slice through
+  re-rolls and other counts (its pad is lit bright), or lets it go again. SHIFT + a pad
+  is not the pad's printed shortcut on this tab.
+- **SHIFT + 5, KEY SHIFT.** The focused slice goes onto the group's next empty sound,
+  over all its keys.
+- **SHIFT + 6, RE-ROLL** (Random mode). Random picks again.
+- The slicer's MODE has **Find** and **Random** after Maschine's four, each with a
+  SAMPLES count.
+
 ### 5.2 Knobs (page-local, 3 pages; LEFT/RIGHT move between them)
 
 The page indicator always shows "n/3". With no sample there is one empty page.

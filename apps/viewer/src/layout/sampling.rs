@@ -1086,6 +1086,10 @@ fn wave(
             let x = fx(s as f64);
             painter.vline(x, w.y_range(), Stroke::new(1.0, white(164)));
             painter.text(Pos2::new(x + 3.0, w.top() + 2.0), Align2::LEFT_TOP, (i + 1).to_string(), font(9.0), white(142));
+            // A kept slice (it stays through re-rolls): a block on its line.
+            if st.kept.contains(&s) {
+                painter.rect_filled(Rect::from_min_size(Pos2::new(x - 3.0, w.top() + 15.0), Vec2::splat(7.0)), 1.0, white(230));
+            }
         }
     }
     // Loop frame and S/E markers.
@@ -1276,6 +1280,38 @@ fn wave(
     }
     if resp.double_clicked() && !slices {
         acts.push(sact(SamplingAct::Select(Some((lo as usize, hi as usize)))));
+    }
+    // SLICE, right-clicked: the slice under the pointer kept (Find, Random), or key shifted.
+    if slices {
+        let at = ui.id().with("slice-menu-at");
+        if resp.secondary_clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            ui.data_mut(|d| d.insert_temp(at, xf(pos.x).max(0.0) as usize));
+        }
+        resp.context_menu(|ui| {
+            let f = ui.data(|d| d.get_temp::<usize>(at)).unwrap_or(0);
+            let i = st.slices.iter().rposition(|&s| s <= f).unwrap_or(0);
+            if matches!(st.slice_mode, 4 | 5) {
+                let kept = st.slices.get(i).is_some_and(|s| st.kept.contains(s));
+                if ui
+                    .button(if kept { "Don't keep slice" } else { "Keep slice" })
+                    .on_hover_text("A kept slice stays where it is when the others are picked again")
+                    .clicked()
+                {
+                    acts.push(sact(SamplingAct::KeepSlice(i)));
+                    ui.close();
+                }
+            }
+            if ui
+                .button("Key Shift to new sound")
+                .on_hover_text("This slice on the group's next empty sound, over all its keys: play it in keyboard mode")
+                .clicked()
+            {
+                acts.push(sact(SamplingAct::KeyShift(i)));
+                ui.close();
+            }
+        });
     }
     // Zoom with the wheel (around the pointer), scroll with a horizontal swipe.
     if resp.hovered() {
@@ -1753,6 +1789,19 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
     ) {
         acts.push(sact(SamplingAct::ClearSlices));
     }
+    // CUE (or Enter): a slice where the sample is playing. SHIFT: exactly there.
+    x += 74.0 + 15.0;
+    let can_cue = manual && st.playhead.is_some();
+    let enter = can_cue && ui.input(|i| i.key_pressed(egui::Key::Enter)) && ui.memory(|m| m.focused().is_none());
+    if tool_button(ui, &painter, Rect::from_min_size(Pos2::new(x, y), Vec2::new(58.0, 40.0)), "CUE", can_cue, false, "cue") || enter {
+        acts.push(sact(SamplingAct::Catch(ui.input(|i| i.modifiers.shift))));
+    }
+    if st.slice_mode == 5 {
+        x += 62.0 + 15.0;
+        if tool_button(ui, &painter, Rect::from_min_size(Pos2::new(x, y), Vec2::new(64.0, 40.0)), "RE-ROLL", true, false, "reroll") {
+            acts.push(sact(SamplingAct::Reroll));
+        }
+    }
     let apply = Rect::from_min_size(Pos2::new(tools.right() - 80.0, y), Vec2::new(68.0, 40.0));
     if tool_button(ui, &painter, apply, "APPLY", st.slices.len() > 1, false, "apply") {
         acts.push(sact(SamplingAct::ApplySlices));
@@ -1789,6 +1838,12 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
             let i = st.find;
             let mut f = choice_field("SAMPLES", FIND_COUNTS.map(|c| c.to_string()).to_vec(), i, |k| sact(SamplingAct::FindCount(k)));
             f.tip = "How many starts to find: where something comes in, on the sample's bars and beats when it has a tempo";
+            fields.push(f);
+        }
+        5 => {
+            let i = st.random;
+            let mut f = choice_field("SAMPLES", FIND_COUNTS.map(|c| c.to_string()).to_vec(), i, |k| sact(SamplingAct::RandomCount(k)));
+            f.tip = "How many starts to pick at random among the places Find weighs (RE-ROLL picks again; right-click a slice to keep it)";
             fields.push(f);
         }
         _ => {}

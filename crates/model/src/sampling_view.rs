@@ -20,6 +20,8 @@ pub struct SampleView {
     pub selection: Option<(usize, usize)>,
     /// Slice starts (frames), and the slice in focus (kept by the scripts).
     pub slices: Vec<usize>,
+    /// The slices kept through re-rolls (Find, Random), by index.
+    pub kept: Vec<usize>,
     pub focus_slice: Option<usize>,
     pub playhead: Option<usize>,
     /// The Sampler's zones (keys, velocities; inclusive) and the focused one.
@@ -73,6 +75,15 @@ pub enum SamplingCall {
     SplitSlice(usize),
     RemoveSlice(usize),
     ClearSlices,
+    /// A slice where the sample is playing (`true`: exactly there, not on its nearest
+    /// 1/8 note).
+    CatchSlice(bool),
+    /// Keep slice `.0` through re-rolls, or no longer.
+    KeepSlice(usize),
+    /// Slice `.0` onto the group's next empty sound, over all its keys.
+    KeyShift(usize),
+    /// Random picks again.
+    Reroll,
     MoveSlice(usize, usize),
     /// Make the slices zones of the focused sound.
     ApplySlices,

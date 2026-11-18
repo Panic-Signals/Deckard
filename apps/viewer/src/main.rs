@@ -9047,6 +9047,10 @@ impl App {
                 return;
             }
             C::ClearSlices => S::ClearSlices,
+            C::CatchSlice(free) => S::Catch(free),
+            C::KeepSlice(i) => S::KeepSlice(i),
+            C::KeyShift(i) => S::KeyShift(i),
+            C::Reroll => S::Reroll,
             C::MoveSlice(i, f) => S::MoveSlice(i, f),
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
@@ -17652,6 +17656,69 @@ mod tests {
         let again = project_of(&h).groups[0].sounds[0].sampler.clone().unwrap().zones;
         assert_eq!(again.len(), 7);
         assert_eq!((again[0].play_range.0, again[6].play_range.1), (zones[0].play_range.0, zones[7].play_range.1));
+    }
+
+    /// SLICE in the software: CUE and Enter catch a slice where the sample plays, RE-ROLL
+    /// picks again, a right-click keeps a slice or key shifts it.
+    #[test]
+    fn slice_cue_reroll_and_the_slice_menu() {
+        use layout::sampling::SamplingAct as S;
+        let (app, _tmp) = crate::surface_sampling_tests::app();
+        let mut h = harness_of(app, false);
+        let act = |h: &mut Harness<'static, App>, a: S| {
+            h.state_mut().arrange_act(layout::Act::Sampling(a));
+            h.run_steps(3);
+        };
+        let tool = |h: &Harness<'static, App>, id: &str| -> Option<egui::Rect> {
+            h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-tool", id.to_string()))))
+        };
+        act(&mut h, S::Tab(2));
+        act(&mut h, S::SliceMode(3));
+        act(&mut h, S::ClearSlices);
+        // Nothing plays: CUE does nothing.
+        let cue = tool(&h, "cue").expect("CUE drawn");
+        click(&mut h, cue.center());
+        assert!(h.state().sampling.slices.is_empty());
+        // A slice's pad plays it from 20 000 on (held there: it starts in a while).
+        let soon = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        h.state_mut().prehear_from = Some((soon, 20_000, 44_100));
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.playhead, Some(20_000));
+        click(&mut h, cue.center());
+        assert_eq!(h.state().sampling.slices, [0, 20_000]);
+        h.state_mut().prehear_from = Some((soon, 30_000, 44_100));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.slices, [0, 20_000, 30_000], "Enter catches one too");
+        h.state_mut().prehear_from = None;
+        h.run_steps(2);
+        // Random: RE-ROLL moves its picks on; Manual has no such button.
+        assert!(tool(&h, "reroll").is_none());
+        act(&mut h, S::SliceMode(5));
+        let reroll = tool(&h, "reroll").expect("RE-ROLL drawn");
+        click(&mut h, reroll.center());
+        assert_eq!(h.state().sampling.seed, 1);
+        // Right-click in a slice: kept, then not; and key shifted.
+        let wave: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-sample-wave"))).expect("waveform drawn");
+        h.state_mut().sampling.slices = vec![0, 11_025, 22_050];
+        h.run_steps(2);
+        let in_second = egui::pos2(wave.left() + wave.width() * 0.4, wave.center().y);
+        right_click(&mut h, in_second);
+        h.get_by_label("Keep slice").click();
+        h.run_steps(3);
+        assert_eq!(h.state().sampling.kept, [11_025]);
+        right_click(&mut h, in_second);
+        h.get_by_label("Don't keep slice").click();
+        h.run_steps(3);
+        assert!(h.state().sampling.kept.is_empty());
+        right_click(&mut h, in_second);
+        h.get_by_label("Key Shift to new sound").click();
+        h.run_steps(3);
+        let p = project_of(&h);
+        let made = p.groups[h.state().group].sounds.iter().find(|x| x.name.ends_with(" keys")).expect("the slice on a new sound");
+        assert_eq!(made.sampler.as_ref().unwrap().zones[0].play_range, (11_025, 22_049));
+        assert_eq!(h.state().sampling.slices, [0, 11_025, 22_050], "a right-click adds no slice");
     }
 
     fn pedal_before(p: &deckard_model::Project, g: usize, pi: usize) -> usize {

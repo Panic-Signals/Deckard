@@ -166,6 +166,7 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
     };
     let slices = if st.tab == 2 && st.slices.is_empty() { vec![0] } else { st.slices.clone() };
     let focus_slice = focus_slice.filter(|&i| i < slices.len());
+    let kept = slices.iter().enumerate().filter(|(_, f)| st.kept.contains(f)).map(|(i, _)| i).collect();
     Some(SampleView {
         name: z.sample.path.rsplit(['/', '\\']).next().unwrap_or("").to_string(),
         path: z.sample.path.clone(),
@@ -178,6 +179,7 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
         looped: (z.loop_active && z.loop_range.1 > z.loop_range.0).then_some((z.loop_range.0 as usize, z.loop_range.1 as usize + 1)),
         selection: st.selection,
         slices,
+        kept,
         focus_slice,
         playhead: st.playhead,
         zones,

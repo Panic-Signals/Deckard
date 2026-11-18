@@ -13,11 +13,16 @@
 --                     (SHIFT: solo); the right display shows the lanes stacked
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
+--   SHIFT+SLICE 5-6   KEY SHIFT (the focused slice onto the group's next empty sound,
+--                     over all its keys), RE-ROLL (Random: pick again)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
 --   LEFT / RIGHT      the tab's knob pages
 --   knobs 1-4         the page's settings (SHIFT: finer)
 --   knobs 5 / 6       zoom / scroll the sample (their icons shown while touched)
---   pads              SLICE: pick a slice and hear it; else the sounds, as ever
+--   pads              SLICE: pick a slice and hear it; Manual, while the sample plays,
+--                     an empty pad drops a slice there (SHIFT: exactly there, not on
+--                     the nearest 1/8 note); Find and Random, SHIFT + a slice's pad
+--                     keeps it through re-rolls (lit bright); else the sounds, as ever
 
 local widgets = require("lib.widgets")
 
@@ -56,6 +61,12 @@ local function view()
   return deckard.state().sampling
 end
 
+-- The slicer's mode, by name ("Manual", "Find", …).
+local function slicer_mode(v)
+  local k = v.slice["Slice.Mode"]
+  return k and k.text or ""
+end
+
 -- The SLICE tab's own pages, from the slicer's knobs (by key): what page 1 shows
 -- follows the slicer's mode.
 local function slice_pages(v)
@@ -68,6 +79,8 @@ local function slice_pages(v)
     slicer[2] = k["Slice.Split"]
   elseif mode == "Find" then
     slicer[2] = k["Slice.Find"]
+  elseif mode == "Random" then
+    slicer[2] = k["Slice.Random"]
   elseif mode == "Grid" then
     slicer[2], slicer[3], slicer[4] = k["Slice.Grid"], k["Slice.BpmMode"], k["Slice.Bpm"]
   end
@@ -240,6 +253,11 @@ local function buttons(v)
   elseif v.tab == 3 then
     local n = s and #s.slices or 0
     local i = math.min(slice or 1, math.max(n, 1))
+    if deckard.held("SHIFT") then
+      local out = { { text = "KEY SHIFT", disabled = n == 0, act = function() deckard.sampling_call("key_shift", i) end } }
+      if slicer_mode(v) == "Random" then out[2] = { text = "RE-ROLL", act = function() deckard.sampling_call("reroll") end } end
+      return out
+    end
     return {
       { text = "SPLIT", disabled = n == 0, act = function() deckard.sampling_call("split_slice", i) end },
       { text = "REMOVE", disabled = n == 0, act = function() deckard.sampling_call("remove_slice", i) end },
@@ -371,9 +389,16 @@ function page.pad(n)
   local s = v.sample
   if not s then return true end
   local i = ((slice or 1) - 1) // 16 * 16 + n
-  if s.slices[i] then
+  local mode, shift = slicer_mode(v), deckard.held("SHIFT")
+  if s.slices[i] and shift and (mode == "Find" or mode == "Random") then
+    -- Kept through re-rolls, or no longer.
+    deckard.sampling_call("keep_slice", i)
+  elseif s.slices[i] then
     slice = i
     deckard.sampling_call("prehear", s.slices[i], s.slices[i + 1] or s.play[2])
+  elseif mode == "Manual" and s.playhead then
+    -- An empty pad while the sample plays: a slice there.
+    deckard.sampling_call("catch_slice", shift and 1 or 0)
   end
   return true
 end
@@ -423,7 +448,9 @@ function page.leds()
     for i = 1, 16 do
       local k = bank + i
       if s and s.slices[k] then
-        deckard.led("PAD_" .. i, palette, k == slice)
+        local kept = false
+        for _, j in ipairs(s.kept or {}) do kept = kept or j == k end
+        deckard.led("PAD_" .. i, palette, k == slice or kept)
       else
         deckard.led("PAD_" .. i, "off")
       end

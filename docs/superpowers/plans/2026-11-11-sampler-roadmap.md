@@ -403,6 +403,11 @@ four stems together in one zone, so they share every edit.
 
 ## Phase 3: Chopping
 
+> Built (2026-11-18, `docs/superpowers/specs/2026-11-18-chop-by-playing-design.md`): Catch
+> cues (Manual mode; CUE, Enter, an empty pad), Slicer from the playhead (Split and Grid),
+> Random with RE-ROLL, Favorite (kept slices, in Find and Random), Key Shift (one slice
+> over all the keys of the group's next empty sound).
+
 - **Catch cues:** in SLICE, press empty pads while the sample plays to drop slices at the
   playhead (Serato, MPC). Snap with Quantize to 1/8 beat.
 - **Autoset:**
