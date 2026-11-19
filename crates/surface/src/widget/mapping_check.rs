@@ -450,7 +450,7 @@ mod tests {
     fn check_a_mapping() {
         let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
         let (Some(path), Some(dump_path)) = (var("DECKARD_MAPPING"), var("DECKARD_DUMP")) else {
-            // (Run with every ignored test, as rig runs do: nothing to check.)
+            // (Run with every ignored test (`--ignored`): nothing to check.)
             eprintln!("check_a_mapping: set DECKARD_MAPPING (a mapping .lua) and DECKARD_DUMP (its plugin-probe dump); nothing checked");
             return;
         };
