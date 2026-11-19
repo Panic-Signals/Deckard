@@ -5700,9 +5700,7 @@ impl App {
             }
             _ => text.to_string(),
         };
-        let mod_at: Vec<Option<f64>> = (0..8)
-            .map(|i| edits.get(i).copied().flatten().and_then(|e| self.mod_position(e)))
-            .collect();
+        let mod_at: Vec<Option<f64>> = (0..8).map(|i| edits.get(i).copied().flatten().and_then(|e| self.mod_position(e))).collect();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
