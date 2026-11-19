@@ -1192,6 +1192,7 @@ pub struct App {
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
+    plugin_clipboard: Option<deckard_doc::CopiedSlot>,
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
@@ -10890,6 +10891,37 @@ impl App {
             self.midi_ports = midi_ports::probe();
         }
         &self.midi_ports
+    }
+
+    fn copy_plugin(&mut self, chain: deckard_doc::Chain, at: usize) {
+        let Some(doc) = self.doc.clone() else { return };
+        let key = self.plugin_slot_key(chain, at);
+        self.store_plugin_states_of(|slot| *slot == key);
+        match doc.borrow().copy_slot(chain, at) {
+            Ok(copy) => {
+                self.plugin_clipboard = Some(copy);
+                self.status = "Copied plug-in".into();
+            }
+            Err(e) => self.status = format!("Can't copy plug-in: {e}"),
+        }
+    }
+
+    fn paste_plugin(&mut self, chain: deckard_doc::Chain, over: Option<usize>) {
+        let Some(doc) = self.doc.clone() else { return };
+        self.store_plugin_states();
+        let Some(copy) = &self.plugin_clipboard else { return };
+        let pasted = match over {
+            Some(at) => doc.borrow_mut().paste_over_instrument(chain, at, copy).map(|()| at),
+            None => doc.borrow_mut().paste_slot(chain, copy),
+        };
+        match pasted {
+            Ok(at) => {
+                self.editors.retain(|(c, ..)| *c != chain);
+                self.plugin_views.clear();
+                layout::apply_acts(self, vec![layout::Act::FocusChainSlot(chain, at)]);
+            }
+            Err(e) => self.status = format!("Can't paste plug-in: {e}"),
+        }
     }
 
     /// Move slot `from` of the focused chain to `to`; it stays shown.
