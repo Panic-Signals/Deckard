@@ -245,15 +245,11 @@ mod tests {
     #[test]
     fn the_documented_example_loads() {
         let doc = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/controller-api.md")).unwrap();
+        // (A Windows checkout may have CRLF line endings.)
+        let doc = doc.replace("\r\n", "\n");
         let from = doc.find("### Example: Acme Ladder").expect("the example");
         let code = &doc[from..];
-        let start = code
-            .find(
-                "```lua
-",
-            )
-            .expect("its code")
-            + 7;
+        let start = code.find("```lua\n").expect("its code") + 7;
         let end = start + code[start..].find("```").expect("its end");
         let lua = mlua::Lua::new();
         let t: mlua::Table = lua.load(&code[start..end]).eval().unwrap();
