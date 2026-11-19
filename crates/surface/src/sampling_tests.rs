@@ -363,6 +363,38 @@ fn the_slice_pads_catch_keep_and_key_shift() {
 }
 
 #[test]
+fn the_slice_pads_bank() {
+    let (mut s, mut v) = (Surface::new(), sampled(2));
+    let now = Instant::now();
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    // (Pad 16 is dark wherever this counts: lit pads are the ones unlike it.)
+    let lit = |s: &mut Surface, v: &View| {
+        let leds = s.leds(v);
+        (1..=16).filter(|i| leds.get(&format!("LED_PAD_{i}")) != leds.get("LED_PAD_16")).count()
+    };
+    // Few slices: one bank, no button.
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
+    assert!(s.screen_text(&v).iter().any(|t| t == "BANK 1/1"));
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_7").is_empty());
+    // Forty: three banks, the last of eight (pad 16 dark there, as it is with few).
+    v.sampling.sample.as_mut().unwrap().slices = (0..40).map(|k| k * 1000).collect();
+    assert!(s.screen_text(&v).iter().any(|t| t == "BANK 1/3"));
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    assert!(s.screen_text(&v).iter().any(|t| t == "BANK 2/3"));
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, now);
+    assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::SamplingCall(SamplingCall::Prehear(16_000, 17_000))], "pad 1: slice 17");
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    assert!(s.screen_text(&v).iter().any(|t| t == "BANK 3/3"));
+    assert_eq!(lit(&mut s, &v), 8, "the last bank's eight");
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, now);
+    assert!(s.event(&Event::PadOn(9, 0.8), &v, now).is_empty(), "no slice 41");
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    assert!(s.screen_text(&v).iter().any(|t| t == "BANK 1/3"), "round to the first");
+}
+
+#[test]
 fn the_zone_buttons_go_through_the_zones() {
     let (mut s, mut v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");

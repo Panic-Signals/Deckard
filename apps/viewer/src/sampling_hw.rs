@@ -15,7 +15,7 @@
 //!
 //! Frame knobs move across the part of the sample shown in a turn (a hundredth a step).
 
-use crate::layout::sampling::{FIND_COUNTS, GRID_DIVS, PATTERN_MODES, SLICE_MODES, SPLIT_COUNTS, SamplingState};
+use crate::layout::sampling::{APPLY_TO, FIND_COUNTS, GRID_DIVS, NOTE_ORDERS, PATTERN_MODES, SLICE_MODES, SPLIT_COUNTS, SamplingState};
 use crate::record_knobs::{self, Knobs};
 use deckard_lua_host::state::{KnobPage, SampleView, SamplingKnob};
 use deckard_model::{Color, Project};
@@ -54,6 +54,8 @@ pub enum Apply {
     Sensitivity,
     ZeroX,
     PatternMode,
+    ApplyTo,
+    NoteOrder,
     /// A New Sampler zone's play mode (0 Repitch, 1 Sync, 2 Keys), tempo, root note, and
     /// the note it plays at (its Tune).
     PlayMode,
@@ -419,6 +421,8 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         ),
         (on_off("Slice.ZeroX", "ZERO-X", st.zero_x), Apply::ZeroX),
         (choice("Slice.Apply", "PATTERN", &names(&PATTERN_MODES), st.pattern_mode), Apply::PatternMode),
+        (choice("Slice.To", "TO", &names(&APPLY_TO), st.apply_to.min(1)), Apply::ApplyTo),
+        (choice("Slice.Order", "ORDER", &names(&NOTE_ORDERS), usize::from(st.shuffle)), Apply::NoteOrder),
         // Slices follow the song's tempo; a New Sampler zone's with a tempo, its own.
         (knob("Slice.BpmMode", "BPM", if own_tempo.is_some() { "Sample" } else { "Song" }.into(), 0.0, (0.0, 0.0), 1.0, TURN), Apply::None),
         (knob("Slice.Bpm", "TEMPO", format!("{tempo:.2}"), tempo, (tempo, tempo), 1.0, TURN), Apply::None),

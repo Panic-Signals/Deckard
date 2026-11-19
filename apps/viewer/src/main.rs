@@ -64,6 +64,9 @@ mod auto_length_tests;
 mod beat;
 mod chop;
 mod chop_app;
+mod chop_group;
+#[cfg(test)]
+mod chop_group_tests;
 #[cfg(test)]
 mod chop_tests;
 #[cfg(test)]
@@ -8133,6 +8136,9 @@ impl App {
                 self.sampling.kept.clear();
             }
             S::PatternMode(m) => self.sampling.pattern_mode = m,
+            S::ApplyTo(k) => self.sampling.apply_to = k.min(1),
+            S::NoteOrder(on) => self.sampling.shuffle = on,
+            S::ExportSlices => self.export_slices(),
             S::SliceToEnd(on) => self.sampling.slice_to_end = Some(on),
             S::ApplySlices => self.apply_slices(),
             S::FocusZone(i) => self.zone = i,
@@ -8351,7 +8357,7 @@ impl App {
             4 => {
                 // Where things start: on the sample's own bars (or beats, of a short one)
                 // when the zone has a tempo, else on its hits.
-                let count = FIND_COUNTS[st.find.min(3)];
+                let count = FIND_COUNTS[st.find.min(FIND_COUNTS.len() - 1)];
                 let lines = self.find_lines(s.rate, r, count);
                 let mut found = deckard_analysis::find_samples_keeping(&s.frames, s.rate, r, &lines, count, &st.kept);
                 if found.is_empty() {
@@ -8361,7 +8367,7 @@ impl App {
             }
             5 => {
                 // Any of the places Find weighs, the kept ones staying.
-                let count = FIND_COUNTS[st.random.min(3)];
+                let count = FIND_COUNTS[st.random.min(FIND_COUNTS.len() - 1)];
                 let mut picked = chop::random_picks(&self.slice_candidates(&s, r, count), &st.kept, count, st.seed, s.rate as usize / 25);
                 if picked.is_empty() {
                     picked.push(r.0);
@@ -8490,6 +8496,9 @@ impl App {
         if slices.len() < 2 {
             return;
         }
+        if self.sampling.apply_to == 1 {
+            return self.apply_slices_to_pads(&s, &slices, end);
+        }
         let zi = self.zone;
         // Sliced before: a slice still where it was keeps its zone's settings (its lanes'
         // mutes, its tune), a new or moved one takes the focused zone's.
@@ -8547,16 +8556,18 @@ impl App {
             let Some(pat) = p.groups.get(g).and_then(|gr| gr.patterns.get(pi)) else { return };
             let ticks_per_frame = p.tempo / 60.0 * deckard_model::PPQ as f64 / s.rate.max(1) as f64;
             let a0 = slices[0].0;
+            // (Shuffled: a note's time is its own, the slice it plays another's.)
+            let order = chop::note_order(slices.len(), self.sampling.shuffle, self.sampling.seed);
             let add: Vec<Note> = slices
                 .iter()
-                .enumerate()
-                .map(|(i, &(a, b))| Note {
+                .zip(&order)
+                .map(|(&(a, _), &k)| Note {
                     ratchet: Default::default(),
                     expr: None,
                     sound: snd,
                     position: pat.start + ((a - a0) as f64 * ticks_per_frame) as i64,
-                    length: (((b - a) as f64 * ticks_per_frame) as i64).max(1),
-                    pitch: (36 + i).min(127) as i64,
+                    length: (((slices[k].1 - slices[k].0) as f64 * ticks_per_frame) as i64).max(1),
+                    pitch: (36 + k).min(127) as i64,
                     velocity: 100,
                     probability: 100,
                 })
@@ -8948,6 +8959,8 @@ impl App {
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
+            Some(Apply::ApplyTo) => SamplingAct::ApplyTo(at),
+            Some(Apply::NoteOrder) => SamplingAct::NoteOrder(value >= 0.5),
             Some(Apply::LaneGain(k)) => {
                 let gain = if value <= -60.0 { 0.0 } else { 10f64.powf(value.min(6.0) / 20.0) };
                 SamplingAct::Lane(k, layout::sampling::LaneAct::Gain(gain))

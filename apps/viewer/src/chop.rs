@@ -29,21 +29,49 @@ pub fn slicer_range(range: (usize, usize), playhead: Option<usize>, selection: O
     (from.unwrap_or(range.0), range.1)
 }
 
+/// The next number after `state` (splitmix64).
+fn mix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Which slice each of `n` notes plays, the notes in time order: its own, or (`shuffled`)
+/// another's, by `seed`. Shuffled, two or more are never left as they were.
+pub fn note_order(n: usize, shuffled: bool, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    if !shuffled || n < 2 {
+        return order;
+    }
+    let mut state = seed;
+    for i in (1..n).rev() {
+        order.swap(i, (mix(&mut state) % (i as u64 + 1)) as usize);
+    }
+    if order.iter().enumerate().all(|(i, k)| i == *k) {
+        order.rotate_left(1);
+    }
+    order
+}
+
+/// The files `n` exported slices of a sample named `stem` go to: "<stem> 01.wav" on, with
+/// what a file name can't hold replaced.
+pub fn slice_file_names(stem: &str, n: usize) -> Vec<String> {
+    let clean: String = stem.trim().chars().map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c }).collect();
+    let stem = if clean.is_empty() { "Slice" } else { clean.as_str() };
+    let digits = n.to_string().len().max(2);
+    (1..=n).map(|k| format!("{stem} {k:0digits$}.wav")).collect()
+}
+
 /// Random's slices: the `kept` ones and, of `cands`, as many more as make `count`, none
 /// within `near` frames of a kept one. The same `seed` picks the same.
 pub fn random_picks(cands: &[usize], kept: &[usize], count: usize, seed: u64, near: usize) -> Vec<usize> {
     let mut free: Vec<usize> = cands.iter().copied().filter(|c| kept.iter().all(|k| k.abs_diff(*c) > near)).collect();
     free.sort_unstable();
     free.dedup();
-    // (splitmix64.)
     let mut state = seed;
-    let mut next = || {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    };
+    let mut next = || mix(&mut state);
     let mut out = kept.to_vec();
     while out.len() < count && !free.is_empty() {
         out.push(free.swap_remove((next() % free.len() as u64) as usize));
@@ -114,6 +142,32 @@ mod tests {
         assert_eq!(random_picks(&cands[..3], &[], 8, 1, 40), [0, 1000, 2000]);
         assert_eq!(random_picks(&cands, &kept, 2, 1, 40), kept, "all kept: as they are");
         assert_eq!(random_picks(&[], &[], 8, 1, 40), [0usize; 0]);
+    }
+
+    #[test]
+    fn notes_play_their_own_slice_or_another() {
+        assert_eq!(note_order(4, false, 9), [0, 1, 2, 3]);
+        for seed in 0..50 {
+            let o = note_order(8, true, seed);
+            let mut sorted = o.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..8).collect::<Vec<_>>(), "every slice once");
+            assert_ne!(o, sorted, "not as they were");
+            assert_eq!(o, note_order(8, true, seed));
+            assert_eq!(note_order(2, true, seed), [1, 0]);
+        }
+        assert_ne!(note_order(8, true, 1), note_order(8, true, 2));
+        assert_eq!(note_order(1, true, 3), [0]);
+        assert_eq!(note_order(0, true, 3), [0usize; 0]);
+    }
+
+    #[test]
+    fn exported_slices_are_numbered() {
+        assert_eq!(slice_file_names("Break", 3), ["Break 01.wav", "Break 02.wav", "Break 03.wav"]);
+        assert_eq!(slice_file_names("Break", 120)[4], "Break 005.wav");
+        assert_eq!(slice_file_names("a/b:c", 1), ["a_b_c 01.wav"]);
+        assert_eq!(slice_file_names("  ", 1), ["Slice 01.wav"]);
+        assert!(slice_file_names("x", 0).is_empty());
     }
 
     #[test]

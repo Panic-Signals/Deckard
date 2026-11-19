@@ -407,6 +407,11 @@ four stems together in one zone, so they share every edit.
 > cues (Manual mode; CUE, Enter, an empty pad), Slicer from the playhead (Split and Grid),
 > Random with RE-ROLL, Favorite (kept slices, in Find and Random), Key Shift (one slice
 > over all the keys of the group's next empty sound).
+>
+> Built (2026-11-19, `docs/superpowers/specs/2026-11-19-slices-to-pads-and-files-design.md`):
+> counts of 64, BANK on the MK3's slice pads, APPLY to pads (new groups, a sound a slice),
+> a shuffled note order, EXPORT (each slice a WAV). Not built: dragging slices out,
+> linear/random locks.
 
 - **Catch cues:** in SLICE, press empty pads while the sample plays to drop slices at the
   playhead (Serato, MPC). Snap with Quantize to 1/8 beat.

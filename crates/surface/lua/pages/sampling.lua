@@ -99,7 +99,7 @@ local function slice_pages(v)
   return {
     { name = "Slicer", knobs = slicer },
     { name = "Edit", knobs = edit },
-    { name = "Apply", knobs = { nil, k["Slice.Apply"], k["Slice.BpmMode"], k["Slice.Bpm"] } },
+    { name = "Apply", knobs = { k["Slice.To"], k["Slice.Apply"], k["Slice.Order"], k["Slice.Bpm"] } },
   }
 end
 
@@ -256,6 +256,14 @@ local function buttons(v)
     if deckard.held("SHIFT") then
       local out = { { text = "KEY SHIFT", disabled = n == 0, act = function() deckard.sampling_call("key_shift", i) end } }
       if slicer_mode(v) == "Random" then out[2] = { text = "RE-ROLL", act = function() deckard.sampling_call("reroll") end } end
+      -- BANK: the pads' next sixteen slices (round to the first).
+      local banks = math.max(1, (n + 15) // 16)
+      local bank = (i - 1) // 16
+      out[3] = {
+        text = "BANK " .. (bank + 1) .. "/" .. banks,
+        disabled = banks < 2,
+        act = function() slice = (bank + 1) % banks * 16 + 1 end,
+      }
       return out
     end
     return {

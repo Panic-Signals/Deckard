@@ -239,8 +239,14 @@ DECKARD's own page adds, on SLICE:
 - **SHIFT + 5, KEY SHIFT.** The focused slice goes onto the group's next empty sound,
   over all its keys.
 - **SHIFT + 6, RE-ROLL** (Random mode). Random picks again.
+- **SHIFT + 7, BANK.** With more than 16 slices, the pads go to the next 16 (and round
+  to the first). Selecting a slice with the knob moves the pads to its bank too.
 - The slicer's MODE has **Find** and **Random** after Maschine's four, each with a
-  SAMPLES count.
+  SAMPLES count. Split's, Find's and Random's counts go up to 64.
+- The Apply page has **TO** on knob 1 (*Keys*: every slice on a key of this sound, as
+  Maschine does; *Pads*: every slice a sound of its own on the pads of new groups, 16 a
+  group, the sliced group left as it is) and **ORDER** on knob 3 (*In order* or
+  *Shuffled*: the pattern's notes keep their times and play other slices).
 
 ### 5.2 Knobs (page-local, 3 pages; LEFT/RIGHT move between them)
 

@@ -29,10 +29,13 @@ const EDIT_BUTTONS: [(&str, EditOp); 14] = [
 ];
 pub const SLICE_MODES: [&str; 6] = ["Split", "Grid", "Detect", "Manual", "Find", "Random"];
 /// How many starts Find looks for.
-pub const FIND_COUNTS: [usize; 4] = [4, 8, 16, 32];
-pub const SPLIT_COUNTS: [usize; 4] = [4, 8, 16, 32];
+pub const FIND_COUNTS: [usize; 5] = [4, 8, 16, 32, 64];
+pub const SPLIT_COUNTS: [usize; 5] = [4, 8, 16, 32, 64];
 pub const GRID_DIVS: [(u32, &str); 4] = [(4, "1/4"), (8, "1/8"), (16, "1/16"), (32, "1/32")];
 pub const PATTERN_MODES: [&str; 3] = ["Create Pattern", "Replace Pattern", "No Pattern"];
+/// Where APPLY puts the slices: the keys of this sound, or the pads of new groups.
+pub const APPLY_TO: [&str; 2] = ["Keys", "Pads"];
+pub const NOTE_ORDERS: [&str; 2] = ["In order", "Shuffled"];
 
 /// An edit of the selection (or, without one, the play range).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +110,9 @@ pub struct SamplingState {
     /// The SLICE tool removes instead of adding.
     pub remove_tool: bool,
     pub pattern_mode: usize,
+    /// Where APPLY puts the slices (`APPLY_TO`), and whether its notes play them shuffled.
+    pub apply_to: usize,
+    pub shuffle: bool,
     /// APPLY's slices each play on to the sample's end (start points, as Serato's
     /// cues), not to the next slice. Unset: so for a New Sampler, not for a Sampler.
     pub slice_to_end: Option<bool>,
@@ -153,6 +159,8 @@ impl Default for SamplingState {
             zero_x: true,
             remove_tool: false,
             pattern_mode: 2,
+            apply_to: 0,
+            shuffle: false,
             slice_to_end: None,
             stretch: None,
             zone_map: true,
@@ -376,6 +384,10 @@ pub enum SamplingAct {
     ClearSlices,
     ApplySlices,
     PatternMode(usize),
+    /// APPLY to keys (0) or pads (`APPLY_TO`); its notes shuffled; the slices as files.
+    ApplyTo(usize),
+    NoteOrder(bool),
+    ExportSlices,
     /// APPLY's slices play to the sample's end (else to the next slice).
     SliceToEnd(bool),
     FocusZone(usize),
@@ -1812,13 +1824,31 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
     if tool_button(ui, &painter, apply, "APPLY", st.slices.len() > 1, false, "apply") {
         acts.push(sact(SamplingAct::ApplySlices));
     }
+    let groups = st.slices.len().div_ceil(16);
     painter.text(
         Pos2::new(apply.left() - 10.0, apply.center().y),
         Align2::RIGHT_CENTER,
-        format!("{} slices, on keys from C1", st.slices.len()),
+        if st.apply_to == 1 {
+            format!("{} slices, on the pads of {} new group{}", st.slices.len(), groups, if groups == 1 { "" } else { "s" })
+        } else {
+            format!("{} slices, on keys from C1", st.slices.len())
+        },
         font(11.0),
         white(142),
     );
+    // EXPORT: each slice as a file.
+    x += 66.0 + 15.0;
+    if tool_button(
+        ui,
+        &painter,
+        Rect::from_min_size(Pos2::new(x, y), Vec2::new(62.0, 40.0)),
+        "EXPORT",
+        st.sample.is_some(),
+        false,
+        "export",
+    ) {
+        acts.push(sact(SamplingAct::ExportSlices));
+    }
     // Footer.
     let fy = y + 48.0;
     let mode = st.slice_mode;
@@ -1862,16 +1892,37 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
         nx,
         fy,
         "APPLY",
-        &[choice_field("PATTERN", PATTERN_MODES.map(String::from).to_vec(), pm, |k| sact(SamplingAct::PatternMode(k))), {
-            let to_end = st.slices_to_end(app.doc.as_ref().is_some_and(|d| {
-                d.borrow().project().groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some())
-            }));
-            let mut f = choice_field("EACH PLAYS TO", vec!["Next slice".into(), "Sample end".into()], usize::from(to_end), |k| {
-                sact(SamplingAct::SliceToEnd(k == 1))
-            });
-            f.tip = "Next slice: each pad plays its own piece. Sample end: each pad is a start point, playing on for as long as it's held";
-            f
-        }],
+        &[
+            {
+                let mut f = choice_field("TO", APPLY_TO.map(String::from).to_vec(), st.apply_to.min(1), |k| sact(SamplingAct::ApplyTo(k)));
+                f.tip = "Keys: every slice on a key of this sound. Pads: every slice a sound of its own, on the pads of new groups (16 a group)";
+                f
+            },
+            choice_field("PATTERN", PATTERN_MODES.map(String::from).to_vec(), pm, |k| sact(SamplingAct::PatternMode(k))),
+            {
+                let mut f = choice_field("ORDER", NOTE_ORDERS.map(String::from).to_vec(), usize::from(st.shuffle), |k| {
+                    sact(SamplingAct::NoteOrder(k == 1))
+                });
+                f.tip = "The pattern's notes play the slices in order, or shuffled: the same times, other slices";
+                f
+            },
+            {
+                let to_end = st.slices_to_end(app.doc.as_ref().is_some_and(|d| {
+                    d.borrow()
+                        .project()
+                        .groups
+                        .get(app.group)
+                        .and_then(|g| g.sounds.get(app.sound))
+                        .is_some_and(|x| x.new_sampler.is_some())
+                }));
+                let mut f = choice_field("EACH PLAYS TO", vec!["Next slice".into(), "Sample end".into()], usize::from(to_end), |k| {
+                    sact(SamplingAct::SliceToEnd(k == 1))
+                });
+                f.tip =
+                    "Next slice: each pad plays its own piece. Sample end: each pad is a start point, playing on for as long as it's held";
+                f
+            },
+        ],
         acts,
     );
 }
