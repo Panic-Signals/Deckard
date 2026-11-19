@@ -258,9 +258,10 @@ local function draw_strip(screen, theme, c, right)
   local function overflow(last)
     if first > 1 or last < #c.chain then
       if inline then
+        -- (6 x 11: 30% under the 8 x 16 of the other strips, centred on the same row.)
         local right_edge = widgets.button_x(4) + widgets.BUTTON_W
-        if first > 1 then screen:triangle(widgets.button_x(1), PIC_Y, 8, 16, "left", "text") end
-        if last < #c.chain then screen:triangle(right_edge - 8, PIC_Y, 8, 16, "right", "text") end
+        if first > 1 then screen:triangle(widgets.button_x(1), PIC_Y + 3, 6, 11, "left", "text") end
+        if last < #c.chain then screen:triangle(right_edge - 6, PIC_Y + 3, 6, 11, "right", "text") end
         return
       end
       local range = last >= first and (first == last and tostring(first) or first .. "-" .. last) or "+"
