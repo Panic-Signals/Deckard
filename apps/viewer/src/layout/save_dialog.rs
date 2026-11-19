@@ -78,6 +78,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         if d.confirm_overwrite {
             ui.colored_label(egui::Color32::from_rgb(0xE3, 0x42, 0x3F), format!("\"{}\" is there already: replace it?", d.name.trim()));
         }
+        if let Some(e) = &d.error {
+            ui.add(egui::Label::new(RichText::new(e).color(egui::Color32::from_rgb(0xE3, 0x42, 0x3F))).wrap());
+        }
         ui.horizontal(|ui| {
             if ui.button(if d.confirm_overwrite { "Replace" } else { "Save" }).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 save = true;
