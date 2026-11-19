@@ -1224,14 +1224,24 @@ fn the_info_bar_shows_a_wheel_change() {
     v.master_db = -1.5;
     let text = s.screen_text(&v);
     assert!(text.contains(&"-1.5 dB".to_string()) && text.contains(&"MASTER VOL".to_string()), "{text:?}");
-    press(&mut s, &v, "BUTTON_TEMPO");
-    s.event(&Event::Wheel(3), &v, now);
+    let at = |ms: u64| now + std::time::Duration::from_millis(ms);
+    let tap = |s: &mut Surface, v: &View, ms: u64| {
+        s.event(&Event::Button("BUTTON_TEMPO", true), v, at(ms));
+        s.event(&Event::Button("BUTTON_TEMPO", false), v, at(ms));
+    };
+    tap(&mut s, &v, 0);
+    s.event(&Event::Wheel(3), &v, at(0));
     v.tempo = 123.0;
     assert!(s.screen_text(&v).contains(&"123.00 BPM".to_string()));
+    s.tick(&v, at(3000));
     assert!(s.screen_text(&v).contains(&"123.00 BPM".to_string()), "it stays while TEMPO is on");
-    press(&mut s, &v, "BUTTON_TEMPO");
-    assert!(!s.screen_text(&v).contains(&"123.00 BPM".to_string()), "TEMPO off: the tempo and scene again");
-    press(&mut s, &v, "BUTTON_TEMPO");
+    s.event(&Event::Wheel(1), &v, at(3000));
+    tap(&mut s, &v, 3100);
+    assert!(s.screen_text(&v).contains(&"123.00 BPM".to_string()), "TEMPO off: still there a moment after the last turn");
+    assert!(s.animates(), "and drawn again when it's due to go");
+    s.tick(&v, at(4600));
+    assert!(!s.screen_text(&v).contains(&"123.00 BPM".to_string()), "then the tempo and scene again");
+    tap(&mut s, &v, 4700);
     assert!(!s.screen_text(&v).contains(&"123.00 BPM".to_string()), "on again: not before a turn");
 }
 
@@ -4124,15 +4134,14 @@ fn touching_a_knob_focuses_its_picture() {
     let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
     s.event(&Event::Button("BUTTON_CAP_1", true), &v, t0);
     s.tick(&v, ms(150));
-    let picture = s.draw_picture(&v);
-    assert!(picture.texts.iter().any(|t| t == "1.20 kHz"), "the cutoff's value in the picture: {:?}", picture.texts);
     let touched = s.picture(&v);
     let band = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
     assert_ne!(band(&before), band(&touched), "the cutoff lights in the picture");
     s.event(&Event::Button("BUTTON_CAP_2", true), &v, ms(160));
     s.event(&Event::Button("BUTTON_CAP_3", true), &v, ms(160));
     s.tick(&v, ms(400));
-    assert!(!s.draw_picture(&v).texts.iter().any(|t| t == "1.20 kHz"), "a resting hand shows nothing");
+    let band_now = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    assert_eq!(band_now(&s.picture(&v)), band_now(&before), "a resting hand lights nothing");
     for n in ["BUTTON_CAP_1", "BUTTON_CAP_2", "BUTTON_CAP_3"] {
         s.event(&Event::Button(n, false), &v, ms(410));
     }
@@ -4141,8 +4150,11 @@ fn touching_a_knob_focuses_its_picture() {
     assert_eq!(s.error(), None);
 }
 
+/// Whether the cutoff has focus: its guide and handle change the left picture band
+/// from how a surface nobody has touched draws it.
 fn shows_cutoff(s: &Surface, v: &View) -> bool {
-    s.draw_picture(v).texts.iter().any(|t| t == "1.20 kHz")
+    let band = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    band(&s.picture(v)) != band(&Surface::new().picture(v))
 }
 
 /// A finger must rest 120 ms before a knob takes focus, and focus stays 180 ms after

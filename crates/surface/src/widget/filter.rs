@@ -15,12 +15,12 @@
 //! | `cutoff_mod` | Hz: the modulated cutoff; the base curve is drawn muted under it |
 //! | `resonance_mod` | 0..1: the modulated resonance, drawn the same way |
 //!
-//! Touch focus on `cutoff` draws a guide from the curve to the axis, a handle and the
-//! cutoff's value; on `resonance` it rings the peak and writes the Q.
+//! Touch focus on `cutoff` draws a guide from the curve to the axis and a handle; on
+//! `resonance` it rings the peak and writes the Q.
 
 use mlua::Table;
 
-use super::{Align, Canvas, freq_t, hz_text, num, text};
+use super::{Align, Canvas, freq_t, num, text};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
@@ -170,11 +170,8 @@ impl Filter {
             // (Kept inside the box at the ends of the range.)
             let (x, y) = (px(freq_t(eff)).clamp(6.0, w as f32 - 6.0), y_at(eff).clamp(6.0, h as f32 - 6.0));
             c.line(x, y, x, bottom - 1.0, 1.5, look.record);
+            // (No frequency written over it: the knob's own value shows it.)
             c.dot(x, y, 5.0, look.record);
-            let label = hz_text(eff);
-            let tw = c.text_width(&label, look.small) + 6;
-            let tx = (x as i32 - tw / 2).clamp(2, w - tw - 2);
-            c.text(tx, 3, tw, 12, &label, look.small, look.text, Align::Center);
         }
         if c.lit("resonance") {
             // The peak: the tallest point of the curve.

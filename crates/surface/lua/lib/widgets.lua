@@ -261,9 +261,9 @@ end
 -- name, or for a moment what the jog wheel just changed (the tempo shows only then).
 -- Nothing for the master. Returns where it starts.
 function widgets.info_on_row(screen, theme, info, y, button, least)
-  -- (The ink ending against the right border of the button above, just inside it:
-  -- bright text in the border's own column looked past the dim line.)
-  local right = widgets.button_x(button or 4) + BUTTON_W - 1
+  -- (The ink ending two columns inside the right border of the button above: bright
+  -- text in or against the border's own column looked past the dim line.)
+  local right = widgets.button_x(button or 4) + BUTTON_W - 2
   least = least or 300
   local quick = quick_edit.values(deckard.state())
   if quick then

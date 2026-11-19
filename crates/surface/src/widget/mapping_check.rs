@@ -436,6 +436,25 @@ mod tests {
         if let Some(name) = var("DECKARD_LOADING") {
             v.loading = Some(name);
         }
+        // (`DECKARD_EVENTS`: MK3 events first, comma-separated: `down:BUTTON_SHIFT`,
+        // `up:BUTTON_SHIFT`, `press:BUTTON_TEMPO`, `wheel:2`.)
+        if let Some(events) = var("DECKARD_EVENTS") {
+            let now = std::time::Instant::now();
+            s.tick(&v, now);
+            for e in events.split(',') {
+                let (kind, arg) = e.trim().split_once(':').expect("kind:argument");
+                let name: &'static str = Box::leak(arg.to_string().into_boxed_str());
+                match kind {
+                    "down" | "up" => drop(s.event(&deckard_mk3::Event::Button(name, kind == "down"), &v, now)),
+                    "press" => {
+                        s.event(&deckard_mk3::Event::Button(name, true), &v, now);
+                        s.event(&deckard_mk3::Event::Button(name, false), &v, now);
+                    }
+                    "wheel" => drop(s.event(&deckard_mk3::Event::Wheel(arg.parse().expect("steps")), &v, now)),
+                    _ => panic!("event {e}"),
+                }
+            }
+        }
         let mut px = s.picture(&v);
         assert!(s.error().is_none(), "{:?}", s.error());
         // (`DECKARD_565`: as the displays show it, dithered to their 5-6-5 levels.)
