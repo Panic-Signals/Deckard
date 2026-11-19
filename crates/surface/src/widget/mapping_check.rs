@@ -392,6 +392,11 @@ mod tests {
             }
             v.control.chain[0].picture = Some(key);
         }
+        // (`DECKARD_EMPTY`: a chain with no plug-ins at all.)
+        if var("DECKARD_EMPTY").is_some() {
+            v.control.chain.clear();
+            (v.control.slot, v.control.slot_index, v.control.slot_count) = (None, None, 0);
+        }
         // (`DECKARD_SLOTS`: more slots after it, comma-separated names, for a long chain.)
         if let Some(names) = var("DECKARD_SLOTS") {
             for n in names.split(',') {

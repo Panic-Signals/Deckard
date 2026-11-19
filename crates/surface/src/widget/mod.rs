@@ -546,7 +546,7 @@ pub fn ms_text(ms: f32) -> String {
 
 /// With the dials centred: how much higher than the plain look their box (and a
 /// picture's floor) ends, leaving a row over the knobs' names for the sections' names.
-const CENTRED_GAP: i32 = 14;
+const CENTRED_GAP: i32 = 15;
 /// With the dials centred: how much higher than the band a picture starts (level with
 /// the plug-in's own picture beside it).
 const CENTRED_RISE: i32 = 28;
