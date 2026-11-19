@@ -486,7 +486,8 @@ function control.draw(screen, theme, opts)
   local snd = group and group.sounds[s.sound]
   local shift_layer = c.plugins and deckard.held("SHIFT")
   local z = c.plugins and not shift_layer and c.zhora
-  local in_tabs = theme.info_in_tabs and not shift_layer and not z and c.plugins
+  -- (SHIFT changes only the buttons' row: the layout stays as it is.)
+  local in_tabs = theme.info_in_tabs and not z and c.plugins
   -- (The level's: the master's "M" in white, the group's label, or the sound's number.)
   local info = widgets.focus_info(s)
   if c.level == 1 then
@@ -499,7 +500,7 @@ function control.draw(screen, theme, opts)
   local pictured = {}
   if in_tabs then
     -- (No info bar: the level's number and name at the end of the chain strip's row.)
-    chain.tabs(screen, theme, c.level)
+    if not shift_layer then chain.tabs(screen, theme, c.level) end
     if c.level == 1 then info.number = nil end
     -- (Its name and number go to the right screen's row, after the page: the strip has
     -- the left one to itself.)
