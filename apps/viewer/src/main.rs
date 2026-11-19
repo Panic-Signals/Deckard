@@ -4633,6 +4633,27 @@ impl App {
         }
     }
 
+    /// Whether `edit`'s parameter has modulation in its group's active pattern (the
+    /// playing pattern while playing, the focused one when stopped), or an open touch.
+    pub(crate) fn is_modulated_in(&self, p: &deckard_model::Project, edit: layout::Edit) -> bool {
+        let Some((chain, target)) = modulation::mod_target(edit) else { return false };
+        if self.mod_takes.iter().any(|t| t.chain == chain && t.target == target) {
+            return true;
+        }
+        let (g, sound) = match chain {
+            deckard_doc::Chain::Sound(g, s) => (g, Some(s)),
+            deckard_doc::Chain::Group(g) => (g, None),
+            deckard_doc::Chain::Master => return false,
+        };
+        let pi = match self.playhead() {
+            Some(h) => record::pattern_at(p, h.mode, h.position, g).map(|(pi, _)| pi),
+            None if g == self.group => Some(self.pattern),
+            None => p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find_map(|&(gr, pi)| (gr == g).then_some(pi))),
+        };
+        let Some(pat) = pi.and_then(|pi| p.groups.get(g)?.patterns.get(pi)) else { return false };
+        pat.mods.iter().any(|m| m.sound == sound && m.slot == target.slot && m.field == target.field)
+    }
+
     /// Where a modulated knob's modulation has it now (0..1): its value moved by the
     /// playing pattern's points at the play position; `None` when it isn't modulated
     /// there (or the song is stopped).
@@ -5585,6 +5606,7 @@ impl App {
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
                         auto_mod: self.auto_mod_text(edits.get(i).copied().flatten()),
                         in_macro: !on_macros && k.param.is_some_and(|p| doc_cache.macro_targets.contains(&p)),
+                        modulated: k.modulated,
                     })
                 })
                 .collect(),
@@ -6127,6 +6149,7 @@ impl App {
                 }
             }
             A::Turn { knob, inc, fine } => self.control_request(R::Turn { pos: knob, inc, fine }),
+            A::EraseKnob(knob) => self.control_request(R::Erase { pos: knob }),
             A::Page(next) => self.control_request(R::Page(next)),
             A::PluginPage(n) => {
                 let Some(doc) = self.doc.clone() else { return };
@@ -6482,7 +6505,7 @@ impl App {
                         value: value as f64,
                         text: whole.unwrap_or(text),
                         param: edit.and_then(|e| layout::channel::knob_param(&e)).and_then(|(t, f)| d.param_oid(t, f)),
-                        modulated: edit.and_then(|e| self.mod_amount(e)).is_some(),
+                        modulated: edit.is_some_and(|e| self.is_modulated_in(p, e)),
                     }
                 });
             }
@@ -6533,7 +6556,7 @@ impl App {
                         value: shown_value as f64,
                         text,
                         param: edit.and_then(|e| layout::edit_param_oid(self, &d, e)),
-                        modulated: edit.and_then(|e| self.mod_amount(e)).is_some(),
+                        modulated: edit.is_some_and(|e| self.is_modulated_in(p, e)),
                     }
                 });
             }

@@ -1016,6 +1016,17 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    let sh = shared.clone();
+    d.set(
+        "erase_knob",
+        lua.create_function(move |_, knob: usize| {
+            if knob > 8 {
+                return Err(mlua::Error::runtime("there are 8 knobs"));
+            }
+            act(&sh, Action::EraseKnob(index(knob, "a knob")?));
+            Ok(())
+        })?,
+    )?;
 
     lua.globals().set("deckard", d)
 }
@@ -1585,6 +1596,7 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
                 kt.set("step_mod", knob.step_mod.as_deref())?;
                 kt.set("auto_mod", knob.auto_mod.as_deref())?;
                 kt.set("macro", knob.in_macro)?;
+                kt.set("modulated", knob.modulated)?;
                 Value::Table(kt)
             }
             _ => Value::Boolean(false),
