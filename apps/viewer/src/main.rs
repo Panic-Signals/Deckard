@@ -1550,7 +1550,11 @@ impl App {
                 self.sound_clipboard = std::mem::take(&mut self.sound_clipboard).into_iter().map(|c| c.carried(&old, &mut d)).collect();
             }
             if let Some(dir) = self.controller_scripts() {
-                self.controller = Some(controller::Controller::new(&dir, &self.model, Some(doc.clone())));
+                let ctl = controller::Controller::new(&dir, &self.model, Some(doc.clone()));
+                if let Ok(c) = &ctl {
+                    c.set_pinned(&self.settings.pinned_pages);
+                }
+                self.controller = Some(ctl);
             }
             // Projects with an arrangement open in the Song view, others in Ideas.
             self.song_view = !doc.borrow().project().sections.is_empty();
@@ -2344,10 +2348,21 @@ impl App {
     /// picked, and DECKARD's pictures of its plug-ins (C47).
     fn new_surface(&self) -> deckard_surface::Surface {
         let mut s = deckard_surface::Surface::with_user_dir(menu::settings_dir().map(|d| d.join("controller")));
+        s.set_pinned(self.settings.pinned_pages.clone(), self.settings.pinned_open.as_deref());
         s.set_lcd(&self.settings.lcd_mode);
         s.set_theme(&self.settings.controller_theme);
         plugin_pictures::give(&mut s);
         s
+    }
+
+    pub(crate) fn sync_surface_pins(&mut self) {
+        if self.surface.pins_match(&self.settings.pinned_pages, self.settings.pinned_open.as_deref()) {
+            return;
+        }
+        self.settings.pinned_pages = self.surface.pinned();
+        self.settings.pinned_open = self.surface.pinned_open();
+        #[cfg(not(test))]
+        self.settings.save();
     }
 
     /// Preferences ▸ Hardware ▸ Controller: stop the scripts for DECKARD's own layer, or
@@ -2372,7 +2387,11 @@ impl App {
     /// Start the controller scripts again (after a model change, or edited scripts).
     fn reload_controller(&mut self) {
         if let Some(dir) = self.controller_scripts() {
-            self.controller = Some(controller::Controller::new(&dir, &self.model, self.doc.clone()));
+            let ctl = controller::Controller::new(&dir, &self.model, self.doc.clone());
+            if let Ok(c) = &ctl {
+                c.set_pinned(&self.settings.pinned_pages);
+            }
+            self.controller = Some(ctl);
             self.sync_controller();
             self.status = format!("controller scripts loaded for {}", self.model);
             if let Some(Ok(c)) = &self.controller
@@ -5357,7 +5376,12 @@ impl App {
                 screens = c.screens().map(|s| (self.mk3_screens_sent, mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(s.px.clone()))));
             }
             let scaling = self.settings.velocity_scaling;
+            let pin_changed = c.sync_pins(&mut self.settings.pinned_pages);
             let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: touches(self, group) };
+            if pin_changed {
+                #[cfg(not(test))]
+                self.settings.save();
+            }
             self.control_bridge();
             Mk3Out { route, leds, screens }
         } else {
@@ -5398,6 +5422,7 @@ impl App {
                 view = self.surface_view();
             }
             self.stop_prehear_after_browse();
+            self.sync_surface_pins();
             // On the Browse page, the browser has its results to show.
             if self.surface.page() == "browse" && !self.browser.started() {
                 self.browse(browser::BrowseAct::Toggle);

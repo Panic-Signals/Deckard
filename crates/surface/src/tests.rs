@@ -3918,3 +3918,49 @@ fn a_long_pad_name_wraps_onto_a_second_line() {
     assert!(wrapped("dt02_kick-punchy_crunch"), "{texts:?}");
     assert!(texts.iter().any(|t| t == "Kick"), "a short name, one line: {texts:?}");
 }
+
+#[test]
+fn pinned_events_screen_persists_across_reloads_and_restarts() {
+    let (mut s, v) = (Surface::new(), view());
+    let now = Instant::now();
+    hold(&mut s, &v, "BUTTON_EVENTS", true);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty());
+    hold(&mut s, &v, "BUTTON_EVENTS", false);
+    assert_eq!(s.page(), "events");
+    assert!(s.pinned().contains("EVENTS"));
+    assert_eq!(s.pinned_open().as_deref(), Some("EVENTS"));
+    assert_eq!(s.leds(&v).get("LED_EVENTS"), Some(crate::leds::ON));
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Theme changes keep both the pin and the open pinned page.
+    s.set_theme("palenight");
+    assert_eq!(s.page(), "events");
+    assert_eq!(s.pinned_open().as_deref(), Some("EVENTS"));
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Restart while the pinned Events screen was open: reopens on Events over the
+    // project's saved base page, and restores the project's pad mode.
+    let mut s2 = Surface::new();
+    s2.set_pinned(s.pinned(), s.pinned_open().as_deref());
+    s2.set_theme("palenight");
+    let acts = s2.restore("mixer", "keyboard", &v, now);
+    assert!(acts.contains(&Action::KeyboardMode(true)), "{acts:?}");
+    assert_eq!(s2.page(), "events");
+    assert_eq!(s2.screen(), Some(("mixer".to_string(), "keyboard".to_string())));
+    assert_eq!(s2.leds(&v).get("LED_EVENTS"), Some(crate::leds::ON));
+    assert_eq!(s2.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Tapping EVENTS closes back to the base page, while keeping EVENTS pinned.
+    press(&mut s2, &v, "BUTTON_EVENTS");
+    assert_eq!(s2.page(), "mixer");
+    assert!(s2.pinned().contains("EVENTS"));
+    assert_eq!(s2.pinned_open(), None);
+
+    // Restart with EVENTS pinned (not open): starts on Control, and a tap locks Events open.
+    let mut s3 = Surface::new();
+    s3.set_pinned(s2.pinned(), s2.pinned_open().as_deref());
+    assert_eq!(s3.page(), FIRST_PAGE);
+    press(&mut s3, &v, "BUTTON_EVENTS");
+    assert_eq!(s3.page(), "events");
+    assert_eq!(s3.pinned_open().as_deref(), Some("EVENTS"));
+}

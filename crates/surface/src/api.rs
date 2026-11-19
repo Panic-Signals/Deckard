@@ -106,6 +106,50 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
     let sh = shared.clone();
     d.set("page", lua.create_function(move |_, ()| Ok(sh.borrow().page.clone()))?)?;
+    {
+        let sh = shared.clone();
+        d.set("pinned", lua.create_function(move |_, name: String| Ok(sh.borrow().pinned.contains(&name)))?)?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
+            "set_pinned",
+            lua.create_function(move |_, (name, on): (String, bool)| {
+                let mut b = sh.borrow_mut();
+                if on {
+                    b.pinned.insert(name);
+                } else {
+                    b.pinned.remove(&name);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
+            "shown_pin",
+            lua.create_function(move |lua, ()| match &sh.borrow().shown_pin {
+                Some((button, back)) => {
+                    let t = lua.create_table()?;
+                    t.set("button", button.as_str())?;
+                    t.set("back", back.as_str())?;
+                    Ok(Value::Table(t))
+                }
+                None => Ok(Value::Nil),
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
+            "set_shown_pin",
+            lua.create_function(move |_, (button, back): (Option<String>, Option<String>)| {
+                sh.borrow_mut().shown_pin = button.map(|b| (b, back.unwrap_or_else(|| crate::FIRST_PAGE.to_string())));
+                Ok(())
+            })?,
+        )?;
+    }
     let sh = shared.clone();
     // (The mod matrix left for a page shown while a button is held: it's coming back.)
     let parked = std::cell::Cell::new(false);
