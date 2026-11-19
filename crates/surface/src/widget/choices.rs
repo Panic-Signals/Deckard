@@ -3,8 +3,9 @@
 //! has no picture over it, in place of a dial; up to [`MAX`] values (a longer list
 //! would be too small to read: such a knob gets nothing, its cell shows the value).
 //!
-//! The list is left-aligned with the knob's name and value in the cell below, and
-//! centred in the box's height.
+//! The list is left-aligned with the knob's name and value in the cell below, and sits
+//! at the bottom of the box. The value it's on is in the accent with a tick beside it;
+//! the others are dim.
 //!
 //! Inputs:
 //!
@@ -54,7 +55,7 @@ impl Choices {
         let look = *c.look;
         c.fill(0, 0, c.r.w, c.r.h, look.background);
         let rh = row_h(n, c.h() - 8.0);
-        let top = ((c.h() - rh * n as f32) / 2.0).round();
+        let top = (c.h() - 6.0 - rh * n as f32).round();
         let mut st = look.label;
         st.size = if n > 4 { 11.0 } else { 12.0 };
         // (The cell's text starts 11 px in; the fill reaches a little left of it.)
@@ -63,9 +64,10 @@ impl Choices {
             let y = (top + rh * i as f32).round() as i32;
             let on = self.active == Some(i);
             if on {
-                c.fill(x, y + 1, w, rh as i32 - 2, c.ink(look.accent, &["value"]));
+                c.fill(x, y + 3, 2, rh as i32 - 6, c.ink(look.accent, &["value"]));
             }
-            let ink = if on { look.on_colour } else { mix(look.background, look.text, 0.6) };
+            // (Inactive values stay dim while the knob is touched.)
+            let ink = if on { look.accent } else { mix(look.background, look.text, 0.6) };
             c.text(x + 6, y, w - 8, rh as i32, item, st, ink, Align::Left);
         }
     }

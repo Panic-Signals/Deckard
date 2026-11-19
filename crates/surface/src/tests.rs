@@ -592,7 +592,7 @@ fn an_edit_of_the_same_size_reloads() {
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["lcd", "maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
+    assert_eq!(s.themes(), ["deep", "lcd", "maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -622,7 +622,7 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["lcd", "maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
+    assert_eq!(s.themes(), ["deep", "lcd", "maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
 }
 
 #[test]
@@ -1975,8 +1975,9 @@ fn plugin_pictures_show_on_the_plugin_page() {
     for k in 4..8 {
         v.control.knobs[k] = None;
     }
-    let count =
-        |px: &[[u8; 4]], c: [u8; 4], right: bool| px.iter().enumerate().filter(|(i, p)| **p == c && ((i % 960) >= 480) == right).count();
+    let count = |px: &[[u8; 4]], c: [u8; 4], right: bool| {
+        px.iter().enumerate().filter(|(i, p)| p[..3] == c[..3] && ((i % 960) >= 480) == right).count()
+    };
     let px = s.picture(&v);
     // (Small: the chain is the strip over the picture band.)
     assert!(count(&px, thumb, false) > 300, "the thumbnail in the chain: {}", count(&px, thumb, false));
@@ -4309,17 +4310,86 @@ fn bare_knobs_get_dials() {
     let rings = |pic: &crate::screen::Picture, x0: f32, x1: f32| {
         pic.ops
             .iter()
-            .filter(|o| matches!(o, screen::DrawOp::Line { p0, .. } if p0.0 >= x0 && p0.0 < x1 && p0.1 >= 106.0 && p0.1 < 200.0))
+            .filter(|o| matches!(o, screen::DrawOp::Arc { centre, .. } if centre.0 >= x0 && centre.0 < x1 && centre.1 >= 106.0 && centre.1 < 232.0))
             .count()
     };
     for k in 0..6 {
         let x = k as f32 * 120.0;
-        assert!(rings(&pic, x, x + 120.0) > 50, "a dial over knob {}", k + 1);
+        assert!(rings(&pic, x, x + 120.0) >= 2, "a dial (track and value) over knob {}", k + 1);
     }
     assert_eq!(rings(&pic, 720.0, 960.0), 0, "knobs 7-8 have no parameter");
     v.control.eq = Some(crate::EqCurveView { points: vec![0.5; 48], ..Default::default() });
     let pic = s.draw_picture(&v);
-    assert!(rings(&pic, 0.0, 120.0) > 50, "the left keeps its dials");
-    assert!(rings(&pic, 480.0, 960.0) < 200, "no dials over the EQ's curve");
+    assert!(rings(&pic, 0.0, 120.0) >= 2, "the left keeps its dials");
+    assert_eq!(rings(&pic, 480.0, 960.0), 0, "no dials over the EQ's curve");
+    assert_eq!(s.error(), None);
+}
+
+/// Writes, for a theme (`DECKARD_THEME`, else deep) and the controller folder in
+/// `DECKARD_CONTROLLER` if set, the Browse page and a Control page whose chain is a
+/// Cymbal then an EQ, in a few groups' colours, to `DECKARD_RENDER_DIR` (`--ignored`;
+/// to look at).
+#[test]
+#[ignore]
+fn render_browse_and_chain() {
+    let Ok(dir) = std::env::var("DECKARD_RENDER_DIR").map(std::path::PathBuf::from) else { return };
+    let mut s = Surface::with_user_dir(std::env::var("DECKARD_CONTROLLER").ok().map(std::path::PathBuf::from));
+    s.set_theme(&std::env::var("DECKARD_THEME").unwrap_or_else(|_| "deep".into()));
+    let mut v = view();
+    library(&mut v);
+    let write = |px: &[[u8; 4]], name: String| {
+        let f = std::fs::File::create(dir.join(&name)).unwrap();
+        let mut e = png::Encoder::new(f, 960, 272);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+        eprintln!("{}", dir.join(&name).display());
+    };
+    for (colour, rgb, idx) in [("red", [0xff, 0x13, 0x0f], 0), ("yellow", [0xff, 0xff, 0x00], 4), ("white", [0xff, 0xff, 0xff], 16)] {
+        v.groups[v.group].rgb = rgb;
+        v.groups[v.group].color = idx;
+        press(&mut s, &v, "BUTTON_BROWSE");
+        write(&s.picture(&v), format!("browse-{colour}.png"));
+        press(&mut s, &v, "BUTTON_BROWSE");
+        v.control.modules_visible = true;
+        v.control.chain = [("Cymbal", true), ("EQ", false)]
+            .iter()
+            .map(|(n, inst)| crate::SlotView { name: n.to_string(), instrument: *inst, active: true, plugin: false, picture: None })
+            .collect();
+        // (DECKARD's own pictures of them, as the app gives them.)
+        for slot in v.control.chain.iter_mut() {
+            let key = slot.name.to_lowercase();
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../apps/viewer/assets/plugins/{key}_Thumb.png"));
+            let Ok(f) = std::fs::File::open(path) else { continue };
+            let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+            dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+            let mut r = dec.read_info().unwrap();
+            let mut buf = vec![0; r.output_buffer_size().unwrap()];
+            let info = r.next_frame(&mut buf).unwrap();
+            let ch = info.color_type.samples();
+            let px = buf.chunks(ch).take((info.width * info.height) as usize).map(|p| match ch {
+                4 => [p[0], p[1], p[2], p[3]],
+                3 => [p[0], p[1], p[2], 255],
+                2 => [p[0], p[0], p[0], p[1]],
+                _ => [p[0], p[0], p[0], 255],
+            });
+            s.add_picture(&key, true, info.width as usize, info.height as usize, px.collect());
+            slot.picture = Some(key);
+        }
+        (v.control.slot_count, v.control.slot_index, v.control.slot) = (2, Some(1), Some("EQ".into()));
+        write(&s.picture(&v), format!("chain-{colour}.png"));
+        // (A chain longer than the strip, scrolled to its middle: an arrow at each side.)
+        let more = v.control.chain.clone();
+        for n in ["Reverb", "Delay", "Compressor", "Filter"] {
+            v.control.chain.push(crate::SlotView { name: n.into(), instrument: false, active: true, plugin: false, picture: None });
+        }
+        (v.control.slot_count, v.control.slot_index, v.control.slot) = (6, Some(3), Some("Delay".into()));
+        write(&s.picture(&v), format!("chain-long-{colour}.png"));
+        v.control.chain = more;
+        (v.control.slot_count, v.control.slot_index, v.control.slot) = (2, Some(1), Some("EQ".into()));
+        press(&mut s, &v, "BUTTON_PAD_MODE");
+        write(&s.picture(&v), format!("pad-{colour}.png"));
+        press(&mut s, &v, "BUTTON_PAD_MODE");
+    }
     assert_eq!(s.error(), None);
 }

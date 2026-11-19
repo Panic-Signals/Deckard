@@ -13,6 +13,7 @@ function widgets.button_x(i)
 end
 
 local BUTTON_W, BUTTON_H, BUTTON_Y = 115, 24, 4
+widgets.BUTTON_W = BUTTON_W
 
 -- Each screen's rows: the display buttons' labels (to 28), the info bar (35-59), then
 -- on the left the chain strip (lib/chain.lua, to 99), then the picture band (106-199),
@@ -91,17 +92,23 @@ local function style(theme, name, colour)
   return s
 end
 
+-- How tall a display button's label box is: to its bottom border (a theme that sets
+-- text by its capitals, `text_on_caps`: inside the border, the capitals centred in it).
+local function label_h(theme)
+  return theme.text_on_caps and BUTTON_H - 2 or BUTTON_H - 1
+end
+
 -- A display button's label at `x`: its text, a ★ after it (or alone) for `b.star`.
 local STAR_R, STAR_GAP = 6, 4
 local function label(screen, theme, x, b, st, star_colour)
   local text = b.text or ""
   if not b.star then
-    screen:label(x, BUTTON_Y + 1, BUTTON_W, BUTTON_H - 1, text, st)
+    screen:label(x, BUTTON_Y + 1, BUTTON_W, label_h(theme), text, st)
     return
   end
   local tw = text ~= "" and screen:text_width(text, st) + STAR_GAP or 0
   local x0 = x + (BUTTON_W - tw - 2 * STAR_R) // 2
-  if text ~= "" then screen:label(x0, BUTTON_Y + 1, tw, BUTTON_H - 1, text, st, "left") end
+  if text ~= "" then screen:label(x0, BUTTON_Y + 1, tw, label_h(theme), text, st, "left") end
   widgets.star(screen, x0 + tw + STAR_R, BUTTON_Y + BUTTON_H // 2, STAR_R, star_colour)
 end
 
@@ -186,7 +193,7 @@ function widgets.pin_tabs(screen, theme, on, names, pinned)
     local lit = i == pinned and on
     if i == pinned then screen:rect(x, BUTTON_Y, 117, BUTTON_H, lit and "button_selected" or "button", theme.corner) end
     if lit then widgets.chase(screen, theme, x, BUTTON_Y, 117, BUTTON_H) end
-    screen:label(x, BUTTON_Y + 1, 117, BUTTON_H - 1, name, style(theme, lit and "head_selected" or "head"))
+    screen:label(x, BUTTON_Y + 1, 117, label_h(theme), name, style(theme, lit and "head_selected" or "head"))
   end
 end
 
@@ -246,6 +253,49 @@ function widgets.meter_fill(db)
     if db <= d1 then return (h0 + (db - d0) / (d1 - d0) * (h1 - h0)) / 119 end
   end
   return 1
+end
+
+-- For a theme without the info bar (`info_in_tabs`): along the row at `y`, ending
+-- under display button `button` (default 4) and starting no further left than `least`
+-- (default 300), the focused group's or sound's number in a tile of its colour and its
+-- name, or for a moment what the jog wheel just changed (the tempo shows only then).
+-- Nothing for the master. Returns where it starts.
+function widgets.info_on_row(screen, theme, info, y, button, least)
+  -- (The ink ending against the right border of the button above, just inside it:
+  -- bright text in the border's own column looked past the dim line.)
+  local right = widgets.button_x(button or 4) + BUTTON_W - 1
+  least = least or 300
+  local quick = quick_edit.values(deckard.state())
+  if quick then
+    for i = #quick, 1, -1 do
+      local v = quick[i]
+      local st = v.title and style(theme, "info_title") or style(theme, "default", v.palette and widgets.colour(theme, v.palette, false, true))
+      local w = screen:text_width(v.text, st)
+      if right - w < least then break end
+      -- (The rightmost one's ink on the edge, as the name's.)
+      local ink = i == #quick and screen:text_bearing(v.text, st) or 0
+      if v.title then
+        screen:label(right - w + ink, y + 4, w, 16, v.text, st, "center", "bottom")
+      else
+        screen:label(right - w + ink, y + 3, w, 18, v.text, st, "center", "bottom")
+      end
+      right = right - w - (v.title and 4 or 8)
+    end
+    return right
+  end
+  local name, number = info.name or "", tostring(info.number or "")
+  if name == "" and number == "" then return right end
+  local st = style(theme, "default")
+  local w = math.min(screen:text_width(name, st), right - least - 30)
+  -- (The last letter's ink, not its width, on the edge: "Lead" and "Sound 1" alike.)
+  local ink = screen:text_bearing(name, st)
+  screen:label(right - w + ink, y, w, 24, name, st, "right", "center")
+  local tw = math.max(22, screen:text_width(number, style(theme, "info_number")) + 8)
+  local tx = right - w - (w > 0 and 8 or 0) - tw
+  local fill = widgets.colour(theme, info.palette)
+  screen:rect(tx, y + 1, tw, 22, fill, theme.corner)
+  screen:label(tx, y + 1, tw, 22, number, style(theme, "info_number", widgets.on_text(theme, fill)))
+  return tx
 end
 
 -- One tile (a group, or a pad): filled in its colour when `on`, else faint, with
@@ -354,21 +404,55 @@ end
 
 -- (`params[k].macro`: a macro controls it, the macro icon at the top right.)
 -- (`params[k].modulated`: automated in the pattern, a dot at the top right.)
-function widgets.params(screen, theme, x0, groups, page, params)
-  for _, g in ipairs(groups or {}) do
+-- (`pictured[k]`: knob k is in a picture, not a dial.)
+function widgets.params(screen, theme, x0, groups, page, params, pictured)
+  groups = groups or {}
+  -- (In a centred theme, one row on every page just over the knobs' names, whatever is
+  -- above it (a dial, a picture, tiles), in the theme's `section` style: not to be read
+  -- as one more knob's name. The dials and pictures end higher to leave it room.)
+  local own_row = theme.knobs_centred
+  for i, g in ipairs(groups) do
     local x = x0 + (g.at - 1) * 120
-    screen:label(x + 12, 207, 228, 24, g.text, style(theme, "default"), "left", "center")
+    if own_row then
+      if g.text and g.text ~= "" then
+        local last = (groups[i + 1] and groups[i + 1].at or 5) - 1
+        local to = x0 + last * 120 - 10
+        local st = style(theme, theme.styles.section and "section" or "param_name")
+        screen:label(x + 11, 217, to - x - 11, 14, g.text:upper(), st, "left", "center")
+      end
+    else
+      screen:label(x + 12, 207, 228, 24, g.text, style(theme, "default"), "left", "center")
+    end
   end
   if page then
     screen:label(x0 + 372, 207, 96, 24, page, style(theme, "param_page"), "right", "center")
+  end
+  -- (With sections in a centred theme, the lines between knobs only where a section
+  -- starts: how far each one reaches.)
+  local starts
+  if own_row then
+    for _, g in ipairs(groups) do
+      if g.text and g.text ~= "" then starts = {} end
+    end
+    for _, g in ipairs(starts and groups or {}) do starts[g.at] = true end
   end
   for k = 1, 4 do
     local p = params[k]
     if p then
       local x = x0 + (k - 1) * 120
-      if k > 1 then screen:rect(x, 233, 1, 39, "separator") end
+      if k > 1 and (not starts or starts[k]) then screen:rect(x, 233, 1, 39, "separator") end
       local icons = (p.macro and 1 or 0) + (p.modulated and 1 or 0)
       local name_w = icons == 2 and 78 or (icons == 1 and 90 or 100)
+      if theme.knobs_centred and not theme.knobs_left then
+        -- (Centred under the knob's dial; a unit runs on after the value.)
+        screen:label(x + 6, 233, 108, 14, p.name or "", style(theme, "param_name"), "center", "top")
+        local v = p.value or ""
+        if p.unit and p.unit ~= "" then v = v .. " " .. p.unit end
+        screen:label(x + 4, 248, 112, 27, v, style(theme, "param_value"), "center", "top")
+        if p.macro then macro_icon(screen, x + 108, 240, style(theme, "param_name").color) end
+        if p.modulated then screen:circle(x + (p.macro and 96 or 108), 240, 3.5, "record") end
+        goto continue
+      end
       screen:label(x + 11, 233, name_w, 14, p.name or "", style(theme, "param_name"), "left", "top")
       if p.macro then macro_icon(screen, x + 108, 240, style(theme, "param_name").color) end
       if p.modulated then screen:circle(x + (p.macro and 96 or 108), 240, 3.5, "record") end
@@ -377,6 +461,7 @@ function widgets.params(screen, theme, x0, groups, page, params)
         screen:label(x + 11 + w + 6, 248, 104 - w - 6, 25, p.unit, style(theme, "param_unit"), "left", "bottom")
       end
     end
+    ::continue::
   end
 end
 

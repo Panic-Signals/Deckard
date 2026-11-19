@@ -45,6 +45,8 @@ pub const CELL_W: i32 = 120;
 /// `lib/widgets.lua`): under the left screen's chain strip, above the knobs' section names.
 pub const BAND_Y: i32 = 106;
 pub const BAND_H: i32 = 94;
+/// Where the knobs' names start (`widgets.params`).
+pub const KNOB_NAME_Y: i32 = 233;
 
 /// A box on the screens (960 × 272, the right screen from x = 480).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,6 +55,123 @@ pub struct Rect {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+/// How the pictures look as a whole, the same for every widget: how much of the
+/// curve's colour fills under it (0: none, lines only), how strongly grids show, and
+/// whether faint dividers part neighbouring pictures or each sits on a panel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PictureStyle {
+    pub fill: f32,
+    pub grid: f32,
+    pub dividers: bool,
+    pub panels: bool,
+    /// A soft halo round the picture's lines (0: none), as a lit display's.
+    pub glow: f32,
+    /// The picture's lines this much thicker (1: as drawn).
+    pub stroke: f32,
+    /// The band redrawn as a dot matrix of `dots`-pixel dots (0: off).
+    pub dots: i32,
+    /// Colours of its own instead of the theme's: the picture, the grid, the panel.
+    pub ink: Option<[u8; 3]>,
+    pub grid_ink: Option<[u8; 3]>,
+    pub panel_ink: Option<[u8; 3]>,
+    /// Fills under curves fade from the curve's colour at the box's top to the field.
+    pub gradient: bool,
+    /// A touched dial keeps its arc's width and lights up with a halo round it.
+    pub focus_glow: bool,
+}
+
+impl PictureStyle {
+    const BASE: PictureStyle = PictureStyle {
+        fill: 0.0,
+        grid: 0.4,
+        dividers: false,
+        panels: false,
+        glow: 0.0,
+        stroke: 1.0,
+        dots: 0,
+        ink: None,
+        grid_ink: None,
+        panel_ink: None,
+        gradient: false,
+        focus_glow: false,
+    };
+    /// Lines only: no fills, faint grids.
+    pub const LINES: PictureStyle = PictureStyle::BASE;
+    /// A faint fill under curves, dividers between pictures.
+    pub const SOFT: PictureStyle = PictureStyle { fill: 0.16, dividers: true, ..PictureStyle::BASE };
+    /// Lines on a panel per picture and per knob.
+    pub const PANELS: PictureStyle = PictureStyle { panels: true, ..PictureStyle::BASE };
+    /// Lit lines with a halo, as a backlit display's segments.
+    pub const GLOW: PictureStyle = PictureStyle { glow: 1.0, fill: 0.08, grid: 0.25, ..PictureStyle::BASE };
+    /// An oscilloscope: green phosphor with a halo over a graticule.
+    pub const SCOPE: PictureStyle = PictureStyle {
+        glow: 1.0,
+        grid: 1.0,
+        ink: Some([0x6c, 0xff, 0x8f]),
+        grid_ink: Some([0x16, 0x3a, 0x22]),
+        panel_ink: Some([0x04, 0x0c, 0x07]),
+        panels: true,
+        ..PictureStyle::BASE
+    };
+    /// A dot-matrix display: the band in chunky dots, unlit ones faint.
+    pub const DOTS: PictureStyle = PictureStyle { dots: 3, stroke: 1.6, fill: 0.35, grid: 0.3, ..PictureStyle::BASE };
+    /// Bold silhouettes: curves filled solid, thick lines, no grid.
+    pub const SOLID: PictureStyle = PictureStyle { fill: 1.0, stroke: 2.0, grid: 0.3, ..PictureStyle::BASE };
+    /// Fills that fade from the top, heavier lines: for a theme with lit colour on a
+    /// dark ground.
+    pub const DEEP: PictureStyle =
+        PictureStyle { fill: 0.5, stroke: 1.35, grid: 0.7, gradient: true, focus_glow: true, ..PictureStyle::BASE };
+    /// White hairlines on deep blue panels, a drafting sheet's grid.
+    pub const BLUEPRINT: PictureStyle = PictureStyle {
+        grid: 1.0,
+        stroke: 0.75,
+        ink: Some([0xee, 0xf4, 0xff]),
+        grid_ink: Some([0x2a, 0x4e, 0x7e]),
+        panel_ink: Some([0x0c, 0x23, 0x45]),
+        panels: true,
+        ..PictureStyle::BASE
+    };
+}
+
+impl PictureStyle {
+    /// The style a theme names (`picture_style`).
+    pub fn named(name: &str) -> Option<PictureStyle> {
+        Some(match name {
+            "lines" => PictureStyle::LINES,
+            "soft" => PictureStyle::SOFT,
+            "panels" => PictureStyle::PANELS,
+            "glow" => PictureStyle::GLOW,
+            "scope" => PictureStyle::SCOPE,
+            "dots" => PictureStyle::DOTS,
+            "solid" => PictureStyle::SOLID,
+            "deep" => PictureStyle::DEEP,
+            "blueprint" => PictureStyle::BLUEPRINT,
+            _ => return None,
+        })
+    }
+}
+
+thread_local! {
+    static STYLE: std::cell::Cell<PictureStyle> = const { std::cell::Cell::new(PictureStyle::LINES) };
+    static THEME_STYLE: std::cell::Cell<Option<PictureStyle>> = const { std::cell::Cell::new(None) };
+}
+
+/// The style pictures draw in (on this thread: the scripts' and the tests'): the
+/// theme's own if it names one, else the one set.
+pub fn style() -> PictureStyle {
+    THEME_STYLE.with(|t| t.get()).unwrap_or_else(|| STYLE.with(|s| s.get()))
+}
+
+/// The style the theme drawing now names, if any (set before each frame).
+pub fn set_theme_style(s: Option<PictureStyle>) {
+    THEME_STYLE.with(|c| c.set(s));
+}
+
+/// Draw pictures in `s` from now on (on this thread).
+pub fn set_style(s: PictureStyle) {
+    STYLE.with(|c| c.set(s));
 }
 
 /// The theme's colours and type a widget draws with.
@@ -87,6 +206,12 @@ pub struct Look {
     pub big: Style,
     /// The theme asks for soft fills (`widgets_soft = true`). Off, fills are flat.
     pub soft: bool,
+    /// How much of a curve's colour fills under it ([`PictureStyle::fill`]; 0: no fill).
+    pub fill: f32,
+    /// The theme centres the knobs' names and values in their cells, and the dials over them.
+    pub centred: bool,
+    /// ... but at the cells' left, lined up with the names and values.
+    pub left: bool,
 }
 
 impl Look {
@@ -103,7 +228,8 @@ impl Look {
         let c = |name: &str, or: Paint| cache.color(name).unwrap_or(or);
         let background = c("background", f.background);
         let text = c("text", f.text);
-        let weak = c("weak", f.weak);
+        // (A dot matrix can't draw small labels: they'd be smudges. Its pictures go without.)
+        let weak = if style().dots >= 2 { background } else { c("weak", f.weak) };
         let mut small = cache.style("default");
         small.size = 10.0;
         small.colour = weak;
@@ -112,13 +238,21 @@ impl Look {
         let big = cache.style("param_value");
         Look {
             background,
-            panel: c("panel", f.panel),
+            // (In the panels style, a plot's own field is the panel it sits on.)
+            panel: match (style().panel_ink, style().panels) {
+                (Some(p), _) => Paint { rgb: p, alpha: 1.0 },
+                (None, true) => mix(background, text, 0.08),
+                (None, false) => c("panel", f.panel),
+            },
             text,
             weak,
-            grid: c("button", f.grid),
+            grid: match style().grid_ink {
+                Some(g) => Paint { rgb: g, alpha: 1.0 },
+                None => mix(background, c("button", f.grid), style().grid),
+            },
             separator: c("separator", f.separator),
             muted: c("muted", f.muted),
-            accent: c("accent", f.accent),
+            accent: style().ink.map_or(c("accent", f.accent), |i| Paint { rgb: i, alpha: 1.0 }),
             record: c("record", f.record),
             marker: c("marker", f.marker),
             on_colour: c("on_colour", f.on_colour),
@@ -126,6 +260,9 @@ impl Look {
             label,
             big,
             soft: cache.soft,
+            fill: style().fill,
+            centred: cache.centred,
+            left: cache.left,
         }
     }
 
@@ -152,13 +289,16 @@ impl Look {
             label: st(12.0, weak),
             big: st(21.5, p(255, 255, 255)),
             soft: false,
+            fill: style().fill,
+            centred: false,
+            left: false,
         }
     }
 
     /// The fill under a curve: a dimmer step of the curve's colour toward the field,
     /// opaque, so it reads on the `lcd` theme and keeps the MK3's runs of one colour.
     pub fn fill_of(&self, c: Paint) -> Paint {
-        mix(self.background, c, if self.soft { 0.45 } else { 0.3 })
+        mix(self.background, c, self.fill)
     }
 }
 
@@ -182,6 +322,12 @@ pub enum Align {
     Right,
 }
 
+impl Drop for Canvas<'_> {
+    fn drop(&mut self) {
+        self.pic.ops.push(DrawOp::Clip(None));
+    }
+}
+
 /// What a widget draws into: its box (`r`), the theme (`look`) and the input that has
 /// touch focus, if any. **Coordinates are relative to the box's top left** (0..w,
 /// 0..h); nothing may be drawn outside it (the golden tests check).
@@ -195,6 +341,9 @@ pub struct Canvas<'a> {
 
 impl<'a> Canvas<'a> {
     pub fn new(pic: &'a mut Picture, r: Rect, look: &'a Look) -> Canvas<'a> {
+        // (Nothing a widget draws leaves its box: past x = 480 it would be on the other
+        // screen.)
+        pic.ops.push(DrawOp::Clip(Some((r.x, r.y, r.x + r.w, r.y + r.h))));
         Canvas { pic, r, look, focus: None }
     }
 
@@ -231,10 +380,36 @@ impl<'a> Canvas<'a> {
         self.pic.ops.push(DrawOp::Frame { x: self.r.x + x, y: self.r.y + y, w, h, c, corner: 1.0 });
     }
 
-    /// A line `width` thick.
+    /// A line `width` thick. In a style with a stroke weight or a glow, a picture's own
+    /// lines (1.5 px and up: grids are thinner) are drawn heavier, or with a halo.
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: Paint) {
         let (ox, oy) = (self.r.x as f32, self.r.y as f32);
+        let st = style();
+        let width = if width >= 1.5 { width * st.stroke } else { width };
+        if st.glow > 0.0 && width >= 1.5 {
+            for (extra, a) in [(7.0, 0.12), (3.5, 0.25)] {
+                let halo = Paint { rgb: c.rgb, alpha: c.alpha * a * st.glow };
+                self.pic.ops.push(DrawOp::Line { p0: (ox + x0, oy + y0), p1: (ox + x1, oy + y1), width: width + extra, c: halo });
+            }
+        }
         self.pic.ops.push(DrawOp::Line { p0: (ox + x0, oy + y0), p1: (ox + x1, oy + y1), width, c });
+    }
+
+    /// An arc `width` thick of the circle of radius `r` about (`cx`, `cy`), from angle
+    /// `a0` to `a1` (degrees, counter-clockwise from 3 o'clock), in one stroke; heavier
+    /// or with a halo in a style that does that to lines, as [`Canvas::line`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, a0: f32, a1: f32, width: f32, c: Paint) {
+        let centre = (self.r.x as f32 + cx, self.r.y as f32 + cy);
+        let st = style();
+        let width = if width >= 1.5 { width * st.stroke } else { width };
+        if st.glow > 0.0 && width >= 1.5 {
+            for (extra, a) in [(7.0, 0.12), (3.5, 0.25)] {
+                let halo = Paint { rgb: c.rgb, alpha: c.alpha * a * st.glow };
+                self.pic.ops.push(DrawOp::Arc { centre, r, a0, a1, width: width + extra, c: halo });
+            }
+        }
+        self.pic.ops.push(DrawOp::Arc { centre, r, a0, a1, width, c });
     }
 
     /// Lines through `pts` in order.
@@ -247,10 +422,12 @@ impl<'a> Canvas<'a> {
     /// A flat fill between the curve through `pts` (in x order) and the line `y = base`,
     /// one column per pixel.
     pub fn area(&mut self, pts: &[(f32, f32)], base: f32, c: Paint) {
-        if pts.len() < 2 {
+        // (No fill in this style: the field's own colour.)
+        if pts.len() < 2 || c.rgb == self.look.background.rgb {
             return;
         }
         let (x0, x1) = (pts[0].0.ceil() as i32, pts[pts.len() - 1].0.floor() as i32);
+        let gradient = style().gradient;
         let mut seg = 0;
         for x in x0..=x1 {
             let xf = x as f32;
@@ -262,7 +439,12 @@ impl<'a> Canvas<'a> {
             let y = a.1 + (b.1 - a.1) * t;
             let (top, bottom) = if y < base { (y, base) } else { (base, y) };
             let (top, bottom) = (top.round() as i32, bottom.round() as i32);
-            if bottom > top {
+            if bottom > top && gradient && base > 0.0 {
+                // (Strongest at the box's top, fading to a trace of the colour at the base.)
+                let at = |yy: i32| mix(self.look.background, c, 0.12 + 0.88 * ((base - yy as f32) / base).clamp(0.0, 1.0)).rgb;
+                let (ox, oy) = (self.r.x, self.r.y);
+                self.pic.ops.push(DrawOp::Gradient { x: ox + x, y: oy + top, w: 1, h: bottom - top, top: at(top), bottom: at(bottom) });
+            } else if bottom > top {
                 self.fill(x, top, 1, bottom - top, c);
             }
         }
@@ -361,6 +543,13 @@ pub fn ms_text(ms: f32) -> String {
         format!("{ms:.1} ms")
     }
 }
+
+/// With the dials centred: how much higher than the plain look their box (and a
+/// picture's floor) ends, leaving a row over the knobs' names for the sections' names.
+const CENTRED_GAP: i32 = 14;
+/// With the dials centred: how much higher than the band a picture starts (level with
+/// the plug-in's own picture beside it).
+const CENTRED_RISE: i32 = 28;
 
 /// The pictures for a page of knobs (`knobs`, the Control page's eight, `false` where
 /// there's none), each in the picture band over the knobs it draws ([`layout`]), with
@@ -469,6 +658,18 @@ pub fn draw_pictures(
         spans.push(layout::Span { first: k, cells: 1, kind: "dial".into(), inputs, knobs: vec![(k, "value".into())] });
     }
     spans.sort_by_key(|s| s.first);
+    let st = style();
+    // Faint dividers where two pictures meet on one screen.
+    if st.dividers {
+        let ink = mix(look.background, look.separator, 0.45);
+        for w in spans.windows(2) {
+            let edge = w[0].first + w[0].cells;
+            if edge == w[1].first && edge % 4 != 0 {
+                let x = ((edge / 4) * 480 + (edge % 4) * CELL_W as usize) as f32;
+                pic.ops.push(DrawOp::Line { p0: (x, (BAND_Y + 10) as f32), p1: (x, (BAND_Y + BAND_H - 10) as f32), width: 1.0, c: ink });
+            }
+        }
+    }
     let out = lua.create_table()?;
     for span in spans {
         let inputs = lua.create_table()?;
@@ -487,11 +688,29 @@ pub fn draw_pictures(
         let x = (span.first / 4) as i32 * 480 + (span.first % 4) as i32 * CELL_W;
         // (A dial's box: lined up with its knob's name and value, which start 11 px into
         // the cell, rather than centred in the cell.)
-        let r = if span.kind == "dial" {
+        // (Centred: in the middle of the cell (or at its left), down close over the knob's
+        // name, every dial at one height; the section names go over them. A picture there
+        // ends on the dials' line, the ring's lowest point 8 px above its box's foot, so
+        // a curve's floor and a dial's foot sit level.)
+        let r = if span.kind == "dial" && look.centred {
+            Rect { x: if look.left { x + 6 } else { x + (CELL_W - 54) / 2 }, y: BAND_Y, w: 54, h: KNOB_NAME_Y - 2 - CENTRED_GAP - BAND_Y }
+        } else if span.kind == "dial" {
             Rect { x: x + 6, y: BAND_Y, w: 54, h: BAND_H }
         } else {
-            Rect { x, y: BAND_Y, w: span.cells as i32 * CELL_W, h: BAND_H }
+            // (Centred, the sections' names are under the band, not over it: a picture
+            // starts higher, into the room they left.)
+            let top = if look.centred { BAND_Y - CENTRED_RISE } else { BAND_Y };
+            let h = if look.centred { KNOB_NAME_Y - 2 - CENTRED_GAP - 8 + 1 - top } else { BAND_H };
+            // (At the left: in from the cells' edges as far as the names under it, so it
+            // keeps the screen's margins.)
+            let inset = if look.left { 11 } else { 0 };
+            Rect { x: x + inset, y: top, w: span.cells as i32 * CELL_W - 2 * inset, h }
         };
+        // Each picture (and each knob's dial or list) on a panel of its own.
+        if draw && st.panels {
+            let w = span.cells as i32 * CELL_W;
+            pic.ops.push(DrawOp::Fill { x: x + 4, y: BAND_Y, w: w - 8, h: BAND_H, c: look.panel, corner: 0.35 });
+        }
         if draw {
             draw_lua(&span.kind, pic, r, &inputs, look)?;
         }
@@ -500,6 +719,13 @@ pub fn draw_pictures(
         s.raw_set("cells", span.cells)?;
         s.raw_set("kind", span.kind.as_str())?;
         out.raw_push(s)?;
+    }
+    // A dot-matrix style: the band on both screens redrawn in dots.
+    if st.dots >= 2 {
+        let ghost = mix(look.background, look.text, 0.06).rgb;
+        for x in [0, 480] {
+            pic.ops.push(DrawOp::Dots { x, y: BAND_Y, w: 480, h: BAND_H, cell: st.dots, ghost });
+        }
     }
     Ok(out)
 }
@@ -511,19 +737,93 @@ pub struct Mappings(pub std::rc::Rc<Vec<mapping::Mapping>>);
 pub fn draw_lua(kind: &str, pic: &mut Picture, r: Rect, t: &Table, look: &Look) -> mlua::Result<()> {
     let mut c = Canvas::new(pic, r, look);
     c.focus = text(t, "focus");
+    draw_on(kind, &mut c, t)
+}
+
+/// Draw widget `kind` from `t` on canvas `c`.
+pub fn draw_on(kind: &str, c: &mut Canvas, t: &Table) -> mlua::Result<()> {
+    let c = &mut *c;
     match kind {
-        "curve" => curve::Curve::from_lua(t)?.draw(&mut c),
-        "dial" => dial::Dial::from_lua(t)?.draw(&mut c),
-        "choices" => choices::Choices::from_lua(t)?.draw(&mut c),
-        "filter" => filter::Filter::from_lua(t)?.draw(&mut c),
-        "band" => band::Band::from_lua(t)?.draw(&mut c),
-        "eq" => eq::Eq::from_lua(t)?.draw(&mut c),
-        "envelope" => envelope::Envelope::from_lua(t)?.draw(&mut c),
-        "lfo" => lfo::Lfo::from_lua(t)?.draw(&mut c),
-        "oscillators" => oscillators::Oscillators::from_lua(t)?.draw(&mut c),
-        "transfer" => transfer::Transfer::from_lua(t)?.draw(&mut c),
-        "value" => value::Value::from_lua(t)?.draw(&mut c),
+        "curve" => curve::Curve::from_lua(t)?.draw(c),
+        "dial" => dial::Dial::from_lua(t)?.draw(c),
+        "choices" => choices::Choices::from_lua(t)?.draw(c),
+        "filter" => filter::Filter::from_lua(t)?.draw(c),
+        "band" => band::Band::from_lua(t)?.draw(c),
+        "eq" => eq::Eq::from_lua(t)?.draw(c),
+        "envelope" => envelope::Envelope::from_lua(t)?.draw(c),
+        "lfo" => lfo::Lfo::from_lua(t)?.draw(c),
+        "oscillators" => oscillators::Oscillators::from_lua(t)?.draw(c),
+        "transfer" => transfer::Transfer::from_lua(t)?.draw(c),
+        "value" => value::Value::from_lua(t)?.draw(c),
         _ => return Err(mlua::Error::runtime(format!("no widget \"{kind}\""))),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::golden;
+
+    /// Every widget, pushed to the ends of its inputs, still draws only inside its box
+    /// (the MK3 shows each screen apart: a mark past a picture's edge at x = 480 lands
+    /// on the other screen).
+    #[test]
+    fn widgets_stay_in_their_box_at_the_extremes() {
+        let lua = mlua::Lua::new();
+        let cases = [
+            ("curve", "{ kind = 'freq', points = { 0, 1, 0 }, bands = { { x = 0, y = 0 }, { x = 1, y = 1 }, { x = 0, y = 1 } } }", 2),
+            ("curve", "{ kind = 'time', points = { 1, 0 }, bands = { { x = 0, y = 1 }, { x = 1, y = 0 } }, focus = 'bands' }", 2),
+            ("filter", "{ cutoff = 20, resonance = 1, focus = 'cutoff' }", 2),
+            ("filter", "{ cutoff = 20000, resonance = 1, shape = 'hp', focus = 'resonance', cutoff_mod = 20 }", 2),
+            ("band", "{ freq = 20, gain = 24, q = 20, focus = 'freq' }", 2),
+            ("band", "{ freq = 20000, gain = -24, q = 0.1, type = 'high_shelf', focus = 'q', freq_mod = 20 }", 2),
+            (
+                "eq",
+                "{ bands = { { freq = 20, gain = 18, q = 10 }, { freq = 20000, gain = -18, q = 0.1 }, { freq = 20, gain = -18, type = 'low_cut' } }, focus = 'band1' }",
+                3,
+            ),
+            ("eq", "{ bands = { { freq = 10, gain = 30, q = 40 }, { freq = 30000, gain = -30, q = 40 } }, focus = 'band2' }", 3),
+            ("envelope", "{ attack = 0, decay = 0, sustain = 1, release = 0, focus = 'attack' }", 2),
+            ("envelope", "{ attack = 100000, decay = 100000, sustain = 0, release = 100000, amount = -1, attack_mod = 0 }", 2),
+            ("lfo", "{ shape = 'square', depth = 1, position = 1, phase = 1, focus = 'depth', depth_mod = 1 }", 2),
+            ("transfer", "{ threshold = 0, ratio = 100, makeup = 24, level = 0, reduction = 60, focus = 'threshold' }", 2),
+            ("transfer", "{ threshold = -60, ratio = 1, knee = 24, makeup = -24, level = -100 }", 2),
+            (
+                "value",
+                "{ name = 'A VERY LONG PARAMETER NAME', text = '-120000.00 kHz', value = 1, value_mod = 0, bipolar = true, focus = 'value' }",
+                1,
+            ),
+            ("oscillators", "{ wave1 = 'very nrw', octave1 = 4, wave2 = 'saw', octave2 = -3, noise = 1, focus = 'wave1' }", 2),
+            ("dial", "{ value = 1, value_mod = 0, focus = 'value' }", 1),
+            ("dial", "{ value = 0, bipolar = true, steps = 16, value_mod = 1 }", 1),
+            ("choices", "{ items = { 'A VERY LONG CHOICE NAME', 'B', 'C', 'D', 'E', 'F' }, active = 6, focus = 'value' }", 1),
+        ];
+        let mut failures = Vec::new();
+        for theme in golden::THEMES {
+            let look = golden::look(theme);
+            for (kind, src, min_cells) in cases {
+                let t: mlua::Table = lua.load(format!("return {src}")).eval().unwrap();
+                for w in golden::widths(min_cells) {
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        golden::render(&look, w, None, |cv| {
+                            cv.focus = super::text(&t, "focus");
+                            super::draw_on(kind, cv, &t).unwrap();
+                        })
+                    }));
+                    if r.is_err() {
+                        failures.push(format!("{kind} {src} at {w} on {theme}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "drawing outside the box:
+{}",
+            failures.join(
+                "
+"
+            )
+        );
+    }
 }

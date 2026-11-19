@@ -230,7 +230,8 @@ end
 -- page ("1/6") at the right.
 -- (`no_page`: without the "2/4" over the right knob.)
 -- (`knob_of`, if given, shows each knob as it returns it, or not at all for nil.)
-local function knobs(screen, theme, c, no_page, knob_of)
+-- (`pictured[i]`: knob i is in a picture over the band, not a dial.)
+local function knobs(screen, theme, c, no_page, knob_of, pictured)
   local function at(i)
     local knob = c.knobs[i]
     if knob and knob_of then return knob_of(knob) end
@@ -257,8 +258,11 @@ local function knobs(screen, theme, c, no_page, knob_of)
       end
     end
     local page = nil
-    if half == 1 and #c.pages > 1 and not no_page then page = c.page .. "/" .. #c.pages end
-    widgets.params(screen, theme, half * 480, groups, page, params)
+    -- (A theme with its knobs centred shows the page up on the bar instead.)
+    if half == 1 and #c.pages > 1 and not no_page and not theme.knobs_centred then page = c.page .. "/" .. #c.pages end
+    local in_picture = {}
+    for k = 1, 4 do in_picture[k] = pictured and pictured[half * 4 + k] or nil end
+    widgets.params(screen, theme, half * 480, groups, page, params, in_picture)
   end
 end
 
@@ -475,6 +479,30 @@ local function random_view(screen, theme, r)
   screen:label(bx, by - 16, bw, 14, "VELOCITY · " .. (names[(r.distribution or 1) + 1] or ""), { size = 9, color = gc.weak }, "left", "center")
 end
 
+-- The page on the right screen's bar: its name, then a pip per page, the shown one lit.
+-- Past PIPS pages, a track as long as eight pips with the shown page lit along it, as
+-- a scroll bar's, and the count. Returns where it ends.
+local PIPS, TRACK_W = 8, 8 * 10 + 8
+local function page_pips(screen, theme, c)
+  local n = #c.pages
+  local name = c.pages[c.page] or ""
+  local w = screen:label(494, 37, 160, 24, name, "param_name", "left", "center")
+  local x = 494 + w + 10
+  if n <= PIPS then
+    for i = 1, n do
+      local on = i == c.page
+      screen:rect(x, 47, on and 14 or 6, 4, on and "accent" or "button", 0.5)
+      x = x + (on and 14 or 6) + 4
+    end
+    return x
+  end
+  local thumb = math.max(8, TRACK_W // n)
+  screen:rect(x, 48, TRACK_W, 2, "button")
+  local at = x + math.floor((TRACK_W - thumb) * (c.page - 1) / (n - 1) + 0.5)
+  screen:rect(at, 47, thumb, 4, "accent", 0.5)
+  return x + TRACK_W + 8 + screen:label(x + TRACK_W + 8, 37, 60, 24, c.page .. " / " .. n, "param_name", "left", "center")
+end
+
 -- The knobs in touch focus (CAP_1..8 rested on, just lifted from, or just turned).
 local function touched()
   return touch.focused(deckard.now())
@@ -489,7 +517,7 @@ function control.draw(screen, theme, opts)
   local snd = group and group.sounds[s.sound]
   local shift_layer = c.plugins and deckard.held("SHIFT")
   local z = c.plugins and not shift_layer and c.zhora
-  if not shift_layer and not z then chain.tabs(screen, theme, c.level) end
+  local in_tabs = theme.info_in_tabs and not shift_layer and not z and c.plugins
   -- (The level's: the master's "M" in white, the group's label, or the sound's number.)
   local info = widgets.focus_info(s)
   if c.level == 1 then
@@ -498,7 +526,18 @@ function control.draw(screen, theme, opts)
     info.number = string.char(string.byte("A") + (s.group - 1) % 8) .. ((s.group - 1) // 8 + 1)
     info.palette, info.name = group.palette, group.name
   end
-  widgets.info_bar(screen, theme, info)
+  -- (The knobs in a picture over the band rather than a dial.)
+  local pictured = {}
+  if in_tabs then
+    -- (No info bar: the level's number and name at the end of the chain strip's row.)
+    chain.tabs(screen, theme, c.level)
+    if c.level == 1 then info.number = nil end
+    -- (Its name and number go to the right screen's row, after the page: the strip has
+    -- the left one to itself.)
+  else
+    if not shift_layer and not z then chain.tabs(screen, theme, c.level) end
+    widgets.info_bar(screen, theme, info)
+  end
   if shift_layer then
     local slot = c.slot_index and c.chain[c.slot_index]
     widgets.buttons(screen, theme, {
@@ -536,12 +575,38 @@ function control.draw(screen, theme, opts)
     -- goes over the right screen's picture (drawn after it, on its own background)
     -- rather than taking it away.
     local own = slot and (c.tuner or c.eq or c.filter or c.picture)
-    local right_free = true
+    local right_free, left_free = true, true
     for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false, true)) do
       if span.first > 4 and span.kind ~= "choices" then right_free = false end
+      if span.first <= 4 and span.kind ~= "dial" and span.kind ~= "choices" then left_free = false end
+      if span.kind ~= "dial" then
+        for i = span.first, span.first + span.cells - 1 do pictured[i] = true end
+      end
     end
+    -- A theme's showcase: over a left screen of only dials, a hosted plug-in's own picture as
+    -- it is, at its own size (shrunk, or in the theme's colours, it smudges).
+    -- (At its own size at the left margin, between the strip and the section names;
+    -- centred under the bar otherwise.)
+    -- (Not DECKARD's own devices: the strip already shows their picture whole.)
+    if theme.plugin_showcase and left_free and slot and slot.plugin and slot.picture then
+      local w, h = screen:image_size(slot.picture, true)
+      if theme.knobs_left and w then
+        -- (At its own size, or shrunk to fit, centred in its band.)
+        local k = math.min(1, 80 / h, 458 / w)
+        local pw, ph = math.floor(w * k + 0.5), math.floor(h * k + 0.5)
+        screen:image(11, 78 + (80 - ph) // 2, pw, ph, slot.picture, true, true)
+      else
+        local y = theme.info_in_tabs and 86 or widgets.BAND_Y - 6
+        screen:image(0, y, 480, 80, slot.picture, true, true)
+      end
+    end
+    local pips_end = theme.knobs_centred and #c.pages > 1 and page_pips(screen, theme, c) or 494
+    if in_tabs then widgets.info_on_row(screen, theme, info, 36, 8, pips_end + 16) end
     if slot then
-      screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
+      -- (Not in a theme whose bar shows the page: the strip names the plug-in.)
+      if not theme.knobs_centred then
+        screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
+      end
       if c.tuner then
         -- The Tuner effect: A4's pitch (and Muted) on the bar, the dial under it.
         local t = c.tuner
@@ -579,7 +644,7 @@ function control.draw(screen, theme, opts)
       channel_icon(screen, c.page_group, 720, widgets.BAND_Y + widgets.BAND_H // 2, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
     end
   end
-  knobs(screen, theme, c, false, knob_of)
+  knobs(screen, theme, c, false, knob_of, pictured)
 end
 
 -- The knobs' row as the page draws it (Set Macro shows it too).

@@ -217,7 +217,8 @@ impl Envelope {
         c.fill(0, 0, w, h, look.panel);
         let times = w >= 360;
         let base = (h - if times { 29 } else { 17 }) as f32;
-        let top = 3.0;
+        // (Room over the peak: a line along the panel's top edge reads as cut off.)
+        let top = 7.0;
         let (x0, pw) = (4.0, (w - 8) as f32);
         let flip = self.amount < 0.0;
         let amt = self.amount.abs();
@@ -253,7 +254,7 @@ impl Envelope {
                 _ => "R",
             };
             c.text(mid as i32 - 12, base as i32 + 3, 24, 12, letter, look.small, look.weak, Align::Center);
-            if times && matches!(s.name, "attack" | "decay" | "release") {
+            if times && matches!(s.name, "attack" | "decay" | "sustain" | "release") {
                 let x = (mid as i32 - 28).clamp(0, w - 56);
                 c.text(x, base as i32 + 15, 56, 12, &self.value_text(s.name), look.small, look.weak, Align::Center);
             }

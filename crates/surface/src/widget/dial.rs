@@ -3,9 +3,8 @@
 //! the value, so the dial has no text.
 //!
 //! The ring is open at the bottom: its track sweeps 270 degrees clockwise from the lower
-//! left, through the top, to the lower right. It's at most 20 px in radius, and placed so
-//! the shape you see (the open ring, not the whole circle) is centred in the box: with
-//! the gap at the bottom, the circle's own centre would leave it looking high.
+//! left, through the top, to the lower right. It's at most 20 px in radius, and sits at
+//! the bottom of its box, close to the knob's name and value below.
 //!
 //! Inputs (all optional):
 //!
@@ -34,8 +33,6 @@ pub struct Dial {
 /// from 3 o'clock, as in maths).
 const START: f32 = 225.0;
 const SWEEP: f32 = 270.0;
-/// Degrees per polyline segment.
-const SEG: f32 = 3.0;
 /// The gap between a stepped knob's segments, in degrees.
 const GAP: f32 = 6.0;
 
@@ -49,11 +46,9 @@ fn point(cx: f32, cy: f32, r: f32, deg: f32) -> (f32, f32) {
     (cx + r * a.cos(), cy - r * a.sin())
 }
 
-/// An arc of radius `r` from angle `a0` to `a1` (degrees), as short line segments.
+/// An arc of radius `r` from angle `a0` to `a1` (degrees), one smooth stroke.
 fn arc(c: &mut Canvas, (cx, cy): (f32, f32), r: f32, a0: f32, a1: f32, width: f32, ink: super::Paint) {
-    let n = ((a1 - a0).abs() / SEG).ceil().max(1.0) as usize;
-    let pts: Vec<(f32, f32)> = (0..=n).map(|i| point(cx, cy, r, a0 + (a1 - a0) * i as f32 / n as f32)).collect();
-    c.polyline(&pts, width, ink);
+    c.arc(cx, cy, r, a0, a1, width, ink);
 }
 
 impl Dial {
@@ -70,14 +65,26 @@ impl Dial {
         let look = *c.look;
         let focused = c.lit("value");
         let r = (c.r.w.min(c.r.h) as f32 / 2.0 - 7.0).clamp(8.0, 20.0);
-        // (The ring's lowest point is at r·sin 45° below the centre, not r: lower the
-        // centre by half the difference so the visible ring sits in the middle.)
-        let centre = (c.w() / 2.0, c.h() / 2.0 + r * (1.0 - std::f32::consts::FRAC_1_SQRT_2) / 2.0);
+        // (At the bottom of the box, near the knob's name and value below it: the ring's
+        // lowest point, r·sin 45° under its centre, 8 px above the box's foot.)
+        let centre = (c.w() / 2.0, c.h() - 8.0 - r * std::f32::consts::FRAC_1_SQRT_2);
         let value = self.value.clamp(0.0, 1.0);
         let from: f32 = if self.bipolar { 0.5 } else { 0.0 };
         let track = c.ink(if focused { look.separator } else { look.grid }, &["value"]);
         let accent = c.ink(look.accent, &["value"]);
-        let arc_w = if focused { 5.0 } else { 3.0 };
+        let glow = focused && super::style().focus_glow;
+        let arc_w = if focused && !glow { 5.0 } else { 3.0 };
+        // (A glow: a faint haze hugging the lit arc, 3 px each side, in its colour faded
+        // into the field and falling off smoothly (a ring a pixel apart, none of them a
+        // visible band); opaque so the segments' ends don't stack up.)
+        let halo = |c: &mut Canvas, a0: f32, a1: f32| {
+            if glow {
+                for i in (1..=6).rev() {
+                    let k = 0.2 * (1.0 - i as f32 / 7.0).powi(2);
+                    arc(c, centre, r, a0, a1, arc_w + i as f32, super::mix(look.background, look.accent, k));
+                }
+            }
+        };
         let (lo, hi) = (from.min(value), from.max(value));
         match self.steps {
             Some(n) => {
@@ -87,19 +94,23 @@ impl Dial {
                     // A segment is lit when its middle lies in the arc.
                     let mid = (i as f32 + 0.5) / n as f32;
                     let on = mid >= lo && mid <= hi && (lo < hi);
+                    if on {
+                        halo(c, s0, s1);
+                    }
                     arc(c, centre, r, s0, s1, if on { arc_w } else { 3.0 }, if on { accent } else { track });
                 }
             }
             None => {
                 arc(c, centre, r, angle(0.0), angle(1.0), 3.0, track);
                 if hi > lo {
+                    halo(c, angle(lo), angle(hi));
                     arc(c, centre, r, angle(lo), angle(hi), arc_w, accent);
                 }
             }
         }
         if let Some(m) = self.value_mod {
             let m = m.clamp(0.0, 1.0);
-            let fill = c.ink(look.fill_of(look.accent), &["value", "value_mod"]);
+            let fill = c.ink(super::mix(look.background, look.accent, 0.45), &["value", "value_mod"]);
             if (m - value).abs() > 1e-4 {
                 arc(c, centre, r, angle(value), angle(m), 1.5, fill);
             }
@@ -134,10 +145,12 @@ mod tests {
         let r = crate::widget::Rect { x: 0, y: 0, w: 120, h: 104 };
         let mut cv = Canvas::new(&mut p, r, &look);
         d.draw(&mut cv);
+        drop(cv);
         let n = p.ops.len();
         let mut p2 = crate::screen::Picture::new([0; 3]);
         let mut cv = Canvas::new(&mut p2, r, &look);
         Dial { value: 0.45, bipolar: true, ..Default::default() }.draw(&mut cv);
+        drop(cv);
         assert!(p2.ops.len() > n);
     }
 
@@ -165,6 +178,28 @@ mod tests {
         golden::check("dial-focus", 1, Some("value"), |cv| d.draw(cv));
     }
 
+    /// A dial plain and touched in a theme (`DECKARD_THEME`, default deep), side by side,
+    /// into `DECKARD_RENDER_DIR` (to look at, not a check).
+    #[test]
+    #[ignore = "renders a picture to look at"]
+    fn render_dial_focus() {
+        let Ok(out) = std::env::var("DECKARD_RENDER_DIR") else { return };
+        let theme = std::env::var("DECKARD_THEME").unwrap_or_else(|_| "deep".into());
+        let look = golden::look(&theme);
+        crate::widget::set_theme_style(crate::widget::PictureStyle::named(&theme));
+        let d = Dial { value: 0.6, ..Default::default() };
+        let (w, h) = (120usize, crate::widget::BAND_H as usize);
+        let plain = golden::render(&look, w as i32, None, |cv| d.draw(cv));
+        let lit = golden::render(&look, w as i32, Some("value"), |cv| d.draw(cv));
+        let mut px = Vec::with_capacity(w * 2 * h);
+        for y in 0..h {
+            px.extend_from_slice(&plain[y * w..(y + 1) * w]);
+            px.extend_from_slice(&lit[y * w..(y + 1) * w]);
+        }
+        let file = std::path::PathBuf::from(out).join("dial-focus.png");
+        golden::write_png(&file, (w * 2) as u32, h as u32, &px);
+    }
+
     #[test]
     fn focus_changes() {
         let d = Dial { value: 0.4, ..Default::default() };
@@ -178,7 +213,7 @@ mod tests {
         let t: Table = lua.load("return { value = 0.3, bipolar = true, value_mod = 0.6, steps = 5 }").eval().unwrap();
         let look = crate::widget::Look::fallback();
         crate::widget::draw_lua("dial", &mut p, crate::widget::Rect { x: 0, y: 0, w: 120, h: 104 }, &t, &look).unwrap();
-        assert!(p.ops.len() > 10);
+        assert!(p.ops.len() >= 5, "five segments, the modulation and the pointer");
         let d = Dial::from_lua(&t).unwrap();
         assert_eq!(d.steps, Some(5));
         assert!(d.bipolar);

@@ -18,9 +18,31 @@ use std::time::Duration;
 pub const WIDTH: usize = 480;
 pub const HEIGHT: usize = 272;
 
-/// An RGB565 pixel.
+/// An RGB565 pixel (each channel's top bits).
 pub fn rgb565(r: u8, g: u8, b: u8) -> u16 {
     ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3)
+}
+
+/// The RGB565 pixel nearest (`r`, `g`, `b`), undithered (for a picture's fine detail).
+pub fn rgb565_rounded(r: u8, g: u8, b: u8) -> u16 {
+    let q = |v: u8, levels: u32| (u32::from(v) * levels + 127) / 255;
+    ((q(r, 31) << 11) | (q(g, 63) << 5) | q(b, 31)) as u16
+}
+
+/// A 64×64 blue-noise threshold map, 0..255 (`tools/blue_noise.py`).
+static BLUE_NOISE: &[u8; 64 * 64] = include_bytes!("blue_noise_64.bin");
+
+/// The RGB565 pixel at (`x`, `y`) on a display: each channel rounded up or down to its
+/// nearest levels by a blue-noise threshold fixed to the place, so a shade between two
+/// levels shows as a fine even mix of them (their average its own) instead of a band of
+/// the lower one. Fixed to the place, a pixel that doesn't change doesn't flicker; one
+/// colour for all three channels keeps the grain grey rather than coloured. 0 and 255
+/// stay as they are.
+pub fn rgb565_dithered(x: usize, y: usize, r: u8, g: u8, b: u8) -> u16 {
+    let d = u32::from(BLUE_NOISE[(y % 64) * 64 + x % 64]);
+    // floor(v × levels / 255 + (d + 0.5) / 256), in integers.
+    let q = |v: u8, levels: u32| (u32::from(v) * levels * 512 + (2 * d + 1) * 255) / (255 * 512);
+    ((q(r, 31) << 11) | (q(g, 63) << 5) | q(b, 31)) as u16
 }
 
 /// The transfer that draws rows `y0..y1` of `px` (one display's pixels, row by row).
@@ -241,6 +263,30 @@ impl Displays {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dithering_keeps_the_average_and_the_ends() {
+        let split = |p: u16| (p >> 11, (p >> 5) & 63, p & 31);
+        assert_eq!(rgb565_dithered(5, 9, 0, 0, 0), 0);
+        assert_eq!(rgb565_dithered(5, 9, 255, 255, 255), 0xffff);
+        // Over a tile, a shade's levels average to the shade itself (not the level under it).
+        for v in [21u8, 100, 130, 200, 250] {
+            let (mut r, mut g) = (0.0, 0.0);
+            for y in 0..64 {
+                for x in 0..64 {
+                    let (pr, pg, _) = split(rgb565_dithered(x, y, v, v, v));
+                    r += f64::from(pr) / 31.0 * 255.0;
+                    g += f64::from(pg) / 63.0 * 255.0;
+                }
+            }
+            let (r, g) = (r / 4096.0, g / 4096.0);
+            assert!((r - f64::from(v)).abs() < 0.6 && (g - f64::from(v)).abs() < 0.6, "{v}: {r:.2} {g:.2}");
+        }
+        // Each threshold once per 16 pixels: an even mix, every value used.
+        let mut n = [0u32; 256];
+        BLUE_NOISE.iter().for_each(|&d| n[usize::from(d)] += 1);
+        assert!(n.iter().all(|&c| c == 16));
+    }
 
     #[test]
     fn decoding_reverses_encoding() {

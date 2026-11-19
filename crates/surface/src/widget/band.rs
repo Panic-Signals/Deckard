@@ -160,7 +160,8 @@ impl Band {
         }
         c.polyline(&pts, 2.0, c.ink(accent, &all));
 
-        let hx = px(freq_t(self.freq));
+        // (Kept inside the plot at the ends of the range.)
+        let hx = px(freq_t(self.freq)).clamp(5.0, pw as f32 - 5.0);
         let hy = py(self.db_at(self.freq));
         let mark = if self.on { look.record } else { look.weak };
         c.dot(hx, hy.clamp(5.0, h as f32 - 5.0), 3.5, c.ink(mark, &["freq", "gain"]));

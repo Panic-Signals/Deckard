@@ -167,9 +167,10 @@ impl Filter {
 
         let y_at = |f: f32| py(self.db_with(eff, eff_res, f));
         if c.lit("cutoff") {
-            let (x, y) = (px(freq_t(eff)), y_at(eff));
+            // (Kept inside the box at the ends of the range.)
+            let (x, y) = (px(freq_t(eff)).clamp(6.0, w as f32 - 6.0), y_at(eff).clamp(6.0, h as f32 - 6.0));
             c.line(x, y, x, bottom - 1.0, 1.5, look.record);
-            c.dot(x, y.clamp(6.0, h as f32 - 6.0), 5.0, look.record);
+            c.dot(x, y, 5.0, look.record);
             let label = hz_text(eff);
             let tw = c.text_width(&label, look.small) + 6;
             let tx = (x as i32 - tw / 2).clamp(2, w - tw - 2);
@@ -183,7 +184,7 @@ impl Filter {
                     best = (x, y);
                 }
             }
-            c.ring(best.0, best.1.clamp(7.0, h as f32 - 7.0), 6.0, 1.5, look.record);
+            c.ring(best.0.clamp(8.0, w as f32 - 8.0), best.1.clamp(8.0, h as f32 - 8.0), 6.0, 1.5, look.record);
             let label = format!("Q {:.1}", q_of(eff_res));
             let tw = c.text_width(&label, look.small) + 6;
             let tx = if best.0 > w as f32 / 2.0 { 3 } else { w - tw - 3 };
