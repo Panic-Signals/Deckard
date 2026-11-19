@@ -1456,11 +1456,11 @@ mod tests {
         h.run_steps(3);
         let at = add_row(&h, Channel::Group(0), 0);
         right_click_at(&mut h, at);
-        h.get_by_label("Copy Plug-in").click();
+        h.get_by_label("Copy").click();
         h.run_steps(3);
         let at = add_row(&h, Channel::Group(target), 0);
         click_at(&mut h, at);
-        h.get_by_label("Paste Plug-in").click();
+        h.get_by_label("Paste").click();
         h.run_steps(3);
         let d = doc.borrow();
         let slots = d.chain_slots(Chain::Group(target)).unwrap();
