@@ -4085,6 +4085,8 @@ fn pinned_events_screen_persists_across_reloads_and_restarts() {
     press(&mut s3, &v, "BUTTON_EVENTS");
     assert_eq!(s3.page(), "events");
     assert_eq!(s3.pinned_open().as_deref(), Some("EVENTS"));
+}
+
 /// The Control page draws pictures over the knobs they draw: a filter over Cutoff and
 /// Reso (knobs 1-2) in the left screen's picture band, nothing over knobs that match no
 /// picture.
