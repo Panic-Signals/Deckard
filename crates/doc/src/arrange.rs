@@ -497,6 +497,15 @@ impl Document {
             },
             _ => return Err("pattern entry without a pattern".into()),
         };
+        set_param(pat, "start", Value::Int(0));
+        if let Some(Value::Obj(seq)) = pat.get_mut("sequence") {
+            if let Some(c) = seq.get_mut("current") {
+                *c = Value::Null;
+            }
+            if let Some(Value::Obj(ev)) = seq.get_mut("events") {
+                *ev = crate::notes::events_with(ev, &[]);
+            }
+        }
         // No notes: each sound's sequence lives in the sound and would be shared.
         if let Some(Value::Obj(ss)) = pat.get_mut("sound_sequences")
             && let Some(Value::Obj(objs)) = ss.get_mut("objects")

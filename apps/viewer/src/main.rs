@@ -1660,8 +1660,19 @@ impl App {
             }
             Act::DeletePattern(g, p) => {
                 let r = doc.borrow_mut().delete_pattern(g, p);
-                if r.is_ok() && self.group == g && self.pattern >= p {
-                    self.pattern = self.pattern.saturating_sub(1);
+                if r.is_ok() {
+                    if self.group == g && self.pattern >= p {
+                        self.pattern = self.pattern.saturating_sub(1);
+                    }
+                    if let Some(grow) = &mut self.grow
+                        && grow.group == g
+                    {
+                        if grow.pattern == p {
+                            self.grow = None;
+                        } else if grow.pattern > p {
+                            grow.pattern -= 1;
+                        }
+                    }
                 }
                 r
             }
@@ -1687,6 +1698,7 @@ impl App {
     /// the one before.
     fn delete_group(&mut self, g: usize) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Ok(()) };
+        let was_last = doc.borrow().project().groups.len() == 1;
         doc.borrow_mut().delete_group(g)?;
         self.samples.plugins.retain(|slot| {
             !matches!(
@@ -1698,6 +1710,13 @@ impl App {
             )
         });
         let n = doc.borrow().project().groups.len();
+        if let Some(grow) = &mut self.grow {
+            if was_last || grow.group == g {
+                self.grow = None;
+            } else if grow.group > g {
+                grow.group -= 1;
+            }
+        }
         let focus = if self.group > g { self.group - 1 } else { self.group.min(n.saturating_sub(1)) };
         if focus != self.group || self.group == g {
             (self.group, self.sound, self.pattern) = (focus, 0, 0);
@@ -3624,6 +3643,9 @@ impl App {
 
     /// Play `mode` from tick `start`.
     fn play_from(&mut self, mode: Mode, start: i64) {
+        if self.recording && start > 0 {
+            self.auto_grow_at(mode, start as f64);
+        }
         let Some(doc) = self.doc.clone() else { return };
         self.placed_head = false;
         let looping = self.loops(mode);
@@ -3894,6 +3916,10 @@ impl App {
             self.focus_sound(0);
             self.pattern = self.scene_pattern(group).unwrap_or(0);
         }
+        if self.recording && self.scene_pattern(self.group) == Some(self.pattern) {
+            let head = self.playhead().map(|h| (h.mode, h.position));
+            self.arm_grow_for(self.group, self.pattern, head, false);
+        }
     }
 
     /// Focus a sound. A plain focus replaces SELECT's set with that one sound.
@@ -3974,7 +4000,13 @@ impl App {
             && self.group == grow.group
             && self.scene_pattern(self.group) == Some(grow.pattern)
         {
-            return Some(grow.strip_progress(at));
+            let rel = head
+                .and_then(|h| {
+                    let d = self.doc.as_ref()?.borrow();
+                    Self::mode_pattern_tick(d.project(), h.mode, h.position, grow.group, grow.pattern)
+                })
+                .unwrap_or(at);
+            return Some(grow.strip_progress(rel));
         }
         Some(at as f64 / length as f64)
     }
@@ -4012,6 +4044,22 @@ impl App {
     fn arrange(&mut self, act: layout::Act) {
         use layout::Act;
         let Some(doc) = self.doc.clone() else { return };
+        if self.recording {
+            match &act {
+                Act::NewPattern(s, g) | Act::NewPatternAt(s, g, _)
+                    if *s == self.scene && self.grow.as_ref().is_some_and(|gr| gr.group == *g) =>
+                {
+                    self.settle_active_grow();
+                }
+                Act::AssignPattern(s, g, p)
+                    if *s == self.scene && self.grow.as_ref().is_some_and(|gr| gr.group == *g && Some(gr.pattern) != *p) =>
+                {
+                    self.settle_active_grow();
+                }
+                _ => {}
+            }
+        }
+        let mut arm_after: Option<(usize, usize, bool)> = None;
         let result = {
             let mut d = doc.borrow_mut();
             match act {
@@ -4024,7 +4072,16 @@ impl App {
                     })
                     .map(|_| Some((Some(made), None)))
                 }
-                Act::AssignPattern(s, g, p) => d.assign_pattern(s, g, p).map(|_| None),
+                Act::AssignPattern(s, g, p) => {
+                    let r = d.assign_pattern(s, g, p).map(|_| None);
+                    if r.is_ok()
+                        && s == self.scene
+                        && let Some(pi) = p
+                    {
+                        arm_after = Some((g, pi, g == self.group));
+                    }
+                    r
+                }
                 Act::NewPattern(s, g) | Act::NewPatternAt(s, g, _) => {
                     let slot = if let Act::NewPatternAt(.., slot) = act { Some(slot) } else { None };
                     let n = d.project().groups.get(g).map_or(0, |x| x.patterns.len());
@@ -4045,6 +4102,18 @@ impl App {
                         Ok(())
                     });
                     if r.is_ok() {
+                        if let Some(gr) = &mut self.grow
+                            && gr.group == g
+                            && gr.pattern >= made
+                        {
+                            gr.pattern += 1;
+                        }
+                        if self.recording {
+                            self.take.insert_empty_pattern(g, made);
+                            if s == self.scene {
+                                arm_after = Some((g, made, g == self.group));
+                            }
+                        }
                         (self.group, self.pattern) = (g, made);
                     }
                     r.map(|_| None)
@@ -4056,17 +4125,28 @@ impl App {
                     };
                     let before = slots(&*d).unwrap_or_default();
                     let focused = (self.group == g).then(|| before.get(self.pattern).copied()).flatten();
+                    let growing = self.grow.as_ref().filter(|gr| gr.group == g).and_then(|gr| before.get(gr.pattern).copied());
                     let r = d.move_pattern(g, p, slot);
-                    if let (Ok(_), Some(f), Some(&from)) = (&r, focused, before.get(p)) {
-                        let f = if f == from {
-                            slot
-                        } else if f == slot {
-                            from
-                        } else {
-                            f
+                    if let (Ok(_), Some(&from)) = (&r, before.get(p)) {
+                        let mapped = |s0: usize| {
+                            if s0 == from {
+                                slot
+                            } else if s0 == slot {
+                                from
+                            } else {
+                                s0
+                            }
                         };
-                        if let Some(i) = slots(&*d).and_then(|s| s.iter().position(|x| *x == f)) {
+                        let after = slots(&*d);
+                        if let Some(f) = focused
+                            && let Some(i) = after.as_ref().and_then(|s| s.iter().position(|x| *x == mapped(f)))
+                        {
                             self.pattern = i;
+                        }
+                        if let (Some(gs), Some(gr)) = (growing, self.grow.as_mut())
+                            && let Some(i) = after.as_ref().and_then(|s| s.iter().position(|x| *x == mapped(gs)))
+                        {
+                            gr.pattern = i;
                         }
                     }
                     r.map(|_| None)
@@ -4095,6 +4175,9 @@ impl App {
                 Act::SectionScene(i, s) => d.set_section_scene(i, s).map(|_| None),
                 Act::PatternLength(g, p, t) => {
                     // A length chosen: no longer Auto.
+                    if self.grow.as_ref().is_some_and(|gr| (gr.group, gr.pattern) == (g, p)) {
+                        self.grow = None;
+                    }
                     d.set_length_auto(g, p, false);
                     d.set_pattern_length(g, p, t).map(|_| None)
                 }
@@ -4222,6 +4305,12 @@ impl App {
             Ok(None) => {}
             Err(e) => self.status = format!("can't do that: {e}"),
         }
+        if self.recording
+            && let Some((g, pi, force)) = arm_after
+        {
+            let head = self.playhead().map(|h| (h.mode, h.position));
+            self.arm_grow_for(g, pi, head, force);
+        }
     }
 
     /// Pick a section in the Song view. While the song plays, playback jumps to it
@@ -4345,6 +4434,9 @@ impl App {
             deckard_doc::Chain::Sound(g, _) | deckard_doc::Chain::Group(g) => g,
             deckard_doc::Chain::Master => return,
         };
+        if self.recording {
+            self.mark_grow_recorded(&doc, g, mode, tick);
+        }
         let (pi, pos, dev) = {
             let d = doc.borrow();
             let p = d.project();
@@ -4375,14 +4467,6 @@ impl App {
         }
         if let Some(take) = self.mod_takes.iter_mut().find(|t| t.chain == chain && t.target == target) {
             take.moved = std::time::Instant::now();
-        }
-        if self.recording
-            && let Some(grow) = &mut self.grow
-            && g == grow.group
-            && pi == grow.pattern
-        {
-            let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
-            grow.record_at(pos - start);
         }
         self.touch_write_for(chain, &target, pos, dev);
         if done {
@@ -4685,19 +4769,12 @@ impl App {
             self.take = record::Take::begin(doc.borrow().project());
             (self.take_played, self.take_grown) = (0.0, None);
             self.controls = record::ControlWriter::default();
-            // An empty Auto-length pattern starts as a bar, growing as it's played into
-            // (unless the Settings page's GROW is off).
-            let (g, pi) = (self.group, self.pattern);
-            let empty =
-                doc.borrow().project().groups.get(g).and_then(|x| x.patterns.get(pi)).filter(|p| p.notes.is_empty()).map(|p| p.length);
+            // An empty Auto-length pattern starts as a bar (or a bar ahead of where
+            // playback already is), growing as it's played into (unless the Settings
+            // page's GROW is off).
             self.grow = None;
-            if let Some(len) = empty.filter(|_| self.settings.pattern_grow && doc.borrow().length_is_auto(g, pi)) {
-                let mut grow = record::Grow::new(g, pi, doc.borrow().project().bar_length());
-                grow.before = len;
-                if doc.borrow_mut().set_pattern_length(g, pi, grow.length()).is_ok() {
-                    self.grow = Some(grow);
-                }
-            }
+            let head = self.playhead().map(|h| (h.mode, h.position));
+            self.arm_grow_for(self.group, self.pattern, head, true);
             if self.playing.is_some() {
                 if let Some(Ok(out)) = &self.output {
                     out.set_recording(true);
@@ -4721,22 +4798,7 @@ impl App {
             self.apply_take(held);
             self.controls.finish(&mut doc.borrow_mut());
             // A grown pattern: the bars played, or as it was.
-            if let Some(grow) = self.grow.take() {
-                let (g, pi) = (grow.group, grow.pattern);
-                let d = doc.borrow();
-                let p = d.project();
-                let bar = p.bar_length();
-                let pat = &p.groups[g].patterns[pi];
-                let first = pat.notes.iter().map(|n| n.position).min();
-                let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
-                let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
-                let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
-                drop(d);
-                if end.is_some() {
-                    doc.borrow_mut().set_length_auto(g, pi, false);
-                }
-                let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
-            }
+            self.settle_active_grow();
             // First takes in fixed-length empty patterns follow the same start
             // rule. Overdubs retain the existing pattern's deliberate space.
             for (g, pi) in self.take.new_recordings() {
@@ -4757,6 +4819,97 @@ impl App {
         }
     }
 
+    /// Unwrapped tick of `mode` at `tick` when `(g, pi)` is the pattern `mode` plays for `g`.
+    fn mode_pattern_tick(p: &deckard_model::Project, mode: Mode, tick: f64, g: usize, pi: usize) -> Option<i64> {
+        let t = match mode {
+            Mode::Pattern(pg, ppi) => ((pg, ppi) == (g, pi)).then_some(tick)?,
+            Mode::Scene(s) => p.scenes.get(s)?.patterns.contains(&(g, pi)).then_some(tick)?,
+            Mode::Arrangement => {
+                let si = p.section_at(tick as i64)?;
+                let scene = p.sections[si].scene?;
+                p.scenes.get(scene)?.patterns.contains(&(g, pi)).then_some(tick - p.section_start(si) as f64)?
+            }
+        };
+        Some((t.round() as i64).max(0))
+    }
+
+    /// Settle `self.grow` (trimming to the bars played, or restoring `before` when empty).
+    fn settle_active_grow(&mut self) {
+        let Some(doc) = self.doc.clone() else {
+            self.grow = None;
+            return;
+        };
+        let Some(grow) = self.grow.take() else { return };
+        let (g, pi) = (grow.group, grow.pattern);
+        let settle = {
+            let d = doc.borrow();
+            let p = d.project();
+            let bar = p.bar_length();
+            p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).map(|pat| {
+                let first = pat.notes.iter().map(|n| n.position).min();
+                let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
+                let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
+                let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
+                (start, to, end.is_some())
+            })
+        };
+        if let Some((start, to, has_notes)) = settle {
+            if has_notes {
+                doc.borrow_mut().set_length_auto(g, pi, false);
+            }
+            let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
+        }
+    }
+
+    /// Start auto-growing `(g, pi)` when recording into an empty Auto-length pattern.
+    /// If `at` is `Some((mode, tick))` and `(g, pi)` is playing there, `Grow` starts a bar
+    /// ahead of `tick` so mid-scene recording never wraps backwards at bar boundaries.
+    fn arm_grow_for(&mut self, g: usize, pi: usize, at: Option<(Mode, f64)>, force: bool) {
+        if !self.recording || !self.settings.pattern_grow {
+            return;
+        }
+        if self.grow.as_ref().is_some_and(|gr| (gr.group, gr.pattern) == (g, pi)) {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let eligible = {
+            let d = doc.borrow();
+            let p = d.project();
+            if !d.length_is_auto(g, pi) {
+                None
+            } else {
+                p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).filter(|pt| pt.notes.is_empty()).map(|pt| {
+                    let rel = at.and_then(|(m, t)| Self::mode_pattern_tick(p, m, t, g, pi));
+                    (pt.length, p.bar_length(), rel)
+                })
+            }
+        };
+        let Some((len, bar, rel)) = eligible else { return };
+        if let Some(prev) = &self.grow {
+            let prev_occupied = prev.has_recorded()
+                || doc
+                    .borrow()
+                    .project()
+                    .groups
+                    .get(prev.group)
+                    .and_then(|gr| gr.patterns.get(prev.pattern))
+                    .is_some_and(|pt| !pt.notes.is_empty());
+            if prev_occupied && prev.group != g && !force {
+                return;
+            }
+            self.settle_active_grow();
+        }
+        let mut grow = record::Grow::new(g, pi, bar);
+        grow.before = len;
+        if let Some(rel) = rel {
+            grow.advance_bar(rel);
+            let _ = grow.reach(rel);
+        }
+        if doc.borrow_mut().set_pattern_length(g, pi, grow.length()).is_ok() {
+            self.grow = Some(grow);
+        }
+    }
+
     /// SHIFT + REC: count in (Preferences' bars, at least one), then play and record
     /// from the beginning, as PLAY from a fresh start does (not where STOP left it).
     fn count_in_and_play(&mut self) {
@@ -4774,15 +4927,27 @@ impl App {
     }
 
     fn mark_grow_recorded(&mut self, doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>, group: usize, mode: Mode, tick: f64) {
+        if self.grow.as_ref().is_none_or(|gr| gr.group != group) {
+            let candidate = {
+                let d = doc.borrow();
+                let p = d.project();
+                record::pattern_at(p, mode, tick, group)
+                    .map(|(pi, _)| pi)
+                    .filter(|&pi| self.settings.pattern_grow && d.length_is_auto(group, pi))
+                    .filter(|&pi| p.groups.get(group).and_then(|g| g.patterns.get(pi)).is_some_and(|pt| pt.notes.is_empty()))
+            };
+            if let Some(pi) = candidate {
+                self.arm_grow_for(group, pi, Some((mode, tick)), false);
+            }
+        }
         let Some(len) = self.grow.as_mut().and_then(|grow| {
             if group != grow.group {
                 return None;
             }
             let d = doc.borrow();
             let p = d.project();
-            let (pi, pos) = record::pattern_at(p, mode, tick, group).filter(|x| x.0 == grow.pattern)?;
-            let start = p.groups[group].patterns.get(pi).map_or(0, |pt| pt.start);
-            let at = pos - start;
+            p.groups.get(group)?.patterns.get(grow.pattern)?;
+            let at = Self::mode_pattern_tick(p, mode, tick, group, grow.pattern)?;
             grow.record_at(at);
             grow.reach(at)
         }) else {
@@ -4929,10 +5094,16 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let Some(grow) = &mut self.grow else { return };
         let (g, pi) = (grow.group, grow.pattern);
-        let at = record::pattern_at(doc.borrow().project(), mode, tick, g).filter(|x| x.0 == pi);
-        let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
-        if let Some((_, pos)) = at {
-            let rel = pos - start;
+        let rel = {
+            let d = doc.borrow();
+            let p = d.project();
+            if p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).is_none() {
+                self.grow = None;
+                return;
+            }
+            Self::mode_pattern_tick(p, mode, tick, g, pi)
+        };
+        if let Some(rel) = rel {
             grow.advance_bar(rel);
             if let Some(len) = grow.reach(rel)
                 && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
@@ -4956,6 +5127,12 @@ impl App {
             self.take_in_all(notes, exprs, controls, now);
         }
         if let Some(h) = self.playhead() {
+            if let Some(pi) = self.scene_pattern(self.group)
+                && self.grow.as_ref().is_none_or(|gr| gr.group == self.group && gr.pattern != pi)
+            {
+                let force = self.grow.as_ref().is_some_and(|gr| gr.group == self.group);
+                self.arm_grow_for(self.group, pi, Some((h.mode, h.position)), force);
+            }
             self.auto_grow_at(h.mode, h.position);
             self.tick_controls(h.mode, h.position, now);
             // Held notes stretch in the pattern as they're held.
