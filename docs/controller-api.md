@@ -593,10 +593,9 @@ Defaults and drawing details are in each widget's doc comment in `crates/surface
 
 Each MK3 knob reports a finger resting on it. A knob a finger has rested on for 120 ms takes
 **focus**: the part of its picture it moves lights (the cutoff's guide line, a band's ring,
-an envelope segment) and the rest of the picture dims, and the touched knob's name and value
-show large in the right screen's header. Focus lasts 180 ms after the finger lifts, and a
-knob turned with no touch registered has it for 1 s after its last turn. The `focus` column
-above is the input each knob lights, taken from the `model` input the knob's parameter is
+an envelope segment) and the rest of the picture dims. Focus lasts 180 ms after the finger
+lifts, and a knob turned with no touch registered has it for 1 s after its last turn. The
+`focus` column above is the input each knob lights, taken from the `model` input the knob's parameter is
 bound to (in the generic patterns, the pattern's own names). One or two touched knobs each
 light; three or more at once is a resting hand and lights nothing. Touch events still reach
 pages as before.
