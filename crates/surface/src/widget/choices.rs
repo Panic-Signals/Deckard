@@ -13,7 +13,9 @@
 //! | `items` | the values' names, in order |
 //! | `active` | the one the knob is on (1-based, as Lua counts) |
 //!
-//! Touch focus on `value` brightens the list's names.
+//! The values it isn't on stay dim, touched or not: only the filled one stands out.
+//! The box is filled with the screen's background first, so a list drawn over a
+//! picture (a plug-in's, on the right screen) stays readable.
 
 use mlua::Table;
 
@@ -50,7 +52,7 @@ impl Choices {
             return;
         }
         let look = *c.look;
-        let lit = c.lit("value");
+        c.fill(0, 0, c.r.w, c.r.h, look.background);
         let rh = row_h(n, c.h() - 8.0);
         let top = ((c.h() - rh * n as f32) / 2.0).round();
         let mut st = look.label;
@@ -63,13 +65,7 @@ impl Choices {
             if on {
                 c.fill(x, y + 1, w, rh as i32 - 2, c.ink(look.accent, &["value"]));
             }
-            let ink = if on {
-                look.on_colour
-            } else if lit {
-                look.text
-            } else {
-                mix(look.background, look.text, 0.6)
-            };
+            let ink = if on { look.on_colour } else { mix(look.background, look.text, 0.6) };
             c.text(x + 6, y, w - 8, rh as i32, item, st, ink, Align::Left);
         }
     }
@@ -94,8 +90,8 @@ mod tests {
     fn choices_four() {
         let c = list(&["BP", "LP1", "LP2", "MM"], 3);
         golden::check("choices-four", 1, None, |cv| c.draw(cv));
-        golden::check("choices-four-focus", 1, Some("value"), |cv| c.draw(cv));
-        assert!(golden::focus_changes(120, "value", |cv| c.draw(cv)));
+        // Touching the knob doesn't brighten the values it isn't on.
+        assert!(!golden::focus_changes(120, "value", |cv| c.draw(cv)));
     }
 
     #[test]
