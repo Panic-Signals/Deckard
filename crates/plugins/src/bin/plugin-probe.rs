@@ -168,8 +168,8 @@ fn load_state(path: &Path, installed: &[Entry]) -> Result<nks::Resolved, String>
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         return nks::parse(&bytes)?.resolve(installed);
     }
-    nks::native_preset_file(path, None, false, installed)
-        .unwrap_or_else(|| Err(format!("{}: not a preset type the probe knows", path.display())))
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    nks::native_preset(&ext, &bytes, installed).unwrap_or_else(|| Err(format!("{}: not a preset type the probe knows", path.display())))
 }
 
 /// The plug-in's id, name and state to load, from `--state` or the installed list.
@@ -384,6 +384,7 @@ mod measure {
     }
 
     /// The time (ms) the level takes to reach 95% of its peak.
+    #[cfg(test)]
     pub fn rise_ms(env: &[f32]) -> Option<f64> {
         let peak = env.iter().copied().fold(0.0, f32::max);
         if peak < 1e-4 {
