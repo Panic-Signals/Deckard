@@ -1154,6 +1154,10 @@ pub struct App {
     /// Each plug-in's parameters (by chain and slot, with the plug-in's id), for the
     /// macros that control them.
     plugin_params: std::cell::RefCell<std::collections::HashMap<(deckard_doc::Chain, usize), (String, Vec<deckard_plugins::ParamInfo>)>>,
+    /// A stepped plug-in parameter's names as last read (by instance, id and steps):
+    /// [`App::knob_choices`] reads them with `try_lock`, and a frame that finds the
+    /// plug-in busy shows these rather than dropping the list for a dial.
+    step_names: std::cell::RefCell<std::collections::HashMap<(usize, u32, i32), Vec<String>>>,
     /// Open the focused sound's plug-in window one second after start-up
     /// (`--plugin-window`).
     pending_editor: bool,
@@ -4674,8 +4678,11 @@ impl App {
                 return None;
             }
             let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, slot))?;
-            let p = inst.try_lock().ok()?;
-            Some((0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect())
+            let key = (std::sync::Arc::as_ptr(&inst) as *const () as usize, id, steps);
+            let Ok(p) = inst.try_lock() else { return self.step_names.borrow().get(&key).cloned() };
+            let names: Vec<String> = (0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect();
+            self.step_names.borrow_mut().insert(key, names.clone());
+            Some(names)
         };
         let names = match edit {
             Edit::Choice(_, _, names, ..) => Some(names.iter().map(|s| s.to_string()).collect()),

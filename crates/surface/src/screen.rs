@@ -772,13 +772,19 @@ impl UserData for Picture {
         });
         // pictures(knobs, touched): the pictures over a page's knobs (`crate::widget::layout`),
         // in the picture band of both screens; `touched` the knob numbers a finger rests on.
-        // pictures(knobs, touched, plugin, no_right_dials): `no_right_dials` when the page
-        // draws its own picture in the right screen's band.
-        m.add_method_mut("pictures", |lua, p, (knobs, touched, plugin, no_right): (Table, Option<Table>, Option<String>, Option<bool>)| {
-            let look = crate::widget::Look::of(lua);
-            let touched: Vec<usize> = touched.map(|t| t.sequence_values::<usize>().filter_map(Result::ok).collect()).unwrap_or_default();
-            crate::widget::draw_pictures(lua, p, &knobs, &touched, plugin.as_deref(), !no_right.unwrap_or(false), &look)
-        });
+        // pictures(knobs, touched, plugin, no_right_dials, layout_only): `no_right_dials`
+        // when the page draws its own picture in the right screen's band (a choice's list
+        // still goes over it); `layout_only` returns the spans without drawing them.
+        m.add_method_mut(
+            "pictures",
+            |lua, p, (knobs, touched, plugin, no_right, layout_only): (Table, Option<Table>, Option<String>, Option<bool>, Option<bool>)| {
+                let look = crate::widget::Look::of(lua);
+                let touched: Vec<usize> =
+                    touched.map(|t| t.sequence_values::<usize>().filter_map(Result::ok).collect()).unwrap_or_default();
+                let draw = !layout_only.unwrap_or(false);
+                crate::widget::draw_pictures(lua, p, &knobs, &touched, plugin.as_deref(), !no_right.unwrap_or(false), draw, &look)
+            },
+        );
     }
 }
 

@@ -485,11 +485,13 @@ function control.draw(screen, theme, opts)
     screen:rect(480, 35, 480, 25, "bar")
     -- Pictures over the knobs they draw (a filter over Cutoff and Reso, an envelope
     -- over its times...) and a dial over every other knob, in the band on both screens;
-    -- not over the right screen's own picture of a built-in effect.
+    -- not over the right screen's own picture of a built-in effect. A choice's list
+    -- goes over the right screen's picture (drawn after it, on its own background)
+    -- rather than taking it away.
     local own = slot and (c.tuner or c.eq or c.filter or c.picture)
     local right_free = true
-    for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false)) do
-      if span.first > 4 then right_free = false end
+    for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false, true)) do
+      if span.first > 4 and span.kind ~= "choices" then right_free = false end
     end
     if slot then
       screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
@@ -505,6 +507,7 @@ function control.draw(screen, theme, opts)
       elseif c.picture then eq_curve(screen, theme, c.picture)
       else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
     end
+    screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false)
     -- (The band below always has pictures: the chain is the short strip.)
     chain.draw(screen, theme, c, true)
   else

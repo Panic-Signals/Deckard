@@ -370,7 +370,10 @@ pub fn ms_text(ms: f32) -> String {
 /// `plugin` names the focused slot's plug-in: its mapping's pictures (`mapping`, from
 /// the controller scripts' `mappings/`) come first, the generic patterns fill the knobs
 /// they leave, and every knob still bare gets a `dial` of its own (on the right screen
-/// only if `right_dials`: not over a picture the page draws there itself).
+/// only if `right_dials`: not over a picture the page draws there itself). A choice's
+/// list goes over such a picture all the same, on its own background. `draw` false
+/// lays the spans out without drawing them, so a page can draw its own picture first.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_pictures(
     lua: &Lua,
     pic: &mut Picture,
@@ -378,6 +381,7 @@ pub fn draw_pictures(
     touched: &[usize],
     plugin: Option<&str>,
     right_dials: bool,
+    draw: bool,
     look: &Look,
 ) -> mlua::Result<Table> {
     let page: [Option<layout::Knob>; 8] = std::array::from_fn(|i| {
@@ -435,7 +439,7 @@ pub fn draw_pictures(
     // of many, or a value that isn't a number ("Off", "LP24"), gets nothing.
     for (k, knob) in page.iter().enumerate() {
         let Some(knob) = knob else { continue };
-        if taken[k] || (k >= 4 && !right_dials) {
+        if taken[k] {
             continue;
         }
         if !knob.choices.is_empty() {
@@ -449,6 +453,9 @@ pub fn draw_pictures(
                 ];
                 spans.push(layout::Span { first: k, cells: 1, kind: "choices".into(), inputs, knobs: vec![(k, "value".into())] });
             }
+            continue;
+        }
+        if k >= 4 && !right_dials {
             continue;
         }
         let numeric = knob.text.trim().chars().next().is_none_or(|ch| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | '∞'));
@@ -485,7 +492,9 @@ pub fn draw_pictures(
         } else {
             Rect { x, y: BAND_Y, w: span.cells as i32 * CELL_W, h: BAND_H }
         };
-        draw_lua(&span.kind, pic, r, &inputs, look)?;
+        if draw {
+            draw_lua(&span.kind, pic, r, &inputs, look)?;
+        }
         let s = lua.create_table()?;
         s.raw_set("first", span.first + 1)?;
         s.raw_set("cells", span.cells)?;
