@@ -294,13 +294,17 @@ local function draw_strip(screen, theme, c, right)
   overflow(#c.chain)
   if x + STRIP_NEW_W > LEFT + room then return end
   -- A new slot, framed while it's the one focused (the plug-in browser loads into it).
+  -- (With no plug-ins in the chain, twice the size, from the same top: the only thing
+  -- in the strip.)
+  local k = #c.chain == 0 and 2 or 1
   if not c.slot_index then
-    screen:frame(x + 3, PIC_Y - 3, 26, 22, "text", 0.76)
-    screen:frame(x + 4, PIC_Y - 2, 24, 20, "text")
+    screen:frame(x + 3, PIC_Y - 3, 26 * k, 22 * k, "text", 0.76)
+    screen:frame(x + 4, PIC_Y - 2, 26 * k - 2, 22 * k - 2, "text")
   end
   local mark = paint(theme, "chain_mark", { 0xbb, 0xbb, 0xbb })
-  screen:rect(x + 11, PIC_Y + 7, 10, 2, mark)
-  screen:rect(x + 15, PIC_Y + 3, 2, 10, mark)
+  local cx, cy = x + 3 + 13 * k, PIC_Y - 3 + 11 * k
+  screen:rect(cx - 5 * k, cy - k, 10 * k, 2 * k, mark)
+  screen:rect(cx - k, cy - 5 * k, 2 * k, 10 * k, mark)
 end
 
 -- The chain on the left screen: a short strip under the info bar when `compact` (the
