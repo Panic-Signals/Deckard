@@ -392,6 +392,18 @@ mod tests {
             }
             v.control.chain[0].picture = Some(key);
         }
+        // (`DECKARD_SLOTS`: more slots after it, comma-separated names, for a long chain.)
+        if let Some(names) = var("DECKARD_SLOTS") {
+            for n in names.split(',') {
+                v.control.chain.push(crate::SlotView {
+                    name: n.trim().into(),
+                    instrument: false,
+                    active: true,
+                    plugin: true,
+                    picture: None,
+                });
+            }
+        }
         let i = m.pages.iter().position(|p| p.name.eq_ignore_ascii_case(&page_name)).expect("page");
         v.control.page = i;
         // (`DECKARD_PAGES=n:k`: as if the plug-in had n pages and this were page k.)

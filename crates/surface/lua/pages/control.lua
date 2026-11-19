@@ -508,6 +508,22 @@ local function touched()
   return touch.focused(deckard.now())
 end
 
+-- The widest run of knobs `from`..`to` not in `taken` (a set of knob numbers): its first
+-- knob and how many (0 when there's none).
+local function free_run(taken, from, to)
+  local best_at, best, at, n = from, 0, nil, 0
+  for k = from, to do
+    if taken[k] then
+      n = 0
+    else
+      if n == 0 then at = k end
+      n = n + 1
+      if n > best then best_at, best = at, n end
+    end
+  end
+  return best_at, best
+end
+
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -576,11 +592,17 @@ function control.draw(screen, theme, opts)
     -- rather than taking it away.
     local own = slot and (c.tuner or c.eq or c.filter or c.picture)
     local right_free, left_free = true, true
+    -- (The knobs whose cells hold a list of choices: a picture goes beside them, whole, or
+    -- not at all, never under a list's box.)
+    local listed = {}
     for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false, true)) do
       if span.first > 4 and span.kind ~= "choices" then right_free = false end
       if span.first <= 4 and span.kind ~= "dial" and span.kind ~= "choices" then left_free = false end
       if span.kind ~= "dial" then
         for i = span.first, span.first + span.cells - 1 do pictured[i] = true end
+      end
+      if span.kind == "choices" then
+        for i = span.first, span.first + span.cells - 1 do listed[i] = true end
       end
     end
     -- A theme's showcase: over a left screen of only dials, a hosted plug-in's own picture as
@@ -591,11 +613,16 @@ function control.draw(screen, theme, opts)
     if theme.plugin_showcase and left_free and slot and slot.plugin and slot.picture then
       local w, h = screen:image_size(slot.picture, true)
       if theme.knobs_left and w then
-        -- (At its own size, or shrunk to fit, centred in its band.)
-        local k = math.min(1, 80 / h, 458 / w)
-        local pw, ph = math.floor(w * k + 0.5), math.floor(h * k + 0.5)
-        screen:image(11, 78 + (80 - ph) // 2, pw, ph, slot.picture, true, true)
-      else
+        -- (At its own size, or shrunk to fit, centred in its band: in the widest run of
+        -- cells with no list, and only if it keeps half its size there.)
+        local first, cells = free_run(listed, 1, 4)
+        local k = cells > 0 and math.min(1, 80 / h, (cells * 120 - 22) / w) or 0
+        if k >= 0.5 then
+          local pw, ph = math.floor(w * k + 0.5), math.floor(h * k + 0.5)
+          screen:image((first - 1) * 120 + 11, 78 + (80 - ph) // 2, pw, ph, slot.picture, true, true)
+        end
+      elseif not (listed[1] or listed[2] or listed[3] or listed[4]) then
+        -- (The whole screen's width: only with no list on it.)
         local y = theme.info_in_tabs and 86 or widgets.BAND_Y - 6
         screen:image(0, y, 480, 80, slot.picture, true, true)
       end
@@ -618,7 +645,9 @@ function control.draw(screen, theme, opts)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
       else
-        chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false)
+        -- (Over two cells with no list: knobs 5 and 6, else 7 and 8, else not at all.)
+        local at = not (listed[5] or listed[6]) and 480 or not (listed[7] or listed[8]) and 720 or nil
+        if at then chain.thumbnail(screen, theme, at, 68, 240, 136, slot, false) end
         if c.scope then scope_view(screen, c.scope) end
       end
     end
