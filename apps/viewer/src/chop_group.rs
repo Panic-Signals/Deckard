@@ -19,19 +19,23 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let (g, snd) = (self.group, self.sound);
         let p = doc.borrow().project().clone();
-        let Some(src) = p.groups.get(g).and_then(|x| x.sounds.get(snd)) else { return };
-        let Some(sampler) = src.sampler.as_ref() else { return };
+        let Some((src, sampler)) = p.groups.get(g).and_then(|x| x.sounds.get(snd)).and_then(|x| Some((x, x.sampler.as_ref()?))) else {
+            self.status = "can't apply the slices: no sampler here".into();
+            return;
+        };
         // A slice that is a zone already (the sample was sliced): that zone's settings.
         let was = self.chops().map(|c| (c.1, c.2)).unwrap_or_default();
-        let zone_of = |a: usize| was.0.iter().position(|&x| x == a).map_or(self.zone, |k| was.1[k]);
+        let focused = self.zone;
+        let zone_of = |a: usize| was.0.iter().position(|&x| x == a).map_or(focused, |k| was.1[k]);
         let to_end = self.sampling.slices_to_end(src.new_sampler.is_some());
         let one_shot = sampler.envelope_type == 0;
         let settings = src.new_sampler.clone();
-        let name = src.name.clone();
+        let name = if src.name.trim().is_empty() { "Slice".to_string() } else { src.name.clone() };
         let groups = slices.len().div_ceil(PADS);
         let with_notes = self.sampling.pattern_mode < 2;
-        let order = chop::note_order(slices.len(), self.sampling.shuffle, self.sampling.seed);
-        let ticks_per_frame = p.tempo / 60.0 * deckard_model::PPQ as f64 / s.rate.max(1) as f64;
+        let order = chop::note_order(slices.len(), self.sampling.shuffle, self.shuffle_seed());
+        let ticks_per_frame = self.slice_ticks_per_frame(&p, s.rate);
+        let scene = self.scene;
         let bar = p.bar_length().max(1);
         let label = "Apply Slices to Pads";
         let mut made = Vec::new();
@@ -97,14 +101,18 @@ impl App {
                         ratchet: Default::default(),
                         expr: None,
                         sound: o % PADS,
-                        position: start + ((a - a0) as f64 * ticks_per_frame) as i64,
-                        length: (((slices[o].1 - slices[o].0) as f64 * ticks_per_frame) as i64).max(1),
+                        position: start + ((a - a0) as f64 * ticks_per_frame).round() as i64,
+                        length: (((slices[o].1 - slices[o].0) as f64 * ticks_per_frame).round() as i64).max(1),
                         pitch: 60,
                         velocity: 100,
                         probability: 100,
                     })
                     .collect();
                 d.edit_notes("Slice Pattern", ng, pi, &[], &add)?;
+                // In the focused scene, so it plays with the others.
+                if scene < d.project().scenes.len() {
+                    d.assign_pattern(scene, ng, Some(pi))?;
+                }
             }
             Ok(())
         });
@@ -112,6 +120,23 @@ impl App {
             Ok(()) => format!("{} slices are on the pads of {}", slices.len(), made.join(", ")),
             Err(e) => format!("can't apply the slices: {e}"),
         };
+    }
+
+    /// Pattern ticks a frame of the focused zone takes when its notes play it: at the
+    /// song's tempo, or (a Sync zone, stretched to the song) at its own.
+    pub(crate) fn slice_ticks_per_frame(&self, p: &deckard_model::Project, rate: u32) -> f64 {
+        let zone = p.groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|s| {
+            s.new_sampler.as_ref()?;
+            s.sampler.as_ref()?.zones.get(self.zone)?.meta.as_ref()
+        });
+        let own = zone.filter(|m| m.mode == PlayMode::Sync).and_then(|m| m.bpm).filter(|b| b.is_finite() && *b > 0.0);
+        own.unwrap_or(p.tempo) / 60.0 * deckard_model::PPQ as f64 / f64::from(rate.max(1))
+    }
+
+    /// The seed of a shuffled APPLY's order: another each time.
+    pub(crate) fn shuffle_seed(&mut self) -> u64 {
+        self.sampling.shuffles = self.sampling.shuffles.wrapping_add(1);
+        self.sampling.seed ^ self.sampling.shuffles.wrapping_mul(0x9E37_79B9)
     }
 
     /// The slices as APPLY cuts them (each to the next), with the sample they are of.

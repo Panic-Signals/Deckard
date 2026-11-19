@@ -13,8 +13,9 @@
 --                     (SHIFT: solo); the right display shows the lanes stacked
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
---   SHIFT+SLICE 5-6   KEY SHIFT (the focused slice onto the group's next empty sound,
---                     over all its keys), RE-ROLL (Random: pick again)
+--   SHIFT+SLICE 5-7   KEY SHIFT (the focused slice onto the group's next empty sound,
+--                     over all its keys), RE-ROLL (Random: pick again), BANK (the
+--                     pads' next sixteen slices)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
 --   LEFT / RIGHT      the tab's knob pages
 --   knobs 1-4         the page's settings (SHIFT: finer)
@@ -65,6 +66,13 @@ end
 local function slicer_mode(v)
   local k = v.slice["Slice.Mode"]
   return k and k.text or ""
+end
+
+-- The first slice before the sixteen on the pads: the selected slice's bank (of the
+-- slices there are now).
+local function pad_bank(s)
+  local n = s and #s.slices or 0
+  return (math.max(1, math.min(slice or 1, math.max(n, 1))) - 1) // 16 * 16
 end
 
 -- The SLICE tab's own pages, from the slicer's knobs (by key): what page 1 shows
@@ -396,7 +404,7 @@ function page.pad(n)
   if v.tab ~= 3 then return end
   local s = v.sample
   if not s then return true end
-  local i = ((slice or 1) - 1) // 16 * 16 + n
+  local i = pad_bank(s) + n
   local mode, shift = slicer_mode(v), deckard.held("SHIFT")
   if s.slices[i] and shift and (mode == "Find" or mode == "Random") then
     -- Kept through re-rolls, or no longer.
@@ -452,7 +460,7 @@ function page.leds()
   elseif v.tab == 3 then
     local s = v.sample
     local palette = s and s.palette or 16
-    local bank = ((slice or 1) - 1) // 16 * 16
+    local bank = pad_bank(s)
     for i = 1, 16 do
       local k = bank + i
       if s and s.slices[k] then

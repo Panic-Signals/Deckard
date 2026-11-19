@@ -113,6 +113,8 @@ pub struct SamplingState {
     /// Where APPLY puts the slices (`APPLY_TO`), and whether its notes play them shuffled.
     pub apply_to: usize,
     pub shuffle: bool,
+    /// Shuffled APPLYs so far: each gets another order.
+    pub shuffles: u64,
     /// APPLY's slices each play on to the sample's end (start points, as Serato's
     /// cues), not to the next slice. Unset: so for a New Sampler, not for a Sampler.
     pub slice_to_end: Option<bool>,
@@ -161,6 +163,7 @@ impl Default for SamplingState {
             pattern_mode: 2,
             apply_to: 0,
             shuffle: false,
+            shuffles: 0,
             slice_to_end: None,
             stretch: None,
             zone_map: true,
@@ -1903,7 +1906,7 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
                 let mut f = choice_field("ORDER", NOTE_ORDERS.map(String::from).to_vec(), usize::from(st.shuffle), |k| {
                     sact(SamplingAct::NoteOrder(k == 1))
                 });
-                f.tip = "The pattern's notes play the slices in order, or shuffled: the same times, other slices";
+                f.tip = "The pattern's notes (PATTERN) play the slices in order, or shuffled: the same times, other slices, another order each APPLY";
                 f
             },
             {

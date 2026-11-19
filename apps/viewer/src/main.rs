@@ -8508,6 +8508,9 @@ impl App {
         // Start points: each slice plays on to the end, for as long as its pad is held.
         let new_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(snd)).is_some_and(|x| x.new_sampler.is_some());
         let to_end = self.sampling.slices_to_end(new_sampler);
+        // (Before the zones change: a Sync zone's notes go by its own tempo.)
+        let ticks_per_frame = self.slice_ticks_per_frame(doc.borrow().project(), s.rate);
+        let shuffle_seed = self.shuffle_seed();
         let specs: Vec<deckard_doc::ZoneSpec> = slices
             .iter()
             .enumerate()
@@ -8554,10 +8557,9 @@ impl App {
             let p = d.project().clone();
             let pi = self.pattern;
             let Some(pat) = p.groups.get(g).and_then(|gr| gr.patterns.get(pi)) else { return };
-            let ticks_per_frame = p.tempo / 60.0 * deckard_model::PPQ as f64 / s.rate.max(1) as f64;
             let a0 = slices[0].0;
             // (Shuffled: a note's time is its own, the slice it plays another's.)
-            let order = chop::note_order(slices.len(), self.sampling.shuffle, self.sampling.seed);
+            let order = chop::note_order(slices.len(), self.sampling.shuffle, shuffle_seed);
             let add: Vec<Note> = slices
                 .iter()
                 .zip(&order)

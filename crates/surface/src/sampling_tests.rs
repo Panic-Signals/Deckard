@@ -392,6 +392,13 @@ fn the_slice_pads_bank() {
     s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
     press(&mut s, &v, "BUTTON_SCREEN_7");
     assert!(s.screen_text(&v).iter().any(|t| t == "BANK 1/3"), "round to the first");
+    // On the last bank when the slices become few: the pads show the ones there are.
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    v.sampling.sample.as_mut().unwrap().slices = (0..4).map(|k| k * 1000).collect();
+    assert_eq!(lit(&mut s, &v), 4);
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, now);
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), [Action::SamplingCall(SamplingCall::Prehear(1000, 2000))]);
 }
 
 #[test]

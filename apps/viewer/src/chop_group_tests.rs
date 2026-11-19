@@ -78,6 +78,8 @@ fn seventeen_slices_make_two_groups_of_pads() {
         let b = slices.get(i + 1).copied().unwrap_or(44_100);
         assert_eq!((zones[0].play_range, zones[0].key_range, zones[0].root_key), ((a as i64, b as i64 - 1), (0, 127), 60), "slice {i}");
         assert_eq!(snd.name, format!("{name} {}", i + 1));
+        // A Sampler's zone has no tempo: said to play as a sampler does.
+        assert_eq!(zones[0].meta.as_ref().map(|m| m.mode), Some(PlayMode::Repitch));
     }
     assert!(p.groups[n].patterns.is_empty(), "No Pattern: none");
     // What was sliced is as it was.
@@ -111,9 +113,10 @@ fn sixty_four_slices_make_four_groups_with_their_patterns() {
         assert_eq!(pat.length % p.bar_length(), 0);
         assert!(pat.length as f64 >= 44_100.0 * ticks_per_frame);
         assert_eq!(pat.notes.len(), 16);
+        assert!(p.scenes[app.scene].patterns.contains(&(n + k, 0)), "in the focused scene: {:?}", p.scenes[app.scene].patterns);
         for note in &pat.notes {
             let i = k * 16 + note.sound;
-            let at = pat.start + ((i * 44_100 / 64) as f64 * ticks_per_frame) as i64;
+            let at = pat.start + ((i * 44_100 / 64) as f64 * ticks_per_frame).round() as i64;
             assert_eq!((note.position, note.pitch), (at, 60), "slice {i}");
             seen += 1;
         }
@@ -137,7 +140,7 @@ fn shuffled_pads_play_in_another_order() {
         let pat = &p.groups[n + k].patterns[0];
         for note in &pat.notes {
             let slot = (0..20)
-                .find(|i| pat.start + ((i * 44_100 / 20) as f64 * ticks_per_frame) as i64 == note.position)
+                .find(|i| pat.start + ((i * 44_100 / 20) as f64 * ticks_per_frame).round() as i64 == note.position)
                 .expect("at a slice's time");
             played.push((slot, k * 16 + note.sound));
         }
@@ -203,4 +206,50 @@ fn export_writes_a_file_per_slice() {
     // No slices: the whole range, one file.
     app.sampling.slices.clear();
     assert_eq!(app.export_slices_to(&tmp.path().join("whole"), false), Ok(1));
+}
+
+#[test]
+fn pads_that_play_to_the_end_are_ended_by_their_notes() {
+    let (mut app, _tmp) = sliced(3);
+    let n = project(&app).groups.len();
+    let (g, s) = (app.group, app.sound);
+    assert_eq!(project(&app).groups[g].sounds[s].sampler.as_ref().unwrap().envelope_type, 0, "a one-shot");
+    app.sampling_act(S::SliceToEnd(true));
+    app.sampling_act(S::ApplyTo(1));
+    app.sampling_act(S::ApplySlices);
+    let p = project(&app);
+    assert_eq!(p.groups.len(), n + 1, "{}", app.status);
+    for pad in 0..3 {
+        let smp = p.groups[n].sounds[pad].sampler.as_ref().unwrap();
+        assert_eq!(smp.zones[0].play_range.1, 44_099, "to the sample's end");
+        assert_eq!(smp.envelope_type, 2, "held: the note ends it");
+    }
+    assert_eq!(p.groups[g].sounds[s].sampler.as_ref().unwrap().envelope_type, 0, "the sliced sound is as it was");
+}
+
+#[test]
+fn a_sync_zones_notes_go_by_its_own_tempo_and_each_slices_length() {
+    let (mut app, _tmp) = app();
+    app.convert_instrument(true);
+    let (g, s) = (app.group, app.sound);
+    let doc = app.doc.clone().unwrap();
+    let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+    // A second at 60 BPM is a beat, whatever the song's tempo.
+    let meta = ZoneMeta { file, mode: PlayMode::Sync, bpm: Some(60.0), beats: Some(1.0), ..ZoneMeta::default() };
+    doc.borrow_mut().set_zone_meta(g, s, 0, &meta, "Zone Tempo").unwrap();
+    app.update_sampling();
+    app.sampling_act(S::Tab(2));
+    app.sampling_act(S::SliceMode(3));
+    app.sampling.slices = vec![0, 11_025, 33_075];
+    let n = project(&app).groups.len();
+    app.sampling_act(S::ApplyTo(1));
+    app.sampling_act(S::PatternMode(0));
+    app.sampling_act(S::ApplySlices);
+    let p = project(&app);
+    assert_ne!(p.tempo, 60.0);
+    let ppq = deckard_model::PPQ;
+    let pat = &p.groups[n].patterns[0];
+    let mut notes: Vec<(usize, i64, i64)> = pat.notes.iter().map(|x| (x.sound, x.position - pat.start, x.length)).collect();
+    notes.sort_unstable();
+    assert_eq!(notes, [(0, 0, ppq / 4), (1, ppq / 4, ppq / 2), (2, ppq * 3 / 4, ppq / 4)]);
 }

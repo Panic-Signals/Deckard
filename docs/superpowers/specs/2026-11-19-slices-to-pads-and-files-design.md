@@ -25,19 +25,19 @@ no way to get them. The counts also stop at 32.
 - **Apply to pads.** APPLY gains **TO**: *Keys* (as now) or *Pads*. Pads makes new groups
   at the end of the group list, 16 slices each: every slice is a copy of the sliced sound
   (its effects and settings, not its notes) with the slice as its only zone, over all
-  keys with its root at C3. The group is named after the sound (a number added from the
-  second group on), the sounds "<name> <slice number>". The current group and the
+  keys with its root at C3. The group is named after the sound (numbered when there are
+  several), the sounds "<name> <slice number>". The current group and the
   slicer's slices are left as they are, and the focus stays. One undo step.
   - With **Create Pattern** or **Replace Pattern**, each new group gets a pattern with a
-    note per slice at the slice's time, so the groups' patterns played together play the
-    sample. *(my call: Replace means the same as Create here, there being nothing to
+    note per slice at the slice's time, in the focused scene, so the groups' patterns
+    played together play the sample (a Sync zone's times go by its own tempo). *(my call: Replace means the same as Create here, there being nothing to
     replace.)*
   - **EACH PLAYS TO** applies as it does for keys.
   - A zone's tempo and play mode come along unchanged (a Sync slice stays in Sync); a
     zone with none plays Repitch, as with Key Shift. *(my call)*
 - **ORDER** in APPLY: *In order* (as now) or *Shuffled*: the notes keep their times and
-  each plays another slice. The shuffle is the slicer's seed's, so the same until
-  RE-ROLL. *(my call: one shuffle, not the Octatrack's lock types.)*
+  each plays another slice. Each APPLY shuffles anew. *(my call: one shuffle, not the
+  Octatrack's lock types.)*
 - **EXPORT** (software only): a button on SLICE asks for a folder and writes each slice
   as a 24-bit stereo WAV named "<sample> 01.wav", "<sample> 02.wav" and so on. It asks
   before replacing files that are there. *(my call: no export from the MK3, which has no
