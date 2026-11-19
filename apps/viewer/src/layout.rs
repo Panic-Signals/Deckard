@@ -218,6 +218,8 @@ fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3])> {
         // Solarized's field and text. Palenight's writing on black.
         "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1])),
         "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff])),
+        // Deep's cool white on black.
+        "deep" => Some(([0x00, 0x00, 0x00], [0xee, 0xf2, 0xf6])),
         // Palenight on its blue-grey field.
         "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff])),
         _ => None,
