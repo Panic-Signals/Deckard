@@ -65,6 +65,11 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("themes/palenight.lua", include_str!("../lua/themes/palenight.lua")),
     ("themes/palenight_blue_green.lua", include_str!("../lua/themes/palenight_blue_green.lua")),
     ("themes/solarized_dark.lua", include_str!("../lua/themes/solarized_dark.lua")),
+    ("mappings/arturia/pigments.lua", include_str!("../lua/mappings/arturia/pigments.lua")),
+    ("mappings/native-instruments/massive-x.lua", include_str!("../lua/mappings/native-instruments/massive-x.lua")),
+    ("mappings/native-instruments/monark.lua", include_str!("../lua/mappings/native-instruments/monark.lua")),
+    ("mappings/plugin-alliance/bx-oberhausen.lua", include_str!("../lua/mappings/plugin-alliance/bx-oberhausen.lua")),
+    ("mappings/vital-audio/vital.lua", include_str!("../lua/mappings/vital-audio/vital.lua")),
 ];
 
 /// A user file as last seen: its path, when it was last written and its size.
