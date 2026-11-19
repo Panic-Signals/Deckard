@@ -134,15 +134,14 @@ wrong knobs. Re-run until clean.
 
 ## 7. Install it or ship it
 
-- **The user's own** (any plug-in; the only place for commercial ones): copy it into
+- **The user's own** (any plug-in): copy it into
   their controller folder's `mappings/<vendor>/` (Controller ▸ Open Controller Scripts
   shows it). DECKARD reloads it when it changes; a mapping that fails shows its
   error on the MK3 and is left out.
-- **Shipped with DECKARD** (only plug-ins that are open source, free, on macOS, Linux and
-  Windows, widely used, with stable parameter ids): put it in
+- **Shipped with DECKARD** (plug-ins many people play, with stable parameter ids): put it in
   `crates/surface/lua/mappings/<vendor>/<plugin>.lua`, add it to `SHIPPED` in
-  `crates/surface/src/sources.rs`, and its dump to
-  `crates/surface/tests/mappings/<plugin>.json` (the test
+  `crates/surface/src/sources.rs`, and its dump, cut down to the parameters the mapping
+  names (by id or title), to `crates/surface/tests/mappings/<plugin>.json` (the test
   `shipped_mappings_check_against_their_dumps` checks it in CI). No vendor artwork.
   Then the `pull-request` skill: the PR's test steps say which plug-in version the dump
   is from and attach a few of the rendered pages.

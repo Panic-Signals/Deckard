@@ -2,8 +2,8 @@
 //! (`plugin-probe dump`, the plug-in's parameters and their text at 64 values), as the
 //! spec's "Checking a mapping" asks.
 //!
-//! - **Shipped mappings** (`crates/surface/lua/mappings/`) each come with their dump in
-//!   `crates/surface/tests/mappings/<plugin>.json`; `shipped_mappings_check_against_their_dumps`
+//! - **Shipped mappings** (`crates/surface/lua/mappings/`) each come with their dump (the parameters
+//!   they name) in `crates/surface/tests/mappings/<plugin>.json`; `shipped_mappings_check_against_their_dumps`
 //!   (run with the other tests, so in CI) fails on any problem.
 //! - **Any mapping**, a user's included: `scripts/mapping-check.sh <mapping.lua>
 //!   <dump.json> [out folder]` runs `check_a_mapping` (ignored by default), which lists
