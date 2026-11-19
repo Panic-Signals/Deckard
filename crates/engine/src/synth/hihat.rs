@@ -280,6 +280,10 @@ impl Synth for Hihat {
         self.push(Ev::Off);
     }
 
+    fn all_notes_off(&mut self) {
+        self.push(Ev::Off);
+    }
+
     // MIDI controllers, pitch bend and CC 120 never reach the module in Maschine (the
     // wrapper's CC 120 choke is unreachable from a sound): the default `control` ignores
     // them.
