@@ -10657,11 +10657,14 @@ impl App {
         }
     }
 
-    fn paste_plugin(&mut self, chain: deckard_doc::Chain) {
+    fn paste_plugin(&mut self, chain: deckard_doc::Chain, over: Option<usize>) {
         let Some(doc) = self.doc.clone() else { return };
         self.store_plugin_states();
         let Some(copy) = &self.plugin_clipboard else { return };
-        let pasted = doc.borrow_mut().paste_slot(chain, copy);
+        let pasted = match over {
+            Some(at) => doc.borrow_mut().paste_over_instrument(chain, at, copy).map(|()| at),
+            None => doc.borrow_mut().paste_slot(chain, copy),
+        };
         match pasted {
             Ok(at) => {
                 self.editors.retain(|(c, ..)| *c != chain);

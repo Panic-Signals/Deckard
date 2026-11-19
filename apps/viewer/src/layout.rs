@@ -952,7 +952,7 @@ pub enum Act {
     ResetSound(usize, usize),
     CutGroup(usize),
     CopyPlugin(deckard_doc::Chain, usize),
-    PastePlugin(deckard_doc::Chain),
+    PastePlugin(deckard_doc::Chain, Option<usize>),
     CopyGroup(usize),
     PasteGroup(usize),
     DeleteGroup(usize),
@@ -1433,7 +1433,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.sampler_page = 0;
             }
             Act::CopyPlugin(c, i) => app.copy_plugin(c, i),
-            Act::PastePlugin(c) => app.paste_plugin(c),
+            Act::PastePlugin(c, over) => app.paste_plugin(c, over),
             Act::AddSlot(what) => app.add_slot(what),
             Act::MoveSlot(from, to) => app.move_slot(from, to),
             Act::MoveSlotIn(c, from, to) => app.move_slot_in(c, from, to),
@@ -5782,7 +5782,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
                 resp.menu_on_right_click(|ui| {
-                    item(ui, "Copy", true, || Act::CopyPlugin(app.chain(), i), acts);
+                    plugin_clipboard_menu(ui, app, app.chain(), i, slot.is_instrument(), acts);
                     if plugin && ui.button("Open Plug-in Window").clicked() {
                         acts.push(Act::OpenSlotEditor(i));
                         ui.close();
@@ -5917,18 +5917,30 @@ fn add_menu_in(ui: &mut Ui, app: &App, chain: deckard_doc::Chain, instruments: b
         .as_ref()
         .zip(app.doc.as_ref())
         .is_some_and(|(copy, doc)| doc.borrow().slot_paste_position(chain, copy).is_ok());
-    item(ui, "Paste", can_paste, || Act::PastePlugin(chain), acts);
+    item(ui, "Paste", can_paste, || Act::PastePlugin(chain, None), acts);
     module_menu(ui, app, chain, instruments, true, &Act::AddSlot, acts);
 }
 
 /// A plug-in row's right-click menu in the Mixer: put another module in its place, or
 /// remove it. For chain `c`, which needn't be the focused one.
 fn slot_menu(ui: &mut Ui, app: &App, c: deckard_doc::Chain, i: usize, is_instrument: bool, acts: &mut Vec<Act>) {
-    item(ui, "Copy", true, || Act::CopyPlugin(c, i), acts);
+    plugin_clipboard_menu(ui, app, c, i, is_instrument, acts);
     change_menu(ui, app, c, i, is_instrument, acts);
     if ui.button("Remove").clicked() {
         acts.push(Act::RemoveSlotIn(c, i));
         ui.close();
+    }
+}
+
+fn plugin_clipboard_menu(ui: &mut Ui, app: &App, chain: deckard_doc::Chain, at: usize, instrument: bool, acts: &mut Vec<Act>) {
+    item(ui, "Copy", true, || Act::CopyPlugin(chain, at), acts);
+    if instrument {
+        let can_paste = app
+            .plugin_clipboard
+            .as_ref()
+            .zip(app.doc.as_ref())
+            .is_some_and(|(copy, doc)| doc.borrow().can_paste_over_instrument(chain, at, copy));
+        item(ui, "Paste", can_paste, || Act::PastePlugin(chain, Some(at)), acts);
     }
 }
 

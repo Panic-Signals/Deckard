@@ -566,6 +566,26 @@ impl Document {
         Ok(at)
     }
 
+    /// Check whether the clicked instrument can be replaced by the clipboard's instrument.
+    pub fn can_paste_over_instrument(&self, c: Chain, at: usize, copy: &CopiedSlot) -> bool {
+        copy.instrument
+            && at == 0
+            && matches!(c, Chain::Sound(..))
+            && self.chain_slots(c).and_then(|slots| slots.first()).is_some_and(|slot| slot.is_instrument())
+    }
+
+    /// Replace the instrument in one undo step, keeping the sound's effects.
+    pub fn paste_over_instrument(&mut self, c: Chain, at: usize, copy: &CopiedSlot) -> Result<(), String> {
+        if !self.can_paste_over_instrument(c, at, copy) {
+            return Err("select an instrument slot and copy an instrument first".into());
+        }
+        self.transaction("Paste Instrument", |doc| {
+            doc.remove_slot_in(c, at)?;
+            doc.paste_slot(c, copy)?;
+            Ok(())
+        })
+    }
+
     /// Bypass (`active` false) or enable slot `at` of sound `s`.
     pub fn set_slot_active(&mut self, g: usize, s: usize, at: usize, active: bool) -> Result<(), String> {
         self.set_slot_active_in(Chain::Sound(g, s), at, active)
