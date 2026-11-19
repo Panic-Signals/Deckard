@@ -267,6 +267,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Ear),
+        scope: false,
     };
 
     /// An engine for `p` (its sound 0 a Zhora) with an [`Ear`] in Zhora's place, stopped,

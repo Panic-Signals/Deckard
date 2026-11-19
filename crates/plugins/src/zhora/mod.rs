@@ -18,7 +18,7 @@ use crate::replicant::{Env, EnvSettings, env_time, glide_time, step, time_text};
 use crate::{MAX_BLOCK, Transport};
 
 pub static CLASS: Class =
-    Class { cid: *b"DECKARD:Zhora001", name: "Zhora", instrument: true, params: PARAMS, pages: PAGES, make: |sr| Box::new(Zhora::new(sr)) };
+    Class { cid: *b"DECKARD:Zhora001", name: "Zhora", instrument: true, params: PARAMS, pages: PAGES, make: |sr| Box::new(Zhora::new(sr)), scope: false };
 
 /// Whether `id` (a saved `plugin_id`) is Zhora.
 pub fn is_zhora(id: &str) -> bool {

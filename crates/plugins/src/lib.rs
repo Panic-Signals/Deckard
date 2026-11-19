@@ -556,6 +556,22 @@ impl Plugin {
         }
     }
 
+    /// A synth's preview for its scope: the waveform's columns and the note's envelope;
+    /// `None` for a plug-in without one.
+    #[allow(dead_code)]
+    pub fn scope(&mut self, columns: usize) -> Option<native::Scope> {
+        self.scope_at(columns, 0)
+    }
+
+    /// Like [`Self::scope`], but with a `phase` that slides the displayed wave slice
+    /// through the preview note, so the picture moves instead of staying frozen.
+    pub fn scope_at(&mut self, columns: usize, phase: usize) -> Option<native::Scope> {
+        match &mut self.kind {
+            Kind::Native(p) => p.scope_at(columns, phase),
+            _ => None,
+        }
+    }
+
     /// Whether the plug-in's state changed by itself (a finished Tune) and is to be
     /// stored, without taking the news (as [`Plugin::take_dirty`] does).
     pub fn changed_by_itself(&self) -> bool {

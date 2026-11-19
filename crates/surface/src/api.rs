@@ -1552,6 +1552,13 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
         t.set("muted", tv.muted)?;
         ct.set("tuner", t)?;
     }
+    // The focused synth's preview: the wave's low/high columns and the note's envelope.
+    if let Some(s) = &c.scope {
+        let t = lua.create_table()?;
+        t.set("wave", lua.create_sequence_from(s.wave.iter().flat_map(|(lo, hi)| [*lo, *hi]))?)?;
+        t.set("env", lua.create_sequence_from(s.envelope.iter().copied())?)?;
+        ct.set("scope", t)?;
+    }
     // The Generate page's Euclidean circle.
     if let Some(e) = &c.euclid {
         let t = lua.create_table()?;

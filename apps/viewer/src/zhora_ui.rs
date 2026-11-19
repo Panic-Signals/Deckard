@@ -9,7 +9,7 @@ use deckard_plugins::native::{InputSource, Readout, TuneState};
 use deckard_plugins::zhora::{
     ATTACK, CHECK, DECAY, HOLD, HOLD_NOTE, INPUT, LIVE, OUTS, RELEASE, SIGNAL_NAMES, SUSTAIN, TUNE, input_of, is_zhora,
 };
-use deckard_surface::{TunerView, ZhoraView};
+use deckard_surface::{ScopeView, TunerView, ZhoraView};
 
 use crate::App;
 use crate::settings::Settings;
@@ -239,6 +239,9 @@ pub fn view(r: &Readout, live: bool, hold_note: &str, input: String, problem: Op
 /// Samples in the envelope's picture.
 const ENV_POINTS: usize = 240;
 
+/// Columns in the scope beside the picture (1 px each: 218 px inside its frame).
+const SCOPE_COLUMNS: usize = 218;
+
 /// The picture of an envelope whose knobs are at `[attack, decay, sustain, release]`
 /// (0..1), as the LFO page draws one, and where it shows the note off.
 pub fn env_picture([a, d, s, r]: [f64; 4]) -> (Vec<f32>, f32) {
@@ -283,6 +286,67 @@ impl App {
         let v = tuner_view(&r, reference);
         *shown = Some((key, v.clone()));
         Some(v)
+    }
+
+    /// What the right screen shows of the focused synth's preview. Read without waiting
+    /// on the audio thread: while it has the instance, the last picture stays.
+    pub(crate) fn scope_view(&self) -> Option<ScopeView> {
+        let chain = self.chain();
+        let i = self.slot.filter(|_| !self.channel)?;
+        let key = (chain, i);
+        // Internal synths (drum synths, Bass/Poly Synth): render a preview note.
+        let slot = self.doc.as_ref()?.borrow().chain_slots(chain)?.get(i)?.clone();
+        if deckard_model::INTERNAL_INSTRUMENTS.contains(&slot.module.as_str()) {
+            let mut shown = self.scope_shown.borrow_mut();
+            let params: Vec<(String, f64)> = slot.params.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let scope = self.render_internal_scope(&slot.module, &params)?;
+            let v = ScopeView { wave: scope.wave, envelope: scope.envelope };
+            *shown = Some((key, v.clone()));
+            return Some(v);
+        }
+        let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, i))?;
+        let mut shown = self.scope_shown.borrow_mut();
+        let Ok(mut p) = inst.try_lock() else {
+            return shown.as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
+        };
+        let scope = p.scope(SCOPE_COLUMNS);
+        drop(p);
+        let Some(scope) = scope else {
+            *shown = None;
+            return None;
+        };
+        let v = ScopeView { wave: scope.wave, envelope: scope.envelope };
+        *shown = Some((key, v.clone()));
+        Some(v)
+    }
+
+    fn render_internal_scope(&self, module: &str, params: &[(String, f64)]) -> Option<deckard_plugins::native::Scope> {
+        let sr = 48000.0;
+        let mut synth = deckard_engine::synth::make(module, params, sr)?;
+        let total = (sr * deckard_plugins::native::PREVIEW_SECONDS).round() as usize;
+        let hold = (sr * deckard_plugins::native::PREVIEW_HOLD).round() as usize;
+        let mut mono = Vec::with_capacity(total);
+        let mut left = vec![0.0f32; deckard_plugins::MAX_BLOCK];
+        let mut right = vec![0.0f32; deckard_plugins::MAX_BLOCK];
+        synth.note_on(69, 100);
+        let mut done = 0;
+        let mut released = false;
+        while done < total {
+            if !released && done >= hold {
+                synth.note_off(69);
+                released = true;
+            }
+            let until = if released { total } else { hold.min(total) };
+            let n = (until - done).min(deckard_plugins::MAX_BLOCK);
+            left[..n].fill(0.0);
+            right[..n].fill(0.0);
+            synth.process(&mut left[..n], &mut right[..n]);
+            for i in 0..n {
+                mono.push((left[i] + right[i]) * 0.5);
+            }
+            done += n;
+        }
+        Some(deckard_plugins::native::scope_of(&mono, SCOPE_COLUMNS, 0))
     }
 
     /// The focused slot, when it is a Zhora playing a sound: (group, sound, slot).

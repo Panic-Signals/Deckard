@@ -1298,6 +1298,8 @@ pub struct App {
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
     /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
+    /// The focused synth's scope (chain, slot) as last shown, while the audio thread has it.
+    scope_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::ScopeView)>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -5640,6 +5642,7 @@ impl App {
             picture: None,
             zhora: None,
             tuner: None,
+            scope: None,
             euclid: self.euclid_view(c.level, c.page, head),
             random: self.random_view(c.level, c.page, head),
         };
@@ -5707,6 +5710,7 @@ impl App {
             if self.surface.page() == "control" {
                 v.control.zhora = self.zhora_view(p);
                 v.control.tuner = self.tuner_view();
+                v.control.scope = self.scope_view();
             }
         }
         v.project = p.name.clone();

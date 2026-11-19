@@ -18,6 +18,7 @@ pub static CLASS: Class = Class {
     params: PARAMS,
     pages: PAGES,
     make: |sr| Box::new(Replicant::new(sr)),
+    scope: true,
 };
 
 // Parameter ids (saved in projects: never renumber).
@@ -831,6 +832,83 @@ mod tests {
         let ups = x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         let hz = ups as f64 * 48_000.0 / x.len() as f64;
         assert!((hz - 440.0).abs() < 1.5, "{hz} Hz");
+    }
+
+    /// The preview of a fresh instance with `set` applied.
+    fn preview(set: &[(u32, f64)], columns: usize) -> crate::native::Scope {
+        let mut inst = Instance::new(&CLASS, 48_000.0);
+        for (id, v) in set {
+            inst.set_param(*id, *v);
+        }
+        inst.scope(columns).expect("Replicant has a scope")
+    }
+
+    #[test]
+    fn scope_previews_the_patch_without_a_note() {
+        let s = preview(&[(DRIFT, 0.0), (CUTOFF, 0.8)], 64);
+        assert_eq!(s.wave.len(), 64);
+        assert_eq!(s.envelope.len(), 64);
+        assert!(s.wave.iter().any(|&(lo, hi)| hi - lo > 0.05), "not a flat line");
+        assert!(s.envelope.iter().any(|&v| v > 0.2), "the preview note sounds");
+        assert!(s.wave.iter().all(|&(lo, hi)| lo.is_finite() && hi.is_finite() && lo >= -1.0 && hi <= 1.0 && lo <= hi));
+        let mut inst = Instance::new(&CLASS, 48_000.0);
+        assert!(inst.scope(0).is_none(), "no columns, nothing to draw");
+    }
+
+    #[test]
+    fn scope_follows_the_knobs() {
+        let dull = preview(&[(CUTOFF, 0.2)], 64);
+        let open = preview(&[(CUTOFF, 0.9)], 64);
+        let moved = dull.wave.iter().zip(&open.wave).map(|((a, b), (c, d))| (a - c).abs().max((b - d).abs())).fold(0.0f32, f32::max);
+        assert!(moved > 0.1, "Cutoff changes the picture: {moved}");
+        let same = preview(&[(CUTOFF, 0.2)], 64);
+        assert_eq!(dull, same, "the same settings draw the same picture");
+    }
+
+    #[test]
+    fn scope_envelope_follows_the_amp_envelope() {
+        let fast = preview(&[(A_ATTACK, 0.0), (A_DECAY, 0.3), (A_SUSTAIN, 0.8)], 64);
+        let slow = preview(&[(A_ATTACK, 0.75), (A_DECAY, 0.3), (A_SUSTAIN, 0.8)], 64);
+        let early = |s: &crate::native::Scope| s.envelope[..8].iter().copied().fold(0.0f32, f32::max);
+        assert!(early(&fast) > early(&slow) + 0.1, "fast {} vs slow {}", early(&fast), early(&slow));
+        assert!(fast.envelope[60] < fast.envelope[20], "the release falls: {} then {}", fast.envelope[20], fast.envelope[60]);
+    }
+
+    #[test]
+    fn scope_envelope_shows_sustain() {
+        let quiet = preview(&[(A_SUSTAIN, 0.2)], 64);
+        let loud = preview(&[(A_SUSTAIN, 0.9)], 64);
+        assert!(loud.envelope[20] > quiet.envelope[20] * 1.8, "sustain: {} vs {}", quiet.envelope[20], loud.envelope[20]);
+        assert!(loud.envelope[20] < 1.0, "headroom for the held note: {}", loud.envelope[20]);
+    }
+
+    #[test]
+    fn scope_wave_starts_on_a_rising_crossing() {
+        let s = preview(&[(OSC1_WAVE, 3.0), (MIX, 0.0), (DETUNE, 0.0), (DRIFT, 0.0), (CUTOFF, 1.0), (ENV_AMT, 0.5), (RESO, 0.0)], 64);
+        let (lo, hi) = s.wave[0];
+        assert!(lo > -0.05 && hi > 0.0, "first column: {lo}..{hi}");
+        assert!(s.wave.iter().filter(|&&(lo, hi)| hi - lo > 0.05).count() > 32);
+    }
+
+    #[test]
+    fn scope_ignores_modulation() {
+        let mut inst = Instance::new(&CLASS, 48_000.0);
+        let plain = inst.scope(48).expect("a scope");
+        inst.modulate(CUTOFF, 0.1);
+        assert_eq!(inst.scope(48), Some(plain), "modulation does not move the preview");
+    }
+
+    #[test]
+    fn scope_is_only_replicant_and_works_at_44_khz() {
+        let mut other = Instance::new(&crate::zhora::CLASS, 44_100.0);
+        assert!(other.scope(16).is_none(), "Zhora has no scope");
+        let mut inst = Instance::new(&CLASS, 44_100.0);
+        for (id, v) in [(A_ATTACK, 1.0), (A_RELEASE, 1.0), (F_ATTACK, 1.0)] {
+            inst.set_param(id, v);
+        }
+        let s = inst.scope(32).expect("a scope");
+        assert!(s.wave.iter().all(|&(lo, hi)| lo.is_finite() && hi.is_finite() && lo <= hi));
+        assert!(s.envelope.iter().all(|&v| v.is_finite() && (0.0..=1.0).contains(&v)));
     }
 
     /// The supersaw: off by default (one oscillator, as before); seven copies sound

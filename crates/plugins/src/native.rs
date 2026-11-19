@@ -172,6 +172,26 @@ pub trait Engine: Send {
     }
 }
 
+/// What a synth's scope draws: the waveform of a held note and the note's amplitude
+/// envelope over time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scope {
+    /// The lowest and highest signal in each column, -1..1 (0 the middle line).
+    pub wave: Vec<(f32, f32)>,
+    /// The preview note's level in each column, 0..1.
+    pub envelope: Vec<f32>,
+}
+
+/// The preview note: an A4 held for [`PREVIEW_HOLD`] seconds of a [`PREVIEW_SECONDS`]-second
+/// render.
+pub const PREVIEW_SECONDS: f64 = 1.0;
+pub const PREVIEW_HOLD: f64 = 0.6;
+pub const PREVIEW_NOTE: u8 = 69;
+pub const PREVIEW_VELOCITY: u8 = 100;
+/// Samples the waveform shows, and how much louder than the signal it is drawn.
+const SCOPE_WINDOW: usize = 1024;
+const SCOPE_GAIN: f32 = 6.0;
+
 /// What a Tune or Check is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuneState {
@@ -216,6 +236,8 @@ pub struct Class {
     pub pages: &'static [Page],
     /// A new engine at `sample_rate`.
     pub make: fn(sample_rate: f64) -> Box<dyn Engine>,
+    /// Whether this class renders a preview for its scope (built-in synths only).
+    pub scope: bool,
 }
 
 impl Class {
@@ -252,6 +274,8 @@ pub struct Instance {
     out: (Vec<f32>, Vec<f32>),
     sample_rate: f64,
     dirty: std::sync::atomic::AtomicBool,
+    /// One second of the preview note at the current knob values: what the scope draws.
+    preview: Option<Vec<f32>>,
     /// The Maschine chunk last applied.
     pub(crate) chunk: Vec<u8>,
 }
@@ -274,6 +298,7 @@ impl Instance {
             out: (vec![0.0; crate::MAX_BLOCK], vec![0.0; crate::MAX_BLOCK]),
             sample_rate,
             dirty: Default::default(),
+            preview: None,
             chunk: Vec::new(),
         }
     }
@@ -317,6 +342,7 @@ impl Instance {
             self.engine.set_param(p.id, *v);
         }
         self.values = values;
+        self.preview = None;
         self.held = [false; 128];
         self.sustained = [false; 128];
         self.pedal = false;
@@ -368,6 +394,7 @@ impl Instance {
         let v = if p.steps > 0 { (v.clamp(0.0, 1.0) * p.steps as f64).round() / p.steps as f64 } else { v.clamp(0.0, 1.0) };
         if self.values[i] != v {
             self.values[i] = v;
+            self.preview = None;
             // Modulation holds it until it lets go (then the knob's value plays).
             if self.modded[i].is_none() {
                 self.engine.set_param(id, v);
@@ -522,9 +549,107 @@ impl Instance {
         self.engine.readout()
     }
 
+    /// What the synth's scope draws: a short preview note rendered from the current
+    /// knob values, downsampled to `columns`. `None` for a plug-in without a scope.
+    #[allow(dead_code)]
+    pub(crate) fn scope(&mut self, columns: usize) -> Option<Scope> {
+        self.scope_at(columns, 0)
+    }
+
+    pub(crate) fn scope_at(&mut self, columns: usize, phase: usize) -> Option<Scope> {
+        if columns == 0 || !self.class.scope {
+            return None;
+        }
+        if self.preview.is_none() {
+            self.preview = Some(self.render_preview());
+        }
+        Some(scope_of(self.preview.as_deref().unwrap_or(&[]), columns, phase))
+    }
+
+    /// Render the preview note with the current knob values: an A4 held for part of the
+    /// second, then released, as mono samples.
+    fn render_preview(&self) -> Vec<f32> {
+        let mut engine = (self.class.make)(self.sample_rate);
+        for (p, v) in self.class.params.iter().zip(&self.values) {
+            engine.set_param(p.id, *v);
+        }
+        let total = (self.sample_rate * PREVIEW_SECONDS).round() as usize;
+        let hold = (self.sample_rate * PREVIEW_HOLD).round() as usize;
+        let mut mono = Vec::with_capacity(total);
+        let transport = Transport::default();
+        let mut left = vec![0.0f32; crate::MAX_BLOCK];
+        let mut right = vec![0.0f32; crate::MAX_BLOCK];
+        engine.note_on(PREVIEW_NOTE, PREVIEW_VELOCITY);
+        let mut done = 0;
+        let mut released = false;
+        while done < total {
+            if !released && done >= hold {
+                engine.note_off(PREVIEW_NOTE);
+                released = true;
+            }
+            let until = if released { total } else { hold.min(total) };
+            let n = (until - done).min(crate::MAX_BLOCK);
+            let (l, r) = (&mut left[..n], &mut right[..n]);
+            l.fill(0.0);
+            r.fill(0.0);
+            engine.process(l, r, &transport);
+            mono.extend(l.iter().zip(r.iter()).map(|(a, b)| 0.5 * (a + b)));
+            done += n;
+        }
+        mono
+    }
+
     pub(crate) fn changed(&self) -> bool {
         self.engine.changed()
     }
+}
+
+/// A preview note (mono) as a scope draws it: the waveform of a slice, and the note's
+/// envelope over all of it.
+pub fn scope_of(mono: &[f32], columns: usize, phase: usize) -> Scope {
+    let n = mono.len();
+    let mut wave = Vec::with_capacity(columns);
+    let mut envelope = Vec::with_capacity(columns);
+    for c in 0..columns {
+        let a = c * n / columns;
+        let b = ((c + 1) * n / columns).max(a + 1).min(n);
+        let mut peak = 0.0f32;
+        for &x in &mono[a..b] {
+            if x.is_finite() {
+                peak = peak.max(x.abs());
+            }
+        }
+        envelope.push((peak * SCOPE_GAIN).clamp(0.0, 1.0));
+    }
+    // Show a slice of the note. At phase 0 it sits at 30 % of the note's length (the
+    // familiar triggered picture); as the phase advances the slice slides through the
+    // note, so the wave moves instead of staying frozen. A rising-zero snap keeps the
+    // picture from tearing while it travels.
+    let base = (n * 3 / 10).min(n);
+    let max_start = n.saturating_sub(SCOPE_WINDOW).max(1);
+    let start = if phase == 0 { base } else { (base + phase * 256) % max_start }.min(n);
+    let window = &mono[start..(start + SCOPE_WINDOW).min(n)];
+    let at = (1..window.len()).find(|&i| window[i - 1] < 0.0 && window[i] >= 0.0).unwrap_or(0);
+    let window = &window[at..];
+    for c in 0..columns {
+        let a = c * window.len() / columns;
+        let b = ((c + 1) * window.len() / columns).max(a + 1).min(window.len());
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &x in &window[a..b] {
+            if !x.is_finite() {
+                continue;
+            }
+            let x = x * SCOPE_GAIN;
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        if lo.is_finite() && hi.is_finite() {
+            wave.push((lo.clamp(-1.0, 1.0), hi.clamp(-1.0, 1.0)));
+        } else {
+            wave.push((0.0, 0.0));
+        }
+    }
+    Scope { wave, envelope }
 }
 
 /// A saved state's parameter values (id, normalized; non-finite ones left out) and the
@@ -625,9 +750,10 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Multi { aux: (vec![0.25; crate::MAX_BLOCK], vec![0.5; crate::MAX_BLOCK]) }),
+        scope: false,
     };
 
-    static PLAIN: Class = Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain) };
+    static PLAIN: Class = Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain), scope: false };
 
     /// A native plug-in says how many output buses it has and what they're called.
     #[test]
@@ -664,7 +790,7 @@ mod tests {
             fn process(&mut self, _: &mut [f32], _: &mut [f32], _: &Transport) {}
         }
         static PRESSED: Class =
-            Class { cid: [9; 16], name: "Pressed", instrument: true, params: &[], pages: &[], make: |_| Box::new(Pressed) };
+            Class { cid: [9; 16], name: "Pressed", instrument: true, params: &[], pages: &[], make: |_| Box::new(Pressed), scope: false };
         let id = crate::PluginId::parse(&PRESSED.plugin_id(), PRESSED.name).unwrap();
         let mut p = crate::Plugin::native(&PRESSED, id, "Pressed", 48_000.0);
         p.channel_pressure(127);
@@ -753,5 +879,38 @@ mod tests {
         assert_eq!(p.modulated(param), Some(0.9), "modulation still holds it");
         p.unmodulate(param);
         assert_eq!(p.param_value(param), 0.3);
+    }
+
+    /// The picture keeps NaNs out: a column with no finite sample is zero, never an
+    /// inverted low/high pair.
+    #[test]
+    fn the_scope_picture_keeps_nan_out() {
+        let s = scope_of(&[0.1, f32::NAN, -0.1, f32::NAN], 4, 0);
+        assert!(s.wave.iter().all(|(lo, hi)| lo.is_finite() && hi.is_finite() && lo <= hi));
+        assert!(s.envelope.iter().all(|v| v.is_finite()));
+    }
+
+    /// The preview renders once and is reused: a redraw only asks for columns.
+    #[test]
+    fn the_preview_renders_once_until_a_knob_changes() {
+        let mut inst = Instance::new(&crate::replicant::CLASS, 48_000.0);
+        inst.scope(8);
+        inst.preview = Some(vec![0.5; 32]);
+        inst.scope(16);
+        assert_eq!(inst.preview.as_deref(), Some(&[0.5f32; 32][..]), "the cached preview is reused");
+        let id = inst.class.params[0].id;
+        inst.set_param(id, 1.0);
+        assert!(inst.preview.is_none(), "a knob drops the preview");
+        inst.scope(16);
+        assert!(inst.preview.as_ref().is_some_and(|p| p.len() != 32), "the next look renders it again");
+    }
+
+    /// Loading a state drops the preview with the values it was rendered from.
+    #[test]
+    fn loading_a_state_drops_the_preview() {
+        let mut inst = Instance::new(&crate::replicant::CLASS, 48_000.0);
+        inst.scope(8);
+        inst.load(&[]).unwrap();
+        assert!(inst.preview.is_none());
     }
 }

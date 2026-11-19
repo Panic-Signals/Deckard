@@ -12047,6 +12047,7 @@ mod tests {
             params: &[],
             pages: &[],
             make: |_| Box::new(Duck),
+            scope: false,
         };
 
         let run = |on_group: bool, with_source: bool, sc_gain: f64| {
@@ -12477,6 +12478,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Split::default()),
+        scope: false,
     };
 
     static SPLIT_INSTRUMENT: deckard_plugins::native::Class = deckard_plugins::native::Class {
@@ -12486,6 +12488,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Split { instrument: true, ..Default::default() }),
+        scope: false,
     };
 
     pub(crate) fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
@@ -13074,6 +13077,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Pressed::default()),
+        scope: false,
     };
 
     /// Channel pressure reaches a plug-in instrument (the woosh's Z on Pigments), as
