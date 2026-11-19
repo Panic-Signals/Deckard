@@ -677,15 +677,19 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
 fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
-    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
+    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565_dithered, rgb565_rounded};
+    // (A picture's pixels, marked by the surface, rounded rather than dithered.)
+    let to565 = |x: usize, y: usize, [r, g, b, a]: [u8; 4]| {
+        if a == deckard_surface::PICTURE_ALPHA { rgb565_rounded(r, g, b) } else { rgb565_dithered(x, y, r, g, b) }
+    };
     let mut left = vec![0u16; WIDTH * HEIGHT];
     let mut right = vec![0u16; WIDTH * HEIGHT];
-    // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
+    // Fill `out` with one 480×272 half of a 960-wide RGBA picture, dithered to the
+    // displays' 5-6-5 levels (the one place the picture loses its low bits).
     let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
-                let [r, g, b, _] = px.get(y * WIDTH * 2 + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
-                out[y * WIDTH + x] = rgb565(r, g, b);
+                out[y * WIDTH + x] = to565(x, y, px.get(y * WIDTH * 2 + x0 + x).copied().unwrap_or([0, 0, 0, 255]));
             }
         }
     };

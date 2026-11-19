@@ -284,6 +284,165 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// The mapping in `DECKARD_MAPPING` (against `DECKARD_DUMP`) rendered in each picture
+    /// style, into `DECKARD_RENDER_DIR/<style>/`, to compare them (`--ignored`).
+    #[test]
+    #[ignore = "renders style variants to look at"]
+    fn render_picture_styles() {
+        let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
+        let (Some(path), Some(dump_path)) = (var("DECKARD_MAPPING"), var("DECKARD_DUMP")) else { return };
+        let out = var("DECKARD_RENDER_DIR").unwrap_or_else(|| std::env::temp_dir().join("deckard-styles"));
+        let m = read_mapping(&path).unwrap();
+        let dump = read_dump(&dump_path).unwrap();
+        use super::super::PictureStyle as S;
+        for (name, st) in [
+            ("lines", S::LINES),
+            ("soft", S::SOFT),
+            ("panels", S::PANELS),
+            ("glow", S::GLOW),
+            ("scope", S::SCOPE),
+            ("dots", S::DOTS),
+            ("solid", S::SOLID),
+            ("blueprint", S::BLUEPRINT),
+        ] {
+            super::super::set_style(st);
+            let files = render_pages(&path, &m, &dump, &out.join(name)).unwrap();
+            println!("{name}: {} files", files.len());
+        }
+        super::super::set_style(super::super::PictureStyle::LINES);
+    }
+
+    /// One page (`DECKARD_PAGE`) of the mapping in `DECKARD_MAPPING` in theme
+    /// `DECKARD_THEME` and the `deep` picture style, to `DECKARD_RENDER_DIR/<page>.png`
+    /// (`--ignored`).
+    #[test]
+    #[ignore = "renders one page to look at"]
+    fn render_one_page() {
+        let var = |k: &str| std::env::var(k).ok();
+        let (Some(path), Some(dump_path), Some(out)) = (var("DECKARD_MAPPING"), var("DECKARD_DUMP"), var("DECKARD_RENDER_DIR")) else {
+            return;
+        };
+        let page_name = var("DECKARD_PAGE").unwrap_or_else(|| "AMP".into());
+        let path = PathBuf::from(path);
+        let m = read_mapping(&path).unwrap();
+        let dump = read_dump(Path::new(&dump_path)).unwrap();
+        super::super::set_style(super::super::PictureStyle::DEEP);
+        let dir = std::env::temp_dir().join(format!("deckard-one-page-{}", std::process::id()));
+        let maps = dir.join("mappings").join("check");
+        // (`DECKARD_CONTROLLER`: a controller folder whose scripts replace the built-ins.)
+        if let Some(from) = var("DECKARD_CONTROLLER") {
+            fn copy(from: &Path, to: &Path) {
+                std::fs::create_dir_all(to).unwrap();
+                for e in std::fs::read_dir(from).unwrap().flatten() {
+                    let (f, t) = (e.path(), to.join(e.file_name()));
+                    if f.is_dir() {
+                        copy(&f, &t)
+                    } else {
+                        std::fs::copy(&f, &t).unwrap();
+                    }
+                }
+            }
+            copy(Path::new(&from), &dir);
+        }
+        std::fs::create_dir_all(&maps).unwrap();
+        std::fs::copy(&path, maps.join("mapping.lua")).unwrap();
+        let mut s = Surface::with_user_dir(Some(dir.clone()));
+        s.set_theme(&var("DECKARD_THEME").unwrap_or_else(|| "deep".into()));
+        let name = m.matches.name.clone().or_else(|| m.matches.builtin.clone()).unwrap_or_else(|| "Plug-in".into());
+        let mut v = crate::tests_support::view();
+        v.control.modules_visible = true;
+        v.control.chain[0].name = name.clone();
+        // (`DECKARD_BUILTIN`: as one of DECKARD's own devices rather than a hosted plug-in.)
+        v.control.chain[0].plugin = var("DECKARD_BUILTIN").is_none();
+        v.control.chain[0].instrument = m.kind == "synth";
+        v.control.slot = Some(name.clone());
+        v.control.pages = m.pages.iter().map(|p| p.name.clone()).collect();
+        // (`DECKARD_LEVEL`: 0 master, 1 group, 2 sound; `DECKARD_GROUP_NAME` renames the group.)
+        if let Some(l) = var("DECKARD_LEVEL").and_then(|l| l.parse().ok()) {
+            v.control.level = l;
+        }
+        if let Some(n) = var("DECKARD_GROUP_NAME") {
+            v.groups[v.group].name = n;
+        }
+        // The plug-in's own pictures, where the host has them (`DECKARD_PICTURES`: a
+        // folder with `thumb.png` and `logo.png`).
+        if let Some(dir) = var("DECKARD_PICTURES") {
+            let key = name.to_lowercase();
+            for (file, thumb) in [("thumb.png", true), ("logo.png", false)] {
+                let Ok(f) = std::fs::File::open(Path::new(&dir).join(file)) else { continue };
+                let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+                dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+                let mut r = dec.read_info().unwrap();
+                let mut buf = vec![0; r.output_buffer_size().unwrap()];
+                let info = r.next_frame(&mut buf).unwrap();
+                let (w, h) = (info.width as usize, info.height as usize);
+                let ch = info.color_type.samples();
+                let px = (0..w * h)
+                    .map(|i| {
+                        let p = &buf[i * ch..i * ch + ch];
+                        match ch {
+                            4 => [p[0], p[1], p[2], p[3]],
+                            3 => [p[0], p[1], p[2], 255],
+                            2 => [p[0], p[0], p[0], p[1]],
+                            _ => [p[0], p[0], p[0], 255],
+                        }
+                    })
+                    .collect();
+                s.add_picture(&key, thumb, w, h, px);
+            }
+            v.control.chain[0].picture = Some(key);
+        }
+        let i = m.pages.iter().position(|p| p.name.eq_ignore_ascii_case(&page_name)).expect("page");
+        v.control.page = i;
+        // (`DECKARD_PAGES=n:k`: as if the plug-in had n pages and this were page k.)
+        if let Some((n, k)) = var("DECKARD_PAGES").and_then(|s| s.split_once(':').map(|(a, b)| (a.parse::<usize>(), b.parse::<usize>())))
+            && let (Ok(n), Ok(k)) = (n, k)
+        {
+            while v.control.pages.len() < n {
+                v.control.pages.push(format!("PAGE {}", v.control.pages.len() + 1));
+            }
+            v.control.pages.truncate(n);
+            v.control.pages[k - 1] = page_name.clone();
+            v.control.page = k - 1;
+        }
+        v.control.knobs = m.pages[i].knobs.iter().map(|k| k.as_deref().and_then(|k| knob(&m, k, &dump, None))).collect();
+        // (`DECKARD_SECTIONS`: the knobs' section names, comma-separated, as a plug-in's
+        // own pages give them.)
+        if let Some(names) = var("DECKARD_SECTIONS") {
+            for (k, name) in v.control.knobs.iter_mut().zip(names.split(',')) {
+                if let Some(k) = k {
+                    k.section = name.trim().to_string();
+                }
+            }
+        }
+        // (`DECKARD_LOADING`: with the loading overlay over it, naming that.)
+        if let Some(name) = var("DECKARD_LOADING") {
+            v.loading = Some(name);
+        }
+        let mut px = s.picture(&v);
+        assert!(s.error().is_none(), "{:?}", s.error());
+        // (`DECKARD_565`: as the displays show it, dithered to their 5-6-5 levels.)
+        if var("DECKARD_565").is_some() {
+            let w = crate::screen::WIDTH;
+            for (i, p) in px.iter_mut().enumerate() {
+                let (x, y) = (i % w, i / w);
+                let q = if p[3] == crate::PICTURE_ALPHA {
+                    deckard_mk3::display::rgb565_rounded(p[0], p[1], p[2])
+                } else {
+                    deckard_mk3::display::rgb565_dithered(x % (w / 2), y, p[0], p[1], p[2])
+                };
+                let up = |v: u16, max: u16| ((u32::from(v) * 255 + u32::from(max) / 2) / u32::from(max)) as u8;
+                *p = [up(q >> 11, 31), up((q >> 5) & 63, 63), up(q & 31, 31), p[3]];
+            }
+        }
+        std::fs::create_dir_all(&out).unwrap();
+        let file = PathBuf::from(out).join(format!("{}.png", page_name.to_ascii_lowercase()));
+        super::super::golden::write_png(&file, crate::screen::WIDTH as u32, crate::screen::HEIGHT as u32, &px);
+        println!("wrote {}", file.display());
+        super::super::set_style(super::super::PictureStyle::LINES);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `scripts/mapping-check.sh`: checks the mapping in `DECKARD_MAPPING` against the dump
     /// in `DECKARD_DUMP` and renders its pages into `DECKARD_RENDER_DIR`.
     #[test]

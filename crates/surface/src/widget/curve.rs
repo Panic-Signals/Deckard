@@ -114,13 +114,13 @@ impl Curve {
         let handle = c.ink(look.record, &["bands"]);
         for (i, &(bx, by)) in self.bands.iter().enumerate() {
             let (cx, cy) = (px(bx), py(by));
-            if kind == "time" {
-                c.line(cx, py(0.0), cx, cy, 1.5, handle);
-            }
             // (Kept inside the box: a handle at an edge sits against it.)
             let edge = radius + 5.0;
             let cx = cx.clamp(edge, w as f32 - edge);
             let cy = cy.clamp(edge, h as f32 - edge);
+            if kind == "time" {
+                c.line(cx, py(0.0).min(h as f32 - 2.0), cx, cy, 1.5, handle);
+            }
             if c.lit("bands") {
                 c.ring(cx, cy, radius + 3.0, 1.5, look.text);
             }

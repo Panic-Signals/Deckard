@@ -25,12 +25,15 @@ pub type Pictures = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<(St
 /// DECKARD's fonts, by the name scripts and themes use: IBM Plex Sans and IBM Plex Mono
 /// (SIL OFL 1.1), egui's Ubuntu Light and Hack, and Google's Roboto (Apache 2.0) and
 /// Roboto Mono (SIL OFL 1.1), as Maschine's screens use (`fonts/`, with their licences).
-pub const FONTS: [(&str, &[u8]); 12] = [
+pub const FONTS: [(&str, &[u8]); 14] = [
     ("ubuntu", epaint_default_fonts::UBUNTU_LIGHT),
     ("hack", epaint_default_fonts::HACK_REGULAR),
     ("plex", include_bytes!("../fonts/IBMPlexSans-Regular.ttf")),
     ("plex-bold", include_bytes!("../fonts/IBMPlexSans-Bold.ttf")),
     ("plex-mono", include_bytes!("../fonts/IBMPlexMono-Regular.ttf")),
+    // (The same, a weight heavier: for a small screen.)
+    ("plex-medium", include_bytes!("../fonts/IBMPlexSans-Medium.ttf")),
+    ("plex-mono-medium", include_bytes!("../fonts/IBMPlexMono-Medium.ttf")),
     ("roboto", include_bytes!("../fonts/Roboto-Regular.ttf")),
     ("roboto-light", include_bytes!("../fonts/Roboto-Light.ttf")),
     ("roboto-medium", include_bytes!("../fonts/Roboto-Medium.ttf")),
@@ -94,13 +97,22 @@ pub struct ThemeCache {
     colors: HashMap<String, Paint>,
     fonts: HashMap<String, usize>,
     styles: HashMap<String, Style>,
-    default_style: Style,
+    pub(crate) default_style: Style,
     pub background: [u8; 3],
     pub text: [u8; 3],
     pub accent: [u8; 3],
     pub animates: bool,
     /// The theme asks widgets for soft fills (`widgets_soft = true`).
     pub soft: bool,
+    /// The knobs' names, values and dials centred in their cells (`knobs_centred = true`).
+    pub centred: bool,
+    /// With `centred`, the dials and the names and values at the cells' left instead
+    /// (`knobs_left = true`).
+    pub left: bool,
+    /// The pictures' style the theme asks for (`picture_style = "deep"`), if any.
+    pub picture_style: Option<crate::widget::PictureStyle>,
+    /// Labels set by their capitals (`text_on_caps = true`): see [`Picture::caps`].
+    pub caps: bool,
 }
 
 impl ThemeCache {
@@ -181,12 +193,36 @@ impl ThemeCache {
         let accent = colors.get("accent").map_or([0xff, 0xa5, 0x2a], |p| p.rgb);
         let animates = theme.get::<Value>("chase").is_ok_and(|c| !c.is_nil());
         let soft = theme.get::<Option<bool>>("widgets_soft").ok().flatten().unwrap_or(false);
-        Ok(ThemeCache { colors, fonts, styles, default_style, background, text, accent, animates, soft })
+        let centred = theme.get::<Option<bool>>("knobs_centred").ok().flatten().unwrap_or(false);
+        let left = theme.get::<Option<bool>>("knobs_left").ok().flatten().unwrap_or(false);
+        let picture_style =
+            theme.get::<Option<String>>("picture_style").ok().flatten().and_then(|n| crate::widget::PictureStyle::named(&n));
+        let caps = theme.get::<Option<bool>>("text_on_caps").ok().flatten().unwrap_or(false);
+        Ok(ThemeCache {
+            colors,
+            fonts,
+            styles,
+            default_style,
+            background,
+            text,
+            accent,
+            animates,
+            soft,
+            centred,
+            left,
+            picture_style,
+            caps,
+        })
     }
 
     /// The theme's colour `name`, if it has one.
     pub(crate) fn color(&self, name: &str) -> Option<Paint> {
         self.colors.get(name).copied()
+    }
+
+    /// Colour `name` is `rgb` from now on (opaque).
+    pub fn set_colour(&mut self, name: &str, rgb: [u8; 3]) {
+        self.colors.insert(name.to_string(), Paint { rgb, alpha: 1.0 });
     }
 
     /// The theme's style `name`, else its default style.
@@ -342,13 +378,93 @@ fn style(lua: &Lua, v: &Value) -> mlua::Result<Style> {
 /// One drawing command recorded by `draw(screen, theme)`.
 #[derive(Clone, PartialEq)]
 pub enum DrawOp {
-    Fill { x: i32, y: i32, w: i32, h: i32, c: Paint, corner: f32 },
-    Frame { x: i32, y: i32, w: i32, h: i32, c: Paint, corner: f32 },
-    Triangle { x: i32, y: i32, w: i32, h: i32, dir: String, c: Paint },
-    Circle { cx: f32, cy: f32, r: f32, width: Option<f32>, c: Paint, arc: Option<(f32, f32)> },
-    Line { p0: (f32, f32), p1: (f32, f32), width: f32, c: Paint },
-    Text { font_idx: usize, size: f32, colour: Paint, x: i32, y: i32, max_w: i32, text: String },
-    Image { x: i32, y: i32, w: i32, h: i32, key: String, thumb: bool, restyle: bool },
+    Fill {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        c: Paint,
+        corner: f32,
+    },
+    Frame {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        c: Paint,
+        corner: f32,
+    },
+    Triangle {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        dir: String,
+        c: Paint,
+    },
+    Circle {
+        cx: f32,
+        cy: f32,
+        r: f32,
+        width: Option<f32>,
+        c: Paint,
+        arc: Option<(f32, f32)>,
+    },
+    Line {
+        p0: (f32, f32),
+        p1: (f32, f32),
+        width: f32,
+        c: Paint,
+    },
+    /// A stroke `width` thick along the circle of radius `r` about `centre`, from angle
+    /// `a0` to `a1` (degrees, counter-clockwise from 3 o'clock, y up), with round ends.
+    Arc {
+        centre: (f32, f32),
+        r: f32,
+        a0: f32,
+        a1: f32,
+        width: f32,
+        c: Paint,
+    },
+    Text {
+        font_idx: usize,
+        size: f32,
+        colour: Paint,
+        x: i32,
+        y: i32,
+        max_w: i32,
+        text: String,
+    },
+    Image {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        key: String,
+        thumb: bool,
+        restyle: bool,
+    },
+    /// From here on, draw only inside (x0, y0)-(x1, y1) (a widget's box), or anywhere.
+    Clip(Option<(i32, i32, i32, i32)>),
+    /// The box redrawn as a dot-matrix display: `cell`-pixel dots with a pixel's gap,
+    /// each lit to the brightest of the pixels it covers, unlit ones `ghost`.
+    Dots {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        cell: i32,
+        ghost: [u8; 3],
+    },
+    /// A box filled opaque, `top`'s colour at its top row fading to `bottom`'s at its last.
+    Gradient {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        top: [u8; 3],
+        bottom: [u8; 3],
+    },
 }
 
 /// A plug-in picture's pixel in the theme: orange (the knobs) becomes `accent`, and
@@ -378,6 +494,12 @@ pub struct Picture {
     pub plug_field: [u8; 3],
     pub plug_ink: [u8; 3],
     pub plug_accent: [u8; 3],
+    /// Labels placed in their boxes by their capitals rather than by the font's ascent
+    /// and descent: any font's capitals where Roboto's are (a font with a taller ascent,
+    /// IBM Plex, otherwise sits lower in the same box).
+    pub caps: bool,
+    /// Where drawing is allowed now ([`DrawOp::Clip`]).
+    clip: Option<(i32, i32, i32, i32)>,
 }
 
 impl Picture {
@@ -392,6 +514,8 @@ impl Picture {
             plug_field: background,
             plug_ink: [255, 255, 255],
             plug_accent: [0xff, 0xa5, 0x2a],
+            caps: false,
+            clip: None,
         }
     }
 
@@ -399,13 +523,29 @@ impl Picture {
         let [r, g, b] = self.background;
         self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
         let ops = std::mem::take(&mut self.ops);
+        self.clip = None;
         for op in &ops {
             match op {
+                DrawOp::Clip(c) => self.clip = *c,
+                DrawOp::Dots { x, y, w, h, cell, ghost } => self.dots(*x, *y, *w, *h, *cell, *ghost),
+                DrawOp::Gradient { x, y, w, h, top, bottom } => {
+                    // (Smooth here; the whole picture is dithered to the MK3's 5-6-5 levels on
+                    // its way to the displays: `deckard_mk3::display::rgb565_dithered`.)
+                    for row in 0..*h {
+                        let t = if *h > 1 { row as f32 / (*h - 1) as f32 } else { 0.0 };
+                        let v = |k: usize| f32::from(top[k]) + (f32::from(bottom[k]) - f32::from(top[k])) * t;
+                        let (r, g, b) = (v(0), v(1), v(2));
+                        let py = *y + row;
+                        let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+                        self.fill(*x, py, *w, 1, Paint { rgb: [q(r), q(g), q(b)], alpha: 1.0 }, 1.0);
+                    }
+                }
                 DrawOp::Fill { x, y, w, h, c, corner } => self.fill(*x, *y, *w, *h, *c, *corner),
                 DrawOp::Frame { x, y, w, h, c, corner } => self.frame(*x, *y, *w, *h, *c, *corner),
                 DrawOp::Triangle { x, y, w, h, dir, c } => self.triangle(*x, *y, *w, *h, dir, *c),
                 DrawOp::Circle { cx, cy, r, width, c, arc } => self.circle(*cx, *cy, *r, *width, *c, *arc),
                 DrawOp::Line { p0, p1, width, c } => self.line(*p0, *p1, *width, *c),
+                DrawOp::Arc { centre, r, a0, a1, width, c } => self.arc(*centre, *r, *a0, *a1, *width, *c),
                 DrawOp::Text { font_idx, size, colour, x, y, max_w, text } => {
                     let s = Style { font_idx: *font_idx, font: font_at(*font_idx), size: *size, colour: *colour };
                     self.text(&s, *x, *y, *max_w, text);
@@ -418,6 +558,52 @@ impl Picture {
             }
         }
         self.ops = ops;
+        self.clip = None;
+    }
+
+    /// [`DrawOp::Dots`].
+    fn dots(&mut self, x: i32, y: i32, w: i32, h: i32, cell: i32, ghost: [u8; 3]) {
+        if cell < 2 || self.px.is_empty() {
+            return;
+        }
+        let bg = self.background;
+        let at = |px: &Vec<[u8; 4]>, xx: i32, yy: i32| px[yy as usize * WIDTH + xx as usize];
+        let (x1, y1) = ((x + w).min(WIDTH as i32), (y + h).min(HEIGHT as i32));
+        let mut cy = y.max(0);
+        while cy + cell <= y1 {
+            let mut cx = x.max(0);
+            while cx + cell <= x1 {
+                // The brightest pixel under the dot, so a thin line still lights it.
+                let mut best = [bg[0], bg[1], bg[2], 255];
+                let mut lum = -1i32;
+                for yy in cy..cy + cell {
+                    for xx in cx..cx + cell {
+                        let p = at(&self.px, xx, yy);
+                        let l = i32::from(p[0]) * 3 + i32::from(p[1]) * 6 + i32::from(p[2]);
+                        if l > lum && p[..3] != bg {
+                            lum = l;
+                            best = p;
+                        }
+                    }
+                }
+                let lit = best[..3] != bg;
+                for yy in cy..cy + cell {
+                    for xx in cx..cx + cell {
+                        let gap = xx == cx + cell - 1 || yy == cy + cell - 1;
+                        let c = if gap {
+                            bg
+                        } else if lit {
+                            [best[0], best[1], best[2]]
+                        } else {
+                            ghost
+                        };
+                        self.px[yy as usize * WIDTH + xx as usize] = [c[0], c[1], c[2], 255];
+                    }
+                }
+                cx += cell;
+            }
+            cy += cell;
+        }
     }
 
     pub fn into_pixels(mut self) -> Vec<[u8; 4]> {
@@ -429,21 +615,46 @@ impl Picture {
         if x < 0 || y < 0 || x as usize >= WIDTH || y as usize >= HEIGHT || a <= 0.0 {
             return;
         }
+        if let Some((x0, y0, x1, y1)) = self.clip
+            && (x < x0 || y < y0 || x >= x1 || y >= y1)
+        {
+            return;
+        }
         if self.px.is_empty() {
             let [r, g, b] = self.background;
             self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
         }
         let d = &mut self.px[y as usize * WIDTH + x as usize];
+        // (Drawn over opaquely, a picture's pixel is no longer the picture's.)
+        if a >= 1.0 {
+            *d = [c[0], c[1], c[2], 255];
+            return;
+        }
         for k in 0..3 {
             d[k] = (d[k] as f32 * (1.0 - a) + c[k] as f32 * a).round() as u8;
+        }
+    }
+
+    /// Marks the pixel at (`x`, `y`) as a picture's ([`PICTURE_ALPHA`]), where drawing reaches.
+    fn mark_picture(&mut self, x: i32, y: i32) {
+        let inside = x >= 0 && y >= 0 && (x as usize) < WIDTH && (y as usize) < HEIGHT;
+        let clipped = self.clip.is_some_and(|(x0, y0, x1, y1)| x < x0 || y < y0 || x >= x1 || y >= y1);
+        if inside
+            && !clipped
+            && let Some(d) = self.px.get_mut(y as usize * WIDTH + x as usize)
+        {
+            d[3] = PICTURE_ALPHA;
         }
     }
 
     /// A filled rectangle; its four corner pixels at `corner` of its opacity (a little
     /// rounding).
     fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, c: Paint, corner: f32) {
-        let (x0, y0) = (x.max(0), y.max(0));
-        let (x1, y1) = ((x.saturating_add(w)).min(WIDTH as i32), (y.saturating_add(h)).min(HEIGHT as i32));
+        let (mut x0, mut y0) = (x.max(0), y.max(0));
+        let (mut x1, mut y1) = ((x.saturating_add(w)).min(WIDTH as i32), (y.saturating_add(h)).min(HEIGHT as i32));
+        if let Some((cx0, cy0, cx1, cy1)) = self.clip {
+            (x0, y0, x1, y1) = (x0.max(cx0), y0.max(cy0), x1.min(cx1), y1.min(cy1));
+        }
         for yy in y0..y1 {
             for xx in x0..x1 {
                 let at_corner = (xx == x || xx == x + w - 1) && (yy == y || yy == y + h - 1);
@@ -549,6 +760,37 @@ impl Picture {
         }
     }
 
+    /// A stroke along an arc ([`DrawOp::Arc`]), in one pass: each pixel covered by how
+    /// far its centre lies inside the stroke's edge (an exact edge, no seams or beads
+    /// where pieces would meet).
+    fn arc(&mut self, (cx, cy): (f32, f32), r: f32, a0: f32, a1: f32, width: f32, c: Paint) {
+        let h = width / 2.0;
+        let (lo, sweep) = (a0.min(a1), (a1 - a0).abs().min(360.0));
+        let end = |deg: f32| {
+            let a = deg.to_radians();
+            (cx + r * a.cos(), cy - r * a.sin())
+        };
+        let (e0, e1) = (end(a0), end(a1));
+        let reach = r + h + 1.0;
+        for y in (cy - reach).floor() as i32..=(cy + reach).ceil() as i32 {
+            for x in (cx - reach).floor() as i32..=(cx + reach).ceil() as i32 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let (dx, dy) = (px - cx, cy - py);
+                let along = (dy.atan2(dx).to_degrees() - lo).rem_euclid(360.0) <= sweep;
+                let d = if along {
+                    ((dx * dx + dy * dy).sqrt() - r).abs()
+                } else {
+                    let to = |(ex, ey): (f32, f32)| ((px - ex).powi(2) + (py - ey).powi(2)).sqrt();
+                    to(e0).min(to(e1))
+                };
+                let cover = (h + 0.5 - d).clamp(0.0, 1.0);
+                if cover > 0.0 {
+                    self.blend(x, y, c.rgb, c.alpha * cover);
+                }
+            }
+        }
+    }
+
     /// A line `width` thick from (x0, y0) to (x1, y1).
     fn line(&mut self, (x0, y0): (f32, f32), (x1, y1): (f32, f32), width: f32, c: Paint) {
         let (dx, dy) = (x1 - x0, y1 - y0);
@@ -573,14 +815,31 @@ impl Picture {
             "right" => x + w - width,
             _ => x + (w - width) / 2,
         };
-        let (ascent, descent) = s.font.horizontal_line_metrics(s.size).map_or((s.size, 0.0), |m| (m.ascent, m.descent));
+        let (ascent, descent) = if self.caps {
+            // (Roboto's line, in ems: ascent, descent and cap height; this font's capitals
+            // standing where its would.)
+            const ASCENT: f32 = 1900.0 / 2048.0;
+            const DESCENT: f32 = -500.0 / 2048.0;
+            const CAP: f32 = 1456.0 / 2048.0;
+            let h = s.font.metrics('H', s.size).bounds;
+            (s.size * (ASCENT - CAP) + h.height + h.ymin, s.size * DESCENT)
+        } else {
+            s.font.horizontal_line_metrics(s.size).map_or((s.size, 0.0), |m| (m.ascent, m.descent))
+        };
         let text_h = (ascent - descent).round() as i32;
         let top = match valign {
             "top" => y,
             "bottom" => y + h - text_h,
             _ => y + (h - text_h) / 2,
         };
-        self.record_text(s, x0, top + ascent.round() as i32, x + w - x0, text)
+        let baseline = if self.caps && valign == "center" {
+            // (Set by its capitals: those in the middle of the box.)
+            let cap = s.font.metrics('H', s.size).bounds;
+            y + ((h as f32 + cap.height + cap.ymin) / 2.0).round() as i32
+        } else {
+            top + ascent.round() as i32
+        };
+        self.record_text(s, x0, baseline, x + w - x0, text)
     }
 
     fn record_text(&mut self, s: &Style, x: i32, y: i32, max_w: i32, text: String) -> i32 {
@@ -622,6 +881,22 @@ impl Picture {
         pen.round() as i32
     }
 
+    /// Where `text`'s ink ends, from where it starts, as [`Picture::text`] places its
+    /// letters (kerned, each at its rounded place).
+    pub(crate) fn ink_end(s: &Style, text: &str) -> i32 {
+        let (mut pen, mut end, mut prev) = (0.0f32, 0, None);
+        for ch in text.chars() {
+            pen += prev.and_then(|p| s.font.horizontal_kern(p, ch, s.size)).unwrap_or(0.0);
+            let m = s.font.metrics(ch, s.size);
+            if m.width > 0 {
+                end = end.max((pen + m.xmin as f32).round() as i32 + m.width as i32);
+            }
+            pen += m.advance_width;
+            prev = Some(ch);
+        }
+        end
+    }
+
     pub(crate) fn width(s: &Style, text: &str) -> i32 {
         let mut w = 0.0f32;
         let mut prev = None;
@@ -635,8 +910,9 @@ impl Picture {
         w.round() as i32
     }
 
-    /// `img` scaled to fit `w` × `h` at (x, y), centred, keeping its shape (each pixel
-    /// the average of those it covers). `restyle` redraws it in the theme.
+    /// `img` scaled to fit `w` × `h` at (x, y), centred, keeping its shape: at its own
+    /// size pixel for pixel, else resampled with Spline36 (widened to the shrink, so a
+    /// smaller copy stays sharp without aliasing). `restyle` redraws it in the theme.
     fn image(&mut self, x: i32, y: i32, w: i32, h: i32, img: &Image, restyle: bool) {
         if img.w == 0 || img.h == 0 || w <= 0 || h <= 0 {
             return;
@@ -644,34 +920,34 @@ impl Picture {
         let k = (w as f32 / img.w as f32).min(h as f32 / img.h as f32);
         let (dw, dh) = (((img.w as f32 * k).round() as i32).max(1), ((img.h as f32 * k).round() as i32).max(1));
         let (ox, oy) = (x + (w - dw) / 2, y + (h - dh) / 2);
+        let px = resample(img, dw as usize, dh as usize);
         for dy in 0..dh {
-            let (sy0, sy1) = ((dy as f32 / k) as usize, (((dy + 1) as f32 / k).ceil() as usize).clamp(1, img.h));
             for dx in 0..dw {
-                let (sx0, sx1) = ((dx as f32 / k) as usize, (((dx + 1) as f32 / k).ceil() as usize).clamp(1, img.w));
-                let (mut sum, mut n) = ([0u32; 4], 0u32);
-                for sy in sy0.min(sy1 - 1)..sy1 {
-                    for sx in sx0.min(sx1 - 1)..sx1 {
-                        let p = img.px[sy * img.w + sx];
-                        for c in 0..4 {
-                            sum[c] += u32::from(p[c]);
-                        }
-                        n += 1;
-                    }
+                let p = px[dy as usize * dw as usize + dx as usize];
+                let rgb = if restyle { plug_colour(p, self.plug_field, self.plug_ink, self.plug_accent) } else { [p[0], p[1], p[2]] };
+                self.blend(ox + dx, oy + dy, rgb, f32::from(p[3]) / 255.0);
+                // (Mostly the picture: marked to stay sharp on the displays, until something
+                // is drawn over it.)
+                if p[3] >= 128 {
+                    self.mark_picture(ox + dx, oy + dy);
                 }
-                let avg = sum.map(|v| (v / n.max(1)) as u8);
-                let rgb =
-                    if restyle { plug_colour(avg, self.plug_field, self.plug_ink, self.plug_accent) } else { [avg[0], avg[1], avg[2]] };
-                self.blend(ox + dx, oy + dy, rgb, f32::from(avg[3]) / 255.0);
             }
         }
     }
 
-    /// The "loading" overlay: both screens dimmed, with LOADING and the name centred on each.
-    pub fn loading(&mut self, name: &str) {
-        let font_idx = font_index("ubuntu").expect("built in");
+    /// The "loading" overlay: both screens dimmed, with LOADING and the name centred on each,
+    /// in the theme's font (`theme`: its default style; without a theme, Ubuntu).
+    pub fn loading(&mut self, name: &str, theme: Option<Style>) {
+        let (font_idx, font) = match theme {
+            Some(s) => (s.font_idx, s.font),
+            None => {
+                let i = font_index("ubuntu").expect("built in");
+                (i, font_at(i))
+            }
+        };
         let white = Paint { rgb: [255; 3], alpha: 1.0 };
-        let big = Style { font_idx, font: font_at(font_idx), size: 30.0, colour: white };
-        let small = Style { font_idx, font: font_at(font_idx), size: 16.0, colour: Paint { rgb: [200; 3], alpha: 1.0 } };
+        let big = Style { font_idx, font, size: 30.0, colour: white };
+        let small = Style { font_idx, font, size: 16.0, colour: Paint { rgb: [200; 3], alpha: 1.0 } };
         for screen in 0..2 {
             let x0 = screen * (WIDTH as i32 / 2);
             let w = WIDTH as i32 / 2;
@@ -746,24 +1022,51 @@ impl UserData for Picture {
             p.texts.push(text.clone());
             Ok(p.record_text(&s, x, y, max_w.unwrap_or(WIDTH as i32), text))
         });
-        // image(x, y, w, h, key, thumb): a picture given to the surface, fitted into the
-        // box; false if there's none by that key.
-        m.add_method_mut("image", |lua, p, (x, y, w, h, key, thumb): (i32, i32, i32, i32, String, Option<bool>)| {
-            let Some(pictures) = lua.app_data_ref::<Pictures>().map(|p| p.clone()) else { return Ok(false) };
+        // image(x, y, w, h, key, thumb, real, crop): a picture given to the surface, fitted
+        // into the box; false if there's none by that key. `real`: in its own colours.
+        // `crop`: at its own size from its top left, cut to the box (a window onto it,
+        // sharp, where shrinking it would smudge it).
+        #[allow(clippy::type_complexity)]
+        m.add_method_mut(
+            "image",
+            |lua, p, (x, y, w, h, key, thumb, real, crop): (i32, i32, i32, i32, String, Option<bool>, Option<bool>, Option<bool>)| {
+                let Some(pictures) = lua.app_data_ref::<Pictures>().map(|p| p.clone()) else { return Ok(false) };
+                let pictures = pictures.borrow();
+                let thumb = thumb.unwrap_or(true);
+                let Some(img) = pictures.get(&(key.clone(), thumb)).cloned() else {
+                    return Ok(false);
+                };
+                let (iw, ih) = (img.w as i32, img.h as i32);
+                p.images.insert((key.clone(), thumb), img);
+                // Product shots in the browser stay as they are. A plug-in's own picture is
+                // redrawn in the theme: its orange knobs take the accent, the rest the field
+                // and the writing.
+                let restyle = p.restyle_plugs && !key.starts_with("artwork:") && real != Some(true);
+                if crop == Some(true) {
+                    p.ops.push(DrawOp::Clip(Some((x, y, x + w, y + h))));
+                    p.ops.push(DrawOp::Image { x, y, w: iw, h: ih, key, thumb, restyle });
+                    p.ops.push(DrawOp::Clip(None));
+                } else {
+                    p.ops.push(DrawOp::Image { x, y, w, h, key, thumb, restyle });
+                }
+                Ok(true)
+            },
+        );
+        // image_size(key, thumb): a picture's own width and height, or nothing if there's
+        // none by that key.
+        m.add_method("image_size", |lua, _, (key, thumb): (String, Option<bool>)| {
+            let Some(pictures) = lua.app_data_ref::<Pictures>().map(|p| p.clone()) else { return Ok((None, None)) };
             let pictures = pictures.borrow();
-            let thumb = thumb.unwrap_or(true);
-            let Some(img) = pictures.get(&(key.clone(), thumb)).cloned() else {
-                return Ok(false);
-            };
-            p.images.insert((key.clone(), thumb), img);
-            // Product shots in the browser stay as they are. A plug-in's own picture is
-            // redrawn in the theme: its orange knobs take the accent, the rest the field
-            // and the writing.
-            let restyle = p.restyle_plugs && !key.starts_with("artwork:");
-            p.ops.push(DrawOp::Image { x, y, w, h, key, thumb, restyle });
-            Ok(true)
+            let size = pictures.get(&(key, thumb.unwrap_or(true))).map(|img| (img.w as i32, img.h as i32));
+            Ok((size.map(|s| s.0), size.map(|s| s.1)))
         });
         m.add_method("text_width", |lua, _, (text, st): (String, Value)| Ok(Picture::width(&style(lua, &st)?, &text)));
+        // text_bearing(text, style): the space after the last letter's ink, within its
+        // width (pixels; to set the ink, not the width, against an edge).
+        m.add_method("text_bearing", |lua, _, (text, st): (String, Value)| {
+            let s = style(lua, &st)?;
+            Ok(Picture::width(&s, &text) - Picture::ink_end(&s, &text))
+        });
         // widget(kind, x, y, w, h, inputs): one of the Rust widgets (`crate::widget`), drawn
         // in the box from the inputs table, in the theme's colours.
         m.add_method_mut("widget", |lua, p, (kind, x, y, w, h, inputs): (String, i32, i32, i32, i32, Table)| {
@@ -788,11 +1091,168 @@ impl UserData for Picture {
     }
 }
 
+/// The alpha of a pixel in a finished picture that is a picture's (a plug-in's own, say),
+/// rather than 255: the displays show it rounded to their nearest levels, not dithered
+/// (dithering's grain only muddies a photo's fine detail).
+pub const PICTURE_ALPHA: u8 = 254;
+
+/// The Spline36 kernel (6 taps): sharper than bicubic, with little ringing.
+fn spline36(x: f32) -> f32 {
+    let x = x.abs();
+    if x < 1.0 {
+        ((13.0 / 11.0 * x - 453.0 / 209.0) * x - 3.0 / 209.0) * x + 1.0
+    } else if x < 2.0 {
+        let x = x - 1.0;
+        ((-6.0 / 11.0 * x + 270.0 / 209.0) * x - 156.0 / 209.0) * x
+    } else if x < 3.0 {
+        let x = x - 2.0;
+        ((1.0 / 11.0 * x - 45.0 / 209.0) * x + 26.0 / 209.0) * x
+    } else {
+        0.0
+    }
+}
+
+/// For each of `out` pixels along an axis of `len`: the first source pixel and the
+/// weights from it (summing to 1).
+fn spline36_taps(len: usize, out: usize) -> Vec<(usize, Vec<f32>)> {
+    let k = out as f32 / len as f32;
+    // (Shrinking, the kernel widens by as much, to take in every pixel it covers.)
+    let s = (1.0 / k).max(1.0);
+    let r = 3.0 * s;
+    (0..out)
+        .map(|o| {
+            let c = (o as f32 + 0.5) / k - 0.5;
+            let lo = ((c - r).ceil().max(0.0)) as usize;
+            let hi = ((c + r).floor() as usize).min(len - 1);
+            let mut w: Vec<f32> = (lo..=hi).map(|i| spline36((i as f32 - c) / s)).collect();
+            let sum: f32 = w.iter().sum();
+            if sum.abs() > 1e-6 {
+                w.iter_mut().for_each(|v| *v /= sum);
+            }
+            (lo, w)
+        })
+        .collect()
+}
+
+/// `img` at `dw` × `dh`: itself when that's its size, else Spline36 in each direction
+/// on premultiplied colour (so a clear edge doesn't darken).
+fn resample(img: &Image, dw: usize, dh: usize) -> Vec<[u8; 4]> {
+    if dw == img.w && dh == img.h {
+        return img.px.clone();
+    }
+    let pre = |p: [u8; 4]| {
+        let a = f32::from(p[3]) / 255.0;
+        [f32::from(p[0]) * a, f32::from(p[1]) * a, f32::from(p[2]) * a, f32::from(p[3])]
+    };
+    let (xs, ys) = (spline36_taps(img.w, dw), spline36_taps(img.h, dh));
+    let mut rows = vec![[0f32; 4]; img.h * dw];
+    for sy in 0..img.h {
+        for (dx, (lo, w)) in xs.iter().enumerate() {
+            let mut acc = [0f32; 4];
+            for (j, wt) in w.iter().enumerate() {
+                let p = pre(img.px[sy * img.w + lo + j]);
+                for c in 0..4 {
+                    acc[c] += p[c] * wt;
+                }
+            }
+            rows[sy * dw + dx] = acc;
+        }
+    }
+    let mut out = vec![[0u8; 4]; dw * dh];
+    for (dy, (lo, w)) in ys.iter().enumerate() {
+        for dx in 0..dw {
+            let mut acc = [0f32; 4];
+            for (j, wt) in w.iter().enumerate() {
+                let p = rows[(lo + j) * dw + dx];
+                for c in 0..4 {
+                    acc[c] += p[c] * wt;
+                }
+            }
+            let a = acc[3].clamp(0.0, 255.0);
+            let un = |v: f32| if a > 0.0 { (v * 255.0 / a).round().clamp(0.0, 255.0) as u8 } else { 0 };
+            out[dy * dw + dx] = [un(acc[0]), un(acc[1]), un(acc[2]), a.round() as u8];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests_support::view;
     use crate::{GroupView, SoundView, Surface, View};
+
+    /// `DECKARD_RESAMPLE=in.png,out.png,w,h`: `in.png` resampled as the screens do,
+    /// on black (`--ignored`; to look at).
+    #[test]
+    #[ignore]
+    fn resample_a_png() {
+        let Ok(spec) = std::env::var("DECKARD_RESAMPLE") else { return };
+        let a: Vec<&str> = spec.split(',').collect();
+        let mut dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(a[0]).unwrap()));
+        dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut r = dec.read_info().unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        let ch = info.color_type.samples();
+        let px: Vec<[u8; 4]> = buf
+            .chunks(ch)
+            .take((info.width * info.height) as usize)
+            .map(|p| match ch {
+                4 => [p[0], p[1], p[2], p[3]],
+                3 => [p[0], p[1], p[2], 255],
+                2 => [p[0], p[0], p[0], p[1]],
+                _ => [p[0], p[0], p[0], 255],
+            })
+            .collect();
+        let img = Image { w: info.width as usize, h: info.height as usize, px };
+        let (w, h): (usize, usize) = (a[2].parse().unwrap(), a[3].parse().unwrap());
+        let out: Vec<u8> = resample(&img, w, h)
+            .iter()
+            .flat_map(|p| {
+                let k = u16::from(p[3]);
+                [p[0], p[1], p[2]].map(|c| (u16::from(c) * k / 255) as u8)
+            })
+            .collect();
+        let mut e = png::Encoder::new(std::fs::File::create(a[1]).unwrap(), w as u32, h as u32);
+        e.set_color(png::ColorType::Rgb);
+        e.write_header().unwrap().write_image_data(&out).unwrap();
+    }
+
+    #[test]
+    fn pictures_scale_with_spline36() {
+        // At its own size a picture is itself; scaled, a flat one stays flat (the weights
+        // sum to 1) and a clear edge doesn't darken what's beside it.
+        let px: Vec<[u8; 4]> = (0..40 * 20).map(|i| [(i % 251) as u8, 90, 200, 255]).collect();
+        let img = Image { w: 40, h: 20, px: px.clone() };
+        assert_eq!(resample(&img, 40, 20), px);
+        let flat = Image { w: 40, h: 20, px: vec![[120, 60, 30, 255]; 800] };
+        for (w, h) in [(13, 7), (75, 38), (40, 9)] {
+            assert!(resample(&flat, w, h).iter().all(|p| *p == [120, 60, 30, 255]), "{w}x{h}");
+        }
+        let half = Image { w: 8, h: 1, px: (0..8).map(|i| if i < 4 { [255, 255, 255, 255] } else { [0, 0, 0, 0] }).collect() };
+        let out = resample(&half, 16, 1);
+        assert!(out.iter().filter(|p| p[3] > 0).all(|p| p[0] == 255), "{out:?}");
+        assert!((spline36(0.0) - 1.0).abs() < 1e-6 && spline36(1.0).abs() < 1e-6 && spline36(2.0).abs() < 1e-6);
+        // The kernel itself: continuous at its knots, small lobes (its known values), and
+        // its taps at any phase summing to 1 before normalising.
+        for knot in [1.0f32, 2.0, 3.0] {
+            assert!((spline36(knot - 1e-4) - spline36(knot + 1e-4)).abs() < 1e-3, "continuous at {knot}");
+        }
+        assert!((spline36(0.5) - 0.5987).abs() < 1e-3 && (spline36(1.5) + 0.1184).abs() < 1e-3 && (spline36(2.5) - 0.0197).abs() < 1e-3);
+        for phase in [0.0f32, 0.25, 0.5] {
+            let sum: f32 = (-3..=3).map(|i| spline36(i as f32 - phase)).sum();
+            assert!((sum - 1.0).abs() < 1e-3, "phase {phase}: {sum}");
+        }
+        // A ramp shrunk stays a ramp; a fine checkerboard shrunk turns grey, not to noise.
+        let ramp = Image { w: 100, h: 1, px: (0..100).map(|i| [(i * 255 / 99) as u8, 0, 0, 255]).collect() };
+        let r = resample(&ramp, 80, 1);
+        assert!(r.windows(2).all(|p| u16::from(p[1][0]) + 1 >= u16::from(p[0][0])), "{r:?}");
+        let check =
+            Image { w: 40, h: 40, px: (0..1600).map(|i| if (i % 40 + i / 40) % 2 == 0 { [255; 4] } else { [0, 0, 0, 255] }).collect() };
+        let g = resample(&check, 16, 16);
+        assert!(g.iter().all(|p| (90..=165).contains(&p[0])), "{g:?}");
+    }
 
     #[test]
     fn screens_redraw_only_on_change() {

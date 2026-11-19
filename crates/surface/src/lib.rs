@@ -26,7 +26,7 @@ mod screen;
 mod sources;
 pub mod widget;
 
-pub use screen::{FONTS, Picture};
+pub use screen::{FONTS, PICTURE_ALPHA, Picture};
 pub use sources::SHIPPED;
 
 /// What the layer shows of the app, filled by the app each frame.
@@ -1709,7 +1709,7 @@ impl Surface {
         let Some(p) = self.with(v, None, |run| self.draw_picture_in(run, v)).map(|(p, _)| p) else {
             let mut p = screen::Picture::new([0, 0, 0]);
             if let Some(name) = &v.loading {
-                p.loading(name);
+                p.loading(name, None);
             }
             if let Some(e) = self.error() {
                 p.error(&e);
@@ -1722,6 +1722,27 @@ impl Surface {
     fn draw_picture_in(&self, run: &Run, v: &View) -> screen::Picture {
         let res: mlua::Result<screen::Picture> = (|| {
             let theme: Table = run.lua.named_registry_value("deckard.theme")?;
+            widget::set_theme_style(run.lua.app_data_ref::<screen::ThemeCache>().and_then(|c| c.picture_style));
+            // (A theme in the focused group's colour: its accent, and what's lit, follow it.
+            // Not `on_colour`: that's also the text on a row filled in the text colour,
+            // as Browse's focused result.)
+            if theme.get::<Option<bool>>("accent_from_group").ok().flatten() == Some(true)
+                && let Some(g) = v.groups.get(v.group)
+            {
+                let rgb = g.rgb;
+                let lum = 0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2]);
+                let on = if lum > 110.0 { [0x08, 0x10, 0x16] } else { [0xf2, 0xf6, 0xfa] };
+                if let Some(mut cache) = run.lua.app_data_mut::<screen::ThemeCache>() {
+                    cache.set_colour("accent", rgb);
+                    cache.set_colour("button_selected", rgb);
+                    cache.set_colour("button_selected_text", on);
+                    cache.accent = rgb;
+                }
+                let colors: Table = theme.get("colors")?;
+                for (k, c) in [("accent", rgb), ("button_selected", rgb), ("button_selected_text", on)] {
+                    colors.set(k, run.lua.create_sequence_from(c)?)?;
+                }
+            }
             let (field, ink, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
                 Some(cache) => (cache.background, cache.text, cache.accent),
                 None => {
@@ -1738,6 +1759,7 @@ impl Surface {
             pic.plug_field = field;
             pic.plug_ink = ink;
             pic.plug_accent = accent;
+            pic.caps = run.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.caps);
             let ud = run.lua.create_userdata(pic)?;
             for t in self.tables(run).into_iter().rev() {
                 let Ok(Some(f)) = t.get::<Option<Function>>("draw") else { continue };
@@ -1755,7 +1777,7 @@ impl Surface {
             }
         };
         if let Some(name) = &v.loading {
-            p.loading(name);
+            p.loading(name, run.lua.app_data_ref::<screen::ThemeCache>().map(|c| c.default_style));
         }
         if let Some(e) = self.error() {
             p.error(&e);

@@ -7,7 +7,8 @@ local chain = {}
 
 local LEVELS = { "MASTER", "GROUP", "SOUND" }
 
--- MASTER / GROUP / SOUND: one frame, the chosen tab filled.
+-- MASTER / GROUP / SOUND: one frame, the chosen tab filled (`tag` after its name: the
+-- group's or sound's number, in a theme without the info bar).
 function chain.tabs(screen, theme, level)
   screen:frame(4, 4, 353, 24, "button", theme.corner)
   local xs = { { 4, 117 }, { 121, 119 }, { 240, 117 } }
@@ -73,6 +74,14 @@ end
 
 function chain.thumbnail(screen, theme, x, y, w, h, slot, thumb)
   local instrument = slot.instrument
+  -- (A theme's showcase: a window onto the picture at its own size, from its top left
+  -- where a plug-in has its name, in its own colours.)
+  if slot.picture and theme.plugin_showcase and thumb ~= false then
+    if screen:image(x, y, w, h, slot.picture, true, true, true) then
+      screen:frame(x, y, w, h, "button", theme.corner)
+      return
+    end
+  end
   if slot.picture then
     if screen:image(x, y, w, h, slot.picture, thumb ~= false) then return end
     if screen:image(x, y, w, h, slot.picture, thumb == false) then return end
@@ -97,11 +106,11 @@ end
 local SIZES = { Sampler = { 160, 42 }, EQ = { 90, 40 }, Compressor = { 62, 40 } }
 
 -- A slot's kind, as a small icon: keys for an instrument, FX for an effect.
-local function kind_icon(screen, x, y, instrument, fx)
+local function kind_icon(screen, x, y, instrument, fx, keys)
   if instrument then
     for k = 0, 2 do
-      screen:rect(x + k * 4, y, 2, 7, "text")
-      screen:rect(x + k * 4, y + 7, 3, 5, "text")
+      screen:rect(x + k * 4, y, 2, 7, keys or "text")
+      screen:rect(x + k * 4, y + 7, 3, 5, keys or "text")
     end
   else
     screen:frame(x, y, 12, 12, fx, 0.5)
@@ -182,17 +191,35 @@ local INSTRUMENT, EFFECT = { 64, 16 }, { 36, 16 }
 -- The strip: names at NAME_Y, pictures at PIC_Y (16 high: the focus frame ends at 98,
 -- a gap above the band at 106).
 local NAME_Y, PIC_Y = 62, 80
+-- (In a theme without the info bar, the strip moves up into its row, one line high:
+-- each slot's picture beside its name, the names on the line of the level's name at
+-- the row's end, leaving the room below to the pictures and knobs.)
+local function strip_y(theme)
+  if theme.info_in_tabs then return NAME_Y - 19, 40 end
+  return NAME_Y, PIC_Y
+end
 local NAME_STYLE = { size = 11 }
 
 -- How wide the "+" for a new slot is; the strip's edges (room at each side for the
 -- arrows), and how much the "2-4 / 6" takes from its right while it scrolls.
 local STRIP_NEW_W, LEFT, RIGHT, RANGE_W = 34, 12, 468, 48
 
--- Slot `slot`'s picture size and how wide it is in the chain.
-local function strip_size(screen, slot)
+-- Slot `slot`'s picture size, how wide it is in the chain, and where its picture
+-- starts in it (under the name, or `inline` after it).
+local function strip_size(screen, slot, inline)
   local size = STRIP_SIZES[slot.name] or (slot.instrument and INSTRUMENT or EFFECT)
+  if inline then
+    -- (DECKARD's own picture of a device whole, as tall as the strip: a window onto
+    -- its corner showed each one's own odd piece, a header here, a knob's edge there.
+    -- A hosted plug-in's keeps the window onto its name, at its top left.)
+    local w, h
+    if slot.picture and not slot.plugin then w, h = screen:image_size(slot.picture, true) end
+    if w and h > 0 then size = { math.max(8, math.floor(w * size[2] / h + 0.5)), size[2] } end
+    local name_w = screen:text_width(slot.name, NAME_STYLE)
+    return size, name_w, 20 + name_w + 8 + size[1] + 14, 20 + name_w + 8 + 3
+  end
   local name_w = math.max(30, screen:text_width(slot.name, NAME_STYLE))
-  return size, name_w, math.max(size[1] + 12, 20 + name_w) + 6
+  return size, name_w, math.max(size[1] + 12, 20 + name_w) + 6, 6
 end
 
 -- The slots from the focused one back as far as fit in `room`, and then on.
@@ -209,10 +236,13 @@ end
 -- while the picture band below holds pictures: each slot's kind, name and a small picture, the focused one framed, then a "+" for a new one. Longer
 -- than the screen, it scrolls to keep the focused slot (or the "+") in view, showing
 -- only whole slots, with arrows at the sides and the range shown at the right.
-local function draw_strip(screen, theme, c)
+local function draw_strip(screen, theme, c, right)
+  local NAME_Y, PIC_Y = strip_y(theme)
+  local inline = theme.info_in_tabs
+  local RIGHT = math.min(right or RIGHT, RIGHT)
   local widths, total = {}, STRIP_NEW_W
   for i, slot in ipairs(c.chain) do
-    local _, _, w = strip_size(screen, slot)
+    local _, _, w = strip_size(screen, slot, inline)
     widths[i] = w
     total = total + w
   end
@@ -220,30 +250,44 @@ local function draw_strip(screen, theme, c)
   local focus = c.slot_index or #c.chain + 1
   local room = RIGHT - LEFT
   local scrolls = total > room
-  if scrolls then room = room - RANGE_W end
+  -- (One line high, no "2-4 / 6": the arrows alone, on the outer borders of the display
+  -- buttons above, level with the slots' pictures.)
+  if scrolls then room = room - (inline and 4 or RANGE_W) end
   local first = scrolls and first_shown(widths, focus, room) or 1
   local x = LEFT
   local function overflow(last)
     if first > 1 or last < #c.chain then
+      if inline then
+        local right_edge = widgets.button_x(4) + widgets.BUTTON_W
+        if first > 1 then screen:triangle(widgets.button_x(1), PIC_Y, 8, 16, "left", "text") end
+        if last < #c.chain then screen:triangle(right_edge - 8, PIC_Y, 8, 16, "right", "text") end
+        return
+      end
       local range = last >= first and (first == last and tostring(first) or first .. "-" .. last) or "+"
       screen:label(RIGHT - RANGE_W, NAME_Y, RANGE_W, 14, range .. " / " .. #c.chain, { size = 10, color = "text" }, "right", "center")
       if first > 1 then screen:triangle(1, PIC_Y - 4, 8, 16, "left", "text") end
-      if last < #c.chain then screen:triangle(471, PIC_Y - 4, 8, 16, "right", "text") end
+      if last < #c.chain then screen:triangle(RIGHT + 3, PIC_Y - 4, 8, 16, "right", "text") end
     end
   end
   for i = first, #c.chain do
     local slot = c.chain[i]
-    local size, name_w, w = strip_size(screen, slot)
+    local size, name_w, w, px = strip_size(screen, slot, inline)
     if x + w > LEFT + room then overflow(i - 1); return end
     local focused = i == c.slot_index
-    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
+    -- (In a theme that dims the slots not focused, their icons too; the focused one's
+    -- lit with its name.)
+    local dim = theme.colors.chain_idle and not focused
+    local icon = focused and theme.colors.chain_idle and "text" or paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa })
+    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil)
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
     screen:label(x + 20, NAME_Y, name_w, 14, slot.name, { size = 11, color = colour }, "left", "center")
     if focused then
-      screen:frame(x + 3, PIC_Y - 3, size[1] + 6, size[2] + 6, "text", 0.76)
-      screen:frame(x + 4, PIC_Y - 2, size[1] + 4, size[2] + 4, "text")
+      screen:frame(x + px - 3, PIC_Y - 3, size[1] + 6, size[2] + 6, "text", 0.76)
+      screen:frame(x + px - 2, PIC_Y - 2, size[1] + 4, size[2] + 4, "text")
     end
-    chain.thumbnail(screen, theme, x + 6, PIC_Y, size[1], size[2], slot)
+    if not (inline and slot.picture and not slot.plugin and screen:image(x + px, PIC_Y, size[1], size[2], slot.picture, true, theme.plugin_showcase)) then
+      chain.thumbnail(screen, theme, x + px, PIC_Y, size[1], size[2], slot)
+    end
     x = x + w
   end
   overflow(#c.chain)
@@ -259,9 +303,9 @@ local function draw_strip(screen, theme, c)
 end
 
 -- The chain on the left screen: a short strip under the info bar when `compact` (the
--- picture band below holds pictures), else at full size.
-function chain.draw(screen, theme, c, compact)
-  if compact then return draw_strip(screen, theme, c) end
+-- picture band below holds pictures), ending at `right` if given, else at full size.
+function chain.draw(screen, theme, c, compact, right)
+  if compact then return draw_strip(screen, theme, c, right) end
   return draw_large(screen, theme, c)
 end
 
