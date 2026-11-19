@@ -37,8 +37,8 @@ $PROBE list --out plugins.json
 ```
 
 Find its `identity` (the id mappings and the probe accept) and name. Stop if a mapping
-already matches it: the user's `<settings>/controller/mappings/` (Start-local rigs: the
-`DECKARD_CONTROLLER_DIR` folder's `mappings/`) or DECKARD's `crates/surface/lua/mappings/`,
+already matches it: the user's `<settings>/controller/mappings/` (or the `mappings/` of the
+scripts folder they run DECKARD with) or DECKARD's `crates/surface/lua/mappings/`,
 unless you were asked to replace it.
 
 A product inside a host plug-in (Reaktor's Monark, a Kontakt instrument) needs its
@@ -135,9 +135,8 @@ wrong knobs. Re-run until clean.
 ## 7. Install it or ship it
 
 - **The user's own** (any plug-in; the only place for commercial ones): copy it into
-  their controller folder's `mappings/<vendor>/`. On a Start-local rig that's the
-  `DECKARD_CONTROLLER_DIR` folder, and copy it to `%APPDATA%\deckard\controller` too if
-  that's kept in step. DECKARD reloads it when it changes; a mapping that fails shows its
+  their controller folder's `mappings/<vendor>/` (Controller ▸ Open Controller Scripts
+  shows it). DECKARD reloads it when it changes; a mapping that fails shows its
   error on the MK3 and is left out.
 - **Shipped with DECKARD** (only plug-ins that are open source, free, on macOS, Linux and
   Windows, widely used, with stable parameter ids): put it in
