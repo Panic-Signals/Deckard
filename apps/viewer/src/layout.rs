@@ -951,6 +951,8 @@ pub enum Act {
     PasteSound(usize, usize),
     ResetSound(usize, usize),
     CutGroup(usize),
+    CopyPlugin(deckard_doc::Chain, usize),
+    PastePlugin(deckard_doc::Chain),
     CopyGroup(usize),
     PasteGroup(usize),
     DeleteGroup(usize),
@@ -1430,6 +1432,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
                 app.sampler_page = 0;
             }
+            Act::CopyPlugin(c, i) => app.copy_plugin(c, i),
+            Act::PastePlugin(c) => app.paste_plugin(c),
             Act::AddSlot(what) => app.add_slot(what),
             Act::MoveSlot(from, to) => app.move_slot(from, to),
             Act::MoveSlotIn(c, from, to) => app.move_slot_in(c, from, to),
@@ -5778,6 +5782,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
                 resp.menu_on_right_click(|ui| {
+                    item(ui, "Copy Plug-in", true, || Act::CopyPlugin(app.chain(), i), acts);
                     if plugin && ui.button("Open Plug-in Window").clicked() {
                         acts.push(Act::OpenSlotEditor(i));
                         ui.close();
@@ -5903,12 +5908,23 @@ fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -
 
 /// The "+" menu: Maschine's internal modules, then plug-ins by role and vendor.
 fn add_menu(ui: &mut Ui, app: &App, instruments: bool, acts: &mut Vec<Act>) {
-    module_menu(ui, app, app.chain(), instruments, true, &Act::AddSlot, acts);
+    add_menu_in(ui, app, app.chain(), instruments, acts);
+}
+
+fn add_menu_in(ui: &mut Ui, app: &App, chain: deckard_doc::Chain, instruments: bool, acts: &mut Vec<Act>) {
+    let can_paste = app
+        .plugin_clipboard
+        .as_ref()
+        .zip(app.doc.as_ref())
+        .is_some_and(|(copy, doc)| doc.borrow().slot_paste_position(chain, copy).is_ok());
+    item(ui, "Paste Plug-in", can_paste, || Act::PastePlugin(chain), acts);
+    module_menu(ui, app, chain, instruments, true, &Act::AddSlot, acts);
 }
 
 /// A plug-in row's right-click menu in the Mixer: put another module in its place, or
 /// remove it. For chain `c`, which needn't be the focused one.
 fn slot_menu(ui: &mut Ui, app: &App, c: deckard_doc::Chain, i: usize, is_instrument: bool, acts: &mut Vec<Act>) {
+    item(ui, "Copy Plug-in", true, || Act::CopyPlugin(c, i), acts);
     change_menu(ui, app, c, i, is_instrument, acts);
     if ui.button("Remove").clicked() {
         acts.push(Act::RemoveSlotIn(c, i));
