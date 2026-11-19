@@ -5214,6 +5214,7 @@ impl App {
                 for a in actions {
                     self.surface_act(a);
                 }
+                self.follow_edits();
                 // (A slot or sound the buttons just focused shows its plug-in's knobs.)
                 self.update_slot_view();
                 self.refresh_surface_settings();
@@ -11566,6 +11567,30 @@ impl App {
             self.pending_editor = false;
             self.open_plugin_editor(self.group, self.sound);
         }
+        if self.held.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+            self.release_held();
+        }
+        let before = (self.group, self.sound, self.scene, self.section, self.song_view);
+        // Hardware controllers and MIDI run before plug-in editor timers and UI panels so
+        // mutes, pattern switches and transport commands reach the audio thread at once.
+        self.sync_notes_played();
+        if !self.lit.is_empty() {
+            // Unlight the flashed numbers on time.
+            ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
+        }
+        let mut hw_requests = Vec::new();
+        self.mk3_sync(ui.ctx(), &mut hw_requests, false);
+        self.jam_sync(ui.ctx(), false);
+        if !hw_requests.is_empty() {
+            self.handle(hw_requests);
+        }
+        self.follow_edits();
+        self.midi_sync(ui.ctx());
+        self.midi_devices_sync(ui.ctx());
+        self.follow_edits();
+        self.sync_clocks(ui.ctx());
+        self.input_sync();
+
         // Plug-ins' timers, which this app's repainting would otherwise starve.
         deckard_plugins::editor::serve_timers();
         self.poll_wine();
@@ -11576,9 +11601,6 @@ impl App {
             self.poll_plugin_editors();
             // On Linux the editors' timers run from these ticks: keep them coming.
             ctx.request_repaint_after(std::time::Duration::from_millis(if cfg!(target_os = "linux") { 16 } else { 250 }));
-        }
-        if self.held.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
-            self.release_held();
         }
         self.follow_edits();
         self.keep_session_soon();
@@ -11591,7 +11613,6 @@ impl App {
         }
         self.update_meters(ctx, std::time::Duration::ZERO);
 
-        let before = (self.group, self.sound, self.scene, self.section, self.song_view);
         layout::header(self, ui);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F4)) {
             self.browse(browser::BrowseAct::Toggle);
@@ -11607,11 +11628,6 @@ impl App {
         }
 
         // The controller panel: tick the scripts, draw, and act on what they ask for.
-        self.sync_notes_played();
-        if !self.lit.is_empty() {
-            // Unlight the flashed numbers on time.
-            ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
-        }
         let mut requests = Vec::new();
         if let Some(c) = &mut self.controller {
             if self.show_controller {
@@ -11635,9 +11651,8 @@ impl App {
                 ctx.request_repaint_after(c.interval());
             }
         }
-        self.mk3_sync(ui.ctx(), &mut requests, false);
-        self.jam_sync(ui.ctx(), false);
         self.handle(requests);
+        self.follow_edits();
         self.sync_selection();
         self.sync_audio_settings();
         self.sync_browse_page();
@@ -11656,11 +11671,6 @@ impl App {
                 self.follow_root(from, now.0);
             }
         }
-
-        self.midi_sync(ui.ctx());
-        self.midi_devices_sync(ui.ctx());
-        self.sync_clocks(ui.ctx());
-        self.input_sync();
         layout::body(self, ui);
         self.update_slot_view();
         self.follow_edits();

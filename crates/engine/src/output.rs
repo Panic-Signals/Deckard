@@ -922,10 +922,10 @@ impl Output {
         fresh.set_fx_meters(&self.fx_meters);
         fresh.set_route_travels(&self.route_travels);
         let (mode, queued) = self.telemetry(|t| (t.mode, t.queued));
-        let mut modes: Vec<Mode> = mode.into_iter().collect();
-        modes.extend(queued);
+        // `fresh` already holds the timeline for `fresh.mode` when timelines changed.
+        let modes: Vec<Mode> = mode.into_iter().chain(queued).filter(|&m| m != fresh.mode).collect();
         // (None needed when the edit keeps the playing timelines.)
-        let timelines = if fresh.keeps_timelines() { Timelines::default() } else { Timelines::of(project, &modes) };
+        let timelines = if fresh.keeps_timelines() || modes.is_empty() { Timelines::default() } else { Timelines::of(project, &modes) };
         self.sender.collect();
         self.sender.send(Command::Adopt(Box::new(AdoptMsg { engine: Some(fresh), timelines })));
     }

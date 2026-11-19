@@ -323,7 +323,84 @@ impl Document {
                 entries.push(entry);
             }
         }
-        self.apply("Assign Pattern", vec![Op::Set { path: entries_path, value: Value::List(entries) }])
+        self.apply_with(
+            "Assign Pattern",
+            vec![Op::Set { path: entries_path, value: Value::List(entries) }],
+            vec![Some((crate::Target::Scene(scene), "__patterns".into()))],
+        )
+    }
+
+    /// Re-read scene `scene`'s pattern assignments in place without decoding the whole
+    /// project tree (so live pattern switches and mutes/drops stay sub-millisecond).
+    pub(crate) fn patch_scene_patterns(&mut self, scene: usize) -> bool {
+        if scene >= self.project.scenes.len() {
+            return false;
+        }
+        let mut group_by_oid = std::collections::HashMap::with_capacity(self.addresses.groups.len());
+        let mut pattern_by_oid = std::collections::HashMap::new();
+        for (g, ga) in self.addresses.groups.iter().enumerate() {
+            let Ok(g_oid) = self.oid_at(&ga.group) else { return false };
+            group_by_oid.insert(g_oid, g);
+            for (pi, pa) in ga.patterns.iter().enumerate() {
+                let Ok(p_oid) = self.oid_at(pa) else { return false };
+                pattern_by_oid.insert(p_oid, (g, pi));
+            }
+        }
+        let Some(scene_path) = self.addresses.scenes.get(scene) else { return false };
+        let Some(s) = self.obj_by_path(scene_path) else { return false };
+        let entries: &[Value] = match s.get("patterns") {
+            Some(Value::Obj(m)) => match m.get("objects") {
+                Some(Value::Obj(o)) => match o.get("items") {
+                    Some(Value::List(items)) => items,
+                    _ => return false,
+                },
+                _ => return false,
+            },
+            None => &[],
+            _ => return false,
+        };
+        let mut patterns = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Value::Obj(eo) = entry else { return false };
+            let g_oid = match eo.get("first") {
+                Some(Value::Ref(r)) => *r,
+                Some(Value::Obj(o)) => match o.oid {
+                    Some(id) => id,
+                    None => return false,
+                },
+                _ => continue,
+            };
+            if !group_by_oid.contains_key(&g_oid) {
+                return false;
+            }
+            let pref = match eo.get("second") {
+                Some(Value::Obj(sp)) => match sp.get("px") {
+                    Some(Value::Obj(px)) => px,
+                    _ => return false,
+                },
+                _ => return false,
+            };
+            let p_oid = match pref.get("pattern") {
+                Some(Value::Null) | None => continue,
+                Some(Value::Ref(r)) => *r,
+                Some(Value::Obj(o)) => match o.oid {
+                    Some(id) => id,
+                    None => return false,
+                },
+                _ => return false,
+            };
+            let Some(&(pg, pi)) = pattern_by_oid.get(&p_oid) else { return false };
+            patterns.push((pg, pi));
+        }
+        patterns.sort_unstable();
+        self.project.scenes[scene].patterns = patterns;
+        let len = self.project.scene_length(scene);
+        for sec in &mut self.project.sections {
+            if sec.auto && sec.scene == Some(scene) {
+                sec.length = len;
+            }
+        }
+        true
     }
 
     /// A new empty pattern in `group` named `name`, after the group's other patterns,
@@ -855,5 +932,36 @@ mod slot_tests {
         let mut d = Document::new_project().unwrap();
         assert_eq!(d.add_pattern_in_slot(0, 0, 5, "Six").unwrap(), 0);
         assert_eq!(d.project().groups[0].patterns[0].slot, 5);
+    }
+
+    /// Scene pattern switches and pattern length/start edits patch the model in place
+    /// (keeping existing plug-in chunks untouched) and match a full reload across undo/redo.
+    #[test]
+    fn assign_pattern_and_pattern_span_patch_in_place_without_rebuilding_plugins() {
+        let mut d = Document::new_project().unwrap();
+        d.add_slot(0, 0, 0, &crate::NewModule::Plugin { id: "Test:VST3:INSTR:1".into(), name: "Synth".into(), chunk: vec![7u8; 4096] })
+            .unwrap();
+        d.add_pattern(0, 0, "One").unwrap();
+        d.add_pattern(0, 0, "Two").unwrap();
+        d.add_section(0).unwrap();
+        let ptr_before = d.project().groups[0].sounds[0].plugin.as_ref().unwrap().chunk.as_ptr();
+
+        d.assign_pattern(0, 0, Some(1)).unwrap();
+        d.set_pattern_span(0, 1, 240, 2 * deckard_model::PPQ * 4).unwrap();
+        assert_eq!(d.project().groups[0].sounds[0].plugin.as_ref().unwrap().chunk.as_ptr(), ptr_before);
+        let reloaded = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(d.project().scenes, reloaded.project().scenes);
+        assert_eq!(d.project().sections, reloaded.project().sections);
+        assert_eq!(d.project().groups[0].patterns[1].start, 240);
+        assert_eq!(d.project().groups[0].patterns[1].length, 2 * deckard_model::PPQ * 4);
+
+        assert!(d.undo());
+        assert!(d.undo());
+        assert_eq!(d.project().scenes[0].patterns, Vec::<(usize, usize)>::new());
+        assert!(d.redo());
+        assert!(d.redo());
+        assert_eq!(d.project().scenes, reloaded.project().scenes);
+        assert_eq!(d.project().sections, reloaded.project().sections);
+        assert_eq!(d.project().groups[0].sounds[0].plugin.as_ref().unwrap().chunk.as_ptr(), ptr_before);
     }
 }
