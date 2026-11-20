@@ -90,13 +90,14 @@ and **re-applied from the notes as they were** when Live is on (the existing
 - position ± `time_shift` % of a grid step, clamped inside the pattern
 - length untouched
 
-**Random** (mode 1) — vary the beats, and make notes:
-- each note survives with `probability` % (else it goes)
-- pitch drawn in `[note_range/low, note_range/high]`, kept in the selected scale when one is on
-  (manual: "Random mode conforms to the selected scale"), shaped by `dist/notes`
-- velocity drawn in the velocity band
-- length `steps` grid steps, shaped by `dist/note_length` (`Fixed`: exactly `steps`)
-- position ± `time_shift` %
+**Random** (mode 1) — vary the beats, and make notes. The probability is **per step of the
+pattern**, in the manual's own words: "at 50 % a note may or may not be created at each step".
+So there are two halves:
+- what the sound has is varied where it stands — it may go (`probability`), and what stays is
+  re-pitched in `[note_range/low, note_range/high]`, kept in the selected scale when one is on
+  (manual: "Random mode conforms to the selected scale"), at the velocity band, at `steps` grid
+  steps shaped by `dist/note_length` (`Fixed`: exactly `steps`), ± `time_shift` %
+- the steps it has nothing on get notes: the same draw, at the same probability
 - `note_count` notes stack the chord per step, shaped by `dist/note_count` (`Fixed`: exactly the
   CHORDS value)
 
@@ -106,9 +107,11 @@ Two readings are DECKARD's, not NI's, and are marked for the rig:
    bounds a deviation ("users complain it is a fixed range, not a deviation around the original",
    §5.2). This build draws in the band. Probe: Velocity 40/60, Apply, then look at whether the notes
    sit inside 40–60.
-2. **Random varies rather than regenerates** — the manual offers "randomly generated patterns *or*
-   variations of your beats". This build varies what is there (probability keeps or drops, ranges
-   re-place) so that it stays distinct from the Generate page, which replaces wholesale.
+2. ~~**Random varies rather than regenerates**~~ — **settled by the rig, 2026-11-21.** The first
+   build only re-rolled the notes that were already there, and the rig said exactly what the manual
+   says: Apply made nothing new. Random now varies what is there *and* creates notes on the steps
+   the sound had none (the probability is per step), which is also what keeps it distinct from the
+   Generate page: Generate replaces the sound's part of the pattern wholesale.
 
 ## Landed
 
@@ -135,7 +138,8 @@ Two readings are DECKARD's, not NI's, and are marked for the rig:
 
 ## Tests
 
-- `crates/doc/src/groove.rs`: `humanize_bounds_velocity_and_leaves_the_rest` (nothing made
+- `crates/doc/src/groove.rs`: `random_makes_notes_on_the_steps_the_sound_had_none` (four notes in
+  a bar of sixteen, probability 100 → a note on every step), `humanize_bounds_velocity_and_leaves_the_rest` (nothing made
   or dropped, the band bounds, positions and lengths untouched) and
   `random_keeps_the_ranges_the_chords_and_the_length` (pitches in range, velocities in the
   band, a step long, the chord is the Note Count).

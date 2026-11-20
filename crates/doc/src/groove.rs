@@ -59,6 +59,34 @@ impl Rng {
     }
 }
 
+/// The pitches a chord of `count` notes drawn from `pool`: distinct, so a chord is not
+/// one note twice.
+fn chord_pitches(rng: &mut Rng, pool: &[i64], count: i64, dist: i64) -> Vec<i64> {
+    let mut pitches: Vec<i64> = Vec::new();
+    for _ in 0..count.clamp(0, 6) {
+        for _ in 0..16 {
+            let i = rng.spread(0.0, (pool.len() - 1) as f64, dist).round() as usize;
+            let pitch = pool[i.min(pool.len() - 1)];
+            if !pitches.contains(&pitch) {
+                pitches.push(pitch);
+                break;
+            }
+        }
+    }
+    pitches
+}
+
+/// How many notes a chord gets: the CHORDS value itself when the distribution is Fixed
+/// (3), else drawn from the top half up to it.
+fn chord_count(rng: &mut Rng, count: i64, dist: i64) -> i64 {
+    if dist == 3 {
+        count
+    } else {
+        let least = (count - (count - 1) / 2).max(1);
+        rng.spread(least as f64, count as f64, dist).round() as i64
+    }
+}
+
 /// The Variation page's settings (work-item 35): Maschine's, with DECKARD's defaults
 /// where the sound saves nothing. They live under `sequence_variation/…`, which
 /// [`Sound::groove`] keeps when the project's format has no place for them (its
@@ -361,48 +389,68 @@ impl Document {
                 }
             }
         } else {
-            // Random: the note may go (probability), and what stays is re-made in the
-            // note range and the scale, as a chord of `note_count` notes, at the length
-            // and velocity the page says.
+            // Random: at each step the probability says whether there is a note at all
+            // ("at 50 % a note may or may not be created at each step"), and the notes it
+            // makes are drawn from the note range and the scale, as chords of the Note
+            // Count, at the page's length and velocity. What the sound has already is
+            // varied where it stands; the steps it has nothing on are where notes appear.
             let prob = st.probability as f64 / 100.0;
             let pool: Vec<i64> = (st.note_lo..=st.note_hi).filter(|&pitch| in_scale(pitch)).collect();
             if pool.is_empty() {
                 return Err("the note range holds no note of the scale".into());
             }
-            for n in base.unwrap_or(&old) {
-                if rng.unit() > prob {
-                    continue;
-                }
-                // Chords: Fixed is the CHORDS value itself, the rest shape how many of
-                // them a step gets.
-                let count = if st.dist_note_count == 3 {
-                    st.note_count
-                } else {
-                    let least = (st.note_count - (st.note_count - 1) / 2).max(1);
-                    rng.spread(least as f64, st.note_count as f64, st.dist_note_count).round() as i64
-                };
-                let mut pitches: Vec<i64> = Vec::new();
-                for _ in 0..count {
-                    for _ in 0..16 {
-                        let i = rng.spread(0.0, (pool.len() - 1) as f64, st.dist_notes).round() as usize;
-                        let pitch = pool[i.min(pool.len() - 1)];
-                        if !pitches.contains(&pitch) {
-                            pitches.push(pitch);
-                            break;
-                        }
-                    }
-                }
-                let at = place(n.position as f64 + rng.spread(-time * step, time * step, st.dist_notes));
+            let source: Vec<Note> = base.unwrap_or(&old).to_vec();
+            let mut taken: Vec<(i64, i64)> = Vec::new();
+            let draw = |rng: &mut Rng, at: i64, pitches: Vec<i64>| -> Vec<Note> {
                 let wanted = st.steps * step;
                 let length = if st.dist_note_length == 3 { wanted } else { rng.spread(wanted * 0.5, wanted * 1.5, st.dist_note_length) };
                 let length = fit(length, at);
-                for pitch in pitches {
-                    let velocity = rng.spread(st.velocity_lo as f64, st.velocity_hi as f64, 0).round();
-                    let m = Note { position: at, length, pitch, velocity: velocity.clamp(1.0, 127.0) as i64, ..*n };
-                    if !new.iter().any(|x| x.position == m.position && x.pitch == m.pitch) {
+                pitches
+                    .into_iter()
+                    .map(|pitch| Note {
+                        ratchet: Default::default(),
+                        expr: None,
+                        sound: s,
+                        position: at,
+                        length,
+                        pitch,
+                        velocity: rng.spread(st.velocity_lo as f64, st.velocity_hi as f64, 0).round().clamp(1.0, 127.0) as i64,
+                        probability: 100,
+                    })
+                    .collect()
+            };
+            // What the sound has there now: the note may go, and what stays is re-made.
+            for n in &source {
+                if rng.unit() > prob {
+                    continue;
+                }
+                let count = chord_count(rng, st.note_count, st.dist_note_count);
+                let pitches = chord_pitches(rng, &pool, count, st.dist_notes);
+                let at = place(n.position as f64 + rng.spread(-time * step, time * step, st.dist_notes));
+                for m in draw(rng, at, pitches) {
+                    if taken.contains(&(m.position, m.pitch)) {
+                        continue;
+                    }
+                    taken.push((m.position, m.pitch));
+                    new.push(m);
+                }
+            }
+            // And the steps it has nothing on: the probability makes notes there too.
+            let mut t = pat.start;
+            while t < end {
+                if !source.iter().any(|n| n.position == t) && rng.unit() <= prob {
+                    let count = chord_count(rng, st.note_count, st.dist_note_count);
+                    let pitches = chord_pitches(rng, &pool, count, st.dist_notes);
+                    let at = place(t as f64 + rng.spread(-time * step, time * step, st.dist_notes));
+                    for m in draw(rng, at, pitches) {
+                        if taken.contains(&(m.position, m.pitch)) {
+                            continue;
+                        }
+                        taken.push((m.position, m.pitch));
                         new.push(m);
                     }
                 }
+                t += grid.max(1);
             }
         }
         self.edit_notes("Apply Variation", g, p, &old, &new)
@@ -837,5 +885,36 @@ mod tests {
         assert_ne!(after, before, "Apply varies the notes");
         assert!(after.iter().all(|n| (60..=64).contains(&n.pitch)), "{:?}", after.iter().map(|n| n.pitch).collect::<Vec<_>>());
         assert_eq!(d.variation(0, 0).mode, 1, "the page reads its own mode back");
+    }
+
+    /// Random makes notes where the sound had none: the probability is per *step* of the
+    /// pattern ("at 50 % a note may or may not be created at each step"), so a sound with
+    /// four notes in a bar of sixteen fills it when the probability is 100.
+    #[test]
+    fn random_makes_notes_on_the_steps_the_sound_had_none() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        let euclid: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_generation/mode" => Some(1.0),
+            "sequence_generation/steps" => Some(4.0),
+            "sequence_generation/fills" => Some(4.0),
+            "sequence_generation/division" => Some(1.0),
+            _ => None,
+        };
+        d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
+        let bar = d.project().bar_length();
+        assert_eq!(d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count(), 4, "four to the bar");
+        let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_variation/mode" => Some(1.0),
+            "sequence_variation/probability" => Some(100.0),
+            "sequence_variation/note_range/low" => Some(60.0),
+            "sequence_variation/note_range/high" => Some(64.0),
+            _ => None,
+        };
+        d.apply_variation_with(0, 0, 0, 240, None, page, None, &mut Rng::seeded(7)).unwrap();
+        let mut at: Vec<i64> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).map(|n| n.position).collect();
+        at.sort_unstable();
+        at.dedup();
+        assert_eq!(at.len() as i64, bar / 240, "a note on every step: {at:?}");
     }
 }
