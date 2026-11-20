@@ -45,22 +45,21 @@ const INK: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
 const HEADER_INK: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 const RULE: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
 
-/// The widest a column gets: the reference's own. Its Grid page (four slots) and its Scale page
-/// (eight) wear the same column width, so a page of one or two slots is that many columns wide
-/// and no wider — a single item is never stretched across the whole bar.
-pub const COL_MAX: f32 = 292.0;
+/// The strip is **eight slots wide**, always — the reference's own page — whatever the published
+/// page holds. A page of one slot fills the first column and leaves seven empty; nothing stretches
+/// and nothing shrinks, so `Scale 2/2` sits in one column exactly as its 2/2 page does in Maschine.
+pub const SLOTS: usize = 8;
 
-/// The strip's width for an app window `main` points wide showing a page of `slots`: its columns
-/// divide most of the app's width, and never stretch past [`COL_MAX`].
-pub fn width_for(main: f32, slots: usize) -> f32 {
-    let want = (main * 0.78).clamp(560.0, 1180.0);
-    want.min(slots.max(1) as f32 * COL_MAX)
+/// The strip's width for an app window `main` points wide: most of it, so a column is the
+/// reference's ~148 points at a 1500-wide app.
+pub fn width_for(main: f32) -> f32 {
+    (main * 0.78).clamp(880.0, 1180.0)
 }
 
-/// Where the page's `slot` of `count` sits, in points from the strip's top-left corner:
-/// columns of an equal share of `width`.
-pub fn slot_rect(slot: usize, count: usize, width: f32) -> egui::Rect {
-    let w = width / count.max(1) as f32;
+/// Where the page's `slot` sits, in points from the strip's top-left corner: one of the eight
+/// equal columns. A slot past the eighth is off the strip and draws nothing.
+pub fn slot_rect(slot: usize, width: f32) -> egui::Rect {
+    let w = width / SLOTS as f32;
     egui::Rect::from_min_size(egui::pos2(slot as f32 * w, 0.0), egui::vec2(w, BODY_H))
 }
 
@@ -157,25 +156,25 @@ pub fn rows(page: &OsoPage) -> Option<Vec<Row>> {
 /// rule between columns, three lines of type inside each, and no cell fill of any kind. A hole
 /// keeps its column and draws nothing in it; a column whose group header runs into the next one
 /// is labelled once, over the run's first column.
-pub fn slots(ui: &mut egui::Ui, count: usize, rows: &[Row], width: f32) {
+pub fn slots(ui: &mut egui::Ui, rows: &[Row], width: f32) {
     let size = egui::vec2(width, BODY_H);
     let (rect, _hover) = ui.allocate_exact_size(size, egui::Sense::hover());
     let origin = rect.min.to_vec2();
     ui.painter().rect_filled(rect, 0.0, PAPER);
-    // The separators: between columns, never on the strip's outer edges.
-    for at in 1..count.max(1) {
-        let x = rect.left() + at as f32 * (width / count.max(1) as f32);
+    // Eight columns, whether or not the page fills them: the rules are the strip's, not the page's.
+    // An empty column is background and its rules, and nothing else.
+    for at in 1..SLOTS {
+        let x = rect.left() + at as f32 * (width / SLOTS as f32);
         ui.painter().vline(x, rect.y_range(), egui::Stroke::new(SEPARATOR, RULE));
     }
     // Each header covers its group: consecutive slots sharing a header text, drawn once over
     // the run's first column and free to run past its own column into the gap after it.
     let runs = header_runs(rows.iter().map(|r| (r.slot, r.header.as_deref())));
     for (start, len, header) in &runs {
-        let mut band = slot_rect(*start, count, width).translate(origin);
-        band.max.x = slot_rect(start + len - 1, count, width).max.x + origin.x;
+        let mut band = slot_rect(*start, width).translate(origin);
+        band.max.x = slot_rect(start + len - 1, width).max.x + origin.x;
         band.max.y = band.min.y + HEADER_H;
-        let next =
-            runs.iter().find(|(s, ..)| *s > start + len - 1).map_or(rect.right(), |(s, ..)| slot_rect(*s, count, width).left() + origin.x);
+        let next = runs.iter().find(|(s, ..)| *s > start + len - 1).map_or(rect.right(), |(s, ..)| slot_rect(*s, width).left() + origin.x);
         band.max.x = next.min(rect.right()).max(band.max.x) - 2.0;
         ui.painter().with_clip_rect(band).text(
             band.left_top() + Vec2::new(PAD_X, 14.0),
@@ -186,7 +185,7 @@ pub fn slots(ui: &mut egui::Ui, count: usize, rows: &[Row], width: f32) {
         );
     }
     for row in rows {
-        let cell = slot_rect(row.slot, count, width).translate(origin);
+        let cell = slot_rect(row.slot, width).translate(origin);
         // The value: the strip's loudest line, centred in its column as the reference has it.
         ui.painter().with_clip_rect(cell.shrink2(egui::vec2(PAD_X * 0.5, 0.0))).text(
             egui::pos2(cell.center().x, cell.top() + HEADER_H + 4.0),
@@ -367,31 +366,30 @@ mod tests {
     }
 
     #[test]
-    fn the_columns_divide_the_window_and_the_rows_stack_as_the_capture_has_them() {
-        // A strip is a bar: however many slots a page holds, they share the window's width, so
-        // four slots of a 1184 wide strip are 296 wide each, as the reference's Grid page is.
-        let w = width_for(1500.0, 8);
+    fn the_strip_is_eight_columns_wide_whatever_the_page_holds() {
+        // The model the reference has: eight slots, always. Its Grid page fills four and leaves
+        // four empty; nothing stretches to fill the bar and nothing shrinks.
+        let w = width_for(1500.0);
         assert_eq!(w, 1170.0, "most of the app's width, clamped");
-        let (a, b) = (slot_rect(0, 4, w), slot_rect(1, 4, w));
-        assert_eq!(a.width(), w / 4.0);
+        let (a, b) = (slot_rect(0, w), slot_rect(1, w));
+        assert_eq!(a.width(), w / SLOTS as f32);
         assert_eq!(a.height(), BODY_H);
         assert!(a.min.x < b.min.x && a.min.y == b.min.y, "one row, left to right");
         assert_eq!(a.size(), b.size(), "all columns the same size");
-        assert_eq!(slot_rect(3, 4, w).right(), w, "the last column ends at the edge");
+        assert_eq!(slot_rect(7, w).right(), w, "the eighth column ends at the strip's edge");
         assert!(BODY_H >= 80.0, "a bar tall enough for three lines of type");
     }
 
     #[test]
-    fn a_page_of_one_slot_is_one_column_wide_not_a_stretched_bar() {
-        // The fault this replaces: `Scale 2/2` holds one slot, and it was drawn across the whole
-        // bar — "Horizontal" floating in the middle of 1170 points. A column has the reference's
-        // width, so the window is that wide and no wider.
-        let one = width_for(1500.0, 1);
-        assert_eq!(one, COL_MAX, "one slot: one column, the reference's width");
-        assert_eq!(width_for(1500.0, 2), COL_MAX * 2.0);
-        assert_eq!(width_for(1500.0, 4), 1168.0, "four slots reach the app's width, as Grid does");
-        assert_eq!(width_for(1500.0, 8), 1170.0, "and eight are the bar's");
-        assert_eq!(slot_rect(0, 1, one).width(), COL_MAX);
+    fn a_page_of_one_slot_keeps_one_of_the_eight_columns() {
+        // The fault this replaces: `Scale 2/2` holds one slot and it was drawn across the whole
+        // bar — "Horizontal" floating mid-screen. The eight columns exist whether the page fills
+        // them or not, so a lone item keeps its own and the seven after it stay empty.
+        let w = width_for(1500.0);
+        assert_eq!(SLOTS, 8);
+        assert_eq!(slot_rect(0, w).width(), w / 8.0);
+        assert!(slot_rect(0, w).width() < w / 4.0, "a single item is never most of the bar");
+        assert!(slot_rect(0, w).right() < w, "and the empty columns are still the strip's");
     }
 
     #[test]

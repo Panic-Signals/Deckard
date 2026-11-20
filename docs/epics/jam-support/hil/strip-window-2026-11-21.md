@@ -17,7 +17,7 @@ through it, in chord order: every key goes down before any comes up. `DECKARD_JA
 what eframe made of the strip (`native window`, or `EMBEDDED (a panel in the app)` — the thing the
 window replaced) and where it put it.
 
-```
+```text
 $ DECKARD_JAM_TRACE=1 ./target/debug/deckard --jam TEMPO --screenshot /tmp/app.png --wait 3
 Maschine JAM: --jam, no hardware
 jam strip: native window at [1254.0 573.0] size [52.0 74.0]     <- the Tempo page: one slot
@@ -58,16 +58,20 @@ so the run proves DECKARD's own `maschine_jam`, not NI's copy.
 3. **Its own lifetime.** `TEMPO` (static): the window stays up past two seconds of no input and
    goes on the next page button. `SCALE` (non-static): untouched for ~2 s, it goes by itself. The
    window must never outlive the page, and never lag it.
-4. **Moved by its bar, inert elsewhere.** Drag the strip's bar: the window follows the pointer and
+4. **Eight columns, empty where the page is empty.** Nothing stretches: `Scale 2/2` (one slot) fills
+   the first of eight columns and the other seven stay empty; `Grid` (four) fills four. The
+   separators are the strip's — they run across all eight — and an empty column holds no value, no
+   sub-label and no rule.
+5. **Moved by its bar, inert elsewhere.** Drag the strip's bar: the window follows the pointer and
    stays where it is let go. Click and double-click the slots: nothing happens — no hover state, no
    focus change, no page change (the body has no click target at all). This row replaced a
    click-through test: the reference's window is movable, and a movable window takes the pointer.
    Record the compositor (macOS / X11 / Wayland) with the result, since drag-out-of-a-chromeless-
    window is the platform-sensitive part.
-5. **Position.** Quit and restart with the strip showing: it comes back at the same offset from the
+6. **Position.** Quit and restart with the strip showing: it comes back at the same offset from the
    app's top-left. Then move the app to a second display (or shrink the desktop): the strip comes
    back beside it and some of it is still reachable — never wholly off-screen.
-6. **Never steals focus.** With the strip open, type into the app: keystrokes go to the app. Show
+7. **Never steals focus.** With the strip open, type into the app: keystrokes go to the app. Show
    the strip and check the focused window did not change.
 
 ## Sign-off

@@ -86,11 +86,11 @@ editing, Scale 1/2) and are the closest reading of them.
 
 | | points |
 |---|---|
-| window width | `width_for(main, slots) = (main × 0.78).clamp(560, 1180).min(slots × 292)` — 1170 for a 1500-wide app showing eight slots, as the capture's 1181 is; **a page of one slot is one column wide (292), never stretched across the bar** |
+| window width | `width_for(main) = (main × 0.78).clamp(880, 1180)` — 1170 for a 1500-wide app, as the capture's 1181 is; the strip is **eight columns wide whatever the page holds** |
 | bar | 28 |
 | body | 144 = header band 40 + value row 40 + sub row 40 + bottom pad 24 |
 | type | header 11.5, value 21, sub 13, page name 13, counter 12 |
-| columns | `width / slots`, equal, capped at 292 (`COL_MAX`), 1 pt separators between them (never on the outer edges) |
+| columns | eight, always: `width / 8`. A page of `n` slots fills the first `n`; the rest are **empty columns** — background and their rules, nothing else. Nothing stretches (a `Scale 2/2` page is one column of eight) and nothing shrinks |
 | layout | group header left-aligned over its run's **first** column; value and sub **centred** |
 | cursor | a rule under each column's sub-label; the focused one 2.5 pt white, the rest 1 pt dim |
 | editing | corner brackets, inset 6 pt, spanning the value and sub rows |

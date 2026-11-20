@@ -11972,14 +11972,14 @@ impl App {
             // The window's own drawing, at its own size, over the app: `--screenshot` captures
             // it and the run crops the corner back out. (A second viewport is not in the main
             // one's picture, and Screen Recording is not always granted.)
-            let width = crate::jam_strip::width_for(ui.max_rect().width(), page.slots.len());
+            let width = crate::jam_strip::width_for(ui.max_rect().width());
             let size = crate::jam_window::window_size(width);
             let at = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), size);
             let (name, counter) = (crate::jam_strip::name(page), crate::jam_strip::counter(page));
             egui::Area::new(egui::Id::new("jam strip preview")).fixed_pos(at.min).order(egui::Order::Foreground).show(ctx, |ui| {
                 ui.painter().rect_filled(at, 0.0, egui::Color32::BLACK);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-                    crate::jam_window::paint(ui, &name, counter.as_deref(), page.slots.len(), rows, width, false);
+                    crate::jam_window::paint(ui, &name, counter.as_deref(), rows, width, false);
                 });
             });
         }

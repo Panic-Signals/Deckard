@@ -83,7 +83,7 @@ fn the_strip_renders_the_published_page() {
 fn the_strip_is_a_window_of_its_own() {
     let app = scale_view();
     let (page, rows) = app.jam_shown().expect("the Scale OSO publishes");
-    let width = crate::jam_strip::width_for(1500.0, page.slots.len());
+    let width = crate::jam_strip::width_for(1500.0);
     let window = crate::jam_window::window_size(width);
     assert_eq!((window.x, window.y), (width, crate::jam_strip::BODY_H + crate::jam_window::BAR_H), "the bar plus its rows");
     assert_eq!(rows.len(), 7);

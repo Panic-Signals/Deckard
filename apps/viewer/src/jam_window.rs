@@ -69,14 +69,13 @@ pub fn offset_of(placed: Rect, main: Rect) -> Vec2 {
 /// without this module knowing any of those rules.
 pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option<Vec2>) -> Option<Vec2> {
     let Some((page, rows)) = page else { return None };
-    let slots = page.slots.len();
     // A strip is a bar: its width comes from the app's window, as the reference's does, not
     // from how many slots the page happens to hold.
     let (main, monitor) = ctx.input_for(egui::ViewportId::ROOT, |i| (i.viewport().outer_rect, i.viewport().monitor_size));
     // (Headless or first frame: no main window yet, so the strip has nothing to sit beside.)
     let main = main.unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(1500.0, 930.0)));
     let monitor = monitor.unwrap_or(main.size());
-    let width = jam_strip::width_for(main.width(), slots);
+    let width = jam_strip::width_for(main.width());
     let size = window_size(width);
     let at = position(saved, main, size, monitor);
     let builder = egui::ViewportBuilder::default()
@@ -98,7 +97,7 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
             let kind = if class == egui::ViewportClass::EmbeddedWindow { "EMBEDDED (a panel in the app)" } else { "native window" };
             eprintln!("jam strip: {kind} at {at:?} size {size:?}");
         }
-        paint(ui, &name, counter.as_deref(), slots, rows, width, true);
+        paint(ui, &name, counter.as_deref(), rows, width, true);
     });
     // What the window (or the window manager) made of that place. With mouse passthrough on
     // the window cannot be dragged, so a difference here is the manager's placement, or a
@@ -113,7 +112,7 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
 /// `draggable` is the real window's: the bar is what moves it, as a title bar does — the
 /// reference's overlay is moved around the screen, and its body still belongs to the encoder
 /// (no click target, no hover, nothing to hit).
-pub(crate) fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, slots: usize, rows: &[Row], width: f32, draggable: bool) {
+pub(crate) fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, rows: &[Row], width: f32, draggable: bool) {
     let sense = if draggable { egui::Sense::click_and_drag() } else { egui::Sense::hover() };
     let (bar, grab) = ui.allocate_exact_size(Vec2::new(width, BAR_H), sense);
     if draggable && grab.drag_started() {
@@ -137,7 +136,7 @@ pub(crate) fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, slots:
             Color32::from_gray(150),
         );
     }
-    jam_strip::slots(ui, slots, rows, width);
+    jam_strip::slots(ui, rows, width);
 }
 
 #[cfg(test)]
@@ -154,8 +153,8 @@ mod tests {
         // the same window, as the reference's Tempo and Grid pages are.
         assert_eq!(window_size(1170.0), Vec2::new(1170.0, jam_strip::BODY_H + BAR_H));
         assert_eq!(window_size(560.0).y, window_size(1170.0).y, "the height is the rows', not the width's");
-        assert_eq!(jam_strip::width_for(1500.0, 8), 1170.0, "most of the app's width");
-        assert_eq!(jam_strip::width_for(600.0, 8), 560.0, "and never narrower than a readable bar");
+        assert_eq!(jam_strip::width_for(1500.0), 1170.0, "most of the app's width");
+        assert_eq!(jam_strip::width_for(600.0), 880.0, "and never narrower than eight readable columns");
     }
 
     #[test]
