@@ -4,7 +4,7 @@
 //! each sets, as the Sampling view's footers have them:
 //!
 //! - EDIT: PLAY RANGE (START, END), SELECTION RANGE (START, END); the MK3 manual's two
-//!   pages. A New Sampler zone's also TEMPO / PITCH (MODE, BPM, ROOT, PLAYS AT) and
+//!   pages. A New Sampler zone's also TEMPO / PITCH (MODE, BPM, BEATS, ROOT) and
 //!   PLAYBACK (SPEED, REVERSE, KEY).
 //! - ZONE: PLAY RANGE, LOOP (ACTIVE, START, END, XFADE), TUNE / MIX (TUNE, GAIN, PAN,
 //!   ROOT KEY), ENVELOPE (ATTACK, DECAY), MAP (KEY LO, KEY HI, VEL LO, VEL HI); the
@@ -59,10 +59,12 @@ pub enum Apply {
     PatternMode,
     ApplyTo,
     NoteOrder,
-    /// A New Sampler zone's play mode (0 Repitch, 1 Sync, 2 Keys), tempo, root note, and
-    /// the note it plays at (its Tune).
+    /// A New Sampler zone's play mode (0 Repitch, 1 Sync, 2 Keys), tempo, length in
+    /// beats (whole ones: its tempo follows), root note, and the note it plays at (its
+    /// Tune).
     PlayMode,
     Bpm,
+    Beats,
     Root,
     PlaysAt,
     /// A Sync zone's start grid (`StartGrid::ALL`).
@@ -86,6 +88,39 @@ pub struct Pages {
 
 fn knob(key: &str, name: &str, text: String, value: f64, (min, max): (f64, f64), step: f64, turn: f64) -> SamplingKnob {
     SamplingKnob { key: key.into(), name: name.into(), text, value, min, max, step, turn }
+}
+
+/// A sample's length in beats as its knob shows it: whole bars of four as bars too ("8
+/// (2 bars)"), a length between beats to two places ("8.60").
+pub fn beats_text(beats: Option<f64>) -> String {
+    match beats {
+        None => "-".into(),
+        Some(b) if (b - b.round()).abs() < 0.005 => {
+            let n = b.round() as i64;
+            match (n % 4, n / 4) {
+                (0, 1) => format!("{n} (1 bar)"),
+                (0, bars) => format!("{n} ({bars} bars)"),
+                _ => format!("{n}"),
+            }
+        }
+        Some(b) => format!("{b:.2}"),
+    }
+}
+
+/// The whole beats a turn of the BEATS knob from `now` to `asked` means: from a length
+/// between beats, the next whole one that way.
+pub fn beats_turned(now: Option<f64>, asked: f64) -> f64 {
+    let Some(now) = now else { return asked.round().max(1.0) };
+    let steps = (asked - now).round();
+    let whole = (now - now.round()).abs() < 0.005;
+    let from = if whole {
+        now.round()
+    } else if steps > 0.0 {
+        now.floor()
+    } else {
+        now.ceil()
+    };
+    (from + steps).max(1.0)
 }
 
 fn choice(key: &str, name: &str, options: &[String], at: usize) -> SamplingKnob {
@@ -267,16 +302,13 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             Some(r) => crate::analysis::note_name(r),
             None => "-".into(),
         };
-        let mut knobs = vec![
+        // (The note it plays at is PLAYBACK's KEY.)
+        let knobs = vec![
             (choice("Beat.Mode", "MODE", &modes, mode), Apply::PlayMode),
             (knob("Beat.Bpm", "BPM", bpm_text, bpm, (20.0, 999.0), 0.01, 1.0 / 400.0), Apply::Bpm),
+            (knob("Beat.Beats", "BEATS", beats_text(m.beats), m.beats.unwrap_or(4.0), (1.0, 999.0), 1.0, TURN), Apply::Beats),
             (knob("Beat.Root", "ROOT", root_text, f64::from(root), (0.0, 127.0), 1.0, TURN), Apply::Root),
         ];
-        if let Some(r) = m.root {
-            let at = crate::beat::target_of(r, m.cents, z.tune).clamp(0, 127);
-            let text = crate::analysis::note_name(at as u8);
-            knobs.push((knob("Beat.PlaysAt", "PLAYS AT", text, at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));
-        }
         page(&mut out, 1, "TEMPO / PITCH", knobs);
         // How this slice plays: its own speed against the song (Sync and Keys), backwards,
         // and the note it plays at.

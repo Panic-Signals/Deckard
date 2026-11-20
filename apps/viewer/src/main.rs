@@ -9116,6 +9116,7 @@ impl App {
             Some(
                 a @ (Apply::PlayMode
                 | Apply::Bpm
+                | Apply::Beats
                 | Apply::Root
                 | Apply::PlaysAt
                 | Apply::StartGrid
@@ -9139,6 +9140,10 @@ impl App {
                         SamplingAct::PlayMode(mode)
                     }
                     Apply::Bpm => SamplingAct::Meta(beat::with_bpm(&m, value, seconds)),
+                    Apply::Beats => match beat::with_beats(&m, sampling_hw::beats_turned(m.beats, value), seconds) {
+                        Some(m) => SamplingAct::Meta(m),
+                        None => return,
+                    },
                     Apply::Root => SamplingAct::Meta(beat::with_root(&m, at.min(127) as u8)),
                     Apply::Speed => {
                         SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { speed: (value.round() / 100.0).clamp(0.25, 4.0), ..m })

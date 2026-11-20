@@ -552,6 +552,29 @@ mod app_tests {
         use deckard_model::new_sampler::StartGrid;
         assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Sixteenth);
         app.record_apply.insert("Beat.Start".into(), crate::sampling_hw::Apply::StartGrid);
+        // The controller's BEATS: a length between beats goes to the next whole one that
+        // way, the tempo following (2 s: 4.3 beats at 129, 5 at 150, 4 at 120).
+        let kept = zone(&app).meta.unwrap();
+        app.record_apply.insert("Beat.Bpm".into(), crate::sampling_hw::Apply::Bpm);
+        app.record_apply.insert("Beat.Beats".into(), crate::sampling_hw::Apply::Beats);
+        app.sampling_knob("Beat.Bpm", 129.0);
+        let now = zone(&app).meta.unwrap().beats.unwrap();
+        assert!((now - 4.3).abs() < 1e-9, "{now}");
+        app.sampling_knob("Beat.Beats", now + 1.0);
+        let m = zone(&app).meta.unwrap();
+        assert_eq!((m.beats, m.bpm), (Some(5.0), Some(150.0)));
+        app.sampling_knob("Beat.Bpm", 129.0);
+        app.sampling_knob("Beat.Beats", now - 1.0);
+        let m = zone(&app).meta.unwrap();
+        assert_eq!((m.beats, m.bpm), (Some(4.0), Some(120.0)));
+        app.sampling_knob("Beat.Beats", 8.0);
+        assert_eq!(zone(&app).meta.unwrap().bpm, Some(240.0), "whole already: a beat a step");
+        assert_eq!(crate::sampling_hw::beats_text(Some(8.0)), "8 (2 bars)");
+        assert_eq!(crate::sampling_hw::beats_text(Some(4.0)), "4 (1 bar)");
+        assert_eq!(crate::sampling_hw::beats_text(Some(6.0)), "6");
+        assert_eq!(crate::sampling_hw::beats_text(Some(8.6)), "8.60");
+        assert_eq!(crate::sampling_hw::beats_text(None), "-");
+        app.sampling_act(crate::layout::sampling::SamplingAct::Meta(kept));
         app.sampling_knob("Beat.Start", 3.0);
         assert_eq!(zone(&app).meta.unwrap().start, StartGrid::Quarter);
         // The PLAYBACK page: its SPEED (percent) and REVERSE.

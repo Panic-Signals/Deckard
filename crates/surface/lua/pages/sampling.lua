@@ -11,7 +11,8 @@
 --   EDIT 7            ANALYZE: a New Sampler zone's tempo and root heard again (the
 --                     part it plays; its bass stem, if it has one, settles the key)
 --   SHIFT+EDIT 5-8    a New Sampler zone's tempo: X2, 1/2, TO PROJECT, MATCH KEY (its
---                     knob pages: TEMPO / PITCH, SYNC, WARP; its edit functions go on
+--                     knob pages: TEMPO / PITCH (BEATS: the sample's length in whole
+--                     beats, its tempo following: "8 (2 bars)"), SYNC, WARP; its edit functions go on
 --                     with WARP MARKERS, QUANTIZE AUDIO, CLEAR WARP; TO (NEW) SAMPLER
 --                     converts the sound's Sampler)
 --   EDIT, PLAYBACK    a New Sampler slice: its SPEED against the song, REVERSE, its KEY
@@ -193,7 +194,7 @@ local function tempo_buttons(v)
     { text = "X2", disabled = not has, act = function() deckard.sampling_call("double_bpm") end },
     { text = "1/2", disabled = not has, act = function() deckard.sampling_call("halve_bpm") end },
     { text = "TO PROJECT", disabled = not has, act = function() deckard.sampling_call("to_project") end },
-    { text = "MATCH KEY", disabled = not (p.knobs[4] ~= nil), act = function() deckard.sampling_call("match_key") end },
+    { text = "MATCH KEY", disabled = not (p.knobs[4] and p.knobs[4].text ~= "-"), act = function() deckard.sampling_call("match_key") end },
   }
 end
 
