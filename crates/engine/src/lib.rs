@@ -6783,7 +6783,8 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64, plug
     let same_silence = muting(prev, g, s).silent == muting(project, g, s).silent;
     let mut r = Reuse::default();
     // The Sampler: the same, or the same zones (new settings).
-    if same_silence {
+    // (A New Sampler's own settings, its Slice Motion, are given it when it's made.)
+    if same_silence && old.new_sampler == new.new_sampler {
         match (&old.sampler, &new.sampler, synth_of(old), synth_of(new)) {
             (_, _, Some((a, pa)), Some((b, pb))) if a == b => {
                 r.sampler = true;
@@ -12426,6 +12427,25 @@ mod tests {
         c.extra_outs[0].level = 0.5;
         let r = reuse_of(&b, &c, 0, 0, 1000.0, &deckard_plugins::Host::default());
         assert!(r.chain && r.instrument, "a level is no new strip");
+    }
+
+    /// Slice Motion changed alone (the Sampler itself the same) makes the Sampler anew
+    /// on an edit: one kept would go on playing the Motion it was made with.
+    #[test]
+    fn a_new_motion_remakes_the_sampler() {
+        use deckard_model::new_sampler::Motion;
+        let (_tmp, a, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let host = deckard_plugins::Host::default();
+        assert!(reuse_of(&a, &a.clone(), 0, 0, 48_000.0, &host).sampler, "nothing changed: kept");
+        let mut b = a.clone();
+        b.groups[0].sounds[0].new_sampler.as_mut().unwrap().motion = Motion::Next;
+        assert!(!reuse_of(&a, &b, 0, 0, 48_000.0, &host).sampler, "Motion on");
+        assert!(!reuse_of(&b, &a, 0, 0, 48_000.0, &host).sampler, "and off again");
+        // (New settings alone keep it, as before.)
+        let mut c = b.clone();
+        c.groups[0].sounds[0].sampler.as_mut().unwrap().tune += 1.0;
+        let r = reuse_of(&b, &c, 0, 0, 48_000.0, &host);
+        assert!(r.sampler && r.settings.is_some());
     }
 
     /// A bypassed plug-in makes no sound, so none is heard.
