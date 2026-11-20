@@ -112,8 +112,8 @@ impl Variation {
     pub fn from_settings(settings: Settings) -> Variation {
         let d = Variation::default();
         let v = |f: &str, d: f64| settings(&format!("sequence_variation/{f}")).unwrap_or(d);
-        let (lo, hi) = (v("velocity_range/lo", d.velocity_lo as f64), v("velocity_range/hi", d.velocity_hi as f64));
-        let (nlo, nhi) = (v("note_range/lo", d.note_lo as f64), v("note_range/hi", d.note_hi as f64));
+        let (lo, hi) = (v("velocity_range/low", d.velocity_lo as f64), v("velocity_range/high", d.velocity_hi as f64));
+        let (nlo, nhi) = (v("note_range/low", d.note_lo as f64), v("note_range/high", d.note_hi as f64));
         Variation {
             mode: (v("mode", d.mode as f64) as i64).clamp(0, 1),
             velocity_lo: lo.min(hi).round().clamp(0.0, 127.0) as i64,
@@ -178,13 +178,25 @@ impl Document {
     /// Variation or Generate setting `field` of sound `s` of group `g`: the project's
     /// own (projects from Maschine 3 keep them), else DECKARD's, kept with the sound.
     pub fn groove_setting(&self, g: usize, s: usize, field: &str) -> Option<f64> {
-        if self.has_groove_settings(g, s) { self.num(Target::Sound(g, s), field) } else { self.kept_groove(g, s, field) }
+        // The project's own where the sound's module holds the field — and DECKARD's
+        // otherwise: the format's Variation module is four floats and an enum, so the
+        // page's other settings (its mode, ranges, chords, distributions) have no place
+        // there and live with the sound.
+        if self.has_groove_settings(g, s) {
+            if let Some(v) = self.num(Target::Sound(g, s), field) {
+                return Some(v);
+            }
+        }
+        self.kept_groove(g, s, field)
     }
 
     /// Set Variation or Generate setting `field` of sound `s` of group `g`, where
     /// [`Document::groove_setting`] reads it (one undo step; a knob turn is one).
     pub fn set_groove_setting(&mut self, g: usize, s: usize, field: &str, v: f64) -> Result<(), String> {
-        if self.has_groove_settings(g, s) {
+        // Where the sound's module holds the field, there; else in DECKARD's field, where
+        // `groove_setting` reads it back. (Writing the format's path blind is what made
+        // the page's settings vanish: the module has no `mode`, and the write errored.)
+        if self.has_groove_settings(g, s) && self.num(Target::Sound(g, s), field).is_some() {
             return self.set("Channel Property", Target::Sound(g, s), field, Value::Float(v));
         }
         let ops = self.groove_ops(g, s, field, v)?;
@@ -707,8 +719,8 @@ mod tests {
         };
         d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
         let band: &dyn Fn(&str) -> Option<f64> = &|f| match f {
-            "sequence_variation/velocity_range/lo" => Some(40.0),
-            "sequence_variation/velocity_range/hi" => Some(60.0),
+            "sequence_variation/velocity_range/low" => Some(40.0),
+            "sequence_variation/velocity_range/high" => Some(60.0),
             _ => None,
         };
         let before: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
@@ -737,11 +749,11 @@ mod tests {
         let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
             "sequence_variation/mode" => Some(1.0),
             "sequence_variation/probability" => Some(100.0),
-            "sequence_variation/note_range/lo" => Some(60.0),
-            "sequence_variation/note_range/hi" => Some(64.0),
+            "sequence_variation/note_range/low" => Some(60.0),
+            "sequence_variation/note_range/high" => Some(64.0),
             "sequence_variation/note_count" => Some(3.0),
-            "sequence_variation/velocity_range/lo" => Some(70.0),
-            "sequence_variation/velocity_range/hi" => Some(80.0),
+            "sequence_variation/velocity_range/low" => Some(70.0),
+            "sequence_variation/velocity_range/high" => Some(80.0),
             _ => None,
         };
         d.apply_variation_with(0, 0, 0, 240, None, page, None, &mut Rng::seeded(4)).unwrap();
@@ -753,5 +765,77 @@ mod tests {
         let chord = |at: i64| after.iter().filter(|n| n.position == at).count();
         let most = after.iter().map(|n| chord(n.position)).max().unwrap_or(0);
         assert_eq!(most, 3, "the chord is Note Count notes (the range holds five pitches)");
+    }
+
+    /// Every setting the Variation page shows survives a save into the sound and reads
+    /// back: the format's module holds four floats and an enum, so the rest ride on
+    /// DECKARD's field — and a write that lands nowhere would make Apply read its
+    /// defaults and look like it did nothing.
+    #[test]
+    fn every_variation_setting_round_trips() {
+        let mut d = Document::new_project().unwrap();
+        for (field, value) in [
+            ("mode", 1.0),
+            ("velocity_range/low", 40.0),
+            ("velocity_range/high", 60.0),
+            ("time_shift", 25.0),
+            ("probability", 70.0),
+            ("note_range/low", 60.0),
+            ("note_range/high", 72.0),
+            ("note_count", 3.0),
+            ("steps", 2.0),
+            ("dist/note_count", 1.0),
+            ("dist/notes", 2.0),
+            ("dist/note_length", 3.0),
+        ] {
+            let name = format!("sequence_variation/{field}");
+            d.set_groove_setting(0, 0, &name, value).unwrap();
+            assert_eq!(d.groove_setting(0, 0, &name), Some(value), "{name}");
+        }
+        let v = d.variation(0, 0);
+        assert_eq!((v.mode, v.velocity_lo, v.velocity_hi, v.probability), (1, 40, 60, 70));
+        assert_eq!((v.note_count, v.steps, v.dist_notes), (3, 2.0, 2));
+    }
+
+    /// The app's own path: the page's settings saved into the sound, read back through
+    /// `groove_setting` as `GROOVE_FIELDS` reads them, then Apply. (Writing the format's
+    /// path blind is what once made every turn vanish and Apply a no-op.)
+    #[test]
+    fn the_apps_path_reads_its_settings_and_varies_the_notes() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        let euclid: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_generation/mode" => Some(1.0),
+            "sequence_generation/steps" => Some(4.0),
+            "sequence_generation/fills" => Some(4.0),
+            "sequence_generation/division" => Some(1.0),
+            _ => None,
+        };
+        d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
+        for (field, value) in [("mode", 1.0), ("probability", 100.0), ("note_range/low", 60.0), ("note_range/high", 64.0)] {
+            d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).unwrap();
+        }
+        // The viewer's list, as `GROOVE_FIELDS` has it.
+        let fields = [
+            "sequence_variation/mode",
+            "sequence_variation/velocity_amount",
+            "sequence_variation/time_shift",
+            "sequence_variation/length_scale",
+            "sequence_variation/length_variation",
+            "sequence_variation/distribution",
+            "sequence_variation/probability",
+            "sequence_variation/note_range/low",
+            "sequence_variation/note_range/high",
+            "sequence_variation/note_count",
+            "sequence_variation/steps",
+        ];
+        let settings: Vec<(String, f64)> = fields.iter().filter_map(|f| d.groove_setting(0, 0, f).map(|v| (f.to_string(), v))).collect();
+        let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
+        let before: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        d.apply_variation(0, 0, 0, 240, None, &get).unwrap();
+        let after: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        assert_ne!(after, before, "Apply varies the notes");
+        assert!(after.iter().all(|n| (60..=64).contains(&n.pitch)), "{:?}", after.iter().map(|n| n.pitch).collect::<Vec<_>>());
+        assert_eq!(d.variation(0, 0).mode, 1, "the page reads its own mode back");
     }
 }

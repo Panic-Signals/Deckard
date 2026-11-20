@@ -62,12 +62,12 @@ NI documents no algorithm. Settings live under `sequence_variation/` in the soun
 | Field | Values | Default | Source |
 |---|---|---|---|
 | `mode` | 0 Humanize, 1 Random | 0 (Humanize: the reference titles that page plain `Variation`, Random `1/2`) | capture (2 modes) |
-| `velocity_range/lo` | 0–127 | 100 | capture |
-| `velocity_range/hi` | 0–127 | 127 | capture |
+| `velocity_range/low` | 0–127 | 100 | capture |
+| `velocity_range/high` | 0–127 | 127 | capture |
 | `time_shift` | 0–50 %, 5 % steps (SHIFT 1 %) | 0 | manual §5.2 |
 | `probability` | 10–100 %, 10 % steps (SHIFT 1 %) | 50 | manual §5.2 |
-| `note_range/lo` | 0–127 | 60 (C3) | manual §5.2, capture |
-| `note_range/hi` | 0–127 | 72 (C4) | manual §5.2, capture |
+| `note_range/low` | 0–127 | 60 (C3) | manual §5.2, capture |
+| `note_range/high` | 0–127 | 72 (C4) | manual §5.2, capture |
 | `note_count` | 1–6 | 1 | manual §5.2 |
 | `steps` | 1–6 (one decimal) | 1.0 | manual §5.2, capture |
 | `dist/note_count` | 0 Equal, 1 Gauss, 2 ½ Gauss, 3 Fixed | 3 | manual §5.2 |
@@ -86,13 +86,13 @@ and **re-applied from the notes as they were** when Live is on (the existing
 `apply_variation_from`), so a drag re-rolls instead of compounding.
 
 **Humanize** (mode 0) — perturb only, nothing created or removed:
-- velocity drawn in `[velocity_range/lo, velocity_range/hi]`
+- velocity drawn in `[velocity_range/low, velocity_range/high]`
 - position ± `time_shift` % of a grid step, clamped inside the pattern
 - length untouched
 
 **Random** (mode 1) — vary the beats, and make notes:
 - each note survives with `probability` % (else it goes)
-- pitch drawn in `[note_range/lo, note_range/hi]`, kept in the selected scale when one is on
+- pitch drawn in `[note_range/low, note_range/high]`, kept in the selected scale when one is on
   (manual: "Random mode conforms to the selected scale"), shaped by `dist/notes`
 - velocity drawn in the velocity band
 - length `steps` grid steps, shaped by `dist/note_length` (`Fixed`: exactly `steps`)

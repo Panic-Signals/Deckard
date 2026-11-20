@@ -825,8 +825,8 @@ const GROOVE_FIELDS: [&str; 28] = [
     "sequence_variation/live",
     // The Variation page (work-item 35).
     "sequence_variation/mode",
-    "sequence_variation/velocity_range/lo",
-    "sequence_variation/velocity_range/hi",
+    "sequence_variation/velocity_range/low",
+    "sequence_variation/velocity_range/high",
     "sequence_variation/probability",
     "sequence_variation/note_range/low",
     "sequence_variation/note_range/high",
@@ -853,8 +853,8 @@ const GROOVE_FIELDS: [&str; 28] = [
 fn variation_field(name: &str) -> Option<&'static str> {
     Some(match name {
         "mode" => "sequence_variation/mode",
-        "velocity_lo" => "sequence_variation/velocity_range/lo",
-        "velocity_hi" => "sequence_variation/velocity_range/hi",
+        "velocity_lo" => "sequence_variation/velocity_range/low",
+        "velocity_hi" => "sequence_variation/velocity_range/high",
         "time_shift" => "sequence_variation/time_shift",
         "probability" => "sequence_variation/probability",
         "note_lo" => "sequence_variation/note_range/low",
@@ -10607,12 +10607,26 @@ impl App {
         let (root, bank, kind) = self.scale;
         let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
         let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
+        // What the sound has there now, so Apply can say when it changed nothing (a
+        // Humanize at 100–127 and no time shift does exactly that, as Maschine's does).
+        let sound_notes = |d: &deckard_doc::Document| -> Vec<deckard_model::Note> {
+            d.project()
+                .groups
+                .get(g)
+                .and_then(|x| x.patterns.get(p))
+                .map_or(Vec::new(), |pat| pat.notes.iter().filter(|n| n.sound == s).copied().collect())
+        };
+        let before = sound_notes(&doc.borrow());
         let done = match b {
             layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_variation(g, p, s, grid, in_scale, &get),
             layout::GrooveButton::Generate => doc.borrow_mut().generate(g, p, s, grid, polyphonic, in_scale, &get),
         };
-        if let Err(e) = done {
-            self.status = format!("can't do that: {e}");
+        match done {
+            Err(e) => self.status = format!("can't do that: {e}"),
+            Ok(()) if matches!(b, layout::GrooveButton::ApplyVariation) && sound_notes(&doc.borrow()) == before => {
+                self.status = "Apply changed nothing: mind the mode, the ranges and the time shift".into();
+            }
+            Ok(()) => {}
         }
     }
 
