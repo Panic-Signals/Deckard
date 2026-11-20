@@ -249,6 +249,20 @@ fn main() {
         p.exists().then_some(p)
     });
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
+    // `--jam KEY` (repeatable): press a Jam control through the script, so the strip and its
+    // window can be looked at with no Jam on the wire. An unknown name is named back.
+    let jam_hil_presses: Vec<&'static str> = args
+        .windows(2)
+        .filter(|w| w[0] == "--jam")
+        .filter_map(|w| {
+            let name = w[1].as_str();
+            let known = deckard_jam::map::BUTTON_LEDS.iter().copied().chain(["ENCODER_TOUCH", "ENCODER"]).find(|n| *n == name);
+            if known.is_none() {
+                eprintln!("--jam: no Jam control called {name}");
+            }
+            known
+        })
+        .collect();
     // (flag, value) pairs for --press/--pad, in order.
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
@@ -273,6 +287,8 @@ fn main() {
                 screenshot,
                 scripts,
                 model,
+                jam_hil: !jam_hil_presses.is_empty(),
+                jam_hil_presses,
                 show_controller: false,
                 meter_inputs: true,
                 follow: true,
@@ -1073,6 +1089,11 @@ pub struct App {
     /// it's connected.
     jam: Option<jam_io::JamIo>,
     jam_device: Option<deckard_surface::device::Device>,
+    /// `--jam`: run the Jam's script, and press `jam_hil_presses` on it, with no Jam plugged
+    /// in — how the on-screen strip and its window are looked at without hardware
+    /// (`docs/epics/jam-support/hil/strip-window-2026-11-21.md`).
+    jam_hil: bool,
+    jam_hil_presses: Vec<&'static str>,
     /// The last JAM script error shown.
     jam_error: Option<String>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.

@@ -280,7 +280,8 @@ impl App {
         let Some(j) = &self.jam else { return };
         j.set_context(ctx);
         j.set_enabled(self.settings.jam_enabled);
-        let connected = j.connected();
+        // (`--jam` runs the script with no Jam on the wire, for the strip's HIL.)
+        let connected = j.connected() || self.jam_hil;
         let (events, pending) = (j.take_events(), j.take_pending());
         let now = Instant::now();
         if !connected {
@@ -300,7 +301,28 @@ impl App {
             self.jam_device = Some(d);
             self.jam_asked(asked);
             self.status = "Maschine JAM connected".into();
-            eprintln!("Maschine JAM connected");
+            if self.jam_hil {
+                eprintln!("Maschine JAM: --jam, no hardware");
+            } else {
+                eprintln!("Maschine JAM connected");
+            }
+        }
+        if !self.jam_hil_presses.is_empty()
+            && let Some(mut d) = self.jam_device.take()
+        {
+            let view = self.surface_view();
+            // (Every key goes down before any comes up, so a chord like SHIFT + PAD_MODE
+            // is a chord here as it is on the hardware.)
+            let mut asked = Vec::new();
+            let keys = std::mem::take(&mut self.jam_hil_presses);
+            for key in &keys {
+                asked.extend(d.button(key, true, &view, now));
+            }
+            for key in keys.iter().rev() {
+                asked.extend(d.button(key, false, &view, now));
+            }
+            self.jam_device = Some(d);
+            self.jam_asked(asked);
         }
         let (leds, route) = self.jam_events(events, now);
         if let Some(j) = &self.jam {

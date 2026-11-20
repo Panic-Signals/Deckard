@@ -1,13 +1,35 @@
 # HIL: the Jam strip's own window — `strip-window-2026-11-21`
 
-Status: **run sheet, not yet run.** The two-window captures the brief calls for (one of the window
-alone, one of it over each view) need a machine with a Jam or a published page and a compositor to
-look at; nothing here was captured from the branch as committed. What *is* proved headless is
-listed under "Headless, already green" so the rig pass only has to answer what a test cannot.
+Status: **partly proved on a machine with no Jam.** The strip is announced by eframe as a
+**native window** (not a panel inside the app), at the size its page needs, while the app's own
+window holds no strip at all — see "What a machine without a Jam can prove". The pixel captures of
+the window alone, the real hardware's rows, and the click-through rows still want a rig (and, on
+macOS, Screen Recording permission, which the DECKARD checkout's terminal did not have).
 
 Plan this implements: `docs/epics/jam-support/plan-2026-11-21-overlay-window.md` (work item
 `22-jam-overlay-detached-window.md`'s required plan). Contract: `oso-contract.md` — the page, its
 cursor and its lifetime are the script's, and the window adds none of them.
+
+## What a machine without a Jam can prove
+
+`--jam KEY` (repeatable) runs the Jam's script with no Jam on the wire and presses those keys
+through it, in chord order: every key goes down before any comes up. `DECKARD_JAM_TRACE=1` prints
+what eframe made of the strip (`native window`, or `EMBEDDED (a panel in the app)` — the thing the
+window replaced) and where it put it.
+
+```
+$ DECKARD_JAM_TRACE=1 ./target/debug/deckard --jam TEMPO --screenshot /tmp/app.png --wait 3
+Maschine JAM: --jam, no hardware
+jam strip: native window at [1254.0 573.0] size [52.0 74.0]     <- the Tempo page: one slot
+
+$ DECKARD_JAM_TRACE=1 ./target/debug/deckard --jam SHIFT --jam PAD_MODE --jam ENCODER_TOUCH \
+      --screenshot /tmp/app.png --wait 3
+jam strip: native window at [1058.0 573.0] size [444.0 74.0]    <- Scale 1/2: eight slots
+```
+
+Both runs' `--screenshot` (the app's own viewport) contain **no strip**: with a page published,
+the app window shows the pads and nothing else. That is the negative half of "a window, not a
+section", and it is repeatable on any machine, with no hardware.
 
 ## Rig
 

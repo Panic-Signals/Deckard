@@ -90,7 +90,14 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
         .with_taskbar(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop);
     let (name, counter) = (jam_strip::name(page), jam_strip::counter(page));
-    ctx.show_viewport_immediate(id(), builder, |ui, _class| {
+    let trace = std::env::var_os("DECKARD_JAM_TRACE").is_some();
+    ctx.show_viewport_immediate(id(), builder, |ui, class| {
+        if trace {
+            // (A native viewport is a window of its own; `EmbeddedWindow` would mean the
+            // strip is being drawn as a panel inside DECKARD, which is the thing it replaced.)
+            let kind = if class == egui::ViewportClass::EmbeddedWindow { "EMBEDDED (a panel in the app)" } else { "native window" };
+            eprintln!("jam strip: {kind} at {at:?} size {size:?}");
+        }
         paint(ui, &name, counter.as_deref(), slots, rows);
     });
     // What the window (or the window manager) made of that place. With mouse passthrough on
