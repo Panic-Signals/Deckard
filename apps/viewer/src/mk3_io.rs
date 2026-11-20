@@ -272,6 +272,8 @@ struct Shared {
     /// dark since `closing`.
     connected: bool,
     displays_connected: bool,
+    /// The first look for the controller is over (found or not).
+    probed: bool,
     leds_closed: bool,
     displays_closed: bool,
     /// The MIDI Monitor, shown what the pads play.
@@ -411,6 +413,25 @@ impl Mk3Io {
         self.shared.lock().unwrap().agent_holding
     }
 
+    /// Whether the controller is there, once the first look for it is over: it's looked
+    /// for on a thread of its own, so asking as that starts always said no. Waits at
+    /// most `patience` for that first look.
+    pub fn found(&self, patience: Duration) -> bool {
+        let until = std::time::Instant::now() + patience;
+        loop {
+            {
+                let s = self.shared.lock().unwrap();
+                if s.probed || s.connected {
+                    return s.connected;
+                }
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Whether the MK3's screens are open.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn displays_connected(&self) -> bool {
@@ -441,14 +462,20 @@ fn run(shared: &Mutex<Shared>) {
         let mut dev = match deckard_mk3::Device::open() {
             Ok(d) => d,
             Err(e) => {
-                shared.lock().unwrap().status = e;
+                let mut s = shared.lock().unwrap();
+                s.status = e;
+                s.probed = true;
+                drop(s);
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
         // Clear the preceding host/session before waiting for the first UI state.
         if let Err(e) = dev.write_leds(&deckard_mk3::leds::Leds::default()) {
-            shared.lock().unwrap().status = format!("Maschine MK3: {e}");
+            let mut s = shared.lock().unwrap();
+            s.status = format!("Maschine MK3: {e}");
+            s.probed = true;
+            drop(s);
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
@@ -457,6 +484,7 @@ fn run(shared: &Mutex<Shared>) {
             let mut s = shared.lock().unwrap();
             s.status = format!("{} connected", dev.model().name);
             s.connected = true;
+            s.probed = true;
         }
         let mut events = Vec::new();
         // Shown on the LEDs: none yet, so the first state is sent.
@@ -786,6 +814,27 @@ mod tests {
     use super::*;
     use deckard_model::pad_touch::{PadTouch, TouchMode};
     use deckard_model::{Dim, ExprKind, MidiKind};
+
+    /// The splash asks whether the MK3 is there as the look for it starts: the answer
+    /// waits for that first look, rather than saying no at once.
+    #[test]
+    fn found_waits_for_the_first_look() {
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        assert!(!io.found(Duration::from_millis(20)), "never looked: no, after the wait");
+        let s = io.shared.clone();
+        let looking = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let mut s = s.lock().unwrap();
+            s.connected = true;
+            s.probed = true;
+        });
+        assert!(io.found(Duration::from_secs(5)), "found once the look is over");
+        looking.join().unwrap();
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.shared.lock().unwrap().probed = true;
+        let t = std::time::Instant::now();
+        assert!(!io.found(Duration::from_secs(5)) && t.elapsed() < Duration::from_secs(1), "looked, not there: no at once");
+    }
 
     fn route(touch: PadTouch) -> PadRoute {
         let mut touches = [PadTouch::default(); 16];
