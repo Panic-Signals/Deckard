@@ -359,6 +359,9 @@ pub enum SamplingAct {
     Lane(usize, LaneAct),
     /// The lanes folded into one waveform, or stacked.
     LanesMix(bool),
+    /// Drag the sample (or stem lane `.0`) out of the window as a file: the part
+    /// selected, else the part the zone plays; `true`: all of it.
+    DragOut(Option<usize>, bool),
     /// Play the focused zone on this key, or stop it if it sounds.
     Audition(i64),
     Open(bool),
@@ -584,8 +587,18 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         }
         let name = z.sample.path.rsplit(['/', '\\']).next().unwrap_or("");
         let t = painter.text(Pos2::new(play.right() + 6.0, info.center().y), Align2::LEFT_CENTER, name, font(12.0), gcol);
+        // Out of the window, as a file: onto another sampler, a track, the Finder.
+        let grip = Rect::from_min_size(Pos2::new(t.right() + 8.0, info.top() + 1.0), Vec2::new(40.0, 14.0));
+        let resp = ui.interact(grip, ui.id().with("samp-drag-out"), Sense::drag()).on_hover_text(
+            "Drag this onto another application (a sampler, a track, the Finder): the part selected, else the part this zone plays, as a WAV. Alt-drag: the whole file",
+        );
+        painter.rect_filled(grip, 2.0, if resp.hovered() || resp.dragged() { s03() } else { s01() });
+        painter.text(grip.center(), Align2::CENTER_CENTER, "DRAG", font(9.0), if resp.hovered() { white(245) } else { white(200) });
+        if resp.drag_started() {
+            acts.push(sact(SamplingAct::DragOut(None, ui.input(|i| i.modifiers.alt))));
+        }
         let d = painter.text(
-            Pos2::new(t.right() + 12.0, info.center().y),
+            Pos2::new(grip.right() + 10.0, info.center().y),
             Align2::LEFT_CENTER,
             frames_text(s.frames.len(), s.rate),
             font(12.0),
@@ -1184,8 +1197,15 @@ fn wave(
             let col = LANE_COLOURS[lane];
             let y = cr.top() + 2.0;
             let name = Rect::from_min_size(Pos2::new(cr.left() + 18.0, y), Vec2::new(46.0, 14.0));
-            painter.rect_filled(name, 2.0, Color32::from_black_alpha(170));
+            // Its name: dragged, the stem goes out of the window as a file.
+            let nr = ui.interact(name, ui.id().with(("lane-drag-out", lane)), Sense::drag()).on_hover_text(
+                "Drag this stem onto another application: the part selected, else the part this zone plays, as a WAV. Alt-drag: the whole stem",
+            );
+            painter.rect_filled(name, 2.0, if nr.hovered() || nr.dragged() { s03() } else { Color32::from_black_alpha(170) });
             painter.text(name.center(), Align2::CENTER_CENTER, deckard_model::new_sampler::LANE_NAMES[lane].to_uppercase(), font(9.0), col);
+            if nr.drag_started() {
+                acts.push(sact(SamplingAct::DragOut(Some(lane), ui.input(|i| i.modifiers.alt))));
+            }
             let mr = Rect::from_min_size(Pos2::new(name.right() + 2.0, y), Vec2::splat(14.0));
             if small(ui, mr, "M", l.mute.then_some(col), ("lane-m", lane), "Mute this stem") {
                 acts.push(sact(SamplingAct::Lane(lane, LaneAct::Mute)));

@@ -413,6 +413,13 @@ four stems together in one zone, so they share every edit.
 > a shuffled note order, EXPORT (each slice a WAV). Not built: dragging slices out,
 > linear/random locks.
 >
+> Built (2026-11-20): DRAG in the Sampling view's info bar, and a stem lane's name: the
+> sample (or that stem) dragged onto another application as a file, as recorded. The
+> part selected, else the part the zone plays, written once as a WAV in the project's
+> `Samples/Dragged`; Alt-drag, or a part that's all of it: the file itself. macOS only.
+> Not built: the audio as it plays (stretched, tuned), each slice dragged by itself,
+> Windows and Linux.
+>
 > Built (2026-11-19, `docs/superpowers/specs/2026-11-19-motion-tail-munge-design.md`):
 > Slice Motion (MOTION: Next / Random, over all the sound's slices), TAIL (a fading
 > reverse tail, 0 to 2000 ms), MUNGE on EDIT (swing, the eighths of a bar taken out,

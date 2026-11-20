@@ -41,6 +41,7 @@ mod controller;
 #[cfg(test)]
 mod controller_quality_tests;
 mod controller_timing;
+mod drag_out;
 mod drop_pos;
 mod drum_ui;
 mod export;
@@ -978,6 +979,9 @@ pub struct App {
     /// Scripted pointer input (`--input`): (seconds after start, (m/d/u = move, down,
     /// up, position)).
     input_script: Vec<(f32, (char, egui::Pos2))>,
+    /// A drag out of the window took the mouse ([`drag_out`]): the button it never
+    /// hears come up is let go for egui.
+    drag_release: bool,
     /// Load the project's plug-ins once the window has drawn (they take a moment, and
     /// a press that waits for them isn't a click any more).
     preload_plugins: bool,
@@ -8039,6 +8043,7 @@ impl App {
             }
             S::Lane(k, act) => self.lane_act(k, act),
             S::LanesMix(on) => self.sampling.lanes_mix = on,
+            S::DragOut(lane, whole) => self.drag_out(lane, whole),
             S::Edit(op) => {
                 let (Some(s), Some(r)) = (self.sampling.sample.clone(), self.edit_range()) else { return };
                 type Lane = Box<dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample>;
@@ -12386,6 +12391,12 @@ impl eframe::App for App {
     /// `--input FILE`: feed scripted pointer input to the running app, for reproducing
     /// what a user does with plug-ins loaded (which tests can't, off the main thread).
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if std::mem::take(&mut self.drag_release)
+            && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
+        {
+            let button = egui::PointerButton::Primary;
+            raw.events.push(egui::Event::PointerButton { pos, button, pressed: false, modifiers: Default::default() });
+        }
         let t = self.started.elapsed().as_secs_f32();
         while let Some(&(at, ev)) = self.input_script.first()
             && at <= t

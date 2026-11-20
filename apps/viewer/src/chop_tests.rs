@@ -485,3 +485,43 @@ fn munge_keeps_what_the_zone_plays() {
     assert_eq!(zone0(&app), before);
     assert!(app.status.contains("no eighth"), "{}", app.status);
 }
+
+/// Dragged out of the window, the sample is a file: itself when all of it goes (or
+/// Alt is held), else the part selected (or the part the zone plays) written once as a
+/// WAV in the project's `Samples/Dragged`.
+#[test]
+fn a_drag_out_gives_the_part_as_a_file() {
+    let (mut app, tmp) = loop_at_120(false);
+    let original = std::path::PathBuf::from(zone0(&app).sample.path);
+    let len = app.sampling.len();
+    app.sampling.selection = None;
+    assert_eq!(app.drag_file(None, false).unwrap(), original, "all of it: the file itself");
+    // A part selected: that part, in Samples/Dragged next to the project.
+    app.sampling.selection = Some((11_025, 22_050));
+    let part = app.drag_file(None, false).unwrap();
+    assert_eq!(part.parent().unwrap(), tmp.path().join("Samples").join("Dragged"));
+    let name = part.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.ends_with(" 0.250-0.500s.wav"), "{name}");
+    let made = Sample::load(&part).unwrap();
+    assert_eq!((made.frames.len(), made.rate), (11_025, RATE));
+    assert_eq!(made.frames[0], app.sampling.sample.as_ref().unwrap().frames[11_025]);
+    // The same part again is the same file, not written again.
+    let written = std::fs::metadata(&part).unwrap().modified().unwrap();
+    assert_eq!(app.drag_file(None, false).unwrap(), part);
+    assert_eq!(std::fs::metadata(&part).unwrap().modified().unwrap(), written);
+    // Alt: the whole file, whatever is selected.
+    assert_eq!(app.drag_file(None, true).unwrap(), original);
+    // No selection: the part the zone plays.
+    app.sampling.selection = None;
+    let t = deckard_doc::Target::Zone(app.group, app.sound, 0);
+    app.doc.as_ref().unwrap().borrow_mut().set("Play Range", t, "play_range/high", mxprj::decode::Value::Int(22_049)).unwrap();
+    app.update_sampling();
+    app.sampling.selection = None;
+    let played = app.drag_file(None, false).unwrap();
+    assert_eq!(Sample::load(&played).unwrap().frames.len(), 22_050);
+    assert!(len > 22_050);
+    // A stem lane it doesn't have.
+    assert!(app.drag_file(Some(2), false).is_err());
+    // Nothing was changed in the project.
+    assert_eq!(std::path::PathBuf::from(zone0(&app).sample.path), original);
+}
