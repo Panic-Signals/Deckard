@@ -547,6 +547,12 @@ pub struct VariationView {
     pub dist_note_count: i64,
     pub dist_notes: i64,
     pub dist_note_length: i64,
+    /// The generator's Euclidean settings, which `Euclid` (mode 2) shows.
+    pub euclid_steps: i64,
+    pub fills: i64,
+    pub rotate: i64,
+    /// Its Division, as `layout::channel::DIVISIONS` lists it (0 Grid … 10 Fit Bar).
+    pub division: i64,
     pub keyboard: bool,
 }
 

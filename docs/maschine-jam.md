@@ -118,7 +118,10 @@ previous or next.
 | Loop range by SHIFT + ▶ and two scene buttons | SHIFT + ▶ switches looping; DECKARD has no scene loop range yet |
 | A group's Tune | DECKARD has no group tune: it moves the group's Samplers together. Plug-in instruments don't move |
 | Level and Swing written with AUTO | Only what's a Control-page parameter writes modulation; the mixer's level isn't one yet |
-| Variation's on-screen settings (SHIFT + E) | The focused sound's Groove ▸ Variation page, on the strips |
+| Variation's on-screen settings (SHIFT + E) | The page, on the OSO, and the focused sound's Groove ▸ Variation page on the strips |
+| Variation ▸ Mode | Humanize, Random, and **Euclid** — DECKARD's own third mode (Steps, Fills, Rotate, Division) |
+| Variation ▸ Apply in Random mode | The **Generate engine**: the same code the app's Generate ▸ Random button runs |
+| Variation's settings | The **sound's**, saved with the project (Maschine keeps the 2.x-era ones workspace-wide) |
 | Plug-in mode, MIDI mode, Controller Editor, SHIFT + F (TS EDIT), SHIFT + H (INSTANCE) | Not here |
 | LOCK again updates the snapshot | LOCK recalls it, as on DECKARD's MK3; in Lock View it updates the one in focus |
 

@@ -856,14 +856,19 @@ fn variation_field(name: &str) -> Option<&'static str> {
         "velocity_lo" => "sequence_variation/velocity_range/low",
         "velocity_hi" => "sequence_variation/velocity_range/high",
         "time_shift" => "sequence_variation/time_shift",
-        "probability" => "sequence_variation/probability",
-        "note_lo" => "sequence_variation/note_range/low",
-        "note_hi" => "sequence_variation/note_range/high",
-        "note_count" => "sequence_variation/note_count",
+        "probability" => "sequence_generation/probability",
+        "note_lo" => "sequence_generation/note_range/low",
+        "note_hi" => "sequence_generation/note_range/high",
+        "note_count" => "sequence_generation/note_count",
         "steps" => "sequence_variation/steps",
         "dist_note_count" => "sequence_variation/dist/note_count",
         "dist_notes" => "sequence_variation/dist/notes",
         "dist_note_length" => "sequence_variation/dist/note_length",
+        // Euclid's own, which the generator keeps under its module.
+        "euclid_steps" => "sequence_generation/steps",
+        "fills" => "sequence_generation/fills",
+        "rotate" => "sequence_generation/rotate",
+        "division" => "sequence_generation/division",
         _ => return None,
     })
 }
@@ -5806,6 +5811,10 @@ impl App {
                 dist_note_count: x.dist_note_count,
                 dist_notes: x.dist_notes,
                 dist_note_length: x.dist_note_length,
+                euclid_steps: d.groove_setting(self.group, self.sound, "sequence_generation/steps").unwrap_or(8.0) as i64,
+                fills: d.groove_setting(self.group, self.sound, "sequence_generation/fills").unwrap_or(5.0) as i64,
+                rotate: d.groove_setting(self.group, self.sound, "sequence_generation/rotate").unwrap_or(0.0) as i64,
+                division: d.groove_setting(self.group, self.sound, "sequence_generation/division").unwrap_or(0.0) as i64,
                 keyboard: self.piano_roll,
             }
         });
@@ -10618,7 +10627,9 @@ impl App {
         };
         let before = sound_notes(&doc.borrow());
         let done = match b {
-            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_variation(g, p, s, grid, in_scale, &get),
+            // The page's one action: Humanize varies what is there, Random and Euclid run
+            // the generator — the same code the Jam's Apply asks for.
+            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_groove_page(g, p, s, grid, polyphonic, in_scale, &get),
             layout::GrooveButton::Generate => doc.borrow_mut().generate(g, p, s, grid, polyphonic, in_scale, &get),
         };
         match done {
@@ -10661,11 +10672,12 @@ impl App {
             GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let grid = self.grid;
+        let polyphonic = self.piano_roll;
         // The scale Random keeps to (the controller's Keyboard scale too; Chromatic is none).
         let (root, bank, kind) = self.scale;
         let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
         let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
-        if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, in_scale, &get, &base) {
+        if let Err(e) = doc.borrow_mut().apply_groove_page_from(g, p, s, grid, polyphonic, in_scale, &get, &base) {
             self.status = format!("can't vary: {e}");
             return;
         }

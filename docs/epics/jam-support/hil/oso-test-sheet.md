@@ -60,6 +60,7 @@ the view it was opened in.
 | `Variation` | **SHIFT + E** (Group 5) | `--jam SHIFT --jam E` | 5 — Mode, Apply, Velocity Lo, Velocity Hi, Step | on the chord (static; the strips also open the Groove Variation page) | SHIFT + E again, or a view change. **No timer** |
 | `Variation 1/2` | Mode turned to **Random** | `--jam SHIFT --jam E`, press ENCODER, turn | 8 — Mode, Apply, Probability, Note Lo, Note Hi, Velocity Lo, Velocity Hi, Note Count | with it, once the MODE setting says Random | as above; 2/2 is one turn past the eighth |
 | `Variation 2/2` | the second Random page | turn past Note Count | 5 — Steps, Step (TIME SHIFT), and the three DISTRIBUTIONS | with it | the eighth turns back |
+| `Euclid` | Mode turned to **Euclid** | `--jam SHIFT --jam E`, press ENCODER, turn twice | 6 — Mode, Apply, Steps, Fills, Rotate, Division | with it | as above. **DECKARD's mode, not the reference's** |
 The page is the focused sound's, read with the notes it varies; **Apply** is a button (no
 sub-label) and the encoder's press on it runs it. In **pad mode** (pads not in a keyboard
 layout) the note range and the chords leave the page, so Random is one page of eight.

@@ -836,7 +836,9 @@ end
 -- The Variation page (work-item 35): Maschine's thirteen settings in the page's order,
 -- five of them in Humanize, and the note range and chords left out while the pads are not
 -- in a keyboard layout. Static: the page stays until SHIFT + Group 5 again or another page.
-local VARIATION_MODES = { "Humanize", "Random" }
+local VARIATION_MODES = { "Humanize", "Random", "Euclid" }
+-- As the app's Division list names them (`layout::channel::DIVISIONS`).
+local VARIATION_DIVISIONS = { "Grid", "1/4", "1/8", "1/16", "1/32", "1/8 T", "1/16 T", "1/4 Q", "1/8 Q", "1/16 Q", "Fit Bar" }
 local VARIATION_TAILS = { "Equal", "Gauss", "1/2 Gauss" }
 local VARIATION_DISTS = { "Equal", "Gauss", "1/2 Gauss", "Fixed" }
 
@@ -853,6 +855,13 @@ end
 local function variation_hidden(s, item)
   local v = s.variation or {}
   if item.key == nil then return false end
+  -- Euclid shows its own settings and nothing else; the other modes hide them.
+  if (v.mode or 0) == 2 then
+    return item.key ~= "mode" and item.key ~= "euclid_steps" and item.key ~= "fills" and item.key ~= "rotate" and item.key ~= "division"
+  end
+  if item.key == "euclid_steps" or item.key == "fills" or item.key == "rotate" or item.key == "division" then
+    return true
+  end
   if (v.mode or 0) == 0 then
     return item.key ~= "mode" and item.key ~= "velocity_lo" and item.key ~= "velocity_hi" and item.key ~= "time_shift"
   end
@@ -925,6 +934,12 @@ local function variation_menu()
     choice("dist_note_count", "Note Count", "DISTRIBUTIONS", VARIATION_DISTS),
     choice("dist_notes", "Notes", "DISTRIBUTIONS", VARIATION_TAILS),
     choice("dist_note_length", "Note Length", "DISTRIBUTIONS", VARIATION_DISTS),
+    -- DECKARD's own mode: the generator's Euclidean settings, which the reference's page
+    -- does not have (recorded in docs/maschine-jam.md's deviation table).
+    number("euclid_steps", "Steps", "EUCLID", step("euclid_steps", 1, 32, 1, 1)),
+    number("fills", "Fills", "EUCLID", step("fills", 1, 32, 1, 1)),
+    number("rotate", "Rotate", "EUCLID", step("rotate", 0, 31, 1, 1)),
+    choice("division", "Division", "EUCLID", VARIATION_DIVISIONS),
   }
   for _, item in ipairs(items) do
     local text = item.text
@@ -1097,6 +1112,7 @@ end
 local function variation_sizes(s)
   local v = s.variation or {}
   if (v.mode or 0) == 0 then return { 5 } end
+  if (v.mode or 0) == 2 then return { 6 } end
   if v.keyboard then return { 8, 5 } end
   return { 8 }
 end
@@ -1143,7 +1159,7 @@ local function variation_oso_page(s)
       }
     end
   end
-  local title = pages > 1 and string.format("Variation %d/%d", n, pages) or "Variation"
+  local title = pages > 1 and string.format("Variation %d/%d", n, pages) or ((s.variation or {}).mode == 2 and "Euclid" or "Variation")
   return {
     title = title,
     page = n,

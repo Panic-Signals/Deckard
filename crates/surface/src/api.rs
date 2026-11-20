@@ -269,7 +269,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("swing", (amount: f64) => Action::Swing(amount.clamp(0.0, 100.0)));
     {
         // The Variation page's settings (work-item 35), by the names the page uses.
-        const FIELDS: [&str; 12] = [
+        const FIELDS: [&str; 16] = [
             "mode",
             "velocity_lo",
             "velocity_hi",
@@ -282,6 +282,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             "dist_note_count",
             "dist_notes",
             "dist_note_length",
+            "euclid_steps",
+            "fills",
+            "rotate",
+            "division",
         ];
         let sh = shared.clone();
         d.set(
@@ -1269,6 +1273,10 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
                 t2.set("dist_note_count", x.dist_note_count)?;
                 t2.set("dist_notes", x.dist_notes)?;
                 t2.set("dist_note_length", x.dist_note_length)?;
+                t2.set("euclid_steps", x.euclid_steps)?;
+                t2.set("fills", x.fills)?;
+                t2.set("rotate", x.rotate)?;
+                t2.set("division", x.division)?;
                 t2.set("keyboard", x.keyboard)?;
                 mlua::Value::Table(t2)
             }

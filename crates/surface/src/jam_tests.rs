@@ -1759,6 +1759,10 @@ fn the_variation_page_publishes_its_settings() {
         dist_note_count: 3,
         dist_notes: 1,
         dist_note_length: 2,
+        euclid_steps: 8,
+        fills: 5,
+        rotate: 0,
+        division: 0,
         keyboard: true,
     });
     let mut d = Device::new("maschine_jam", None);
@@ -1804,4 +1808,27 @@ fn the_variation_page_publishes_its_settings() {
     d.encoder(1, &v, Instant::now()); // the cursor onto Apply
     let out = press(&mut d, &v, "ENCODER");
     assert!(apps(&out).contains(&Action::ApplyVariation), "{:?}", apps(&out));
+}
+
+/// The page's third mode is DECKARD's own: the generator's Euclidean settings, on one
+/// page of six, with the reference's two modes untouched before it.
+#[test]
+fn the_variation_page_shows_euclid_as_its_third_mode() {
+    let mut v = jam_view();
+    v.variation = Some(VariationView { mode: 2, euclid_steps: 8, fills: 5, rotate: 2, division: 3, keyboard: true, ..Default::default() });
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Euclid page published");
+    assert_eq!((page.title.as_str(), page.pages), ("Euclid", 1));
+    assert_eq!(page.slots.len(), 6, "Mode, Apply, Steps, Fills, Rotate, Division");
+    let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
+    assert_eq!((slot(0).value.as_str(), slot(0).sub.as_deref()), ("Euclid", Some("Mode")));
+    assert_eq!((slot(2).value.as_str(), slot(2).group.as_deref()), ("8", Some("EUCLID")));
+    assert_eq!((slot(3).value.as_str(), slot(3).sub.as_deref()), ("5", Some("Fills")));
+    assert_eq!((slot(5).value.as_str(), slot(5).sub.as_deref()), ("1/16", Some("Division")));
 }

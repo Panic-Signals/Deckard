@@ -61,14 +61,15 @@ NI documents no algorithm. Settings live under `sequence_variation/` in the soun
 
 | Field | Values | Default | Source |
 |---|---|---|---|
-| `mode` | 0 Humanize, 1 Random | 0 (Humanize: the reference titles that page plain `Variation`, Random `1/2`) | capture (2 modes) |
+| `mode` | 0 Humanize, 1 Random, 2 Euclid | 0 (Humanize: the reference titles that page plain `Variation`, Random `1/2`) | capture (2 modes) + DECKARD's third |
 | `velocity_range/low` | 0–127 | 100 | capture |
 | `velocity_range/high` | 0–127 | 127 | capture |
 | `time_shift` | 0–50 %, 5 % steps (SHIFT 1 %) | 0 | manual §5.2 |
-| `probability` | 10–100 %, 10 % steps (SHIFT 1 %) | 50 | manual §5.2 |
-| `note_range/low` | 0–127 | 60 (C3) | manual §5.2, capture |
-| `note_range/high` | 0–127 | 72 (C4) | manual §5.2, capture |
-| `note_count` | 1–6 | 1 | manual §5.2 |
+| `sequence_generation/probability` | 10–100 %, 10 % steps (SHIFT 1 %) | 55 | manual §5.2 |
+| `sequence_generation/note_range/low` | 0–127 | 60 (C3) | manual §5.2, capture |
+| `sequence_generation/note_range/high` | 0–127 | 72 (C4) | manual §5.2, capture |
+| `sequence_generation/note_count` | 1–6 | 1 | manual §5.2 |
+| `sequence_generation/steps`, `fills`, `rotate`, `division` | Euclid's | 8, 5, 0, 0 | DECKARD's mode |
 | `steps` | 1–6 (one decimal) | 1.0 | manual §5.2, capture |
 | `dist/note_count` | 0 Equal, 1 Gauss, 2 ½ Gauss, 3 Fixed | 3 | manual §5.2 |
 | `dist/notes` | 0 Equal, 1 Gauss, 2 ½ Gauss | 0 | manual §5.2 |
@@ -85,21 +86,20 @@ One pass, two modes, both against the focused Sound's notes in the focused patte
 and **re-applied from the notes as they were** when Live is on (the existing
 `apply_variation_from`), so a drag re-rolls instead of compounding.
 
-**Humanize** (mode 0) — perturb only, nothing created or removed:
-- velocity drawn in `[velocity_range/low, velocity_range/high]`
-- position ± `time_shift` % of a grid step, clamped inside the pattern
-- length untouched
+One action, chosen by the Mode:
+- **Humanize** (0) — perturbs what is there and creates nothing: the velocity band clamps each
+  note (the in-app page's `velocity_amount` is still its deviation), the time shift moves it, and
+  `length_scale`/`length_variation` scale its length. An empty sound is an error: there is
+  nothing to move.
+- **Random** (1) — the **generator's Random**, the same code the app's Generate ▸ Random button
+  runs: per step of the pattern, the probability says whether there is a note, and what it makes
+  is drawn from the note range and the scale, as chords of the Note Count, at the page's length
+  and velocity, shifted by the time shift, shaped by the three distributions.
+- **Euclid** (2) — the **generator's Euclidean** mode, DECKARD's own addition to the page:
+  Steps, Fills, Rotate and Division, exactly as the app's Generate page sets them.
 
-**Random** (mode 1) — vary the beats, and make notes. The probability is **per step of the
-pattern**, in the manual's own words: "at 50 % a note may or may not be created at each step".
-So there are two halves:
-- what the sound has is varied where it stands — it may go (`probability`), and what stays is
-  re-pitched in `[note_range/low, note_range/high]`, kept in the selected scale when one is on
-  (manual: "Random mode conforms to the selected scale"), at the velocity band, at `steps` grid
-  steps shaped by `dist/note_length` (`Fixed`: exactly `steps`), ± `time_shift` %
-- the steps it has nothing on get notes: the same draw, at the same probability
-- `note_count` notes stack the chord per step, shaped by `dist/note_count` (`Fixed`: exactly the
-  CHORDS value)
+So the page is one selector over DECKARD's Groove engines, and every slot on it is read by the
+engine that applies it (`random_generate_reads_the_variation_pages_settings` pins that).
 
 Two readings are DECKARD's, not NI's, and are marked for the rig:
 

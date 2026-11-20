@@ -144,16 +144,20 @@ impl Variation {
         let d = Variation::default();
         let v = |f: &str, d: f64| settings(&format!("sequence_variation/{f}")).unwrap_or(d);
         let (lo, hi) = (v("velocity_range/low", d.velocity_lo as f64), v("velocity_range/high", d.velocity_hi as f64));
-        let (nlo, nhi) = (v("note_range/low", d.note_lo as f64), v("note_range/high", d.note_hi as f64));
+        // The generator's own half of the page: Random and Euclid are the generator, so
+        // its probability, note range and chords are the generator's settings, where its
+        // module keeps them (`sequence_generation/…`).
+        let g = |f: &str| settings(&format!("sequence_generation/{f}"));
+        let (nlo, nhi) = (g("note_range/low").unwrap_or(d.note_lo as f64), g("note_range/high").unwrap_or(d.note_hi as f64));
         Variation {
             mode: (v("mode", d.mode as f64) as i64).clamp(0, 1),
             velocity_lo: lo.min(hi).round().clamp(0.0, 127.0) as i64,
             velocity_hi: lo.max(hi).round().clamp(0.0, 127.0) as i64,
             time_shift: v("time_shift", d.time_shift).clamp(0.0, 50.0),
-            probability: (v("probability", d.probability as f64) as i64).clamp(10, 100),
+            probability: (g("probability").unwrap_or(d.probability as f64) as i64).clamp(10, 100),
             note_lo: nlo.min(nhi).round().clamp(0.0, 127.0) as i64,
             note_hi: nlo.max(nhi).round().clamp(0.0, 127.0) as i64,
-            note_count: (v("note_count", d.note_count as f64) as i64).clamp(1, 6),
+            note_count: (g("note_count").unwrap_or(d.note_count as f64) as i64).clamp(1, 6),
             steps: v("steps", d.steps).clamp(1.0, 6.0),
             dist_note_count: (v("dist/note_count", d.dist_note_count as f64) as i64).clamp(0, 3),
             dist_notes: (v("dist/notes", d.dist_notes as f64) as i64).clamp(0, 2),
@@ -312,10 +316,69 @@ impl Document {
         Variation::from_settings(&|f| self.groove_setting(g, s, f))
     }
 
-    /// Apply the Variation page to sound `s`'s notes in pattern `p` of group `g`:
-    /// Humanize moves them where they are, Random varies them and makes notes (`grid`:
-    /// the step, in ticks, the shifts are measured in). `scale`: whether a pitch is in
-    /// the selected scale (none selected: `None`).
+    /// The Groove page's one action, chosen by its Mode: 0 Humanize varies the notes that
+    /// are there, 1 Random and 2 Euclid run the generator with its own settings
+    /// (`sequence_generation/…`), which reads the page's velocity band, length and time
+    /// shift where they are set. One engine, two surfaces — the in-app Groove page and the
+    /// Jam's (work-item 35).
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_groove_page(
+        &mut self,
+        g: usize,
+        p: usize,
+        s: usize,
+        grid: i64,
+        polyphonic: bool,
+        scale: Option<&dyn Fn(i64) -> bool>,
+        settings: Settings,
+    ) -> Result<(), String> {
+        self.apply_groove_page_with(g, p, s, grid, polyphonic, scale, settings, None, &mut Rng::new())
+    }
+
+    /// [`Document::apply_groove_page`] starting from `base` (the notes as they were before
+    /// a run of live changes): Humanize re-applies from it, the generator replaces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_groove_page_from(
+        &mut self,
+        g: usize,
+        p: usize,
+        s: usize,
+        grid: i64,
+        polyphonic: bool,
+        scale: Option<&dyn Fn(i64) -> bool>,
+        settings: Settings,
+        base: &[Note],
+    ) -> Result<(), String> {
+        self.apply_groove_page_with(g, p, s, grid, polyphonic, scale, settings, Some(base), &mut Rng::new())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_groove_page_with(
+        &mut self,
+        g: usize,
+        p: usize,
+        s: usize,
+        grid: i64,
+        polyphonic: bool,
+        scale: Option<&dyn Fn(i64) -> bool>,
+        settings: Settings,
+        base: Option<&[Note]>,
+        rng: &mut Rng,
+    ) -> Result<(), String> {
+        let mode = settings("sequence_variation/mode").unwrap_or(0.0) as i64;
+        if mode == 0 {
+            return self.apply_variation_with(g, p, s, grid, scale, settings, base, rng);
+        }
+        // Random is the generator's Random (0), Euclid its Euclidean (1).
+        let generator = if mode == 1 { 0.0 } else { 1.0 };
+        let forced = |f: &str| if f == "sequence_generation/mode" { Some(generator) } else { settings(f) };
+        self.generate_with(g, p, s, grid, polyphonic, scale, &forced, rng)
+    }
+
+    /// Humanize (the Variation page's mode 0): move sound `s`'s notes in pattern `p` of
+    /// group `g` where they are — velocity into the band, the time shift, the length's
+    /// scale (`grid`: the step, in ticks). Random and Euclid are the generator's, through
+    /// [`Document::apply_groove_page`].
     pub fn apply_variation(
         &mut self,
         g: usize,
@@ -351,7 +414,9 @@ impl Document {
         p: usize,
         s: usize,
         grid: i64,
-        scale: Option<&dyn Fn(i64) -> bool>,
+        // Humanize keeps the pitches it has; the dispatcher passes the scale on to the
+        // generator (Random, Euclid), which is the only half that snaps to it.
+        _scale: Option<&dyn Fn(i64) -> bool>,
         settings: Settings,
         base: Option<&[Note]>,
         rng: &mut Rng,
@@ -364,12 +429,9 @@ impl Document {
         let (amount, length_scale, length_variation) =
             (v("velocity_amount", 0.0) / 100.0, 4f64.powf((v("length_scale", 0.5) - 0.5) * 2.0), v("length_variation", 0.0) / 100.0);
         let old: Vec<Note> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
-        // Humanize has nothing to move on an empty sound; Random makes the notes it has
-        // nowhere to vary, so it needs no notes to start with.
-        if old.is_empty() && st.mode == 0 {
+        if old.is_empty() {
             return Err("this sound has no notes in the pattern".into());
         }
-        let in_scale = |pitch: i64| scale.is_none_or(|f| f(pitch));
         let step = grid.max(1) as f64;
         let end = pat.start + if pat.length > 0 { pat.length } else { self.project.bar_length() };
         let time = st.time_shift / 100.0;
@@ -377,85 +439,19 @@ impl Document {
         let place = |wanted: f64| (wanted.round() as i64).clamp(pat.start, end - 1);
         let fit = |wanted: f64, at: i64| (wanted.round() as i64).clamp(10, (end - at).max(10));
         let mut new: Vec<Note> = Vec::new();
-        if st.mode == 0 {
-            // Humanize: nothing is made or dropped. A note's velocity stays where it is
-            // inside the band, and its deviation (`velocity_amount`, the in-app page's
-            // knob) may take it out, so the band clamps it back in.
-            let dist = v("distribution", 1.0) as i64;
-            for n in base.unwrap_or(&old) {
-                let mut m = *n;
-                let dv = rng.spread(-amount * 63.5, amount * 63.5, dist);
-                m.velocity = (n.velocity as f64 + dv).round().clamp(st.velocity_lo as f64, st.velocity_hi as f64) as i64;
-                m.position = place(n.position as f64 + rng.spread(-time * step, time * step, dist));
-                let dl = rng.spread(-length_variation * step, length_variation * step, dist);
-                m.length = fit(n.length as f64 * length_scale + dl, m.position);
-                if !new.iter().any(|x| x.position == m.position && x.pitch == m.pitch) {
-                    new.push(m);
-                }
-            }
-        } else {
-            // Random: at each step the probability says whether there is a note at all
-            // ("at 50 % a note may or may not be created at each step"), and the notes it
-            // makes are drawn from the note range and the scale, as chords of the Note
-            // Count, at the page's length and velocity. What the sound has already is
-            // varied where it stands; the steps it has nothing on are where notes appear.
-            let prob = st.probability as f64 / 100.0;
-            let pool: Vec<i64> = (st.note_lo..=st.note_hi).filter(|&pitch| in_scale(pitch)).collect();
-            if pool.is_empty() {
-                return Err("the note range holds no note of the scale".into());
-            }
-            let source: Vec<Note> = base.unwrap_or(&old).to_vec();
-            let mut taken: Vec<(i64, i64)> = Vec::new();
-            let draw = |rng: &mut Rng, at: i64, pitches: Vec<i64>| -> Vec<Note> {
-                let wanted = st.steps * step;
-                let length = if st.dist_note_length == 3 { wanted } else { rng.spread(wanted * 0.5, wanted * 1.5, st.dist_note_length) };
-                let length = fit(length, at);
-                pitches
-                    .into_iter()
-                    .map(|pitch| Note {
-                        ratchet: Default::default(),
-                        expr: None,
-                        sound: s,
-                        position: at,
-                        length,
-                        pitch,
-                        velocity: rng.spread(st.velocity_lo as f64, st.velocity_hi as f64, 0).round().clamp(1.0, 127.0) as i64,
-                        probability: 100,
-                    })
-                    .collect()
-            };
-            // What the sound has there now: the note may go, and what stays is re-made.
-            for n in &source {
-                if rng.unit() > prob {
-                    continue;
-                }
-                let count = chord_count(rng, st.note_count, st.dist_note_count);
-                let pitches = chord_pitches(rng, &pool, count, st.dist_notes);
-                let at = place(n.position as f64 + rng.spread(-time * step, time * step, st.dist_notes));
-                for m in draw(rng, at, pitches) {
-                    if taken.contains(&(m.position, m.pitch)) {
-                        continue;
-                    }
-                    taken.push((m.position, m.pitch));
-                    new.push(m);
-                }
-            }
-            // And the steps it has nothing on: the probability makes notes there too.
-            let mut t = pat.start;
-            while t < end {
-                if !source.iter().any(|n| n.position == t) && rng.unit() <= prob {
-                    let count = chord_count(rng, st.note_count, st.dist_note_count);
-                    let pitches = chord_pitches(rng, &pool, count, st.dist_notes);
-                    let at = place(t as f64 + rng.spread(-time * step, time * step, st.dist_notes));
-                    for m in draw(rng, at, pitches) {
-                        if taken.contains(&(m.position, m.pitch)) {
-                            continue;
-                        }
-                        taken.push((m.position, m.pitch));
-                        new.push(m);
-                    }
-                }
-                t += grid.max(1);
+        // Humanize: nothing is made or dropped. A note's velocity stays where it is
+        // inside the band, and its deviation (`velocity_amount`, the in-app page's
+        // knob) may take it out, so the band clamps it back in.
+        let dist = v("distribution", 1.0) as i64;
+        for n in base.unwrap_or(&old) {
+            let mut m = *n;
+            let dv = rng.spread(-amount * 63.5, amount * 63.5, dist);
+            m.velocity = (n.velocity as f64 + dv).round().clamp(st.velocity_lo as f64, st.velocity_hi as f64) as i64;
+            m.position = place(n.position as f64 + rng.spread(-time * step, time * step, dist));
+            let dl = rng.spread(-length_variation * step, length_variation * step, dist);
+            m.length = fit(n.length as f64 * length_scale + dl, m.position);
+            if !new.iter().any(|x| x.position == m.position && x.pitch == m.pitch) {
+                new.push(m);
             }
         }
         self.edit_notes("Apply Variation", g, p, &old, &new)
@@ -815,15 +811,15 @@ mod tests {
         d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
         let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
             "sequence_variation/mode" => Some(1.0),
-            "sequence_variation/probability" => Some(100.0),
-            "sequence_variation/note_range/low" => Some(60.0),
-            "sequence_variation/note_range/high" => Some(64.0),
-            "sequence_variation/note_count" => Some(3.0),
+            "sequence_generation/probability" => Some(100.0),
+            "sequence_generation/note_range/low" => Some(60.0),
+            "sequence_generation/note_range/high" => Some(64.0),
+            "sequence_generation/note_count" => Some(3.0),
             "sequence_variation/velocity_range/low" => Some(70.0),
             "sequence_variation/velocity_range/high" => Some(80.0),
             _ => None,
         };
-        d.apply_variation_with(0, 0, 0, 240, None, page, None, &mut Rng::seeded(4)).unwrap();
+        d.apply_groove_page_with(0, 0, 0, 240, true, None, page, None, &mut Rng::seeded(4)).unwrap();
         let after: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
         assert!(!after.is_empty());
         assert!(after.iter().all(|n| (60..=64).contains(&n.pitch)), "{:?}", after.iter().map(|n| n.pitch).collect::<Vec<_>>());
@@ -841,23 +837,24 @@ mod tests {
     #[test]
     fn every_variation_setting_round_trips() {
         let mut d = Document::new_project().unwrap();
-        for (field, value) in [
-            ("mode", 1.0),
-            ("velocity_range/low", 40.0),
-            ("velocity_range/high", 60.0),
-            ("time_shift", 25.0),
-            ("probability", 70.0),
-            ("note_range/low", 60.0),
-            ("note_range/high", 72.0),
-            ("note_count", 3.0),
-            ("steps", 2.0),
-            ("dist/note_count", 1.0),
-            ("dist/notes", 2.0),
-            ("dist/note_length", 3.0),
+        // Each setting where its engine keeps it: the generator's own half in its module,
+        // DECKARD's extension of the page in the sound's field.
+        for (name, value) in [
+            ("sequence_variation/mode", 1.0),
+            ("sequence_variation/velocity_range/low", 40.0),
+            ("sequence_variation/velocity_range/high", 60.0),
+            ("sequence_variation/time_shift", 25.0),
+            ("sequence_variation/steps", 2.0),
+            ("sequence_variation/dist/note_count", 1.0),
+            ("sequence_variation/dist/notes", 2.0),
+            ("sequence_variation/dist/note_length", 3.0),
+            ("sequence_generation/probability", 70.0),
+            ("sequence_generation/note_range/low", 58.0),
+            ("sequence_generation/note_range/high", 74.0),
+            ("sequence_generation/note_count", 3.0),
         ] {
-            let name = format!("sequence_variation/{field}");
-            d.set_groove_setting(0, 0, &name, value).unwrap();
-            assert_eq!(d.groove_setting(0, 0, &name), Some(value), "{name}");
+            d.set_groove_setting(0, 0, name, value).unwrap();
+            assert_eq!(d.groove_setting(0, 0, name), Some(value), "{name}");
         }
         let v = d.variation(0, 0);
         assert_eq!((v.mode, v.velocity_lo, v.velocity_hi, v.probability), (1, 40, 60, 70));
@@ -879,8 +876,13 @@ mod tests {
             _ => None,
         };
         d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
-        for (field, value) in [("mode", 1.0), ("probability", 100.0), ("note_range/low", 60.0), ("note_range/high", 64.0)] {
-            d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).unwrap();
+        for (field, value) in [
+            ("sequence_variation/mode", 1.0),
+            ("sequence_generation/probability", 100.0),
+            ("sequence_generation/note_range/low", 60.0),
+            ("sequence_generation/note_range/high", 64.0),
+        ] {
+            d.set_groove_setting(0, 0, field, value).unwrap();
         }
         // The viewer's list, as `GROOVE_FIELDS` has it.
         let fields = [
@@ -890,16 +892,18 @@ mod tests {
             "sequence_variation/length_scale",
             "sequence_variation/length_variation",
             "sequence_variation/distribution",
-            "sequence_variation/probability",
-            "sequence_variation/note_range/low",
-            "sequence_variation/note_range/high",
-            "sequence_variation/note_count",
+            "sequence_variation/velocity_range/low",
+            "sequence_variation/velocity_range/high",
             "sequence_variation/steps",
+            "sequence_generation/probability",
+            "sequence_generation/note_range/low",
+            "sequence_generation/note_range/high",
+            "sequence_generation/note_count",
         ];
         let settings: Vec<(String, f64)> = fields.iter().filter_map(|f| d.groove_setting(0, 0, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let before: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
-        d.apply_variation(0, 0, 0, 240, None, &get).unwrap();
+        d.apply_groove_page(0, 0, 0, 240, true, None, &get).unwrap();
         let after: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
         assert_ne!(after, before, "Apply varies the notes");
         assert!(after.iter().all(|n| (60..=64).contains(&n.pitch)), "{:?}", after.iter().map(|n| n.pitch).collect::<Vec<_>>());
@@ -925,12 +929,12 @@ mod tests {
         assert_eq!(d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count(), 4, "four to the bar");
         let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
             "sequence_variation/mode" => Some(1.0),
-            "sequence_variation/probability" => Some(100.0),
-            "sequence_variation/note_range/low" => Some(60.0),
-            "sequence_variation/note_range/high" => Some(64.0),
+            "sequence_generation/probability" => Some(100.0),
+            "sequence_generation/note_range/low" => Some(60.0),
+            "sequence_generation/note_range/high" => Some(64.0),
             _ => None,
         };
-        d.apply_variation_with(0, 0, 0, 240, None, page, None, &mut Rng::seeded(7)).unwrap();
+        d.apply_groove_page_with(0, 0, 0, 240, true, None, page, None, &mut Rng::seeded(7)).unwrap();
         let mut at: Vec<i64> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).map(|n| n.position).collect();
         at.sort_unstable();
         at.dedup();
@@ -947,12 +951,12 @@ mod tests {
         let bar = d.project().bar_length();
         let random: &dyn Fn(&str) -> Option<f64> = &|f| match f {
             "sequence_variation/mode" => Some(1.0),
-            "sequence_variation/probability" => Some(100.0),
-            "sequence_variation/note_range/low" => Some(60.0),
-            "sequence_variation/note_range/high" => Some(64.0),
+            "sequence_generation/probability" => Some(100.0),
+            "sequence_generation/note_range/low" => Some(60.0),
+            "sequence_generation/note_range/high" => Some(64.0),
             _ => None,
         };
-        d.apply_variation_with(0, 0, 0, 240, None, random, None, &mut Rng::seeded(2)).unwrap();
+        d.apply_groove_page_with(0, 0, 0, 240, true, None, random, None, &mut Rng::seeded(2)).unwrap();
         let mut at: Vec<i64> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).map(|n| n.position).collect();
         at.sort_unstable();
         at.dedup();
