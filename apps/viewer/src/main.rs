@@ -139,6 +139,7 @@ mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+mod plugin_spectrum;
 #[cfg(test)]
 mod preferences_tests;
 mod preset_load;
@@ -1416,6 +1417,7 @@ pub struct App {
     /// The preview last rendered of an internal synth, with the module and the parameters
     /// it was rendered from: rendered again only when they change.
     internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
+    plugin_spectrum: std::cell::RefCell<Option<plugin_spectrum::Focus>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -5818,6 +5820,9 @@ impl App {
             return None;
         }
         let pace = controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering());
+        if self.plugin_spectrum.borrow().as_ref().is_some_and(plugin_spectrum::Focus::is_live) {
+            return Some(pace.min(plugin_spectrum::FRAME_INTERVAL));
+        }
         Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             pace.min(std::time::Duration::from_millis(30))
         } else {
@@ -5881,6 +5886,7 @@ impl App {
             side_live: shot.side_live,
             dim: shot.dim,
             preview: shot.preview,
+            ..Default::default()
         })
     }
 
@@ -6288,14 +6294,18 @@ impl App {
                 patterns: b.patterns,
             };
         }
-        let Some(doc) = &self.doc else { return v };
+        let Some(doc) = &self.doc else {
+            self.plugin_spectrum.borrow_mut().take();
+            return v;
+        };
         let d = doc.borrow();
         let p = d.project();
+        let chain = self.chain();
+        let slot = d.chain_slots(chain).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+        v.control.eq = self.plugin_spectrum_view(chain, self.slot.zip(slot));
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
         if !self.channel {
-            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
-            v.control.eq = slot.and_then(Self::eq_curve);
             let tempo = v.tempo;
             let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));

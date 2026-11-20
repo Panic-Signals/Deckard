@@ -67,6 +67,8 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("themes/solarized_dark.lua", include_str!("../lua/themes/solarized_dark.lua")),
     ("mappings/arturia/pigments.lua", include_str!("../lua/mappings/arturia/pigments.lua")),
     ("mappings/native-instruments/massive-x.lua", include_str!("../lua/mappings/native-instruments/massive-x.lua")),
+    ("mappings/builtin/eq.lua", include_str!("../lua/mappings/builtin/eq.lua")),
+    ("mappings/tokyo-dawn-labs/tdr-nova.lua", include_str!("../lua/mappings/tokyo-dawn-labs/tdr-nova.lua")),
     ("mappings/native-instruments/monark.lua", include_str!("../lua/mappings/native-instruments/monark.lua")),
     ("mappings/plugin-alliance/bx-oberhausen.lua", include_str!("../lua/mappings/plugin-alliance/bx-oberhausen.lua")),
     ("mappings/vital-audio/vital.lua", include_str!("../lua/mappings/vital-audio/vital.lua")),

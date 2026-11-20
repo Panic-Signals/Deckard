@@ -452,7 +452,11 @@ return {
 ```
 
 `api` is the mapping format, 1 now. DECKARD loads mappings written for its own format or an
-older one and refuses a newer one. `kind` (a string) is optional and nothing reads it yet.
+older one and refuses a newer one. Set `kind = "eq"` on a hosted effect to show its live
+input and output spectra in the MK3's right-hand EQ curve area on the plug-in page.
+The chart spans 20 Hz to 20 kHz and −90 to 0 dBFS. A mapping can set this tag
+without defining any custom knob pages. The built-in EQ also shows live input and
+output spectra behind its response curve and band handles.
 
 #### `match`
 
