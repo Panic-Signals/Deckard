@@ -1832,3 +1832,22 @@ fn the_variation_page_shows_euclid_as_its_third_mode() {
     assert_eq!((slot(3).value.as_str(), slot(3).sub.as_deref()), ("5", Some("Fills")));
     assert_eq!((slot(5).value.as_str(), slot(5).sub.as_deref()), ("1/16", Some("Division")));
 }
+
+/// SHIFT + E twice: the page goes on the second press, as the reference's static pages do,
+/// whichever mode it was showing (the menu keeps its own title through the mode's pages).
+#[test]
+fn shift_e_pressed_twice_closes_the_variation_page() {
+    let mut v = jam_view();
+    v.variation = Some(VariationView { mode: 2, euclid_steps: 8, fills: 5, keyboard: true, ..Default::default() });
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GROUP_E");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("Euclid"), "the third mode's page");
+    press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the second press closes it");
+}

@@ -1735,7 +1735,13 @@ local function group_button(s, i)
       toggle_follow(s)
     elseif i == 5 then
       -- VARIATION: the focused sound's Groove ▸ Variation, on the strips, and its
-      -- thirteen settings on the OSO (work-item 35: static, as the reference has it).
+      -- settings on the OSO (work-item 35: static, as the reference has it). The second
+      -- press closes it, as GRID's does. (The menu's title stays `Variation` whichever
+      -- mode it shows, so Euclid's page closes here too.)
+      if st.menu and st.menu.title == "Variation" then
+        close_menu()
+        return
+      end
       st.strip = "control"
       deckard.groove_page(2)
       variation_menu()
