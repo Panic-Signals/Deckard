@@ -12336,6 +12336,40 @@ mod tests {
         Some(harness_of(app, song_view))
     }
 
+    /// The Jam's VARIATION page's Apply reaches the app: the sound's pattern gains notes
+    /// where it had none, which is what the rig found missing (work-item 35).
+    #[test]
+    fn the_jams_apply_variation_reaches_the_app() {
+        let mut h = blank_harness(false);
+        let doc = h.state().doc.clone().expect("a project");
+        {
+            let mut d = doc.borrow_mut();
+            d.add_pattern(0, 0, "P").expect("a pattern");
+            let notes: Vec<deckard_model::Note> = (0..4)
+                .map(|i| deckard_model::Note {
+                    ratchet: Default::default(),
+                    expr: None,
+                    sound: 0,
+                    position: i * 960,
+                    length: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    probability: 100,
+                })
+                .collect();
+            d.edit_notes("Seed", 0, 0, &[], &notes).expect("seeded");
+            for (field, value) in [("mode", 1.0), ("probability", 100.0)] {
+                d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).expect("the page's setting");
+            }
+        }
+        let count = |d: &deckard_doc::Document| d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count();
+        assert_eq!(count(&doc.borrow()), 4, "four to the bar");
+        h.state_mut().surface_act(deckard_surface::Action::ApplyVariation);
+        h.run_steps(2);
+        let after = count(&doc.borrow());
+        assert!(after > 4, "the empty steps fill: {after} notes, status {:?}", h.state().status);
+    }
+
     /// [`harness`] on a new project (one group of 16 empty sounds, one scene), so the
     /// test runs anywhere, CI included: no library project needed.
     pub(super) fn blank_harness(song_view: bool) -> Harness<'static, App> {

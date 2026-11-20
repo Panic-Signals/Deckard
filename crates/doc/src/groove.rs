@@ -63,6 +63,9 @@ impl Rng {
 /// one note twice.
 fn chord_pitches(rng: &mut Rng, pool: &[i64], count: i64, dist: i64) -> Vec<i64> {
     let mut pitches: Vec<i64> = Vec::new();
+    if pool.is_empty() {
+        return pitches;
+    }
     for _ in 0..count.clamp(0, 6) {
         for _ in 0..16 {
             let i = rng.spread(0.0, (pool.len() - 1) as f64, dist).round() as usize;
@@ -361,7 +364,9 @@ impl Document {
         let (amount, length_scale, length_variation) =
             (v("velocity_amount", 0.0) / 100.0, 4f64.powf((v("length_scale", 0.5) - 0.5) * 2.0), v("length_variation", 0.0) / 100.0);
         let old: Vec<Note> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
-        if old.is_empty() {
+        // Humanize has nothing to move on an empty sound; Random makes the notes it has
+        // nowhere to vary, so it needs no notes to start with.
+        if old.is_empty() && st.mode == 0 {
             return Err("this sound has no notes in the pattern".into());
         }
         let in_scale = |pitch: i64| scale.is_none_or(|f| f(pitch));
@@ -520,25 +525,10 @@ impl Document {
             let mut t = start;
             while t < end {
                 if rng.unit() < prob {
-                    let least = (count - (count - 1) / 2).max(1);
-                    let k = rng.spread(least as f64, count as f64, dist).round() as i64;
-                    let mut pitches: Vec<i64> = Vec::new();
-                    for _ in 0..k {
-                        if !polyphonic {
-                            pitches = vec![root];
-                            break;
-                        }
-                        if pool.is_empty() {
-                            break;
-                        }
-                        for _ in 0..16 {
-                            let pitch = pool[((rng.unit() * pool.len() as f64) as usize).min(pool.len() - 1)];
-                            if !pitches.contains(&pitch) {
-                                pitches.push(pitch);
-                                break;
-                            }
-                        }
-                    }
+                    // The chord's size and its pitches come from the same helpers the
+                    // Variation page uses, so the two pages cannot drift apart.
+                    let k = chord_count(rng, count, dist);
+                    let pitches = if polyphonic { chord_pitches(rng, &pool, k, dist) } else { vec![root] };
                     for pitch in pitches {
                         let vel = velocity + rng.spread(-amount * 63.5, amount * 63.5, dist);
                         new.push(note(t, pitch, vel.round().clamp(1.0, 127.0) as i64, grid.min(end - t)));
@@ -916,5 +906,31 @@ mod tests {
         at.sort_unstable();
         at.dedup();
         assert_eq!(at.len() as i64, bar / 240, "a note on every step: {at:?}");
+    }
+
+    /// Random makes notes for a sound that has none at all: the steps it has nothing on
+    /// are exactly where the probability puts them, and Humanize still refuses (there is
+    /// nothing to move).
+    #[test]
+    fn random_makes_notes_for_a_sound_with_none() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        let bar = d.project().bar_length();
+        let random: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_variation/mode" => Some(1.0),
+            "sequence_variation/probability" => Some(100.0),
+            "sequence_variation/note_range/low" => Some(60.0),
+            "sequence_variation/note_range/high" => Some(64.0),
+            _ => None,
+        };
+        d.apply_variation_with(0, 0, 0, 240, None, random, None, &mut Rng::seeded(2)).unwrap();
+        let mut at: Vec<i64> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).map(|n| n.position).collect();
+        at.sort_unstable();
+        at.dedup();
+        assert_eq!(at.len() as i64, bar / 240, "a note on every step: {at:?}");
+        // Humanize on the same (now full) sound still refuses another sound with none.
+        let humanize: &dyn Fn(&str) -> Option<f64> = &|f| (f == "sequence_variation/mode").then_some(0.0);
+        let err = d.apply_variation_with(0, 0, 1, 240, None, humanize, None, &mut Rng::seeded(3)).unwrap_err();
+        assert!(err.contains("no notes"), "{err}");
     }
 }
