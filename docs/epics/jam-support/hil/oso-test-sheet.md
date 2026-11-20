@@ -57,7 +57,8 @@ the view it was opened in.
 
 | OSO | State |
 |---|---|
-| `RANDOMIZER` (`Variation`) | **no page is composed.** VARIATION is a strip mode (`SELECT` + `Sound` puts it on the touch strips) and publishes nothing; `RANDOMIZER` is still on the static list from the same RE reading that got PERFORM FX wrong once, so if the reference does show a page here it is missing |
+| `RANDOMIZER` (`Variation`) | **no page is composed, and the model is short of one.** Maschine's page reads thirteen settings over two pages (Humanize: five); DECKARD's Variation module keeps five (`sequence_variation/velocity_amount`, `time_shift`, `length_scale`, `length_variation`, `distribution`) and its *Generate* module keeps the rest (`probability`, `note_range/low|high`, `note_count`, `distribution`, `steps`, `fills`). Maschine's velocity **lo/hi**, its **mode** (Random / Humanize / …), its **Apply** and its **three separate distributions** have no counterpart. A page composed today would draw numbers that do not exist behind it. Static in the reference (it does not time out) — one more thing confirmed against the same list that once got PERFORM FX wrong |
+| `INSTANCE` (`SHIFT` + `H`) | **a different window, not this strip.** What it opens is NI's *desktop on-screen overlay* (§2 of the RE notes): its own window, "MASCHINE JAM" in the chrome, an instance page listing products with their pad-layout line. That is the overlay this branch deliberately leaves out — DECKARD's equivalent lives in the in-app library panel |
 | desktop `BROWSE` overlay (§2 of the RE notes) | out of scope for this branch — the library stays an in-app panel |
 | NI-scripted controllers' OSO | their own path in `lua-host`, untouched, coexists by design |
 
