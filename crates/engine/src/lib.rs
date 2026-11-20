@@ -8967,6 +8967,33 @@ mod tests {
         }
     }
 
+    /// A zone stretched as it plays: its playhead goes on to the end of the sample, as
+    /// the sound does (the stretcher gives its last frames after it's fed the last).
+    #[test]
+    fn a_stretched_zones_playhead_reaches_the_end() {
+        let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        e.note_hold(0, 0, 60, 100);
+        let mut out = vec![0f32; 2 * 240];
+        let (mut last, mut blocks) = (0usize, 0);
+        loop {
+            e.process(&mut out);
+            match e.zone_position(0, 0, 0) {
+                Some(at) => {
+                    assert!(at + 600 >= last, "it goes on: {at} after {last}");
+                    last = last.max(at);
+                }
+                None if last > 0 => break,
+                None => {}
+            }
+            blocks += 1;
+            assert!(blocks < 4000, "it ends");
+        }
+        assert!(last + 1000 >= frames, "the playhead stopped at {last} of {frames}");
+    }
+
     /// A Sync zone playing the second half of its file: the playhead is in the sample's
     /// frames (from the start marker on), not the render's (from 0), before the render
     /// comes and after.

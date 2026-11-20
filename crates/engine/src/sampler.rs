@@ -1455,11 +1455,19 @@ impl SamplerRt {
     /// Where the newest voice playing zone `zone` is in its sample (frames), if any:
     /// the Sample Editor's playhead.
     pub fn play_position(&self, zone: usize) -> Option<usize> {
-        self.voices.iter().filter(|v| v.zone == zone && !v.stream.done && v.fade.is_none()).max_by_key(|v| v.age).map(|v| {
+        // (A stretcher fed its zone's last frame still has its end to give: it plays on.)
+        let ending = |v: &Voice| self.lives.get(v.live as usize).and_then(|l| l.left).filter(|&n| n > 0);
+        let plays = |v: &&Voice| v.zone == zone && v.fade.is_none() && (!v.stream.done || ending(v).is_some());
+        self.voices.iter().filter(plays).max_by_key(|v| v.age).map(|v| {
             let mut pos = v.stream.pos.max(0) as f64;
             // A stretcher is fed ahead of what it gives: the frame heard is behind.
             if let Some(l) = self.lives.get(v.live as usize) {
-                let ahead = l.lat.0 as f64 + l.lat.1 as f64 * l.rate;
+                let mut ahead = l.lat.0 as f64 + l.lat.1 as f64 * l.rate;
+                // Fed to the end: what it has left to give, back from there.
+                if let (true, Some(left)) = (v.stream.done, ending(v)) {
+                    pos = if v.stream.forward { v.stream.play.1 as f64 } else { v.stream.play.0 as f64 };
+                    ahead = f64::from(left) * l.rate;
+                }
                 pos = if v.stream.forward {
                     (pos - ahead).max(v.stream.play.0 as f64)
                 } else {
