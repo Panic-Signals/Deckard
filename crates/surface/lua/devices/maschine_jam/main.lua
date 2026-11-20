@@ -1159,7 +1159,9 @@ local function variation_oso_page(s)
       }
     end
   end
-  local title = pages > 1 and string.format("Variation %d/%d", n, pages) or ((s.variation or {}).mode == 2 and "Euclid" or "Variation")
+  -- The bare name: the host draws the `n/N` counter itself (`jam_strip::counter`), as it does
+  -- for the arpeggiator's three pages. Putting it in the title doubles it.
+  local title = (s.variation or {}).mode == 2 and "Euclid" or "Variation"
   return {
     title = title,
     page = n,

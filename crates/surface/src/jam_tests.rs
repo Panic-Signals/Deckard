@@ -1790,7 +1790,7 @@ fn the_variation_page_publishes_its_settings() {
     v.variation.as_mut().expect("a sound").mode = 1;
     d.tick(&v, Instant::now());
     let page = d.oso().expect("Random page");
-    assert_eq!((page.title.as_str(), page.page, page.pages), ("Variation 1/2", 1, 2));
+    assert_eq!((page.title.as_str(), page.page, page.pages), ("Variation", 1, 2), "the host adds the 1/2");
     assert_eq!(page.slots.len(), 8, "Mode, Apply, Probability, Note Lo and Hi, Velocity Lo and Hi, Chords");
     let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
     assert_eq!((slot(2).value.as_str(), slot(2).group.as_deref()), ("50 %", Some("PROBABILITY")));
