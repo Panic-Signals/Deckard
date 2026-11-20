@@ -33,9 +33,11 @@ outer rect, and that lives in `Settings`, not in the renderer.
 
 **D2 — the title bar is one more row of the same painter, not a nested `egui::Window`.** A
 floating `egui::Window` inside the viewport would drag egui's own window-dragging, shadow and
-resize behaviour in, and with mouse passthrough on none of it could be used anyway. `window_paint`
-draws: a bar of `BAR_H` points, the page name left, the counter right-aligned before the mark,
-the NI mark in the bar's right corner; then the strip's slots below it.
+resize behaviour in, and with mouse passthrough on none of it could be used anyway. The bar is
+`BAR_H` points of the strip's own background with a rule under it, the page's name at the left and
+the `n/N` counter just after it (`Scale  1/2`) — where the reference puts them, and **no mark at
+the right**: DECKARD is not Maschine, and a second company's logo has no business in it (the
+reference's own is an NI mark, which the brief transcribed; the human's call is to drop it).
 
 **D3 — the counter moves, and `jam_strip::title` is split to do it.** `title()` keeps its
 behaviour for the docked callers that no longer exist, so instead: `name(page)` is the page's
@@ -73,6 +75,29 @@ called and eframe drops it.
 `with_decorations(false)` + `with_mouse_passthrough(true)` + `with_taskbar(false)` +
 `with_window_level(AlwaysOnTop)` + `with_resizable(false)` + `with_active(false)` (never steals
 focus on show).
+
+## The strip's metrics, measured off the reference
+
+`docs/superpowers/specs/2026-11-16-jam-overlay-refs.md` §1 says the binary keeps **no** strip pixel
+metrics (window state and styling are runtime/style-sheet), so there is nothing to copy: the
+numbers below are measured from two 2× captures of Maschine 3.6.0's strip (Grid browsing, Grid
+editing, Scale 1/2) and are the closest reading of them.
+
+| | points |
+|---|---|
+| window width | most of the app's: `width_for(main) = (main × 0.78).clamp(560, 1180)` — 1170 for a 1500-wide app, as the capture's 1181 is |
+| bar | 28 |
+| body | 144 = header band 40 + value row 40 + sub row 40 + bottom pad 24 |
+| type | header 11.5, value 21, sub 13, page name 13, counter 12 |
+| columns | `width / slots`, equal, 1 pt separators between them (never on the outer edges) |
+| layout | group header left-aligned over its run's **first** column; value and sub **centred** |
+| cursor | a rule under each column's sub-label; the focused one 2.5 pt white, the rest 1 pt dim |
+| editing | corner brackets, inset 6 pt, spanning the value and sub rows |
+
+What this replaced, and what was wrong with it: the strip was a row of fixed 52×44 pt **filled**
+cells with the title inside the body and the counter at the right — a button bar. The reference is
+a flat bar with thin rules and three lines of type per column, and its window's width follows the
+app, not the slot count (four Grid slots fill the same bar eight Scale slots do).
 
 ## Platform facts, checked against the pinned versions (eframe/egui 0.36.2)
 

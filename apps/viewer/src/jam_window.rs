@@ -25,19 +25,17 @@ pub const BAR_H: f32 = 18.0;
 /// How much of the window stays on screen whatever was saved: this many points of its
 /// width, and (on the y axis) its bar.
 const KEEP: f32 = 40.0;
-/// The bar's text inset, and the mark's size.
-const PAD: f32 = 6.0;
-const MARK: f32 = 9.0;
+/// The bar's text inset.
+const PAD: f32 = 8.0;
 
 /// The window's id: one strip. `from_hash_of`, as the splash window's.
 pub fn id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("deckard-jam-strip")
 }
 
-/// The window's inner size for a page of `slots` slots: the strip's own size plus its bar.
-pub fn window_size(slots: usize) -> Vec2 {
-    let strip = jam_strip::strip_size(slots);
-    Vec2::new(strip.x, strip.y + BAR_H)
+/// The window's inner size for a strip `width` points wide: the bar, then the body's rows.
+pub fn window_size(width: f32) -> Vec2 {
+    Vec2::new(width, jam_strip::BODY_H + BAR_H)
 }
 
 /// Where the window goes: `saved` is an offset from the main window's top-left (so the strip
@@ -72,11 +70,14 @@ pub fn offset_of(placed: Rect, main: Rect) -> Vec2 {
 pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option<Vec2>) -> Option<Vec2> {
     let Some((page, rows)) = page else { return None };
     let slots = page.slots.len();
-    let size = window_size(slots);
+    // A strip is a bar: its width comes from the app's window, as the reference's does, not
+    // from how many slots the page happens to hold.
     let (main, monitor) = ctx.input_for(egui::ViewportId::ROOT, |i| (i.viewport().outer_rect, i.viewport().monitor_size));
     // (Headless or first frame: no main window yet, so the strip has nothing to sit beside.)
-    let main = main.unwrap_or(Rect::from_min_size(Pos2::ZERO, size));
-    let monitor = monitor.unwrap_or(size);
+    let main = main.unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(1500.0, 930.0)));
+    let monitor = monitor.unwrap_or(main.size());
+    let width = jam_strip::width_for(main.width());
+    let size = window_size(width);
     let at = position(saved, main, size, monitor);
     let builder = egui::ViewportBuilder::default()
         .with_title(jam_strip::title(page))
@@ -98,7 +99,7 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
             let kind = if class == egui::ViewportClass::EmbeddedWindow { "EMBEDDED (a panel in the app)" } else { "native window" };
             eprintln!("jam strip: {kind} at {at:?} size {size:?}");
         }
-        paint(ui, &name, counter.as_deref(), slots, rows);
+        paint(ui, &name, counter.as_deref(), slots, rows, width);
     });
     // What the window (or the window manager) made of that place. With mouse passthrough on
     // the window cannot be dragged, so a difference here is the manager's placement, or a
@@ -109,40 +110,27 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
 }
 
 /// The window's contents: its bar, then the published page's slots.
-fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, slots: usize, rows: &[Row]) {
-    let width = jam_strip::strip_size(slots).x;
+pub(crate) fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, slots: usize, rows: &[Row], width: f32) {
     let (bar, _) = ui.allocate_exact_size(Vec2::new(width, BAR_H), egui::Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(bar, 0.0, Color32::from_gray(28));
-    painter.hline(bar.x_range(), bar.bottom() - 0.5, egui::Stroke::new(1.0, Color32::from_gray(60)));
-    painter.text(
-        bar.left_center() + Vec2::new(PAD, 0.0),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(11.0),
-        Color32::from_gray(205),
-    );
-    let mark = Rect::from_center_size(bar.right_center() - Vec2::new(PAD + MARK / 2.0, 0.0), Vec2::splat(MARK * 2.0));
-    mark_ni(painter, mark);
+    painter.rect_filled(bar, 0.0, Color32::from_rgb(0x44, 0x44, 0x44));
+    painter.hline(bar.x_range(), bar.bottom() - 0.5, egui::Stroke::new(1.0, Color32::from_rgb(0x5a, 0x5a, 0x5a)));
+    let at = bar.left_center() + Vec2::new(PAD, 0.0);
+    let font = egui::FontId::proportional(13.0);
+    painter.text(at, egui::Align2::LEFT_CENTER, name, font.clone(), Color32::from_rgb(0xd8, 0xd8, 0xd8));
     if let Some(counter) = counter {
-        // (The `n/N` counter lives in the bar, not in the strip's body: the reference's
-        // window carries it in its title.)
+        // (The `n/N` counter lives in the bar, not in the strip's body, and sits just after the
+        // page's name — the reference's title reads `Scale  1/2`, not a right-aligned count.)
+        let name_w = painter.layout_no_wrap(name.to_owned(), font, Color32::WHITE).size().x;
         painter.text(
-            Pos2::new(mark.left() - PAD, bar.center().y),
-            egui::Align2::RIGHT_CENTER,
+            at + Vec2::new(name_w + PAD + 4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
             counter,
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(12.0),
             Color32::from_gray(150),
         );
     }
-    jam_strip::slots(ui, slots, rows);
-}
-
-/// The mark at the bar's right edge, drawn from primitives: no NI artwork ships with DECKARD
-/// (the clean-room boundary, `docs/FEASIBILITY.md`).
-fn mark_ni(painter: &egui::Painter, at: Rect) {
-    painter.rect_stroke(at, 2.0, egui::Stroke::new(1.0, Color32::from_gray(150)), egui::StrokeKind::Inside);
-    painter.text(at.center(), egui::Align2::CENTER_CENTER, "NI", egui::FontId::proportional(8.0), Color32::from_gray(150));
+    jam_strip::slots(ui, slots, rows, width);
 }
 
 #[cfg(test)]
@@ -154,15 +142,18 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_as_wide_as_its_slots_and_one_bar_taller() {
-        let strip = jam_strip::strip_size(8);
-        assert_eq!(window_size(8), Vec2::new(strip.x, strip.y + BAR_H));
-        assert!(window_size(9).x > window_size(8).x, "a wider page is a wider window");
+    fn the_window_is_the_strip_and_one_bar_taller() {
+        // The width is the bar's, not a sum of cells: a page of one slot and a page of eight are
+        // the same window, as the reference's Tempo and Grid pages are.
+        assert_eq!(window_size(1170.0), Vec2::new(1170.0, jam_strip::BODY_H + BAR_H));
+        assert_eq!(window_size(560.0).y, window_size(1170.0).y, "the height is the rows', not the width's");
+        assert_eq!(jam_strip::width_for(1500.0), 1170.0, "most of the app's width");
+        assert_eq!(jam_strip::width_for(600.0), 560.0, "and never narrower than a readable bar");
     }
 
     #[test]
     fn nothing_saved_centres_it_over_the_main_window() {
-        let size = window_size(8);
+        let size = window_size(1170.0);
         let at = position(None, main(), size, Vec2::new(1440.0, 900.0));
         assert!((at.x - (main().left() + (main().width() - size.x) / 2.0)).abs() < 0.01);
         assert!((at.y - (main().top() + (main().height() - size.y) / 2.0)).abs() < 0.01);
@@ -170,7 +161,7 @@ mod tests {
 
     #[test]
     fn a_saved_offset_comes_back_with_the_app() {
-        let size = window_size(8);
+        let size = window_size(1170.0);
         let saved = Some(Vec2::new(-40.0, -12.0));
         let at = position(saved, main(), size, Vec2::new(1440.0, 900.0));
         assert_eq!(at, main().min + Vec2::new(-40.0, -12.0));
@@ -182,7 +173,7 @@ mod tests {
         // viewport's size, never a monitor's origin, so the band is measured from the app:
         // however far it was dragged, the strip stays within one display of it and `KEEP`
         // points of it are reachable.
-        let size = window_size(8);
+        let size = window_size(1170.0);
         let monitor = Vec2::new(1440.0, 900.0);
         let at = position(Some(Vec2::new(3800.0, 12.0)), main(), size, monitor);
         assert!(at.x + KEEP <= main().left() + monitor.x + 0.01, "at most a display right of the app");

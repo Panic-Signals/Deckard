@@ -16,13 +16,47 @@
 use deckard_surface::OsoPage;
 use eframe::egui::{self, Color32, Vec2};
 
-/// A slot's size and the gap after it.
-const SLOT: Vec2 = Vec2::new(52.0, 44.0);
-const GAP: f32 = 4.0;
-/// The band above the slots carrying the group headers.
-const HEADER_BAND: f32 = 12.0;
+/// The body's rows, from the reference's own proportions: the group header band, the value,
+/// then the sub-label, with the padding the capture shows. A strip is a wide bar — its columns
+/// divide whatever width the window has, they are not a fixed cell size.
+const HEADER_H: f32 = 40.0;
+const VALUE_H: f32 = 40.0;
+const SUB_H: f32 = 40.0;
+const BOTTOM_PAD: f32 = 24.0;
+/// The body's whole height, and the strip's, for a window's inner size.
+pub const BODY_H: f32 = HEADER_H + VALUE_H + SUB_H + BOTTOM_PAD;
+
+/// The text's left inset inside a column, and the column separator's width.
+const PAD_X: f32 = 14.0;
+const SEPARATOR: f32 = 1.0;
+
+/// The type, as the capture has it: the header small and quiet, the value the loudest thing
+/// on the strip, the sub-label between them.
+const FONT_HEADER: f32 = 11.5;
+const FONT_VALUE: f32 = 21.0;
+const FONT_SUB: f32 = 13.0;
+
 /// The corner brackets' arm length, in points.
 const BRACKET: f32 = 7.0;
+
+/// Everything the strip is, drawn on, from the capture: a flat body, the bar's own shade.
+const PAPER: Color32 = Color32::from_rgb(0x3d, 0x3d, 0x3d);
+const INK: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
+const HEADER_INK: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
+const RULE: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
+
+/// The width a strip takes for an app window `main` points wide: the reference's bar is most
+/// of its window, not a row of small cells.
+pub fn width_for(main: f32) -> f32 {
+    (main * 0.78).clamp(560.0, 1180.0)
+}
+
+/// Where the page's `slot` of `count` sits, in points from the strip's top-left corner:
+/// columns of an equal share of `width`.
+pub fn slot_rect(slot: usize, count: usize, width: f32) -> egui::Rect {
+    let w = width / count.max(1) as f32;
+    egui::Rect::from_min_size(egui::pos2(slot as f32 * w, 0.0), egui::vec2(w, BODY_H))
+}
 
 /// One rendered slot: its position on the published page, the spanning header
 /// over it, its value text, and whether the encoder is on it (`focused`) or
@@ -38,18 +72,6 @@ pub struct Row {
     pub sub: Option<String>,
     pub focused: bool,
     pub editing: bool,
-}
-
-/// The strip's size for a page of `slots` slots: its slots and the gaps between
-/// them, plus the header band.
-pub fn strip_size(slots: usize) -> Vec2 {
-    Vec2::new(slots as f32 * (SLOT.x + GAP) - GAP, SLOT.y + HEADER_BAND)
-}
-
-/// Where the page's `slot` sits, in points from the strip's top-left corner.
-pub fn slot_rect(slot: usize) -> egui::Rect {
-    let at = Vec2::new(slot as f32 * (SLOT.x + GAP), HEADER_BAND);
-    egui::Rect::from_min_size(egui::Pos2::new(at.x, at.y), SLOT)
 }
 
 /// The header runs the strip draws: each group's header with the slots it spans
@@ -120,77 +142,82 @@ pub fn rows(page: &OsoPage) -> Option<Vec<Row>> {
     (!rows.is_empty()).then_some(rows)
 }
 
-/// The slots: one cell per published slot, the section header over each, the focused slot
-/// underlined, the editing slot in corner brackets. The mouse does nothing here — the strip
-/// belongs to the encoder — so this allocates hover sense and never reads a click.
+/// The strip's body: one column per published slot, the group header over its run, the value
+/// and the sub-label under it, the focused slot's underline and the editing slot's brackets.
+/// The mouse does nothing here — the strip belongs to the encoder — so this allocates hover
+/// sense and never reads a click.
 ///
-/// This is the whole of what the strip draws: the title row that used to sit above it lives in
-/// the window's own bar (`jam_window`), where the reference keeps it. A docked row is gone, so
-/// there is no second way to draw the same page.
-pub fn slots(ui: &mut egui::Ui, slots: usize, rows: &[Row]) {
-    let width = strip_size(slots).x;
-    let (rect, _hover) = ui.allocate_exact_size(strip_size(slots), egui::Sense::hover());
+/// What it draws is the reference's own arrangement, not a row of buttons: a flat body, a thin
+/// rule between columns, three lines of type inside each, and no cell fill of any kind. A hole
+/// keeps its column and draws nothing in it; a column whose group header runs into the next one
+/// is labelled once, over the run's first column.
+pub fn slots(ui: &mut egui::Ui, count: usize, rows: &[Row], width: f32) {
+    let size = egui::vec2(width, BODY_H);
+    let (rect, _hover) = ui.allocate_exact_size(size, egui::Sense::hover());
     let origin = rect.min.to_vec2();
-    // Each header covers its group: consecutive slots sharing a header text. The
-    // reference draws it as one label over the band, aligned to the group's
-    // first slot.
+    ui.painter().rect_filled(rect, 0.0, PAPER);
+    // The separators: between columns, never on the strip's outer edges.
+    for at in 1..count.max(1) {
+        let x = rect.left() + at as f32 * (width / count.max(1) as f32);
+        ui.painter().vline(x, rect.y_range(), egui::Stroke::new(SEPARATOR, RULE));
+    }
+    // Each header covers its group: consecutive slots sharing a header text, drawn once over
+    // the run's first column and free to run past its own column into the gap after it.
     let runs = header_runs(rows.iter().map(|r| (r.slot, r.header.as_deref())));
     for (start, len, header) in &runs {
-        let mut band = slot_rect(*start);
-        band.max.x = slot_rect(start + len - 1).max.x;
-        band.min.y = 0.0;
-        band.max.y = HEADER_BAND;
-        let mut band = band.translate(origin);
-        // A label may run past its group into the space to its right, as the reference
-        // does: clipped to its own band, a one-slot group cut PAD LAYOUT to PAD LAYOU.
-        let next = runs.iter().find(|(s, ..)| *s > start + len - 1).map_or(origin.x + width, |(s, ..)| slot_rect(*s).min.x + origin.x);
-        band.max.x = next.min(origin.x + width).max(band.max.x) - 2.0;
+        let mut band = slot_rect(*start, count, width).translate(origin);
+        band.max.x = slot_rect(start + len - 1, count, width).max.x + origin.x;
+        band.max.y = band.min.y + HEADER_H;
+        let next =
+            runs.iter().find(|(s, ..)| *s > start + len - 1).map_or(rect.right(), |(s, ..)| slot_rect(*s, count, width).left() + origin.x);
+        band.max.x = next.min(rect.right()).max(band.max.x) - 2.0;
         ui.painter().with_clip_rect(band).text(
-            band.left_top() + Vec2::new(4.0, 1.0),
+            band.left_top() + Vec2::new(PAD_X, 14.0),
             egui::Align2::LEFT_TOP,
             header,
-            egui::FontId::proportional(9.0),
-            Color32::from_gray(170),
+            egui::FontId::proportional(FONT_HEADER),
+            HEADER_INK,
         );
     }
     for row in rows {
-        let cell = slot_rect(row.slot).translate(origin);
-        let fill = if row.editing {
-            Color32::from_rgb(96, 74, 28)
-        } else if row.focused {
-            Color32::from_gray(70)
-        } else {
-            Color32::from_gray(45)
-        };
-        ui.painter().rect_filled(cell, 3.0, fill);
-        // Value above, its display name below — the reference's two rows in the cell.
-        ui.painter().with_clip_rect(cell).text(
-            cell.left_top() + Vec2::new(4.0, 5.0),
-            egui::Align2::LEFT_TOP,
+        let cell = slot_rect(row.slot, count, width).translate(origin);
+        // The value: the strip's loudest line, centred in its column as the reference has it.
+        ui.painter().with_clip_rect(cell.shrink2(egui::vec2(PAD_X * 0.5, 0.0))).text(
+            egui::pos2(cell.center().x, cell.top() + HEADER_H + 4.0),
+            egui::Align2::CENTER_TOP,
             &row.value,
-            egui::FontId::proportional(12.0),
-            Color32::WHITE,
+            egui::FontId::proportional(FONT_VALUE),
+            INK,
         );
-        // Long values clip at the slot: the strip never invents a shorter name.
+        // Its display name below, quiet: `Root Note`, `Value`. Blank where the page has none.
+        let sub_at = egui::pos2(cell.center().x, cell.top() + HEADER_H + VALUE_H);
         ui.painter().with_clip_rect(cell).text(
-            cell.left_bottom() + Vec2::new(4.0, -4.0),
-            egui::Align2::LEFT_BOTTOM,
+            sub_at,
+            egui::Align2::CENTER_TOP,
             row.sub.as_deref().unwrap_or(""),
-            egui::FontId::proportional(9.0),
-            Color32::from_gray(170),
+            egui::FontId::proportional(FONT_SUB),
+            INK,
         );
-        if row.focused {
-            ui.painter().line_segment([cell.left_bottom(), cell.right_bottom()], egui::Stroke::new(2.0, Color32::WHITE));
-        }
+        // A rule under the sub-label in every column, the focused one bright and thicker: that
+        // is the capture's own cue, and it is the only thing the cursor draws (never a fill).
+        let y = cell.top() + HEADER_H + VALUE_H + SUB_H - 5.0;
+        let stroke = if row.focused { egui::Stroke::new(2.5, Color32::WHITE) } else { egui::Stroke::new(1.0, RULE) };
+        let half = (cell.width() / 2.0 - PAD_X).max(0.0);
+        ui.painter().line_segment([egui::pos2(cell.center().x - half, y), egui::pos2(cell.center().x + half, y)], stroke);
         if row.editing {
             brackets(ui, cell);
         }
     }
 }
 
-/// The editing mark: corner brackets around the slot being changed (the
-/// hardware-confirmed mark; a filled background alone is not it).
+/// The editing mark: corner brackets around the column being changed, inset from its edges and
+/// spanning the value and sub-label rows, as the reference's editing capture has them. (A filled
+/// background alone is not it.)
 fn brackets(ui: &egui::Ui, cell: egui::Rect) {
+    let cell = egui::Rect::from_min_max(
+        egui::pos2(cell.left() + 6.0, cell.top() + HEADER_H + 2.0),
+        egui::pos2(cell.right() - 6.0, cell.top() + BODY_H - 6.0),
+    );
     let stroke = egui::Stroke::new(2.0, Color32::WHITE);
     let p = ui.painter();
     let (l, r, t, b) = (cell.left(), cell.right(), cell.top(), cell.bottom());
@@ -334,13 +361,20 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_is_one_row_of_equal_slots() {
-        assert_eq!(strip_size(9).x, 9.0 * (SLOT.x + GAP) - GAP);
-        assert_eq!(strip_size(2).y, SLOT.y + HEADER_BAND);
-        let (s0, s1) = (slot_rect(0), slot_rect(1));
-        assert!(s0.min.x < s1.min.x && s0.min.y == s1.min.y, "one row, left to right");
-        assert_eq!(s0.size(), s1.size(), "all slots the same size");
-        assert_eq!(strip_size(9).x, slot_rect(8).max.x, "the strip is exactly its slots");
+    fn the_columns_divide_the_window_and_the_rows_stack_as_the_capture_has_them() {
+        // A strip is a bar: however many slots a page holds, they share the window's width, so
+        // four slots of a 1184 wide strip are 296 wide each, as the reference's Grid page is.
+        let w = width_for(1500.0);
+        assert_eq!(w, 1170.0, "most of the app's width, clamped");
+        let (a, b) = (slot_rect(0, 4, w), slot_rect(1, 4, w));
+        assert_eq!(a.width(), w / 4.0);
+        assert_eq!(a.height(), BODY_H);
+        assert!(a.min.x < b.min.x && a.min.y == b.min.y, "one row, left to right");
+        assert_eq!(a.size(), b.size(), "all columns the same size");
+        assert_eq!(slot_rect(3, 4, w).right(), w, "the last column ends at the edge");
+        assert!(BODY_H >= 80.0, "a bar tall enough for three lines of type");
+        // A page of one slot still fills the width, as Tempo's window does.
+        assert_eq!(slot_rect(0, 1, w).width(), w);
     }
 
     #[test]

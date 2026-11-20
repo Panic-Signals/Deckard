@@ -251,6 +251,7 @@ fn main() {
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
     // `--jam KEY` (repeatable): press a Jam control through the script, so the strip and its
     // window can be looked at with no Jam on the wire. An unknown name is named back.
+    let jam_shot = args.iter().any(|a| a == "--jam-shot");
     let jam_hil_presses: Vec<&'static str> = args
         .windows(2)
         .filter(|w| w[0] == "--jam")
@@ -289,6 +290,7 @@ fn main() {
                 model,
                 jam_hil: !jam_hil_presses.is_empty(),
                 jam_hil_presses,
+                jam_shot,
                 show_controller: false,
                 meter_inputs: true,
                 follow: true,
@@ -1094,6 +1096,10 @@ pub struct App {
     /// (`docs/epics/jam-support/hil/strip-window-2026-11-21.md`).
     jam_hil: bool,
     jam_hil_presses: Vec<&'static str>,
+    /// `--jam-shot`: draw the strip window's content into the app's own viewport, so
+    /// `--screenshot` captures what that window shows. A second viewport is not in the main
+    /// one's picture, and Screen Recording is not always granted (`hil/strip-window-2026-11-21.md`).
+    jam_shot: bool,
     /// The last JAM script error shown.
     jam_error: Option<String>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.
@@ -1347,7 +1353,7 @@ impl Started {
     }
 }
 
-fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
+pub(crate) fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), image.size[0] as u32, image.size[1] as u32);
     enc.set_color(png::ColorType::Rgba);
@@ -11960,6 +11966,23 @@ impl App {
             self.settings.save();
         }
         layout::body(self, ui);
+        if self.jam_shot
+            && let Some((page, rows)) = &shown
+        {
+            // The window's own drawing, at its own size, over the app: `--screenshot` captures
+            // it and the run crops the corner back out. (A second viewport is not in the main
+            // one's picture, and Screen Recording is not always granted.)
+            let width = crate::jam_strip::width_for(ui.max_rect().width());
+            let size = crate::jam_window::window_size(width);
+            let at = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), size);
+            let (name, counter) = (crate::jam_strip::name(page), crate::jam_strip::counter(page));
+            egui::Area::new(egui::Id::new("jam strip preview")).fixed_pos(at.min).order(egui::Order::Foreground).show(ctx, |ui| {
+                ui.painter().rect_filled(at, 0.0, egui::Color32::BLACK);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                    crate::jam_window::paint(ui, &name, counter.as_deref(), page.slots.len(), rows, width);
+                });
+            });
+        }
         self.update_slot_view();
         self.follow_edits();
         if !self.dropped_samples.is_empty() {

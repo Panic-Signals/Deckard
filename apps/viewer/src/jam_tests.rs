@@ -83,9 +83,9 @@ fn the_strip_renders_the_published_page() {
 fn the_strip_is_a_window_of_its_own() {
     let app = scale_view();
     let (page, rows) = app.jam_shown().expect("the Scale OSO publishes");
-    let strip = crate::jam_strip::strip_size(page.slots.len());
-    let window = crate::jam_window::window_size(page.slots.len());
-    assert_eq!((window.x, window.y), (strip.x, strip.y + crate::jam_window::BAR_H), "the page's size plus the bar");
+    let width = crate::jam_strip::width_for(1500.0);
+    let window = crate::jam_window::window_size(width);
+    assert_eq!((window.x, window.y), (width, crate::jam_strip::BODY_H + crate::jam_window::BAR_H), "the bar plus its rows");
     assert_eq!(rows.len(), 7);
     assert_eq!(crate::jam_strip::name(&page), "Scale", "the bar names the page");
     assert_eq!(crate::jam_strip::counter(&page).as_deref(), Some("1/2"), "the isomorphic layout is the second page");
