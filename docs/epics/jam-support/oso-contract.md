@@ -97,7 +97,7 @@ Two lifetimes, both inherited from NI's model (`JamHelper.isOSOTypeStatic`; the 
 
 | | static | non-static |
 |---|---|---|
-| types | `GRID`, `TEMPO`, `REC_MODE`, `RANDOMIZER` (`PERFORM_FX` was here: **corrected on the rig, 2026-11-21** — it arms the idle timer and goes) | everything else — `SCALE`, `ARP_REPEAT`, `SWING`, `TUNE`, `LOCK`, `NOTES`, `PERFORM_FX` |
+| types | `GRID`, `TEMPO`, `REC_MODE`, `RANDOMIZER`, `PERFORM_FX` (the rig, 2026-11-21: it is static after all — the **encoder's press** closes it, not the timer) | everything else — `SCALE`, `ARP_REPEAT`, `SWING`, `TUNE`, `LOCK`, `NOTES` |
 | opened by | its own key or chord, on the press | its trigger — the encoder touch **or its own button** (`SWING`, `TUNE`, `NOTES`, `NOTE_REPEAT`, the keyboard/piano-roll view switch: rig, 2026-11-21) |
 | closed by | that key again, **the controller's page changing**, the device going | the idle timer, an explicit close, a page change |
 | idle timer | **never armed** | armed on show: `DEFAULT_OSO_TIMEOUT = 70` ticks ≈ **2 s** |

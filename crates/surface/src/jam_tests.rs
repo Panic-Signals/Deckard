@@ -1650,11 +1650,10 @@ fn jam_oso_pages_need_no_ni_install() {
     }
 }
 
-/// PERFORM FX goes by itself, as the rig has it (2026-11-21). The 2026-11-20 RE reading listed it
-/// among the static types, so the strip stayed up until its key or a page change; it is the idle
-/// timer's like every other page that is not GRID, TEMPO or REC MODE.
+/// PERFORM FX is **static**: the timer does not take it, the encoder's press closes it — the rig
+/// had it the other way round first (2026-11-21), and the machine's own press is the closer.
 #[test]
-fn perform_fx_closes_by_itself() {
+fn perform_fx_stays_up_and_closes_on_the_encoder_press() {
     let mut d = jam();
     let mut v = jam_view();
     v.groups[0].perform = Some((false, 0.5));
@@ -1665,8 +1664,59 @@ fn perform_fx_closes_by_itself() {
     release(&mut d, &v, "SHIFT");
     d.tick(&v, t);
     assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("PERFORM FX"), "shows on the press");
-    d.tick(&v, t + Duration::from_millis(1500));
-    assert!(d.oso().is_some_and(|p| !p.slots.is_empty()), "still up at 1.5 s");
     d.tick(&v, t + Duration::from_millis(2500));
-    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "gone by 2.5 s, as the machine does it");
+    assert!(d.oso().is_some_and(|p| !p.slots.is_empty()), "static: still up at 2.5 s");
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the encoder's press closes it");
+}
+
+/// With GRID showing, SHIFT + GRID enters REC MODE — and GRID stays lit, as on the machine.
+#[test]
+fn shift_grid_enters_record_mode_over_the_grid() {
+    let mut d = jam();
+    let v = jam_view();
+    press(&mut d, &v, "GRID");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("GRID"));
+    hold(&mut d, &v, "SHIFT");
+    let out = press(&mut d, &v, "GRID");
+    release(&mut d, &v, "SHIFT");
+    assert_eq!(messages(&out), ["REC MODE ▸ Metronome Level: -"], "the record mode opened over the grid");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("REC MODE"), "the record mode's page");
+    assert_eq!(button_light(&mut d, &v, "GRID"), deckard_jam::leds::ON, "and GRID stays lit");
+}
+
+/// SWING and TUNE go on the timer, and an encoder touch brings them back — the view is still theirs.
+#[test]
+fn swing_comes_back_on_an_encoder_touch_after_the_timer() {
+    let mut d = jam();
+    let v = jam_view();
+    let t = Instant::now();
+    press(&mut d, &v, "SWING");
+    d.tick(&v, t);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("SWING"));
+    d.tick(&v, t + Duration::from_millis(2500));
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "gone by 2.5 s");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("SWING"), "and back on a touch");
+}
+
+/// The piano roll's Scale page is the scale's own three settings: root, bank, type, one page.
+#[test]
+fn the_piano_roll_shows_the_scales_own_three_settings() {
+    let mut d = jam();
+    let v = jam_view();
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "STEP");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("the piano roll publishes the Scale page");
+    assert_eq!((page.title.as_str(), page.pages), ("Scale", 1), "one page, no counter");
+    let subs: Vec<Option<&str>> = page.slots.iter().flatten().map(|s| s.sub.as_deref()).collect();
+    assert_eq!(subs, [Some("Root Note"), Some("Bank"), Some("Type")], "three slots, no chord or layout");
+    let groups: Vec<Option<&str>> = page.slots.iter().flatten().map(|s| s.group.as_deref()).collect();
+    assert_eq!(groups, [Some("SCALE"), Some("SCALE"), Some("SCALE")], "under one SCALE header");
 }

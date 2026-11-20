@@ -489,6 +489,8 @@ local function open_menu(title, items, opts)
     -- A static OSO belongs to the page it was opened on and survives the idle timer; a
     -- non-static one arms that timer and the page change leaves it alone.
     static = opts.static,
+    -- (The piano roll's Scale page is the scale's three settings only: see `step_scale_page`.)
+    limited = opts.limited,
     page = deckard.state().surface_page,
     used = deckard.now(),
   }
@@ -600,7 +602,7 @@ local function rec_mode_menu()
 end
 
 local function scale_menu(opts)
-  open_menu("SCALE", {
+  local items = {
     {
       name = "Root Note",
       text = function(s) return oso_root_value(s) or "-" end,
@@ -646,7 +648,13 @@ local function scale_menu(opts)
       text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "dir") or "-" end,
       turn = oso_turn_layout("dir"),
     },
-  }, opts)
+  }
+  -- The piano roll shows the scale's own three settings and nothing else — root, bank, type —
+  -- under one SCALE header, on one page with no counter (the rig's capture, 2026-11-21).
+  if opts and opts.limited then
+    items = { items[1], items[2], items[3] }
+  end
+  open_menu("SCALE", items, opts)
 end
 
 local function repeat_menu(opts)
@@ -823,7 +831,7 @@ local function perform_menu()
         if to ~= mode_of(s) then deckard.perform_mode(deckard.state().group, to + 1) end
       end,
     },
-  }, { idle = true })
+  }, { static = true })
 end
 -- ---- the OSO page ---------------------------------------------------------------
 -- The focused page as structured slots for the viewer strip. One slot per setting:
@@ -978,6 +986,23 @@ local function generic_oso_page(s)
   return { title = m.title, page = 1, pages = 1, slots = slots, focus = at - 1, editing = m.editing == true }
 end
 
+-- The piano roll's Scale page: the three settings the piano roll edits, under one SCALE header.
+-- One page, no counter, no chord or pad-layout slots (`hil/strip-window-2026-11-21.md`).
+local function step_scale_page(s)
+  local m = st.menu
+  local slots = {}
+  for _, item in ipairs(m.items) do
+    local value = item.text and item.text(s) or ""
+    if value == nil or value == "" or value == "-" then
+      slots[#slots + 1] = false
+    else
+      slots[#slots + 1] = { label = item.name, value = value, sub = item.name, group = "SCALE" }
+    end
+  end
+  local at = clamp(m.at or 1, 1, math.max(#m.items, 1))
+  return { title = "Scale", page = 1, pages = 1, slots = slots, focus = at - 1, editing = m.editing == true }
+end
+
 -- The focused page: the menu's page while a menu is open, else the keyboard view's.
 -- Browsing shows the library panel, which has no strip page. Every page carries the
 -- script's cursor (`focus`, 0-based, holes counted) and its editing flag: the script
@@ -989,7 +1014,7 @@ local function build_oso(s)
     local t = st.menu.title
     local page
     if t == "Tempo" then page = tempo_oso_page(s)
-    elseif t == "SCALE" then page = scale_oso_page(s)
+    elseif t == "SCALE" then page = st.menu.limited and step_scale_page(s) or scale_oso_page(s)
     elseif t == "ARP" or t == "NOTE REPEAT" then
       if not st.arp then page = generic_oso_page(s)
       else
@@ -1640,8 +1665,9 @@ local function step_button(down)
         set_view(st.back)
       else
         set_view("roll")
-        -- The piano roll's page, on the switch, on the idle timer (the rig, 2026-11-21).
-        scale_menu({ idle = true })
+        -- The piano roll's page, on the switch, on the idle timer, and its own limited page —
+        -- the scale's three settings, not the keyboard view's (the rig, 2026-11-21).
+        scale_menu({ idle = true, limited = true })
       end
       st.step_entered = true
       return
@@ -1788,6 +1814,9 @@ function M.button(name, down)
     if st.browser then
       browser_press()
       browser_line()
+    elseif st.menu and st.menu.title == "PERFORM FX" then
+      -- The press closes the Perform FX page rather than editing it (the rig, 2026-11-21).
+      close_menu()
     elseif st.menu then
       menu_press()
     end
@@ -1798,8 +1827,14 @@ function M.button(name, down)
       repeat_menu({ idle = true })
     elseif st.view == "lock" then
       lock_menu({ idle = true })
-    elseif st.view == "keyboard" or st.view == "roll" or st.view == "notes" then
+    elseif st.view == "keyboard" or st.view == "notes" then
       scale_menu({ idle = true })
+    elseif st.view == "roll" then
+      scale_menu({ idle = true, limited = true })
+    elseif st.strip == "swing" then
+      swing_menu({ idle = true })
+    elseif st.strip == "tune" then
+      tune_menu({ idle = true })
     end
   elseif name == "PERFORM" then
     set_strip("perform")
@@ -1844,10 +1879,12 @@ function M.button(name, down)
       tempo_menu()
     end
   elseif name == "GRID" then
-    if st.menu and (st.menu.title == "GRID" or st.menu.title == "REC MODE") then
-      close_menu()
-    elseif shift() then
+    -- Shift is asked first: with GRID showing, SHIFT + GRID enters REC MODE (the GRID light stays
+    -- on, as it does on the machine) instead of closing the grid.
+    if shift() then
       rec_mode_menu()
+    elseif st.menu and (st.menu.title == "GRID" or st.menu.title == "REC MODE") then
+      close_menu()
     else
       grid_menu()
     end
