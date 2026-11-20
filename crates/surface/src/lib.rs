@@ -632,6 +632,8 @@ pub struct ZhoraView {
 /// actually apply yet (the Cabinet).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EqCurveView {
+    /// Live input and output spectra behind a built-in EQ's response.
+    pub spectrum: [Vec<f32>; 2],
     pub points: Vec<f32>,
     pub bands: Vec<(f32, f32)>,
     pub extent: Vec<f32>,
@@ -1697,6 +1699,18 @@ impl Surface {
         let all = run.lua.app_data_ref::<widget::Mappings>()?;
         let pages = widget::mapping::find(&all.0, name, "", "")?.page_params();
         (!pages.is_empty()).then_some(pages)
+    }
+
+    /// Whether the focused plug-in's mapping requests an EQ spectrum.
+    pub fn mapping_shows_eq(&self, name: &str, vendor: &str, id: &str) -> bool {
+        self.run
+            .as_ref()
+            .and_then(|run| {
+                let all = run.lua.app_data_ref::<widget::Mappings>()?;
+                let mapping = widget::mapping::find(&all.0, name, vendor, id)?;
+                Some(mapping.kind == "eq" && (mapping.matches.builtin.is_none() || (vendor.is_empty() && id.is_empty())))
+            })
+            .unwrap_or(false)
     }
 
     /// The widgets' look in the theme shown now (for the widgets' golden tests).

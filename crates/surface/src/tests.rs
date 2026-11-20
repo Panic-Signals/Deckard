@@ -1878,6 +1878,113 @@ fn the_eq_curve_stays_on_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
+#[test]
+fn eq_spectrum_is_drawn_in_the_eq_curve_area() {
+    let dir = std::env::var_os("DECKARD_RIG_CONTROLLER").map(std::path::PathBuf::from);
+    let (s, mut v) = (Surface::with_user_dir(dir), view());
+    assert!(s.mapping_shows_eq("TDR Nova", "Tokyo Dawn Labs", ""));
+    assert!(!s.mapping_shows_eq("Monark", "Native Instruments", ""));
+    v.control.knobs = vec![None; 8];
+    v.control.chain[0].name = "TDR Nova".into();
+    v.control.chain[0].plugin = true;
+    v.control.slot = Some("TDR Nova".into());
+    v.control.eq = Some(crate::EqCurveView { kind: "spectrum".into(), points: vec![0.75; 96], side: vec![0.25; 96], ..Default::default() });
+    let pic = s.draw_picture(&v);
+    assert!(!pic.texts.iter().any(|text| matches!(text.as_str(), "IN" | "OUT")));
+    let changed = |with: &[[u8; 4]], without: &[[u8; 4]]| {
+        let mut count = 0;
+        for (i, (a, b)) in with.iter().zip(without).enumerate() {
+            if a != b {
+                assert!((488..944).contains(&(i % 960)));
+                count += 1;
+            }
+        }
+        assert!(count > 200);
+    };
+    let both = s.picture(&v);
+    v.control.eq.as_mut().unwrap().side.clear();
+    let output = s.picture(&v);
+    changed(&both, &output);
+    v.control.eq.as_mut().unwrap().points.clear();
+    changed(&output, &s.picture(&v));
+    assert_eq!(s.error(), None);
+}
+
+#[test]
+fn spectrum_partial_redraw_matches_full_redraw() {
+    let dir = std::env::var_os("DECKARD_RIG_CONTROLLER").map(std::path::PathBuf::from);
+    let (s, mut v) = (Surface::with_user_dir(dir), view());
+    v.control.knobs = vec![None; 8];
+    for internal in [false, true] {
+        let name = if internal { "EQ" } else { "TDR Nova" };
+        v.control.chain[0].name = name.into();
+        v.control.chain[0].plugin = !internal;
+        v.control.slot = Some(name.into());
+        v.control.eq = Some(crate::EqCurveView {
+            kind: if internal { "freq" } else { "spectrum" }.into(),
+            points: vec![0.5; 96],
+            bands: if internal { vec![(0.3, 0.5), (0.7, 0.5)] } else { vec![] },
+            spectrum: if internal { [vec![0.3; 96], vec![0.6; 96]] } else { Default::default() },
+            side: if internal { vec![] } else { vec![0.3; 96] },
+            ..Default::default()
+        });
+        let old = s.draw_picture(&v);
+        let mut patched = old.clone().into_pixels();
+        let eq = v.control.eq.as_mut().unwrap();
+        if internal {
+            eq.spectrum[0].fill(0.7);
+            eq.spectrum[1].fill(0.4);
+        } else {
+            eq.side.clear();
+            eq.points.fill(0.75);
+        }
+        let mut next = s.draw_picture(&v);
+        let expected = next.clone().into_pixels();
+        assert_ne!(patched, expected);
+        let (x0, y0, x1, y1) = next.rasterize_spectrum_update(&old, &mut patched).expect("spectrum-only update");
+        assert_eq!((x0, x1), (488, 944));
+        assert!(y0 > 0 && y1 < 272);
+        assert_eq!(patched, expected);
+        next.background[0] ^= 1;
+        assert!(next.rasterize_spectrum_update(&old, &mut patched).is_none(), "unrelated changes use a full redraw");
+    }
+    assert_eq!(s.error(), None);
+}
+
+#[test]
+fn the_internal_eq_shows_spectra_and_keeps_its_response_and_band_handles() {
+    let dir = std::env::var_os("DECKARD_RIG_CONTROLLER").map(std::path::PathBuf::from);
+    let (s, mut v) = (Surface::with_user_dir(dir), view());
+    assert!(s.mapping_shows_eq("EQ", "", ""));
+    assert!(!s.mapping_shows_eq("EQ", "Some Vendor", "Some Vendor:VST3:FX:1234"));
+    v.control.knobs = vec![None; 8];
+    v.control.chain[0].name = "EQ".into();
+    v.control.slot = Some("EQ".into());
+    v.control.eq = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.25, 0.5), (0.75, 0.5)],
+        spectrum: [vec![0.3; 48], vec![0.7; 48]],
+        ..Default::default()
+    });
+    let pic = s.draw_picture(&v);
+    assert!(!pic.texts.iter().any(|text| matches!(text.as_str(), "IN" | "OUT")));
+    for label in ["1", "2"] {
+        assert!(pic.texts.iter().any(|text| text == label), "{label}");
+    }
+    let overlay = s.picture(&v);
+    v.control.eq.as_mut().unwrap().spectrum = Default::default();
+    let response = s.picture(&v);
+    let mut different = 0;
+    for (i, (a, b)) in overlay.iter().zip(&response).enumerate() {
+        if a != b {
+            assert!((488..944).contains(&(i % 960)));
+            different += 1;
+        }
+    }
+    assert!(different > 700);
+    assert_eq!(s.error(), None);
+}
+
 /// The curve takes the theme's accent: Palenight's blue, the LCD's amber ink.
 #[test]
 fn the_right_screen_curve_follows_the_theme() {

@@ -375,6 +375,12 @@ impl<'a> Canvas<'a> {
         self.pic.ops.push(DrawOp::Fill { x: self.r.x + x, y: self.r.y + y, w, h, c, corner: 1.0 });
     }
 
+    /// A full, opaque panel for a live spectrum, eligible for partial redraws.
+    pub fn spectrum_panel(&mut self, c: Paint) {
+        let Rect { x, y, w, h } = self.r;
+        self.pic.ops.push(DrawOp::SpectrumPanel { x, y, w, h, c });
+    }
+
     /// A one-pixel outline.
     pub fn frame(&mut self, x: i32, y: i32, w: i32, h: i32, c: Paint) {
         self.pic.ops.push(DrawOp::Frame { x: self.r.x + x, y: self.r.y + y, w, h, c, corner: 1.0 });

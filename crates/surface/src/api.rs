@@ -1504,6 +1504,11 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
         let Some(curve) = curve else { continue };
         let t = lua.create_table()?;
         t.set("points", lua.create_sequence_from(curve.points.iter().copied())?)?;
+        for (key, points) in ["spectrum_in", "spectrum_out"].into_iter().zip(&curve.spectrum) {
+            if !points.is_empty() {
+                t.set(key, lua.create_sequence_from(points.iter().copied())?)?;
+            }
+        }
         let bands = lua.create_table()?;
         for (i, (x, y)) in curve.bands.iter().enumerate() {
             let b = lua.create_table()?;

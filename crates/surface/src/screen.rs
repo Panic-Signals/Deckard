@@ -378,6 +378,14 @@ fn style(lua: &Lua, v: &Value) -> mlua::Result<Style> {
 /// One drawing command recorded by `draw(screen, theme)`.
 #[derive(Clone, PartialEq)]
 pub enum DrawOp {
+    /// The opaque background that starts a spectrum widget's clipped drawing.
+    SpectrumPanel {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        c: Paint,
+    },
     Fill {
         x: i32,
         y: i32,
@@ -520,13 +528,78 @@ impl Picture {
     }
 
     pub fn rasterize(&mut self) {
+        let mut px = std::mem::take(&mut self.px);
+        self.rasterize_into(&mut px);
+        self.px = px;
+    }
+
+    /// Rasterize a complete picture, reusing the RGBA buffer.
+    pub fn rasterize_into(&mut self, out: &mut Vec<[u8; 4]>) {
         let [r, g, b] = self.background;
-        self.px = vec![[r, g, b, 255]; WIDTH * HEIGHT];
+        let bg = [r, g, b, 255];
+        if out.len() == WIDTH * HEIGHT {
+            out.fill(bg);
+        } else {
+            out.clear();
+            out.resize(WIDTH * HEIGHT, bg);
+        }
+        self.replay(out, 0, None);
+    }
+
+    /// Update only the spectrum's widget box if everything outside it is identical
+    /// to the last picture. Pixels outside the returned box in `out` are unspecified.
+    pub fn rasterize_spectrum_update(&mut self, previous: &Picture, out: &mut Vec<[u8; 4]>) -> Option<(usize, usize, usize, usize)> {
+        let (start, end, region) = self.spectrum_span()?;
+        let (old_start, old_end, old_region) = previous.spectrum_span()?;
+        if region != old_region
+            || self.background != previous.background
+            || (self.plug_field, self.plug_ink, self.plug_accent) != (previous.plug_field, previous.plug_ink, previous.plug_accent)
+            || self.ops[..start] != previous.ops[..old_start]
+            || self.ops[end..] != previous.ops[old_end..]
+            || self.images.len() != previous.images.len()
+            || self.images.iter().any(|(key, image)| previous.images.get(key).is_none_or(|old| !std::sync::Arc::ptr_eq(image, old)))
+            || self.ops[start..].iter().any(|op| matches!(op, DrawOp::Dots { .. }))
+        {
+            return None;
+        }
+        out.resize(WIDTH * HEIGHT, [0, 0, 0, 255]);
+        self.replay(out, start, Some(region));
+        let (x0, y0, x1, y1) = region;
+        Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
+    }
+
+    fn spectrum_span(&self) -> Option<(usize, usize, (i32, i32, i32, i32))> {
+        let start = self.ops.iter().position(|op| matches!(op, DrawOp::SpectrumPanel { .. }))?;
+        let DrawOp::SpectrumPanel { x, y, w, h, c } = self.ops[start] else { return None };
+        let region = (x, y, x.saturating_add(w), y.saturating_add(h));
+        if c.alpha != 1.0
+            || x < 0
+            || y < 0
+            || w <= 0
+            || h <= 0
+            || region.2 > WIDTH as i32
+            || region.3 > HEIGHT as i32
+            || self.ops.get(start.checked_sub(1)?) != Some(&DrawOp::Clip(Some(region)))
+        {
+            return None;
+        }
+        let end = start + 1 + self.ops[start + 1..].iter().position(|op| matches!(op, DrawOp::Clip(_)))?;
+        (self.ops[end] == DrawOp::Clip(None)).then_some((start, end, region))
+    }
+
+    fn replay(&mut self, out: &mut Vec<[u8; 4]>, start: usize, region: Option<(i32, i32, i32, i32)>) {
+        std::mem::swap(&mut self.px, out);
         let ops = std::mem::take(&mut self.ops);
-        self.clip = None;
-        for op in &ops {
+        self.clip = region;
+        for op in &ops[start..] {
             match op {
-                DrawOp::Clip(c) => self.clip = *c,
+                DrawOp::Clip(c) => {
+                    self.clip = match (region, *c) {
+                        (Some((x0, y0, x1, y1)), Some((a, b, c, d))) => Some((x0.max(a), y0.max(b), x1.min(c), y1.min(d))),
+                        _ => region.or(*c),
+                    };
+                }
+                DrawOp::SpectrumPanel { x, y, w, h, c } => self.fill(*x, *y, *w, *h, *c, 1.0),
                 DrawOp::Dots { x, y, w, h, cell, ghost } => self.dots(*x, *y, *w, *h, *cell, *ghost),
                 DrawOp::Gradient { x, y, w, h, top, bottom } => {
                     // (Smooth here; the whole picture is dithered to the MK3's 5-6-5 levels on
@@ -559,6 +632,7 @@ impl Picture {
         }
         self.ops = ops;
         self.clip = None;
+        std::mem::swap(&mut self.px, out);
     }
 
     /// [`DrawOp::Dots`].
@@ -704,8 +778,12 @@ impl Picture {
     /// Pixels near `inside` (a test on pixel centres in screen space), smoothed by 4 × 4
     /// samples, over the box (x0, y0)-(x1, y1).
     fn shape(&mut self, (x0, y0, x1, y1): (f32, f32, f32, f32), c: Paint, inside: impl Fn(f32, f32) -> bool) {
-        for y in y0.floor() as i32..=y1.ceil() as i32 {
-            for x in x0.floor() as i32..=x1.ceil() as i32 {
+        let (cx0, cy0, cx1, cy1) = self.clip.unwrap_or((0, 0, WIDTH as i32, HEIGHT as i32));
+        if cx0 >= cx1 || cy0 >= cy1 {
+            return;
+        }
+        for y in (y0.floor() as i32).max(cy0)..=(y1.ceil() as i32).min(cy1 - 1) {
+            for x in (x0.floor() as i32).max(cx0)..=(x1.ceil() as i32).min(cx1 - 1) {
                 let mut n = 0;
                 for sy in 0..4 {
                     for sx in 0..4 {
@@ -920,6 +998,9 @@ impl Picture {
         let k = (w as f32 / img.w as f32).min(h as f32 / img.h as f32);
         let (dw, dh) = (((img.w as f32 * k).round() as i32).max(1), ((img.h as f32 * k).round() as i32).max(1));
         let (ox, oy) = (x + (w - dw) / 2, y + (h - dh) / 2);
+        if self.clip.is_some_and(|(x0, y0, x1, y1)| ox >= x1 || oy >= y1 || ox + dw <= x0 || oy + dh <= y0) {
+            return;
+        }
         let px = resample(img, dw as usize, dh as usize);
         for dy in 0..dh {
             for dx in 0..dw {

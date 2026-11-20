@@ -7,7 +7,9 @@
 //! | input | |
 //! |---|---|
 //! | `kind` | `"freq"` (20 Hz to 20 kHz, ±12 dB: the EQ and the Filter; the default), `"law"` (input along the bottom, output up the side), `"time"` (level over time), `"dots"` (a cloud) |
+//! | `spectrum` | a `kind` with the same frequency axis and a −90 to 0 dBFS level axis. `side` is input and `points` is output. |
 //! | `points` | the curve |
+//! | `spectrum_in`, `spectrum_out` | optional live spectra behind the response |
 //! | `extent` | how far a modulation sweeps it, faint behind it |
 //! | `side`, `side_live` | a side-chain's curve, brighter while it plays |
 //! | `bands` | handles: `{ x = 0..1, y = 0..1 }` each; several `freq` bands are numbered |
@@ -23,6 +25,7 @@ use super::{Align, Canvas, flag, nums, text};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Curve {
+    pub spectrum: [Vec<f32>; 2],
     pub kind: String,
     pub points: Vec<f32>,
     pub extent: Vec<f32>,
@@ -48,6 +51,7 @@ impl Curve {
             }
         }
         Ok(Curve {
+            spectrum: [nums(t, "spectrum_in"), nums(t, "spectrum_out")],
             kind: text(t, "kind").filter(|k| !k.is_empty()).unwrap_or_else(|| "freq".into()),
             points: nums(t, "points"),
             extent: nums(t, "extent"),
@@ -65,21 +69,31 @@ impl Curve {
         let show_lfo = self.lfo.len() >= 2 && c.r.w >= 3 * super::CELL_W;
         let w = if show_lfo { c.r.w - LFO_W - LFO_GAP } else { c.r.w };
         let h = c.r.h;
-        c.fill(0, 0, w, h, look.panel);
+        if !show_lfo && (self.kind == "spectrum" || self.spectrum.iter().any(|trace| !trace.is_empty())) {
+            c.spectrum_panel(look.panel);
+        } else {
+            c.fill(0, 0, w, h, look.panel);
+        }
         // (Inset a pixel, so a curve's 2-pixel line stays in the box.)
         let px = |t: f32| 1.0 + t * (w - 3) as f32;
         let py = |v: f32| (1.0 - v) * (h - 1) as f32;
         let grid = look.grid;
         let kind = self.kind.as_str();
         match kind {
-            "freq" | "" => {
+            "freq" | "" | "spectrum" => {
                 for hz in [100.0, 1000.0, 10000.0] {
                     let x = px(super::freq_t(hz));
                     c.line(x, 1.0, x, (h - 1) as f32, 1.0, grid);
                 }
-                for db in [-6.0f32, 0.0, 6.0] {
-                    let y = py(db / 24.0 + 0.5);
-                    c.line(1.0, y, (w - 1) as f32, y, 1.0, if db == 0.0 { look.separator } else { grid });
+                if kind == "spectrum" {
+                    for t in [1.0 / 3.0, 2.0 / 3.0] {
+                        c.line(1.0, py(t), (w - 1) as f32, py(t), 1.0, grid);
+                    }
+                } else {
+                    for db in [-6.0f32, 0.0, 6.0] {
+                        let y = py(db / 24.0 + 0.5);
+                        c.line(1.0, y, (w - 1) as f32, y, 1.0, if db == 0.0 { look.separator } else { grid });
+                    }
                 }
             }
             "law" => {
@@ -106,6 +120,8 @@ impl Curve {
             c.polyline(&line, width, ink);
         };
         let curve_ink = c.ink(if self.dim { look.muted } else { look.accent }, &["points"]);
+        stroke(c, &self.spectrum[0], 1.0, look.weak);
+        stroke(c, &self.spectrum[1], 1.5, look.marker);
         stroke(c, &self.extent, 1.0, c.ink(look.muted, &["points"]));
         stroke(c, &self.side, 1.5, c.ink(if self.side_live { look.marker } else { look.weak }, &["side"]));
         stroke(c, &self.points, 2.0, curve_ink);
@@ -129,7 +145,7 @@ impl Curve {
                 c.text(cx as i32 - 7, cy as i32 - 7, 14, 14, &(i + 1).to_string(), look.small, look.on_colour, Align::Center);
             }
         }
-        if freq && w >= 2 * super::CELL_W {
+        if (freq || kind == "spectrum") && w >= 2 * super::CELL_W {
             for (hz, name) in [(100.0, "100"), (1000.0, "1k"), (10000.0, "10k")] {
                 let x = px(super::freq_t(hz)) as i32;
                 c.text(x - 16, h - 14, 32, 12, name, look.small, look.weak, Align::Center);
