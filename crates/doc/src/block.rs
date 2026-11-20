@@ -648,7 +648,8 @@ impl Document {
         b.audio_offsets = patterns(&self.project)
             .flat_map(|(g, p, pt)| pt.audio.iter().filter(|c| c.offset != 0).map(move |c| (g, p, c.sound, c.offset)))
             .collect();
-        let payload = (!b.patterns.is_empty()
+
+        (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
             || !b.routes.is_empty()
@@ -662,8 +663,7 @@ impl Document {
             || !b.audio_offsets.is_empty()
             || !b.ratchets.is_empty()
             || !b.grooves.is_empty())
-        .then(|| encode(&b));
-        payload
+        .then(|| encode(&b))
     }
 
     /// `archived` (Maschine's part) with the DECKARD block `payload` ([`Document::block_payload`]).
