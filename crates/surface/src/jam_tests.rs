@@ -1720,3 +1720,22 @@ fn the_piano_roll_shows_the_scales_own_three_settings() {
     let groups: Vec<Option<&str>> = page.slots.iter().flatten().map(|s| s.group.as_deref()).collect();
     assert_eq!(groups, [Some("SCALE"), Some("SCALE"), Some("SCALE")], "under one SCALE header");
 }
+
+/// The lock view opens its page on the switch, on the timer, and a touch brings it back — the same
+/// rule the keyboard and piano-roll views follow (the rig, 2026-11-21).
+#[test]
+fn the_lock_view_opens_its_page_and_the_timer_takes_it() {
+    let mut d = jam();
+    let v = jam_view();
+    let t = Instant::now();
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "LOCK");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, t);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("LOCK"), "open on the switch");
+    d.tick(&v, t + Duration::from_millis(2500));
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "gone by 2.5 s");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("LOCK"), "and back on a touch");
+}

@@ -1845,7 +1845,14 @@ function M.button(name, down)
     end
   elseif name == "LOCK" then
     if shift() then
-      if st.view == "lock" then set_view(st.back) else set_view("lock") end
+      if st.view == "lock" then
+        set_view(st.back)
+      else
+        set_view("lock")
+        -- The lock view's page opens on the switch, on the idle timer, as the keyboard's and the
+        -- piano roll's do (the rig's rule, 2026-11-21): every view that has a page shows it.
+        lock_menu({ idle = true })
+      end
     elseif st.view == "lock" then
       if s.lock.focus then deckard.lock("update") end
     else
