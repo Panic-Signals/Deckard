@@ -28,6 +28,7 @@ pub mod midi;
 pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
+pub mod munge;
 #[cfg(native_asio)]
 pub(crate) mod native_asio;
 pub mod note_echo;
@@ -3194,10 +3195,12 @@ impl Engine {
                                 lanes: None,
                                 reverse: false,
                                 once: false,
+                                tail_ms: 0.0,
                             };
                             if s.new_sampler.is_some() {
                                 zone.reverse = z.meta.as_ref().is_some_and(|m| m.reverse);
                                 zone.once = z.meta.as_ref().is_some_and(|m| m.once);
+                                zone.tail_ms = z.meta.as_ref().map_or(0.0, |m| m.tail_ms() as f32);
                                 // Its stem lanes: files at the sample's rate.
                                 if let Some(m) = z.meta.as_ref().filter(|m| m.has_stems()) {
                                     let rate = zone.sample.rate;
@@ -3235,7 +3238,9 @@ impl Engine {
                             zones.push(zone);
                         }
                         // At unity: the sound's level and pan are the mixer's (they glide).
-                        Some(SamplerRt::new(sampler::Settings::new(smp, sr_f), zones, (1.0, 1.0), sr_f))
+                        let mut rt = SamplerRt::new(sampler::Settings::new(smp, sr_f), zones, (1.0, 1.0), sr_f);
+                        rt.motion = s.new_sampler.map_or(Default::default(), |n| n.motion);
+                        Some(rt)
                     })
                     .collect()
             })
@@ -7531,6 +7536,7 @@ mod tests {
             lanes: None,
             reverse: false,
             once: false,
+            tail_ms: 0.0,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -8232,6 +8238,7 @@ mod tests {
                 lanes: None,
                 reverse: false,
                 once: false,
+                tail_ms: 0.0,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -8729,6 +8736,12 @@ mod tests {
         let mut cache = SampleCache::default();
         let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
         assert!(zone0(&e).once);
+        assert_eq!((zone0(&e).tail_ms, e.sounds[0][0].as_ref().unwrap().motion), (0.0, deckard_model::new_sampler::Motion::Off));
+        // Its tail and the sound's Slice Motion reach the engine too.
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].meta.as_mut().unwrap().tail = 250.0;
+        p.groups[0].sounds[0].new_sampler.as_mut().unwrap().motion = deckard_model::new_sampler::Motion::Random;
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!((zone0(&e).tail_ms, e.sounds[0][0].as_ref().unwrap().motion), (250.0, deckard_model::new_sampler::Motion::Random));
         let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
         z.meta.as_mut().unwrap().reverse = true;
         z.loop_active = true;

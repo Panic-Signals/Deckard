@@ -119,6 +119,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         reverse: false,
         speed: 0.0,
         once: false,
+        tail: 0.0,
     }
 }
 

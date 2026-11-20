@@ -13,6 +13,7 @@ use crate::sample::Sample;
 use crate::sampler_tables as t;
 use crate::synth::Synth;
 use deckard_model::MidiKind;
+use deckard_model::new_sampler::Motion;
 use std::sync::Arc;
 
 /// Control rate: modulation, filter coefficients and smoothing are updated every
@@ -268,6 +269,8 @@ pub struct ZoneRt {
     pub reverse: bool,
     /// A one-shot: a note plays it to its end, whenever the note ends.
     pub once: bool,
+    /// Its tail, ms of its sample (0: none): at its end it plays back from there, fading.
+    pub tail_ms: f32,
 }
 
 /// A zone's stem lanes (roadmap 2b): each as long as the zone's sample, read at the same
@@ -769,6 +772,11 @@ struct Stream {
     /// How long the loop crossfade under way runs (frames); 0: none is.
     fading: i64,
     done: bool,
+    /// The tail to come when the play range runs out (frames; 0: none, or it has begun),
+    /// and the tail under way: frames left of how many.
+    tail: i64,
+    tail_left: i64,
+    tail_len: i64,
 }
 
 impl Stream {
@@ -796,12 +804,28 @@ impl Stream {
             return [0.0; 2];
         }
         let (start, end) = self.play;
-        let p = self.pos;
+        let mut p = self.pos;
         if p < start || p >= end {
-            self.done = true;
-            return [0.0; 2];
+            if self.tail <= 0 || end <= start {
+                self.done = true;
+                return [0.0; 2];
+            }
+            // The tail: back from the edge it ran off, fading (the same audio the other
+            // way, so the turn can't click).
+            self.tail_len = self.tail.min(end - start);
+            self.tail_left = self.tail_len;
+            self.tail = 0;
+            self.forward = !self.forward;
+            p = if self.forward { start } else { end - 1 };
+            self.pos = p;
         }
         let mut x = self.faded(read, p);
+        if self.tail_len > 0 {
+            let g = self.tail_left as f32 / self.tail_len as f32;
+            x = [x[0] * g, x[1] * g];
+            self.tail_left -= 1;
+            self.done = self.tail_left <= 0;
+        }
         // Loop crossfade: the last frames before the jump back fade into what the jump
         // would otherwise skip, linearly (§6.5). That's in the sample whether or not it's
         // in the play range.
@@ -1120,6 +1144,8 @@ const VOICE_ROOM: usize = 24;
 struct Voice {
     id: u64,
     note: i64,
+    /// The key its pitch is of: the note, or (Slice Motion) its zone's root.
+    pitch: i64,
     zone: usize,
     vel: f32,
     age: u64,
@@ -1229,6 +1255,12 @@ pub struct SamplerRt {
     /// Frames rendered, and the frame the next stretcher may start at.
     frame: u64,
     live_from: u64,
+    /// Slice Motion: which of the zones a note plays.
+    pub motion: Motion,
+    /// The next slice Next plays, and the one played last (both counted in key order
+    /// among the zones that can play).
+    turn: usize,
+    last: usize,
 }
 
 impl SamplerRt {
@@ -1241,6 +1273,9 @@ impl SamplerRt {
             lives,
             frame: 0,
             live_from: 0,
+            motion: Motion::Off,
+            turn: 0,
+            last: usize::MAX,
             settings,
             base,
             hit: false,
@@ -1464,7 +1499,7 @@ impl SamplerRt {
                 // Its Tune may have moved.
                 Some((semis, keys)) if stretched && v.live != NO_LIVE => {
                     let root = self.zones[v.zone].root;
-                    v.octaves = semis as f32 / 12.0 + if keys { (v.note - root) as f32 / 12.0 } else { 0.0 };
+                    v.octaves = semis as f32 / 12.0 + if keys { (v.pitch - root) as f32 / 12.0 } else { 0.0 };
                 }
                 _ => v.live = NO_LIVE,
             }
@@ -1487,7 +1522,7 @@ impl SamplerRt {
                     v.stream.fade_out = b.fade_out as i64;
                     v.stream.x_fade = b.x_fade as i64;
                     v.stream.fading = 0;
-                    let offset = v.note - b.root;
+                    let offset = v.pitch - b.root;
                     v.variant = b.sync.as_ref().and_then(|sy| sy.note(offset));
                     let keys = b.sync.as_ref().is_some_and(|sy| sy.keys);
                     v.octaves = if keys && v.variant.is_none() { offset as f32 / 12.0 } else { 0.0 };
@@ -1505,6 +1540,7 @@ impl SamplerRt {
             self.voices.push(v);
         }
         self.clock = old.clock;
+        (self.turn, self.last) = (old.turn, old.last);
         (self.frame, self.live_from) = (old.frame, old.live_from);
         (self.mod_wheel, self.bend, self.pedal) = (old.mod_wheel, old.bend, old.pedal);
         self.held = old.held;
@@ -1530,10 +1566,13 @@ impl SamplerRt {
             return;
         }
         let velocity = if velocity <= 0 { 64 } else { velocity.min(127) };
-        if !self
-            .zones
-            .iter()
-            .any(|z| (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0)
+        // Slice Motion: the note plays one slice, whichever key it is.
+        let moved = self.next_slice();
+        if moved.is_none()
+            && !self
+                .zones
+                .iter()
+                .any(|z| (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0)
         {
             return;
         }
@@ -1562,10 +1601,16 @@ impl SamplerRt {
         let mut started = false;
         for zi in 0..self.zones.len() {
             let z = &self.zones[zi];
-            if !(z.keys.0..=z.keys.1).contains(&note) || !(z.vels.0..=z.vels.1).contains(&velocity) || z.play.1 <= z.play.0 {
+            let plays = match moved {
+                Some(m) => m == zi,
+                None => (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0,
+            };
+            if !plays {
                 continue;
             }
-            let v = self.make_voice(id, note, velocity, zi, age, ctx);
+            // (A slice in motion plays at its own pitch.)
+            let pitch = if moved.is_some() { z.root } else { note };
+            let v = self.make_voice(id, note, pitch, velocity, zi, age, ctx);
             if self.voices.len() >= MAX_VOICES
                 && let Some(i) = self.voices.iter().enumerate().min_by_key(|(_, v)| v.age).map(|(i, _)| i)
             {
@@ -1595,7 +1640,35 @@ impl SamplerRt {
         }
     }
 
-    fn make_voice(&mut self, id: u64, note: i64, velocity: i64, zi: usize, age: u64, ctx: &Context) -> Voice {
+    /// Slice Motion: the zone the next note plays (`None`: Motion is off, or no zone can
+    /// play). Without allocating: it runs on the audio thread.
+    fn next_slice(&mut self) -> Option<usize> {
+        if self.motion == Motion::Off {
+            return None;
+        }
+        let zones = &self.zones;
+        let playable = |i: usize| zones[i].play.1 > zones[i].play.0;
+        let n = (0..zones.len()).filter(|&i| playable(i)).count();
+        if n == 0 {
+            return None;
+        }
+        let k = if self.motion == Motion::Random && n > 1 {
+            self.seed = self.seed.wrapping_mul(0x0BB3_8435).wrapping_add(0x3619_636B);
+            let draw = (self.seed >> 8) as usize;
+            // One of the others than the last.
+            if self.last < n { (self.last + 1 + draw % (n - 1)) % n } else { draw % n }
+        } else {
+            self.turn % n
+        };
+        self.turn = (k + 1) % n;
+        self.last = k;
+        // The `k`th in key order (zones on one key: in their own order).
+        let before = |i: usize, j: usize| (zones[j].keys.0, j) < (zones[i].keys.0, i);
+        (0..zones.len()).find(|&i| playable(i) && (0..zones.len()).filter(|&j| playable(j) && before(i, j)).count() == k)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_voice(&mut self, id: u64, note: i64, pitch: i64, velocity: i64, zi: usize, age: u64, ctx: &Context) -> Voice {
         let s = self.settings.clone();
         let free_hz = self.free_lfo_hz();
         self.seed = self.seed.wrapping_mul(0x0BB3_8435).wrapping_add(0x3619_636B);
@@ -1666,6 +1739,10 @@ impl SamplerRt {
             fade_out: z.fade_out as i64,
             fading: 0,
             done: false,
+            // (A loop goes round instead.)
+            tail: if looping { 0 } else { (f64::from(z.tail_ms.max(0.0)) / 1000.0 * f64::from(z.sample.rate)) as i64 },
+            tail_left: 0,
+            tail_len: 0,
         };
         // Gain and pan (§6.6).
         let mut g = 2.3948107 * z.gain.powi(5) + 0.767467 * z.gain * z.gain;
@@ -1689,20 +1766,21 @@ impl SamplerRt {
         // Sync and Keys: Tune is in the render (the length stays); Keys transposes by
         // the note, from its render if there is one.
         let (octaves, variant) = match &z.sync {
-            None => (z.tune / 12.0 + s.tune + (note - z.root) as f32 / 12.0, None),
+            None => (z.tune / 12.0 + s.tune + (pitch - z.root) as f32 / 12.0, None),
             // Stretched as it plays: its Tune and (Keys) the note are the stretcher's.
             Some(sy) if sy.live.is_some() => {
-                (sy.live.unwrap_or(0.0) as f32 / 12.0 + if sy.keys { (note - z.root) as f32 / 12.0 } else { 0.0 }, None)
+                (sy.live.unwrap_or(0.0) as f32 / 12.0 + if sy.keys { (pitch - z.root) as f32 / 12.0 } else { 0.0 }, None)
             }
-            Some(sy) => match sy.note(note - z.root) {
+            Some(sy) => match sy.note(pitch - z.root) {
                 Some(i) => (0.0, Some(i)),
-                None if sy.keys => ((note - z.root) as f32 / 12.0, None),
+                None if sy.keys => ((pitch - z.root) as f32 / 12.0, None),
                 None => (0.0, None),
             },
         };
         let mut v = Voice {
             id,
             note,
+            pitch,
             zone: zi,
             vel,
             age,
@@ -1856,6 +1934,8 @@ impl SamplerRt {
         (self.glide, self.glide_target, self.glide_step) = (0.0, 0.0, 0.0);
         self.pedal = false;
         self.bend = 0.0;
+        // Slice Motion starts over.
+        self.turn = 0;
     }
 
     /// Mix the voices into interleaved `out`; returns the peak (left, right).
@@ -2234,6 +2314,7 @@ mod tests {
             lanes: None,
             reverse: false,
             once: false,
+            tail_ms: 0.0,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
@@ -2268,6 +2349,7 @@ mod tests {
             lanes: None,
             reverse: false,
             once: false,
+            tail_ms: 0.0,
         };
         SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
     }
@@ -2519,6 +2601,105 @@ mod tests {
         assert!(tail.windows(2).filter(|w| w[1] > w[0] * 1.01).count() >= 3, "and round again");
     }
 
+    /// A sampler of the 2 s ramp cut in `plays`, a zone a key from 36 (Repitch, one-shot).
+    fn chopped(plays: &[(usize, usize)]) -> SamplerRt {
+        let mut smp = synced(None);
+        let z = ZoneRt { tune: 0.0, ..smp.zones[0].clone() };
+        smp.zones = plays.iter().enumerate().map(|(i, &play)| ZoneRt { play, keys: (36 + i as i64, 36 + i as i64), ..z.clone() }).collect();
+        smp
+    }
+
+    /// The first frame heard of a note of `key` (the ramp tells where in the sample).
+    fn first_heard(smp: &mut SamplerRt, id: u64, key: i64) -> usize {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        smp.voices.clear();
+        smp.note_on(id, key, 100, &ctx);
+        smp.voices.last().map_or(usize::MAX, |v| v.stream.play.0 as usize)
+    }
+
+    /// Slice Motion, Next: every note plays the next slice in key order, whichever key,
+    /// at the slice's own pitch; zones that can't play are passed over, one zone plays
+    /// every time, and stopping starts over.
+    #[test]
+    fn motion_plays_the_slices_in_turn() {
+        let mut smp = chopped(&[(0, 1000), (5000, 5000), (20_000, 21_000), (40_000, 41_000)]);
+        assert_eq!(first_heard(&mut smp, 1, 60), usize::MAX, "off: no zone on that key");
+        smp.motion = Motion::Next;
+        let heard: Vec<usize> = (0..4).map(|i| first_heard(&mut smp, 2 + i, 60)).collect();
+        assert_eq!(heard, [0, 20_000, 40_000, 0], "in turn, the empty one passed over");
+        assert_eq!(smp.voices.last().unwrap().octaves, 0.0, "at its own pitch, two octaves from its key");
+        assert_eq!(first_heard(&mut smp, 9, 37), 20_000, "whichever key");
+        smp.fade_all();
+        assert_eq!(first_heard(&mut smp, 10, 60), 0, "stopped, it starts over");
+        // Zones on one key go in their own order; one zone plays every time.
+        smp.zones[3].keys = (36, 36);
+        smp.fade_all();
+        assert_eq!([first_heard(&mut smp, 11, 60), first_heard(&mut smp, 12, 60)], [0, 40_000]);
+        let mut one = chopped(&[(300, 900)]);
+        one.motion = Motion::Random;
+        assert_eq!([first_heard(&mut one, 1, 50), first_heard(&mut one, 2, 51)], [300, 300]);
+        let mut none = chopped(&[(5, 5)]);
+        none.motion = Motion::Next;
+        assert_eq!(first_heard(&mut none, 1, 36), usize::MAX);
+    }
+
+    #[test]
+    fn random_motion_never_repeats() {
+        let mut smp = chopped(&[(0, 1000), (20_000, 21_000), (40_000, 41_000)]);
+        smp.motion = Motion::Random;
+        let heard: Vec<usize> = (0..40).map(|i| first_heard(&mut smp, i, 60)).collect();
+        assert!(heard.windows(2).all(|w| w[0] != w[1]), "{heard:?}");
+        for a in [0, 20_000, 40_000] {
+            assert!(heard.contains(&a), "{a} in {heard:?}");
+        }
+        // Kept through an edit: the sampler made again goes on from where it was.
+        smp.motion = Motion::Next;
+        smp.fade_all();
+        first_heard(&mut smp, 50, 60);
+        let mut again = chopped(&[(0, 1000), (20_000, 21_000), (40_000, 41_000)]);
+        again.motion = Motion::Next;
+        again.adopt(smp);
+        assert_eq!(first_heard(&mut again, 51, 60), 20_000);
+    }
+
+    /// Tail: at the slice's end the note plays back from there, fading to nothing; no
+    /// longer than the slice; a reversed slice's tail goes forwards from its start.
+    #[test]
+    fn a_tail_plays_back_from_the_end_and_fades() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let heard = |tail_ms: f32, reverse: bool, n: usize| {
+            let mut smp = chopped(&[(48_000, 49_000)]);
+            smp.zones[0].keys = (0, 127);
+            smp.zones[0].tail_ms = tail_ms;
+            smp.zones[0].reverse = reverse;
+            smp.note_on(1, 60, 127, &ctx);
+            let mut out = vec![0.0; n * 2];
+            smp.render(&mut out);
+            out.chunks(2).map(|f| f[0]).collect::<Vec<f32>>()
+        };
+        let peak = |x: &[f32]| x.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let none = heard(0.0, false, 3000);
+        assert!(peak(&none[1010..]) < 1e-4, "no tail: silent past the end");
+        // 500 frames of tail (at 48 kHz).
+        let tail = heard(500.0 / 48.0, false, 3000);
+        assert!(tail[1100] > 0.2 && tail[1100] < none[900], "there, and quieter than the slice: {}", tail[1100]);
+        assert!(tail[1100] > tail[1300] && tail[1300] > tail[1480], "fading");
+        assert!(peak(&tail[1510..]) < 1e-4, "gone after 500 frames");
+        assert!((tail[1001] - tail[997]).abs() < 0.01, "no jump at the turn: {} {}", tail[997], tail[1001]);
+        let long = heard(1000.0, false, 4000);
+        assert!(long[1500] > 0.05 && peak(&long[2010..]) < 1e-4, "at most as long as the slice");
+        let back = heard(500.0 / 48.0, true, 3000);
+        assert!(back[1100] > 0.2 && peak(&back[1510..]) < 1e-4, "a reversed slice's tail");
+        // A loop has none.
+        let mut smp = chopped(&[(48_000, 49_000)]);
+        smp.settings.env_type = 2;
+        smp.zones[0].keys = (0, 127);
+        smp.zones[0].tail_ms = 100.0;
+        smp.zones[0].looped = Some((48_000, 49_000));
+        smp.note_on(1, 60, 127, &ctx);
+        assert_eq!(smp.voices[0].stream.tail, 0);
+    }
+
     /// Stem lanes: with them all on a voice plays the sample itself; a muted lane leaves
     /// the others' sum, reached over a few milliseconds on a sounding note, and unmuting
     /// goes back to the sample.
@@ -2637,7 +2818,20 @@ mod tests {
     fn stream(play: (i64, i64), looped: (i64, i64), x_fade: i64, forward: bool) -> (super::Stream, Vec<[f32; 2]>) {
         let data = (0..1000).map(|i| [i as f32, i as f32]).collect();
         let pos = if forward { play.0 } else { play.1 - 1 };
-        let st = super::Stream { pos, forward, play, looped: Some(looped), x_fade, fade_in: 0, fade_out: 0, fading: 0, done: false };
+        let st = super::Stream {
+            pos,
+            forward,
+            play,
+            looped: Some(looped),
+            x_fade,
+            fade_in: 0,
+            fade_out: 0,
+            fading: 0,
+            done: false,
+            tail: 0,
+            tail_left: 0,
+            tail_len: 0,
+        };
         (st, data)
     }
 
@@ -2828,6 +3022,7 @@ mod tests {
                 lanes: None,
                 reverse: false,
                 once: false,
+                tail_ms: 0.0,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
@@ -2870,6 +3065,7 @@ mod tests {
             lanes: None,
             reverse: false,
             once: false,
+            tail_ms: 0.0,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato

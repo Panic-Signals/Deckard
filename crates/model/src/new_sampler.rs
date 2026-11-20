@@ -19,10 +19,35 @@ pub enum StretchEngine {
     Live,
 }
 
+/// Slice Motion: which of the sound's slices a note plays.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// The one on its key.
+    #[default]
+    Off,
+    /// The next in key order, whichever key it is (round to the first).
+    Next,
+    /// A random one, never the one before.
+    Random,
+}
+
+impl Motion {
+    pub const ALL: [Motion; 3] = [Motion::Off, Motion::Next, Motion::Random];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Motion::Off => "Off",
+            Motion::Next => "Next",
+            Motion::Random => "Random",
+        }
+    }
+}
+
 /// The New Sampler's own settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NewSampler {
     pub stretch: StretchEngine,
+    pub motion: Motion,
 }
 
 /// How a zone plays.
@@ -156,9 +181,20 @@ pub struct ZoneMeta {
     pub speed: f64,
     /// A one-shot: a note plays it through to its end, however short the note.
     pub once: bool,
+    /// Its tail, ms (0: none): a note that reaches its end plays back from there this
+    /// long, fading out.
+    pub tail: f64,
 }
 
+/// The longest tail, ms.
+pub const TAIL_MAX: f64 = 2000.0;
+
 impl ZoneMeta {
+    /// [`ZoneMeta::tail`] within its limits (0 when unset).
+    pub fn tail_ms(&self) -> f64 {
+        if self.tail.is_finite() { self.tail.clamp(0.0, TAIL_MAX) } else { 0.0 }
+    }
+
     /// [`ZoneMeta::speed`] as a factor: 1 when unset, within a quarter to four times.
     pub fn speed_factor(&self) -> f64 {
         if self.speed > 0.0 && self.speed.is_finite() { self.speed.clamp(0.25, 4.0) } else { 1.0 }
@@ -305,6 +341,7 @@ fn from_word<T: Copy>(table: &[(T, &'static str)], w: &str) -> Option<T> {
 }
 
 const STRETCH: &[(StretchEngine, &str)] = &[(StretchEngine::Rendered, "rendered"), (StretchEngine::Live, "live")];
+const MOTIONS: &[(Motion, &str)] = &[(Motion::Off, "off"), (Motion::Next, "next"), (Motion::Random, "random")];
 const MODES: &[(PlayMode, &str)] = &[(PlayMode::Repitch, "repitch"), (PlayMode::Sync, "sync"), (PlayMode::Keys, "keys")];
 const STARTS: &[(StartGrid, &str)] =
     &[(StartGrid::Off, "off"), (StartGrid::Sixteenth, "16"), (StartGrid::Eighth, "8"), (StartGrid::Quarter, "4"), (StartGrid::Bar, "bar")];
@@ -318,16 +355,20 @@ fn lines(text: &str) -> impl Iterator<Item = (&str, &str)> {
 
 impl NewSampler {
     pub fn to_text(&self) -> String {
-        format!("v 1\nstretch {}", word(STRETCH, self.stretch, |a, b| a == b))
+        let mut t = format!("v 1\nstretch {}", word(STRETCH, self.stretch, |a, b| a == b));
+        if self.motion != Motion::Off {
+            t += &format!("\nmotion {}", word(MOTIONS, self.motion, |a, b| a == b));
+        }
+        t
     }
 
     pub fn from_text(text: &str) -> NewSampler {
         let mut n = NewSampler::default();
         for (k, v) in lines(text) {
-            if k == "stretch"
-                && let Some(s) = from_word(STRETCH, v)
-            {
-                n.stretch = s;
+            match k {
+                "stretch" => n.stretch = from_word(STRETCH, v).unwrap_or(n.stretch),
+                "motion" => n.motion = from_word(MOTIONS, v).unwrap_or_default(),
+                _ => {}
             }
         }
         n
@@ -376,6 +417,9 @@ impl ZoneMeta {
         if self.once {
             t += "once 1\n";
         }
+        if self.tail_ms() > 0.0 {
+            t += &format!("tail {}\n", self.tail_ms());
+        }
         t + "file " + &self.file
     }
 
@@ -395,6 +439,7 @@ impl ZoneMeta {
                 "stems_only" => m.stems_only = v == "1",
                 "reverse" => m.reverse = v == "1",
                 "once" => m.once = v == "1",
+                "tail" => m.tail = v.parse().ok().filter(|t: &f64| t.is_finite()).map_or(0.0, |t| t.clamp(0.0, TAIL_MAX)),
                 "speed" => m.speed = v.parse().unwrap_or(0.0),
                 "bpm" => m.bpm = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
                 "beats" => m.beats = v.parse().ok().filter(|b: &f64| b.is_finite() && *b > 0.0),
@@ -434,9 +479,17 @@ mod tests {
 
     #[test]
     fn settings_round_trip_as_text() {
-        for n in [NewSampler::default(), NewSampler { stretch: StretchEngine::Live }] {
+        let live = NewSampler { stretch: StretchEngine::Live, ..Default::default() };
+        for n in [
+            NewSampler::default(),
+            live,
+            NewSampler { motion: Motion::Next, ..live },
+            NewSampler { motion: Motion::Random, ..Default::default() },
+        ] {
             assert_eq!(NewSampler::from_text(&n.to_text()), n);
         }
+        assert_eq!(NewSampler::default().to_text(), "v 1\nstretch rendered", "nothing new said when Motion is off");
+        assert_eq!(NewSampler::from_text("stretch live\nmotion sideways"), live, "a motion not known is off");
     }
 
     #[test]
@@ -463,6 +516,7 @@ mod tests {
             reverse: true,
             speed: 1.5,
             once: true,
+            tail: 120.0,
         };
         assert_eq!(lane_levels(&full.stems), [0.0, 0.0, 1.0, 0.0], "the soloed lane only");
         let mut open = full.stems.clone();
@@ -512,6 +566,9 @@ mod tests {
         let m = ZoneMeta::from_text("v 9\nsparkle 3\nnonsense\nbpm -4\nroot 300\nfile a.wav").unwrap();
         assert_eq!(m, ZoneMeta { file: "a.wav".into(), ..ZoneMeta::default() });
         assert_eq!(ZoneMeta::from_text("bpm 120"), None);
+        assert_eq!(ZoneMeta::from_text("tail 99999\nfile a.wav").unwrap().tail, TAIL_MAX);
+        assert_eq!(ZoneMeta::from_text("tail soon\nfile a.wav").unwrap().tail, 0.0);
+        assert!(!ZoneMeta { file: "a.wav".into(), ..ZoneMeta::default() }.to_text().contains("tail"));
         assert_eq!(NewSampler::from_text("stretch warp\nzzz"), NewSampler::default());
     }
 }

@@ -228,7 +228,7 @@ mod tests {
     fn marks_and_unmarks_a_sound() {
         let mut d = doc("/s/a.wav");
         assert_eq!(d.project().groups[0].sounds[0].new_sampler, None);
-        let live = NewSampler { stretch: StretchEngine::Live };
+        let live = NewSampler { stretch: StretchEngine::Live, ..Default::default() };
         d.set_new_sampler(0, 0, Some(&live)).unwrap();
         assert_eq!(d.project().groups[0].sounds[0].new_sampler, Some(live));
         assert!(d.undo());
@@ -375,11 +375,14 @@ mod tests {
     #[test]
     fn both_round_trip_through_a_save() {
         let mut d = doc("/s/a.wav");
-        d.set_new_sampler(0, 0, Some(&NewSampler { stretch: StretchEngine::Live })).unwrap();
+        d.set_new_sampler(0, 0, Some(&NewSampler { stretch: StretchEngine::Live, ..Default::default() })).unwrap();
         let file = path_of(&d);
         d.note_zone_meta(0, 0, 0, &meta(&file)).unwrap();
         let again = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
-        assert_eq!(again.project().groups[0].sounds[0].new_sampler, Some(NewSampler { stretch: StretchEngine::Live }));
+        assert_eq!(
+            again.project().groups[0].sounds[0].new_sampler,
+            Some(NewSampler { stretch: StretchEngine::Live, ..Default::default() })
+        );
         assert_eq!(zone_meta(&again), Some(meta(&file)));
     }
 
