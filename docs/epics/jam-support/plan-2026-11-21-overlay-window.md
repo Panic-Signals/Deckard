@@ -45,25 +45,26 @@ title alone and `counter(page)` is `Some("1/3")` only when `pages > 1`. The bar 
 strip body no longer allocates `TITLE_ROW` when it is drawn inside the window. (The strip's own
 `TITLE_ROW` stays for the `paint` path so no existing test changes meaning.)
 
-**D4 — mouse passthrough on, always.** This is the structural answer to "the strip belongs to
-the encoder", and it is what makes a click on the strip reach the view underneath. The cost is
-that the window cannot be dragged by the mouse — so:
+**D4 — the window takes the mouse, and its bar is what moves it.** *(Reversed 2026-11-21, on the
+human's call and the reference's own behaviour.)* This first read the brief literally —
+`with_mouse_passthrough(true)` as "the strip belongs to the encoder" — but the reference's overlay
+is **movable anywhere on screen** (`work-items/22` says so, and its `isMouseDragging` state only
+exists because the window receives presses), so passthrough made a window that could never be put
+where the user wanted it. Now: no passthrough, and the bar is a title bar — `Sense::click_and_drag`
+on the bar sends `ViewportCommand::StartDrag`. The body still belongs to the encoder: no click
+target, no hover, nothing to hit, so a stray click on the slots does nothing at all.
 
-**D5 — the position is a settings' offset from the main window, clamped to the display.** With
-D4 the window cannot be dragged on any platform that honours cursor hit-testing, so "position
-persisted" means: remember where it was, bring it back there, and never restore it somewhere the
-user cannot reach it. What is saved is an offset in points from the **main window's top-left**,
-not an absolute screen position (`Settings::jam_strip_pos: Option<(f32, f32)>`), so the strip
-comes back beside the app on whichever display the app opens on — the brief's "restored on a
-second monitor" clause — with no monitor rectangle arithmetic to get wrong. (egui exposes a
-viewport's `monitor_size`, never monitor origins, so an absolute-position model could not decide
-whether a saved point is on screen at all.) The saved offset is written when the window reports
-an outer rect that differs from the one we sent — a window manager's placement, or a platform
-that ignores passthrough — and never in the frame we commanded a position.
-`jam_window::clamp_axis` keeps `KEEP` points of the window inside the main window's display on
-each axis (its bar on y), so an offset saved on a wider desktop still lands somewhere usable.
-Nothing saved centres the window over the main window, as the reference centres over its parent
-from live bounds.
+**D5 — the position is a setting, and the drag writes it.** With D4 the window is movable, so the
+offset from the main window's top-left (`Settings::jam_strip_pos: Option<(f32, f32)>`) is both read
+on show and written when the window reports an outer rect that differs from the one we sent — a
+drag, a window manager's placement, or a display change. It is never written in the frame we
+commanded a position. The offset, not an absolute point: the strip then comes back beside the app
+on whichever display the app opens on, which is the brief's "restored on a second monitor" clause,
+and it needs no monitor rectangles (egui exposes a viewport's `monitor_size`, never monitor
+origins). `jam_window::clamp_axis` keeps `KEEP` points of the window inside the main window's
+display on each axis (its bar on y), so an offset saved on a wider desktop still lands somewhere
+usable. Nothing saved centres the window over the main window, as the reference centres over its
+parent from live bounds.
 
 **D6 — two lifetimes stay untangled.** The script owns the page's lifetime; the app owns the
 *window's*. The window exists exactly while `jam_strip()` returns `Some`. That is one rule, in
@@ -72,7 +73,7 @@ the idle timer keeps its window, and the moment the script publishes none, the v
 called and eframe drops it.
 
 **D7 — the decoration-free window is what the platform risk is about, so it is proved first.**
-`with_decorations(false)` + `with_mouse_passthrough(true)` + `with_taskbar(false)` +
+`with_decorations(false)` + `with_taskbar(false)` +
 `with_window_level(AlwaysOnTop)` + `with_resizable(false)` + `with_active(false)` (never steals
 focus on show).
 
@@ -85,11 +86,11 @@ editing, Scale 1/2) and are the closest reading of them.
 
 | | points |
 |---|---|
-| window width | most of the app's: `width_for(main) = (main × 0.78).clamp(560, 1180)` — 1170 for a 1500-wide app, as the capture's 1181 is |
+| window width | `width_for(main, slots) = (main × 0.78).clamp(560, 1180).min(slots × 292)` — 1170 for a 1500-wide app showing eight slots, as the capture's 1181 is; **a page of one slot is one column wide (292), never stretched across the bar** |
 | bar | 28 |
 | body | 144 = header band 40 + value row 40 + sub row 40 + bottom pad 24 |
 | type | header 11.5, value 21, sub 13, page name 13, counter 12 |
-| columns | `width / slots`, equal, 1 pt separators between them (never on the outer edges) |
+| columns | `width / slots`, equal, capped at 292 (`COL_MAX`), 1 pt separators between them (never on the outer edges) |
 | layout | group header left-aligned over its run's **first** column; value and sub **centred** |
 | cursor | a rule under each column's sub-label; the focused one 2.5 pt white, the rest 1 pt dim |
 | editing | corner brackets, inset 6 pt, spanning the value and sub rows |
@@ -121,8 +122,8 @@ New: `apps/viewer/src/jam_window.rs`
   `ViewportBuilder` (inner size from `window_size(slots)`, the flags of D7) and calls
   `ctx.show_viewport_immediate(id(), builder, |ui, _| paint(…))`; it returns the offset the window
   ended up at when that differs from the one it was given.
-- `fn paint(ui, name, counter, slots, rows)` — the bar (name left, counter and mark right), then
-  `jam_strip::slots(ui, slots, rows)`.
+- `fn paint(ui, name, counter, slots, rows, width, draggable)` — the bar (name and counter at
+  the left; dragging it moves the window), then `jam_strip::slots(ui, slots, rows, width)`.
 - `pub fn window_size(slots) -> Vec2`, `pub fn position(saved, main, size, monitor) -> Pos2`,
   `pub fn offset_of(placed, main) -> Vec2`, `fn clamp_axis(offset, len, monitor) -> f32`,
   `pub fn id() -> ViewportId` (`"deckard-jam-strip"`).

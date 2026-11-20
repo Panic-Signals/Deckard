@@ -45,10 +45,16 @@ const INK: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
 const HEADER_INK: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 const RULE: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
 
-/// The width a strip takes for an app window `main` points wide: the reference's bar is most
-/// of its window, not a row of small cells.
-pub fn width_for(main: f32) -> f32 {
-    (main * 0.78).clamp(560.0, 1180.0)
+/// The widest a column gets: the reference's own. Its Grid page (four slots) and its Scale page
+/// (eight) wear the same column width, so a page of one or two slots is that many columns wide
+/// and no wider — a single item is never stretched across the whole bar.
+pub const COL_MAX: f32 = 292.0;
+
+/// The strip's width for an app window `main` points wide showing a page of `slots`: its columns
+/// divide most of the app's width, and never stretch past [`COL_MAX`].
+pub fn width_for(main: f32, slots: usize) -> f32 {
+    let want = (main * 0.78).clamp(560.0, 1180.0);
+    want.min(slots.max(1) as f32 * COL_MAX)
 }
 
 /// Where the page's `slot` of `count` sits, in points from the strip's top-left corner:
@@ -364,7 +370,7 @@ mod tests {
     fn the_columns_divide_the_window_and_the_rows_stack_as_the_capture_has_them() {
         // A strip is a bar: however many slots a page holds, they share the window's width, so
         // four slots of a 1184 wide strip are 296 wide each, as the reference's Grid page is.
-        let w = width_for(1500.0);
+        let w = width_for(1500.0, 8);
         assert_eq!(w, 1170.0, "most of the app's width, clamped");
         let (a, b) = (slot_rect(0, 4, w), slot_rect(1, 4, w));
         assert_eq!(a.width(), w / 4.0);
@@ -373,8 +379,19 @@ mod tests {
         assert_eq!(a.size(), b.size(), "all columns the same size");
         assert_eq!(slot_rect(3, 4, w).right(), w, "the last column ends at the edge");
         assert!(BODY_H >= 80.0, "a bar tall enough for three lines of type");
-        // A page of one slot still fills the width, as Tempo's window does.
-        assert_eq!(slot_rect(0, 1, w).width(), w);
+    }
+
+    #[test]
+    fn a_page_of_one_slot_is_one_column_wide_not_a_stretched_bar() {
+        // The fault this replaces: `Scale 2/2` holds one slot, and it was drawn across the whole
+        // bar — "Horizontal" floating in the middle of 1170 points. A column has the reference's
+        // width, so the window is that wide and no wider.
+        let one = width_for(1500.0, 1);
+        assert_eq!(one, COL_MAX, "one slot: one column, the reference's width");
+        assert_eq!(width_for(1500.0, 2), COL_MAX * 2.0);
+        assert_eq!(width_for(1500.0, 4), 1168.0, "four slots reach the app's width, as Grid does");
+        assert_eq!(width_for(1500.0, 8), 1170.0, "and eight are the bar's");
+        assert_eq!(slot_rect(0, 1, one).width(), COL_MAX);
     }
 
     #[test]

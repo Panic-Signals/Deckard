@@ -58,11 +58,12 @@ so the run proves DECKARD's own `maschine_jam`, not NI's copy.
 3. **Its own lifetime.** `TEMPO` (static): the window stays up past two seconds of no input and
    goes on the next page button. `SCALE` (non-static): untouched for ~2 s, it goes by itself. The
    window must never outlive the page, and never lag it.
-4. **No mouse.** Click, double-click and drag on the strip: the click lands on whatever is under
-   it (the app's view, the desktop), and the strip neither moves nor takes focus nor changes the
-   page. **On Wayland this row is expected to FAIL** (`set_cursor_hittest` is unimplemented there;
-   egui-winit logs it) — record the compositor (Wayland vs X11 vs macOS) with the result. What
-   must hold even there: a click on the strip does nothing at all — no hover, no drag, no cursor.
+4. **Moved by its bar, inert elsewhere.** Drag the strip's bar: the window follows the pointer and
+   stays where it is let go. Click and double-click the slots: nothing happens — no hover state, no
+   focus change, no page change (the body has no click target at all). This row replaced a
+   click-through test: the reference's window is movable, and a movable window takes the pointer.
+   Record the compositor (macOS / X11 / Wayland) with the result, since drag-out-of-a-chromeless-
+   window is the platform-sensitive part.
 5. **Position.** Quit and restart with the strip showing: it comes back at the same offset from the
    app's top-left. Then move the app to a second display (or shrink the desktop): the strip comes
    back beside it and some of it is still reachable — never wholly off-screen.

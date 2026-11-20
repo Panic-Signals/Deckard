@@ -21,7 +21,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 
 /// The window's own bar: the page's name left, the counter and the mark right. The
 /// reference has no window chrome above it, and no buttons.
-pub const BAR_H: f32 = 18.0;
+pub const BAR_H: f32 = 28.0;
 /// How much of the window stays on screen whatever was saved: this many points of its
 /// width, and (on the y axis) its bar.
 const KEEP: f32 = 40.0;
@@ -76,7 +76,7 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
     // (Headless or first frame: no main window yet, so the strip has nothing to sit beside.)
     let main = main.unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(1500.0, 930.0)));
     let monitor = monitor.unwrap_or(main.size());
-    let width = jam_strip::width_for(main.width());
+    let width = jam_strip::width_for(main.width(), slots);
     let size = window_size(width);
     let at = position(saved, main, size, monitor);
     let builder = egui::ViewportBuilder::default()
@@ -84,7 +84,6 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
         .with_inner_size(size)
         .with_position(at)
         .with_decorations(false)
-        .with_mouse_passthrough(true)
         .with_resizable(false)
         // (Shown, never focused: the strip must not take the keyboard from the app.)
         .with_active(false)
@@ -99,7 +98,7 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
             let kind = if class == egui::ViewportClass::EmbeddedWindow { "EMBEDDED (a panel in the app)" } else { "native window" };
             eprintln!("jam strip: {kind} at {at:?} size {size:?}");
         }
-        paint(ui, &name, counter.as_deref(), slots, rows, width);
+        paint(ui, &name, counter.as_deref(), slots, rows, width, true);
     });
     // What the window (or the window manager) made of that place. With mouse passthrough on
     // the window cannot be dragged, so a difference here is the manager's placement, or a
@@ -110,8 +109,16 @@ pub fn show(ctx: &egui::Context, page: Option<(&OsoPage, &[Row])>, saved: Option
 }
 
 /// The window's contents: its bar, then the published page's slots.
-pub(crate) fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, slots: usize, rows: &[Row], width: f32) {
-    let (bar, _) = ui.allocate_exact_size(Vec2::new(width, BAR_H), egui::Sense::hover());
+///
+/// `draggable` is the real window's: the bar is what moves it, as a title bar does — the
+/// reference's overlay is moved around the screen, and its body still belongs to the encoder
+/// (no click target, no hover, nothing to hit).
+pub(crate) fn paint(ui: &mut egui::Ui, name: &str, counter: Option<&str>, slots: usize, rows: &[Row], width: f32, draggable: bool) {
+    let sense = if draggable { egui::Sense::click_and_drag() } else { egui::Sense::hover() };
+    let (bar, grab) = ui.allocate_exact_size(Vec2::new(width, BAR_H), sense);
+    if draggable && grab.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
     let painter = ui.painter();
     painter.rect_filled(bar, 0.0, Color32::from_rgb(0x44, 0x44, 0x44));
     painter.hline(bar.x_range(), bar.bottom() - 0.5, egui::Stroke::new(1.0, Color32::from_rgb(0x5a, 0x5a, 0x5a)));
@@ -147,8 +154,8 @@ mod tests {
         // the same window, as the reference's Tempo and Grid pages are.
         assert_eq!(window_size(1170.0), Vec2::new(1170.0, jam_strip::BODY_H + BAR_H));
         assert_eq!(window_size(560.0).y, window_size(1170.0).y, "the height is the rows', not the width's");
-        assert_eq!(jam_strip::width_for(1500.0), 1170.0, "most of the app's width");
-        assert_eq!(jam_strip::width_for(600.0), 560.0, "and never narrower than a readable bar");
+        assert_eq!(jam_strip::width_for(1500.0, 8), 1170.0, "most of the app's width");
+        assert_eq!(jam_strip::width_for(600.0, 8), 560.0, "and never narrower than a readable bar");
     }
 
     #[test]
