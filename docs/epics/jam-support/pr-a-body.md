@@ -26,8 +26,8 @@ dragging it moves the window, and the body has no click target at all, because t
 to the encoder. Its place is remembered as an offset from the app window, so it comes back beside
 the app on whatever display the app opens on, clamped so it can never be restored off-screen.
 
-**Preferences ▸ Hardware** carries `Show the on-screen strip`: off, the pages still publish and the
-controller behaves as ever, and only the window goes. Switching it clears the saved place, so the
+**Preferences ▸ Hardware** carries `Show the on-screen overlay`: off, the pages still publish and
+the controller behaves as ever, and only the window goes. Switching it clears the saved place, so the
 window comes back beside the app rather than wherever it was last left.
 
 **The pages** (`crates/surface/lua/devices/maschine_jam/main.lua`). One composer per OSO type, a

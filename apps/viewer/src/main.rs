@@ -1129,7 +1129,7 @@ pub struct App {
     jam: Option<jam_io::JamIo>,
     jam_device: Option<deckard_surface::device::Device>,
     /// `--jam`: run the Jam's script, and press `jam_hil_presses` on it, with no Jam plugged
-    /// in — how the on-screen strip and its window are looked at without hardware
+    /// in — how the on-screen overlay and its window are looked at without hardware
     /// (`docs/epics/jam-support/hil/strip-window-2026-11-21.md`).
     jam_hil: bool,
     jam_hil_presses: Vec<&'static str>,
@@ -3380,9 +3380,9 @@ impl App {
                     ui.end_row();
                     ui.label("");
                     if ui
-                        .checkbox(&mut self.settings.show_strip, "Show the on-screen strip")
+                        .checkbox(&mut self.settings.show_overlay, "Show the on-screen overlay")
                         .on_hover_text(
-                            "The Jam's parameter page, drawn in its own small window over the app. Off: the pages still run, so the encoders, the lights and every page behave as they ever did, but nothing is drawn. Switching it puts the window back beside the app.",
+                            "The Jam's on-screen overlay — the page its script publishes (the OSO) — drawn in its own small window over the app. Off: the pages still run, so the encoders, the lights and every page behave as they ever did, but nothing is drawn. Switching it puts the window back beside the app. (The Jam's touchstrips are unaffected.)",
                         )
                         .changed()
                     {
@@ -12061,7 +12061,7 @@ impl App {
         // by that page's own lifetime (never by a mode), over whatever view is showing, and
         // never in front of the mouse. No page draws no window.
         let shown = self.jam_shown();
-        let strip = if self.settings.show_strip {
+        let strip = if self.settings.show_overlay {
             shown.as_ref().map(|(page, rows)| (page, rows.as_slice()))
         } else {
             None

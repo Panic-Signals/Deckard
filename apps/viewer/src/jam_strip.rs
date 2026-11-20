@@ -1,4 +1,4 @@
-//! The Jam's on-screen strip: the focused OSO page the surface host stored
+//! The Jam's on-screen overlay (the manual's OSO): the focused page the surface host stored
 //! (`deckard_surface::OsoPage`, published by `maschine_jam` through `deckard.oso`)
 //! rendered as the reference draws it — the group header in its own band spanning
 //! its slots, the value, then the sub-label; the focused slot underlined, the
