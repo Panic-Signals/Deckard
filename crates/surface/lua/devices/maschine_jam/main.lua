@@ -816,7 +816,7 @@ local function perform_menu()
         if to ~= mode_of(s) then deckard.perform_mode(deckard.state().group, to + 1) end
       end,
     },
-  }, { static = true })
+  }, { idle = true })
 end
 -- ---- the OSO page ---------------------------------------------------------------
 -- The focused page as structured slots for the viewer strip. One slot per setting:
@@ -1736,7 +1736,17 @@ function M.button(name, down)
     deckard.song_view(not s.song_view)
     set_view("song")
   elseif name == "PAD_MODE" then
-    set_view(shift() and "keyboard" or "pad")
+    if shift() then
+      set_view("keyboard")
+      -- The rig, 2026-11-21: switching to the keyboard view shows the keyboard's scales (the
+      -- Scale OSO), not an empty strip until the encoder is touched. This supersedes the
+      -- 2026-11-20 finding in `hil/strip-repoint-2026-11-20.md` row 2, which had it the other
+      -- way round; the page is the Scale OSO, never a page of the viewer's own.
+      scale_menu({ idle = true })
+    else
+      set_view("pad")
+      close_menu()
+    end
   elseif name == "NOTE_REPEAT" then
     if shift() then
       st.arp = not st.arp

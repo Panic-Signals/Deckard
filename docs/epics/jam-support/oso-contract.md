@@ -38,10 +38,11 @@ deckard.oso({
 - **`pages` never counts a page that cannot exist.** `Arpeggiator` is always `3` (8 / 7 / 2);
   `Scale` is `8 + 1`, so it is `2` while the keyboard layout is isomorphic and `1` otherwise.
   A `2/2` that renders nothing is a bug in the composer.
-- **A view switch draws nothing.** An OSO appears when the encoder is touched or a menu is
-  opened, and the strip is empty otherwise — there is no page for "the keyboard view is
-  selected" (one existed once, and it hid the fact that the eight-plus-one split belonged to
-  `Scale`).
+- **A view switch draws nothing**, with one rig correction (2026-11-21): **SHIFT + PAD_MODE
+  opens the keyboard's scales — the `Scale` OSO** — where it drew nothing until an encoder touch.
+  What survives is the reason the rule existed: there is no page of the *viewer's* own for "the
+  keyboard view is selected" (one existed once, and it hid the fact that the eight-plus-one split
+  belonged to `Scale`).
 - **`focus` and `editing` are the script's on every page**, menu or tab. The host does not compute
   them, keep a second copy, or advance them on its own — that is exactly how the underline came to
   sit on a slot the encoder was not on.
@@ -96,7 +97,7 @@ Two lifetimes, both inherited from NI's model (`JamHelper.isOSOTypeStatic`; the 
 
 | | static | non-static |
 |---|---|---|
-| types | `GRID`, `TEMPO`, `REC_MODE`, `RANDOMIZER`, `PERFORM_FX` | everything else — `SCALE`, `ARP_REPEAT`, `SWING`, `TUNE`, `LOCK`, `NOTES` |
+| types | `GRID`, `TEMPO`, `REC_MODE`, `RANDOMIZER` (`PERFORM_FX` was here: **corrected on the rig, 2026-11-21** — it arms the idle timer and goes) | everything else — `SCALE`, `ARP_REPEAT`, `SWING`, `TUNE`, `LOCK`, `NOTES`, `PERFORM_FX` |
 | opened by | its own key or chord, on the press | its trigger, usually the encoder touch |
 | closed by | that key again, **the controller's page changing**, the device going | the idle timer, an explicit close, a page change |
 | idle timer | **never armed** | armed on show: `DEFAULT_OSO_TIMEOUT = 70` ticks ≈ **2 s** |

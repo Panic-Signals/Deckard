@@ -48,8 +48,11 @@ fn the_strip_renders_the_published_page() {
     run(&mut app, vec![Event::Button("SHIFT", true)]);
     press(&mut app, "PAD_MODE");
     run(&mut app, vec![Event::Button("SHIFT", false)]);
-    assert!(app.jam_strip().is_none(), "the plain keyboard view draws no strip");
-    // Touching the encoder opens the Scale OSO: eight slots on its first page.
+    // The keyboard view opens its scales: the Scale OSO, on the view switch (2026-11-21 — it used
+    // to take an encoder touch).
+    let (switched, _, _) = app.jam_strip().expect("the keyboard view publishes the Scale OSO");
+    assert_eq!(switched, "Scale 1/2");
+    // The encoder's touch finds it already open and changes nothing.
     run(&mut app, vec![Event::Button("ENCODER_TOUCH", true)]);
     let (title, slots, rows) = app.jam_strip().expect("the Scale OSO publishes");
     assert_eq!(title, "Scale 1/2", "the counter comes from the published page");

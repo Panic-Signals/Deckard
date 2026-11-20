@@ -26,6 +26,8 @@ timer.
   anyway).
 - `PERFORM FX` is marked static too — the RE list is `GRID`, `TEMPO`, `REC_MODE`, `RANDOMIZER`,
   `PERFORM_FX`, and item 33's table had it wrong.
+  **Superseded 2026-11-21 (rig):** PERFORM FX does go by itself, so it arms the idle timer
+  and is not static. The rest of the RE list stands.
 
 ## Tests
 

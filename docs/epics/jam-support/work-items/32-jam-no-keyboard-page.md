@@ -17,7 +17,9 @@ separate page called `Keyboard` (6 + 3) and left `Scale` as one page of nine.
 
 ## What changed
 
-- **Nothing is published for a keyboard view.** `build_oso` has no branch for it: the strip is empty
+- **Nothing is published for a keyboard view.** (*Superseded 2026-11-21 on the rig:* SHIFT + PAD_MODE
+  now opens the `Scale` OSO — the keyboard's scales. What survives is the item's point: that page is
+  `Scale`, never a page of the viewer's own.) `build_oso` has no branch for it: the strip is empty
   until the encoder is touched or a menu opens.
 - **`Scale` is the paged OSO**: eight slots then one, `pages` `2` while the layout is isomorphic and
   `1` otherwise, the page derived from the cursor exactly as the ARP's is (`at` 9 → page 2).

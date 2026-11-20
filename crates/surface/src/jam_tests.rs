@@ -847,10 +847,11 @@ fn touching_the_encoder_opens_the_scale_and_it_closes_by_itself() {
     assert!(messages(&d.button("ENCODER_TOUCH", true, &v, t)).is_empty(), "Project View has none");
     d.button("ENCODER_TOUCH", false, &v, t);
     hold(&mut d, &v, "SHIFT");
-    press(&mut d, &v, "PAD_MODE");
+    let out = press(&mut d, &v, "PAD_MODE");
     release(&mut d, &v, "SHIFT");
-    let out = d.button("ENCODER_TOUCH", true, &v, t);
-    assert_eq!(messages(&out), ["SCALE ▸ Root Note: C3"]);
+    assert_eq!(messages(&out), ["SCALE ▸ Root Note: C3"], "the keyboard view opens its scales");
+    // (The touch that used to be what opened it now finds it open, so it adds nothing.)
+    assert!(messages(&d.button("ENCODER_TOUCH", true, &v, t)).is_empty(), "already open");
     d.button("ENCODER_TOUCH", false, &v, t);
     press(&mut d, &v, "ENCODER");
     assert_eq!(apps(&d.encoder(2, &v, t)), [Action::Scale { root: 62, bank: 0, kind: 0 }]);
@@ -1302,14 +1303,17 @@ fn jam_oso_pages_come_from_maschine_jam() {
     assert_eq!(format!("{} {}/{}", p1.title, p1.page, p1.pages), "Arpeggiator 1/3");
     assert_eq!(format!("{} {}/{}", p2.title, p2.page, p2.pages), "Arpeggiator 2/3");
     assert_eq!(format!("{} {}/{}", p3.title, p3.page, p3.pages), "Arpeggiator 3/3");
-    // KEYBOARD with no menu publishes nothing: the reference opens an OSO on an encoder
-    // touch, not on a view switch.
+    // KEYBOARD shows the keyboard's scales: the view switch opens the Scale OSO itself, never a
+    // page of the viewer's own. (Until 2026-11-21 this asserted an empty strip — the rig now has
+    // it the other way round.)
     press(&mut d, &v, "SONG");
     hold(&mut d, &v, "SHIFT");
     press(&mut d, &v, "PAD_MODE");
     release(&mut d, &v, "SHIFT");
     d.tick(&v, Instant::now());
-    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the keyboard view draws no strip");
+    let scales = d.oso().expect("the keyboard view publishes the Scale OSO");
+    assert_eq!(scales.title, "Scale");
+    assert!(!scales.slots.is_empty(), "and it is the Scale page, not an empty one");
     // The Scale OSO's own second page is the layout's direction, so it exists only while
     // the layout is isomorphic. (ARP is still on from above; turn it off so the encoder's
     // menu is the Scale OSO.)
@@ -1379,14 +1383,13 @@ fn menu_cursor_moves_the_published_focus() {
     d.tick(&v, Instant::now());
     let arp = d.oso().expect("ARP page 2");
     assert_eq!((arp.page, arp.focus), (2, 0), "the cursor crosses onto the new page");
-    // The plain keyboard view publishes nothing: the reference opens an OSO on an encoder
-    // touch or a menu key, never on a view switch.
+    // The keyboard view opens its own scales on the view switch (2026-11-21): the Scale OSO.
     press(&mut d, &v, "SONG");
     hold(&mut d, &v, "SHIFT");
     press(&mut d, &v, "PAD_MODE");
     release(&mut d, &v, "SHIFT");
     d.tick(&v, Instant::now());
-    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the keyboard view draws no strip");
+    assert_eq!(d.oso().expect("the keyboard view publishes").title, "Scale");
     // Touching the encoder opens the Scale OSO, paged eight then one: the ninth slot is the
     // layout's direction, which exists only while the layout is isomorphic.
     // (ARP is still on from above, so turn it off: the encoder's menu is the Scale OSO.)
@@ -1593,14 +1596,14 @@ fn jam_oso_pages_need_no_ni_install() {
     let p3 = d.oso().expect("ARP page 3");
     assert_eq!((p3.page, p3.pages), (3, 3));
     assert_eq!(filled(&d), Some(2), "ARP page 3 has 2 slots");
-    // KEYBOARD with no menu publishes nothing (an OSO opens on an encoder touch), and the
-    // Scale OSO's second page exists only while the layout is isomorphic.
+    // KEYBOARD publishes the Scale OSO on the view switch, and that page's second half exists
+    // only while the layout is isomorphic.
     press(&mut d, &v, "SONG");
     hold(&mut d, &v, "SHIFT");
     press(&mut d, &v, "PAD_MODE");
     release(&mut d, &v, "SHIFT");
     d.tick(&v, Instant::now());
-    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the keyboard view draws no strip");
+    assert_eq!(d.oso().expect("the keyboard view publishes").title, "Scale");
     // (ARP is still on from above; its menu would open instead of the Scale OSO's.)
     hold(&mut d, &v, "SHIFT");
     press(&mut d, &v, "NOTE_REPEAT");
@@ -1642,4 +1645,25 @@ fn jam_oso_pages_need_no_ni_install() {
             std::env::set_var("DECKARD_SCRIPTS", s);
         }
     }
+}
+
+/// PERFORM FX goes by itself, as the rig has it (2026-11-21). The 2026-11-20 RE reading listed it
+/// among the static types, so the strip stayed up until its key or a page change; it is the idle
+/// timer's like every other page that is not GRID, TEMPO or REC MODE.
+#[test]
+fn perform_fx_closes_by_itself() {
+    let mut d = jam();
+    let mut v = jam_view();
+    v.groups[0].perform = Some((false, 0.5));
+    v.groups[0].perform_mode = Some((2, "Burst Echo".into()));
+    let t = Instant::now();
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PERFORM");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, t);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("PERFORM FX"), "shows on the press");
+    d.tick(&v, t + Duration::from_millis(1500));
+    assert!(d.oso().is_some_and(|p| !p.slots.is_empty()), "still up at 1.5 s");
+    d.tick(&v, t + Duration::from_millis(2500));
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "gone by 2.5 s, as the machine does it");
 }
