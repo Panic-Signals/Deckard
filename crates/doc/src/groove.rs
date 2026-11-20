@@ -517,6 +517,25 @@ impl Document {
             let prob = v("probability", 55.0) / 100.0;
             let amount = v("velocity_amount", 10.0) / 100.0;
             let dist = v("distribution", 1.0) as i64;
+            // The Variation page's slots each do something here: where the page has set
+            // one, the Random engine reads it, so the Jam's Apply and the app's Generate
+            // page run this one piece of code. Unset, the older behaviour stands.
+            let sv = |f: &str| settings(&format!("sequence_variation/{f}"));
+            let band = match (sv("velocity_range/low"), sv("velocity_range/high")) {
+                (None, None) => None,
+                (lo, hi) => {
+                    let (lo, hi) = (lo.unwrap_or(0.0), hi.unwrap_or(127.0));
+                    Some((lo.min(hi).clamp(0.0, 127.0), lo.max(hi).clamp(0.0, 127.0)))
+                }
+            };
+            let step = grid.max(1) as f64;
+            let time_shift = sv("time_shift").unwrap_or(0.0).clamp(0.0, 50.0) / 100.0;
+            let length = sv("steps").map_or(grid as f64, |x| x.clamp(1.0, 6.0) * step);
+            let dist_count = sv("dist/note_count").map_or(dist, |d| d as i64);
+            let dist_notes = sv("dist/notes").map_or(dist, |d| d as i64);
+            // A note's length had no distribution before the page existed: unset, it
+            // stays fixed rather than picking up the chord's.
+            let dist_length = sv("dist/note_length").map_or(3, |d| d as i64);
             let (lo, hi) = (v("note_range/low", 60.0) as i64, v("note_range/high", 72.0) as i64);
             let (lo, hi) = (lo.min(hi).clamp(0, 127), lo.max(hi).clamp(0, 127));
             let count = if polyphonic { v("note_count", 1.0).clamp(1.0, 6.0) as i64 } else { 1 };
@@ -527,11 +546,21 @@ impl Document {
                 if rng.unit() < prob {
                     // The chord's size and its pitches come from the same helpers the
                     // Variation page uses, so the two pages cannot drift apart.
-                    let k = chord_count(rng, count, dist);
-                    let pitches = if polyphonic { chord_pitches(rng, &pool, k, dist) } else { vec![root] };
+                    let k = chord_count(rng, count, dist_count);
+                    let pitches = if polyphonic { chord_pitches(rng, &pool, k, dist_notes) } else { vec![root] };
+                    let at =
+                        ((t as f64 + rng.spread(-time_shift * step, time_shift * step, dist_notes)).round() as i64).clamp(start, end - 1);
+                    let want = if dist_length == 3 { length } else { rng.spread(length * 0.5, length * 1.5, dist_length) };
+                    let len = (want.round() as i64).clamp(10, (end - at).max(10));
                     for pitch in pitches {
-                        let vel = velocity + rng.spread(-amount * 63.5, amount * 63.5, dist);
-                        new.push(note(t, pitch, vel.round().clamp(1.0, 127.0) as i64, grid.min(end - t)));
+                        let vel = match band {
+                            Some((band_lo, band_hi)) => rng.spread(band_lo, band_hi, 0),
+                            None => velocity + rng.spread(-amount * 63.5, amount * 63.5, dist),
+                        };
+                        if new.iter().any(|x: &Note| x.position == at && x.pitch == pitch) {
+                            continue;
+                        }
+                        new.push(note(at, pitch, vel.round().clamp(1.0, 127.0) as i64, len));
                     }
                 }
                 t += grid;
@@ -932,5 +961,50 @@ mod tests {
         let humanize: &dyn Fn(&str) -> Option<f64> = &|f| (f == "sequence_variation/mode").then_some(0.0);
         let err = d.apply_variation_with(0, 0, 1, 240, None, humanize, None, &mut Rng::seeded(3)).unwrap_err();
         assert!(err.contains("no notes"), "{err}");
+    }
+
+    /// The Random engine reads the Variation page's slots where the page has set them:
+    /// the velocity band, the note length and the time shift each do something, so no
+    /// slot on the Jam's page is a number nobody reads. Unset, the older behaviour stands.
+    #[test]
+    fn random_generate_reads_the_variation_pages_settings() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_generation/mode" => Some(0.0),
+            "sequence_generation/probability" => Some(100.0),
+            "sequence_generation/note_range/low" => Some(60.0),
+            "sequence_generation/note_range/high" => Some(64.0),
+            "sequence_variation/velocity_range/low" => Some(70.0),
+            "sequence_variation/velocity_range/high" => Some(80.0),
+            "sequence_variation/steps" => Some(2.0),
+            _ => None,
+        };
+        d.generate_with(0, 0, 0, 240, false, None, page, &mut Rng::seeded(5)).unwrap();
+        let notes: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        assert!(!notes.is_empty());
+        assert!(notes.iter().all(|n| (60..=64).contains(&n.pitch)), "{:?}", notes.iter().map(|n| n.pitch).collect::<Vec<_>>());
+        assert!(notes.iter().all(|n| (70..=80).contains(&n.velocity)), "{:?}", notes.iter().map(|n| n.velocity).collect::<Vec<_>>());
+        let bar = d.project().bar_length();
+        assert!(
+            notes.iter().all(|n| n.length == 480 || n.position + 480 > bar),
+            "two steps long, cut at the pattern's end: {:?}",
+            notes.iter().map(|n| n.length).collect::<Vec<_>>()
+        );
+        // The same call without the page's settings keeps the deviation and one step.
+        d.generate_with(
+            0,
+            0,
+            0,
+            240,
+            false,
+            None,
+            &|f: &str| (f == "sequence_generation/probability").then_some(100.0),
+            &mut Rng::seeded(5),
+        )
+        .unwrap();
+        let plain: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        assert!(plain.iter().all(|n| n.length == 240), "one step, as before");
+        assert!(plain.iter().any(|n| n.velocity != 100), "the deviation around 100, as before");
     }
 }
