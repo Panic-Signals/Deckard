@@ -227,6 +227,12 @@ impl Recorder {
         self.meter_key.is_some()
     }
 
+    /// Holding the engine's master/internal tap (metering or recording an internal
+    /// source): a session recording must not grab the same tap at the same time.
+    pub fn is_internal_active(&self) -> bool {
+        self.tap.is_some()
+    }
+
     /// Whether START can be pressed: Auto needs something to play.
     pub fn can_start(&self) -> bool {
         let v = &self.view;
@@ -1152,6 +1158,14 @@ mod tests {
         assert_eq!(sample.frames[9][0], 0.1);
         assert_eq!(sample.frames[10][0], 0.5);
         assert_eq!(r.view.status, RecStatus::Idle);
+    }
+
+    #[test]
+    fn internal_active_tracks_the_tap() {
+        let mut r = Recorder::new();
+        assert!(!r.is_internal_active());
+        r.tap = Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        assert!(r.is_internal_active());
     }
 
     #[test]
