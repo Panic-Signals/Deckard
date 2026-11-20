@@ -45,6 +45,9 @@ pub enum Apply {
     Reverse,
     /// Held, a one-shot or a loop.
     Plays,
+    /// A New Sampler zone's tail (ms), and its sound's Slice Motion.
+    Tail,
+    Motion,
     /// The loop's length: sixteenths of the sample's tempo, or (no tempo) milliseconds.
     LoopLength,
     FindCount,
@@ -297,6 +300,21 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             knobs.push((knob("Play.Key", "KEY", crate::analysis::note_name(at as u8), at as f64, (0.0, 127.0), 1.0, TURN), Apply::PlaysAt));
         }
         page(&mut out, 1, "PLAYBACK", knobs);
+        // The slice's tail and the sound's Slice Motion (a page of their own: the MK3
+        // reaches a page's first four knobs).
+        {
+            use deckard_model::new_sampler::{Motion, TAIL_MAX};
+            let tail = m.tail_ms();
+            let text = if tail > 0.0 { format!("{tail:.0} ms") } else { "Off".into() };
+            let motion = p.groups.get(g).and_then(|x| x.sounds.get(s)).and_then(|x| x.new_sampler).map_or(Motion::Off, |n| n.motion);
+            let names: Vec<String> = Motion::ALL.iter().map(|x| x.label().to_string()).collect();
+            let at = Motion::ALL.iter().position(|x| *x == motion).unwrap_or(0);
+            let knobs = vec![
+                (knob("Play.Tail", "TAIL", text, tail, (0.0, TAIL_MAX), 10.0, 1.0 / 200.0), Apply::Tail),
+                (choice("Play.Motion", "MOTION", &names, at), Apply::Motion),
+            ];
+            page(&mut out, 1, "TAIL / MOTION", knobs);
+        }
         if m.mode == deckard_model::new_sampler::PlayMode::Sync {
             use deckard_model::new_sampler::StartGrid;
             let grids: Vec<String> = StartGrid::ALL.iter().map(|g| g.label().to_string()).collect();

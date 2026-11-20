@@ -1567,8 +1567,8 @@ impl SamplerRt {
         }
         let velocity = if velocity <= 0 { 64 } else { velocity.min(127) };
         // Slice Motion: the note plays one slice, whichever key it is.
-        let moved = self.next_slice();
-        if moved.is_none()
+        let in_motion = self.motion != Motion::Off && self.zones.iter().any(|z| z.play.1 > z.play.0);
+        if !in_motion
             && !self
                 .zones
                 .iter()
@@ -1598,6 +1598,8 @@ impl SamplerRt {
         }
         self.clock += 1;
         let age = self.clock;
+        // (Chosen here: a legato note that only glides takes no turn.)
+        let moved = if in_motion { self.next_slice() } else { None };
         let mut started = false;
         for zi in 0..self.zones.len() {
             let z = &self.zones[zi];
@@ -2641,6 +2643,19 @@ mod tests {
         let mut none = chopped(&[(5, 5)]);
         none.motion = Motion::Next;
         assert_eq!(first_heard(&mut none, 1, 36), usize::MAX);
+        // Legato: a note that glides the sounding voice takes no turn.
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let mut smp = chopped(&[(0, 90_000), (20_000, 90_000), (40_000, 90_000)]);
+        smp.motion = Motion::Next;
+        smp.settings.polyphony = 0;
+        assert!(smp.settings.legato());
+        smp.note_on(1, 60, 100, &ctx);
+        smp.note_on(2, 62, 100, &ctx);
+        assert_eq!(smp.voices.len(), 1, "it glides");
+        smp.voices.clear();
+        smp.held.clear();
+        smp.note_on(3, 60, 100, &ctx);
+        assert_eq!(smp.voices[0].stream.play.0, 20_000, "the second slice, not the third");
     }
 
     #[test]

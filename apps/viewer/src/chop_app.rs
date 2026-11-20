@@ -2,8 +2,29 @@
 //! re-rolls, and one slice spread over a new sound's keys ([`crate::chop`] decides where).
 
 use crate::{App, beat, chop};
+use deckard_engine::munge::{Munge, munge};
 use deckard_engine::sample::Sample;
 use deckard_model::new_sampler::{BeatMap, PlayMode, ZoneMeta};
+
+/// A munge ready to make: the sample, the range, its eighths, an eighth's even length,
+/// the settings, and the zone's meta as it will be.
+pub(crate) struct MungePlan {
+    sample: std::sync::Arc<Sample>,
+    range: (usize, usize),
+    cuts: Vec<usize>,
+    eighth: f64,
+    settings: Munge,
+    meta: ZoneMeta,
+}
+
+impl MungePlan {
+    /// The munged sample, and where its munged part ends.
+    pub(crate) fn make(&self) -> Result<(Sample, usize), String> {
+        let out = munge(&self.sample, self.range, &self.cuts, self.eighth, &self.settings).ok_or("nothing would be left to play")?;
+        let end = out.frames.len().saturating_sub(self.sample.frames.len() - self.range.1);
+        Ok((out, end))
+    }
+}
 
 impl App {
     /// The focused zone's own beats: a New Sampler zone with a tempo.
@@ -25,6 +46,99 @@ impl App {
     /// Every place in `r` Find would weigh for `count` starts: what Random picks among.
     pub(crate) fn slice_candidates(&self, s: &Sample, r: (usize, usize), count: usize) -> Vec<usize> {
         deckard_analysis::find_samples(&s.frames, s.rate, r, &self.find_lines(s.rate, r, count), usize::MAX)
+    }
+
+    /// What MUNGE would do now: the edit range cut at the sample's eighth notes (the
+    /// first at the range's start).
+    pub(crate) fn munge_plan(&self) -> Result<MungePlan, String> {
+        let settings = self.sampling.munge.ok_or("MUNGE isn't open")?;
+        let sample = self.sampling.sample.clone().ok_or("no sample")?;
+        let (a, b) = self.edit_range().ok_or("no sample")?;
+        let range = (a.min(sample.frames.len()), b.min(sample.frames.len()));
+        let no_tempo = "MUNGE needs the sample's tempo (ZONE: BPM)";
+        let meta = {
+            let d = self.doc.as_ref().ok_or("no project")?.borrow();
+            let z = d
+                .project()
+                .groups
+                .get(self.group)
+                .and_then(|g| g.sounds.get(self.sound))
+                .and_then(|s| s.sampler.as_ref()?.zones.get(self.zone));
+            z.and_then(|z| z.meta.clone()).ok_or(no_tempo)?
+        };
+        let map = BeatMap::of(&meta, sample.rate).ok_or(no_tempo)?;
+        let beat = f64::from(sample.rate) * 60.0 / meta.bpm.ok_or(no_tempo)?;
+        // The range starts on the eighth nearest it.
+        let first = (map.beat_at(range.0 as f64) * 2.0).round() / 2.0;
+        let mut cuts = vec![range.0];
+        for k in 1..100_000 {
+            let f = map.frame_at(first + f64::from(k) * 0.5).round();
+            if f >= range.1 as f64 {
+                break;
+            }
+            if f > *cuts.last().unwrap() as f64 {
+                cuts.push(f as usize);
+            }
+        }
+        // The result is on an even grid at its tempo from the range's start.
+        let meta = ZoneMeta { warps: Vec::new(), grid_offset: (range.0 as f64 - first * beat).rem_euclid(beat).round() as u64, ..meta };
+        Ok(MungePlan { sample, range, cuts, eighth: beat / 2.0, settings, meta })
+    }
+
+    /// MUNGE's APPLY: the range munged, as a new file (one undo step).
+    pub(crate) fn munge_apply(&mut self) {
+        if !self.sampling.munge.is_some_and(|m| m.changes()) {
+            self.status = "MUNGE: nothing to change (set SWING, or switch an eighth off)".into();
+            return;
+        }
+        let made = self.munge_plan().and_then(|p| Ok((p.make()?.0, p)));
+        match made {
+            Ok((out, p)) => {
+                let beat = p.eighth * 2.0;
+                let meta = ZoneMeta { beats: Some(out.frames.len() as f64 / beat), ..p.meta.clone() };
+                let lane = |l: &Sample| munge(l, p.range, &p.cuts, p.eighth, &p.settings).unwrap_or_else(|| l.clone());
+                self.sampling.munge = None;
+                self.store_edit(out, "Munge", Some((&lane, (0, false))), Some(meta));
+            }
+            Err(e) => self.status = format!("can't munge: {e}"),
+        }
+    }
+
+    /// MUNGE's HEAR: the munged range played, nothing kept.
+    pub(crate) fn munge_hear(&mut self) {
+        let made = self.munge_plan().and_then(|p| Ok((p.make()?, p.range.0)));
+        match made {
+            Ok(((out, end), from)) => {
+                let part = Sample { rate: out.rate, frames: out.frames[from.min(end)..end].to_vec() };
+                self.ensure_engine();
+                let gain = self.doc.as_ref().map_or(1.0, |d| {
+                    let d = d.borrow();
+                    let p = d.project();
+                    let g = p.groups.get(self.group);
+                    let s = g.and_then(|g| g.sounds.get(self.sound));
+                    deckard_model::level_gain(p.master_level) * g.map_or(1.0, |g| g.level) * s.map_or(1.0, |s| s.level)
+                });
+                if let Some(Ok(out)) = &self.output {
+                    out.prehear(Some(std::sync::Arc::new(part)), gain as f32);
+                    self.prehear_from = None;
+                }
+                self.status = "MUNGE: playing it (APPLY keeps it)".into();
+            }
+            Err(e) => self.status = format!("can't munge: {e}"),
+        }
+    }
+
+    /// The focused sound's Slice Motion (a New Sampler's; one undo step).
+    pub(crate) fn set_motion(&mut self, motion: deckard_model::new_sampler::Motion) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (g, s) = (self.group, self.sound);
+        let now = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(s)).and_then(|x| x.new_sampler);
+        let Some(now) = now.filter(|n| n.motion != motion) else { return };
+        let settings = deckard_model::new_sampler::NewSampler { motion, ..now };
+        match doc.borrow_mut().transaction("Slice Motion", |d| d.set_new_sampler(g, s, Some(&settings))) {
+            Ok(()) => self.status = format!("Slice Motion: {}", motion.label()),
+            Err(e) => self.status = format!("can't set Slice Motion: {e}"),
+        }
     }
 
     /// CUE, or an empty pad: a slice where the sample is playing (Manual mode only, so

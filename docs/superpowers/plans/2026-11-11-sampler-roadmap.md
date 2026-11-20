@@ -412,6 +412,12 @@ four stems together in one zone, so they share every edit.
 > counts of 64, BANK on the MK3's slice pads, APPLY to pads (new groups, a sound a slice),
 > a shuffled note order, EXPORT (each slice a WAV). Not built: dragging slices out,
 > linear/random locks.
+>
+> Built (2026-11-19, `docs/superpowers/specs/2026-11-19-motion-tail-munge-design.md`):
+> Slice Motion (MOTION: Next / Random, over all the sound's slices), TAIL (a fading
+> reverse tail, 0 to 2000 ms), MUNGE on EDIT (swing, the eighths of a bar taken out,
+> GRUNGE / COMB splices; HEAR before APPLY). Not built: Motion over N slices, a tail loop
+> start, Munge on the MK3, per-slice tune and gain, overlapping slices and sidecar files.
 
 - **Catch cues:** in SLICE, press empty pads while the sample plays to drop slices at the
   playhead (Serato, MPC). Snap with Quantize to 1/8 beat.

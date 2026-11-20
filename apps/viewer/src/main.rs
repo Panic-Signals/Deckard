@@ -7908,12 +7908,15 @@ impl App {
 
     /// Write `sample` as an edited copy of the focused zone's file and point the zone at
     /// it (one undo step). `lanes`: how the edit goes for a stem lane (see
-    /// [`Self::carry_lanes`]); without it the zone's lanes don't follow.
-    fn store_edit(
+    /// [`Self::carry_lanes`]); without it the zone's lanes don't follow. `meta`: what the
+    /// zone knows of the new file (its tempo, say), kept in the same step; else the file
+    /// is looked at afresh.
+    pub(crate) fn store_edit(
         &mut self,
         sample: deckard_engine::sample::Sample,
         label: &str,
         lanes: Option<(&dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample, (usize, bool))>,
+        meta: Option<deckard_model::new_sampler::ZoneMeta>,
     ) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(key) = self.sampling.sample_key.clone() else { return };
@@ -7925,6 +7928,12 @@ impl App {
         }
         let frames = sample.frames.len();
         let carried = lanes.and_then(|(lane, how)| self.carry_lanes(&key, frames, lane, how));
+        // (The lanes are those carried: ones that couldn't be are left behind.)
+        let carried = match (meta, carried) {
+            (Some(m), Some(c)) => Some(deckard_model::new_sampler::ZoneMeta { stems: c.stems, stems_only: c.stems_only, ..m }),
+            (Some(m), None) => Some(deckard_model::new_sampler::ZoneMeta { stems: Default::default(), stems_only: false, ..m }),
+            (None, c) => c,
+        };
         // An Audio plug-in's take (its tempo kept), else a Sampler's zone.
         let audio = doc
             .borrow()
@@ -8049,12 +8058,20 @@ impl App {
                         (edit::paste(&s, r.0, &clip), "Paste", None)
                     }
                     EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate", Some(Box::new(move |l| edit::duplicate(l, r)))),
-                    EditOp::Stretch | EditOp::AutoLoop | EditOp::Stems => return,
+                    EditOp::Stretch | EditOp::Munge | EditOp::AutoLoop | EditOp::Stems => return,
                 };
                 let shift = if op == EditOp::Truncate { r.0 } else { 0 };
-                self.store_edit(out, label, lane.as_deref().map(|l| (l, (shift, false))));
+                self.store_edit(out, label, lane.as_deref().map(|l| (l, (shift, false))), None);
             }
+            S::MungeOpen(on) => {
+                self.sampling.munge = on.then(Default::default);
+                self.sampling.stretch = None;
+            }
+            S::SetMunge(m) => self.sampling.munge = Some(m),
+            S::MungeApply => self.munge_apply(),
+            S::MungeHear => self.munge_hear(),
             S::StretchOpen(on) => {
+                self.sampling.munge = None;
                 let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
                 self.sampling.stretch =
                     on.then_some(layout::sampling::Stretch { beat: true, tune: 0.0, src_bpm: tempo, new_bpm: tempo, speed: 100.0 });
@@ -8067,7 +8084,7 @@ impl App {
                 self.sampling.stretch = None;
                 let (factor, tune) = (sx.factor(), sx.tune);
                 let lane = move |l: &deckard_engine::sample::Sample| edit::stretch(l, r, factor, tune);
-                self.store_edit(out, "Stretch", Some((&lane, (0, true))));
+                self.store_edit(out, "Stretch", Some((&lane, (0, true))), None);
             }
             S::SliceMode(m) => {
                 self.sampling.slice_mode = m;
@@ -8194,6 +8211,7 @@ impl App {
                 }
             }
             S::Plays(plays) => self.set_plays(plays),
+            S::Motion(motion) => self.set_motion(motion),
             S::RemoveZone(i) => {
                 let Some(doc) = self.doc.clone() else { return };
                 let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
@@ -8984,7 +9002,17 @@ impl App {
                 return;
             }
             Some(Apply::Plays) => SamplingAct::Plays(deckard_model::new_sampler::Plays::ALL[at.min(2)]),
-            Some(a @ (Apply::PlayMode | Apply::Bpm | Apply::Root | Apply::PlaysAt | Apply::StartGrid | Apply::Speed | Apply::Reverse)) => {
+            Some(Apply::Motion) => SamplingAct::Motion(deckard_model::new_sampler::Motion::ALL[at.min(2)]),
+            Some(
+                a @ (Apply::PlayMode
+                | Apply::Bpm
+                | Apply::Root
+                | Apply::PlaysAt
+                | Apply::StartGrid
+                | Apply::Speed
+                | Apply::Reverse
+                | Apply::Tail),
+            ) => {
                 use deckard_model::new_sampler::PlayMode;
                 let Some(doc) = self.doc.clone() else { return };
                 let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
@@ -9006,6 +9034,10 @@ impl App {
                         SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { speed: (value.round() / 100.0).clamp(0.25, 4.0), ..m })
                     }
                     Apply::Reverse => SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { reverse: value >= 0.5, ..m }),
+                    Apply::Tail => {
+                        use deckard_model::new_sampler::{TAIL_MAX, ZoneMeta};
+                        SamplingAct::Meta(ZoneMeta { tail: ((value / 10.0).round() * 10.0).clamp(0.0, TAIL_MAX), ..m })
+                    }
                     Apply::StartGrid => {
                         use deckard_model::new_sampler::{StartGrid, ZoneMeta};
                         SamplingAct::Meta(ZoneMeta { start: StartGrid::ALL[at.min(StartGrid::ALL.len() - 1)], ..m })
@@ -17541,6 +17573,40 @@ mod tests {
         h.state_mut().zone = 0;
         h.run_steps(3);
         assert_eq!(h.state().zone, 0);
+    }
+
+    /// EDIT's MUNGE bar: the tool opens it, the eighths switch off and on, CANCEL closes
+    /// it; a New Sampler's zone bar (with TAIL and MOTION) is drawn over it.
+    #[test]
+    fn the_munge_bar_opens_and_its_eighths_switch() {
+        let Some(mut h) = harness(false, true) else { return };
+        (h.state_mut().group, h.state_mut().sound) = (0, 0);
+        h.run_steps(3);
+        let panel_top = 33.0 + 3.0 + 343.0 + 2.0 + 140.0 + 2.0;
+        click(&mut h, Pos2::new(3.0 + 16.0, panel_top + 7.0 + 4.0 * 28.0 + 12.0));
+        h.run_steps(3);
+        h.state_mut().convert_instrument(true);
+        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(1)));
+        h.run_steps(3);
+        let tool = |h: &Harness<'static, App>, id: &str| -> egui::Rect {
+            h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-tool", id.to_string())))).expect("tool drawn")
+        };
+        let r = tool(&h, "MUNGE");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert!(h.state().sampling.munge.is_some(), "the bar is open");
+        let r = tool(&h, "munge-3");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.munge.unwrap().mutes, [false, false, true, false, false, false, false, false]);
+        let r = tool(&h, "munge-3");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert!(!h.state().sampling.munge.unwrap().changes(), "and on again");
+        let r = tool(&h, "munge-cancel");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert!(h.state().sampling.munge.is_none());
     }
 
     /// The sample's zooming scroll bar, as the Pattern Editor's: up zooms in round where

@@ -9,6 +9,7 @@
 --                     with WARP MARKERS, QUANTIZE AUDIO, CLEAR WARP; TO (NEW) SAMPLER
 --                     converts the sound's Sampler)
 --   EDIT, PLAYBACK    a New Sampler slice: its SPEED against the song, REVERSE, its KEY
+--   EDIT, TAIL / MOTION  its tail at its end, and the sound's Slice Motion
 --   EDIT, STEMS page  a zone with stem lanes: knobs 1-4 their levels, 5-8 mute them
 --                     (SHIFT: solo); the right display shows the lanes stacked
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices

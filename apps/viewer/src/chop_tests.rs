@@ -272,3 +272,149 @@ fn key_shift_without_an_empty_sound_says_so() {
     assert!(app.status.contains("empty sound"), "{}", app.status);
     assert_eq!(doc.borrow().undo_label().map(str::to_string), label);
 }
+
+/// The app's tone as a half-bar loop at 120 BPM (four eighths of 11 025 frames), its
+/// edits written beside a project in the test's folder.
+fn loop_at_120(warped: bool) -> (crate::App, tempfile::TempDir) {
+    let (mut app, tmp) = app();
+    app.path = Some(tmp.path().join("Song.mxprj"));
+    app.convert_instrument(true);
+    let (g, s) = (app.group, app.sound);
+    let doc = app.doc.clone().unwrap();
+    let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+    let warps = if warped {
+        deckard_model::new_sampler::warps_at(&ZoneMeta { bpm: Some(120.0), ..ZoneMeta::default() }, RATE, &[0, 22_050])
+    } else {
+        Vec::new()
+    };
+    let meta = ZoneMeta { file, mode: PlayMode::Sync, bpm: Some(120.0), beats: Some(2.0), warps, ..ZoneMeta::default() };
+    doc.borrow_mut().set_zone_meta(g, s, 0, &meta, "Zone Tempo").unwrap();
+    app.update_sampling();
+    (app, tmp)
+}
+
+fn zone0(app: &crate::App) -> deckard_model::Zone {
+    let d = app.doc.as_ref().unwrap().borrow();
+    d.project().groups[app.group].sounds[app.sound].sampler.as_ref().unwrap().zones[0].clone()
+}
+
+#[test]
+fn munge_takes_an_eighth_out_of_the_bar() {
+    use crate::layout::sampling::EditOp;
+    let (mut app, _tmp) = loop_at_120(true);
+    let before = zone0(&app);
+    app.sampling_act(S::MungeOpen(true));
+    let m = app.sampling.munge.expect("the bar is open");
+    assert!(!m.changes());
+    // Nothing set: APPLY keeps the sample as it is.
+    app.sampling_act(S::MungeApply);
+    assert_eq!(zone0(&app), before);
+    assert!(app.status.contains("nothing to change"), "{}", app.status);
+    let mut mutes = m.mutes;
+    mutes[3] = true;
+    app.sampling_act(S::SetMunge(deckard_engine::munge::Munge { mutes, ..m }));
+    app.sampling_act(S::MungeHear);
+    assert_eq!(zone0(&app), before, "HEAR keeps nothing");
+    app.sampling_act(S::MungeApply);
+    assert!(app.sampling.munge.is_none(), "the bar closes");
+    let z = zone0(&app);
+    assert_ne!(z.sample.path, before.sample.path, "a new file: {}", app.status);
+    let made = Sample::load(std::path::Path::new(&z.sample.path)).unwrap();
+    assert_eq!(made.frames.len(), 3 * 11_025, "three eighths left");
+    let meta = z.meta.clone().expect("it keeps what it knows");
+    assert_eq!((meta.bpm, meta.beats, meta.warps.len(), meta.mode), (Some(120.0), Some(1.5), 0, PlayMode::Sync));
+    assert_eq!(meta.file, z.sample.path);
+    app.undo();
+    assert_eq!(zone0(&app), before, "one step back");
+    // The other edits don't answer to it, and STRETCH closes it.
+    app.sampling_act(S::MungeOpen(true));
+    app.sampling_act(S::Edit(EditOp::Munge));
+    assert_eq!(zone0(&app), before);
+    app.sampling_act(S::StretchOpen(true));
+    assert!(app.sampling.munge.is_none() && app.sampling.stretch.is_some());
+    app.sampling_act(S::MungeOpen(true));
+    assert!(app.sampling.stretch.is_none());
+}
+
+#[test]
+fn munge_swings_a_selection_and_keeps_the_rest() {
+    let (mut app, _tmp) = loop_at_120(false);
+    let before = app.sampling.sample.clone().unwrap();
+    app.sampling.selection = Some((11_025, 33_075));
+    app.sampling_act(S::MungeOpen(true));
+    let m = app.sampling.munge.unwrap();
+    app.sampling_act(S::SetMunge(deckard_engine::munge::Munge { swing: 0.6, sixteenths: false, ..m }));
+    app.sampling_act(S::MungeApply);
+    let z = zone0(&app);
+    let made = Sample::load(std::path::Path::new(&z.sample.path)).unwrap();
+    assert_eq!(made.frames.len(), before.frames.len(), "swing keeps the length");
+    let near = |a: &[[f32; 2]], b: &[[f32; 2]]| a.iter().zip(b).all(|(x, y)| (x[0] - y[0]).abs() < 1e-4);
+    assert!(near(&made.frames[..11_025], &before.frames[..11_025]) && near(&made.frames[33_075..], &before.frames[33_075..]));
+    assert!(!near(&made.frames[11_025..33_075], &before.frames[11_025..33_075]), "the selection is swung");
+    assert_eq!(z.meta.unwrap().beats, Some(2.0));
+}
+
+#[test]
+fn munge_needs_a_tempo() {
+    let (mut app, tmp) = app();
+    app.path = Some(tmp.path().join("Song.mxprj"));
+    let before = zone0(&app);
+    app.sampling_act(S::MungeOpen(true));
+    let m = app.sampling.munge.unwrap();
+    app.sampling_act(S::SetMunge(deckard_engine::munge::Munge { swing: 0.5, ..m }));
+    app.sampling_act(S::MungeApply);
+    assert_eq!(zone0(&app), before);
+    assert!(app.status.contains("tempo"), "{}", app.status);
+    app.sampling_act(S::MungeHear);
+    assert!(app.status.contains("tempo"), "{}", app.status);
+    // Every eighth off: nothing would be left.
+    let (mut app, _tmp) = loop_at_120(false);
+    let before = zone0(&app);
+    app.sampling_act(S::MungeOpen(true));
+    let m = app.sampling.munge.unwrap();
+    app.sampling_act(S::SetMunge(deckard_engine::munge::Munge { mutes: [true; 8], ..m }));
+    app.sampling_act(S::MungeApply);
+    assert_eq!(zone0(&app), before);
+    assert!(app.status.contains("nothing would be left"), "{}", app.status);
+}
+
+/// MOTION (the sound's) and TAIL (the zone's), from the window and from the MK3's knobs:
+/// each one undo step, and both reach the engine.
+#[test]
+fn motion_and_tail_are_set_and_undone() {
+    use deckard_model::new_sampler::Motion;
+    let (mut app, _tmp) = loop_at_120(false);
+    let (g, s) = (app.group, app.sound);
+    let sound = |app: &crate::App| app.doc.as_ref().unwrap().borrow().project().groups[g].sounds[s].clone();
+    let state = |app: &crate::App| (sound(app).new_sampler.unwrap().motion, zone0(app).meta.unwrap().tail);
+    assert_eq!(state(&app), (Motion::Off, 0.0));
+    app.sampling_act(S::Motion(Motion::Next));
+    assert_eq!(state(&app), (Motion::Next, 0.0));
+    app.sampling_act(S::Motion(Motion::Next));
+    app.undo();
+    assert_eq!(state(&app), (Motion::Off, 0.0), "one step, and setting it again was none");
+    app.sampling_act(S::Meta(ZoneMeta { tail: 250.0, ..zone0(&app).meta.unwrap() }));
+    assert_eq!(state(&app), (Motion::Off, 250.0));
+    // The MK3 has a page for both.
+    let knob = |app: &mut crate::App, key: &str| {
+        let pages = app.surface_view().sampling.pages;
+        pages[1].iter().flat_map(|p| p.knobs.clone()).find(|k| k.key == key)
+    };
+    let tail = knob(&mut app, "Play.Tail").expect("a TAIL knob");
+    assert_eq!((tail.text.as_str(), tail.value), ("250 ms", 250.0));
+    assert_eq!(knob(&mut app, "Play.Motion").expect("a MOTION knob").text, "Off");
+    app.record_apply.insert("Play.Tail".into(), crate::sampling_hw::Apply::Tail);
+    app.record_apply.insert("Play.Motion".into(), crate::sampling_hw::Apply::Motion);
+    app.sampling_knob("Play.Tail", 404.0);
+    app.sampling_knob("Play.Motion", 2.0);
+    assert_eq!(state(&app), (Motion::Random, 400.0), "the knob steps by 10 ms");
+    assert_eq!(knob(&mut app, "Play.Tail").unwrap().text, "400 ms");
+    assert_eq!(knob(&mut app, "Play.Motion").unwrap().text, "Random");
+    app.undo();
+    assert_eq!(state(&app), (Motion::Off, 400.0));
+    // A plain Sampler has neither.
+    app.convert_instrument(false);
+    app.sampling_act(S::Motion(Motion::Next));
+    assert!(sound(&app).new_sampler.is_none());
+    assert!(knob(&mut app, "Play.Tail").is_none() && knob(&mut app, "Play.Motion").is_none());
+}

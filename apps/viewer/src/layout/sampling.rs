@@ -11,7 +11,7 @@ pub const TABS: [&str; 4] = ["RECORD", "EDIT", "SLICE", "ZONE"];
 
 /// The fewest frames the waveform zooms in to.
 const MIN_VIEW: f64 = 64.0;
-const EDIT_BUTTONS: [(&str, EditOp); 14] = [
+const EDIT_BUTTONS: [(&str, EditOp); 15] = [
     ("TRUNCATE", EditOp::Truncate),
     ("NORM.", EditOp::Normalize),
     ("REVERSE", EditOp::Reverse),
@@ -24,6 +24,7 @@ const EDIT_BUTTONS: [(&str, EditOp); 14] = [
     ("PASTE", EditOp::Paste),
     ("DUPL.", EditOp::Duplicate),
     ("STRETCH", EditOp::Stretch),
+    ("MUNGE", EditOp::Munge),
     ("STEMS", EditOp::Stems),
     ("AUTO LOOP", EditOp::AutoLoop),
 ];
@@ -52,6 +53,8 @@ pub enum EditOp {
     Paste,
     Duplicate,
     Stretch,
+    /// Open the munge bar (swing, eighths taken out).
+    Munge,
     /// Find a loop in the play range that joins smoothly, and switch it on.
     AutoLoop,
     /// Separate the sample into drums, bass, other and vocals, into a new group (or stop
@@ -120,6 +123,8 @@ pub struct SamplingState {
     pub slice_to_end: Option<bool>,
     /// Stretch settings while the stretch bar is open.
     pub stretch: Option<Stretch>,
+    /// Munge settings while the munge bar is open.
+    pub munge: Option<deckard_engine::munge::Munge>,
     /// Zone tab: the map (else the focused zone's sample) and the zone list.
     pub zone_map: bool,
     pub zone_list: bool,
@@ -166,6 +171,7 @@ impl Default for SamplingState {
             shuffles: 0,
             slice_to_end: None,
             stretch: None,
+            munge: None,
             zone_map: true,
             zone_list: true,
             sample: None,
@@ -364,6 +370,11 @@ pub enum SamplingAct {
     StretchOpen(bool),
     SetStretch(Stretch),
     StretchApply,
+    MungeOpen(bool),
+    SetMunge(deckard_engine::munge::Munge),
+    MungeApply,
+    /// Play the munged range without keeping it.
+    MungeHear,
     SliceMode(usize),
     SplitCount(usize),
     FindCount(usize),
@@ -404,6 +415,8 @@ pub enum SamplingAct {
     PlayMode(deckard_model::new_sampler::PlayMode),
     /// The focused New Sampler zone's tempo, length or root, set by hand.
     Meta(deckard_model::new_sampler::ZoneMeta),
+    /// The sound's Slice Motion.
+    Motion(deckard_model::new_sampler::Motion),
     /// What a note does with the focused New Sampler slice: held, a one-shot or a loop.
     Plays(deckard_model::new_sampler::Plays),
     /// TAP, at this time (seconds).
@@ -845,7 +858,26 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
             sact(SamplingAct::Plays(Plays::ALL[k.min(2)]))
         });
         f.tip = "Hold: it plays while the pad is held. One shot: a tap plays it through to its end (E, the next slice at first). Loop: it goes round while the pad is held (the LOOP frame, this slice at first)";
-        x = group_box(ui, &painter, x, y, "SLICE", &[f], acts);
+        // Its tail: what it does at its end.
+        use deckard_model::new_sampler::{Motion, TAIL_MAX};
+        let (m6, m7, tail) = (m.clone(), m.clone(), m.tail_ms());
+        let mut tf = field("TAIL", if tail > 0.0 { format!("{tail:.0} ms") } else { "Off".into() }, move |n| {
+            meta(ZoneMeta { tail: (tail / 10.0 + n).round().clamp(0.0, TAIL_MAX / 10.0) * 10.0, ..m6.clone() })
+        });
+        tf.tip = "A tail for a slice that ends abruptly: at its end it plays back from there this long, fading out (a slice that loops has none; right-click: off)";
+        tf.menu = Some(("No tail".to_string(), Box::new(move || meta(ZoneMeta { tail: 0.0, ..m7.clone() }))));
+        // The sound's: which of its slices a note plays.
+        let motion = app
+            .doc
+            .as_ref()
+            .and_then(|d| d.borrow().project().groups.get(app.group)?.sounds.get(app.sound)?.new_sampler)
+            .map_or(Motion::Off, |n| n.motion);
+        let cur = Motion::ALL.iter().position(|x| *x == motion).unwrap_or(0);
+        let mut mf = choice_field("MOTION", Motion::ALL.iter().map(|x| x.label().to_string()).collect(), cur, |k| {
+            sact(SamplingAct::Motion(Motion::ALL[k.min(2)]))
+        });
+        mf.tip = "Slice Motion, for the whole sound. Next: every note plays the next of its slices, whichever key it is. Random: any but the one before. Each plays at its own pitch";
+        x = group_box(ui, &painter, x, y, "SLICE", &[f, tf, mf], acts);
     }
     // Its own speed against the song's (Sync and Keys: the stretcher's).
     if m.mode != PlayMode::Repitch && has {
@@ -1680,6 +1712,54 @@ fn edit_tab(
         group_box(ui, &painter, x, y - 2.0, "STRETCH", &fields, acts);
         return;
     }
+    if let Some(mx) = st.munge {
+        use deckard_engine::munge::{COMB_MS, GRUNGE_MS, Munge};
+        // The munge bar: APPLY / CANCEL / HEAR, the settings, and the eighths of a bar.
+        let tempo = zone.meta.as_ref().is_some_and(|m| m.bpm.is_some());
+        let mut x = tools.left() + 12.0;
+        for (label, id, act, enabled) in [
+            ("APPLY", "munge-apply", SamplingAct::MungeApply, tempo && mx.changes()),
+            ("CANCEL", "munge-cancel", SamplingAct::MungeOpen(false), true),
+            ("HEAR", "munge-hear", SamplingAct::MungeHear, tempo),
+        ] {
+            if tool_button(ui, &painter, Rect::from_min_size(Pos2::new(x, y), Vec2::new(62.0, 40.0)), label, enabled, false, id) {
+                acts.push(sact(act));
+            }
+            x += 70.0;
+        }
+        x += 10.0;
+        let set = |m: Munge| sact(SamplingAct::SetMunge(m));
+        let mut fields = vec![
+            field("SWING", format!("{:+.0} %", mx.swing * 100.0), move |n| {
+                set(Munge { swing: ((mx.swing * 100.0 + n).round() / 100.0).clamp(-1.0, 1.0), ..mx })
+            }),
+            choice_field("ON", vec!["1/8".into(), "1/16".into()], usize::from(mx.sixteenths), move |k| {
+                set(Munge { sixteenths: k == 1, ..mx })
+            }),
+            field("GRUNGE", format!("{:.0} ms", mx.grunge_ms), move |n| {
+                set(Munge { grunge_ms: (mx.grunge_ms + n).clamp(GRUNGE_MS.0, GRUNGE_MS.1), ..mx })
+            }),
+            field("COMB", format!("{:.0} ms", mx.comb_ms), move |n| {
+                set(Munge { comb_ms: (mx.comb_ms + n).clamp(COMB_MS.0, COMB_MS.1), ..mx })
+            }),
+        ];
+        fields[0].tip =
+            "Each second eighth (or sixteenth, see ON) later (+) or earlier (-): 100 % is a triplet; minus takes swing out of a loop";
+        fields[1].tip = "What SWING moves: the eighths or the sixteenths";
+        fields[2].tip = "The fade where a part is cut short or joined";
+        fields[3].tip = "How much of a part's end repeats to make it longer: short buzzes, long echoes";
+        x = group_box(ui, &painter, x, y - 2.0, if tempo { "MUNGE" } else { "MUNGE (SET THE SAMPLE'S TEMPO FIRST)" }, &fields, acts);
+        // The eighths of a bar: lit plays; dark is cut out of every bar (the loop gets shorter).
+        for k in 0..8 {
+            let r = Rect::from_min_size(Pos2::new(x + 8.0 + k as f32 * 34.0, y), Vec2::new(30.0, 40.0));
+            if tool_button(ui, &painter, r, &(k + 1).to_string(), true, !mx.mutes[k], &format!("munge-{}", k + 1)) {
+                let mut mutes = mx.mutes;
+                mutes[k] = !mutes[k];
+                acts.push(set(Munge { mutes, ..mx }));
+            }
+        }
+        return;
+    }
     let mut x = tools.left() + 12.0;
     for (label, op) in EDIT_BUTTONS {
         // STEMS shows how far a separation of this sample is (a click stops it); one at
@@ -1720,6 +1800,7 @@ fn edit_tab(
             let to_group = op == EditOp::Stems && stems.is_none() && ui.input(|i| i.modifiers.shift);
             acts.push(sact(match op {
                 EditOp::Stretch => SamplingAct::StretchOpen(true),
+                EditOp::Munge => SamplingAct::MungeOpen(true),
                 _ if to_group => SamplingAct::StemsToGroup,
                 _ => SamplingAct::Edit(op),
             }));
