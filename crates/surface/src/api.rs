@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use mlua::{Function, Lua, Table, Value};
 
-use crate::{Action, Browse, ColorOf, Shared, View, leds, names};
+use crate::{Action, Browse, ColorOf, OsoPage, OsoSlot, Shared, View, leds, names};
 
 /// Tempos the app takes: 10–400 BPM.
 pub fn tempo_in_range(bpm: f64) -> f64 {
@@ -100,7 +100,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     let sh = shared.clone();
     d.set("held", lua.create_function(move |_, name: String| Ok(sh.borrow().held.contains(&name)))?)?;
     let sh = shared.clone();
-    d.set("pad_held", lua.create_function(move |_, n: usize| Ok(n >= 1 && n <= 16 && sh.borrow().pads[n - 1]))?)?;
+    d.set("pad_held", lua.create_function(move |_, n: usize| Ok((1..=16).contains(&n) && sh.borrow().pads[n - 1]))?)?;
     d.set("device", lua.create_function(|_, ()| Ok(crate::sources::DEVICE))?)?;
     let sh = shared.clone();
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
@@ -407,7 +407,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         d.set(
             "setting",
             lua.create_function(move |_, (name, step, index): (String, i64, Option<usize>)| {
-                const NAMES: [&str; 31] = [
+                const NAMES: [&str; 35] = [
                     "count_in",
                     "numerator",
                     "denominator",
@@ -439,6 +439,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "pattern_length",
                     "pattern_length_fine",
                     "pattern_grow",
+                    "jam_keyboard_layout",
+                    "jam_iso_layout",
+                    "jam_iso_type",
+                    "jam_iso_dir",
                 ];
                 let Some(&name) = NAMES.iter().find(|n| **n == name) else {
                     return Err(mlua::Error::runtime(format!("no setting \"{name}\" ({})", NAMES.join(", "))));
@@ -1028,6 +1032,60 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         })?,
     )?;
 
+    // The Jam script's focused OSO page (`deckard.oso(page)`): the host stores it so
+    // the viewer reads it without Lua, mirroring `leds` and the status line. Holes
+    // are `false` (never an empty label); `sub`/`group` are nil where the reference
+    // leaves the row blank. The cursor (`focus`) and its edit flag come from the script
+    // on every page; the strip draws them and routes the ENCODER to the script.
+    let sh = shared.clone();
+    d.set(
+        "oso",
+        lua.create_function(move |_, page: Table| {
+            let title: String = page.get("title")?;
+            let cur: usize = page.get("page")?;
+            let total: usize = page.get("pages")?;
+            let pages = total.max(1);
+            let slots_t: Table = page.get("slots")?;
+            let len = slots_t.len()? as usize;
+            let mut slots = Vec::with_capacity(len);
+            for i in 1..=len {
+                let v: Value = slots_t.get(i)?;
+                let slot = match v {
+                    Value::Nil => None,
+                    Value::Boolean(false) => None,
+                    Value::Table(t) => {
+                        // (The script's own key stays in the script: see `OsoSlot`.)
+                        // No display text is no slot: a hole, as `false` is, rather than an
+                        // error that stops the device's script.
+                        let value: Option<String> = t.get("value")?;
+                        match value.filter(|v| !v.is_empty()) {
+                            None => None,
+                            Some(value) => {
+                                let sub: Option<String> = t.get("sub")?;
+                                let group: Option<String> = t.get("group")?;
+                                let sub = sub.filter(|s| !s.is_empty());
+                                let group = group.filter(|s| !s.is_empty());
+                                Some(OsoSlot { value, sub, group })
+                            }
+                        }
+                    }
+                    _ => return Err(mlua::Error::runtime("oso slots hold tables or false")),
+                };
+                slots.push(slot);
+            }
+            let focus: Option<usize> = page.get("focus")?;
+            let editing: Option<bool> = page.get("editing")?;
+            sh.borrow_mut().oso = Some(OsoPage {
+                title,
+                page: cur.clamp(1, pages),
+                pages,
+                slots,
+                focus: focus.unwrap_or(0),
+                editing: editing.unwrap_or(false),
+            });
+            Ok(())
+        })?,
+    )?;
     lua.globals().set("deckard", d)
 }
 
@@ -1175,6 +1233,11 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     t.set("input_meters", inputs)?;
     t.set("input_levels", lua.create_sequence_from(v.input_levels)?)?;
     t.set("playing", v.playing)?;
+    // The desktop library panel is open: the strip is hidden, so a script declines an
+    // ENCODER press there rather than setting an edit nobody can see.
+    t.set("browser_open", v.browser_open)?;
+    // The controller's page, which a page change closes a static OSO with.
+    t.set("surface_page", v.page.as_str())?;
     t.set("recording", v.recording)?;
     t.set("looping", v.looping)?;
     t.set("metronome", v.metronome)?;

@@ -126,6 +126,13 @@ pub struct View {
     pub control: ControlView,
     /// The library as BROWSE shows it.
     pub browser: BrowserView,
+    /// The desktop library panel is open, so the strip is hidden: a script must not set
+    /// an edit nobody can see there (one that survives the panel closing).
+    pub browser_open: bool,
+    /// The controller page the app is showing (`control`, `step`, `song`…), as the MK3's
+    /// scripts leave it: the fact NI hands a device when the controller's page changes,
+    /// which is what closes a static OSO.
+    pub page: String,
     /// What the Sampling page (SAMPLE) shows.
     pub sampling: SamplingView,
     /// A group or sound is loading: the name, shown over both screens until it's in.
@@ -1102,6 +1109,39 @@ pub enum Action {
     SettingsWanted(bool),
 }
 
+/// One OSO slot as the Jam script publishes it (`deckard.oso`): what the strip draws,
+/// and nothing else. `value` is the display text, `sub` the transcribed third-row
+/// sub-label (`None` where the reference leaves the row blank), `group` the spanning
+/// header (`None` where the reference shows none). Holes are `None` in the page's
+/// `slots`. The script's own key for the parameter (`RootNote`) stays in the script: no
+/// host code looks a slot up by name, and a required field nobody reads only failed
+/// scripts that had a slot the host ignored.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsoSlot {
+    pub value: String,
+    pub sub: Option<String>,
+    pub group: Option<String>,
+}
+
+/// The Jam script's focused OSO page (`deckard.oso`): the title without its counter,
+/// the 1-based `page` and total `pages` for the `n/N` counter, the page-scoped slots
+/// (`None` is a hole), and the script's own cursor — `focus`, a 0-based page slot with
+/// holes counted, and whether it is being changed (`editing`).
+///
+/// The cursor is the script's on every page, menu or tab: the strip draws it and routes
+/// the ENCODER to the script, which owns the press and the turn alike. A viewer-side
+/// cursor existed once and drifted from the script's (three places kept a copy and the
+/// underline sat on a slot the encoder was not on). Stored so the viewer reads it
+/// without Lua.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsoPage {
+    pub title: String,
+    pub page: usize,
+    pub pages: usize,
+    pub slots: Vec<Option<OsoSlot>>,
+    pub focus: usize,
+    pub editing: bool,
+}
 /// Where the pads play.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PadSetup {
@@ -1112,7 +1152,6 @@ pub struct PadSetup {
     /// Chords mode: every pad plays its chord's notes instead (128: none).
     pub chords: Option<[[i64; 16]; 16]>,
 }
-
 /// The page shown when the scripts start.
 pub const FIRST_PAGE: &str = "control";
 
@@ -1138,6 +1177,8 @@ pub(crate) struct Shared {
     pub leds: Leds,
     pub pinned: BTreeSet<String>,
     pub shown_pin: Option<(String, String)>,
+    /// The Jam script's focused OSO page, as `deckard.oso` last published it.
+    pub oso: Option<OsoPage>,
 }
 
 impl Shared {
@@ -1516,10 +1557,8 @@ impl Surface {
                 self.call_global(run, "knob_turned", ());
                 self.dispatch(run, "knob", (k + 1, amount));
             }
-            Event::Wheel(steps) => {
-                if !self.call_global(run, "wheel_mode", steps) {
-                    self.dispatch(run, "wheel", steps);
-                }
+            Event::Wheel(steps) if !self.call_global(run, "wheel_mode", steps) => {
+                self.dispatch(run, "wheel", steps);
             }
             // (Fingers from 1; "down", "move" or "up".)
             Event::Touch(finger, kind, pos) => {
@@ -1865,6 +1904,7 @@ fn start(
         leds: leds::blank(),
         pinned,
         shown_pin,
+        oso: None,
     }));
     api::install(&lua, &shared)?;
     sources::install_require(&lua, sources.clone())?;

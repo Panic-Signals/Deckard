@@ -70,8 +70,10 @@ mod group_edit_tests;
 mod header_tests;
 mod input_levels;
 mod jam_io;
+mod jam_strip;
 #[cfg(test)]
 mod jam_tests;
+mod jam_window;
 mod keep_running;
 mod keys;
 mod layout;
@@ -915,8 +917,10 @@ pub struct App {
     clip: Option<(usize, usize)>,
     /// When the controller's Settings ▸ Audio was last told the audio interface.
     audio_view_at: Option<std::time::Instant>,
-    /// What the own layer's Settings page shows, and when it was looked up.
+    /// What the own layer's Settings page shows, the settings it was built from (so a
+    /// change anywhere rebuilds it), and when its live part was last looked up.
     surface_settings: deckard_surface::SettingsView,
+    surface_settings_from: Option<crate::settings::Settings>,
     surface_settings_at: Option<std::time::Instant>,
     /// A Lock recall morphing its way.
     lock_morph: Option<lock::LockMorph>,
@@ -1069,8 +1073,6 @@ pub struct App {
     /// it's connected.
     jam: Option<jam_io::JamIo>,
     jam_device: Option<deckard_surface::device::Device>,
-    /// The JAM's script wants the Settings page's values (its REC MODE readout).
-    jam_settings_wanted: bool,
     /// The last JAM script error shown.
     jam_error: Option<String>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.
@@ -5646,6 +5648,9 @@ impl App {
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
             settings: self.surface_settings.clone(),
+            // (The strip hides while this is open, so a script declines an ENCODER press there.)
+            browser_open: self.browser.open,
+            page: self.surface.page(),
             lock: self.lock_view(),
             // (The waves' pictures, and the mod matrix's slots, only while their pages show.)
             lfos: self.lfo_views(self.surface.page() == "lfo"),
@@ -6333,7 +6338,9 @@ impl App {
             }
             A::ResetKnob(knob) => self.jam_reset_knob(knob),
             A::PerformMode { group, mode } => self.jam_perform_mode(group, mode),
-            A::SettingsWanted(on) => self.jam_settings_wanted = on,
+            // (A script asking for the Settings page's values is satisfied by
+            // construction: the View carries them as they are, whoever is looking.)
+            A::SettingsWanted(_) => {}
             A::Lfo(what, pad, v) => self.surface_lfo(what, pad, v),
             A::ModSlot(slot, row, steps) => mod_slots::step(self, slot, row, steps),
             A::ModSlotsClosed => self.mod_draft = None,
@@ -11918,6 +11925,18 @@ impl App {
             if same_group && now.0 != from {
                 self.follow_root(from, now.0);
             }
+        }
+        // The Jam's strip is its own window: the page its script published, shown and hidden
+        // by that page's own lifetime (never by a mode), over whatever view is showing, and
+        // never in front of the mouse. No page draws no window.
+        let shown = self.jam_shown();
+        let strip = shown.as_ref().map(|(page, rows)| (page, rows.as_slice()));
+        let saved = self.settings.jam_strip_pos.map(|(x, y)| egui::Vec2::new(x, y));
+        if let Some(offset) = crate::jam_window::show(ctx, strip, saved) {
+            // Where the window manager put it, which is where the user has it now.
+            self.settings.jam_strip_pos = Some((offset.x, offset.y));
+            #[cfg(not(test))]
+            self.settings.save();
         }
         layout::body(self, ui);
         self.update_slot_view();

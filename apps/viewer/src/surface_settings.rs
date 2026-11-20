@@ -31,19 +31,32 @@ fn stepped<T: PartialEq + Copy>(list: &[T], at: T, step: i64) -> T {
 }
 
 impl App {
-    /// While the Settings page shows: its view, looked up again now and then (and
-    /// after a change).
+    /// The Settings page's view, current. One fact decides it: whether the settings the
+    /// view was built from are still the settings the app holds. The page showing adds
+    /// only the live part — the interface's status and the port lists, which move
+    /// without a setting — so that case alone is rate-limited.
+    ///
+    /// This replaced three triggers (the Settings page open, a script asking, a Jam
+    /// connected). Each was a guess at who reads the view, and together they left it
+    /// empty on a cold boot: the Jam's Mode slot drew as a hole until a menu happened
+    /// to ask first.
     pub(crate) fn refresh_surface_settings(&mut self) {
-        if self.surface.page() != "settings" && !self.jam_settings_wanted {
-            self.surface_settings_at = None;
+        let page = self.surface.page() == "settings";
+        let settled = self.surface_settings_from.as_ref() == Some(&self.settings);
+        // The page's live part — the interface's status, the port lists — moves without a
+        // setting, so it is looked up again once a second, and only on this timer: a
+        // setting step must not ask the watcher for a rescan (the knobs are turned right
+        // here, one `Action::Setting` at a time).
+        let due = page && !self.surface_settings_at.is_some_and(|t| t.elapsed() < REFRESH);
+        if settled && !due {
             return;
         }
-        if self.surface_settings_at.is_some_and(|t| t.elapsed() < REFRESH) {
-            return;
+        if due {
+            self.surface_settings_at = Some(std::time::Instant::now());
+            self.refresh_midi_ports();
         }
-        self.surface_settings_at = Some(std::time::Instant::now());
-        self.refresh_midi_ports();
         self.surface_settings = self.settings_view();
+        self.surface_settings_from = Some(self.settings.clone());
     }
 
     pub(crate) fn settings_view(&mut self) -> SettingsView {
@@ -109,6 +122,14 @@ impl App {
         set("strip_position", STRIP_POSITIONS[usize::from(s.strip_position.min(2))].to_string());
         set("touch_auto_write", on_off(s.touch_auto_write));
         set("display_brightness", s.display_brightness.to_string());
+        // The Jam's pad layout, in the manual's own order (Keyboard mode, p. 98).
+        // Indices are the plist's (`JamKeyboardLayout`, `JamIsoLayout`, ...); the
+        // strings are what `deckard.state().settings.values` carries to the scripts.
+        let layout = |table: &[&str], i: i64| table[i.clamp(0, table.len() as i64 - 1) as usize].to_string();
+        set("jam_keyboard_layout", layout(&["Standard", "Isomorph"], s.jam_keyboard_layout));
+        set("jam_iso_layout", layout(&["3rds", "4ths", "Sequential"], s.jam_iso_layout));
+        set("jam_iso_type", layout(&["In Key", "Chromatic"], s.jam_iso_type));
+        set("jam_iso_dir", layout(&["Vertical", "Horizontal"], s.jam_iso_dir));
         let ports = |prefix: &str, list: &[String]| -> Vec<(String, bool)> {
             list.iter().map(|n| (n.clone(), !s.midi_off.contains(&format!("{prefix}{n}")))).collect()
         };
@@ -218,10 +239,8 @@ impl App {
                     self.settings.midi_off.insert(key);
                 }
             }
-            "link" => {
-                if up != self.settings.link {
-                    self.toggle_link();
-                }
+            "link" if up != self.settings.link => {
+                self.toggle_link();
             }
             "link_start_stop" => self.settings.link_start_stop = up,
             "metronome_volume" => self.settings.metronome_volume = (i64::from(self.settings.metronome_volume) + step).clamp(0, 100) as u8,
@@ -244,6 +263,12 @@ impl App {
             "strip_position" => self.settings.strip_position = (i64::from(self.settings.strip_position) + step).clamp(0, 2) as u8,
             "touch_auto_write" => self.settings.touch_auto_write = up,
             "sensitivity" => self.settings.pad_sensitivity = (i64::from(self.settings.pad_sensitivity) + step).clamp(0, 100) as u8,
+            // The Jam's pad layout: clamped to each table, so a knob never lands on an
+            // unnamed value and renders blank in a filled slot.
+            "jam_keyboard_layout" => self.settings.jam_keyboard_layout = (self.settings.jam_keyboard_layout + step).clamp(0, 1),
+            "jam_iso_layout" => self.settings.jam_iso_layout = (self.settings.jam_iso_layout + step).clamp(0, 2),
+            "jam_iso_type" => self.settings.jam_iso_type = (self.settings.jam_iso_type + step).clamp(0, 1),
+            "jam_iso_dir" => self.settings.jam_iso_dir = (self.settings.jam_iso_dir + step).clamp(0, 1),
             "display_brightness" => {
                 self.settings.display_brightness = (i64::from(self.settings.display_brightness) + step).clamp(0, 100) as u8;
                 if let Some(m) = &self.mk3 {
@@ -254,6 +279,10 @@ impl App {
         }
         if self.settings != before {
             self.settings.save();
+            // The scripts read these values through the View, and the View is built
+            // from the settings themselves (`refresh_surface_settings`), so there is
+            // nothing to push: a value the setting carries cannot go stale.
+            self.surface_settings_at = None;
             if let Some(Ok(out)) = &self.output {
                 out.set_metronome_settings(
                     f32::from(self.settings.metronome_volume) / 100.0,
@@ -263,7 +292,6 @@ impl App {
             }
         }
         // (Shown at once.)
-        self.surface_settings_at = None;
         self.refresh_surface_settings();
     }
 }

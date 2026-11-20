@@ -75,6 +75,11 @@ impl JamIo {
         self.shared.lock().unwrap().connected
     }
 
+    /// What the JAM's thread last said: connected, disconnected, or its script's error.
+    pub fn status(&self) -> String {
+        self.shared.lock().unwrap().status.clone()
+    }
+
     /// What the controller did since the last call.
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut self.shared.lock().unwrap().events)
@@ -282,7 +287,6 @@ impl App {
             if let Some(mut d) = self.jam_device.take() {
                 let asked = d.close();
                 self.jam_asked(asked);
-                self.jam_settings_wanted = false;
                 self.input_watched = false;
                 self.status = "Maschine JAM disconnected".into();
             }
@@ -317,24 +321,44 @@ impl App {
     pub(crate) fn jam_events(&mut self, events: Vec<Event>, now: Instant) -> (Leds, PadMap) {
         self.follow_edits();
         self.update_slot_view();
-        if self.jam_settings_wanted {
-            self.refresh_surface_settings();
-        }
+        // (The scripts read the settings on every page: this is a comparison against
+        // the last build, so it costs nothing when nothing moved.)
+        self.refresh_surface_settings();
         let view = self.surface_view();
         let Some(mut d) = self.jam_device.take() else { return (Leds::default(), PadMap::default()) };
         let mut asked = d.poll(now);
         for e in coalesced(events) {
             asked.extend(match e {
-                Event::Button(name, down) => d.button(name, down, &view, now),
+                Event::Button(name, down) => {
+                    // Every button is the script's, the ENCODER's press included: it is
+                    // the script's cursor and edit flag the strip draws, so the press that
+                    // moves them has to be the script's too.
+                    d.button(name, down, &view, now)
+                }
                 Event::Pad { column, row, down } => d.pad(column, row, down, &view, now),
                 Event::Strip { strip, finger, kind, pos } => d.strip(strip, finger, kind.name(), pos, &view, now),
-                Event::Encoder(steps) => d.encoder(steps, &view, now),
+                Event::Encoder(steps) => {
+                    // The ENCODER is the script's: on a menu it steps the menu's cursor,
+                    // on the keyboard tab it steps the tab's when its edit flag is set,
+                    // and everywhere else it does what the script does with it (tempo,
+                    // levels, cue and inputs).
+                    d.encoder(steps, &view, now)
+                }
             });
         }
         asked.extend(d.tick(&view, now));
-        self.jam_asked(asked);
+        let applied = self.jam_asked(asked);
         self.follow_edits();
         self.update_slot_view();
+        // A turn or press the script handled changes state *after* it published the page,
+        // so the page it drew still says what it said before (PERFORM FX showed the mode
+        // from before its FX went in). One more tick over what the host now holds
+        // republishes it — and it publishes only: applying its requests again would
+        // double the ones a tick emits by nature (a held strip's touch-write).
+        if applied > 0 {
+            let view = self.surface_view();
+            self.jam_republish(d.tick(&view, now));
+        }
         let view = self.surface_view();
         let (leds, route) = (d.leds(&view, now), d.pad_map(&view, now));
         let error = d.error();
@@ -349,15 +373,34 @@ impl App {
     }
 
     /// What the script asked of the app.
-    fn jam_asked(&mut self, asked: Vec<Out>) {
+    /// What the script asked of the app; how many requests it made (the page a script
+    /// drew before them is stale, and the caller republishes).
+    fn jam_asked(&mut self, asked: Vec<Out>) -> usize {
+        self.jam_apply(asked, true)
+    }
+
+    /// The same, for the tick that exists only to republish a page: its requests are
+    /// dropped, because the tick before it already applied this frame's.
+    fn jam_republish(&mut self, asked: Vec<Out>) {
+        let _ = self.jam_apply(asked, false);
+    }
+
+    fn jam_apply(&mut self, asked: Vec<Out>, apply: bool) -> usize {
+        let mut made = 0;
         for a in asked {
             match a {
-                Out::App(a) => self.surface_act(a),
+                Out::App(a) => {
+                    if apply {
+                        self.surface_act(a);
+                    }
+                    made += 1;
+                }
                 Out::Print(p) => self.print_notes(&p),
                 Out::Message(m) => self.status = m,
                 Out::Midi { .. } => {}
             }
         }
+        made
     }
 
     /// Group `g`'s Perform FX's mode: one is added if the group has none.

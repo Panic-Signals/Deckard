@@ -113,6 +113,18 @@ pub struct Settings {
     pub display_brightness: u8,
     /// DECKARD drives a Maschine JAM plugged in (Preferences > MIDI).
     pub jam_enabled: bool,
+    /// The Jam's pad layout, as the manual's PAD LAYOUT table lists it (Keyboard mode
+    /// p. 98): `jam_keyboard_layout` 0 Standard / 1 Isomorph, `jam_iso_layout` 0 3rds /
+    /// 1 4ths / 2 Sequential, `jam_iso_type` 0 In Key / 1 Chromatic, `jam_iso_dir`
+    /// 0 Vertical / 1 Horizontal. Defaults are the hardware capture
+    /// (`Isomorph / Sequential / In Key / Vertical`); never NI's plist (read-only).
+    pub jam_keyboard_layout: i64,
+    pub jam_iso_layout: i64,
+    pub jam_iso_type: i64,
+    pub jam_iso_dir: i64,
+    /// Where the Jam strip's own window sits: its offset in points from the main window's
+    /// top-left, so the strip comes back beside the app on whatever display it opens on.
+    pub jam_strip_pos: Option<(f32, f32)>,
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
@@ -384,6 +396,11 @@ impl Default for Settings {
             render_ahead_ms: 0,
             display_brightness: 100,
             jam_enabled: true,
+            jam_keyboard_layout: 1,
+            jam_iso_layout: 2,
+            jam_iso_type: 0,
+            jam_iso_dir: 0,
+            jam_strip_pos: None,
             pad_sensitivity: 50,
             metronome_volume: 100,
             focus_follows: true,
@@ -629,6 +646,33 @@ impl Settings {
                     }
                 }
                 "jam_enabled" => s.jam_enabled = v != "false",
+                "jam_keyboard_layout" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_keyboard_layout = n.clamp(0, 1);
+                    }
+                }
+                "jam_iso_layout" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_iso_layout = n.clamp(0, 2);
+                    }
+                }
+                "jam_iso_type" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_iso_type = n.clamp(0, 1);
+                    }
+                }
+                "jam_iso_dir" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_iso_dir = n.clamp(0, 1);
+                    }
+                }
+                "jam_strip_pos" => {
+                    if let Some((x, y)) = v.split_once(',')
+                        && let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>())
+                    {
+                        s.jam_strip_pos = Some((x, y));
+                    }
+                }
                 "render_ahead_ms" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.render_ahead_ms = n.min(200);
@@ -812,6 +856,13 @@ impl Settings {
             self.buffer_frames, self.multicore, self.exact_timing, self.render_ahead_ms, self.display_brightness, self.pad_sensitivity
         );
         out += &format!("jam_enabled = {}\n", self.jam_enabled);
+        out += &format!(
+            "jam_keyboard_layout = {}\njam_iso_layout = {}\njam_iso_type = {}\njam_iso_dir = {}\n",
+            self.jam_keyboard_layout, self.jam_iso_layout, self.jam_iso_type, self.jam_iso_dir
+        );
+        if let Some((x, y)) = self.jam_strip_pos {
+            out += &format!("jam_strip_pos = {x},{y}\n");
+        }
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!("relative_strips = {}\n", self.relative_strips);
         for p in &self.pinned_pages {
@@ -1357,7 +1408,7 @@ mod sync_tests {
         assert_eq!(scanned.last(), Some(&foreign));
         let saved = s.to_text();
         assert!(saved.contains("dir = /Library/Audio/Plug-Ins/VST3 from a Mac\n"));
-        assert_eq!(saved.matches("dir = ").count(), 1, "only the addition is saved:\n{saved}");
+        assert_eq!(saved.matches("\ndir = ").count(), 1, "only the addition is saved:\n{saved}");
         assert!(!saved.contains("dirs = none"));
         assert_eq!(Settings::parse(&saved).dirs, s.dirs);
         // An old file saying there are no folders at all: the standard ones still.
