@@ -8747,6 +8747,85 @@ mod tests {
         assert_eq!(voices(&e), 0, "over at its end, not a beat and a half on");
     }
 
+    /// A Sync note sounding when the tempo changes stays with the song: its beats fall
+    /// on the song's after the change as before (the stretcher, fed ahead for the tempo
+    /// it began at, isn't left ahead of the song or behind it).
+    #[test]
+    fn a_stretched_note_stays_on_the_beat_through_a_tempo_change() {
+        // Where the hits of an 8-beat 94 BPM loop (a burst on each beat) are heard.
+        let onsets = |from: f64, to: f64, first: usize| -> Vec<i64> {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("hits.wav");
+            let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            let beat = 48_000.0 * 60.0 / 94.0;
+            let frames = (beat * 8.0) as usize;
+            for i in 0..frames {
+                let into = i as f64 % beat;
+                let v = if into < 480.0 { (i as f32 / 48_000.0 * 2000.0 * std::f32::consts::TAU).sin() * 0.8 } else { 0.0 };
+                w.write_sample(v).unwrap();
+                w.write_sample(v).unwrap();
+            }
+            w.finalize().unwrap();
+            let path: String = path.to_string_lossy().into();
+            let mut p = project();
+            p.tempo = from;
+            let snd = &mut p.groups[0].sounds[0];
+            snd.new_sampler = Some(Default::default());
+            let z = &mut snd.sampler.as_mut().unwrap().zones[0];
+            z.sample = deckard_model::SampleRef { kind: 0, path: path.clone(), ..Default::default() };
+            z.play_range = (0, frames as i64 - 1);
+            z.meta = Some(deckard_model::new_sampler::ZoneMeta {
+                file: path,
+                mode: deckard_model::new_sampler::PlayMode::Sync,
+                bpm: Some(94.0),
+                beats: Some(8.0),
+                ..Default::default()
+            });
+            let mut cache = SampleCache::default();
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            e.sequencing = false;
+            e.note_hold(0, 0, 60, 100);
+            let mut heard = Vec::new();
+            let mut out = vec![0f32; 2 * 64];
+            let mut run = |e: &mut Engine, n: usize, heard: &mut Vec<f32>| {
+                for _ in 0..n / 64 {
+                    e.process(&mut out);
+                    heard.extend(out.chunks(2).map(|f| f[0].abs()));
+                }
+            };
+            run(&mut e, first, &mut heard);
+            p.tempo = to;
+            e.update(&p, None, &mut cache);
+            run(&mut e, 200_000, &mut heard);
+            // A hit: loud after 2,000 quiet frames.
+            let mut at = Vec::new();
+            let mut quiet = 2000;
+            for (i, v) in heard.iter().enumerate() {
+                if *v > 0.2 {
+                    if quiet >= 2000 {
+                        at.push(i as i64);
+                    }
+                    quiet = 0;
+                } else {
+                    quiet += 1;
+                }
+            }
+            at
+        };
+        // Two beats at 188 (15,319 frames each, 30,656 in whole blocks), then 94: the
+        // third beat on comes every 30,638 frames from there.
+        let slow = onsets(188.0, 94.0, 30_656);
+        for (k, want) in [(2, 30_656 - 18), (3, 30_656 - 18 + 30_638), (4, 30_656 - 18 + 2 * 30_638)] {
+            assert!((slow[k] - want).abs() < 600, "188 to 94, beat {}: {} for {want} ({slow:?})", k + 1, slow[k]);
+        }
+        // A beat at 94 (30,656 frames: 18 into its second), then 188.
+        let fast = onsets(94.0, 188.0, 30_656);
+        for (k, want) in [(2, 30_656 + 15_310), (3, 30_656 + 15_310 + 15_319), (4, 30_656 + 15_310 + 2 * 15_319)] {
+            assert!((fast[k] - want).abs() < 600, "94 to 188, beat {}: {} for {want} ({fast:?})", k + 1, fast[k]);
+        }
+    }
+
     /// A start point (a zone that plays to its file's end) set to reverse plays from
     /// there back to the file's beginning; a slice with an end of its own, its own frames.
     #[test]

@@ -349,6 +349,9 @@ struct Live {
     owed: f64,
     /// Input frames an output frame, and the pitch factor.
     rate: f64,
+    /// The rate it was last fed at: it's fed ahead of what it gives by its latency at
+    /// that rate, so another rate owes it the difference (or it, the song).
+    fed: f64,
     transpose: f32,
     /// A voice was given it and hasn't started it.
     fresh: bool,
@@ -418,6 +421,7 @@ impl Live {
             at: 0,
             owed: 0.0,
             rate: 1.0,
+            fed: 1.0,
             transpose: 1.0,
             fresh: false,
             left: None,
@@ -451,6 +455,7 @@ impl Live {
         let drop_n = lat_out.min(ol.len());
         self.st.process(&il[..m], &ir[..m], &mut ol[..drop_n], &mut or[..drop_n]);
         (self.have, self.at, self.owed, self.left, self.fresh) = (0, 0, 0.0, None, false);
+        self.fed = rate;
     }
 
     /// The next frame out.
@@ -461,9 +466,17 @@ impl Live {
         if self.at == self.have {
             let [il, ir, ol, or] = &mut self.buf;
             self.st.set_transpose(self.transpose);
-            let want = LIVE_CHUNK as f64 * self.rate.clamp(0.05, 16.0) + self.owed;
-            let m = (want.floor() as usize).min(LIVE_IN);
-            self.owed = want - want.floor();
+            let rate = self.rate.clamp(0.05, 16.0);
+            // Another tempo: what it holds was fed for the old one, so the note would be
+            // left ahead of the song (a slower one) or behind it by the latency's worth.
+            // That's taken back over the next chunks, at no less than half the rate and no
+            // more than twice.
+            self.owed += self.lat.1 as f64 * (rate - self.fed);
+            self.fed = rate;
+            let chunk = LIVE_CHUNK as f64 * rate;
+            let want = chunk + self.owed;
+            let m = (want.clamp(chunk * 0.5, chunk * 2.0).floor() as usize).min(LIVE_IN);
+            self.owed = want - m as f64;
             for k in 0..m {
                 [il[k], ir[k]] = pull();
             }
