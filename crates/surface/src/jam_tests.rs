@@ -899,8 +899,11 @@ fn note_repeat_and_the_arp() {
     let out = press(&mut d, &v, "NOTE_REPEAT");
     release(&mut d, &v, "SHIFT");
     assert_eq!(apps(&out), [Action::KeyboardMode(true), Action::Repeat("on", 1.0)]);
+    // (The status line says the repeat went on, then the page's own line: both belong to the press.)
+    assert_eq!(messages(&out), ["Arp: On", "ARP ▸ Type: -"], "the Arp's page opens on the press (2026-11-21)");
     assert_eq!(d.pad_map(&v, Instant::now()).pads[0].len(), 1, "Keyboard mode: every pad");
-    assert_eq!(messages(&d.button("ENCODER_TOUCH", true, &v, Instant::now())), ["ARP ▸ Type: -"]);
+    // (The touch that used to be what opened it now finds it open, so it adds nothing.)
+    assert!(messages(&d.button("ENCODER_TOUCH", true, &v, Instant::now())).is_empty());
 }
 
 /// The library opens as the main window's panel, and the encoder and D-pad walk it.

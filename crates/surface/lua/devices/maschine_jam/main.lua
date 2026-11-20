@@ -351,15 +351,22 @@ end
 
 -- ---- the views ------------------------------------------------------------------------
 
+-- (Declared before `set_view` uses it: a Lua `local` binds from its declaration down, so a
+-- later `local function close_menu` would not be the one `set_view` called.)
+local close_menu
+
 local function set_view(view)
   if view == st.view then return end
   if st.view == "song" or st.view == "pad" or st.view == "keyboard" then st.back = st.view end
   st.view = view
   st.step_page = 0
+  -- Navigating away closes whatever page was showing: a static one belongs to the page it was
+  -- opened on, and a non-static one has no business outliving the view it was opened in.
+  close_menu()
   deckard.keyboard_mode(view == "keyboard" or view == "roll" or view == "notes")
 end
 
-local function close_menu()
+function close_menu()
   if st.menu and st.menu.settings then deckard.settings_wanted(false) end
   st.menu = nil
 end
@@ -752,7 +759,7 @@ local function swing_menu()
         if x then deckard.set_swing(s.group, s.sound, (x.swing or 0) + by(steps, fine)) end
       end,
     },
-  })
+  }, { idle = true })
 end
 
 local function tune_menu()
@@ -777,7 +784,7 @@ local function tune_menu()
         if x and x.tune then deckard.set_tune(s.group, s.sound, x.tune + by(steps, fine)) end
       end,
     },
-  })
+  }, { idle = true })
 end
 
 -- TEMPO: one slot, no header and no sub-label — the reference draws "120.00" and nothing else
@@ -1629,7 +1636,13 @@ end
 local function step_button(down)
   if down then
     if shift() then
-      if st.view == "roll" then set_view(st.back) else set_view("roll") end
+      if st.view == "roll" then
+        set_view(st.back)
+      else
+        set_view("roll")
+        -- The piano roll's page, on the switch, on the idle timer (the rig, 2026-11-21).
+        scale_menu({ idle = true })
+      end
       st.step_entered = true
       return
     end
@@ -1707,6 +1720,9 @@ function M.button(name, down)
     else
       set_strip("notes")
       set_view("notes")
+      -- Its page, on the press: `Scale`, the same one the keyboard view opens (the rig,
+      -- 2026-11-21 — it showed nothing until the encoder was touched).
+      scale_menu({ idle = true })
     end
     return
   end
@@ -1759,6 +1775,9 @@ function M.button(name, down)
     end
     deckard.note_repeat("on", st.repeating)
     say((st.arp and "Arp: " or "Note Repeat: ") .. (st.repeating and "On" or "Off"))
+    -- The page on the button (the rig, 2026-11-21): the Arpeggiator while the arp is on, Note
+    -- Repeat otherwise; off, it goes.
+    if st.repeating then repeat_menu({ idle = true }) else close_menu() end
   elseif name == "UP" or name == "DOWN" or name == "LEFT" or name == "RIGHT" then
     dpad(s, name)
   elseif name == "MST" or name == "GRP" or name == "IN1" or name == "CUE" then
