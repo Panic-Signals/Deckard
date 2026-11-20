@@ -1611,6 +1611,7 @@ impl App {
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
                     drop(d);
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
                     self.samples.plugins.retain(|slot| {
                         !matches!(
                             slot,
@@ -1622,7 +1623,11 @@ impl App {
                     Ok(())
                 })
             }
-            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard),
+            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard).map(|_| {
+                for sound in s..s + self.sound_clipboard.len() {
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, sound));
+                }
+            }),
             Act::CopyGroup(g) => self.copy_group(g),
             Act::CutGroup(g) => self.copy_group(g).and_then(|_| {
                 self.delete_group(g)?;
@@ -1632,7 +1637,10 @@ impl App {
             Act::PasteGroup(g) => match &self.group_clipboard {
                 Some(bytes) => {
                     let mut d = doc.borrow_mut();
-                    d.load_group_file(g, bytes).map(|_| d.relabel_last("Paste Group"))
+                    d.load_group_file(g, bytes).map(|_| {
+                        d.relabel_last("Paste Group");
+                        self.forget_group_presets(g);
+                    })
                 }
                 None => Ok(()),
             },
@@ -1641,6 +1649,7 @@ impl App {
             Act::ResetSound(g, s) => {
                 let r = doc.borrow_mut().reset_sound(g, s);
                 if r.is_ok() {
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
                     self.samples.plugins.retain(|slot| {
                         !matches!(
                             slot,
@@ -7333,6 +7342,7 @@ impl App {
     fn undo(&mut self) {
         self.lock_end_morph();
         let Some(doc) = self.doc.clone() else { return };
+        self.forget_replaced_presets(doc.borrow().undo_label());
         let ok = doc.borrow_mut().undo();
         if !ok && !self.back_to_replaced() {
             self.status = "nothing to undo".into();
@@ -7342,7 +7352,8 @@ impl App {
 
     fn redo(&mut self) {
         self.lock_end_morph();
-        if let Some(doc) = &self.doc {
+        if let Some(doc) = self.doc.clone() {
+            self.forget_replaced_presets(doc.borrow().redo_label());
             let ok = doc.borrow_mut().redo();
             if !ok {
                 self.status = "nothing to redo".into();
@@ -9109,6 +9120,41 @@ impl App {
         roots
     }
 
+    fn forget_group_presets(&mut self, g: usize) {
+        use deckard_doc::FileItem;
+        self.saved.retain(|item, _| !matches!(item, FileItem::Group(group) | FileItem::Sound(group, _) if *group == g));
+    }
+
+    // Loads and resets retain the document slot's ID. Undo or redo can
+    // change which preset occupies that ID.
+    fn forget_replaced_presets(&mut self, label: Option<&str>) {
+        use deckard_doc::FileItem;
+        match label {
+            Some("Load Group" | "Paste Group" | "Clear Group" | "Clear rig group") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Group(_) | FileItem::Sound(..)));
+            }
+            Some("Load Sound" | "Cut Sound" | "Paste Sound" | "Paste Sounds" | "Reset Sound" | "Reset Sounds") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Sound(..)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Remember an editable preset only after its load succeeds.
+    fn remember_preset_source(
+        &mut self,
+        what: deckard_doc::FileItem,
+        item: &deckard_library::Item,
+        info: Option<mxprj::sound_info::SoundInfo>,
+    ) {
+        self.saved.remove(&what);
+        let Some(info) = info else { return };
+        let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
+        if id.is_some() {
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false });
+        }
+    }
+
     /// Save a sound, group or preset: again where it was (Save), or through the dialog.
     fn save_item(&mut self, what: deckard_doc::FileItem, mode: SaveMode) {
         use deckard_doc::FileItem;
@@ -9643,7 +9689,12 @@ impl App {
                     }
                 };
                 drop(d);
+                if matches!(item.kind, Kind::Sound) {
+                    self.remember_preset_source(deckard_doc::FileItem::Sound(g, s), item, preset_load::editable_preset_info(item, &bytes));
+                }
                 if matches!(item.kind, Kind::Group) {
+                    self.forget_group_presets(g);
+                    self.remember_preset_source(deckard_doc::FileItem::Group(g), item, preset_load::editable_preset_info(item, &bytes));
                     self.editors
                         .retain(|&(c, ..)| !matches!(c, deckard_doc::Chain::Group(cg) | deckard_doc::Chain::Sound(cg, _) if cg == g));
                     self.slot_of = None;
