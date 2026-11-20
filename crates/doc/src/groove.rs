@@ -150,7 +150,8 @@ impl Variation {
         let g = |f: &str| settings(&format!("sequence_generation/{f}"));
         let (nlo, nhi) = (g("note_range/low").unwrap_or(d.note_lo as f64), g("note_range/high").unwrap_or(d.note_hi as f64));
         Variation {
-            mode: (v("mode", d.mode as f64) as i64).clamp(0, 1),
+            // Humanize, Random, Euclid: the page's three, in the order it lists them.
+            mode: (v("mode", d.mode as f64) as i64).clamp(0, 2),
             velocity_lo: lo.min(hi).round().clamp(0.0, 127.0) as i64,
             velocity_hi: lo.max(hi).round().clamp(0.0, 127.0) as i64,
             time_shift: v("time_shift", d.time_shift).clamp(0.0, 50.0),
@@ -840,7 +841,7 @@ mod tests {
         // Each setting where its engine keeps it: the generator's own half in its module,
         // DECKARD's extension of the page in the sound's field.
         for (name, value) in [
-            ("sequence_variation/mode", 1.0),
+            ("sequence_variation/mode", 2.0),
             ("sequence_variation/velocity_range/low", 40.0),
             ("sequence_variation/velocity_range/high", 60.0),
             ("sequence_variation/time_shift", 25.0),
@@ -857,7 +858,7 @@ mod tests {
             assert_eq!(d.groove_setting(0, 0, name), Some(value), "{name}");
         }
         let v = d.variation(0, 0);
-        assert_eq!((v.mode, v.velocity_lo, v.velocity_hi, v.probability), (1, 40, 60, 70));
+        assert_eq!((v.mode, v.velocity_lo, v.velocity_hi, v.probability), (2, 40, 60, 70), "Euclid reads back as 2");
         assert_eq!((v.note_count, v.steps, v.dist_notes), (3, 2.0, 2));
     }
 
