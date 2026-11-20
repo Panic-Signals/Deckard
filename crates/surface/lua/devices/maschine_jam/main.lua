@@ -833,6 +833,109 @@ local function perform_menu()
     },
   }, { static = true })
 end
+-- The Variation page (work-item 35): Maschine's thirteen settings in the page's order,
+-- five of them in Humanize, and the note range and chords left out while the pads are not
+-- in a keyboard layout. Static: the page stays until SHIFT + Group 5 again or another page.
+local VARIATION_MODES = { "Humanize", "Random" }
+local VARIATION_TAILS = { "Equal", "Gauss", "1/2 Gauss" }
+local VARIATION_DISTS = { "Equal", "Gauss", "1/2 Gauss", "Fixed" }
+
+local function variation_value(s, key)
+  return (s.variation or {})[key]
+end
+
+local function variation_note(pitch)
+  return NOTE_NAMES[pitch % 12 + 1] .. (math.floor(pitch / 12) - 2)
+end
+
+-- Whether `item` shows at all: Humanize keeps to the velocity band and the time shift,
+-- and pad mode (no keyboard layout) leaves out the note range and the chords.
+local function variation_hidden(s, item)
+  local v = s.variation or {}
+  if item.key == nil then return false end
+  if (v.mode or 0) == 0 then
+    return item.key ~= "mode" and item.key ~= "velocity_lo" and item.key ~= "velocity_hi" and item.key ~= "time_shift"
+  end
+  if not v.keyboard then
+    return item.key == "note_lo" or item.key == "note_hi" or item.key == "note_count"
+  end
+  return false
+end
+
+local function variation_menu()
+  local function step(key, lo, hi, by, fine)
+    return function(s, steps, shift_held)
+      local v = variation_value(s, key)
+      if v == nil then return end
+      deckard.variation(key, clamp(v + steps * ((shift_held and fine) or by), lo, hi))
+    end
+  end
+  local function pick(key, list)
+    return function(s, steps)
+      local v = variation_value(s, key) or 0
+      local to = clamp(v + steps, 0, #list - 1)
+      if to ~= v then deckard.variation(key, to) end
+    end
+  end
+  local function number(key, name, section, turn, fmt)
+    return {
+      key = key,
+      name = name,
+      section = section,
+      text = function(s)
+        local v = variation_value(s, key)
+        if v == nil then return "-" end
+        return fmt and fmt(v) or tostring(math.floor(v + 0.5))
+      end,
+      turn = turn,
+    }
+  end
+  local function choice(key, name, section, list)
+    return {
+      key = key,
+      name = name,
+      section = section,
+      text = function(s) return list[(variation_value(s, key) or 0) + 1] or "-" end,
+      turn = pick(key, list),
+    }
+  end
+  local function percent(v) return string.format("%d %%", math.floor(v + 0.5)) end
+  local items = {
+    {
+      key = "mode",
+      name = "Mode",
+      text = function(s) return VARIATION_MODES[(variation_value(s, "mode") or 0) + 1] or "-" end,
+      turn = function(s, steps)
+        local v = variation_value(s, "mode") or 0
+        local to = clamp(v + steps, 0, #VARIATION_MODES - 1)
+        if to ~= v then deckard.variation("mode", to) end
+      end,
+    },
+    -- Apply is the page's button, not a value: the reference draws it with no sub-label.
+    { key = nil, name = "Apply", text = function() return "Apply" end, sub = false,
+      press = function() deckard.apply_variation() end },
+    number("probability", "Probability", "PROBABILITY", step("probability", 10, 100, 10, 1), percent),
+    number("note_lo", "Note Lo", "NOTE RANGE", step("note_lo", 0, 127, 1, 1), variation_note),
+    number("note_hi", "Note Hi", "NOTE RANGE", step("note_hi", 0, 127, 1, 1), variation_note),
+    number("velocity_lo", "Velocity Lo", "VELOCITY RANGE", step("velocity_lo", 0, 127, 1, 1)),
+    number("velocity_hi", "Velocity Hi", "VELOCITY RANGE", step("velocity_hi", 0, 127, 1, 1)),
+    number("note_count", "Note Count", "CHORDS", step("note_count", 1, 6, 1, 1)),
+    number("steps", "Steps", "NOTE LENGTH", step("steps", 1, 6, 1, 1), function(v) return string.format("%.1f", v) end),
+    number("time_shift", "Step", "TIME SHIFT", step("time_shift", 0, 50, 5, 1), function(v) return "± " .. percent(v) end),
+    choice("dist_note_count", "Note Count", "DISTRIBUTIONS", VARIATION_DISTS),
+    choice("dist_notes", "Notes", "DISTRIBUTIONS", VARIATION_TAILS),
+    choice("dist_note_length", "Note Length", "DISTRIBUTIONS", VARIATION_DISTS),
+  }
+  for _, item in ipairs(items) do
+    local text = item.text
+    item.text = function(s)
+      if variation_hidden(s, item) then return "-" end
+      return text(s)
+    end
+  end
+  open_menu("Variation", items, { static = true })
+end
+
 -- ---- the OSO page ---------------------------------------------------------------
 -- The focused page as structured slots for the viewer strip. One slot per setting:
 -- `{ label, value, sub, group }`, where `label` is the stable parameter key (e.g.
@@ -988,6 +1091,69 @@ end
 
 -- The piano roll's Scale page: the three settings the piano roll edits, under one SCALE header.
 -- One page, no counter, no chord or pad-layout slots (`hil/strip-window-2026-11-21.md`).
+-- The Variation page's pages: Humanize is one (five settings), Random is two in a
+-- keyboard layout (eight and five) and one in pad mode, which drops the note range and
+-- the chords (the MK3 manual's pad layout: probability, velocity, time shift, length).
+local function variation_sizes(s)
+  local v = s.variation or {}
+  if (v.mode or 0) == 0 then return { 5 } end
+  if v.keyboard then return { 8, 5 } end
+  return { 8 }
+end
+
+local function variation_oso_page(s)
+  local m = st.menu
+  local shown = {}
+  for i = 1, #m.items do
+    if menu_available(m.items[i], s) then shown[#shown + 1] = m.items[i] end
+  end
+  local sizes = variation_sizes(s)
+  local pages = #sizes
+  -- The cursor's place among the settings shown (the menu counts every item, holes
+  -- included), then which page that place falls on.
+  local at = 0
+  local seen = 0
+  for i = 1, #m.items do
+    if menu_available(m.items[i], s) then
+      seen = seen + 1
+      if i >= (m.at or 1) then at = seen break end
+    end
+  end
+  at = math.max(at, seen, 1)
+  local n = 1
+  local start = 1
+  for i = 1, pages do
+    if at >= start and at < start + sizes[i] then n = i end
+    start = start + sizes[i]
+  end
+  start = 1
+  for i = 1, n - 1 do start = start + sizes[i] end
+  local slots = {}
+  for i = start, start + sizes[n] - 1 do
+    local item = shown[i]
+    if item == nil then slots[#slots + 1] = false else
+      -- (`item.sub == false`: a button, which the reference draws with no sub-label.)
+      local sub = item.name
+      if item.sub == false then sub = nil end
+      slots[#slots + 1] = {
+        label = item.name,
+        value = item.text(s),
+        sub = sub,
+        group = item.section,
+      }
+    end
+  end
+  local title = pages > 1 and string.format("Variation %d/%d", n, pages) or "Variation"
+  return {
+    title = title,
+    page = n,
+    pages = pages,
+    slots = slots,
+    focus = clamp(at - start, 0, sizes[n] - 1),
+    editing = m.editing == true,
+  }
+end
+
 local function step_scale_page(s)
   local m = st.menu
   local slots = {}
@@ -1014,6 +1180,7 @@ local function build_oso(s)
     local t = st.menu.title
     local page
     if t == "Tempo" then page = tempo_oso_page(s)
+    elseif t == "Variation" then page = variation_oso_page(s)
     elseif t == "SCALE" then page = st.menu.limited and step_scale_page(s) or scale_oso_page(s)
     elseif t == "ARP" or t == "NOTE REPEAT" then
       if not st.arp then page = generic_oso_page(s)
@@ -1551,10 +1718,12 @@ local function group_button(s, i)
     if i == 1 then
       toggle_follow(s)
     elseif i == 5 then
-      -- VARIATION: the focused sound's Groove ▸ Variation, on the strips.
+      -- VARIATION: the focused sound's Groove ▸ Variation, on the strips, and its
+      -- thirteen settings on the OSO (work-item 35: static, as the reference has it).
       st.strip = "control"
       deckard.groove_page(2)
-      say("Variation: on the strips")
+      variation_menu()
+      say("Variation")
     elseif i == 7 then
       deckard.file("save")
     end

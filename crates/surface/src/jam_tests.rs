@@ -8,7 +8,7 @@ use deckard_jam::map::METER_LEDS;
 
 use crate::device::{Device, Out, devices};
 use crate::tests_support::view;
-use crate::{Action, GroupView, PatternView, SceneView, View};
+use crate::{Action, GroupView, PatternView, SceneView, VariationView, View};
 
 const WHITE: i64 = 16;
 
@@ -1738,4 +1738,70 @@ fn the_lock_view_opens_its_page_and_the_timer_takes_it() {
     d.button("ENCODER_TOUCH", true, &v, Instant::now());
     d.tick(&v, Instant::now());
     assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("LOCK"), "and back on a touch");
+}
+
+/// SHIFT + GROUP 5 (`GROUP_E`) puts the focused sound's Variation page on the OSO, static
+/// as the reference has it: five settings in Humanize, and the two Random pages in a
+/// keyboard layout, with the encoder turning the setting under the cursor (work-item 35).
+#[test]
+fn the_variation_page_publishes_its_settings() {
+    let mut v = jam_view();
+    v.variation = Some(VariationView {
+        mode: 0,
+        velocity_lo: 100,
+        velocity_hi: 127,
+        time_shift: 0.0,
+        probability: 50,
+        note_lo: 60,
+        note_hi: 72,
+        note_count: 1,
+        steps: 1.0,
+        dist_note_count: 3,
+        dist_notes: 1,
+        dist_note_length: 2,
+        keyboard: true,
+    });
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    let out = press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    assert_eq!(apps(&out), [Action::GroovePage(1)], "the strips show it as they ever did");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Variation page published");
+    assert_eq!((page.title.as_str(), page.page, page.pages), ("Variation", 1, 1));
+    assert_eq!(page.slots.len(), 5, "Humanize is five settings");
+    let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
+    assert_eq!((slot(0).value.as_str(), slot(0).sub.as_deref()), ("Humanize", Some("Mode")));
+    assert_eq!((slot(1).value.as_str(), slot(1).sub.as_deref()), ("Apply", None), "a button has no sub-label");
+    assert_eq!(slot(2).group.as_deref(), Some("VELOCITY RANGE"));
+    assert_eq!((slot(2).value.as_str(), slot(3).value.as_str()), ("100", "127"));
+    assert_eq!((slot(4).value.as_str(), slot(4).group.as_deref()), ("± 0 %", Some("TIME SHIFT")));
+    // The MODE setting turns to Random; the page then has two, eight settings on the first.
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    let out = d.encoder(1, &v, Instant::now());
+    assert!(apps(&out).iter().any(|a| matches!(a, Action::Variation { field: "mode", value } if *value == 1.0)), "{:?}", apps(&out));
+    v.variation.as_mut().expect("a sound").mode = 1;
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Random page");
+    assert_eq!((page.title.as_str(), page.page, page.pages), ("Variation 1/2", 1, 2));
+    assert_eq!(page.slots.len(), 8, "Mode, Apply, Probability, Note Lo and Hi, Velocity Lo and Hi, Chords");
+    let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
+    assert_eq!((slot(2).value.as_str(), slot(2).group.as_deref()), ("50 %", Some("PROBABILITY")));
+    assert_eq!((slot(3).value.as_str(), slot(4).value.as_str()), ("C3", "C4"), "the note range reads as C3 and C4");
+    assert_eq!((slot(7).value.as_str(), slot(7).group.as_deref()), ("1", Some("CHORDS")));
+    // Apply is the page's button: the press asks the app to vary the sound's notes.
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert!(!d.oso().expect("page").editing, "it opens browsing");
+    d.encoder(1, &v, Instant::now()); // the cursor onto Apply
+    let out = press(&mut d, &v, "ENCODER");
+    assert!(apps(&out).contains(&Action::ApplyVariation), "{:?}", apps(&out));
 }

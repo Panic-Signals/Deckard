@@ -180,6 +180,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 |---|---|
 | `project` | The project's name. |
 | `tempo`, `swing` | The tempo, and the swing (0–100). |
+| `variation` | The focused sound's Variation page (`nil` with no sound): `mode` (0 Humanize, 1 Random), `velocity_lo`, `velocity_hi`, `time_shift` (per cent of a step, 0–50), `probability` (per cent, 10–100), `note_lo`, `note_hi`, `note_count` (1–6), `steps` (a note's length in steps, 1–6), the three distributions (0 Equal, 1 Gauss, 2 ½ Gauss, 3 Fixed) `dist_note_count`, `dist_notes`, `dist_note_length`, and `keyboard` (the pads are in a keyboard layout, which is what shows the note range and the chords). |
 | `volume`, `volume_db` | The master level (0–1; 0.75 is unity), and in dB (−∞ silent). |
 | `playing`, `recording`, `looping`, `metronome`, `auto_write`, `fixed_velocity`, `follow` | `true` or `false`. |
 | `velocity` | The velocity the pads play with Fixed Velocity on (0–127). |
@@ -326,6 +327,8 @@ and `positions`.
 | `deckard.step(at, length, velocity)` | Step mode's pad: the focused sound's notes starting from `at` to `at + length` (ticks) go; with none there, a note of its base key goes in at `at`, `length` long, at `velocity` (0–127), and becomes the selection. With no pattern, a new one first. |
 | `deckard.step_notes(at, length, velocity, pitches)` | The step grid's button in Keyboard and Chords mode: `pitches` (a list, at most 16) of the focused sound from `at` to `at + length` (ticks). All there already, they go; else the missing ones go in, a step long at `velocity`, and all of them are selected. Other pitches stay. With no pattern, a new one first. |
 | `deckard.groove_page(n)` | Show the focused sound's Groove properties on the Control page, page `n` (1 Swing, 2 Variation, 3 Generate). |
+| `deckard.variation(field, value)` | The focused sound's Variation page: the setting `field` (`mode`, `velocity_lo`, `velocity_hi`, `time_shift`, `probability`, `note_lo`, `note_hi`, `note_count`, `steps`, `dist_note_count`, `dist_notes`, `dist_note_length`, as `deckard.state().variation` names them) to `value`, clamped to what the manual allows. |
+| `deckard.apply_variation()` | The Variation page's Apply: the focused sound's notes in the pattern — Humanize moves them where they are (velocity into the band, the time shift), Random varies them by the probability and re-makes them in the note range and the scale, as chords of the Note Count, at the page's length. One undo step, from the notes as they were. |
 | `deckard.set_macro(knob, level)` | Make knob `knob`'s parameter (1–8, as the Control page shows it) a macro of the master (`level` 0), the focused group (1) or sound (2), or stop it being one. |
 | `deckard.velocity(v)` | The velocity the pads play with Fixed Velocity on (0–127). |
 | `deckard.scale(root, bank, kind)` | Keyboard and Chords mode's scale: the root (MIDI note) and the scale (places in `deckard.scales`). The pattern editor's scale follows. |

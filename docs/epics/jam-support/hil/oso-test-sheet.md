@@ -57,8 +57,12 @@ the view it was opened in.
 
 | OSO | State |
 |---|---|
-| `RANDOMIZER` (`Variation`) | **no page is composed, and the model is short of one.** Maschine's page reads thirteen settings over two pages (Humanize: five); DECKARD's Variation module keeps five (`sequence_variation/velocity_amount`, `time_shift`, `length_scale`, `length_variation`, `distribution`) and its *Generate* module keeps the rest (`probability`, `note_range/low|high`, `note_count`, `distribution`, `steps`, `fills`). Maschine's velocity **lo/hi**, its **mode** (Random / Humanize / …), its **Apply** and its **three separate distributions** have no counterpart. A page composed today would draw numbers that do not exist behind it. Static in the reference (it does not time out) — one more thing confirmed against the same list that once got PERFORM FX wrong |
-| `INSTANCE` (`SHIFT` + `H`) | **a different window, not this strip.** What it opens is NI's *desktop on-screen overlay* (§2 of the RE notes): its own window, "MASCHINE JAM" in the chrome, an instance page listing products with their pad-layout line. That is the overlay this branch deliberately leaves out — DECKARD's equivalent lives in the in-app library panel |
+| `Variation` | **SHIFT + E** (Group 5) | `--jam SHIFT --jam E` | 5 — Mode, Apply, Velocity Lo, Velocity Hi, Step | on the chord (static; the strips also open the Groove Variation page) | SHIFT + E again, or a view change. **No timer** |
+| `Variation 1/2` | Mode turned to **Random** | `--jam SHIFT --jam E`, press ENCODER, turn | 8 — Mode, Apply, Probability, Note Lo, Note Hi, Velocity Lo, Velocity Hi, Note Count | with it, once the MODE setting says Random | as above; 2/2 is one turn past the eighth |
+| `Variation 2/2` | the second Random page | turn past Note Count | 5 — Steps, Step (TIME SHIFT), and the three DISTRIBUTIONS | with it | the eighth turns back |
+The page is the focused sound's, read with the notes it varies; **Apply** is a button (no
+sub-label) and the encoder's press on it runs it. In **pad mode** (pads not in a keyboard
+layout) the note range and the chords leave the page, so Random is one page of eight.
 | desktop `BROWSE` overlay (§2 of the RE notes) | out of scope for this branch — the library stays an in-app panel |
 | NI-scripted controllers' OSO | their own path in `lua-host`, untouched, coexists by design |
 

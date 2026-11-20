@@ -35,6 +35,8 @@ pub struct View {
     pub tempo: f64,
     /// The song's swing, 0–100 %.
     pub swing: f64,
+    /// The focused sound's Variation settings, when there is a sound to show.
+    pub variation: Option<VariationView>,
     /// The master level as stored (0..1, 0.75 unity).
     pub master_volume: f64,
     /// The master level in dB (−∞ silent).
@@ -524,6 +526,30 @@ pub struct MixView {
     pub tune: Option<f64>,
 }
 
+/// The focused sound's Variation page (work-item 35): what the Jam's RANDOMIZER shows
+/// and sets. `mode` is 0 Humanize or 1 Random; the distributions are 0 Equal, 1 Gauss,
+/// 2 ½ Gauss, 3 Fixed; `keyboard` says whether the pads are in a keyboard layout, which
+/// shows Note Range and Chords (pad mode hides them).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VariationView {
+    pub mode: i64,
+    pub velocity_lo: i64,
+    pub velocity_hi: i64,
+    /// Per cent of a grid step, 0–50.
+    pub time_shift: f64,
+    /// Per cent, 10–100.
+    pub probability: i64,
+    pub note_lo: i64,
+    pub note_hi: i64,
+    pub note_count: i64,
+    /// A note's length in grid steps, 1–6.
+    pub steps: f64,
+    pub dist_note_count: i64,
+    pub dist_notes: i64,
+    pub dist_note_length: i64,
+    pub keyboard: bool,
+}
+
 /// The app's Control area: what the eight knobs turn.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ControlView {
@@ -728,6 +754,14 @@ pub enum Action {
     Volume(f64),
     /// The master level in dB (at most +10).
     VolumeDb(f64),
+    /// Set one of the focused sound's Variation settings (work-item 35): `field` as the
+    /// page names it (`mode`, `velocity_lo`, …, `dist_notes`), `value` as it shows it.
+    Variation {
+        field: &'static str,
+        value: f64,
+    },
+    /// The Variation page's Apply: vary the focused sound's notes in the focused pattern.
+    ApplyVariation,
     FocusGroup(usize),
     /// Focus sound `.0` of the focused group.
     FocusSound(usize),

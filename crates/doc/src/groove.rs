@@ -59,6 +59,78 @@ impl Rng {
     }
 }
 
+/// The Variation page's settings (work-item 35): Maschine's, with DECKARD's defaults
+/// where the sound saves nothing. They live under `sequence_variation/…`, which
+/// [`Sound::groove`] keeps when the project's format has no place for them (its
+/// `SequenceVariationModule` is four floats, an enum and a bool).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Variation {
+    /// 0 Humanize, 1 Random.
+    pub mode: i64,
+    pub velocity_lo: i64,
+    pub velocity_hi: i64,
+    /// Per cent of one grid step, 0–50.
+    pub time_shift: f64,
+    /// Per cent, 10–100.
+    pub probability: i64,
+    pub note_lo: i64,
+    pub note_hi: i64,
+    /// Notes a chord has per step, 1–6.
+    pub note_count: i64,
+    /// A note's length in grid steps, 1–6.
+    pub steps: f64,
+    /// Distributions (0 Equal, 1 Gauss, 2 ½ Gauss, 3 Fixed): the chord's size, the
+    /// pitches, the lengths.
+    pub dist_note_count: i64,
+    pub dist_notes: i64,
+    pub dist_note_length: i64,
+}
+
+impl Default for Variation {
+    fn default() -> Variation {
+        Variation {
+            mode: 0,
+            velocity_lo: 100,
+            velocity_hi: 127,
+            time_shift: 0.0,
+            probability: 50,
+            note_lo: 60,
+            note_hi: 72,
+            note_count: 1,
+            steps: 1.0,
+            dist_note_count: 3,
+            dist_notes: 0,
+            dist_note_length: 3,
+        }
+    }
+}
+
+impl Variation {
+    /// What `settings` gives (`sequence_variation/…` names) over DECKARD's defaults,
+    /// each clamped to what the manual allows; a range given the wrong way round is
+    /// read low to high.
+    pub fn from_settings(settings: Settings) -> Variation {
+        let d = Variation::default();
+        let v = |f: &str, d: f64| settings(&format!("sequence_variation/{f}")).unwrap_or(d);
+        let (lo, hi) = (v("velocity_range/lo", d.velocity_lo as f64), v("velocity_range/hi", d.velocity_hi as f64));
+        let (nlo, nhi) = (v("note_range/lo", d.note_lo as f64), v("note_range/hi", d.note_hi as f64));
+        Variation {
+            mode: (v("mode", d.mode as f64) as i64).clamp(0, 1),
+            velocity_lo: lo.min(hi).round().clamp(0.0, 127.0) as i64,
+            velocity_hi: lo.max(hi).round().clamp(0.0, 127.0) as i64,
+            time_shift: v("time_shift", d.time_shift).clamp(0.0, 50.0),
+            probability: (v("probability", d.probability as f64) as i64).clamp(10, 100),
+            note_lo: nlo.min(nhi).round().clamp(0.0, 127.0) as i64,
+            note_hi: nlo.max(nhi).round().clamp(0.0, 127.0) as i64,
+            note_count: (v("note_count", d.note_count as f64) as i64).clamp(1, 6),
+            steps: v("steps", d.steps).clamp(1.0, 6.0),
+            dist_note_count: (v("dist/note_count", d.dist_note_count as f64) as i64).clamp(0, 3),
+            dist_notes: (v("dist/notes", d.dist_notes as f64) as i64).clamp(0, 2),
+            dist_note_length: (v("dist/note_length", d.dist_note_length as f64) as i64).clamp(0, 3),
+        }
+    }
+}
+
 /// Step length in ticks of a Euclidean division (`grid` for Grid; Fit Bar: the bar
 /// split into the steps).
 pub fn division_ticks(division: i64, grid: i64, bar: i64, steps: i64) -> i64 {
@@ -191,24 +263,42 @@ impl Document {
         self.num(Target::Sound(g, s), "sequence_variation/velocity_amount").is_some()
     }
 
-    /// Humanize sound `s`'s notes in pattern `p` of group `g` with its Variation
-    /// settings (`grid`: the step, in ticks, the time and length shifts are measured in).
-    pub fn apply_variation(&mut self, g: usize, p: usize, s: usize, grid: i64, settings: Settings) -> Result<(), String> {
-        self.apply_variation_with(g, p, s, grid, settings, None, &mut Rng::new())
+    /// Sound `s`'s Variation settings (group `g`), DECKARD's defaults where the sound
+    /// saves none.
+    pub fn variation(&self, g: usize, s: usize) -> Variation {
+        Variation::from_settings(&|f| self.groove_setting(g, s, f))
+    }
+
+    /// Apply the Variation page to sound `s`'s notes in pattern `p` of group `g`:
+    /// Humanize moves them where they are, Random varies them and makes notes (`grid`:
+    /// the step, in ticks, the shifts are measured in). `scale`: whether a pitch is in
+    /// the selected scale (none selected: `None`).
+    pub fn apply_variation(
+        &mut self,
+        g: usize,
+        p: usize,
+        s: usize,
+        grid: i64,
+        scale: Option<&dyn Fn(i64) -> bool>,
+        settings: Settings,
+    ) -> Result<(), String> {
+        self.apply_variation_with(g, p, s, grid, scale, settings, None, &mut Rng::new())
     }
 
     /// [`Document::apply_variation`] starting from `base` (the notes as they were
     /// before a run of live changes) instead of the notes now.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_variation_from(
         &mut self,
         g: usize,
         p: usize,
         s: usize,
         grid: i64,
+        scale: Option<&dyn Fn(i64) -> bool>,
         settings: Settings,
         base: &[Note],
     ) -> Result<(), String> {
-        self.apply_variation_with(g, p, s, grid, settings, Some(base), &mut Rng::new())
+        self.apply_variation_with(g, p, s, grid, scale, settings, Some(base), &mut Rng::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -218,36 +308,89 @@ impl Document {
         p: usize,
         s: usize,
         grid: i64,
+        scale: Option<&dyn Fn(i64) -> bool>,
         settings: Settings,
         base: Option<&[Note]>,
         rng: &mut Rng,
     ) -> Result<(), String> {
         let pat = self.project.groups.get(g).and_then(|x| x.patterns.get(p)).ok_or("no such pattern")?.clone();
+        // The page's own settings, and the two the in-app Variation page has always read:
+        // the velocity's deviation and the length's scale.
         let v = |f: &str, d: f64| settings(&format!("sequence_variation/{f}")).unwrap_or(d);
-        let (vel, time, scale, var, dist) = (
-            v("velocity_amount", 0.0) / 100.0,
-            v("time_shift", 0.0) / 100.0,
-            4f64.powf((v("length_scale", 0.5) - 0.5) * 2.0),
-            v("length_variation", 0.0) / 100.0,
-            v("distribution", 1.0) as i64,
-        );
+        let st = Variation::from_settings(settings);
+        let (amount, length_scale, length_variation) =
+            (v("velocity_amount", 0.0) / 100.0, 4f64.powf((v("length_scale", 0.5) - 0.5) * 2.0), v("length_variation", 0.0) / 100.0);
         let old: Vec<Note> = pat.notes.iter().filter(|n| n.sound == s).copied().collect();
         if old.is_empty() {
             return Err("this sound has no notes in the pattern".into());
         }
+        let in_scale = |pitch: i64| scale.is_none_or(|f| f(pitch));
         let step = grid.max(1) as f64;
         let end = pat.start + if pat.length > 0 { pat.length } else { self.project.bar_length() };
+        let time = st.time_shift / 100.0;
+        // Where a note may land: inside the pattern, and at least 10 ticks long.
+        let place = |wanted: f64| (wanted.round() as i64).clamp(pat.start, end - 1);
+        let fit = |wanted: f64, at: i64| (wanted.round() as i64).clamp(10, (end - at).max(10));
         let mut new: Vec<Note> = Vec::new();
-        for n in base.unwrap_or(&old) {
-            let mut m = *n;
-            let dv = rng.spread(-vel * 63.5, vel * 63.5, dist);
-            m.velocity = (n.velocity as f64 + dv).round().clamp(1.0, 127.0) as i64;
-            let dt = rng.spread(-time * step, time * step, dist);
-            m.position = ((n.position as f64 + dt).round() as i64).clamp(pat.start, end - 1);
-            let dl = rng.spread(-var * step, var * step, dist);
-            m.length = ((n.length as f64 * scale + dl).round() as i64).max(10);
-            if !new.iter().any(|x| x.position == m.position && x.pitch == m.pitch) {
-                new.push(m);
+        if st.mode == 0 {
+            // Humanize: nothing is made or dropped. A note's velocity stays where it is
+            // inside the band, and its deviation (`velocity_amount`, the in-app page's
+            // knob) may take it out, so the band clamps it back in.
+            let dist = v("distribution", 1.0) as i64;
+            for n in base.unwrap_or(&old) {
+                let mut m = *n;
+                let dv = rng.spread(-amount * 63.5, amount * 63.5, dist);
+                m.velocity = (n.velocity as f64 + dv).round().clamp(st.velocity_lo as f64, st.velocity_hi as f64) as i64;
+                m.position = place(n.position as f64 + rng.spread(-time * step, time * step, dist));
+                let dl = rng.spread(-length_variation * step, length_variation * step, dist);
+                m.length = fit(n.length as f64 * length_scale + dl, m.position);
+                if !new.iter().any(|x| x.position == m.position && x.pitch == m.pitch) {
+                    new.push(m);
+                }
+            }
+        } else {
+            // Random: the note may go (probability), and what stays is re-made in the
+            // note range and the scale, as a chord of `note_count` notes, at the length
+            // and velocity the page says.
+            let prob = st.probability as f64 / 100.0;
+            let pool: Vec<i64> = (st.note_lo..=st.note_hi).filter(|&pitch| in_scale(pitch)).collect();
+            if pool.is_empty() {
+                return Err("the note range holds no note of the scale".into());
+            }
+            for n in base.unwrap_or(&old) {
+                if rng.unit() > prob {
+                    continue;
+                }
+                // Chords: Fixed is the CHORDS value itself, the rest shape how many of
+                // them a step gets.
+                let count = if st.dist_note_count == 3 {
+                    st.note_count
+                } else {
+                    let least = (st.note_count - (st.note_count - 1) / 2).max(1);
+                    rng.spread(least as f64, st.note_count as f64, st.dist_note_count).round() as i64
+                };
+                let mut pitches: Vec<i64> = Vec::new();
+                for _ in 0..count {
+                    for _ in 0..16 {
+                        let i = rng.spread(0.0, (pool.len() - 1) as f64, st.dist_notes).round() as usize;
+                        let pitch = pool[i.min(pool.len() - 1)];
+                        if !pitches.contains(&pitch) {
+                            pitches.push(pitch);
+                            break;
+                        }
+                    }
+                }
+                let at = place(n.position as f64 + rng.spread(-time * step, time * step, st.dist_notes));
+                let wanted = st.steps * step;
+                let length = if st.dist_note_length == 3 { wanted } else { rng.spread(wanted * 0.5, wanted * 1.5, st.dist_note_length) };
+                let length = fit(length, at);
+                for pitch in pitches {
+                    let velocity = rng.spread(st.velocity_lo as f64, st.velocity_hi as f64, 0).round();
+                    let m = Note { position: at, length, pitch, velocity: velocity.clamp(1.0, 127.0) as i64, ..*n };
+                    if !new.iter().any(|x| x.position == m.position && x.pitch == m.pitch) {
+                        new.push(m);
+                    }
+                }
             }
         }
         self.edit_notes("Apply Variation", g, p, &old, &new)
@@ -484,7 +627,7 @@ mod tests {
         // Variation: velocities move, nothing else when only velocity is on.
         let before: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
         let vary: &dyn Fn(&str) -> Option<f64> = &|f| (f == "sequence_variation/velocity_amount").then_some(100.0);
-        d.apply_variation_with(0, 0, 0, 240, vary, None, &mut Rng::seeded(3)).unwrap();
+        d.apply_variation_with(0, 0, 0, 240, None, vary, None, &mut Rng::seeded(3)).unwrap();
         let after: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
         assert_eq!(after.len(), before.len());
         assert!(after.iter().zip(&before).all(|(a, b)| a.position == b.position && a.length == b.length));
@@ -546,5 +689,69 @@ mod tests {
         d.undo();
         d.undo();
         assert_eq!(d.groove_setting(0, 0, "sequence_generation/fills"), None);
+    }
+
+    /// Humanize moves the notes it has and only what the page says: the velocity band
+    /// bounds them (the in-app knob's deviation may push one out, so it is clamped back),
+    /// and nothing is created, dropped or re-pitched.
+    #[test]
+    fn humanize_bounds_velocity_and_leaves_the_rest() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        let euclid: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_generation/mode" => Some(1.0),
+            "sequence_generation/steps" => Some(4.0),
+            "sequence_generation/fills" => Some(4.0),
+            "sequence_generation/division" => Some(1.0),
+            _ => None,
+        };
+        d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
+        let band: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_variation/velocity_range/lo" => Some(40.0),
+            "sequence_variation/velocity_range/hi" => Some(60.0),
+            _ => None,
+        };
+        let before: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        assert!(!before.is_empty());
+        d.apply_variation_with(0, 0, 0, 240, None, band, None, &mut Rng::seeded(3)).unwrap();
+        let after: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        assert_eq!(after.len(), before.len(), "nothing made or dropped");
+        assert!(after.iter().all(|n| (40..=60).contains(&n.velocity)), "{:?}", after.iter().map(|n| n.velocity).collect::<Vec<_>>());
+        assert!(after.iter().zip(&before).all(|(a, b)| a.position == b.position && a.pitch == b.pitch && a.length == b.length));
+    }
+
+    /// Random varies what is there: what the probability keeps is re-pitched into the
+    /// note range as a chord of the Note Count, in the velocity band, at the step length.
+    #[test]
+    fn random_keeps_the_ranges_the_chords_and_the_length() {
+        let mut d = Document::new_project().unwrap();
+        d.add_pattern(0, 0, "P").unwrap();
+        let euclid: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_generation/mode" => Some(1.0),
+            "sequence_generation/steps" => Some(4.0),
+            "sequence_generation/fills" => Some(4.0),
+            "sequence_generation/division" => Some(1.0),
+            _ => None,
+        };
+        d.generate_with(0, 0, 0, 240, false, None, euclid, &mut Rng::seeded(1)).unwrap();
+        let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_variation/mode" => Some(1.0),
+            "sequence_variation/probability" => Some(100.0),
+            "sequence_variation/note_range/lo" => Some(60.0),
+            "sequence_variation/note_range/hi" => Some(64.0),
+            "sequence_variation/note_count" => Some(3.0),
+            "sequence_variation/velocity_range/lo" => Some(70.0),
+            "sequence_variation/velocity_range/hi" => Some(80.0),
+            _ => None,
+        };
+        d.apply_variation_with(0, 0, 0, 240, None, page, None, &mut Rng::seeded(4)).unwrap();
+        let after: Vec<Note> = d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect();
+        assert!(!after.is_empty());
+        assert!(after.iter().all(|n| (60..=64).contains(&n.pitch)), "{:?}", after.iter().map(|n| n.pitch).collect::<Vec<_>>());
+        assert!(after.iter().all(|n| (70..=80).contains(&n.velocity)));
+        assert!(after.iter().all(|n| n.length == 240), "a step long");
+        let chord = |at: i64| after.iter().filter(|n| n.position == at).count();
+        let most = after.iter().map(|n| chord(n.position)).max().unwrap_or(0);
+        assert_eq!(most, 3, "the chord is Note Count notes (the range holds five pitches)");
     }
 }

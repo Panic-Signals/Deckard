@@ -816,13 +816,25 @@ type VariationBase = ((usize, usize, usize), Vec<Note>, Vec<Note>);
 type InputKey = (Option<String>, Vec<Option<usize>>);
 
 /// The Variation and Generate settings (fields of a sound).
-const GROOVE_FIELDS: [&str; 17] = [
+const GROOVE_FIELDS: [&str; 28] = [
     "sequence_variation/velocity_amount",
     "sequence_variation/time_shift",
     "sequence_variation/length_scale",
     "sequence_variation/length_variation",
     "sequence_variation/distribution",
     "sequence_variation/live",
+    // The Variation page (work-item 35).
+    "sequence_variation/mode",
+    "sequence_variation/velocity_range/lo",
+    "sequence_variation/velocity_range/hi",
+    "sequence_variation/probability",
+    "sequence_variation/note_range/low",
+    "sequence_variation/note_range/high",
+    "sequence_variation/note_count",
+    "sequence_variation/steps",
+    "sequence_variation/dist/note_count",
+    "sequence_variation/dist/notes",
+    "sequence_variation/dist/note_length",
     "sequence_generation/mode",
     "sequence_generation/probability",
     "sequence_generation/velocity_amount",
@@ -835,6 +847,26 @@ const GROOVE_FIELDS: [&str; 17] = [
     "sequence_generation/rotate",
     "sequence_generation/division",
 ];
+
+/// The Variation page's short names (`deckard.variation`) as the sound's fields keep
+/// them (work-item 35).
+fn variation_field(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "mode" => "sequence_variation/mode",
+        "velocity_lo" => "sequence_variation/velocity_range/lo",
+        "velocity_hi" => "sequence_variation/velocity_range/hi",
+        "time_shift" => "sequence_variation/time_shift",
+        "probability" => "sequence_variation/probability",
+        "note_lo" => "sequence_variation/note_range/low",
+        "note_hi" => "sequence_variation/note_range/high",
+        "note_count" => "sequence_variation/note_count",
+        "steps" => "sequence_variation/steps",
+        "dist_note_count" => "sequence_variation/dist/note_count",
+        "dist_notes" => "sequence_variation/dist/notes",
+        "dist_note_length" => "sequence_variation/dist/note_length",
+        _ => return None,
+    })
+}
 
 /// The stem separation model's install, offered the first time DECKARD starts without
 /// it (the .deb and .rpm can't ask; a download of [`stems::MODEL_MB`] MB).
@@ -5757,6 +5789,26 @@ impl App {
         v.velocity = d.num(deckard_doc::Target::Song, "fixed_velocity").map_or(100, |v| (v as i64).clamp(0, 127));
         (_, v.scale_bank, v.scale_kind) = self.scale;
         let song = |field: &str, default: f64| d.num(deckard_doc::Target::Song, field).unwrap_or(default) as i64;
+        // The focused sound's Variation page (work-item 35).
+        v.variation = self.doc.as_ref().map(|doc| {
+            let d = doc.borrow();
+            let x = d.variation(self.group, self.sound);
+            deckard_surface::VariationView {
+                mode: x.mode,
+                velocity_lo: x.velocity_lo,
+                velocity_hi: x.velocity_hi,
+                time_shift: x.time_shift,
+                probability: x.probability,
+                note_lo: x.note_lo,
+                note_hi: x.note_hi,
+                note_count: x.note_count,
+                steps: x.steps,
+                dist_note_count: x.dist_note_count,
+                dist_notes: x.dist_notes,
+                dist_note_length: x.dist_note_length,
+                keyboard: self.piano_roll,
+            }
+        });
         v.grid = deckard_surface::GridView {
             perform: song("perform_grid", 5.0),
             arrange: song("arrange_grid", 0.0),
@@ -6000,6 +6052,17 @@ impl App {
             }
             A::Volume(level) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, level)]),
             A::VolumeDb(db) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, deckard_model::level_from_db(db))]),
+            A::Variation { field, value } => {
+                let Some(name) = variation_field(field) else { return };
+                let Some(doc) = self.doc.clone() else { return };
+                let (g, s) = (self.group, self.sound);
+                let done = doc.borrow_mut().set_groove_setting(g, s, name, value);
+                match done {
+                    Err(e) => self.status = format!("can't set that: {e}"),
+                    Ok(()) => self.live_groove(g, s, name),
+                }
+            }
+            A::ApplyVariation => self.groove(layout::GrooveButton::ApplyVariation),
             A::FocusGroup(group) => self.focus_group(group),
             A::FocusSound(s) => self.focus_sound(s),
             A::SelectPad { index, multi } => self.select_pad(index, multi),
@@ -10545,7 +10608,7 @@ impl App {
         let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
         let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
         let done = match b {
-            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_variation(g, p, s, grid, &get),
+            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_variation(g, p, s, grid, in_scale, &get),
             layout::GrooveButton::Generate => doc.borrow_mut().generate(g, p, s, grid, polyphonic, in_scale, &get),
         };
         if let Err(e) = done {
@@ -10584,7 +10647,11 @@ impl App {
             GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let grid = self.grid;
-        if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, &get, &base) {
+        // The scale Random keeps to (the controller's Keyboard scale too; Chromatic is none).
+        let (root, bank, kind) = self.scale;
+        let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
+        let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
+        if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, in_scale, &get, &base) {
             self.status = format!("can't vary: {e}");
             return;
         }

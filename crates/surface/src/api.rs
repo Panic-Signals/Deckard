@@ -267,6 +267,36 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("auto_write", (on: bool) => Action::AutoWrite(on));
     request!("tempo", (bpm: f64) => Action::Tempo(tempo_in_range(bpm)));
     request!("swing", (amount: f64) => Action::Swing(amount.clamp(0.0, 100.0)));
+    {
+        // The Variation page's settings (work-item 35), by the names the page uses.
+        const FIELDS: [&str; 12] = [
+            "mode",
+            "velocity_lo",
+            "velocity_hi",
+            "time_shift",
+            "probability",
+            "note_lo",
+            "note_hi",
+            "note_count",
+            "steps",
+            "dist_note_count",
+            "dist_notes",
+            "dist_note_length",
+        ];
+        let sh = shared.clone();
+        d.set(
+            "variation",
+            lua.create_function(move |_, (field, value): (String, f64)| {
+                let Some(name) = FIELDS.iter().find(|f| **f == field) else {
+                    return Err(mlua::Error::runtime(format!("no variation setting \"{field}\" ({})", FIELDS.join(", "))));
+                };
+                act(&sh, Action::Variation { field: name, value });
+                Ok(())
+            })?,
+        )?;
+    }
+    request!("apply_variation", () => Action::ApplyVariation);
+
     request!("volume", (level: f64) => Action::Volume(level.clamp(0.0, 1.0)));
     request!("volume_db", (db: f64) => Action::VolumeDb(db.min(MAX_DB)));
     request!("fixed_velocity", (on: bool) => Action::FixedVelocity(on));
@@ -1221,6 +1251,30 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     t.set("pattern_position", v.pattern_position)?;
     t.set("tempo", v.tempo)?;
     t.set("swing", v.swing)?;
+    t.set(
+        "variation",
+        match &v.variation {
+            None => mlua::Value::Nil,
+            Some(x) => {
+                let t2 = lua.create_table()?;
+                t2.set("mode", x.mode)?;
+                t2.set("velocity_lo", x.velocity_lo)?;
+                t2.set("velocity_hi", x.velocity_hi)?;
+                t2.set("time_shift", x.time_shift)?;
+                t2.set("probability", x.probability)?;
+                t2.set("note_lo", x.note_lo)?;
+                t2.set("note_hi", x.note_hi)?;
+                t2.set("note_count", x.note_count)?;
+                t2.set("steps", x.steps)?;
+                t2.set("dist_note_count", x.dist_note_count)?;
+                t2.set("dist_notes", x.dist_notes)?;
+                t2.set("dist_note_length", x.dist_note_length)?;
+                t2.set("keyboard", x.keyboard)?;
+                mlua::Value::Table(t2)
+            }
+        },
+    )?;
+
     t.set("volume", v.master_volume)?;
     t.set("volume_db", v.master_db)?;
     t.set("master_meter", lua.create_sequence_from([db(v.master_meter.0), db(v.master_meter.1)])?)?;
