@@ -322,8 +322,12 @@ fn munge_takes_an_eighth_out_of_the_bar() {
     let made = Sample::load(std::path::Path::new(&z.sample.path)).unwrap();
     assert_eq!(made.frames.len(), 3 * 11_025, "three eighths left");
     let meta = z.meta.clone().expect("it keeps what it knows");
-    assert_eq!((meta.bpm, meta.beats, meta.warps.len(), meta.mode), (Some(120.0), Some(1.5), 0, PlayMode::Sync));
+    assert_eq!((meta.bpm, meta.beats, meta.mode), (Some(120.0), Some(1.5), PlayMode::Sync));
     assert_eq!(meta.file, z.sample.path);
+    // Its warp markers follow: the result is even from its start to its (new) end.
+    let map = deckard_model::new_sampler::BeatMap::of(&meta, RATE).unwrap();
+    assert_eq!((meta.warps.len(), map.beat_at(33_075.0), map.beat_at(11_025.0)), (2, 1.5, 0.5));
+    assert_eq!(z.play_range, (0, 33_074));
     app.undo();
     assert_eq!(zone0(&app), before, "one step back");
     // The other edits don't answer to it, and STRETCH closes it.
@@ -340,7 +344,7 @@ fn munge_takes_an_eighth_out_of_the_bar() {
 fn munge_swings_a_selection_and_keeps_the_rest() {
     let (mut app, _tmp) = loop_at_120(false);
     let before = app.sampling.sample.clone().unwrap();
-    app.sampling.selection = Some((11_025, 33_075));
+    app.sampling.selection = Some((22_050, 44_100));
     app.sampling_act(S::MungeOpen(true));
     let m = app.sampling.munge.unwrap();
     app.sampling_act(S::SetMunge(deckard_engine::munge::Munge { swing: 0.6, sixteenths: false, ..m }));
@@ -349,8 +353,8 @@ fn munge_swings_a_selection_and_keeps_the_rest() {
     let made = Sample::load(std::path::Path::new(&z.sample.path)).unwrap();
     assert_eq!(made.frames.len(), before.frames.len(), "swing keeps the length");
     let near = |a: &[[f32; 2]], b: &[[f32; 2]]| a.iter().zip(b).all(|(x, y)| (x[0] - y[0]).abs() < 1e-4);
-    assert!(near(&made.frames[..11_025], &before.frames[..11_025]) && near(&made.frames[33_075..], &before.frames[33_075..]));
-    assert!(!near(&made.frames[11_025..33_075], &before.frames[11_025..33_075]), "the selection is swung");
+    assert!(near(&made.frames[..22_050], &before.frames[..22_050]));
+    assert!(!near(&made.frames[22_050..], &before.frames[22_050..]), "the selection is swung");
     assert_eq!(z.meta.unwrap().beats, Some(2.0));
 }
 
@@ -417,4 +421,67 @@ fn motion_and_tail_are_set_and_undone() {
     app.sampling_act(S::Motion(Motion::Next));
     assert!(sound(&app).new_sampler.is_none());
     assert!(knob(&mut app, "Play.Tail").is_none() && knob(&mut app, "Play.Motion").is_none());
+}
+
+/// A zone that plays part of its file goes on playing that part, munged: not the whole
+/// file. The eighths count from the bar, not from where the range starts; a range that
+/// starts between two eighths is munged from the next one.
+#[test]
+fn munge_keeps_what_the_zone_plays() {
+    use deckard_engine::munge::Munge;
+    let (mut app, _tmp) = loop_at_120(false);
+    let (g, s) = (app.group, app.sound);
+    let set = |app: &mut crate::App, field: &str, v: i64| {
+        let t = deckard_doc::Target::Zone(g, s, 0);
+        app.doc.as_ref().unwrap().borrow_mut().set("Play Range", t, field, mxprj::decode::Value::Int(v)).unwrap();
+    };
+    // From the bar's second eighth to its end: three eighths.
+    set(&mut app, "play_range/low", 11_025);
+    set(&mut app, "play_range/high", 44_099);
+    app.update_sampling();
+    app.sampling.selection = None;
+    app.sampling_act(S::MungeOpen(true));
+    let m = app.sampling.munge.unwrap();
+    // Eighth 1 isn't in what it plays: nothing changes.
+    let mut mutes = [false; 8];
+    mutes[0] = true;
+    app.sampling_act(S::SetMunge(Munge { mutes, ..m }));
+    let before = zone0(&app);
+    app.sampling_act(S::MungeApply);
+    assert_eq!(zone0(&app), before, "{}", app.status);
+    assert!(app.sampling.munge.is_some(), "the bar stays");
+    // Eighth 3 is its second.
+    mutes = [false; 8];
+    mutes[2] = true;
+    app.sampling_act(S::SetMunge(Munge { mutes, ..m }));
+    app.sampling_act(S::MungeApply);
+    let z = zone0(&app);
+    let made = Sample::load(std::path::Path::new(&z.sample.path)).unwrap();
+    assert_eq!(made.frames.len(), 33_075);
+    assert_eq!(z.play_range, (11_025, 33_074), "what it played, an eighth shorter");
+    assert_eq!(z.meta.unwrap().grid_offset, 0, "the grid stays where it was");
+    // A selection from between two eighths: munged from the next eighth on.
+    let (mut app, _tmp) = loop_at_120(false);
+    let before = app.sampling.sample.clone().unwrap();
+    app.sampling.selection = Some((5_000, 44_100));
+    app.sampling_act(S::MungeOpen(true));
+    mutes = [false; 8];
+    mutes[1] = true;
+    app.sampling_act(S::SetMunge(Munge { mutes, ..m }));
+    app.sampling_act(S::MungeApply);
+    let z = zone0(&app);
+    let made = Sample::load(std::path::Path::new(&z.sample.path)).unwrap();
+    assert_eq!(made.frames.len(), 33_075);
+    let near = |a: &[[f32; 2]], b: &[[f32; 2]]| a.iter().zip(b).all(|(x, y)| (x[0] - y[0]).abs() < 1e-4);
+    assert!(near(&made.frames[..11_025], &before.frames[..11_025]), "the first eighth is whole");
+    assert_eq!(z.play_range, (0, 33_074));
+    // A range with no eighth line in it.
+    let (mut app, _tmp) = loop_at_120(false);
+    let before = zone0(&app);
+    app.sampling.selection = Some((43_000, 44_100));
+    app.sampling_act(S::MungeOpen(true));
+    app.sampling_act(S::SetMunge(Munge { swing: 0.5, ..m }));
+    app.sampling_act(S::MungeApply);
+    assert_eq!(zone0(&app), before);
+    assert!(app.status.contains("no eighth"), "{}", app.status);
 }

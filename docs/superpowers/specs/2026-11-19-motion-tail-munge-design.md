@@ -17,10 +17,12 @@ All three are the New Sampler's (a plain Sampler shows none of them).
   page): *Off*, *Next* or *Random*. On, every note plays one slice of the sound, whichever
   key it is: the next in key order (round to the first), or a random one that isn't the
   one before. The slice plays at its own pitch. Stopping the song goes back to the first.
+  The editor's PLAY still plays the slice shown, by itself.
 - **TAIL** (a zone's; same box, same page): 0 to 2000 ms. A note that reaches the slice's
   end plays back from there for that long, fading to nothing (the MPC's reverse tail: it
-  can't click, the audio being the same at the turn). A slice that loops has no tail. At
-  most as long as the slice.
+  can't click, the audio being the same at the turn). A slice that loops, or fades
+  out at that end, has no tail. At most as long as the slice. The time is the sample's: a
+  note played off its root, or a slice stretched as it plays, has it longer or shorter.
 - **MUNGE** (EDIT, software only, like STRETCH): opens a bar with APPLY, CANCEL and HEAR.
   It needs the zone's tempo. It cuts the selection (or the play range) into eighth notes
   by the sample's beats and builds it again:
@@ -31,9 +33,15 @@ All three are the New Sampler's (a plain Sampler shows none of them).
   - A part made shorter is cut and faded over **GRUNGE** (1 to 30 ms); one made longer is
     filled by repeating its last **COMB** (2 to 100 ms: short buzzes, long echoes), dying
     away.
-  - The result is on an even grid at the zone's tempo: its warp markers go, its length in
-    beats follows. HEAR plays it without keeping it. APPLY is one undo step, a new file
-    as every edit is.
+  - The eighths are the bar's, wherever the range starts; a range that starts between
+    two is munged from the next one on. With swing on eighths, a beat without its
+    off-beat in the range (or the other way round) stays as it is.
+  - The munged part is on an even grid at the zone's tempo. A zone with warp markers
+    keeps those outside it (the ones after move with their audio); its length in beats
+    follows. The zone goes on playing what it played, its loop too. HEAR plays the
+    result without keeping it. APPLY is one undo step, a new file as every edit is.
+    (Taking an eighth out of the middle of a sample without markers leaves what comes
+    after half a beat off its grid.)
 
 ## Non-goals
 

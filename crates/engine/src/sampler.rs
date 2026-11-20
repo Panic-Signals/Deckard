@@ -1741,8 +1741,13 @@ impl SamplerRt {
             fade_out: z.fade_out as i64,
             fading: 0,
             done: false,
-            // (A loop goes round instead.)
-            tail: if looping { 0 } else { (f64::from(z.tail_ms.max(0.0)) / 1000.0 * f64::from(z.sample.rate)) as i64 },
+            // (A loop goes round instead; a zone fade at that edge has ended it already, and
+            // a note started at the very end has played nothing to come back through.)
+            tail: if looping || (if forward { z.fade_out } else { z.fade_in }) > 0 || offset >= len as i64 {
+                0
+            } else {
+                (f64::from(z.tail_ms.max(0.0)) / 1000.0 * f64::from(z.sample.rate)) as i64
+            },
             tail_left: 0,
             tail_len: 0,
         };
@@ -2713,6 +2718,15 @@ mod tests {
         smp.zones[0].looped = Some((48_000, 49_000));
         smp.note_on(1, 60, 127, &ctx);
         assert_eq!(smp.voices[0].stream.tail, 0);
+        // Nor has a slice that fades out at that end.
+        let mut smp = chopped(&[(48_000, 49_000)]);
+        smp.zones[0].keys = (0, 127);
+        smp.zones[0].tail_ms = 100.0;
+        smp.note_on(1, 60, 127, &ctx);
+        assert!(smp.voices[0].stream.tail > 0);
+        smp.zones[0].fade_out = 200;
+        smp.note_on(2, 60, 127, &ctx);
+        assert_eq!(smp.voices[1].stream.tail, 0);
     }
 
     /// Stem lanes: with them all on a voice plays the sample itself; a muted lane leaves

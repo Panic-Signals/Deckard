@@ -6670,6 +6670,29 @@ impl App {
     /// doesn't end with its note). The song, if it plays, plays on.
     pub(crate) fn audition_toggle(&mut self, pitch: i64) {
         let (g, s) = (self.group, self.sound);
+        // Slice Motion would play another slice than the one shown: this one is heard by
+        // itself (as its pad on SLICE plays it).
+        let in_motion = self.doc.as_ref().is_some_and(|d| {
+            let d = d.borrow();
+            d.project().groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| {
+                x.new_sampler.is_some_and(|n| n.motion != Default::default()) && x.sampler.as_ref().is_some_and(|z| z.zones.len() > 1)
+            })
+        });
+        if in_motion {
+            if self.prehear_from.take().is_some() {
+                if let Some(Ok(out)) = &self.output {
+                    out.prehear(None, 0.0);
+                }
+                return;
+            }
+            let selection = self.sampling.selection.take();
+            let range = self.edit_range();
+            self.sampling.selection = selection;
+            if let Some((a, b)) = range {
+                self.sampling_call(deckard_lua_host::state::SamplingCall::Prehear(a, b));
+            }
+            return;
+        }
         let sounding = self.sampling.playhead.is_some();
         if let Some((ag, asnd, ap)) = self.audition.take()
             && let Some(Ok(out)) = &self.output
@@ -7909,14 +7932,15 @@ impl App {
     /// Write `sample` as an edited copy of the focused zone's file and point the zone at
     /// it (one undo step). `lanes`: how the edit goes for a stem lane (see
     /// [`Self::carry_lanes`]); without it the zone's lanes don't follow. `meta`: what the
-    /// zone knows of the new file (its tempo, say), kept in the same step; else the file
-    /// is looked at afresh.
+    /// zone knows of the new file (its tempo, say) and zone parameters to set on it (its
+    /// play range, else all of the file), kept in the same step; else the file is looked
+    /// at afresh.
     pub(crate) fn store_edit(
         &mut self,
         sample: deckard_engine::sample::Sample,
         label: &str,
         lanes: Option<(&dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample, (usize, bool))>,
-        meta: Option<deckard_model::new_sampler::ZoneMeta>,
+        meta: Option<(deckard_model::new_sampler::ZoneMeta, [(&'static str, i64); 4])>,
     ) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(key) = self.sampling.sample_key.clone() else { return };
@@ -7929,6 +7953,7 @@ impl App {
         let frames = sample.frames.len();
         let carried = lanes.and_then(|(lane, how)| self.carry_lanes(&key, frames, lane, how));
         // (The lanes are those carried: ones that couldn't be are left behind.)
+        let (meta, params) = meta.unzip();
         let carried = match (meta, carried) {
             (Some(m), Some(c)) => Some(deckard_model::new_sampler::ZoneMeta { stems: c.stems, stems_only: c.stems_only, ..m }),
             (Some(m), None) => Some(deckard_model::new_sampler::ZoneMeta { stems: Default::default(), stems_only: false, ..m }),
@@ -7954,6 +7979,9 @@ impl App {
                         .as_ref()
                         .map_or_else(String::new, |x| x.zones[key.2].sample.path.clone());
                     d.set_zone_meta(key.0, key.1, key.2, &meta, label)?;
+                }
+                for (field, v) in params.into_iter().flatten() {
+                    d.set(label, deckard_doc::Target::Zone(key.0, key.1, key.2), field, mxprj::decode::Value::Int(v))?;
                 }
                 Ok(())
             })

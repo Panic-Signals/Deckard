@@ -1769,6 +1769,8 @@ fn edit_tab(
             EditOp::Paste => st.clipboard.is_some(),
             EditOp::Cut | EditOp::Copy | EditOp::Duplicate | EditOp::Silence => has_sel,
             EditOp::Stems => stems.is_none_or(|(here, ..)| here),
+            // (It goes by the sample's tempo: a New Sampler zone's.)
+            EditOp::Munge => !take && zone.meta.is_some(),
             _ => true,
         };
         let text = match (op, stems) {

@@ -6,23 +6,63 @@ use deckard_engine::munge::{Munge, munge};
 use deckard_engine::sample::Sample;
 use deckard_model::new_sampler::{BeatMap, PlayMode, ZoneMeta};
 
-/// A munge ready to make: the sample, the range, its eighths, an eighth's even length,
-/// the settings, and the zone's meta as it will be.
+/// A munge ready to make: the sample, the range (from an eighth line on), its eighths,
+/// an eighth's even length, the eighth of its bar the range starts on, the settings, the
+/// zone's meta, and the beats the range runs from and to.
 pub(crate) struct MungePlan {
     sample: std::sync::Arc<Sample>,
     range: (usize, usize),
     cuts: Vec<usize>,
     eighth: f64,
+    phase: usize,
     settings: Munge,
     meta: ZoneMeta,
+    beats: (f64, f64),
 }
 
 impl MungePlan {
     /// The munged sample, and where its munged part ends.
     pub(crate) fn make(&self) -> Result<(Sample, usize), String> {
-        let out = munge(&self.sample, self.range, &self.cuts, self.eighth, &self.settings).ok_or("nothing would be left to play")?;
+        let out = self.of(&self.sample).ok_or("nothing would be left to play")?;
         let end = out.frames.len().saturating_sub(self.sample.frames.len() - self.range.1);
         Ok((out, end))
+    }
+
+    fn of(&self, s: &Sample) -> Option<Sample> {
+        munge(s, self.range, &self.cuts, self.eighth, self.phase, &self.settings)
+    }
+
+    /// Where frame `x` of the sample (inclusive ends too) is in the result ending its
+    /// munged part at `end`.
+    fn moved(&self, x: i64, end: usize, delta: i64) -> i64 {
+        if x >= self.range.1 as i64 { x + delta } else { x.min(end as i64 - 1) }.max(0)
+    }
+
+    /// The zone's meta for the result: its length in beats, and (a zone with warp
+    /// markers) the markers before the range as they were, the range even between two
+    /// of its own, those after moved with their audio.
+    fn meta_after(&self, new_len: usize, end: usize) -> ZoneMeta {
+        use deckard_model::new_sampler::Warp;
+        let beat = self.eighth * 2.0;
+        let (a, b) = self.range;
+        let delta = new_len as i64 - self.sample.frames.len() as i64;
+        let cut = self.beats.1 - (self.beats.0 + (end - a) as f64 / beat);
+        let mut meta = self.meta.clone();
+        if meta.warps.is_empty() {
+            meta.beats = Some(new_len as f64 / beat);
+        } else {
+            let old = std::mem::take(&mut meta.warps);
+            meta.warps = old.iter().filter(|w| (w.frame as usize) < a).copied().collect();
+            meta.warps.push(Warp { frame: a as u64, beat: self.beats.0 });
+            meta.warps.push(Warp { frame: end as u64, beat: self.beats.0 + (end - a) as f64 / beat });
+            meta.warps.extend(
+                old.iter()
+                    .filter(|w| w.frame as usize > b)
+                    .map(|w| Warp { frame: (w.frame as i64 + delta).max(0) as u64, beat: w.beat - cut }),
+            );
+            meta.beats = meta.beats.map(|x| (x - cut).max(0.0));
+        }
+        meta
     }
 }
 
@@ -68,11 +108,19 @@ impl App {
         };
         let map = BeatMap::of(&meta, sample.rate).ok_or(no_tempo)?;
         let beat = f64::from(sample.rate) * 60.0 / meta.bpm.ok_or(no_tempo)?;
-        // The range starts on the eighth nearest it.
-        let first = (map.beat_at(range.0 as f64) * 2.0).round() / 2.0;
-        let mut cuts = vec![range.0];
+        // From the range's start if that is an eighth line (within a millisecond), else
+        // from the next: what comes before it stays as it is.
+        let at = map.beat_at(range.0 as f64) * 2.0;
+        let near = (at - at.round()).abs() * beat / 2.0 <= f64::from(sample.rate) / 1000.0;
+        let first = if near { at.round() } else { at.ceil() };
+        let from = if near { range.0 } else { map.frame_at(first / 2.0).round().max(range.0 as f64) as usize };
+        if from >= range.1 {
+            return Err("the range holds no eighth note".into());
+        }
+        let range = (from, range.1);
+        let mut cuts = vec![from];
         for k in 1..100_000 {
-            let f = map.frame_at(first + f64::from(k) * 0.5).round();
+            let f = map.frame_at((first + f64::from(k)) / 2.0).round();
             if f >= range.1 as f64 {
                 break;
             }
@@ -80,27 +128,54 @@ impl App {
                 cuts.push(f as usize);
             }
         }
-        // The result is on an even grid at its tempo from the range's start.
-        let meta = ZoneMeta { warps: Vec::new(), grid_offset: (range.0 as f64 - first * beat).rem_euclid(beat).round() as u64, ..meta };
-        Ok(MungePlan { sample, range, cuts, eighth: beat / 2.0, settings, meta })
+        let beats = (first / 2.0, map.beat_at(range.1 as f64));
+        let phase = (first as i64).rem_euclid(8) as usize;
+        Ok(MungePlan { sample, range, cuts, eighth: beat / 2.0, phase, settings, meta, beats })
     }
 
-    /// MUNGE's APPLY: the range munged, as a new file (one undo step).
+    /// MUNGE's APPLY: the range munged, as a new file (one undo step). The zone goes on
+    /// playing what it played (the munged part, or its share of it), its loop likewise.
     pub(crate) fn munge_apply(&mut self) {
         if !self.sampling.munge.is_some_and(|m| m.changes()) {
             self.status = "MUNGE: nothing to change (set SWING, or switch an eighth off)".into();
             return;
         }
-        let made = self.munge_plan().and_then(|p| Ok((p.make()?.0, p)));
-        match made {
-            Ok((out, p)) => {
-                let beat = p.eighth * 2.0;
-                let meta = ZoneMeta { beats: Some(out.frames.len() as f64 / beat), ..p.meta.clone() };
-                let lane = |l: &Sample| munge(l, p.range, &p.cuts, p.eighth, &p.settings).unwrap_or_else(|| l.clone());
-                self.sampling.munge = None;
-                self.store_edit(out, "Munge", Some((&lane, (0, false))), Some(meta));
+        let made = self.munge_plan().and_then(|p| Ok((p.make()?, p)));
+        let ((out, end), p) = match made {
+            Ok(x) => x,
+            Err(e) => {
+                self.status = format!("can't munge: {e}");
+                return;
             }
-            Err(e) => self.status = format!("can't munge: {e}"),
+        };
+        if out.frames == p.sample.frames {
+            self.status = "MUNGE: nothing changes in this range".into();
+            return;
+        }
+        let old_len = p.sample.frames.len() as i64;
+        let delta = out.frames.len() as i64 - old_len;
+        let zone = self.doc.as_ref().and_then(|d| {
+            let d = d.borrow();
+            d.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones.get(self.zone).cloned()
+        });
+        let Some(zone) = zone else { return };
+        let (lo, hi) = if zone.play_range.1 > zone.play_range.0 { zone.play_range } else { (0, old_len - 1) };
+        let last = out.frames.len() as i64 - 1;
+        let fit = |x: i64| p.moved(x, end, delta).min(last);
+        let (lo, hi) = (fit(lo).min(last - 1).max(0), fit(hi));
+        let (ll, lh) = (fit(zone.loop_range.0), fit(zone.loop_range.1));
+        let params = [
+            ("play_range/low", lo),
+            ("play_range/high", hi.max(lo + 1).min(last)),
+            ("loop_range/low", ll),
+            ("loop_range/high", lh.max(ll)),
+        ];
+        let meta = p.meta_after(out.frames.len(), end);
+        let lane = |l: &Sample| p.of(l).unwrap_or_else(|| l.clone());
+        self.store_edit(out, "Munge", Some((&lane, (0, false))), Some((meta, params)));
+        // (Open still if the file couldn't be written.)
+        if self.status.starts_with("Munge:") {
+            self.sampling.munge = None;
         }
     }
 
