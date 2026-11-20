@@ -7678,7 +7678,7 @@ impl App {
                 }
             }
             if let Some(r) = deckard_analysis::root_by_bass(&mix, rate, Some(&bass.frames)) {
-                (meta.root, meta.cents, meta.root_guess) = (Some(r.note), r.cents, r.guess);
+                (meta.root, meta.cents, meta.root_guess, meta.key_minor) = (Some(r.note), r.cents, r.guess, r.minor);
             }
         }
         let dir = self.sample_dir("Stems");
@@ -8374,7 +8374,7 @@ impl App {
             };
         }
         if let Some(r) = found.root.filter(|_| !m.root_locked) {
-            (m.root, m.cents, m.root_guess) = (Some(r.note), r.cents, r.guess);
+            (m.root, m.cents, m.root_guess, m.key_minor) = (Some(r.note), r.cents, r.guess, r.minor);
         }
         self.status = match (found.tempo, found.root) {
             (None, None) => "Reanalyze: no tempo or root heard there".into(),
@@ -8430,7 +8430,7 @@ impl App {
             match deckard_analysis::root(part, l.rate) {
                 Some(_) if m.root_locked => said.push("the root is set by hand: it stays".into()),
                 Some(r) => {
-                    (m.root, m.cents, m.root_guess) = (Some(r.note), r.cents, r.guess);
+                    (m.root, m.cents, m.root_guess, m.key_minor) = (Some(r.note), r.cents, r.guess, r.minor);
                     said.push(format!("root {}{}", analysis::note_name(r.note), if r.guess { "?" } else { "" }));
                 }
                 None => said.push("no root heard".into()),
@@ -9237,6 +9237,14 @@ impl App {
                     .and_then(|x| x.sounds.get(self.sound))
                     .is_some_and(|x| x.new_sampler.is_none());
                 self.convert_instrument(to_new);
+                return;
+            }
+            C::Reanalyze => {
+                self.reanalyze();
+                return;
+            }
+            C::LaneHear(lane, root, tempo) => {
+                self.hear_lane(lane, root, tempo);
                 return;
             }
             C::MatchKey => {

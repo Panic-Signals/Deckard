@@ -256,6 +256,13 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
         let bpm_text = m.bpm.map_or("-".into(), |b| format!("{b:.2}"));
         let root = m.root.unwrap_or(z.root_key.clamp(0, 127) as u8);
         let root_text = match m.root {
+            // (A key's tonic: "E3 min", a guess "E3 min?".)
+            Some(r) if m.key_minor.is_some() || m.root_guess => format!(
+                "{}{}{}",
+                crate::analysis::note_name(r),
+                m.key_minor.map_or("", |minor| if minor { " min" } else { " maj" }),
+                if m.root_guess { "?" } else { "" }
+            ),
             Some(r) if m.cents.abs() >= 1.0 => format!("{} {:+.0}", crate::analysis::note_name(r), m.cents),
             Some(r) => crate::analysis::note_name(r),
             None => "-".into(),

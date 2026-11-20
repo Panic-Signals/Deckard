@@ -232,7 +232,10 @@ fn a_new_sampler_zone_has_its_tempo_on_edit() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::ScaleBpm(false))]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::ToProject)]);
     s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
-    // Without SHIFT, the edit functions as ever.
+    // Without SHIFT, ANALYZE beside the edit functions: its tempo and root heard again.
+    assert!(s.screen_text(&v).iter().any(|t| t == "ANALYZE"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::Reanalyze)]);
+    // The edit functions as ever.
     press(&mut s, &v, "BUTTON_SCREEN_6");
     assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
     // Back past the first: the New Sampler's own, last. TO SAMPLER, then the warp ones.
@@ -284,6 +287,55 @@ fn stem_lanes_have_their_mutes_on_the_display_buttons() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::LaneSolo(1))]);
     s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
     assert_eq!(s.event(&Event::Knob(0, -0.01), &v, Instant::now()), [Action::SamplingKnob { page: 2, knob: 0, value: -0.5 }]);
+}
+
+/// A New Sampler zone with stem lanes: three more edit functions set its root or tempo
+/// as one stem alone has it; button 7 goes round the stems.
+#[test]
+fn a_stem_gives_the_root_or_tempo_from_the_edit_functions() {
+    use deckard_model::sampling_view::LaneView;
+    let (mut s, mut v) = (Surface::new(), sampled(1));
+    let lane = |lane: usize, name: &str| LaneView { lane, name: name.into(), heard: true, ..Default::default() };
+    let knob = |key: &str, text: &str| SamplingKnob {
+        key: key.into(),
+        name: key.into(),
+        text: text.into(),
+        value: 1.0,
+        min: 0.0,
+        max: 999.0,
+        step: 1.0,
+        turn: 0.01,
+    };
+    let tempo = KnobPage { name: "TEMPO / PITCH".into(), knobs: vec![knob("Beat.Mode", "Sync"), knob("Beat.Bpm", "120.00")] };
+    v.sampling.pages[1].push(tempo);
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let shown = |s: &mut Surface, v: &_, t: &str| s.screen_text(v).iter().any(|x| x == t);
+    // No stems: no such functions (back from the first: TO SAMPLER, then CLEAR WARP).
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    assert!(shown(&mut s, &v, "CLEAR WARP"));
+    press(&mut s, &v, "BUTTON_SCREEN_6");
+    // With them: STEM ROOT, STEM TEMPO, STEM ANALYZE come before it.
+    v.sampling.sample.as_mut().unwrap().lanes = vec![lane(0, "Drums"), lane(2, "Bass"), lane(3, "Leads")];
+    assert!(shown(&mut s, &v, "STEM ROOT") && shown(&mut s, &v, "BASS"), "the bass first, for a root");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::LaneHear(2, true, false))]);
+    press(&mut s, &v, "BUTTON_SCREEN_6");
+    assert!(shown(&mut s, &v, "STEM TEMPO") && shown(&mut s, &v, "DRUMS"), "the drums first, for a tempo");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::LaneHear(0, false, true))]);
+    press(&mut s, &v, "BUTTON_SCREEN_6");
+    assert!(shown(&mut s, &v, "STEM ANALYZE") && shown(&mut s, &v, "BASS"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::LaneHear(2, true, true))]);
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    press(&mut s, &v, "BUTTON_SCREEN_5");
+    // Button 7 goes round the stems there are: Leads, then Drums.
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_7").is_empty());
+    assert!(shown(&mut s, &v, "LEADS"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::LaneHear(3, true, false))]);
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    assert!(shown(&mut s, &v, "DRUMS"));
+    // The stems gone (cleared): the pick with them, and nothing breaks.
+    v.sampling.sample.as_mut().unwrap().lanes.clear();
+    assert!(!shown(&mut s, &v, "STEM ROOT"));
 }
 
 #[test]

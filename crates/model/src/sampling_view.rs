@@ -98,9 +98,13 @@ pub enum SamplingCall {
     ToProject,
     /// Its Tune set so its root is the nearest note of the song's key.
     MatchKey,
+    /// Its tempo and root heard again (the part selected, else the part it plays).
+    Reanalyze,
     /// Stem lane `.0` (from 0, as [`LaneView::lane`]) muted or not; soloed or not.
     LaneMute(usize),
     LaneSolo(usize),
+    /// Its root (`.1`) and/or tempo (`.2`) as stem lane `.0` alone has them.
+    LaneHear(usize, bool, bool),
     /// Its warp markers: 0 put on its hits, 1 quantized, 2 cleared.
     Warp(usize),
     /// The sound's Sampler made a New Sampler, or back.

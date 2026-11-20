@@ -37,6 +37,7 @@ pub fn with_root(meta: &ZoneMeta, root: u8) -> ZoneMeta {
         cents: if meta.root == Some(root) { meta.cents } else { 0.0 },
         root_locked: true,
         root_guess: false,
+        key_minor: None,
         ..meta.clone()
     }
 }

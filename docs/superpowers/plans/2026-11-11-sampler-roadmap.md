@@ -334,7 +334,9 @@ and the Sampler both stay.
 > when stems are made, a root not yet sure is heard again), else the mix's low end. With
 > nothing settled the root is a guess, shown with a question mark ("Root E3?"). A stem
 > lane's name, right-clicked: Root, Tempo or Analyse from this stem. Tuned on one loop:
-> more are wanted.
+> more are wanted. A root that's a key's tonic names the key ("Key E min · Root E3"; the
+> MK3's ROOT knob: "E3 min"). On the MK3's EDIT tab: ANALYZE on button 7, and for a zone
+> with stems the edit functions STEM ROOT, STEM TEMPO, STEM ANALYZE (button 7: the stem).
 
 ---
 

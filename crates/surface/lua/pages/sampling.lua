@@ -4,6 +4,12 @@
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), PREVIOUS, NEXT take
 --   EDIT 5-6 / 8      ◀ the edit function ▶, APPLY (STEMS: CANCEL while separating)
+--   EDIT, STEM …      a zone with stem lanes has three more edit functions: STEM ROOT,
+--                     STEM TEMPO, STEM ANALYZE (both). Button 7 goes round its stems
+--                     (the bass first for the root, the drums for the tempo); APPLY
+--                     sets the zone's from that stem alone
+--   EDIT 7            ANALYZE: a New Sampler zone's tempo and root heard again (the
+--                     part it plays; its bass stem, if it has one, settles the key)
 --   SHIFT+EDIT 5-8    a New Sampler zone's tempo: X2, 1/2, TO PROJECT, MATCH KEY (its
 --                     knob pages: TEMPO / PITCH, SYNC, WARP; its edit functions go on
 --                     with WARP MARKERS, QUANTIZE AUDIO, CLEAR WARP; TO (NEW) SAMPLER
@@ -41,6 +47,11 @@ local FUNCTIONS = {
 }
 local func = 1
 -- A New Sampler zone with a tempo has its warp markers too; a Sampler converts.
+-- A zone with stem lanes: its root or tempo as one stem alone has it (the third: what
+-- `lane_hear` is asked for; the fourth: the stem first offered).
+local STEM = { { "STEM ROOT", "lane_hear", 1, "BASS" }, { "STEM TEMPO", "lane_hear", 2, "DRUMS" }, { "STEM ANALYZE", "lane_hear", 3, "BASS" } }
+-- The stem picked for each (an index into the lanes shown), once button 7 has.
+local stem_pick = {}
 local WARP = { { "WARP MARKERS", "warp_markers" }, { "QUANTIZE AUDIO", "warp_quantize" }, { "CLEAR WARP", "warp_clear" } }
 
 -- The knob page shown on each tab, the slice focused (from 1; none until a pad picks
@@ -157,6 +168,9 @@ local function functions(v)
   if p and p.knobs[2] and p.knobs[2].text ~= "-" then
     for _, f in ipairs(WARP) do list[#list + 1] = f end
   end
+  if p and v.sample and v.sample.lanes and #v.sample.lanes > 0 then
+    for _, f in ipairs(STEM) do list[#list + 1] = f end
+  end
   if not (v.sample and v.sample.take) then
     list[#list + 1] = { p and "TO SAMPLER" or "TO NEW SAMPLER", "convert" }
   end
@@ -242,10 +256,28 @@ local function buttons(v)
     if t then return t end
     local f = current(v)
     local cancel = f[2] == "stems" and v.stems and v.stems.focused
+    if f[2] == "lane_hear" then
+      -- The stem heard: the one picked, else the one first offered, else the first.
+      local lanes = s.lanes
+      local i = stem_pick[f[3]]
+      if not i or i > #lanes then
+        i = 1
+        for j, l in ipairs(lanes) do
+          if l.name:upper() == f[4] then i = j end
+        end
+      end
+      return {
+        { arrows = true, text = f[1] },
+        nil,
+        { text = lanes[i].name:upper(), act = function() stem_pick[f[3]] = i % #lanes + 1 end },
+        { text = "APPLY", act = function() deckard.sampling_call("lane_hear", lanes[i].lane, f[3]) end },
+      }
+    end
     return {
       { arrows = true, text = f[1], disabled = not s },
       nil,
-      nil,
+      -- (A New Sampler zone's: a Sampler's has no tempo or root to hear.)
+      tempo_page(v) and { text = "ANALYZE", disabled = not s, act = function() deckard.sampling_call("reanalyze") end } or nil,
       {
         text = cancel and "CANCEL" or "APPLY",
         disabled = not s or (f[2] == "stems" and stems_running(v) and not cancel),

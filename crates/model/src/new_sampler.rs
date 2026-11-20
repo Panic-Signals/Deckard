@@ -165,6 +165,9 @@ pub struct ZoneMeta {
     pub root_locked: bool,
     /// Analysis's best guess: no key stood out (shown with a question mark).
     pub root_guess: bool,
+    /// The root is the tonic of the sample's key (it has no single note): whether that
+    /// key is minor.
+    pub key_minor: Option<bool>,
     /// Warp markers (roadmap 1e): frames of the sample pinned to beats, in order. None:
     /// the sample's beats are evenly spaced at `bpm` from `grid_offset`.
     pub warps: Vec<Warp>,
@@ -402,6 +405,9 @@ impl ZoneMeta {
         if self.root_guess {
             t += "root_guess 1\n";
         }
+        if let Some(minor) = self.key_minor {
+            t += if minor { "key minor\n" } else { "key major\n" };
+        }
         for w in &self.warps {
             t += &format!("warp {} {}\n", w.frame, w.beat);
         }
@@ -442,6 +448,7 @@ impl ZoneMeta {
                 "cents" => m.cents = v.parse().unwrap_or(0.0),
                 "root_locked" => m.root_locked = v == "1",
                 "root_guess" => m.root_guess = v == "1",
+                "key" => m.key_minor = Some(v == "minor"),
                 "stems_only" => m.stems_only = v == "1",
                 "reverse" => m.reverse = v == "1",
                 "once" => m.once = v == "1",
@@ -511,6 +518,7 @@ mod tests {
             cents: -12.5,
             root_locked: true,
             root_guess: true,
+            key_minor: Some(true),
             warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 22_050, beat: 1.0625 }],
             start: StartGrid::Bar,
             stems: [

@@ -17,6 +17,9 @@ pub struct Root {
     pub confidence: f32,
     /// No key stood out: this is the likeliest, for what it's worth.
     pub guess: bool,
+    /// The root is a key's tonic (chords, a band, a song, not one note): whether the key
+    /// is minor.
+    pub minor: Option<bool>,
 }
 
 /// Above this, pairs of samples are averaged down so a window still spans low notes.
@@ -47,6 +50,7 @@ pub fn root_by_bass(frames: &[[f32; 2]], rate: u32, bass: Option<&[[f32; 2]]>) -
             cents: k.cents,
             confidence: k.confidence,
             guess,
+            minor: Some(k.minor),
         })
     })
 }
@@ -100,7 +104,7 @@ fn note(frames: &[[f32; 2]], rate: u32) -> Option<Root> {
         acc += c.1;
         acc >= weight[note] / 2.0
     });
-    Some(Root { note: note as u8, cents: median.map_or(0.0, |c| c.0), confidence, guess: false })
+    Some(Root { note: note as u8, cents: median.map_or(0.0, |c| c.0), confidence, guess: false, minor: None })
 }
 
 /// The root as [`root`] hears it, but a note in the file's name wins: it sets the pitch
@@ -123,7 +127,9 @@ pub fn root_with_name(frames: &[[f32; 2]], rate: u32, name: &str) -> Option<Root
     };
     let note = u8::try_from(note.clamp(0, 127)).ok()?;
     let cents = heard.filter(|h| h.note % 12 == note % 12).map_or(0.0, |h| h.cents);
-    Some(Root { note, cents, confidence: 1.0, guess: false })
+    // (The key heard is kept when its note is the name's.)
+    let minor = heard.filter(|h| h.note % 12 == note % 12).and_then(|h| h.minor);
+    Some(Root { note, cents, confidence: 1.0, guess: false, minor })
 }
 
 #[cfg(test)]

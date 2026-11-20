@@ -113,6 +113,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         cents: a.root.map_or(0.0, |r| r.cents),
         root_locked: false,
         root_guess: a.root.is_some_and(|r| r.guess),
+        key_minor: a.root.and_then(|r| r.minor),
         warps: Vec::new(),
         start: Default::default(),
         stems: Default::default(),
@@ -135,6 +136,12 @@ pub fn note_name(note: u8) -> String {
     format!("{}{}", NAMES[note as usize % 12], i32::from(note) / 12 - 2)
 }
 
+/// A key's name: "E min", "F# maj".
+pub fn key_name(tonic: u8, minor: bool) -> String {
+    let note = note_name(tonic);
+    format!("{} {}", note.trim_end_matches(|c: char| c.is_ascii_digit() || c == '-'), if minor { "min" } else { "maj" })
+}
+
 /// The Sampling page's line for a New Sampler zone: "120.00 BPM · 16 beats · Root A1
 /// −12 ct", or "Analysing…" (the play mode shows on its buttons).
 pub fn readout(meta: Option<&ZoneMeta>) -> String {
@@ -144,6 +151,10 @@ pub fn readout(meta: Option<&ZoneMeta>) -> String {
         (Some(b), Some(n)) => parts.push(format!("{b:.2} BPM · {} beats", (n * 100.0).round() / 100.0)),
         (Some(b), None) => parts.push(format!("{b:.2} BPM")),
         _ => parts.push("No tempo".into()),
+    }
+    // Its key, when the root is a key's tonic.
+    if let (Some(r), Some(minor)) = (m.root, m.key_minor) {
+        parts.push(format!("Key {}{}", key_name(r, minor), if m.root_guess { "?" } else { "" }));
     }
     match m.root {
         // (A guess: no cents, it has no single note to be off.)
@@ -172,15 +183,19 @@ mod tests {
         assert_eq!(meta_from(&short, "a", "Hit.wav").mode, PlayMode::Repitch);
         let eight = Analysis { tempo: tempo(120.0, 8.0), root: None, seconds: 8.0 };
         assert_eq!(meta_from(&eight, "a", "808 Long.wav").mode, PlayMode::Repitch);
-        let pad = Analysis { tempo: None, root: Some(Root { note: 57, cents: 0.0, confidence: 1.0, guess: false }), seconds: 6.0 };
+        let pad =
+            Analysis { tempo: None, root: Some(Root { note: 57, cents: 0.0, confidence: 1.0, guess: false, minor: None }), seconds: 6.0 };
         let m = meta_from(&pad, "a", "Pad.wav");
         assert_eq!((m.mode, m.root, m.bpm), (PlayMode::Repitch, Some(57), None));
     }
 
     #[test]
     fn the_readout() {
-        let a =
-            Analysis { tempo: tempo(120.0, 8.0), root: Some(Root { note: 45, cents: -12.4, confidence: 1.0, guess: false }), seconds: 8.0 };
+        let a = Analysis {
+            tempo: tempo(120.0, 8.0),
+            root: Some(Root { note: 45, cents: -12.4, confidence: 1.0, guess: false, minor: None }),
+            seconds: 8.0,
+        };
         assert_eq!(readout(Some(&meta_from(&a, "f", "x.wav"))), "120.00 BPM · 16 beats · Root A1 −12 ct");
         assert_eq!(readout(None), "Analysing…");
         // A guess says so, and has no cents.
@@ -188,6 +203,15 @@ mod tests {
         let m = meta_from(&a, "f", "x.wav");
         assert!(m.root_guess);
         assert_eq!(readout(Some(&m)), "120.00 BPM · 16 beats · Root A1?");
+        // A root that's a key's tonic names the key too.
+        let a = Analysis { root: a.root.map(|r| Root { note: 64, guess: false, minor: Some(true), ..r }), ..a };
+        let m = meta_from(&a, "f", "x.wav");
+        assert_eq!(m.key_minor, Some(true));
+        assert_eq!(readout(Some(&m)), "120.00 BPM · 16 beats · Key E min · Root E3 −12 ct");
+        let m = ZoneMeta { root_guess: true, key_minor: Some(false), ..m };
+        assert_eq!(readout(Some(&m)), "120.00 BPM · 16 beats · Key E maj? · Root E3?");
+        // Set by hand, it's a note again.
+        assert_eq!(crate::beat::with_root(&m, 62).key_minor, None);
     }
 
     /// A root analysis wasn't sure of is heard again when the stems come (the bass alone

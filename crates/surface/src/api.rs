@@ -604,8 +604,14 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "halve_bpm" => C::ScaleBpm(false),
                     "to_project" => C::ToProject,
                     "match_key" => C::MatchKey,
+                    "reanalyze" => C::Reanalyze,
                     "lane_mute" => C::LaneMute(n(a, "a stem lane")?),
                     "lane_solo" => C::LaneSolo(n(a, "a stem lane")?),
+                    // (What: 1 its root, 2 its tempo, 3 both.)
+                    "lane_hear" => {
+                        let what = b.map_or(3, |x| x.round() as i64);
+                        C::LaneHear(n(a, "a stem lane")?, what != 2, what != 1)
+                    }
                     "warp_markers" => C::Warp(0),
                     "warp_quantize" => C::Warp(1),
                     "warp_clear" => C::Warp(2),
