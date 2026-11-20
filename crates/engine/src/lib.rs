@@ -3743,6 +3743,7 @@ impl Engine {
         // Meters of the new shape, made here rather than on the audio thread.
         fresh.meters = self.sounds.iter().map(|g| vec![(0.0, 0.0); g.len()]).collect();
         std::mem::swap(&mut self.meters, &mut fresh.meters);
+        self.retime_offs(self.tempo, fresh.tempo);
         self.tempo = fresh.tempo;
         self.song_tempo = fresh.song_tempo;
         for u in self.fx.iter_mut().flatten().flatten().flat_map(|c| c.units.iter_mut()) {
@@ -8705,6 +8706,45 @@ mod tests {
         }
         let at = e.sounds[0][0].as_ref().unwrap().play_position(0).unwrap() as f64;
         assert!((at - 36_000.0).abs() < 3000.0, "{at}");
+    }
+
+    /// A pattern's note sounding when the tempo changes ends where it's written, not at
+    /// the frame its end fell on at the tempo it began at (a 2-beat note of a 4-beat
+    /// loop: its end is the note's, not the sample's).
+    #[test]
+    fn a_note_sounding_through_a_tempo_change_keeps_its_length() {
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        p.tempo = 240.0;
+        let smp = p.groups[0].sounds[0].sampler.as_mut().unwrap();
+        for (k, v) in [("envelope_type", 2.0), ("volume_envelope/sustain", 1.0), ("volume_envelope/release", 0.0)] {
+            smp.params.insert(k.into(), v);
+        }
+        let pat = &mut p.groups[0].patterns[0];
+        pat.notes.truncate(1);
+        pat.notes[0].length = 2 * PPQ;
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Pattern(0, 0), &mut cache);
+        let voices = |e: &Engine| e.sounds[0][0].as_ref().unwrap().voices();
+        // A beat at 240 (12,000 frames): the note has a beat to go.
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 1);
+        p.tempo = 120.0;
+        e.update(&p, None, &mut cache);
+        // Three quarters of a beat at 120: past where it ended at 240 (12,000 on).
+        play_frames(&mut e, 18_000);
+        assert_eq!(voices(&e), 1, "still held in its second beat");
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 0, "over at its end");
+        // The tempo raised: it ends sooner, with its beats.
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Pattern(0, 0), &mut cache);
+        play_frames(&mut e, 12_000);
+        p.tempo = 240.0;
+        e.update(&p, None, &mut cache);
+        // A beat and a half to go: 18,000 frames at 240 (36,000 at 120).
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 1, "in its second beat");
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 0, "over at its end, not a beat and a half on");
     }
 
     /// A start point (a zone that plays to its file's end) set to reverse plays from

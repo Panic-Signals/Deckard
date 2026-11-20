@@ -453,6 +453,13 @@ impl Player {
                 let (at, ev, _) = self.pending.remove(i);
                 if let Ev::Position { frame, playing, tempo, numerator, denominator } = ev {
                     if at >= self.position.0 {
+                        // Another tempo: the notes sounding end where they're written.
+                        let was = self.position.3;
+                        if tempo != was && was > 0.0 && tempo > 0.0 {
+                            for o in &mut self.offs {
+                                o.0 = pos + (o.0.saturating_sub(pos) as f64 * was / tempo).round() as u64;
+                            }
+                        }
                         self.position = (at, frame, playing, tempo, numerator, denominator);
                     }
                 } else {
