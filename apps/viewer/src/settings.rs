@@ -125,6 +125,10 @@ pub struct Settings {
     /// Where the Jam strip's own window sits: its offset in points from the main window's
     /// top-left, so the strip comes back beside the app on whatever display it opens on.
     pub jam_strip_pos: Option<(f32, f32)>,
+    /// The Jam's parameter overlay, in its own window (Preferences > Hardware). Off, the pages
+    /// still publish — the encoders, lights and every page behave as ever — and nothing draws.
+    /// Switching it clears the window's saved place, so it comes back beside the app.
+    pub show_strip: bool,
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
@@ -401,6 +405,7 @@ impl Default for Settings {
             jam_iso_type: 0,
             jam_iso_dir: 0,
             jam_strip_pos: None,
+            show_strip: true,
             pad_sensitivity: 50,
             metronome_volume: 100,
             focus_follows: true,
@@ -592,6 +597,7 @@ impl Settings {
                 }
                 "focus_follows" => s.focus_follows = v != "false",
                 "relative_strips" => s.relative_strips = v == "true",
+                "show_strip" => s.show_strip = v == "true",
                 "pinned_page" if !v.is_empty() => {
                     s.pinned_pages.insert(v.to_string());
                 }
@@ -865,6 +871,7 @@ impl Settings {
         }
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!("relative_strips = {}\n", self.relative_strips);
+        out += &format!("show_strip = {}\n", self.show_strip);
         for p in &self.pinned_pages {
             out += &format!("pinned_page = {p}\n");
         }
@@ -1556,5 +1563,23 @@ mod wine_tests {
         assert!(s.to_text().contains("bridge_windows = false\n"));
         assert!(!Settings::parse(&s.to_text()).bridge_windows);
         assert!(Settings::parse("").bridge_windows);
+    }
+}
+
+/// The Jam's overlay window, as a preference.
+#[cfg(test)]
+mod strip_tests {
+    use super::Settings;
+
+    /// The strip's window can be switched off, and stays off across a save. (Off does not
+    /// stop the pages: it is the overlay that goes, not the controller.)
+    #[test]
+    fn the_strips_window_can_be_switched_off() {
+        let mut s = Settings::default();
+        assert!(s.show_strip, "on by default: the overlay is a Jam's only display");
+        s.show_strip = false;
+        assert!(s.to_text().contains("show_strip = false\n"));
+        assert!(!Settings::parse(&s.to_text()).show_strip);
+        assert!(Settings::parse("").show_strip, "and on for anyone who never set it");
     }
 }

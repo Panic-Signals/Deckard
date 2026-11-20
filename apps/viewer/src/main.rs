@@ -3379,6 +3379,17 @@ impl App {
                     );
                     ui.end_row();
                     ui.label("");
+                    if ui
+                        .checkbox(&mut self.settings.show_strip, "Show the on-screen strip")
+                        .on_hover_text(
+                            "The Jam's parameter page, drawn in its own small window over the app. Off: the pages still run, so the encoders, the lights and every page behave as they ever did, but nothing is drawn. Switching it puts the window back beside the app.",
+                        )
+                        .changed()
+                    {
+                        self.settings.jam_strip_pos = None;
+                    }
+                    ui.end_row();
+                    ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };
                     ui.label(
                         egui::RichText::new(format!(
@@ -12050,7 +12061,11 @@ impl App {
         // by that page's own lifetime (never by a mode), over whatever view is showing, and
         // never in front of the mouse. No page draws no window.
         let shown = self.jam_shown();
-        let strip = shown.as_ref().map(|(page, rows)| (page, rows.as_slice()));
+        let strip = if self.settings.show_strip {
+            shown.as_ref().map(|(page, rows)| (page, rows.as_slice()))
+        } else {
+            None
+        };
         let saved = self.settings.jam_strip_pos.map(|(x, y)| egui::Vec2::new(x, y));
         if let Some(offset) = crate::jam_window::show(ctx, strip, saved) {
             // Where the window manager put it, which is where the user has it now.
