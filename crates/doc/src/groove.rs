@@ -1012,4 +1012,35 @@ mod tests {
         assert!(plain.iter().all(|n| n.length == 240), "one step, as before");
         assert!(plain.iter().any(|n| n.velocity != 100), "the deviation around 100, as before");
     }
+
+    /// One engine, two surfaces: with the same seed the Jam's Apply (mode Random) and the
+    /// app's Generate button write the identical notes. Random output differs press to
+    /// press by design, so a seed is the only way to say "same code" and mean it.
+    #[test]
+    fn the_jams_apply_and_the_generate_button_are_one_engine() {
+        let page: &dyn Fn(&str) -> Option<f64> = &|f| match f {
+            "sequence_variation/mode" => Some(1.0),
+            "sequence_generation/probability" => Some(80.0),
+            "sequence_generation/note_range/low" => Some(60.0),
+            "sequence_generation/note_range/high" => Some(71.0),
+            "sequence_generation/note_count" => Some(2.0),
+            "sequence_variation/velocity_range/low" => Some(70.0),
+            "sequence_variation/velocity_range/high" => Some(90.0),
+            "sequence_variation/steps" => Some(1.0),
+            _ => None,
+        };
+        let mut apply = Document::new_project().unwrap();
+        apply.add_pattern(0, 0, "P").unwrap();
+        apply.apply_groove_page_with(0, 0, 0, 240, true, None, page, None, &mut Rng::seeded(9)).unwrap();
+        let mut button = Document::new_project().unwrap();
+        button.add_pattern(0, 0, "P").unwrap();
+        button
+            .generate_with(0, 0, 0, 240, true, None, &|f: &str| (f == "sequence_generation/mode").then_some(0.0).or_else(|| page(f)), &mut Rng::seeded(9))
+            .unwrap();
+        let notes = |d: &Document| -> Vec<Note> {
+            d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect()
+        };
+        assert!(!notes(&apply).is_empty(), "something was made");
+        assert_eq!(notes(&apply), notes(&button), "the Jam's Apply and the Generate button are the same call");
+    }
 }

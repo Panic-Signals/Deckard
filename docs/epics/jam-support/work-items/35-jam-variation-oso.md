@@ -143,7 +143,12 @@ Two readings are DECKARD's, not NI's, and are marked for the rig:
   or dropped, the band bounds, positions and lengths untouched) and
   `random_keeps_the_ranges_the_chords_and_the_length` (pitches in range, velocities in the
   band, a step long, the chord is the Note Count).
-- `crates/surface/src/jam_tests.rs`: `the_variation_page_publishes_its_settings` — SHIFT + E
+- `the_jams_apply_and_the_generate_button_are_one_engine` — with one seed, the Jam's Apply in
+  Random mode and the app's Generate button write **identical** notes. Random output cannot be
+  compared press to press (it is clock-seeded, as Maschine's is), so a seed is how "same code" is
+  stated and meant.
+- `crates/surface/src/jam_tests.rs`: `the_variation_page_publishes_its_settings`,
+  `the_variation_page_shows_euclid_as_its_third_mode`, `shift_e_pressed_twice_closes_the_variation_page` — SHIFT + E
   publishes the Humize page of five (Mode, Apply without a sub-label, the velocity range,
   the time shift), the MODE turn asks the app to switch, Random then shows two pages of
   eight with Probability, the note range as C3/C4 and CHORDS, and the encoder's press on

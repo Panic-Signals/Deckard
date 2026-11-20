@@ -23,7 +23,14 @@ whole 7 s probe, timed pages closed at ~2 s, `BROWSE` showed nothing at all.
 | 10 | `SWING` | **SWING** | `--jam SWING` | 3 — Master, Group, Sound | on the press, and again on a touch | 2 s idle, another channel-mode button, view change |
 | 11 | `TUNE` | **TUNE** | `--jam TUNE` | 2 — Group, Sound | on the press, and again on a touch | 2 s idle, another channel-mode button, view change |
 | 12 | `LOCK` | **SHIFT + LOCK** | `--jam SHIFT --jam LOCK` | 3 — Morph, Mode, Time / Grid | on the view switch, and again on a touch | 2 s idle, SHIFT + LOCK again, view change |
-| 13 | *nothing* | **BROWSE** | `--jam BROWSE` | — | — | the library panel wins while it is open: no strip at all |
+| 13 | `Variation` | **SHIFT + E** (Group 5) | `--jam SHIFT --jam E` | 5 — Mode, Apply, Velocity Lo, Velocity Hi, Step | on the chord (static; the strips also open the Groove Variation page) | SHIFT + E again, or a view change. **No timer** |
+| 14 | `Variation 1/2` / `2/2` | Mode turned to **Random** | `--jam SHIFT --jam E`, press ENCODER, turn | 8 then 5 — Mode, Apply, Probability, Note Lo, Note Hi, Velocity Lo, Velocity Hi, Note Count / Steps, Step, three DISTRIBUTIONS | with it, once the MODE setting says Random | as row 13; 2/2 is one turn past the eighth |
+| 15 | `Euclid` | Mode turned to **Euclid** | `--jam SHIFT --jam E`, press ENCODER, turn twice | 6 — Mode, Apply, Steps, Fills, Rotate, Division | with it | as row 13. **DECKARD's mode, not the reference's** |
+| 16 | *nothing* | **BROWSE** | `--jam BROWSE` | — | — | the library panel wins while it is open: no strip at all |
+
+Rows 13–15 are the focused sound's page, read with the notes it varies; **Apply** is a button (no
+sub-label) and the encoder's press on it runs it. In **pad mode** (pads not in a keyboard layout)
+the note range and the chords leave the page, so Random is one page of eight.
 
 "Any view change" is `set_view`: PAD MODE, SONG, SHIFT + STEP and the rest. A page never outlives
 the view it was opened in.
@@ -35,8 +42,9 @@ the view it was opened in.
 | Turn the encoder | the focused slot's value moves; the underline stays on that slot |
 | Press the encoder | corner brackets on the focused slot (editing); press again to leave them |
 | Turn while editing | the focused value changes (except on PERFORM FX, where the press **closes** the page) |
-| Turn past the last item of a multi-page type | the counter moves (`Scale 2/2`, `Arpeggiator 2/3`, `… 3/3`), never to a page that draws nothing |
+| Turn past the last item of a multi-page type | the counter moves (`Scale 2/2`, `Arpeggiator 2/3`, `Variation 2/2`), never to a page that draws nothing |
 | Turn through a menu with unavailable items (isomorphic layout on Standard) | the cursor steps over them: it never rests on a hole |
+| Press the encoder on **Apply** (row 13–15) | the focused sound's notes are varied; the page stays. A pass that changes nothing says so in the status line |
 | Leave a timed page alone ~2 s | it goes, and an **encoder touch** brings it back (it is still that view's page) |
 | Navigate away (PAD MODE, SONG, …) | whatever was showing goes, static pages included |
 | Open BROWSE | the strip disappears; closing the panel brings the page back |
@@ -57,15 +65,9 @@ the view it was opened in.
 
 | OSO | State |
 |---|---|
-| `Variation` | **SHIFT + E** (Group 5) | `--jam SHIFT --jam E` | 5 — Mode, Apply, Velocity Lo, Velocity Hi, Step | on the chord (static; the strips also open the Groove Variation page) | SHIFT + E again, or a view change. **No timer** |
-| `Variation 1/2` | Mode turned to **Random** | `--jam SHIFT --jam E`, press ENCODER, turn | 8 — Mode, Apply, Probability, Note Lo, Note Hi, Velocity Lo, Velocity Hi, Note Count | with it, once the MODE setting says Random | as above; 2/2 is one turn past the eighth |
-| `Variation 2/2` | the second Random page | turn past Note Count | 5 — Steps, Step (TIME SHIFT), and the three DISTRIBUTIONS | with it | the eighth turns back |
-| `Euclid` | Mode turned to **Euclid** | `--jam SHIFT --jam E`, press ENCODER, turn twice | 6 — Mode, Apply, Steps, Fills, Rotate, Division | with it | as above. **DECKARD's mode, not the reference's** |
-The page is the focused sound's, read with the notes it varies; **Apply** is a button (no
-sub-label) and the encoder's press on it runs it. In **pad mode** (pads not in a keyboard
-layout) the note range and the chords leave the page, so Random is one page of eight.
 | desktop `BROWSE` overlay (§2 of the RE notes) | out of scope for this branch — the library stays an in-app panel |
 | NI-scripted controllers' OSO | their own path in `lua-host`, untouched, coexists by design |
+| `INSTANCE` (`SHIFT` + `H`) | a different window: NI's desktop overlay, with its own chrome and an instance page of products. Out of this branch by design |
 
 ## E. Sequencing worth a second look on hardware
 
@@ -75,3 +77,13 @@ layout) the note range and the chords leave the page, so Random is one page of e
 4. Scale 1/2 → turn to 2/2 → switch layout Standard in the app's Settings → the second page stops
    existing and the cursor resolves back onto a filled slot.
 5. `Arpeggiator 2/3` → change the pad layout → the cursor never lands on a hole.
+6. `Variation` → Mode **Random**, Probability 100, Note Count 3, Note Range C3–C4, Velocity 70/80
+   → Apply: every step carries a three-note chord, pitches between C3 and C4, velocities 70–80.
+   **Press Apply twice: the notes must differ** — it is random by nature, seeded from the clock —
+   while those invariants hold. The app's Generate ▸ Random gives the same invariants, not the
+   same notes; that the two are one engine is proved by seed in
+   `the_jams_apply_and_the_generate_button_are_one_engine`, not on the rig.
+7. `Variation` → Mode **Humanize**, Velocity Lo 40, Velocity Hi 60 → Apply: do the velocities land
+   *inside* 40–60 (the band replaces them), or stay spread around what they were (the band bounds
+   a deviation)? NI does not say; this build clamps into the band. The answer settles work item
+   35's one marked assumption.
