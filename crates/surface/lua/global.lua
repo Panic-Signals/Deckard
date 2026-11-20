@@ -330,8 +330,6 @@ function global.shift_pad(n)
   if (page == "grid" and deckard.held("FOLLOW")) or (page == "macro_set" and deckard.held("MACRO")) then
     return false
   end
-  -- (Sampling's SLICE pads are the slices: SHIFT keeps one, or catches one exactly.)
-  if page == "sampling" and deckard.state().sampling.tab == 3 then return false end
   if deckard.held("ERASE") then
     if pads.mode ~= "pad" or page == "lfo" then return false end
     local s = deckard.state()

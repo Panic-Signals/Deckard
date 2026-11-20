@@ -333,19 +333,23 @@ fn the_slice_pads_catch_keep_and_key_shift() {
     v.sampling.sample.as_mut().unwrap().playhead = Some(5000);
     assert_eq!(s.event(&Event::PadOn(9, 0.8), &v, now), call(SamplingCall::CatchSlice(false)));
     assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), call(SamplingCall::Prehear(11_025, 22_050)));
+    // SHIFT + a pad is the shortcut printed under it, as on every page: undo, redo...
     s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
-    assert_eq!(s.event(&Event::PadOn(9, 0.8), &v, now), call(SamplingCall::CatchSlice(true)), "SHIFT: exactly there");
-    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), call(SamplingCall::Prehear(11_025, 22_050)), "Manual keeps none");
+    assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::Edit("undo")]);
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), [Action::Edit("redo")]);
+    assert_eq!(s.event(&Event::PadOn(12, 0.8), &v, now), [Action::Edit("paste")]);
+    assert!(!s.screen_text(&v).iter().any(|t| t == "KEEP"), "Manual keeps none");
     // SHIFT + display 5: the focused slice key shifted. No RE-ROLL outside Random.
     assert!(s.screen_text(&v).iter().any(|t| t == "KEY SHIFT"));
     assert!(!s.screen_text(&v).iter().any(|t| t == "RE-ROLL"));
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), call(SamplingCall::KeyShift(1)));
     assert!(press(&mut s, &v, "BUTTON_SCREEN_6").is_empty());
-    // Find and Random: SHIFT + a slice's pad keeps it; an empty pad does nothing.
+    // Find and Random: SHIFT + display 8 keeps the focused slice (the pad last pressed).
     for m in ["Find", "Random"] {
         mode(&mut v, m);
-        assert_eq!(s.event(&Event::PadOn(3, 0.8), &v, now), call(SamplingCall::KeepSlice(2)), "{m}");
-        assert!(s.event(&Event::PadOn(9, 0.8), &v, now).is_empty(), "{m}");
+        assert!(s.screen_text(&v).iter().any(|t| t == "KEEP"), "{m}");
+        assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), call(SamplingCall::KeepSlice(1)), "{m}");
+        assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::Edit("undo")], "{m}");
     }
     assert!(s.screen_text(&v).iter().any(|t| t == "RE-ROLL"));
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), call(SamplingCall::Reroll));
@@ -356,10 +360,10 @@ fn the_slice_pads_catch_keep_and_key_shift() {
     let dim = lit(&mut s, &v, "LED_PAD_4");
     v.sampling.sample.as_mut().unwrap().kept = vec![3];
     assert_ne!(lit(&mut s, &v, "LED_PAD_4"), dim, "kept: bright");
-    // Split: SHIFT + a pad neither keeps nor undoes.
-    mode(&mut v, "Split");
+    // The focused slice kept already: the button lets it go.
+    v.sampling.sample.as_mut().unwrap().kept = vec![1];
     s.event(&Event::Button("BUTTON_SHIFT", true), &v, now);
-    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), call(SamplingCall::Prehear(11_025, 22_050)));
+    assert!(s.screen_text(&v).iter().any(|t| t == "UNKEEP"));
 }
 
 #[test]

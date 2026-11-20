@@ -239,13 +239,15 @@ DECKARD's own page adds, on SLICE:
 
 - **Catching.** In Manual mode, while the sample plays (a slice's pad was pressed, or
   PLAY in the software), an empty pad drops a slice at the play position, on the
-  sample's nearest 1/8 note when the zone has a tempo. With SHIFT, exactly there.
-- **Keeping.** In Find and Random, SHIFT + a slice's pad keeps that slice through
-  re-rolls and other counts (its pad is lit bright), or lets it go again. SHIFT + a pad
-  is not the pad's printed shortcut on this tab.
+  sample's nearest 1/8 note when the zone has a tempo. (Exactly there: SHIFT + CUE in
+  the software.)
+- **SHIFT + a pad** is the pad's printed shortcut (undo, redo, quantize...), as on
+  every other page.
 - **SHIFT + 5, KEY SHIFT.** The focused slice goes onto the group's next empty sound,
   over all its keys.
 - **SHIFT + 6, RE-ROLL** (Random mode). Random picks again.
+- **SHIFT + 8, KEEP** (Find and Random). The focused slice (the pad last pressed) is
+  kept through re-rolls and other counts (its pad is lit bright); **UNKEEP** lets it go.
 - **SHIFT + 7, BANK.** With more than 16 slices, the pads go to the next 16 (and round
   to the first). Selecting a slice with the knob moves the pads to its bank too.
 - The slicer's MODE has **Find** and **Random** after Maschine's four, each with a

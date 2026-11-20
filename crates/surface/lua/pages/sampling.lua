@@ -14,17 +14,18 @@
 --                     (SHIFT: solo); the right display shows the lanes stacked
 --   SLICE 5-8         SPLIT, REMOVE the focused slice, DELETE ALL, APPLY… (the slices
 --                     made zones of the focused sound)
---   SHIFT+SLICE 5-7   KEY SHIFT (the focused slice onto the group's next empty sound,
+--   SHIFT+SLICE 5-8   KEY SHIFT (the focused slice onto the group's next empty sound,
 --                     over all its keys), RE-ROLL (Random: pick again), BANK (the
---                     pads' next sixteen slices)
+--                     pads' next sixteen slices), KEEP (Find and Random: the focused
+--                     slice kept through re-rolls, lit bright; UNKEEP lets it go)
 --   ZONE 5-8          REMOVE the focused zone, ADD, PREVIOUS, NEXT zone
 --   LEFT / RIGHT      the tab's knob pages
 --   knobs 1-4         the page's settings (SHIFT: finer)
 --   knobs 5 / 6       zoom / scroll the sample (their icons shown while touched)
 --   pads              SLICE: pick a slice and hear it; Manual, while the sample plays,
---                     an empty pad drops a slice there (SHIFT: exactly there, not on
---                     the nearest 1/8 note); Find and Random, SHIFT + a slice's pad
---                     keeps it through re-rolls (lit bright); else the sounds, as ever
+--                     an empty pad drops a slice there, on the nearest 1/8 note;
+--                     else the sounds, as ever. SHIFT + a pad is the shortcut printed
+--                     under it on every tab (undo, redo...)
 
 local widgets = require("lib.widgets")
 
@@ -273,6 +274,13 @@ local function buttons(v)
         disabled = banks < 2,
         act = function() slice = (bank + 1) % banks * 16 + 1 end,
       }
+      -- KEEP: the focused slice stays through re-rolls and other counts.
+      local mode = slicer_mode(v)
+      if mode == "Find" or mode == "Random" then
+        local kept = false
+        for _, j in ipairs(s and s.kept or {}) do kept = kept or j == i end
+        out[4] = { text = kept and "UNKEEP" or "KEEP", disabled = n == 0, act = function() deckard.sampling_call("keep_slice", i) end }
+      end
       return out
     end
     return {
@@ -406,16 +414,13 @@ function page.pad(n)
   local s = v.sample
   if not s then return true end
   local i = pad_bank(s) + n
-  local mode, shift = slicer_mode(v), deckard.held("SHIFT")
-  if s.slices[i] and shift and (mode == "Find" or mode == "Random") then
-    -- Kept through re-rolls, or no longer.
-    deckard.sampling_call("keep_slice", i)
-  elseif s.slices[i] then
+  -- (SHIFT + a pad never comes here: it is the pad's printed shortcut.)
+  if s.slices[i] then
     slice = i
     deckard.sampling_call("prehear", s.slices[i], s.slices[i + 1] or s.play[2])
-  elseif mode == "Manual" and s.playhead then
+  elseif slicer_mode(v) == "Manual" and s.playhead then
     -- An empty pad while the sample plays: a slice there.
-    deckard.sampling_call("catch_slice", shift and 1 or 0)
+    deckard.sampling_call("catch_slice", 0)
   end
   return true
 end
