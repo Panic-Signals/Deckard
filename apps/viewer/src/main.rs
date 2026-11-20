@@ -41,6 +41,9 @@ mod controller;
 #[cfg(test)]
 mod controller_quality_tests;
 mod controller_timing;
+/// The stem lane the bass is on ([`deckard_model::new_sampler::LANE_NAMES`]).
+const BASS_LANE: usize = 2;
+
 mod drag_out;
 mod drop_pos;
 mod drum_ui;
@@ -7662,6 +7665,22 @@ impl App {
             self.status = "the zone changed while its stems were made: they weren't kept".into();
             return;
         };
+        // A root analysis wasn't sure of (none, or a guess) is heard again now there's a
+        // bass to hear: the stems together are the sample.
+        if !meta.root_locked
+            && (meta.root.is_none() || meta.root_guess)
+            && let Some(bass) = stems.iter().find(|s| s.kind == Kind::Bass)
+        {
+            let mut mix = vec![[0f32; 2]; bass.frames.len()];
+            for s in &stems {
+                for (m, f) in mix.iter_mut().zip(&s.frames) {
+                    (m[0], m[1]) = (m[0] + f[0], m[1] + f[1]);
+                }
+            }
+            if let Some(r) = deckard_analysis::root_by_bass(&mix, rate, Some(&bass.frames)) {
+                (meta.root, meta.cents, meta.root_guess) = (Some(r.note), r.cents, r.guess);
+            }
+        }
         let dir = self.sample_dir("Stems");
         for s in stems {
             let lane = match s.kind {
@@ -8044,6 +8063,7 @@ impl App {
             S::Lane(k, act) => self.lane_act(k, act),
             S::LanesMix(on) => self.sampling.lanes_mix = on,
             S::DragOut(lane, whole) => self.drag_out(lane, whole),
+            S::LaneHear(lane, root, tempo) => self.hear_lane(lane, root, tempo),
             S::Edit(op) => {
                 let (Some(s), Some(r)) = (self.sampling.sample.clone(), self.edit_range()) else { return };
                 type Lane = Box<dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample>;
@@ -8338,7 +8358,11 @@ impl App {
         if b <= a || s.rate == 0 {
             return;
         }
-        let found = deckard_analysis::analyse(&s.frames[a..b], s.rate, "");
+        let mut found = deckard_analysis::analyse(&s.frames[a..b], s.rate, "");
+        // Its bass lane, if it has one, settles a key that's a close call.
+        if let Some(l) = self.sampling.lanes[BASS_LANE].as_ref().filter(|l| l.sample.frames.len() >= b) {
+            found.root = deckard_analysis::root_by_bass(&s.frames[a..b], s.rate, Some(&l.sample.frames[a..b]));
+        }
         let seconds = s.frames.len() as f64 / f64::from(s.rate);
         let mut m = meta.clone();
         if let Some(t) = found.tempo {
@@ -8350,18 +8374,71 @@ impl App {
             };
         }
         if let Some(r) = found.root.filter(|_| !m.root_locked) {
-            (m.root, m.cents) = (Some(r.note), r.cents);
+            (m.root, m.cents, m.root_guess) = (Some(r.note), r.cents, r.guess);
         }
         self.status = match (found.tempo, found.root) {
             (None, None) => "Reanalyze: no tempo or root heard there".into(),
             (t, r) => format!(
                 "Reanalyze: {}{}",
                 t.map_or("no tempo".into(), |t| format!("{:.2} BPM", t.bpm)),
-                r.map_or(String::new(), |r| format!(", root {}", analysis::note_name(r.note)))
+                r.map_or(String::new(), |r| format!(", root {}{}", analysis::note_name(r.note), if r.guess { "?" } else { "" }))
             ),
         };
         if m != meta
             && let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &m, "Reanalyze")
+        {
+            self.status = format!("can't change the zone: {e}");
+        }
+    }
+
+    /// The focused zone's root and/or tempo as stem lane `lane` alone has them (the part
+    /// selected, else the part the zone plays): a root set by hand stays. One undo step.
+    fn hear_lane(&mut self, lane: usize, root: bool, tempo: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let name = deckard_model::new_sampler::LANE_NAMES.get(lane).copied().unwrap_or("stem");
+        let Some(l) = self.sampling.lanes.get(lane).and_then(Option::as_ref).map(|l| l.sample.clone()) else {
+            self.status = format!("no {name} stem here");
+            return;
+        };
+        let p = doc.borrow().project().clone();
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+        let Some(meta) = zone.meta else { return };
+        let (a, b) = self.sampling.selection.or_else(|| self.play_range_of_focused()).unwrap_or((0, l.frames.len()));
+        let (a, b) = (a.min(l.frames.len()), b.min(l.frames.len()));
+        if b <= a || l.rate == 0 {
+            return;
+        }
+        let part = &l.frames[a..b];
+        let mut m = meta.clone();
+        let mut said = Vec::new();
+        if tempo {
+            match deckard_analysis::tempo(part, l.rate, None) {
+                Some(t) => {
+                    let seconds = l.frames.len() as f64 / f64::from(l.rate);
+                    m = deckard_model::new_sampler::ZoneMeta {
+                        bpm_source: deckard_model::new_sampler::BpmSource::Audio,
+                        grid_offset: (a + t.offset) as u64,
+                        warps: Vec::new(),
+                        ..beat::with_bpm(&m, t.bpm, seconds)
+                    };
+                    said.push(format!("{:.2} BPM", t.bpm));
+                }
+                None => said.push("no tempo heard".into()),
+            }
+        }
+        if root {
+            match deckard_analysis::root(part, l.rate) {
+                Some(_) if m.root_locked => said.push("the root is set by hand: it stays".into()),
+                Some(r) => {
+                    (m.root, m.cents, m.root_guess) = (Some(r.note), r.cents, r.guess);
+                    said.push(format!("root {}{}", analysis::note_name(r.note), if r.guess { "?" } else { "" }));
+                }
+                None => said.push("no root heard".into()),
+            }
+        }
+        self.status = format!("From the {name} stem: {}", said.join(", "));
+        if m != meta
+            && let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &m, "Analyse Stem")
         {
             self.status = format!("can't change the zone: {e}");
         }

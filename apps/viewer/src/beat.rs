@@ -32,7 +32,13 @@ pub fn with_beats(meta: &ZoneMeta, beats: f64, seconds: f64) -> Option<ZoneMeta>
 
 /// `meta` with its root note set by hand (locked: analysis leaves it).
 pub fn with_root(meta: &ZoneMeta, root: u8) -> ZoneMeta {
-    ZoneMeta { root: Some(root.min(127)), cents: if meta.root == Some(root) { meta.cents } else { 0.0 }, root_locked: true, ..meta.clone() }
+    ZoneMeta {
+        root: Some(root.min(127)),
+        cents: if meta.root == Some(root) { meta.cents } else { 0.0 },
+        root_locked: true,
+        root_guess: false,
+        ..meta.clone()
+    }
 }
 
 /// The note a sample of root `root` (`cents` off it) sounds at with Tune `tune`.

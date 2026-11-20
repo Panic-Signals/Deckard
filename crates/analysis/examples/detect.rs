@@ -57,5 +57,13 @@ fn main() {
         let t = std::time::Instant::now();
         let k = deckard_analysis::key(part, rate);
         eprintln!("key in {:.2} s: {k:?}", t.elapsed().as_secs_f64());
+        // With the bass heard: in the low end of the file, or (BASS=FILE) a bass stem.
+        let stem = std::env::var("BASS").ok().map(|f| deckard_engine::sample::Sample::load(std::path::Path::new(&f)).unwrap());
+        let bass = stem.as_ref().map(|s| &s.frames[at(start).min(s.frames.len())..at(start + len).min(s.frames.len())]);
+        eprintln!(
+            "key by bass ({}): {:?}",
+            if bass.is_some() { "stem" } else { "low end" },
+            deckard_analysis::key_by_bass(part, rate, bass)
+        );
     }
 }

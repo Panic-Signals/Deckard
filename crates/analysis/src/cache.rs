@@ -68,7 +68,8 @@ impl Cache {
     pub fn get(&self, key: &str) -> Option<Analysis> {
         let text = std::fs::read_to_string(self.path(key)).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != "v 2" {
+        // (v 3: a root may be a guess, and the bass settles a close key.)
+        if lines.next()? != "v 3" {
             return None;
         }
         let mut a = Analysis { tempo: None, root: None, seconds: 0.0 };
@@ -95,8 +96,8 @@ impl Cache {
                 }
                 "root" => {
                     num();
-                    let (note, cents, confidence) = (num()?, num()?, num()?);
-                    a.root = Some(Root { note: note as u8, cents: cents as f32, confidence: confidence as f32 });
+                    let (note, cents, confidence, guess) = (num()?, num()?, num()?, num()?);
+                    a.root = Some(Root { note: note as u8, cents: cents as f32, confidence: confidence as f32, guess: guess != 0.0 });
                 }
                 _ => {}
             }
@@ -107,13 +108,13 @@ impl Cache {
     /// Keep `a` for `key` (written whole, then renamed into place).
     pub fn put(&self, key: &str, a: &Analysis) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        let mut text = format!("v 2\nseconds {}\n", a.seconds);
+        let mut text = format!("v 3\nseconds {}\n", a.seconds);
         if let Some(t) = &a.tempo {
             let source = SOURCES.iter().find(|s| s.0 == t.source).map_or("audio", |s| s.1);
             text += &format!("tempo {} {} {} {} {source}\n", t.bpm, t.beats, t.offset, t.confidence);
         }
         if let Some(r) = &a.root {
-            text += &format!("root {} {} {}\n", r.note, r.cents, r.confidence);
+            text += &format!("root {} {} {} {}\n", r.note, r.cents, r.confidence, u8::from(r.guess));
         }
         let tmp = self.dir.join(format!("{key}.tmp"));
         std::fs::write(&tmp, text)?;
@@ -134,6 +135,8 @@ mod tests {
         f.extend(tone(110.0, 2.0, 44_100, 1));
         let a = Analysis { root: crate::root(&tone(110.0, 2.0, 44_100, 1), 44_100), ..analyse(&f, 44_100, "loop.wav") };
         assert!(a.tempo.is_some() && a.root.is_some());
+        // (A guess is kept as one.)
+        let a = Analysis { root: a.root.map(|r| crate::Root { guess: true, ..r }), ..a };
         let key = Cache::key(b"some bytes");
         cache.put(&key, &a).unwrap();
         assert_eq!(cache.get(&key), Some(a));

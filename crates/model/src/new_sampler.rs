@@ -163,6 +163,8 @@ pub struct ZoneMeta {
     pub cents: f32,
     /// Set by hand: analysis leaves it alone.
     pub root_locked: bool,
+    /// Analysis's best guess: no key stood out (shown with a question mark).
+    pub root_guess: bool,
     /// Warp markers (roadmap 1e): frames of the sample pinned to beats, in order. None:
     /// the sample's beats are evenly spaced at `bpm` from `grid_offset`.
     pub warps: Vec<Warp>,
@@ -397,6 +399,9 @@ impl ZoneMeta {
         if let Some(r) = self.root {
             t += &format!("root {r}\n");
         }
+        if self.root_guess {
+            t += "root_guess 1\n";
+        }
         for w in &self.warps {
             t += &format!("warp {} {}\n", w.frame, w.beat);
         }
@@ -436,6 +441,7 @@ impl ZoneMeta {
                 "grid_offset" => m.grid_offset = v.parse().unwrap_or(0),
                 "cents" => m.cents = v.parse().unwrap_or(0.0),
                 "root_locked" => m.root_locked = v == "1",
+                "root_guess" => m.root_guess = v == "1",
                 "stems_only" => m.stems_only = v == "1",
                 "reverse" => m.reverse = v == "1",
                 "once" => m.once = v == "1",
@@ -504,6 +510,7 @@ mod tests {
             root: Some(45),
             cents: -12.5,
             root_locked: true,
+            root_guess: true,
             warps: vec![Warp { frame: 0, beat: 0.0 }, Warp { frame: 22_050, beat: 1.0625 }],
             start: StartGrid::Bar,
             stems: [

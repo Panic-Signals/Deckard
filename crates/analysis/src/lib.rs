@@ -15,8 +15,8 @@ mod test_signals;
 
 pub use cache::{Analysis, Cache, analyse};
 pub use find::{find_samples, find_samples_keeping};
-pub use key::{Key, key};
-pub use root::{Root, root, root_with_name};
+pub use key::{Key, key, key_by_bass};
+pub use root::{Root, root, root_by_bass, root_with_name};
 pub use tempo::{Tempo, TempoSource, tempo};
 
 /// The frames mixed to mono.

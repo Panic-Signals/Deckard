@@ -359,6 +359,8 @@ pub enum SamplingAct {
     Lane(usize, LaneAct),
     /// The lanes folded into one waveform, or stacked.
     LanesMix(bool),
+    /// The zone's root (`.1`) and/or tempo (`.2`) as stem lane `.0` alone has them.
+    LaneHear(usize, bool, bool),
     /// Drag the sample (or stem lane `.0`) out of the window as a file: the part
     /// selected, else the part the zone plays; `true`: all of it.
     DragOut(Option<usize>, bool),
@@ -725,6 +727,7 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
     let m3 = m.clone();
     let start_root = root.unwrap_or(z.root_key.clamp(0, 127) as u8);
     let root_text = match root {
+        Some(r) if m.root_guess => format!("{}?", crate::analysis::note_name(r)),
         Some(r) if m.cents.abs() >= 1.0 => format!("{} {:+.0} ct", crate::analysis::note_name(r), m.cents).replace('-', "−"),
         Some(r) => crate::analysis::note_name(r),
         None => "—".into(),
@@ -732,7 +735,11 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
     let mut rf = field(if m.root_locked { "ROOT (SET)" } else { "ROOT" }, root_text, move |n| {
         meta(beat::with_root(&m3, (i64::from(start_root) + n as i64).clamp(0, 127) as u8))
     });
-    rf.tip = "The sample's root note: drag to set it (then analysis leaves it)";
+    rf.tip = if m.root_guess {
+        "The sample's root note, a guess (no key stood out): drag to set it, or right-click a stem's name to hear it there"
+    } else {
+        "The sample's root note: drag to set it (then analysis leaves it)"
+    };
     let mut pitch = vec![rf];
     if let Some(r) = root {
         let cents = m.cents;
@@ -1198,14 +1205,31 @@ fn wave(
             let y = cr.top() + 2.0;
             let name = Rect::from_min_size(Pos2::new(cr.left() + 18.0, y), Vec2::new(46.0, 14.0));
             // Its name: dragged, the stem goes out of the window as a file.
-            let nr = ui.interact(name, ui.id().with(("lane-drag-out", lane)), Sense::drag()).on_hover_text(
-                "Drag this stem onto another application: the part selected, else the part this zone plays, as a WAV. Alt-drag: the whole stem",
+            let nr = ui.interact(name, ui.id().with(("lane-drag-out", lane)), Sense::click_and_drag()).on_hover_text(
+                "Drag this stem onto another application: the part selected, else the part this zone plays, as a WAV (Alt-drag: the whole stem). Right-click: the root or tempo as this stem has it",
             );
             painter.rect_filled(name, 2.0, if nr.hovered() || nr.dragged() { s03() } else { Color32::from_black_alpha(170) });
             painter.text(name.center(), Align2::CENTER_CENTER, deckard_model::new_sampler::LANE_NAMES[lane].to_uppercase(), font(9.0), col);
             if nr.drag_started() {
                 acts.push(sact(SamplingAct::DragOut(Some(lane), ui.input(|i| i.modifiers.alt))));
             }
+            // What analysis hears in this stem alone (the bass for the root, the drums
+            // for the tempo, say).
+            nr.context_menu(|ui| {
+                let stem = deckard_model::new_sampler::LANE_NAMES[lane];
+                for (label, root, tempo) in
+                    [("Root from this stem", true, false), ("Tempo from this stem", false, true), ("Analyse from this stem", true, true)]
+                {
+                    if ui
+                        .button(label)
+                        .on_hover_text(format!("Set it as the {stem} stem alone has it: the part selected, else the part this zone plays"))
+                        .clicked()
+                    {
+                        acts.push(sact(SamplingAct::LaneHear(lane, root, tempo)));
+                        ui.close();
+                    }
+                }
+            });
             let mr = Rect::from_min_size(Pos2::new(name.right() + 2.0, y), Vec2::splat(14.0));
             if small(ui, mr, "M", l.mute.then_some(col), ("lane-m", lane), "Mute this stem") {
                 acts.push(sact(SamplingAct::Lane(lane, LaneAct::Mute)));

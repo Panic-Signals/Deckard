@@ -15,6 +15,8 @@ pub struct Root {
     pub cents: f32,
     /// How sure: 0 to 1; 1 when the file's name gives the note.
     pub confidence: f32,
+    /// No key stood out: this is the likeliest, for what it's worth.
+    pub guess: bool,
 }
 
 /// Above this, pairs of samples are averaged down so a window still spans low notes.
@@ -32,7 +34,21 @@ const LISTEN: usize = 30;
 /// its key's tonic, in the octave from C3. `None` when it has neither (drums, noise,
 /// silence): better unset than a guess.
 pub fn root(frames: &[[f32; 2]], rate: u32) -> Option<Root> {
-    note(frames, rate).or_else(|| crate::key(frames, rate).map(|k| Root { note: 60 + k.tonic, cents: k.cents, confidence: k.confidence }))
+    root_by_bass(frames, rate, None)
+}
+
+/// [`root`] with the bass alone to hear (a stem of `frames`, as long): where the key is
+/// a close call the bass settles it ([`crate::key_by_bass`]), and without one it's
+/// heard in the low end of `frames`.
+pub fn root_by_bass(frames: &[[f32; 2]], rate: u32, bass: Option<&[[f32; 2]]>) -> Option<Root> {
+    note(frames, rate).or_else(|| {
+        crate::key_by_bass(frames, rate, bass).map(|(k, guess)| Root {
+            note: 60 + k.tonic,
+            cents: k.cents,
+            confidence: k.confidence,
+            guess,
+        })
+    })
 }
 
 /// The one note `frames` plays at, if it's one.
@@ -84,7 +100,7 @@ fn note(frames: &[[f32; 2]], rate: u32) -> Option<Root> {
         acc += c.1;
         acc >= weight[note] / 2.0
     });
-    Some(Root { note: note as u8, cents: median.map_or(0.0, |c| c.0), confidence })
+    Some(Root { note: note as u8, cents: median.map_or(0.0, |c| c.0), confidence, guess: false })
 }
 
 /// The root as [`root`] hears it, but a note in the file's name wins: it sets the pitch
@@ -107,7 +123,7 @@ pub fn root_with_name(frames: &[[f32; 2]], rate: u32, name: &str) -> Option<Root
     };
     let note = u8::try_from(note.clamp(0, 127)).ok()?;
     let cents = heard.filter(|h| h.note % 12 == note % 12).map_or(0.0, |h| h.cents);
-    Some(Root { note, cents, confidence: 1.0 })
+    Some(Root { note, cents, confidence: 1.0, guess: false })
 }
 
 #[cfg(test)]

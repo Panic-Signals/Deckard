@@ -112,6 +112,7 @@ pub fn meta_from(a: &Analysis, file: &str, name: &str) -> ZoneMeta {
         root: a.root.map(|r| r.note),
         cents: a.root.map_or(0.0, |r| r.cents),
         root_locked: false,
+        root_guess: a.root.is_some_and(|r| r.guess),
         warps: Vec::new(),
         start: Default::default(),
         stems: Default::default(),
@@ -145,6 +146,8 @@ pub fn readout(meta: Option<&ZoneMeta>) -> String {
         _ => parts.push("No tempo".into()),
     }
     match m.root {
+        // (A guess: no cents, it has no single note to be off.)
+        Some(r) if m.root_guess => parts.push(format!("Root {}?", note_name(r))),
         Some(r) if m.cents.abs() >= 1.0 => parts.push(format!("Root {} {:+.0} ct", note_name(r), m.cents).replace('-', "−")),
         Some(r) => parts.push(format!("Root {}", note_name(r))),
         None => parts.push("No root".into()),
@@ -169,16 +172,115 @@ mod tests {
         assert_eq!(meta_from(&short, "a", "Hit.wav").mode, PlayMode::Repitch);
         let eight = Analysis { tempo: tempo(120.0, 8.0), root: None, seconds: 8.0 };
         assert_eq!(meta_from(&eight, "a", "808 Long.wav").mode, PlayMode::Repitch);
-        let pad = Analysis { tempo: None, root: Some(Root { note: 57, cents: 0.0, confidence: 1.0 }), seconds: 6.0 };
+        let pad = Analysis { tempo: None, root: Some(Root { note: 57, cents: 0.0, confidence: 1.0, guess: false }), seconds: 6.0 };
         let m = meta_from(&pad, "a", "Pad.wav");
         assert_eq!((m.mode, m.root, m.bpm), (PlayMode::Repitch, Some(57), None));
     }
 
     #[test]
     fn the_readout() {
-        let a = Analysis { tempo: tempo(120.0, 8.0), root: Some(Root { note: 45, cents: -12.4, confidence: 1.0 }), seconds: 8.0 };
+        let a =
+            Analysis { tempo: tempo(120.0, 8.0), root: Some(Root { note: 45, cents: -12.4, confidence: 1.0, guess: false }), seconds: 8.0 };
         assert_eq!(readout(Some(&meta_from(&a, "f", "x.wav"))), "120.00 BPM · 16 beats · Root A1 −12 ct");
         assert_eq!(readout(None), "Analysing…");
+        // A guess says so, and has no cents.
+        let a = Analysis { root: a.root.map(|r| Root { guess: true, ..r }), ..a };
+        let m = meta_from(&a, "f", "x.wav");
+        assert!(m.root_guess);
+        assert_eq!(readout(Some(&m)), "120.00 BPM · 16 beats · Root A1?");
+    }
+
+    /// A root analysis wasn't sure of is heard again when the stems come (the bass alone
+    /// has a note), and a stem's name gives the root as that stem has it; a root set by
+    /// hand stays through both.
+    #[test]
+    fn the_bass_stem_gives_the_root() {
+        use crate::App;
+        use crate::layout::sampling::SamplingAct;
+        use deckard_model::new_sampler::ZoneMeta;
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 48_000u32;
+        let tone = |hz: f32| -> Vec<[f32; 2]> {
+            (0..96_000)
+                .map(|i| {
+                    let t = i as f32 / rate as f32 * std::f32::consts::TAU * hz;
+                    [0.3 * (t.sin() + 0.5 * (2.0 * t).sin() + 0.25 * (3.0 * t).sin()); 2]
+                })
+                .collect()
+        };
+        // The bass on 55 Hz (note 33, an A), the leads on 164.81 Hz (note 52, an E), drums
+        // and vocals silent.
+        let stems = || -> Vec<deckard_stems::Stem> {
+            deckard_stems::Kind::ALL
+                .iter()
+                .map(|&kind| deckard_stems::Stem {
+                    kind,
+                    frames: match kind {
+                        deckard_stems::Kind::Bass => tone(55.0),
+                        deckard_stems::Kind::Other => tone(164.81),
+                        _ => vec![[0.0; 2]; 96_000],
+                    },
+                })
+                .collect()
+        };
+        let file = dir.path().join("Loop.wav");
+        let sample = deckard_engine::sample::Sample { rate, frames: tone(55.0) };
+        deckard_engine::edit::write_wav_channels(&file, &sample, 2).unwrap();
+        let app_with = |meta: &dyn Fn(String) -> ZoneMeta| {
+            let mut doc = deckard_doc::Document::new_project().unwrap();
+            if doc.project().groups[0].sounds[0].slots.is_empty() {
+                doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+            }
+            let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+            doc.set_zones(0, 0, &[spec], "Load").unwrap();
+            doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+            let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+            doc.note_zone_meta(0, 0, 0, &meta(path.clone())).unwrap();
+            let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+            app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+            app.path = Some(dir.path().join("x.mxprj"));
+            app.sampling.set_sample((0, 0, 0, path), std::sync::Arc::new(sample.clone()));
+            app
+        };
+        let meta = |app: &App| {
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone().unwrap()
+        };
+        // No root yet: the stems bring one (the bass's note).
+        let mut app = app_with(&|file| ZoneMeta { file, ..Default::default() });
+        app.finish_stem_lanes("Loop", rate, stems(), (0, 0, 0));
+        let m = meta(&app);
+        assert_eq!((m.root, m.root_guess), (Some(33), false), "{}", app.status);
+        // A guess is heard again too; a root set by hand is left.
+        let mut app = app_with(&|file| ZoneMeta { file, root: Some(60), root_guess: true, ..Default::default() });
+        app.finish_stem_lanes("Loop", rate, stems(), (0, 0, 0));
+        assert_eq!(meta(&app).root, Some(33));
+        let mut app = app_with(&|file| ZoneMeta { file, root: Some(60), root_locked: true, ..Default::default() });
+        app.finish_stem_lanes("Loop", rate, stems(), (0, 0, 0));
+        assert_eq!(meta(&app).root, Some(60));
+        // A stem's own root, asked for by its name: the leads' E, then the bass's A.
+        let mut app = app_with(&|file| ZoneMeta { file, bpm: Some(120.0), beats: Some(4.0), ..Default::default() });
+        app.finish_stem_lanes("Loop", rate, stems(), (0, 0, 0));
+        // (Its lanes, as the Sampling view loads them.)
+        let files = meta(&app).stems.map(|l| l.map(|l| l.file));
+        app.sampling.set_lanes(files, |f| deckard_engine::sample::Sample::load(std::path::Path::new(f)).ok().map(std::sync::Arc::new));
+        app.sampling.selection = None;
+        app.sampling_act(SamplingAct::LaneHear(3, true, false));
+        let m = meta(&app);
+        assert_eq!((m.root, m.bpm), (Some(52), Some(120.0)), "{}", app.status);
+        assert_eq!(app.status, format!("From the Leads stem: root {}", note_name(52)));
+        assert!(app.doc.as_ref().unwrap().borrow().undo_labels().contains(&"Analyse Stem"));
+        app.sampling_act(SamplingAct::LaneHear(2, true, false));
+        assert_eq!(meta(&app).root, Some(33));
+        // Drums that are silent have neither, and nothing changes.
+        let before = meta(&app);
+        app.sampling_act(SamplingAct::LaneHear(0, true, true));
+        assert_eq!(meta(&app), before);
+        assert_eq!(app.status, "From the Drums stem: no tempo heard, no root heard");
+        // Set by hand, it stays.
+        let locked = crate::beat::with_root(&before, 50);
+        app.doc.as_ref().unwrap().borrow_mut().set_zone_meta(0, 0, 0, &locked, "Zone Root").unwrap();
+        app.sampling_act(SamplingAct::LaneHear(2, true, false));
+        assert_eq!(meta(&app).root, Some(50), "{}", app.status);
     }
 
     #[test]

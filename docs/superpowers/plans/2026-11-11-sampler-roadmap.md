@@ -328,6 +328,14 @@ and the Sampler both stay.
 - **Auto-map zones:** by detected pitch, or by note names in the filenames (C3, F#2, 060).
 - **Key Shift Pad** (Serato): spread one chop chromatically across the 16 pads.
 
+> Built (2026-11-20): the bass settles a close key. A key and the key a fifth up fit a mix
+> nearly alike, and a full loop often had no root for it. Where no key is well ahead, the
+> bass chooses among the close ones: the zone's bass stem when it has one (REANALYZE, and
+> when stems are made, a root not yet sure is heard again), else the mix's low end. With
+> nothing settled the root is a guess, shown with a question mark ("Root E3?"). A stem
+> lane's name, right-clicked: Root, Tempo or Analyse from this stem. Tuned on one loop:
+> more are wanted.
+
 ---
 
 ## Phase 2b: Stem lanes in the Sampler
