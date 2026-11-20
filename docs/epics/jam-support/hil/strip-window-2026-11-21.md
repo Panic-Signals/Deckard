@@ -73,10 +73,16 @@ so the run proves DECKARD's own `maschine_jam`, not NI's copy.
    back beside it and some of it is still reachable — never wholly off-screen.
 7. **Never steals focus.** With the strip open, type into the app: keystrokes go to the app. Show
    the strip and check the focused window did not change.
+8. **Switched off, and back.** Preferences ▸ Hardware ▸ `Show the on-screen overlay`, unticked: the
+   window goes and the pages keep publishing (press `SHIFT` + `E` and read the status line). Ticked
+   again: the window returns **beside the app**, not where it was last dragged, because switching it
+   clears the saved place. *Confirmed on the rig 2026-11-21* — the toggle hides and shows the window;
+   the re-anchoring is the part to watch next time the app moves displays.
 
 ## Sign-off
 
-Rows 1–3 and 5–6 pass, with row 4 recorded per compositor and its Wayland note. Captures filed
+Rows 1–3, 5–6 and 8 pass (8 confirmed on the rig 2026-11-21), with row 4 recorded per compositor
+and its Wayland note. Captures filed
 beside this page as `strip-window-alone.png`, `strip-window-ideas.png`, `strip-window-song.png`,
 `strip-window-mixer.png`. If row 4 fails on this machine's compositor, that is the platform
 finding the plan predicted, not a build failure — say so in the PR body rather than working around
