@@ -25,11 +25,17 @@ fn frame() -> Mk3Out {
     Mk3Out { route: route(), leds: Leds::default(), screens: None }
 }
 
+/// A frame that sends new screens: what the app hands out when the display changed.
+fn frame_with_screens(n: u64) -> Mk3Out {
+    let frame = mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(vec![[1, 2, 3, 255]; 4]));
+    Mk3Out { route: route(), leds: Leds::default(), screens: Some((n, frame)) }
+}
+
 /// What a recording sink saw and was given: shared, so a test can read it after the sink
 /// has gone into `Sinks` as a box.
 #[derive(Default)]
 struct Seen {
-    shown: Vec<(mk3_io::PadRoute, Leds)>,
+    shown: Vec<(mk3_io::PadRoute, Leds, Option<u64>)>,
     queued: Vec<Event>,
 }
 
@@ -37,7 +43,7 @@ struct Recording(Rc<RefCell<Seen>>);
 
 impl Mk3Sink for Recording {
     fn show(&mut self, out: &Mk3Out) {
-        self.0.borrow_mut().shown.push((out.route, out.leds.clone()));
+        self.0.borrow_mut().shown.push((out.route, out.leds.clone(), out.screens.as_ref().map(|(n, _)| *n)));
     }
 
     fn events(&mut self) -> Vec<Event> {
@@ -102,4 +108,45 @@ fn no_sink_wants_frames_by_default() {
     sinks.add(Box::new(NullSink));
     assert!(!sinks.wants_frames(), "a sink that shows what it is given asks for no frames");
     assert!(!Sinks::new().wants_frames(), "and no sinks at all asks for none");
+}
+
+#[test]
+fn a_sink_joining_late_receives_the_current_screen() {
+    let mut sinks = Sinks::new();
+    sinks.show(&frame_with_screens(7));
+
+    let (late_sink, late) = recording();
+    sinks.add(Box::new(late_sink));
+    assert!(late.borrow().shown.is_empty(), "nothing yet: it has not been replayed");
+    sinks.replay_latest();
+
+    let seen = late.borrow();
+    assert_eq!(seen.shown.len(), 1, "the frame in hand, once");
+    assert_eq!(seen.shown[0].2, Some(7), "with the screens the device is showing");
+    assert!(seen.shown[0].1 == Leds::default(), "the lights that are on the device");
+}
+
+#[test]
+fn a_frame_without_screens_still_replays_the_last_one() {
+    let mut sinks = Sinks::new();
+    sinks.show(&frame_with_screens(7));
+    sinks.show(&frame()); // nothing changed on the display
+    let (late_sink, late) = recording();
+    sinks.add(Box::new(late_sink));
+    sinks.replay_latest();
+
+    let shown = late.borrow().shown.len();
+    assert_eq!(shown, 1, "a sink that arrives between redraws still gets a frame");
+}
+
+#[test]
+fn a_sink_that_was_there_for_the_frame_is_not_shown_it_twice() {
+    let (early_sink, early) = recording();
+    let mut sinks = Sinks::new();
+    sinks.add(Box::new(early_sink));
+    sinks.show(&frame_with_screens(7));
+    assert_eq!(early.borrow().shown.len(), 1);
+
+    sinks.replay_latest();
+    assert_eq!(early.borrow().shown.len(), 1, "it already had that frame");
 }

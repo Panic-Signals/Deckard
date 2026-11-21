@@ -253,6 +253,9 @@ fn main() {
         p.exists().then_some(p)
     });
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
+    // What else shows the MK3's frames: a panel on screen, and the port it serves on.
+    let mk3_panel = args.iter().any(|a| a == "--mk3-panel");
+    let serve = flag("--serve").and_then(|v| v.parse::<u16>().ok());
     // (flag, value) pairs for --press/--pad, in order.
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
@@ -277,6 +280,8 @@ fn main() {
                 screenshot,
                 scripts,
                 model,
+                mk3_panel,
+                serve,
                 show_controller: false,
                 meter_inputs: true,
                 follow: true,
@@ -1069,6 +1074,10 @@ pub struct App {
     variation_base: Option<VariationBase>,
     midi_table_for: Option<(u64, usize, usize, bool, Vec<(String, u8)>)>,
     midi_wired: bool,
+    /// `--mk3-panel`: an MK3 panel on screen, drawn from the same frames the device gets.
+    mk3_panel: bool,
+    /// `--serve PORT`: the MK3 panel's server on that port (nothing else serves).
+    serve: Option<u16>,
     /// The Maschine MK3 over USB (started by `boot`, not in tests), and the sinks its
     /// frames go to: the device is one of them.
     mk3: Option<std::sync::Arc<mk3_io::Mk3Io>>,
@@ -1343,6 +1352,8 @@ fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
 
 /// Where playback is: what plays, what is queued next, and the position in ticks.
 /// What the MK3 gets after a frame's events (see `App::mk3_events`).
+/// Clonable because a sink that joins late is shown the frame already in hand.
+#[derive(Clone)]
 pub(crate) struct Mk3Out {
     pub route: mk3_io::PadRoute,
     pub leds: deckard_mk3::leds::Leds,

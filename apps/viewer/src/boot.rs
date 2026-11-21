@@ -253,6 +253,14 @@ impl App {
                 self.user_chords = user_chords::UserChords::load();
                 self.recent = menu::load_recent();
                 self.settings = settings::Settings::load();
+                // A flag belongs to this run: it turns the panel on without saving that as
+                // the preference, and without touching whether the device drives anything.
+                if self.mk3_panel {
+                    self.settings.mk3_panel = true;
+                }
+                if self.serve.is_some() {
+                    self.settings.serve = self.serve;
+                }
                 self.browser.routing = self.settings.load_group_routing;
                 self.browser.patterns = self.settings.load_group_patterns;
                 Outcome::Ok

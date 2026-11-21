@@ -22,6 +22,11 @@ pub trait Mk3Sink {
     fn wants_frames(&self) -> bool {
         false
     }
+    /// This sink arrived after frames had begun: show it the one already in hand, so its
+    /// screen is what the device shows rather than blank until the next redraw.
+    fn joined(&mut self, out: &Mk3Out) {
+        self.show(out);
+    }
 }
 
 /// A sink that shows nothing and answers nothing: headless runs, and tests of the others.
@@ -64,6 +69,11 @@ impl Mk3Sink for DeviceSink {
 #[derive(Default)]
 pub struct Sinks {
     sinks: Vec<Box<dyn Mk3Sink>>,
+    /// The last frame the app built, with the last screens it sent: a frame carries screens
+    /// only when they changed, so the ones a late sink needs are usually from before it.
+    latest: Option<Mk3Out>,
+    /// Sinks added since the last frame: they have not seen `latest` yet.
+    pending: Vec<usize>,
 }
 
 impl Sinks {
@@ -71,8 +81,10 @@ impl Sinks {
         Sinks::default()
     }
 
+    /// Add a sink. It is shown the frame already in hand by [`Sinks::replay_latest`].
     pub fn add(&mut self, sink: Box<dyn Mk3Sink>) {
         self.sinks.push(sink);
+        self.pending.push(self.sinks.len() - 1);
     }
 
     /// How many sinks there are (the device is one, when it started).
@@ -86,8 +98,24 @@ impl Sinks {
 
     /// Show one frame on every sink: the same route, the same LEDs, the same screens.
     pub fn show(&mut self, out: &Mk3Out) {
+        // Keep what was just shown, screens carried forward: a frame has them only when they
+        // changed, so the newest non-empty screens are the ones on the device now.
+        let screens = out.screens.clone().or_else(|| self.latest.as_ref().and_then(|l| l.screens.clone()));
+        self.latest = Some(Mk3Out { route: out.route, leds: out.leds.clone(), screens });
+        self.pending.clear();
         for sink in &mut self.sinks {
             sink.show(out);
+        }
+    }
+
+    /// Show the frame already in hand to every sink that arrived since the last one: the
+    /// screen a panel draws on opening, without waiting for the app to redraw it.
+    pub fn replay_latest(&mut self) {
+        let Some(out) = self.latest.clone() else { return };
+        for at in std::mem::take(&mut self.pending) {
+            if let Some(sink) = self.sinks.get_mut(at) {
+                sink.joined(&out);
+            }
         }
     }
 

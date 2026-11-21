@@ -118,6 +118,11 @@ pub struct Settings {
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
     /// to where the finger lands (Preferences > Hardware).
     pub relative_strips: bool,
+    /// An MK3 panel on screen beside the window (`--mk3-panel`): what the device shows,
+    /// drawn in its own viewport. The device is unaffected either way.
+    pub mk3_panel: bool,
+    /// The port the MK3 panel's server listens on (`--serve`); `None`: not serving.
+    pub serve: Option<u16>,
     /// Held-page buttons pinned on the MK3 (`EVENTS`, `SCENE`, `PATTERN`…), and the one
     /// left open on screen (`None`: none).
     pub pinned_pages: BTreeSet<String>,
@@ -388,6 +393,8 @@ impl Default for Settings {
             metronome_volume: 100,
             focus_follows: true,
             relative_strips: false,
+            mk3_panel: false,
+            serve: None,
             pinned_pages: BTreeSet::new(),
             pinned_open: None,
             metronome_auto: false,
@@ -575,6 +582,8 @@ impl Settings {
                 }
                 "focus_follows" => s.focus_follows = v != "false",
                 "relative_strips" => s.relative_strips = v == "true",
+                "mk3_panel" => s.mk3_panel = v == "true",
+                "serve" if !v.is_empty() => s.serve = v.parse().ok(),
                 "pinned_page" if !v.is_empty() => {
                     s.pinned_pages.insert(v.to_string());
                 }
@@ -814,6 +823,10 @@ impl Settings {
         out += &format!("jam_enabled = {}\n", self.jam_enabled);
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!("relative_strips = {}\n", self.relative_strips);
+        out += &format!("mk3_panel = {}\n", self.mk3_panel);
+        if let Some(port) = self.serve {
+            out += &format!("serve = {port}\n");
+        }
         for p in &self.pinned_pages {
             out += &format!("pinned_page = {p}\n");
         }
@@ -1490,6 +1503,8 @@ mod wine_tests {
     fn touchstrips_are_absolute_unless_switched_on() {
         let mut s = Settings::default();
         assert!(!s.relative_strips);
+        assert!(!s.mk3_panel, "no panel unless asked for");
+        assert_eq!(s.serve, None, "and nothing served");
         assert!(!Settings::parse("").relative_strips, "a settings file from before");
         s.relative_strips = true;
         assert!(Settings::parse(&s.to_text()).relative_strips);
