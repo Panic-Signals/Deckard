@@ -15543,6 +15543,7 @@ mod tests {
             .with_size(egui::vec2(1920.0, 380.0))
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        layout::style(&h.ctx);
         h.run_steps(3);
         let screen = h.ctx.content_rect();
         let window = |h: &Harness<'static, App>, title: &str| {
@@ -15596,6 +15597,8 @@ mod tests {
             .with_size(egui::vec2(1366.0, 768.0))
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        // (The app's own fonts, as at start-up: the harness has egui's.)
+        layout::style(&h.ctx);
         h.run_steps(3);
         for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
             h.state_mut().prefs = Some(tab);
@@ -15644,6 +15647,7 @@ mod tests {
                 .with_size(egui::vec2(w, ht))
                 .with_step_dt(1.0 / 60.0)
                 .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            layout::style(&h.ctx);
             h.run_steps(3);
             let screen = h.ctx.content_rect();
             let fits = |h: &Harness<'static, App>, title: &str, what: &str| {
@@ -15682,6 +15686,77 @@ mod tests {
         }
     }
 
+    /// Every character the app's own text uses (outside ASCII) has a glyph in its fonts:
+    /// none draws as a box ("Preferences ▸ General" did). Read from the sources, so a new
+    /// symbol is checked too.
+    #[test]
+    fn every_symbol_in_the_ui_has_a_glyph() {
+        fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if p.is_dir() {
+                    sources(&p, out);
+                } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+                    out.push(p);
+                }
+            }
+        }
+        // The non-ASCII characters inside string literals (not comments).
+        let mut used = std::collections::BTreeMap::<char, String>::new();
+        let mut files = Vec::new();
+        sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let (mut in_str, mut escaped) = (false, false);
+            for line in text.lines() {
+                let chars: Vec<char> = line.chars().collect();
+                let mut i = 0;
+                while i < chars.len() {
+                    let c = chars[i];
+                    if !in_str && c == '/' && chars.get(i + 1) == Some(&'/') {
+                        break;
+                    }
+                    if !in_str && c == '\'' {
+                        // A char literal ('"', '\'') or a lifetime: skip it.
+                        let close = chars[i + 1..].iter().take(4).position(|&x| x == '\'').map(|k| i + 1 + k);
+                        i = close.filter(|&k| k > i + 1).map_or(i + 1, |k| k + 1);
+                        continue;
+                    }
+                    if in_str && !escaped && !c.is_ascii() {
+                        used.entry(c).or_insert_with(|| f.file_name().unwrap().to_string_lossy().to_string());
+                    }
+                    if c == '"' && !escaped {
+                        in_str = !in_str;
+                    }
+                    escaped = in_str && c == '\\' && !escaped;
+                    i += 1;
+                }
+                escaped = false;
+            }
+        }
+        assert!(used.contains_key(&'▸'), "the scan finds the UI's symbols");
+        // Each font of the app's text, in order, read for its glyphs. (Not egui's
+        // `has_glyph`: it reports "no" for whatever the font that also draws the box
+        // supplies, here the emoji font, so every emoji would count as missing.)
+        let defs = layout::font_definitions();
+        let chain = &defs.families[&egui::FontFamily::Proportional];
+        let fonts: Vec<fontdue::Font> = chain
+            .iter()
+            .map(|name| {
+                let data = &defs.font_data[name];
+                let settings = fontdue::FontSettings { collection_index: data.index, ..Default::default() };
+                fontdue::Font::from_bytes(&data.font[..], settings).unwrap_or_else(|e| panic!("{name}: {e}"))
+            })
+            .collect();
+        let missing: Vec<String> = used
+            .iter()
+            .filter(|(c, _)| !fonts.iter().any(|f| f.lookup_glyph_index(**c) != 0))
+            .map(|(c, file)| format!("U+{:04X} {c} ({file})", *c as u32))
+            .collect();
+        assert!(missing.is_empty(), "no glyph for: {missing:?}");
+    }
+
     /// On a laptop screen the header's groups don't overlap: the transport, centred, moves
     /// right of Save rather than over it (at 1280 px it would cover it), and leaves the
     /// master fader and the CPU meter their room. Narrower than its groups fit (900 px),
@@ -15695,6 +15770,7 @@ mod tests {
                 .with_size(egui::vec2(w, 720.0))
                 .with_step_dt(1.0 / 60.0)
                 .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            layout::style(&h.ctx);
             h.run_steps(3);
             let at =
                 |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap_or_else(|| panic!("{name} drawn"));
@@ -15713,6 +15789,7 @@ mod tests {
             .with_size(egui::vec2(900.0, 720.0))
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        layout::style(&h.ctx);
         h.run_steps(3);
         let at = |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap();
         let mid = (at("restart").left() + at("keys").right()) / 2.0;

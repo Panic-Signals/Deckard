@@ -1734,8 +1734,9 @@ pub fn logo_font() -> Vec<u8> {
 }
 
 /// The app's fonts: IBM Plex Sans (regular, bold) and IBM Plex Mono, egui's fallbacks,
-/// the logo's, and the emoji font for names.
-fn font_definitions() -> egui::FontDefinitions {
+/// the logo's, and the emoji font for names. Last of all egui's Hack, for the symbols no
+/// other font has (▸ in "Preferences ▸ General", ⇕).
+pub(crate) fn font_definitions() -> egui::FontDefinitions {
     let bytes = logo_font();
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
@@ -1752,6 +1753,9 @@ fn font_definitions() -> egui::FontDefinitions {
     let mono_fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
     let mut prop = vec!["plex".into(), EMOJI_FONT.into()];
     prop.extend(prop_fallbacks);
+    if fonts.font_data.contains_key("Hack") && !prop.iter().any(|f| f == "Hack") {
+        prop.push("Hack".into());
+    }
     fonts.families.insert(egui::FontFamily::Proportional, prop.clone());
     let mut mono = vec!["plex-mono".into(), EMOJI_FONT.into()];
     mono.extend(mono_fallbacks);
