@@ -1,149 +1,84 @@
-# PR A — the Jam's on-screen overlay, in a window of its own
+# PR A — the JAM's overlay, in a window of its own
 
-Draft body for a pull request to `Panic-Signals/Deckard`. Branch `jam-oso`, cut from
-`upstream/main` (`f2b5ea3`), 22 commits. Nothing here is PR B: no `jam_server`, `jam_layout`,
-`jam_input`, `jam_lights`, `onscreen_jam`, `mk3_server`, `pad_play`, and no MK1 layer.
+The body for the pull request to `Panic-Signals/Deckard`, branch `jam-oso`, cut from `upstream/main`
+(`f2b5ea3`). Fill the manual's number in **Manual** when the manual pull request opens, and delete this
+paragraph.
 
-## What it does
+---
 
-A Maschine Jam's ENCODER is blind in DECKARD today: the script runs, the lights work, and the
-on-screen parameter overlay (the manual's **OSO** — the on-screen overlay) draws nothing. This
-adds it: the page the script publishes, rendered in a **chromeless floating window** that shows
-while a page is published and disappears with it.
+## Type
 
-Four parts, in the order the commits take them.
+- [x] Enhancement
 
-**The contract** (`docs/epics/jam-support/oso-contract.md`). Pages live in the script; rendering
-and input routing live in the host; the script owns the slot's behaviour. The script publishes
-`deckard.oso{title, page, pages, slots, focus, editing}`; the host stores it (`OsoPage`,
-`OsoSlot`), draws it, and hands **every** ENCODER press and turn back to the script. There is one
-cursor — the script's — on every page. The viewer-side cursor that drifted from it is gone.
+## Summary
 
-**The window** (`apps/viewer/src/jam_window.rs`). A second eframe viewport:
-`show_viewport_immediate`, no decorations, always on top, never activated when shown. Its bar
-carries the page's name and the `n/N` counter (`Scale  1/2`); the bar is also its only handle —
-dragging it moves the window, and the body has no click target at all, because the strip belongs
-to the encoder. Its place is remembered as an offset from the app window, so it comes back beside
-the app on whatever display the app opens on, clamped so it can never be restored off-screen.
+Touching a Maschine JAM's encoder now opens the overlay its manual describes — the page's settings,
+in a small window of its own over the app — instead of the single line in the status bar it used to
+be. The Variation page comes with it, including a third **Mode**, **Euclid**, that varies a sound's
+notes with DECKARD's own generator.
 
-**Preferences ▸ Hardware** carries `Show the on-screen overlay`: off, the pages still publish and
-the controller behaves as ever, and only the window goes. Switching it clears the saved place, so the
-window comes back beside the app rather than wherever it was last left.
+## How to check it works
 
-**The pages** (`crates/surface/lua/devices/maschine_jam/main.lua`). One composer per OSO type, a
-menu cursor that steps over items a page cannot show, the settings read as a projection rather
-than a push, and the two lifetimes from the reference's own model — static types die on their key
-or on the page change (`View.surface_page`), everything else on a ~2 s idle timer.
+A JAM is not needed: `--jam` presses named keys on a machine with no hardware, and `--jam-shot` draws
+the overlay into the app window so `--screenshot` can capture it.
 
-What the rig settled, once each page was in front of hands on a Jam:
+1. `cargo run -- --jam SHIFT --jam PAD_MODE --jam-shot --screenshot /tmp/overlay.png` — the Scale
+   page appears beside the app: `Scale 1/2` in its bar, eight columns, the cursor rule under Root
+   Note. Before this branch, the same keys put one line in the status bar and nothing on screen
+   showed the page.
+2. `cargo run -- --jam TEMPO` — the Tempo page, one slot, `120.00`. It stays until TEMPO again or
+   another view.
+3. `cargo run -- --jam SHIFT --jam E` — the focused sound's Variation page: Mode, Apply, Velocity Lo,
+   Velocity Hi, Step. Static too; the encoder's press on Apply varies the notes.
+4. With a JAM plugged in: touch the encoder in Keyboard and wait two seconds — the page goes; touch
+   the encoder again — it comes back, because it is still that view's page. Press PAD MODE with any
+   page up — it goes, the static pages included.
+5. **Preferences ▸ Hardware ▸ Show the on-screen overlay** off — nothing is drawn, and the encoders
+   and lights behave as they did.
 
-- The strip is **eight columns**, `width / 8`, and nothing stretches: a page of one slot fills the
-  first and leaves seven empty, and a column keeps its width when its page does not (`a105011`,
-  `6e8a56e`). The bar is a real bar — dragging it moves the window (`e819c76`).
-- Every page **opens on its own button and closes on the same one**, and the idle timer reaches
-  them all (`7404cca`). GRID keeps its light into REC MODE, and the piano roll gets its own Scale
-  page rather than the full one (`1f83c5f`). PERFORM FX does time out (`265d13d`), the lock view
-  opens its page on the switch (`e861cb3`), and SHIFT + E closes the page it opened (`97591bc`).
+Automated, on this branch's tip: `cargo test --workspace` — 64 suites, 2566 passed, 0 failed, 35
+ignored (the ignored ones need local data, as always without a Maschine install). The overlay's own
+path needs no NI install at all (`jam_oso_pages_need_no_ni_install`), which is what CI runs.
+`scripts/check-platforms.sh` type-checks the workspace for `x86_64-unknown-linux-gnu` and
+`x86_64-pc-windows-gnu`, both clean, so the second viewport compiles beyond macOS. Patch coverage is
+76% of 1079 changed lines (the 70% gate).
 
-**The Groove page** (`b9ad3c5` … `f689b88`). `OSO_RANDOMIZER` was on the static list with nothing
-behind it. It now publishes Maschine's **Variation** page: thirteen settings over two pages, five
-of them in Humanize, static, closed by the encoder's press or another page. Its shape comes from
-captures of the reference (`hil/oso-test-sheet.md`), its labels, ranges and steps from the MK3
-manual's Variation chapter, and its **Mode** selects the engine:
+## Platforms
 
-| Mode | Engine |
-|---|---|
-| `Humanize` | the variation pass: velocity band, time shift, length scale. Nothing created |
-| `Random` | the generator's Random — the same call the app's Generate ▸ Random button makes |
-| `Euclid` | the generator's Euclidean mode — DECKARD's own addition, recorded as such |
+- [x] All
+- [ ] macOS
+- [ ] Linux
+- [ ] Windows
 
-Each setting lives where its engine keeps it: probability, note range and chords in the generator's
-module; the velocity band, note length, time shift and the three distributions in the sound's
-DECKARD field. They are the **sound's**, saved with the project. Unset, the engine behaves exactly
-as before this branch.
+Tried on: macOS (arm64), the window with and without a JAM; the steps above with no hardware.
 
-## Review pointers
+## Manual
 
-- `crates/surface/src/{lib,api,device}.rs` — the wire: `OsoPage`/`OsoSlot`, the `deckard.oso`
-  publisher, `View.page` and `View.browser_open`, and the Variation page's `state().variation` /
-  `deckard.variation` / `deckard.apply_variation`.
-- `apps/viewer/src/jam_strip.rs` — the renderer. Pure functions of the published page: it draws
-  the cursor where the script put it and settles nothing of its own, and it keeps no state.
-- `apps/viewer/src/jam_io.rs` — the routing, plus the extra tick that republishes a page after a
-  turn changed the state it was drawn from (PERFORM FX shows the mode it just changed to).
-- `crates/doc/src/groove.rs` — `Variation`, `apply_groove_page` (the mode dispatch) and the
-  generator that reads the page's slots.
-- `docs/epics/jam-support/plan-2026-11-21-overlay-window.md` — the plan work-item 22 demanded:
-  the viewport, the chrome, the lifetime rule, the saved offset, the platform facts, and the
-  metrics, which are measured from captures because the reference keeps none in its binary.
-- `docs/epics/jam-support/work-items/35-jam-variation-oso.md` — the Groove page's contract, its
-  parameter homes, and the one reading still marked as DECKARD's.
-- `docs/maschine-jam.md`'s deviation table — every place this deliberately differs from NI's
-  manual, including the third mode and the settings belonging to the sound.
+Panic-Signals/panic-signals-site#<n> — the JAM chapter, which now covers the overlay as a window, and
+the Variation page's third Mode.
 
-## The strip's metrics
+## Notes for the reviewer
 
-The reference has no hardcoded strip metrics (its window state and styling are runtime), so the
-numbers are measured off captures of Maschine 3.6.0: bar 28 pt over a 144 pt body (header 40,
-value 40, sub 40, pad 24); header 11.5 pt, value 21, sub 13; eight columns always, `width / 8`, so a
-page of one slot fills the first and leaves seven empty (nothing stretches), with 1 pt separators,
-the group header left-aligned over its run's first column, and the value and sub centred;
-the cursor a rule under each sub-label with the focused one bright; editing in inset corner
-brackets.
-
-One deliberate departure from the reference: **no mark in the bar**. The reference has an NI
-wordmark; this is DECKARD and it does not wear another company's logo, so the bar is the page's
-name and its counter, and nothing else.
-
-`apps/viewer/src/main.rs` gains one drawing path that is not the window's: `--jam-shot` renders the
-same painter into the app's viewport so `--screenshot` can capture it. A second viewport is not in
-the main one's picture, and Screen Recording is not always granted — it is how the strip's own
-pixels were reviewed and how CI can look at them.
-
-## Testing
-
-`cargo test --offline -p deckard -p deckard-surface -p deckard-doc`, green on the tip: 841 + 309 +
-220 passing, the ignored tests pre-existing. The obligations the contract names each have a test
-with the contract's own name:
-
-- `jam_strip::tests::the_underline_follows_the_published_cursor_wherever_it_moves`,
-  `the_edit_mark_is_the_scripts_and_marks_only_the_focused_slot`
-- `jam_strip::tests::a_page_whose_fill_varies_keeps_the_cursor_on_a_slot`,
-  `a_cursor_on_a_hole_underlines_nothing`
-- `jam_tests::menu_cursor_moves_the_published_focus`,
-  `a_menu_turn_skips_unavailable_items`
-- `jam_tests::a_published_page_keeps_its_cursor_on_a_slot_when_its_fill_changes`
-- `jam_tests::a_turn_republishes_the_page_it_changed`
-- `surface_settings_tests::the_scripts_read_the_settings_with_nothing_asking_for_them`
-- `jam_tests::a_page_change_drops_a_static_oso`, `the_tempo_button_publishes_its_oso`
-- `jam_tests::jam_oso_pages_need_no_ni_install` — the whole overlay with no NI install at all
-- `jam_window::tests::*` — geometry, the offset band, and that an unmoved window writes nothing
-- `jam_tests::the_strip_is_a_window_of_its_own` — a window sized from the page; no page, no window
-- `jam_tests::shift_e_pressed_twice_closes_the_variation_page`,
-  `the_variation_page_publishes_its_settings`,
-  `the_variation_page_shows_euclid_as_its_third_mode`
-- `groove::tests::every_variation_setting_round_trips`,
-  `the_apps_path_reads_its_settings_and_varies_the_notes` — a setting is written where its engine
-  reads it, and Apply varies the notes
-- `groove::tests::the_jams_apply_and_the_generate_button_are_one_engine` — one seed, both paths,
-  identical notes: "one engine" proved rather than promised
-
-For a machine with no Jam, `--jam KEY` runs the script and presses those keys (in chord order), and
-`DECKARD_JAM_TRACE=1` prints what eframe made of the strip:
-
-```text
-DECKARD_JAM_TRACE=1 ./target/debug/deckard --jam SHIFT --jam PAD_MODE --jam ENCODER_TOUCH
-jam strip: native window at [695.0 524.0] size [1170.0 172.0]
-```
-
-`docs/epics/jam-support/hil/strip-window-2026-11-21.md` is the rig pass for the window, and
-`hil/oso-test-sheet.md` is the end-user sheet: every page, its buttons, its slots, when it opens,
-when it goes, and the two sequences still worth a second look (Random's invariants, and whether
-Humanize's velocity band replaces a velocity or bounds a deviation).
-
-## Out of scope
-
-The virtual MK3/Jam panel line (PR B), NI-scripted controllers' OSO path (their
-`setOSOType`/`addParameter` API stays in `lua-host`), and the desktop BROWSE overlay and `INSTANCE`
-page, which stay in-app — `INSTANCE` is a different window with its own chrome, recorded as
-known-absent in the sheet.
+- **Where the page lives.** The script owns the page and each slot's behaviour; the host stores the
+  published page, draws it, and hands every ENCODER press and turn back to the script.
+  `docs/epics/jam-support/oso-contract.md` is the contract, and every obligation in it names the test
+  that holds it.
+- **One cursor.** The renderer keeps no state: it draws the cursor the script published. Earlier
+  drafts had the viewer settle a cursor onto the nearest filled slot, which underlined a different
+  setting from the one the status line named.
+- **The window** (`apps/viewer/src/jam_window.rs`) is a second eframe viewport, chromeless and always
+  on top, with mouse passthrough: the strip belongs to the encoder, so nothing in the window takes a
+  click except its own bar, which drags it. Its place is saved as an offset from the app window and
+  clamped, so it cannot be restored off-screen.
+- **The rest of the diff is not the overlay.** `crates/doc/src/groove.rs` is the largest file here
+  because the Variation page needs an engine behind its Mode, so the page and the engine travel
+  together: Humanize (velocity band, time shift, length scale), Random (the generator's Random, the
+  same call Generate ▸ Random makes), and Euclid. The settings are the sound's and are saved with the
+  project; unset, the engine behaves as before.
+- **Deliberate departures**, all in the `docs/maschine-jam.md` table: Euclid as a third mode; the
+  settings belong to the sound; and no mark in the window's bar — the reference has NI's wordmark and
+  DECKARD does not wear another company's logo.
+- **Not here:** the virtual MK3/JAM panel work (separate pull request), `INSTANCE`, the desktop
+  `BROWSE` overlay, and NI-scripted controllers' own overlay path, which stays in `lua-host`.
+- `--jam-shot` is not only for review: a second viewport is not in the main window's capture, so it
+  is how the strip's own pixels can be looked at in a screenshot at all.
