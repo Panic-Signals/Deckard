@@ -1035,11 +1035,19 @@ mod tests {
         let mut button = Document::new_project().unwrap();
         button.add_pattern(0, 0, "P").unwrap();
         button
-            .generate_with(0, 0, 0, 240, true, None, &|f: &str| (f == "sequence_generation/mode").then_some(0.0).or_else(|| page(f)), &mut Rng::seeded(9))
+            .generate_with(
+                0,
+                0,
+                0,
+                240,
+                true,
+                None,
+                &|f: &str| (f == "sequence_generation/mode").then_some(0.0).or_else(|| page(f)),
+                &mut Rng::seeded(9),
+            )
             .unwrap();
-        let notes = |d: &Document| -> Vec<Note> {
-            d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect()
-        };
+        let notes =
+            |d: &Document| -> Vec<Note> { d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect() };
         assert!(!notes(&apply).is_empty(), "something was made");
         assert_eq!(notes(&apply), notes(&button), "the Jam's Apply and the Generate button are the same call");
     }
