@@ -15603,6 +15603,27 @@ mod tests {
             h.render().unwrap().save(dir.join(format!("prefs-{tab}.png"))).unwrap();
         }
         h.state_mut().prefs = None;
+        // The main window's toolbars, in each view, at both laptop sizes.
+        for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
+            h.set_size(egui::vec2(w, ht));
+            for (name, song, mixer, lfos, browser) in [
+                ("ideas", false, false, false, false),
+                ("song", true, false, false, false),
+                ("mixer", false, true, false, false),
+                ("lfos", false, false, true, false),
+                ("browser", false, false, false, true),
+            ] {
+                let app = h.state_mut();
+                (app.song_view, app.lfos, app.browser.open) = (song, lfos, browser);
+                app.set_mixer(mixer);
+                h.run_steps(4);
+                h.render().unwrap().save(dir.join(format!("main-{name}-{w}.png"))).unwrap();
+            }
+        }
+        h.set_size(egui::vec2(1366.0, 768.0));
+        let app = h.state_mut();
+        (app.song_view, app.lfos, app.browser.open) = (false, false, false);
+        app.set_mixer(false);
         for (name, set) in [("repeat", 0), ("lock", 1), ("monitor", 2)] {
             h.state_mut().repeat_panel = set == 0;
             h.state_mut().lock_panel = set == 1;
@@ -15658,6 +15679,32 @@ mod tests {
                 "{w}x{ht}: the MIDI Monitor doesn't keep widening: {opened:?} → {later:?}"
             );
             h.state_mut().midi_monitor = false;
+        }
+    }
+
+    /// On a laptop screen the header's groups don't overlap: the transport, centred, moves
+    /// right of Save rather than over it (at 1280 px it would cover it), and leaves the
+    /// master fader and the CPU meter their room.
+    #[test]
+    fn the_header_fits_a_laptop_screen() {
+        for w in [1280.0, 1366.0, 1920.0] {
+            let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+            app.new_project();
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(w, 720.0))
+                .with_step_dt(1.0 / 60.0)
+                .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            h.run_steps(3);
+            let at =
+                |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap_or_else(|| panic!("{name} drawn"));
+            let (save, restart, keys, master, cpu) = (at("save"), at("restart"), at("keys"), at("master"), at("cpu"));
+            assert!(save.right() <= restart.left(), "{w}: Save clear of the transport: {save:?} vs {restart:?}");
+            assert!(keys.right() <= master.left(), "{w}: the transport clear of the master fader: {keys:?} vs {master:?}");
+            assert!(cpu.right() <= w, "{w}: the CPU meter on the screen: {cpu:?}");
+            if w >= 1920.0 {
+                let mid = (restart.left() + keys.right()) / 2.0;
+                assert!((mid - w / 2.0).abs() < 2.0, "{w}: still centred where there's room: {mid}");
+            }
         }
     }
 

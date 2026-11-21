@@ -1912,7 +1912,11 @@ pub fn header(app: &mut App, ui: &mut Ui) {
             let t = Vec2::new(32.0, 24.0);
             let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
             let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
-            let mid_left = full.center().x - group / 2.0;
+            // Centred, as Maschine's, but right of the left group (where it ended last
+            // frame): in a narrow window (a laptop's 1280 px) the transport moves over
+            // rather than covering Save.
+            let left_end = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("header-left-end"))).unwrap_or(0.0);
+            let mid_left = (full.center().x - group / 2.0).max(left_end + 8.0);
             // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
             // and a new release's button.
             ui.horizontal_centered(|ui| {
@@ -1986,16 +1990,19 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     let dirty = d.is_dirty();
                     let save_tip =
                         if dirty { "Save (⌘S); the first save keeps the original as .mxprj.bak" } else { "No unsaved changes" };
-                    if icon_button(ui, t, dirty, PLAY_ON, save_tip, |p, r, c| {
+                    let save = icon_button(ui, t, dirty, PLAY_ON, save_tip, |p, r, c| {
                         let b = Rect::from_center_size(r.center(), Vec2::splat(12.0));
                         p.rect_stroke(b, 1.0, Stroke::new(1.5, c), StrokeKind::Inside);
                         p.rect_filled(Rect::from_min_size(b.min + Vec2::new(3.0, 0.0), Vec2::new(6.0, 4.0)), 0.0, c);
-                    })
-                    .clicked()
-                    {
+                    });
+                    note_rect(ui, "save", save.rect);
+                    if save.clicked() {
                         acts.push(Act::Save);
                     }
                 }
+                // (Before the update button, which only shows where there's room for it.)
+                let end = ui.cursor().left();
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("header-left-end"), end));
                 if let Some(rel) = app.update.available()
                     && update_button(ui, mid_left, rel.version_text()).is_some_and(|r| r.clicked())
                 {
