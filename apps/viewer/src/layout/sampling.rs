@@ -334,6 +334,54 @@ pub enum LaneAct {
     Clear,
 }
 
+/// What's done to a layer of a New Sampler sound (`deckard_model::layers`). Level, pan
+/// and tune are the zone's own, as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayerAct {
+    Focus,
+    Mute,
+    Solo,
+    Level(f64),
+    Pan(f64),
+    Tune(f64),
+    Root(i64),
+    /// Seconds.
+    Attack(f64),
+    Decay(f64),
+    /// 0 to 1.
+    Sustain(f64),
+    Release(f64),
+    /// Its window's point (0: A … 3: D) put here on the morph.
+    Window(usize, f64),
+    Remove,
+    Duplicate,
+    /// To this lane.
+    MoveTo(usize),
+    /// These files from this lane on: an empty lane gets a layer, a full one another
+    /// sample.
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// What's done to a layered sound's morph, and to all its layers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MorphAct {
+    On(bool),
+    Position(f64),
+    Sync(bool),
+    Bars(f64),
+    Seconds(f64),
+    Shape(deckard_model::layers::Shape),
+    Depth(f64),
+    Reset(bool),
+    Fade(deckard_model::layers::Fade),
+    /// The windows spread evenly again.
+    Spread,
+    /// Every layer over these keys.
+    Keys(i64, i64),
+    /// Choose files for the next empty lanes.
+    Add,
+}
+
 /// The stem lanes' colours, in their order: Drums, Vocals, Bass, Leads.
 pub const LANE_COLOURS: [Color32; 4] = [
     Color32::from_rgb(0xf2, 0xa2, 0x3c),
@@ -351,6 +399,10 @@ pub struct LaneView {
 
 #[derive(Debug, Clone)]
 pub enum SamplingAct {
+    /// A layer of the focused sound (its lane, from 0).
+    Layer(usize, LayerAct),
+    /// Its layers' morph, and what's the sound's.
+    Morph(MorphAct),
     /// STEMS into a new group, whatever the zone (Maschine's way).
     StemsToGroup,
     /// Pick stem files for the focused zone's lanes.

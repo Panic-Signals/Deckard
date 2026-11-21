@@ -87,6 +87,9 @@ mod jam_io;
 mod jam_tests;
 mod keep_running;
 mod keys;
+mod layers;
+#[cfg(test)]
+mod layers_tests;
 mod layout;
 mod lock;
 #[cfg(test)]
@@ -8060,6 +8063,8 @@ impl App {
                     self.load_stems(&files);
                 }
             }
+            S::Layer(lane, act) => self.layer_act(lane, act),
+            S::Morph(act) => self.morph_act(act),
             S::Lane(k, act) => self.lane_act(k, act),
             S::LanesMix(on) => self.sampling.lanes_mix = on,
             S::DragOut(lane, whole) => self.drag_out(lane, whole),

@@ -8719,6 +8719,32 @@ mod tests {
         assert!(e.sounds[0][0].as_ref().unwrap().zones[0].layer.is_none());
     }
 
+    /// A layer whose file is missing is left out; the others play, their windows and
+    /// mutes as they were.
+    #[test]
+    fn a_missing_layer_file_leaves_the_rest() {
+        use deckard_model::layers::Layer;
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let smp = p.groups[0].sounds[0].sampler.as_mut().unwrap();
+        let w = deckard_model::layers::spread(3, Default::default());
+        let first = smp.zones[0].clone();
+        smp.zones = (0..3)
+            .map(|k| {
+                let mut z = first.clone();
+                z.meta.as_mut().unwrap().layer = Some(Layer { window: w[k], mute: k == 2, ..Default::default() });
+                z
+            })
+            .collect();
+        smp.zones[1].sample.path = "/nowhere/gone.wav".into();
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let rt = e.sounds[0][0].as_ref().unwrap();
+        assert_eq!(rt.zones.len(), 2);
+        let (a, c) = (rt.zones[0].layer.unwrap(), rt.zones[1].layer.unwrap());
+        assert_eq!((a.window, c.window), (w[0], w[2]));
+        assert!(a.on && !c.on, "the third is still the muted one");
+    }
+
     fn zone0(e: &Engine) -> &sampler::ZoneRt {
         &e.sounds[0][0].as_ref().unwrap().zones[0]
     }

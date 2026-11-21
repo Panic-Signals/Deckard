@@ -28,6 +28,13 @@ impl Document {
         if ops.is_empty() { Ok(()) } else { self.apply(label, ops) }
     }
 
+    /// Sound (`g`, `s`)'s New Sampler settings changed, as the undo step `label` (a
+    /// setting dragged is one step, as a zone's are).
+    pub fn set_new_sampler_as(&mut self, g: usize, s: usize, settings: &NewSampler, label: &str) -> Result<(), String> {
+        let ops = self.new_sampler_ops(g, s, Some(settings))?;
+        if ops.is_empty() { Ok(()) } else { self.apply(label, ops) }
+    }
+
     /// The ops giving sound (`g`, `s`) these New Sampler settings (none if it has them).
     pub(crate) fn new_sampler_ops(&self, g: usize, s: usize, settings: Option<&NewSampler>) -> Result<Vec<Op>, String> {
         let path = self.owner(Target::Sound(g, s)).ok_or_else(|| format!("no sound {} in group {}", s + 1, g + 1))?;
