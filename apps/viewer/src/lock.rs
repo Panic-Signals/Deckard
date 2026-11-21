@@ -280,76 +280,79 @@ impl App {
         let mut open = true;
         let mut todo = Vec::new();
         let active = self.lock_active;
-        egui::Window::new("Lock").open(&mut open).resizable(false).show(ctx, |ui| {
-            crate::layout::dialog_style(ui);
-            ui.horizontal(|ui| {
-                if ui.selectable_label(active, "LOCK").on_hover_text("Take a snapshot; again: recall it").clicked() {
-                    todo.push(Do::Lock);
-                }
-                let focus = l.focus.is_some();
-                if ui.add_enabled(focus, egui::Button::new("UPDATE")).on_hover_text("Take the focused snapshot again").clicked() {
-                    todo.push(Do::Update);
-                }
-                if ui.add_enabled(focus, egui::Button::new("DELETE")).clicked() {
-                    todo.push(Do::Delete);
-                }
-                ui.separator();
-                if ui.add_enabled(l.focus_bank > 0, egui::Button::new("◀")).clicked() {
-                    todo.push(Do::Bank(false));
-                }
-                ui.label(format!("Bank {} / {}", l.focus_bank + 1, l.banks));
-                if ui.add_enabled(l.focus_bank < 3, egui::Button::new("▶")).on_hover_text("Past the last: a new bank").clicked() {
-                    todo.push(Do::Bank(true));
-                }
-            });
-            egui::Grid::new("lock-pads").spacing([4.0, 4.0]).show(ui, |ui| {
-                for row in (0..4).rev() {
-                    for col in 0..4 {
-                        let pad = row * 4 + col;
-                        let slot = l.focus_bank * 16 + pad;
-                        let taken = l.slots.contains(&slot);
-                        let text = if taken { format!("{}", slot + 1) } else { String::new() };
-                        let b = egui::Button::new(text).min_size(egui::vec2(44.0, 36.0)).selected(l.focus == Some(slot));
-                        let b = if taken { b } else { b.fill(egui::Color32::from_gray(30)) };
-                        let resp = ui.add(b);
-                        let name = format!("Lock pad {}", pad + 1);
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
-                        let resp = resp.on_hover_text(if taken { "Recall (right-click: delete)" } else { "Take a snapshot here" });
-                        if resp.clicked() {
-                            todo.push(Do::Pad(pad));
-                        }
-                        if taken && resp.secondary_clicked() {
-                            todo.push(Do::DeleteSlot(slot));
-                        }
+        egui::Window::new("Lock").open(&mut open).resizable(false).max_height(crate::layout::dialog_max_height(ctx)).vscroll(true).show(
+            ctx,
+            |ui| {
+                crate::layout::dialog_style(ui);
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(active, "LOCK").on_hover_text("Take a snapshot; again: recall it").clicked() {
+                        todo.push(Do::Lock);
                     }
-                    ui.end_row();
-                }
-            });
-            ui.separator();
-            ui.horizontal(|ui| {
-                let mut morph = l.morph;
-                if ui.checkbox(&mut morph, "Morph").on_hover_text("Recalls glide to the snapshot").changed() {
-                    todo.push(Do::Set("morph", f64::from(u8::from(morph))));
-                }
-                ui.add_enabled_ui(l.morph, |ui| {
-                    let mut choose = |ui: &mut egui::Ui, id: &str, field: &'static str, list: &[&str], at: usize| {
-                        crate::layout::combo(id).selected_text(list[at.min(list.len() - 1)]).show_ui(ui, |ui| {
-                            for (i, name) in list.iter().enumerate() {
-                                if ui.selectable_label(i == at, *name).clicked() {
-                                    todo.push(Do::Set(field, i as f64));
-                                }
-                            }
-                        });
-                    };
-                    choose(ui, "lock-mode", "morph_mode", &deckard_model::LOCK_MODES, l.mode);
-                    if l.mode == 0 {
-                        choose(ui, "lock-time", "morph_time", &deckard_model::LOCK_TIMES, l.time);
-                    } else {
-                        choose(ui, "lock-grid", "morph_grid", &deckard_model::LOCK_GRIDS, l.grid);
+                    let focus = l.focus.is_some();
+                    if ui.add_enabled(focus, egui::Button::new("UPDATE")).on_hover_text("Take the focused snapshot again").clicked() {
+                        todo.push(Do::Update);
+                    }
+                    if ui.add_enabled(focus, egui::Button::new("DELETE")).clicked() {
+                        todo.push(Do::Delete);
+                    }
+                    ui.separator();
+                    if ui.add_enabled(l.focus_bank > 0, egui::Button::new("◀")).clicked() {
+                        todo.push(Do::Bank(false));
+                    }
+                    ui.label(format!("Bank {} / {}", l.focus_bank + 1, l.banks));
+                    if ui.add_enabled(l.focus_bank < 3, egui::Button::new("▶")).on_hover_text("Past the last: a new bank").clicked() {
+                        todo.push(Do::Bank(true));
                     }
                 });
-            });
-        });
+                egui::Grid::new("lock-pads").spacing([4.0, 4.0]).show(ui, |ui| {
+                    for row in (0..4).rev() {
+                        for col in 0..4 {
+                            let pad = row * 4 + col;
+                            let slot = l.focus_bank * 16 + pad;
+                            let taken = l.slots.contains(&slot);
+                            let text = if taken { format!("{}", slot + 1) } else { String::new() };
+                            let b = egui::Button::new(text).min_size(egui::vec2(44.0, 36.0)).selected(l.focus == Some(slot));
+                            let b = if taken { b } else { b.fill(egui::Color32::from_gray(30)) };
+                            let resp = ui.add(b);
+                            let name = format!("Lock pad {}", pad + 1);
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+                            let resp = resp.on_hover_text(if taken { "Recall (right-click: delete)" } else { "Take a snapshot here" });
+                            if resp.clicked() {
+                                todo.push(Do::Pad(pad));
+                            }
+                            if taken && resp.secondary_clicked() {
+                                todo.push(Do::DeleteSlot(slot));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let mut morph = l.morph;
+                    if ui.checkbox(&mut morph, "Morph").on_hover_text("Recalls glide to the snapshot").changed() {
+                        todo.push(Do::Set("morph", f64::from(u8::from(morph))));
+                    }
+                    ui.add_enabled_ui(l.morph, |ui| {
+                        let mut choose = |ui: &mut egui::Ui, id: &str, field: &'static str, list: &[&str], at: usize| {
+                            crate::layout::combo(id).selected_text(list[at.min(list.len() - 1)]).show_ui(ui, |ui| {
+                                for (i, name) in list.iter().enumerate() {
+                                    if ui.selectable_label(i == at, *name).clicked() {
+                                        todo.push(Do::Set(field, i as f64));
+                                    }
+                                }
+                            });
+                        };
+                        choose(ui, "lock-mode", "morph_mode", &deckard_model::LOCK_MODES, l.mode);
+                        if l.mode == 0 {
+                            choose(ui, "lock-time", "morph_time", &deckard_model::LOCK_TIMES, l.time);
+                        } else {
+                            choose(ui, "lock-grid", "morph_grid", &deckard_model::LOCK_GRIDS, l.grid);
+                        }
+                    });
+                });
+            },
+        );
         self.lock_panel = open;
         for d in todo {
             match d {
@@ -378,70 +381,76 @@ impl App {
             (d.project().scene_recall.clone(), d.project().section_recall.clone())
         };
         let mut recall: Vec<(&'static str, &'static str, Value)> = Vec::new();
-        egui::Window::new("MIDI Change").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
-            crate::layout::dialog_style(ui);
-            let lock = deckard_model::MidiRecall { trigger: l.midi_trigger, source: l.midi_source.clone(), channel: l.midi_channel };
-            let blocks = [
-                ("Scene", "scene_recall", &scene, "Notes 0–127 (C-2 up) or programs 1–128 pick scenes 1–128."),
-                ("Section", "section_recall", &section, "Notes 0–127 (C-2 up) or programs 1–128 pick sections 1–128."),
-                ("Lock", "snapshot_recall", &lock, "Notes 0–63 (C-2 up) or programs 1–64 recall Lock slots 1–64."),
-            ];
-            for (i, (name, block, r, note)) in blocks.into_iter().enumerate() {
-                if i > 0 {
-                    ui.separator();
-                }
-                ui.heading(name);
-                let mut change = |field: &'static str, v: Value| {
-                    if block == "snapshot_recall" {
-                        set.push((field, v));
-                    } else {
-                        recall.push((block, field, v));
+        egui::Window::new("MIDI Change")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .max_height(crate::layout::dialog_max_height(ctx))
+            .vscroll(true)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                let lock = deckard_model::MidiRecall { trigger: l.midi_trigger, source: l.midi_source.clone(), channel: l.midi_channel };
+                let blocks = [
+                    ("Scene", "scene_recall", &scene, "Notes 0–127 (C-2 up) or programs 1–128 pick scenes 1–128."),
+                    ("Section", "section_recall", &section, "Notes 0–127 (C-2 up) or programs 1–128 pick sections 1–128."),
+                    ("Lock", "snapshot_recall", &lock, "Notes 0–63 (C-2 up) or programs 1–64 recall Lock slots 1–64."),
+                ];
+                for (i, (name, block, r, note)) in blocks.into_iter().enumerate() {
+                    if i > 0 {
+                        ui.separator();
                     }
-                };
-                let salt = name.to_lowercase();
-                egui::Grid::new(format!("midi-change-{salt}")).num_columns(2).show(ui, |ui| {
-                    ui.label("Trigger");
-                    let shown = deckard_model::MIDI_TRIGGERS[r.trigger.min(2)];
-                    let c = crate::layout::combo(format!("{salt}-trigger")).selected_text(shown).show_ui(ui, |ui| {
-                        for (i, label) in deckard_model::MIDI_TRIGGERS.iter().enumerate() {
-                            if ui.selectable_label(i == r.trigger, *label).clicked() {
-                                change("trigger", Value::Int(i as i64));
-                            }
+                    ui.heading(name);
+                    let mut change = |field: &'static str, v: Value| {
+                        if block == "snapshot_recall" {
+                            set.push((field, v));
+                        } else {
+                            recall.push((block, field, v));
                         }
-                    });
-                    let info = format!("{name} trigger");
-                    c.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, info.as_str()));
-                    ui.end_row();
-                    ui.add_enabled_ui(r.trigger != 0, |ui| {
-                        ui.label("Source");
-                    });
-                    ui.add_enabled_ui(r.trigger != 0, |ui| {
-                        crate::layout::combo(format!("{salt}-source")).selected_text(&r.source).show_ui(ui, |ui| {
-                            for port in std::iter::once("None".to_string()).chain(ports.iter().cloned()) {
-                                if ui.selectable_label(port == r.source, &port).clicked() {
-                                    change("input", Value::Str(port.clone()));
+                    };
+                    let salt = name.to_lowercase();
+                    egui::Grid::new(format!("midi-change-{salt}")).num_columns(2).show(ui, |ui| {
+                        ui.label("Trigger");
+                        let shown = deckard_model::MIDI_TRIGGERS[r.trigger.min(2)];
+                        let c = crate::layout::combo(format!("{salt}-trigger")).selected_text(shown).show_ui(ui, |ui| {
+                            for (i, label) in deckard_model::MIDI_TRIGGERS.iter().enumerate() {
+                                if ui.selectable_label(i == r.trigger, *label).clicked() {
+                                    change("trigger", Value::Int(i as i64));
                                 }
                             }
                         });
-                    });
-                    ui.end_row();
-                    ui.add_enabled_ui(r.trigger != 0, |ui| {
-                        ui.label("Channel");
-                    });
-                    ui.add_enabled_ui(r.trigger != 0, |ui| {
-                        crate::layout::combo(format!("{salt}-channel")).selected_text(r.channel.to_string()).show_ui(ui, |ui| {
-                            for ch in 1..=16 {
-                                if ui.selectable_label(ch == r.channel, ch.to_string()).clicked() {
-                                    change("midi_channel", Value::Int(ch));
-                                }
-                            }
+                        let info = format!("{name} trigger");
+                        c.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, info.as_str()));
+                        ui.end_row();
+                        ui.add_enabled_ui(r.trigger != 0, |ui| {
+                            ui.label("Source");
                         });
+                        ui.add_enabled_ui(r.trigger != 0, |ui| {
+                            crate::layout::combo(format!("{salt}-source")).selected_text(&r.source).show_ui(ui, |ui| {
+                                for port in std::iter::once("None".to_string()).chain(ports.iter().cloned()) {
+                                    if ui.selectable_label(port == r.source, &port).clicked() {
+                                        change("input", Value::Str(port.clone()));
+                                    }
+                                }
+                            });
+                        });
+                        ui.end_row();
+                        ui.add_enabled_ui(r.trigger != 0, |ui| {
+                            ui.label("Channel");
+                        });
+                        ui.add_enabled_ui(r.trigger != 0, |ui| {
+                            crate::layout::combo(format!("{salt}-channel")).selected_text(r.channel.to_string()).show_ui(ui, |ui| {
+                                for ch in 1..=16 {
+                                    if ui.selectable_label(ch == r.channel, ch.to_string()).clicked() {
+                                        change("midi_channel", Value::Int(ch));
+                                    }
+                                }
+                            });
+                        });
+                        ui.end_row();
                     });
-                    ui.end_row();
-                });
-                ui.label(egui::RichText::new(note).weak());
-            }
-        });
+                    ui.label(egui::RichText::new(note).weak());
+                }
+            });
         self.midi_change = open;
         for (field, v) in set {
             let r = match (field, &v) {

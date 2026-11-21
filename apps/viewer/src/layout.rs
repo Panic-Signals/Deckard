@@ -1830,6 +1830,19 @@ pub fn dialog_style(ui: &mut Ui) {
     s.icon_spacing = 6.0;
 }
 
+/// The tallest a dialog can be and still fit the window, with room round it. Past it
+/// a dialog's contents scroll instead of running off the bottom of a short screen.
+pub fn dialog_max_height(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - 64.0).max(160.0)
+}
+
+/// A modal's contents, scrolling when they're taller than the window has room for
+/// ([`dialog_max_height`], less the modal's own frame).
+pub fn fit_dialog<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let max = dialog_max_height(ui.ctx()) - 32.0;
+    egui::ScrollArea::vertical().max_height(max).show(ui, add).inner
+}
+
 /// Draws the browser header icon (three equidistant shelf lines on the left and a magnifying glass on the right).
 fn draw_browser_icon(p: &Painter, r: Rect, c: Color32) {
     let x0 = (r.center().x - 9.0).floor() + 0.5;
@@ -7420,9 +7433,14 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     if app.lanes_dialog {
         let mut open = true;
         let sound = p.groups[app.group].sounds.get(app.sound).map_or(String::new(), |s| s.name.clone());
-        egui::Window::new("MIDI Lanes").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(
-            ui.ctx(),
-            |ui| {
+        egui::Window::new("MIDI Lanes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .max_height(dialog_max_height(ui.ctx()))
+            .vscroll(true)
+            .show(ui.ctx(), |ui| {
                 dialog_style(ui);
                 ui.label(egui::RichText::new(format!("Lanes for {sound}")).weak());
                 ui.add_space(4.0);
@@ -7486,8 +7504,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                         }
                     }
                 });
-            },
-        );
+            });
         if !open {
             acts.push(Act::LanesDialog(false));
         }

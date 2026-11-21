@@ -268,39 +268,44 @@ fn colour(k: Kind) -> eframe::egui::Color32 {
 pub fn window(ctx: &eframe::egui::Context, open: &mut bool, m: &Monitor, v: &mut View) {
     use eframe::egui;
     m.set_context(ctx);
-    egui::Window::new("MIDI Monitor").open(open).resizable(true).default_size([980.0, 420.0]).show(ctx, |ui| {
-        crate::layout::dialog_style(ui);
-        ui.horizontal(|ui| {
-            crate::layout::combo("monitor-kind").selected_text(v.kind.map_or("All types", Kind::label)).show_ui(ui, |ui| {
-                ui.selectable_value(&mut v.kind, None, "All types");
-                for k in Kind::ALL {
-                    ui.selectable_value(&mut v.kind, Some(k), k.label());
+    egui::Window::new("MIDI Monitor")
+        .open(open)
+        .resizable(true)
+        .default_size([980.0, 420.0f32.min(crate::layout::dialog_max_height(ctx))])
+        .max_height(crate::layout::dialog_max_height(ctx))
+        .show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
+            ui.horizontal(|ui| {
+                crate::layout::combo("monitor-kind").selected_text(v.kind.map_or("All types", Kind::label)).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut v.kind, None, "All types");
+                    for k in Kind::ALL {
+                        ui.selectable_value(&mut v.kind, Some(k), k.label());
+                    }
+                });
+                let label = if v.paused { "▶ Resume" } else { "⏸ Pause" };
+                ui.toggle_value(&mut v.paused, label);
+                if ui.button("Clear").clicked() {
+                    m.clear();
                 }
             });
-            let label = if v.paused { "▶ Resume" } else { "⏸ Pause" };
-            ui.toggle_value(&mut v.paused, label);
-            if ui.button("Clear").clicked() {
-                m.clear();
-            }
-        });
-        ui.separator();
-        let half = (ui.available_width() - 12.0) / 2.0;
-        ui.horizontal_top(|ui| {
-            for (dir, title, all) in [(Dir::In, "IN", "All sources"), (Dir::Out, "OUT", "All destinations")] {
-                ui.allocate_ui_with_layout(egui::vec2(half, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_width(half);
-                    let pick = match dir {
-                        Dir::In => &mut v.port_in,
-                        Dir::Out => &mut v.port_out,
-                    };
-                    side(ui, m, dir, title, all, v.kind, pick);
-                });
-                if dir == Dir::In {
-                    ui.separator();
+            ui.separator();
+            let half = (ui.available_width() - 12.0) / 2.0;
+            ui.horizontal_top(|ui| {
+                for (dir, title, all) in [(Dir::In, "IN", "All sources"), (Dir::Out, "OUT", "All destinations")] {
+                    ui.allocate_ui_with_layout(egui::vec2(half, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(half);
+                        let pick = match dir {
+                            Dir::In => &mut v.port_in,
+                            Dir::Out => &mut v.port_out,
+                        };
+                        side(ui, m, dir, title, all, v.kind, pick);
+                    });
+                    if dir == Dir::In {
+                        ui.separator();
+                    }
                 }
-            }
+            });
         });
-    });
 }
 
 /// One side: its port picker and its rows (newest at the bottom, following unless

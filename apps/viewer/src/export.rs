@@ -322,99 +322,105 @@ impl App {
         let song_view = self.song_view;
         let cv_mask = self.settings.cv_mask();
         let s = &mut self.export.settings;
-        egui::Window::new(title).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
-            crate::layout::dialog_style(ui);
-            ui.add_enabled_ui(running.is_none(), |ui| {
-                ui.heading("Source");
-                egui::Grid::new("export-source").num_columns(2).show(ui, |ui| {
-                    if song_view {
-                        ui.label("Range");
-                        combo(ui, "export-range", &mut s.range_loop, &[(false, "All"), (true, "Loop")]);
-                    } else {
-                        ui.label("Scenes");
-                        combo(ui, "export-scenes", &mut s.scenes_selected, &[(false, "All"), (true, "Selected")]);
-                    }
-                    ui.end_row();
-                    ui.label("Source");
-                    combo(
-                        ui,
-                        "export-source",
-                        &mut s.source,
-                        &[(Source::Master, "Master"), (Source::Group, "Group"), (Source::Sound, "Sound")],
-                    );
-                    ui.end_row();
-                });
-                output_list(ui, &p, s, cv_mask);
-                ui.separator();
-                ui.heading("Options");
-                egui::Grid::new("export-options").num_columns(2).show(ui, |ui| {
-                    ui.checkbox(&mut s.format.normalize, "Normalize");
-                    ui.checkbox(&mut s.format.loop_optimize, "Loop Optimize");
-                    ui.end_row();
-                    if song_view {
-                        ui.checkbox(&mut s.split_by_section, "Split By Section");
+        egui::Window::new(title)
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .max_height(crate::layout::dialog_max_height(ctx))
+            .vscroll(true)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                ui.add_enabled_ui(running.is_none(), |ui| {
+                    ui.heading("Source");
+                    egui::Grid::new("export-source").num_columns(2).show(ui, |ui| {
+                        if song_view {
+                            ui.label("Range");
+                            combo(ui, "export-range", &mut s.range_loop, &[(false, "All"), (true, "Loop")]);
+                        } else {
+                            ui.label("Scenes");
+                            combo(ui, "export-scenes", &mut s.scenes_selected, &[(false, "All"), (true, "Selected")]);
+                        }
                         ui.end_row();
-                    }
-                    ui.label("Type");
-                    combo(ui, "export-type", &mut s.format.file_type, &[(FileType::Wav, "WAV"), (FileType::Aiff, "AIFF")]);
-                    ui.end_row();
-                    ui.label("Sample Rate");
-                    let rates: Vec<(u32, String)> = ex::RATES.iter().map(|&r| (r, format!("{r} Hz"))).collect();
-                    let rates: Vec<(u32, &str)> = rates.iter().map(|(r, t)| (*r, t.as_str())).collect();
-                    combo(ui, "export-rate", &mut s.format.rate, &rates);
-                    ui.end_row();
-                    ui.label("Bit Depth");
-                    combo(
-                        ui,
-                        "export-depth",
-                        &mut s.format.depth,
-                        &[(BitDepth::Int16, "16 bit"), (BitDepth::Int24, "24 bit"), (BitDepth::Float32, "32 bit float")],
-                    );
-                    ui.end_row();
+                        ui.label("Source");
+                        combo(
+                            ui,
+                            "export-source",
+                            &mut s.source,
+                            &[(Source::Master, "Master"), (Source::Group, "Group"), (Source::Sound, "Sound")],
+                        );
+                        ui.end_row();
+                    });
+                    output_list(ui, &p, s, cv_mask);
+                    ui.separator();
+                    ui.heading("Options");
+                    egui::Grid::new("export-options").num_columns(2).show(ui, |ui| {
+                        ui.checkbox(&mut s.format.normalize, "Normalize");
+                        ui.checkbox(&mut s.format.loop_optimize, "Loop Optimize");
+                        ui.end_row();
+                        if song_view {
+                            ui.checkbox(&mut s.split_by_section, "Split By Section");
+                            ui.end_row();
+                        }
+                        ui.label("Type");
+                        combo(ui, "export-type", &mut s.format.file_type, &[(FileType::Wav, "WAV"), (FileType::Aiff, "AIFF")]);
+                        ui.end_row();
+                        ui.label("Sample Rate");
+                        let rates: Vec<(u32, String)> = ex::RATES.iter().map(|&r| (r, format!("{r} Hz"))).collect();
+                        let rates: Vec<(u32, &str)> = rates.iter().map(|(r, t)| (*r, t.as_str())).collect();
+                        combo(ui, "export-rate", &mut s.format.rate, &rates);
+                        ui.end_row();
+                        ui.label("Bit Depth");
+                        combo(
+                            ui,
+                            "export-depth",
+                            &mut s.format.depth,
+                            &[(BitDepth::Int16, "16 bit"), (BitDepth::Int24, "24 bit"), (BitDepth::Float32, "32 bit float")],
+                        );
+                        ui.end_row();
+                    });
+                    ui.separator();
+                    ui.heading("Destination");
+                    egui::Grid::new("export-dest").num_columns(2).show(ui, |ui| {
+                        ui.label("Folder");
+                        if ui.button(folder.display().to_string()).on_hover_text("Choose the folder").clicked()
+                            && let Some(dir) = rfd::FileDialog::new().set_directory(&folder).pick_folder()
+                        {
+                            s.folder = Some(dir);
+                        }
+                        ui.end_row();
+                        ui.label("Name");
+                        let mut name = s.name.clone().unwrap_or(default_name);
+                        if ui.text_edit_singleline(&mut name).changed() {
+                            s.name = Some(name);
+                        }
+                        ui.end_row();
+                    });
                 });
                 ui.separator();
-                ui.heading("Destination");
-                egui::Grid::new("export-dest").num_columns(2).show(ui, |ui| {
-                    ui.label("Folder");
-                    if ui.button(folder.display().to_string()).on_hover_text("Choose the folder").clicked()
-                        && let Some(dir) = rfd::FileDialog::new().set_directory(&folder).pick_folder()
-                    {
-                        s.folder = Some(dir);
+                if let Some(w) = warning(&p) {
+                    ui.label(egui::RichText::new(w).color(ui.visuals().warn_fg_color));
+                }
+                match running {
+                    Some(f) => {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::ProgressBar::new(f).desired_width(220.0).show_percentage());
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
                     }
-                    ui.end_row();
-                    ui.label("Name");
-                    let mut name = s.name.clone().unwrap_or(default_name);
-                    if ui.text_edit_singleline(&mut name).changed() {
-                        s.name = Some(name);
+                    None => {
+                        ui.horizontal(|ui| {
+                            if ui.button("Export").clicked() {
+                                export = true;
+                            }
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        });
                     }
-                    ui.end_row();
-                });
+                }
             });
-            ui.separator();
-            if let Some(w) = warning(&p) {
-                ui.label(egui::RichText::new(w).color(ui.visuals().warn_fg_color));
-            }
-            match running {
-                Some(f) => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::ProgressBar::new(f).desired_width(220.0).show_percentage());
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
-                    });
-                }
-                None => {
-                    ui.horizontal(|ui| {
-                        if ui.button("Export").clicked() {
-                            export = true;
-                        }
-                        if ui.button("Close").clicked() {
-                            close = true;
-                        }
-                    });
-                }
-            }
-        });
         if close {
             match &self.export.running {
                 Some(r) => r.cancel(),

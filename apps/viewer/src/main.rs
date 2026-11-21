@@ -3070,7 +3070,8 @@ impl App {
         let mut library_change = None;
         let mut controller_change = None;
         let mut wine_action = None;
-        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([760.0, 700.0]).open(&mut open).show(ctx, |ui| {
+        let fit = crate::layout::dialog_max_height(ctx);
+        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([760.0, 700.0f32.min(fit)]).max_height(fit).open(&mut open).show(ctx, |ui| {
             crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, 7, "General");
@@ -3085,6 +3086,9 @@ impl App {
                 ui.selectable_value(&mut tab, 1, "Location");
             });
             ui.separator();
+            // Past the window's height the tab scrolls (a short screen); the Plug-in Manager's
+            // list scrolls by itself, so its tab doesn't.
+            egui::ScrollArea::new([false, tab != 0]).id_salt(("prefs-tab", tab)).auto_shrink([false, false]).show(ui, |ui| {
             if tab == 2 {
                 self.audio_preferences(ui);
             } else if tab == 7 {
@@ -3416,6 +3420,7 @@ impl App {
                     }
                 });
             }
+            });
         });
         if self.settings != before {
             self.settings.save();
@@ -3458,26 +3463,28 @@ impl App {
         match offer {
             StemsOffer::Asking => {
                 egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
-                    crate::layout::dialog_style(ui);
-                    ui.set_width(420.0);
-                    ui.label(egui::RichText::new("Install stem separation?").strong());
-                    ui.add_space(4.0);
-                    ui.label(format!(
-                        "Sampling ▸ EDIT ▸ STEMS splits a sample into drums, bass, vocals and the rest with Meta's Demucs model, \
+                    crate::layout::fit_dialog(ui, |ui| {
+                        crate::layout::dialog_style(ui);
+                        ui.set_width(420.0);
+                        ui.label(egui::RichText::new("Install stem separation?").strong());
+                        ui.add_space(4.0);
+                        ui.label(format!(
+                            "Sampling ▸ EDIT ▸ STEMS splits a sample into drums, bass, vocals and the rest with Meta's Demucs model, \
                          a {} MB download that isn't bundled with DECKARD. It goes into DECKARD's settings folder.",
-                        stems::MODEL_MB
-                    ));
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("If you skip this, DECKARD downloads it the first time you use STEMS.").weak());
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Install").clicked() {
-                            start = true;
-                        }
-                        if ui.button("Not now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            done = true;
-                        }
-                    });
+                            stems::MODEL_MB
+                        ));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("If you skip this, DECKARD downloads it the first time you use STEMS.").weak());
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Install").clicked() {
+                                start = true;
+                            }
+                            if ui.button("Not now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                done = true;
+                            }
+                        });
+                    })
                 });
             }
             StemsOffer::Installing(rx) => {
@@ -3498,12 +3505,14 @@ impl App {
                 }
                 if !done {
                     egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
-                        crate::layout::dialog_style(ui);
-                        ui.set_width(420.0);
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(format!("Downloading the stem separation model ({} MB)…", stems::MODEL_MB));
-                        });
+                        crate::layout::fit_dialog(ui, |ui| {
+                            crate::layout::dialog_style(ui);
+                            ui.set_width(420.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("Downloading the stem separation model ({} MB)…", stems::MODEL_MB));
+                            });
+                        })
                     });
                     ctx.request_repaint_after(std::time::Duration::from_millis(250));
                 }
@@ -3549,20 +3558,22 @@ impl App {
         if let Some(version) = self.whats_new.clone() {
             let mut choice = None;
             egui::Modal::new(egui::Id::new("whats-new")).show(ctx, |ui| {
-                crate::layout::dialog_style(ui);
-                ui.set_width(360.0);
-                ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
-                ui.add_space(4.0);
-                ui.label("Would you like to see the release notes?");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("See Release Notes").clicked() {
-                        choice = Some(true);
-                    }
-                    if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(false);
-                    }
-                });
+                crate::layout::fit_dialog(ui, |ui| {
+                    crate::layout::dialog_style(ui);
+                    ui.set_width(360.0);
+                    ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
+                    ui.add_space(4.0);
+                    ui.label("Would you like to see the release notes?");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("See Release Notes").clicked() {
+                            choice = Some(true);
+                        }
+                        if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            choice = Some(false);
+                        }
+                    });
+                })
             });
             if let Some(open) = choice {
                 if open {
@@ -3579,29 +3590,31 @@ impl App {
             };
             let mut choice = None;
             egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
-                crate::layout::dialog_style(ui);
-                ui.set_width(360.0);
-                ui.label(egui::RichText::new(question).strong());
-                ui.add_space(4.0);
-                ui.label("Your changes will be lost if you don't save them.");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if matches!(then, Pending::Revert) {
-                        if ui.button("Revert").clicked() {
-                            choice = Some(1);
+                crate::layout::fit_dialog(ui, |ui| {
+                    crate::layout::dialog_style(ui);
+                    ui.set_width(360.0);
+                    ui.label(egui::RichText::new(question).strong());
+                    ui.add_space(4.0);
+                    ui.label("Your changes will be lost if you don't save them.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if matches!(then, Pending::Revert) {
+                            if ui.button("Revert").clicked() {
+                                choice = Some(1);
+                            }
+                        } else {
+                            if ui.button("Save").clicked() {
+                                choice = Some(0);
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                choice = Some(1);
+                            }
                         }
-                    } else {
-                        if ui.button("Save").clicked() {
-                            choice = Some(0);
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            choice = Some(2);
                         }
-                        if ui.button("Don't Save").clicked() {
-                            choice = Some(1);
-                        }
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(2);
-                    }
-                });
+                    });
+                })
             });
             match choice {
                 Some(0) => {
@@ -8250,48 +8263,62 @@ impl App {
         let mut open = true;
         let mut edits: Vec<(String, f64)> = Vec::new();
         let (mut on, mut lock) = (self.repeat_soft, self.arp_locked);
-        egui::Window::new("Note Repeat / Arp").open(&mut open).resizable(false).show(ctx, |ui| {
-            crate::layout::dialog_style(ui);
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut on, "On").on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
-                ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
-                ui.separator();
-                let shown = view.knobs.iter().find(|k| k.key == "arp/preset").map_or(0, |k| k.value as usize);
-                // Presets 1–4 (item 0 is none).
-                for (i, name) in
-                    view.lists.iter().find(|(k, _)| k == "arp/preset").map(|x| x.1.clone()).unwrap_or_default().iter().enumerate().skip(1)
-                {
-                    if ui.selectable_label(shown == i, name).clicked() {
-                        edits.push(("arp/preset".into(), i as f64));
-                    }
-                }
-            });
-            ui.separator();
-            egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
-                for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
-                    ui.label(&k.name);
-                    match view.lists.iter().find(|(key, _)| *key == k.key) {
-                        Some((_, list)) => {
-                            crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
-                                for (i, name) in list.iter().enumerate() {
-                                    if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
-                                        edits.push((k.key.clone(), i as f64));
-                                    }
-                                }
-                            });
+        egui::Window::new("Note Repeat / Arp")
+            .open(&mut open)
+            .resizable(false)
+            .max_height(crate::layout::dialog_max_height(ctx))
+            .vscroll(true)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                ui.horizontal(|ui| {
+                    ui.toggle_value(&mut on, "On")
+                        .on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
+                    ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
+                    ui.separator();
+                    let shown = view.knobs.iter().find(|k| k.key == "arp/preset").map_or(0, |k| k.value as usize);
+                    // Presets 1–4 (item 0 is none).
+                    for (i, name) in view
+                        .lists
+                        .iter()
+                        .find(|(k, _)| k == "arp/preset")
+                        .map(|x| x.1.clone())
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                    {
+                        if ui.selectable_label(shown == i, name).clicked() {
+                            edits.push(("arp/preset".into(), i as f64));
                         }
-                        None => {
-                            let mut v = k.value;
-                            let slider = egui::Slider::new(&mut v, k.min..=k.max).step_by(k.step).custom_formatter(|_, _| k.text.clone());
-                            if ui.add(slider).changed() {
-                                edits.push((k.key.clone(), v));
+                    }
+                });
+                ui.separator();
+                egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
+                    for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
+                        ui.label(&k.name);
+                        match view.lists.iter().find(|(key, _)| *key == k.key) {
+                            Some((_, list)) => {
+                                crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
+                                    for (i, name) in list.iter().enumerate() {
+                                        if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
+                                            edits.push((k.key.clone(), i as f64));
+                                        }
+                                    }
+                                });
+                            }
+                            None => {
+                                let mut v = k.value;
+                                let slider =
+                                    egui::Slider::new(&mut v, k.min..=k.max).step_by(k.step).custom_formatter(|_, _| k.text.clone());
+                                if ui.add(slider).changed() {
+                                    edits.push((k.key.clone(), v));
+                                }
                             }
                         }
+                        ui.end_row();
                     }
-                    ui.end_row();
-                }
+                });
             });
-        });
         self.repeat_panel = open;
         self.repeat_soft = on;
         if lock != self.arp_locked {
@@ -15500,6 +15527,58 @@ mod tests {
         h.state_mut().sampling.view = None;
         h.run_steps(1);
         h.render().unwrap().save(dir.join("sampling-long.png")).unwrap();
+    }
+
+    /// On a short screen (shorter than a 1920x515 monitor, so that the Hardware tab of a
+    /// new project doesn't fit), Preferences and the panels that open as dialogs stay
+    /// inside the window, and what doesn't fit scrolls into view: the Hardware tab's last
+    /// setting is reached with the wheel instead of being cut off.
+    #[test]
+    fn dialogs_fit_a_short_window_and_scroll() {
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1920.0, 380.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(3);
+        let screen = h.ctx.content_rect();
+        let window = |h: &Harness<'static, App>, title: &str| {
+            // (A window's id is its title's text, which egui keeps as an `Option`.)
+            h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed(title))))).unwrap_or_else(|| panic!("{title} shown"))
+        };
+        for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+            h.state_mut().prefs = Some(tab);
+            h.run_steps(3);
+            let r = window(&h, "Preferences");
+            assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "tab {tab}: {r:?} in {screen:?}");
+        }
+        h.state_mut().prefs = Some(4);
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        let last = |h: &Harness<'static, App>| h.get_by_label("Desktop theme").rect();
+        assert!(last(&h).bottom() > prefs.bottom(), "the Hardware tab is taller than the window: {:?} vs {prefs:?}", last(&h));
+        h.hover_at(prefs.center());
+        for _ in 0..20 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        assert!(last(&h).bottom() <= prefs.bottom(), "scrolled into view: {:?} in {prefs:?}", last(&h));
+        h.state_mut().prefs = None;
+        for (title, open) in [("Note Repeat / Arp", 0), ("Lock", 1)] {
+            h.state_mut().repeat_panel = open == 0;
+            h.state_mut().lock_panel = open == 1;
+            h.run_steps(3);
+            let r = window(&h, title);
+            assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "{title}: {r:?} in {screen:?}");
+        }
     }
 
     /// The MASCHINE menu: the undo history undoes several steps at once; Open Recent
