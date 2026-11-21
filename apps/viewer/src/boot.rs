@@ -302,7 +302,7 @@ impl App {
                 let mk3 = std::sync::Arc::new(mk3_io::Mk3Io::start());
                 mk3.set_display_brightness(self.settings.display_brightness);
                 let outcome = found(mk3.displays_connected());
-                self.mk3_sinks.add(crate::mk3_sink::DeviceSink::new((*mk3).clone()));
+                self.mk3_sinks.enable_device((*mk3).clone());
                 self.mk3 = Some(mk3);
                 outcome
             }

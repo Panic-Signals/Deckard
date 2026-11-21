@@ -1096,6 +1096,9 @@ pub struct App {
     mk3_panel: bool,
     /// `--serve PORT`: the MK3 panel's server on that port (nothing else serves).
     serve: Option<u16>,
+    /// The pads a panel's or a client's press plays through: the hardware's own thread plays
+    /// its presses, so a virtual one must play here or it would only ever reach the scripts.
+    mk3_virtual_pads: pad_play::Pads,
     /// The port the panel's server actually bound, and why it is not serving if it failed:
     /// a listen error is the user's to see, not a status line that never arrives.
     mk3_serve: Option<u16>,
@@ -5360,12 +5363,74 @@ impl App {
 
     /// The MK3's events since the last frame, to the controller scripts (pads already
     /// played from the controller's thread); keep the pads' routing current.
+    /// Play what a panel or a browser client pressed. The route is the last frame's: this
+    /// frame's is built from the scripts afterwards, so a virtual press is one frame behind
+    /// the hardware thread, which plays from the route the app retained too. With no frame yet
+    /// there is nothing to play from, and the press still reaches the scripts.
+    fn play_virtual_pads(&mut self, events: &[deckard_mk3::Event]) {
+        use deckard_mk3::Event;
+        let Some(route) = self.mk3_sinks.last_route() else { return };
+        let out = self.output.as_ref().and_then(|o| o.as_ref().ok()).map(|o| o.sender()).filter(deckard_engine::output::Sender::has_engine);
+        let monitor = self.midi.monitor();
+        self.mk3_virtual_pads.set_engine(out.is_some());
+        let send = |pad: usize, slot: Option<(usize, usize, i64)>, lives: Vec<deckard_engine::Live>| {
+            mk3_io::forward_pad_lives(
+                lives,
+                |l| {
+                    if let Some(o) = &out {
+                        o.live(l);
+                    }
+                },
+                |ev| monitor.pad(pad, slot.map(|x| x.2), ev),
+            );
+        };
+        for e in events {
+            if let Event::PadPressure(p, v) = *e {
+                let slot = self.mk3_virtual_pads.sounding(p);
+                if out.is_some() {
+                    let lives = self.mk3_virtual_pads.pressure(&route, p, v, slot);
+                    send(p, slot, lives);
+                }
+                continue;
+            }
+            let (pad, from_pressure) = match *e {
+                Event::PadOn(p, v) => (p, ((mk3_io::pad_velocity(v, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
+                Event::PadOff(p) => (p, 0),
+                _ => continue,
+            };
+            if from_pressure == 0 {
+                let slot = self.mk3_virtual_pads.sounding(pad);
+                let lives = self.mk3_virtual_pads.release(pad);
+                if out.is_some() && slot.is_some() {
+                    monitor.pad(pad, slot.map(|x| x.2), crate::midi_monitor::Pad::Off);
+                    send(pad, slot, lives);
+                }
+                continue;
+            }
+            let lives = self.mk3_virtual_pads.hit(&route, pad, from_pressure);
+            if let (Some(o), Some(&deckard_engine::Live::NoteOn { velocity, .. })) = (&out, lives.first()) {
+                for l in &lives {
+                    o.live(*l);
+                }
+                monitor.pad(pad, self.mk3_virtual_pads.sounding(pad).map(|x| x.2), crate::midi_monitor::Pad::On(velocity));
+            }
+        }
+    }
+
     fn mk3_sync(&mut self, ctx: &egui::Context, requests: &mut Vec<controller::Request>, covered: bool) {
-        let Some(m) = &self.mk3 else { return };
-        m.set_context(ctx);
-        m.set_monitor(self.midi.monitor());
-        let events = self.mk3_sinks.events();
-        let pending = m.take_pending();
+        // The device's handle, cloned out of `self` so the frame's own work may borrow it mutably.
+        if self.mk3.is_none() {
+            return;
+        }
+        self.mk3_sinks.set_context(ctx);
+        self.mk3_sinks.set_monitor(self.midi.monitor());
+        // Split by origin: a panel's or a client's press is silent until played here; the
+        // device's already sounded on its own thread and must never play twice.
+        let input = self.mk3_sinks.take_input();
+        self.play_virtual_pads(&input.virtual_);
+        let mut events = input.device;
+        events.extend(input.virtual_);
+        let pending = self.mk3_sinks.take_pending();
         let out = self.mk3_events(events, requests);
         if let Some(after) = self.mk3_wake() {
             ctx.request_repaint_after(if covered { undrawn(ctx, after) } else { after });
@@ -5403,12 +5468,10 @@ impl App {
                 }
             }
         }
-        if let Some(m) = &self.mk3 {
-            m.set_led_brightness(self.settings.led_brightness);
-            m.set_display_brightness(self.settings.display_brightness);
-            // Written to the controller only when it changes (and on connecting).
-            m.set_pad_sensitivity(self.settings.pad_sensitivity);
-        }
+        self.mk3_sinks.set_led_brightness(self.settings.led_brightness);
+        self.mk3_sinks.set_display_brightness(self.settings.display_brightness);
+        // Written to the controller only when it changes (and on connecting).
+        self.mk3_sinks.set_pad_sensitivity(self.settings.pad_sensitivity);
         // Pad hits that came while no engine ran (it starts with the first): each at its
         // own pitch, so a chord stays a chord.
         for note in mk3_io::pending_notes(&pending) {
@@ -7002,8 +7065,8 @@ impl App {
         {
             out.set_midi(self.midi.sender());
             self.midi.set_output(out.sender());
-            if let Some(m) = &self.mk3 {
-                m.set_output(out.sender());
+            if self.mk3.is_some() {
+                self.mk3_sinks.set_output(out.sender());
             }
             if let Some(j) = &self.jam {
                 j.set_output(out.sender());

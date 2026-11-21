@@ -6,8 +6,6 @@
 //! the Lua the surface ships rather than retyped, so a transcription that drifts fails.
 
 use crate::led_palette::PALETTE;
-use crate::mk3_lights;
-use std::time::Instant;
 
 /// The table is the theme's `PALETTE`, entry for entry: the scripts run this Lua, so it is the
 /// copy the hardware's colours actually come from.

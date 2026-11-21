@@ -178,18 +178,14 @@ impl Sinks {
 
     /// Start the hardware driver, exactly as start-up always has (`Mk3Io::start` opens the
     /// device lazily, so a missing MK3 is not an error), and sink it first.
-    pub fn enable_device(&mut self) {
+    pub fn enable_device(&mut self, mk3: Mk3Io) {
         if self.device.is_some() {
             return;
         }
-        let mk3 = Mk3Io::start();
+        // One device, two handles: `Mk3Io` is a lock around shared state, so the app's handle
+        // and the sink's never drift, and the device is never opened twice.
         self.device = Some(mk3.clone());
         self.add(DeviceSink::new(mk3));
-    }
-
-    /// Whether the hardware driver runs (always true in the app; false in tests).
-    pub fn has_device(&self) -> bool {
-        self.device.is_some()
     }
 
     /// The same frame to every enabled sink, in the order they were enabled.
@@ -310,35 +306,6 @@ impl Sinks {
     pub fn set_pad_sensitivity(&self, level: u8) {
         if let Some(m) = &self.device {
             m.set_pad_sensitivity(level);
-        }
-    }
-
-    /// Whether NI's software is keeping the MK3's screens from opening.
-    pub fn agent_holding(&self) -> bool {
-        self.device.as_ref().is_some_and(Mk3Io::agent_holding)
-    }
-
-    /// Whether the MK3's screens are open.
-    pub fn displays_connected(&self) -> bool {
-        self.device.as_ref().is_some_and(Mk3Io::displays_connected)
-    }
-
-    /// Whether the screens are given back to NI's driver.
-    pub fn displays_released(&self) -> bool {
-        self.device.as_ref().is_some_and(Mk3Io::displays_released)
-    }
-
-    /// Give the screens back to NI's driver, or take them up again.
-    pub fn release_displays(&self, released: bool) {
-        if let Some(m) = &self.device {
-            m.release_displays(released);
-        }
-    }
-
-    /// Leave the controller dark but for `picture` on the displays, then stop.
-    pub fn shut_down(&self, picture: Vec<[u8; 4]>) {
-        if let Some(m) = &self.device {
-            m.shut_down(picture);
         }
     }
 }
