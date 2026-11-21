@@ -1238,6 +1238,20 @@ impl Output {
         })
     }
 
+    /// Where the morph of a sound's layers is, as last published; it is watched from
+    /// now on.
+    pub fn morph_position(&self, group: usize, sound: usize) -> Option<f32> {
+        self.telemetry(|t| {
+            if t.morph_watch == Some((group, sound)) {
+                t.morph
+            } else {
+                t.morph_watch = Some((group, sound));
+                t.morph = None;
+                None
+            }
+        })
+    }
+
     /// Run `f` on the playing engine at its next block, without waiting (it goes
     /// back to be freed here). For decisions that need the engine's state at that
     /// moment.

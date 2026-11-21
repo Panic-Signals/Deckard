@@ -2057,6 +2057,9 @@ pub struct Telemetry {
     /// is playing.
     pub watch: Vec<(usize, usize, usize)>,
     pub zones: Vec<Option<usize>>,
+    /// The sound (group, sound) whose layers' morph the UI wants, and where it is.
+    pub morph_watch: Option<(usize, usize)>,
+    pub morph: Option<f32>,
     /// The last note played live: how many so far, then its group, sound, pitch and
     /// velocity. (The Sampler's pages show the zone it lands in.)
     pub live_hit: (u64, usize, usize, i64, i64),
@@ -6335,6 +6338,7 @@ impl Engine {
         for (pos, &(g, s, z)) in t.zones.iter_mut().zip(&t.watch) {
             *pos = self.zone_position(g, s, z);
         }
+        t.morph = t.morph_watch.and_then(|(g, s)| self.morph_position(g, s));
     }
 
     /// Where the morph of sound `sound`'s layers is (0 to 1) for its newest note; `None`

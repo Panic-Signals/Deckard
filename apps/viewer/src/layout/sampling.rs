@@ -7,7 +7,23 @@ use super::*;
 use deckard_engine::sample::Sample;
 use std::sync::Arc;
 
-pub const TABS: [&str; 4] = ["RECORD", "EDIT", "SLICE", "ZONE"];
+pub const TABS: [&str; 5] = ["RECORD", "EDIT", "SLICE", "ZONE", "LAYERS"];
+
+pub mod layers;
+
+/// Which of the tabs sound (`g`, `s`) offers, its sample a zone's (`zone`) or an Audio
+/// plug-in's take (`take`): only RECORD without a sample; RECORD and EDIT for a take;
+/// LAYERS for a New Sampler without slices (even an empty one), which once it has a
+/// layer has no SLICE.
+pub fn tab_shown(p: &Project, g: usize, s: usize, tab: usize, zone: bool, take: bool) -> bool {
+    match tab {
+        0 => true,
+        4 => !take && crate::layers::can_layer(p, g, s),
+        2 => zone && !take && !crate::layers::layered(p, g, s),
+        1 => zone,
+        _ => zone && !take,
+    }
+}
 
 /// The fewest frames the waveform zooms in to.
 const MIN_VIEW: f64 = 64.0;
@@ -142,6 +158,10 @@ pub struct SamplingState {
     /// The focused zone's stem lanes, and whether they're folded into one waveform.
     pub lanes: [Option<LaneView>; 4],
     pub lanes_mix: bool,
+    /// LAYERS: each layer's waveform, where each is playing, and where the morph is.
+    pub layers: Vec<Option<LaneView>>,
+    pub layer_heads: Vec<Option<usize>>,
+    pub morph_at: Option<f32>,
 }
 
 impl Default for SamplingState {
@@ -183,6 +203,9 @@ impl Default for SamplingState {
             warp_strength: 1.0,
             lanes: Default::default(),
             lanes_mix: false,
+            layers: Vec::new(),
+            layer_heads: Vec::new(),
+            morph_at: None,
         }
     }
 }
@@ -322,7 +345,25 @@ impl SamplingState {
     }
 }
 
-/// What the Sampling view asks for.
+impl SamplingState {
+    /// The layers' waveforms, for these files (a file already shown is kept).
+    pub fn set_layers(&mut self, files: Vec<String>, mut load: impl FnMut(&str) -> Option<Arc<Sample>>) {
+        let mut old = std::mem::take(&mut self.layers);
+        self.layers = files
+            .into_iter()
+            .enumerate()
+            .map(|(k, f)| match old.get_mut(k).and_then(Option::take) {
+                Some(l) if l.file == f => Some(l),
+                _ => old
+                    .iter_mut()
+                    .find(|l| l.as_ref().is_some_and(|l| l.file == f))
+                    .and_then(Option::take)
+                    .or_else(|| load(&f).map(|sample| LaneView { peaks: peaks_of(&sample), file: f, sample })),
+            })
+            .collect();
+    }
+}
+
 /// What's done to a stem lane (roadmap 2b). `Clear` takes them all off the zone.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LaneAct {
@@ -557,16 +598,17 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         Some((zi, z, t, take)) => (*zi, Some(z), *t, *take),
         None => (0, None, Target::Zone(app.group, app.sound, 0), false),
     };
-    // An Audio plug-in's take: RECORD and EDIT only.
-    let tab = if take { st.tab.min(1) } else { st.tab };
+    // The tab asked for, if this sound has it (else EDIT, or RECORD with no sample).
+    let shown = |i: usize| tab_shown(p, app.group, app.sound, i, zone.is_some(), take);
+    let tab = if shown(st.tab) { st.tab } else { usize::from(zone.is_some()) };
 
     // Header: the tabs (only RECORD until the sound has a sample).
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 37.0));
     painter.rect_filled(header, 0.0, s00());
     let mut x = header.left() + 12.0;
     for (i, name) in TABS.iter().enumerate() {
-        if i > 0 && zone.is_none() || i > 1 && take {
-            break;
+        if !shown(i) {
+            continue;
         }
         let w = 14.0 + name.len() as f32 * 7.5;
         let r = Rect::from_min_size(Pos2::new(x, header.top() + 8.0), Vec2::new(w, 22.0));
@@ -701,6 +743,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
         0 => record_tab(ui, app, p, body, gcol, acts),
         1 => edit_tab(ui, app, body, zi, zone, zt, take, gcol, acts),
         2 => slice_tab(ui, app, body, zi, zone, gcol, acts),
+        4 => layers::layers_tab(ui, app, p, body, gcol, acts),
         _ => zone_tab(ui, app, p, body, zi, gcol, acts),
     }
 }

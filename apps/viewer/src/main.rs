@@ -7429,8 +7429,39 @@ impl App {
             }
             None => {
                 self.sampling.clear_sample();
-                if self.sampling.tab != 0 {
+                // (An empty New Sampler has its LAYERS.)
+                let layers = self.sampling.tab == 4 && layers::can_layer(doc.borrow().project(), self.group, self.sound);
+                if self.sampling.tab != 0 && !layers {
                     self.sampling.tab = 0;
+                }
+            }
+        }
+        // LAYERS: every layer's waveform, where each plays, where the morph is.
+        if self.sampling.tab == 4 {
+            let files: Vec<(usize, String)> = {
+                let d = doc.borrow();
+                let p = d.project();
+                let zones =
+                    p.groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|s| s.sampler.as_ref()).map(|x| &x.zones);
+                layers::layers_in(p, self.group, self.sound)
+                    .iter()
+                    .filter_map(|&(zi, _)| Some((zi, zones?.get(zi)?.sample.clone())))
+                    .map(|(zi, sref)| (zi, sref.path))
+                    .collect()
+            };
+            let samples = &mut self.samples;
+            self.sampling.set_layers(files.iter().map(|f| f.1.clone()).collect(), |file| {
+                samples.sample(&deckard_model::SampleRef { kind: 0, path: file.to_string(), ..Default::default() }, path.as_deref())
+            });
+            let (g, s) = (self.group, self.sound);
+            match &self.output {
+                Some(Ok(out)) => {
+                    self.sampling.layer_heads = files.iter().map(|&(zi, _)| out.zone_position(g, s, zi)).collect();
+                    self.sampling.morph_at = out.morph_position(g, s);
+                }
+                _ => {
+                    self.sampling.layer_heads.clear();
+                    self.sampling.morph_at = None;
                 }
             }
         }
@@ -12598,6 +12629,7 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         ctx.data_mut(|d| d.remove::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS)));
+        ctx.data_mut(|d| d.remove::<Vec<egui::Rect>>(egui::Id::new(layout::sampling::layers::LANE_RECTS)));
         self.dropped_samples = samples;
         if let Some(path) = other.into_iter().next() {
             self.open_file(path);
@@ -12791,9 +12823,21 @@ impl App {
         self.follow_edits();
         if !self.dropped_samples.is_empty() {
             let files = std::mem::take(&mut self.dropped_samples);
-            let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
-            let at = self.file_drag.and_then(|p| rows.iter().find(|(r, _)| r.contains(p)).map(|&(_, gs)| gs));
-            self.drop_samples(at.unwrap_or((self.group, self.sound)), &files);
+            // On a lane of the LAYERS tab: a layer there.
+            let lanes =
+                ctx.data(|d| d.get_temp::<Vec<egui::Rect>>(egui::Id::new(layout::sampling::layers::LANE_RECTS))).unwrap_or_default();
+            let lane = self
+                .file_drag
+                .filter(|_| self.sampling_open && self.sampling.tab == 4)
+                .and_then(|p| lanes.iter().position(|r| r.contains(p)));
+            if let Some(lane) = lane {
+                self.layer_files(lane, &files);
+            } else {
+                let rows =
+                    ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
+                let at = self.file_drag.and_then(|p| rows.iter().find(|(r, _)| r.contains(p)).map(|&(_, gs)| gs));
+                self.drop_samples(at.unwrap_or((self.group, self.sound)), &files);
+            }
             self.file_drag = None;
         }
         // A browser result dropped on a sound's row loads there.
@@ -12876,6 +12920,8 @@ fn preset_sound_name(name: &str) -> &str {
 mod tests {
     //! The window driven with simulated mouse input (egui_kittest).
     use super::*;
+
+    mod layers_ui;
     use deckard_model::Dim;
     use deckard_model::Note;
     use egui::{Event, PointerButton, Pos2};
