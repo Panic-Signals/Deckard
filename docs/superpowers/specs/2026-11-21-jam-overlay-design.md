@@ -188,9 +188,11 @@ The strip's pixels are measured, not copied: the reference's binary keeps no str
 metrics (its window state and styling are runtime), so the numbers are read off captures
 of the running app — bar 28 points, body 144 (header 40, value 40, sub 40, pad 24), type
 11.5 / 21 / 13, a rule under each column's sub-label with the focused one at 2.5 points
-white, and editing as inset corner brackets. Long values still clip mid-word in a narrow
-column (`Harmoni`): the pages own their text, so shortening a value belongs there rather than
-in the renderer.
+white, and editing as inset corner brackets. A value too long for its column is cut at the
+column's edge — no ellipsis, no smaller type. That is deliberate: the pages publish the manual's
+own words (`Chromatic`, `Harmonizer`) where the reference publishes abbreviations (`Chrom`,
+`Harm`), and a clipped word stays readable where an abbreviation has to be learned. The cost is a
+value cut mid-word in a narrow strip, which is the narrower evil.
 
 ## Platform facts (eframe/egui 0.36.2)
 
