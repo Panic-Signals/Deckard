@@ -147,6 +147,21 @@ pub fn rows(page: &OsoPage) -> Option<Vec<Row>> {
     (!rows.is_empty()).then_some(rows)
 }
 
+/// The cursor's rule: one segment under the focused column's sub-label, and none under any
+/// other. The reference marks the column the encoder is on and leaves the rest bare, so a rule
+/// over every column would be a cue the page does not have.
+fn cursor_rules(rows: &[Row], width: f32, origin: egui::Vec2) -> Vec<[egui::Pos2; 2]> {
+    rows.iter()
+        .filter(|row| row.focused)
+        .map(|row| {
+            let cell = slot_rect(row.slot, width).translate(origin);
+            let y = cell.top() + HEADER_H + VALUE_H + SUB_H - 5.0;
+            let half = (cell.width() / 2.0 - PAD_X).max(0.0);
+            [egui::pos2(cell.center().x - half, y), egui::pos2(cell.center().x + half, y)]
+        })
+        .collect()
+}
+
 /// The strip's body: one column per published slot, the group header over its run, the value
 /// and the sub-label under it, the focused slot's underline and the editing slot's brackets.
 /// The mouse does nothing here — the strip belongs to the encoder — so this allocates hover
@@ -203,15 +218,12 @@ pub fn slots(ui: &mut egui::Ui, rows: &[Row], width: f32) {
             egui::FontId::proportional(FONT_SUB),
             INK,
         );
-        // A rule under the sub-label in every column, the focused one bright and thicker: that
-        // is the capture's own cue, and it is the only thing the cursor draws (never a fill).
-        let y = cell.top() + HEADER_H + VALUE_H + SUB_H - 5.0;
-        let stroke = if row.focused { egui::Stroke::new(2.5, Color32::WHITE) } else { egui::Stroke::new(1.0, RULE) };
-        let half = (cell.width() / 2.0 - PAD_X).max(0.0);
-        ui.painter().line_segment([egui::pos2(cell.center().x - half, y), egui::pos2(cell.center().x + half, y)], stroke);
         if row.editing {
             brackets(ui, cell);
         }
+    }
+    for rule in cursor_rules(rows, width, origin) {
+        ui.painter().line_segment(rule, egui::Stroke::new(2.5, Color32::WHITE));
     }
 }
 
@@ -327,6 +339,27 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| r.focused).count(), 1);
         assert!(rows[1].focused, "focus is the page index, holes counted");
         assert!(rows.iter().all(|r| !r.editing));
+    }
+
+    #[test]
+    fn the_rule_is_drawn_under_the_focused_column_only() {
+        let page = || {
+            page(
+                "Scale",
+                1,
+                1,
+                vec![slot("C3", None, Some("Root Note")), slot("Main", None, Some("Bank")), slot("Chrom", None, Some("Type"))],
+            )
+        };
+        let first = cursor_rules(&rows(&at(page(), 1, false)).expect("rows"), 800.0, egui::Vec2::ZERO);
+        assert_eq!(first.len(), 1, "one rule, under the column the encoder is on, and none anywhere else");
+        let [from, to] = first[0];
+        assert_eq!(from.y, to.y, "a horizontal rule");
+        assert!(from.x > 100.0 && to.x < 200.0, "{from:?}..{to:?} stays in the second column of eight");
+        assert!(((from.x + to.x) / 2.0 - 150.0).abs() < 0.01, "centred in its column");
+        let moved = cursor_rules(&rows(&at(page(), 2, false)).expect("rows"), 800.0, egui::Vec2::ZERO);
+        assert_eq!(moved.len(), 1, "still one, wherever the focus goes");
+        assert!(moved[0][0].x > 200.0, "and the rule follows the focus");
     }
 
     #[test]

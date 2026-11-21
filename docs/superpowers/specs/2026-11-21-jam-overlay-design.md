@@ -187,7 +187,7 @@ show, one window that exists exactly while the script publishes a page.
 The strip's pixels are measured, not copied: the reference's binary keeps no strip
 metrics (its window state and styling are runtime), so the numbers are read off captures
 of the running app — bar 28 points, body 144 (header 40, value 40, sub 40, pad 24), type
-11.5 / 21 / 13, a rule under each column's sub-label with the focused one at 2.5 points
+11.5 / 21 / 13, a rule under the focused column's sub-label and under no other, 2.5 points
 white, and editing as inset corner brackets. A value too long for its column is cut at the
 column's edge — no ellipsis, no smaller type. That is deliberate: the pages publish the manual's
 own words (`Chromatic`, `Harmonizer`) where the reference publishes abbreviations (`Chrom`,

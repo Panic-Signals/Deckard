@@ -6,8 +6,9 @@
 //! because it is a window it needs no rule to avoid the mouse — where a docked strip had to
 //! actively ignore clicks. Both properties come free here.
 //!
-//! What this module owns: the window's chrome (its bar: the page's name at the left, the
-//! `n/N` counter and the mark at the right), its geometry, and where it goes. What it must
+//! What this module owns: the window's chrome (its bar: the page's name and the `n/N` counter at
+//! the left, and nothing at the right — the reference has NI's mark there and this is not
+//! Maschine), its geometry, and where it goes. What it must
 //! not own: the page, the cursor, or the edit flag — those are the script's, published
 //! through `deckard_surface::OsoPage`, and `jam_strip` draws them. This module keeps no
 //! state; the only thing it remembers between frames is the settings' saved offset.
@@ -19,7 +20,7 @@ use crate::jam_strip::{self, Row};
 use deckard_surface::OsoPage;
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 
-/// The window's own bar: the page's name left, the counter and the mark right. The
+/// The window's own bar: the page's name and the counter at the left, and no mark at the right.
 /// reference has no window chrome above it, and no buttons.
 pub const BAR_H: f32 = 28.0;
 /// How much of the window stays on screen whatever was saved: this many points of its
