@@ -261,6 +261,9 @@ impl App {
                 if self.serve.is_some() {
                     self.settings.serve = self.serve;
                 }
+                if self.settings.mk3_panel {
+                    self.mk3_sinks.set_panel_open(true);
+                }
                 self.browser.routing = self.settings.load_group_routing;
                 self.browser.patterns = self.settings.load_group_patterns;
                 Outcome::Ok
@@ -283,7 +286,7 @@ impl App {
                 let mk3 = std::sync::Arc::new(mk3_io::Mk3Io::start());
                 mk3.set_display_brightness(self.settings.display_brightness);
                 let outcome = found(mk3.displays_connected());
-                self.mk3_sinks.add(Box::new(crate::mk3_sink::DeviceSink::new(std::sync::Arc::clone(&mk3))));
+                self.mk3_sinks.add(crate::mk3_sink::DeviceSink::new((*mk3).clone()));
                 self.mk3 = Some(mk3);
                 outcome
             }

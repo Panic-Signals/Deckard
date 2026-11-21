@@ -242,3 +242,102 @@ fn host_frame(leds: deckard_mk3::leds::Leds, screens: Option<(u64, crate::mk3_io
         screens,
     }
 }
+
+#[test]
+fn the_docked_host_returns_pointer_events_as_mk3_events() {
+    let mut host = crate::onscreen_mk3::Host::default();
+    host.panel.pointer_down(0, center("pad1"), None);
+    host.show(&host_frame(deckard_mk3::leds::Leds::default(), None));
+    let events = host.events();
+    assert!(matches!(events.as_slice(), [Event::PadOn(1, _)]), "pointer down in pad 1's rect drains as one PadOn(1, _): {events:?}");
+    assert_eq!(host.events(), Vec::new(), "a second drain is empty");
+}
+
+#[test]
+fn the_docked_host_retains_the_last_frame() {
+    let mut host = crate::onscreen_mk3::Host::default();
+    assert!(host.last.is_none(), "no frame yet");
+    let px = vec![[1, 2, 3, 255]; 4];
+    host.show(&host_frame(
+        deckard_mk3::leds::Leds::default(),
+        Some((7, crate::mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(px.clone())))),
+    ));
+    assert_eq!(
+        host.last.as_ref().and_then(|o| o.screens.as_ref().map(|(n, f)| (*n, f.clone().into_pixels()))),
+        Some((7, px.clone())),
+        "show retains the frame's screens"
+    );
+    host.show(&host_frame(deckard_mk3::leds::Leds::default(), None));
+    assert_eq!(
+        host.last.as_ref().and_then(|o| o.screens.as_ref().map(|(n, f)| (*n, f.clone().into_pixels()))),
+        Some((7, px)),
+        "a frame without screens keeps the retained screens"
+    );
+}
+
+#[test]
+fn the_docked_host_wants_frames_only_while_a_led_flashes() {
+    let mut host = crate::onscreen_mk3::Host::default();
+    assert!(!host.wants_frames(), "no frame yet: no repaint asked");
+    let mut steady = deckard_mk3::leds::Leds::default();
+    assert!(steady.set("LED_PAD_1", 17 * 4 + 2), "white, bright, steady");
+    host.show(&host_frame(steady, None));
+    assert!(!host.wants_frames(), "a steady LED needs no repaint");
+    let mut flashing = deckard_mk3::leds::Leds::default();
+    assert!(flashing.set("LED_PAD_1", 17 * 4 + 3), "white, dim flash");
+    host.show(&host_frame(flashing, None));
+    assert!(host.wants_frames(), "a flashing LED asks for frames");
+}
+
+#[test]
+fn portrait_swaps_the_surface_axes_in_hit_testing() {
+    use crate::onscreen_mk3::{surface_size, to_landscape, to_portrait, to_surface};
+    // The portrait surface is the whole table turned 90° clockwise: TAP's portrait
+    // image sits on File in landscape, and pressing that same surface point in
+    // portrait is TAP. The pair is derived from the table, never hardcoded.
+    let tap = center("BUTTON_TAP");
+    let q = to_portrait(tap, true);
+    assert_eq!(mk3_layout::at(q).map(|c| c.id), Some("BUTTON_FILE"), "TAP's portrait image sits on File in landscape");
+    // The aspect flips: a 1518 x 1382 surface becomes 1382 x 1518.
+    assert_eq!(surface_size(false), egui::vec2(mk3_layout::WIDTH, mk3_layout::HEIGHT), "landscape is the table itself");
+    assert_eq!(surface_size(true), egui::vec2(mk3_layout::HEIGHT, mk3_layout::WIDTH), "portrait flips the axes");
+    assert_eq!(to_landscape(q, false), q, "landscape maps nothing");
+    assert_eq!(to_portrait(q, false), q, "landscape maps nothing, either way");
+    let back = to_landscape(q, true);
+    assert_eq!(mk3_layout::at(back).map(|c| c.id), Some("BUTTON_TAP"), "portrait: the same point is Tap");
+    assert_eq!(to_portrait(back, true), q, "the transform undoes itself");
+    // Painter and hit test share the one transform: TAP's portrait placement
+    // contains TAP's portrait image.
+    let tapp = mk3_layout::control("BUTTON_TAP").expect("BUTTON_TAP is in the table");
+    assert_eq!(to_surface(tapp.rect, false), tapp.rect, "landscape places nothing");
+    assert!(to_surface(tapp.rect, true).contains(q), "portrait places Tap over its own image");
+    // End-to-end through the panel: the same surface point presses File in
+    // landscape and Tap in portrait.
+    let mut panel = Panel::default();
+    panel.pointer_down(0, q, None);
+    assert_eq!(panel.take(), vec![Event::Button("BUTTON_FILE", true)], "landscape presses File");
+    let mut panel = Panel::default();
+    panel.pointer_down(0, back, None);
+    assert_eq!(panel.take(), vec![Event::Button("BUTTON_TAP", true)], "portrait presses Tap");
+}
+
+/// Two touch fingers hold two pads: per-finger identity survives the painter's
+/// forwarding, so the second finger holds its own control instead of re-downing
+/// finger 0 (which would release the first pad). Screen coords are table coords
+/// here: scale 1 from the origin, landscape.
+#[test]
+fn two_touch_fingers_hold_two_pads() {
+    use crate::onscreen_mk3::Host;
+    use eframe::egui::{TouchId, TouchPhase};
+    let mut host = Host::default();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(mk3_layout::WIDTH, mk3_layout::HEIGHT));
+    let pad = |id| mk3_layout::control(id).unwrap_or_else(|| panic!("{id} is in the table")).rect.center();
+    host.forward_touches(rect, 1.0, false, &[(TouchId(1), TouchPhase::Start, pad("pad1"), None)]);
+    assert_eq!(host.events(), vec![Event::PadOn(1, 0.8)], "the first finger holds pad 1");
+    host.forward_touches(rect, 1.0, false, &[(TouchId(2), TouchPhase::Start, pad("pad2"), None)]);
+    assert_eq!(host.events(), vec![Event::PadOn(2, 0.8)], "the second finger holds its own pad, not finger 0's re-down");
+    host.forward_touches(rect, 1.0, false, &[(TouchId(1), TouchPhase::End, pad("pad1"), None)]);
+    assert_eq!(host.events(), vec![Event::PadOff(1)], "lifting one finger releases only its pad");
+    host.forward_touches(rect, 1.0, false, &[(TouchId(2), TouchPhase::End, pad("pad2"), None)]);
+    assert_eq!(host.events(), vec![Event::PadOff(2)], "the held pad releases on its own lift");
+}

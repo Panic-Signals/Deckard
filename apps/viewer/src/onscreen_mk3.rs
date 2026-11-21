@@ -299,3 +299,176 @@ impl Panel {
         (0..2).find(|slot| !self.drags.iter().any(|d| matches!(d.state, DragState::Strip { slot: s, .. } if s == *slot)))
     }
 }
+
+/// The on-screen MK3: the window-free [`Panel`] as a sink, so frames fan out to
+/// it through [`crate::mk3_sink::Sinks`] like any other sink and its pointer contact
+/// drains back through [`crate::mk3_sink::Sinks::events`]. One host owns the panel;
+/// the docked surface (`ui`) and the panel's own window ([`Host::viewport`]) are two
+/// ways to present it, never two hosts. The painter (`onscreen_mk3_paint`) draws
+/// [`last`](Host::last) and forwards contact to [`panel`](Host::panel); this core
+/// stays window-free.
+#[derive(Default)]
+pub struct Host {
+    /// Pointer contact in, [`deckard_mk3::Event`]s out: the sink drains it.
+    pub(crate) panel: Panel,
+    /// The last frame shown, with the last screens the source drew: most frames carry
+    /// `screens: None` (nothing changed), and the retained screens stay until the
+    /// source draws again, as in [`crate::mk3_sink::Sinks`].
+    pub(crate) last: Option<crate::Mk3Out>,
+    /// The screens' texture, rebuilt only when the frame's change count moves: a
+    /// per-frame upload of a 1 MB image is the defect this cache exists to prevent.
+    pub(crate) screens: Option<(u64, egui::TextureHandle)>,
+    /// Whether the panel is shown at all (docked or in its own window): the Controller
+    /// menu's choice, persisted in the settings. A closed host still sinks frames, so
+    /// opening shows the current one.
+    pub(crate) open: bool,
+    /// The whole surface turned 90° clockwise for a vertical monitor: the painter and
+    /// the hit test share the [`to_landscape`]/[`to_surface`] transform, and the
+    /// window's aspect follows it. The menu's portrait toggle, persisted in the settings.
+    pub portrait: bool,
+    /// Touch contacts by `TouchId`: the finger each live touch drives, so two fingers
+    /// hold two controls. The painter owns the mapping (it sees the touch events);
+    /// `Panel` only ever sees per-finger contact, whatever its source.
+    pub(crate) touches: HashMap<u64, usize>,
+    /// Whether a pointer button is held on the surface this frame: the painter reads it
+    /// to tell a press from a drag from a release (see [`contact_step`]).
+    pub(crate) pointer_down: bool,
+    /// The last report from the panel's own window, written by the viewport closure
+    /// and taken by the app on the next frame: closing and geometry both persist.
+    outcome: Option<ViewportOutcome>,
+}
+
+/// What the panel's own window reports back each frame: whether the user closed it,
+/// and the window's geometry, so the app remembers both across restarts. `None`
+/// geometry is unknown (Wayland never reports the position); fullscreen reports
+/// nothing, so a fullscreened window never persists its fullscreen size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportOutcome {
+    /// The user clicked the window's close button: hiding it is the app's job.
+    pub close_requested: bool,
+    /// The window's content size, in points.
+    pub inner_size: Option<[f32; 2]>,
+    /// The window's outer top-left, in monitor points.
+    pub outer_pos: Option<[f32; 2]>,
+}
+
+impl Host {
+    /// The panel's own window: a deferred viewport titled DECKARD MK3, sized and
+    /// placed from the remembered geometry, drawing the same surface as the docked
+    /// panel through [`Host::ui`]. Deferred, as the viewport docs recommend: the
+    /// child repaints on its own cadence instead of with the parent. The `'static`
+    /// closure shares the one host through `host`, so the panel still has a single
+    /// owner and [`Mk3Sink`](crate::mk3_sink::Mk3Sink)'s contract is unchanged —
+    /// `show`/`events`/`wants_frames` behave exactly as docked. Each run reports the
+    /// window back into the host; this call hands the previous run's report to the
+    /// app, which persists it. `ViewportCommand::Screenshot` is per viewport, so
+    /// the panel's own window can be captured on a machine with a display.
+    pub fn viewport(
+        ctx: &egui::Context,
+        host: &std::sync::Arc<std::sync::Mutex<Host>>,
+        size: [f32; 2],
+        pos: Option<[f32; 2]>,
+    ) -> Option<ViewportOutcome> {
+        let shared = std::sync::Arc::clone(host);
+        let id = egui::ViewportId::from_hash_of("deckard-mk3-panel");
+        let mut builder = egui::ViewportBuilder::default().with_title("DECKARD MK3").with_inner_size(size);
+        if let Some([x, y]) = pos {
+            builder = builder.with_position([x, y]);
+        }
+        // The builder applies when the window is created; afterwards the user moves
+        // and resizes freely, and the outcome below reports where it went.
+        ctx.show_viewport_deferred(id, builder, move |ui, _class| {
+            // A poisoned lock recovers onto the data it holds: the window must keep
+            // painting and reporting instead of going dark silently.
+            let mut host = shared.lock().unwrap_or_else(|e| e.into_inner());
+            host.ui(ui);
+            let outcome = ui.ctx().input_for(id, |i| {
+                let v = i.viewport();
+                let fullscreen = v.fullscreen.unwrap_or(false);
+                ViewportOutcome {
+                    close_requested: v.close_requested(),
+                    inner_size: (!fullscreen).then(|| v.inner_rect.map(|r| [r.size().x, r.size().y])).flatten(),
+                    outer_pos: (!fullscreen).then(|| v.outer_rect.map(|r| [r.min.x, r.min.y])).flatten(),
+                }
+            });
+            host.outcome = Some(outcome);
+        });
+        host.lock().unwrap_or_else(|e| e.into_inner()).outcome.take()
+    }
+
+    /// One frame's touch contacts, each driving its own finger: a `Start` inside the
+    /// presented surface takes the lowest free finger, `Move` follows it, `End` and
+    /// `Cancel` release it. A `Start` outside the surface is not a finger — the panel
+    /// would ignore it anyway, and the slot must stay free for a finger that lands
+    /// inside. Force rides along as the pressure the panel reads, when reported.
+    pub(crate) fn forward_touches(
+        &mut self,
+        rect: egui::Rect,
+        scale: f32,
+        portrait: bool,
+        contacts: &[(egui::TouchId, egui::TouchPhase, egui::Pos2, Option<f32>)],
+    ) {
+        for &(id, phase, pos, force) in contacts {
+            let table = to_landscape(crate::onscreen_mk3_paint::table_point(rect, scale, pos), portrait);
+            match phase {
+                egui::TouchPhase::Start => {
+                    if !rect.contains(pos) {
+                        continue;
+                    }
+                    if let Some(&finger) = self.touches.get(&id.0) {
+                        self.panel.pointer_down(finger, table, force);
+                        continue;
+                    }
+                    let mut finger = 0;
+                    while self.touches.values().any(|&f| f == finger) {
+                        finger += 1;
+                    }
+                    self.touches.insert(id.0, finger);
+                    self.panel.pointer_down(finger, table, force);
+                }
+                egui::TouchPhase::Move => {
+                    if let Some(&finger) = self.touches.get(&id.0) {
+                        self.panel.pointer_move(finger, table);
+                    }
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                    if let Some(finger) = self.touches.remove(&id.0) {
+                        self.panel.pointer_up(finger);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl crate::mk3_sink::Mk3Sink for Host {
+    /// Retain the frame, keeping the last screens the source drew across frames that
+    /// carry none — the late-join replay (`joined`) then hands a new panel the
+    /// current picture with no re-render.
+    fn show(&mut self, out: &crate::Mk3Out) {
+        let mut frame = out.clone();
+        if frame.screens.is_none() {
+            frame.screens = self.last.as_ref().and_then(|prev| prev.screens.clone());
+        }
+        self.last = Some(frame);
+    }
+
+    /// The panel's queued pointer events; nothing else drains the queue.
+    fn events(&mut self) -> Vec<deckard_mk3::Event> {
+        self.panel.take()
+    }
+
+    /// Whether any control's colour LED is flashing now: the app repaints on the
+    /// [`crate::mk3_lights`] cadence while one is. Only what
+    /// [`crate::mk3_lights::color`] reads as flashing counts — a colour byte whose
+    /// shade has the flash bit and names a real palette colour — so neither painter
+    /// can invent its own blink.
+    fn wants_frames(&self) -> bool {
+        let Some(out) = &self.last else { return false };
+        crate::mk3_layout::controls().iter().any(|c| {
+            let Some(name) = crate::mk3_layout::led(c.id) else { return false };
+            let Some(byte) = out.leds.get(&name) else { return false };
+            deckard_mk3::leds::is_colour(&name) && matches!(byte >> 2, 1..=17) && byte & 1 != 0
+        })
+    }
+}

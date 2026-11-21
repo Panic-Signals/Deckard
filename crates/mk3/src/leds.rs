@@ -219,7 +219,7 @@ pub fn palette_rgb(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Both LED reports.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Leds {
     pub buttons: [u8; 63],
     pub pads: [u8; 42],

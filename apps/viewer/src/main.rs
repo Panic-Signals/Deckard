@@ -114,6 +114,9 @@ mod module_ui;
 mod ni_agent;
 mod ni_services;
 mod onscreen_mk3;
+mod onscreen_mk3_paint;
+#[cfg(test)]
+mod onscreen_mk3_paint_tests;
 #[cfg(test)]
 mod onscreen_mk3_tests;
 #[cfg(test)]
@@ -5361,6 +5364,38 @@ impl App {
             ctx.request_repaint_after(if covered { undrawn(ctx, after) } else { after });
         }
         self.mk3_sinks.show(&out);
+        if self.mk3_sinks.panel_open() && self.settings.panel_viewport {
+            // The panel's own window: a deferred viewport sized and placed from what it last
+            // reported. The report lags a frame; closing and geometry both persist.
+            let outcome = self
+                .mk3_sinks
+                .panel_shared()
+                .and_then(|shared| crate::onscreen_mk3::Host::viewport(ctx, &shared, self.settings.panel_size, self.settings.panel_pos));
+            if let Some(outcome) = outcome {
+                if outcome.close_requested {
+                    self.mk3_sinks.set_panel_open(false);
+                    self.settings.mk3_panel = false;
+                    self.settings.save();
+                } else {
+                    let mut changed = false;
+                    if let Some(size) = outcome.inner_size
+                        && size != self.settings.panel_size
+                    {
+                        self.settings.panel_size = size;
+                        changed = true;
+                    }
+                    if let Some(pos) = outcome.outer_pos
+                        && Some(pos) != self.settings.panel_pos
+                    {
+                        self.settings.panel_pos = Some(pos);
+                        changed = true;
+                    }
+                    if changed {
+                        self.settings.save();
+                    }
+                }
+            }
+        }
         if let Some(m) = &self.mk3 {
             m.set_led_brightness(self.settings.led_brightness);
             m.set_display_brightness(self.settings.display_brightness);

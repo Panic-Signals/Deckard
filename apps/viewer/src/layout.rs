@@ -1720,6 +1720,18 @@ fn apply(app: &mut App, acts: Vec<Act>) {
 pub(crate) const LOGO_FONT: &str = "deckard-logo";
 const LOGO_SIZE: f32 = 20.0;
 
+/// The MK3 panel's label family: bold Roboto once the app's fonts are installed, egui's own
+/// proportional face otherwise. A context without the app's fonts (a test harness, a window
+/// created before `style`) paints plain type instead of panicking on a family that is not
+/// there.
+const MK3_FONT: &str = "deckard-mk3";
+const BUILT_IN_MK3_FONT: &[u8] = include_bytes!("../../../crates/surface/fonts/Roboto-Bold.ttf");
+
+pub fn mk3_family(ctx: &egui::Context) -> egui::FontFamily {
+    let family = egui::FontFamily::Name(MK3_FONT.into());
+    if ctx.fonts(|f| f.families().contains(&family)) { family } else { egui::FontFamily::Proportional }
+}
+
 /// The name the emoji font has among the app's fonts.
 const EMOJI_FONT: &str = "deckard-emoji";
 
@@ -1740,6 +1752,8 @@ fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
     fonts.families.insert(egui::FontFamily::Name(LOGO_FONT.into()), vec![LOGO_FONT.into()]);
+    fonts.font_data.insert(MK3_FONT.into(), std::sync::Arc::new(egui::FontData::from_static(BUILT_IN_MK3_FONT)));
+    fonts.families.insert(egui::FontFamily::Name(MK3_FONT.into()), vec![MK3_FONT.into()]);
     for name in ["plex", "plex-bold", "plex-mono"] {
         if let Some((_, data)) = deckard_surface::FONTS.iter().find(|(n, _)| *n == name) {
             fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_static(data)));
