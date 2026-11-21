@@ -1,8 +1,8 @@
 //! The Jam's strip as its own window: a second eframe viewport, chromeless, mouse-inert,
 //! always on top, drawn from the same published page `jam_strip` renders.
 //!
-//! Why a window and not a docked row (`docs/epics/jam-support/work-items/22-jam-overlay-
-//! detached-window.md`): the reference's strip floats over whatever view is showing, and
+//! Why a window and not a docked row (`docs/superpowers/specs/2026-11-21-jam-overlay-design.md`):
+//! the reference's strip floats over whatever view is showing, and
 //! because it is a window it needs no rule to avoid the mouse — where a docked strip had to
 //! actively ignore clicks. Both properties come free here.
 //!

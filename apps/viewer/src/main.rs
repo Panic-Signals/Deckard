@@ -1130,7 +1130,7 @@ pub struct App {
     jam_device: Option<deckard_surface::device::Device>,
     /// `--jam`: run the Jam's script, and press `jam_hil_presses` on it, with no Jam plugged
     /// in — how the on-screen overlay and its window are looked at without hardware
-    /// (`docs/epics/jam-support/hil/strip-window-2026-11-21.md`).
+    /// (`docs/superpowers/plans/2026-11-21-jam-overlay.md`, "HIL").
     jam_hil: bool,
     jam_hil_presses: Vec<&'static str>,
     /// `--jam-shot`: draw the strip window's content into the app's own viewport, so
@@ -12061,11 +12061,7 @@ impl App {
         // by that page's own lifetime (never by a mode), over whatever view is showing, and
         // never in front of the mouse. No page draws no window.
         let shown = self.jam_shown();
-        let strip = if self.settings.show_overlay {
-            shown.as_ref().map(|(page, rows)| (page, rows.as_slice()))
-        } else {
-            None
-        };
+        let strip = if self.settings.show_overlay { shown.as_ref().map(|(page, rows)| (page, rows.as_slice())) } else { None };
         let saved = self.settings.jam_strip_pos.map(|(x, y)| egui::Vec2::new(x, y));
         if let Some(offset) = crate::jam_window::show(ctx, strip, saved) {
             // Where the window manager put it, which is where the user has it now.

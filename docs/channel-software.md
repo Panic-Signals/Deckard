@@ -451,7 +451,7 @@ range and distribution settings; DECKARD keeps them in its own sound field (`dec
 **global** randomiser parameters also cease to be global: they are the sound's, saved with the
 project. Unset, the generator behaves exactly as §5.2 describes. The page's contract, its rig rows
 and the one reading still marked as DECKARD's are in
-`epics/jam-support/work-items/35-jam-variation-oso.md`.
+`superpowers/specs/2026-11-21-jam-overlay-design.md`, "The Variation page".
 
 ---
 

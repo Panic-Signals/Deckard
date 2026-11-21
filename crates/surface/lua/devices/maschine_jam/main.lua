@@ -508,8 +508,8 @@ end
 -- The browsing cursor `steps` items along — one notch, one place, as the reference counts
 -- them — and never landing on an item a page cannot show: a notch onto a hole carries on in
 -- the same direction until something shows, and a turn whose whole run is holes leaves the
--- cursor where it was. (NI's `incrementFocusParameter` steps past unavailable parameters the
--- same way, ParameterHandlerJam.lua:342-393.)
+-- cursor where it was. The reference steps past what a page cannot show in the same way,
+-- and the rig confirms it.
 local function menu_step(at, steps, items, s)
   if steps == 0 then return at end
   local dir = steps > 0 and 1 or -1
@@ -2237,9 +2237,9 @@ function M.tick()
     st.group_bank = (s.group - 1) // 8
   end
   follow_steps(s)
-  -- A static OSO belongs to the page it was opened on: the controller's page changing drops it,
-  -- exactly as NI's `onControllerPageChanged` hides every static OSO unless SWING/TUNE is held
-  -- (`ParameterHandlerJam.lua:180-196`). A non-static one is the idle timer's business.
+  -- A static OSO belongs to the page it was opened on: a controller page change drops it, as the
+  -- reference drops every static OSO unless SWING/TUNE is held. A non-static one is the idle
+  -- timer's business.
   if st.menu and st.menu.static and s.surface_page ~= st.menu.page then
     close_menu()
   end
