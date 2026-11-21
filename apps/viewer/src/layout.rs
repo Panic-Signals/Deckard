@@ -1923,7 +1923,8 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 )
             });
             let centred = full.center().x - group / 2.0;
-            let (lo, hi) = (left_end + 8.0, right_start - 8.0 - group);
+            // (The right group's own spacing already ends it with a gap.)
+            let (lo, hi) = (left_end + 8.0, right_start - group);
             let mid_left = if lo <= hi { centred.clamp(lo, hi) } else { centred };
             // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
             // and a new release's button.
