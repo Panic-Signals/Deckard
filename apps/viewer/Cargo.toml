@@ -5,6 +5,7 @@ edition = "2024"
 description = "Read-only viewer for Maschine projects"
 
 [dependencies]
+tungstenite = { version = "0.30.0", features = ["handshake"] }
 serde_json = "1"
 eframe = "0.36"
 deckard-plugins = { path = "../../crates/plugins" }

@@ -103,6 +103,9 @@ mod mk3_layout_tests;
 mod mk3_lights;
 #[cfg(test)]
 mod mk3_lights_tests;
+mod mk3_server;
+#[cfg(test)]
+mod mk3_server_tests;
 mod mk3_sink;
 #[cfg(test)]
 mod mk3_sink_tests;
@@ -1093,6 +1096,10 @@ pub struct App {
     mk3_panel: bool,
     /// `--serve PORT`: the MK3 panel's server on that port (nothing else serves).
     serve: Option<u16>,
+    /// The port the panel's server actually bound, and why it is not serving if it failed:
+    /// a listen error is the user's to see, not a status line that never arrives.
+    mk3_serve: Option<u16>,
+    mk3_serve_error: Option<String>,
     /// The Maschine MK3 over USB (started by `boot`, not in tests), and the sinks its
     /// frames go to: the device is one of them.
     mk3: Option<std::sync::Arc<mk3_io::Mk3Io>>,

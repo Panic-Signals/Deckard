@@ -264,6 +264,17 @@ impl App {
                 if self.settings.mk3_panel {
                     self.mk3_sinks.set_panel_open(true);
                 }
+                if let Some(port) = self.settings.serve {
+                    // The panel's protocol: a listen failure is reported, never swallowed —
+                    // the flag asked for a server and there is no server.
+                    match crate::mk3_server::Server::start(Some(port)) {
+                        Ok((server, bound)) => {
+                            self.mk3_serve = Some(bound);
+                            self.mk3_sinks.add(server);
+                        }
+                        Err(e) => self.mk3_serve_error = Some(format!("port {port}: {e}")),
+                    }
+                }
                 self.browser.routing = self.settings.load_group_routing;
                 self.browser.patterns = self.settings.load_group_patterns;
                 Outcome::Ok

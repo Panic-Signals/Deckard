@@ -1,0 +1,213 @@
+/* The MK3 stage: the surface positions nothing itself — every control's rectangle
+   arrives inline from /layout.json, only the material lives here. The material is
+   the jamulator fork's `#controller-mk3` (css/jamulator.scss ~1201-1522), so the
+   browser client and the on-screen panel are one design. */
+html, body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: #363535;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+#surface {
+  position: relative;
+  margin: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  background: #1f1f1f;
+  border-radius: 6px;
+  box-shadow:
+    0 0 0 1px #282828,
+    0 4px 16px rgba(0,0,0,0.4),
+    inset 0 1px 0 rgba(255,255,255,0.04);
+  overflow: hidden;
+  container-type: inline-size;
+}
+.control {
+  position: absolute;
+  box-sizing: border-box;
+  touch-action: none;
+  /* The fork's MK3 silkscreen: labels top-left, condensed uppercase micro-type. */
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+  font-size: .82cqw;
+  font-weight: 700;
+  font-stretch: condensed;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  line-height: 1.2;
+  padding: .3cqw .45cqw;
+  color: #1a1a1a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+/* Default silicon caps: the fork's `.jam-btn`. */
+.cap-silicon {
+  background: radial-gradient(circle at 50% 40%, #a29b95, #7c7772);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.1),
+    inset 0 0 8px rgb(var(--btn-tint, 255 255 255) / 0.07),
+    0 2px 4px rgba(0,0,0,0.5),
+    0 0 4px rgb(var(--btn-tint, 255 255 255) / 0.04);
+}
+/* Dark translucent caps: the fork's `.btn-rgb:not(.lit)` (pads, mutes, groups). */
+.cap-rgb {
+  background: linear-gradient(to bottom, #383736, #383531);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 2px 4px rgba(0,0,0,0.5);
+}
+/* LED-lit: the LED colour mixed into the base cap plus a glow, per the fork's
+   `.lit` (silicon) and `.btn-rgb.lit` (rgb) rules. Colours arrive as
+   `--led-color` from a light message; the plain fallback covers no-mix. */
+.control.lit {
+  background: var(--led-color);
+  background:
+    radial-gradient(ellipse at center, rgba(255,255,255,0.3), transparent 90%),
+    color-mix(in oklch, var(--led-color) calc(var(--led-brightness, 1) * 100%), #d0ccc8);
+  box-shadow:
+    0 0 3px color-mix(in oklch, var(--led-color) calc(var(--led-brightness, 1) * 40%), transparent);
+  color: #111;
+}
+.control.cap-rgb.lit {
+  background: var(--led-color);
+  background:
+    radial-gradient(ellipse at center,
+      color-mix(in srgb, white calc(var(--led-brightness, 1) * 30%), transparent),
+      transparent 90%),
+    color-mix(in oklch, var(--led-color) calc(var(--led-brightness, 1) * 100%), #282624);
+  color: #111;
+}
+/* A cap that is no cap: the wheel's press is a touch target on the jog, so the jog's
+   own disc is the chrome and nothing is painted here — no material, no ink, lit or
+   unlit (the press carries no LED either way). The element still takes the pointer,
+   which is the whole point of it. */
+.control.cap-bare,
+.control.cap-bare.lit {
+  background: none;
+  box-shadow: none;
+  color: transparent;
+}
+/* Screens: the fork's `.mk3-screen` — dark wells the canvases fill. */
+.kind-screen {
+  background: #2e2e2e;
+  border-radius: 2px;
+  padding: 0;
+  overflow: hidden;
+}
+.control canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+}
+/* Encoders: the fork's `.encoder` — dark ring, radial face, tick at twelve. */
+.kind-knob, .kind-jog {
+  background: radial-gradient(circle, #3e3e3e 50%, #4a4a4a 56%, #3c3c3c 70%, #333);
+  border: 2px solid #505050;
+  border-radius: 50%;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.5), 0 1px 0 rgba(255,255,255,0.05), 0 2px 8px rgba(0,0,0,0.4);
+  padding: 0;
+}
+.kind-knob::after, .kind-jog::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 12%;
+  width: 4%;
+  height: 26%;
+  transform: translateX(-50%);
+  background: #888;
+  border-radius: 2px;
+}
+/* The touch strip: the fork's `.mk3-strip-ph` placeholder bar. */
+.kind-strip {
+  background: linear-gradient(90deg, #444 0, #161616 3%, #161616 97%, #444 100%);
+  border: 1px solid #222;
+  border-radius: 4px;
+  padding: 0;
+}
+/* The strip's 26 LEDs, one span each, lit from `--led-color` like every other light. */
+.kind-strip .mk3-seg {
+  position: absolute;
+  top: 19%;
+  height: 62%;
+  width: calc(100% / 25 * 0.76);
+  border-radius: 1px;
+  background: transparent;
+}
+.kind-strip .mk3-seg.lit {
+  background: var(--led-color);
+}
+/* Decoration, not controls: the fork's static MK3 dressing, same percentages. */
+.mk3-display-box {
+  position: absolute;
+  left: 23.059%; top: 1.882%; width: 74.048%; height: 30.391%;
+  background: #101010;
+  border-radius: 3px;
+}
+.mk3-strip-dots {
+  position: absolute;
+  left: 4.546%; top: 63.243%; width: 29.743%; height: .217%;
+  background: repeating-linear-gradient(90deg, #ddd 0 .664%, transparent .664% 4.762%);
+}
+.mk3-jdot {
+  position: absolute;
+  width: .198%; height: .217%;
+  background: #ddd;
+  border-radius: 50%;
+}
+.mk3-jdot.jd1 { left: 11.595%; top: 43.535%; }
+.mk3-jdot.jd2 { left: 5.599%; top: 50.036%; }
+.mk3-jdot.jd3 { left: 17.522%; top: 50.036%; }
+.mk3-jdot.jd4 { left: 11.595%; top: 56.694%; }
+.mk3-logo {
+  position: absolute;
+  left: 3.096%; top: 35.746%;
+  color: #f2f2f2;
+  font-size: 2.5cqw;
+  font-weight: 800;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  gap: .6cqw;
+  white-space: nowrap;
+}
+.mk3-logo span {
+  display: inline-block;
+  width: 1.9cqw;
+  height: 1.9cqw;
+  border: .26cqw solid #f2f2f2;
+  border-radius: 50%;
+}
+#rotate {
+  display: none;
+}
+#status {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  text-align: center;
+  font: 12px system-ui, sans-serif;
+  color: #ff8060;
+  pointer-events: none;
+}
+/* A phone held upright gets a letterboxed surface that says to turn it. */
+@media (orientation: portrait) {
+  #rotate {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    align-items: center;
+    justify-content: center;
+    font: 14px system-ui, sans-serif;
+    color: #cfcfd4;
+    background: #101014;
+    text-align: center;
+    padding: 0 24px;
+  }
+}
