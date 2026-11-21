@@ -94,6 +94,9 @@ mod midi_io;
 mod midi_monitor;
 mod midi_ports;
 mod mk3_io;
+mod mk3_layout;
+#[cfg(test)]
+mod mk3_layout_tests;
 mod mk3_sink;
 #[cfg(test)]
 mod mk3_sink_tests;
