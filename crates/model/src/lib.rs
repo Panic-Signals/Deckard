@@ -9,6 +9,7 @@
 pub mod chords;
 pub mod expression;
 pub mod extra_out;
+pub mod layers;
 pub mod lfo;
 pub mod mod_matrix;
 pub mod new_sampler;

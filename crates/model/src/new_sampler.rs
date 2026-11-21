@@ -6,6 +6,8 @@
 //! tempo, its root note, how it plays) a `deckard:zone` field on the zone, naming the file
 //! it describes so a zone given another sample isn't described by the old one's.
 
+use crate::layers::{Fade, Layer, Morph, Shape};
+
 /// The sound's field: present, the sound's Sampler is a New Sampler.
 pub const FIELD: &str = "deckard:new_sampler";
 /// A zone's field: its [`ZoneMeta`].
@@ -44,10 +46,12 @@ impl Motion {
 }
 
 /// The New Sampler's own settings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NewSampler {
     pub stretch: StretchEngine,
     pub motion: Motion,
+    /// Its layers' morph ([`crate::layers`]).
+    pub morph: Morph,
 }
 
 /// How a zone plays.
@@ -189,6 +193,8 @@ pub struct ZoneMeta {
     /// Its tail, ms (0: none): a note that reaches its end plays back from there this
     /// long, fading out.
     pub tail: f64,
+    /// It is a layer of its sound ([`crate::layers`]).
+    pub layer: Option<Layer>,
 }
 
 /// The longest tail, ms.
@@ -347,6 +353,47 @@ fn from_word<T: Copy>(table: &[(T, &'static str)], w: &str) -> Option<T> {
 
 const STRETCH: &[(StretchEngine, &str)] = &[(StretchEngine::Rendered, "rendered"), (StretchEngine::Live, "live")];
 const MOTIONS: &[(Motion, &str)] = &[(Motion::Off, "off"), (Motion::Next, "next"), (Motion::Random, "random")];
+const SHAPES: &[(Shape, &str)] = &[(Shape::Round, "round"), (Shape::Back, "back")];
+const FADES: &[(Fade, &str)] = &[(Fade::Linear, "linear"), (Fade::Power, "power")];
+
+/// A `morph` line's value, or `None` if it isn't one.
+fn morph_from(v: &str) -> Option<Morph> {
+    let w: Vec<&str> = v.split(' ').collect();
+    let &[on, position, sync, bars, seconds, shape, depth, reset, fade, spread] = w.as_slice() else { return None };
+    let num = |s: &str, lo: f64, hi: f64| s.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(lo, hi));
+    Some(Morph {
+        on: on == "1",
+        position: num(position, 0.0, 1.0)?,
+        sync: sync == "1",
+        bars: num(bars, crate::layers::SYNCED[0], 64.0)?,
+        seconds: num(seconds, crate::layers::FREE.0, crate::layers::FREE.1)?,
+        shape: from_word(SHAPES, shape)?,
+        depth: num(depth, 0.0, 1.0)?,
+        reset: reset == "1",
+        fade: from_word(FADES, fade)?,
+        spread: spread == "1",
+    })
+}
+
+/// A `layer` line's value, or `None` if it isn't one.
+fn layer_from(v: &str) -> Option<Layer> {
+    let w: Vec<&str> = v.split(' ').collect();
+    let &[flags, attack, decay, sustain, release, a, b, c, d] = w.as_slice() else { return None };
+    let num = |s: &str, lo: f64, hi: f64| s.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(lo, hi));
+    let time = |s: &str| num(s, 0.0, crate::layers::TIME_MAX);
+    let point = |s: &str| num(s, -1.0, 2.0);
+    let f = flags.as_bytes();
+    Some(Layer {
+        mute: f.first() == Some(&b'1'),
+        solo: f.get(1) == Some(&b'1'),
+        attack: time(attack)?,
+        decay: time(decay)?,
+        sustain: num(sustain, 0.0, 1.0)?,
+        release: time(release)?,
+        window: [point(a)?, point(b)?, point(c)?, point(d)?],
+    })
+}
+
 const MODES: &[(PlayMode, &str)] = &[(PlayMode::Repitch, "repitch"), (PlayMode::Sync, "sync"), (PlayMode::Keys, "keys")];
 const STARTS: &[(StartGrid, &str)] =
     &[(StartGrid::Off, "off"), (StartGrid::Sixteenth, "16"), (StartGrid::Eighth, "8"), (StartGrid::Quarter, "4"), (StartGrid::Bar, "bar")];
@@ -364,6 +411,22 @@ impl NewSampler {
         if self.motion != Motion::Off {
             t += &format!("\nmotion {}", word(MOTIONS, self.motion, |a, b| a == b));
         }
+        let m = &self.morph;
+        if *m != Morph::default() {
+            t += &format!(
+                "\nmorph {} {} {} {} {} {} {} {} {} {}",
+                u8::from(m.on),
+                m.position,
+                u8::from(m.sync),
+                m.bars,
+                m.seconds,
+                word(SHAPES, m.shape, |a, b| a == b),
+                m.depth,
+                u8::from(m.reset),
+                word(FADES, m.fade, |a, b| a == b),
+                u8::from(m.spread),
+            );
+        }
         t
     }
 
@@ -373,6 +436,7 @@ impl NewSampler {
             match k {
                 "stretch" => n.stretch = from_word(STRETCH, v).unwrap_or(n.stretch),
                 "motion" => n.motion = from_word(MOTIONS, v).unwrap_or_default(),
+                "morph" => n.morph = morph_from(v).unwrap_or_default(),
                 _ => {}
             }
         }
@@ -431,6 +495,22 @@ impl ZoneMeta {
         if self.tail_ms() > 0.0 {
             t += &format!("tail {}\n", self.tail_ms());
         }
+        if let Some(l) = &self.layer {
+            let w = l.window;
+            t += &format!(
+                "layer {}{} {} {} {} {} {} {} {} {}\n",
+                u8::from(l.mute),
+                u8::from(l.solo),
+                l.attack,
+                l.decay,
+                l.sustain,
+                l.release,
+                w[0],
+                w[1],
+                w[2],
+                w[3]
+            );
+        }
         t + "file " + &self.file
     }
 
@@ -470,6 +550,7 @@ impl ZoneMeta {
                             Some(StemLane { file: file.to_string(), mute: b.first() == Some(&b'1'), solo: b.get(1) == Some(&b'1'), gain });
                     }
                 }
+                "layer" => m.layer = layer_from(v),
                 "warp" => {
                     if let Some((f, b)) = v.split_once(' ')
                         && let (Ok(frame), Ok(beat)) = (f.parse(), b.parse::<f64>())
@@ -489,6 +570,24 @@ impl ZoneMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layers_and_morph_round_trip() {
+        let plain = ZoneMeta { file: "/a b/pad.wav".into(), ..Default::default() };
+        assert!(!plain.to_text().contains("layer"));
+        let l = Layer { mute: true, attack: 2.5, window: [-0.5, 0.0, 0.0, 0.5], ..Default::default() };
+        let m = ZoneMeta { layer: Some(l), ..plain.clone() };
+        assert_eq!(ZoneMeta::from_text(&m.to_text()), Some(m));
+        let s = ZoneMeta { layer: Some(Layer { solo: true, sustain: 0.25, ..Default::default() }), ..plain };
+        assert_eq!(ZoneMeta::from_text(&s.to_text()), Some(s));
+
+        assert!(!NewSampler::default().to_text().contains("morph"));
+        let morph = Morph { on: true, shape: Shape::Back, depth: 0.4, sync: false, seconds: 120.0, spread: false, ..Default::default() };
+        let n = NewSampler { morph, motion: Motion::Next, ..Default::default() };
+        assert_eq!(NewSampler::from_text(&n.to_text()), n);
+        assert_eq!(NewSampler::from_text("v 1\nmorph 1 nonsense").morph, Morph::default());
+        assert_eq!(NewSampler::from_text("v 1\nmorph 1 0.5 1 8 8 sideways 1 1 linear 1").morph, Morph::default());
+    }
 
     #[test]
     fn settings_round_trip_as_text() {
@@ -532,6 +631,7 @@ mod tests {
             speed: 1.5,
             once: true,
             tail: 120.0,
+            layer: Some(Layer { solo: true, decay: 1.5, sustain: 0.5, window: [0.25, 0.5, 0.5, 0.75], ..Default::default() }),
         };
         assert_eq!(lane_levels(&full.stems), [0.0, 0.0, 1.0, 0.0], "the soloed lane only");
         let mut open = full.stems.clone();
