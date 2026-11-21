@@ -493,8 +493,11 @@ impl Plugin {
         sidechain: Option<(&[f32], &[f32])>,
     ) -> (&[f32], &[f32]) {
         let out = each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain));
-        if let (Some(tap), Some(input)) = (&mut self.spectrum_tap, input) {
-            tap.push(input, out);
+        if let Some(tap) = &mut self.spectrum_tap {
+            match input {
+                Some(input) => tap.push(input, out),
+                None => tap.push_output(out),
+            }
         }
         out
     }

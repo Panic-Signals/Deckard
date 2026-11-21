@@ -1,4 +1,5 @@
-//! A single reader taps an effect's main stereo input and output. The audio
+//! A single reader taps an effect's main stereo input and output (an instrument's
+//! output, its input silent). The audio
 //! thread fills a preallocated ring and publishes overlapping windows.
 use std::sync::{Arc, Mutex};
 
@@ -69,6 +70,13 @@ mod tests {
         assert!(reader.receive().unwrap().iter().all(|f| *f == [5.0, 6.0, 7.0, 8.0]));
         assert!(reader.receive().is_none());
     }
+
+    #[test]
+    fn an_instruments_output_comes_with_a_silent_input() {
+        let (mut tap, mut reader) = channel();
+        tap.push_output((&vec![0.5; FRAMES], &vec![-0.5; FRAMES]));
+        assert!(reader.receive().unwrap().iter().all(|f| *f == [0.0, 0.0, 0.5, -0.5]));
+    }
 }
 
 impl Tap {
@@ -77,13 +85,22 @@ impl Tap {
     }
 
     pub fn push(&mut self, (il, ir): (&[f32], &[f32]), (ol, or): (&[f32], &[f32])) {
-        // The reader drops its reference when focus leaves this effect.
+        let n = il.len().min(ir.len()).min(ol.len()).min(or.len());
+        self.push_with(n, |i| [il[i], ir[i], ol[i], or[i]]);
+    }
+
+    /// An instrument's output, with silence for the input it doesn't have.
+    pub fn push_output(&mut self, (ol, or): (&[f32], &[f32])) {
+        self.push_with(ol.len().min(or.len()), |i| [0.0, 0.0, ol[i], or[i]]);
+    }
+
+    fn push_with(&mut self, n: usize, frame: impl Fn(usize) -> [f32; 4]) {
+        // The reader drops its reference when focus leaves this plug-in.
         if !self.has_reader() {
             return;
         }
-        let n = il.len().min(ir.len()).min(ol.len()).min(or.len());
         for i in 0..n {
-            self.window[self.cursor] = [il[i], ir[i], ol[i], or[i]];
+            self.window[self.cursor] = frame(i);
             self.cursor = (self.cursor + 1) % FRAMES;
             self.until_publish -= 1;
             if self.until_publish == 0 {
