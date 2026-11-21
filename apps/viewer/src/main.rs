@@ -906,6 +906,13 @@ pub struct App {
     midi_change: bool,
     /// The MIDI Monitor window shows (View ▸ MIDI Monitor), and its choices.
     midi_monitor: bool,
+    /// The Audio & CPU Monitor window shows.
+    audio_monitor: bool,
+    /// Cross-platform system/process sampler used by the diagnostics window.
+    system_info: sysinfo::System,
+    /// Last sampled system diagnostics, held steady between refreshes for readability.
+    system_diagnostics: Vec<(&'static str, String)>,
+    system_diagnostics_at: Option<std::time::Instant>,
     monitor_view: midi_monitor::View,
     /// File ▸ Export Audio's panel and the export it runs.
     export: export::ExportPanel,
@@ -1324,6 +1331,32 @@ impl Default for Started {
 impl Started {
     fn elapsed(&self) -> std::time::Duration {
         self.0.elapsed()
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    let days = seconds / 86_400;
+    let hours = seconds / 3_600 % 24;
+    let minutes = seconds / 60 % 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else {
+        format!("{minutes}m {seconds}s")
     }
 }
 
@@ -2313,6 +2346,7 @@ impl App {
             C::LockPanel => self.lock_panel = !self.lock_panel,
             C::MidiChange => self.midi_change = true,
             C::MidiMonitor => self.midi_monitor = !self.midi_monitor,
+            C::AudioMonitor => self.audio_monitor = !self.audio_monitor,
             C::ExportAudio => self.export.open = true,
             C::ExportMidi => {
                 if let Err(e) = self.export_song_midi(None) {
@@ -3649,9 +3683,157 @@ impl App {
             );
         }
         self.preferences(ctx);
+        self.audio_monitor(ctx);
         if self.about.is_some() && !about::show(self, ctx) {
             self.about = None;
         }
+    }
+
+    fn audio_monitor(&mut self, ctx: &egui::Context) {
+        if !self.audio_monitor {
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.audio_monitor = false;
+            return;
+        }
+        let mut open = true;
+        let monitor_size = ctx.input(|input| input.viewport().monitor_size).unwrap_or(egui::vec2(900.0, 700.0));
+        let window_size = egui::vec2(420.0, (monitor_size.y - 48.0).max(300.0));
+        egui::Window::new("Audio & CPU Monitor")
+            .title_bar(false)
+            .open(&mut open)
+            .resizable(true)
+            .default_size(window_size)
+            .max_size(window_size)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                let available_height = ui.available_height();
+                egui::ScrollArea::vertical().auto_shrink([true, false]).max_height(available_height).show(ui, |ui| {
+                    if let Some(Ok(out)) = &self.output {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let stats = &out.stats;
+                        let value = |a: &std::sync::atomic::AtomicU64| a.load(Relaxed);
+                        ui.heading("Audio device");
+                        egui::Grid::new("audio-monitor-device").num_columns(2).show(ui, |ui| {
+                            ui.label("Driver");
+                            ui.label(out.driver.name());
+                            ui.end_row();
+                            ui.label("Device");
+                            ui.label(&out.device);
+                            ui.end_row();
+                            ui.label("Sample rate");
+                            ui.label(format!("{} Hz", out.rate));
+                            ui.end_row();
+                            ui.label("Buffer");
+                            ui.label(format!(
+                                "{} samples ({:.1} ms)",
+                                out.block_frames(),
+                                out.block_frames() as f64 / out.rate as f64 * 1000.0
+                            ));
+                            ui.end_row();
+                            ui.label("Reported latency");
+                            ui.label(format!("{:.1} ms", out.latency().as_secs_f64() * 1000.0));
+                            ui.end_row();
+                        });
+                        ui.separator();
+                        ui.heading("Audio thread");
+                        egui::Grid::new("audio-monitor-stats").num_columns(2).show(ui, |ui| {
+                            ui.label("Current load");
+                            ui.label(format!("{:.1} %", self.cpu_load * 100.0));
+                            ui.end_row();
+                            ui.label("Peak load");
+                            ui.label(format!("{:.1} %", value(&stats.peak_load) as f64 / 10.0));
+                            ui.end_row();
+                            ui.label("Callbacks");
+                            ui.label(value(&stats.callbacks).to_string());
+                            ui.end_row();
+                            ui.label("Late callbacks");
+                            ui.label(value(&stats.late).to_string());
+                            ui.end_row();
+                            ui.label("Missed blocks");
+                            ui.label(value(&stats.missed).to_string());
+                            ui.end_row();
+                            ui.label("Device errors / xruns");
+                            ui.label(value(&stats.device_errors).to_string());
+                            ui.end_row();
+                            ui.label("Queue-full events");
+                            ui.label(value(&stats.queue_full).to_string());
+                            ui.end_row();
+                        });
+                        ui.separator();
+                        ui.heading("Render-ahead");
+                        let (ahead, underruns) = out.telemetry(|t| (t.sounds_ahead, t.ahead_underruns));
+                        ui.label(format!("{ahead} sounds currently ahead; {underruns} not-ready events"));
+                        if let Some((threads, helped)) = out.render_threads() {
+                            ui.label(format!("{threads} render threads; {helped} worker-rendered jobs"));
+                        } else {
+                            ui.label("Render-ahead workers: off");
+                        }
+                    } else {
+                        ui.label("Audio output is not open.");
+                        ui.label("Start playback or open a browser preview to initialize it.");
+                    }
+                    ui.separator();
+                    ui.heading("System");
+                    for (label, value) in self.system_diagnostics() {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            ui.label(value);
+                        });
+                    }
+                });
+            });
+        self.audio_monitor = open;
+        if self.audio_monitor {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    fn system_diagnostics(&mut self) -> Vec<(&'static str, String)> {
+        const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if self.system_diagnostics_at.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
+            return self.system_diagnostics.clone();
+        }
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        self.system_info.refresh_cpu_usage();
+        self.system_info.refresh_memory();
+        let pid = Pid::from_u32(std::process::id());
+        self.system_info.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+        let mut diagnostics = Vec::new();
+        diagnostics.push(("System CPU", format!("{:.1} %", self.system_info.global_cpu_usage())));
+        diagnostics.push(("Logical CPUs", self.system_info.cpus().len().to_string()));
+        diagnostics.push(("Physical cores", System::physical_core_count().map_or_else(|| "unavailable".into(), |count| count.to_string())));
+        if let Some(process) = self.system_info.process(pid) {
+            diagnostics.push(("DECKARD CPU", format!("{:.1} %", process.cpu_usage())));
+            diagnostics.push(("Process memory", format_bytes(process.memory())));
+            diagnostics.push(("Virtual address space", format_bytes(process.virtual_memory())));
+            diagnostics.push(("Process threads", process.tasks().map_or_else(|| "unavailable".into(), |tasks| tasks.len().to_string())));
+        } else {
+            diagnostics.push(("DECKARD CPU", "unavailable".into()));
+            diagnostics.push(("Process memory", "unavailable".into()));
+            diagnostics.push(("Virtual address space", "unavailable".into()));
+            diagnostics.push(("Process threads", "unavailable".into()));
+        }
+        diagnostics.push((
+            "System memory",
+            format!("{} used / {} total", format_bytes(self.system_info.used_memory()), format_bytes(self.system_info.total_memory())),
+        ));
+        diagnostics.push(("Available memory", format_bytes(self.system_info.available_memory())));
+        diagnostics.push((
+            "Swap",
+            format!("{} used / {} total", format_bytes(self.system_info.used_swap()), format_bytes(self.system_info.total_swap())),
+        ));
+        diagnostics.push(("Uptime", format_duration(std::time::Duration::from_secs(System::uptime()))));
+
+        #[cfg(target_os = "linux")]
+        {
+            let load = std::fs::read_to_string("/proc/loadavg").ok().map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+            diagnostics.push(("Load average", load.unwrap_or_else(|| "unavailable".into())));
+        }
+        self.system_diagnostics = diagnostics;
+        self.system_diagnostics_at = Some(std::time::Instant::now());
+        self.system_diagnostics.clone()
     }
 
     /// Play `mode`; the arrangement from the focused section.

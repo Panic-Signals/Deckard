@@ -2139,6 +2139,9 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
                 let cpu = cpu_meter(ui, app.output.as_ref().is_some_and(|o| o.is_ok()).then_some(app.cpu_load));
                 note_rect(ui, "cpu", cpu.rect);
+                if cpu.clicked() {
+                    app.audio_monitor = !app.audio_monitor;
+                }
                 ui.add_space(10.0);
                 if let Some(doc) = &app.doc {
                     let level = doc.borrow().project().master_level;
@@ -2237,12 +2240,13 @@ pub(crate) fn cpu_load(prev: (u64, u64), now: (u64, u64)) -> Option<f32> {
 
 /// The CPU meter: the audio thread's load as a bar over "CPU" (`None`: no audio out).
 fn cpu_meter(ui: &mut Ui, load: Option<f32>) -> Response {
-    let (r, resp) = ui.allocate_exact_size(Vec2::new(30.0, HEADER), Sense::hover());
+    let (r, _) = ui.allocate_exact_size(Vec2::new(42.0, HEADER), Sense::hover());
+    let resp = ui.interact(r, egui::Id::new("header-cpu-meter"), Sense::click());
     let tip = match load {
         Some(l) => format!("CPU: the audio is {:.0} % of the time it has to play in", l * 100.0),
         None => "CPU: no audio output".to_string(),
     };
-    let resp = resp.on_hover_text(tip);
+    let resp = resp.on_hover_text(format!("{tip}\nClick for Audio & CPU Monitor"));
     let p = ui.painter();
     let bar = Rect::from_center_size(r.center() - Vec2::new(0.0, 2.5), Vec2::new(r.width() - 4.0, 5.0));
     p.rect_filled(bar, 1.0, white(28));
