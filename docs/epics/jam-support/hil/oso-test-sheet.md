@@ -68,22 +68,3 @@ the view it was opened in.
 | desktop `BROWSE` overlay (§2 of the RE notes) | out of scope for this branch — the library stays an in-app panel |
 | NI-scripted controllers' OSO | their own path in `lua-host`, untouched, coexists by design |
 | `INSTANCE` (`SHIFT` + `H`) | a different window: NI's desktop overlay, with its own chrome and an instance page of products. Out of this branch by design |
-
-## E. Sequencing worth a second look on hardware
-
-1. GRID showing → SHIFT + GRID → REC MODE, GRID still lit → GRID → back to GRID, not closed.
-2. PERFORM FX up → press the encoder → page goes, the group's FX stays.
-3. SWING up → wait 2.5 s (gone) → touch the encoder → SWING back.
-4. Scale 1/2 → turn to 2/2 → switch layout Standard in the app's Settings → the second page stops
-   existing and the cursor resolves back onto a filled slot.
-5. `Arpeggiator 2/3` → change the pad layout → the cursor never lands on a hole.
-6. `Variation` → Mode **Random**, Probability 100, Note Count 3, Note Range C3–C4, Velocity 70/80
-   → Apply: every step carries a three-note chord, pitches between C3 and C4, velocities 70–80.
-   **Press Apply twice: the notes must differ** — it is random by nature, seeded from the clock —
-   while those invariants hold. The app's Generate ▸ Random gives the same invariants, not the
-   same notes; that the two are one engine is proved by seed in
-   `the_jams_apply_and_the_generate_button_are_one_engine`, not on the rig.
-7. `Variation` → Mode **Humanize**, Velocity Lo 40, Velocity Hi 60 → Apply: do the velocities land
-   *inside* 40–60 (the band replaces them), or stay spread around what they were (the band bounds
-   a deviation)? NI does not say; this build clamps into the band. The answer settles work item
-   35's one marked assumption.
