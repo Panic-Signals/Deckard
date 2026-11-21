@@ -75,6 +75,9 @@ mod jam_tests;
 mod keep_running;
 mod keys;
 mod layout;
+mod led_palette;
+#[cfg(test)]
+mod led_palette_tests;
 mod lock;
 #[cfg(test)]
 mod lock_hosted_tests;
@@ -97,6 +100,9 @@ mod mk3_io;
 mod mk3_layout;
 #[cfg(test)]
 mod mk3_layout_tests;
+mod mk3_lights;
+#[cfg(test)]
+mod mk3_lights_tests;
 mod mk3_sink;
 #[cfg(test)]
 mod mk3_sink_tests;
