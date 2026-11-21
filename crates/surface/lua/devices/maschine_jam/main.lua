@@ -24,8 +24,9 @@ local DUP_FLASH = 0.5
 local PAD_PITCH = 60
 -- A double tap: two touches this close (seconds).
 local DOUBLE_TAP = 0.3
--- A menu opened by touching the encoder closes this long after the last use (seconds).
-local MENU_IDLE = 6
+-- A menu opened by touching the encoder closes this long after the last use (seconds). Two is
+-- what Maschine does, measured on the rig — not derived from the scripts' tick count.
+local MENU_IDLE = 2
 -- Taps further apart than this start a new count (seconds).
 local TAP_RESET = 2.0
 -- The meters' floor (dB).
@@ -350,18 +351,118 @@ end
 
 -- ---- the views ------------------------------------------------------------------------
 
+-- (Declared before `set_view` uses it: a Lua `local` binds from its declaration down, so a
+-- later `local function close_menu` would not be the one `set_view` called.)
+local close_menu
+
 local function set_view(view)
   if view == st.view then return end
   if st.view == "song" or st.view == "pad" or st.view == "keyboard" then st.back = st.view end
   st.view = view
   st.step_page = 0
+  -- Navigating away closes whatever page was showing: a static one belongs to the page it was
+  -- opened on, and a non-static one has no business outliving the view it was opened in.
+  close_menu()
   deckard.keyboard_mode(view == "keyboard" or view == "roll" or view == "notes")
 end
 
-local function close_menu()
+function close_menu()
   if st.menu and st.menu.settings then deckard.settings_wanted(false) end
   st.menu = nil
 end
+-- ---- the OSO values (one composer) ---------------------------------------------------
+-- Every value the status menus show and the OSO pages publish comes from these
+-- helpers: the same `deckard.state()` reads, the same tables. Menu items show `"-"`
+-- where a helper returns nil (existing behaviour); OSO slots turn that nil into a
+-- hole. Pad layout is not hardcoded: the four values come from the viewer's settings
+-- store via `deckard.state().settings.values`, written through `deckard.setting`.
+-- A missing key is a hole. Never NI's plist.
+
+local OSO_LAYOUT_KEY = {
+  mode = "jam_keyboard_layout",
+  layout = "jam_iso_layout",
+  type = "jam_iso_type",
+  dir = "jam_iso_dir",
+}
+
+local OSO_LAYOUT_SUB = { mode = "Mode", layout = "Layout", type = "Type", dir = "Direction" }
+
+local function oso_layout_value(s, which)
+  local settings = s.settings
+  local vals = settings and settings.values
+  local v = vals and vals[OSO_LAYOUT_KEY[which]]
+  if v == nil or v == "" then return nil end
+  return v
+end
+
+local function oso_is_isomorphic(s)
+  return oso_layout_value(s, "mode") == "Isomorph"
+end
+
+local function oso_root_value(s)
+  -- Pitch class plus octave, as the reference shows it (`C3` for 60): the
+  -- inventory's root row carries the octave and the strip copies it verbatim.
+  local root = s.scale.root or 60
+  return NOTE_NAMES[root % 12 + 1] .. (math.floor(root / 12) - 2)
+end
+
+local function oso_bank_value(s)
+  return deckard.scales.banks[s.scale.bank]
+end
+
+local function oso_scale_type_value(s)
+  local kinds = deckard.scales.names[s.scale.bank]
+  return kinds and kinds[s.scale.kind] or nil
+end
+
+local function oso_chord_mode_value()
+  return CHORD_MODES[st.chord.mode]
+end
+
+local function oso_chord_type_value(s)
+  if st.chord.mode == 0 then return nil end
+  local list, key = chord_list(s)
+  return list[st.chord.types[key]]
+end
+
+local function oso_repeat_text(s, key)
+  local k = s.note_repeat.settings[key]
+  return k and k.text or nil
+end
+
+local function oso_repeat_switch(s, key)
+  local v = s.note_repeat[key]
+  if v == nil then return nil end
+  return v and "On" or "Off"
+end
+
+local function oso_turn_root(s, steps)
+  deckard.scale(clamp((s.scale.root or 60) + steps, 48, 71), s.scale.bank, s.scale.kind)
+end
+
+local function oso_turn_bank(s, steps)
+  deckard.scale(s.scale.root, clamp(s.scale.bank + steps, 1, #deckard.scales.banks), 1)
+end
+
+local function oso_turn_scale_type(s, steps)
+  local kinds = deckard.scales.names[s.scale.bank]
+  deckard.scale(s.scale.root, s.scale.bank, clamp(s.scale.kind + steps, 1, #kinds))
+end
+
+local function oso_turn_chord_mode(_, steps)
+  st.chord.mode = clamp(st.chord.mode + steps, 0, 3)
+end
+
+local function oso_turn_chord_type(s, steps)
+  if st.chord.mode == 0 then return end
+  local list, key = chord_list(s)
+  st.chord.types[key] = clamp(st.chord.types[key] + steps, 1, #list)
+end
+
+local function oso_turn_layout(which)
+  return function(_, steps) deckard.setting(OSO_LAYOUT_KEY[which], steps) end
+end
+
 
 -- ---- the status bar's menus -----------------------------------------------------------
 
@@ -385,20 +486,50 @@ local function open_menu(title, items, opts)
     editing = #items == 1 and items[1].turn ~= nil,
     settings = opts.settings,
     idle = opts.idle,
+    -- A static OSO belongs to the page it was opened on and survives the idle timer; a
+    -- non-static one arms that timer and the page change leaves it alone.
+    static = opts.static,
+    -- (The piano roll's Scale page is the scale's three settings only: see `step_scale_page`.)
+    limited = opts.limited,
+    page = deckard.state().surface_page,
     used = deckard.now(),
   }
   if opts.settings then deckard.settings_wanted(true) end
   menu_line()
 end
 
+-- An item an OSO page would show: the availability the composers apply, so the cursor
+-- never rests on a hole and the strip never has to underline nothing.
+local function menu_available(item, s)
+  local text = item.text and item.text(s) or ""
+  return text ~= nil and text ~= "" and text ~= "-"
+end
+
+-- The browsing cursor `steps` items along — one notch, one place, as the reference counts
+-- them — and never landing on an item a page cannot show: a notch onto a hole carries on in
+-- the same direction until something shows, and a turn whose whole run is holes leaves the
+-- cursor where it was. The reference steps past what a page cannot show in the same way,
+-- and the rig confirms it.
+local function menu_step(at, steps, items, s)
+  if steps == 0 then return at end
+  local dir = steps > 0 and 1 or -1
+  local j = clamp(at + steps, 1, #items)
+  while j >= 1 and j <= #items and not menu_available(items[j], s) do
+    j = j + dir
+  end
+  if j >= 1 and j <= #items then return j end
+  return at
+end
+
 local function menu_turn(steps)
   local m = st.menu
   m.used = deckard.now()
+  local s = deckard.state()
   if m.editing then
     local item = m.items[m.at]
-    if item.turn then item.turn(deckard.state(), steps, shift()) end
+    if item.turn then item.turn(s, steps, shift()) end
   else
-    m.at = clamp(m.at + steps, 1, #m.items)
+    m.at = menu_step(m.at, steps, m.items, s)
   end
   menu_line()
 end
@@ -436,7 +567,7 @@ local function grid_menu()
     item("Nudge", NUDGE_GRIDS, "nudge"),
     item("Arrange", ARRANGE_GRIDS, "arrange"),
     item("Perform", PERFORM_GRIDS, "perform"),
-  })
+  }, { static = true })
 end
 
 local function rec_mode_menu()
@@ -467,63 +598,70 @@ local function rec_mode_menu()
       text = function() return st.step_follow and "On" or "Off" end,
       turn = function(s) toggle_follow(s) end,
     },
-  }, { settings = true })
+  }, { settings = true, static = true })
 end
 
 local function scale_menu(opts)
-  local function set_scale(s, root, bank, kind)
-    deckard.scale(root or s.scale.root, bank or s.scale.bank, kind or s.scale.kind)
-  end
-  open_menu("SCALE", {
+  local items = {
     {
       name = "Root Note",
-      text = function(s) return NOTE_NAMES[(s.scale.root or 60) % 12 + 1] end,
-      turn = function(s, steps) set_scale(s, clamp((s.scale.root or 60) + steps, 48, 71)) end,
+      text = function(s) return oso_root_value(s) or "-" end,
+      turn = oso_turn_root,
     },
     {
       name = "Bank",
-      text = function(s) return deckard.scales.banks[s.scale.bank] end,
-      turn = function(s, steps)
-        set_scale(s, nil, clamp(s.scale.bank + steps, 1, #deckard.scales.banks), 1)
-      end,
+      text = function(s) return oso_bank_value(s) or "-" end,
+      turn = oso_turn_bank,
     },
     {
       name = "Type",
-      text = function(s) return deckard.scales.names[s.scale.bank][s.scale.kind] or "-" end,
-      turn = function(s, steps)
-        local kinds = deckard.scales.names[s.scale.bank]
-        set_scale(s, nil, nil, clamp(s.scale.kind + steps, 1, #kinds))
-      end,
+      text = function(s) return oso_scale_type_value(s) or "-" end,
+      turn = oso_turn_scale_type,
     },
     {
       name = "Chord Mode",
-      text = function() return CHORD_MODES[st.chord.mode] end,
-      turn = function(_, steps) st.chord.mode = clamp(st.chord.mode + steps, 0, 3) end,
+      text = function() return oso_chord_mode_value() or "-" end,
+      turn = oso_turn_chord_mode,
     },
     {
       name = "Chord Type",
-      text = function(s)
-        if st.chord.mode == 0 then return "-" end
-        local list, key = chord_list(s)
-        return list[st.chord.types[key]] or "-"
-      end,
-      turn = function(s, steps)
-        if st.chord.mode == 0 then return end
-        local list, key = chord_list(s)
-        st.chord.types[key] = clamp(st.chord.types[key] + steps, 1, #list)
-      end,
+      text = function(s) return oso_chord_type_value(s) or "-" end,
+      turn = oso_turn_chord_type,
     },
-  }, opts)
+    {
+      name = "Mode",
+      text = function(s) return oso_layout_value(s, "mode") or "-" end,
+      turn = oso_turn_layout("mode"),
+    },
+    {
+      name = "Layout",
+      text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "layout") or "-" end,
+      turn = oso_turn_layout("layout"),
+    },
+    {
+      name = "Type",
+      text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "type") or "-" end,
+      turn = oso_turn_layout("type"),
+    },
+    {
+      name = "Direction",
+      text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "dir") or "-" end,
+      turn = oso_turn_layout("dir"),
+    },
+  }
+  -- The piano roll shows the scale's own three settings and nothing else — root, bank, type —
+  -- under one SCALE header, on one page with no counter (the rig's capture, 2026-11-21).
+  if opts and opts.limited then
+    items = { items[1], items[2], items[3] }
+  end
+  open_menu("SCALE", items, opts)
 end
 
 local function repeat_menu(opts)
   local function setting(key, name)
     return {
       name = name,
-      text = function(s)
-        local k = s.note_repeat.settings[key]
-        return k and k.text or "-"
-      end,
+      text = function(s) return oso_repeat_text(s, key) or "-" end,
       turn = function(s, steps)
         local k = s.note_repeat.settings[key]
         if k then deckard.note_repeat(key, clamp(k.value + steps * k.step, k.min, k.max)) end
@@ -533,7 +671,7 @@ local function repeat_menu(opts)
   local function switch(key, name)
     return {
       name = name,
-      text = function(s) return s.note_repeat[key] and "On" or "Off" end,
+      text = function(s) return oso_repeat_switch(s, key) or "-" end,
       turn = function(s) deckard.note_repeat(key, not s.note_repeat[key]) end,
     }
   end
@@ -543,6 +681,30 @@ local function repeat_menu(opts)
       setting("type", "Type"), setting("rate", "Rate"), setting("rate_unit", "Unit"), setting("sequence", "Sequence"),
       setting("octaves", "Octaves"), setting("dynamic", "Dynamic"), setting("gate", "Gate"), switch("locked", "Lock"),
       switch("hold", "Hold"),
+      { name = "Root Note",
+        text = function(s) return oso_root_value(s) or "-" end,
+        turn = oso_turn_root },
+      { name = "Bank",
+        text = function(s) return oso_bank_value(s) or "-" end,
+        turn = oso_turn_bank },
+      { name = "Type",
+        text = function(s) return oso_scale_type_value(s) or "-" end,
+        turn = oso_turn_scale_type },
+      { name = "Chord Mode",
+        text = function() return oso_chord_mode_value() or "-" end,
+        turn = oso_turn_chord_mode },
+      { name = "Mode",
+        text = function(s) return oso_layout_value(s, "mode") or "-" end,
+        turn = oso_turn_layout("mode") },
+      { name = "Layout",
+        text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "layout") or "-" end,
+        turn = oso_turn_layout("layout") },
+      { name = "Type",
+        text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "type") or "-" end,
+        turn = oso_turn_layout("type") },
+      { name = "Direction",
+        text = function(s) return oso_is_isomorphic(s) and oso_layout_value(s, "dir") or "-" end,
+        turn = oso_turn_layout("dir") },
     }
   else
     items = { setting("rate", "Rate"), setting("rate_unit", "Unit"), setting("gate", "Gate"), switch("locked", "Lock"), switch("hold", "Hold") }
@@ -605,7 +767,7 @@ local function swing_menu()
         if x then deckard.set_swing(s.group, s.sound, (x.swing or 0) + by(steps, fine)) end
       end,
     },
-  })
+  }, { idle = true })
 end
 
 local function tune_menu()
@@ -630,7 +792,22 @@ local function tune_menu()
         if x and x.tune then deckard.set_tune(s.group, s.sound, x.tune + by(steps, fine)) end
       end,
     },
-  })
+  }, { idle = true })
+end
+
+-- TEMPO: one slot, no header and no sub-label — the reference draws "120.00" and nothing else
+-- (`hil/jam-overlay-2026-11-16.md`, OSO_TEMPO). A static OSO: it never arms the idle timer, and
+-- the first ENCODER press starts the edit rather than the OSO opening in edit
+-- (`overlay-refs.md` §4: GRID, TEMPO, REC MODE, RANDOMIZER and PERFORM FX are the static types).
+local function tempo_menu()
+  open_menu("Tempo", {
+    {
+      name = "Tempo",
+      text = function(s) return string.format("%.2f", s.tempo) end,
+      turn = function(s, steps) deckard.tempo(clamp(s.tempo + steps * (shift() and 0.1 or 1), 20, 300)) end,
+    },
+  }, { static = true })
+  st.menu.editing = false
 end
 
 local function perform_menu()
@@ -639,10 +816,413 @@ local function perform_menu()
     return g and g.perform and g.perform.mode and g.perform.mode - 1 or 0
   end
   open_menu("PERFORM FX", {
-    list_item("Effect", PERFORM_MODES, mode_of, function(to) deckard.perform_mode(deckard.state().group, to + 1) end),
-  })
+    -- The slot is a hole while the group has no Perform FX (nil text): the OSO
+    -- page closes instead of showing a default. The status line then reads the
+    -- bare item name until the host's add lands in the next frame's view.
+    {
+      name = "Effect",
+      text = function(s)
+        local g = focused_group(s)
+        if not (g and g.perform) then return nil end
+        return PERFORM_MODES[mode_of(s) + 1]
+      end,
+      turn = function(s, steps)
+        local to = clamp(mode_of(s) + steps, 0, #PERFORM_MODES - 1)
+        if to ~= mode_of(s) then deckard.perform_mode(deckard.state().group, to + 1) end
+      end,
+    },
+  }, { static = true })
+end
+-- The Variation page (work-item 35): Maschine's thirteen settings in the page's order,
+-- five of them in Humanize, and the note range and chords left out while the pads are not
+-- in a keyboard layout. Static: the page stays until SHIFT + Group 5 again or another page.
+local VARIATION_MODES = { "Humanize", "Random", "Euclid" }
+-- As the app's Division list names them (`layout::channel::DIVISIONS`).
+local VARIATION_DIVISIONS = { "Grid", "1/4", "1/8", "1/16", "1/32", "1/8 T", "1/16 T", "1/4 Q", "1/8 Q", "1/16 Q", "Fit Bar" }
+local VARIATION_TAILS = { "Equal", "Gauss", "1/2 Gauss" }
+local VARIATION_DISTS = { "Equal", "Gauss", "1/2 Gauss", "Fixed" }
+
+local function variation_value(s, key)
+  return (s.variation or {})[key]
 end
 
+local function variation_note(pitch)
+  return NOTE_NAMES[pitch % 12 + 1] .. (math.floor(pitch / 12) - 2)
+end
+
+-- Whether `item` shows at all: Humanize keeps to the velocity band and the time shift,
+-- and pad mode (no keyboard layout) leaves out the note range and the chords.
+local function variation_hidden(s, item)
+  local v = s.variation or {}
+  if item.key == nil then return false end
+  -- Euclid shows its own settings and nothing else; the other modes hide them.
+  if (v.mode or 0) == 2 then
+    return item.key ~= "mode" and item.key ~= "euclid_steps" and item.key ~= "fills" and item.key ~= "rotate" and item.key ~= "division"
+  end
+  if item.key == "euclid_steps" or item.key == "fills" or item.key == "rotate" or item.key == "division" then
+    return true
+  end
+  if (v.mode or 0) == 0 then
+    return item.key ~= "mode" and item.key ~= "velocity_lo" and item.key ~= "velocity_hi" and item.key ~= "time_shift"
+  end
+  if not v.keyboard then
+    return item.key == "note_lo" or item.key == "note_hi" or item.key == "note_count"
+  end
+  return false
+end
+
+local function variation_menu()
+  local function step(key, lo, hi, by, fine)
+    return function(s, steps, shift_held)
+      local v = variation_value(s, key)
+      if v == nil then return end
+      deckard.variation(key, clamp(v + steps * ((shift_held and fine) or by), lo, hi))
+    end
+  end
+  local function pick(key, list)
+    return function(s, steps)
+      local v = variation_value(s, key) or 0
+      local to = clamp(v + steps, 0, #list - 1)
+      if to ~= v then deckard.variation(key, to) end
+    end
+  end
+  local function number(key, name, section, turn, fmt)
+    return {
+      key = key,
+      name = name,
+      section = section,
+      text = function(s)
+        local v = variation_value(s, key)
+        if v == nil then return "-" end
+        return fmt and fmt(v) or tostring(math.floor(v + 0.5))
+      end,
+      turn = turn,
+    }
+  end
+  local function choice(key, name, section, list)
+    return {
+      key = key,
+      name = name,
+      section = section,
+      text = function(s) return list[(variation_value(s, key) or 0) + 1] or "-" end,
+      turn = pick(key, list),
+    }
+  end
+  local function percent(v) return string.format("%d %%", math.floor(v + 0.5)) end
+  local items = {
+    {
+      key = "mode",
+      name = "Mode",
+      text = function(s) return VARIATION_MODES[(variation_value(s, "mode") or 0) + 1] or "-" end,
+      turn = function(s, steps)
+        local v = variation_value(s, "mode") or 0
+        local to = clamp(v + steps, 0, #VARIATION_MODES - 1)
+        if to ~= v then deckard.variation("mode", to) end
+      end,
+    },
+    -- Apply is the page's button, not a value: the reference draws it with no sub-label.
+    { key = nil, name = "Apply", text = function() return "Apply" end, sub = false,
+      press = function() deckard.apply_variation() end },
+    number("probability", "Probability", "PROBABILITY", step("probability", 10, 100, 10, 1), percent),
+    number("note_lo", "Note Lo", "NOTE RANGE", step("note_lo", 0, 127, 1, 1), variation_note),
+    number("note_hi", "Note Hi", "NOTE RANGE", step("note_hi", 0, 127, 1, 1), variation_note),
+    number("velocity_lo", "Velocity Lo", "VELOCITY RANGE", step("velocity_lo", 0, 127, 1, 1)),
+    number("velocity_hi", "Velocity Hi", "VELOCITY RANGE", step("velocity_hi", 0, 127, 1, 1)),
+    number("note_count", "Note Count", "CHORDS", step("note_count", 1, 6, 1, 1)),
+    number("steps", "Steps", "NOTE LENGTH", step("steps", 1, 6, 1, 1), function(v) return string.format("%.1f", v) end),
+    number("time_shift", "Step", "TIME SHIFT", step("time_shift", 0, 50, 5, 1), function(v) return "± " .. percent(v) end),
+    choice("dist_note_count", "Note Count", "DISTRIBUTIONS", VARIATION_DISTS),
+    choice("dist_notes", "Notes", "DISTRIBUTIONS", VARIATION_TAILS),
+    choice("dist_note_length", "Note Length", "DISTRIBUTIONS", VARIATION_DISTS),
+    -- DECKARD's own mode: the generator's Euclidean settings, which the reference's page
+    -- does not have (recorded in docs/maschine-jam.md's deviation table).
+    number("euclid_steps", "Steps", "EUCLID", step("euclid_steps", 1, 32, 1, 1)),
+    number("fills", "Fills", "EUCLID", step("fills", 1, 32, 1, 1)),
+    number("rotate", "Rotate", "EUCLID", step("rotate", 0, 31, 1, 1)),
+    choice("division", "Division", "EUCLID", VARIATION_DIVISIONS),
+  }
+  for _, item in ipairs(items) do
+    local text = item.text
+    item.text = function(s)
+      if variation_hidden(s, item) then return "-" end
+      return text(s)
+    end
+  end
+  open_menu("Variation", items, { static = true })
+end
+
+-- ---- the OSO page ---------------------------------------------------------------
+-- The focused page as structured slots for the viewer strip. One slot per setting:
+-- `{ label, value, sub, group }`, where `label` is the stable parameter key (e.g.
+-- `RootNote`), `value` its display text, `sub` the transcribed third-row sub-label
+-- (`nil` where the reference leaves the row blank), and `group` the spanning header
+-- (`nil` where the reference shows none). Unavailable settings are holes (`false` in
+-- `slots`, never a zero-length label), so focus stepping skips them and the KEYBOARD
+-- second page exists only while the layout is isomorphic. `page`/`pages` are the
+-- 1-based `n/N` counter (`pages` is 1 for a single-page type, so no counter shows).
+-- `focus` is the script's cursor on every page (0-based, holes counted) and `editing`
+-- whether the focused slot is being changed: the strip draws those and nothing else, so
+-- there is one cursor, never two.
+--
+-- The builders below assemble pages from the helpers above ("the OSO values"), the
+-- same functions the status menus read: one composer for the status line and the
+-- page. Pad layout is not hardcoded here: the four
+-- values come from the viewer's settings store via
+-- `deckard.state().settings.values` (`jam_keyboard_layout`, `jam_iso_layout`,
+-- `jam_iso_type`, `jam_iso_dir`), written through `deckard.setting` by the viewer.
+-- A missing key is a hole. Never NI's plist.
+
+-- (Value helpers live above, beside the menus: see "the OSO values".)
+-- A filled slot, or `false` (a hole) where `value` is unavailable.
+local function oso_slot(label, value, sub, group)
+  if value == nil or value == "" then return false end
+  return { label = label, value = value, sub = sub, group = group }
+end
+-- SCALE: one page of nine (five scale/chord plus four pad-layout).
+local function scale_oso_slots(s)
+  -- PAD LAYOUT detail past the mode is isomorphic-only: Standard leaves holes.
+  local iso = oso_is_isomorphic(s)
+  return {
+    oso_slot("RootNote", oso_root_value(s), "Root Note", "SCALE"),
+    oso_slot("ScaleBank", oso_bank_value(s), "Bank", "SCALE"),
+    oso_slot("Scale", oso_scale_type_value(s), "Type", "SCALE"),
+    oso_slot("ChordMode", oso_chord_mode_value(), "Mode", "CHORD"),
+    oso_slot("CurrentChordType", oso_chord_type_value(s), "Type", "CHORD"),
+    oso_slot("KeyboardLayout", oso_layout_value(s, "mode"), OSO_LAYOUT_SUB.mode, "PAD LAYOUT"),
+    oso_slot("IsomorphicKeyboardLayout", iso and oso_layout_value(s, "layout") or nil, OSO_LAYOUT_SUB.layout, "PAD LAYOUT"),
+    oso_slot("IsomorphicType", iso and oso_layout_value(s, "type") or nil, OSO_LAYOUT_SUB.type, "PAD LAYOUT"),
+    oso_slot("IsomorphicDirection", iso and oso_layout_value(s, "dir") or nil, OSO_LAYOUT_SUB.dir, "PAD LAYOUT"),
+  }
+end
+
+-- SCALE: the reference's two pages, eight then one. The cursor decides which page shows,
+-- as the ARP's does: the ninth slot is the layout's direction, which exists only while the
+-- keyboard layout is isomorphic, so page 2 exists only then. There is no page of its own
+-- for the keyboard view — the reference opens this OSO on an encoder touch, and nothing
+-- else draws a strip there.
+local SCALE_PAGE_ONE = 8
+
+local function scale_page_count(s)
+  return oso_is_isomorphic(s) and 2 or 1
+end
+
+local function tempo_oso_page(s)
+  local m = st.menu
+  return {
+    title = "Tempo",
+    page = 1,
+    pages = 1,
+    slots = { { value = string.format("%.2f", s.tempo) } },
+    focus = 0,
+    editing = m ~= nil and m.editing == true,
+  }
+end
+
+local function scale_oso_page(s)
+  local m = st.menu
+  local last = scale_page_count(s) == 2 and SCALE_PAGE_ONE + 1 or SCALE_PAGE_ONE
+  -- The cursor as it is, even on an unavailable item: the status line names the same one,
+  -- and the strip underlines nothing rather than a slot the encoder is not on.
+  local at = m and clamp(m.at or 1, 1, last) or 1
+  local n = at > SCALE_PAGE_ONE and 2 or 1
+  local start = n == 1 and 1 or SCALE_PAGE_ONE + 1
+  local all = scale_oso_slots(s)
+  local slots = {}
+  for i = start, start + (n == 1 and SCALE_PAGE_ONE or 1) - 1 do slots[#slots + 1] = all[i] end
+  local editing = m ~= nil and m.editing == true
+  return { title = "Scale", page = n, pages = scale_page_count(s), slots = slots, focus = at - start, editing = editing }
+end
+
+-- ARP: seventeen slots in three pages of 8 / 7 / 2 (the overlay inventory).
+-- Page 1 is MAIN plus RHYTHM plus OTHER, page 2 Hold plus SCALE plus CHORD plus
+-- PAD LAYOUT's first half, page 3 the layout's second half with no headers.
+local function arp_oso_all(s)
+  local iso = oso_is_isomorphic(s)
+  return {
+    oso_slot("ArpType", oso_repeat_text(s, "type"), "Type", "MAIN"),
+    oso_slot("ArpRate", oso_repeat_text(s, "rate"), "Rate", "RHYTHM"),
+    oso_slot("ArpUnit", oso_repeat_text(s, "rate_unit"), "Unit", "RHYTHM"),
+    oso_slot("ArpSequence", oso_repeat_text(s, "sequence"), "Sequence", "RHYTHM"),
+    oso_slot("ArpOctaves", oso_repeat_text(s, "octaves"), "Octaves", "RHYTHM"),
+    oso_slot("ArpDynamic", oso_repeat_text(s, "dynamic"), "Dynamic", "RHYTHM"),
+    oso_slot("ArpGate", oso_repeat_text(s, "gate"), "Gate", "RHYTHM"),
+    oso_slot("ArpLock", oso_repeat_switch(s, "locked"), "Lock", "OTHER"),
+    oso_slot("ArpHold", oso_repeat_switch(s, "hold"), "Hold", nil),
+    oso_slot("RootNote", oso_root_value(s), "Root Note", "SCALE"),
+    oso_slot("ScaleBank", oso_bank_value(s), "Bank", "SCALE"),
+    oso_slot("Scale", oso_scale_type_value(s), "Type", "SCALE"),
+    oso_slot("ChordMode", oso_chord_mode_value(), "Mode", "CHORD"),
+    oso_slot("KeyboardLayout", oso_layout_value(s, "mode"), OSO_LAYOUT_SUB.mode, "PAD LAYOUT"),
+    oso_slot("IsomorphicKeyboardLayout", iso and oso_layout_value(s, "layout") or nil, OSO_LAYOUT_SUB.layout, "PAD LAYOUT"),
+    oso_slot("IsomorphicType", iso and oso_layout_value(s, "type") or nil, OSO_LAYOUT_SUB.type, nil),
+    oso_slot("IsomorphicDirection", iso and oso_layout_value(s, "dir") or nil, OSO_LAYOUT_SUB.dir, nil),
+  }
+end
+
+local ARP_PAGE_SIZES = { 8, 7, 2 }
+
+local function arp_oso_page(s, n, at)
+  local all = arp_oso_all(s)
+  local start = 1
+  for i = 1, n - 1 do start = start + ARP_PAGE_SIZES[i] end
+  local slots = {}
+  for i = start, start + ARP_PAGE_SIZES[n] - 1 do slots[#slots + 1] = all[i] end
+  local title = st.arp and "Arpeggiator" or "Note Repeat"
+  -- The script's cursor within this page (`at` is 1-based over the flat seventeen),
+  -- 0-based here, and whether it is being changed.
+  local m = st.menu
+  local focus = clamp(at or start, start, start + ARP_PAGE_SIZES[n] - 1) - start
+  local editing = m ~= nil and m.editing == true
+  return { title = title, page = n, pages = 3, slots = slots, focus = focus, editing = editing }
+end
+
+-- Which ARP page holds global slot `at` (1-based into the flat seventeen).
+local function arp_page_of(at)
+  local start = 1
+  for n, size in ipairs(ARP_PAGE_SIZES) do
+    if at >= start and at < start + size then return n end
+    start = start + size
+  end
+  return 3
+end
+
+-- A generic menu as one page (title kept as the scripts name it for the status bar).
+local function generic_oso_page(s)
+  local m = st.menu
+  local slots = {}
+  for _, item in ipairs(m.items) do
+    local value = item.text and item.text(s) or ""
+    if value == nil or value == "" or value == "-" then
+      slots[#slots + 1] = false
+    else
+      slots[#slots + 1] = { label = item.name, value = value, sub = item.name, group = m.title }
+    end
+  end
+  -- Items and slots line up one to one (holes included), so the menu's `at` is the
+  -- page's cursor, 0-based here; the bracket follows the menu's editing flag.
+  local at = clamp(m.at or 1, 1, math.max(#m.items, 1))
+  return { title = m.title, page = 1, pages = 1, slots = slots, focus = at - 1, editing = m.editing == true }
+end
+
+-- The piano roll's Scale page: the three settings the piano roll edits, under one SCALE header.
+-- One page, no counter, no chord or pad-layout slots (`hil/strip-window-2026-11-21.md`).
+-- The Variation page's pages: Humanize is one (five settings), Random is two in a
+-- keyboard layout (eight and five) and one in pad mode, which drops the note range and
+-- the chords (the MK3 manual's pad layout: probability, velocity, time shift, length).
+local function variation_sizes(s)
+  local v = s.variation or {}
+  if (v.mode or 0) == 0 then return { 5 } end
+  if (v.mode or 0) == 2 then return { 6 } end
+  if v.keyboard then return { 8, 5 } end
+  return { 8 }
+end
+
+local function variation_oso_page(s)
+  local m = st.menu
+  local shown = {}
+  for i = 1, #m.items do
+    if menu_available(m.items[i], s) then shown[#shown + 1] = m.items[i] end
+  end
+  local sizes = variation_sizes(s)
+  local pages = #sizes
+  -- The cursor's place among the settings shown (the menu counts every item, holes
+  -- included), then which page that place falls on.
+  local at = 0
+  local seen = 0
+  for i = 1, #m.items do
+    if menu_available(m.items[i], s) then
+      seen = seen + 1
+      if i >= (m.at or 1) then at = seen break end
+    end
+  end
+  at = math.max(at, seen, 1)
+  local n = 1
+  local start = 1
+  for i = 1, pages do
+    if at >= start and at < start + sizes[i] then n = i end
+    start = start + sizes[i]
+  end
+  start = 1
+  for i = 1, n - 1 do start = start + sizes[i] end
+  local slots = {}
+  for i = start, start + sizes[n] - 1 do
+    local item = shown[i]
+    if item == nil then slots[#slots + 1] = false else
+      -- (`item.sub == false`: a button, which the reference draws with no sub-label.)
+      local sub = item.name
+      if item.sub == false then sub = nil end
+      slots[#slots + 1] = {
+        label = item.name,
+        value = item.text(s),
+        sub = sub,
+        group = item.section,
+      }
+    end
+  end
+  -- The bare name: the host draws the `n/N` counter itself (`jam_strip::counter`), as it does
+  -- for the arpeggiator's three pages. Putting it in the title doubles it.
+  local title = (s.variation or {}).mode == 2 and "Euclid" or "Variation"
+  return {
+    title = title,
+    page = n,
+    pages = pages,
+    slots = slots,
+    focus = clamp(at - start, 0, sizes[n] - 1),
+    editing = m.editing == true,
+  }
+end
+
+local function step_scale_page(s)
+  local m = st.menu
+  local slots = {}
+  for _, item in ipairs(m.items) do
+    local value = item.text and item.text(s) or ""
+    if value == nil or value == "" or value == "-" then
+      slots[#slots + 1] = false
+    else
+      slots[#slots + 1] = { label = item.name, value = value, sub = item.name, group = "SCALE" }
+    end
+  end
+  local at = clamp(m.at or 1, 1, math.max(#m.items, 1))
+  return { title = "Scale", page = 1, pages = 1, slots = slots, focus = at - 1, editing = m.editing == true }
+end
+
+-- The focused page: the menu's page while a menu is open, else the keyboard view's.
+-- Browsing shows the library panel, which has no strip page. Every page carries the
+-- script's cursor (`focus`, 0-based, holes counted) and its editing flag: the script
+-- owns the ENCODER press and its turns on menus and tabs alike, so the strip draws one
+-- cursor and there is never a second one to drift from it.
+local function build_oso(s)
+  if st.browser then return nil end
+  if st.menu then
+    local t = st.menu.title
+    local page
+    if t == "Tempo" then page = tempo_oso_page(s)
+    elseif t == "Variation" then page = variation_oso_page(s)
+    elseif t == "SCALE" then page = st.menu.limited and step_scale_page(s) or scale_oso_page(s)
+    elseif t == "ARP" or t == "NOTE REPEAT" then
+      if not st.arp then page = generic_oso_page(s)
+      else
+        local at = clamp(st.menu.at, 1, 17)
+        page = arp_oso_page(s, arp_page_of(at), at)
+      end
+    else page = generic_oso_page(s) end
+    return page
+  end
+  return nil
+end
+
+-- Publish the focused page so the host can read it without Lua, mirroring `leds`.
+-- An empty page clears a stale one (closed menu, left keyboard view).
+local function publish_oso(s)
+  if deckard.oso == nil then return end
+  local page = build_oso(s)
+  if page == nil then
+    deckard.oso({ title = "", page = 1, pages = 1, slots = {} })
+    return
+  end
+  deckard.oso(page)
+end
 -- ---- the library ----------------------------------------------------------------------
 
 local function browser_line()
@@ -1156,10 +1736,18 @@ local function group_button(s, i)
     if i == 1 then
       toggle_follow(s)
     elseif i == 5 then
-      -- VARIATION: the focused sound's Groove ▸ Variation, on the strips.
+      -- VARIATION: the focused sound's Groove ▸ Variation, on the strips, and its
+      -- settings on the OSO (work-item 35: static, as the reference has it). The second
+      -- press closes it, as GRID's does. (The menu's title stays `Variation` whichever
+      -- mode it shows, so Euclid's page closes here too.)
+      if st.menu and st.menu.title == "Variation" then
+        close_menu()
+        return
+      end
       st.strip = "control"
       deckard.groove_page(2)
-      say("Variation: on the strips")
+      variation_menu()
+      say("Variation")
     elseif i == 7 then
       deckard.file("save")
     end
@@ -1228,7 +1816,6 @@ end
 
 local function meter_button(name)
   close_menu()
-  st.tempo = false
   if name == "MST" then
     st.meter = "mst"
     if st.strip == "control" or st.strip == "macro" or mode_held() then deckard.level(1) end
@@ -1267,7 +1854,14 @@ end
 local function step_button(down)
   if down then
     if shift() then
-      if st.view == "roll" then set_view(st.back) else set_view("roll") end
+      if st.view == "roll" then
+        set_view(st.back)
+      else
+        set_view("roll")
+        -- The piano roll's page, on the switch, on the idle timer, and its own limited page —
+        -- the scale's three settings, not the keyboard view's (the rig, 2026-11-21).
+        scale_menu({ idle = true, limited = true })
+      end
       st.step_entered = true
       return
     end
@@ -1345,6 +1939,9 @@ function M.button(name, down)
     else
       set_strip("notes")
       set_view("notes")
+      -- Its page, on the press: `Scale`, the same one the keyboard view opens (the rig,
+      -- 2026-11-21 — it showed nothing until the encoder was touched).
+      scale_menu({ idle = true })
     end
     return
   end
@@ -1367,9 +1964,24 @@ function M.button(name, down)
       end
     end
     close_menu()
+    -- The manual's SONG switches the app's two arrangement views: "Use the SONG button to switch
+    -- between Ideas view and Song view" (MASCHINE JAM Manual, the top view's (1)); the matrix below
+    -- is the Project view in either (its (3)). Ask the app, read from the app — never from a copy of
+    -- it — so a view the app (or an MK3) switched still turns over on the next press.
+    deckard.song_view(not s.song_view)
     set_view("song")
   elseif name == "PAD_MODE" then
-    set_view(shift() and "keyboard" or "pad")
+    if shift() then
+      set_view("keyboard")
+      -- The rig, 2026-11-21: switching to the keyboard view shows the keyboard's scales (the
+      -- Scale OSO), not an empty strip until the encoder is touched. This supersedes the
+      -- 2026-11-20 finding in `hil/strip-repoint-2026-11-20.md` row 2, which had it the other
+      -- way round; the page is the Scale OSO, never a page of the viewer's own.
+      scale_menu({ idle = true })
+    else
+      set_view("pad")
+      close_menu()
+    end
   elseif name == "NOTE_REPEAT" then
     if shift() then
       st.arp = not st.arp
@@ -1382,6 +1994,9 @@ function M.button(name, down)
     end
     deckard.note_repeat("on", st.repeating)
     say((st.arp and "Arp: " or "Note Repeat: ") .. (st.repeating and "On" or "Off"))
+    -- The page on the button (the rig, 2026-11-21): the Arpeggiator while the arp is on, Note
+    -- Repeat otherwise; off, it goes.
+    if st.repeating then repeat_menu({ idle = true }) else close_menu() end
   elseif name == "UP" or name == "DOWN" or name == "LEFT" or name == "RIGHT" then
     dpad(s, name)
   elseif name == "MST" or name == "GRP" or name == "IN1" or name == "CUE" then
@@ -1392,6 +2007,9 @@ function M.button(name, down)
     if st.browser then
       browser_press()
       browser_line()
+    elseif st.menu and st.menu.title == "PERFORM FX" then
+      -- The press closes the Perform FX page rather than editing it (the rig, 2026-11-21).
+      close_menu()
     elseif st.menu then
       menu_press()
     end
@@ -1402,8 +2020,14 @@ function M.button(name, down)
       repeat_menu({ idle = true })
     elseif st.view == "lock" then
       lock_menu({ idle = true })
-    elseif st.view == "keyboard" or st.view == "roll" or st.view == "notes" then
+    elseif st.view == "keyboard" or st.view == "notes" then
       scale_menu({ idle = true })
+    elseif st.view == "roll" then
+      scale_menu({ idle = true, limited = true })
+    elseif st.strip == "swing" then
+      swing_menu({ idle = true })
+    elseif st.strip == "tune" then
+      tune_menu({ idle = true })
     end
   elseif name == "PERFORM" then
     set_strip("perform")
@@ -1414,7 +2038,14 @@ function M.button(name, down)
     end
   elseif name == "LOCK" then
     if shift() then
-      if st.view == "lock" then set_view(st.back) else set_view("lock") end
+      if st.view == "lock" then
+        set_view(st.back)
+      else
+        set_view("lock")
+        -- The lock view's page opens on the switch, on the idle timer, as the keyboard's and the
+        -- piano roll's do (the rig's rule, 2026-11-21): every view that has a page shows it.
+        lock_menu({ idle = true })
+      end
     elseif st.view == "lock" then
       if s.lock.focus then deckard.lock("update") end
     else
@@ -1442,16 +2073,18 @@ function M.button(name, down)
   elseif name == "TEMPO" then
     if shift() then
       tap()
-    else
+    elseif st.menu and st.menu.title == "Tempo" then
       close_menu()
-      st.tempo = not st.tempo
-      if st.tempo then say(string.format("Tempo %.1f", s.tempo)) end
+    else
+      tempo_menu()
     end
   elseif name == "GRID" then
-    if st.menu and (st.menu.title == "GRID" or st.menu.title == "REC MODE") then
-      close_menu()
-    elseif shift() then
+    -- Shift is asked first: with GRID showing, SHIFT + GRID enters REC MODE (the GRID light stays
+    -- on, as it does on the machine) instead of closing the grid.
+    if shift() then
       rec_mode_menu()
+    elseif st.menu and (st.menu.title == "GRID" or st.menu.title == "REC MODE") then
+      close_menu()
     else
       grid_menu()
     end
@@ -1469,12 +2102,6 @@ function M.encoder(steps)
     return
   end
   local fine = shift()
-  if st.tempo then
-    local to = math.floor((s.tempo + steps * (fine and 0.1 or 1)) * 10 + 0.5) / 10
-    deckard.tempo(to)
-    say(string.format("Tempo %.1f", to))
-    return
-  end
   local by = steps * (fine and 0.05 or 0.5)
   if st.meter == "mst" then
     local to = math.max(s.volume_db, -120) + by
@@ -1610,6 +2237,12 @@ function M.tick()
     st.group_bank = (s.group - 1) // 8
   end
   follow_steps(s)
+  -- A static OSO belongs to the page it was opened on: a controller page change drops it, as the
+  -- reference drops every static OSO unless SWING/TUNE is held. A non-static one is the idle
+  -- timer's business.
+  if st.menu and st.menu.static and s.surface_page ~= st.menu.page then
+    close_menu()
+  end
   if st.menu then
     if st.menu.idle and not held("ENCODER_TOUCH") and deckard.now() - st.menu.used > MENU_IDLE then
       close_menu()
@@ -1619,6 +2252,7 @@ function M.tick()
   elseif st.browser then
     browser_line()
   end
+  publish_oso(s)
   if st.dup_flash and deckard.now() >= st.dup_flash.until_at then st.dup_flash = nil end
   -- Touching a Control strip with AUTO held writes where it is, moving or not.
   if s.auto_write and s.playing and (st.strip == "control" or st.strip == "macro") then
@@ -1676,7 +2310,9 @@ local function light_project(s)
       elseif group.scene_pattern == p then
         deckard.pad_led(col, row, pattern.palette, not group.muted)
       else
-        deckard.pad_led(col, row, pattern.palette, "faint")
+        -- Half-lit, not faint: the focused scene doesn't play this one, and an empty place is
+        -- already "off" above (manual 7.2; the scenes and groups below read the same way).
+        deckard.pad_led(col, row, pattern.palette, "dim")
       end
     end
   end
@@ -1970,7 +2606,9 @@ end
 
 local function light_buttons(s)
   local sh = shift()
-  deckard.led("SONG", lit(st.view == "song"))
+  -- The app's view, not the script's: the press toggles the app, so `st.view` is "song" whichever
+  -- way it went, and a light reading that would claim Song view while the app shows Ideas.
+  deckard.led("SONG", lit(s.song_view))
   deckard.led("STEP", lit(st.view == "step" or st.view == "roll"))
   deckard.led("PAD_MODE", lit(st.view == "pad" or st.view == "keyboard"))
   deckard.led("CLEAR", lit(active("CLEAR")))
@@ -1988,7 +2626,7 @@ local function light_buttons(s)
   deckard.led("SHIFT", lit(sh))
   deckard.led("PLAY", lit(s.playing))
   deckard.led("REC", lit(s.recording))
-  deckard.led("TEMPO", lit(st.tempo))
+  deckard.led("TEMPO", lit(st.menu ~= nil and st.menu.title == "Tempo"))
   deckard.led("GRID", lit(st.menu ~= nil and (st.menu.title == "GRID" or st.menu.title == "REC MODE")))
   deckard.led("SOLO", lit(active("SOLO") or st.view == "length"))
   deckard.led("MUTE", lit(active("MUTE")))

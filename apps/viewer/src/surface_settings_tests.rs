@@ -15,6 +15,29 @@ fn new_pattern(app: &mut crate::App) {
     crate::layout::apply_acts(app, vec![new]);
 }
 
+/// The strip's PAD LAYOUT values reach the scripts with nothing asking for them: no
+/// Settings page, no script request, no Jam attached. Three triggers used to gate that
+/// push, and on a cold boot none of them fired, so the map was empty and the Mode slot
+/// drew as a hole.
+#[test]
+fn the_scripts_read_the_settings_with_nothing_asking_for_them() {
+    let mut app = app();
+    assert_ne!(app.surface.page(), "settings", "no Settings page open");
+    assert!(app.jam_device.is_none(), "and no Jam attached");
+    // The frame's own refresh, before any View is built.
+    app.refresh_surface_settings();
+    assert_eq!(app.surface_settings.values.get("jam_iso_dir").map(String::as_str), Some("Vertical"), "filled before anything asked");
+    // A Jam menu steps the setting from its own cursor: the next read is the new value,
+    // with nothing to push it there.
+    app.surface_act(A::Setting("jam_iso_dir", 0, 1));
+    assert_eq!(app.settings.jam_iso_dir, 1, "the setting itself moved");
+    assert_eq!(
+        app.surface_settings.values.get("jam_iso_dir").map(String::as_str),
+        Some("Horizontal"),
+        "so the strip cannot go on showing the old value"
+    );
+}
+
 #[test]
 fn the_general_defaults_are_settings() {
     let mut app = app();

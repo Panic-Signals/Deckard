@@ -625,7 +625,7 @@ impl Document {
         {
             ev.fields.push((AUDIO_OFFSET.into(), v));
         }
-        items.retain(|it| !self.event_obj(&it.event, &paths).is_some_and(|e| e.type_name == AUDIO_EVENT));
+        items.retain(|it| self.event_obj(&it.event, &paths).is_none_or(|e| e.type_name != AUDIO_EVENT));
         if before == items.len() && item.is_none() {
             return Ok(Vec::new());
         }
