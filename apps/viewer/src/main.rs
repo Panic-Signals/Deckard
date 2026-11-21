@@ -9039,12 +9039,14 @@ impl App {
         }
         // The tab: whichever side changed it since they last agreed (at first, the app's).
         let mut tab = None;
+        // (Maschine's scripts have no LAYERS: they show ZONE for it.)
+        let app_tab = self.sampling.tab.min(3);
         if self.hw_sampling_tab.is_some_and(|t| t != hw_tab) {
             self.sampling_act(layout::sampling::SamplingAct::Tab(hw_tab));
-        } else if self.sampling.tab != hw_tab {
-            tab = Some(self.sampling.tab);
+        } else if app_tab != hw_tab {
+            tab = Some(app_tab);
         }
-        self.hw_sampling_tab = Some(self.sampling.tab);
+        self.hw_sampling_tab = Some(self.sampling.tab.min(3));
         let at = (self.group, self.sound, self.zone);
         let pages = self.doc.as_ref().map(|d| {
             let d = d.borrow();
@@ -9070,7 +9072,7 @@ impl App {
         st.stems = self.stems.as_ref().map(|j| deckard_lua_host::state::StemsRun { focused: j.source == at, progress: j.progress() });
         if let Some((k, sample)) = pages {
             st.sample = sample;
-            for (t, pages) in k.tabs.into_iter().enumerate() {
+            for (t, pages) in k.tabs.into_iter().take(4).enumerate() {
                 st.sampling_page[t] = st.sampling_page[t].min(pages.len().saturating_sub(1));
                 st.sampling_pages[t] = pages;
             }
@@ -9130,6 +9132,41 @@ impl App {
             Some(Apply::LaneGain(k)) => {
                 let gain = if value <= -60.0 { 0.0 } else { 10f64.powf(value.min(6.0) / 20.0) };
                 SamplingAct::Lane(k, layout::sampling::LaneAct::Gain(gain))
+            }
+            Some(Apply::Layer(k)) => {
+                use layout::sampling::LayerAct as L;
+                use sampling_hw::{LayerKnob as K, time_at};
+                let lane = self.zone;
+                SamplingAct::Layer(
+                    lane,
+                    match k {
+                        K::Pan => L::Pan(value),
+                        K::Tune => L::Tune(value),
+                        K::Root => L::Root(value.round() as i64),
+                        K::Attack => L::Attack(time_at(at)),
+                        K::Decay => L::Decay(time_at(at)),
+                        K::Sustain => L::Sustain(value),
+                        K::Release => L::Release(time_at(at)),
+                        K::Window(point) => L::Window(point, value),
+                    },
+                )
+            }
+            Some(Apply::Morph(k)) => {
+                use deckard_model::layers::{Fade, Shape};
+                use layout::sampling::MorphAct as M;
+                use sampling_hw::MorphKnob as K;
+                SamplingAct::Morph(match k {
+                    K::On => M::On(value >= 0.5),
+                    K::Position => M::Position(value),
+                    K::Rate => match sampling_hw::rate_at(at) {
+                        (true, bars) => M::Bars(bars),
+                        (false, seconds) => M::Seconds(seconds),
+                    },
+                    K::Shape => M::Shape(if value >= 0.5 { Shape::Back } else { Shape::Round }),
+                    K::Depth => M::Depth(value),
+                    K::Reset => M::Reset(value >= 0.5),
+                    K::Fade => M::Fade(if value >= 0.5 { Fade::Power } else { Fade::Linear }),
+                })
             }
             Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
             Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
@@ -9262,6 +9299,12 @@ impl App {
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::FocusLayer(k) => S::Layer(k, layout::sampling::LayerAct::Focus),
+            C::LayerMute(k) => S::Layer(k, layout::sampling::LayerAct::Mute),
+            C::LayerSolo(k) => S::Layer(k, layout::sampling::LayerAct::Solo),
+            C::RemoveLayer(k) => S::Layer(k, layout::sampling::LayerAct::Remove),
+            C::LayerLevel(v) => S::Layer(self.zone, layout::sampling::LayerAct::Level(v)),
+            C::SpreadLayers => S::Morph(layout::sampling::MorphAct::Spread),
             C::LaneMute(k) => S::Lane(k, layout::sampling::LaneAct::Mute),
             C::LaneSolo(k) => S::Lane(k, layout::sampling::LaneAct::Solo),
             C::Warp(k) => {

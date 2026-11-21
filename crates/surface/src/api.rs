@@ -552,8 +552,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             "sampling_tab",
             lua.create_function(move |_, tab: usize| {
                 let tab = index(tab, "a tab")?;
-                if tab > 3 {
-                    return Err(mlua::Error::runtime("sampling_tab: 1 RECORD … 4 ZONE"));
+                if tab > 4 {
+                    return Err(mlua::Error::runtime("sampling_tab: 1 RECORD … 4 ZONE, 5 LAYERS"));
                 }
                 act(&sh, Action::SamplingTab(tab));
                 Ok(())
@@ -616,6 +616,12 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "warp_quantize" => C::Warp(1),
                     "warp_clear" => C::Warp(2),
                     "convert" => C::Convert,
+                    "focus_layer" => C::FocusLayer(n(a, "a layer")?),
+                    "layer_mute" => C::LayerMute(n(a, "a layer")?),
+                    "layer_solo" => C::LayerSolo(n(a, "a layer")?),
+                    "remove_layer" => C::RemoveLayer(n(a, "a layer")?),
+                    "layer_level" => C::LayerLevel(a.unwrap_or(0.0).clamp(0.0, 1.0)),
+                    "spread_layers" => C::SpreadLayers,
                     _ => return Err(mlua::Error::runtime(format!("no sampling call \"{what}\""))),
                 };
                 act(&sh, Action::SamplingCall(call));
@@ -643,10 +649,13 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             lua.create_function(move |lua, which: String| {
                 let v = &sh.borrow().view;
                 let Some(s) = &v.sampling.sample else { return lua.create_table() };
-                // ("lane<n>": the nth stem lane shown, over the frames shown.)
-                let lane = which.strip_prefix("lane").and_then(|n| n.parse::<usize>().ok()).and_then(|n| s.lanes.get(n.wrapping_sub(1)));
-                let peaks = match lane {
-                    Some(l) => &l.detail,
+                // ("lane<n>": the nth stem lane shown, over the frames shown; "layer<n>":
+                // the nth layer's whole sample.)
+                let nth = |prefix: &str| which.strip_prefix(prefix).and_then(|n| n.parse::<usize>().ok()).map(|n| n.wrapping_sub(1));
+                let lane = nth("lane").and_then(|n| s.lanes.get(n)).map(|l| &l.detail);
+                let layer = nth("layer").and_then(|n| s.layers.get(n)).map(|l| &l.detail);
+                let peaks = match lane.or(layer) {
+                    Some(detail) => detail,
                     None if which == "detail" => &s.detail,
                     None => &s.overview,
                 };
@@ -1772,6 +1781,29 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
             lanes.set(i + 1, lt)?;
         }
         st.set("lanes", lanes)?;
+        let layers = lua.create_table()?;
+        for (i, l) in s.layers.iter().enumerate() {
+            let lt = lua.create_table()?;
+            lt.set("name", l.name.as_str())?;
+            lt.set("mute", l.mute)?;
+            lt.set("solo", l.solo)?;
+            lt.set("heard", l.heard)?;
+            lt.set("gain", l.gain)?;
+            lt.set("level", l.level.as_str())?;
+            lt.set("window", lua.create_sequence_from(l.window)?)?;
+            lt.set("envelope", lua.create_sequence_from(l.envelope)?)?;
+            layers.set(i + 1, lt)?;
+        }
+        st.set("layers", layers)?;
+        st.set("layer", s.layer + 1)?;
+        if let Some(m) = s.morph {
+            let mt = lua.create_table()?;
+            mt.set("on", m.on)?;
+            mt.set("position", m.position)?;
+            mt.set("round", m.round)?;
+            mt.set("power", m.power)?;
+            st.set("morph", mt)?;
+        }
         t.set("sample", st)?;
     }
     let r = lua.create_table()?;

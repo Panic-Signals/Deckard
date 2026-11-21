@@ -74,14 +74,174 @@ pub enum Apply {
     /// QUANTIZE's grid (`beat::WARP_GRIDS`) and strength (0..1).
     WarpGrid,
     WarpStrength,
+    /// A setting of the focused layer; of the sound's morph.
+    Layer(LayerKnob),
+    Morph(MorphKnob),
     /// Shown, not set.
     None,
+}
+
+/// The focused layer's settings on LAYERS' knobs. Its envelope's times are steps of
+/// [`time_at`]; a window point is A, B, C or D (0 to 3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LayerKnob {
+    Pan,
+    Tune,
+    Root,
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+    Window(usize),
+}
+
+/// The morph's settings on LAYERS' knobs. RATE is a step of [`rate_at`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MorphKnob {
+    On,
+    Position,
+    Rate,
+    Shape,
+    Depth,
+    Reset,
+    Fade,
+}
+
+/// The envelope times a knob steps through: none, then from a millisecond a tenth
+/// longer each step, to the longest.
+const TIME_STEPS: usize = 110;
+
+/// The time at step `i` (seconds).
+pub fn time_at(i: usize) -> f64 {
+    if i == 0 { 0.0 } else { (0.001 * 1.1f64.powi(i as i32 - 1)).min(deckard_model::layers::TIME_MAX) }
+}
+
+/// The step nearest `seconds`.
+pub fn time_step(seconds: f64) -> usize {
+    if seconds < 0.0005 {
+        return 0;
+    }
+    (((seconds / 0.001).ln() / 1.1f64.ln()).round().max(0.0) as usize + 1).min(TIME_STEPS)
+}
+
+/// How many free rates follow the synced ones on the RATE knob.
+const FREE_STEPS: usize = 98;
+
+/// The morph's rate at step `i` of its knob: a synced cycle in bars (`true`), then free
+/// seconds, a tenth longer each step.
+pub fn rate_at(i: usize) -> (bool, f64) {
+    use deckard_model::layers::{FREE, SYNCED};
+    match SYNCED.get(i) {
+        Some(&bars) => (true, bars),
+        None => (false, (FREE.0 * 1.1f64.powi((i - SYNCED.len()) as i32)).min(FREE.1)),
+    }
+}
+
+/// The step of the RATE knob nearest the morph's rate.
+pub fn rate_step(m: &deckard_model::layers::Morph) -> usize {
+    use deckard_model::layers::{FREE, SYNCED};
+    if m.sync {
+        return SYNCED.iter().position(|b| *b >= m.bars).unwrap_or(SYNCED.len() - 1);
+    }
+    SYNCED.len() + (((m.seconds.max(FREE.0) / FREE.0).ln() / 1.1f64.ln()).round() as usize).min(FREE_STEPS - 1)
+}
+
+/// LAYERS' pages for sound (`g`, `s`), its layer `focus` focused: LAYER, ENVELOPE, MORPH
+/// and WINDOW. None for a sound without layers.
+fn layer_pages(out: &mut Pages, p: &Project, (g, s): (usize, usize), focus: usize) {
+    use crate::layout::sampling::layers::{rate_text, time_text};
+    use deckard_model::layers::{Fade, Shape};
+    let layers = crate::layers::layers_in(p, g, s);
+    let Some(&(zi, l)) = layers.get(focus.min(layers.len().saturating_sub(1))) else { return };
+    let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return };
+    let Some(z) = snd.sampler.as_ref().and_then(|x| x.zones.get(zi)) else { return };
+    let m = snd.new_sampler.map(|n| n.morph).unwrap_or_default();
+    let names = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let fine = 1.0 / 200.0;
+    page(
+        out,
+        4,
+        "LAYER",
+        vec![
+            (knob("Layer.Pan", "PAN", crate::layout::pan(z.pan), z.pan, (-1.0, 1.0), 0.01, fine), Apply::Layer(LayerKnob::Pan)),
+            (knob("Layer.Tune", "TUNE", format!("{:+.2}", z.tune), z.tune, (-36.0, 36.0), 0.01, fine), Apply::Layer(LayerKnob::Tune)),
+            (
+                knob("Layer.Root", "ROOT", crate::keys::note_name(z.root_key), z.root_key as f64, (0.0, 127.0), 1.0, TURN),
+                Apply::Layer(LayerKnob::Root),
+            ),
+        ],
+    );
+    let time = |key: &str, name: &str, v: f64, which: LayerKnob| {
+        (knob(key, name, time_text(v), time_step(v) as f64, (0.0, TIME_STEPS as f64), 1.0, fine * 2.0), Apply::Layer(which))
+    };
+    page(
+        out,
+        4,
+        "ENVELOPE",
+        vec![
+            time("Layer.Attack", "ATTACK", l.attack, LayerKnob::Attack),
+            time("Layer.Decay", "DECAY", l.decay, LayerKnob::Decay),
+            (
+                knob("Layer.Sustain", "SUSTAIN", format!("{:.0} %", l.sustain * 100.0), l.sustain, (0.0, 1.0), 0.01, fine),
+                Apply::Layer(LayerKnob::Sustain),
+            ),
+            time("Layer.Release", "RELEASE", l.release, LayerKnob::Release),
+        ],
+    );
+    let round = m.shape == Shape::Round;
+    // (Round always goes all the way: DEPTH is There and back's, and doesn't turn.)
+    let depth = if round {
+        knob("Morph.Depth", "DEPTH", "-".into(), m.depth, (m.depth, m.depth), 0.01, fine)
+    } else {
+        knob("Morph.Depth", "DEPTH", format!("{:.0} %", m.depth * 100.0), m.depth, (0.0, 1.0), 0.01, fine)
+    };
+    let last = (deckard_model::layers::SYNCED.len() + FREE_STEPS - 1) as f64;
+    page(
+        out,
+        4,
+        "MORPH",
+        vec![
+            (on_off("Morph.On", "MORPH", m.on), Apply::Morph(MorphKnob::On)),
+            (
+                knob("Morph.Position", "POSITION", format!("{:.0} %", m.position * 100.0), m.position, (0.0, 1.0), 0.005, fine),
+                Apply::Morph(MorphKnob::Position),
+            ),
+            (knob("Morph.Rate", "RATE", rate_text(&m), rate_step(&m) as f64, (0.0, last), 1.0, fine * 4.0), Apply::Morph(MorphKnob::Rate)),
+            (choice("Morph.Shape", "SHAPE", &names(&["Round", "There and back"]), usize::from(!round)), Apply::Morph(MorphKnob::Shape)),
+            (depth, Apply::Morph(MorphKnob::Depth)),
+            (on_off("Morph.Reset", "RESET", m.reset), Apply::Morph(MorphKnob::Reset)),
+        ],
+    );
+    // (Round: a window may reach a turn past either end.)
+    let range = if round { (-1.0, 2.0) } else { (0.0, 1.0) };
+    let point = |k: usize| {
+        let name = ["A", "B", "C", "D"][k];
+        (
+            knob(&format!("Window.{name}"), name, format!("{:.0} %", l.window[k] * 100.0), l.window[k], range, 0.005, fine),
+            Apply::Layer(LayerKnob::Window(k)),
+        )
+    };
+    page(
+        out,
+        4,
+        "WINDOW",
+        vec![
+            point(0),
+            point(1),
+            point(2),
+            point(3),
+            (
+                choice("Window.Fade", "FADE", &names(&["Linear", "Equal power"]), usize::from(m.fade == Fade::Power)),
+                Apply::Morph(MorphKnob::Fade),
+            ),
+        ],
+    );
 }
 
 /// Every tab's pages and the SLICE tab's knobs, with what each sets.
 #[derive(Default)]
 pub struct Pages {
-    pub tabs: [Vec<KnobPage>; 4],
+    pub tabs: [Vec<KnobPage>; 5],
     pub slice: Vec<SamplingKnob>,
     pub apply: std::collections::HashMap<String, Apply>,
 }
@@ -199,6 +359,45 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
             })
             .collect()
     });
+    // Its layers (a layered sound's), their waveforms as LAYERS has them loaded.
+    let found = crate::layers::layers_in(p, g, s);
+    let heard = deckard_model::layers::audible(&found.iter().map(|(_, l)| *l).collect::<Vec<_>>());
+    let all = p.groups[g].sounds[s].sampler.as_ref().map(|x| x.zones.as_slice()).unwrap_or_default();
+    let layers: Vec<deckard_model::sampling_view::LayerView> = found
+        .iter()
+        .enumerate()
+        .filter_map(|(k, &(i, l))| {
+            let lz = all.get(i)?;
+            let detail = st.layers.get(k).and_then(Option::as_ref).map_or_else(Vec::new, |view| {
+                let n = view.sample.frames.len();
+                (0..COLUMNS)
+                    .map(|c| {
+                        let (f0, f1) = (c * n / COLUMNS, ((c + 1) * n / COLUMNS).max(c * n / COLUMNS + 1));
+                        let [a, b] = view.column(f0, f1);
+                        (a.0.min(b.0).min(0.0), a.1.max(b.1).max(0.0))
+                    })
+                    .collect()
+            });
+            Some(deckard_model::sampling_view::LayerView {
+                name: lz.sample.path.rsplit(['/', '\\']).next().unwrap_or("").to_string(),
+                mute: l.mute,
+                solo: l.solo,
+                heard: heard.get(k).copied().unwrap_or(true),
+                gain: lz.gain,
+                level: crate::layout::sampling::layers::level_text(lz.gain),
+                window: l.window,
+                envelope: [l.attack, l.decay, l.sustain, l.release],
+                detail,
+            })
+        })
+        .collect();
+    let morph = p.groups[g].sounds[s].new_sampler.filter(|_| !layers.is_empty()).map(|n| deckard_model::sampling_view::MorphView {
+        on: n.morph.on,
+        position: st.morph_at.map(f64::from).filter(|_| n.morph.on).unwrap_or(n.morph.position),
+        round: n.morph.shape == deckard_model::layers::Shape::Round,
+        power: n.morph.fade == deckard_model::layers::Fade::Power,
+    });
+    let layer = zi.min(layers.len().saturating_sub(1));
     let group = &p.groups[g];
     let color = match (group.sounds[s].color, group.color) {
         (Color::Palette(i), _) | (Color::Default, Color::Palette(i)) => i as u32,
@@ -227,6 +426,9 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
         focus_zone: zi,
         color: Some(color),
         lanes,
+        layers,
+        layer,
+        morph,
     })
 }
 
@@ -235,6 +437,7 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     let mut out = Pages::default();
     out.tabs[0] = record.pages;
     out.apply.extend(record.apply.into_iter().map(|(k, a)| (k, Apply::Record(a))));
+    layer_pages(&mut out, p, (g, s), zi);
     let Some((_, z, _, take)) = crate::layout::sampling::edited(p, (g, s, zi)) else {
         return out;
     };

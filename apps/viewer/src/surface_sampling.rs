@@ -30,7 +30,7 @@ impl App {
             return SamplingView { record, ..Default::default() };
         }
         let mut out = SamplingView {
-            tab: self.sampling.tab.min(3),
+            tab: self.sampling.tab.min(4),
             record,
             takes: v.takes.len(),
             take_waves: v.takes.iter().map(|t| v.take_waves.get(t).cloned().unwrap_or_default()).collect(),
@@ -95,10 +95,10 @@ impl App {
         match a {
             Action::Sampling(true) => self.sample_focused_sound(),
             Action::Sampling(false) => self.sampling_open = false,
-            Action::SamplingTab(t) => self.sampling_act(SamplingAct::Tab(t.min(3))),
+            Action::SamplingTab(t) => self.sampling_act(SamplingAct::Tab(t.min(4))),
             Action::SamplingKnob { page, knob, value } => {
                 let Some(p) = self.sampling_pages() else { return };
-                let tab = self.sampling.tab.min(3);
+                let tab = self.sampling.tab.min(4);
                 let key = if tab == 2 {
                     p.slice.get(knob).map(|k| k.key.clone())
                 } else {

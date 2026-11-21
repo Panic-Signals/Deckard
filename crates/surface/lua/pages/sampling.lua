@@ -2,6 +2,13 @@
 -- time, as Maschine's (docs/sampling-controller.md).
 --
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
+--   display 4 again   a sound with layers (a New Sampler's): between ZONE and LAYERS
+--   LAYERS            knobs 1-6 the page's (LAYER, ENVELOPE, MORPH, WINDOW), knob 7
+--                     the focused layer, knob 8 its LEVEL; 5-8 mute the four layers
+--                     shown (SHIFT: solo); SHIFT + 1 REMOVE the focused layer, SHIFT
+--                     + 2 SPREAD their windows evenly; the pads play the sounds. The
+--                     left display: every layer's window on the morph and where it
+--                     is; the right: the four layers. (A layered sound has no SLICE.)
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), PREVIOUS, NEXT take
 --   EDIT 5-6 / 8      ◀ the edit function ▶, APPLY (STEMS: CANCEL while separating)
 --   EDIT, STEM …      a zone with stem lanes has three more edit functions: STEM ROOT,
@@ -57,7 +64,7 @@ local WARP = { { "WARP MARKERS", "warp_markers" }, { "QUANTIZE AUDIO", "warp_qua
 
 -- The knob page shown on each tab, the slice focused (from 1; none until a pad picks
 -- one: the buttons then act on the first), the knobs touched.
-local at = { 1, 1, 1, 1 }
+local at = { 1, 1, 1, 1, 1 }
 local slice = nil
 local touched = {}
 
@@ -219,12 +226,49 @@ local function stem_buttons(v)
   return out
 end
 
+-- The layers' colours, by lane (as the software's).
+local LAYER_COLOURS = {
+  { 242, 162, 60 }, { 232, 88, 138 }, { 90, 156, 242 }, { 98, 199, 138 },
+  { 176, 124, 240 }, { 76, 201, 214 }, { 230, 210, 74 }, { 240, 116, 82 },
+}
+
+-- The focused sound's layers (none: not a layered sound).
+local function layers_of(v)
+  return v.sample and v.sample.layers or {}
+end
+
+-- The first layer before the four shown: the focused one's four.
+local function layer_bank(s)
+  return (math.max(1, s.layer or 1) - 1) // 4 * 4
+end
+
+-- LAYERS: the display buttons mute the four layers shown (lit: heard), SHIFT solos.
+local function layer_buttons(v)
+  local s = v.sample
+  local out = {}
+  if not s then return out end
+  local solo = deckard.held("SHIFT")
+  local bank = layer_bank(s)
+  for i = 1, 4 do
+    local l = s.layers[bank + i]
+    if l then
+      out[i] = {
+        text = tostring(bank + i) .. (solo and " SOLO" or " MUTE"),
+        selected = solo and l.solo or (not solo and l.heard),
+        act = function() deckard.sampling_call(solo and "layer_solo" or "layer_mute", bank + i) end,
+      }
+    end
+  end
+  return out
+end
+
 -- RECORD: the takes on the pads (TAKES), and the bank of 16 shown.
 local takes_on_pads, take_bank = false, 0
 
 -- What display buttons 5-8 show and do on the tab: { text, act = function, … }.
 local function buttons(v)
   local s = v.sample
+  if v.tab == 5 then return layer_buttons(v) end
   if v.tab == 1 then
     if busy(v) then
       return {
@@ -340,7 +384,18 @@ function page.button(name, down)
   if n then
     if not down then return true end
     if n <= 4 then
-      if n <= tab_count(v) then deckard.sampling_tab(n) end
+      local layers = #layers_of(v)
+      if v.tab == 5 and deckard.held("SHIFT") and n <= 2 then
+        if layers > 0 then
+          if n == 1 then deckard.sampling_call("remove_layer", v.sample.layer) else deckard.sampling_call("spread_layers") end
+        end
+      elseif n == 4 and v.tab == 4 and layers > 0 then
+        deckard.sampling_tab(5)
+      elseif n == 3 and layers > 0 then
+        -- (A layered sound has no slices.)
+      elseif n <= tab_count(v) then
+        deckard.sampling_tab(n)
+      end
       return true
     end
     if v.tab == 2 and (n == 5 or n == 6) and not stem_buttons(v) and not tempo_buttons(v) then
@@ -408,8 +463,31 @@ local function zoom_scroll(v, n, amount)
   if a ~= s.view[1] or b ~= s.view[2] then deckard.sampling_call("view", a, b) end
 end
 
+-- LAYERS: knobs 1-6 the page's, 7 the focused layer, 8 its level.
+local function layer_knob(v, n, amount)
+  local s = v.sample
+  if not s or #s.layers == 0 then return end
+  if n == 7 then
+    local to = math.max(1, math.min(#s.layers, s.layer + require("lib.knobs").gather("layer", amount)))
+    if to ~= s.layer then deckard.sampling_call("focus_layer", to) end
+  elseif n == 8 then
+    local l = s.layers[s.layer]
+    if not l then return end
+    local k = { key = "Layer.Level" .. s.layer, value = l.gain, min = 0, max = 1, step = 0.005, turn = 0.01 }
+    turn(k, amount, function(to) deckard.sampling_call("layer_level", to) end)
+  else
+    local p, pn = knob_page(v)
+    local k = p and p.knobs[n]
+    if k then turn(k, amount, function(to) deckard.sampling_knob(pn, n, to) end) end
+  end
+end
+
 function page.knob(n, amount)
   local v = view()
+  if v.tab == 5 then
+    layer_knob(v, n, amount)
+    return true
+  end
   if n >= 5 then
     zoom_scroll(v, n, amount)
     return true
@@ -471,7 +549,12 @@ end
 function page.leds()
   local v = view()
   if not require("lib.util").sample_led(deckard.state()) then deckard.led("SAMPLE", "on") end
-  for i = 1, 4 do deckard.led("SCREEN_" .. i, i == v.tab and "on" or (i <= tab_count(v) and "dim" or "off")) end
+  local layered = #layers_of(v) > 0
+  for i = 1, 4 do
+    local on = i == v.tab or (i == 4 and v.tab == 5)
+    local there = i <= tab_count(v) and not (i == 3 and layered)
+    deckard.led("SCREEN_" .. i, on and "on" or (there and "dim" or "off"))
+  end
   local b = buttons(v)
   -- (WAITING flashes, four times a second.)
   local flash = v.record.waiting and (deckard.now() * 4) % 2 < 1
@@ -520,10 +603,18 @@ local function split(text)
   return text or "", nil
 end
 
-local function draw_tabs(screen, theme, tab, count)
+local function draw_tabs(screen, theme, tab, count, layered)
   screen:frame(4, 4, 472, 24, "button", theme.corner)
   local xs, ws = { 4, 121, 240, 359 }, { 117, 119, 119, 117 }
-  for i, name in ipairs(TABS) do
+  local names = { TABS[1], TABS[2], TABS[3], TABS[4] }
+  if layered then names[3] = "" end
+  if tab == 5 then
+    -- (LAYERS is display button 4's other tab; SHIFT: what 1 and 2 do to the layers.)
+    names[4] = "LAYERS"
+    if deckard.held("SHIFT") and layered then names[1], names[2] = "REMOVE", "SPREAD" end
+    tab = 4
+  end
+  for i, name in ipairs(names) do
     if i > count then break end
     if i == tab then
       screen:rect(xs[i], 4, ws[i], 24, "button_selected", theme.corner)
@@ -691,10 +782,80 @@ local function stems_progress(screen, theme, v)
   if w > 0 then screen:rect(584, 170, w, 12, { edge[1], edge[2], edge[3], 179 }) end
 end
 
+-- LAYERS: on the left every layer's window over the morph (the focused one filled in
+-- brighter) and where the morph is; on the right the four layers shown, each its
+-- number, name, waveform and level (dim: not heard).
+local function draw_layers(screen, theme, s)
+  local x0, y0, w, h = 8, 68, 464, 128
+  screen:rect(0, 60, 480, 144, { 24, 24, 24 })
+  local morph = s.morph or {}
+  local shifts = morph.round and { -1, 0, 1 } or { 0 }
+  -- A line of the window between morph positions `a` and `b`, kept inside the strip.
+  local function seg(a, ya, b, yb, width, c)
+    if b <= 0 or a >= 1 or b <= a then
+      if not (a == b and a >= 0 and a <= 1) then return end
+    end
+    if a < 0 then ya, a = ya + (yb - ya) * (0 - a) / (b - a), 0 end
+    if b > 1 then yb, b = ya + (yb - ya) * (1 - a) / (b - a), 1 end
+    screen:line(x0 + a * w, y0 + h - ya * h, x0 + b * w, y0 + h - yb * h, width, c)
+  end
+  for i, l in ipairs(s.layers) do
+    local c = LAYER_COLOURS[i] or { 200, 200, 200 }
+    local on = i == s.layer
+    local col = { c[1], c[2], c[3], (morph.on and 255 or 110) * (on and 1 or 0.55) // 1 }
+    local win = l.window
+    for _, o in ipairs(shifts) do
+      seg(win[1] + o, 0, win[2] + o, 1, on and 2 or 1, col)
+      seg(win[2] + o, 1, win[3] + o, 1, on and 2 or 1, col)
+      seg(win[3] + o, 1, win[4] + o, 0, on and 2 or 1, col)
+    end
+  end
+  local edge = theme.colors.text
+  local px = math.floor(x0 + math.max(0, math.min(1, morph.position or 0)) * w)
+  screen:rect(px, y0 - 4, 2, h + 8, { edge[1], edge[2], edge[3], morph.on and 255 or 90 })
+  if not morph.on then
+    screen:label(x0, y0, w, 14, "MORPH OFF", { size = 11, color = "weak" }, "left", "top")
+  end
+
+  local bank = layer_bank(s)
+  for k = 1, 4 do
+    local i = bank + k
+    local l = s.layers[i]
+    local y = 60 + (k - 1) * 36
+    if l then
+      local c = LAYER_COLOURS[i] or { 200, 200, 200 }
+      local on = i == s.layer
+      screen:rect(480, y, 480, 35, on and { 48, 48, 48 } or { 28, 28, 28 })
+      screen:rect(480, y, 3, 35, c)
+      local st = { font = theme.styles.default.font, size = theme.styles.default.size, color = on and "text" or "weak" }
+      screen:label(488, y, 18, 35, tostring(i), st, "left", "center")
+      screen:label(506, y, 150, 35, l.name, st, "left", "center")
+      local tag = l.solo and "S" or (l.mute and "M" or "")
+      if tag ~= "" then screen:label(660, y, 14, 35, tag, { size = 11, color = "weak" }, "left", "center") end
+      local peaks = deckard.peaks("layer" .. i)
+      local wc = l.heard and c or widgets.blend(c, { 0, 0, 0 }, 0.3)
+      local wx, ww = 680, 190
+      local cols = #peaks // 2
+      for col = 0, ww - 1 do
+        local j = math.min(math.max(cols - 1, 0), col * cols // ww) * 2
+        local lo, hi = peaks[j + 1], peaks[j + 2]
+        if lo then
+          local top = math.floor(y + 17 - hi * 15)
+          local bottom = math.ceil(y + 17 - lo * 15)
+          screen:rect(wx + col, top, 1, math.max(1, bottom - top), wc)
+        end
+      end
+      screen:label(876, y, 76, 35, l.level, st, "right", "center")
+    else
+      screen:rect(480, y, 480, 35, { 20, 20, 20 })
+    end
+  end
+end
+
 function page.draw(screen, theme)
   local s = deckard.state()
   local v = s.sampling
-  draw_tabs(screen, theme, v.tab, tab_count(v))
+  draw_tabs(screen, theme, v.tab, tab_count(v), #layers_of(v) > 0)
   local specs = {}
   for i, b in pairs(buttons(v)) do specs[i + 4] = b end
   if specs[5] and specs[5].arrows then specs[5].left, specs[5].right = not specs[5].disabled, not specs[5].disabled end
@@ -709,6 +870,8 @@ function page.draw(screen, theme)
   elseif v.tab == 1 then
     meters(screen, v, colour)
     take_tiles(screen, theme, v, colour)
+  elseif v.tab == 5 and sample_ok(v) then
+    draw_layers(screen, theme, smp)
   elseif sample_ok(v) then
     local slices = v.tab == 3
     if v.tab == 4 then
@@ -751,6 +914,24 @@ function page.draw(screen, theme)
       end
     end
     widgets.params(screen, theme, 0, { { text = p.name, at = 1 } }, count > 1 and (n .. "/" .. count) or nil, params)
+  end
+  if v.tab == 5 and smp and #smp.layers > 0 then
+    -- Knobs 5 and 6 of the page, then the focused layer and its level.
+    local right = {}
+    for k = 5, 6 do
+      local knob = p and p.knobs[k]
+      if knob then
+        local value, unit = split(knob.text)
+        right[k - 4] = { name = knob.name, value = value, unit = unit }
+      end
+    end
+    local l = smp.layers[smp.layer]
+    right[3] = { name = "LAYER", value = smp.layer .. "/" .. #smp.layers }
+    if l then
+      local value, unit = split(l.level)
+      right[4] = { name = "LEVEL", value = value, unit = unit }
+    end
+    widgets.params(screen, theme, 480, {}, nil, right)
   end
 end
 

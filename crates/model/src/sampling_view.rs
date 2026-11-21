@@ -33,6 +33,38 @@ pub struct SampleView {
     pub take: bool,
     /// The zone's stem lanes (a New Sampler's), in their order.
     pub lanes: Vec<LaneView>,
+    /// A layered New Sampler's layers in their order (else none), the one focused, and
+    /// its morph.
+    pub layers: Vec<LayerView>,
+    pub layer: usize,
+    pub morph: Option<MorphView>,
+}
+
+/// A layer of the focused sound, for the controller's LAYERS screens: its sample's
+/// name, whether it's heard (not muted, nor left out by another's solo), its level as
+/// stored (0..1) and as shown, its window on the morph and its envelope (attack, decay,
+/// sustain, release), and its sample's peaks.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LayerView {
+    pub name: String,
+    pub mute: bool,
+    pub solo: bool,
+    pub heard: bool,
+    pub gain: f64,
+    pub level: String,
+    pub window: [f64; 4],
+    pub envelope: [f64; 4],
+    pub detail: Vec<(f32, f32)>,
+}
+
+/// The morph of a sound's layers: whether it runs, where it is now, and its shape
+/// (round, else there and back) and fade (equal power, else linear).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MorphView {
+    pub on: bool,
+    pub position: f64,
+    pub round: bool,
+    pub power: bool,
 }
 
 /// A stem lane of the focused zone, for the controller: which (0 Drums, 1 Vocals, 2
@@ -109,9 +141,18 @@ pub enum SamplingCall {
     Warp(usize),
     /// The sound's Sampler made a New Sampler, or back.
     Convert,
+    /// Layer `.0` focused; muted or not; soloed or not; removed. The focused layer's
+    /// level (a zone's gain, 0..1). Every layer's window spread evenly again.
+    FocusLayer(usize),
+    LayerMute(usize),
+    LayerSolo(usize),
+    RemoveLayer(usize),
+    LayerLevel(f64),
+    SpreadLayers,
 }
 
-/// A page of the Sampling page's knobs (up to four; knobs 5 and 6 zoom and scroll).
+/// A page of the Sampling page's knobs (up to four, knobs 5 and 6 zooming and scrolling;
+/// up to six on LAYERS).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct KnobPage {
     pub name: String,

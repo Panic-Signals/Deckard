@@ -38,6 +38,7 @@ fn sampled(tab: usize) -> View {
             vec![range("PLAY RANGE", "Edit"), range("SELECTION RANGE", "Sel")],
             Vec::new(),
             vec![range("PLAY RANGE", "Zone")],
+            Vec::new(),
         ],
         // (Choices: a step each.)
         slice: vec![knob("Slice.Mode", "MODE", "Split", 1.0, 3.0), knob("Slice.Split", "SLICES", "4", 0.0, 3.0)]
@@ -505,4 +506,150 @@ fn a_sound_with_no_sample_says_so() {
     }
     let text = s.screen_text(&without(0));
     assert!(!text.iter().any(|t| t == "NOT A SAMPLE"), "{text:?}");
+}
+
+/// `sampled(tab)` with `n` layers, the LAYERS tab's pages, and layer `focus` focused.
+fn layered(tab: usize, n: usize, focus: usize) -> View {
+    use deckard_model::sampling_view::{LayerView, MorphView};
+    let mut v = sampled(tab);
+    let knob = |key: &str, name: &str, text: &str, value: f64, (min, max): (f64, f64), step: f64| SamplingKnob {
+        key: key.into(),
+        name: name.into(),
+        text: text.into(),
+        value,
+        min,
+        max,
+        step,
+        turn: 0.01,
+    };
+    v.sampling.pages[4] = vec![
+        KnobPage { name: "LAYER".into(), knobs: vec![knob("Layer.Pan", "PAN", "C", 0.0, (-1.0, 1.0), 0.01)] },
+        KnobPage {
+            name: "MORPH".into(),
+            knobs: vec![
+                knob("Morph.On", "MORPH", "On", 1.0, (0.0, 1.0), 1.0),
+                knob("Morph.Position", "POSITION", "0 %", 0.0, (0.0, 1.0), 0.005),
+                knob("Morph.Rate", "RATE", "8 bars", 7.0, (0.0, 108.0), 1.0),
+                knob("Morph.Shape", "SHAPE", "Round", 0.0, (0.0, 1.0), 1.0),
+                knob("Morph.Depth", "DEPTH", "-", 1.0, (1.0, 1.0), 0.01),
+                knob("Morph.Reset", "RESET", "On", 1.0, (0.0, 1.0), 1.0),
+            ],
+        },
+    ];
+    let s = v.sampling.sample.as_mut().unwrap();
+    s.slices = Vec::new();
+    s.layers = (0..n)
+        .map(|k| LayerView {
+            name: format!("Layer {}.wav", k + 1),
+            heard: true,
+            gain: 0.5,
+            level: "-6.0 dB".into(),
+            window: [0.0, 0.25, 0.5, 0.75],
+            envelope: [0.005, 0.0, 1.0, 0.05],
+            detail: vec![(-0.5, 0.5); 480],
+            ..Default::default()
+        })
+        .collect();
+    s.layer = focus;
+    s.morph = Some(MorphView { on: true, position: 0.3, round: true, power: false });
+    v
+}
+
+/// Display button 4 pressed again goes between ZONE and LAYERS: only for a sound with
+/// layers (a sliced or plain sound's stays on ZONE).
+#[test]
+fn button_four_goes_between_zone_and_layers() {
+    let (mut s, v) = (Surface::new(), layered(3, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert!(s.screen_text(&v).iter().any(|t| t == "ZONE"));
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
+    let v = layered(4, 3, 0);
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "LAYERS") && !text.iter().any(|t| t == "ZONE"), "{text:?}");
+    assert!(text.iter().any(|t| t == "Layer 2.wav"), "{text:?}");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    // From another tab, button 4 is ZONE as ever.
+    assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    // A layered sound has no SLICE.
+    assert!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3").is_empty());
+    // Without layers: ZONE stays ZONE, and SLICE is there.
+    let (mut s, v) = (Surface::new(), sampled(3));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
+}
+
+/// On LAYERS, display buttons 5 to 8 mute the four layers shown (those with the focused
+/// one), SHIFT solos; SHIFT + 1 removes the focused layer, SHIFT + 2 spreads them.
+#[test]
+fn layers_buttons_mute_solo_remove_spread() {
+    let (mut s, v) = (Surface::new(), layered(4, 6, 1));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SamplingCall(SamplingCall::LayerMute(0))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::LayerMute(3))]);
+    // The focused layer among 5 to 8: those are the four shown, and only two are there.
+    let v = layered(4, 6, 4);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SamplingCall(SamplingCall::LayerMute(5))]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_7").is_empty(), "no seventh layer");
+    s.event(&Event::Button("BUTTON_SHIFT", true), &v, Instant::now());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SamplingCall(SamplingCall::LayerSolo(4))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::SamplingCall(SamplingCall::RemoveLayer(4))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::SamplingCall(SamplingCall::SpreadLayers)]);
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "REMOVE") && text.iter().any(|t| t == "SPREAD"), "{text:?}");
+    s.event(&Event::Button("BUTTON_SHIFT", false), &v, Instant::now());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_1"), [Action::SamplingTab(0)], "without SHIFT: RECORD");
+}
+
+/// Knob 7 steps the focused layer; knob 8 is its level; knobs 1 to 6 are the page's.
+#[test]
+fn knob_seven_picks_the_layer_and_eight_its_level() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 1));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let now = Instant::now();
+    assert_eq!(s.event(&Event::Knob(6, 0.1), &v, now), [Action::SamplingCall(SamplingCall::FocusLayer(2))]);
+    assert_eq!(s.event(&Event::Knob(6, -0.1), &v, now), [Action::SamplingCall(SamplingCall::FocusLayer(0))]);
+    assert!(s.event(&Event::Knob(6, 0.1), &layered(4, 3, 2), now).is_empty(), "the last layer");
+    match s.event(&Event::Knob(7, 0.01), &v, now).as_slice() {
+        [Action::SamplingCall(SamplingCall::LayerLevel(g))] => assert!((g - 0.505).abs() < 1e-9, "{g}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.event(&Event::Knob(0, 0.01), &v, now), [Action::SamplingKnob { page: 0, knob: 0, value: 0.01 }]);
+    // MORPH's page: six knobs, the sixth RESET.
+    press(&mut s, &v, "BUTTON_RIGHT");
+    let text = s.screen_text(&v);
+    for want in ["MORPH", "POSITION", "RATE", "bars", "DEPTH", "RESET", "LAYER", "2/3", "LEVEL", "-6.0"] {
+        assert!(text.iter().any(|t| t == want), "{want}: {text:?}");
+    }
+    assert_eq!(s.event(&Event::Knob(5, -0.01), &v, now), [Action::SamplingKnob { page: 1, knob: 5, value: 0.0 }]);
+    // DEPTH in Round doesn't turn.
+    assert!(s.event(&Event::Knob(4, 0.05), &v, now).is_empty());
+    // (DECKARD_LAYERS_SHOT=<file>: both screens, to look at.)
+    if let Some(out) = std::env::var_os("DECKARD_LAYERS_SHOT") {
+        let mut v = layered(4, 6, 1);
+        let l = &mut v.sampling.sample.as_mut().unwrap().layers;
+        for (k, layer) in l.iter_mut().enumerate() {
+            let c = (k as f64 + 0.5) / 6.0;
+            layer.window = [c - 0.25, c, c, c + 0.25];
+        }
+        l[2].heard = false;
+        l[2].mute = true;
+        let px = s.picture(&v);
+        let mut e = png::Encoder::new(std::fs::File::create(out).unwrap(), crate::screen::WIDTH as u32, crate::screen::HEIGHT as u32);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+    }
+}
+
+/// LAYERS leaves the pads to the sounds.
+#[test]
+fn the_pads_still_play_on_layers() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let layers = s.event(&Event::PadOn(2, 0.8), &v, Instant::now());
+    let (mut s2, v2) = (Surface::new(), sampled(1));
+    press(&mut s2, &v2, "BUTTON_SAMPLE");
+    assert_eq!(layers, s2.event(&Event::PadOn(2, 0.8), &v2, Instant::now()), "as EDIT's");
+    assert!(!layers.is_empty());
 }

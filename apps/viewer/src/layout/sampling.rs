@@ -345,6 +345,13 @@ impl SamplingState {
     }
 }
 
+impl LaneView {
+    /// Its sample's peaks (min, max a channel) over frames `a..b`.
+    pub fn column(&self, a: usize, b: usize) -> [(f32, f32); 2] {
+        column_of(&self.sample.frames, &self.peaks, a, b)
+    }
+}
+
 impl SamplingState {
     /// The layers' waveforms, for these files (a file already shown is kept).
     pub fn set_layers(&mut self, files: Vec<String>, mut load: impl FnMut(&str) -> Option<Arc<Sample>>) {

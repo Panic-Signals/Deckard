@@ -250,3 +250,70 @@ fn morph_is_a_destination_only_with_layers() {
     let (_dir, app) = three();
     assert!(has(&app));
 }
+
+/// The MK3's LAYERS pages (tab 5) hold the focused layer's and the morph's settings, and
+/// turning them changes what the software's fields change.
+#[test]
+fn the_mk3_pages_turn_the_same_values() {
+    use deckard_model::layers::Shape;
+    use deckard_surface::{Action as A, SamplingCall as C};
+    let (_dir, mut app) = three();
+    app.sampling_open = true;
+    app.sampling.tab = 4;
+    app.zone = 1;
+    // (The focused zone's sample, as the window's upkeep loads it each frame.)
+    app.sampling.sample = Some(std::sync::Arc::new(deckard_engine::sample::Sample { rate: 44_100, frames: vec![[0.0; 2]; 4410] }));
+    let view = app.sampling_surface_view();
+    assert_eq!(view.tab, 4);
+    let names: Vec<Vec<&str>> = view.pages[4].iter().map(|p| p.knobs.iter().map(|k| k.name.as_str()).collect()).collect();
+    assert_eq!(view.pages[4].iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["LAYER", "ENVELOPE", "MORPH", "WINDOW"]);
+    assert_eq!(names[0], ["PAN", "TUNE", "ROOT"]);
+    assert_eq!(names[1], ["ATTACK", "DECAY", "SUSTAIN", "RELEASE"]);
+    assert_eq!(names[2], ["MORPH", "POSITION", "RATE", "SHAPE", "DEPTH", "RESET"]);
+    assert_eq!(names[3], ["A", "B", "C", "D", "FADE"]);
+    let depth = &view.pages[4][2].knobs[4];
+    assert_eq!((depth.text.as_str(), depth.min == depth.max), ("-", true), "Round: no depth");
+    let s = view.sample.expect("its sample");
+    assert_eq!((s.layers.len(), s.layer), (3, 1));
+    assert_eq!(s.layers[1].level, "0.0 dB");
+    assert!(s.morph.is_some_and(|m| m.round));
+
+    // The focused layer's attack, a few steps up: only its.
+    let attack = view.pages[4][1].knobs[0].value;
+    app.surface_act(A::SamplingKnob { page: 1, knob: 0, value: attack + 10.0 });
+    let l = app.layers_of();
+    assert!((l[1].1.attack - 0.005 * 1.1f64.powi(10)).abs() < 0.002, "{}", l[1].1.attack);
+    assert_eq!(l[0].1.attack, 0.005);
+    // RATE: 64 bars is the last synced step; the next is free.
+    app.surface_act(A::SamplingKnob { page: 2, knob: 2, value: 10.0 });
+    assert_eq!((morph(&app).sync, morph(&app).bars), (true, 64.0));
+    app.surface_act(A::SamplingKnob { page: 2, knob: 2, value: 11.0 });
+    assert_eq!((morph(&app).sync, morph(&app).seconds), (false, 0.05));
+    let rate = &app.sampling_surface_view().pages[4][2].knobs[2];
+    assert_eq!((rate.value, rate.text.as_str()), (11.0, "0.05 s"));
+    // Its window's A, and with it the windows are by hand.
+    app.surface_act(A::SamplingKnob { page: 3, knob: 0, value: 0.1 });
+    assert_eq!(windows(&app)[1][0], 0.1);
+    assert!(!morph(&app).spread);
+    // SHAPE to There and back: DEPTH turns.
+    app.surface_act(A::SamplingKnob { page: 2, knob: 3, value: 1.0 });
+    assert_eq!(morph(&app).shape, Shape::Back);
+    app.surface_act(A::SamplingKnob { page: 2, knob: 4, value: 0.5 });
+    assert_eq!(morph(&app).depth, 0.5);
+
+    // The buttons and knobs 7 and 8.
+    app.surface_act(A::SamplingCall(C::FocusLayer(2)));
+    assert_eq!(app.zone, 2);
+    app.surface_act(A::SamplingCall(C::LayerLevel(0.25)));
+    assert_eq!(zones(&app)[2].gain, 0.25);
+    app.surface_act(A::SamplingCall(C::LayerMute(0)));
+    app.surface_act(A::SamplingCall(C::LayerSolo(1)));
+    let l = app.layers_of();
+    assert!(l[0].1.mute && l[1].1.solo);
+    let s = app.sampling_surface_view().sample.unwrap();
+    assert_eq!(s.layers.iter().map(|l| l.heard).collect::<Vec<_>>(), [false, true, false]);
+    app.surface_act(A::SamplingCall(C::SpreadLayers));
+    assert!(morph(&app).spread);
+    app.surface_act(A::SamplingCall(C::RemoveLayer(2)));
+    assert_eq!(app.layers_of().len(), 2);
+}
