@@ -426,7 +426,7 @@ impl App {
             MorphAct::Keys(lo, hi) => {
                 let (lo, hi) = (lo.clamp(0, 127), hi.clamp(0, 127));
                 let (lo, hi) = (lo.min(hi), lo.max(hi));
-                let done = doc.borrow_mut().transaction("Layer Keys", |d| {
+                let done = doc.borrow_mut().transaction_joined("Layer Keys", |d| {
                     make_layered(d, g, s, "Layer Keys")?;
                     for k in 0..zones_of(d, g, s).len() {
                         // (Low first going down, high first going up: the range is never empty.)

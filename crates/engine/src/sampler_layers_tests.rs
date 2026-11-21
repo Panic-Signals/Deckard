@@ -304,3 +304,27 @@ fn morph_position_is_reported() {
     let p = s.morph_position().unwrap();
     assert!((p - 0.25).abs() < 0.01, "{p}");
 }
+
+/// A layer's level or pan turned while its note is held is heard on that note, ramped.
+#[test]
+fn a_layers_level_and_pan_move_under_a_held_note() {
+    let x = level(0.5);
+    let of = |gain: f32, pan: f32| sound(vec![ZoneRt { gain, pan, ..zone(Arc::clone(&x), 60, Layer::default(), true) }], Morph::default());
+    let mut s = of(0.75, 0.0);
+    s.note_on(1, 60, 127, &CTX);
+    let before = *run(&mut s, 0.1).last().unwrap();
+    let mut next = of(0.25, 0.0);
+    next.adopt(s);
+    s = next;
+    let out = run(&mut s, 0.1);
+    let after = *out.last().unwrap();
+    assert!(after < before * 0.1 && after > before * 0.02, "{before} -> {after}");
+    assert!(step(&out) <= 1.0 / (0.005 * SR as f32) * 1.5, "ramped: {}", step(&out));
+    // Panned hard right: nothing left on the left.
+    let mut next = of(0.25, 1.0);
+    next.adopt(s);
+    s = next;
+    let out = run(&mut s, 0.1);
+    assert!(out.last().unwrap().abs() < after * 0.01, "{}", out.last().unwrap());
+    assert_eq!(s.voices(), 1);
+}

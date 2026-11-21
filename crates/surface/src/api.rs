@@ -1796,6 +1796,7 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
         }
         st.set("layers", layers)?;
         st.set("layer", s.layer + 1)?;
+        st.set("layered", s.layered)?;
         if let Some(m) = s.morph {
             let mt = lua.create_table()?;
             mt.set("on", m.on)?;

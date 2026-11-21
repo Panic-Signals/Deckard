@@ -179,6 +179,15 @@ pub fn layer_times(l: &Layer, sr: f64) -> EnvTimes {
 /// A layer's gain changes (its window, mute, solo) take this long, so nothing clicks.
 const LAYER_RAMP_MS: f64 = 5.0;
 
+/// A zone's gain on each side, from its level and pan (§6.6).
+fn zone_amp(z: &ZoneRt) -> [f32; 2] {
+    let g = 2.3948107 * z.gain.powi(5) + 0.767467 * z.gain * z.gain;
+    let p = z.pan;
+    // 0.70711 and 0.29289 in Maschine.
+    const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    [(1.0 - K * p - (1.0 - K) * p * p) * g, (1.0 + K * p - (1.0 - K) * p * p) * g]
+}
+
 /// How loud layer `l` is to be, and where the morph is, `phase` through its cycle.
 fn layer_to(l: &LayerRt, morph: Option<&Morph>, position: f32, phase: f64) -> (f32, f32) {
     let on = if l.on { 1.0 } else { 0.0 };
@@ -1260,6 +1269,10 @@ struct Voice {
     layer_env: Option<Env>,
     layer_gain: f32,
     layer_to: f32,
+    /// What its velocity makes of its zone's gain, and the gain it's going to (its
+    /// zone's level or pan moved under it: a layer's).
+    vel_gain: f32,
+    gain_to: [f32; 2],
     sweep: f64,
     morph_at: f32,
 }
@@ -1604,6 +1617,10 @@ impl SamplerRt {
                         None => continue,
                     }
                 }
+                // Its level or pan may have moved: it goes there (ramped as it plays).
+                if let Some(b) = self.zones.get(v.zone) {
+                    v.gain_to = zone_amp(b).map(|c| c * v.vel_gain);
+                }
             }
             let live = self.zones.get(v.zone).and_then(|b| b.sync.as_ref()).and_then(|sy| Some((sy.live?, sy.keys)));
             match live {
@@ -1888,14 +1905,10 @@ impl SamplerRt {
             tail_len: 0,
         };
         // Gain and pan (§6.6).
-        let mut g = 2.3948107 * z.gain.powi(5) + 0.767467 * z.gain * z.gain;
         let a = s.vel_volume;
         let u = if a >= 0.0 { 1.0 - vel } else { vel };
-        g *= (1.0 - a.abs() * u).powi(3);
-        let p = z.pan;
-        // 0.70711 and 0.29289 in Maschine.
-        const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
-        let gain = [(1.0 - K * p - (1.0 - K) * p * p) * g, (1.0 + K * p - (1.0 - K) * p * p) * g];
+        let vel_gain = (1.0 - a.abs() * u).powi(3);
+        let gain = zone_amp(z).map(|c| c * vel_gain);
         // LFO (§4).
         let (lfo_hz, phase) = match s.lfo_sync {
             0 => (free_hz, self.lfo_phase + s.lfo_phase as f64),
@@ -1967,6 +1980,8 @@ impl SamplerRt {
             layer_env: z.layer.map(|l| Env::new(l.env, true)),
             layer_gain: 1.0,
             layer_to: 1.0,
+            vel_gain,
+            gain_to: gain,
             sweep: 0.0,
             morph_at: 0.0,
         };
@@ -2334,6 +2349,15 @@ impl SamplerRt {
                         (v.layer_gain - layer_step).max(v.layer_to)
                     };
                     k *= e.next() * v.layer_gain;
+                }
+                if v.gain != v.gain_to {
+                    for c in 0..2 {
+                        v.gain[c] = if v.gain[c] < v.gain_to[c] {
+                            (v.gain[c] + layer_step).min(v.gain_to[c])
+                        } else {
+                            (v.gain[c] - layer_step).max(v.gain_to[c])
+                        };
+                    }
                 }
                 l += x[0] * v.gain[0] * pl * k;
                 rr += x[1] * v.gain[1] * pr * k;

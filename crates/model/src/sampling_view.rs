@@ -38,6 +38,9 @@ pub struct SampleView {
     pub layers: Vec<LayerView>,
     pub layer: usize,
     pub morph: Option<MorphView>,
+    /// Whether the sound is layered (a lone zone not yet a layer is listed in `layers`
+    /// but isn't: it can still be sliced).
+    pub layered: bool,
 }
 
 /// A layer of the focused sound, for the controller's LAYERS screens: its sample's

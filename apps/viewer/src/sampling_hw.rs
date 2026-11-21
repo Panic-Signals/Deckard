@@ -429,6 +429,7 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
         layers,
         layer,
         morph,
+        layered: crate::layers::layered(p, g, s),
     })
 }
 

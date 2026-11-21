@@ -551,6 +551,7 @@ fn layered(tab: usize, n: usize, focus: usize) -> View {
         })
         .collect();
     s.layer = focus;
+    s.layered = true;
     s.morph = Some(MorphView { on: true, position: 0.3, round: true, power: false });
     v
 }
@@ -572,6 +573,13 @@ fn button_four_goes_between_zone_and_layers() {
     assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     // A layered sound has no SLICE.
     assert!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3").is_empty());
+    // A lone zone not yet a layer (the app shows it as the first lane): LAYERS can be
+    // opened, and SLICE is still there.
+    let mut lone = layered(3, 1, 0);
+    lone.sampling.sample.as_mut().unwrap().layered = false;
+    assert_eq!(press(&mut s, &lone, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
+    assert_eq!(press(&mut s, &lone, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
+    assert!(s.screen_text(&lone).iter().any(|t| t == "SLICE"));
     // Without layers: ZONE stays ZONE, and SLICE is there.
     let (mut s, v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");

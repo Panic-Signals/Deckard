@@ -317,3 +317,50 @@ fn the_mk3_pages_turn_the_same_values() {
     app.surface_act(A::SamplingCall(C::RemoveLayer(2)));
     assert_eq!(app.layers_of().len(), 2);
 }
+
+/// A lone plain zone shows as the first lane, but its sound isn't layered: the MK3 keeps
+/// its SLICE.
+#[test]
+fn a_lone_zone_is_not_layered_for_the_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app();
+    {
+        let doc = app.doc.as_ref().unwrap();
+        let spec =
+            deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(tone(dir.path(), "a.wav", 220.0)), set: Vec::new() };
+        doc.borrow_mut().set_zones(0, 0, &[spec], "Load").unwrap();
+    }
+    app.sampling_open = true;
+    app.sampling.sample = Some(std::sync::Arc::new(deckard_engine::sample::Sample { rate: 44_100, frames: vec![[0.0; 2]; 4410] }));
+    let s = app.sampling_surface_view().sample.unwrap();
+    assert_eq!((s.layers.len(), s.layered), (1, false));
+    app.layer_files(1, &[tone(dir.path(), "b.wav", 330.0)]);
+    let s = app.sampling_surface_view().sample.unwrap();
+    assert_eq!((s.layers.len(), s.layered), (2, true));
+}
+
+/// A file dropped on a layered sound anywhere but a lane (its row, another tab) is a
+/// layer more, not a plain zone that would leave the sound neither layered nor sliced.
+#[test]
+fn a_file_dropped_on_a_layered_sound_is_a_layer() {
+    let (dir, mut app) = three();
+    app.drop_samples((0, 0), &[tone(dir.path(), "more.wav", 500.0)]);
+    assert_eq!(app.layers_of().len(), 4, "{}", app.status);
+    let p = crate::project_of_app(&app);
+    assert!(crate::layers::can_layer(&p, 0, 0) && crate::layers::layered(&p, 0, 0));
+    assert!(zones(&app).iter().all(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some())));
+}
+
+/// KEYS dragged through many keys is one undo step.
+#[test]
+fn dragging_keys_is_one_undo_step() {
+    let (_dir, mut app) = three();
+    let before = labels(&app).len();
+    for lo in 1..=12 {
+        app.morph_act(MorphAct::Keys(lo, 127));
+    }
+    assert_eq!(zones(&app)[0].key_range, (12, 127));
+    assert_eq!(labels(&app).len(), before + 1, "{:?}", labels(&app));
+    assert!(app.doc.as_ref().unwrap().borrow_mut().undo());
+    assert!(zones(&app).iter().all(|z| z.key_range == (0, 127)));
+}

@@ -10601,6 +10601,14 @@ impl App {
         if g != self.group {
             self.focus_group(g);
         }
+        // A layered sound takes them as layers more (a plain zone beside its layers would
+        // leave it neither layered nor sliced).
+        let layers = layers::layers_in(doc.borrow().project(), g, s).len();
+        if layers::layered(doc.borrow().project(), g, s) {
+            self.sound = s;
+            self.layer_files(layers, files);
+            return;
+        }
         let mut loaded = Vec::new();
         for (k, file) in files.iter().enumerate() {
             let target = if sampler { s } else { s + k };

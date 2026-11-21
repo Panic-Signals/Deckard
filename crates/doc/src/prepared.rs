@@ -100,6 +100,7 @@ impl EditSnapshot {
             references: None,
             types: mxprj::types::Types::new(),
             undo: Vec::new(),
+            joined: None,
             redo: Vec::new(),
             take: None,
         };

@@ -391,7 +391,7 @@ function page.button(name, down)
         end
       elseif n == 4 and v.tab == 4 and layers > 0 then
         deckard.sampling_tab(5)
-      elseif n == 3 and layers > 0 then
+      elseif n == 3 and v.sample and v.sample.layered then
         -- (A layered sound has no slices.)
       elseif n <= tab_count(v) then
         deckard.sampling_tab(n)
@@ -549,7 +549,7 @@ end
 function page.leds()
   local v = view()
   if not require("lib.util").sample_led(deckard.state()) then deckard.led("SAMPLE", "on") end
-  local layered = #layers_of(v) > 0
+  local layered = v.sample ~= nil and v.sample.layered
   for i = 1, 4 do
     local on = i == v.tab or (i == 4 and v.tab == 5)
     local there = i <= tab_count(v) and not (i == 3 and layered)
@@ -611,7 +611,7 @@ local function draw_tabs(screen, theme, tab, count, layered)
   if tab == 5 then
     -- (LAYERS is display button 4's other tab; SHIFT: what 1 and 2 do to the layers.)
     names[4] = "LAYERS"
-    if deckard.held("SHIFT") and layered then names[1], names[2] = "REMOVE", "SPREAD" end
+    if deckard.held("SHIFT") then names[1], names[2] = "REMOVE", "SPREAD" end
     tab = 4
   end
   for i, name in ipairs(names) do
@@ -855,7 +855,7 @@ end
 function page.draw(screen, theme)
   local s = deckard.state()
   local v = s.sampling
-  draw_tabs(screen, theme, v.tab, tab_count(v), #layers_of(v) > 0)
+  draw_tabs(screen, theme, v.tab, tab_count(v), v.sample ~= nil and v.sample.layered)
   local specs = {}
   for i, b in pairs(buttons(v)) do specs[i + 4] = b end
   if specs[5] and specs[5].arrows then specs[5].left, specs[5].right = not specs[5].disabled, not specs[5].disabled end
