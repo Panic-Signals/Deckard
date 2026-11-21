@@ -107,6 +107,9 @@ mod modulation_tests;
 mod module_ui;
 mod ni_agent;
 mod ni_services;
+mod onscreen_mk3;
+#[cfg(test)]
+mod onscreen_mk3_tests;
 #[cfg(test)]
 mod pad_blink_tests;
 #[cfg(test)]
