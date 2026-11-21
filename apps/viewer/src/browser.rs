@@ -370,6 +370,10 @@ pub enum BrowseAct {
     PinFolder(PathBuf, bool),
     /// FILES: a file chosen (prehears it).
     SelectFile(PathBuf),
+    /// Stop the browser's prehear playback.
+    StopPrehear,
+    /// Restart a FILES sample or preview from the beginning.
+    PrehearFile(PathBuf),
     /// FILES: load a file into a sound (group, sound), else into the focus.
     LoadFile(PathBuf, Option<(usize, usize)>),
     /// Preferences ▸ Library: a folder of sound packs added (true) or taken out.
