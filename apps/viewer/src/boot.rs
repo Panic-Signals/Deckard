@@ -267,7 +267,12 @@ impl App {
                 if let Some(port) = self.settings.serve {
                     // The panel's protocol: a listen failure is reported, never swallowed —
                     // the flag asked for a server and there is no server.
-                    match crate::mk3_server::Server::start(Some(port)) {
+                    let started = if self.settings.serve_token {
+                        crate::mk3_server::Server::start_paired(Some(port))
+                    } else {
+                        crate::mk3_server::Server::start(Some(port))
+                    };
+                    match started {
                         Ok((server, bound)) => {
                             self.mk3_serve = Some(bound);
                             self.mk3_sinks.add(server);

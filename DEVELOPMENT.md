@@ -146,6 +146,7 @@ Run the full suite once, at the end of a branch. CI runs it on all three systems
   - [docs/launchpad-pro-mk3.md](docs/launchpad-pro-mk3.md): the Launchpad Pro MK3 script
     and its hardware checklist.
   - [docs/mk3-usb.md](docs/mk3-usb.md): the MK3's USB protocol.
+  - [docs/virtual-mk3.md](docs/virtual-mk3.md): the on-screen panel and the browser client, and the protocol a page speaks to the app.
   - [docs/lua-mods.md](docs/lua-mods.md): mods.
 - **The app:**
   - [docs/ui-layout.md](docs/ui-layout.md), [docs/mixer-layout.md](docs/mixer-layout.md)
@@ -528,6 +529,11 @@ implementation of that API.
 The pads, buttons and encoders come over HID; on macOS the device is opened shared with
 NI's agent. The two 480×272 displays are driven over the bulk interface, which NI's
 NIHostIntegrationAgent claims while it runs. See [docs/mk3-usb.md](docs/mk3-usb.md).
+
+The same surface can be shown without the hardware: an on-screen panel in its own window, and
+a page served over the local network for a tablet. Both are sinks in the same seam the device
+is, so they see the frames the device sees and their input merges with it. See
+[docs/virtual-mk3.md](docs/virtual-mk3.md).
 
 ## Roadmap
 

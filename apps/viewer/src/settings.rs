@@ -131,6 +131,9 @@ pub struct Settings {
     pub panel_pos: Option<[f32; 2]>,
     /// The panel turned 90° clockwise, for a vertical monitor.
     pub panel_portrait: bool,
+    /// Pairing for the browser client: an upgrade must carry `?t=<token>`. On, a non-loopback
+    /// listen always has the token; off binds loopback only, so an open server cannot exist.
+    pub serve_token: bool,
     /// Held-page buttons pinned on the MK3 (`EVENTS`, `SCENE`, `PATTERN`…), and the one
     /// left open on screen (`None`: none).
     pub pinned_pages: BTreeSet<String>,
@@ -407,6 +410,7 @@ impl Default for Settings {
             panel_size: [640.0, 300.0],
             panel_pos: None,
             panel_portrait: false,
+            serve_token: true,
             pinned_pages: BTreeSet::new(),
             pinned_open: None,
             metronome_auto: false,
@@ -597,6 +601,7 @@ impl Settings {
                 "mk3_panel" => s.mk3_panel = v == "true",
                 "panel_viewport" => s.panel_viewport = v == "true",
                 "panel_portrait" => s.panel_portrait = v == "true",
+                "serve_token" => s.serve_token = v == "true",
                 "panel_size" => {
                     let mut it = v.split(',').filter_map(|n| n.trim().parse::<f32>().ok());
                     if let (Some(w), Some(h)) = (it.next(), it.next()) {
@@ -852,6 +857,7 @@ impl Settings {
         out += &format!("mk3_panel = {}\n", self.mk3_panel);
         out += &format!("panel_viewport = {}\n", self.panel_viewport);
         out += &format!("panel_portrait = {}\n", self.panel_portrait);
+        out += &format!("serve_token = {}\n", self.serve_token);
         out += &format!("panel_size = {}, {}\n", self.panel_size[0], self.panel_size[1]);
         if let Some([x, y]) = self.panel_pos {
             out += &format!("panel_pos = {x}, {y}\n");
