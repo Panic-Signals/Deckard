@@ -2211,6 +2211,7 @@ dependencies = [
  "hound",
  "lewton",
  "plist",
+ "realfft",
  "symphonia",
  "tempfile",
  "transit-audio-asio",
