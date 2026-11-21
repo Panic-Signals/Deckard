@@ -14,13 +14,14 @@
 //! | `mix` | 0..1 (1): dry/wet blend of the magnitude |
 //! | `cutoff_mod` | Hz: the modulated cutoff; the base curve is drawn muted under it |
 //! | `resonance_mod` | 0..1: the modulated resonance, drawn the same way |
+//! | `spectrum` | the plug-in's live output spectrum behind the response: points 0..1 (−90 to 0 dBFS) evenly over the same 20 Hz to 20 kHz axis (the pictures over the knobs get it from the view) |
 //!
 //! Touch focus on `cutoff` draws a guide from the curve to the axis and a handle; on
 //! `resonance` it rings the peak and writes the Q.
 
 use mlua::Table;
 
-use super::{Align, Canvas, freq_t, num, text};
+use super::{Align, Canvas, freq_t, num, nums, text};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
@@ -40,6 +41,7 @@ pub struct Filter {
     pub mix: f32,
     pub cutoff_mod: Option<f32>,
     pub resonance_mod: Option<f32>,
+    pub spectrum: Vec<f32>,
 }
 
 impl Default for Filter {
@@ -53,6 +55,7 @@ impl Default for Filter {
             mix: 1.0,
             cutoff_mod: None,
             resonance_mod: None,
+            spectrum: Vec::new(),
         }
     }
 }
@@ -109,6 +112,7 @@ impl Filter {
             mix: num(t, "mix").unwrap_or(1.0).clamp(0.0, 1.0),
             cutoff_mod: num(t, "cutoff_mod").map(|m| m.clamp(20.0, 20000.0)),
             resonance_mod: num(t, "resonance_mod").map(|m| m.clamp(0.0, 1.0)),
+            spectrum: nums(t, "spectrum"),
         })
     }
 
@@ -126,7 +130,12 @@ impl Filter {
     pub fn draw(&self, c: &mut Canvas) {
         let look = *c.look;
         let (w, h) = (c.r.w, c.r.h);
-        c.fill(0, 0, w, h, look.panel);
+        // (Live: an opaque panel the MK3 can redraw alone, frame after frame.)
+        if self.spectrum.len() >= 2 {
+            c.spectrum_panel(look.panel);
+        } else {
+            c.fill(0, 0, w, h, look.panel);
+        }
         let px = |t: f32| 1.5 + t * (w as f32 - 4.0);
         let py = |db: f32| (2.5 + (DB_TOP - db) / (DB_TOP - DB_BOTTOM) * (h as f32 - 5.0)).clamp(2.0, h as f32 - 2.5);
         let bottom = (h - 1) as f32;
@@ -151,6 +160,19 @@ impl Filter {
         let eff_res = self.resonance_mod.unwrap_or(self.resonance);
         let main = curve(eff, eff_res);
         c.area(&main, bottom, c.ink(look.fill_of(look.accent), &all));
+        // The output's spectrum over the fill (which would hide it) and under the curve,
+        // on its own level axis: -90 dBFS at the floor, 0 at the top.
+        let n = self.spectrum.len();
+        if n >= 2 {
+            let trace: Vec<(f32, f32)> = self
+                .spectrum
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (px(i as f32 / (n - 1) as f32), ((1.0 - v.clamp(0.0, 1.0)) * (h - 1) as f32).clamp(1.5, h as f32 - 2.5)))
+                .collect();
+            // (A step toward the panel: behind the response, not competing with it.)
+            c.polyline(&trace, 1.5, super::mix(look.panel, look.marker, 0.5));
+        }
         if self.cutoff_mod.is_some() || self.resonance_mod.is_some() {
             let base = curve(self.cutoff, self.resonance);
             c.polyline(&base, 1.5, c.ink(look.muted, &all));
@@ -258,6 +280,24 @@ mod tests {
         golden::check("filter-lp-focus-resonance", 2, Some("resonance"), |cv| f.draw(cv));
         assert!(golden::focus_changes(240, "cutoff", |cv| f.draw(cv)));
         assert!(golden::focus_changes(240, "resonance", |cv| f.draw(cv)));
+    }
+
+    #[test]
+    fn a_live_spectrum_draws_on_a_redrawable_panel() {
+        let spectrum: Vec<f32> = (0..96).map(|i| 0.8 - 0.006 * i as f32 + 0.05 * (i as f32 * 0.7).sin()).collect();
+        let f = Filter { cutoff: 2500.0, resonance: 0.5, spectrum, ..Default::default() };
+        golden::check("filter-lp-spectrum", 2, None, |cv| f.draw(cv));
+        let mut p = crate::screen::Picture::new([0; 3]);
+        let look = crate::widget::Look::fallback();
+        let mut c = crate::widget::Canvas::new(&mut p, crate::widget::Rect { x: 0, y: 40, w: 240, h: 104 }, &look);
+        f.draw(&mut c);
+        drop(c);
+        assert!(p.ops.iter().any(|op| matches!(op, crate::screen::DrawOp::SpectrumPanel { .. })));
+        let mut p = crate::screen::Picture::new([0; 3]);
+        let mut c = crate::widget::Canvas::new(&mut p, crate::widget::Rect { x: 0, y: 40, w: 240, h: 104 }, &look);
+        lp().draw(&mut c);
+        drop(c);
+        assert!(!p.ops.iter().any(|op| matches!(op, crate::screen::DrawOp::SpectrumPanel { .. })));
     }
 
     #[test]

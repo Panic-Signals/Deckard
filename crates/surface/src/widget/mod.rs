@@ -156,6 +156,25 @@ impl PictureStyle {
 thread_local! {
     static STYLE: std::cell::Cell<PictureStyle> = const { std::cell::Cell::new(PictureStyle::LINES) };
     static THEME_STYLE: std::cell::Cell<Option<PictureStyle>> = const { std::cell::Cell::new(None) };
+    static LIVE_SPECTRUM: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static FILTER_DRAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The focused plug-in's live output spectrum for this frame's `filter` pictures
+/// ([`crate::ControlView::output_spectrum`]; empty: none). Also forgets whether one was
+/// drawn, for [`filter_drawn`] to say after the frame.
+pub fn begin_frame(output_spectrum: &[f32]) {
+    LIVE_SPECTRUM.with_borrow_mut(|s| {
+        s.clear();
+        s.extend_from_slice(output_spectrum);
+    });
+    FILTER_DRAWN.with(|f| f.set(false));
+}
+
+/// Whether [`draw_pictures`] drew a `filter` picture since [`begin_frame`]: the UI taps
+/// the plug-in's output (and runs its FFT) only then.
+pub fn filter_drawn() -> bool {
+    FILTER_DRAWN.with(std::cell::Cell::get)
 }
 
 /// The style pictures draw in (on this thread: the scripts' and the tests'): the
@@ -716,6 +735,12 @@ pub fn draw_pictures(
         if draw && st.panels {
             let w = span.cells as i32 * CELL_W;
             pic.ops.push(DrawOp::Fill { x: x + 4, y: BAND_Y, w: w - 8, h: BAND_H, c: look.panel, corner: 0.35 });
+        }
+        if draw && span.kind == "filter" {
+            FILTER_DRAWN.with(|f| f.set(true));
+            LIVE_SPECTRUM.with_borrow(|s| {
+                if s.is_empty() { Ok(()) } else { inputs.raw_set("spectrum", lua.create_sequence_from(s.iter().copied())?) }
+            })?;
         }
         if draw {
             draw_lua(&span.kind, pic, r, &inputs, look)?;

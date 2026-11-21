@@ -547,6 +547,10 @@ pub struct ControlView {
     pub filter: Option<EqCurveView>,
     /// Any other focused built-in effect, drawn on the right screen on every page.
     pub picture: Option<EqCurveView>,
+    /// The focused hosted plug-in's live output spectrum (0..1, -90 to 0 dBFS, 20 Hz to
+    /// 20 kHz), behind the response in the `filter` pictures over its knobs. Sent only
+    /// while one is drawn ([`Surface::drew_filter_picture`]).
+    pub output_spectrum: Vec<f32>,
     /// The focused Zhora: its tuner on the right screen, its buttons on both.
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
@@ -1184,6 +1188,8 @@ pub struct Surface {
     last_ops: Option<([u8; 3], Vec<screen::DrawOp>)>,
     /// A picture was added since: the same drawing commands may now look different.
     pictures_changed: std::cell::Cell<bool>,
+    /// The last picture drew a `filter` picture over the knobs.
+    filter_drawn: std::cell::Cell<bool>,
     frames: u64,
     /// Pictures the scripts can draw ([`Surface::add_picture`]).
     pictures: screen::Pictures,
@@ -1218,6 +1224,7 @@ impl Surface {
             picture: None,
             last_ops: None,
             pictures_changed: std::cell::Cell::new(false),
+            filter_drawn: std::cell::Cell::new(false),
             frames: 0,
             pictures: Default::default(),
             pinned: BTreeSet::new(),
@@ -1701,6 +1708,12 @@ impl Surface {
         (!pages.is_empty()).then_some(pages)
     }
 
+    /// Whether the last picture drew a `filter` picture over the knobs: then it can show
+    /// the plug-in's output spectrum ([`ControlView::output_spectrum`]).
+    pub fn drew_filter_picture(&self) -> bool {
+        self.filter_drawn.get()
+    }
+
     /// Whether the focused plug-in's mapping requests an EQ spectrum.
     pub fn mapping_shows_eq(&self, name: &str, vendor: &str, id: &str) -> bool {
         self.run
@@ -1775,12 +1788,14 @@ impl Surface {
             pic.plug_accent = accent;
             pic.caps = run.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.caps);
             let ud = run.lua.create_userdata(pic)?;
+            widget::begin_frame(&v.control.output_spectrum);
             for t in self.tables(run).into_iter().rev() {
                 let Ok(Some(f)) = t.get::<Option<Function>>("draw") else { continue };
                 if let Err(e) = f.call::<()>((ud.clone(), theme.clone())) {
                     self.set_error(e);
                 }
             }
+            self.filter_drawn.set(widget::filter_drawn());
             ud.take::<screen::Picture>()
         })();
         let mut p = match res {

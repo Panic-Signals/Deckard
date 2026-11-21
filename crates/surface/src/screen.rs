@@ -546,45 +546,73 @@ impl Picture {
         self.replay(out, 0, None);
     }
 
-    /// Update only the spectrum's widget box if everything outside it is identical
-    /// to the last picture. Pixels outside the returned box in `out` are unspecified.
+    /// Update only the spectrum widgets' boxes if everything outside them is identical
+    /// to the last picture. Returns the box round them all; pixels outside the boxes in
+    /// `out` are unspecified.
     pub fn rasterize_spectrum_update(&mut self, previous: &Picture, out: &mut Vec<[u8; 4]>) -> Option<(usize, usize, usize, usize)> {
-        let (start, end, region) = self.spectrum_span()?;
-        let (old_start, old_end, old_region) = previous.spectrum_span()?;
-        if region != old_region
+        let spans = self.spectrum_spans()?;
+        let old = previous.spectrum_spans()?;
+        let first = spans.first()?.0;
+        if spans.len() != old.len()
+            || spans.iter().zip(&old).any(|(a, b)| a.2 != b.2)
             || self.background != previous.background
             || (self.plug_field, self.plug_ink, self.plug_accent) != (previous.plug_field, previous.plug_ink, previous.plug_accent)
-            || self.ops[..start] != previous.ops[..old_start]
-            || self.ops[end..] != previous.ops[old_end..]
             || self.images.len() != previous.images.len()
             || self.images.iter().any(|(key, image)| previous.images.get(key).is_none_or(|old| !std::sync::Arc::ptr_eq(image, old)))
-            || self.ops[start..].iter().any(|op| matches!(op, DrawOp::Dots { .. }))
+            || self.ops[first..].iter().any(|op| matches!(op, DrawOp::Dots { .. }))
         {
+            return None;
+        }
+        // Everything between the spectra the same.
+        let (mut at, mut old_at) = (0, 0);
+        for (&(start, end, _), &(old_start, old_end, _)) in spans.iter().zip(&old) {
+            if self.ops[at..start] != previous.ops[old_at..old_start] {
+                return None;
+            }
+            (at, old_at) = (end, old_end);
+        }
+        if self.ops[at..] != previous.ops[old_at..] {
             return None;
         }
         out.resize(WIDTH * HEIGHT, [0, 0, 0, 255]);
-        self.replay(out, start, Some(region));
-        let (x0, y0, x1, y1) = region;
+        let mut all = (i32::MAX, i32::MAX, 0, 0);
+        for &(start, _, region) in &spans {
+            self.replay(out, start, Some(region));
+            all = (all.0.min(region.0), all.1.min(region.1), all.2.max(region.2), all.3.max(region.3));
+        }
+        let (x0, y0, x1, y1) = all;
         Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
     }
 
-    fn spectrum_span(&self) -> Option<(usize, usize, (i32, i32, i32, i32))> {
-        let start = self.ops.iter().position(|op| matches!(op, DrawOp::SpectrumPanel { .. }))?;
-        let DrawOp::SpectrumPanel { x, y, w, h, c } = self.ops[start] else { return None };
-        let region = (x, y, x.saturating_add(w), y.saturating_add(h));
-        if c.alpha != 1.0
-            || x < 0
-            || y < 0
-            || w <= 0
-            || h <= 0
-            || region.2 > WIDTH as i32
-            || region.3 > HEIGHT as i32
-            || self.ops.get(start.checked_sub(1)?) != Some(&DrawOp::Clip(Some(region)))
-        {
-            return None;
+    /// Each spectrum widget's drawing: where it starts (its panel), where it ends (the
+    /// `Clip(None)` after it) and its box. `None` if one isn't drawn so it can be redrawn
+    /// alone (a see-through panel, off the screen, not clipped to its box).
+    fn spectrum_spans(&self) -> Option<Vec<(usize, usize, (i32, i32, i32, i32))>> {
+        let mut spans = Vec::new();
+        let mut from = 0;
+        while let Some(at) = self.ops[from..].iter().position(|op| matches!(op, DrawOp::SpectrumPanel { .. })) {
+            let start = from + at;
+            let DrawOp::SpectrumPanel { x, y, w, h, c } = self.ops[start] else { return None };
+            let region = (x, y, x.saturating_add(w), y.saturating_add(h));
+            if c.alpha != 1.0
+                || x < 0
+                || y < 0
+                || w <= 0
+                || h <= 0
+                || region.2 > WIDTH as i32
+                || region.3 > HEIGHT as i32
+                || self.ops.get(start.checked_sub(1)?) != Some(&DrawOp::Clip(Some(region)))
+            {
+                return None;
+            }
+            let end = start + 1 + self.ops[start + 1..].iter().position(|op| matches!(op, DrawOp::Clip(_)))?;
+            if self.ops[end] != DrawOp::Clip(None) {
+                return None;
+            }
+            spans.push((start, end, region));
+            from = end;
         }
-        let end = start + 1 + self.ops[start + 1..].iter().position(|op| matches!(op, DrawOp::Clip(_)))?;
-        (self.ops[end] == DrawOp::Clip(None)).then_some((start, end, region))
+        Some(spans)
     }
 
     fn replay(&mut self, out: &mut Vec<[u8; 4]>, start: usize, region: Option<(i32, i32, i32, i32)>) {

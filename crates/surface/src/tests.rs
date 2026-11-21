@@ -4190,6 +4190,47 @@ fn a_filter_picture_sits_over_cutoff_and_reso() {
     assert_eq!(s.error(), None);
 }
 
+/// A plug-in's live output spectrum goes behind each filter picture over its knobs,
+/// on panels the MK3 redraws alone; the surface says when a filter picture is drawn
+/// (the UI taps the output only then).
+#[test]
+fn filter_pictures_show_the_output_spectrum_and_redraw_alone() {
+    let (s, mut v) = (Surface::new(), view());
+    let knob = v.control.knobs[0].clone();
+    v.control.knobs = vec![knob; 8];
+    let set = |v: &mut View, k: usize, name: &str, text: &str| {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    };
+    for k in 0..8 {
+        set(&mut v, k, &format!("Level {k}"), "Off");
+    }
+    s.draw_picture(&v);
+    assert!(!s.drew_filter_picture(), "no filter, no spectrum wanted");
+    for k in [0, 4] {
+        set(&mut v, k, "Cutoff", "1.20 kHz");
+        set(&mut v, k + 1, "Reso", "42 %");
+    }
+    let plain = s.draw_picture(&v);
+    assert!(s.drew_filter_picture());
+    let panels = |p: &crate::screen::Picture| p.ops.iter().filter(|op| matches!(op, crate::screen::DrawOp::SpectrumPanel { .. })).count();
+    assert_eq!(panels(&plain), 0, "no spectrum yet: drawn as before");
+
+    v.control.output_spectrum = (0..96).map(|i| 0.7 - 0.005 * i as f32).collect();
+    let old = s.draw_picture(&v);
+    assert_eq!(panels(&old), 2, "both filters");
+    assert_ne!(old.clone().into_pixels(), plain.clone().into_pixels());
+    let mut patched = old.clone().into_pixels();
+    v.control.output_spectrum.iter_mut().for_each(|p| *p = 0.4);
+    let mut next = s.draw_picture(&v);
+    let expected = next.clone().into_pixels();
+    assert_ne!(patched, expected);
+    let (x0, _, x1, _) = next.rasterize_spectrum_update(&old, &mut patched).expect("spectrum-only update");
+    assert!(x0 < 240 && x1 > 480 && x1 <= 960, "{x0}..{x1}");
+    assert_eq!(patched, expected);
+    assert_eq!(s.error(), None);
+}
+
 /// Touching a knob lights what it moves in its picture (the filter writes the cutoff's
 /// value); three fingers (a resting hand) light nothing.
 #[test]

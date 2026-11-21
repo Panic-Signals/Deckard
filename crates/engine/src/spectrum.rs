@@ -50,33 +50,37 @@ impl Analyzer {
     }
 
     pub fn curves(&mut self, window: &[[f32; 4]]) -> [[f32; POINTS]; 2] {
+        [self.curve(window, 0), self.curve(window, 1)]
+    }
+
+    /// One stereo pair's curve: 0 the input (`window`'s first two channels), 1 the output.
+    pub fn curve(&mut self, window: &[[f32; 4]], pair: usize) -> [f32; POINTS] {
         let Self { hann, fft, input, spectrum, scratch, power, bins } = self;
         let n = hann.len();
         assert_eq!(window.len(), n);
+        assert!(pair < 2);
         let fft_scale = 4.0 / n as f32;
-        let mut curves = [[0.0; POINTS]; 2];
-        for (pair, curve) in curves.iter_mut().enumerate() {
-            // Average channel power, so opposite-phase signals stay visible.
-            power.fill(0.0);
-            for ch in [pair * 2, pair * 2 + 1] {
-                for ((dst, sample), w) in input.iter_mut().zip(window).zip(hann.iter()) {
-                    *dst = if sample[ch].is_finite() { sample[ch] * w } else { 0.0 };
-                }
-                // (Only fails on wrongly sized buffers, which `new` made.)
-                let _ = fft.process_with_scratch(input, spectrum, scratch);
-                for (p, c) in power.iter_mut().zip(spectrum.iter()) {
-                    *p += 0.5 * fft_scale * fft_scale * c.norm_sqr();
-                }
+        let mut curve = [0.0; POINTS];
+        // Average channel power, so opposite-phase signals stay visible.
+        power.fill(0.0);
+        for ch in [pair * 2, pair * 2 + 1] {
+            for ((dst, sample), w) in input.iter_mut().zip(window).zip(hann.iter()) {
+                *dst = if sample[ch].is_finite() { sample[ch] * w } else { 0.0 };
             }
-
-            for (y, bin) in curve.iter_mut().zip(bins.iter()) {
-                let interp = power[bin.lower] * (1.0 - bin.fraction) + power[bin.upper] * bin.fraction;
-                // Keep peaks between plot points visible at high frequencies.
-                let peak = bin.peak_bins.clone().fold(interp, |p, b| p.max(power[b]));
-                *y = ((10.0 * peak.log10() + 90.0) / 90.0).clamp(0.0, 1.0);
+            // (Only fails on wrongly sized buffers, which `new` made.)
+            let _ = fft.process_with_scratch(input, spectrum, scratch);
+            for (p, c) in power.iter_mut().zip(spectrum.iter()) {
+                *p += 0.5 * fft_scale * fft_scale * c.norm_sqr();
             }
         }
-        curves
+
+        for (y, bin) in curve.iter_mut().zip(bins.iter()) {
+            let interp = power[bin.lower] * (1.0 - bin.fraction) + power[bin.upper] * bin.fraction;
+            // Keep peaks between plot points visible at high frequencies.
+            let peak = bin.peak_bins.clone().fold(interp, |p, b| p.max(power[b]));
+            *y = ((10.0 * peak.log10() + 90.0) / 90.0).clamp(0.0, 1.0);
+        }
+        curve
     }
 }
 

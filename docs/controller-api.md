@@ -582,7 +582,7 @@ and has a flat look that reads on every theme. Every input is optional. Any inpu
 
 | Widget | Min. cells | Inputs | Touch `focus` names |
 |---|---|---|---|
-| `filter` | 2 | `shape` (`lp`, `hp`, `bp`, `notch`, `svf_lp`, `svf_hp`, `svf_bp`, `ladder4`), `cutoff` Hz, `resonance` 0..1, `slope` 12 or 24, `drive` dB, `mix` 0..1; `cutoff_mod`, `resonance_mod` | `cutoff`, `resonance` |
+| `filter` | 2 | `shape` (`lp`, `hp`, `bp`, `notch`, `svf_lp`, `svf_hp`, `svf_bp`, `ladder4`), `cutoff` Hz, `resonance` 0..1, `slope` 12 or 24, `drive` dB, `mix` 0..1; `cutoff_mod`, `resonance_mod`; `spectrum` (points 0..1 for -90 to 0 dBFS, 20 Hz to 20 kHz: over the knobs, the focused plug-in's live output) | `cutoff`, `resonance` |
 | `envelope` | 2 | `delay`, `attack`, `hold`, `decay`, `release` in ms; `sustain` 0..1; `curve` -1..1; `amount` -1..1; `attack_mod`, `decay_mod`, `sustain_mod`, `release_mod`. Without `sustain` and `release`, an AD envelope | `delay`, `attack`, `hold`, `decay`, `sustain`, `release`, `amount`, `curve` |
 | `lfo` | 2 | `shape` (`sine`, `triangle`, `saw`, `ramp`, `square`, `random`, `wander`), `rate` Hz or `rate_text`, `phase`, `depth` 0..1, `position`; `depth_mod` | `rate`, `depth`, `shape`, `phase` |
 | `transfer` | 2 | `threshold` dB, `ratio`, `knee` dB, `makeup` dB, `level` dB, `reduction` dB; `threshold_mod`, `ratio_mod` | `threshold`, `ratio`, `knee`, `makeup` |

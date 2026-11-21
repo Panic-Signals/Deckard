@@ -5762,6 +5762,7 @@ impl App {
             eq: None,
             filter: None,
             picture: None,
+            output_spectrum: Vec::new(),
             zhora: None,
             tuner: None,
             euclid: self.euclid_view(c.level, c.page, head),
@@ -5822,7 +5823,7 @@ impl App {
         let p = d.project();
         let chain = self.chain();
         let slot = d.chain_slots(chain).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
-        v.control.eq = self.plugin_spectrum_view(chain, self.slot.zip(slot));
+        (v.control.eq, v.control.output_spectrum) = self.plugin_spectrum_view(chain, self.slot.zip(slot));
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
         if !self.channel {
