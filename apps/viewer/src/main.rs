@@ -15684,7 +15684,8 @@ mod tests {
 
     /// On a laptop screen the header's groups don't overlap: the transport, centred, moves
     /// right of Save rather than over it (at 1280 px it would cover it), and leaves the
-    /// master fader and the CPU meter their room.
+    /// master fader and the CPU meter their room. Narrower than its groups fit (900 px),
+    /// it stays centred, as before.
     #[test]
     fn the_header_fits_a_laptop_screen() {
         for w in [1280.0, 1366.0, 1920.0] {
@@ -15706,6 +15707,16 @@ mod tests {
                 assert!((mid - w / 2.0).abs() < 2.0, "{w}: still centred where there's room: {mid}");
             }
         }
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 720.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(3);
+        let at = |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap();
+        let mid = (at("restart").left() + at("keys").right()) / 2.0;
+        assert!((mid - 450.0).abs() < 2.0, "900: too narrow to fit between: centred, as before ({mid})");
     }
 
     /// The MASCHINE menu: the undo history undoes several steps at once; Open Recent

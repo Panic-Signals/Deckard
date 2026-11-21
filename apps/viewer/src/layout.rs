@@ -1912,11 +1912,19 @@ pub fn header(app: &mut App, ui: &mut Ui) {
             let t = Vec2::new(32.0, 24.0);
             let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
             let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
-            // Centred, as Maschine's, but right of the left group (where it ended last
-            // frame): in a narrow window (a laptop's 1280 px) the transport moves over
-            // rather than covering Save.
-            let left_end = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("header-left-end"))).unwrap_or(0.0);
-            let mid_left = (full.center().x - group / 2.0).max(left_end + 8.0);
+            // Centred, as Maschine's, but between the left group and the right one (where
+            // they ended last frame): in a narrow window (a laptop's 1280 px) the transport
+            // moves over rather than covering Save. Where it can't fit between them at all,
+            // it stays centred.
+            let (left_end, right_start) = ui.ctx().data(|d| {
+                (
+                    d.get_temp::<f32>(egui::Id::new("header-left-end")).unwrap_or(0.0),
+                    d.get_temp::<f32>(egui::Id::new("header-right-start")).unwrap_or(full.right()),
+                )
+            });
+            let centred = full.center().x - group / 2.0;
+            let (lo, hi) = (left_end + 8.0, right_start - 8.0 - group);
+            let mid_left = if lo <= hi { centred.clamp(lo, hi) } else { centred };
             // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
             // and a new release's button.
             ui.horizontal_centered(|ui| {
@@ -2192,6 +2200,9 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     }
                     ui.add_space(8.0);
                 }
+                // (Before an error's text, which takes whatever room is left.)
+                let start = ui.cursor().max.x;
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("header-right-start"), start));
                 if let Some(e) = &app.error {
                     let path = app.path.as_deref().map(|p| p.display().to_string()).unwrap_or_default();
                     ui.colored_label(REC_ON, format!("{path}: {e}"));
