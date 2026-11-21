@@ -983,6 +983,9 @@ pub struct App {
     catalog: settings::Catalog,
     /// The browser (LIBRARY / FILES), and the library it shows.
     browser: browser::Browser,
+    /// The browser preview being decoded, if any; the generation drops stale decodes.
+    prehear_task: Option<(u64, std::sync::mpsc::Receiver<Result<deckard_engine::sample::Sample, String>>)>,
+    prehear_generation: u64,
     /// REC: recording (or armed, stopped), and the take being recorded.
     recording: bool,
     take: record::Take,
@@ -9508,6 +9511,17 @@ impl App {
                 }
                 return;
             }
+            B::StopPrehear => {
+                self.stop_prehear();
+                return;
+            }
+            B::PrehearFile(path) => {
+                b.file_selected = Some(path.clone());
+                if let Some(item) = browser::item_of(&path) {
+                    self.prehear_item(&item);
+                }
+                return;
+            }
             B::Rescan => return,
             B::LibraryFolder(dir, on) => {
                 let folders = &mut self.settings.library_folders;
@@ -9549,9 +9563,31 @@ impl App {
     }
 
     /// Stop whatever the browser is prehearing.
-    fn stop_prehear(&self) {
+    fn stop_prehear(&mut self) {
+        self.prehear_generation = self.prehear_generation.wrapping_add(1);
+        self.prehear_task = None;
         if let Some(Ok(out)) = &self.output {
             out.prehear(None, 0.0);
+        }
+    }
+
+    fn poll_prehear(&mut self) {
+        let Some((generation, receiver)) = self.prehear_task.take() else { return };
+        match receiver.try_recv() {
+            Ok(result) if generation == self.prehear_generation => match result {
+                Ok(sample) => {
+                    self.open_output_now();
+                    if let Some(Ok(out)) = &self.output {
+                        out.prehear(Some(std::sync::Arc::new(sample)), self.browser.prehear_gain);
+                    }
+                }
+                Err(e) => self.status = e,
+            },
+            Ok(_) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.prehear_task = Some((generation, receiver));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
     }
 
@@ -9569,15 +9605,15 @@ impl App {
             self.stop_prehear();
             return;
         };
-        let gain = self.browser.prehear_gain;
-        match deckard_engine::sample::Sample::load(&file) {
-            Ok(s) => {
-                if let Some(Ok(out)) = &self.output {
-                    out.prehear(Some(std::sync::Arc::new(s)), gain);
-                }
-            }
-            Err(e) => self.status = format!("can't prehear {}: {e}", file.display()),
-        }
+        self.stop_prehear();
+        self.open_output_now();
+        let generation = self.prehear_generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = deckard_engine::sample::Sample::load(&file).map_err(|e| format!("can't prehear {}: {e}", file.display()));
+            let _ = sender.send(result);
+        });
+        self.prehear_task = Some((generation, receiver));
     }
 
     /// Load a library item: a project opens; a group replaces the focused group; a
@@ -11501,6 +11537,7 @@ impl App {
 
     /// What [`App::logic`] does while the window is covered or minimized.
     fn background(&mut self, ctx: &egui::Context) {
+        self.poll_prehear();
         self.watch_tunes(ctx);
         self.share_tempo();
         self.follow_engine(ctx, undrawn(ctx, BACKGROUND_PACE));
@@ -11860,6 +11897,10 @@ impl App {
             out.set_focus(Some(self.group));
         }
         self.update_meters(ctx, std::time::Duration::ZERO);
+        self.poll_prehear();
+        if self.prehear_task.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
 
         layout::header(self, ui);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F4)) {
