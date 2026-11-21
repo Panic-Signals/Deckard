@@ -94,6 +94,9 @@ mod midi_io;
 mod midi_monitor;
 mod midi_ports;
 mod mk3_io;
+mod mk3_sink;
+#[cfg(test)]
+mod mk3_sink_tests;
 mod mod_slots;
 mod modulation;
 #[cfg(test)]
@@ -1066,8 +1069,10 @@ pub struct App {
     variation_base: Option<VariationBase>,
     midi_table_for: Option<(u64, usize, usize, bool, Vec<(String, u8)>)>,
     midi_wired: bool,
-    /// The Maschine MK3 over USB (started by `main`, not in tests).
-    mk3: Option<mk3_io::Mk3Io>,
+    /// The Maschine MK3 over USB (started by `boot`, not in tests), and the sinks its
+    /// frames go to: the device is one of them.
+    mk3: Option<std::sync::Arc<mk3_io::Mk3Io>>,
+    mk3_sinks: mk3_sink::Sinks,
     /// The Maschine JAM over USB (started by `main`, not in tests), and its script while
     /// it's connected.
     jam: Option<jam_io::JamIo>,
@@ -3623,7 +3628,7 @@ impl App {
             }
         }
         self.stems_offer_dialog(ctx);
-        let holding = self.mk3.as_ref().is_some_and(mk3_io::Mk3Io::agent_holding);
+        let holding = self.mk3.as_ref().is_some_and(|m| m.agent_holding());
         if let Some(failure) = ni_agent::take_failure() {
             self.status = failure;
             self.ni_agent = ni_agent::Ask::Declined;
@@ -5326,22 +5331,18 @@ impl App {
         let Some(m) = &self.mk3 else { return };
         m.set_context(ctx);
         m.set_monitor(self.midi.monitor());
-        let events = m.take_events();
+        let events = self.mk3_sinks.events();
         let pending = m.take_pending();
         let out = self.mk3_events(events, requests);
         if let Some(after) = self.mk3_wake() {
             ctx.request_repaint_after(if covered { undrawn(ctx, after) } else { after });
         }
+        self.mk3_sinks.show(&out);
         if let Some(m) = &self.mk3 {
-            m.set_route(out.route);
-            m.set_leds(out.leds);
             m.set_led_brightness(self.settings.led_brightness);
             m.set_display_brightness(self.settings.display_brightness);
             // Written to the controller only when it changes (and on connecting).
             m.set_pad_sensitivity(self.settings.pad_sensitivity);
-            if let Some((n, frame)) = out.screens {
-                m.set_screens(n, frame);
-            }
         }
         // Pad hits that came while no engine ran (it starts with the first): each at its
         // own pitch, so a chord stays a chord.
