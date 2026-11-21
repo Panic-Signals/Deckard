@@ -12,6 +12,7 @@ deckard-model = { path = "../model" }
 deckard-stretch = { path = "../stretch" }
 deckard-plugins = { path = "../plugins" }
 plist = "1"
+realfft = "3.5"
 cpal = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
