@@ -1,0 +1,28 @@
+{
+  "_about": [
+    "A plugin-probe measure recipe for a subtractive synth: its filter cutoff in Hz and its amp envelope's attack and decay in ms.",
+    "Replace every \"<...>\" with the plug-in's parameter id (from its dump) and the normalised value (0..1) that gives what the note says; delete setup lines the synth hasn't got.",
+    "Ids are strings in setup (JSON keys) and numbers in a step's param. Keys starting with _ are ignored."
+  ],
+  "note": 69,
+  "setup": {
+    "_one plain oscillator, full level": "",
+    "<osc 1 on>": 1.0, "<osc 1 level>": 1.0, "<osc 1 wave: saw>": 0.0,
+    "<other oscillators off or level 0>": 0.0, "<noise off or level 0>": 0.0,
+    "_the filter open, no resonance, nothing moving it": "",
+    "<filter type: low-pass>": 0.0, "<cutoff>": 1.0, "<resonance>": 0.0,
+    "<filter env amount>": 0.0, "<key tracking>": 0.0, "<lfo / mod wheel amounts>": 0.0,
+    "_the amp envelope: instant, held at full": "",
+    "<amp attack>": 0.0, "<amp decay>": 1.0, "<amp sustain>": 1.0, "<amp release>": 0.0,
+    "<glide>": 0.0
+  },
+  "steps": [
+    { "name": "cutoff", "kind": "cutoff", "param": "<cutoff id>", "points": 21,
+      "setup": { "_noise through the filter, resonance high": "", "<osc 1 on>": 0.0, "<noise on>": 1.0, "<noise level>": 1.0, "<resonance>": 0.9 } },
+    { "name": "amp attack", "kind": "attack", "param": "<amp attack id>", "points": 13 },
+    { "name": "amp decay", "kind": "decay", "param": "<amp decay id>", "points": 13,
+      "setup": { "<amp sustain>": 0.0 } },
+    { "name": "filter env attack (a cross-check)", "kind": "bright_attack", "param": "<filter attack id>", "points": 13,
+      "setup": { "<osc 1 on>": 0.0, "<noise on>": 1.0, "<cutoff>": 0.0, "<filter env amount>": 1.0 } }
+  ]
+}

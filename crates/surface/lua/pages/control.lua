@@ -22,6 +22,7 @@ local widgets = require("lib.widgets")
 local chain = require("lib.chain")
 local knob_lib = require("lib.knobs")
 local zhora = require("lib.zhora")
+local touch = require("lib.touch")
 
 local control = {}
 
@@ -83,11 +84,15 @@ end
 function control.button(name, down)
   local cap = tonumber(name:match("^CAP_(%d)$"))
   if cap then
-    if not down then knob_lib.erased[cap] = nil end
+    if not down then
+      knob_lib.erased[cap] = nil
+      touch.up(cap, deckard.now())
+    end
     if deckard.held("ERASE") then
       if down then knob_lib.erase(cap) end
       return true
     end
+    if down then touch.down(cap, deckard.now()) end
   end
   if not down then return end
   local s = deckard.state()
@@ -124,6 +129,7 @@ function control.knob(n, amount)
     knob_lib.erase(n)
     return true
   end
+  touch.turned(n, deckard.now())
   deckard.turn_knob(n, amount, deckard.held("SHIFT"))
   return true
 end
@@ -223,7 +229,8 @@ end
 -- page ("1/6") at the right.
 -- (`no_page`: without the "2/4" over the right knob.)
 -- (`knob_of`, if given, shows each knob as it returns it, or not at all for nil.)
-local function knobs(screen, theme, c, no_page, knob_of)
+-- (`pictured[i]`: knob i is in a picture over the band, not a dial.)
+local function knobs(screen, theme, c, no_page, knob_of, pictured)
   local function at(i)
     local knob = c.knobs[i]
     if knob and knob_of then return knob_of(knob) end
@@ -250,8 +257,11 @@ local function knobs(screen, theme, c, no_page, knob_of)
       end
     end
     local page = nil
-    if half == 1 and #c.pages > 1 and not no_page then page = c.page .. "/" .. #c.pages end
-    widgets.params(screen, theme, half * 480, groups, page, params)
+    -- (A theme with its knobs centred shows the page up on the bar instead.)
+    if half == 1 and #c.pages > 1 and not no_page and not theme.knobs_centred then page = c.page .. "/" .. #c.pages end
+    local in_picture = {}
+    for k = 1, 4 do in_picture[k] = pictured and pictured[half * 4 + k] or nil end
+    widgets.params(screen, theme, half * 480, groups, page, params, in_picture)
   end
 end
 
@@ -270,93 +280,14 @@ local function auto_knob(knob)
   }
 end
 
--- The built-in effect on the right screen, the same on every page. `kind` is freq
+-- The built-in effect on the right screen, the same on every page, in the picture
+-- band: the Rust `curve` widget (crates/surface/src/widget/curve.rs). `kind` is freq
 -- (20 Hz to 20 kHz, ±12 dB; the EQ and the Filter), law (input along the bottom,
 -- output up the side), time (level over time), or dots (a cloud). Several freq bands
--- are numbered. The corner holds an LFO or envelope when one is sent.
---
--- The plot uses the theme: the curve is its accent, the handles its record colour,
--- the grid its buttons. Palenight's curve is blue; the LCD's is its one ink.
+-- are numbered. The corner holds an LFO or envelope when one is sent. It draws in the
+-- theme: the curve its accent, the handles its record colour, the grid its buttons.
 local function eq_curve(screen, theme, eq)
-  local wave = eq.lfo or {}
-  local show_lfo = #wave >= 2
-  local kind = eq.kind or "freq"
-  if kind == "" then kind = "freq" end
-  -- With the modulator shape in the bottom right, the plot stops short of it.
-  local x0, y0, w, h = 488, 66, show_lfo and 336 or 456, 132
-  screen:rect(x0, y0, w, h, "panel")
-  local function px(t) return x0 + t * (w - 1) end
-  local function py(v) return y0 + (1 - v) * (h - 1) end
-  local function freq_x(hz)
-    return (math.log(hz) - math.log(20)) / (math.log(20000) - math.log(20))
-  end
-  local grid = "button"
-  if kind == "freq" then
-    for _, hz in ipairs({ 100, 1000, 10000 }) do
-      local x = px(freq_x(hz))
-      screen:line(x, y0 + 1, x, y0 + h - 1, 1, grid)
-    end
-    for _, db in ipairs({ -6, 0, 6 }) do
-      local y = py(db / 24 + 0.5)
-      screen:line(x0 + 1, y, x0 + w - 1, y, 1, db == 0 and "separator" or grid)
-    end
-  elseif kind == "law" then
-    screen:line(px(0), py(0), px(1), py(1), 1, "separator")
-    for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
-      screen:line(x0 + 1, py(t), x0 + w - 1, py(t), 1, grid)
-      screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
-    end
-  else
-    screen:line(x0 + 1, py(0.5), x0 + w - 1, py(0.5), 1, "separator")
-    for _, t in ipairs({ 0.25, 0.5, 0.75 }) do
-      screen:line(px(t), y0 + 1, px(t), y0 + h - 1, 1, grid)
-    end
-  end
-  local function stroke(pts, width, ink)
-    local n = pts and #pts or 0
-    if n < 2 then return end
-    for i = 1, n - 1 do
-      screen:line(px((i - 1) / (n - 1)), py(pts[i]), px(i / (n - 1)), py(pts[i + 1]), width, ink)
-    end
-  end
-  stroke(eq.extent, 1, "muted")
-  stroke(eq.side, 1.5, eq.side_live and "marker" or "weak")
-  stroke(eq.points, 2, eq.dim and "muted" or "accent")
-  local bands = eq.bands or {}
-  local radius = kind == "freq" and 7 or 4
-  for i, b in ipairs(bands) do
-    local cx, cy = px(b.x), py(b.y)
-    if kind == "time" then
-      screen:line(cx, py(0), cx, cy, 1.5, "record")
-    end
-    screen:circle(cx, cy, radius, "record")
-    if kind == "freq" and #bands > 1 then
-      screen:label(math.floor(cx - 7), math.floor(cy - 7), 14, 14, tostring(i), { size = 10, color = "on_colour" })
-    end
-  end
-  if kind == "freq" then
-    for _, hz in ipairs({ { 100, "100" }, { 1000, "1k" }, { 10000, "10k" } }) do
-      local x = px(freq_x(hz[1]))
-      screen:label(math.floor(x - 16), y0 + h - 14, 32, 12, hz[2], { size = 10, color = "weak" })
-    end
-  end
-  if eq.preview then
-    screen:label(math.floor(x0 + 8), math.floor(y0 + 4), 80, 14, "PREVIEW", { size = 10, color = "weak" })
-  end
-  if show_lfo then
-    -- Bottom right of the right screen, beside the curve.
-    local bx, by, bw, bh = 832, y0 + h - 40, 112, 40
-    screen:rect(bx, by, bw, bh, "background")
-    screen:frame(bx, by, bw, bh, "button")
-    local m = #wave
-    for i = 1, m - 1 do
-      local x1 = bx + 4 + (i - 1) / (m - 1) * (bw - 8)
-      local x2 = bx + 4 + i / (m - 1) * (bw - 8)
-      local y1 = by + 4 + (1 - wave[i]) * (bh - 8)
-      local y2 = by + 4 + (1 - wave[i + 1]) * (bh - 8)
-      screen:line(x1, y1, x2, y2, 1.5, "accent")
-    end
-  end
+  screen:widget("curve", 488, widgets.BAND_Y, 456, widgets.BAND_H, eq)
 end
 
 -- The Generate page's Euclidean rhythm on the right screen: a dot for each step round
@@ -386,7 +317,7 @@ end
 local function euclid_circle(screen, theme, e)
   local n = #e.hits
   if n == 0 then return end
-  local cx, cy, r = 720, 133, 60
+  local cx, cy, r = 720, widgets.BAND_Y + widgets.BAND_H // 2, widgets.BAND_H // 2 - 8
   local function angle(i) return -90 + 360 * i / n end
   local function point(i, radius)
     local a = math.rad(angle(i))
@@ -419,7 +350,7 @@ local function euclid_circle(screen, theme, e)
     local c, s = math.cos(a), math.sin(a)
     screen:line(cx + 26 * c, cy + 26 * s, cx + (r - 7) * c, cy + (r - 7) * s, 2, lit)
   end
-  screen:label(830, 180, 120, 20, "ROTATE " .. e.rotate, { size = 11, color = gc.weak }, "right", "center")
+  screen:label(830, widgets.BAND_Y + widgets.BAND_H - 20, 120, 20, "ROTATE " .. e.rotate, { size = 11, color = gc.weak }, "right", "center")
 end
 
 -- The Generate page's Random notes on the right screen: a piano roll of the
@@ -431,7 +362,7 @@ local NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#",
 local function random_view(screen, theme, r)
   local n = math.max(1, r.steps)
   -- (A gutter at the left for the note names.)
-  local x0, y0, w, h = 512, 66, 312, 132
+  local x0, y0, w, h = 512, widgets.BAND_Y, 312, widgets.BAND_H
   local cw = w / n
   local gc = groove_colours(theme)
   local hit, lit = gc.hit, gc.now
@@ -469,7 +400,7 @@ local function random_view(screen, theme, r)
     screen:line(x, y0, x, y0 + h - 1, 2, lit)
   end
   -- The velocities drawn from: 1 to 127 across the box, Velocity's range about 100.
-  local bx, by, bw, bh = 832, 158, 112, 40
+  local bx, by, bw, bh = 832, widgets.BAND_Y + widgets.BAND_H - 40, 112, 40
   screen:rect(bx, by, bw, bh, gc.box)
   screen:frame(bx, by, bw, bh, gc.bar)
   local spread = (r.velocity_amount or 0) / 100 * 63.5
@@ -501,6 +432,51 @@ local function random_view(screen, theme, r)
   screen:label(bx, by - 16, bw, 14, "VELOCITY · " .. (names[(r.distribution or 1) + 1] or ""), { size = 9, color = gc.weak }, "left", "center")
 end
 
+-- The page on the right screen's bar: its name, then a pip per page, the shown one lit.
+-- Past PIPS pages, a track as long as eight pips with the shown page lit along it, as
+-- a scroll bar's, and the count. Returns where it ends.
+local PIPS, TRACK_W = 8, 8 * 10 + 8
+local function page_pips(screen, theme, c)
+  local n = #c.pages
+  local name = c.pages[c.page] or ""
+  local w = screen:label(494, 37, 160, 24, name, "param_name", "left", "center")
+  local x = 494 + w + 10
+  if n <= PIPS then
+    for i = 1, n do
+      local on = i == c.page
+      screen:rect(x, 47, on and 14 or 6, 4, on and "accent" or "button", 0.5)
+      x = x + (on and 14 or 6) + 4
+    end
+    return x
+  end
+  local thumb = math.max(8, TRACK_W // n)
+  screen:rect(x, 48, TRACK_W, 2, "button")
+  local at = x + math.floor((TRACK_W - thumb) * (c.page - 1) / (n - 1) + 0.5)
+  screen:rect(at, 47, thumb, 4, "accent", 0.5)
+  return x + TRACK_W + 8 + screen:label(x + TRACK_W + 8, 37, 60, 24, c.page .. " / " .. n, "param_name", "left", "center")
+end
+
+-- The knobs in touch focus (CAP_1..8 rested on, just lifted from, or just turned).
+local function touched()
+  return touch.focused(deckard.now())
+end
+
+-- The widest run of knobs `from`..`to` not in `taken` (a set of knob numbers): its first
+-- knob and how many (0 when there's none).
+local function free_run(taken, from, to)
+  local best_at, best, at, n = from, 0, nil, 0
+  for k = from, to do
+    if taken[k] then
+      n = 0
+    else
+      if n == 0 then at = k end
+      n = n + 1
+      if n > best then best_at, best = at, n end
+    end
+  end
+  return best_at, best
+end
+
 function control.draw(screen, theme, opts)
   opts = opts or {}
   local s = deckard.state()
@@ -510,7 +486,8 @@ function control.draw(screen, theme, opts)
   local snd = group and group.sounds[s.sound]
   local shift_layer = c.plugins and deckard.held("SHIFT")
   local z = c.plugins and not shift_layer and c.zhora
-  if not shift_layer and not z then chain.tabs(screen, theme, c.level) end
+  -- (SHIFT changes only the buttons' row: the layout stays as it is.)
+  local in_tabs = theme.info_in_tabs and not z and c.plugins
   -- (The level's: the master's "M" in white, the group's label, or the sound's number.)
   local info = widgets.focus_info(s)
   if c.level == 1 then
@@ -519,7 +496,18 @@ function control.draw(screen, theme, opts)
     info.number = string.char(string.byte("A") + (s.group - 1) % 8) .. ((s.group - 1) // 8 + 1)
     info.palette, info.name = group.palette, group.name
   end
-  widgets.info_bar(screen, theme, info)
+  -- (The knobs in a picture over the band rather than a dial.)
+  local pictured = {}
+  if in_tabs then
+    -- (No info bar: the level's number and name at the end of the chain strip's row.)
+    if not shift_layer then chain.tabs(screen, theme, c.level) end
+    if c.level == 1 then info.number = nil end
+    -- (Its name and number go to the right screen's row, after the page: the strip has
+    -- the left one to itself.)
+  else
+    if not shift_layer and not z then chain.tabs(screen, theme, c.level) end
+    widgets.info_bar(screen, theme, info)
+  end
   if shift_layer then
     local slot = c.slot_index and c.chain[c.slot_index]
     widgets.buttons(screen, theme, {
@@ -551,19 +539,74 @@ function control.draw(screen, theme, opts)
       return
     end
     screen:rect(480, 35, 480, 25, "bar")
+    -- Pictures over the knobs they draw (a filter over Cutoff and Reso, an envelope
+    -- over its times...) and a dial over every other knob, in the band on both screens;
+    -- not over the right screen's own picture of a built-in effect. A choice's list
+    -- goes over the right screen's picture (drawn after it, on its own background)
+    -- rather than taking it away.
+    local own = slot and (c.tuner or c.eq or c.filter or c.picture)
+    local right_free, left_free = true, true
+    -- (The knobs whose cells hold a list of choices: a picture goes beside them, whole, or
+    -- not at all, never under a list's box.)
+    local listed = {}
+    for _, span in ipairs(screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false, true)) do
+      if span.first > 4 and span.kind ~= "choices" then right_free = false end
+      if span.first <= 4 and span.kind ~= "dial" and span.kind ~= "choices" then left_free = false end
+      if span.kind ~= "dial" then
+        for i = span.first, span.first + span.cells - 1 do pictured[i] = true end
+      end
+      if span.kind == "choices" then
+        for i = span.first, span.first + span.cells - 1 do listed[i] = true end
+      end
+    end
+    -- A theme's showcase: over a left screen of only dials, a hosted plug-in's own picture as
+    -- it is, at its own size (shrunk, or in the theme's colours, it smudges).
+    -- (At its own size at the left margin, between the strip and the section names;
+    -- centred under the bar otherwise.)
+    -- (Not DECKARD's own devices: the strip already shows their picture whole.)
+    if theme.plugin_showcase and left_free and slot and slot.plugin and slot.picture then
+      local w, h = screen:image_size(slot.picture, true)
+      if theme.knobs_left and w then
+        -- (At its own size, or shrunk to fit, centred in its band: in the widest run of
+        -- cells with no list, and only if it keeps half its size there.)
+        local first, cells = free_run(listed, 1, 4)
+        local k = cells > 0 and math.min(1, 80 / h, (cells * 120 - 22) / w) or 0
+        if k >= 0.5 then
+          local pw, ph = math.floor(w * k + 0.5), math.floor(h * k + 0.5)
+          screen:image((first - 1) * 120 + 11, 78 + (80 - ph) // 2, pw, ph, slot.picture, true, true)
+        end
+      elseif not (listed[1] or listed[2] or listed[3] or listed[4]) then
+        -- (The whole screen's width: only with no list on it.)
+        local y = theme.info_in_tabs and 86 or widgets.BAND_Y - 6
+        screen:image(0, y, 480, 80, slot.picture, true, true)
+      end
+    end
+    local pips_end = theme.knobs_centred and #c.pages > 1 and page_pips(screen, theme, c) or 494
+    if in_tabs then widgets.info_on_row(screen, theme, info, 36, 8, pips_end + 16) end
     if slot then
-      screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
+      -- (Not in a theme whose bar shows the page: the strip names the plug-in.)
+      if not theme.knobs_centred then
+        screen:label(480 + 21, 36, 480 - 21 - 18, 24, slot.name, "default", "right", "center")
+      end
       if c.tuner then
         -- The Tuner effect: A4's pitch (and Muted) on the bar, the dial under it.
         local t = c.tuner
         screen:label(490, 36, 300, 24, t.reference .. (t.muted and "  ·  Muted" or ""), "default", "left", "center")
         zhora.dial(screen, t)
+      elseif not right_free then
+        -- (The band holds the knobs' pictures.)
       elseif c.eq then eq_curve(screen, theme, c.eq)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
-      else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
+      else
+        -- (Over two cells with no list: knobs 5 and 6, else 7 and 8, else not at all.)
+        local at = not (listed[5] or listed[6]) and 480 or not (listed[7] or listed[8]) and 720 or nil
+        if at then chain.thumbnail(screen, theme, at, 68, 240, 136, slot, false) end
+      end
     end
-    chain.draw(screen, theme, c)
+    screen:pictures(c.knobs, touched(), slot and slot.name, own and true or false)
+    -- (The band below always has pictures: the chain is the short strip.)
+    chain.draw(screen, theme, c, true)
   else
     widgets.buttons(screen, theme, {
       [5] = { arrows = true, text = PAGE_GROUPS[c.page_group] or "", left = can_step(c, false), right = can_step(c, true) },
@@ -580,10 +623,10 @@ function control.draw(screen, theme, opts)
       screen:label(700, 36, 250, 24, string.format("%.0f %%  ·  %s", r.probability, made), "default", "right", "center")
       random_view(screen, theme, r)
     else
-      channel_icon(screen, c.page_group, 720, 126, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
+      channel_icon(screen, c.page_group, 720, widgets.BAND_Y + widgets.BAND_H // 2, 37, theme.colors.channel_icon or { 0x3a, 0x3a, 0x3a }, "background")
     end
   end
-  knobs(screen, theme, c, false, knob_of)
+  knobs(screen, theme, c, false, knob_of, pictured)
 end
 
 -- The knobs' row as the page draws it (Set Macro shows it too).

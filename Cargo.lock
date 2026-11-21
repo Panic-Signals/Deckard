@@ -2191,6 +2191,7 @@ dependencies = [
  "hound",
  "lewton",
  "plist",
+ "realfft",
  "tempfile",
  "transit-audio-asio",
  "transit-audio-backend",
@@ -2323,6 +2324,7 @@ dependencies = [
  "fontdue",
  "mlua",
  "png",
+ "serde_json",
  "tempfile",
 ]
 

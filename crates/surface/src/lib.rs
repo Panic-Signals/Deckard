@@ -24,8 +24,9 @@ mod leds;
 mod names;
 mod screen;
 mod sources;
+pub mod widget;
 
-pub use screen::{FONTS, Picture};
+pub use screen::{FONTS, PICTURE_ALPHA, Picture};
 pub use sources::SHIPPED;
 
 /// What the layer shows of the app, filled by the app each frame.
@@ -546,6 +547,10 @@ pub struct ControlView {
     pub filter: Option<EqCurveView>,
     /// Any other focused built-in effect, drawn on the right screen on every page.
     pub picture: Option<EqCurveView>,
+    /// The focused hosted plug-in's live output spectrum (0..1, -90 to 0 dBFS, 20 Hz to
+    /// 20 kHz), behind the response in the `filter` pictures over its knobs. Sent only
+    /// while one is drawn ([`Surface::drew_filter_picture`]).
+    pub output_spectrum: Vec<f32>,
     /// The focused Zhora: its tuner on the right screen, its buttons on both.
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
@@ -631,6 +636,8 @@ pub struct ZhoraView {
 /// actually apply yet (the Cabinet).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EqCurveView {
+    /// Live input and output spectra behind a built-in EQ's response.
+    pub spectrum: [Vec<f32>; 2],
     pub points: Vec<f32>,
     pub bands: Vec<(f32, f32)>,
     pub extent: Vec<f32>,
@@ -669,6 +676,14 @@ pub struct SlotView {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KnobView {
+    /// Where its parameter is with modulation applied (0..1), when it is modulated.
+    pub mod_position: Option<f64>,
+    /// The knob's text with its parameter at `mod_position` (set with it).
+    pub mod_text: Option<String>,
+    /// Its plug-in parameter's id, if it's a plug-in's (mappings find parameters by it).
+    pub param_id: Option<u32>,
+    /// The values it picks among, if it's a choice of a few (a filter type, a switch).
+    pub choices: Vec<String>,
     pub name: String,
     /// The section of the plug-in it's in ("Voice Settings").
     pub section: String,
@@ -1130,6 +1145,9 @@ pub(crate) struct Shared {
     pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
+    /// Until when (seconds on the `now` clock) the page asked for the screens to keep
+    /// being redrawn (`deckard.redraw_until`), for a timer that ends with no event.
+    pub redraw_until: f64,
     /// Buttons held (the scripts' names: `SHIFT`, `PLAY`…), and pads held (0..16).
     pub held: HashSet<String>,
     pub pads: [bool; 16],
@@ -1170,6 +1188,8 @@ pub struct Surface {
     last_ops: Option<([u8; 3], Vec<screen::DrawOp>)>,
     /// A picture was added since: the same drawing commands may now look different.
     pictures_changed: std::cell::Cell<bool>,
+    /// The last picture drew a `filter` picture over the knobs.
+    filter_drawn: std::cell::Cell<bool>,
     frames: u64,
     /// Pictures the scripts can draw ([`Surface::add_picture`]).
     pictures: screen::Pictures,
@@ -1204,6 +1224,7 @@ impl Surface {
             picture: None,
             last_ops: None,
             pictures_changed: std::cell::Cell::new(false),
+            filter_drawn: std::cell::Cell::new(false),
             frames: 0,
             pictures: Default::default(),
             pinned: BTreeSet::new(),
@@ -1272,8 +1293,12 @@ impl Surface {
         match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode), self.pinned.clone(), self.shown_pin.clone()) {
             Ok(run) => {
                 run.lua.set_app_data(self.pictures.clone());
+                let mapping_error = run.lua.app_data_ref::<MappingErrors>().and_then(|e| e.0.first().cloned());
                 self.run = Some(run);
                 *self.error.borrow_mut() = None;
+                if let Some(e) = mapping_error {
+                    self.set_error(e);
+                }
                 self.picture = None;
                 self.last_ops = None;
                 true
@@ -1360,7 +1385,12 @@ impl Surface {
     /// Whether the theme moves by itself (a `chase` border): the screens want drawing
     /// often, even with nothing happening.
     pub fn animates(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates))
+        self.run.as_ref().is_some_and(|r| {
+            r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates) || {
+                let sh = r.shared.borrow();
+                sh.redraw_until > sh.now
+            }
+        })
     }
 
     /// The pages' timer: `tick()` for the page shown, then `global.lua` (as for events),
@@ -1669,11 +1699,44 @@ impl Surface {
         self.pictures.borrow().contains_key(&(key.to_string(), thumb))
     }
 
+    /// The knob pages of the mapping for plug-in `name`, if one matches and has pages
+    /// (`mappings/` in the controller scripts; the user's win).
+    pub fn mapping_pages(&self, name: &str) -> Option<Vec<widget::mapping::PageParams>> {
+        let run = self.run.as_ref()?;
+        let all = run.lua.app_data_ref::<widget::Mappings>()?;
+        let pages = widget::mapping::find(&all.0, name, "", "")?.page_params();
+        (!pages.is_empty()).then_some(pages)
+    }
+
+    /// Whether the last picture drew a `filter` picture over the knobs: then it can show
+    /// the plug-in's output spectrum ([`ControlView::output_spectrum`]).
+    pub fn drew_filter_picture(&self) -> bool {
+        self.filter_drawn.get()
+    }
+
+    /// Whether the focused plug-in's mapping requests an EQ spectrum.
+    pub fn mapping_shows_eq(&self, name: &str, vendor: &str, id: &str) -> bool {
+        self.run
+            .as_ref()
+            .and_then(|run| {
+                let all = run.lua.app_data_ref::<widget::Mappings>()?;
+                let mapping = widget::mapping::find(&all.0, name, vendor, id)?;
+                Some(mapping.kind == "eq" && (mapping.matches.builtin.is_none() || (vendor.is_empty() && id.is_empty())))
+            })
+            .unwrap_or(false)
+    }
+
+    /// The widgets' look in the theme shown now (for the widgets' golden tests).
+    #[cfg(test)]
+    pub(crate) fn widget_look(&self) -> Option<widget::Look> {
+        self.run.as_ref().and_then(|r| r.lua.app_data_ref::<screen::ThemeCache>().map(|c| widget::Look::from_cache(&c)))
+    }
+
     fn draw_picture(&self, v: &View) -> screen::Picture {
         let Some(p) = self.with(v, None, |run| self.draw_picture_in(run, v)).map(|(p, _)| p) else {
             let mut p = screen::Picture::new([0, 0, 0]);
             if let Some(name) = &v.loading {
-                p.loading(name);
+                p.loading(name, None);
             }
             if let Some(e) = self.error() {
                 p.error(&e);
@@ -1686,6 +1749,27 @@ impl Surface {
     fn draw_picture_in(&self, run: &Run, v: &View) -> screen::Picture {
         let res: mlua::Result<screen::Picture> = (|| {
             let theme: Table = run.lua.named_registry_value("deckard.theme")?;
+            widget::set_theme_style(run.lua.app_data_ref::<screen::ThemeCache>().and_then(|c| c.picture_style));
+            // (A theme in the focused group's colour: its accent, and what's lit, follow it.
+            // Not `on_colour`: that's also the text on a row filled in the text colour,
+            // as Browse's focused result.)
+            if theme.get::<Option<bool>>("accent_from_group").ok().flatten() == Some(true)
+                && let Some(g) = v.groups.get(v.group)
+            {
+                let rgb = g.rgb;
+                let lum = 0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2]);
+                let on = if lum > 110.0 { [0x08, 0x10, 0x16] } else { [0xf2, 0xf6, 0xfa] };
+                if let Some(mut cache) = run.lua.app_data_mut::<screen::ThemeCache>() {
+                    cache.set_colour("accent", rgb);
+                    cache.set_colour("button_selected", rgb);
+                    cache.set_colour("button_selected_text", on);
+                    cache.accent = rgb;
+                }
+                let colors: Table = theme.get("colors")?;
+                for (k, c) in [("accent", rgb), ("button_selected", rgb), ("button_selected_text", on)] {
+                    colors.set(k, run.lua.create_sequence_from(c)?)?;
+                }
+            }
             let (field, ink, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
                 Some(cache) => (cache.background, cache.text, cache.accent),
                 None => {
@@ -1702,13 +1786,16 @@ impl Surface {
             pic.plug_field = field;
             pic.plug_ink = ink;
             pic.plug_accent = accent;
+            pic.caps = run.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.caps);
             let ud = run.lua.create_userdata(pic)?;
+            widget::begin_frame(&v.control.output_spectrum);
             for t in self.tables(run).into_iter().rev() {
                 let Ok(Some(f)) = t.get::<Option<Function>>("draw") else { continue };
                 if let Err(e) = f.call::<()>((ud.clone(), theme.clone())) {
                     self.set_error(e);
                 }
             }
+            self.filter_drawn.set(widget::filter_drawn());
             ud.take::<screen::Picture>()
         })();
         let mut p = match res {
@@ -1719,7 +1806,7 @@ impl Surface {
             }
         };
         if let Some(name) = &v.loading {
-            p.loading(name);
+            p.loading(name, run.lua.app_data_ref::<screen::ThemeCache>().map(|c| c.default_style));
         }
         if let Some(e) = self.error() {
             p.error(&e);
@@ -1844,6 +1931,9 @@ fn sync_lua_pin(lua: &Lua, shown: Option<&(String, String)>) -> mlua::Result<()>
     Ok(())
 }
 
+/// The plug-in mappings that didn't load (Lua app data), first shown as the error.
+struct MappingErrors(Vec<String>);
+
 fn start(
     sources: &sources::Sources,
     page: String,
@@ -1858,6 +1948,7 @@ fn start(
         view: Rc::default(),
         view_id: 1,
         now: 0.0,
+        redraw_until: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
         actions: Vec::new(),
@@ -1875,6 +1966,10 @@ fn start(
     lua.set_named_registry_value("deckard.global", global)?;
     let theme = load_theme(&lua, sources, theme, 0)?;
     lua.set_app_data(screen::ThemeCache::from_theme(&theme)?);
+    // The plug-in mappings; one that doesn't load is reported and left out.
+    let (mappings, errors) = widget::mapping::load_all(&lua, sources);
+    lua.set_app_data(widget::Mappings(std::rc::Rc::new(mappings)));
+    lua.set_app_data(MappingErrors(errors));
     lua.set_named_registry_value("deckard.theme", theme)?;
     lua.set_named_registry_value("deckard.pages", lua.create_table()?)?;
     // The first page loads now, so its errors show at once.
