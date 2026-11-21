@@ -76,7 +76,9 @@ impl Dial {
         let arc_w = if focused && !glow { 5.0 } else { 3.0 };
         // (A glow: a faint haze hugging the lit arc, 3 px each side, in its colour faded
         // into the field and falling off smoothly (a ring a pixel apart, none of them a
-        // visible band); opaque so the segments' ends don't stack up.)
+        // visible band); opaque so the segments' ends don't stack up. Drawn before the
+        // track: its rings have round ends, which drawn over the track would cut a gap in
+        // it just past the value.)
         let halo = |c: &mut Canvas, a0: f32, a1: f32| {
             if glow {
                 for i in (1..=6).rev() {
@@ -89,21 +91,27 @@ impl Dial {
         match self.steps {
             Some(n) => {
                 let seg = SWEEP / n as f32;
-                for i in 0..n {
-                    let (s0, s1) = (START - seg * i as f32 - GAP / 2.0, START - seg * (i + 1) as f32 + GAP / 2.0);
-                    // A segment is lit when its middle lies in the arc.
+                let segment = |i: usize| (START - seg * i as f32 - GAP / 2.0, START - seg * (i + 1) as f32 + GAP / 2.0);
+                // A segment is lit when its middle lies in the arc.
+                let on = |i: usize| {
                     let mid = (i as f32 + 0.5) / n as f32;
-                    let on = mid >= lo && mid <= hi && (lo < hi);
-                    if on {
-                        halo(c, s0, s1);
-                    }
-                    arc(c, centre, r, s0, s1, if on { arc_w } else { 3.0 }, if on { accent } else { track });
+                    mid >= lo && mid <= hi && (lo < hi)
+                };
+                for i in (0..n).filter(|&i| on(i)) {
+                    let (s0, s1) = segment(i);
+                    halo(c, s0, s1);
+                }
+                for i in 0..n {
+                    let (s0, s1) = segment(i);
+                    arc(c, centre, r, s0, s1, if on(i) { arc_w } else { 3.0 }, if on(i) { accent } else { track });
                 }
             }
             None => {
-                arc(c, centre, r, angle(0.0), angle(1.0), 3.0, track);
                 if hi > lo {
                     halo(c, angle(lo), angle(hi));
+                }
+                arc(c, centre, r, angle(0.0), angle(1.0), 3.0, track);
+                if hi > lo {
                     arc(c, centre, r, angle(lo), angle(hi), arc_w, accent);
                 }
             }
@@ -198,6 +206,37 @@ mod tests {
         }
         let file = std::path::PathBuf::from(out).join("dial-focus.png");
         golden::write_png(&file, (w * 2) as u32, h as u32, &px);
+    }
+
+    /// Turning a knob lights its dial, with a glow in the deep theme; the track just past
+    /// the value stays whole (the glow's round ends once cut a gap in it there).
+    #[test]
+    fn a_glowing_dial_leaves_the_track_whole() {
+        let look = golden::look("deep");
+        crate::widget::set_theme_style(crate::widget::PictureStyle::named("deep"));
+        assert!(crate::widget::style().focus_glow);
+        let (w, h) = (120i32, crate::widget::BAND_H);
+        let r = (w.min(h) as f32 / 2.0 - 7.0).clamp(8.0, 20.0);
+        let (cx, cy) = (w as f32 / 2.0, h as f32 - 8.0 - r * std::f32::consts::FRAC_1_SQRT_2);
+        for (value, steps) in [(0.4, None), (0.7, None), (0.5, Some(8))] {
+            let d = Dial { value, steps, ..Default::default() };
+            let px = golden::render(&look, w, Some("value"), |cv| d.draw(cv));
+            let at = |v: f32| {
+                let (x, y) = point(cx, cy, r, angle(v));
+                px[y as usize * w as usize + x as usize]
+            };
+            let far = at(steps.map_or(value + 0.25, |n| (n as f32 - 0.5) / n as f32));
+            let mut past: Vec<f32> = (4..=10).map(|i| value + i as f32 / 100.0).collect();
+            if let Some(n) = steps {
+                // (The middle of each unlit segment past the value: the gaps between are dark.)
+                past = (0..n).map(|i| (i as f32 + 0.5) / n as f32).filter(|m| *m > value).collect();
+            }
+            for v in past {
+                let p = at(v);
+                let diff = (0..3).map(|k| (p[k] as i32 - far[k] as i32).abs()).max().unwrap();
+                assert!(diff <= 24, "value {value} steps {steps:?}: the track at {v} is {p:?}, further on {far:?}");
+            }
+        }
     }
 
     #[test]
