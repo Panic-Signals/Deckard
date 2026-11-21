@@ -13,6 +13,7 @@ use crate::sample::Sample;
 use crate::sampler_tables as t;
 use crate::synth::Synth;
 use deckard_model::MidiKind;
+use deckard_model::layers::{Layer, Morph};
 use deckard_model::new_sampler::Motion;
 use std::sync::Arc;
 
@@ -144,13 +145,50 @@ const C_ATTACK: f64 = -0.332;
 const C_DECAY: f64 = 0.44269788; // 0x3ee2a84c
 
 /// Envelope segment times and sustain level, for one envelope (§3, §5.1).
-#[derive(Clone, Copy, Default, PartialEq)]
-struct EnvTimes {
-    attack: u64,
-    hold: u64,
-    decay: u64,
-    release: u64,
-    sustain: f32,
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct EnvTimes {
+    pub(crate) attack: u64,
+    pub(crate) hold: u64,
+    pub(crate) decay: u64,
+    pub(crate) release: u64,
+    pub(crate) sustain: f32,
+}
+
+/// A zone that is a layer of its sound (`deckard_model::layers`): its own envelope on
+/// top of the sound's, and its window on the sound's morph.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LayerRt {
+    /// It is heard (not muted, nor left out by another's solo).
+    pub on: bool,
+    pub env: EnvTimes,
+    pub window: [f64; 4],
+}
+
+/// A layer's envelope times at `sr` (its sustain a plain level).
+pub fn layer_times(l: &Layer, sr: f64) -> EnvTimes {
+    let frames = |s: f64| if s.is_finite() { (s.clamp(0.0, deckard_model::layers::TIME_MAX) * sr).round() as u64 } else { 0 };
+    EnvTimes {
+        attack: frames(l.attack),
+        hold: 0,
+        decay: frames(l.decay),
+        release: frames(l.release),
+        sustain: if l.sustain.is_finite() { l.sustain.clamp(0.0, 1.0) as f32 } else { 1.0 },
+    }
+}
+
+/// A layer's gain changes (its window, mute, solo) take this long, so nothing clicks.
+const LAYER_RAMP_MS: f64 = 5.0;
+
+/// How loud layer `l` is to be, and where the morph is, `phase` through its cycle.
+fn layer_to(l: &LayerRt, morph: Option<&Morph>, position: f32, phase: f64) -> (f32, f32) {
+    let on = if l.on { 1.0 } else { 0.0 };
+    match morph.filter(|m| m.on) {
+        Some(m) => {
+            let p = m.at(f64::from(position), phase);
+            (on * deckard_model::layers::window_gain(l.window, p, m.shape, m.fade), p as f32)
+        }
+        None => (on, 0.0),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -271,6 +309,8 @@ pub struct ZoneRt {
     pub once: bool,
     /// Its tail, ms of its sample (0: none): at its end it plays back from there, fading.
     pub tail_ms: f32,
+    /// It is a layer of its sound.
+    pub layer: Option<LayerRt>,
 }
 
 /// A zone's stem lanes (roadmap 2b): each as long as the zone's sample, read at the same
@@ -1214,6 +1254,14 @@ struct Voice {
     fade: Option<(u32, u32)>,
     released: bool,
     sustained: bool,
+    /// A layer's voice: its envelope, its gain (window, mute, solo) on its way to
+    /// `layer_to`, how far through the morph's cycle it is (a sweep of its own), and
+    /// where that puts the morph.
+    layer_env: Option<Env>,
+    layer_gain: f32,
+    layer_to: f32,
+    sweep: f64,
+    morph_at: f32,
 }
 
 /// The fade-in of a Sync note started inside its sample, frames at most.
@@ -1274,6 +1322,14 @@ pub struct SamplerRt {
     /// among the zones that can play).
     turn: usize,
     last: usize,
+    /// The morph of its layers (`None`: it has none), POSITION as it plays now (a
+    /// modulation may hold it elsewhere), and how far through its cycle the sound's
+    /// own sweep is.
+    morph: Option<Morph>,
+    morph_pos: f32,
+    sweep: f64,
+    /// Where the song was at the last render (beats), and whether it had moved.
+    song: (f64, bool),
 }
 
 impl SamplerRt {
@@ -1289,6 +1345,10 @@ impl SamplerRt {
             motion: Motion::Off,
             turn: 0,
             last: usize::MAX,
+            morph: None,
+            morph_pos: 0.0,
+            sweep: 0.0,
+            song: (0.0, false),
             settings,
             base,
             hit: false,
@@ -1330,6 +1390,7 @@ impl SamplerRt {
     /// Audio plug-in follows it).
     pub fn set_song(&mut self, beats: f64, tempo: f64) {
         self.tempo = tempo;
+        self.song = (beats, beats != self.song.0);
         if let Some(a) = self.audio.as_mut() {
             a.set_song(beats, tempo);
         }
@@ -1375,6 +1436,7 @@ impl SamplerRt {
     pub(crate) fn finish_modulation(&mut self) -> bool {
         if !self.hit && self.modulated {
             self.settings.copy_values_from(&self.base);
+            self.morph_pos = self.morph.map_or(0.0, |m| m.position.clamp(0.0, 1.0) as f32);
             if let Some((_, synth, ..)) = self.synth.as_mut() {
                 let params = &self.settings.synth;
                 match self.synth_glide.as_mut() {
@@ -1396,6 +1458,12 @@ impl SamplerRt {
     /// edit or modulation: a Sampler field ([`MODULATED`]), or a parameter of the synth
     /// playing (one it has; it glides there).
     pub fn modulate(&mut self, k: &str, v: f64) {
+        if k == "morph" {
+            if v.is_finite() {
+                self.morph_pos = v.clamp(0.0, 1.0) as f32;
+            }
+            return;
+        }
         let Some((_, synth, ..)) = self.synth.as_mut() else {
             self.settings.set_field(k, v, self.sr);
             return;
@@ -1410,6 +1478,11 @@ impl SamplerRt {
             Some(g) => synth.set(if g.retarget(params) { g.now() } else { params }),
             None => synth.set(params),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn morph_pos(&self) -> f32 {
+        self.morph_pos
     }
 
     #[cfg(test)]
@@ -1515,6 +1588,23 @@ impl SamplerRt {
         }
         let stretched = !self.lives.is_empty();
         for mut v in old.voices.drain(..) {
+            // A layer's voice goes with its sample, wherever its layer is now. One whose
+            // layer is gone fades out on what it was playing (kept as a zone no key plays).
+            let was = v.zone;
+            if let Some(a) = old.zones.get(was).filter(|a| a.layer.is_some()) {
+                let its = |b: &ZoneRt| b.layer.is_some() && Arc::ptr_eq(&a.sample, &b.sample);
+                if !self.zones.get(was).is_some_and(its) {
+                    match self.zones.iter().position(its) {
+                        Some(i) => v.zone = i,
+                        None if self.zones.len() < self.zones.capacity() => {
+                            self.zones.push(ZoneRt { keys: (1, 0), ..a.clone() });
+                            v.zone = self.zones.len() - 1;
+                            v.fade_out(self.sr);
+                        }
+                        None => continue,
+                    }
+                }
+            }
             let live = self.zones.get(v.zone).and_then(|b| b.sync.as_ref()).and_then(|sy| Some((sy.live?, sy.keys)));
             match live {
                 // Its Tune may have moved.
@@ -1524,7 +1614,7 @@ impl SamplerRt {
                 }
                 _ => v.live = NO_LIVE,
             }
-            match (old.zones.get(v.zone), self.zones.get(v.zone)) {
+            match (old.zones.get(was), self.zones.get(v.zone)) {
                 (Some(a), Some(b)) if same(a, b) && a.sync.is_none() == b.sync.is_none() => {
                     v.variant =
                         b.sync.as_ref().and_then(|sy| v.variant.and_then(|i| a.sync.as_ref()?.notes.get(i)).and_then(|(o, _)| sy.note(*o)));
@@ -1567,6 +1657,27 @@ impl SamplerRt {
         self.held = old.held;
         (self.glide, self.glide_target, self.glide_step, self.first_note) = (old.glide, old.glide_target, old.glide_step, old.first_note);
         self.lfo_phase = old.lfo_phase;
+        // The morph goes on from where it was.
+        (self.sweep, self.song) = (old.sweep, old.song);
+    }
+
+    /// The sound's layers have this morph (`None`: it has no layers).
+    pub fn set_morph(&mut self, morph: Option<Morph>) {
+        self.morph = morph;
+        // Room for a held chord of them all, made here (off the audio thread).
+        if morph.is_some() {
+            self.voices.reserve(MAX_VOICES.saturating_sub(self.voices.len()));
+            // And for layers taken away while they sound ([`SamplerRt::adopt`]).
+            self.zones.reserve(deckard_model::layers::MAX_LAYERS);
+        }
+        self.morph_pos = morph.map_or(0.0, |m| m.position.clamp(0.0, 1.0) as f32);
+    }
+
+    /// Where the morph is (0 to 1) for the newest note sounding; `None` with the morph
+    /// off or nothing sounding.
+    pub fn morph_position(&self) -> Option<f32> {
+        self.morph.filter(|m| m.on)?;
+        self.voices.iter().filter(|v| v.layer_env.is_some() && v.fade.is_none()).max_by_key(|v| v.age).map(|v| v.morph_at)
     }
 
     fn free_lfo_hz(&self) -> f64 {
@@ -1634,10 +1745,14 @@ impl SamplerRt {
             // (A slice in motion plays at its own pitch.)
             let pitch = if moved.is_some() { z.root } else { note };
             let v = self.make_voice(id, note, pitch, velocity, zi, age, ctx);
+            // No room: the oldest note goes, all its voices (its layers) together.
             if self.voices.len() >= MAX_VOICES
-                && let Some(i) = self.voices.iter().enumerate().min_by_key(|(_, v)| v.age).map(|(i, _)| i)
+                && let Some(oldest) = self.voices.iter().map(|v| v.age).filter(|&a| a != age).min()
             {
-                self.voices.swap_remove(i);
+                self.voices.retain(|v| v.age != oldest);
+            }
+            if self.voices.len() >= MAX_VOICES {
+                continue;
             }
             self.voices.push(v);
             started = true;
@@ -1849,7 +1964,19 @@ impl SamplerRt {
             released: false,
             sustained: false,
             once: z.once,
+            layer_env: z.layer.map(|l| Env::new(l.env, true)),
+            layer_gain: 1.0,
+            layer_to: 1.0,
+            sweep: 0.0,
+            morph_at: 0.0,
         };
+        if let Some(l) = &z.layer {
+            // A note's own sweep starts with it; the sound's is where it is.
+            let reset = self.morph.is_some_and(|m| m.reset);
+            v.sweep = if reset { 0.0 } else { self.sweep };
+            (v.layer_to, v.morph_at) = layer_to(l, self.morph.as_ref(), self.morph_pos, v.sweep);
+            v.layer_gain = v.layer_to;
+        }
         // A zone stretched as it plays: a stretcher no voice has, if one is left (else
         // it plays repitched).
         if z.sync.as_ref().is_some_and(|sy| sy.live.is_some())
@@ -2005,6 +2132,17 @@ impl SamplerRt {
         let engine_gain = if s.mode == 1 { 0.8637621 } else { 1.0 };
         let quantize = s.mode >= 1;
         let lane_step = (1000.0 / (LANE_RAMP_MS * self.sr)) as f32;
+        let layer_step = (1000.0 / (LAYER_RAMP_MS * self.sr)) as f32;
+        // The morph: a cycle of its sweep in frames, the sound's own in step with the
+        // song while that runs.
+        let (morph, morph_pos) = (self.morph, self.morph_pos);
+        let cycle = morph.map_or(1.0, |m| m.cycle_seconds(tempo) * self.sr).max(1.0);
+        if let Some(m) = morph.filter(|m| m.sync && !m.reset && self.song.1) {
+            self.sweep = (self.song.0 / (m.bars.max(deckard_model::layers::SYNCED[0]) * 4.0)).rem_euclid(1.0);
+        }
+        let sweep_from = self.sweep;
+        self.sweep = (self.sweep + frames as f64 / cycle).fract();
+        let own_sweep = morph.is_some_and(|m| m.reset);
         for f in 0..frames {
             // Glide (legato).
             if self.glide_step != 0.0 {
@@ -2070,6 +2208,16 @@ impl SamplerRt {
                     }
                     if let Some(c) = eq {
                         v.eq.set(c);
+                    }
+                    if let Some(l) = &z.layer {
+                        if own_sweep {
+                            v.sweep = (v.sweep + CHUNK as f64 / cycle).fract();
+                        } else {
+                            v.sweep = (sweep_from + f as f64 / cycle).fract();
+                        }
+                        (v.layer_to, v.morph_at) = layer_to(l, morph.as_ref(), morph_pos, v.sweep);
+                    } else {
+                        v.layer_to = 1.0;
                     }
                     let pm = s.lfo_pan * lfo_scale * lfo + s.env_pan * env + s.mw_pan * mw;
                     // Hard left to hard right at most (the amounts add up to ±3).
@@ -2178,7 +2326,15 @@ impl SamplerRt {
                     fade *= 1.0 - v.rise as f32 / RISE as f32;
                     v.rise -= 1;
                 }
-                let k = amp * fade * engine_gain;
+                let mut k = amp * fade * engine_gain;
+                if let Some(e) = v.layer_env.as_mut() {
+                    v.layer_gain = if v.layer_gain < v.layer_to {
+                        (v.layer_gain + layer_step).min(v.layer_to)
+                    } else {
+                        (v.layer_gain - layer_step).max(v.layer_to)
+                    };
+                    k *= e.next() * v.layer_gain;
+                }
                 l += x[0] * v.gain[0] * pl * k;
                 rr += x[1] * v.gain[1] * pr * k;
             }
@@ -2268,6 +2424,9 @@ impl Voice {
             self.released = true;
             self.amp.release();
             self.modenv.release();
+            if let Some(e) = self.layer_env.as_mut() {
+                e.release();
+            }
         }
     }
 
@@ -2276,6 +2435,9 @@ impl Voice {
             return false;
         }
         if self.amp_on && self.amp.done() {
+            return false;
+        }
+        if self.layer_env.as_ref().is_some_and(Env::done) {
             return false;
         }
         // The stream ran out and the interpolator has emptied.
@@ -2343,6 +2505,7 @@ mod tests {
             reverse: false,
             once: false,
             tail_ms: 0.0,
+            layer: None,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
@@ -2378,6 +2541,7 @@ mod tests {
             reverse: false,
             once: false,
             tail_ms: 0.0,
+            layer: None,
         };
         SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
     }
@@ -3073,6 +3237,7 @@ mod tests {
                 reverse: false,
                 once: false,
                 tail_ms: 0.0,
+                layer: None,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
@@ -3116,6 +3281,7 @@ mod tests {
             reverse: false,
             once: false,
             tail_ms: 0.0,
+            layer: None,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato
@@ -3137,3 +3303,7 @@ mod tests {
         assert_eq!(smp.glide_step, 0.0);
     }
 }
+
+#[cfg(test)]
+#[path = "sampler_layers_tests.rs"]
+mod layers_tests;

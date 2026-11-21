@@ -207,7 +207,12 @@ pub(crate) fn routes_of(project: &deckard_model::Project, plugins: &deckard_plug
                     }
                     (ModParam::Field(f), None) if info.module == r.module => {
                         let scale = crate::modscale::scale_of(&info.module, f);
-                        if info.module == "Sampler" {
+                        if info.module == "Sampler" && f == "morph" {
+                            // The morph of its layers: POSITION is what's driven.
+                            let layered = snd.sampler.as_ref().is_some_and(|x| !deckard_model::layers::zones(x).is_empty());
+                            let Some(n) = snd.new_sampler.filter(|_| layered) else { continue };
+                            RouteTarget::Sound { field: f.clone(), scale, base: n.morph.position }
+                        } else if info.module == "Sampler" {
                             let Some(smp) = snd.sampler.as_ref().filter(|_| crate::sampler::MODULATED.contains(&f.as_str())) else {
                                 continue;
                             };

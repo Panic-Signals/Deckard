@@ -3156,7 +3156,7 @@ impl Engine {
                         }
                         let smp = s.sampler.as_ref()?;
                         let mut zones = Vec::new();
-                        for z in &smp.zones {
+                        for (zi, z) in smp.zones.iter().enumerate() {
                             report.zones += 1;
                             let Some(sample) = load(&z.sample) else { continue };
                             let len = sample.frames.len();
@@ -3196,8 +3196,18 @@ impl Engine {
                                 reverse: false,
                                 once: false,
                                 tail_ms: 0.0,
+                                layer: None,
                             };
                             if s.new_sampler.is_some() {
+                                // A layer: its envelope and window, heard unless muted
+                                // or left out by another's solo.
+                                if let Some(l) = z.meta.as_ref().and_then(|m| m.layer.as_ref()) {
+                                    let all: Vec<deckard_model::layers::Layer> =
+                                        smp.zones.iter().filter_map(|z| z.meta.as_ref()?.layer).collect();
+                                    let at = smp.zones[..zi].iter().filter(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some())).count();
+                                    let on = deckard_model::layers::audible(&all).get(at).copied().unwrap_or(true);
+                                    zone.layer = Some(sampler::LayerRt { on, env: sampler::layer_times(l, sr_f), window: l.window });
+                                }
                                 zone.reverse = z.meta.as_ref().is_some_and(|m| m.reverse);
                                 zone.once = z.meta.as_ref().is_some_and(|m| m.once);
                                 zone.tail_ms = z.meta.as_ref().map_or(0.0, |m| m.tail_ms() as f32);
@@ -3240,6 +3250,9 @@ impl Engine {
                         // At unity: the sound's level and pan are the mixer's (they glide).
                         let mut rt = SamplerRt::new(sampler::Settings::new(smp, sr_f), zones, (1.0, 1.0), sr_f);
                         rt.motion = s.new_sampler.map_or(Default::default(), |n| n.motion);
+                        // Its layers' morph.
+                        let layered = smp.zones.iter().any(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some()));
+                        rt.set_morph(s.new_sampler.filter(|_| layered).map(|n| n.morph));
                         Some(rt)
                     })
                     .collect()
@@ -6324,6 +6337,12 @@ impl Engine {
         }
     }
 
+    /// Where the morph of sound `sound`'s layers is (0 to 1) for its newest note; `None`
+    /// with the morph off or nothing sounding.
+    pub fn morph_position(&self, group: usize, sound: usize) -> Option<f32> {
+        self.sounds.get(group)?.get(sound)?.as_ref()?.morph_position()
+    }
+
     /// Where zone `zone` of sound `sound` in group `group` is playing (sample frames).
     pub fn zone_position(&self, group: usize, sound: usize, zone: usize) -> Option<usize> {
         self.sounds.get(group)?.get(sound)?.as_ref()?.play_position(zone)
@@ -7539,6 +7558,7 @@ mod tests {
             reverse: false,
             once: false,
             tail_ms: 0.0,
+            layer: None,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -8241,6 +8261,7 @@ mod tests {
                 reverse: false,
                 once: false,
                 tail_ms: 0.0,
+                layer: None,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -8666,6 +8687,36 @@ mod tests {
         z.play_range = (0, frames as i64 - 1);
         z.meta = Some(deckard_model::new_sampler::ZoneMeta { file: path, mode, bpm: Some(94.0), beats: Some(4.0), ..Default::default() });
         (tmp, p, frames)
+    }
+
+    /// A New Sampler's layer zones get their envelopes and windows, and only the soloed
+    /// one is heard; the sound gets its morph.
+    #[test]
+    fn a_layered_sound_builds_layer_zones() {
+        use deckard_model::layers::{Layer, Morph};
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let snd = &mut p.groups[0].sounds[0];
+        snd.new_sampler.as_mut().unwrap().morph = Morph { on: true, position: 0.25, ..Default::default() };
+        let smp = snd.sampler.as_mut().unwrap();
+        let mut second = smp.zones[0].clone();
+        smp.zones[0].meta.as_mut().unwrap().layer = Some(Layer { attack: 0.5, ..Default::default() });
+        second.meta.as_mut().unwrap().layer = Some(Layer { solo: true, window: [0.0, 0.5, 0.5, 1.0], ..Default::default() });
+        smp.zones.push(second);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let rt = e.sounds[0][0].as_ref().unwrap();
+        let (a, b) = (rt.zones[0].layer.unwrap(), rt.zones[1].layer.unwrap());
+        assert!(!a.on && b.on, "the soloed layer only");
+        assert_eq!(a.env.attack, 24_000);
+        assert_eq!(b.window, [0.0, 0.5, 0.5, 1.0]);
+        assert!((rt.morph_pos() - 0.25).abs() < 1e-6);
+        assert_eq!(e.morph_position(0, 0), None, "nothing sounds");
+        e.sounds[0][0].as_mut().unwrap().note_on(1, 60, 100, &sampler::Context { tempo: 120.0, beats: 0.0, live: false });
+        assert!(e.morph_position(0, 0).is_some());
+        // A sound without layers has no morph.
+        let (_tmp, plain, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let (e, _) = Engine::new(&plain, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(e.sounds[0][0].as_ref().unwrap().zones[0].layer.is_none());
     }
 
     fn zone0(e: &Engine) -> &sampler::ZoneRt {
