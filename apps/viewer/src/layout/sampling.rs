@@ -777,6 +777,8 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         meta(beat::with_bpm(&m1, bpm.unwrap_or(120.0) + n * 0.1, seconds))
     })];
     fields[0].tip = "The sample's tempo: drag (Shift: finer); right-click to set the project's tempo to it";
+    let m8 = m.clone();
+    fields[0].enter = read(move |t| value_entry::plain(t).filter(|v| *v > 0.0).map(|v| meta(beat::with_bpm(&m8, v, seconds))));
     fields[0].menu = bpm.map(|b| -> (String, Box<dyn Fn() -> Act>) {
         (format!("Set the project's tempo to {b:.2} BPM"), Box::new(move || sact(SamplingAct::ToProject(b))))
     });
@@ -786,6 +788,8 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         beat::with_beats(&m2, b.max(1.0), seconds).map_or(Act::Nothing, meta)
     });
     bf.tip = "The sample's length in beats: drag to fit it to whole beats (its tempo follows)";
+    let m9 = m.clone();
+    bf.enter = read(move |t| beat::with_beats(&m9, value_entry::plain(t)?, seconds).map(meta));
     fields.push(bf);
     x = group_box(ui, &painter, x, y, "TEMPO", &fields, acts);
     let small = |x: f32, row: f32, w: f32| Rect::from_min_size(Pos2::new(x, y + row * 28.0), Vec2::new(w, 25.0));
@@ -842,6 +846,8 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
     } else {
         "The sample's root note: drag to set it (then analysis leaves it)"
     };
+    let m10 = m.clone();
+    rf.enter = note_in(move |k| meta(beat::with_root(&m10, k.clamp(0, 127) as u8)));
     let mut pitch = vec![rf];
     if let Some(r) = root {
         let cents = m.cents;
@@ -854,6 +860,7 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         } else {
             "The note it plays at: drag to re-tune it (its length stays)"
         };
+        tf.enter = note_in(move |k| Act::SetParam(zt, "tune", beat::tune_for(r, cents, k.clamp(0, 127)).clamp(-36.0, 36.0)));
         pitch.push(tf);
     }
     x = group_box(ui, &painter, x, y, "PITCH", &pitch, acts);
@@ -878,6 +885,7 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         sact(SamplingAct::Warp(WarpAct::Strength((strength + n * 0.05).clamp(0.0, 1.0))))
     });
     sf.tip = "How far QUANTIZE moves the markers toward the grid";
+    sf.enter = num(|v| sact(SamplingAct::Warp(WarpAct::Strength((v / 100.0).clamp(0.0, 1.0)))));
     let warp_fields = [choice_field("GRID", grids, grid, |k| sact(SamplingAct::Warp(WarpAct::Grid(k)))), sf];
     x = group_box(ui, &painter, x, y, if m.warps.is_empty() { "WARP" } else { "WARP (ON)" }, &warp_fields, acts);
     // What each does, on hover (the buttons themselves are the tool bar's).
@@ -988,6 +996,11 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
         });
         tf.tip = "A tail for a slice that ends abruptly: at its end it plays back from there this long, fading out (a slice that loops has none; right-click: off)";
         tf.menu = Some(("No tail".to_string(), Box::new(move || meta(ZoneMeta { tail: 0.0, ..m7.clone() }))));
+        let m11 = m.clone();
+        tf.enter = Some(Box::new(move |typed, shown| {
+            let ms = if typed.trim().eq_ignore_ascii_case("off") { 0.0 } else { value_entry::time(typed, shown, true)? * 1000.0 };
+            Some(meta(ZoneMeta { tail: ms.round().clamp(0.0, TAIL_MAX), ..m11.clone() }))
+        }));
         // The sound's: which of its slices a note plays.
         let motion = app
             .doc
@@ -1008,6 +1021,8 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
             meta(ZoneMeta { speed: ((sp * 100.0 + n).round() / 100.0).clamp(0.25, 4.0), ..m4.clone() })
         });
         f.tip = "How fast this slice goes against the song, its pitch unmoved: 100 % is in time, 50 % half speed, 200 % double (right-click: back to 100 %)";
+        let m12 = m.clone();
+        f.enter = num(move |v| meta(ZoneMeta { speed: (v.round() / 100.0).clamp(0.25, 4.0), ..m12.clone() }));
         let m5 = m.clone();
         f.menu = Some(("Back to 100 % (in time)".to_string(), Box::new(move || meta(ZoneMeta { speed: 1.0, ..m5.clone() }))));
         x = group_box(ui, &painter, x, y, "STRETCH", &[f], acts);
@@ -1569,10 +1584,17 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         painter.text(Pos2::new(fr.left() + 2.0, fr.top() + 6.0), Align2::LEFT_CENTER, f.label, font(9.0), white(110));
         let value = elide(painter, &f.value, 12.0, fr.width() - 4.0 - if f.choice.is_some() { 10.0 } else { 0.0 });
         let mut resp = ui.interact(fr, ui.id().with(("field", title, i)), Sense::click_and_drag());
-        resp = if value != f.value { resp.on_hover_text(format!("{}\n{}", f.value, f.tip)) } else { resp.on_hover_text(f.tip) };
+        let tip = if f.enter.is_some() { format!("{}\nDouble-click to type it", f.tip) } else { f.tip.to_string() };
+        resp = if value != f.value { resp.on_hover_text(format!("{}\n{tip}", f.value)) } else { resp.on_hover_text(tip) };
         ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sample-field", title.to_string(), f.label.to_string())), fr));
         if let Some(what) = f.typed {
             value_entry::gestures(ui, &resp, what, &f.value, acts);
+        } else if let Some(read) = &f.enter
+            && let Some(text) = value_entry::entry(ui, &resp, &f.value)
+            && text.trim() != f.value.trim()
+            && let Some(a) = read(&text, &f.value)
+        {
+            acts.push(a);
         }
         if let Some((text, act)) = &f.menu {
             resp.context_menu(|ui| {
@@ -1667,12 +1689,49 @@ struct Field<'a> {
     choice: Option<Choice<'a>>,
     /// A double-click types it (value_entry).
     typed: Option<value_entry::What>,
+    /// A double-click types it: what the text typed sets (given the text shown too);
+    /// `None` when it can't be read.
+    enter: Enter<'a>,
     /// A right-click offers this: its text and what it does.
     menu: Option<(String, Box<dyn Fn() -> Act + 'a>)>,
 }
 
 fn field<'a>(label: &'a str, value: String, step: impl Fn(f64) -> Act + 'a) -> Field<'a> {
-    Field { label, value, tip: "Drag up or down (Shift: fine)", step: Box::new(step), click: None, choice: None, typed: None, menu: None }
+    Field {
+        label,
+        value,
+        tip: "Drag up or down (Shift: fine)",
+        step: Box::new(step),
+        click: None,
+        choice: None,
+        typed: None,
+        enter: None,
+        menu: None,
+    }
+}
+
+/// What typing a field's value does: the edit for the text typed (and the text shown).
+type Enter<'a> = Option<Box<dyn Fn(&str, &str) -> Option<Act> + 'a>>;
+
+/// Typed as text, read by `f`.
+fn read<'a>(f: impl Fn(&str) -> Option<Act> + 'a) -> Enter<'a> {
+    Some(Box::new(move |typed, _| f(typed)))
+}
+
+/// Typed as a number (a unit after it is ignored).
+fn num<'a>(f: impl Fn(f64) -> Act + 'a) -> Enter<'a> {
+    read(move |t| value_entry::plain(t).map(&f))
+}
+
+/// Typed as a note: its name or its number.
+fn note_in<'a>(f: impl Fn(i64) -> Act + 'a) -> Enter<'a> {
+    read(move |t| value_entry::note(t).map(&f))
+}
+
+/// Typed as a time, `f` given seconds: a plain number is in the unit shown, else
+/// milliseconds if `ms`.
+fn secs<'a>(ms: bool, f: impl Fn(f64) -> Act + 'a) -> Enter<'a> {
+    Some(Box::new(move |typed, shown| value_entry::time(typed, shown, ms).map(&f)))
 }
 
 /// A position in the sample, in samples: dragged, or typed with a double-click. Shift
@@ -1746,6 +1805,7 @@ fn choice_field<'a>(label: &'a str, options: Vec<String>, cur: usize, pick: impl
         click: None,
         choice: Some((options, cur, Box::new(move |k| pick(k)))),
         typed: None,
+        enter: None,
         menu: None,
     }
 }
@@ -1761,6 +1821,7 @@ fn toggle_field<'a>(label: &'a str, on: bool, act: impl Fn() -> Act + 'a) -> Fie
         click: Some(Box::new(move || a())),
         choice: None,
         typed: None,
+        enter: None,
         menu: None,
     }
 }
@@ -1837,23 +1898,36 @@ fn edit_tab(
             acts.push(sact(SamplingAct::StretchOpen(false)));
         }
         x += 80.0;
+        let stretch = |s: Stretch| sact(SamplingAct::SetStretch(s));
         let mut fields = vec![
-            field("TUNE", format!("{:+.2}", sx.tune), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { tune: (sx.tune + n * 0.01).clamp(-24.0, 24.0), ..sx }))
-            }),
-            toggle_field("MODE BEAT", sx.beat, move || sact(SamplingAct::SetStretch(Stretch { beat: !sx.beat, ..sx }))),
+            Field {
+                enter: num(move |v| stretch(Stretch { tune: v.clamp(-24.0, 24.0), ..sx })),
+                ..field("TUNE", format!("{:+.2}", sx.tune), move |n| {
+                    stretch(Stretch { tune: (sx.tune + n * 0.01).clamp(-24.0, 24.0), ..sx })
+                })
+            },
+            toggle_field("MODE BEAT", sx.beat, move || stretch(Stretch { beat: !sx.beat, ..sx })),
         ];
         if sx.beat {
-            fields.push(field("SRC BPM", format!("{:.2}", sx.src_bpm), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { src_bpm: (sx.src_bpm + n * 0.1).clamp(20.0, 400.0), ..sx }))
-            }));
-            fields.push(field("NEW BPM", format!("{:.2}", sx.new_bpm), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { new_bpm: (sx.new_bpm + n * 0.1).clamp(2.0, 400.0), ..sx }))
-            }));
+            fields.push(Field {
+                enter: num(move |v| stretch(Stretch { src_bpm: v.clamp(20.0, 400.0), ..sx })),
+                ..field("SRC BPM", format!("{:.2}", sx.src_bpm), move |n| {
+                    stretch(Stretch { src_bpm: (sx.src_bpm + n * 0.1).clamp(20.0, 400.0), ..sx })
+                })
+            });
+            fields.push(Field {
+                enter: num(move |v| stretch(Stretch { new_bpm: v.clamp(2.0, 400.0), ..sx })),
+                ..field("NEW BPM", format!("{:.2}", sx.new_bpm), move |n| {
+                    stretch(Stretch { new_bpm: (sx.new_bpm + n * 0.1).clamp(2.0, 400.0), ..sx })
+                })
+            });
         } else {
-            fields.push(field("SPEED", format!("{:.0} %", sx.speed), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { speed: (sx.speed + n).clamp(10.0, 1000.0), ..sx }))
-            }));
+            fields.push(Field {
+                enter: num(move |v| stretch(Stretch { speed: v.clamp(10.0, 1000.0), ..sx })),
+                ..field("SPEED", format!("{:.0} %", sx.speed), move |n| {
+                    stretch(Stretch { speed: (sx.speed + n).clamp(10.0, 1000.0), ..sx })
+                })
+            });
         }
         group_box(ui, &painter, x, y - 2.0, "STRETCH", &fields, acts);
         return;
@@ -1889,6 +1963,9 @@ fn edit_tab(
                 set(Munge { comb_ms: (mx.comb_ms + n).clamp(COMB_MS.0, COMB_MS.1), ..mx })
             }),
         ];
+        fields[0].enter = num(move |v| set(Munge { swing: (v.round() / 100.0).clamp(-1.0, 1.0), ..mx }));
+        fields[2].enter = num(move |v| set(Munge { grunge_ms: v.clamp(GRUNGE_MS.0, GRUNGE_MS.1), ..mx }));
+        fields[3].enter = num(move |v| set(Munge { comb_ms: v.clamp(COMB_MS.0, COMB_MS.1), ..mx }));
         fields[0].tip =
             "Each second eighth (or sixteenth, see ON) later (+) or earlier (-): 100 % is a triplet; minus takes swing out of a loop";
         fields[1].tip = "What SWING moves: the eighths or the sixteenths";
@@ -2096,9 +2173,12 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
         }
         2 => {
             let s = st.sensitivity;
-            fields.push(field("SENSITIVITY", format!("{:.0} %", s * 100.0), move |n| {
-                sact(SamplingAct::Sensitivity((s + n * 0.01).clamp(0.0, 1.0)))
-            }));
+            fields.push(Field {
+                enter: num(|v| sact(SamplingAct::Sensitivity((v / 100.0).clamp(0.0, 1.0)))),
+                ..field("SENSITIVITY", format!("{:.0} %", s * 100.0), move |n| {
+                    sact(SamplingAct::Sensitivity((s + n * 0.01).clamp(0.0, 1.0)))
+                })
+            });
             let z = st.zero_x;
             fields.push(toggle_field("ZERO-X", z, move || sact(SamplingAct::ZeroX(!z))));
         }
@@ -2250,12 +2330,26 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
         y,
         "TUNE / MIX",
         &[
-            field("TUNE", format!("{tune:+.2}"), move |n| Act::SetParam(zt, "tune", (tune + n * 0.01).clamp(-36.0, 36.0))),
-            field("GAIN", format!("{:.1} dB", 20.0 * ((2.3948107 * gain.powi(5) + 0.767467 * gain * gain).max(1e-9)).log10()), move |n| {
-                Act::SetParam(zt, "gain", (gain + n * 0.005).clamp(0.0, 1.0))
-            }),
-            field("PAN", pan(pan_v), move |n| Act::SetParam(zt, "pan", (pan_v + n * 0.01).clamp(-1.0, 1.0))),
-            field("ROOT", note_name(root), move |n| Act::SetParam(zt, "root_key", key(root, n))),
+            Field {
+                enter: num(move |v| Act::SetParam(zt, "tune", v.clamp(-36.0, 36.0))),
+                ..field("TUNE", format!("{tune:+.2}"), move |n| Act::SetParam(zt, "tune", (tune + n * 0.01).clamp(-36.0, 36.0)))
+            },
+            Field {
+                enter: read(move |t| value_entry::level(t).map(|v| Act::SetParam(zt, "gain", v))),
+                ..field(
+                    "GAIN",
+                    format!("{:.1} dB", 20.0 * ((2.3948107 * gain.powi(5) + 0.767467 * gain * gain).max(1e-9)).log10()),
+                    move |n| Act::SetParam(zt, "gain", (gain + n * 0.005).clamp(0.0, 1.0)),
+                )
+            },
+            Field {
+                enter: read(move |t| value_entry::pan(t).map(|v| Act::SetParam(zt, "pan", v))),
+                ..field("PAN", pan(pan_v), move |n| Act::SetParam(zt, "pan", (pan_v + n * 0.01).clamp(-1.0, 1.0)))
+            },
+            Field {
+                enter: note_in(move |k| Act::SetParam(zt, "root_key", k as f64)),
+                ..field("ROOT", note_name(root), move |n| Act::SetParam(zt, "root_key", key(root, n)))
+            },
         ],
         acts,
     );
@@ -2266,10 +2360,22 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
         y,
         "MAP",
         &[
-            field("KEY LO", note_name(kl), move |n| Act::SetParam(zt, "key_range/low", key(kl, n).min(kh as f64))),
-            field("KEY HI", note_name(kh), move |n| Act::SetParam(zt, "key_range/high", key(kh, n).max(kl as f64))),
-            field("VEL LO", vl.to_string(), move |n| Act::SetParam(zt, "velocity_range/low", key(vl, n).min(vh as f64))),
-            field("VEL HI", vh.to_string(), move |n| Act::SetParam(zt, "velocity_range/high", key(vh, n).max(vl as f64))),
+            Field {
+                enter: note_in(move |k| Act::SetParam(zt, "key_range/low", (k as f64).min(kh as f64))),
+                ..field("KEY LO", note_name(kl), move |n| Act::SetParam(zt, "key_range/low", key(kl, n).min(kh as f64)))
+            },
+            Field {
+                enter: note_in(move |k| Act::SetParam(zt, "key_range/high", (k as f64).max(kl as f64))),
+                ..field("KEY HI", note_name(kh), move |n| Act::SetParam(zt, "key_range/high", key(kh, n).max(kl as f64)))
+            },
+            Field {
+                enter: num(move |v| Act::SetParam(zt, "velocity_range/low", v.round().clamp(0.0, vh as f64))),
+                ..field("VEL LO", vl.to_string(), move |n| Act::SetParam(zt, "velocity_range/low", key(vl, n).min(vh as f64)))
+            },
+            Field {
+                enter: num(move |v| Act::SetParam(zt, "velocity_range/high", v.round().clamp(vl as f64, 127.0))),
+                ..field("VEL HI", vh.to_string(), move |n| Act::SetParam(zt, "velocity_range/high", key(vh, n).max(vl as f64)))
+            },
         ],
         acts,
     );
@@ -2601,6 +2707,11 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
     let step = |param: RecParam, cur: i64, by: i64, lo: i64, hi: i64| {
         move |n: f64| sact(SamplingAct::Record(RecordAct::Set(param, (cur + n as i64 * by).clamp(lo, hi))))
     };
+    let rec_set =
+        |param: RecParam, v: f64, lo: i64, hi: i64| sact(SamplingAct::Record(RecordAct::Set(param, (v.round() as i64).clamp(lo, hi))));
+    let whole = |param: RecParam, lo: i64, hi: i64| num(move |v| rec_set(param, v, lo, hi));
+    let millis = |param: RecParam| secs(true, move |s| rec_set(param, s * 1000.0, 100, 30_000));
+    let rec_note = |param: RecParam| note_in(move |k| rec_set(param, k as f64, 0, 127));
     let toggle = |label: &'static str, param: RecParam, on: bool| {
         toggle_field(label, on, move || sact(SamplingAct::Record(RecordAct::Set(param, !on as i64))))
     };
@@ -2615,6 +2726,10 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             let t = rec.threshold;
             fields.push(Field {
                 tip: "Drag up or down (Shift: fine); double-click the meter's slider for -12 dB",
+                enter: read(|t| {
+                    let db = if t.trim().eq_ignore_ascii_case("off") { -60.0 } else { value_entry::plain(t)? };
+                    Some(sact(SamplingAct::Record(RecordAct::Threshold(db.clamp(-60.0, 0.0)))))
+                }),
                 ..field("THRESHOLD", threshold_text(t), move |n| {
                     sact(SamplingAct::Record(RecordAct::Threshold((t + n * 0.5).clamp(-60.0, 0.0))))
                 })
@@ -2626,8 +2741,14 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             fields.push(choice_field("TARGET", names(&r::TARGETS), rec.target, set(RecParam::Target)));
         }
         _ => {
-            fields.push(field("SAMPLE", ms_text(a.sample_ms), step(RecParam::SampleMs, a.sample_ms as i64, 100, 100, 30_000)));
-            fields.push(field("NOTE ON", ms_text(a.note_on_ms), step(RecParam::NoteOnMs, a.note_on_ms as i64, 100, 100, 30_000)));
+            fields.push(Field {
+                enter: millis(RecParam::SampleMs),
+                ..field("SAMPLE", ms_text(a.sample_ms), step(RecParam::SampleMs, a.sample_ms as i64, 100, 100, 30_000))
+            });
+            fields.push(Field {
+                enter: millis(RecParam::NoteOnMs),
+                ..field("NOTE ON", ms_text(a.note_on_ms), step(RecParam::NoteOnMs, a.note_on_ms as i64, 100, 100, 30_000))
+            });
         }
     }
     let y = footer.top() + 6.0;
@@ -2679,22 +2800,37 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             choice_field("MIDI TO", opts, cur, move |k| sact(SamplingAct::Record(RecordAct::MidiTo((k > 0).then(|| ports[k].clone())))));
         f.click = Some(Box::new(|| sact(SamplingAct::Record(RecordAct::ScanMidi))));
         fields.push(f);
-        fields.push(field("CHANNEL", a.channel.to_string(), step(RecParam::Channel, a.channel as i64, 1, 1, 16)));
+        fields.push(Field {
+            enter: whole(RecParam::Channel, 1, 16),
+            ..field("CHANNEL", a.channel.to_string(), step(RecParam::Channel, a.channel as i64, 1, 1, 16))
+        });
     }
     nx = group_box(ui, &painter, nx, y, "INPUT", &fields, acts);
     if auto {
         let key = |n: u8| crate::recorder::note_name(n);
         let fields = [
-            field("STRIDE", a.key_stride.to_string(), step(RecParam::KeyStride, a.key_stride as i64, 1, 1, 127)),
-            field("KEY LO", key(a.key_lo), step(RecParam::KeyLo, a.key_lo as i64, 1, 0, 127)),
-            field("KEY HI", key(a.key_hi), step(RecParam::KeyHi, a.key_hi as i64, 1, 0, 127)),
+            Field {
+                enter: whole(RecParam::KeyStride, 1, 127),
+                ..field("STRIDE", a.key_stride.to_string(), step(RecParam::KeyStride, a.key_stride as i64, 1, 1, 127))
+            },
+            Field { enter: rec_note(RecParam::KeyLo), ..field("KEY LO", key(a.key_lo), step(RecParam::KeyLo, a.key_lo as i64, 1, 0, 127)) },
+            Field { enter: rec_note(RecParam::KeyHi), ..field("KEY HI", key(a.key_hi), step(RecParam::KeyHi, a.key_hi as i64, 1, 0, 127)) },
             toggle("EXTEND", RecParam::KeyExtend, a.key_extend),
         ];
         nx = group_box(ui, &painter, nx, y, "NOTE MAP", &fields, acts);
         let fields = [
-            field("STRIDE", a.vel_stride.to_string(), step(RecParam::VelStride, a.vel_stride as i64, 1, 1, 127)),
-            field("VEL LO", a.vel_lo.to_string(), step(RecParam::VelLo, a.vel_lo as i64, 1, 0, 127)),
-            field("VEL HI", a.vel_hi.to_string(), step(RecParam::VelHi, a.vel_hi as i64, 1, 0, 127)),
+            Field {
+                enter: whole(RecParam::VelStride, 1, 127),
+                ..field("STRIDE", a.vel_stride.to_string(), step(RecParam::VelStride, a.vel_stride as i64, 1, 1, 127))
+            },
+            Field {
+                enter: whole(RecParam::VelLo, 0, 127),
+                ..field("VEL LO", a.vel_lo.to_string(), step(RecParam::VelLo, a.vel_lo as i64, 1, 0, 127))
+            },
+            Field {
+                enter: whole(RecParam::VelHi, 0, 127),
+                ..field("VEL HI", a.vel_hi.to_string(), step(RecParam::VelHi, a.vel_hi as i64, 1, 0, 127))
+            },
             toggle("EXTEND", RecParam::VelExtend, a.vel_extend),
         ];
         nx = group_box(ui, &painter, nx, y, "VELOCITY MAP", &fields, acts);

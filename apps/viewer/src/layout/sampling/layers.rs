@@ -64,6 +64,25 @@ pub fn rate_stepped(m: &Morph, n: f64) -> MorphAct {
     }
 }
 
+/// The morph's rate as typed: a synced cycle ("1/8", "4", "4 bars": the nearest there
+/// is), or the free one in seconds.
+pub fn rate_typed(m: &Morph, typed: &str) -> Option<MorphAct> {
+    if !m.sync {
+        return value_entry::time(typed, "s", false).filter(|s| *s > 0.0).map(|s| MorphAct::Seconds(s.clamp(FREE.0, FREE.1)));
+    }
+    let t = typed.trim().to_ascii_lowercase();
+    let t = t.trim_end_matches("bars").trim_end_matches("bar").trim();
+    let bars = match t.split_once('/') {
+        Some((a, b)) => a.trim().parse::<f64>().ok()? / b.trim().parse::<f64>().ok()?,
+        None => t.parse::<f64>().ok()?,
+    };
+    if !(bars.is_finite() && bars > 0.0) {
+        return None;
+    }
+    let far = |b: &f64| (b / bars).ln().abs();
+    SYNCED.iter().copied().min_by(|a, b| far(a).total_cmp(&far(b))).map(MorphAct::Bars)
+}
+
 /// A zone's gain as stored, in dB.
 pub fn level_text(gain: f64) -> String {
     let lin = 2.3948107 * gain.powi(5) + 0.767467 * gain * gain;
@@ -306,10 +325,22 @@ pub(super) fn layers_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: 
             footer_y,
             &title,
             &[
-                field("LEVEL", level_text(gain), move |n| lact(focus, LayerAct::Level((gain + n * 0.005).clamp(0.0, 1.0)))),
-                field("PAN", pan(pan_v), move |n| Act::SetParam(zt, "pan", (pan_v + n * 0.01).clamp(-1.0, 1.0))),
-                field("TUNE", format!("{tune:+.2}"), move |n| Act::SetParam(zt, "tune", (tune + n * 0.01).clamp(-36.0, 36.0))),
-                field("ROOT", note_name(root), move |n| Act::SetParam(zt, "root_key", (root as f64 + n).clamp(0.0, 127.0))),
+                Field {
+                    enter: read(move |t| value_entry::level(t).map(|v| lact(focus, LayerAct::Level(v)))),
+                    ..field("LEVEL", level_text(gain), move |n| lact(focus, LayerAct::Level((gain + n * 0.005).clamp(0.0, 1.0))))
+                },
+                Field {
+                    enter: read(move |t| value_entry::pan(t).map(|v| Act::SetParam(zt, "pan", v))),
+                    ..field("PAN", pan(pan_v), move |n| Act::SetParam(zt, "pan", (pan_v + n * 0.01).clamp(-1.0, 1.0)))
+                },
+                Field {
+                    enter: num(move |v| Act::SetParam(zt, "tune", v.clamp(-36.0, 36.0))),
+                    ..field("TUNE", format!("{tune:+.2}"), move |n| Act::SetParam(zt, "tune", (tune + n * 0.01).clamp(-36.0, 36.0)))
+                },
+                Field {
+                    enter: note_in(move |k| Act::SetParam(zt, "root_key", k as f64)),
+                    ..field("ROOT", note_name(root), move |n| Act::SetParam(zt, "root_key", (root as f64 + n).clamp(0.0, 127.0)))
+                },
             ],
             acts,
         );
@@ -320,12 +351,24 @@ pub(super) fn layers_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: 
             footer_y,
             "ENVELOPE",
             &[
-                field("ATTACK", time_text(layer.attack), move |n| lact(focus, LayerAct::Attack(time_stepped(layer.attack, n)))),
-                field("DECAY", time_text(layer.decay), move |n| lact(focus, LayerAct::Decay(time_stepped(layer.decay, n)))),
-                field("SUSTAIN", format!("{:.0} %", layer.sustain * 100.0), move |n| {
-                    lact(focus, LayerAct::Sustain((layer.sustain + n * 0.01).clamp(0.0, 1.0)))
-                }),
-                field("RELEASE", time_text(layer.release), move |n| lact(focus, LayerAct::Release(time_stepped(layer.release, n)))),
+                Field {
+                    enter: secs(false, move |s| lact(focus, LayerAct::Attack(s.clamp(0.0, TIME_MAX)))),
+                    ..field("ATTACK", time_text(layer.attack), move |n| lact(focus, LayerAct::Attack(time_stepped(layer.attack, n))))
+                },
+                Field {
+                    enter: secs(false, move |s| lact(focus, LayerAct::Decay(s.clamp(0.0, TIME_MAX)))),
+                    ..field("DECAY", time_text(layer.decay), move |n| lact(focus, LayerAct::Decay(time_stepped(layer.decay, n))))
+                },
+                Field {
+                    enter: num(move |v| lact(focus, LayerAct::Sustain((v / 100.0).clamp(0.0, 1.0)))),
+                    ..field("SUSTAIN", format!("{:.0} %", layer.sustain * 100.0), move |n| {
+                        lact(focus, LayerAct::Sustain((layer.sustain + n * 0.01).clamp(0.0, 1.0)))
+                    })
+                },
+                Field {
+                    enter: secs(false, move |s| lact(focus, LayerAct::Release(s.clamp(0.0, TIME_MAX)))),
+                    ..field("RELEASE", time_text(layer.release), move |n| lact(focus, LayerAct::Release(time_stepped(layer.release, n))))
+                },
             ],
             acts,
         );
@@ -338,6 +381,8 @@ pub(super) fn layers_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: 
     });
     if m.shape == Shape::Round {
         depth.tip = "Round always goes all the way: depth is There and back's";
+    } else {
+        depth.enter = num(|v| mact(MorphAct::Depth((v / 100.0).clamp(0.0, 1.0))));
     }
     let mut spread = field("WINDOWS", if m.spread { "Even".into() } else { "By hand".into() }, move |_| mact(MorphAct::Spread));
     spread.tip = "Click: spread the layers' windows evenly again";
@@ -350,10 +395,13 @@ pub(super) fn layers_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: 
         "MORPH",
         &[
             toggle_field("ON", m.on, move || mact(MorphAct::On(!m.on))),
-            field("POSITION", format!("{:.0} %", m.position * 100.0), move |n| {
-                mact(MorphAct::Position((m.position + n * 0.005).clamp(0.0, 1.0)))
-            }),
-            field("RATE", rate_text(&m), move |n| mact(rate_stepped(&m, n))),
+            Field {
+                enter: num(|v| mact(MorphAct::Position((v / 100.0).clamp(0.0, 1.0)))),
+                ..field("POSITION", format!("{:.0} %", m.position * 100.0), move |n| {
+                    mact(MorphAct::Position((m.position + n * 0.005).clamp(0.0, 1.0)))
+                })
+            },
+            Field { enter: read(move |t| rate_typed(&m, t).map(mact)), ..field("RATE", rate_text(&m), move |n| mact(rate_stepped(&m, n))) },
             toggle_field("SYNC", m.sync, move || mact(MorphAct::Sync(!m.sync))),
             choice_field("SHAPE", shapes, usize::from(m.shape == Shape::Back), |k| {
                 mact(MorphAct::Shape(if k == 1 { Shape::Back } else { Shape::Round }))
@@ -376,8 +424,14 @@ pub(super) fn layers_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: 
             footer_y,
             "KEYS",
             &[
-                field("LOW", note_name(lo), move |n| mact(MorphAct::Keys((lo as f64 + n).clamp(0.0, hi as f64) as i64, hi))),
-                field("HIGH", note_name(hi), move |n| mact(MorphAct::Keys(lo, (hi as f64 + n).clamp(lo as f64, 127.0) as i64))),
+                Field {
+                    enter: note_in(move |k| mact(MorphAct::Keys(k.clamp(0, hi), hi))),
+                    ..field("LOW", note_name(lo), move |n| mact(MorphAct::Keys((lo as f64 + n).clamp(0.0, hi as f64) as i64, hi)))
+                },
+                Field {
+                    enter: note_in(move |k| mact(MorphAct::Keys(lo, k.clamp(lo, 127)))),
+                    ..field("HIGH", note_name(hi), move |n| mact(MorphAct::Keys(lo, (hi as f64 + n).clamp(lo as f64, 127.0) as i64)))
+                },
             ],
             acts,
         );

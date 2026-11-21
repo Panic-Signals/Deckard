@@ -175,3 +175,71 @@ fn the_boxes_edit_the_focused_layer() {
     click(&mut h, r.center());
     assert!(project_of_app(h.state()).groups[0].sounds[0].new_sampler.unwrap().morph.on);
 }
+
+/// A double-click on the field at `r`, `text` typed over its value, Enter.
+fn type_into(h: &mut Harness<'static, App>, r: egui::Rect, text: &str) {
+    let pos = r.center();
+    h.hover_at(pos);
+    h.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+    }
+    h.run_steps(3);
+    h.event(egui::Event::Text(text.into()));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+        h.run_steps(3);
+    }
+    // (Past the double-click time, so the next field's clicks are its own.)
+    h.run_steps(40);
+}
+
+/// A double-click on a footer value types it: a time with its unit, a level in dB, a pan,
+/// a note by name, a synced rate; what can't be read changes nothing.
+#[test]
+fn a_footer_value_is_typed_with_a_double_click() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    let files: Vec<PathBuf> = (0..2).map(|k| tone(dir.path(), &format!("{k}.wav"), 110.0 * (k + 1) as f32)).collect();
+    h.state_mut().layer_files(0, &files);
+    h.state_mut().zone = 1;
+    h.run_steps(3);
+    let at = |h: &Harness<'static, App>, group: &str, label: &str| -> egui::Rect {
+        let id = egui::Id::new(("deckard-sample-field", group.to_string(), label.to_string()));
+        h.ctx.data(|d| d.get_temp(id)).unwrap_or_else(|| panic!("{group} {label} shown"))
+    };
+    let mut set = |h: &mut Harness<'static, App>, group: &str, label: &str, text: &str| {
+        let r = at(h, group, label);
+        type_into(h, r, text);
+    };
+    set(&mut h, "ENVELOPE", "ATTACK", "250");
+    assert!((h.state().layers_of()[1].1.attack - 0.25).abs() < 1e-9, "a plain number is in the unit shown (ms)");
+    set(&mut h, "ENVELOPE", "RELEASE", "1.5 s");
+    assert!((h.state().layers_of()[1].1.release - 1.5).abs() < 1e-9, "{:?}", h.state().layers_of()[1].1);
+    set(&mut h, "ENVELOPE", "SUSTAIN", "40");
+    assert!((h.state().layers_of()[1].1.sustain - 0.4).abs() < 1e-9);
+    set(&mut h, "LAYER 2", "LEVEL", "-6");
+    set(&mut h, "LAYER 2", "PAN", "30L");
+    set(&mut h, "LAYER 2", "TUNE", "-12");
+    set(&mut h, "LAYER 2", "ROOT", "f#2");
+    let z = zones(h.state())[1].clone();
+    assert!((deckard_model::level_db(z.gain) + 6.0).abs() < 0.01, "{}", deckard_model::level_db(z.gain));
+    assert!((z.pan + 0.3).abs() < 1e-9, "{}", z.pan);
+    assert_eq!((z.tune, z.root_key), (-12.0, 54));
+    assert_eq!(zones(h.state())[0].root_key != 54, true, "the other layer's is its own");
+    set(&mut h, "MORPH", "POSITION", "25 %");
+    set(&mut h, "MORPH", "RATE", "1/8");
+    let m = project_of_app(h.state()).groups[0].sounds[0].new_sampler.unwrap().morph;
+    assert_eq!((m.position, m.sync, m.bars), (0.25, true, 0.125));
+    set(&mut h, "KEYS", "LOW", "C1");
+    assert_eq!(zones(h.state())[0].key_range.0, 36);
+    // Nonsense is dropped.
+    let undo = |h: &Harness<'static, App>| h.state().doc.as_ref().unwrap().borrow().undo_labels().len();
+    let before = undo(&h);
+    set(&mut h, "LAYER 2", "TUNE", "loud");
+    assert_eq!((zones(h.state())[1].tune, undo(&h)), (-12.0, before));
+}
