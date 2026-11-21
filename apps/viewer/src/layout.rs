@@ -1836,6 +1836,12 @@ pub fn dialog_max_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 64.0).max(160.0)
 }
 
+/// The widest a dialog can be and still fit the window (a laptop's 1366 px, a small
+/// window), with room round it.
+pub fn dialog_max_width(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().width() - 32.0).max(320.0)
+}
+
 /// A modal's contents, scrolling when they're taller than the window has room for
 /// ([`dialog_max_height`], less the modal's own frame).
 pub fn fit_dialog<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -7439,6 +7445,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .open(&mut open)
             .max_height(dialog_max_height(ui.ctx()))
+            .max_width(dialog_max_width(ui.ctx()))
             .vscroll(true)
             .show(ui.ctx(), |ui| {
                 dialog_style(ui);

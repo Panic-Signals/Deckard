@@ -2455,7 +2455,7 @@ impl App {
                 let got = out.block_frames() as u32;
                 if got > 0 && got != size {
                     ui.label("");
-                    ui.label(egui::RichText::new(format!("The interface uses {got} samples.")).weak());
+                    ui.add(egui::Label::new(egui::RichText::new(format!("The interface uses {got} samples.")).weak()).wrap());
                     ui.end_row();
                 }
                 ui.label("Audio load");
@@ -2488,7 +2488,7 @@ impl App {
                 hint += &format!(" Now: {n} sounds ahead, {late} times not ready.");
             }
             ui.label("");
-            ui.label(egui::RichText::new(hint).weak());
+            ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
             ui.end_row();
             if ahead != self.settings.render_ahead_ms {
                 self.settings.render_ahead_ms = ahead;
@@ -2509,13 +2509,11 @@ impl App {
                 restart = true;
             }
         });
-        ui.label(
-            egui::RichText::new(
+        ui.add(egui::Label::new(egui::RichText::new(
                 "Larger buffers give heavy projects and plug-ins more room (fewer clicks); smaller ones make pads and keys respond sooner. \
                  \"Late\" blocks were heard as clicks.",
             )
-            .weak(),
-        );
+            .weak()).wrap());
         if size != self.settings.buffer_frames {
             self.settings.buffer_frames = size;
             restart = true;
@@ -2554,12 +2552,10 @@ impl App {
                 ui.label(format!("{}: {} Hz, {:?}, {latency:.1} ms from a block's start to the outputs, as the driver says", out.device, out.rate, out.format));
                 ui.end_row();
                 ui.label("");
-                ui.label(
-                    egui::RichText::new(
+                ui.add(egui::Label::new(egui::RichText::new(
                         "The driver has the last word on the buffer size and the rate. If it won't take the size below, set it in its own control panel: DECKARD follows.",
                     )
-                    .weak(),
-                );
+                    .weak()).wrap());
                 ui.end_row();
             }
         });
@@ -2723,7 +2719,7 @@ impl App {
             }
         }
         if ASIO_BUILT && self.settings.audio_driver == AudioDriver::Asio && self.settings.asio_device.is_none() {
-            ui.label(egui::RichText::new("Pick the ASIO driver of your interface.").weak());
+            ui.add(egui::Label::new(egui::RichText::new("Pick the ASIO driver of your interface.").weak()).wrap());
         }
         let channels_of =
             |devices: &[(String, usize)], d: &Option<String>| devices.iter().find(|(n, _)| Some(n) == d.as_ref()).map_or(0, |(_, c)| *c);
@@ -2756,14 +2752,12 @@ impl App {
             ui.selectable_value(&mut self.routing_outputs, true, "Output");
         });
         let outs = self.routing_outputs;
-        ui.label(
-            egui::RichText::new(if outs {
+        ui.add(egui::Label::new(egui::RichText::new(if outs {
                 "Which channel of the interface each of DECKARD's outputs plays on. An alias names it wherever it's offered; one not connected isn't offered."
             } else {
                 "Which channel of the interface each of DECKARD's inputs reads. An alias names it wherever it's offered; one not connected isn't offered."
             })
-            .weak(),
-        );
+            .weak()).wrap());
         let before = (self.settings.output_routing.clone(), self.settings.output_cv_only.clone());
         let project = self.doc.as_ref().map(|d| d.borrow().project().clone()).unwrap_or_default();
         let (own, port, channels) = if outs { ("Out", "Output", out_channels) } else { ("In", "Input", in_channels) };
@@ -2852,7 +2846,7 @@ impl App {
         for (title, ports, prefix) in [("Inputs", &ins, "in:"), ("Outputs", &outs, "out:")] {
             ui.label(egui::RichText::new(title).strong());
             if ports.is_empty() {
-                ui.label(egui::RichText::new("No MIDI ports found").weak());
+                ui.add(egui::Label::new(egui::RichText::new("No MIDI ports found").weak()).wrap());
             }
             for name in ports {
                 let key = format!("{prefix}{name}");
@@ -2954,7 +2948,7 @@ impl App {
                 });
             }
         }
-        ui.label(egui::RichText::new(self.midi.status()).weak());
+        ui.add(egui::Label::new(egui::RichText::new(self.midi.status()).weak()).wrap());
     }
 
     /// The controllers' drum channels for the MIDI routing: each one's notes port (the
@@ -3012,7 +3006,12 @@ impl App {
                 .on_hover_text("Asks GitHub for DECKARD's latest release once per launch. Help ▸ About shows what it found.");
             ui.end_row();
             ui.label("");
-            ui.label(egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak(),
+                )
+                .wrap(),
+            );
             ui.end_row();
         });
     }
@@ -3049,15 +3048,18 @@ impl App {
                     }
                 }
             });
-            ui.label(
-                egui::RichText::new(if cfg!(windows) {
-                    "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
-                } else if cfg!(target_os = "macos") {
-                    "The Dock shows it while DECKARD runs; Finder keeps the app's own."
-                } else {
-                    "The window and the taskbar show it."
-                })
-                .weak(),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(if cfg!(windows) {
+                        "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
+                    } else if cfg!(target_os = "macos") {
+                        "The Dock shows it while DECKARD runs; Finder keeps the app's own."
+                    } else {
+                        "The window and the taskbar show it."
+                    })
+                    .weak(),
+                )
+                .wrap(),
             );
         });
     }
@@ -3070,8 +3072,15 @@ impl App {
         let mut library_change = None;
         let mut controller_change = None;
         let mut wine_action = None;
-        let fit = crate::layout::dialog_max_height(ctx);
-        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([760.0, 700.0f32.min(fit)]).max_height(fit).open(&mut open).show(ctx, |ui| {
+        let (fit, wide) = (crate::layout::dialog_max_height(ctx), crate::layout::dialog_max_width(ctx));
+        egui::Window::new("Preferences")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([760.0f32.min(wide), 700.0f32.min(fit)])
+            .max_height(fit)
+            .max_width(wide)
+            .open(&mut open)
+            .show(ctx, |ui| {
             crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, 7, "General");
@@ -3081,7 +3090,7 @@ impl App {
                 ui.selectable_value(&mut tab, 5, "Library");
                 ui.selectable_value(&mut tab, 6, "Recording");
                 ui.separator();
-                ui.label(egui::RichText::new("Plug-ins:").weak());
+                ui.add(egui::Label::new(egui::RichText::new("Plug-ins:").weak()).wrap());
                 ui.selectable_value(&mut tab, 0, "Manager");
                 ui.selectable_value(&mut tab, 1, "Location");
             });
@@ -3114,10 +3123,8 @@ impl App {
                         });
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("REC from a stop counts in this long first (SHIFT + REC on the controller: at least a bar).")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("REC from a stop counts in this long first (SHIFT + REC on the controller: at least a bar).")
+                            .weak()).wrap());
                     ui.end_row();
                     ui.label("Input Quantize");
                     ui.checkbox(&mut self.settings.input_quantize, "Snap recorded notes to the grid");
@@ -3125,7 +3132,7 @@ impl App {
                 });
             } else if tab == 5 {
                 ui.label("Folders of sound packs to list in the browser under Factory (each folder's name is its library).");
-                ui.label(egui::RichText::new("Maschine's own library is listed when it's installed; add packs here when it isn't.").weak());
+                ui.add(egui::Label::new(egui::RichText::new("Maschine's own library is listed when it's installed; add packs here when it isn't.").weak()).wrap());
                 let mut remove = None;
                 for d in &self.settings.library_folders {
                     ui.horizontal(|ui| {
@@ -3162,10 +3169,8 @@ impl App {
                     self.settings.pad_sensitivity = n;
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
+                            .weak()).wrap());
                     ui.end_row();
                     // Velocity SCALING, as the MK3's own Settings page has it (Soft 3 … Hard 3):
                     // Maschine's measured curves (`mk3_io::pad_velocity`).
@@ -3180,10 +3185,8 @@ impl App {
                     self.settings.velocity_scaling = scaling;
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
+                            .weak()).wrap());
                     ui.end_row();
                     // The two brightnesses are the MK3's own (its LEDs' level report, its
                     // displays' backlight byte), so they follow the model picked here rather
@@ -3196,7 +3199,7 @@ impl App {
                         self.settings.led_brightness = leds;
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak()).wrap());
                         ui.end_row();
                         ui.label("Display brightness");
                         let mut displays = self.settings.display_brightness;
@@ -3204,11 +3207,11 @@ impl App {
                         self.settings.display_brightness = displays;
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak()).wrap());
                         ui.end_row();
                         if self.mk3.is_none() {
                             ui.label("");
-                            ui.label(egui::RichText::new("Applies when the MK3 connects.").weak());
+                            ui.add(egui::Label::new(egui::RichText::new("Applies when the MK3 connects.").weak()).wrap());
                             ui.end_row();
                         }
                     }
@@ -3248,7 +3251,7 @@ impl App {
                         }
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak()).wrap());
                         ui.end_row();
                     }
                     ui.label("Controller");
@@ -3318,12 +3321,10 @@ impl App {
                     ui.end_row();
                     ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };
-                    ui.label(
-                        egui::RichText::new(format!(
+                    ui.add(egui::Label::new(egui::RichText::new(format!(
                             "What runs the MK3: Maschine's controller scripts, from your own Maschine install ({found}), or DECKARD's own layer. Automatic uses the scripts when they're found."
                         ))
-                        .weak(),
-                    );
+                        .weak()).wrap());
                     ui.end_row();
                 });
             } else if tab == 0 {
@@ -3333,12 +3334,12 @@ impl App {
                     ui.checkbox(&mut self.settings.use_au, "Use Audio Units");
                 });
                 ui.checkbox(&mut self.settings.scan_on_start, "Rescan plug-ins at start-up");
-                ui.label(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak());
+                ui.add(egui::Label::new(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak()).wrap());
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;
                     }
-                    ui.label(egui::RichText::new(&self.catalog.status).weak());
+                    ui.add(egui::Label::new(egui::RichText::new(&self.catalog.status).weak()).wrap());
                 });
                 if cfg!(target_os = "linux") {
                     self.wine_section(ui, &mut wine_action);
@@ -8267,6 +8268,7 @@ impl App {
             .open(&mut open)
             .resizable(false)
             .max_height(crate::layout::dialog_max_height(ctx))
+            .max_width(crate::layout::dialog_max_width(ctx))
             .vscroll(true)
             .show(ctx, |ui| {
                 crate::layout::dialog_style(ui);
@@ -15578,6 +15580,84 @@ mod tests {
             h.run_steps(3);
             let r = window(&h, title);
             assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "{title}: {r:?} in {screen:?}");
+        }
+    }
+
+    /// Renders every Preferences tab on a laptop screen into `DECKARD_RENDER_DIR`, to look
+    /// at (`cargo test -p deckard --bin deckard -- --ignored render_laptop_dialogs`).
+    #[test]
+    #[ignore]
+    fn render_laptop_dialogs() {
+        let Some(dir) = std::env::var_os("DECKARD_RENDER_DIR").map(PathBuf::from) else { return };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1366.0, 768.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(3);
+        for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+            h.state_mut().prefs = Some(tab);
+            h.run_steps(4);
+            h.render().unwrap().save(dir.join(format!("prefs-{tab}.png"))).unwrap();
+        }
+        h.state_mut().prefs = None;
+        for (name, set) in [("repeat", 0), ("lock", 1), ("monitor", 2)] {
+            h.state_mut().repeat_panel = set == 0;
+            h.state_mut().lock_panel = set == 1;
+            h.state_mut().midi_monitor = set == 2;
+            h.run_steps(4);
+            h.render().unwrap().save(dir.join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    /// On a laptop screen (1366x768, and 1280x720 to be safe) every Preferences tab and
+    /// the dialogs a laptop user opens most stay inside the window, both ways.
+    #[test]
+    fn dialogs_fit_a_laptop_screen() {
+        for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
+            let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+            app.new_project();
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(w, ht))
+                .with_step_dt(1.0 / 60.0)
+                .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            h.run_steps(3);
+            let screen = h.ctx.content_rect();
+            let fits = |h: &Harness<'static, App>, title: &str, what: &str| {
+                let r = h
+                    .ctx
+                    .memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed(title)))))
+                    .unwrap_or_else(|| panic!("{what} shown"));
+                assert!(screen.expand(0.5).contains_rect(r), "{w}x{ht} {what}: {r:?} in {screen:?}");
+            };
+            for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+                h.state_mut().prefs = Some(tab);
+                h.run_steps(3);
+                fits(&h, "Preferences", &format!("Preferences tab {tab}"));
+            }
+            h.state_mut().prefs = None;
+            h.state_mut().repeat_panel = true;
+            h.run_steps(3);
+            fits(&h, "Note Repeat / Arp", "Note Repeat / Arp");
+            h.state_mut().repeat_panel = false;
+            h.state_mut().lock_panel = true;
+            h.run_steps(3);
+            fits(&h, "Lock", "Lock");
+            h.state_mut().lock_panel = false;
+            h.state_mut().midi_monitor = true;
+            h.run_steps(3);
+            fits(&h, "MIDI Monitor", "MIDI Monitor");
+            let opened = h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed("MIDI Monitor"))))).unwrap();
+            h.run_steps(20);
+            fits(&h, "MIDI Monitor", "MIDI Monitor, later");
+            let later = h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed("MIDI Monitor"))))).unwrap();
+            assert!(
+                (later.width() - opened.width()).abs() < 1.0,
+                "{w}x{ht}: the MIDI Monitor doesn't keep widening: {opened:?} → {later:?}"
+            );
+            h.state_mut().midi_monitor = false;
         }
     }
 

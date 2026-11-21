@@ -327,6 +327,7 @@ impl App {
             .resizable(false)
             .collapsible(false)
             .max_height(crate::layout::dialog_max_height(ctx))
+            .max_width(crate::layout::dialog_max_width(ctx))
             .vscroll(true)
             .show(ctx, |ui| {
                 crate::layout::dialog_style(ui);

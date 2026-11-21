@@ -208,6 +208,7 @@ impl App {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .max_height(crate::layout::dialog_max_height(ctx))
+                .max_width(crate::layout::dialog_max_width(ctx))
                 .vscroll(true)
                 .show(ctx, |ui| {
                     crate::layout::dialog_style(ui);
@@ -240,6 +241,7 @@ impl App {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .max_height(crate::layout::dialog_max_height(ctx))
+                .max_width(crate::layout::dialog_max_width(ctx))
                 .vscroll(true)
                 .show(ctx, |ui| {
                     crate::layout::dialog_style(ui);

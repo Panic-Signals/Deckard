@@ -271,8 +271,9 @@ pub fn window(ctx: &eframe::egui::Context, open: &mut bool, m: &Monitor, v: &mut
     egui::Window::new("MIDI Monitor")
         .open(open)
         .resizable(true)
-        .default_size([980.0, 420.0f32.min(crate::layout::dialog_max_height(ctx))])
+        .default_size([1060.0f32.min(crate::layout::dialog_max_width(ctx)), 420.0f32.min(crate::layout::dialog_max_height(ctx))])
         .max_height(crate::layout::dialog_max_height(ctx))
+        .max_width(crate::layout::dialog_max_width(ctx))
         .show(ctx, |ui| {
             crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
@@ -289,7 +290,10 @@ pub fn window(ctx: &eframe::egui::Context, open: &mut bool, m: &Monitor, v: &mut
                 }
             });
             ui.separator();
-            let half = (ui.available_width() - 12.0) / 2.0;
+            // (Both sides, the separator between them and the spacing round it, exactly the
+            // window's width: wider, the window grew to fit, frame after frame.)
+            let gap = 2.0 * ui.spacing().item_spacing.x + 6.0;
+            let half = ((ui.available_width() - gap) / 2.0).floor();
             ui.horizontal_top(|ui| {
                 for (dir, title, all) in [(Dir::In, "IN", "All sources"), (Dir::Out, "OUT", "All destinations")] {
                     ui.allocate_ui_with_layout(egui::vec2(half, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -332,7 +336,9 @@ fn side(ui: &mut eframe::egui::Ui, m: &Monitor, dir: Dir, title: &str, all: &str
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
     let widths = [64.0, 0.0, 28.0, 96.0, 112.0, 80.0];
     let fixed: f32 = widths.iter().sum::<f32>() + 6.0 * ui.spacing().item_spacing.x;
-    let port_w = (ui.available_width() - fixed).max(60.0);
+    // (The port's column takes what's left, down to a sliver, so that both sides fit the
+    // window rather than widening it frame after frame past a laptop's screen.)
+    let port_w = (ui.available_width() - fixed).max(24.0);
     let cell = |ui: &mut egui::Ui, w: f32, t: egui::RichText| {
         ui.add_sized([w, row_h], egui::Label::new(t.monospace()).truncate());
     };

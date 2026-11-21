@@ -280,9 +280,13 @@ impl App {
         let mut open = true;
         let mut todo = Vec::new();
         let active = self.lock_active;
-        egui::Window::new("Lock").open(&mut open).resizable(false).max_height(crate::layout::dialog_max_height(ctx)).vscroll(true).show(
-            ctx,
-            |ui| {
+        egui::Window::new("Lock")
+            .open(&mut open)
+            .resizable(false)
+            .max_height(crate::layout::dialog_max_height(ctx))
+            .max_width(crate::layout::dialog_max_width(ctx))
+            .vscroll(true)
+            .show(ctx, |ui| {
                 crate::layout::dialog_style(ui);
                 ui.horizontal(|ui| {
                     if ui.selectable_label(active, "LOCK").on_hover_text("Take a snapshot; again: recall it").clicked() {
@@ -351,8 +355,7 @@ impl App {
                         }
                     });
                 });
-            },
-        );
+            });
         self.lock_panel = open;
         for d in todo {
             match d {
@@ -386,6 +389,7 @@ impl App {
             .resizable(false)
             .collapsible(false)
             .max_height(crate::layout::dialog_max_height(ctx))
+            .max_width(crate::layout::dialog_max_width(ctx))
             .vscroll(true)
             .show(ctx, |ui| {
                 crate::layout::dialog_style(ui);
