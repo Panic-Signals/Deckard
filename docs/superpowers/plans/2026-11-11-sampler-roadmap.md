@@ -468,6 +468,17 @@ four stems together in one zone, so they share every edit.
 
 Ensoniq, E-mu and MPC all go well beyond Maschine's zones here.
 
+> Built (2026-11-21, `docs/superpowers/specs/2026-11-21-layers-design.md`): the first
+> part. A New Sampler sound without slices takes up to 8 layers, a sample each, all
+> sounding on every note over the sound's keys; each has its own level, pan, tune, root
+> and ADSR. **Morph** sweeps one position through the layers' windows (A–B–C–D
+> trapezoids, spread evenly or set by hand), free or synced, Round or There and back,
+> with Linear or Equal power fades; MORPH is a mod-matrix destination. The LAYERS tab
+> in the software and on the MK3. Left for later parts: a velocity window and key range
+> per layer, Cycle / Random / Velocity layer play, a filter, delay and envelope type per
+> layer, Patch Select, RENDER (a layered sound printed to one sample), Transwaves and
+> stems to layers.
+
 - **Layers:**
   - up to 8 per sound
   - one zone per key per layer
