@@ -105,6 +105,9 @@ mod ni_services;
 mod pad_blink_tests;
 #[cfg(test)]
 mod pad_light_tests;
+mod pad_play;
+#[cfg(test)]
+mod pad_play_tests;
 #[cfg(test)]
 mod parity_tests;
 mod plugin_macros;
