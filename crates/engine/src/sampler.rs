@@ -1589,11 +1589,8 @@ impl SamplerRt {
             return;
         }
         let same = |a: &ZoneRt, b: &ZoneRt| {
-            Arc::ptr_eq(&a.sample, &b.sample)
-                || (a.sample.frames.len() == b.sample.frames.len()
-                    && a.sample.rate == b.sample.rate
-                    && a.play == b.play
-                    && a.looped == b.looped)
+            // (The same file loaded again is the same sample.)
+            Arc::ptr_eq(&a.sample, &b.sample) || (a.sample.frames.len() == b.sample.frames.len() && a.sample.rate == b.sample.rate)
         };
         // Voices stretched as they play keep their stretchers.
         if !old.lives.is_empty() && !self.lives.is_empty() {
@@ -1635,6 +1632,17 @@ impl SamplerRt {
                 (Some(a), Some(b)) if same(a, b) && a.sync.is_none() == b.sync.is_none() => {
                     v.variant =
                         b.sync.as_ref().and_then(|sy| v.variant.and_then(|i| a.sync.as_ref()?.notes.get(i)).and_then(|(o, _)| sy.note(*o)));
+                    // Its play range, loop or fades moved (the sample its own still): it
+                    // goes on in the new ones, heard at once.
+                    let ranges = |z: &ZoneRt| (z.play, z.looped, z.x_fade, z.fade_in, z.fade_out);
+                    if v.variant.is_none() && ranges(a) != ranges(b) {
+                        v.stream.play = (b.play.0 as i64, b.play.1 as i64);
+                        if v.stream.looped.is_some() {
+                            v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
+                        }
+                        (v.stream.x_fade, v.stream.fade_in, v.stream.fade_out) = (b.x_fade as i64, b.fade_in as i64, b.fade_out as i64);
+                        v.stream.fading = 0;
+                    }
                 }
                 // A Sync or Keys zone given another render (a new tempo, or the first):
                 // its voices carry on from the same place in the music, in the new one.
@@ -3050,6 +3058,41 @@ mod tests {
         let v = &new.voices[0];
         assert!(v.fade.is_none(), "not faded out");
         assert!(((v.stream.pos as f64 / len as f64) - at).abs() < 1e-3, "same place: {} vs {at}", v.stream.pos as f64 / len as f64);
+    }
+
+    /// A zone's loop and play range moved under a held note: the note goes on, in the new
+    /// ones (a loop end pulled back past where it is brings it round at once).
+    #[test]
+    fn a_held_note_follows_its_loop_and_end() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let adsr = || {
+            let mut s = synced(None);
+            s.settings.env_type = 2;
+            s
+        };
+        let mut old = adsr();
+        old.zones[0].looped = Some((1000, 40_000));
+        old.note_on(1, 60, 100, &ctx);
+        assert!(old.voices[0].stream.looped.is_some(), "it loops");
+        read(&mut old, 12_000);
+        assert!(old.voices[0].stream.pos > 10_000);
+        let mut new = adsr();
+        new.zones[0].sample = old.zones[0].sample.clone();
+        (new.zones[0].play, new.zones[0].looped) = ((0, 60_000), Some((2000, 6000)));
+        new.adopt(old);
+        assert_eq!(new.voices.len(), 1);
+        let v = &new.voices[0];
+        assert!(v.fade.is_none(), "it plays on");
+        assert_eq!((v.stream.play, v.stream.looped), ((0, 60_000), Some((2000, 6000))));
+        read(&mut new, 64);
+        let pos = new.voices[0].stream.pos;
+        assert!((2000..6000).contains(&pos), "round the new loop: {pos}");
+        // The loop switched off: it plays out to the new end.
+        let mut off = adsr();
+        off.zones[0].sample = new.zones[0].sample.clone();
+        off.zones[0].play = (0, 30_000);
+        off.adopt(new);
+        assert_eq!((off.voices[0].stream.play, off.voices[0].stream.looped), ((0, 30_000), None));
     }
 
     /// A stream over frames whose value is their index, so a mix shows what it read.

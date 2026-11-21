@@ -1583,7 +1583,9 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         fx += widths[i] + 4.0;
         painter.text(Pos2::new(fr.left() + 2.0, fr.top() + 6.0), Align2::LEFT_CENTER, f.label, font(9.0), white(110));
         let value = elide(painter, &f.value, 12.0, fr.width() - 4.0 - if f.choice.is_some() { 10.0 } else { 0.0 });
-        let mut resp = ui.interact(fr, ui.id().with(("field", title, i)), Sense::click_and_drag());
+        // (By its label and row too: two boxes on a tab may share a title, as SLICE's do.)
+        let fid = ui.id().with(("field", title, f.label, i, y.round() as i32));
+        let mut resp = ui.interact(fr, fid, Sense::click_and_drag());
         let tip = if f.enter.is_some() { format!("{}\nDouble-click to type it", f.tip) } else { f.tip.to_string() };
         resp = if value != f.value { resp.on_hover_text(format!("{}\n{tip}", f.value)) } else { resp.on_hover_text(tip) };
         ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sample-field", title.to_string(), f.label.to_string())), fr));
@@ -1628,7 +1630,7 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         if resp.dragged() {
             let fine = ui.input(|i| i.modifiers.shift);
             let d = -resp.drag_delta().y / if fine { 10.0 } else { 1.0 };
-            let id = ui.id().with(("field-acc", title, i));
+            let id = fid.with("acc");
             let acc = ui.data(|dd| dd.get_temp::<f32>(id)).unwrap_or(0.0) + d;
             let steps = (acc / 4.0).trunc();
             ui.data_mut(|dd| dd.insert_temp(id, acc - steps * 4.0));

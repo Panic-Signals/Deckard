@@ -243,3 +243,55 @@ fn a_footer_value_is_typed_with_a_double_click() {
     set(&mut h, "LAYER 2", "TUNE", "loud");
     assert_eq!((zones(h.state())[1].tune, undo(&h)), (-12.0, before));
 }
+
+/// A click on a field with several options lists them all, to pick from.
+#[test]
+fn a_click_on_a_choice_lists_its_options() {
+    use egui_kittest::kittest::Queryable;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0)]);
+    h.run_steps(3);
+    let id = egui::Id::new(("deckard-sample-field", "MORPH".to_string(), "SHAPE".to_string()));
+    let r: egui::Rect = h.ctx.data(|d| d.get_temp(id)).expect("SHAPE shown");
+    click(&mut h, r.center());
+    h.run_steps(3);
+    h.get_by_label("There and back").click();
+    h.run_steps(3);
+    assert_eq!(project_of_app(h.state()).groups[0].sounds[0].new_sampler.unwrap().morph.shape, Shape::Back);
+}
+
+/// On SLICE two boxes are called SLICE (the slice's own settings over the waveform, the
+/// slicing in the footer): a click on the footer's MODE lists the modes and picks one, and
+/// a double-click on its count types nothing into the slice's TAIL.
+#[test]
+fn the_two_slice_boxes_are_each_their_own() {
+    use egui_kittest::kittest::Queryable;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0)]);
+    {
+        // The same sample as a plain zone with a tempo, so it can be sliced.
+        let mut m = zones(h.state())[0].meta.clone().unwrap();
+        (m.layer, m.bpm, m.beats) = (None, Some(120.0), Some(4.0));
+        let doc = h.state().doc.clone().unwrap();
+        doc.borrow_mut().set_zone_meta(0, 0, 0, &m, "Plain").unwrap();
+    }
+    (h.state_mut().sampling.tab, h.state_mut().zone) = (2, 0);
+    h.run_steps(4);
+    let at = |h: &Harness<'static, App>, label: &str| -> egui::Rect {
+        let id = egui::Id::new(("deckard-sample-field", "SLICE".to_string(), label.to_string()));
+        h.ctx.data(|d| d.get_temp(id)).unwrap_or_else(|| panic!("SLICE {label} shown"))
+    };
+    at(&h, "TAIL");
+    let r = at(&h, "MODE");
+    click(&mut h, r.center());
+    h.get_by_label("Grid").click();
+    h.run_steps(3);
+    assert_eq!(h.state().sampling.slice_mode, 1);
+    assert_eq!(deckard_model::new_sampler::Plays::of(&zones(h.state())[0]), deckard_model::new_sampler::Plays::Held);
+    h.run_steps(40);
+    let r = at(&h, "SLICES");
+    type_into(&mut h, r, "22");
+    assert_eq!(zones(h.state())[0].meta.as_ref().unwrap().tail_ms(), 0.0);
+}
