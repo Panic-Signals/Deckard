@@ -3095,9 +3095,14 @@ impl App {
                 ui.selectable_value(&mut tab, 1, "Location");
             });
             ui.separator();
-            // Past the window's height the tab scrolls (a short screen); the Plug-in Manager's
-            // list scrolls by itself, so its tab doesn't.
-            egui::ScrollArea::new([false, tab != 0]).id_salt(("prefs-tab", tab)).auto_shrink([false, false]).show(ui, |ui| {
+            // Past the window's height the tab scrolls (a short screen). The Plug-in Manager's
+            // list scrolls by itself in the room left under its settings, and at least
+            // `LIST_MIN` (then the tab scrolls too: on Linux the Wine settings alone can be
+            // taller than a short screen).
+            const LIST_MIN: f32 = 160.0;
+            let view_h = ui.available_height();
+            egui::ScrollArea::vertical().id_salt(("prefs-tab", tab)).auto_shrink([false, false]).show(ui, |ui| {
+            let top = ui.cursor().top();
             if tab == 2 {
                 self.audio_preferences(ui);
             } else if tab == 7 {
@@ -3349,7 +3354,8 @@ impl App {
                 entries.sort_by(|a, b| {
                     (a.vendor.to_lowercase(), a.name.to_lowercase()).cmp(&(b.vendor.to_lowercase(), b.name.to_lowercase()))
                 });
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let list_h = (view_h - (ui.cursor().top() - top)).max(LIST_MIN);
+                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                     egui::Grid::new("plugins").striped(true).num_columns(4).show(ui, |ui| {
                         ui.strong("On");
                         ui.strong("Plug-in");
@@ -15531,6 +15537,20 @@ mod tests {
         h.render().unwrap().save(dir.join("sampling-long.png")).unwrap();
     }
 
+    /// A catalog of 200 plug-ins, longer than any screen: the Plug-in Manager's list.
+    fn many_plugins(app: &mut App) {
+        app.catalog.entries = (0..200)
+            .map(|i| deckard_plugins::scan::Entry {
+                kind: deckard_plugins::scan::Kind::Vst3,
+                vendor: "Acme".into(),
+                name: format!("Plug-in {i:03}"),
+                instrument: i % 3 == 0,
+                location: String::new(),
+                cid: format!("{i:032X}"),
+            })
+            .collect();
+    }
+
     /// On a short screen (shorter than a 1920x515 monitor, so that the Hardware tab of a
     /// new project doesn't fit), Preferences and the panels that open as dialogs stay
     /// inside the window, and what doesn't fit scrolls into view: the Hardware tab's last
@@ -15539,6 +15559,7 @@ mod tests {
     fn dialogs_fit_a_short_window_and_scroll() {
         let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
         app.new_project();
+        many_plugins(&mut app);
         let mut h = Harness::builder()
             .with_size(egui::vec2(1920.0, 380.0))
             .with_step_dt(1.0 / 60.0)
@@ -15556,6 +15577,15 @@ mod tests {
             let r = window(&h, "Preferences");
             assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "tab {tab}: {r:?} in {screen:?}");
         }
+        // The Plug-in Manager: its settings at the top, inside the window, and the end of
+        // its list out of sight (it scrolls, rather than the window growing). (On Linux the
+        // Wine settings come first and are taller than this screen: the tab scrolls too.)
+        h.state_mut().prefs = Some(0);
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        let r = h.get_by_label("Use VST3 Plug-ins").rect();
+        assert!(r.top() >= prefs.top() && r.bottom() <= prefs.bottom(), "{r:?} in {prefs:?}");
+        assert!(h.query_by_label("Acme — Plug-in 199").is_none_or(|n| n.rect().top() > prefs.bottom()), "the list scrolls");
         h.state_mut().prefs = Some(4);
         h.run_steps(3);
         let prefs = window(&h, "Preferences");
@@ -15593,6 +15623,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
         app.new_project();
+        many_plugins(&mut app);
         let mut h = Harness::builder()
             .with_size(egui::vec2(1366.0, 768.0))
             .with_step_dt(1.0 / 60.0)
@@ -15605,6 +15636,12 @@ mod tests {
             h.run_steps(4);
             h.render().unwrap().save(dir.join(format!("prefs-{tab}.png"))).unwrap();
         }
+        // The Plug-in Manager on a short screen.
+        h.set_size(egui::vec2(1366.0, 380.0));
+        h.state_mut().prefs = Some(0);
+        h.run_steps(4);
+        h.render().unwrap().save(dir.join("prefs-0-short.png")).unwrap();
+        h.set_size(egui::vec2(1366.0, 768.0));
         h.state_mut().prefs = None;
         // The main window's toolbars, in each view, at both laptop sizes.
         for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
@@ -15643,6 +15680,7 @@ mod tests {
         for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
             let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
             app.new_project();
+            many_plugins(&mut app);
             let mut h = Harness::builder()
                 .with_size(egui::vec2(w, ht))
                 .with_step_dt(1.0 / 60.0)
