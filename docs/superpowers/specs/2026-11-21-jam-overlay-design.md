@@ -71,13 +71,19 @@ none).
 - **`focus` and `editing` are the script's on every page.** The host draws them and keeps
   no second copy. In particular it does not settle a cursor onto a filled slot: a cursor
   on a hole underlines nothing, and that is honest.
+- **A slot that cannot be turned never brackets.** The bracket follows the script's `editing`,
+  which starts true only for a one-item menu whose item can be turned, and a press on a slot
+  that carries an action runs it instead of bracketing — the Variation page's **Apply** is
+  such a slot.
 - **Whose job is it to avoid a hole?** The stepping page's, because it steps: the
   keyboard's page settles its cursor when the pad layout changes the fill under it. A
   menu's cursor moves one place per notch and never lands on an item that does not show.
 - **A page a script drew before the host applied what it asked for is stale**, and the
   host fixes it in the same frame: after applying a script's requests it ticks the script
   once more over the state it now holds. That is why Perform FX shows the mode it just
-  changed to. It runs only when something was applied, so nothing animates twice.
+  changed to. It runs only when something was applied, so nothing animates twice — and that
+  is also the rule a request has to follow: a request that changed state without being an
+  `Action` would be drawn a frame late, which is why adding an effect is one.
 
 ## The Variation page
 
@@ -182,7 +188,9 @@ The strip's pixels are measured, not copied: the reference's binary keeps no str
 metrics (its window state and styling are runtime), so the numbers are read off captures
 of the running app — bar 28 points, body 144 (header 40, value 40, sub 40, pad 24), type
 11.5 / 21 / 13, a rule under each column's sub-label with the focused one at 2.5 points
-white, and editing as inset corner brackets.
+white, and editing as inset corner brackets. Long values still clip mid-word in a narrow
+column (`Harmoni`): the pages own their text, so shortening a value belongs there rather than
+in the renderer.
 
 ## Platform facts (eframe/egui 0.36.2)
 
@@ -232,11 +240,3 @@ Each obligation is a test with its own name:
 
 `docs/controller-api.md` carries the script-facing half of this document.
 
-## Open questions
-
-- A slot that cannot be turned must not set `editing`; that is a promise the script keeps,
-  and it is worth a test the day a composer grows a read-only slot.
-- Perform FX's missing-effect case is covered by the extra tick only because adding an
-  effect is an `Action`. A request that changed state without one would be stale again.
-- Long values still clip mid-word in narrow columns (`Harmoni`). Cell width and clipping
-  belong to the pages, not to this contract.
