@@ -248,16 +248,18 @@ pub fn ask_about(
     }
     let (mut quitting, mut declined) = (false, false);
     egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
-        crate::layout::dialog_style(ui);
-        ui.set_width(420.0);
-        ui.label(egui::RichText::new(words.title).strong());
-        ui.add_space(4.0);
-        ui.label(words.body);
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            quitting = ui.button(words.button).clicked();
-            declined = ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
-        });
+        crate::layout::fit_dialog(ui, |ui| {
+            crate::layout::dialog_style(ui);
+            ui.set_width(420.0);
+            ui.label(egui::RichText::new(words.title).strong());
+            ui.add_space(4.0);
+            ui.label(words.body);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                quitting = ui.button(words.button).clicked();
+                declined = ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+            });
+        })
     });
     if quitting {
         match quit() {
