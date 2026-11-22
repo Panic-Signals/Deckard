@@ -69,7 +69,81 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
                 Tab::Files => files(app, ui, &mut acts),
             }
         });
+    keyboard(app, ui, &mut acts);
     apply(app, acts);
+}
+
+fn keyboard(app: &App, ui: &Ui, acts: &mut Vec<Act>) {
+    if ui.ctx().egui_wants_keyboard_input() {
+        return;
+    }
+    let (up, down, left, right) = ui.input_mut(|input| {
+        (
+            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+        )
+    });
+    if !up && !down && !left && !right {
+        return;
+    }
+
+    match app.browser.tab {
+        Tab::Library => {
+            let Some(selected) = app.browser.selected else {
+                if !app.browser.results.items.is_empty() {
+                    acts.push(Act::Browse(BrowseAct::Select(0)));
+                }
+                return;
+            };
+            if up || down {
+                let last = app.browser.results.items.len().saturating_sub(1);
+                let next = if up { selected.saturating_sub(1) } else { (selected + 1).min(last) };
+                acts.push(Act::Browse(BrowseAct::Select(next)));
+            } else if right {
+                acts.push(Act::Browse(BrowseAct::Prehear(selected)));
+            } else if left {
+                acts.push(Act::Browse(BrowseAct::StopPrehear));
+            }
+        }
+        Tab::Files => {
+            if app.browser.files.is_empty() {
+                if left {
+                    acts.push(Act::Browse(BrowseAct::Up));
+                }
+                return;
+            }
+            let selected =
+                app.browser.file_selected.as_ref().and_then(|path| app.browser.files.iter().position(|entry| &entry.path == path));
+            if up || down {
+                let next = match selected {
+                    Some(i) if up => i.saturating_sub(1),
+                    Some(i) => (i + 1).min(app.browser.files.len() - 1),
+                    None => 0,
+                };
+                let entry = &app.browser.files[next];
+                acts.push(Act::Browse(BrowseAct::SelectFile(entry.path.clone())));
+            } else if let Some(path) = app.browser.file_selected.clone() {
+                let is_dir = app.browser.files.iter().any(|entry| entry.path == path && entry.dir);
+                if right {
+                    if is_dir {
+                        acts.push(Act::Browse(BrowseAct::Folder(path)));
+                    } else {
+                        acts.push(Act::Browse(BrowseAct::PrehearFile(path)));
+                    }
+                } else if left {
+                    if is_dir {
+                        acts.push(Act::Browse(BrowseAct::Up));
+                    } else {
+                        acts.push(Act::Browse(BrowseAct::StopPrehear));
+                    }
+                }
+            } else if left {
+                acts.push(Act::Browse(BrowseAct::Up));
+            }
+        }
+    }
 }
 
 fn library(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
@@ -238,6 +312,9 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                 let item = &b.results.items[i];
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), RESULT_ROW), Sense::click_and_drag());
                 let selected = b.selected == Some(i);
+                if selected {
+                    ui.scroll_to_rect(r, Some(egui::Align::Center));
+                }
                 let fill = if selected {
                     Color32::from_rgb(0x33, 0x40, 0x5A)
                 } else if resp.hovered() {
@@ -365,6 +442,9 @@ fn files(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             let e = &b.files[i];
             let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), RESULT_ROW), Sense::click_and_drag());
             let selected = b.file_selected.as_ref() == Some(&e.path);
+            if selected {
+                ui.scroll_to_rect(r, Some(egui::Align::Center));
+            }
             let fill = if selected {
                 Color32::from_rgb(0x33, 0x40, 0x5A)
             } else if resp.hovered() {

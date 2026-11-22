@@ -608,6 +608,7 @@ impl Output {
             let mut ext = vec![vec![0f32; 16_384]; crate::OUTPUTS];
             let mut stereo = vec![0f32; 16_384];
             let mut engine: Option<Box<Engine>> = None;
+            let mut standalone_prehear = crate::prehear::Prehear::default();
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
             #[cfg(windows)]
@@ -636,7 +637,13 @@ impl Output {
                         Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
                         cmd => cmd,
                     };
-                    if let Some(back) = apply(&mut engine, cmd, started, period, rate as f64, frames, exact)
+                    let result = match cmd {
+                        Command::Prehear(sample, gain) if engine.is_none() => {
+                            Some(Command::Prehear(standalone_prehear.set(sample, gain), 0.0))
+                        }
+                        cmd => apply(&mut engine, cmd, started, period, rate as f64, frames, exact),
+                    };
+                    if let Some(back) = result
                         && let Err(back) = garbage.push(back)
                     {
                         // Nobody is collecting: free it here rather than leak.
@@ -663,6 +670,7 @@ impl Output {
                         }
                     }
                 }
+                standalone_prehear.mix(buf, rate as f64);
                 // Never waits: if the UI is reading, the next block publishes
                 // (peaks keep adding up meanwhile).
                 if let Ok(mut t) = telemetry.try_lock() {
