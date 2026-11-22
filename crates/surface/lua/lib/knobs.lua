@@ -14,6 +14,15 @@ local gathered = {}
 knobs.DOUBLE_TAP = 0.4
 local touched_at = {}
 
+-- Control knobs erased while their cap is held, so Touch Auto-write stays off them
+-- until let go.
+knobs.erased = {}
+
+function knobs.erase(n)
+  knobs.erased[n] = true
+  deckard.erase_knob(n)
+end
+
 -- A turn of `amount`: one step up or down (none for no turn).
 function knobs.each(amount)
   if amount > 0 then return 1 elseif amount < 0 then return -1 end

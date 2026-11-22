@@ -194,13 +194,17 @@ impl Document {
         let mut at = 0;
         self.transaction("Duplicate Pattern", |d| {
             at = d.insert_pattern(g, p, p + 1, &pat.name)?;
+            if pat.start != 0 {
+                d.set_pattern_span(g, at, pat.start, pat.length)?;
+            }
             let start = d.project.groups[g].patterns[at].start;
             let shift = |pos: i64| pos - pat.start + start;
             let notes: Vec<Note> = pat.notes.iter().map(|n| Note { position: shift(n.position), ..*n }).collect();
             let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
             let ops = d.event_ops(g, at, &[], &notes, &[], &midi)?;
             if !ops.is_empty() {
-                d.apply("Duplicate Pattern", ops)?;
+                let params = vec![Some((crate::Target::Group(g), "__events".into())); ops.len()];
+                d.apply_with("Duplicate Pattern", ops, params)?;
             }
             d.copy_pattern_modulation(g, &pat, at, start - pat.start)
         })?;
@@ -254,6 +258,9 @@ impl Document {
         self.transaction("Duplicate Pattern", |d| {
             if existing.is_none() {
                 at = d.add_pattern_in_slot(g, from_idx, to, &pat.name)?;
+                if pat.start != 0 {
+                    d.set_pattern_span(g, at, pat.start, pat.length)?;
+                }
             }
             let target = d.project.groups[g].patterns[at].clone();
             let shift = |pos: i64| pos - pat.start + target.start;
@@ -261,7 +268,8 @@ impl Document {
             let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
             let ops = d.event_ops(g, at, &target.notes, &notes, &target.midi, &midi)?;
             if !ops.is_empty() {
-                d.apply("Duplicate Pattern", ops)?;
+                let params = vec![Some((crate::Target::Group(g), "__events".into())); ops.len()];
+                d.apply_with("Duplicate Pattern", ops, params)?;
             }
             if pat.length > 0 && pat.length != target.length {
                 d.set_pattern_length(g, at, pat.length)?;

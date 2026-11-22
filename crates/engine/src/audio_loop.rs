@@ -167,6 +167,10 @@ impl LoopRt {
         self.gates.retain(|&(_, n)| n != note);
     }
 
+    pub fn release_all(&mut self) {
+        self.gates.clear();
+    }
+
     pub fn control(&mut self, kind: MidiKind) {
         if let MidiKind::PitchBend(v) = kind {
             self.bend = f64::from(v) / 8192.0 - 1.0;

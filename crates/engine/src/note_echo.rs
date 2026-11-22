@@ -161,6 +161,18 @@ impl MidiInput for NoteEcho {
         }
     }
 
+    fn mute_sound(&mut self, sound: usize, clock: Clock, out: &mut Outbox) {
+        let mut i = 0;
+        while i < self.held.len() {
+            if self.held[i].0 == sound {
+                let (_, pitch) = self.held.swap_remove(i);
+                out.off(clock.now, sound, pitch);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     fn finish(&mut self, clock: Clock, out: &mut Outbox) {
         for (sound, pitch) in self.held.drain(..) {
             out.off(clock.now, sound, pitch);
@@ -252,6 +264,18 @@ mod tests {
 
         echo.finish(CLOCK, &mut Outbox::new(&mut notes));
         assert_eq!(notes, [NoteOut::Off { at: CLOCK.now, sound: 2, pitch: 62 }]);
+    }
+
+    #[test]
+    fn mute_sound_releases_only_that_sounds_held_keys() {
+        let mut echo = NoteEcho::new();
+        let mut notes = Vec::with_capacity(OUT_ROOM);
+        echo.note(NoteIn::On { sound: 1, pitch: 60, velocity: 100, length: None }, CLOCK, &mut Outbox::new(&mut notes));
+        echo.note(NoteIn::On { sound: 2, pitch: 64, velocity: 100, length: None }, CLOCK, &mut Outbox::new(&mut notes));
+        echo.mute_sound(1, CLOCK, &mut Outbox::new(&mut notes));
+        assert_eq!(notes, [NoteOut::Off { at: CLOCK.now, sound: 1, pitch: 60 }]);
+        echo.finish(CLOCK, &mut Outbox::new(&mut notes));
+        assert_eq!(notes, [NoteOut::Off { at: CLOCK.now, sound: 2, pitch: 64 }]);
     }
 
     #[test]

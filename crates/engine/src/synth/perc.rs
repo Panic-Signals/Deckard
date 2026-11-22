@@ -345,8 +345,21 @@ impl Synth for Perc {
     }
 
     fn note_off(&mut self, _note: i64) {
+        if let Some((k, v)) = self.pending.take() {
+            if self.fresh {
+                self.start();
+            }
+            self.note(k, v);
+        }
         if self.mode == 2 {
             self.shaker.note_off();
+        }
+    }
+
+    fn all_notes_off(&mut self) {
+        self.pending = None;
+        if self.mode == 2 {
+            self.shaker.all_notes_off();
         }
     }
 
@@ -360,6 +373,7 @@ impl Synth for Perc {
     fn control(&mut self, _kind: MidiKind) {}
 
     fn stop(&mut self) {
+        self.pending = None;
         self.choke();
     }
 
@@ -634,5 +648,41 @@ mod tests {
         assert_eq!(s.voices(), 0);
         let last = render(&mut s, 1024);
         assert!(last.iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn performer_stops_cleanly_after_choke_or_same_block_release() {
+        let mut s = Perc::new(48000.0);
+        s.set(&engine(2.0, 2.0));
+        // Stop/choke while a Performer note is held (without its note_off) must not leave
+        // the held-note count raised for the next note.
+        s.note_on(60, 100);
+        assert!(peak(&render(&mut s, 4800)) > 0.01);
+        s.stop();
+        render(&mut s, 4800);
+        assert_eq!(s.voices(), 0);
+
+        s.note_on(60, 100);
+        assert!(peak(&render(&mut s, 4800)) > 0.01);
+        s.note_off(60);
+        render(&mut s, 48000 * 2);
+        assert_eq!(s.voices(), 0, "next note stops on its own note_off");
+
+        // Overlapping Performer notes release at once on all_notes_off.
+        s.note_on(60, 100);
+        render(&mut s, 2400);
+        s.note_on(62, 100);
+        render(&mut s, 2400);
+        s.all_notes_off();
+        render(&mut s, 48000 * 2);
+        assert_eq!(s.voices(), 0, "all_notes_off releases multiple held Performer notes");
+
+        // Same-timestamp note_on + note_off before process() must not latch Performer on.
+        let mut fresh = Perc::new(48000.0);
+        fresh.set(&engine(2.0, 2.0));
+        fresh.note_on(60, 100);
+        fresh.note_off(60);
+        render(&mut fresh, 48000 * 2);
+        assert_eq!(fresh.voices(), 0, "same-span note_off releases pending Performer note");
     }
 }

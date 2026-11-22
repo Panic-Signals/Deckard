@@ -496,10 +496,37 @@ pub struct Sound {
     /// PROB LOCK: its notes' chances rolled once and kept (DECKARD's [`PROB_LOCK`]
     /// field; Maschine's sound has its own, not in its saved projects).
     pub probability_locked: bool,
+    /// What DECKARD keeps of its Groove pages ([`GROOVE`]): the Variation and Generate
+    /// settings when the project's format has no place for them, and the page it shows.
+    /// By field, sorted.
+    pub groove: Vec<(String, f64)>,
 }
 
 /// The sound object's field that has PROB LOCK on (`Int(1)`; absent when off).
 pub const PROB_LOCK: &str = "deckard:prob_lock";
+
+/// The sound object's field with [`Sound::groove`], as text: `<field> <value>` a line
+/// (`page` is the Groove page shown). Absent when there is nothing to keep.
+pub const GROOVE: &str = "deckard:groove";
+
+/// [`Sound::groove`] from its text; lines that don't read are skipped.
+pub fn groove_from_text(t: &str) -> Vec<(String, f64)> {
+    let mut v: Vec<(String, f64)> = t
+        .lines()
+        .filter_map(|l| {
+            let (k, x) = l.trim().rsplit_once(' ')?;
+            Some((k.to_string(), x.parse::<f64>().ok().filter(|x| x.is_finite())?))
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v.dedup_by(|a, b| a.0 == b.0);
+    v
+}
+
+/// [`Sound::groove`]'s text.
+pub fn groove_to_text(v: &[(String, f64)]) -> String {
+    v.iter().map(|(k, x)| format!("{k} {x}\n")).collect()
+}
 
 /// A lane of the pattern editor, as saved (`NI::MASCHINE::DATA::MidiAutomator`):
 /// `kind` is a MIDI event type (4 = control change, `number` the controller; 3 =
@@ -532,6 +559,88 @@ impl SlotInfo {
     }
 }
 
+/// Reference-counted plug-in state bytes so cloning or comparing [`Project`]s on edits
+/// never copies or scans megabytes of unchanged VST3/CLAP chunks.
+#[derive(Clone, Default)]
+pub struct PluginChunk(std::sync::Arc<[u8]>);
+
+impl PluginChunk {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for PluginChunk {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for PluginChunk {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PluginChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PartialEq for PluginChunk {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0[..] == other.0[..]
+    }
+}
+
+impl Eq for PluginChunk {}
+
+impl PartialEq<[u8]> for PluginChunk {
+    fn eq(&self, other: &[u8]) -> bool {
+        &self.0[..] == other
+    }
+}
+
+impl PartialEq<&[u8]> for PluginChunk {
+    fn eq(&self, other: &&[u8]) -> bool {
+        &self.0[..] == *other
+    }
+}
+
+impl PartialEq<Vec<u8>> for PluginChunk {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        &self.0[..] == other.as_slice()
+    }
+}
+
+impl PartialEq<PluginChunk> for Vec<u8> {
+    fn eq(&self, other: &PluginChunk) -> bool {
+        self.as_slice() == &other.0[..]
+    }
+}
+
+impl<'a> IntoIterator for &'a PluginChunk {
+    type Item = &'a u8;
+    type IntoIter = std::slice::Iter<'a, u8>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl From<Vec<u8>> for PluginChunk {
+    fn from(v: Vec<u8>) -> Self {
+        Self(v.into())
+    }
+}
+
+impl From<&[u8]> for PluginChunk {
+    fn from(s: &[u8]) -> Self {
+        Self(s.into())
+    }
+}
+
 /// A hosted plug-in (a `PluginHost` module): which plug-in, and its saved state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginRef {
@@ -539,7 +648,7 @@ pub struct PluginRef {
     pub id: String,
     pub name: String,
     /// The saved state, as stored (`[u32 1][u32 1][u32 n][n bytes]`).
-    pub chunk: Vec<u8>,
+    pub chunk: PluginChunk,
     /// Parameter pages saved with it (eight knobs each; empty when Maschine maps them
     /// automatically).
     pub pages: Vec<PluginPage>,
@@ -1643,6 +1752,10 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
             _ => Vec::new(),
         },
         probability_locked: s.get(PROB_LOCK).and_then(Value::as_int).is_some_and(|v| v != 0),
+        groove: match s.get(GROOVE) {
+            Some(Value::Str(t)) => groove_from_text(t),
+            _ => Vec::new(),
+        },
     }
 }
 
@@ -1680,7 +1793,7 @@ fn plugin_ref(m: &Obj) -> PluginRef {
         },
         _ => Vec::new(),
     };
-    PluginRef { id: text("plugin_id"), name: text("plugin_name"), chunk, pages: plugin_pages(m) }
+    PluginRef { id: text("plugin_id"), name: text("plugin_name"), chunk: chunk.into(), pages: plugin_pages(m) }
 }
 
 /// A `PluginHost`'s saved parameter pages (`parameters.unknown_48`).

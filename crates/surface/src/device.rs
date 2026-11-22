@@ -348,6 +348,8 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
         actions: Vec::new(),
         page: String::new(),
         leds: leds::blank(),
+        pinned: Default::default(),
+        shown_pin: None,
     }));
     api::install(&lua, &shared)?;
     let outs = Rc::new(RefCell::new(Vec::new()));

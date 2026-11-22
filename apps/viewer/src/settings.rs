@@ -118,6 +118,10 @@ pub struct Settings {
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
     /// to where the finger lands (Preferences > Hardware).
     pub relative_strips: bool,
+    /// Held-page buttons pinned on the MK3 (`EVENTS`, `SCENE`, `PATTERN`…), and the one
+    /// left open on screen (`None`: none).
+    pub pinned_pages: BTreeSet<String>,
+    pub pinned_open: Option<String>,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware):
     /// higher, light presses play louder. The MK3 applies it to the pressure it reports,
     /// as Maschine has it do (`Mk3Io::set_pad_sensitivity`).
@@ -388,6 +392,8 @@ impl Default for Settings {
             metronome_volume: 100,
             focus_follows: true,
             relative_strips: false,
+            pinned_pages: BTreeSet::new(),
+            pinned_open: None,
             metronome_auto: false,
             metronome_ticks: 4,
             reload_last: true,
@@ -575,6 +581,10 @@ impl Settings {
                 }
                 "focus_follows" => s.focus_follows = v != "false",
                 "relative_strips" => s.relative_strips = v == "true",
+                "pinned_page" if !v.is_empty() => {
+                    s.pinned_pages.insert(v.to_string());
+                }
+                "pinned_open" if !v.is_empty() => s.pinned_open = Some(v.to_string()),
                 "metronome_auto" => s.metronome_auto = v == "true",
                 "metronome_ticks" => {
                     if let Ok(n) = v.parse::<u32>()
@@ -812,6 +822,14 @@ impl Settings {
         out += &format!("jam_enabled = {}\n", self.jam_enabled);
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!("relative_strips = {}\n", self.relative_strips);
+        for p in &self.pinned_pages {
+            out += &format!("pinned_page = {p}\n");
+        }
+        if let Some(p) = &self.pinned_open
+            && self.pinned_pages.contains(p)
+        {
+            out += &format!("pinned_open = {p}\n");
+        }
         out += &format!(
             "metronome_volume = {}\nmetronome_auto = {}\nmetronome_ticks = {}\n",
             self.metronome_volume, self.metronome_auto, self.metronome_ticks

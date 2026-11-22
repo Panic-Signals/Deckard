@@ -15,8 +15,9 @@ pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// The payload version written; versions 1 (before Pad Touch), 2 (before modulation
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
 /// CC routes), 7 (before scene settings), 8 (before extra outputs), 9 (before the
-/// app's view), 10 (before CV routes) and 11 (before audio offsets) still read.
-const VERSION: u32 = 13;
+/// app's view), 10 (before CV routes), 11 (before audio offsets), 12 (before ratchets)
+/// and 13 (before sounds' Groove settings) still read.
+const VERSION: u32 = 14;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -100,6 +101,9 @@ pub(crate) struct Block {
     pub audio_offsets: Vec<(usize, usize, usize, i64)>,
     /// The notes that ratchet (version 13).
     pub ratchets: Vec<RatchetEntry>,
+    /// Sounds' Groove settings and page DECKARD keeps (group, sound, as
+    /// [`deckard_model::groove_to_text`]), those with any (version 14).
+    pub grooves: Vec<(usize, usize, String)>,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -322,6 +326,15 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
         w.u32(e.ordinal);
         w.u32(e.ratchet.to_int() as usize);
     }
+    w.u32(b.grooves.len());
+    for (g, s, text) in &b.grooves {
+        w.u32(*g);
+        w.u32(*s);
+        w.u32(text.len());
+        for &c in text.as_bytes() {
+            w.u8(c);
+        }
+    }
     w.0
 }
 
@@ -461,6 +474,16 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
                 ordinal: r.u32()?,
                 ratchet: Ratchet::from_int(r.u32()? as i64),
             });
+        }
+    }
+    if version >= 14 {
+        for _ in 0..r.count(12)? {
+            let (g, s) = (r.u32()?, r.u32()?);
+            let mut text = Vec::new();
+            for _ in 0..r.count(1)? {
+                text.push(r.u8()?);
+            }
+            b.grooves.push((g, s, String::from_utf8_lossy(&text).into_owned()));
         }
     }
     Ok(b)
@@ -603,6 +626,19 @@ impl Document {
             .enumerate()
             .flat_map(|(g, grp)| grp.sounds.iter().enumerate().filter(|(_, s)| s.probability_locked).map(move |(s, _)| (g, s)))
             .collect();
+        b.grooves = self
+            .project
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(g, grp)| {
+                grp.sounds
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !s.groove.is_empty())
+                    .map(move |(s, snd)| (g, s, deckard_model::groove_to_text(&snd.groove)))
+            })
+            .collect();
         b.screen = self.screen.clone();
         b.lfos = deckard_model::lfo::to_text(&self.project.lfos);
         b.cc_routes = deckard_model::mod_matrix::cc_to_text(&self.project.cc_routes);
@@ -624,7 +660,8 @@ impl Document {
             || !b.extra_outs.is_empty()
             || !b.cv_routes.is_empty()
             || !b.audio_offsets.is_empty()
-            || !b.ratchets.is_empty())
+            || !b.ratchets.is_empty()
+            || !b.grooves.is_empty())
         .then(|| encode(&b));
         payload
     }
@@ -705,6 +742,11 @@ impl Document {
         }
         for (g, s) in b.prob_locked {
             if let Ok(ops) = self.prob_lock_ops(g, s, true) {
+                let _ = self.run(&ops);
+            }
+        }
+        for (g, s, text) in b.grooves {
+            if let Ok(ops) = self.groove_text_ops(g, s, &text) {
                 let _ = self.run(&ops);
             }
         }
