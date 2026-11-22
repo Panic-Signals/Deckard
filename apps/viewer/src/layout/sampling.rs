@@ -464,6 +464,8 @@ pub enum SamplingAct {
     /// Drag the sample (or stem lane `.0`) out of the window as a file: the part
     /// selected, else the part the zone plays; `true`: all of it.
     DragOut(Option<usize>, bool),
+    /// SLICE: hear the slice this frame is in.
+    PlaySliceAt(usize),
     /// Play the focused zone on this key, or stop it if it sounds.
     Audition(i64),
     Open(bool),
@@ -1487,7 +1489,14 @@ fn wave(
     {
         let f = xf(pos.x) as usize;
         if slices {
-            acts.push(sact(if st.remove_tool { SamplingAct::RemoveSliceAt(f) } else { SamplingAct::SliceAt(f) }));
+            // Manual: the tool chosen cuts or joins (ALT: hear the slice); else a click
+            // plays the slice under it.
+            let tool = st.slice_mode == 3 && !ui.input(|i| i.modifiers.alt);
+            acts.push(sact(match (tool, st.remove_tool) {
+                (true, true) => SamplingAct::RemoveSliceAt(f),
+                (true, false) => SamplingAct::SliceAt(f),
+                _ => SamplingAct::PlaySliceAt(f),
+            }));
         } else {
             acts.push(sact(SamplingAct::Select(None)));
         }
@@ -2142,7 +2151,7 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
         if st.apply_to == 1 {
             format!("{} slices, on the pads of {} new group{}", st.slices.len(), groups, if groups == 1 { "" } else { "s" })
         } else {
-            format!("{} slices, on keys from C1", st.slices.len())
+            format!("{} slices, on keys from C3", st.slices.len())
         },
         font(11.0),
         white(142),

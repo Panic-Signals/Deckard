@@ -8217,6 +8217,19 @@ impl App {
                     self.sampling.slices.sort_unstable();
                 }
             }
+            S::PlaySliceAt(f) => {
+                // To the next slice, or the end of what is being sliced.
+                let s = &self.sampling.slices;
+                if let Some(i) = s.iter().rposition(|&a| a <= f) {
+                    let selection = self.sampling.selection.take();
+                    let end = self.edit_range().map_or(self.sampling.len(), |r| r.1);
+                    self.sampling.selection = selection;
+                    let (a, b) = (s[i], s.get(i + 1).copied().unwrap_or(end));
+                    if b > a {
+                        self.sampling_call(deckard_lua_host::state::SamplingCall::Prehear(a, b));
+                    }
+                }
+            }
             S::RemoveSliceAt(f) => {
                 // The slice containing `f` joins the previous one.
                 if let Some(i) = self.sampling.slices.iter().rposition(|&s| s <= f).filter(|&i| i > 0) {
@@ -8650,9 +8663,11 @@ impl App {
         }
     }
 
-    /// APPLY: one zone per slice on the same sample, keys from C1 (MIDI 36); with
+    /// APPLY: one zone per slice on the same sample, keys from C3 (`SLICE_KEY`, where a pad plays); with
     /// "Create/Replace Pattern", a note per slice at its time in the focused pattern.
     fn apply_slices(&mut self) {
+        /// The first slice's key: C3, the key a pad plays.
+        const SLICE_KEY: usize = 60;
         let Some(doc) = self.doc.clone() else { return };
         let Some(s) = self.sampling.sample.clone() else { return };
         let end = self.slice_range().map_or(s.frames.len(), |r| r.1);
@@ -8680,7 +8695,7 @@ impl App {
             .enumerate()
             .map(|(i, &(a, b))| {
                 let b = if to_end { end } else { b };
-                let key = (36 + i).min(127) as f64;
+                let key = (SLICE_KEY + i).min(127) as f64;
                 deckard_doc::ZoneSpec {
                     from: deckard_doc::ZoneFrom::Zone(zone_of(a)),
                     file: None,
@@ -8733,7 +8748,7 @@ impl App {
                     sound: snd,
                     position: pat.start + ((a - a0) as f64 * ticks_per_frame) as i64,
                     length: (((slices[k].1 - slices[k].0) as f64 * ticks_per_frame) as i64).max(1),
-                    pitch: (36 + k).min(127) as i64,
+                    pitch: (SLICE_KEY + k).min(127) as i64,
                     velocity: 100,
                     probability: 100,
                 })
@@ -17013,7 +17028,7 @@ mod tests {
 
     /// Sampling: the strip button opens it on the focused sound's sample; dragging on
     /// the waveform selects; NORM. writes an edited copy and points the zone at it
-    /// (undoable); SLICE ▸ APPLY makes a zone per slice on keys from C1.
+    /// (undoable); SLICE ▸ APPLY makes a zone per slice on keys from C3.
     #[test]
     fn recordings_land_where_maschine_puts_them() {
         use layout::sampling::RecParam;
@@ -17953,7 +17968,7 @@ mod tests {
         click(&mut h, r.center());
         let zones = project_of(&h).groups[0].sounds[0].sampler.clone().unwrap().zones;
         assert_eq!(zones.len(), 8);
-        assert_eq!(zones.iter().map(|z| z.root_key).collect::<Vec<_>>(), (36..44).collect::<Vec<_>>());
+        assert_eq!(zones.iter().map(|z| z.root_key).collect::<Vec<_>>(), (60..68).collect::<Vec<_>>());
         assert!(zones.windows(2).all(|w| w[0].play_range.1 + 1 == w[1].play_range.0), "contiguous slices");
         assert_eq!(h.state().sampling.tab, 3, "then the Zone tab");
         h.run_steps(3);

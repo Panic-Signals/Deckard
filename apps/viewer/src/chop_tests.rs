@@ -182,6 +182,22 @@ fn a_slice_pad_gives_a_playhead() {
     assert!(app.prehear_from.is_none());
 }
 
+#[test]
+fn a_click_in_a_slice_plays_it() {
+    let (mut app, _tmp) = app();
+    app.sampling.slices = vec![0, 11_025, 22_050];
+    app.sampling_act(S::PlaySliceAt(15_000));
+    let Some((_, a, b)) = app.prehear_from else {
+        // (No audio output on this machine: nothing plays.)
+        return;
+    };
+    assert_eq!((a, b), (11_025, 22_050));
+    // The last one: to the end of the sample.
+    app.sampling_act(S::PlaySliceAt(30_000));
+    let (_, a, b) = app.prehear_from.unwrap();
+    assert_eq!((a, b), (22_050, app.sampling.len()));
+}
+
 fn sounds(app: &crate::App) -> Vec<deckard_model::Sound> {
     app.doc.as_ref().unwrap().borrow().project().groups[app.group].sounds.clone()
 }

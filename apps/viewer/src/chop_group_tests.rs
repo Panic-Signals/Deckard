@@ -28,7 +28,7 @@ fn split_into_64_goes_on_64_keys() {
     let p = project(&app);
     let zones = &p.groups[app.group].sounds[app.sound].sampler.as_ref().unwrap().zones;
     assert_eq!(zones.len(), 64);
-    assert_eq!((zones[0].key_range, zones[63].key_range), ((36, 36), (99, 99)));
+    assert_eq!((zones[0].key_range, zones[63].key_range), ((60, 60), (123, 123)));
 }
 
 #[test]
@@ -46,12 +46,12 @@ fn shuffled_notes_keep_their_times() {
         n
     };
     let (plain, shuffled) = (notes(false), notes(true));
-    assert_eq!(plain.iter().map(|n| n.1).collect::<Vec<_>>(), (36..44).collect::<Vec<_>>());
+    assert_eq!(plain.iter().map(|n| n.1).collect::<Vec<_>>(), (60..68).collect::<Vec<_>>());
     assert_eq!(plain.iter().map(|n| n.0).collect::<Vec<_>>(), shuffled.iter().map(|n| n.0).collect::<Vec<_>>(), "the same times");
     let mut pitches: Vec<i64> = shuffled.iter().map(|n| n.1).collect();
-    assert_ne!(pitches, (36..44).collect::<Vec<_>>(), "other slices");
+    assert_ne!(pitches, (60..68).collect::<Vec<_>>(), "other slices");
     pitches.sort_unstable();
-    assert_eq!(pitches, (36..44).collect::<Vec<_>>(), "each once");
+    assert_eq!(pitches, (60..68).collect::<Vec<_>>(), "each once");
 }
 
 #[test]
