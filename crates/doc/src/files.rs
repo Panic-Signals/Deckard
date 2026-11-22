@@ -8,6 +8,9 @@
 //! - a sound keeps no pattern events (its `sequences` are empty);
 //! - a group keeps no `patterns` or `sequence` ("stored only at project level") and its
 //!   routing — MIDI input, audio and aux outputs — is skipped (`skip_value` 1);
+//! - in a sound or group, a route to something the file doesn't hold (a sound sent to
+//!   a sub-mix group) goes back to its default: the main output to its parent, the rest
+//!   to none;
 //! - a preset is the slot.
 //!
 //! Saved with samples, each sample is copied into `<name> Samples` beside the file and
@@ -113,7 +116,11 @@ impl Document {
     fn file_object(&self, what: FileItem) -> Result<Obj, String> {
         let at = self.file_item_path(what)?;
         let Some(Value::Obj(obj)) = self.tree.at(&at) else { return Err("not an object".into()) };
-        let mut obj = self_contained(obj.clone(), &self.tree);
+        let mut obj = obj.clone();
+        if !matches!(what, FileItem::Slot(..)) {
+            detach_outside_routes(&mut obj);
+        }
+        let mut obj = self_contained(obj, &self.tree);
         match what {
             FileItem::Sound(..) => empty_sequences(&mut obj),
             FileItem::Group(_) => {
@@ -177,7 +184,7 @@ impl Document {
     }
 
     /// The file's object with ids of this project's (as a paste).
-    fn fresh_obj(&mut self, root: Obj) -> Result<Obj, String> {
+    pub(crate) fn fresh_obj(&mut self, root: Obj) -> Result<Obj, String> {
         let Value::Obj(o) = self.fresh_copy(&Value::Obj(root)) else { return Err("bad file".into()) };
         let classes = crate::build::class_table(Some(self.root()));
         let before = Value::Obj(o.clone());
@@ -489,7 +496,7 @@ fn legacy_track(o: &mut Obj) {
 
 /// `obj` with every object it refers back to but doesn't define (defined earlier in
 /// the project) copied in at its first reference, so it stands as a file of its own.
-fn self_contained(obj: Obj, tree: &Value) -> Obj {
+pub(crate) fn self_contained(obj: Obj, tree: &Value) -> Obj {
     let mut v = Value::Obj(obj);
     for _ in 0..10_000 {
         let Some(id) = first_dangling(&v) else { break };
@@ -803,6 +810,86 @@ fn empty_sequences(sound: &mut Obj) {
     }
 }
 
+/// The values a route is stored as: where it points is a group, sound or slot.
+const ROUTE_VALUES: &[&str] = &[
+    "NI::MASCHINE::DATA::AudioOutputParameterValue",
+    "NI::MASCHINE::DATA::AudioInputParameterValue",
+    "NI::MASCHINE::DATA::SideChainInputParameterValue",
+    "NI::MASCHINE::DATA::EventOutputParameterValue",
+];
+
+/// Every route in `root` that points at a group, sound or slot outside it (a sound
+/// sent to a sub-mix group, a side-chain from another group) back to its default: a
+/// main output to its parent, anything else to none. A file holds only what it
+/// saves; copied in, the other group would make it a file of two, which can't be
+/// written. Routes inside it (a kit's sound into another of its sounds) stay.
+fn detach_outside_routes(root: &mut Obj) {
+    /// The ids `v` defines, not counting what routes point at.
+    fn defined(v: &Value, ids: &mut std::collections::HashSet<u64>) {
+        match v {
+            Value::List(items) => items.iter().for_each(|i| defined(i, ids)),
+            Value::Obj(o) if !ROUTE_VALUES.contains(&o.type_name.as_str()) => {
+                ids.extend(o.oid);
+                o.fields.iter().for_each(|(_, v)| defined(v, ids));
+            }
+            _ => {}
+        }
+    }
+    fn is_ptr(o: &Obj) -> bool {
+        o.type_name.starts_with("std::weak_ptr<") || o.type_name.starts_with("std::shared_ptr<")
+    }
+    /// Whether pointer `v` (a reference, or a smart pointer holding one) points outside.
+    fn outside(v: &Value, inside: &std::collections::HashSet<u64>) -> bool {
+        match v {
+            Value::Ref(id) => !inside.contains(id),
+            Value::Obj(o) if is_ptr(o) => o.fields.iter().any(|(_, v)| outside(v, inside)),
+            Value::Obj(o) => o.oid.is_none_or(|id| !inside.contains(&id)),
+            _ => false,
+        }
+    }
+    /// Pointer `v` pointing nowhere.
+    fn clear(v: &mut Value) {
+        match v {
+            Value::Obj(o) if is_ptr(o) => o.fields.iter_mut().for_each(|(_, v)| clear(v)),
+            Value::Ref(_) | Value::Obj(_) => *v = Value::Null,
+            _ => {}
+        }
+    }
+    /// `field` is the nearest named field above (`audio_output` for a parameter's value).
+    fn walk(v: &mut Value, field: &str, inside: &std::collections::HashSet<u64>) {
+        match v {
+            Value::List(items) => items.iter_mut().for_each(|i| walk(i, field, inside)),
+            Value::Obj(o) if ROUTE_VALUES.contains(&o.type_name.as_str()) => {
+                const POINTERS: [&str; 3] = ["group", "sound", "slot"];
+                if !o.fields.iter().any(|(n, v)| POINTERS.contains(&n.as_str()) && outside(v, inside)) {
+                    return;
+                }
+                let main_out = o.type_name.ends_with("AudioOutputParameterValue") && matches!(field, "audio_output" | "output");
+                for (n, v) in o.fields.iter_mut() {
+                    match n.as_str() {
+                        "type" => *v = Value::Int(if main_out { 1 } else { 0 }),
+                        "index" => *v = Value::Int(-1),
+                        "port" => *v = Value::Str("None".into()),
+                        n if POINTERS.contains(&n) => clear(v),
+                        _ => {}
+                    }
+                }
+            }
+            Value::Obj(o) => o.fields.iter_mut().for_each(|(n, v)| {
+                let named = if n == "value" || n.starts_with('<') { field } else { n.as_str() };
+                walk(v, named, inside)
+            }),
+            _ => {}
+        }
+    }
+    let mut v = Value::Obj(std::mem::take(root));
+    let mut inside = std::collections::HashSet::new();
+    defined(&v, &mut inside);
+    walk(&mut v, "", &inside);
+    let Value::Obj(o) = v else { unreachable!() };
+    *root = o;
+}
+
 /// A routing parameter's value left out, as outside a project (`skip_value` 1).
 fn skip_routing(owner: &mut Obj, field: &str) {
     let Some(Value::Obj(p)) = owner.get_mut(field) else { return };
@@ -959,6 +1046,40 @@ mod tests {
         // Routing values skipped, as in Maschine's group files.
         let Some(mxprj::decode::Value::Obj(input)) = root.get("event_input") else { panic!("no event_input") };
         assert_eq!(input.get("skip_value"), Some(&mxprj::decode::Value::Int(1)));
+    }
+
+    /// A sound routed to another group (a sub-mix bus) saves with its group, its route
+    /// back to the default there: the file can't point at a group it doesn't hold.
+    #[test]
+    fn routes_out_of_the_file_go_back_to_their_defaults() {
+        use crate::SoundRoute;
+        use deckard_model::{AudioDest, AudioSource};
+        use mxprj::decode::Value;
+        let mut d = Document::new_project().unwrap();
+        d.add_group().unwrap();
+        d.set_sound_route(0, 0, SoundRoute::Output(AudioDest::Group(1))).unwrap();
+        d.set_sound_route(0, 1, SoundRoute::Aux(0, AudioDest::Sound(1, 0))).unwrap();
+        d.set_sound_route(0, 2, SoundRoute::AudioIn(AudioSource::Group(1))).unwrap();
+        // A route inside the group stays.
+        d.set_sound_route(0, 3, SoundRoute::Output(AudioDest::Sound(0, 4))).unwrap();
+        let file = d.file_bytes(FileItem::Group(0), &tagged("Kit")).expect("a group routed to another saves");
+        let root = decoded(&file);
+        assert_eq!(root.type_name, "NI::MASCHINE::DATA::Group");
+        let Some(Value::Obj(cfgs)) = root.find("sound_configs") else { panic!("no sound configs") };
+        let Some(Value::List(cfgs)) = cfgs.find("items") else { panic!("no sound config items") };
+        let kind = |s: usize, field: &str| {
+            let Value::Obj(cfg) = &cfgs[s] else { panic!("sound config {s} isn't an object") };
+            super::route_kind(cfg, field).unwrap()
+        };
+        assert_eq!(kind(0, "audio_output"), (1, None, None), "the output goes back to the group");
+        assert_eq!(kind(1, "aux1_output"), (0, None, None), "the aux goes back to none");
+        assert_eq!(kind(2, "audio_input"), (0, None, None), "the input goes back to none");
+        assert_eq!(kind(3, "audio_output").0, 5, "a route to a sound of its own stays");
+        // The other group isn't copied in.
+        let mut groups = 0;
+        Value::Obj(root).walk(&mut |o| groups += usize::from(o.type_name == "NI::MASCHINE::DATA::Group"));
+        assert_eq!(groups, 1);
+        d.file_bytes(FileItem::Sound(0, 0), &tagged("Snd")).expect("its sound saves too");
     }
 
     #[test]

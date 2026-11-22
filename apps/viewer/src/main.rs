@@ -127,6 +127,10 @@ mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
 mod session_backup;
+mod session_record;
+#[cfg(test)]
+mod session_tests;
+mod session_window;
 mod settings;
 mod splash;
 mod splice;
@@ -668,6 +672,8 @@ pub struct SaveDialog {
     pub samples: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
+    /// Why the last Save didn't write it, shown in the dialog.
+    pub error: Option<String>,
 }
 
 /// A file saved: where, its tags, and whether with its samples.
@@ -985,6 +991,9 @@ pub struct App {
     catalog: settings::Catalog,
     /// The browser (LIBRARY / FILES), and the library it shows.
     browser: browser::Browser,
+    /// The browser preview being decoded, if any; the generation drops stale decodes.
+    prehear_task: Option<(u64, std::sync::mpsc::Receiver<Result<deckard_engine::sample::Sample, String>>)>,
+    prehear_generation: u64,
     /// REC: recording (or armed, stopped), and the take being recorded.
     recording: bool,
     take: record::Take,
@@ -1191,9 +1200,13 @@ pub struct App {
     blinks: blink::Blinks,
     /// The (group, sound)s playing a note now, sequenced or live: their numbers flash.
     pub lit: std::collections::HashSet<(usize, usize)>,
+    /// The notes that have just started, sequenced or played, (group, sound, pitch): the
+    /// controller's pads flash white for them.
+    pub hits: std::collections::HashSet<(usize, usize, i64)>,
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
+    plugin_clipboard: Option<deckard_doc::CopiedSlot>,
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
@@ -1236,6 +1249,12 @@ pub struct App {
     rec_base: Option<usize>,
     sampling: layout::sampling::SamplingState,
     recorder: recorder::Recorder,
+    /// Records the master output to a WAV file (File ▸ Session Record).
+    session: session_record::SessionRecorder,
+    /// The live session Recorder window is shown.
+    session_window_open: bool,
+    /// Whether the Recorder window floats above other windows (on by default).
+    session_window_pin: session_window::Pin,
     /// The Mixer is shown (instead of the work views), at sound level (the focused
     /// group's sounds) or group level, with its optional sections.
     mixer: bool,
@@ -1300,6 +1319,11 @@ pub struct App {
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
     /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
+    /// The focused synth's scope (chain, slot) as last shown, while the audio thread has it.
+    scope_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::ScopeView)>>,
+    /// The preview last rendered of an internal synth, with the module and the parameters
+    /// it was rendered from: rendered again only when they change.
+    internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -1617,6 +1641,7 @@ impl App {
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
                     drop(d);
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
                     self.samples.plugins.retain(|slot| {
                         !matches!(
                             slot,
@@ -1628,7 +1653,11 @@ impl App {
                     Ok(())
                 })
             }
-            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard),
+            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard).map(|_| {
+                for sound in s..s + self.sound_clipboard.len() {
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, sound));
+                }
+            }),
             Act::CopyGroup(g) => self.copy_group(g),
             Act::CutGroup(g) => self.copy_group(g).and_then(|_| {
                 self.delete_group(g)?;
@@ -1638,7 +1667,10 @@ impl App {
             Act::PasteGroup(g) => match &self.group_clipboard {
                 Some(bytes) => {
                     let mut d = doc.borrow_mut();
-                    d.load_group_file(g, bytes).map(|_| d.relabel_last("Paste Group"))
+                    d.load_group_file(g, bytes).map(|_| {
+                        d.relabel_last("Paste Group");
+                        self.forget_group_presets(g);
+                    })
                 }
                 None => Ok(()),
             },
@@ -1654,6 +1686,9 @@ impl App {
                         Ok(())
                     });
                     if r.is_ok() {
+                        for &si in &sounds {
+                            self.saved.remove(&deckard_doc::FileItem::Sound(g, si));
+                        }
                         self.samples.plugins.retain(|slot| {
                             !matches!(
                                 slot,
@@ -1667,6 +1702,7 @@ impl App {
                 } else {
                     let r = doc.borrow_mut().reset_sound(g, s);
                     if r.is_ok() {
+                        self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
                         self.samples.plugins.retain(|slot| {
                             !matches!(
                                 slot,
@@ -2343,6 +2379,8 @@ impl App {
                     self.status = format!("can't export MIDI: {e}");
                 }
             }
+            C::SessionRecord => self.toggle_session_record(),
+            C::SessionRecorderWindow => self.session_window_open = !self.session_window_open,
             C::ShowController => self.show_controller = !self.show_controller,
             C::FullScreen => {
                 let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -2606,6 +2644,14 @@ impl App {
     /// Close the audio output and whatever else holds the driver: playback stops.
     fn close_output(&mut self) {
         self.stop();
+        // Tearing down the `Output` drops the session recording's master tap. A device or
+        // buffer change at the SAME sample rate fires no RateChange, so clean-stop the
+        // session here (before the old `Output` is dropped) rather than let it pad pure
+        // silence for the rest of the set. `set_tap(None)` is moot: the `Output` is going.
+        if self.session.active() {
+            self.session.abort(session_record::StopReason::DeviceChange);
+            // The window stays open so it can show the "audio device changed" reason.
+        }
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
@@ -2775,6 +2821,18 @@ impl App {
                     self.settings.save();
                 }
             }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("Session recording").on_hover_text("File ▸ Record Session to File… records the master output to a WAV.");
+            ui.label("Keep free");
+            let mut mb = self.settings.session_reserve_mb;
+            let drag = egui::DragValue::new(&mut mb).range(0..=1_000_000).speed(64).suffix(" MB");
+            if ui.add(drag).changed() {
+                self.settings.session_reserve_mb = mb;
+                self.settings.save();
+            }
+            ui.label(egui::RichText::new("the recording auto-stops before the drive drops below this (1 GB = 1024 MB)").weak());
         });
         ui.separator();
         ui.horizontal(|ui| {
@@ -5790,6 +5848,7 @@ impl App {
             picture: None,
             zhora: None,
             tuner: None,
+            scope: None,
             euclid: self.euclid_view(c.level, c.page, head),
             random: self.random_view(c.level, c.page, head),
         };
@@ -5857,6 +5916,7 @@ impl App {
             if self.surface.page() == "control" {
                 v.control.zhora = self.zhora_view(p);
                 v.control.tuner = self.tuner_view();
+                v.control.scope = self.scope_view();
             }
         }
         v.project = p.name.clone();
@@ -6041,6 +6101,12 @@ impl App {
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
                                     || noted.is_some_and(|n| n.contains(&s)),
                                 playing: self.lit.contains(&(g, s)),
+                                hits: {
+                                    let mut hits: Vec<i64> =
+                                        self.hits.iter().filter(|&&(hg, hs, _)| (hg, hs) == (g, s)).map(|&(_, _, p)| p).collect();
+                                    hits.sort_unstable();
+                                    hits
+                                },
                                 mix: deckard_surface::MixView {
                                     aux: snd.aux,
                                     swing: snd.swing.amount,
@@ -7496,6 +7562,7 @@ impl App {
     fn undo(&mut self) {
         self.lock_end_morph();
         let Some(doc) = self.doc.clone() else { return };
+        self.forget_replaced_presets(doc.borrow().undo_label());
         let ok = doc.borrow_mut().undo();
         if !ok && !self.back_to_replaced() {
             self.status = "nothing to undo".into();
@@ -7505,7 +7572,8 @@ impl App {
 
     fn redo(&mut self) {
         self.lock_end_morph();
-        if let Some(doc) = &self.doc {
+        if let Some(doc) = self.doc.clone() {
+            self.forget_replaced_presets(doc.borrow().redo_label());
             let ok = doc.borrow_mut().redo();
             if !ok {
                 self.status = "nothing to redo".into();
@@ -7664,7 +7732,11 @@ impl App {
         // Sampling page), before recording too.
         let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0)
             || (self.mk3.is_some() && self.surface.page() == "sampling" && self.sampling.tab == 0);
-        let listen = self.meter_inputs && ((self.sampling_open && self.sampling.tab == 0) || hw_record);
+        // A session recording holds the master tap, so internal Sampling metering must not
+        // grab it at the same time (mutual exclusion).
+        let listen = self.meter_inputs
+            && ((self.sampling_open && self.sampling.tab == 0) || hw_record)
+            && !(self.session.active() && self.recorder.view.source == 2);
         self.recorder.meter(
             listen,
             recorder::StartWith {
@@ -7681,6 +7753,14 @@ impl App {
         if let Some(rec) = self.recorder.poll(output, clock) {
             self.finish_recording(rec);
         }
+        // The session recorder takes up its tap and keeps the file's length true to
+        // wall-clock time; it releases the tap itself on an auto-stop. (Re-borrow the
+        // output: `finish_recording` above needed `self` mutably.)
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        self.session.poll(output);
         self.silence_while_recording();
         self.sync_sampling_page();
         self.sync_browse_page();
@@ -8145,7 +8225,14 @@ impl App {
                 }
             }
             S::Record(r) => match r {
-                RecordAct::Start => self.start_recording(),
+                RecordAct::Start => {
+                    if self.session.active() && self.recorder.view.source == 2 {
+                        self.recorder.view.error =
+                            Some("Can't record from an internal source while a session recording is running. Stop it first.".into());
+                    } else {
+                        self.start_recording();
+                    }
+                }
                 RecordAct::Stop => {
                     let clock = self.record_clock();
                     let output = match &self.output {
@@ -8735,6 +8822,102 @@ impl App {
         self.sampling_act(act);
     }
 
+    /// Arm a session recording of the master output (pick the file and open the Recorder
+    /// window, metering but not yet writing — Play begins it), or stop/cancel a live one.
+    /// Refuses when the Sampling recorder already holds the engine tap (mutual exclusion).
+    fn toggle_session_record(&mut self) {
+        if self.session.active() {
+            self.stop_session_record();
+            return;
+        }
+        let Some(rate) = self.session_record_rate() else { return };
+        let project = self.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned());
+        let default = session_record::session_filename(project.as_deref(), &session_record::session_stamp());
+        let mut dialog = rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(default);
+        if let Some(dir) = &self.settings.session_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        self.arm_session_record(path, rate);
+    }
+
+    /// The rate a session recording would be made at, if one can start now: not while
+    /// Sampling records an internal source (it holds the engine's one tap), and only with
+    /// an engine to tap. Says why not.
+    fn session_record_rate(&mut self) -> Option<u32> {
+        if self.recorder.busy() && self.recorder.is_internal_active() {
+            self.error = Some("Can't start a session recording while Sampling is recording from an internal source. Stop it first.".into());
+            return None;
+        }
+        // The tap is the engine's: without one (nothing played yet) it would be dropped, and
+        // the whole recording would be silence.
+        self.ensure_engine();
+        match &self.output {
+            Some(Ok(o)) if o.has_engine() => Some(o.rate),
+            Some(Ok(_)) => {
+                self.error = Some("Nothing to record a session from: open a project first.".into());
+                None
+            }
+            _ => {
+                self.error = Some("No audio output to record from.".into());
+                None
+            }
+        }
+    }
+
+    /// Arm a session recording to `path`, at the output's `rate`.
+    fn arm_session_record(&mut self, path: PathBuf, rate: u32) {
+        let reserve = self.settings.session_reserve_mb as u64 * 1024 * 1024;
+        let free = session_record::free_bytes(path.parent().unwrap_or(&path)).unwrap_or(u64::MAX);
+        if !session_record::can_start(free, reserve) {
+            self.error = Some("Not enough free disk space to start a session recording.".into());
+            return;
+        }
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        // Sampling only metering an internal source makes way: its meter lets the tap go,
+        // and takes it up again when the session ends.
+        if self.recorder.is_internal_active() {
+            self.recorder.cancel(output);
+        }
+        // Arm: attach the master tap now so the window meters live, but write nothing until Play.
+        let buffer = self.session.attach_tap();
+        self.session.arm(path.clone(), rate, reserve);
+        if let Some(o) = output {
+            o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
+        }
+        self.settings.session_dir = path.parent().map(Path::to_path_buf);
+        self.settings.save();
+        self.session_window_open = true;
+        // Surface the time-available estimate once (the OS save dialog can't carry it); the
+        // window then shows it live once recording starts.
+        let left = session_record::seconds_available(free, reserve, rate);
+        self.status = format!("Session armed — press Play ({})", session_window::format_time_left(left));
+    }
+
+    /// Resume/begin recording, or pause it, from the window's Play/Pause control.
+    fn toggle_session_play(&mut self) {
+        match self.session.phase() {
+            session_record::SessionPhase::Armed | session_record::SessionPhase::Paused => {
+                self.session.play(session_record::started_label());
+            }
+            session_record::SessionPhase::Recording => self.session.pause(),
+            session_record::SessionPhase::Idle => {}
+        }
+    }
+
+    /// Stop and finalize a session recording (or cancel an armed one), releasing the tap and
+    /// closing the window.
+    fn stop_session_record(&mut self) {
+        self.session.stop();
+        if let Some(Ok(o)) = &self.output {
+            o.set_tap(None);
+        }
+        self.session_window_open = false;
+    }
+
     fn start_recording(&mut self) {
         if self.recorder.view.source == 2 {
             self.ensure_engine();
@@ -9272,6 +9455,41 @@ impl App {
         roots
     }
 
+    fn forget_group_presets(&mut self, g: usize) {
+        use deckard_doc::FileItem;
+        self.saved.retain(|item, _| !matches!(item, FileItem::Group(group) | FileItem::Sound(group, _) if *group == g));
+    }
+
+    // Loads and resets retain the document slot's ID. Undo or redo can
+    // change which preset occupies that ID.
+    fn forget_replaced_presets(&mut self, label: Option<&str>) {
+        use deckard_doc::FileItem;
+        match label {
+            Some("Load Group" | "Paste Group" | "Clear Group" | "Clear rig group") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Group(_) | FileItem::Sound(..)));
+            }
+            Some("Load Sound" | "Cut Sound" | "Paste Sound" | "Paste Sounds" | "Reset Sound" | "Reset Sounds") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Sound(..)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Remember an editable preset only after its load succeeds.
+    fn remember_preset_source(
+        &mut self,
+        what: deckard_doc::FileItem,
+        item: &deckard_library::Item,
+        info: Option<mxprj::sound_info::SoundInfo>,
+    ) {
+        self.saved.remove(&what);
+        let Some(info) = info else { return };
+        let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
+        if id.is_some() {
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false });
+        }
+    }
+
     /// Save a sound, group or preset: again where it was (Save), or through the dialog.
     fn save_item(&mut self, what: deckard_doc::FileItem, mode: SaveMode) {
         use deckard_doc::FileItem;
@@ -9311,6 +9529,7 @@ impl App {
             },
             samples: mode == SaveMode::WithSamples,
             confirm_overwrite: false,
+            error: None,
         });
     }
 
@@ -9432,6 +9651,7 @@ impl App {
         let name = dlg.name.trim().replace(['/', '\\', ':'], "-");
         if name.is_empty() {
             self.status = "a name, to save it".into();
+            dlg.error = Some("It needs a name.".into());
             return;
         }
         let path = dlg.folder.join(format!("{name}.{ext}"));
@@ -9464,6 +9684,9 @@ impl App {
         let saved = Saved { id, path, info, samples: dlg.samples };
         if self.write_item(what, saved) {
             self.save_dialog = None;
+        } else if let Some(d) = &mut self.save_dialog {
+            // The status line is easy to miss behind the dialog.
+            d.error = Some(self.status.clone());
         }
     }
 
@@ -9612,8 +9835,8 @@ impl App {
             }
             B::Favorite(i, on) => {
                 if let Some(item) = b.results.items.get(i) {
-                    let p = item.path.clone();
-                    b.set_favorite(&p, on);
+                    let key = item.favorite_key();
+                    b.set_favorite(&key, on);
                 }
                 return;
             }
@@ -9671,6 +9894,17 @@ impl App {
                 }
                 return;
             }
+            B::StopPrehear => {
+                self.stop_prehear();
+                return;
+            }
+            B::PrehearFile(path) => {
+                b.file_selected = Some(path.clone());
+                if let Some(item) = browser::item_of(&path) {
+                    self.prehear_item(&item);
+                }
+                return;
+            }
             B::Rescan => return,
             B::LibraryFolder(dir, on) => {
                 let folders = &mut self.settings.library_folders;
@@ -9712,9 +9946,31 @@ impl App {
     }
 
     /// Stop whatever the browser is prehearing.
-    fn stop_prehear(&self) {
+    fn stop_prehear(&mut self) {
+        self.prehear_generation = self.prehear_generation.wrapping_add(1);
+        self.prehear_task = None;
         if let Some(Ok(out)) = &self.output {
             out.prehear(None, 0.0);
+        }
+    }
+
+    fn poll_prehear(&mut self) {
+        let Some((generation, receiver)) = self.prehear_task.take() else { return };
+        match receiver.try_recv() {
+            Ok(result) if generation == self.prehear_generation => match result {
+                Ok(sample) => {
+                    self.open_output_now();
+                    if let Some(Ok(out)) = &self.output {
+                        out.prehear(Some(std::sync::Arc::new(sample)), self.browser.prehear_gain);
+                    }
+                }
+                Err(e) => self.status = e,
+            },
+            Ok(_) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.prehear_task = Some((generation, receiver));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
     }
 
@@ -9732,15 +9988,15 @@ impl App {
             self.stop_prehear();
             return;
         };
-        let gain = self.browser.prehear_gain;
-        match deckard_engine::sample::Sample::load(&file) {
-            Ok(s) => {
-                if let Some(Ok(out)) = &self.output {
-                    out.prehear(Some(std::sync::Arc::new(s)), gain);
-                }
-            }
-            Err(e) => self.status = format!("can't prehear {}: {e}", file.display()),
-        }
+        self.stop_prehear();
+        self.open_output_now();
+        let generation = self.prehear_generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = deckard_engine::sample::Sample::load(&file).map_err(|e| format!("can't prehear {}: {e}", file.display()));
+            let _ = sender.send(result);
+        });
+        self.prehear_task = Some((generation, receiver));
     }
 
     /// Load a library item: a project opens; a group replaces the focused group; a
@@ -9766,8 +10022,9 @@ impl App {
                 return self.load_nks_preset(&item.name, (g, s), &bytes);
             }
             if !matches!(ext.as_str(), "mxinst" | "mxfx") {
-                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                if let Some(res) = deckard_plugins::nks::native_preset(&ext, &bytes, &self.catalog.entries) {
+                if let Some(res) =
+                    deckard_plugins::nks::native_preset_file(path, item.uuid.as_deref(), item.kind == Kind::Effect, &self.catalog.entries)
+                {
                     let plugin = res.map_err(|e| format!("{}: {e}", item.name))?;
                     return self.load_resolved_preset(&item.name, (g, s), plugin);
                 }
@@ -9806,7 +10063,12 @@ impl App {
                     }
                 };
                 drop(d);
+                if matches!(item.kind, Kind::Sound) {
+                    self.remember_preset_source(deckard_doc::FileItem::Sound(g, s), item, preset_load::editable_preset_info(item, &bytes));
+                }
                 if matches!(item.kind, Kind::Group) {
+                    self.forget_group_presets(g);
+                    self.remember_preset_source(deckard_doc::FileItem::Group(g), item, preset_load::editable_preset_info(item, &bytes));
                     self.editors
                         .retain(|&(c, ..)| !matches!(c, deckard_doc::Chain::Group(cg) | deckard_doc::Chain::Sound(cg, _) if cg == g));
                     self.slot_of = None;
@@ -11097,6 +11359,37 @@ impl App {
         &self.midi_ports
     }
 
+    fn copy_plugin(&mut self, chain: deckard_doc::Chain, at: usize) {
+        let Some(doc) = self.doc.clone() else { return };
+        let key = self.plugin_slot_key(chain, at);
+        self.store_plugin_states_of(|slot| *slot == key);
+        match doc.borrow().copy_slot(chain, at) {
+            Ok(copy) => {
+                self.plugin_clipboard = Some(copy);
+                self.status = "Copied plug-in".into();
+            }
+            Err(e) => self.status = format!("Can't copy plug-in: {e}"),
+        }
+    }
+
+    fn paste_plugin(&mut self, chain: deckard_doc::Chain, over: Option<usize>) {
+        let Some(doc) = self.doc.clone() else { return };
+        self.store_plugin_states();
+        let Some(copy) = &self.plugin_clipboard else { return };
+        let pasted = match over {
+            Some(at) => doc.borrow_mut().paste_over_instrument(chain, at, copy).map(|()| at),
+            None => doc.borrow_mut().paste_slot(chain, copy),
+        };
+        match pasted {
+            Ok(at) => {
+                self.editors.retain(|(c, ..)| *c != chain);
+                self.plugin_views.clear();
+                layout::apply_acts(self, vec![layout::Act::FocusChainSlot(chain, at)]);
+            }
+            Err(e) => self.status = format!("Can't paste plug-in: {e}"),
+        }
+    }
+
     /// Move slot `from` of the focused chain to `to`; it stays shown.
     fn move_slot(&mut self, from: usize, to: usize) {
         self.move_slot_in(self.chain(), from, to);
@@ -11637,8 +11930,10 @@ impl App {
     fn sync_notes_played(&mut self) {
         let played = self.notes_played();
         self.lit = played.iter().map(|&(g, s, _)| (g, s)).collect();
+        self.hits.clone_from(&played);
         if let Some(Ok(out)) = &self.output {
             self.lit.extend(out.played_sounds());
+            self.hits.extend(out.played_notes());
         }
         if !matches!(self.controller, Some(Ok(_))) {
             return;
@@ -11706,6 +12001,7 @@ impl App {
 
     /// What [`App::logic`] does while the window is covered or minimized.
     fn background(&mut self, ctx: &egui::Context) {
+        self.poll_prehear();
         self.watch_tunes(ctx);
         self.share_tempo();
         self.follow_engine(ctx, undrawn(ctx, BACKGROUND_PACE));
@@ -11792,6 +12088,9 @@ impl eframe::App for App {
     /// Leave the MK3 dark, as it was before DECKARD started.
     fn on_exit(&mut self) {
         self.end_session();
+        // A session recording is finalized here (the app leaves without running destructors,
+        // and the file would be short of what was written since its last flush).
+        self.session.stop();
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
@@ -11899,8 +12198,10 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed, recording, or metering.
-        if self.recorder.busy() || self.recorder.is_metering() {
+        // The recorder takes up its audio every frame while armed, recording, or metering;
+        // a session recording must keep rendering too, or its silence-pad grows between
+        // polls and the meters freeze.
+        if self.recorder.busy() || self.recorder.is_metering() || self.session.active() {
             ctx.request_repaint();
         }
         self.update_slot_view();
@@ -12027,7 +12328,7 @@ impl App {
         // Hardware controllers and MIDI run before plug-in editor timers and UI panels so
         // mutes, pattern switches and transport commands reach the audio thread at once.
         self.sync_notes_played();
-        if !self.lit.is_empty() {
+        if !self.lit.is_empty() || !self.hits.is_empty() {
             // Unlight the flashed numbers on time.
             ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
         }
@@ -12065,6 +12366,10 @@ impl App {
             out.set_focus(Some(self.group));
         }
         self.update_meters(ctx, std::time::Duration::ZERO);
+        self.poll_prehear();
+        if self.prehear_task.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
 
         layout::header(self, ui);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F4)) {
@@ -12191,6 +12496,15 @@ impl App {
         self.bounce_windows(ctx);
         if self.export.open {
             self.export_window(ctx);
+        }
+        if self.session_window_open {
+            match session_window::show(ctx, &self.session.view, self.session_window_pin.on()) {
+                session_window::WindowAction::TogglePlay => self.toggle_session_play(),
+                session_window::WindowAction::Stop => self.stop_session_record(),
+                session_window::WindowAction::Hide => self.session_window_open = false,
+                session_window::WindowAction::TogglePin => self.session_window_pin = self.session_window_pin.toggled(),
+                session_window::WindowAction::None => {}
+            }
         }
         if (self.group, self.sound, self.scene, self.section, self.song_view) != before {
             self.sync_controller();
@@ -17891,7 +18205,9 @@ mod tests {
         let omni_art = tmp.path().join("omnisphere");
         let omni_vendor = tmp.path().join("spectrasonics").join("omnisphere");
         let kontakt = tmp.path().join("kontakt");
-        for d in [&omni_art, &omni_vendor, &kontakt] {
+        let monark = tmp.path().join("monark");
+        let prism = tmp.path().join("prism");
+        for d in [&omni_art, &omni_vendor, &kontakt, &monark, &prism] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(omni_art.join("MST_artwork.png"), thumb_png).unwrap();
@@ -17899,6 +18215,10 @@ mod tests {
         std::fs::write(omni_vendor.join("MST_logo.png"), logo_png).unwrap();
         std::fs::write(kontakt.join("MST_artwork.png"), thumb_png).unwrap();
         std::fs::write(kontakt.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(monark.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(monark.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(prism.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(prism.join("MST_logo.png"), logo_png).unwrap();
 
         let prev = std::env::var_os("DECKARD_NI_IMAGE_DIR");
         // SAFETY: scoped to this unit test; `with_ni_pictures` rescans when the path changes.
@@ -17908,6 +18228,27 @@ mod tests {
         assert!(s.has_picture("omnisphere", true) && s.has_picture("omnisphere", false));
         assert_eq!(plugin_pictures::slot_key(&s, "Kontakt 7").as_deref(), Some("kontakt7"));
         assert!(s.has_picture("kontakt7", true) && s.has_picture("kontakt7", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Monark").as_deref(), Some("monark"));
+        assert!(s.has_picture("monark", true) && s.has_picture("monark", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Prism FX").as_deref(), Some("prismfx"));
+        assert!(s.has_picture("prismfx", true) && s.has_picture("prismfx", false));
+        let mut app = App::default();
+        app.new_project();
+        app.load_resolved_preset(
+            "Bass Sting",
+            (0, 0),
+            deckard_plugins::nks::Resolved {
+                id: "Native Instruments:VST3:INSTR:5653544E6952367265616B746F722036".into(),
+                name: "Monark".into(),
+                chunk: Vec::new(),
+                pages: Vec::new(),
+            },
+        )
+        .unwrap();
+        let doc = app.doc.as_ref().unwrap().borrow();
+        let slot = &doc.project().groups[0].sounds[0].slots[0];
+        assert_eq!(slot.name, "Monark");
+        assert_eq!(plugin_pictures::slot_key(&s, &slot.name).as_deref(), Some("monark"));
         plugin_pictures::ensure_browser_product(&s, "Omnisphere");
         assert!(s.has_picture("artwork:omnisphere", true) && s.has_picture("artwork:omnisphere", false));
         match prev {
