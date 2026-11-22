@@ -2072,6 +2072,25 @@ impl SamplerRt {
         self.held.retain(|&n| n != note);
     }
 
+    /// Release every held note without allocating (when the sound is muted): gated
+    /// voices enter release, Performer shakers stop shaking, and one-shot hits ring out.
+    pub fn all_notes_off(&mut self) {
+        if let Some(a) = self.audio.as_mut() {
+            a.release_all();
+            return;
+        }
+        if let Some((_, s, ..)) = self.synth.as_mut() {
+            s.all_notes_off();
+            return;
+        }
+        self.pedal = false;
+        self.held.clear();
+        for v in &mut self.voices {
+            v.sustained = false;
+            v.release(false);
+        }
+    }
+
     /// MIDI controllers (§6.3): mod wheel, sustain pedal, all sound off, pitch bend.
     pub fn control(&mut self, kind: MidiKind) {
         if let Some(a) = self.audio.as_mut() {

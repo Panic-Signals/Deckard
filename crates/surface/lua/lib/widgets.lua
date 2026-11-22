@@ -231,8 +231,20 @@ function widgets.info_bar(screen, theme, info)
   screen:label(34, 38, right - 34 - 4, 18, info.name or "", style(theme, "default"), "left", "bottom")
 end
 
+-- How much of a small meter `db` fills (0..1): the Mixer's scale, its top spread wide.
+local METER_SCALE = { { -60, 0 }, { -30, 22 }, { -20, 39 }, { -10, 64 }, { 0, 91 }, { 10, 119 } }
+function widgets.meter_fill(db)
+  if not db or db <= METER_SCALE[1][1] then return 0 end
+  for i = 2, #METER_SCALE do
+    local d0, h0, d1, h1 = METER_SCALE[i - 1][1], METER_SCALE[i - 1][2], METER_SCALE[i][1], METER_SCALE[i][2]
+    if db <= d1 then return (h0 + (db - d0) / (d1 - d0) * (h1 - h0)) / 119 end
+  end
+  return 1
+end
+
 -- One tile (a group, or a pad): filled in its colour when `on`, else faint, with
--- `big` (a group's letter) and `name` in the corner.
+-- `big` (a group's letter) and `name` in the corner. `meter` ({ left, right }, dB) is its
+-- level: two slim bars up its right edge while it sounds.
 local function tile(screen, theme, x, y, w, h, t)
   if t.empty then
     screen:rect(x, y, w, h, "pad_empty", theme.corner)
@@ -252,10 +264,18 @@ local function tile(screen, theme, x, y, w, h, t)
     screen:label(x + 7, y + 33, w - 21, 18, t.name or "", style(theme, "default", text), "left", "top")
   else
     local st = style(theme, "pad_label", text)
-    local first, second = widgets.wrap(screen, t.name or "", st, w - 9)
-    screen:label(x + 7, y + 4, w - 9, 16, first, st, "left", "top")
+    local name_w = w - 9 - (t.meter and 7 or 0)
+    local first, second = widgets.wrap(screen, t.name or "", st, name_w)
+    screen:label(x + 7, y + 4, name_w, 16, first, st, "left", "top")
     if second ~= "" then
-      screen:label(x + 7, y + 21, w - 9, 16, second, st, "left", "top")
+      screen:label(x + 7, y + 21, name_w, 16, second, st, "left", "top")
+    end
+  end
+  if t.meter then
+    local full = h - 10
+    for k = 1, 2 do
+      local lit = math.floor(widgets.meter_fill(t.meter[k]) * full + 0.5)
+      if lit > 0 then screen:rect(x + w - 12 + k * 3, y + h - 5 - lit, 2, lit, text) end
     end
   end
 end
@@ -327,6 +347,7 @@ local function macro_icon(screen, cx, cy, colour)
 end
 
 -- (`params[k].macro`: a macro controls it, the macro icon at the top right.)
+-- (`params[k].modulated`: automated in the pattern, a dot at the top right.)
 function widgets.params(screen, theme, x0, groups, page, params)
   for _, g in ipairs(groups or {}) do
     local x = x0 + (g.at - 1) * 120
@@ -340,8 +361,11 @@ function widgets.params(screen, theme, x0, groups, page, params)
     if p then
       local x = x0 + (k - 1) * 120
       if k > 1 then screen:rect(x, 233, 1, 39, "separator") end
-      screen:label(x + 11, 233, 100, 14, p.name or "", style(theme, "param_name"), "left", "top")
+      local icons = (p.macro and 1 or 0) + (p.modulated and 1 or 0)
+      local name_w = icons == 2 and 78 or (icons == 1 and 90 or 100)
+      screen:label(x + 11, 233, name_w, 14, p.name or "", style(theme, "param_name"), "left", "top")
       if p.macro then macro_icon(screen, x + 108, 240, style(theme, "param_name").color) end
+      if p.modulated then screen:circle(x + (p.macro and 96 or 108), 240, 3.5, "record") end
       local w = screen:label(x + 11, 248, 104, 27, p.value or "", style(theme, "param_value"), "left", "top")
       if p.unit and p.unit ~= "" then
         screen:label(x + 11 + w + 6, 248, 104 - w - 6, 25, p.unit, style(theme, "param_unit"), "left", "bottom")
@@ -357,7 +381,7 @@ function widgets.sound_pads(s)
   for i = 1, 16 do
     local snd = group and group.sounds[i]
     if snd and snd.used then
-      out[i] = { name = snd.name, palette = snd.palette, on = snd.selected or i == s.sound }
+      out[i] = { name = snd.name, palette = snd.palette, on = snd.selected or i == s.sound, meter = snd.meter }
     elseif (snd and snd.selected) or i == s.sound then
       out[i] = { name = "", palette = 15, on = true }
     else
@@ -381,6 +405,7 @@ function widgets.group_bank(s, on)
         name = group.name,
         palette = group.palette,
         on = on(g, group),
+        meter = group.meter,
       }
     end
   end

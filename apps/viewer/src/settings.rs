@@ -118,6 +118,10 @@ pub struct Settings {
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
     /// to where the finger lands (Preferences > Hardware).
     pub relative_strips: bool,
+    /// Held-page buttons pinned on the MK3 (`EVENTS`, `SCENE`, `PATTERN`…), and the one
+    /// left open on screen (`None`: none).
+    pub pinned_pages: BTreeSet<String>,
+    pub pinned_open: Option<String>,
     /// How hard the MK3's pads have to be pressed, 0..=100 (Preferences > Hardware):
     /// higher, light presses play louder. The MK3 applies it to the pressure it reports,
     /// as Maschine has it do (`Mk3Io::set_pad_sensitivity`).
@@ -137,6 +141,10 @@ pub struct Settings {
     /// The project File ▸ New starts from (a template: its groups, sounds, plug-ins,
     /// tempo and routing); `None`, or gone: an empty project.
     pub default_project: Option<PathBuf>,
+    /// Folder the last session recording went to; `None`: the default location.
+    pub session_dir: Option<PathBuf>,
+    /// Free disk space (MB) a session recording leaves untouched.
+    pub session_reserve_mb: u32,
     /// Scene / Section: duplicating a scene copies its patterns too (Maschine's "Scn &
     /// Ptn"), and a duplicated section plays the same scene (LINK WHEN DUPL).
     pub duplicate_patterns: bool,
@@ -384,10 +392,14 @@ impl Default for Settings {
             metronome_volume: 100,
             focus_follows: true,
             relative_strips: false,
+            pinned_pages: BTreeSet::new(),
+            pinned_open: None,
             metronome_auto: false,
             metronome_ticks: 4,
             reload_last: true,
             default_project: None,
+            session_dir: None,
+            session_reserve_mb: 1024,
             auto_backup: true,
             duplicate_patterns: false,
             link_duplicates: false,
@@ -569,6 +581,10 @@ impl Settings {
                 }
                 "focus_follows" => s.focus_follows = v != "false",
                 "relative_strips" => s.relative_strips = v == "true",
+                "pinned_page" if !v.is_empty() => {
+                    s.pinned_pages.insert(v.to_string());
+                }
+                "pinned_open" if !v.is_empty() => s.pinned_open = Some(v.to_string()),
                 "metronome_auto" => s.metronome_auto = v == "true",
                 "metronome_ticks" => {
                     if let Ok(n) = v.parse::<u32>()
@@ -580,6 +596,8 @@ impl Settings {
                 "reload_last" => s.reload_last = v == "true",
                 "stems_offered" => s.stems_offered = v == "true",
                 "default_project" if !v.is_empty() => s.default_project = Some(PathBuf::from(v)),
+                "session_reserve_mb" => s.session_reserve_mb = v.parse().unwrap_or(1024),
+                "session_dir" if !v.is_empty() => s.session_dir = Some(PathBuf::from(v)),
                 "auto_backup" => s.auto_backup = v == "true",
                 "duplicate_patterns" => s.duplicate_patterns = v == "true",
                 "link_duplicates" => s.link_duplicates = v == "true",
@@ -804,6 +822,14 @@ impl Settings {
         out += &format!("jam_enabled = {}\n", self.jam_enabled);
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!("relative_strips = {}\n", self.relative_strips);
+        for p in &self.pinned_pages {
+            out += &format!("pinned_page = {p}\n");
+        }
+        if let Some(p) = &self.pinned_open
+            && self.pinned_pages.contains(p)
+        {
+            out += &format!("pinned_open = {p}\n");
+        }
         out += &format!(
             "metronome_volume = {}\nmetronome_auto = {}\nmetronome_ticks = {}\n",
             self.metronome_volume, self.metronome_auto, self.metronome_ticks
@@ -815,6 +841,10 @@ impl Settings {
         );
         if let Some(p) = &self.default_project {
             out += &format!("default_project = {}\n", p.display());
+        }
+        out += &format!("session_reserve_mb = {}\n", self.session_reserve_mb);
+        if let Some(p) = &self.session_dir {
+            out += &format!("session_dir = {}\n", p.display());
         }
         if self.stems_offered {
             out += "stems_offered = true\n";
@@ -1361,6 +1391,18 @@ mod sync_tests {
         assert_eq!(Settings::parse("").last_version, "");
         let s = Settings { last_version: "0.2.0".into(), ..Settings::default() };
         assert_eq!(Settings::parse(&s.to_text()).last_version, "0.2.0");
+    }
+
+    #[test]
+    fn session_settings_round_trip() {
+        let mut s = Settings::default();
+        assert_eq!(s.session_reserve_mb, 1024);
+        assert_eq!(s.session_dir, None);
+        s.session_reserve_mb = 2048;
+        s.session_dir = Some(std::path::PathBuf::from("/tmp/sets"));
+        let back = Settings::parse(&s.to_text());
+        assert_eq!(back.session_reserve_mb, 2048);
+        assert_eq!(back.session_dir, Some(std::path::PathBuf::from("/tmp/sets")));
     }
 
     #[test]

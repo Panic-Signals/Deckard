@@ -85,3 +85,60 @@ fn a_touched_knob_writes_with_touch_auto_write() {
     app.touch_write_at(k, head);
     assert!(!app.mod_takes.is_empty(), "writing");
 }
+
+/// Automated knobs show an indicator on the MK3 whether playing or stopped, and
+/// ERASE + tapping the knob deletes the automation and removes the indicator.
+#[test]
+fn automated_knobs_show_an_indicator_and_erase_tap_removes_it() {
+    use deckard_mk3::Event as E;
+    let mut app = app();
+    let k = knob(&mut app);
+    let mut s = deckard_surface::Surface::new();
+    let now = std::time::Instant::now();
+
+    let v0 = app.surface_view();
+    assert!(!v0.control.knobs[k].as_ref().unwrap().modulated, "unmodulated at first");
+    let before = s.picture(&v0);
+
+    // Record step modulation on knob `k` (while stopped).
+    app.surface_act(A::StepModAt(Some((0, 240))));
+    app.surface_act(A::StepMod { from: 0, length: 240, pads: 1, knob: k, inc: 0.25 });
+    app.surface_act(A::StepModAt(None));
+
+    let v1 = app.surface_view();
+    assert!(v1.control.knobs[k].as_ref().unwrap().modulated, "modulated while stopped");
+    let with_ind = s.picture(&v1);
+    assert_ne!(before, with_ind, "MK3 screen draws the indicator");
+
+    // Switching to a new empty pattern hides the indicator; switching back shows it.
+    app.surface_act(A::NewPatternIn(0));
+    app.surface_act(A::PickPattern(1));
+    assert!(!app.surface_view().control.knobs[k].as_ref().unwrap().modulated, "empty pattern has no indicator");
+    app.surface_act(A::PickPattern(0));
+    assert!(app.surface_view().control.knobs[k].as_ref().unwrap().modulated, "modulated pattern shows indicator");
+
+    // ERASE + tap knob on the MK3 deletes the automation in one undo step and removes the indicator.
+    let cap: &'static str = ["CAP_1", "CAP_2", "CAP_3", "CAP_4", "CAP_5", "CAP_6", "CAP_7", "CAP_8"][k];
+    let undo_before = app.doc.as_ref().unwrap().borrow().undo_labels().len();
+    let v = app.surface_view();
+    s.event(&E::Button("ERASE", true), &v, now);
+    let acts = s.event(&E::Button(cap, true), &v, now);
+    assert_eq!(acts, [A::EraseKnob(k)]);
+    for a in acts {
+        app.surface_act(a);
+    }
+    s.event(&E::Button(cap, false), &app.surface_view(), now);
+    s.event(&E::Button("ERASE", false), &app.surface_view(), now);
+
+    assert!(points(&app).is_empty(), "modulation deleted");
+    assert_eq!(app.doc.as_ref().unwrap().borrow().undo_labels().len(), undo_before + 1, "one undo step");
+    let v2 = app.surface_view();
+    assert!(!v2.control.knobs[k].as_ref().unwrap().modulated, "indicator cleared");
+    assert_eq!(s.picture(&v2), before, "MK3 screen back to unmodulated");
+
+    // Undo brings the modulation and indicator back; SHIFT + pad 10 (Clear Auto) clears the pattern's.
+    assert!(app.doc.as_ref().unwrap().borrow_mut().undo());
+    assert!(app.surface_view().control.knobs[k].as_ref().unwrap().modulated);
+    app.surface_act(A::Edit("clear_modulation"));
+    assert!(!app.surface_view().control.knobs[k].as_ref().unwrap().modulated);
+}

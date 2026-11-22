@@ -12,7 +12,8 @@
 --                     its notes along the pattern
 --
 -- Zhora focused, its own buttons and tuner instead (lib/zhora.lua). The Tuner effect
--- focused, its dial on the right screen under A4's pitch.
+-- focused, its dial on the right screen under A4's pitch. A synth focused, its signal's
+-- scope beside its picture.
 --
 -- With SHIFT held on PLUG-IN, the focused slot's edits: EDIT (a plug-in's window),
 -- INSERT (the plug-in browser for a new slot after the last), SAVE (not yet), MOVE
@@ -20,6 +21,7 @@
 
 local widgets = require("lib.widgets")
 local chain = require("lib.chain")
+local knob_lib = require("lib.knobs")
 local zhora = require("lib.zhora")
 
 local control = {}
@@ -80,6 +82,14 @@ local function shift_button(c, n)
 end
 
 function control.button(name, down)
+  local cap = tonumber(name:match("^CAP_(%d)$"))
+  if cap then
+    if not down then knob_lib.erased[cap] = nil end
+    if deckard.held("ERASE") then
+      if down then knob_lib.erase(cap) end
+      return true
+    end
+  end
   if not down then return end
   local s = deckard.state()
   local c = s.control
@@ -111,6 +121,10 @@ function control.button(name, down)
 end
 
 function control.knob(n, amount)
+  if deckard.held("ERASE") then
+    knob_lib.erase(n)
+    return true
+  end
   deckard.turn_knob(n, amount, deckard.held("SHIFT"))
   return true
 end
@@ -227,7 +241,13 @@ local function knobs(screen, theme, c, no_page, knob_of)
           groups[#groups + 1] = { text = knob.section, at = k }
         end
         local value, unit = split(knob.text)
-        params[k] = { name = knob.name:upper(), value = value, unit = unit, macro = knob.macro }
+        params[k] = {
+          name = knob.name:upper(),
+          value = value,
+          unit = unit,
+          macro = knob.macro,
+          modulated = knob.modulated,
+        }
       end
     end
     local page = nil
@@ -241,7 +261,14 @@ end
 -- modulated, its modulation where the song is in place of its value.
 local function auto_knob(knob)
   if not knob.modulatable then return nil end
-  return { name = knob.name, section = knob.section, value = knob.value, text = knob.auto_mod or knob.text }
+  return {
+    name = knob.name,
+    section = knob.section,
+    value = knob.value,
+    text = knob.auto_mod or knob.text,
+    macro = knob.macro,
+    modulated = knob.modulated,
+  }
 end
 
 -- The built-in effect on the right screen, the same on every page. `kind` is freq
@@ -330,6 +357,52 @@ local function eq_curve(screen, theme, eq)
       local y2 = by + 4 + (1 - wave[i + 1]) * (bh - 8)
       screen:line(x1, y1, x2, y2, 1.5, "accent")
     end
+  end
+end
+
+-- The focused synth's preview beside its picture, on the right screen: the wave's
+-- lowest and highest value in each column (0 the middle line), so a fast signal is
+-- solid rather than aliased, over the note's amplitude envelope. A pixel per column,
+-- with anti-aliased edges, so the curves read smoothly rather than as blocks.
+-- `scope.wave` runs low, high, low, high…; `scope.env` is one level per column, 0..1.
+local function scope_view(screen, scope)
+  local wave = scope.wave or {}
+  local env = scope.env or {}
+  local x0, y0, w, h = 728, 68, 224, 136
+  screen:rect(x0, y0, w, h, "panel")
+  screen:frame(x0, y0, w, h, "button")
+  local mid = 116
+  screen:line(x0 + 1, mid, x0 + w - 2, mid, 1, "separator")
+  local left, inner = x0 + 3, w - 6
+  local n = math.floor(#wave / 2)
+  if n > 0 then
+    local cw = inner / n
+    local ink = math.max(1, cw + 0.4)
+    local half = 44
+    local prev_x, prev_lo, prev_hi = nil, nil, nil
+    for i = 0, n - 1 do
+      local lo = math.min(1, math.max(-1, wave[i * 2 + 1] or 0))
+      local hi = math.min(1, math.max(-1, wave[i * 2 + 2] or 0))
+      local x = left + (i + 0.5) * cw
+      screen:line(x, mid - hi * half, x, mid - lo * half, ink, "accent")
+      if prev_x then
+        screen:line(prev_x, mid - prev_hi * half, x, mid - hi * half, ink, "accent")
+        screen:line(prev_x, mid - prev_lo * half, x, mid - lo * half, ink, "accent")
+      end
+      prev_x, prev_lo, prev_hi = x, lo, hi
+    end
+  end
+  screen:line(x0 + 1, 164, x0 + w - 2, 164, 1, "button")
+  local en = #env
+  if en > 0 then
+    local cw = inner / en
+    local ink = math.max(1, cw + 0.4)
+    for i = 0, en - 1 do
+      local level = math.min(1, math.max(0, env[i + 1] or 0))
+      local x = left + (i + 0.5) * cw
+      screen:line(x, 200 - level * 32, x, 200, ink, "accent")
+    end
+    screen:line(left, 200, left + inner, 200, 1, "accent")
   end
 end
 
@@ -535,7 +608,10 @@ function control.draw(screen, theme, opts)
       elseif c.eq then eq_curve(screen, theme, c.eq)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
-      else chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false) end
+      else
+        chain.thumbnail(screen, theme, 480, 68, 240, 136, slot, false)
+        if c.scope then scope_view(screen, c.scope) end
+      end
     end
     chain.draw(screen, theme, c)
   else

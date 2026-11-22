@@ -144,6 +144,10 @@ mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
 mod session_backup;
+mod session_record;
+#[cfg(test)]
+mod session_tests;
+mod session_window;
 mod settings;
 mod splash;
 mod splice;
@@ -395,7 +399,7 @@ fn main() {
 
 /// Where a chain was left: its focused slot, the page each of its slots showed, and the
 /// page each property set (Input, Output, Groove, Macro) showed. (A sound's Groove
-/// page is the app's, `App::groove_page`, not the chain's.)
+/// page is kept with the sound, `Document::groove_page`.)
 #[derive(Debug, Default, Clone)]
 pub struct ChainPages {
     slot: Option<usize>,
@@ -685,6 +689,8 @@ pub struct SaveDialog {
     pub samples: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
+    /// Why the last Save didn't write it, shown in the dialog.
+    pub error: Option<String>,
 }
 
 /// A file saved: where, its tags, and whether with its samples.
@@ -894,6 +900,8 @@ pub struct App {
     sound: usize,
     /// SELECT's other sounds in the focused group (the focused one is always selected).
     sound_selection: Vec<usize>,
+    /// Anchor sound in the focused group for Shift+click range selection.
+    sound_anchor: Option<usize>,
     scene: usize,
     /// The section picked in the Song view: the song plays from it, or jumps to it
     /// when the playing section ends.
@@ -923,6 +931,13 @@ pub struct App {
     midi_change: bool,
     /// The MIDI Monitor window shows (View ▸ MIDI Monitor), and its choices.
     midi_monitor: bool,
+    /// The Audio & CPU Monitor window shows.
+    audio_monitor: bool,
+    /// Cross-platform system/process sampler used by the diagnostics window.
+    system_info: sysinfo::System,
+    /// Last sampled system diagnostics, held steady between refreshes for readability.
+    system_diagnostics: Vec<(&'static str, String)>,
+    system_diagnostics_at: Option<std::time::Instant>,
     monitor_view: midi_monitor::View,
     /// File ▸ Export Audio's panel and the export it runs.
     export: export::ExportPanel,
@@ -1008,6 +1023,9 @@ pub struct App {
     catalog: settings::Catalog,
     /// The browser (LIBRARY / FILES), and the library it shows.
     browser: browser::Browser,
+    /// The browser preview being decoded, if any; the generation drops stale decodes.
+    prehear_task: Option<(u64, std::sync::mpsc::Receiver<Result<deckard_engine::sample::Sample, String>>)>,
+    prehear_generation: u64,
     /// REC: recording (or armed, stopped), and the take being recorded.
     recording: bool,
     take: record::Take,
@@ -1068,9 +1086,6 @@ pub struct App {
     channel: bool,
     prop_set: usize,
     prop_page: usize,
-    /// The Groove page (Swing, Variation, Generate) last shown on any sound: every
-    /// sound's Groove shows it, and VARIATION goes back to it. `None` before one shows.
-    groove_page: Option<usize>,
     /// Where each chain was left, shown again on coming back to it. `pages_of` is the
     /// chain the fields above were last kept for, `page_key` the slot `plugin_page` is for.
     chain_pages: std::collections::HashMap<deckard_doc::Chain, ChainPages>,
@@ -1083,9 +1098,6 @@ pub struct App {
     midi_ports_at: Option<std::time::Instant>,
     midi_port_watch: Option<midi_ports::Watcher>,
     midi_prefs_shown: bool,
-    /// Variation and Generate settings of sounds whose project can't keep them (from
-    /// before Maschine 3): (group, sound, field) → value, for this session.
-    groove_settings: std::collections::HashMap<(usize, usize, String), f64>,
     /// MIDI input and output, and what its routing was built from (revision, focus,
     /// Default = focus); whether the output knows it.
     midi: midi_io::MidiIo,
@@ -1187,6 +1199,9 @@ pub struct App {
     /// Where STOP left the song: shown there, and PLAY goes on from it (RESTART: from
     /// the start).
     parked: Option<Playhead>,
+    /// The playhead was put in the pattern (clicked while stopped) and nothing has
+    /// played since: ⌘V pastes there.
+    placed_head: bool,
     status: String,
     /// Scripts directory and controller model for the controller panel.
     scripts: Option<PathBuf>,
@@ -1217,9 +1232,13 @@ pub struct App {
     blinks: blink::Blinks,
     /// The (group, sound)s playing a note now, sequenced or live: their numbers flash.
     pub lit: std::collections::HashSet<(usize, usize)>,
+    /// The notes that have just started, sequenced or played, (group, sound, pitch): the
+    /// controller's pads flash white for them.
+    pub hits: std::collections::HashSet<(usize, usize, i64)>,
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
+    plugin_clipboard: Option<deckard_doc::CopiedSlot>,
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
@@ -1268,6 +1287,12 @@ pub struct App {
     rec_base: Option<usize>,
     sampling: layout::sampling::SamplingState,
     recorder: recorder::Recorder,
+    /// Records the master output to a WAV file (File ▸ Session Record).
+    session: session_record::SessionRecorder,
+    /// The live session Recorder window is shown.
+    session_window_open: bool,
+    /// Whether the Recorder window floats above other windows (on by default).
+    session_window_pin: session_window::Pin,
     /// The Mixer is shown (instead of the work views), at sound level (the focused
     /// group's sounds) or group level, with its optional sections.
     mixer: bool,
@@ -1332,6 +1357,11 @@ pub struct App {
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
     /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
+    /// The focused synth's scope (chain, slot) as last shown, while the audio thread has it.
+    scope_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::ScopeView)>>,
+    /// The preview last rendered of an internal synth, with the module and the parameters
+    /// it was rendered from: rendered again only when they change.
+    internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -1355,6 +1385,32 @@ impl Default for Started {
 impl Started {
     fn elapsed(&self) -> std::time::Duration {
         self.0.elapsed()
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    let days = seconds / 86_400;
+    let hours = seconds / 3_600 % 24;
+    let minutes = seconds / 60 % 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else {
+        format!("{minutes}m {seconds}s")
     }
 }
 
@@ -1542,6 +1598,8 @@ impl App {
 
     /// Let go of what belongs to the open document (playback, caches, plug-in views).
     fn leave_document(&mut self) {
+        self.sound_selection.clear();
+        self.sound_anchor = None;
         self.zone_of = None;
         self.lock_morph = None;
         self.lock_active = false;
@@ -1584,7 +1642,11 @@ impl App {
                 self.sound_clipboard = std::mem::take(&mut self.sound_clipboard).into_iter().map(|c| c.carried(&old, &mut d)).collect();
             }
             if let Some(dir) = self.controller_scripts() {
-                self.controller = Some(controller::Controller::new(&dir, &self.model, Some(doc.clone())));
+                let ctl = controller::Controller::new(&dir, &self.model, Some(doc.clone()));
+                if let Ok(c) = &ctl {
+                    c.set_pinned(&self.settings.pinned_pages);
+                }
+                self.controller = Some(ctl);
             }
             // Projects with an arrangement open in the Song view, others in Ideas.
             self.song_view = !doc.borrow().project().sections.is_empty();
@@ -1596,6 +1658,8 @@ impl App {
             self.doc = Some(doc);
             self.error = None;
             (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
+            self.sound_selection.clear();
+            self.sound_anchor = None;
             self.section = None;
             self.focus_scene(0);
             self.restore_screen();
@@ -1641,6 +1705,7 @@ impl App {
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
                     drop(d);
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
                     self.samples.plugins.retain(|slot| {
                         !matches!(
                             slot,
@@ -1652,7 +1717,11 @@ impl App {
                     Ok(())
                 })
             }
-            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard),
+            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard).map(|_| {
+                for sound in s..s + self.sound_clipboard.len() {
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, sound));
+                }
+            }),
             Act::CopyGroup(g) => self.copy_group(g),
             Act::CutGroup(g) => self.copy_group(g).and_then(|_| {
                 self.delete_group(g)?;
@@ -1662,25 +1731,53 @@ impl App {
             Act::PasteGroup(g) => match &self.group_clipboard {
                 Some(bytes) => {
                     let mut d = doc.borrow_mut();
-                    d.load_group_file(g, bytes).map(|_| d.relabel_last("Paste Group"))
+                    d.load_group_file(g, bytes).map(|_| {
+                        d.relabel_last("Paste Group");
+                        self.forget_group_presets(g);
+                    })
                 }
                 None => Ok(()),
             },
             Act::DeleteGroup(g) => self.delete_group(g),
             Act::MoveGroup(g, to) => self.move_group(g, to),
             Act::ResetSound(g, s) => {
-                let r = doc.borrow_mut().reset_sound(g, s);
-                if r.is_ok() {
-                    self.samples.plugins.retain(|slot| {
-                        !matches!(
-                            slot,
-                            deckard_plugins::Slot::Sound { group, sound }
-                                | deckard_plugins::Slot::Chain { group, sound, .. }
-                                if *group == g && *sound == s
-                        )
+                let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+                if let Some(sounds) = self.selected_sounds_for(g, s, count) {
+                    let r = doc.borrow_mut().transaction("Reset Sounds", |d| {
+                        for &si in &sounds {
+                            d.reset_sound(g, si)?;
+                        }
+                        Ok(())
                     });
+                    if r.is_ok() {
+                        for &si in &sounds {
+                            self.saved.remove(&deckard_doc::FileItem::Sound(g, si));
+                        }
+                        self.samples.plugins.retain(|slot| {
+                            !matches!(
+                                slot,
+                                deckard_plugins::Slot::Sound { group, sound }
+                                    | deckard_plugins::Slot::Chain { group, sound, .. }
+                                    if *group == g && sounds.contains(sound)
+                            )
+                        });
+                    }
+                    r
+                } else {
+                    let r = doc.borrow_mut().reset_sound(g, s);
+                    if r.is_ok() {
+                        self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
+                        self.samples.plugins.retain(|slot| {
+                            !matches!(
+                                slot,
+                                deckard_plugins::Slot::Sound { group, sound }
+                                    | deckard_plugins::Slot::Chain { group, sound, .. }
+                                    if *group == g && *sound == s
+                            )
+                        });
+                    }
+                    r
                 }
-                r
             }
             Act::ExportMidi(g, s) => self.export_midi(g, s),
             Act::ImportMidi(g, s) => self.import_midi(g, s),
@@ -1694,8 +1791,19 @@ impl App {
             }
             Act::DeletePattern(g, p) => {
                 let r = doc.borrow_mut().delete_pattern(g, p);
-                if r.is_ok() && self.group == g && self.pattern >= p {
-                    self.pattern = self.pattern.saturating_sub(1);
+                if r.is_ok() {
+                    if self.group == g && self.pattern >= p {
+                        self.pattern = self.pattern.saturating_sub(1);
+                    }
+                    if let Some(grow) = &mut self.grow
+                        && grow.group == g
+                    {
+                        if grow.pattern == p {
+                            self.grow = None;
+                        } else if grow.pattern > p {
+                            grow.pattern -= 1;
+                        }
+                    }
                 }
                 r
             }
@@ -1721,6 +1829,7 @@ impl App {
     /// the one before.
     fn delete_group(&mut self, g: usize) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Ok(()) };
+        let was_last = doc.borrow().project().groups.len() == 1;
         doc.borrow_mut().delete_group(g)?;
         self.samples.plugins.retain(|slot| {
             !matches!(
@@ -1732,6 +1841,13 @@ impl App {
             )
         });
         let n = doc.borrow().project().groups.len();
+        if let Some(grow) = &mut self.grow {
+            if was_last || grow.group == g {
+                self.grow = None;
+            } else if grow.group > g {
+                grow.group -= 1;
+            }
+        }
         let focus = if self.group > g { self.group - 1 } else { self.group.min(n.saturating_sub(1)) };
         if focus != self.group || self.group == g {
             (self.group, self.sound, self.pattern) = (focus, 0, 0);
@@ -2321,12 +2437,15 @@ impl App {
             C::LockPanel => self.lock_panel = !self.lock_panel,
             C::MidiChange => self.midi_change = true,
             C::MidiMonitor => self.midi_monitor = !self.midi_monitor,
+            C::AudioMonitor => self.audio_monitor = !self.audio_monitor,
             C::ExportAudio => self.export.open = true,
             C::ExportMidi => {
                 if let Err(e) = self.export_song_midi(None) {
                     self.status = format!("can't export MIDI: {e}");
                 }
             }
+            C::SessionRecord => self.toggle_session_record(),
+            C::SessionRecorderWindow => self.session_window_open = !self.session_window_open,
             C::ShowController => self.show_controller = !self.show_controller,
             C::FullScreen => {
                 let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -2359,10 +2478,21 @@ impl App {
     /// picked, and DECKARD's pictures of its plug-ins (C47).
     fn new_surface(&self) -> deckard_surface::Surface {
         let mut s = deckard_surface::Surface::with_user_dir(menu::settings_dir().map(|d| d.join("controller")));
+        s.set_pinned(self.settings.pinned_pages.clone(), self.settings.pinned_open.as_deref());
         s.set_lcd(&self.settings.lcd_mode);
         s.set_theme(&self.settings.controller_theme);
         plugin_pictures::give(&mut s);
         s
+    }
+
+    pub(crate) fn sync_surface_pins(&mut self) {
+        if self.surface.pins_match(&self.settings.pinned_pages, self.settings.pinned_open.as_deref()) {
+            return;
+        }
+        self.settings.pinned_pages = self.surface.pinned();
+        self.settings.pinned_open = self.surface.pinned_open();
+        #[cfg(not(test))]
+        self.settings.save();
     }
 
     /// Preferences ▸ Hardware ▸ Controller: stop the scripts for DECKARD's own layer, or
@@ -2387,7 +2517,11 @@ impl App {
     /// Start the controller scripts again (after a model change, or edited scripts).
     fn reload_controller(&mut self) {
         if let Some(dir) = self.controller_scripts() {
-            self.controller = Some(controller::Controller::new(&dir, &self.model, self.doc.clone()));
+            let ctl = controller::Controller::new(&dir, &self.model, self.doc.clone());
+            if let Ok(c) = &ctl {
+                c.set_pinned(&self.settings.pinned_pages);
+            }
+            self.controller = Some(ctl);
             self.sync_controller();
             self.status = format!("controller scripts loaded for {}", self.model);
             if let Some(Ok(c)) = &self.controller
@@ -2451,7 +2585,7 @@ impl App {
                 let got = out.block_frames() as u32;
                 if got > 0 && got != size {
                     ui.label("");
-                    ui.label(egui::RichText::new(format!("The interface uses {got} samples.")).weak());
+                    ui.add(egui::Label::new(egui::RichText::new(format!("The interface uses {got} samples.")).weak()).wrap());
                     ui.end_row();
                 }
                 ui.label("Audio load");
@@ -2484,7 +2618,7 @@ impl App {
                 hint += &format!(" Now: {n} sounds ahead, {late} times not ready.");
             }
             ui.label("");
-            ui.label(egui::RichText::new(hint).weak());
+            ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
             ui.end_row();
             if ahead != self.settings.render_ahead_ms {
                 self.settings.render_ahead_ms = ahead;
@@ -2505,13 +2639,11 @@ impl App {
                 restart = true;
             }
         });
-        ui.label(
-            egui::RichText::new(
+        ui.add(egui::Label::new(egui::RichText::new(
                 "Larger buffers give heavy projects and plug-ins more room (fewer clicks); smaller ones make pads and keys respond sooner. \
                  \"Late\" blocks were heard as clicks.",
             )
-            .weak(),
-        );
+            .weak()).wrap());
         if size != self.settings.buffer_frames {
             self.settings.buffer_frames = size;
             restart = true;
@@ -2550,12 +2682,10 @@ impl App {
                 ui.label(format!("{}: {} Hz, {:?}, {latency:.1} ms from a block's start to the outputs, as the driver says", out.device, out.rate, out.format));
                 ui.end_row();
                 ui.label("");
-                ui.label(
-                    egui::RichText::new(
+                ui.add(egui::Label::new(egui::RichText::new(
                         "The driver has the last word on the buffer size and the rate. If it won't take the size below, set it in its own control panel: DECKARD follows.",
                     )
-                    .weak(),
-                );
+                    .weak()).wrap());
                 ui.end_row();
             }
         });
@@ -2575,6 +2705,14 @@ impl App {
     /// Close the audio output and whatever else holds the driver: playback stops.
     fn close_output(&mut self) {
         self.stop();
+        // Tearing down the `Output` drops the session recording's master tap. A device or
+        // buffer change at the SAME sample rate fires no RateChange, so clean-stop the
+        // session here (before the old `Output` is dropped) rather than let it pad pure
+        // silence for the rest of the set. `set_tap(None)` is moot: the `Output` is going.
+        if self.session.active() {
+            self.session.abort(session_record::StopReason::DeviceChange);
+            // The window stays open so it can show the "audio device changed" reason.
+        }
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
@@ -2719,7 +2857,7 @@ impl App {
             }
         }
         if ASIO_BUILT && self.settings.audio_driver == AudioDriver::Asio && self.settings.asio_device.is_none() {
-            ui.label(egui::RichText::new("Pick the ASIO driver of your interface.").weak());
+            ui.add(egui::Label::new(egui::RichText::new("Pick the ASIO driver of your interface.").weak()).wrap());
         }
         let channels_of =
             |devices: &[(String, usize)], d: &Option<String>| devices.iter().find(|(n, _)| Some(n) == d.as_ref()).map_or(0, |(_, c)| *c);
@@ -2747,19 +2885,29 @@ impl App {
         });
         ui.separator();
         ui.horizontal(|ui| {
+            ui.strong("Session recording").on_hover_text("File ▸ Record Session to File… records the master output to a WAV.");
+            ui.label("Keep free");
+            let mut mb = self.settings.session_reserve_mb;
+            let drag = egui::DragValue::new(&mut mb).range(0..=1_000_000).speed(64).suffix(" MB");
+            if ui.add(drag).changed() {
+                self.settings.session_reserve_mb = mb;
+                self.settings.save();
+            }
+            ui.label(egui::RichText::new("the recording auto-stops before the drive drops below this (1 GB = 1024 MB)").weak());
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
             ui.strong("Routing");
             ui.selectable_value(&mut self.routing_outputs, false, "Input");
             ui.selectable_value(&mut self.routing_outputs, true, "Output");
         });
         let outs = self.routing_outputs;
-        ui.label(
-            egui::RichText::new(if outs {
+        ui.add(egui::Label::new(egui::RichText::new(if outs {
                 "Which channel of the interface each of DECKARD's outputs plays on. An alias names it wherever it's offered; one not connected isn't offered."
             } else {
                 "Which channel of the interface each of DECKARD's inputs reads. An alias names it wherever it's offered; one not connected isn't offered."
             })
-            .weak(),
-        );
+            .weak()).wrap());
         let before = (self.settings.output_routing.clone(), self.settings.output_cv_only.clone());
         let project = self.doc.as_ref().map(|d| d.borrow().project().clone()).unwrap_or_default();
         let (own, port, channels) = if outs { ("Out", "Output", out_channels) } else { ("In", "Input", in_channels) };
@@ -2848,7 +2996,7 @@ impl App {
         for (title, ports, prefix) in [("Inputs", &ins, "in:"), ("Outputs", &outs, "out:")] {
             ui.label(egui::RichText::new(title).strong());
             if ports.is_empty() {
-                ui.label(egui::RichText::new("No MIDI ports found").weak());
+                ui.add(egui::Label::new(egui::RichText::new("No MIDI ports found").weak()).wrap());
             }
             for name in ports {
                 let key = format!("{prefix}{name}");
@@ -2950,7 +3098,7 @@ impl App {
                 });
             }
         }
-        ui.label(egui::RichText::new(self.midi.status()).weak());
+        ui.add(egui::Label::new(egui::RichText::new(self.midi.status()).weak()).wrap());
     }
 
     /// The controllers' drum channels for the MIDI routing: each one's notes port (the
@@ -3008,7 +3156,12 @@ impl App {
                 .on_hover_text("Asks GitHub for DECKARD's latest release once per launch. Help ▸ About shows what it found.");
             ui.end_row();
             ui.label("");
-            ui.label(egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak(),
+                )
+                .wrap(),
+            );
             ui.end_row();
         });
     }
@@ -3045,15 +3198,18 @@ impl App {
                     }
                 }
             });
-            ui.label(
-                egui::RichText::new(if cfg!(windows) {
-                    "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
-                } else if cfg!(target_os = "macos") {
-                    "The Dock shows it while DECKARD runs; Finder keeps the app's own."
-                } else {
-                    "The window and the taskbar show it."
-                })
-                .weak(),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(if cfg!(windows) {
+                        "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
+                    } else if cfg!(target_os = "macos") {
+                        "The Dock shows it while DECKARD runs; Finder keeps the app's own."
+                    } else {
+                        "The window and the taskbar show it."
+                    })
+                    .weak(),
+                )
+                .wrap(),
             );
         });
     }
@@ -3066,7 +3222,15 @@ impl App {
         let mut library_change = None;
         let mut controller_change = None;
         let mut wine_action = None;
-        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([760.0, 700.0]).open(&mut open).show(ctx, |ui| {
+        let (fit, wide) = (crate::layout::dialog_max_height(ctx), crate::layout::dialog_max_width(ctx));
+        egui::Window::new("Preferences")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([760.0f32.min(wide), 700.0f32.min(fit)])
+            .max_height(fit)
+            .max_width(wide)
+            .open(&mut open)
+            .show(ctx, |ui| {
             crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, 7, "General");
@@ -3076,11 +3240,19 @@ impl App {
                 ui.selectable_value(&mut tab, 5, "Library");
                 ui.selectable_value(&mut tab, 6, "Recording");
                 ui.separator();
-                ui.label(egui::RichText::new("Plug-ins:").weak());
+                ui.add(egui::Label::new(egui::RichText::new("Plug-ins:").weak()).wrap());
                 ui.selectable_value(&mut tab, 0, "Manager");
                 ui.selectable_value(&mut tab, 1, "Location");
             });
             ui.separator();
+            // Past the window's height the tab scrolls (a short screen). The Plug-in Manager's
+            // list scrolls by itself in the room left under its settings, and at least
+            // `LIST_MIN` (then the tab scrolls too: on Linux the Wine settings alone can be
+            // taller than a short screen).
+            const LIST_MIN: f32 = 160.0;
+            let view_h = ui.available_height();
+            egui::ScrollArea::vertical().id_salt(("prefs-tab", tab)).auto_shrink([false, false]).show(ui, |ui| {
+            let top = ui.cursor().top();
             if tab == 2 {
                 self.audio_preferences(ui);
             } else if tab == 7 {
@@ -3106,10 +3278,8 @@ impl App {
                         });
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("REC from a stop counts in this long first (SHIFT + REC on the controller: at least a bar).")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("REC from a stop counts in this long first (SHIFT + REC on the controller: at least a bar).")
+                            .weak()).wrap());
                     ui.end_row();
                     ui.label("Input Quantize");
                     ui.checkbox(&mut self.settings.input_quantize, "Snap recorded notes to the grid");
@@ -3117,7 +3287,7 @@ impl App {
                 });
             } else if tab == 5 {
                 ui.label("Folders of sound packs to list in the browser under Factory (each folder's name is its library).");
-                ui.label(egui::RichText::new("Maschine's own library is listed when it's installed; add packs here when it isn't.").weak());
+                ui.add(egui::Label::new(egui::RichText::new("Maschine's own library is listed when it's installed; add packs here when it isn't.").weak()).wrap());
                 let mut remove = None;
                 for d in &self.settings.library_folders {
                     ui.horizontal(|ui| {
@@ -3154,10 +3324,8 @@ impl App {
                     self.settings.pad_sensitivity = n;
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
+                            .weak()).wrap());
                     ui.end_row();
                     // Velocity SCALING, as the MK3's own Settings page has it (Soft 3 … Hard 3):
                     // Maschine's measured curves (`mk3_io::pad_velocity`).
@@ -3172,10 +3340,8 @@ impl App {
                     self.settings.velocity_scaling = scaling;
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
+                            .weak()).wrap());
                     ui.end_row();
                     // The two brightnesses are the MK3's own (its LEDs' level report, its
                     // displays' backlight byte), so they follow the model picked here rather
@@ -3188,7 +3354,7 @@ impl App {
                         self.settings.led_brightness = leds;
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak()).wrap());
                         ui.end_row();
                         ui.label("Display brightness");
                         let mut displays = self.settings.display_brightness;
@@ -3196,11 +3362,11 @@ impl App {
                         self.settings.display_brightness = displays;
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak()).wrap());
                         ui.end_row();
                         if self.mk3.is_none() {
                             ui.label("");
-                            ui.label(egui::RichText::new("Applies when the MK3 connects.").weak());
+                            ui.add(egui::Label::new(egui::RichText::new("Applies when the MK3 connects.").weak()).wrap());
                             ui.end_row();
                         }
                     }
@@ -3240,7 +3406,7 @@ impl App {
                         }
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak()).wrap());
                         ui.end_row();
                     }
                     ui.label("Controller");
@@ -3310,12 +3476,10 @@ impl App {
                     ui.end_row();
                     ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };
-                    ui.label(
-                        egui::RichText::new(format!(
+                    ui.add(egui::Label::new(egui::RichText::new(format!(
                             "What runs the MK3: Maschine's controller scripts, from your own Maschine install ({found}), or DECKARD's own layer. Automatic uses the scripts when they're found."
                         ))
-                        .weak(),
-                    );
+                        .weak()).wrap());
                     ui.end_row();
                 });
             } else if tab == 0 {
@@ -3325,12 +3489,12 @@ impl App {
                     ui.checkbox(&mut self.settings.use_au, "Use Audio Units");
                 });
                 ui.checkbox(&mut self.settings.scan_on_start, "Rescan plug-ins at start-up");
-                ui.label(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak());
+                ui.add(egui::Label::new(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak()).wrap());
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;
                     }
-                    ui.label(egui::RichText::new(&self.catalog.status).weak());
+                    ui.add(egui::Label::new(egui::RichText::new(&self.catalog.status).weak()).wrap());
                 });
                 if cfg!(target_os = "linux") {
                     self.wine_section(ui, &mut wine_action);
@@ -3340,7 +3504,8 @@ impl App {
                 entries.sort_by(|a, b| {
                     (a.vendor.to_lowercase(), a.name.to_lowercase()).cmp(&(b.vendor.to_lowercase(), b.name.to_lowercase()))
                 });
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let list_h = (view_h - (ui.cursor().top() - top)).max(LIST_MIN);
+                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                     egui::Grid::new("plugins").striped(true).num_columns(4).show(ui, |ui| {
                         ui.strong("On");
                         ui.strong("Plug-in");
@@ -3412,6 +3577,7 @@ impl App {
                     }
                 });
             }
+            });
         });
         if self.settings != before {
             self.settings.save();
@@ -3454,26 +3620,28 @@ impl App {
         match offer {
             StemsOffer::Asking => {
                 egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
-                    crate::layout::dialog_style(ui);
-                    ui.set_width(420.0);
-                    ui.label(egui::RichText::new("Install stem separation?").strong());
-                    ui.add_space(4.0);
-                    ui.label(format!(
-                        "Sampling ▸ EDIT ▸ STEMS splits a sample into drums, bass, vocals and the rest with Meta's Demucs model, \
+                    crate::layout::fit_dialog(ui, |ui| {
+                        crate::layout::dialog_style(ui);
+                        ui.set_width(420.0);
+                        ui.label(egui::RichText::new("Install stem separation?").strong());
+                        ui.add_space(4.0);
+                        ui.label(format!(
+                            "Sampling ▸ EDIT ▸ STEMS splits a sample into drums, bass, vocals and the rest with Meta's Demucs model, \
                          a {} MB download that isn't bundled with DECKARD. It goes into DECKARD's settings folder.",
-                        stems::MODEL_MB
-                    ));
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("If you skip this, DECKARD downloads it the first time you use STEMS.").weak());
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Install").clicked() {
-                            start = true;
-                        }
-                        if ui.button("Not now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            done = true;
-                        }
-                    });
+                            stems::MODEL_MB
+                        ));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("If you skip this, DECKARD downloads it the first time you use STEMS.").weak());
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Install").clicked() {
+                                start = true;
+                            }
+                            if ui.button("Not now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                done = true;
+                            }
+                        });
+                    })
                 });
             }
             StemsOffer::Installing(rx) => {
@@ -3494,12 +3662,14 @@ impl App {
                 }
                 if !done {
                     egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
-                        crate::layout::dialog_style(ui);
-                        ui.set_width(420.0);
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(format!("Downloading the stem separation model ({} MB)…", stems::MODEL_MB));
-                        });
+                        crate::layout::fit_dialog(ui, |ui| {
+                            crate::layout::dialog_style(ui);
+                            ui.set_width(420.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("Downloading the stem separation model ({} MB)…", stems::MODEL_MB));
+                            });
+                        })
                     });
                     ctx.request_repaint_after(std::time::Duration::from_millis(250));
                 }
@@ -3545,20 +3715,22 @@ impl App {
         if let Some(version) = self.whats_new.clone() {
             let mut choice = None;
             egui::Modal::new(egui::Id::new("whats-new")).show(ctx, |ui| {
-                crate::layout::dialog_style(ui);
-                ui.set_width(360.0);
-                ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
-                ui.add_space(4.0);
-                ui.label("Would you like to see the release notes?");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("See Release Notes").clicked() {
-                        choice = Some(true);
-                    }
-                    if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(false);
-                    }
-                });
+                crate::layout::fit_dialog(ui, |ui| {
+                    crate::layout::dialog_style(ui);
+                    ui.set_width(360.0);
+                    ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
+                    ui.add_space(4.0);
+                    ui.label("Would you like to see the release notes?");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("See Release Notes").clicked() {
+                            choice = Some(true);
+                        }
+                        if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            choice = Some(false);
+                        }
+                    });
+                })
             });
             if let Some(open) = choice {
                 if open {
@@ -3575,29 +3747,31 @@ impl App {
             };
             let mut choice = None;
             egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
-                crate::layout::dialog_style(ui);
-                ui.set_width(360.0);
-                ui.label(egui::RichText::new(question).strong());
-                ui.add_space(4.0);
-                ui.label("Your changes will be lost if you don't save them.");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if matches!(then, Pending::Revert) {
-                        if ui.button("Revert").clicked() {
-                            choice = Some(1);
+                crate::layout::fit_dialog(ui, |ui| {
+                    crate::layout::dialog_style(ui);
+                    ui.set_width(360.0);
+                    ui.label(egui::RichText::new(question).strong());
+                    ui.add_space(4.0);
+                    ui.label("Your changes will be lost if you don't save them.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if matches!(then, Pending::Revert) {
+                            if ui.button("Revert").clicked() {
+                                choice = Some(1);
+                            }
+                        } else {
+                            if ui.button("Save").clicked() {
+                                choice = Some(0);
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                choice = Some(1);
+                            }
                         }
-                    } else {
-                        if ui.button("Save").clicked() {
-                            choice = Some(0);
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            choice = Some(2);
                         }
-                        if ui.button("Don't Save").clicked() {
-                            choice = Some(1);
-                        }
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(2);
-                    }
-                });
+                    });
+                })
             });
             match choice {
                 Some(0) => {
@@ -3642,9 +3816,157 @@ impl App {
             );
         }
         self.preferences(ctx);
+        self.audio_monitor(ctx);
         if self.about.is_some() && !about::show(self, ctx) {
             self.about = None;
         }
+    }
+
+    fn audio_monitor(&mut self, ctx: &egui::Context) {
+        if !self.audio_monitor {
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.audio_monitor = false;
+            return;
+        }
+        let mut open = true;
+        let monitor_size = ctx.input(|input| input.viewport().monitor_size).unwrap_or(egui::vec2(900.0, 700.0));
+        let window_size = egui::vec2(420.0, (monitor_size.y - 48.0).max(300.0));
+        egui::Window::new("Audio & CPU Monitor")
+            .title_bar(false)
+            .open(&mut open)
+            .resizable(true)
+            .default_size(window_size)
+            .max_size(window_size)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                let available_height = ui.available_height();
+                egui::ScrollArea::vertical().auto_shrink([true, false]).max_height(available_height).show(ui, |ui| {
+                    if let Some(Ok(out)) = &self.output {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let stats = &out.stats;
+                        let value = |a: &std::sync::atomic::AtomicU64| a.load(Relaxed);
+                        ui.heading("Audio device");
+                        egui::Grid::new("audio-monitor-device").num_columns(2).show(ui, |ui| {
+                            ui.label("Driver");
+                            ui.label(out.driver.name());
+                            ui.end_row();
+                            ui.label("Device");
+                            ui.label(&out.device);
+                            ui.end_row();
+                            ui.label("Sample rate");
+                            ui.label(format!("{} Hz", out.rate));
+                            ui.end_row();
+                            ui.label("Buffer");
+                            ui.label(format!(
+                                "{} samples ({:.1} ms)",
+                                out.block_frames(),
+                                out.block_frames() as f64 / out.rate as f64 * 1000.0
+                            ));
+                            ui.end_row();
+                            ui.label("Reported latency");
+                            ui.label(format!("{:.1} ms", out.latency().as_secs_f64() * 1000.0));
+                            ui.end_row();
+                        });
+                        ui.separator();
+                        ui.heading("Audio thread");
+                        egui::Grid::new("audio-monitor-stats").num_columns(2).show(ui, |ui| {
+                            ui.label("Current load");
+                            ui.label(format!("{:.1} %", self.cpu_load * 100.0));
+                            ui.end_row();
+                            ui.label("Peak load");
+                            ui.label(format!("{:.1} %", value(&stats.peak_load) as f64 / 10.0));
+                            ui.end_row();
+                            ui.label("Callbacks");
+                            ui.label(value(&stats.callbacks).to_string());
+                            ui.end_row();
+                            ui.label("Late callbacks");
+                            ui.label(value(&stats.late).to_string());
+                            ui.end_row();
+                            ui.label("Missed blocks");
+                            ui.label(value(&stats.missed).to_string());
+                            ui.end_row();
+                            ui.label("Device errors / xruns");
+                            ui.label(value(&stats.device_errors).to_string());
+                            ui.end_row();
+                            ui.label("Queue-full events");
+                            ui.label(value(&stats.queue_full).to_string());
+                            ui.end_row();
+                        });
+                        ui.separator();
+                        ui.heading("Render-ahead");
+                        let (ahead, underruns) = out.telemetry(|t| (t.sounds_ahead, t.ahead_underruns));
+                        ui.label(format!("{ahead} sounds currently ahead; {underruns} not-ready events"));
+                        if let Some((threads, helped)) = out.render_threads() {
+                            ui.label(format!("{threads} render threads; {helped} worker-rendered jobs"));
+                        } else {
+                            ui.label("Render-ahead workers: off");
+                        }
+                    } else {
+                        ui.label("Audio output is not open.");
+                        ui.label("Start playback or open a browser preview to initialize it.");
+                    }
+                    ui.separator();
+                    ui.heading("System");
+                    for (label, value) in self.system_diagnostics() {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            ui.label(value);
+                        });
+                    }
+                });
+            });
+        self.audio_monitor = open;
+        if self.audio_monitor {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    fn system_diagnostics(&mut self) -> Vec<(&'static str, String)> {
+        const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if self.system_diagnostics_at.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
+            return self.system_diagnostics.clone();
+        }
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        self.system_info.refresh_cpu_usage();
+        self.system_info.refresh_memory();
+        let pid = Pid::from_u32(std::process::id());
+        self.system_info.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+        let mut diagnostics = Vec::new();
+        diagnostics.push(("System CPU", format!("{:.1} %", self.system_info.global_cpu_usage())));
+        diagnostics.push(("Logical CPUs", self.system_info.cpus().len().to_string()));
+        diagnostics.push(("Physical cores", System::physical_core_count().map_or_else(|| "unavailable".into(), |count| count.to_string())));
+        if let Some(process) = self.system_info.process(pid) {
+            diagnostics.push(("DECKARD CPU", format!("{:.1} %", process.cpu_usage())));
+            diagnostics.push(("Process memory", format_bytes(process.memory())));
+            diagnostics.push(("Virtual address space", format_bytes(process.virtual_memory())));
+            diagnostics.push(("Process threads", process.tasks().map_or_else(|| "unavailable".into(), |tasks| tasks.len().to_string())));
+        } else {
+            diagnostics.push(("DECKARD CPU", "unavailable".into()));
+            diagnostics.push(("Process memory", "unavailable".into()));
+            diagnostics.push(("Virtual address space", "unavailable".into()));
+            diagnostics.push(("Process threads", "unavailable".into()));
+        }
+        diagnostics.push((
+            "System memory",
+            format!("{} used / {} total", format_bytes(self.system_info.used_memory()), format_bytes(self.system_info.total_memory())),
+        ));
+        diagnostics.push(("Available memory", format_bytes(self.system_info.available_memory())));
+        diagnostics.push((
+            "Swap",
+            format!("{} used / {} total", format_bytes(self.system_info.used_swap()), format_bytes(self.system_info.total_swap())),
+        ));
+        diagnostics.push(("Uptime", format_duration(std::time::Duration::from_secs(System::uptime()))));
+
+        #[cfg(target_os = "linux")]
+        {
+            let load = std::fs::read_to_string("/proc/loadavg").ok().map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+            diagnostics.push(("Load average", load.unwrap_or_else(|| "unavailable".into())));
+        }
+        self.system_diagnostics = diagnostics;
+        self.system_diagnostics_at = Some(std::time::Instant::now());
+        self.system_diagnostics.clone()
     }
 
     /// Play `mode`; the arrangement from the focused section.
@@ -3658,7 +3980,11 @@ impl App {
 
     /// Play `mode` from tick `start`.
     fn play_from(&mut self, mode: Mode, start: i64) {
+        if self.recording && start > 0 {
+            self.auto_grow_at(mode, start as f64);
+        }
         let Some(doc) = self.doc.clone() else { return };
+        self.placed_head = false;
         let looping = self.loops(mode);
         let synced = self.sync_start();
         // Each channel's peak (its headroom) counts from the start of playback.
@@ -3927,12 +4253,129 @@ impl App {
             self.focus_sound(0);
             self.pattern = self.scene_pattern(group).unwrap_or(0);
         }
+        if self.recording && self.scene_pattern(self.group) == Some(self.pattern) {
+            let head = self.playhead().map(|h| (h.mode, h.position));
+            self.arm_grow_for(self.group, self.pattern, head, false);
+        }
     }
 
     /// Focus a sound. A plain focus replaces SELECT's set with that one sound.
     fn focus_sound(&mut self, sound: usize) {
         self.sound = sound;
         self.sound_selection.clear();
+        self.sound_anchor = Some(sound);
+    }
+
+    /// Whether `sound` in `group` is part of the active sound selection (focused or secondary).
+    pub(crate) fn is_sound_selected(&self, group: usize, sound: usize) -> bool {
+        group == self.group && (sound == self.sound || self.sound_selection.contains(&sound))
+    }
+
+    /// When two or more sounds in `group` are selected and `sound` is among them, returns
+    /// all selected sound indices in `0..count` in pad order.
+    pub(crate) fn selected_sounds_for(&self, group: usize, sound: usize, count: usize) -> Option<Vec<usize>> {
+        if group != self.group || self.sound_selection.is_empty() || !self.is_sound_selected(group, sound) {
+            return None;
+        }
+        let out: Vec<usize> = (0..count).filter(|&s| s == self.sound || self.sound_selection.contains(&s)).collect();
+        (out.len() > 1).then_some(out)
+    }
+
+    /// Click a sound in the Sound list or Mixer strip header:
+    /// Shift+click selects the inclusive range from `sound_anchor` (or `self.sound`) to `sound`;
+    /// Cmd/Ctrl+click (`toggle`) adds or removes `sound`; plain click focuses `sound`.
+    pub(crate) fn click_sound(&mut self, sound: usize, shift: bool, toggle: bool) {
+        let n = self.group_len();
+        if sound >= n {
+            return;
+        }
+        if shift {
+            let anchor = self.sound_anchor.filter(|&a| a < n).unwrap_or(self.sound);
+            let (lo, hi) = (anchor.min(sound), anchor.max(sound));
+            self.sound = sound;
+            self.sound_selection = (lo..=hi).filter(|&s| s != sound).collect();
+            self.sound_anchor = Some(anchor);
+        } else if toggle {
+            if sound == self.sound {
+                if let Some(next) = self.sound_selection.pop() {
+                    self.sound = next;
+                    self.sound_anchor = Some(next);
+                }
+            } else if self.sound_selection.contains(&sound) {
+                self.sound_selection.retain(|&s| s != sound);
+            } else {
+                if !self.sound_selection.contains(&self.sound) {
+                    self.sound_selection.push(self.sound);
+                }
+                self.sound_selection.retain(|&s| s != sound);
+                self.sound = sound;
+                self.sound_anchor = Some(sound);
+            }
+        } else {
+            self.focus_sound(sound);
+        }
+    }
+
+    /// Move focus to `sound` while keeping the current multi-selection when `sound` is
+    /// already selected (e.g. opening a context menu on a selected sound).
+    pub(crate) fn focus_selected_sound(&mut self, sound: usize) {
+        let n = self.group_len();
+        if sound >= n {
+            return;
+        }
+        if self.is_sound_selected(self.group, sound) {
+            if sound != self.sound {
+                if !self.sound_selection.contains(&self.sound) {
+                    self.sound_selection.push(self.sound);
+                }
+                self.sound_selection.retain(|&s| s != sound);
+                self.sound = sound;
+            }
+        } else {
+            self.focus_sound(sound);
+        }
+    }
+
+    /// Apply a sound swing edit across all selected sounds when `s` is part of a multi-selection.
+    pub(crate) fn set_multi_sound_swing(&mut self, g: usize, s: usize, sw: deckard_model::Swing, exact: bool) -> bool {
+        use deckard_doc::Target;
+        use mxprj::decode::Value;
+        let Some(doc) = self.doc.clone() else { return false };
+        let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+        let Some(sounds) = self.selected_sounds_for(g, s, count) else { return false };
+        let edits: Vec<(Target, &str, Value)> = {
+            let d = doc.borrow();
+            let p = d.project();
+            let Some(old) = p.groups.get(g).and_then(|gr| gr.sounds.get(s)).map(|snd| snd.swing) else { return false };
+            let mut out = Vec::new();
+            if exact || (sw.amount - old.amount).abs() > 1e-9 {
+                let delta = sw.amount - old.amount;
+                for &si in &sounds {
+                    let cur = p.groups[g].sounds[si].swing.amount;
+                    let amount = if exact { sw.amount } else { cur + delta }.clamp(0.0, 100.0);
+                    out.push((Target::Sound(g, si), "swing_amount", Value::Float(amount)));
+                }
+            }
+            if exact || sw.cycle != old.cycle {
+                let cycle = sw.cycle.clamp(0, 7);
+                for &si in &sounds {
+                    out.push((Target::Sound(g, si), "swing_cycle", Value::Int(cycle)));
+                }
+            }
+            if exact || sw.invert != old.invert {
+                let inv = sw.invert as i64;
+                for &si in &sounds {
+                    out.push((Target::Sound(g, si), "swing_invert", Value::Int(inv)));
+                }
+            }
+            out
+        };
+        if !edits.is_empty()
+            && let Err(e) = doc.borrow_mut().set_many("Swing", &edits)
+        {
+            self.status = format!("can't set swing: {e}");
+        }
+        true
     }
 
     fn group_len(&self) -> usize {
@@ -3955,14 +4398,20 @@ impl App {
             } else {
                 self.sound_selection.push(index);
             }
+            if self.sound_anchor.is_none() {
+                self.sound_anchor = Some(self.sound);
+            }
         } else if selected {
             if index != self.sound && !self.sound_selection.contains(&self.sound) {
                 self.sound_selection.push(self.sound);
             }
+            self.sound_selection.retain(|&s| s != index);
             self.sound = index;
+            self.sound_anchor = Some(index);
         } else {
             self.sound = index;
             self.sound_selection.clear();
+            self.sound_anchor = Some(index);
         }
     }
 
@@ -3970,11 +4419,15 @@ impl App {
     fn select_all_sounds(&mut self) {
         let n = self.group_len();
         self.sound_selection = (0..n).filter(|&s| s != self.sound).collect();
+        if self.sound_anchor.is_none() {
+            self.sound_anchor = Some(self.sound);
+        }
     }
 
     /// SELECT + NONE: only the focused sound stays selected.
     fn select_no_sounds(&mut self) {
         self.sound_selection.clear();
+        self.sound_anchor = Some(self.sound);
     }
 
     /// The pattern `group` plays in the focused scene.
@@ -4007,7 +4460,13 @@ impl App {
             && self.group == grow.group
             && self.scene_pattern(self.group) == Some(grow.pattern)
         {
-            return Some(grow.strip_progress(at));
+            let rel = head
+                .and_then(|h| {
+                    let d = self.doc.as_ref()?.borrow();
+                    Self::mode_pattern_tick(d.project(), h.mode, h.position, grow.group, grow.pattern)
+                })
+                .unwrap_or(at);
+            return Some(grow.strip_progress(rel));
         }
         Some(at as f64 / length as f64)
     }
@@ -4016,6 +4475,29 @@ impl App {
         let d = self.doc.as_ref()?.borrow();
         let s = d.project().scenes.get(self.scene)?;
         s.patterns.iter().find(|(g, _)| *g == group).map(|&(_, pi)| pi)
+    }
+
+    /// Group `g`'s active pattern for recording or clearing modulation: the playing
+    /// pattern at the playhead when running, else its scene pattern, else the focused one.
+    pub(crate) fn active_modulation_pattern(&self, g: usize) -> usize {
+        if let Some(doc) = &self.doc {
+            let d = doc.borrow();
+            if let Some(h) = self.playhead()
+                && let Some((pi, _)) = record::pattern_at(d.project(), h.mode, h.position, g)
+            {
+                return pi;
+            }
+            drop(d);
+            if let Some(Mode::Pattern(pg, pi)) = self.playing
+                && pg == g
+            {
+                return pi;
+            }
+            if let Some(pi) = self.scene_pattern(g) {
+                return pi;
+            }
+        }
+        if g == self.group { self.pattern } else { 0 }
     }
 
     /// With Follow on, the focus follows playback: the playing scene (or the
@@ -4045,6 +4527,22 @@ impl App {
     fn arrange(&mut self, act: layout::Act) {
         use layout::Act;
         let Some(doc) = self.doc.clone() else { return };
+        if self.recording {
+            match &act {
+                Act::NewPattern(s, g) | Act::NewPatternAt(s, g, _)
+                    if *s == self.scene && self.grow.as_ref().is_some_and(|gr| gr.group == *g) =>
+                {
+                    self.settle_active_grow();
+                }
+                Act::AssignPattern(s, g, p)
+                    if *s == self.scene && self.grow.as_ref().is_some_and(|gr| gr.group == *g && Some(gr.pattern) != *p) =>
+                {
+                    self.settle_active_grow();
+                }
+                _ => {}
+            }
+        }
+        let mut arm_after: Option<(usize, usize, bool)> = None;
         let result = {
             let mut d = doc.borrow_mut();
             match act {
@@ -4057,7 +4555,16 @@ impl App {
                     })
                     .map(|_| Some((Some(made), None)))
                 }
-                Act::AssignPattern(s, g, p) => d.assign_pattern(s, g, p).map(|_| None),
+                Act::AssignPattern(s, g, p) => {
+                    let r = d.assign_pattern(s, g, p).map(|_| None);
+                    if r.is_ok()
+                        && s == self.scene
+                        && let Some(pi) = p
+                    {
+                        arm_after = Some((g, pi, g == self.group));
+                    }
+                    r
+                }
                 Act::NewPattern(s, g) | Act::NewPatternAt(s, g, _) => {
                     let slot = if let Act::NewPatternAt(.., slot) = act { Some(slot) } else { None };
                     let n = d.project().groups.get(g).map_or(0, |x| x.patterns.len());
@@ -4078,6 +4585,18 @@ impl App {
                         Ok(())
                     });
                     if r.is_ok() {
+                        if let Some(gr) = &mut self.grow
+                            && gr.group == g
+                            && gr.pattern >= made
+                        {
+                            gr.pattern += 1;
+                        }
+                        if self.recording {
+                            self.take.insert_empty_pattern(g, made);
+                            if s == self.scene {
+                                arm_after = Some((g, made, g == self.group));
+                            }
+                        }
                         (self.group, self.pattern) = (g, made);
                     }
                     r.map(|_| None)
@@ -4089,17 +4608,28 @@ impl App {
                     };
                     let before = slots(&*d).unwrap_or_default();
                     let focused = (self.group == g).then(|| before.get(self.pattern).copied()).flatten();
+                    let growing = self.grow.as_ref().filter(|gr| gr.group == g).and_then(|gr| before.get(gr.pattern).copied());
                     let r = d.move_pattern(g, p, slot);
-                    if let (Ok(_), Some(f), Some(&from)) = (&r, focused, before.get(p)) {
-                        let f = if f == from {
-                            slot
-                        } else if f == slot {
-                            from
-                        } else {
-                            f
+                    if let (Ok(_), Some(&from)) = (&r, before.get(p)) {
+                        let mapped = |s0: usize| {
+                            if s0 == from {
+                                slot
+                            } else if s0 == slot {
+                                from
+                            } else {
+                                s0
+                            }
                         };
-                        if let Some(i) = slots(&*d).and_then(|s| s.iter().position(|x| *x == f)) {
+                        let after = slots(&*d);
+                        if let Some(f) = focused
+                            && let Some(i) = after.as_ref().and_then(|s| s.iter().position(|x| *x == mapped(f)))
+                        {
                             self.pattern = i;
+                        }
+                        if let (Some(gs), Some(gr)) = (growing, self.grow.as_mut())
+                            && let Some(i) = after.as_ref().and_then(|s| s.iter().position(|x| *x == mapped(gs)))
+                        {
+                            gr.pattern = i;
                         }
                     }
                     r.map(|_| None)
@@ -4128,6 +4658,9 @@ impl App {
                 Act::SectionScene(i, s) => d.set_section_scene(i, s).map(|_| None),
                 Act::PatternLength(g, p, t) => {
                     // A length chosen: no longer Auto.
+                    if self.grow.as_ref().is_some_and(|gr| (gr.group, gr.pattern) == (g, p)) {
+                        self.grow = None;
+                    }
                     d.set_length_auto(g, p, false);
                     d.set_pattern_length(g, p, t).map(|_| None)
                 }
@@ -4255,6 +4788,12 @@ impl App {
             Ok(None) => {}
             Err(e) => self.status = format!("can't do that: {e}"),
         }
+        if self.recording
+            && let Some((g, pi, force)) = arm_after
+        {
+            let head = self.playhead().map(|h| (h.mode, h.position));
+            self.arm_grow_for(g, pi, head, force);
+        }
     }
 
     /// Pick a section in the Song view. While the song plays, playback jumps to it
@@ -4341,6 +4880,7 @@ impl App {
         };
         drop(d);
         self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.placed_head = true;
         self.sync_transport();
     }
 
@@ -4352,6 +4892,7 @@ impl App {
         let to = tick.max(0);
         let mode = Mode::Arrangement;
         self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
+        self.placed_head = true;
         self.sync_transport();
     }
 
@@ -4376,6 +4917,9 @@ impl App {
             deckard_doc::Chain::Sound(g, _) | deckard_doc::Chain::Group(g) => g,
             deckard_doc::Chain::Master => return,
         };
+        if self.recording {
+            self.mark_grow_recorded(&doc, g, mode, tick);
+        }
         let (pi, pos, dev) = {
             let d = doc.borrow();
             let p = d.project();
@@ -4406,14 +4950,6 @@ impl App {
         }
         if let Some(take) = self.mod_takes.iter_mut().find(|t| t.chain == chain && t.target == target) {
             take.moved = std::time::Instant::now();
-        }
-        if self.recording
-            && let Some(grow) = &mut self.grow
-            && g == grow.group
-            && pi == grow.pattern
-        {
-            let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
-            grow.record_at(pos - start);
         }
         self.touch_write_for(chain, &target, pos, dev);
         if done {
@@ -4559,6 +5095,27 @@ impl App {
         if let Err(e) = doc.borrow_mut().clear_modulation(chain, &target) {
             self.status = format!("can't remove the modulation: {e}");
         }
+    }
+
+    /// Whether `edit`'s parameter has modulation in its group's active pattern (the
+    /// playing pattern while playing, the focused one when stopped), or an open touch.
+    pub(crate) fn is_modulated_in(&self, p: &deckard_model::Project, edit: layout::Edit) -> bool {
+        let Some((chain, target)) = modulation::mod_target(edit) else { return false };
+        if self.mod_takes.iter().any(|t| t.chain == chain && t.target == target) {
+            return true;
+        }
+        let (g, sound) = match chain {
+            deckard_doc::Chain::Sound(g, s) => (g, Some(s)),
+            deckard_doc::Chain::Group(g) => (g, None),
+            deckard_doc::Chain::Master => return false,
+        };
+        let pi = match self.playhead() {
+            Some(h) => record::pattern_at(p, h.mode, h.position, g).map(|(pi, _)| pi),
+            None if g == self.group => Some(self.pattern),
+            None => p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find_map(|&(gr, pi)| (gr == g).then_some(pi))),
+        };
+        let Some(pat) = pi.and_then(|pi| p.groups.get(g)?.patterns.get(pi)) else { return false };
+        pat.mods.iter().any(|m| m.sound == sound && m.slot == target.slot && m.field == target.field)
     }
 
     /// Where a modulated knob's modulation has it now (0..1): its value moved by the
@@ -4716,19 +5273,12 @@ impl App {
             self.take = record::Take::begin(doc.borrow().project());
             (self.take_played, self.take_grown) = (0.0, None);
             self.controls = record::ControlWriter::default();
-            // An empty Auto-length pattern starts as a bar, growing as it's played into
-            // (unless the Settings page's GROW is off).
-            let (g, pi) = (self.group, self.pattern);
-            let empty =
-                doc.borrow().project().groups.get(g).and_then(|x| x.patterns.get(pi)).filter(|p| p.notes.is_empty()).map(|p| p.length);
+            // An empty Auto-length pattern starts as a bar (or a bar ahead of where
+            // playback already is), growing as it's played into (unless the Settings
+            // page's GROW is off).
             self.grow = None;
-            if let Some(len) = empty.filter(|_| self.settings.pattern_grow && doc.borrow().length_is_auto(g, pi)) {
-                let mut grow = record::Grow::new(g, pi, doc.borrow().project().bar_length());
-                grow.before = len;
-                if doc.borrow_mut().set_pattern_length(g, pi, grow.length()).is_ok() {
-                    self.grow = Some(grow);
-                }
-            }
+            let head = self.playhead().map(|h| (h.mode, h.position));
+            self.arm_grow_for(self.group, self.pattern, head, true);
             if self.playing.is_some() {
                 if let Some(Ok(out)) = &self.output {
                     out.set_recording(true);
@@ -4752,22 +5302,7 @@ impl App {
             self.apply_take(held);
             self.controls.finish(&mut doc.borrow_mut());
             // A grown pattern: the bars played, or as it was.
-            if let Some(grow) = self.grow.take() {
-                let (g, pi) = (grow.group, grow.pattern);
-                let d = doc.borrow();
-                let p = d.project();
-                let bar = p.bar_length();
-                let pat = &p.groups[g].patterns[pi];
-                let first = pat.notes.iter().map(|n| n.position).min();
-                let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
-                let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
-                let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
-                drop(d);
-                if end.is_some() {
-                    doc.borrow_mut().set_length_auto(g, pi, false);
-                }
-                let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
-            }
+            self.settle_active_grow();
             // First takes in fixed-length empty patterns follow the same start
             // rule. Overdubs retain the existing pattern's deliberate space.
             for (g, pi) in self.take.new_recordings() {
@@ -4788,6 +5323,97 @@ impl App {
         }
     }
 
+    /// Unwrapped tick of `mode` at `tick` when `(g, pi)` is the pattern `mode` plays for `g`.
+    fn mode_pattern_tick(p: &deckard_model::Project, mode: Mode, tick: f64, g: usize, pi: usize) -> Option<i64> {
+        let t = match mode {
+            Mode::Pattern(pg, ppi) => ((pg, ppi) == (g, pi)).then_some(tick)?,
+            Mode::Scene(s) => p.scenes.get(s)?.patterns.contains(&(g, pi)).then_some(tick)?,
+            Mode::Arrangement => {
+                let si = p.section_at(tick as i64)?;
+                let scene = p.sections[si].scene?;
+                p.scenes.get(scene)?.patterns.contains(&(g, pi)).then_some(tick - p.section_start(si) as f64)?
+            }
+        };
+        Some((t.round() as i64).max(0))
+    }
+
+    /// Settle `self.grow` (trimming to the bars played, or restoring `before` when empty).
+    fn settle_active_grow(&mut self) {
+        let Some(doc) = self.doc.clone() else {
+            self.grow = None;
+            return;
+        };
+        let Some(grow) = self.grow.take() else { return };
+        let (g, pi) = (grow.group, grow.pattern);
+        let settle = {
+            let d = doc.borrow();
+            let p = d.project();
+            let bar = p.bar_length();
+            p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).map(|pat| {
+                let first = pat.notes.iter().map(|n| n.position).min();
+                let start = first.map_or(pat.start, |n| pat.start + (n - pat.start).max(0) / bar * bar);
+                let end = pat.notes.iter().map(|n| n.position - start + n.length).max();
+                let to = end.map_or(grow.before, |e| ((e + bar - 1) / bar).max(1) * bar);
+                (start, to, end.is_some())
+            })
+        };
+        if let Some((start, to, has_notes)) = settle {
+            if has_notes {
+                doc.borrow_mut().set_length_auto(g, pi, false);
+            }
+            let _ = doc.borrow_mut().set_pattern_span(g, pi, start, to);
+        }
+    }
+
+    /// Start auto-growing `(g, pi)` when recording into an empty Auto-length pattern.
+    /// If `at` is `Some((mode, tick))` and `(g, pi)` is playing there, `Grow` starts a bar
+    /// ahead of `tick` so mid-scene recording never wraps backwards at bar boundaries.
+    fn arm_grow_for(&mut self, g: usize, pi: usize, at: Option<(Mode, f64)>, force: bool) {
+        if !self.recording || !self.settings.pattern_grow {
+            return;
+        }
+        if self.grow.as_ref().is_some_and(|gr| (gr.group, gr.pattern) == (g, pi)) {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let eligible = {
+            let d = doc.borrow();
+            let p = d.project();
+            if !d.length_is_auto(g, pi) {
+                None
+            } else {
+                p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).filter(|pt| pt.notes.is_empty()).map(|pt| {
+                    let rel = at.and_then(|(m, t)| Self::mode_pattern_tick(p, m, t, g, pi));
+                    (pt.length, p.bar_length(), rel)
+                })
+            }
+        };
+        let Some((len, bar, rel)) = eligible else { return };
+        if let Some(prev) = &self.grow {
+            let prev_occupied = prev.has_recorded()
+                || doc
+                    .borrow()
+                    .project()
+                    .groups
+                    .get(prev.group)
+                    .and_then(|gr| gr.patterns.get(prev.pattern))
+                    .is_some_and(|pt| !pt.notes.is_empty());
+            if prev_occupied && prev.group != g && !force {
+                return;
+            }
+            self.settle_active_grow();
+        }
+        let mut grow = record::Grow::new(g, pi, bar);
+        grow.before = len;
+        if let Some(rel) = rel {
+            grow.advance_bar(rel);
+            let _ = grow.reach(rel);
+        }
+        if doc.borrow_mut().set_pattern_length(g, pi, grow.length()).is_ok() {
+            self.grow = Some(grow);
+        }
+    }
+
     /// SHIFT + REC: count in (Preferences' bars, at least one), then play and record
     /// from the beginning, as PLAY from a fresh start does (not where STOP left it).
     fn count_in_and_play(&mut self) {
@@ -4805,15 +5431,27 @@ impl App {
     }
 
     fn mark_grow_recorded(&mut self, doc: &std::rc::Rc<std::cell::RefCell<deckard_doc::Document>>, group: usize, mode: Mode, tick: f64) {
+        if self.grow.as_ref().is_none_or(|gr| gr.group != group) {
+            let candidate = {
+                let d = doc.borrow();
+                let p = d.project();
+                record::pattern_at(p, mode, tick, group)
+                    .map(|(pi, _)| pi)
+                    .filter(|&pi| self.settings.pattern_grow && d.length_is_auto(group, pi))
+                    .filter(|&pi| p.groups.get(group).and_then(|g| g.patterns.get(pi)).is_some_and(|pt| pt.notes.is_empty()))
+            };
+            if let Some(pi) = candidate {
+                self.arm_grow_for(group, pi, Some((mode, tick)), false);
+            }
+        }
         let Some(len) = self.grow.as_mut().and_then(|grow| {
             if group != grow.group {
                 return None;
             }
             let d = doc.borrow();
             let p = d.project();
-            let (pi, pos) = record::pattern_at(p, mode, tick, group).filter(|x| x.0 == grow.pattern)?;
-            let start = p.groups[group].patterns.get(pi).map_or(0, |pt| pt.start);
-            let at = pos - start;
+            p.groups.get(group)?.patterns.get(grow.pattern)?;
+            let at = Self::mode_pattern_tick(p, mode, tick, group, grow.pattern)?;
             grow.record_at(at);
             grow.reach(at)
         }) else {
@@ -4960,10 +5598,16 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let Some(grow) = &mut self.grow else { return };
         let (g, pi) = (grow.group, grow.pattern);
-        let at = record::pattern_at(doc.borrow().project(), mode, tick, g).filter(|x| x.0 == pi);
-        let start = doc.borrow().project().groups[g].patterns.get(pi).map_or(0, |p| p.start);
-        if let Some((_, pos)) = at {
-            let rel = pos - start;
+        let rel = {
+            let d = doc.borrow();
+            let p = d.project();
+            if p.groups.get(g).and_then(|gr| gr.patterns.get(pi)).is_none() {
+                self.grow = None;
+                return;
+            }
+            Self::mode_pattern_tick(p, mode, tick, g, pi)
+        };
+        if let Some(rel) = rel {
             grow.advance_bar(rel);
             if let Some(len) = grow.reach(rel)
                 && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
@@ -4987,6 +5631,12 @@ impl App {
             self.take_in_all(notes, exprs, controls, now);
         }
         if let Some(h) = self.playhead() {
+            if let Some(pi) = self.scene_pattern(self.group)
+                && self.grow.as_ref().is_none_or(|gr| gr.group == self.group && gr.pattern != pi)
+            {
+                let force = self.grow.as_ref().is_some_and(|gr| gr.group == self.group);
+                self.arm_grow_for(self.group, pi, Some((h.mode, h.position)), force);
+            }
             self.auto_grow_at(h.mode, h.position);
             self.tick_controls(h.mode, h.position, now);
             // Held notes stretch in the pattern as they're held.
@@ -5211,7 +5861,12 @@ impl App {
                 screens = c.screens().map(|s| (self.mk3_screens_sent, mk3_io::ScreenFrame::Pixels(std::sync::Arc::new(s.px.clone()))));
             }
             let scaling = self.settings.velocity_scaling;
+            let pin_changed = c.sync_pins(&mut self.settings.pinned_pages);
             let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: touches(self, group) };
+            if pin_changed {
+                #[cfg(not(test))]
+                self.settings.save();
+            }
             self.control_bridge();
             Mk3Out { route, leds, screens }
         } else {
@@ -5245,12 +5900,14 @@ impl App {
                 for a in actions {
                     self.surface_act(a);
                 }
+                self.follow_edits();
                 // (A slot or sound the buttons just focused shows its plug-in's knobs.)
                 self.update_slot_view();
                 self.refresh_surface_settings();
                 view = self.surface_view();
             }
             self.stop_prehear_after_browse();
+            self.sync_surface_pins();
             // On the Browse page, the browser has its results to show.
             if self.surface.page() == "browse" && !self.browser.started() {
                 self.browse(browser::BrowseAct::Toggle);
@@ -5413,6 +6070,7 @@ impl App {
                         step_mod: self.step_mod_text(edits.get(i).copied().flatten()),
                         auto_mod: self.auto_mod_text(edits.get(i).copied().flatten()),
                         in_macro: !on_macros && k.param.is_some_and(|p| doc_cache.macro_targets.contains(&p)),
+                        modulated: k.modulated,
                     })
                 })
                 .collect(),
@@ -5423,6 +6081,7 @@ impl App {
             picture: None,
             zhora: None,
             tuner: None,
+            scope: None,
             euclid: self.euclid_view(c.level, c.page, head),
             random: self.random_view(c.level, c.page, head),
         };
@@ -5490,6 +6149,7 @@ impl App {
             if self.surface.page() == "control" {
                 v.control.zhora = self.zhora_view(p);
                 v.control.tuner = self.tuner_view();
+                v.control.scope = self.scope_view();
             }
         }
         v.project = p.name.clone();
@@ -5674,6 +6334,12 @@ impl App {
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
                                     || noted.is_some_and(|n| n.contains(&s)),
                                 playing: self.lit.contains(&(g, s)),
+                                hits: {
+                                    let mut hits: Vec<i64> =
+                                        self.hits.iter().filter(|&&(hg, hs, _)| (hg, hs) == (g, s)).map(|&(_, _, p)| p).collect();
+                                    hits.sort_unstable();
+                                    hits
+                                },
                                 mix: deckard_surface::MixView {
                                     aux: snd.aux,
                                     swing: snd.swing.amount,
@@ -5809,14 +6475,20 @@ impl App {
             }
             A::PatternSpan { start, length } => layout::apply_acts(self, vec![Act::PatternSpan(g, self.pattern, start, length)]),
             A::Color { of, color } => {
-                let t = match of {
-                    deckard_surface::ColorOf::Pattern => Target::Pattern(g, self.pattern),
-                    deckard_surface::ColorOf::Scene => Target::Scene(self.scene),
-                    deckard_surface::ColorOf::Group => Target::Group(g),
-                    deckard_surface::ColorOf::Sound => Target::Sound(g, self.sound),
+                let targets = match of {
+                    deckard_surface::ColorOf::Pattern => vec![Target::Pattern(g, self.pattern)],
+                    deckard_surface::ColorOf::Scene => vec![Target::Scene(self.scene)],
+                    deckard_surface::ColorOf::Group => vec![Target::Group(g)],
+                    deckard_surface::ColorOf::Sound => {
+                        let count = self.group_len();
+                        self.selected_sounds_for(g, self.sound, count).map_or_else(
+                            || vec![Target::Sound(g, self.sound)],
+                            |ss| ss.into_iter().map(|si| Target::Sound(g, si)).collect(),
+                        )
+                    }
                 };
                 let c = color.map_or(deckard_model::Color::Default, deckard_model::Color::Palette);
-                layout::apply_acts(self, vec![Act::SetColor(vec![t], c)]);
+                layout::apply_acts(self, vec![Act::SetColor(targets, c)]);
             }
             A::PatternEdit(what) => {
                 let a = match what {
@@ -5955,6 +6627,7 @@ impl App {
                 }
             }
             A::Turn { knob, inc, fine } => self.control_request(R::Turn { pos: knob, inc, fine }),
+            A::EraseKnob(knob) => self.control_request(R::Erase { pos: knob }),
             A::Page(next) => self.control_request(R::Page(next)),
             A::PluginPage(n) => {
                 let Some(doc) = self.doc.clone() else { return };
@@ -6216,9 +6889,16 @@ impl App {
                     "link_group" => "Link Group",
                     _ => "Link Mode",
                 };
-                if let Some(doc) = &self.doc
-                    && let Err(e) = doc.borrow_mut().set(label, Target::Sound(g, self.sound), field, mxprj::decode::Value::Int(v))
-                {
+                let count = self.group_len();
+                let res = if let Some(sounds) = self.selected_sounds_for(g, self.sound, count) {
+                    let edits: Vec<_> = sounds.into_iter().map(|si| (Target::Sound(g, si), field, mxprj::decode::Value::Int(v))).collect();
+                    self.doc.as_ref().map(|doc| doc.borrow_mut().set_many(label, &edits))
+                } else {
+                    self.doc
+                        .as_ref()
+                        .map(|doc| doc.borrow_mut().set(label, Target::Sound(g, self.sound), field, mxprj::decode::Value::Int(v)))
+                };
+                if let Some(Err(e)) = res {
                     self.status = format!("{label}: {e}");
                 }
             }
@@ -6310,7 +6990,7 @@ impl App {
                         value: value as f64,
                         text: whole.unwrap_or(text),
                         param: edit.and_then(|e| layout::channel::knob_param(&e)).and_then(|(t, f)| d.param_oid(t, f)),
-                        modulated: edit.and_then(|e| self.mod_amount(e)).is_some(),
+                        modulated: edit.is_some_and(|e| self.is_modulated_in(p, e)),
                     }
                 });
             }
@@ -6361,7 +7041,7 @@ impl App {
                         value: shown_value as f64,
                         text,
                         param: edit.and_then(|e| layout::edit_param_oid(self, &d, e)),
-                        modulated: edit.and_then(|e| self.mod_amount(e)).is_some(),
+                        modulated: edit.is_some_and(|e| self.is_modulated_in(p, e)),
                     }
                 });
             }
@@ -6599,13 +7279,17 @@ impl App {
                 self.send_live(surface_strip::strip_note(group, sound, pitch, velocity, on));
                 return;
             }
-            // VARIATION: the Groove page last shown (Swing, Variation or Generate, on
-            // any sound), else page `n`.
+            // VARIATION: the Groove page the focused sound was left on (Swing,
+            // Variation or Generate), else page `n`.
             R::GroovePage(n) => {
                 layout::apply_acts(self, vec![Act::ChainTab(layout::ChainTab::Sound)]);
                 self.channel = true;
                 self.prop_set = 2;
-                let page = *self.groove_page.get_or_insert(n.min(2));
+                let (g, s) = (self.group, self.sound);
+                let page = self.sound_groove_page(deckard_doc::Chain::Sound(g, s)).unwrap_or(n.min(2));
+                if let Some(doc) = &self.doc {
+                    doc.borrow_mut().set_groove_page(g, s, page);
+                }
                 self.prop_page = page;
                 return;
             }
@@ -7168,6 +7852,7 @@ impl App {
     fn undo(&mut self) {
         self.lock_end_morph();
         let Some(doc) = self.doc.clone() else { return };
+        self.forget_replaced_presets(doc.borrow().undo_label());
         let ok = doc.borrow_mut().undo();
         if !ok && !self.back_to_replaced() {
             self.status = "nothing to undo".into();
@@ -7177,7 +7862,8 @@ impl App {
 
     fn redo(&mut self) {
         self.lock_end_morph();
-        if let Some(doc) = &self.doc {
+        if let Some(doc) = self.doc.clone() {
+            self.forget_replaced_presets(doc.borrow().redo_label());
             let ok = doc.borrow_mut().redo();
             if !ok {
                 self.status = "nothing to redo".into();
@@ -7338,7 +8024,11 @@ impl App {
         // Sampling page), before recording too.
         let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0)
             || (self.mk3.is_some() && self.surface.page() == "sampling" && self.sampling.tab == 0);
-        let listen = self.meter_inputs && ((self.sampling_open && self.sampling.tab == 0) || hw_record);
+        // A session recording holds the master tap, so internal Sampling metering must not
+        // grab it at the same time (mutual exclusion).
+        let listen = self.meter_inputs
+            && ((self.sampling_open && self.sampling.tab == 0) || hw_record)
+            && !(self.session.active() && self.recorder.view.source == 2);
         self.recorder.meter(
             listen,
             recorder::StartWith {
@@ -7355,6 +8045,14 @@ impl App {
         if let Some(rec) = self.recorder.poll(output, clock) {
             self.finish_recording(rec);
         }
+        // The session recorder takes up its tap and keeps the file's length true to
+        // wall-clock time; it releases the tap itself on an auto-stop. (Re-borrow the
+        // output: `finish_recording` above needed `self` mutably.)
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        self.session.poll(output);
         self.silence_while_recording();
         self.sync_sampling_page();
         self.sync_browse_page();
@@ -8350,7 +9048,14 @@ impl App {
                 }
             }
             S::Record(r) => match r {
-                RecordAct::Start => self.start_recording(),
+                RecordAct::Start => {
+                    if self.session.active() && self.recorder.view.source == 2 {
+                        self.recorder.view.error =
+                            Some("Can't record from an internal source while a session recording is running. Stop it first.".into());
+                    } else {
+                        self.start_recording();
+                    }
+                }
                 RecordAct::Stop => {
                     let clock = self.record_clock();
                     let output = match &self.output {
@@ -8892,48 +9597,63 @@ impl App {
         let mut open = true;
         let mut edits: Vec<(String, f64)> = Vec::new();
         let (mut on, mut lock) = (self.repeat_soft, self.arp_locked);
-        egui::Window::new("Note Repeat / Arp").open(&mut open).resizable(false).show(ctx, |ui| {
-            crate::layout::dialog_style(ui);
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut on, "On").on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
-                ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
-                ui.separator();
-                let shown = view.knobs.iter().find(|k| k.key == "arp/preset").map_or(0, |k| k.value as usize);
-                // Presets 1–4 (item 0 is none).
-                for (i, name) in
-                    view.lists.iter().find(|(k, _)| k == "arp/preset").map(|x| x.1.clone()).unwrap_or_default().iter().enumerate().skip(1)
-                {
-                    if ui.selectable_label(shown == i, name).clicked() {
-                        edits.push(("arp/preset".into(), i as f64));
-                    }
-                }
-            });
-            ui.separator();
-            egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
-                for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
-                    ui.label(&k.name);
-                    match view.lists.iter().find(|(key, _)| *key == k.key) {
-                        Some((_, list)) => {
-                            crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
-                                for (i, name) in list.iter().enumerate() {
-                                    if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
-                                        edits.push((k.key.clone(), i as f64));
-                                    }
-                                }
-                            });
+        egui::Window::new("Note Repeat / Arp")
+            .open(&mut open)
+            .resizable(false)
+            .max_height(crate::layout::dialog_max_height(ctx))
+            .max_width(crate::layout::dialog_max_width(ctx))
+            .vscroll(true)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                ui.horizontal(|ui| {
+                    ui.toggle_value(&mut on, "On")
+                        .on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
+                    ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
+                    ui.separator();
+                    let shown = view.knobs.iter().find(|k| k.key == "arp/preset").map_or(0, |k| k.value as usize);
+                    // Presets 1–4 (item 0 is none).
+                    for (i, name) in view
+                        .lists
+                        .iter()
+                        .find(|(k, _)| k == "arp/preset")
+                        .map(|x| x.1.clone())
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                    {
+                        if ui.selectable_label(shown == i, name).clicked() {
+                            edits.push(("arp/preset".into(), i as f64));
                         }
-                        None => {
-                            let mut v = k.value;
-                            let slider = egui::Slider::new(&mut v, k.min..=k.max).step_by(k.step).custom_formatter(|_, _| k.text.clone());
-                            if ui.add(slider).changed() {
-                                edits.push((k.key.clone(), v));
+                    }
+                });
+                ui.separator();
+                egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
+                    for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
+                        ui.label(&k.name);
+                        match view.lists.iter().find(|(key, _)| *key == k.key) {
+                            Some((_, list)) => {
+                                crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
+                                    for (i, name) in list.iter().enumerate() {
+                                        if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
+                                            edits.push((k.key.clone(), i as f64));
+                                        }
+                                    }
+                                });
+                            }
+                            None => {
+                                let mut v = k.value;
+                                let slider =
+                                    egui::Slider::new(&mut v, k.min..=k.max).step_by(k.step).custom_formatter(|_, _| k.text.clone());
+                                if ui.add(slider).changed() {
+                                    edits.push((k.key.clone(), v));
+                                }
                             }
                         }
+                        ui.end_row();
                     }
-                    ui.end_row();
-                }
+                });
             });
-        });
         self.repeat_panel = open;
         self.repeat_soft = on;
         if lock != self.arp_locked {
@@ -9399,6 +10119,102 @@ impl App {
             }
         };
         self.sampling_act(act);
+    }
+
+    /// Arm a session recording of the master output (pick the file and open the Recorder
+    /// window, metering but not yet writing — Play begins it), or stop/cancel a live one.
+    /// Refuses when the Sampling recorder already holds the engine tap (mutual exclusion).
+    fn toggle_session_record(&mut self) {
+        if self.session.active() {
+            self.stop_session_record();
+            return;
+        }
+        let Some(rate) = self.session_record_rate() else { return };
+        let project = self.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned());
+        let default = session_record::session_filename(project.as_deref(), &session_record::session_stamp());
+        let mut dialog = rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(default);
+        if let Some(dir) = &self.settings.session_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        self.arm_session_record(path, rate);
+    }
+
+    /// The rate a session recording would be made at, if one can start now: not while
+    /// Sampling records an internal source (it holds the engine's one tap), and only with
+    /// an engine to tap. Says why not.
+    fn session_record_rate(&mut self) -> Option<u32> {
+        if self.recorder.busy() && self.recorder.is_internal_active() {
+            self.error = Some("Can't start a session recording while Sampling is recording from an internal source. Stop it first.".into());
+            return None;
+        }
+        // The tap is the engine's: without one (nothing played yet) it would be dropped, and
+        // the whole recording would be silence.
+        self.ensure_engine();
+        match &self.output {
+            Some(Ok(o)) if o.has_engine() => Some(o.rate),
+            Some(Ok(_)) => {
+                self.error = Some("Nothing to record a session from: open a project first.".into());
+                None
+            }
+            _ => {
+                self.error = Some("No audio output to record from.".into());
+                None
+            }
+        }
+    }
+
+    /// Arm a session recording to `path`, at the output's `rate`.
+    fn arm_session_record(&mut self, path: PathBuf, rate: u32) {
+        let reserve = self.settings.session_reserve_mb as u64 * 1024 * 1024;
+        let free = session_record::free_bytes(path.parent().unwrap_or(&path)).unwrap_or(u64::MAX);
+        if !session_record::can_start(free, reserve) {
+            self.error = Some("Not enough free disk space to start a session recording.".into());
+            return;
+        }
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        // Sampling only metering an internal source makes way: its meter lets the tap go,
+        // and takes it up again when the session ends.
+        if self.recorder.is_internal_active() {
+            self.recorder.cancel(output);
+        }
+        // Arm: attach the master tap now so the window meters live, but write nothing until Play.
+        let buffer = self.session.attach_tap();
+        self.session.arm(path.clone(), rate, reserve);
+        if let Some(o) = output {
+            o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
+        }
+        self.settings.session_dir = path.parent().map(Path::to_path_buf);
+        self.settings.save();
+        self.session_window_open = true;
+        // Surface the time-available estimate once (the OS save dialog can't carry it); the
+        // window then shows it live once recording starts.
+        let left = session_record::seconds_available(free, reserve, rate);
+        self.status = format!("Session armed — press Play ({})", session_window::format_time_left(left));
+    }
+
+    /// Resume/begin recording, or pause it, from the window's Play/Pause control.
+    fn toggle_session_play(&mut self) {
+        match self.session.phase() {
+            session_record::SessionPhase::Armed | session_record::SessionPhase::Paused => {
+                self.session.play(session_record::started_label());
+            }
+            session_record::SessionPhase::Recording => self.session.pause(),
+            session_record::SessionPhase::Idle => {}
+        }
+    }
+
+    /// Stop and finalize a session recording (or cancel an armed one), releasing the tap and
+    /// closing the window.
+    fn stop_session_record(&mut self) {
+        self.session.stop();
+        if let Some(Ok(o)) = &self.output {
+            o.set_tap(None);
+        }
+        self.session_window_open = false;
     }
 
     fn start_recording(&mut self) {
@@ -9938,6 +10754,41 @@ impl App {
         roots
     }
 
+    fn forget_group_presets(&mut self, g: usize) {
+        use deckard_doc::FileItem;
+        self.saved.retain(|item, _| !matches!(item, FileItem::Group(group) | FileItem::Sound(group, _) if *group == g));
+    }
+
+    // Loads and resets retain the document slot's ID. Undo or redo can
+    // change which preset occupies that ID.
+    fn forget_replaced_presets(&mut self, label: Option<&str>) {
+        use deckard_doc::FileItem;
+        match label {
+            Some("Load Group" | "Paste Group" | "Clear Group" | "Clear rig group") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Group(_) | FileItem::Sound(..)));
+            }
+            Some("Load Sound" | "Cut Sound" | "Paste Sound" | "Paste Sounds" | "Reset Sound" | "Reset Sounds") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Sound(..)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Remember an editable preset only after its load succeeds.
+    fn remember_preset_source(
+        &mut self,
+        what: deckard_doc::FileItem,
+        item: &deckard_library::Item,
+        info: Option<mxprj::sound_info::SoundInfo>,
+    ) {
+        self.saved.remove(&what);
+        let Some(info) = info else { return };
+        let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
+        if id.is_some() {
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false });
+        }
+    }
+
     /// Save a sound, group or preset: again where it was (Save), or through the dialog.
     fn save_item(&mut self, what: deckard_doc::FileItem, mode: SaveMode) {
         use deckard_doc::FileItem;
@@ -9977,6 +10828,7 @@ impl App {
             },
             samples: mode == SaveMode::WithSamples,
             confirm_overwrite: false,
+            error: None,
         });
     }
 
@@ -10098,6 +10950,7 @@ impl App {
         let name = dlg.name.trim().replace(['/', '\\', ':'], "-");
         if name.is_empty() {
             self.status = "a name, to save it".into();
+            dlg.error = Some("It needs a name.".into());
             return;
         }
         let path = dlg.folder.join(format!("{name}.{ext}"));
@@ -10130,6 +10983,9 @@ impl App {
         let saved = Saved { id, path, info, samples: dlg.samples };
         if self.write_item(what, saved) {
             self.save_dialog = None;
+        } else if let Some(d) = &mut self.save_dialog {
+            // The status line is easy to miss behind the dialog.
+            d.error = Some(self.status.clone());
         }
     }
 
@@ -10278,8 +11134,8 @@ impl App {
             }
             B::Favorite(i, on) => {
                 if let Some(item) = b.results.items.get(i) {
-                    let p = item.path.clone();
-                    b.set_favorite(&p, on);
+                    let key = item.favorite_key();
+                    b.set_favorite(&key, on);
                 }
                 return;
             }
@@ -10337,6 +11193,17 @@ impl App {
                 }
                 return;
             }
+            B::StopPrehear => {
+                self.stop_prehear();
+                return;
+            }
+            B::PrehearFile(path) => {
+                b.file_selected = Some(path.clone());
+                if let Some(item) = browser::item_of(&path) {
+                    self.prehear_item(&item);
+                }
+                return;
+            }
             B::Rescan => return,
             B::LibraryFolder(dir, on) => {
                 let folders = &mut self.settings.library_folders;
@@ -10378,9 +11245,31 @@ impl App {
     }
 
     /// Stop whatever the browser is prehearing.
-    fn stop_prehear(&self) {
+    fn stop_prehear(&mut self) {
+        self.prehear_generation = self.prehear_generation.wrapping_add(1);
+        self.prehear_task = None;
         if let Some(Ok(out)) = &self.output {
             out.prehear(None, 0.0);
+        }
+    }
+
+    fn poll_prehear(&mut self) {
+        let Some((generation, receiver)) = self.prehear_task.take() else { return };
+        match receiver.try_recv() {
+            Ok(result) if generation == self.prehear_generation => match result {
+                Ok(sample) => {
+                    self.open_output_now();
+                    if let Some(Ok(out)) = &self.output {
+                        out.prehear(Some(std::sync::Arc::new(sample)), self.browser.prehear_gain);
+                    }
+                }
+                Err(e) => self.status = e,
+            },
+            Ok(_) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.prehear_task = Some((generation, receiver));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
     }
 
@@ -10399,15 +11288,15 @@ impl App {
             self.stop_prehear();
             return;
         };
-        let gain = self.browser.prehear_gain;
-        match deckard_engine::sample::Sample::load(&file) {
-            Ok(s) => {
-                if let Some(Ok(out)) = &self.output {
-                    out.prehear(Some(std::sync::Arc::new(s)), gain);
-                }
-            }
-            Err(e) => self.status = format!("can't prehear {}: {e}", file.display()),
-        }
+        self.stop_prehear();
+        self.open_output_now();
+        let generation = self.prehear_generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = deckard_engine::sample::Sample::load(&file).map_err(|e| format!("can't prehear {}: {e}", file.display()));
+            let _ = sender.send(result);
+        });
+        self.prehear_task = Some((generation, receiver));
     }
 
     /// Load a library item: a project opens; a group replaces the focused group; a
@@ -10433,8 +11322,9 @@ impl App {
                 return self.load_nks_preset(&item.name, (g, s), &bytes);
             }
             if !matches!(ext.as_str(), "mxinst" | "mxfx") {
-                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                if let Some(res) = deckard_plugins::nks::native_preset(&ext, &bytes, &self.catalog.entries) {
+                if let Some(res) =
+                    deckard_plugins::nks::native_preset_file(path, item.uuid.as_deref(), item.kind == Kind::Effect, &self.catalog.entries)
+                {
                     let plugin = res.map_err(|e| format!("{}: {e}", item.name))?;
                     return self.load_resolved_preset(&item.name, (g, s), plugin);
                 }
@@ -10473,7 +11363,12 @@ impl App {
                     }
                 };
                 drop(d);
+                if matches!(item.kind, Kind::Sound) {
+                    self.remember_preset_source(deckard_doc::FileItem::Sound(g, s), item, preset_load::editable_preset_info(item, &bytes));
+                }
                 if matches!(item.kind, Kind::Group) {
+                    self.forget_group_presets(g);
+                    self.remember_preset_source(deckard_doc::FileItem::Group(g), item, preset_load::editable_preset_info(item, &bytes));
                     self.editors
                         .retain(|&(c, ..)| !matches!(c, deckard_doc::Chain::Group(cg) | deckard_doc::Chain::Sound(cg, _) if cg == g));
                     self.slot_of = None;
@@ -10906,7 +11801,7 @@ impl App {
         if self.pages_of != Some(chain) {
             let kept = self.chain_pages.get(&chain);
             self.prop_page = kept.map_or(0, |k| k.prop_pages[self.prop_set.min(3)]);
-            if let (2, deckard_doc::Chain::Sound(..), Some(p)) = (self.prop_set, chain, self.groove_page) {
+            if let (2, Some(p)) = (self.prop_set, self.sound_groove_page(chain)) {
                 self.prop_page = p;
             }
             if self.slot_of != Some(chain) {
@@ -11001,8 +11896,8 @@ impl App {
         let kept = self.chain_pages.entry(chain).or_default();
         kept.slot = self.slot;
         kept.prop_pages[self.prop_set.min(3)] = self.prop_page;
-        if self.prop_set == 2 && self.channel && matches!(chain, deckard_doc::Chain::Sound(..)) {
-            self.groove_page = Some(self.prop_page);
+        if let (2, true, deckard_doc::Chain::Sound(g, s), Some(doc)) = (self.prop_set, self.channel, chain, &self.doc) {
+            doc.borrow_mut().set_groove_page(g, s, self.prop_page.min(2));
         }
         if let Some(i) = self.slot {
             kept.slot_pages.insert(i, self.plugin_page);
@@ -11021,9 +11916,6 @@ impl App {
             "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\n",
             self.song_view as u8, self.mixer as u8, self.mixer_sounds as u8, self.piano_roll as u8, self.prop_set
         );
-        if let Some(p) = self.groove_page {
-            t += &format!("groove_page {p}\n");
-        }
         let mut chains: Vec<_> = self.chain_pages.iter().collect();
         chains.sort_by_key(|(c, _)| format!("{c:?}"));
         for (c, k) in chains {
@@ -11052,11 +11944,6 @@ impl App {
                 Some("mixer") => self.mixer = flag(1).unwrap_or(self.mixer),
                 Some("mixer_sounds") => self.mixer_sounds = flag(1).unwrap_or(self.mixer_sounds),
                 Some("piano_roll") => self.piano_roll = flag(1).unwrap_or(self.piano_roll),
-                Some("groove_page") => {
-                    if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
-                        self.groove_page = Some(n.min(2));
-                    }
-                }
                 Some("props") => {
                     if let Some(n) = w.get(1).and_then(|v| v.parse::<usize>().ok()) {
                         self.prop_set = n.min(3);
@@ -11116,10 +12003,16 @@ impl App {
         }
     }
 
+    /// The Groove page sound `chain` was left on (kept with the sound), if it was.
+    fn sound_groove_page(&self, chain: deckard_doc::Chain) -> Option<usize> {
+        let deckard_doc::Chain::Sound(g, s) = chain else { return None };
+        self.doc.as_ref()?.borrow().groove_page(g, s)
+    }
+
     /// The page property set `set` of the chain shown was left on (0 if never shown).
     pub(crate) fn kept_prop_page(&self, set: usize) -> usize {
         let chain = self.chain();
-        if let (2, deckard_doc::Chain::Sound(..), Some(p)) = (set, chain, self.groove_page) {
+        if let (2, Some(p)) = (set, self.sound_groove_page(chain)) {
             return p;
         }
         self.chain_pages.get(&chain).map_or(0, |k| k.prop_pages[set.min(3)])
@@ -11315,9 +12208,29 @@ impl App {
     /// Make a routing choice from the channel properties.
     fn set_route(&mut self, r: layout::RouteSet) {
         let Some(doc) = self.doc.clone() else { return };
+        let count = doc.borrow().project().groups.get(self.group).map_or(0, |gr| gr.sounds.len());
         let mut d = doc.borrow_mut();
         let done = match r {
-            layout::RouteSet::Sound(g, s, route) => d.set_sound_route(g, s, route),
+            layout::RouteSet::Sound(g, s, route) => {
+                if let Some(sounds) = self.selected_sounds_for(g, s, count) {
+                    d.transaction("Sound Routing", |d| {
+                        for &si in &sounds {
+                            let self_route = matches!(
+                                &route,
+                                deckard_doc::SoundRoute::Output(deckard_model::AudioDest::Sound(dg, ds))
+                                    | deckard_doc::SoundRoute::Aux(_, deckard_model::AudioDest::Sound(dg, ds))
+                                    if (*dg, *ds) == (g, si)
+                            );
+                            if !self_route {
+                                d.set_sound_route(g, si, route.clone())?;
+                            }
+                        }
+                        Ok(())
+                    })
+                } else {
+                    d.set_sound_route(g, s, route)
+                }
+            }
             layout::RouteSet::Group(g, aux, dest) => d.set_group_route(g, aux, dest),
             layout::RouteSet::GroupMidiInput(g, name) => {
                 drop(d);
@@ -11342,12 +12255,8 @@ impl App {
         let (g, s, p) = (self.group, self.sound, self.pattern);
         let grid = self.grid;
         let polyphonic = self.piano_roll;
-        let kept = self.groove_settings.clone();
-        let saved = doc.borrow().has_groove_settings(g, s);
-        let lookup = |f: &str| -> Option<f64> {
-            if saved { doc.borrow().groove_setting(g, s, f) } else { kept.get(&(g, s, f.to_string())).copied() }
-        };
-        let settings: Vec<(String, f64)> = GROOVE_FIELDS.iter().filter_map(|f| lookup(f).map(|v| (f.to_string(), v))).collect();
+        let settings: Vec<(String, f64)> =
+            GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         // The scale selected (the pattern editor's, which is the controller's Keyboard
         // scale too; Chromatic is none): Generate keeps to it.
@@ -11390,15 +12299,8 @@ impl App {
             Some((k, base, made)) if *k == (g, p, s) && *made == now => base.clone(),
             _ => now,
         };
-        let kept = self.groove_settings.clone();
-        let saved = doc.borrow().has_groove_settings(g, s);
-        let settings: Vec<(String, f64)> = GROOVE_FIELDS
-            .iter()
-            .filter_map(|f| {
-                let v = if saved { doc.borrow().groove_setting(g, s, f) } else { kept.get(&(g, s, f.to_string())).copied() };
-                v.map(|v| (f.to_string(), v))
-            })
-            .collect();
+        let settings: Vec<(String, f64)> =
+            GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let grid = self.grid;
         if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, &get, &base) {
@@ -11534,6 +12436,28 @@ impl App {
             }));
         }
         if self.key_focus == KeyFocus::Sounds {
+            if cmd(egui::Key::A) {
+                self.select_all_sounds();
+            }
+            if !self.sound_selection.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.select_no_sounds();
+            }
+            let arrow = |m: egui::Modifiers, k: egui::Key| ctx.input_mut(|i| i.consume_key(m, k));
+            if arrow(egui::Modifiers::SHIFT, egui::Key::ArrowUp) {
+                if s > 0 {
+                    acts.push(Act::ClickSound { sound: s - 1, shift: true, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                if s > 0 {
+                    acts.push(Act::ClickSound { sound: s - 1, shift: false, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::SHIFT, egui::Key::ArrowDown) {
+                if s + 1 < self.group_len() {
+                    acts.push(Act::ClickSound { sound: s + 1, shift: true, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::NONE, egui::Key::ArrowDown) && s + 1 < self.group_len() {
+                acts.push(Act::ClickSound { sound: s + 1, shift: false, toggle: false });
+            }
             if cmd(egui::Key::X) || ev(|e| matches!(e, egui::Event::Cut)) {
                 acts.push(Act::CutSound(g, s));
             }
@@ -11598,6 +12522,9 @@ impl App {
         let (Some(clip), Some(doc)) = (self.note_clip.clone(), self.doc.clone()) else { return };
         let (g, focused, scene, song_view) = (self.group, self.pattern, self.scene, self.song_view);
         let (sound, keyboard, grid) = (self.sound, self.piano_roll, self.grid);
+        // Stopped with the playhead put in the pattern: ⌘V pastes there.
+        let mode = if song_view { Mode::Arrangement } else { Mode::Scene(scene) };
+        let head = self.parked.filter(|h| self.placed_head && self.playing.is_none() && h.mode == mode);
         let mut pasted = None;
         let r = doc.borrow_mut().transaction("Paste Notes", |d| {
             // The focused pattern; a group without one (clicked in the Group list)
@@ -11617,6 +12544,11 @@ impl App {
             let p = d.project();
             let group = &p.groups[g];
             let pat = &group.patterns[pi];
+            let plen = layout::pattern_len(p, g, pi).max(1);
+            let at = match (at, head) {
+                (clipboard::PasteAt::Keys, Some(h)) => clipboard::PasteAt::Playhead(parked_tick(p, h, plen)),
+                (at, _) => at,
+            };
             let add = clipboard::paste(&clip, at, sound, keyboard, pat.start, grid, group.sounds.len());
             if add.is_empty() {
                 return Ok(());
@@ -11711,12 +12643,7 @@ impl App {
     }
 
     pub fn groove_setting(&self, g: usize, s: usize, field: &str) -> Option<f64> {
-        let doc = self.doc.as_ref()?.borrow();
-        if doc.has_groove_settings(g, s) {
-            doc.groove_setting(g, s, field)
-        } else {
-            self.groove_settings.get(&(g, s, field.to_string())).copied()
-        }
+        self.doc.as_ref()?.borrow().groove_setting(g, s, field)
     }
 
     /// Ask the background watcher to scan MIDI ports again (e.g. for virtual ports).
@@ -11738,6 +12665,37 @@ impl App {
             self.midi_ports = midi_ports::probe();
         }
         &self.midi_ports
+    }
+
+    fn copy_plugin(&mut self, chain: deckard_doc::Chain, at: usize) {
+        let Some(doc) = self.doc.clone() else { return };
+        let key = self.plugin_slot_key(chain, at);
+        self.store_plugin_states_of(|slot| *slot == key);
+        match doc.borrow().copy_slot(chain, at) {
+            Ok(copy) => {
+                self.plugin_clipboard = Some(copy);
+                self.status = "Copied plug-in".into();
+            }
+            Err(e) => self.status = format!("Can't copy plug-in: {e}"),
+        }
+    }
+
+    fn paste_plugin(&mut self, chain: deckard_doc::Chain, over: Option<usize>) {
+        let Some(doc) = self.doc.clone() else { return };
+        self.store_plugin_states();
+        let Some(copy) = &self.plugin_clipboard else { return };
+        let pasted = match over {
+            Some(at) => doc.borrow_mut().paste_over_instrument(chain, at, copy).map(|()| at),
+            None => doc.borrow_mut().paste_slot(chain, copy),
+        };
+        match pasted {
+            Ok(at) => {
+                self.editors.retain(|(c, ..)| *c != chain);
+                self.plugin_views.clear();
+                layout::apply_acts(self, vec![layout::Act::FocusChainSlot(chain, at)]);
+            }
+            Err(e) => self.status = format!("Can't paste plug-in: {e}"),
+        }
     }
 
     /// Move slot `from` of the focused chain to `to`; it stays shown.
@@ -12401,8 +13359,10 @@ impl App {
     fn sync_notes_played(&mut self) {
         let played = self.notes_played();
         self.lit = played.iter().map(|&(g, s, _)| (g, s)).collect();
+        self.hits.clone_from(&played);
         if let Some(Ok(out)) = &self.output {
             self.lit.extend(out.played_sounds());
+            self.hits.extend(out.played_notes());
         }
         if !matches!(self.controller, Some(Ok(_))) {
             return;
@@ -12470,6 +13430,7 @@ impl App {
 
     /// What [`App::logic`] does while the window is covered or minimized.
     fn background(&mut self, ctx: &egui::Context) {
+        self.poll_prehear();
         self.watch_tunes(ctx);
         self.share_tempo();
         self.follow_engine(ctx, undrawn(ctx, BACKGROUND_PACE));
@@ -12556,6 +13517,9 @@ impl eframe::App for App {
     /// Leave the MK3 dark, as it was before DECKARD started.
     fn on_exit(&mut self) {
         self.end_session();
+        // A session recording is finalized here (the app leaves without running destructors,
+        // and the file would be short of what was written since its last flush).
+        self.session.stop();
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
@@ -12669,8 +13633,10 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed, recording, or metering.
-        if self.recorder.busy() || self.recorder.is_metering() {
+        // The recorder takes up its audio every frame while armed, recording, or metering;
+        // a session recording must keep rendering too, or its silence-pad grows between
+        // polls and the meters freeze.
+        if self.recorder.busy() || self.recorder.is_metering() || self.session.active() {
             ctx.request_repaint();
         }
         self.update_slot_view();
@@ -12796,6 +13762,30 @@ impl App {
             self.pending_editor = false;
             self.open_plugin_editor(self.group, self.sound);
         }
+        if self.held.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+            self.release_held();
+        }
+        let before = (self.group, self.sound, self.scene, self.section, self.song_view);
+        // Hardware controllers and MIDI run before plug-in editor timers and UI panels so
+        // mutes, pattern switches and transport commands reach the audio thread at once.
+        self.sync_notes_played();
+        if !self.lit.is_empty() || !self.hits.is_empty() {
+            // Unlight the flashed numbers on time.
+            ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
+        }
+        let mut hw_requests = Vec::new();
+        self.mk3_sync(ui.ctx(), &mut hw_requests, false);
+        self.jam_sync(ui.ctx(), false);
+        if !hw_requests.is_empty() {
+            self.handle(hw_requests);
+        }
+        self.follow_edits();
+        self.midi_sync(ui.ctx());
+        self.midi_devices_sync(ui.ctx());
+        self.follow_edits();
+        self.sync_clocks(ui.ctx());
+        self.input_sync();
+
         // Plug-ins' timers, which this app's repainting would otherwise starve.
         deckard_plugins::editor::serve_timers();
         self.poll_wine();
@@ -12807,9 +13797,6 @@ impl App {
             // On Linux the editors' timers run from these ticks: keep them coming.
             ctx.request_repaint_after(std::time::Duration::from_millis(if cfg!(target_os = "linux") { 16 } else { 250 }));
         }
-        if self.held.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
-            self.release_held();
-        }
         self.follow_edits();
         self.keep_session_soon();
         if self.session_due.is_some() {
@@ -12820,8 +13807,11 @@ impl App {
             out.set_focus(Some(self.group));
         }
         self.update_meters(ctx, std::time::Duration::ZERO);
+        self.poll_prehear();
+        if self.prehear_task.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
 
-        let before = (self.group, self.sound, self.scene, self.section, self.song_view);
         layout::header(self, ui);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F4)) {
             self.browse(browser::BrowseAct::Toggle);
@@ -12837,11 +13827,6 @@ impl App {
         }
 
         // The controller panel: tick the scripts, draw, and act on what they ask for.
-        self.sync_notes_played();
-        if !self.lit.is_empty() {
-            // Unlight the flashed numbers on time.
-            ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
-        }
         let mut requests = Vec::new();
         if let Some(c) = &mut self.controller {
             if self.show_controller {
@@ -12865,9 +13850,8 @@ impl App {
                 ctx.request_repaint_after(c.interval());
             }
         }
-        self.mk3_sync(ui.ctx(), &mut requests, false);
-        self.jam_sync(ui.ctx(), false);
         self.handle(requests);
+        self.follow_edits();
         self.sync_selection();
         self.sync_audio_settings();
         self.sync_browse_page();
@@ -12886,11 +13870,6 @@ impl App {
                 self.follow_root(from, now.0);
             }
         }
-
-        self.midi_sync(ui.ctx());
-        self.midi_devices_sync(ui.ctx());
-        self.sync_clocks(ui.ctx());
-        self.input_sync();
         layout::body(self, ui);
         self.update_slot_view();
         self.follow_edits();
@@ -12970,6 +13949,15 @@ impl App {
         self.bounce_windows(ctx);
         if self.export.open {
             self.export_window(ctx);
+        }
+        if self.session_window_open {
+            match session_window::show(ctx, &self.session.view, self.session_window_pin.on()) {
+                session_window::WindowAction::TogglePlay => self.toggle_session_play(),
+                session_window::WindowAction::Stop => self.stop_session_record(),
+                session_window::WindowAction::Hide => self.session_window_open = false,
+                session_window::WindowAction::TogglePin => self.session_window_pin = self.session_window_pin.toggled(),
+                session_window::WindowAction::None => {}
+            }
         }
         if (self.group, self.sound, self.scene, self.section, self.song_view) != before {
             self.sync_controller();
@@ -16488,6 +17476,303 @@ mod tests {
         h.render().unwrap().save(dir.join("sampling-long.png")).unwrap();
     }
 
+    /// A catalog of 200 plug-ins, longer than any screen: the Plug-in Manager's list.
+    fn many_plugins(app: &mut App) {
+        app.catalog.entries = (0..200)
+            .map(|i| deckard_plugins::scan::Entry {
+                kind: deckard_plugins::scan::Kind::Vst3,
+                vendor: "Acme".into(),
+                name: format!("Plug-in {i:03}"),
+                instrument: i % 3 == 0,
+                location: String::new(),
+                cid: format!("{i:032X}"),
+            })
+            .collect();
+    }
+
+    /// On a short screen (shorter than a 1920x515 monitor, so that the Hardware tab of a
+    /// new project doesn't fit), Preferences and the panels that open as dialogs stay
+    /// inside the window, and what doesn't fit scrolls into view: the Hardware tab's last
+    /// setting is reached with the wheel instead of being cut off.
+    #[test]
+    fn dialogs_fit_a_short_window_and_scroll() {
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        many_plugins(&mut app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1920.0, 380.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        layout::style(&h.ctx);
+        h.run_steps(3);
+        let screen = h.ctx.content_rect();
+        let window = |h: &Harness<'static, App>, title: &str| {
+            // (A window's id is its title's text, which egui keeps as an `Option`.)
+            h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed(title))))).unwrap_or_else(|| panic!("{title} shown"))
+        };
+        for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+            h.state_mut().prefs = Some(tab);
+            h.run_steps(3);
+            let r = window(&h, "Preferences");
+            assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "tab {tab}: {r:?} in {screen:?}");
+        }
+        // The Plug-in Manager: its settings at the top, inside the window, and the end of
+        // its list out of sight (it scrolls, rather than the window growing). (On Linux the
+        // Wine settings come first and are taller than this screen: the tab scrolls too.)
+        h.state_mut().prefs = Some(0);
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        let r = h.get_by_label("Use VST3 Plug-ins").rect();
+        assert!(r.top() >= prefs.top() && r.bottom() <= prefs.bottom(), "{r:?} in {prefs:?}");
+        assert!(h.query_by_label("Acme — Plug-in 199").is_none_or(|n| n.rect().top() > prefs.bottom()), "the list scrolls");
+        h.state_mut().prefs = Some(4);
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        let last = |h: &Harness<'static, App>| h.get_by_label("Desktop theme").rect();
+        assert!(last(&h).bottom() > prefs.bottom(), "the Hardware tab is taller than the window: {:?} vs {prefs:?}", last(&h));
+        h.hover_at(prefs.center());
+        for _ in 0..20 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        assert!(last(&h).bottom() <= prefs.bottom(), "scrolled into view: {:?} in {prefs:?}", last(&h));
+        h.state_mut().prefs = None;
+        for (title, open) in [("Note Repeat / Arp", 0), ("Lock", 1)] {
+            h.state_mut().repeat_panel = open == 0;
+            h.state_mut().lock_panel = open == 1;
+            h.run_steps(3);
+            let r = window(&h, title);
+            assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "{title}: {r:?} in {screen:?}");
+        }
+    }
+
+    /// Renders every Preferences tab on a laptop screen into `DECKARD_RENDER_DIR`, to look
+    /// at (`cargo test -p deckard --bin deckard -- --ignored render_laptop_dialogs`).
+    #[test]
+    #[ignore]
+    fn render_laptop_dialogs() {
+        let Some(dir) = std::env::var_os("DECKARD_RENDER_DIR").map(PathBuf::from) else { return };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        many_plugins(&mut app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1366.0, 768.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        // (The app's own fonts, as at start-up: the harness has egui's.)
+        layout::style(&h.ctx);
+        h.run_steps(3);
+        for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+            h.state_mut().prefs = Some(tab);
+            h.run_steps(4);
+            h.render().unwrap().save(dir.join(format!("prefs-{tab}.png"))).unwrap();
+        }
+        // The Plug-in Manager on a short screen.
+        h.set_size(egui::vec2(1366.0, 380.0));
+        h.state_mut().prefs = Some(0);
+        h.run_steps(4);
+        h.render().unwrap().save(dir.join("prefs-0-short.png")).unwrap();
+        h.set_size(egui::vec2(1366.0, 768.0));
+        h.state_mut().prefs = None;
+        // The main window's toolbars, in each view, at both laptop sizes.
+        for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
+            h.set_size(egui::vec2(w, ht));
+            for (name, song, mixer, lfos, browser) in [
+                ("ideas", false, false, false, false),
+                ("song", true, false, false, false),
+                ("mixer", false, true, false, false),
+                ("lfos", false, false, true, false),
+                ("browser", false, false, false, true),
+            ] {
+                let app = h.state_mut();
+                (app.song_view, app.lfos, app.browser.open) = (song, lfos, browser);
+                app.set_mixer(mixer);
+                h.run_steps(4);
+                h.render().unwrap().save(dir.join(format!("main-{name}-{w}.png"))).unwrap();
+            }
+        }
+        h.set_size(egui::vec2(1366.0, 768.0));
+        let app = h.state_mut();
+        (app.song_view, app.lfos, app.browser.open) = (false, false, false);
+        app.set_mixer(false);
+        for (name, set) in [("repeat", 0), ("lock", 1), ("monitor", 2)] {
+            h.state_mut().repeat_panel = set == 0;
+            h.state_mut().lock_panel = set == 1;
+            h.state_mut().midi_monitor = set == 2;
+            h.run_steps(4);
+            h.render().unwrap().save(dir.join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    /// On a laptop screen (1366x768, and 1280x720 to be safe) every Preferences tab and
+    /// the dialogs a laptop user opens most stay inside the window, both ways.
+    #[test]
+    fn dialogs_fit_a_laptop_screen() {
+        for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
+            let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+            app.new_project();
+            many_plugins(&mut app);
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(w, ht))
+                .with_step_dt(1.0 / 60.0)
+                .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            layout::style(&h.ctx);
+            h.run_steps(3);
+            let screen = h.ctx.content_rect();
+            let fits = |h: &Harness<'static, App>, title: &str, what: &str| {
+                let r = h
+                    .ctx
+                    .memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed(title)))))
+                    .unwrap_or_else(|| panic!("{what} shown"));
+                assert!(screen.expand(0.5).contains_rect(r), "{w}x{ht} {what}: {r:?} in {screen:?}");
+            };
+            for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+                h.state_mut().prefs = Some(tab);
+                h.run_steps(3);
+                fits(&h, "Preferences", &format!("Preferences tab {tab}"));
+            }
+            h.state_mut().prefs = None;
+            h.state_mut().repeat_panel = true;
+            h.run_steps(3);
+            fits(&h, "Note Repeat / Arp", "Note Repeat / Arp");
+            h.state_mut().repeat_panel = false;
+            h.state_mut().lock_panel = true;
+            h.run_steps(3);
+            fits(&h, "Lock", "Lock");
+            h.state_mut().lock_panel = false;
+            h.state_mut().midi_monitor = true;
+            h.run_steps(3);
+            fits(&h, "MIDI Monitor", "MIDI Monitor");
+            let opened = h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed("MIDI Monitor"))))).unwrap();
+            h.run_steps(20);
+            fits(&h, "MIDI Monitor", "MIDI Monitor, later");
+            let later = h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed("MIDI Monitor"))))).unwrap();
+            assert!(
+                (later.width() - opened.width()).abs() < 1.0,
+                "{w}x{ht}: the MIDI Monitor doesn't keep widening: {opened:?} → {later:?}"
+            );
+            h.state_mut().midi_monitor = false;
+        }
+    }
+
+    /// Every character the app's own text uses (outside ASCII) has a glyph in its fonts:
+    /// none draws as a box ("Preferences ▸ General" did). Read from the sources, so a new
+    /// symbol is checked too.
+    #[test]
+    fn every_symbol_in_the_ui_has_a_glyph() {
+        fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if p.is_dir() {
+                    sources(&p, out);
+                } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+                    out.push(p);
+                }
+            }
+        }
+        // The non-ASCII characters inside string literals (not comments).
+        let mut used = std::collections::BTreeMap::<char, String>::new();
+        let mut files = Vec::new();
+        sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let (mut in_str, mut escaped) = (false, false);
+            for line in text.lines() {
+                let chars: Vec<char> = line.chars().collect();
+                let mut i = 0;
+                while i < chars.len() {
+                    let c = chars[i];
+                    if !in_str && c == '/' && chars.get(i + 1) == Some(&'/') {
+                        break;
+                    }
+                    if !in_str && c == '\'' {
+                        // A char literal ('"', '\'') or a lifetime: skip it.
+                        let close = chars[i + 1..].iter().take(4).position(|&x| x == '\'').map(|k| i + 1 + k);
+                        i = close.filter(|&k| k > i + 1).map_or(i + 1, |k| k + 1);
+                        continue;
+                    }
+                    if in_str && !escaped && !c.is_ascii() {
+                        used.entry(c).or_insert_with(|| f.file_name().unwrap().to_string_lossy().to_string());
+                    }
+                    if c == '"' && !escaped {
+                        in_str = !in_str;
+                    }
+                    escaped = in_str && c == '\\' && !escaped;
+                    i += 1;
+                }
+                escaped = false;
+            }
+        }
+        assert!(used.contains_key(&'▸'), "the scan finds the UI's symbols");
+        // Each font of the app's text, in order, read for its glyphs. (Not egui's
+        // `has_glyph`: it reports "no" for whatever the font that also draws the box
+        // supplies, here the emoji font, so every emoji would count as missing.)
+        let defs = layout::font_definitions();
+        let chain = &defs.families[&egui::FontFamily::Proportional];
+        let fonts: Vec<fontdue::Font> = chain
+            .iter()
+            .map(|name| {
+                let data = &defs.font_data[name];
+                let settings = fontdue::FontSettings { collection_index: data.index, ..Default::default() };
+                fontdue::Font::from_bytes(&data.font[..], settings).unwrap_or_else(|e| panic!("{name}: {e}"))
+            })
+            .collect();
+        let missing: Vec<String> = used
+            .iter()
+            .filter(|(c, _)| !fonts.iter().any(|f| f.lookup_glyph_index(**c) != 0))
+            .map(|(c, file)| format!("U+{:04X} {c} ({file})", *c as u32))
+            .collect();
+        assert!(missing.is_empty(), "no glyph for: {missing:?}");
+    }
+
+    /// On a laptop screen the header's groups don't overlap: the transport, centred, moves
+    /// right of Save rather than over it (at 1280 px it would cover it), and leaves the
+    /// master fader and the CPU meter their room. Narrower than its groups fit (900 px),
+    /// it stays centred, as before.
+    #[test]
+    fn the_header_fits_a_laptop_screen() {
+        for w in [1280.0, 1366.0, 1920.0] {
+            let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+            app.new_project();
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(w, 720.0))
+                .with_step_dt(1.0 / 60.0)
+                .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            layout::style(&h.ctx);
+            h.run_steps(3);
+            let at =
+                |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap_or_else(|| panic!("{name} drawn"));
+            let (save, restart, keys, master, cpu) = (at("save"), at("restart"), at("keys"), at("master"), at("cpu"));
+            assert!(save.right() <= restart.left(), "{w}: Save clear of the transport: {save:?} vs {restart:?}");
+            assert!(keys.right() <= master.left(), "{w}: the transport clear of the master fader: {keys:?} vs {master:?}");
+            assert!(cpu.right() <= w, "{w}: the CPU meter on the screen: {cpu:?}");
+            if w >= 1920.0 {
+                let mid = (restart.left() + keys.right()) / 2.0;
+                assert!((mid - w / 2.0).abs() < 2.0, "{w}: still centred where there's room: {mid}");
+            }
+        }
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 720.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        layout::style(&h.ctx);
+        h.run_steps(3);
+        let at = |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap();
+        let mid = (at("restart").left() + at("keys").right()) / 2.0;
+        assert!((mid - 450.0).abs() < 2.0, "900: too narrow to fit between: centred, as before ({mid})");
+    }
+
     /// The MASCHINE menu: the undo history undoes several steps at once; Open Recent
     /// asks about unsaved changes first.
     #[test]
@@ -18788,7 +20073,9 @@ mod tests {
         let omni_art = tmp.path().join("omnisphere");
         let omni_vendor = tmp.path().join("spectrasonics").join("omnisphere");
         let kontakt = tmp.path().join("kontakt");
-        for d in [&omni_art, &omni_vendor, &kontakt] {
+        let monark = tmp.path().join("monark");
+        let prism = tmp.path().join("prism");
+        for d in [&omni_art, &omni_vendor, &kontakt, &monark, &prism] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(omni_art.join("MST_artwork.png"), thumb_png).unwrap();
@@ -18796,6 +20083,10 @@ mod tests {
         std::fs::write(omni_vendor.join("MST_logo.png"), logo_png).unwrap();
         std::fs::write(kontakt.join("MST_artwork.png"), thumb_png).unwrap();
         std::fs::write(kontakt.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(monark.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(monark.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(prism.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(prism.join("MST_logo.png"), logo_png).unwrap();
 
         let prev = std::env::var_os("DECKARD_NI_IMAGE_DIR");
         // SAFETY: scoped to this unit test; `with_ni_pictures` rescans when the path changes.
@@ -18805,6 +20096,27 @@ mod tests {
         assert!(s.has_picture("omnisphere", true) && s.has_picture("omnisphere", false));
         assert_eq!(plugin_pictures::slot_key(&s, "Kontakt 7").as_deref(), Some("kontakt7"));
         assert!(s.has_picture("kontakt7", true) && s.has_picture("kontakt7", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Monark").as_deref(), Some("monark"));
+        assert!(s.has_picture("monark", true) && s.has_picture("monark", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Prism FX").as_deref(), Some("prismfx"));
+        assert!(s.has_picture("prismfx", true) && s.has_picture("prismfx", false));
+        let mut app = App::default();
+        app.new_project();
+        app.load_resolved_preset(
+            "Bass Sting",
+            (0, 0),
+            deckard_plugins::nks::Resolved {
+                id: "Native Instruments:VST3:INSTR:5653544E6952367265616B746F722036".into(),
+                name: "Monark".into(),
+                chunk: Vec::new(),
+                pages: Vec::new(),
+            },
+        )
+        .unwrap();
+        let doc = app.doc.as_ref().unwrap().borrow();
+        let slot = &doc.project().groups[0].sounds[0].slots[0];
+        assert_eq!(slot.name, "Monark");
+        assert_eq!(plugin_pictures::slot_key(&s, &slot.name).as_deref(), Some("monark"));
         plugin_pictures::ensure_browser_product(&s, "Omnisphere");
         assert!(s.has_picture("artwork:omnisphere", true) && s.has_picture("artwork:omnisphere", false));
         match prev {
@@ -19547,6 +20859,43 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert_eq!(app.parked.expect("parked unchanged").position as i64, 2 * PPQ);
     }
 
+    /// ⌘V while stopped, with the playhead put in the pattern, pastes at the playhead
+    /// (not after the copied notes, which would make the pattern longer); once played,
+    /// it pastes after them again.
+    #[test]
+    fn keys_paste_at_the_playhead_put_in_the_pattern() {
+        let mut app = App { grid: PPQ / 4, ..App::default() };
+        app.new_project();
+        app.controller = None;
+        let doc = app.doc.clone().unwrap();
+        doc.borrow_mut().add_pattern(0, 0, "P").unwrap();
+        doc.borrow_mut().assign_pattern(0, 0, Some(0)).unwrap();
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: PPQ / 2,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        doc.borrow_mut().edit_notes("t", 0, 0, &[], &[note(0), note(PPQ)]).unwrap();
+        let len = layout::pattern_len(doc.borrow().project(), 0, 0);
+        let at = || -> Vec<i64> { doc.borrow().project().groups[0].patterns[0].notes.iter().map(|n| n.position).collect() };
+        app.pattern = 0;
+        app.copy_notes(false);
+        app.seek_pattern(2 * PPQ);
+        app.paste_notes(clipboard::PasteAt::Keys);
+        assert_eq!(at(), [0, PPQ, 2 * PPQ, 3 * PPQ]);
+        assert_eq!(layout::pattern_len(doc.borrow().project(), 0, 0), len, "no longer");
+        // Not placed (played since): after the copied notes, on the grid.
+        app.placed_head = false;
+        doc.borrow_mut().undo();
+        app.paste_notes(clipboard::PasteAt::Keys);
+        assert_eq!(at(), [0, PPQ, 3 * PPQ / 2, 5 * PPQ / 2]);
+    }
+
     /// Drawing or adding notes in the Pattern Editor when the focused group has no active
     /// pattern creates `"Pattern 1"` with the default pattern length, assigns it to the
     /// active scene, and adds the drawn notes in a single undo step.
@@ -19742,4 +21091,24 @@ fn confirmed_quit_bypasses_periodic_work_and_keeps_close_requested() {
     assert!(
         output.viewport_output[&eframe::egui::ViewportId::ROOT].commands.iter().any(|c| matches!(c, eframe::egui::ViewportCommand::Close))
     );
+}
+
+/// Where the parked playhead `h` is in a pattern `plen` ticks long, from its start (as
+/// [`App::seek_pattern`] put it there): in Song view, from its section's start.
+fn parked_tick(p: &deckard_model::Project, h: Playhead, plen: i64) -> i64 {
+    let pos = h.position.max(0.0) as i64;
+    let from = match h.mode {
+        Mode::Arrangement => {
+            let mut start = 0i64;
+            for sec in &p.sections {
+                if pos < start + sec.length {
+                    break;
+                }
+                start += sec.length;
+            }
+            start
+        }
+        _ => 0,
+    };
+    (pos - from).max(0).rem_euclid(plen.max(1))
 }

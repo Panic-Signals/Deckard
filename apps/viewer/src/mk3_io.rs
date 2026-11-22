@@ -241,6 +241,7 @@ struct Shared {
     repaint: Option<eframe::egui::Context>,
     /// What the LEDs should show.
     leds: Option<deckard_mk3::leds::Leds>,
+    leds_seq: u64,
     #[cfg(test)]
     leds_applied: Option<(deckard_mk3::leds::Leds, Instant)>,
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
@@ -271,6 +272,8 @@ struct Shared {
     /// dark since `closing`.
     connected: bool,
     displays_connected: bool,
+    /// The first look for the controller is over (found or not).
+    probed: bool,
     leds_closed: bool,
     displays_closed: bool,
     /// The MIDI Monitor, shown what the pads play.
@@ -380,7 +383,9 @@ impl Mk3Io {
 
     /// Light the LEDs so (sent when they change).
     pub fn set_leds(&self, leds: deckard_mk3::leds::Leds) {
-        self.shared.lock().unwrap().leds = Some(leds);
+        let mut s = self.shared.lock().unwrap();
+        s.leds = Some(leds);
+        s.leds_seq = s.leds_seq.wrapping_add(1);
     }
 
     #[cfg(test)]
@@ -406,6 +411,25 @@ impl Mk3Io {
     /// Whether NI's software is keeping the MK3's screens from opening.
     pub fn agent_holding(&self) -> bool {
         self.shared.lock().unwrap().agent_holding
+    }
+
+    /// Whether the controller is there, once the first look for it is over: it's looked
+    /// for on a thread of its own, so asking as that starts always said no. Waits at
+    /// most `patience` for that first look.
+    pub fn found(&self, patience: Duration) -> bool {
+        let until = std::time::Instant::now() + patience;
+        loop {
+            {
+                let s = self.shared.lock().unwrap();
+                if s.probed || s.connected {
+                    return s.connected;
+                }
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Whether the MK3's screens are open.
@@ -438,14 +462,20 @@ fn run(shared: &Mutex<Shared>) {
         let mut dev = match deckard_mk3::Device::open() {
             Ok(d) => d,
             Err(e) => {
-                shared.lock().unwrap().status = e;
+                let mut s = shared.lock().unwrap();
+                s.status = e;
+                s.probed = true;
+                drop(s);
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
         // Clear the preceding host/session before waiting for the first UI state.
         if let Err(e) = dev.write_leds(&deckard_mk3::leds::Leds::default()) {
-            shared.lock().unwrap().status = format!("Maschine MK3: {e}");
+            let mut s = shared.lock().unwrap();
+            s.status = format!("Maschine MK3: {e}");
+            s.probed = true;
+            drop(s);
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
@@ -454,10 +484,12 @@ fn run(shared: &Mutex<Shared>) {
             let mut s = shared.lock().unwrap();
             s.status = format!("{} connected", dev.model().name);
             s.connected = true;
+            s.probed = true;
         }
         let mut events = Vec::new();
         // Shown on the LEDs: none yet, so the first state is sent.
         let mut shown = None;
+        let mut checked_leds_seq = 0u64;
         // The backlight write that succeeded, so a failed one is tried again and a
         // screen reconnect (a new stamp) is sent even when the level did not change.
         let mut applied_stamp = 0u64;
@@ -480,11 +512,109 @@ fn run(shared: &Mutex<Shared>) {
                 shared.lock().unwrap().leds_closed = true;
                 return;
             }
-            if let Err(e) = dev.poll(2, &mut events) {
+            if let Err(e) = dev.poll(1, &mut events) {
                 let mut s = shared.lock().unwrap();
                 s.status = format!("Maschine MK3: {e}");
                 s.connected = false;
                 break;
+            }
+            // Dispatch arrived pad/button events immediately before any LED/feature writes.
+            if !events.is_empty() {
+                let mut s = shared.lock().unwrap();
+                let route = s.route.unwrap_or(PadRoute {
+                    play: true,
+                    group: 0,
+                    keys: None,
+                    chords: None,
+                    velocity: None,
+                    scaling: 0,
+                    fixed: 100,
+                    touches: [PadTouch::default(); 16],
+                });
+                let out = s.output.clone().filter(Sender::has_engine);
+                let monitor = s.monitor.clone().filter(crate::midi_monitor::Monitor::is_open);
+                let shown_mon = |pad: usize, slot: Option<(usize, usize, i64)>, ev| {
+                    if let Some(m) = &monitor {
+                        m.pad(pad, slot.map(|x| x.2), ev);
+                    }
+                };
+                // What a pad's pressure (or release) sends, to the engine and the monitor.
+                let send = |pad: usize, slot: Option<(usize, usize, i64)>, lives: Vec<Live>| {
+                    use crate::midi_monitor::Pad;
+                    for l in lives {
+                        let ev = match l {
+                            Live::RepeatPressure { velocity, .. } => Pad::Pressure(velocity.clamp(0, 127) as u8),
+                            Live::Expression { value, .. } => Pad::PolyAt((value * 127.0).round() as u8),
+                            Live::ControlIn { kind, .. } => Pad::Control(kind),
+                            _ => continue,
+                        };
+                        if let Some(o) = &out {
+                            o.live(l);
+                        }
+                        shown_mon(pad, slot, ev);
+                    }
+                };
+                for e in &events {
+                    if let Event::PadPressure(p, v) = *e {
+                        let slot = p.checked_sub(1).and_then(|i| sounding.get(i)).copied().flatten();
+                        if out.is_some() {
+                            send(p, slot, touching.pressure(p, slot, v, &route));
+                        }
+                        continue;
+                    }
+                    let (pad, from_pressure) = match *e {
+                        Event::PadOn(p, v) => (p, ((pad_velocity(v, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
+                        Event::PadOff(p) => (p, 0),
+                        _ => continue,
+                    };
+                    let slot = pad.checked_sub(1).and_then(|i| sounding.get_mut(i));
+                    let rest = pad.checked_sub(1).and_then(|i| chord_rest.get_mut(i));
+                    if from_pressure == 0 {
+                        let rest = rest.map(std::mem::take).unwrap_or_default();
+                        if let (Some(o), Some(Some((group, sound, pitch)))) = (&out, slot.map(Option::take)) {
+                            for &(group, sound, pitch) in &rest {
+                                o.live(Live::NoteRelease { group, sound, pitch });
+                            }
+                            o.live(Live::NoteRelease { group, sound, pitch });
+                            shown_mon(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::Off);
+                            send(pad, Some((group, sound, pitch)), touching.release(pad, (group, sound, pitch), &route));
+                        } else if out.is_none() && route.play && route.keys.is_none() {
+                            s.pending.push((route.group, pad - 1, PAD_PITCH, 0));
+                        }
+                        continue;
+                    }
+                    if !route.play {
+                        continue;
+                    }
+                    let notes = pad_notes(&route, pad);
+                    let Some(&(sound, pitch)) = notes.first() else { continue };
+                    let group = route.group;
+                    let velocity = Touching::hit_velocity(&route, group, sound, from_pressure);
+                    match &out {
+                        Some(o) => {
+                            // Held until the pad is let go (Note Repeat / the Arp take held notes).
+                            o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
+                            shown_mon(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::On(velocity));
+                            touching.hit(pad, (group, sound, pitch), &route);
+                            if let Some(slot) = slot {
+                                *slot = Some((group, sound, pitch));
+                            }
+                            // (A chord's other notes sound with it; its pressure goes to the first.)
+                            let others: Vec<_> = notes[1..].iter().map(|&(sound, pitch)| (group, sound, pitch)).collect();
+                            for &(group, sound, pitch) in &others {
+                                o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
+                            }
+                            if let Some(rest) = rest {
+                                *rest = others;
+                            }
+                        }
+                        None => s.pending.extend(notes.iter().map(|&(sound, pitch)| (group, sound, pitch, velocity))),
+                    }
+                }
+                s.events.append(&mut events);
+                if let Some(ctx) = &s.repaint {
+                    ctx.request_repaint();
+                }
             }
             let (wanted, stamp) = {
                 let s = shared.lock().unwrap();
@@ -534,7 +664,15 @@ fn run(shared: &Mutex<Shared>) {
                     }
                 }
             }
-            let leds = shared.lock().unwrap().leds.clone();
+            let leds = {
+                let s = shared.lock().unwrap();
+                if s.leds_seq != checked_leds_seq {
+                    checked_leds_seq = s.leds_seq;
+                    s.leds.clone()
+                } else {
+                    None
+                }
+            };
             if leds.is_some() && leds != shown {
                 if let Some(l) = &leds
                     && let Err(e) = dev.write_leds(l)
@@ -549,104 +687,6 @@ fn run(shared: &Mutex<Shared>) {
                     shared.lock().unwrap().leds_applied = Some((l.clone(), Instant::now()));
                 }
                 shown = leds;
-            }
-            if events.is_empty() {
-                continue;
-            }
-            let mut s = shared.lock().unwrap();
-            let route = s.route.unwrap_or(PadRoute {
-                play: true,
-                group: 0,
-                keys: None,
-                chords: None,
-                velocity: None,
-                scaling: 0,
-                fixed: 100,
-                touches: [PadTouch::default(); 16],
-            });
-            let out = s.output.clone().filter(Sender::has_engine);
-            let monitor = s.monitor.clone().filter(crate::midi_monitor::Monitor::is_open);
-            let shown = |pad: usize, slot: Option<(usize, usize, i64)>, ev| {
-                if let Some(m) = &monitor {
-                    m.pad(pad, slot.map(|x| x.2), ev);
-                }
-            };
-            // What a pad's pressure (or release) sends, to the engine and the monitor.
-            let send = |pad: usize, slot: Option<(usize, usize, i64)>, lives: Vec<Live>| {
-                use crate::midi_monitor::Pad;
-                for l in lives {
-                    let ev = match l {
-                        Live::RepeatPressure { velocity, .. } => Pad::Pressure(velocity.clamp(0, 127) as u8),
-                        Live::Expression { value, .. } => Pad::PolyAt((value * 127.0).round() as u8),
-                        Live::ControlIn { kind, .. } => Pad::Control(kind),
-                        _ => continue,
-                    };
-                    if let Some(o) = &out {
-                        o.live(l);
-                    }
-                    shown(pad, slot, ev);
-                }
-            };
-            for e in &events {
-                if let Event::PadPressure(p, v) = *e {
-                    let slot = p.checked_sub(1).and_then(|i| sounding.get(i)).copied().flatten();
-                    if out.is_some() {
-                        send(p, slot, touching.pressure(p, slot, v, &route));
-                    }
-                    continue;
-                }
-                let (pad, from_pressure) = match *e {
-                    Event::PadOn(p, v) => (p, ((pad_velocity(v, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
-                    Event::PadOff(p) => (p, 0),
-                    _ => continue,
-                };
-                let slot = pad.checked_sub(1).and_then(|i| sounding.get_mut(i));
-                let rest = pad.checked_sub(1).and_then(|i| chord_rest.get_mut(i));
-                if from_pressure == 0 {
-                    let rest = rest.map(std::mem::take).unwrap_or_default();
-                    if let (Some(o), Some(Some((group, sound, pitch)))) = (&out, slot.map(Option::take)) {
-                        for &(group, sound, pitch) in &rest {
-                            o.live(Live::NoteRelease { group, sound, pitch });
-                        }
-                        o.live(Live::NoteRelease { group, sound, pitch });
-                        shown(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::Off);
-                        send(pad, Some((group, sound, pitch)), touching.release(pad, (group, sound, pitch), &route));
-                    } else if out.is_none() && route.play && route.keys.is_none() {
-                        s.pending.push((route.group, pad - 1, PAD_PITCH, 0));
-                    }
-                    continue;
-                }
-                if !route.play {
-                    continue;
-                }
-                let notes = pad_notes(&route, pad);
-                let Some(&(sound, pitch)) = notes.first() else { continue };
-                let group = route.group;
-                let velocity = Touching::hit_velocity(&route, group, sound, from_pressure);
-                match &out {
-                    Some(o) => {
-                        // Held until the pad is let go (Note Repeat / the Arp take held notes).
-                        o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
-                        shown(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::On(velocity));
-                        touching.hit(pad, (group, sound, pitch), &route);
-                        if let Some(slot) = slot {
-                            *slot = Some((group, sound, pitch));
-                        }
-                        // (A chord's other notes sound with it; its pressure goes to the first.)
-                        let others: Vec<_> = notes[1..].iter().map(|&(sound, pitch)| (group, sound, pitch)).collect();
-                        for &(group, sound, pitch) in &others {
-                            o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
-                        }
-                        if let Some(rest) = rest {
-                            *rest = others;
-                        }
-                    }
-                    None => s.pending.extend(notes.iter().map(|&(sound, pitch)| (group, sound, pitch, velocity))),
-                }
-            }
-            s.events.append(&mut events);
-            if let Some(ctx) = &s.repaint {
-                ctx.request_repaint();
             }
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -774,6 +814,27 @@ mod tests {
     use super::*;
     use deckard_model::pad_touch::{PadTouch, TouchMode};
     use deckard_model::{Dim, ExprKind, MidiKind};
+
+    /// The splash asks whether the MK3 is there as the look for it starts: the answer
+    /// waits for that first look, rather than saying no at once.
+    #[test]
+    fn found_waits_for_the_first_look() {
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        assert!(!io.found(Duration::from_millis(20)), "never looked: no, after the wait");
+        let s = io.shared.clone();
+        let looking = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let mut s = s.lock().unwrap();
+            s.connected = true;
+            s.probed = true;
+        });
+        assert!(io.found(Duration::from_secs(5)), "found once the look is over");
+        looking.join().unwrap();
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.shared.lock().unwrap().probed = true;
+        let t = std::time::Instant::now();
+        assert!(!io.found(Duration::from_secs(5)) && t.elapsed() < Duration::from_secs(1), "looked, not there: no at once");
+    }
 
     fn route(touch: PadTouch) -> PadRoute {
         let mut touches = [PadTouch::default(); 16];

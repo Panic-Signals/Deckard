@@ -8,7 +8,7 @@
 //! Nothing here is from NI's controller scripts.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -407,6 +407,9 @@ pub struct SoundView {
     pub used: bool,
     /// One of its notes is sounding.
     pub playing: bool,
+    /// The pitches of its notes that have just started (sequenced or played): what its
+    /// pad, and in Keyboard mode each note's pad, flashes white for.
+    pub hits: Vec<i64>,
     /// The Mixer: its level (dB, −∞ silent), pan (−1..1), meters (left, right;
     /// amplitude), headroom (its loudest since reset; amplitude) and plug-ins.
     pub mix: MixView,
@@ -550,6 +553,9 @@ pub struct ControlView {
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
+    /// The focused built-in synth (Replicant, Plaits, an internal instrument): its
+    /// patch's preview beside its picture.
+    pub scope: Option<ScopeView>,
     /// The sound's Generate page in Euclidean mode: its circle on the right screen.
     pub euclid: Option<EuclidView>,
     /// The sound's Generate page in Random mode: its notes on the right screen.
@@ -593,6 +599,15 @@ pub struct TunerView {
     pub in_tune: bool,
     pub reference: String,
     pub muted: bool,
+}
+
+/// A synth's preview on the right screen: `wave` is `columns` pairs of (low, high),
+/// each -1..1, 0 being the middle line; `envelope` is the preview note's level in each
+/// column, 0..1.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScopeView {
+    pub wave: Vec<(f32, f32)>,
+    pub envelope: Vec<f32>,
 }
 
 /// What Zhora's screens show. `note` is the note heard on its input and `cents` how far
@@ -686,6 +701,9 @@ pub struct KnobView {
     pub auto_mod: Option<String>,
     /// A macro controls its parameter (the macro icon at the top right of its name).
     pub in_macro: bool,
+    /// Its parameter has modulation in the active pattern (an indicator at the top right
+    /// of its name).
+    pub modulated: bool,
 }
 
 pub use deckard_model::sampling_view::{KnobPage, RecordPress, RecordState, SampleView, SamplingCall, SamplingKnob, StemsRun};
@@ -749,6 +767,8 @@ pub enum Action {
         inc: f64,
         fine: bool,
     },
+    /// ERASE + Control knob `.0` (0..8): remove its modulation.
+    EraseKnob(usize),
     /// The next (true) or previous page.
     Page(bool),
     /// The focused plug-in's page `.0` (from 0).
@@ -1131,6 +1151,8 @@ pub(crate) struct Shared {
     pub actions: Vec<Action>,
     pub page: String,
     pub leds: Leds,
+    pub pinned: BTreeSet<String>,
+    pub shown_pin: Option<(String, String)>,
 }
 
 impl Shared {
@@ -1166,6 +1188,10 @@ pub struct Surface {
     frames: u64,
     /// Pictures the scripts can draw ([`Surface::add_picture`]).
     pictures: screen::Pictures,
+    /// Held-page buttons pinned open (`EVENTS`, `SCENE`, `PATTERN`…), kept across script
+    /// reloads and saved in preferences.
+    pinned: BTreeSet<String>,
+    shown_pin: Option<(String, String)>,
 }
 
 impl Default for Surface {
@@ -1195,6 +1221,8 @@ impl Surface {
             pictures_changed: std::cell::Cell::new(false),
             frames: 0,
             pictures: Default::default(),
+            pinned: BTreeSet::new(),
+            shown_pin: None,
         };
         s.load();
         s
@@ -1250,8 +1278,13 @@ impl Surface {
 
     /// Load the scripts; on an error the last working ones stay.
     fn load(&mut self) -> bool {
+        if let Some(r) = &self.run {
+            let sh = r.shared.borrow();
+            self.pinned = sh.pinned.clone();
+            self.shown_pin = sh.shown_pin.clone();
+        }
         let page = self.run.as_ref().map_or(FIRST_PAGE.to_string(), |r| r.shared.borrow().page.clone());
-        match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode)) {
+        match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode), self.pinned.clone(), self.shown_pin.clone()) {
             Ok(run) => {
                 run.lua.set_app_data(self.pictures.clone());
                 self.run = Some(run);
@@ -1264,6 +1297,69 @@ impl Surface {
                 self.set_error(e);
                 false
             }
+        }
+    }
+
+    /// Held-page buttons whose pins (`SCREEN_1`) are switched on.
+    pub fn pinned(&self) -> BTreeSet<String> {
+        self.run.as_ref().map_or_else(|| self.pinned.clone(), |r| r.shared.borrow().pinned.clone())
+    }
+
+    /// The pinned button whose page is currently open on screen, if any.
+    pub fn pinned_open(&self) -> Option<String> {
+        match &self.run {
+            Some(r) => {
+                let sh = r.shared.borrow();
+                let (btn, _) = sh.shown_pin.as_ref()?;
+                (sh.pinned.contains(btn) && hold_page(btn) == Some(sh.page.as_str())).then(|| btn.clone())
+            }
+            None => self.shown_pin.as_ref().and_then(|(b, _)| self.pinned.contains(b).then(|| b.clone())),
+        }
+    }
+
+    /// Fast zero-allocation check whether [`Surface::pinned`] and [`Surface::pinned_open`]
+    /// match `pinned` and `open`.
+    pub fn pins_match(&self, pinned: &BTreeSet<String>, open: Option<&str>) -> bool {
+        match &self.run {
+            Some(r) => {
+                let sh = r.shared.borrow();
+                let cur_open = sh
+                    .shown_pin
+                    .as_ref()
+                    .and_then(|(b, _)| (sh.pinned.contains(b) && hold_page(b) == Some(sh.page.as_str())).then_some(b.as_str()));
+                sh.pinned == *pinned && cur_open == open
+            }
+            None => {
+                let cur_open = self.shown_pin.as_ref().and_then(|(b, _)| self.pinned.contains(b).then_some(b.as_str()));
+                self.pinned == *pinned && cur_open == open
+            }
+        }
+    }
+
+    /// Restore saved page pins (and `open` on screen if it is pinned).
+    pub fn set_pinned(&mut self, pinned: BTreeSet<String>, open: Option<&str>) {
+        let open = open.filter(|b| pinned.contains(*b)).and_then(|b| Some((b, hold_page(b)?)));
+        let base = self.run.as_ref().map_or_else(
+            || FIRST_PAGE.to_string(),
+            |r| {
+                let sh = r.shared.borrow();
+                sh.shown_pin
+                    .as_ref()
+                    .filter(|(b, _)| hold_page(b) == Some(sh.page.as_str()))
+                    .map_or_else(|| sh.page.clone(), |(_, back)| back.clone())
+            },
+        );
+        self.pinned = pinned;
+        self.shown_pin = open.map(|(b, _)| (b.to_string(), base.clone()));
+        if let Some(r) = &self.run {
+            let target_page = open.map_or(base, |(_, pg)| pg.to_string());
+            {
+                let mut sh = r.shared.borrow_mut();
+                sh.pinned = self.pinned.clone();
+                sh.shown_pin = self.shown_pin.clone();
+            }
+            let _ = sync_lua_pin(&r.lua, self.shown_pin.as_ref());
+            r.shared.borrow_mut().page = target_page;
         }
     }
 
@@ -1374,13 +1470,31 @@ impl Surface {
         let run = self.run.as_ref()?;
         let require: Function = run.lua.globals().get("require").ok()?;
         let mode: String = require.call::<Table>("lib.pads").ok()?.get("mode").ok()?;
-        Some((self.page(), mode))
+        let cur = self.page();
+        let back = require.call::<Table>("lib.pin").ok().and_then(|p| p.get::<Option<Table>>("shown").ok().flatten()).and_then(|s| {
+            let btn: String = s.get("button").ok()?;
+            (hold_page(&btn) == Some(cur.as_str())).then(|| s.get::<String>("back").ok())?
+        });
+        Some((back.unwrap_or(cur), mode))
     }
 
     /// Come back to a saved project's [`Surface::screen`]: `global.lua`'s `restore`.
     pub fn restore(&mut self, page: &str, mode: &str, v: &View, now: Instant) -> Vec<Action> {
+        let reopen = self.pinned_open();
         let r = self.with(v, Some(now), |run| {
+            if reopen.is_some() {
+                let _ = sync_lua_pin(&run.lua, None);
+            }
             self.call_global(run, "restore", (page, mode));
+            if let Some(btn) = &reopen
+                && let Some(pg) = hold_page(btn)
+            {
+                let back = run.shared.borrow().page.clone();
+                let pair = (btn.clone(), back);
+                if sync_lua_pin(&run.lua, Some(&pair)).is_ok() {
+                    run.shared.borrow_mut().page = pg.to_string();
+                }
+            }
         });
         r.map(|(_, a)| a).unwrap_or_default()
     }
@@ -1711,7 +1825,48 @@ fn one_colour(leds: &mut Leds, colour: i64) {
     }
 }
 
-fn start(sources: &sources::Sources, page: String, theme: &str, look: lcd::Look) -> mlua::Result<Run> {
+fn hold_page(button: &str) -> Option<&'static str> {
+    match button {
+        "MUTE" | "SOLO" | "SELECT" => Some("hold"),
+        "PATTERN" => Some("pattern"),
+        "SCENE" => Some("scene"),
+        "FOLLOW" => Some("grid"),
+        "EVENTS" => Some("events"),
+        "NOTE_REPEAT" => Some("note_repeat"),
+        _ => None,
+    }
+}
+
+fn sync_lua_pin(lua: &Lua, shown: Option<&(String, String)>) -> mlua::Result<()> {
+    let require: Function = lua.globals().get("require")?;
+    let pin: Table = require.call("lib.pin")?;
+    match shown {
+        Some((button, back)) => {
+            let t = lua.create_table()?;
+            t.set("button", button.as_str())?;
+            t.set("back", back.as_str())?;
+            pin.set("shown", t)?;
+            if let Some(pg) = hold_page(button)
+                && matches!(pg, "events" | "note_repeat")
+                && let Some(pt) = page_table(lua, pg)?
+                && let Some(f) = pt.get::<Option<Function>>("shown")?
+            {
+                let _ = f.call::<()>(());
+            }
+        }
+        None => pin.set("shown", Value::Nil)?,
+    }
+    Ok(())
+}
+
+fn start(
+    sources: &sources::Sources,
+    page: String,
+    theme: &str,
+    look: lcd::Look,
+    pinned: BTreeSet<String>,
+    shown_pin: Option<(String, String)>,
+) -> mlua::Result<Run> {
     // No file, process or OS access: the scripts only get the `deckard` API.
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::default())?;
     let shared = Rc::new(RefCell::new(Shared {
@@ -1723,6 +1878,8 @@ fn start(sources: &sources::Sources, page: String, theme: &str, look: lcd::Look)
         actions: Vec::new(),
         page,
         leds: leds::blank(),
+        pinned,
+        shown_pin,
     }));
     api::install(&lua, &shared)?;
     sources::install_require(&lua, sources.clone())?;

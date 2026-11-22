@@ -88,6 +88,28 @@ pub struct Item {
     pub tempo: Option<f64>,
     pub author: String,
     pub favorite: bool,
+    /// NI `k_sound_info.uuid` (e.g. to distinguish Reaktor ensemble snapshots sharing one `.ens`/`.rkplr` file).
+    pub uuid: Option<String>,
+    /// `<upid>/<rel_dir>` for locating previews under Native Browser Preview Library's `Samples/` folder.
+    pub preview_subpath: Option<PathBuf>,
+}
+
+impl Item {
+    /// Whether `path` is a multi-snapshot Reaktor ensemble container (`.ens` / `.rkplr`).
+    pub fn is_ensemble_container(path: &std::path::Path) -> bool {
+        path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ens") || e.eq_ignore_ascii_case("rkplr"))
+    }
+
+    /// Key used in DECKARD's `favorites` / `not_favorites` tables: `<path>#<uuid>` for
+    /// ensemble containers so siblings don't collide, and bare `<path>` for single-file presets.
+    pub fn favorite_key(&self) -> String {
+        match &self.uuid {
+            Some(u) if !u.is_empty() && Self::is_ensemble_container(&self.path) => {
+                format!("{}#{u}", self.path.to_string_lossy())
+            }
+            _ => self.path.to_string_lossy().into_owned(),
+        }
+    }
 }
 
 /// What the browser asks for.
@@ -198,14 +220,19 @@ impl Library {
             None => Results::default(),
         };
         // Maschine's favourites and DECKARD's: NI's file is never written, so one taken off
-        // here is remembered here.
-        let (favorites, not_favorites) = (self.own.favorites(), self.own.not_favorites());
-        let maschines: std::collections::HashSet<&PathBuf> = theirs.items.iter().filter(|i| i.favorite).map(|i| &i.path).collect();
+        // here is remembered here. Ensemble containers share one file across hundreds of
+        // snapshots, so key DECKARD's overrides by `<path>#<uuid>` and preserve NI's per-row
+        // favorite status instead of merging by file path alone.
+        let (favorites, not_favorites) = (self.own.favorite_keys(), self.own.not_favorite_keys());
         let mine: std::collections::HashSet<&PathBuf> = own.items.iter().map(|i| &i.path).collect();
-        let mut items: Vec<Item> = theirs.items.iter().filter(|i| !mine.contains(&i.path)).cloned().collect();
-        items.extend(own.items.iter().cloned());
+        let mut items: Vec<Item> = theirs.items.into_iter().filter(|i| !mine.contains(&i.path)).collect();
+        items.extend(own.items);
         for i in &mut items {
-            i.favorite = !not_favorites.contains(&i.path) && (favorites.contains(&i.path) || maschines.contains(&i.path));
+            let key = i.favorite_key();
+            let legacy_key = i.uuid.as_deref().filter(|u| !u.is_empty()).is_some_and(|_| Item::is_ensemble_container(&i.path));
+            let suppressed = not_favorites.contains(&key) || (!legacy_key && not_favorites.contains(&*i.path.to_string_lossy()));
+            let added = favorites.contains(&key) || (!legacy_key && favorites.contains(&*i.path.to_string_lossy()));
+            i.favorite = !suppressed && (added || i.favorite);
         }
         items.retain(|i| !q.favorites || i.favorite);
         let products: std::collections::BTreeSet<String> = theirs.products.into_iter().chain(own.products).collect();
@@ -247,5 +274,13 @@ impl Library {
 
     pub fn set_favorite(&mut self, path: &std::path::Path, on: bool) {
         let _ = self.own.set_favorite(path, on);
+    }
+
+    pub fn set_favorite_item(&mut self, item: &Item, on: bool) {
+        let _ = self.own.set_favorite_key(&item.favorite_key(), on);
+    }
+
+    pub fn set_favorite_key(&mut self, key: &str, on: bool) {
+        let _ = self.own.set_favorite_key(key, on);
     }
 }

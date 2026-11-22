@@ -438,6 +438,131 @@ fn ratchet_shots() {
     mk3(&mut h, "mk3-ratchet.png");
 }
 
+/// The Session Recorder window (manual: "Session recording"), mid-set: a running set
+/// timer, the scrolling waveform and the L/R meters, in the default Maschine theme. The
+/// window reads `session.view`, so no audio engine is needed — the state is set directly.
+#[test]
+#[ignore]
+fn session_recorder_shots() {
+    use crate::session_record::{SessionPhase, SessionView, bytes_per_second};
+    use std::collections::VecDeque;
+
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+
+    // A believable mid-set stereo waveform: per-bucket (left peak, right peak), the two
+    // channels pulsing a little differently.
+    let rate = 48_000u32;
+    let mut wave: VecDeque<(f32, f32)> = VecDeque::new();
+    for i in 0..180u32 {
+        let t = i as f32 / 180.0;
+        let env = 0.30 + 0.55 * (t * std::f32::consts::TAU * 3.0).sin().abs() * (0.6 + 0.4 * (t * 37.0).sin().abs());
+        let l = (env * (0.7 + 0.3 * (t * 101.0).sin()).abs()).min(0.97);
+        let r = (env * (0.7 + 0.3 * (t * 61.0).cos()).abs()).min(0.97);
+        wave.push_back((l, r));
+    }
+
+    let app = h.state_mut();
+    app.session_window_open = true;
+    app.session.view = SessionView {
+        phase: SessionPhase::Recording,
+        elapsed: 2537.0, // 00:42:17
+        started_label: "22:14".into(),
+        meter: (0.62, 0.48),
+        peak: (0.86, 0.74),
+        bytes: 2537 * bytes_per_second(rate),
+        free: 212_000_000_000,
+        reserve: 1_000_000_000,
+        rate,
+        path: Some(std::path::PathBuf::from("session-night-run-2026-11-17-2214.wav")),
+        wave,
+        error: None,
+        stopped: None,
+    };
+    // Cropped to the Recorder window, which egui lays out at the top-left.
+    window(&mut h, "session-recorder.png", Some((6, 14, 406, 383)));
+}
+
+/// A frame sequence of the play/pause flow (arm → record → pause → resume), one PNG per
+/// frame (`flow-000.png` …) in `$DECKARD_SHOTS`, for assembling into a demo GIF with
+/// ffmpeg. The clock advances a second per recording frame and holds while paused; the
+/// stereo waveform scrolls while recording and freezes while paused.
+#[test]
+#[ignore]
+fn session_recorder_flow_frames() {
+    use crate::session_record::{SessionPhase, SessionView, bytes_per_second};
+    use std::collections::VecDeque;
+
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+    let rate = 48_000u32;
+
+    const CAP: usize = 180;
+    // A continuous stereo signal: global bucket index `g` -> (left peak, right peak).
+    let sig = |g: f32, amp: f32| -> (f32, f32) {
+        let env = amp * (0.35 + 0.5 * (g * 0.11).sin().abs() * (0.6 + 0.4 * (g * 0.027).sin().abs()));
+        let l = (env * (0.7 + 0.3 * (g * 0.9).sin()).abs()).min(0.97);
+        let r = (env * (0.7 + 0.3 * (g * 0.5).cos()).abs()).min(0.97);
+        (l, r)
+    };
+
+    h.state_mut().session_window_open = true;
+
+    let mut g = 0.0f32;
+    let mut elapsed = 0.0f64;
+    let mut wave: VecDeque<(f32, f32)> = (0..CAP).map(|_| (0.012, 0.012)).collect();
+    let mut frame = 0u32;
+
+    // (phase, frames to hold, is the transport running, waveform amplitude).
+    let beats = [
+        (SessionPhase::Armed, 3u32, false, 0.0f32),
+        (SessionPhase::Recording, 9, true, 0.95),
+        (SessionPhase::Paused, 4, false, 0.0),
+        (SessionPhase::Recording, 9, true, 0.95),
+    ];
+    for (phase, frames, running, amp) in beats {
+        for _ in 0..frames {
+            if running {
+                for _ in 0..22 {
+                    wave.push_back(sig(g, amp));
+                    g += 1.0;
+                    if wave.len() > CAP {
+                        wave.pop_front();
+                    }
+                }
+                elapsed += 1.0;
+            }
+            let (meter, peak) = if running {
+                let p = 0.45 + 0.25 * (g * 0.3).sin().abs();
+                ((p * 0.8, p * 0.66), (p.min(0.97), (p * 0.85).min(0.97)))
+            } else {
+                ((0.015, 0.015), (0.0, 0.0))
+            };
+            h.state_mut().session.view = SessionView {
+                phase,
+                elapsed,
+                started_label: "22:14".into(),
+                meter,
+                peak,
+                bytes: (elapsed as u64) * bytes_per_second(rate),
+                free: 212_000_000_000,
+                reserve: 1_000_000_000,
+                rate,
+                path: Some(std::path::PathBuf::from("session-night-run-2026-11-19-2214.wav")),
+                wave: wave.clone(),
+                error: None,
+                stopped: None,
+            };
+            window(&mut h, &format!("flow-{frame:03}.png"), Some((6, 14, 406, 383)));
+            frame += 1;
+        }
+    }
+}
+
 /// The whole window in the desktop theme `$DECKARD_SHOT_DESKTOP` (LCD: `$DECKARD_SHOT_LCD`):
 /// the Ideas, Song, Mix and LFO views, and the Sampling page.
 #[test]

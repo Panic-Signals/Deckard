@@ -267,9 +267,19 @@ impl Plugin {
     /// plug-ins set themselves up on their first blocks (2–3 ms each for some, most of
     /// a 128-frame block's time). Only for an instance nothing else plays yet.
     pub fn warm_up(&mut self) {
+        let was_dirty = match &self.kind {
+            Kind::Vst3(v) => v.edits.lock().is_ok_and(|e| e.dirty),
+            _ => false,
+        };
         let silence = [0f32; MAX_BLOCK];
         for _ in 0..4 {
             self.process_input(MAX_BLOCK, &Transport::default(), Some((&silence, &silence)));
+        }
+        if let Kind::Vst3(v) = &mut self.kind
+            && !was_dirty
+            && let Ok(mut e) = v.edits.lock()
+        {
+            e.dirty = false;
         }
     }
 
@@ -546,6 +556,34 @@ impl Plugin {
         }
     }
 
+    /// A synth's preview for its scope: the waveform's columns and the note's envelope;
+    /// `None` for a plug-in without one, and until the preview of the current knob
+    /// values is rendered ([`Self::preview_job`]). It never renders.
+    pub fn scope(&self, columns: usize) -> Option<native::Scope> {
+        match &self.kind {
+            Kind::Native(p) => p.scope(columns),
+            _ => None,
+        }
+    }
+
+    /// What to render for the scope when the knobs moved since the last preview: render
+    /// it with this plug-in unlocked (the audio thread waits on its lock), then
+    /// [`Self::set_preview`].
+    pub fn preview_job(&self) -> Option<native::PreviewJob> {
+        match &self.kind {
+            Kind::Native(p) => p.preview_job(),
+            _ => None,
+        }
+    }
+
+    /// Keep a rendered preview, if the knobs are still where its job found them.
+    pub fn set_preview(&mut self, rendered: native::Preview) -> bool {
+        match &mut self.kind {
+            Kind::Native(p) => p.set_preview(rendered),
+            _ => false,
+        }
+    }
+
     /// Whether the plug-in's state changed by itself (a finished Tune) and is to be
     /// stored, without taking the news (as [`Plugin::take_dirty`] does).
     pub fn changed_by_itself(&self) -> bool {
@@ -741,6 +779,11 @@ impl Vst3 {
         }
         self.held = [false; 128];
         self.set_active(true);
+        // Restoring saved state is not an edit in the plug-in's UI (some VST3 controllers
+        // call `restartComponent` or `performEdit` inside `setComponentState`/`setState`).
+        if let Ok(mut e) = self.edits.lock() {
+            e.dirty = false;
+        }
         result
     }
 

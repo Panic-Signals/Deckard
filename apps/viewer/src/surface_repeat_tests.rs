@@ -70,3 +70,49 @@ fn the_engine_started_for_the_pads_repeats() {
     app.sync_arp();
     assert!(!app.idle_engine(48_000).repeating(), "off");
 }
+
+#[test]
+fn events_screen_pin_persists_across_restarts() {
+    let mut app = app();
+    let mut reqs = Vec::new();
+    app.mk3_events(
+        vec![
+            Event::Button("BUTTON_EVENTS", true),
+            Event::Button("BUTTON_SCREEN_1", true),
+            Event::Button("BUTTON_SCREEN_1", false),
+            Event::Button("BUTTON_EVENTS", false),
+        ],
+        &mut reqs,
+    );
+    assert_eq!(app.surface.page(), "events");
+    assert!(app.settings.pinned_pages.contains("EVENTS"));
+    assert_eq!(app.settings.pinned_open.as_deref(), Some("EVENTS"));
+    app.store_screen();
+    let bytes = app.doc.as_ref().unwrap().borrow().to_bytes().unwrap();
+
+    // Restart with Events still locked open on screen: reopens on Events even after
+    // restoring the project's saved screen.
+    let saved_settings = crate::settings::Settings::parse(&app.settings.to_text());
+    assert!(saved_settings.pinned_pages.contains("EVENTS"));
+    assert_eq!(saved_settings.pinned_open.as_deref(), Some("EVENTS"));
+    let mut restarted = crate::App::default();
+    restarted.settings = saved_settings;
+    restarted.surface = restarted.new_surface();
+    restarted.show_document(deckard_doc::Document::from_bytes(bytes.clone(), None));
+    assert_eq!(restarted.surface.page(), "events");
+
+    // Tap EVENTS to close it: pinned_open clears, EVENTS stays pinned for the next restart.
+    restarted.mk3_events(vec![Event::Button("BUTTON_EVENTS", true), Event::Button("BUTTON_EVENTS", false)], &mut reqs);
+    assert_eq!(restarted.surface.page(), "control");
+    assert!(restarted.settings.pinned_pages.contains("EVENTS"));
+    assert_eq!(restarted.settings.pinned_open, None);
+
+    let next_settings = crate::settings::Settings::parse(&restarted.settings.to_text());
+    let mut third = crate::App::default();
+    third.settings = next_settings;
+    third.surface = third.new_surface();
+    third.show_document(deckard_doc::Document::from_bytes(bytes, None));
+    assert_eq!(third.surface.page(), "control");
+    third.mk3_events(vec![Event::Button("BUTTON_EVENTS", true), Event::Button("BUTTON_EVENTS", false)], &mut reqs);
+    assert_eq!(third.surface.page(), "events");
+}

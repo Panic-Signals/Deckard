@@ -22,7 +22,7 @@ mod clips;
 pub use block::SavedScreen;
 pub use clips::CLIP;
 mod chain;
-pub use chain::{Chain, NewModule};
+pub use chain::{Chain, CopiedSlot, NewModule};
 pub use files::{FileItem, Samples, sample_refs};
 mod audio;
 mod lanes;
@@ -635,22 +635,29 @@ impl Document {
     }
 
     pub fn set_pattern_length(&mut self, g: usize, p: usize, ticks: i64) -> Result<(), String> {
-        let ops = self.param_ops(Target::Pattern(g, p), "length", Value::Int(ticks.max(deckard_model::PPQ / 4)))?;
+        let t = Target::Pattern(g, p);
+        let ops = self.param_ops(t, "length", Value::Int(ticks.max(deckard_model::PPQ / 4)))?;
         if ops.is_empty() {
             return Ok(());
         }
-        self.apply("Pattern Length", ops)
+        let params = vec![Some((t, "length".to_string())); ops.len()];
+        self.apply_with("Pattern Length", ops, params)
     }
 
     /// A pattern's start (where in its notes it begins, ticks, from 0) and length, as one
     /// edit.
     pub fn set_pattern_span(&mut self, g: usize, p: usize, start: i64, length: i64) -> Result<(), String> {
-        let mut ops = self.param_ops(Target::Pattern(g, p), "start", Value::Int(start.max(0)))?;
-        ops.extend(self.param_ops(Target::Pattern(g, p), "length", Value::Int(length.max(deckard_model::PPQ / 4)))?);
-        if ops.is_empty() {
+        let t = Target::Pattern(g, p);
+        let start_ops = self.param_ops(t, "start", Value::Int(start.max(0)))?;
+        let len_ops = self.param_ops(t, "length", Value::Int(length.max(deckard_model::PPQ / 4)))?;
+        if start_ops.is_empty() && len_ops.is_empty() {
             return Ok(());
         }
-        self.apply("Pattern Start", ops)
+        let mut params = vec![Some((t, "start".to_string())); start_ops.len()];
+        params.extend(std::iter::repeat_n(Some((t, "length".to_string())), len_ops.len()));
+        let mut ops = start_ops;
+        ops.extend(len_ops);
+        self.apply_with("Pattern Start", ops, params)
     }
 
     /// The groove of a sound (`Target::Sound`), group (`Target::Group`) or the master
@@ -711,6 +718,26 @@ impl Document {
         self.set("Cue", strip(target), "cue_enabled", Value::Int(cue as i64))
     }
 
+    /// Set several parameters as one undo step (e.g. across multiple selected sounds).
+    /// Continuous drags merge into the same step even when some targets hit a rail.
+    pub fn set_many(&mut self, label: &str, edits: &[(Target, &str, Value)]) -> Result<(), String> {
+        let mut ops = Vec::new();
+        let mut params = Vec::new();
+        for (target, field, value) in edits {
+            let t = match (*target, *field) {
+                (Target::Group(_), "level" | "pan" | "mute" | "cue_enabled") => strip(*target),
+                _ => *target,
+            };
+            let o = self.param_ops(t, field, value.clone())?;
+            params.extend(std::iter::repeat_n(Some((t, (*field).to_string())), o.len()));
+            ops.extend(o);
+        }
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.apply_step(label, ops, params, true)
+    }
+
     // ---- applying, undo, redo ------------------------------------------------------
 
     /// Apply `ops` as one undo step. Repeated changes to the same values within a
@@ -720,7 +747,16 @@ impl Document {
         self.apply_with(label, ops, params)
     }
 
-    fn apply_with(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>) -> Result<(), String> {
+    fn apply_with(&mut self, label: &str, ops: Vec<Op>, params: Vec<Option<(Target, String)>>) -> Result<(), String> {
+        self.apply_step(label, ops, params, false)
+    }
+
+    /// `apply_with`; with `batch` (an edit to several targets at once, [`Self::set_many`])
+    /// a step that changes only some of the previous step's values extends it too: a
+    /// sound at its rail drops out of a drag without splitting the drag in two. Any
+    /// other edit extends the previous step only when it changes the very same values,
+    /// so two settings turned one after the other undo in turn.
+    fn apply_step(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>, batch: bool) -> Result<(), String> {
         let mut undo = self.run(&ops)?;
         // An edit that took away an object's definition: anything still referring to
         // it keeps it (see `rehomed`).
@@ -731,15 +767,31 @@ impl Document {
             undo = self.run(&ops)?;
         }
         let now = Instant::now();
-        let same_targets = |s: &Step| {
+        let unique = |xs: &[Op]| (0..xs.len()).all(|i| xs[..i].iter().all(|a| op_target(a) != op_target(&xs[i])));
+        let same = |s: &Step| s.redo.len() == ops.len() && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b));
+        let some_of = |s: &Step| {
+            batch
+                && !ops.is_empty()
+                && unique(&s.redo)
+                && unique(&ops)
+                && ops.iter().all(|b| s.redo.iter().any(|a| op_target(a) == op_target(b)))
+        };
+        let can_merge = |s: &Step| {
             s.label == label
-                && s.redo.len() == ops.len()
                 && !s.redo.iter().chain(&ops).any(|op| matches!(op, Op::Append { .. } | Op::Pop { .. }))
-                && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b))
+                && (same(s) || some_of(s))
         };
         match self.undo.last_mut() {
-            Some(last) if same_targets(last) && now.duration_since(last.at) < MERGE_WINDOW => {
-                last.redo = ops;
+            Some(last) if can_merge(last) && now.duration_since(last.at) < MERGE_WINDOW => {
+                if last.redo.len() == ops.len() && last.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b)) {
+                    last.redo = ops;
+                } else {
+                    for b in ops {
+                        if let Some(a) = last.redo.iter_mut().find(|a| op_target(a) == op_target(&b)) {
+                            *a = b;
+                        }
+                    }
+                }
                 last.at = now;
             }
             _ => self.undo.push(Step::new(label, undo, ops, params.clone(), now)),
@@ -966,6 +1018,16 @@ impl Document {
             self.revision += 1;
             return;
         }
+        if !params.is_empty()
+            && params.iter().all(|p| matches!(p, Some((Target::Scene(_), f)) if f == "__patterns"))
+            && params.iter().all(|p| match p {
+                Some((Target::Scene(s), _)) => self.patch_scene_patterns(*s),
+                _ => false,
+            })
+        {
+            self.revision += 1;
+            return;
+        }
         let patched = params.iter().all(|p| match p {
             Some((target, field)) => self.patch(*target, field),
             None => false,
@@ -982,6 +1044,9 @@ impl Document {
     fn patch(&mut self, target: Target, field: &str) -> bool {
         if field == "plugin_chunk" {
             return self.patch_plugin_chunk(target);
+        }
+        if field == deckard_model::GROOVE {
+            return self.patch_groove(target);
         }
         let Ok(path) = self.param_path(target, field) else { return false };
         let value = match self.tree.at(&path) {
@@ -1039,6 +1104,9 @@ impl Document {
             (Target::Sound(g, s), "pan", Some(n), _) => p.groups[g].sounds[s].pan = n,
             (Target::Sound(g, s), "mute", Some(n), _) => p.groups[g].sounds[s].muted = n != 0.0,
             (Target::Sound(g, s), "midi_channel", Some(n), _) => p.groups[g].sounds[s].channel.midi_channel = n as i64,
+            (Target::Sound(g, s), "midi_thru", Some(n), _) => p.groups[g].sounds[s].channel.midi_thru = n != 0.0,
+            (Target::Sound(g, s), "audio_mute", Some(n), _) => p.groups[g].sounds[s].channel.audio_mute = n != 0.0,
+            (Target::Sound(g, s), "event_output_channel", Some(n), _) => p.groups[g].sounds[s].channel.midi_out_channel = n as i64,
             (Target::Sound(g, s), "base_key", Some(n), _) => p.groups[g].sounds[s].channel.base_key = n as i64,
             (Target::Sound(g, s), "choke_group", Some(n), _) => p.groups[g].sounds[s].channel.choke_group = n as i64,
             (Target::Sound(g, s), "choke_mode", Some(n), _) => p.groups[g].sounds[s].channel.choke_mode = n as i64,
@@ -1047,6 +1115,20 @@ impl Document {
             (Target::Sound(g, s), "input_gain", Some(n), _) => p.groups[g].sounds[s].channel.input_gain = n,
             (Target::Sound(g, s), "transpose", Some(n), _) => p.groups[g].sounds[s].channel.transpose = n as i64,
             (Target::Pattern(g, i), "name", _, Some(t)) if i < clips::CLIP => p.groups[g].patterns[i].name = t,
+            (Target::Pattern(g, i), "start", Some(n), _) if i < clips::CLIP => p.groups[g].patterns[i].start = n as i64,
+            (Target::Pattern(g, i), "length", Some(n), _) if i < clips::CLIP => {
+                p.groups[g].patterns[i].length = n as i64;
+                for sc in 0..p.scenes.len() {
+                    if p.scenes[sc].patterns.contains(&(g, i)) {
+                        let len = p.scene_length(sc);
+                        for sec in &mut p.sections {
+                            if sec.auto && sec.scene == Some(sc) {
+                                sec.length = len;
+                            }
+                        }
+                    }
+                }
+            }
             (Target::Scene(s), "name", _, Some(t)) => p.scenes[s].name = t,
             (Target::Zone(g, s, z), f, Some(n), _) => {
                 let zone = p.groups[g].sounds[s].sampler.as_mut().and_then(|smp| smp.zones.get_mut(z));
@@ -1659,5 +1741,68 @@ mod snapshot_tests {
         let snap = d.snapshot();
         let now = d.to_bytes().unwrap();
         assert_eq!(std::thread::spawn(move || snap.to_bytes().unwrap()).join().unwrap(), now);
+    }
+
+    #[test]
+    fn set_many_merges_continuous_drags_when_a_sound_clamps() {
+        let mut d = Document::new_project().unwrap();
+        d.set_many("Noop", &[]).unwrap();
+        d.set_many("Group Level", &[(Target::Group(0), "level", Value::Float(0.65))]).unwrap();
+        assert!((d.project().groups[0].level - 0.65).abs() < 1e-9);
+        d.set_many(
+            "Channel Switches",
+            &[
+                (Target::Sound(0, 0), "midi_thru", Value::Int(0)),
+                (Target::Sound(0, 0), "audio_mute", Value::Int(1)),
+                (Target::Sound(0, 0), "event_output_channel", Value::Int(5)),
+            ],
+        )
+        .unwrap();
+        assert!(!d.project().groups[0].sounds[0].channel.midi_thru);
+        assert!(d.project().groups[0].sounds[0].channel.audio_mute);
+        assert_eq!(d.project().groups[0].sounds[0].channel.midi_out_channel, 5);
+
+        d.set_level(Target::Sound(0, 1), 0.90).unwrap();
+        d.set_level(Target::Sound(0, 2), 0.50).unwrap();
+        if let Some(last) = d.undo.last_mut() {
+            last.at -= MERGE_WINDOW * 2;
+        }
+        let steps_before = d.undo_labels().len();
+
+        // Drag up +0.10, then +0.05 (Sound 1 clamps at 1.0 on the first frame, so the
+        // second frame only changes Sounds 0 and 2).
+        d.set_many(
+            "Level",
+            &[
+                (Target::Sound(0, 0), "level", Value::Float(0.85)),
+                (Target::Sound(0, 1), "level", Value::Float(1.00)),
+                (Target::Sound(0, 2), "level", Value::Float(0.60)),
+            ],
+        )
+        .unwrap();
+        d.set_many(
+            "Level",
+            &[
+                (Target::Sound(0, 0), "level", Value::Float(0.90)),
+                (Target::Sound(0, 1), "level", Value::Float(1.00)),
+                (Target::Sound(0, 2), "level", Value::Float(0.65)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(d.undo_labels().len(), steps_before + 1, "clamped sound did not split the drag step");
+        assert!((d.project().groups[0].sounds[0].level - 0.90).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[1].level - 1.00).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[2].level - 0.65).abs() < 1e-9);
+
+        assert!(d.undo());
+        assert!((d.project().groups[0].sounds[0].level - 0.75).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[1].level - 0.90).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[2].level - 0.50).abs() < 1e-9);
+
+        assert!(d.redo());
+        assert!((d.project().groups[0].sounds[0].level - 0.90).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[1].level - 1.00).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[2].level - 0.65).abs() < 1e-9);
     }
 }

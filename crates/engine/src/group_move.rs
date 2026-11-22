@@ -75,7 +75,12 @@ impl Engine {
             remap_live(event, a, b);
         }
         macro_rules! swap { ($($field:ident),*) => { $(if self.$field.len() > a.max(b) { self.$field.swap(a,b); })* }; }
-        swap!(sounds, instruments, fx, buses, bufs, sound_aux, group_aux, midi_inputs, live_hint, reuse);
+        swap!(sounds, instruments, fx, buses, bufs, sound_aux, group_aux, midi_inputs, live_hint, sound_muted, pattern_sigs, reuse);
+        for entry in &mut self.recent_live {
+            if entry.0 != u64::MAX {
+                entry.1 = moved(entry.1, a, b);
+            }
+        }
         for g in [a, b] {
             if let Some(p) = self.midi_inputs.get_mut(g).and_then(Option::as_mut) {
                 p.group_moved(g);

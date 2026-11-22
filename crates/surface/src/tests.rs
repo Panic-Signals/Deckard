@@ -2443,7 +2443,8 @@ fn holding_a_step_modulates_it() {
 }
 
 /// A knob touched twice quickly: on the Events and Step pages VELOCITY and PROBABILITY
-/// back to 100, on the Mixer the strip back to 0 dB.
+/// back to 100. Not on the Mixer: a knob turned fast is touched, let go and touched
+/// again, and its strip isn't to jump to 0 dB.
 #[test]
 fn a_knob_tapped_twice_resets_it() {
     use std::time::Duration;
@@ -2472,10 +2473,7 @@ fn a_knob_tapped_twice_resets_it() {
 
     press(&mut s, &v, "BUTTON_MIX");
     tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_secs(5));
-    assert_eq!(
-        tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)),
-        [Action::ChannelLevel { group: v.group, sound: Some(1), db: 0.0 }]
-    );
+    assert!(tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)).is_empty(), "the Mixer's knobs don't reset");
 }
 
 /// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
@@ -2554,6 +2552,26 @@ fn the_events_zoom_knobs_show_icons_while_touched() {
     assert!(s.screen_text(&v).contains(&"1×".to_string()), "knob 7: the lanes' size");
     hold(&mut s, &v, "BUTTON_CAP_6", false);
     assert!(!boxed(&mut s), "let go: gone");
+}
+
+/// Touching one of the Step page's knobs 5-8 shows what they do in a box over each, as
+/// the Events page does: knob 6 the 16 steps shown, knob 8 (Keyboard mode) the pitches.
+#[test]
+fn the_step_page_knobs_show_icons_while_touched() {
+    let (mut s, v) = (Surface::new(), view());
+    press(&mut s, &v, "BUTTON_STEP");
+    let boxed = |s: &Surface, k: usize| s.picture(&v)[250 * 960 + 480 + (k - 5) * 120 + 46][0] == 0x89;
+    assert!(!boxed(&s, 6), "not before a touch");
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    assert!(boxed(&s, 6), "knob 6: the steps shown");
+    assert!(!boxed(&s, 8), "knob 8 does nothing outside Keyboard mode");
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(!boxed(&s, 6), "let go: gone");
+    press(&mut s, &v, "BUTTON_SCREEN_4");
+    hold(&mut s, &v, "BUTTON_CAP_8", true);
+    assert!(boxed(&s, 6) && boxed(&s, 8), "Keyboard mode: knob 8 the pitches");
+    hold(&mut s, &v, "BUTTON_CAP_8", false);
+    assert_eq!(s.error(), None);
 }
 
 /// Browse: touching or turning knob 5, 6 or 7 shows all its values over the right
@@ -2696,6 +2714,72 @@ fn the_step_page_knob_5_zooms_the_right_screen() {
         "knob 6 pans 1 bar (bars 2-5)"
     );
     assert_eq!(s.error(), None);
+}
+
+/// An automated knob shows an indicator dot at the top right of its name (beside the
+/// macro icon when both apply, and while AUTO is on too), and disappears when cleared.
+#[test]
+fn an_automated_knob_shows_an_indicator_beside_its_name() {
+    let (mut s, mut v) = (Surface::new(), view());
+    for k in v.control.knobs.iter_mut().flatten() {
+        k.modulatable = true;
+        k.auto_mod = Some("0%".into());
+    }
+    let plain = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = true;
+    let with_auto = s.picture(&v);
+    let diff = |a: &[[u8; 4]], b: &[[u8; 4]]| -> Vec<(usize, usize)> {
+        (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| (i % 960, i / 960)).collect()
+    };
+    let changed = diff(&plain, &with_auto);
+    assert!(!changed.is_empty(), "modulated indicator drawn");
+    assert!(changed.iter().all(|&(x, y)| (340..360).contains(&x) && (234..247).contains(&y)), "{changed:?}");
+
+    // Alongside the macro icon: both show without colliding.
+    v.control.knobs[2].as_mut().unwrap().in_macro = true;
+    let both = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = false;
+    let macro_only = s.picture(&v);
+    let shifted = diff(&macro_only, &both);
+    assert!(!shifted.is_empty(), "modulated indicator beside macro icon");
+    assert!(shifted.iter().all(|&(x, y)| (330..343).contains(&x) && (234..247).contains(&y)), "{shifted:?}");
+
+    // Still shown while Auto-write is on, and on the monotone LCD theme.
+    v.auto_write = true;
+    let auto_plain = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = true;
+    assert!(!diff(&auto_plain, &s.picture(&v)).is_empty(), "shown while AUTO is on");
+
+    s.set_lcd("yellow");
+    s.set_theme("lcd");
+    let lcd_with = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = false;
+    assert!(!diff(&s.picture(&v), &lcd_with).is_empty(), "shown on LCD theme");
+}
+
+/// ERASE + tapping (or turning) a knob on the Control page removes its modulation, and
+/// doesn't trigger Touch Auto-write while the finger lifts.
+#[test]
+fn erase_and_tapping_a_knob_removes_its_modulation() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.playing, v.auto_write, v.touch_auto_write) = (true, true, true);
+    hold(&mut s, &v, "BUTTON_ERASE", true);
+    assert_eq!(hold(&mut s, &v, "BUTTON_CAP_3", true), [Action::EraseKnob(2)], "ERASE + tap");
+    assert!(s.tick(&v, now).is_empty(), "no TouchWrite while ERASE is held");
+    // Even if ERASE comes up before the finger leaves the knob, that tap doesn't write.
+    hold(&mut s, &v, "BUTTON_ERASE", false);
+    assert!(s.tick(&v, now).is_empty(), "no TouchWrite before CAP_3 lifts");
+    assert!(hold(&mut s, &v, "BUTTON_CAP_3", false).is_empty());
+    // Next plain touch writes as usual.
+    hold(&mut s, &v, "BUTTON_CAP_3", true);
+    assert!(s.tick(&v, now).contains(&Action::TouchWrite(2)));
+    hold(&mut s, &v, "BUTTON_CAP_3", false);
+
+    // ERASE + turning a knob also erases instead of turning.
+    hold(&mut s, &v, "BUTTON_ERASE", true);
+    assert_eq!(s.event(&Event::Knob(4, 0.05), &v, now), [Action::EraseKnob(4)], "ERASE + turn");
+    hold(&mut s, &v, "BUTTON_ERASE", false);
 }
 
 #[test]
@@ -3647,6 +3731,25 @@ fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
     }
 }
 
+#[test]
+fn pattern_page_shift_steps_length_by_a_sixteenth_like_start() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.pattern_start, v.pattern_length) = (3840, 3840);
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(s.event(&Event::Knob(2, 0.1), &v, now), [Action::PatternSpan { start: 3840 + 240, length: 3840 - 240 }], "START");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::PatternSpan { start: 3840 + 240, length: 3840 }], "POSITION");
+    assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(3840 + 240)], "LENGTH: a sixteenth longer");
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(3840 - 240)], "a sixteenth shorter");
+    // Off the grid, it snaps to the sixteenths; it never goes below one.
+    v.pattern_length = 3840 + 100;
+    assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(3840 + 240)]);
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(3840)]);
+    v.pattern_length = 240;
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(240)]);
+}
+
 /// A view with Zhora focused: its four pages, an A3 heard 2 cents sharp.
 fn zhora_view() -> View {
     let mut v = view();
@@ -3917,4 +4020,50 @@ fn a_long_pad_name_wraps_onto_a_second_line() {
     assert!(wrapped("ClosedHH Bionic 2") && !texts.iter().any(|t| t == "ClosedHH Bionic"), "{texts:?}");
     assert!(wrapped("dt02_kick-punchy_crunch"), "{texts:?}");
     assert!(texts.iter().any(|t| t == "Kick"), "a short name, one line: {texts:?}");
+}
+
+#[test]
+fn pinned_events_screen_persists_across_reloads_and_restarts() {
+    let (mut s, v) = (Surface::new(), view());
+    let now = Instant::now();
+    hold(&mut s, &v, "BUTTON_EVENTS", true);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty());
+    hold(&mut s, &v, "BUTTON_EVENTS", false);
+    assert_eq!(s.page(), "events");
+    assert!(s.pinned().contains("EVENTS"));
+    assert_eq!(s.pinned_open().as_deref(), Some("EVENTS"));
+    assert_eq!(s.leds(&v).get("LED_EVENTS"), Some(crate::leds::ON));
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Theme changes keep both the pin and the open pinned page.
+    s.set_theme("palenight");
+    assert_eq!(s.page(), "events");
+    assert_eq!(s.pinned_open().as_deref(), Some("EVENTS"));
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Restart while the pinned Events screen was open: reopens on Events over the
+    // project's saved base page, and restores the project's pad mode.
+    let mut s2 = Surface::new();
+    s2.set_pinned(s.pinned(), s.pinned_open().as_deref());
+    s2.set_theme("palenight");
+    let acts = s2.restore("mixer", "keyboard", &v, now);
+    assert!(acts.contains(&Action::KeyboardMode(true)), "{acts:?}");
+    assert_eq!(s2.page(), "events");
+    assert_eq!(s2.screen(), Some(("mixer".to_string(), "keyboard".to_string())));
+    assert_eq!(s2.leds(&v).get("LED_EVENTS"), Some(crate::leds::ON));
+    assert_eq!(s2.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Tapping EVENTS closes back to the base page, while keeping EVENTS pinned.
+    press(&mut s2, &v, "BUTTON_EVENTS");
+    assert_eq!(s2.page(), "mixer");
+    assert!(s2.pinned().contains("EVENTS"));
+    assert_eq!(s2.pinned_open(), None);
+
+    // Restart with EVENTS pinned (not open): starts on Control, and a tap locks Events open.
+    let mut s3 = Surface::new();
+    s3.set_pinned(s2.pinned(), s2.pinned_open().as_deref());
+    assert_eq!(s3.page(), FIRST_PAGE);
+    press(&mut s3, &v, "BUTTON_EVENTS");
+    assert_eq!(s3.page(), "events");
+    assert_eq!(s3.pinned_open().as_deref(), Some("EVENTS"));
 }

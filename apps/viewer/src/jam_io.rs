@@ -33,6 +33,7 @@ struct Shared {
     output: Option<Sender>,
     route: Option<PadMap>,
     leds: Option<Leds>,
+    leds_seq: u64,
     #[cfg(test)]
     leds_applied: Option<(Leds, Instant)>,
     repaint: Option<eframe::egui::Context>,
@@ -90,7 +91,9 @@ impl JamIo {
 
     /// Light the LEDs so (only what changed is sent).
     pub fn set_leds(&self, leds: Leds) {
-        self.shared.lock().unwrap().leds = Some(leds);
+        let mut s = self.shared.lock().unwrap();
+        s.leds = Some(leds);
+        s.leds_seq = s.leds_seq.wrapping_add(1);
     }
 
     #[cfg(test)]
@@ -152,44 +155,15 @@ fn run(shared: &Mutex<Shared>) {
         let mut events = Vec::new();
         // What each pad started, so it stops the same notes however the route changed.
         let mut sounding: Vec<PadNotes> = vec![Vec::new(); 64];
-        loop {
-            let (closing, enabled, leds) = {
-                let s = shared.lock().unwrap();
-                (s.closing, s.enabled, s.leds.clone())
-            };
-            if closing || !enabled {
-                let _ = jam.dark();
-                let mut s = shared.lock().unwrap();
-                s.closed = closing;
-                s.connected = false;
-                release(&s, &mut sounding);
-                if closing {
-                    return;
-                }
-                break;
-            }
-            let wrote = leds.as_ref().map_or(Ok(()), |l| jam.show(l));
-            #[cfg(test)]
-            if wrote.is_ok() {
-                if let Some(l) = &leds {
-                    shared.lock().unwrap().leds_applied = Some((l.clone(), Instant::now()));
-                }
-            }
-            let read = wrote.and_then(|()| jam.poll(2, &mut events));
-            if let Err(e) = read {
-                let mut s = shared.lock().unwrap();
-                s.status = format!("Maschine JAM: {e}");
-                s.connected = false;
-                release(&s, &mut sounding);
-                break;
-            }
+        let mut applied_leds_seq = 0u64;
+        let dispatch = |shared: &Mutex<Shared>, events: &mut Vec<Event>, sounding: &mut [PadNotes]| {
             if events.is_empty() {
-                continue;
+                return;
             }
             let mut s = shared.lock().unwrap();
             let out = s.output.clone().filter(Sender::has_engine);
             let route = s.route.clone();
-            for e in &events {
+            for e in events.iter() {
                 let Event::Pad { column, row, down } = *e else { continue };
                 let pad = usize::from(column) + usize::from(row) * 8;
                 if down {
@@ -210,9 +184,54 @@ fn run(shared: &Mutex<Shared>) {
                     }
                 }
             }
-            s.events.append(&mut events);
+            s.events.append(events);
             if let Some(ctx) = &s.repaint {
                 ctx.request_repaint();
+            }
+        };
+        loop {
+            let (closing, enabled) = {
+                let s = shared.lock().unwrap();
+                (s.closing, s.enabled)
+            };
+            if closing || !enabled {
+                let _ = jam.dark();
+                let mut s = shared.lock().unwrap();
+                s.closed = closing;
+                s.connected = false;
+                release(&s, &mut sounding);
+                if closing {
+                    return;
+                }
+                break;
+            }
+            // Poll inputs first (1 ms) and dispatch immediately before any LED writes.
+            if let Err(e) = jam.poll(1, &mut events) {
+                let mut s = shared.lock().unwrap();
+                s.status = format!("Maschine JAM: {e}");
+                s.connected = false;
+                release(&s, &mut sounding);
+                break;
+            }
+            dispatch(shared, &mut events, &mut sounding);
+            let leds = {
+                let s = shared.lock().unwrap();
+                (s.leds_seq != applied_leds_seq).then(|| (s.leds_seq, s.leds.clone())).and_then(|(seq, l)| l.map(|l| (seq, l)))
+            };
+            if let Some((seq, l)) = leds {
+                if let Err(e) = jam.show_polling(&l, &mut events) {
+                    let mut s = shared.lock().unwrap();
+                    s.status = format!("Maschine JAM: {e}");
+                    s.connected = false;
+                    release(&s, &mut sounding);
+                    break;
+                }
+                applied_leds_seq = seq;
+                #[cfg(test)]
+                {
+                    shared.lock().unwrap().leds_applied = Some((l, Instant::now()));
+                }
+                dispatch(shared, &mut events, &mut sounding);
             }
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -296,6 +315,7 @@ impl App {
     /// The JAM's events, to its script: the lights and the pads' route after them.
     /// Hardware-free, so tests drive it with made-up events.
     pub(crate) fn jam_events(&mut self, events: Vec<Event>, now: Instant) -> (Leds, PadMap) {
+        self.follow_edits();
         self.update_slot_view();
         if self.jam_settings_wanted {
             self.refresh_surface_settings();
@@ -313,6 +333,7 @@ impl App {
         }
         asked.extend(d.tick(&view, now));
         self.jam_asked(asked);
+        self.follow_edits();
         self.update_slot_view();
         let view = self.surface_view();
         let (leds, route) = (d.leds(&view, now), d.pad_map(&view, now));
@@ -390,7 +411,7 @@ impl App {
             pg.knobs
         };
         if let Some(Some((_, _, _, Some(edit)))) = knobs.get(pos).cloned() {
-            crate::layout::apply_acts(self, vec![edit.reset()]);
+            crate::layout::apply_acts(self, vec![crate::layout::Act::Exact(Box::new(edit.reset()))]);
         }
     }
 }

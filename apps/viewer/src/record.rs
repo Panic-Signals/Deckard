@@ -104,6 +104,22 @@ impl Take {
     pub fn new_recordings(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.empty_at_start.intersection(&self.recorded_into).copied()
     }
+
+    /// Empty pattern `at` was inserted into `group` during an active take: indices at or
+    /// above `at` in `group` shifted up by one.
+    pub fn insert_empty_pattern(&mut self, group: usize, at: usize) {
+        let shift = |set: &mut HashSet<(usize, usize)>| {
+            *set = set.drain().map(|(g, pi)| (g, if g == group && pi >= at { pi + 1 } else { pi })).collect();
+        };
+        shift(&mut self.empty_at_start);
+        shift(&mut self.recorded_into);
+        for h in self.held.values_mut() {
+            if h.on.group == group && h.pattern >= at {
+                h.pattern += 1;
+            }
+        }
+        self.empty_at_start.insert((group, at));
+    }
     /// Take in a recorded on or release: the edits it makes. A note goes in at once, a
     /// placeholder long (a tick, a grid step quantized, a repeat note its own length),
     /// replacing notes of its sound and pitch starting in that span; a release sets
@@ -425,6 +441,10 @@ impl Grow {
     pub fn record_at(&mut self, at: i64) {
         let b = at.max(0) / self.bar;
         self.recorded_bar = Some(self.recorded_bar.map_or(b, |prev| prev.max(b)));
+    }
+
+    pub fn has_recorded(&self) -> bool {
+        self.recorded_bar.is_some()
     }
 
     /// MK3 touchstrip progress (0..1) at `at` ticks into the growing pattern: spans the
