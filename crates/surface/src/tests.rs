@@ -2443,7 +2443,8 @@ fn holding_a_step_modulates_it() {
 }
 
 /// A knob touched twice quickly: on the Events and Step pages VELOCITY and PROBABILITY
-/// back to 100, on the Mixer the strip back to 0 dB.
+/// back to 100. Not on the Mixer: a knob turned fast is touched, let go and touched
+/// again, and its strip isn't to jump to 0 dB.
 #[test]
 fn a_knob_tapped_twice_resets_it() {
     use std::time::Duration;
@@ -2472,10 +2473,7 @@ fn a_knob_tapped_twice_resets_it() {
 
     press(&mut s, &v, "BUTTON_MIX");
     tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_secs(5));
-    assert_eq!(
-        tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)),
-        [Action::ChannelLevel { group: v.group, sound: Some(1), db: 0.0 }]
-    );
+    assert!(tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)).is_empty(), "the Mixer's knobs don't reset");
 }
 
 /// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
@@ -2554,6 +2552,26 @@ fn the_events_zoom_knobs_show_icons_while_touched() {
     assert!(s.screen_text(&v).contains(&"1×".to_string()), "knob 7: the lanes' size");
     hold(&mut s, &v, "BUTTON_CAP_6", false);
     assert!(!boxed(&mut s), "let go: gone");
+}
+
+/// Touching one of the Step page's knobs 5-8 shows what they do in a box over each, as
+/// the Events page does: knob 6 the 16 steps shown, knob 8 (Keyboard mode) the pitches.
+#[test]
+fn the_step_page_knobs_show_icons_while_touched() {
+    let (mut s, v) = (Surface::new(), view());
+    press(&mut s, &v, "BUTTON_STEP");
+    let boxed = |s: &Surface, k: usize| s.picture(&v)[250 * 960 + 480 + (k - 5) * 120 + 46][0] == 0x89;
+    assert!(!boxed(&s, 6), "not before a touch");
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    assert!(boxed(&s, 6), "knob 6: the steps shown");
+    assert!(!boxed(&s, 8), "knob 8 does nothing outside Keyboard mode");
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(!boxed(&s, 6), "let go: gone");
+    press(&mut s, &v, "BUTTON_SCREEN_4");
+    hold(&mut s, &v, "BUTTON_CAP_8", true);
+    assert!(boxed(&s, 6) && boxed(&s, 8), "Keyboard mode: knob 8 the pitches");
+    hold(&mut s, &v, "BUTTON_CAP_8", false);
+    assert_eq!(s.error(), None);
 }
 
 /// Browse: touching or turning knob 5, 6 or 7 shows all its values over the right
@@ -3711,6 +3729,25 @@ fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
         assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(want)]);
         v.pattern_length = want;
     }
+}
+
+#[test]
+fn pattern_page_shift_steps_length_by_a_sixteenth_like_start() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.pattern_start, v.pattern_length) = (3840, 3840);
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(s.event(&Event::Knob(2, 0.1), &v, now), [Action::PatternSpan { start: 3840 + 240, length: 3840 - 240 }], "START");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::PatternSpan { start: 3840 + 240, length: 3840 }], "POSITION");
+    assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(3840 + 240)], "LENGTH: a sixteenth longer");
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(3840 - 240)], "a sixteenth shorter");
+    // Off the grid, it snaps to the sixteenths; it never goes below one.
+    v.pattern_length = 3840 + 100;
+    assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(3840 + 240)]);
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(3840)]);
+    v.pattern_length = 240;
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(240)]);
 }
 
 /// A view with Zhora focused: its four pages, an A3 heard 2 cents sharp.

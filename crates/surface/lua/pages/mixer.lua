@@ -11,7 +11,6 @@
 --                     focus the previous / next sound (or group)
 
 local widgets = require("lib.widgets")
-local knobs = require("lib.knobs")
 local util = require("lib.util")
 
 local mixer = {}
@@ -69,16 +68,11 @@ local function moved_level(level, db)
 end
 
 function mixer.button(name, down)
-  local tapped = knobs.double_tap(name, down)
+  -- (A knob touched twice doesn't reset its strip: turning one fast is touch, let go,
+  -- touch, and it jumped to 0 dB mid-turn.)
   if not down then return end
   local s = deckard.state()
   local list, focused = channels(s)
-  -- (A knob tapped twice: its strip back to 0 dB.)
-  if tapped then
-    local at = (bank - 1) * STRIPS + tapped
-    if list[at] then set_level(s, at, 0) end
-    return true
-  end
   if name == "LEFT" then
     if bank > 1 then bank = bank - 1 end
   elseif name == "RIGHT" then

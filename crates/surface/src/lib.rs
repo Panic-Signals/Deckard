@@ -416,6 +416,9 @@ pub struct SoundView {
     pub used: bool,
     /// One of its notes is sounding.
     pub playing: bool,
+    /// The pitches of its notes that have just started (sequenced or played): what its
+    /// pad, and in Keyboard mode each note's pad, flashes white for.
+    pub hits: Vec<i64>,
     /// The Mixer: its level (dB, −∞ silent), pan (−1..1), meters (left, right;
     /// amplitude), headroom (its loudest since reset; amplitude) and plug-ins.
     pub mix: MixView,
@@ -589,6 +592,9 @@ pub struct ControlView {
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
+    /// The focused built-in synth (Replicant, Plaits, an internal instrument): its
+    /// patch's preview beside its picture.
+    pub scope: Option<ScopeView>,
     /// The sound's Generate page in Euclidean mode: its circle on the right screen.
     pub euclid: Option<EuclidView>,
     /// The sound's Generate page in Random mode: its notes on the right screen.
@@ -632,6 +638,15 @@ pub struct TunerView {
     pub in_tune: bool,
     pub reference: String,
     pub muted: bool,
+}
+
+/// A synth's preview on the right screen: `wave` is `columns` pairs of (low, high),
+/// each -1..1, 0 being the middle line; `envelope` is the preview note's level in each
+/// column, 0..1.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScopeView {
+    pub wave: Vec<(f32, f32)>,
+    pub envelope: Vec<f32>,
 }
 
 /// What Zhora's screens show. `note` is the note heard on its input and `cents` how far

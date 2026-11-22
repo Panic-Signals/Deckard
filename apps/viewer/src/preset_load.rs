@@ -5,8 +5,20 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 pub(crate) struct PreparedGroup {
     edit: deckard_doc::PreparedEdit,
+    source_info: Option<mxprj::sound_info::SoundInfo>,
     samples: deckard_engine::PreloadedSamples,
     natives: Vec<(deckard_plugins::Slot, deckard_model::PluginRef, deckard_plugins::Shared)>,
+}
+
+pub(super) fn editable_preset_info(item: &Item, bytes: &[u8]) -> Option<mxprj::sound_info::SoundInfo> {
+    if !item.user || std::fs::metadata(&item.path).ok()?.permissions().readonly() {
+        return None;
+    }
+    let mut info = mxprj::Project::parse(bytes).ok()?.sound_info().unwrap_or_default();
+    if info.name.is_empty() {
+        info.name = item.name.clone();
+    }
+    Some(info)
 }
 
 pub(crate) struct GroupLoad {
@@ -105,6 +117,80 @@ mod tests {
         let d = app.doc.as_ref().unwrap().borrow();
         assert_eq!(d.project().groups[0].name, item.name);
         assert_eq!(d.project().groups[1].name, "Edited while loading");
+    }
+
+    #[test]
+    fn saving_a_loaded_user_group_replaces_its_exact_source() {
+        for fallback in [false, true] {
+            use deckard_doc::{FileItem, Target};
+            let (mut app, dir, mut item) = fixture();
+            item.user = true;
+            let alternate = dir.path().join("other").join(item.path.file_name().unwrap());
+            std::fs::create_dir(alternate.parent().unwrap()).unwrap();
+            std::fs::copy(&item.path, &alternate).unwrap();
+            let original = std::fs::read(&alternate).unwrap();
+            let d = app.doc.clone().unwrap();
+            app.queue_group_load(&item, 0).unwrap();
+            if fallback {
+                app.poll_group_load();
+                d.borrow_mut().rename(Target::Group(1), "Edited while loading").unwrap();
+            }
+            finish(&mut app);
+            d.borrow_mut().set_level(Target::Sound(0, 0), 0.659).unwrap();
+            app.save_item(FileItem::Group(0), SaveMode::Save);
+            assert!(app.status.starts_with("saved "), "{}", app.status);
+            assert!(app.save_dialog.is_none());
+            assert_eq!(std::fs::read(&alternate).unwrap(), original);
+            let mut reopened = Document::new_project().unwrap();
+            reopened.load_group_file(0, &std::fs::read(&item.path).unwrap()).unwrap();
+            assert!((reopened.project().groups[0].sounds[0].level - 0.659).abs() < 1e-6);
+
+            item.user = false;
+            item.path = alternate;
+            app.queue_group_load(&item, 0).unwrap();
+            finish(&mut app);
+            app.save_item(FileItem::Group(0), SaveMode::Save);
+            assert!(app.save_dialog.is_some(), "factory presets use the Save dialog");
+            assert_eq!(std::fs::read(&item.path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn saving_a_loaded_user_sound_replaces_its_exact_source() {
+        use deckard_doc::{FileItem, Target};
+        let (mut app, dir, _) = fixture();
+        let what = FileItem::Sound(0, 0);
+        let d = app.doc.clone().unwrap();
+        let mut info = mxprj::sound_info::SoundInfo::default();
+        info.author = "Preset author".into();
+        let original = d.borrow().file_bytes(what, &info).unwrap();
+        let path = dir.path().join("Kick.mxsnd");
+        let other = dir.path().join("other").join("Kick.mxsnd");
+        std::fs::create_dir(other.parent().unwrap()).unwrap();
+        for file in [&path, &other] {
+            std::fs::write(file, &original).unwrap();
+        }
+        let mut item = crate::browser::item_of(&path).unwrap();
+        app.queue_item_load(&item, Some((0, 0))).unwrap();
+        app.poll_item_load();
+        app.poll_item_load();
+        d.borrow_mut().set_level(Target::Sound(0, 0), 0.659).unwrap();
+        app.save_item(what, SaveMode::Save);
+        assert!(app.status.starts_with("saved "), "{}", app.status);
+        assert!(app.save_dialog.is_none());
+        assert_eq!(std::fs::read(&other).unwrap(), original);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut reopened = Document::new_project().unwrap();
+        reopened.load_sound_file(0, 0, &bytes).unwrap();
+        assert!((reopened.project().groups[0].sounds[0].level - 0.659).abs() < 1e-6);
+        assert_eq!(mxprj::Project::parse(&bytes).unwrap().sound_info().unwrap().author, "Preset author");
+
+        item.user = false;
+        item.path = other;
+        app.load_item(&item, Some((0, 0))).unwrap();
+        app.save_item(what, SaveMode::Save);
+        assert!(app.save_dialog.is_some(), "factory presets use the Save dialog");
+        assert_eq!(std::fs::read(&item.path).unwrap(), original);
     }
 
     #[test]
@@ -290,8 +376,12 @@ impl App {
             match std::thread::Builder::new().name("deckard-group-load".into()).spawn(move || {
                 let result = std::fs::read(&item.path)
                     .map_err(|e| e.to_string())
-                    .and_then(|bytes| snapshot.prepare("Load Group", |d| d.load_group_file_with(g, &bytes, routing, patterns)))
-                    .map(|edit| {
+                    .and_then(|bytes| {
+                        snapshot
+                            .prepare("Load Group", |d| d.load_group_file_with(g, &bytes, routing, patterns))
+                            .map(|edit| (edit, editable_preset_info(&item, &bytes)))
+                    })
+                    .map(|(edit, source_info)| {
                         let (samples, natives) = match edit.project().groups.get(g) {
                             Some(grp) => std::thread::scope(|s| {
                                 let samples_h = s.spawn(|| {
@@ -303,7 +393,7 @@ impl App {
                             }),
                             None => (deckard_engine::PreloadedSamples::default(), Vec::new()),
                         };
-                        PreparedGroup { edit, samples, natives }
+                        PreparedGroup { edit, source_info, samples, natives }
                     });
                 let _ = tx.send(result);
             }) {
@@ -345,6 +435,8 @@ impl App {
             }
             return;
         }
+        self.forget_group_presets(job.group);
+        self.remember_preset_source(deckard_doc::FileItem::Group(job.group), &job.item, prepared.source_info);
         self.editors.retain(|&(c, ..)| !matches!(c, deckard_doc::Chain::Group(g) | deckard_doc::Chain::Sound(g, _) if g == job.group));
         if self.group == job.group {
             self.slot_of = None;

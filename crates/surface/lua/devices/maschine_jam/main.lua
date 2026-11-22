@@ -2360,7 +2360,7 @@ local function light_steps(s)
       else
         local n = note_in(s, sound, at, length)
         if not n then
-          deckard.pad_led(col, row, x.palette, "faint")
+          deckard.pad_led(col, row, WHITE, "faint")
         elseif n.velocity >= ACCENT_FROM then
           deckard.pad_led(col, row, x.palette, "pale")
         else

@@ -410,6 +410,7 @@ fn a_side_chain_plugin_shows_its_side_chain_page_on_sound_and_group() {
         params: &PARAMS,
         pages: &PAGES,
         make: |_| Box::new(Duck),
+        scope: false,
     };
 
     let mut app = crate::App::default();

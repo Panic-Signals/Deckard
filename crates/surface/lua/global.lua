@@ -435,6 +435,7 @@ local TOUCH_STRIP = 25
 
 -- The palette colour Maschine lights a focused empty sound slot in.
 local EMPTY_SLOT = 15
+local WHITE = 16
 
 -- A one-colour button: lit, or its faint backlight.
 local function lit(on)
@@ -587,10 +588,19 @@ function global.leds()
   -- Keyboard mode, the Arp's, the keyboard).
   local group = s.groups[s.group]
   local sounds = group and group.sounds or {}
+  -- A note that has just started, sequenced or played, flashes its pad white: a brighter
+  -- shade of the pad's own colour hardly shows on a pad that's already bright.
   if pads.keys() then
-    local palette = sounds[s.sound] and sounds[s.sound].palette or 16
+    local focused = sounds[s.sound]
+    local palette = focused and focused.palette or 16
+    local hit = {}
+    for _, pitch in ipairs(focused and focused.hits or {}) do hit[pitch] = true end
     for i, note in ipairs(pads.notes()) do
-      deckard.led("PAD_" .. i, palette, deckard.pad_held(i) or note % 12 == pads.base % 12)
+      if hit[note] then
+        deckard.led("PAD_" .. i, WHITE, true, true)
+      else
+        deckard.led("PAD_" .. i, palette, deckard.pad_held(i) or note % 12 == pads.base % 12)
+      end
     end
     return
   end
@@ -598,7 +608,9 @@ function global.leds()
     local sound = sounds[i]
     local name = "PAD_" .. i
     local chosen = sound and (sound.selected or i == s.sound)
-    if not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
+    if sound and #sound.hits > 0 then
+      deckard.led(name, WHITE, true, true)
+    elseif not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
       deckard.led(name, "off")
     elseif muting then
       deckard.led(name, sound.palette, not sound.muted, sound.playing and not deckard.pad_held(i))

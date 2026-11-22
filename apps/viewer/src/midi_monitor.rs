@@ -268,39 +268,48 @@ fn colour(k: Kind) -> eframe::egui::Color32 {
 pub fn window(ctx: &eframe::egui::Context, open: &mut bool, m: &Monitor, v: &mut View) {
     use eframe::egui;
     m.set_context(ctx);
-    egui::Window::new("MIDI Monitor").open(open).resizable(true).default_size([980.0, 420.0]).show(ctx, |ui| {
-        crate::layout::dialog_style(ui);
-        ui.horizontal(|ui| {
-            crate::layout::combo("monitor-kind").selected_text(v.kind.map_or("All types", Kind::label)).show_ui(ui, |ui| {
-                ui.selectable_value(&mut v.kind, None, "All types");
-                for k in Kind::ALL {
-                    ui.selectable_value(&mut v.kind, Some(k), k.label());
+    egui::Window::new("MIDI Monitor")
+        .open(open)
+        .resizable(true)
+        .default_size([1060.0f32.min(crate::layout::dialog_max_width(ctx)), 420.0f32.min(crate::layout::dialog_max_height(ctx))])
+        .max_height(crate::layout::dialog_max_height(ctx))
+        .max_width(crate::layout::dialog_max_width(ctx))
+        .show(ctx, |ui| {
+            crate::layout::dialog_style(ui);
+            ui.horizontal(|ui| {
+                crate::layout::combo("monitor-kind").selected_text(v.kind.map_or("All types", Kind::label)).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut v.kind, None, "All types");
+                    for k in Kind::ALL {
+                        ui.selectable_value(&mut v.kind, Some(k), k.label());
+                    }
+                });
+                let label = if v.paused { "▶ Resume" } else { "⏸ Pause" };
+                ui.toggle_value(&mut v.paused, label);
+                if ui.button("Clear").clicked() {
+                    m.clear();
                 }
             });
-            let label = if v.paused { "▶ Resume" } else { "⏸ Pause" };
-            ui.toggle_value(&mut v.paused, label);
-            if ui.button("Clear").clicked() {
-                m.clear();
-            }
-        });
-        ui.separator();
-        let half = (ui.available_width() - 12.0) / 2.0;
-        ui.horizontal_top(|ui| {
-            for (dir, title, all) in [(Dir::In, "IN", "All sources"), (Dir::Out, "OUT", "All destinations")] {
-                ui.allocate_ui_with_layout(egui::vec2(half, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_width(half);
-                    let pick = match dir {
-                        Dir::In => &mut v.port_in,
-                        Dir::Out => &mut v.port_out,
-                    };
-                    side(ui, m, dir, title, all, v.kind, pick);
-                });
-                if dir == Dir::In {
-                    ui.separator();
+            ui.separator();
+            // (Both sides, the separator between them and the spacing round it, exactly the
+            // window's width: wider, the window grew to fit, frame after frame.)
+            let gap = 2.0 * ui.spacing().item_spacing.x + 6.0;
+            let half = ((ui.available_width() - gap) / 2.0).floor();
+            ui.horizontal_top(|ui| {
+                for (dir, title, all) in [(Dir::In, "IN", "All sources"), (Dir::Out, "OUT", "All destinations")] {
+                    ui.allocate_ui_with_layout(egui::vec2(half, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(half);
+                        let pick = match dir {
+                            Dir::In => &mut v.port_in,
+                            Dir::Out => &mut v.port_out,
+                        };
+                        side(ui, m, dir, title, all, v.kind, pick);
+                    });
+                    if dir == Dir::In {
+                        ui.separator();
+                    }
                 }
-            }
+            });
         });
-    });
 }
 
 /// One side: its port picker and its rows (newest at the bottom, following unless
@@ -327,7 +336,9 @@ fn side(ui: &mut eframe::egui::Ui, m: &Monitor, dir: Dir, title: &str, all: &str
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
     let widths = [64.0, 0.0, 28.0, 96.0, 112.0, 80.0];
     let fixed: f32 = widths.iter().sum::<f32>() + 6.0 * ui.spacing().item_spacing.x;
-    let port_w = (ui.available_width() - fixed).max(60.0);
+    // (The port's column takes what's left, down to a sliver, so that both sides fit the
+    // window rather than widening it frame after frame past a laptop's screen.)
+    let port_w = (ui.available_width() - fixed).max(24.0);
     let cell = |ui: &mut egui::Ui, w: f32, t: egui::RichText| {
         ui.add_sized([w, row_h], egui::Label::new(t.monospace()).truncate());
     };

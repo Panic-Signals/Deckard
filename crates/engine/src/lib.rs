@@ -155,6 +155,10 @@ pub struct Timeline {
     /// How many ratcheted notes have been put in: each takes the next roll
     /// ([`NoteEvent::roll`]).
     pub ratchets: u64,
+    /// Where a queued switch can happen: every this many ticks (a scene's longest
+    /// pattern, inside the longer cycle its patterns make looping by themselves). 0: only
+    /// at the end.
+    pub switch_every: i64,
 }
 
 impl Timeline {
@@ -398,7 +402,8 @@ pub fn timeline(p: &Project, mode: Mode) -> Timeline {
             }
         }
         Mode::Scene(scene) if scene < p.scenes.len() => {
-            t.length = p.scene_length(scene);
+            t.length = scene_cycle(p, scene);
+            t.switch_every = p.scene_length(scene);
             let len = t.length;
             t.tempos.push((0, p.scenes[scene].tempo));
             add_scene(&mut t, scene, 0, len);
@@ -523,6 +528,31 @@ fn group_pattern_sigs(project: &Project, mode: Mode) -> Vec<u64> {
 }
 fn pattern_length(p: &Project, g: usize, pi: usize) -> i64 {
     own_length(p, &p.groups[g].patterns[pi])
+}
+
+/// The longest a scene's cycle gets, in bars; past it, its patterns start over with the
+/// longest one.
+const MAX_CYCLE_BARS: i64 = 128;
+
+/// How long scene `scene` plays before it repeats. Each pattern loops by itself, as in
+/// Maschine's Ideas view (a 1-bar and a 1:0:2 pattern line up again after 9 bars), so
+/// it's the shortest stretch every pattern fits a whole number of times into: the
+/// longest pattern when that's over [`MAX_CYCLE_BARS`].
+fn scene_cycle(p: &Project, scene: usize) -> i64 {
+    fn gcd(a: i64, b: i64) -> i64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let longest = p.scene_length(scene);
+    let cap = MAX_CYCLE_BARS * p.bar_length().max(1);
+    let mut cycle = longest.max(1);
+    for &(g, pi) in &p.scenes[scene].patterns {
+        let l = pattern_length(p, g, pi).max(1);
+        cycle = cycle / gcd(cycle, l) * l;
+        if cycle > cap {
+            return longest;
+        }
+    }
+    cycle
 }
 
 /// A pattern's (or clip's) length, a bar when it has none.
@@ -4154,9 +4184,10 @@ impl Engine {
                 jump = None;
                 moved = true;
             }
+            let switch = (self.queued.is_some() && !switched).then(|| self.switch_tick(tl, frame)).flatten();
             if sequencing {
                 while let Some(e) = tl.events.get(next) {
-                    if self.frame_of(e.tick) > frame {
+                    if self.frame_of(e.tick) > frame || switch.is_some_and(|at| e.tick >= at) {
                         break;
                     }
                     if t >= skip {
@@ -4171,9 +4202,10 @@ impl Engine {
                     }
                     next += 1;
                 }
-                if next >= tl.events.len() && frame >= end {
+                let switch_now = switch.map(|at| self.frame_of(at)).filter(|&f| frame >= f);
+                if switch_now.is_some() || (next >= tl.events.len() && frame >= end) {
                     if self.queued.is_some() && !switched {
-                        frame -= end.min(frame);
+                        frame -= switch_now.unwrap_or(end).min(frame);
                         next = 0;
                         pass += 1;
                         switched = true;
@@ -4199,6 +4231,9 @@ impl Engine {
             if sequencing {
                 let mut target = tl.events.get(next).map_or(end, |e| self.frame_of(e.tick));
                 if let Some((at, _)) = jump {
+                    target = target.min(self.frame_of(at));
+                }
+                if let Some(at) = switch {
                     target = target.min(self.frame_of(at));
                 }
                 until = until.min(target.saturating_sub(frame).max(1));
@@ -4260,6 +4295,19 @@ impl Engine {
     /// Output frame (from the start of the timeline) at which `tick` falls.
     fn frame_of(&self, tick: i64) -> u64 {
         (tick as f64 * self.samples_per_tick()).round().max(0.0) as u64
+    }
+
+    /// Where a switch queued `frame` frames into timeline `tl` happens before its end, if
+    /// it does: the next multiple of its `switch_every` (where the scene's longest
+    /// pattern ends, inside the longer cycle of patterns looping by themselves).
+    fn switch_tick(&self, tl: &Timeline, frame: u64) -> Option<i64> {
+        let every = tl.switch_every;
+        if every <= 0 || every >= tl.length {
+            return None;
+        }
+        let k = (frame as f64 / self.samples_per_tick() / every as f64).floor() as i64;
+        let at = if k > 0 && self.frame_of(k * every) >= frame { k * every } else { (k + 1) * every };
+        (at < tl.length).then_some(at)
     }
 
     /// Keep only the sounds for which `keep(group, sound)` is true (a solo).
@@ -5640,9 +5688,12 @@ impl Engine {
                 self.seek(to);
             }
             if self.sequencing {
+                // A queued switch comes where the scene's longest pattern ends, which can
+                // be before the end of the cycle its patterns make.
+                let switch = self.queued.as_ref().and_then(|_| self.switch_tick(&self.timeline, self.frame));
                 // Events due now.
                 while let Some(&e) = self.timeline.events.get(self.next) {
-                    if self.frame_of(e.tick) > self.frame {
+                    if self.frame_of(e.tick) > self.frame || switch.is_some_and(|at| e.tick >= at) {
                         break;
                     }
                     let idx = self.next;
@@ -5658,9 +5709,10 @@ impl Engine {
                         self.from_timeline = false;
                     }
                 }
-                if self.next >= self.timeline.events.len() && self.frame >= end {
+                let switch_now = switch.map(|at| self.frame_of(at)).filter(|&f| self.frame >= f);
+                if switch_now.is_some() || (self.next >= self.timeline.events.len() && self.frame >= end) {
                     if let Some((mode, timeline)) = self.queued.take() {
-                        self.frame -= end.min(self.frame);
+                        self.frame -= switch_now.unwrap_or(end).min(self.frame);
                         self.next = 0;
                         self.pass += 1;
                         self.mode = mode;
@@ -5692,6 +5744,9 @@ impl Engine {
                     target = target.min(self.frame_of(at));
                 }
                 if let Some(at) = self.timeline.next_tempo(self.position() as i64) {
+                    target = target.min(self.frame_of(at));
+                }
+                if let Some(at) = self.queued.as_ref().and_then(|_| self.switch_tick(&self.timeline, self.frame)) {
                     target = target.min(self.frame_of(at));
                 }
                 until = until.min(target.saturating_sub(self.frame).max(1));
@@ -8004,6 +8059,7 @@ mod tests {
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
+            switch_every: 0,
         };
         let out = render(&mut e, 1.0);
         let left: Vec<f32> = out.iter().step_by(2).map(|x| x * 100.0).collect();
@@ -8042,6 +8098,7 @@ mod tests {
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
+            switch_every: 0,
         };
         let out = render(&mut e, 1.0);
         // The 8-point interpolator follows a ramp once its history is filled.
@@ -8424,6 +8481,100 @@ mod tests {
         let onsets: Vec<usize> = (0..6000).filter(|&i| out[i * 2] > 0.5).collect();
         assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 3000, 4000, 5000]);
         assert_eq!((e.mode(), e.queued()), (Mode::Scene(1), None));
+    }
+
+    /// `project()` plus group 1 with a silent pattern `len` ticks long, in scene 0.
+    fn with_odd_pattern(len: i64) -> Project {
+        let mut p = project();
+        p.groups.push(Group { patterns: vec![Pattern { length: len, ..Default::default() }], ..Default::default() });
+        p.scenes[0].patterns.push((1, 0));
+        p
+    }
+
+    /// A 1-bar and a 1:0:2 pattern each loop by themselves, as in Maschine's Ideas view:
+    /// the scene repeats when they line up again (9 bars), not when the longer one ends.
+    #[test]
+    fn a_scenes_patterns_loop_by_themselves() {
+        let odd = 4 * PPQ + 2 * PPQ / 4;
+        let mut p = with_odd_pattern(odd);
+        p.groups[1].patterns[0].notes = vec![Note {
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 240,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+            ratchet: Default::default(),
+        }];
+        let t = timeline(&p, Mode::Scene(0));
+        assert_eq!((t.length, t.switch_every), (9 * 4 * PPQ, odd));
+        let at = |g: usize| t.events.iter().filter(|e| e.group == g).map(|e| e.tick).collect::<Vec<_>>();
+        assert_eq!(at(0), (0..36).map(|i| i * PPQ).collect::<Vec<_>>(), "the bar's quarters, every bar");
+        assert_eq!(at(1), (0..8).map(|i| i * odd).collect::<Vec<_>>());
+        // Lengths that would line up only after more than MAX_CYCLE_BARS: the longest sets it.
+        let p = with_odd_pattern(4 * PPQ + 1);
+        let t = timeline(&p, Mode::Scene(0));
+        assert_eq!((t.length, t.switch_every), (4 * PPQ + 1, 4 * PPQ + 1));
+        // Song sections still start every pattern from the top.
+        let mut p = with_odd_pattern(odd);
+        p.sections = vec![Section { scene: Some(0), length: odd, auto: true }];
+        assert_eq!(timeline(&p, Mode::Arrangement).length, odd);
+    }
+
+    /// Playing, the 1-bar pattern goes on past the 1:0:2 one's end: no restart there.
+    #[test]
+    fn a_shorter_pattern_doesnt_start_over_with_the_longest() {
+        let p = with_odd_pattern(4 * PPQ + 2 * PPQ / 4);
+        // 120 BPM at 1 kHz: a quarter is 500 frames, the 1:0:2 pattern 2250.
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 5000];
+        e.process(&mut out);
+        let onsets: Vec<usize> = (0..5000).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, (0..10).map(|i| i * 500).collect::<Vec<_>>());
+    }
+
+    /// A launched scene still starts where the playing scene's longest pattern ends, not
+    /// at the end of the longer cycle its patterns make.
+    #[test]
+    fn a_launched_scene_starts_when_the_longest_pattern_ends() {
+        let mut p = with_odd_pattern(4 * PPQ + 2 * PPQ / 4);
+        let halves = (0..2)
+            .map(|i| Note {
+                expr: None,
+                sound: 0,
+                position: i * 2 * PPQ,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+                ratchet: Default::default(),
+            })
+            .collect();
+        p.groups[0].patterns.push(Pattern { length: 4 * PPQ, notes: halves, ..Default::default() });
+        p.scenes.push(Scene { patterns: vec![(0, 1)], ..Default::default() });
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 6000];
+        e.process(&mut out[..2 * 700]);
+        e.queue(&p, Mode::Scene(1));
+        e.process(&mut out[2 * 700..]);
+        let onsets: Vec<usize> = (0..6000).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 2250, 3250, 4250, 5250], "scene 1 from 2250");
+        assert_eq!((e.mode(), e.queued()), (Mode::Scene(1), None));
+        // Queued in the second pass of the 1:0:2 pattern: at its end, 4500.
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 6000];
+        e.process(&mut out[..2 * 3000]);
+        e.queue(&p, Mode::Scene(1));
+        e.process(&mut out[2 * 3000..]);
+        let onsets: Vec<usize> = (0..6000).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5500], "scene 1 from 4500");
     }
 
     #[test]
@@ -12047,6 +12198,7 @@ mod tests {
             params: &[],
             pages: &[],
             make: |_| Box::new(Duck),
+            scope: false,
         };
 
         let run = |on_group: bool, with_source: bool, sc_gain: f64| {
@@ -12477,6 +12629,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Split::default()),
+        scope: false,
     };
 
     static SPLIT_INSTRUMENT: deckard_plugins::native::Class = deckard_plugins::native::Class {
@@ -12486,6 +12639,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Split { instrument: true, ..Default::default() }),
+        scope: false,
     };
 
     pub(crate) fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
@@ -13074,6 +13228,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Pressed::default()),
+        scope: false,
     };
 
     /// Channel pressure reaches a plug-in instrument (the woosh's Z on Pigments), as
