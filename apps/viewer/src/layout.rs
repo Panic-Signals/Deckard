@@ -6107,7 +6107,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                     change_menu(ui, app, app.chain(), i, !movable, acts);
                     // The Sampler and the Audio plug-in become a New Sampler, and back.
                     if i == 0 && matches!(app.chain(), deckard_doc::Chain::Sound(..)) {
-                        let new_sampler = slot.name == "New Sampler";
+                        let new_sampler = slot.name == "Sampler Preview";
                         if new_sampler {
                             if ui
                                 .button("Convert to Sampler")
@@ -6119,8 +6119,8 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                             }
                         } else if (slot.module == "Sampler" || slot.module == "AudioModule")
                             && ui
-                                .button("Convert to New Sampler")
-                                .on_hover_text("Keep its samples, in DECKARD's New Sampler (loops in Sync)")
+                                .button("Convert to Sampler Preview")
+                                .on_hover_text("Keep its samples, in DECKARD's Sampler Preview (loops in Sync)")
                                 .clicked()
                         {
                             acts.push(Act::ConvertInstrument(true));
@@ -6209,7 +6209,7 @@ fn native(instrument: bool) -> impl Iterator<Item = &'static deckard_plugins::na
 /// "+" › Internal's instruments (a sound's first slot only): the Sampler and Audio,
 /// Maschine's synths, DECKARD's own.
 fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -> Act, acts: &mut Vec<Act>) {
-    for (name, what) in [("Sampler", AddWhat::Sampler), ("New Sampler", AddWhat::NewSampler), ("Audio", AddWhat::Audio)] {
+    for (name, what) in [("Sampler", AddWhat::Sampler), ("Sampler Preview", AddWhat::NewSampler), ("Audio", AddWhat::Audio)] {
         if ui.add_enabled(instruments, egui::Button::new(name)).on_disabled_hover_text(AFTER_FX).clicked() {
             acts.push(pick(what));
             ui.close();

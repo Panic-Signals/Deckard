@@ -894,7 +894,7 @@ mod app_tests {
             let m = snd.sampler.as_ref().unwrap().zones[0].meta.clone().unwrap();
             assert_eq!(m.mode, PlayMode::Sync);
             assert!((m.bpm.unwrap() - 120.0).abs() < 0.1, "{m:?}");
-            assert_eq!(d.undo_label(), Some("Convert to New Sampler"));
+            assert_eq!(d.undo_label(), Some("Convert to Sampler Preview"));
         }
         app.convert_instrument(false);
         let d = app.doc.as_ref().unwrap().borrow();

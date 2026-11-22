@@ -1741,7 +1741,7 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
     if new_sampler.is_some()
         && let Some(first) = slots.first_mut()
     {
-        first.name = "New Sampler".into();
+        first.name = "Sampler Preview".into();
     }
     Sound {
         instrument: modules.first().map_or(String::new(), |m| m.type_name.rsplit("::").next().unwrap_or("").to_string()),

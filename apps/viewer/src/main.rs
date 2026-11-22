@@ -8446,7 +8446,7 @@ impl App {
             return;
         };
         let (Some(mut meta), Some(sample)) = (zone.meta, self.sampling.sample.clone()) else {
-            self.status = "stems go on a New Sampler's zone (once it's analysed)".into();
+            self.status = "stems go on a Sampler Preview's zone (once it's analysed)".into();
             return;
         };
         let mut taken: [bool; 4] = std::array::from_fn(|k| meta.stems[k].is_some());
@@ -12755,7 +12755,7 @@ impl App {
         let native = |instrument: bool| deckard_plugins::native::CLASSES.iter().filter(move |c| c.instrument == instrument);
         let mut out = vec![
             internal("Sampler", true, AddWhat::Sampler),
-            internal("New Sampler", true, AddWhat::NewSampler),
+            internal("Sampler Preview", true, AddWhat::NewSampler),
             internal("Audio", true, AddWhat::Audio),
         ];
         for class in deckard_model::INTERNAL_INSTRUMENTS {
@@ -12924,7 +12924,7 @@ impl App {
             }
             doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune, a.mode == deckard_model::AudioMode::Gate)
         } else if snd.sampler.is_some() && snd.new_sampler.is_none() {
-            doc.borrow_mut().transaction("Convert to New Sampler", |d| d.set_new_sampler(g, s, Some(&Default::default())))
+            doc.borrow_mut().transaction("Convert to Sampler Preview", |d| d.set_new_sampler(g, s, Some(&Default::default())))
         } else {
             return;
         };
@@ -12999,7 +12999,7 @@ impl App {
             deckard_doc::NewModule::Effect(_) => "Load Effect",
             _ => "Load Module",
         };
-        let label = if matches!(what, layout::AddWhat::NewSampler) { "Add New Sampler" } else { label };
+        let label = if matches!(what, layout::AddWhat::NewSampler) { "Add Sampler Preview" } else { label };
         let added = doc.borrow_mut().transaction(label, |d| {
             d.add_slot_in(c, at, &module)?;
             if let (layout::AddWhat::NewSampler, deckard_doc::Chain::Sound(g, s)) = (&what, c) {

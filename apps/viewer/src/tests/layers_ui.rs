@@ -81,7 +81,7 @@ fn the_tab_is_offered_where_it_can_be() {
     }
     assert_eq!(shown(&app, true), [true, true, true, true, false], "sliced: no LAYERS");
     let p = project_of_app(&app);
-    assert!(!tab_shown(&p, 0, 1, 4, false, false), "not a New Sampler");
+    assert!(!tab_shown(&p, 0, 1, 4, false, false), "not a Sampler Preview");
     assert!(!tab_shown(&p, 0, 0, 4, true, true), "a take");
 }
 
@@ -89,7 +89,7 @@ fn the_tab_is_offered_where_it_can_be() {
 fn a_file_dropped_on_a_lane_lands_there() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = layers_harness();
-    assert_eq!(h.state().sampling.tab, 4, "an empty New Sampler stays on LAYERS");
+    assert_eq!(h.state().sampling.tab, 4, "an empty Sampler Preview stays on LAYERS");
     let l = lanes(&h);
     assert_eq!(l.len(), 8);
     drop_on(&mut h, l[0].center(), &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);

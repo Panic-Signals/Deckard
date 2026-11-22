@@ -226,7 +226,7 @@ fn only_a_sound_without_slices_can_layer() {
     let (dir, mut app) = three();
     let p = |app: &App| app.doc.as_ref().unwrap().borrow().project().clone();
     assert!(can_layer(&p(&app), 0, 0));
-    assert!(!can_layer(&p(&app), 0, 1), "not a New Sampler");
+    assert!(!can_layer(&p(&app), 0, 1), "not a Sampler Preview");
     // Three plain zones (slices): no layers, and files don't go in.
     {
         let doc = app.doc.as_ref().unwrap();

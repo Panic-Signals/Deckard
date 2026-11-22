@@ -881,46 +881,48 @@ fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Targ
     }
     ui.interact(mk, ui.id().with("beat-match-key-tip"), Sense::hover()).on_hover_text(tip);
     x += 86.0;
-    // Warp markers: on the hits, quantized, cleared.
-    let st = &app.sampling;
-    let (grid, strength) = (st.warp_grid, st.warp_strength);
-    let grids: Vec<String> = beat::WARP_GRIDS.iter().map(|g| g.1.to_string()).collect();
-    let mut sf = field("STRENGTH", format!("{:.0} %", strength * 100.0), move |n| {
-        sact(SamplingAct::Warp(WarpAct::Strength((strength + n * 0.05).clamp(0.0, 1.0))))
-    });
-    sf.tip = "How far QUANTIZE moves the markers toward the grid";
-    sf.enter = num(|v| sact(SamplingAct::Warp(WarpAct::Strength((v / 100.0).clamp(0.0, 1.0)))));
-    let warp_fields = [choice_field("GRID", grids, grid, |k| sact(SamplingAct::Warp(WarpAct::Grid(k)))), sf];
-    x = group_box(ui, &painter, x, y, if m.warps.is_empty() { "WARP" } else { "WARP (ON)" }, &warp_fields, acts);
-    // What each does, on hover (the buttons themselves are the tool bar's).
-    let tip = |r: Rect, id: &str, text: &str| {
-        ui.interact(r, ui.id().with(("warp-tip", id)), Sense::hover()).on_hover_text(text.to_string());
-    };
-    let r = small(x, 0.0, 70.0);
-    if tool_button(ui, &painter, r, "MARKERS", has, false, "warp-detect") {
-        acts.push(sact(SamplingAct::Warp(WarpAct::Detect)));
+    if beat::WARPS {
+        // Warp markers: on the hits, quantized, cleared.
+        let st = &app.sampling;
+        let (grid, strength) = (st.warp_grid, st.warp_strength);
+        let grids: Vec<String> = beat::WARP_GRIDS.iter().map(|g| g.1.to_string()).collect();
+        let mut sf = field("STRENGTH", format!("{:.0} %", strength * 100.0), move |n| {
+            sact(SamplingAct::Warp(WarpAct::Strength((strength + n * 0.05).clamp(0.0, 1.0))))
+        });
+        sf.tip = "How far QUANTIZE moves the markers toward the grid";
+        sf.enter = num(|v| sact(SamplingAct::Warp(WarpAct::Strength((v / 100.0).clamp(0.0, 1.0)))));
+        let warp_fields = [choice_field("GRID", grids, grid, |k| sact(SamplingAct::Warp(WarpAct::Grid(k)))), sf];
+        x = group_box(ui, &painter, x, y, if m.warps.is_empty() { "WARP" } else { "WARP (ON)" }, &warp_fields, acts);
+        // What each does, on hover (the buttons themselves are the tool bar's).
+        let tip = |r: Rect, id: &str, text: &str| {
+            ui.interact(r, ui.id().with(("warp-tip", id)), Sense::hover()).on_hover_text(text.to_string());
+        };
+        let r = small(x, 0.0, 70.0);
+        if tool_button(ui, &painter, r, "MARKERS", has, false, "warp-detect") {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Detect)));
+        }
+        tip(
+            r,
+            "detect",
+            "Put a warp marker on each hit. A marker holds that moment of the sample on a beat; nothing moves until one is dragged or QUANTIZE is pressed",
+        );
+        let r = small(x, 1.0, 70.0);
+        if tool_button(ui, &painter, r, "QUANTIZE", !m.warps.is_empty(), false, "warp-quantize") {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Quantize)));
+        }
+        tip(
+            r,
+            "quantize",
+            "Move each marker's hit onto the nearest GRID line (by STRENGTH): a loose loop plays in time. Heard in Sync and Keys",
+        );
+        x += 74.0;
+        let r = small(x, 0.0, 50.0);
+        if tool_button(ui, &painter, r, "CLEAR", !m.warps.is_empty(), false, "warp-clear") {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Clear)));
+        }
+        tip(r, "clear", "Take every warp marker away: the sample plays at its own timing again");
+        x += 54.0;
     }
-    tip(
-        r,
-        "detect",
-        "Put a warp marker on each hit. A marker holds that moment of the sample on a beat; nothing moves until one is dragged or QUANTIZE is pressed",
-    );
-    let r = small(x, 1.0, 70.0);
-    if tool_button(ui, &painter, r, "QUANTIZE", !m.warps.is_empty(), false, "warp-quantize") {
-        acts.push(sact(SamplingAct::Warp(WarpAct::Quantize)));
-    }
-    tip(
-        r,
-        "quantize",
-        "Move each marker's hit onto the nearest GRID line (by STRENGTH): a loose loop plays in time. Heard in Sync and Keys",
-    );
-    x += 74.0;
-    let r = small(x, 0.0, 50.0);
-    if tool_button(ui, &painter, r, "CLEAR", !m.warps.is_empty(), false, "warp-clear") {
-        acts.push(sact(SamplingAct::Warp(WarpAct::Clear)));
-    }
-    tip(r, "clear", "Take every warp marker away: the sample plays at its own timing again");
-    x += 54.0;
     // How it plays.
     x += 8.0;
     for (k, (label, mode, tip)) in [
@@ -1101,7 +1103,9 @@ fn wave(
     // Warp markers: a line through the waveform and a handle on the timeline. Drag a
     // handle to move its beat (the grid moves past it), double-click it to remove it;
     // double-click the timeline for a new one.
-    if let (Some(m), Some(map)) = (zone.meta.as_ref(), map.as_ref()) {
+    if crate::beat::WARPS
+        && let (Some(m), Some(map)) = (zone.meta.as_ref(), map.as_ref())
+    {
         let warp_col = Color32::from_rgb(0xf2, 0xc1, 0x4e);
         let per = sample.rate as f64 * 60.0 / m.bpm.unwrap_or(120.0);
         let frames_per_px = (v1 - v0) / w.width().max(1.0) as f64;
@@ -2018,7 +2022,9 @@ fn edit_tab(
         // STEMS, right-clicked: where the stems go, or stems of your own.
         if op == EditOp::Stems && stems.is_none() {
             ui.interact(r, ui.id().with("stems-menu"), Sense::click())
-                .on_hover_text("Separate into stems: onto a New Sampler zone's lanes, else a new group (Shift, or right-click for more)")
+                .on_hover_text(
+                    "Separate into stems: onto a Sampler Preview zone's lanes, else a new group (Shift, or right-click for more)",
+                )
                 .context_menu(|ui| {
                     if ui.button("Separate onto the zone's lanes").clicked() {
                         acts.push(sact(SamplingAct::Edit(EditOp::Stems)));

@@ -60,6 +60,8 @@ local func = 1
 local STEM = { { "STEM ROOT", "lane_hear", 1, "BASS" }, { "STEM TEMPO", "lane_hear", 2, "DRUMS" }, { "STEM ANALYZE", "lane_hear", 3, "BASS" } }
 -- The stem picked for each (an index into the lanes shown), once button 7 has.
 local stem_pick = {}
+-- (Held back for now, as the app's `beat::WARPS`.)
+local WARPS = false
 local WARP = { { "WARP MARKERS", "warp_markers" }, { "QUANTIZE AUDIO", "warp_quantize" }, { "CLEAR WARP", "warp_clear" } }
 
 -- The knob page shown on each tab, the slice focused (from 1; none until a pad picks
@@ -173,14 +175,14 @@ local function functions(v)
   local list = {}
   for _, f in ipairs(FUNCTIONS) do list[#list + 1] = f end
   local p = tempo_page(v)
-  if p and p.knobs[2] and p.knobs[2].text ~= "-" then
+  if WARPS and p and p.knobs[2] and p.knobs[2].text ~= "-" then
     for _, f in ipairs(WARP) do list[#list + 1] = f end
   end
   if p and v.sample and v.sample.lanes and #v.sample.lanes > 0 then
     for _, f in ipairs(STEM) do list[#list + 1] = f end
   end
   if not (v.sample and v.sample.take) then
-    list[#list + 1] = { p and "TO SAMPLER" or "TO NEW SAMPLER", "convert" }
+    list[#list + 1] = { p and "TO SAMPLER" or "TO SAMPLER PREVIEW", "convert" }
   end
   return list
 end

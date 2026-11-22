@@ -579,7 +579,7 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             page(&mut out, 1, "STEMS", knobs);
         }
         // Warp markers (the EDIT functions put them on the hits, quantize and clear them).
-        if m.bpm.is_some() {
+        if crate::beat::WARPS && m.bpm.is_some() {
             let grids: Vec<String> = crate::beat::WARP_GRIDS.iter().map(|g| g.1.to_string()).collect();
             let strength = st.warp_strength;
             page(

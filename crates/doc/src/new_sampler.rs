@@ -24,7 +24,7 @@ impl Document {
     /// plain Sampler again: one undo step.
     pub fn set_new_sampler(&mut self, g: usize, s: usize, settings: Option<&NewSampler>) -> Result<(), String> {
         let ops = self.new_sampler_ops(g, s, settings)?;
-        let label = if settings.is_some() { "New Sampler" } else { "Convert to Sampler" };
+        let label = if settings.is_some() { "Sampler Preview" } else { "Convert to Sampler" };
         if ops.is_empty() { Ok(()) } else { self.apply(label, ops) }
     }
 
@@ -110,7 +110,7 @@ impl Document {
                 cued.push((pi, notes));
             }
         }
-        self.transaction("Convert to New Sampler", |d| {
+        self.transaction("Convert to Sampler Preview", |d| {
             let patterns: Vec<usize> = cued.iter().map(|c| c.0).collect();
             if !patterns.is_empty() {
                 d.set_audio_in(g, s, &patterns, None, "Audio")?;
@@ -306,7 +306,7 @@ mod tests {
         let m = zones[0].meta.as_ref().unwrap();
         assert_eq!((m.mode, m.bpm, m.beats), (PlayMode::Sync, Some(94.0), Some(4.0)));
         assert_eq!(zones[1].meta.as_ref().unwrap().mode, PlayMode::Repitch);
-        assert_eq!(d.undo_label(), Some("Convert to New Sampler"));
+        assert_eq!(d.undo_label(), Some("Convert to Sampler Preview"));
         assert!(d.undo());
         assert_eq!(d.project().groups[0].sounds[0].instrument, "AudioModule", "one step back");
     }

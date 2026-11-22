@@ -26,7 +26,11 @@ pub const PICTURES: &[(&str, &[u8], &[u8])] = &[
     ("lo-fi", include_bytes!("../assets/plugins/lo-fi_Thumb.png"), include_bytes!("../assets/plugins/lo-fi_Logo.png")),
     ("maximizer", include_bytes!("../assets/plugins/maximizer_Thumb.png"), include_bytes!("../assets/plugins/maximizer_Logo.png")),
     ("metaverb", include_bytes!("../assets/plugins/metaverb_Thumb.png"), include_bytes!("../assets/plugins/metaverb_Logo.png")),
-    ("newsampler", include_bytes!("../assets/plugins/newsampler_Thumb.png"), include_bytes!("../assets/plugins/newsampler_Logo.png")),
+    (
+        "samplerpreview",
+        include_bytes!("../assets/plugins/samplerpreview_Thumb.png"),
+        include_bytes!("../assets/plugins/samplerpreview_Logo.png"),
+    ),
     ("percussion", include_bytes!("../assets/plugins/percussion_Thumb.png"), include_bytes!("../assets/plugins/percussion_Logo.png")),
     ("phaser", include_bytes!("../assets/plugins/phaser_Thumb.png"), include_bytes!("../assets/plugins/phaser_Logo.png")),
     ("plaits", include_bytes!("../assets/plugins/plaits_Thumb.png"), include_bytes!("../assets/plugins/plaits_Logo.png")),

@@ -128,6 +128,11 @@ pub fn lane_for(name: &str, taken: &[bool; 4]) -> Option<usize> {
     (0..4).map(|k| (want + k) % 4).find(|&k| !taken[k])
 }
 
+/// Whether the warp markers' controls show (the Sampling page's WARP box and markers,
+/// the controller's WARP page). Held back for now: markers a project has still play.
+/// (The controller's edit functions: `WARPS` in `pages/sampling.lua`.)
+pub const WARPS: bool = false;
+
 /// Quantize grids, beats: 1/4, 1/8, 1/16, 1/32 notes.
 pub const WARP_GRIDS: [(f64, &str); 4] = [(1.0, "1/4"), (0.5, "1/8"), (0.25, "1/16"), (0.125, "1/32")];
 

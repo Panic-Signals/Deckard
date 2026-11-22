@@ -189,7 +189,7 @@ impl App {
         let (g, s) = (self.group, self.sound);
         let p = doc.borrow().project().clone();
         if !can_layer(&p, g, s) {
-            self.status = "layers are a New Sampler's, one without slices".into();
+            self.status = "layers are a Sampler Preview's, one without slices".into();
             return;
         }
         let have = layers_in(&p, g, s).len();

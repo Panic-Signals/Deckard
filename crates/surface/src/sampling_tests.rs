@@ -239,17 +239,18 @@ fn a_new_sampler_zone_has_its_tempo_on_edit() {
     // The edit functions as ever.
     press(&mut s, &v, "BUTTON_SCREEN_6");
     assert!(s.screen_text(&v).iter().any(|t| t == "NORMALIZE"));
-    // Back past the first: the New Sampler's own, last. TO SAMPLER, then the warp ones.
+    // Back past the first: the New Sampler's own, last. TO SAMPLER (the warp ones are
+    // held back for now).
     press(&mut s, &v, "BUTTON_SCREEN_5");
     press(&mut s, &v, "BUTTON_SCREEN_5");
     assert!(s.screen_text(&v).iter().any(|t| t == "TO SAMPLER"));
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Convert)]);
     press(&mut s, &v, "BUTTON_SCREEN_5");
-    assert!(s.screen_text(&v).iter().any(|t| t == "CLEAR WARP"));
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::Warp(2))]);
-    // A plain Sampler's zone: no warp functions, and it converts the other way.
+    assert!(!s.screen_text(&v).iter().any(|t| t == "CLEAR WARP"));
+    press(&mut s, &v, "BUTTON_SCREEN_6");
+    // A plain Sampler's zone converts the other way.
     v.sampling.pages[1].pop();
-    assert!(s.screen_text(&v).iter().any(|t| t == "TO NEW SAMPLER"));
+    assert!(s.screen_text(&v).iter().any(|t| t == "TO SAMPLER PREVIEW"));
 }
 
 /// A zone with stem lanes: on EDIT's STEMS knob page the knobs are the lanes' levels,
@@ -311,11 +312,9 @@ fn a_stem_gives_the_root_or_tempo_from_the_edit_functions() {
     v.sampling.pages[1].push(tempo);
     press(&mut s, &v, "BUTTON_SAMPLE");
     let shown = |s: &mut Surface, v: &_, t: &str| s.screen_text(v).iter().any(|x| x == t);
-    // No stems: no such functions (back from the first: TO SAMPLER, then CLEAR WARP).
+    // No stems: no such functions (back from the first: TO SAMPLER).
     press(&mut s, &v, "BUTTON_SCREEN_5");
-    press(&mut s, &v, "BUTTON_SCREEN_5");
-    assert!(shown(&mut s, &v, "CLEAR WARP"));
-    press(&mut s, &v, "BUTTON_SCREEN_6");
+    assert!(shown(&mut s, &v, "TO SAMPLER"));
     // With them: STEM ROOT, STEM TEMPO, STEM ANALYZE come before it.
     v.sampling.sample.as_mut().unwrap().lanes = vec![lane(0, "Drums"), lane(2, "Bass"), lane(3, "Leads")];
     assert!(shown(&mut s, &v, "STEM ROOT") && shown(&mut s, &v, "BASS"), "the bass first, for a root");

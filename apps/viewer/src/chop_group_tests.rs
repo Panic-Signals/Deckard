@@ -174,7 +174,7 @@ fn a_sync_zone_stays_in_sync_on_its_pad() {
     assert_eq!(p.groups[n].name, p.groups[g].sounds[s].name, "one group: the sound's name");
     for pad in 0..2 {
         let snd = &p.groups[n].sounds[pad];
-        assert!(snd.new_sampler.is_some(), "a New Sampler as the sliced one");
+        assert!(snd.new_sampler.is_some(), "a Sampler Preview as the sliced one");
         let m = snd.sampler.as_ref().unwrap().zones[0].meta.clone().expect("its tempo comes along");
         assert_eq!((m.mode, m.bpm), (PlayMode::Sync, Some(120.0)));
     }

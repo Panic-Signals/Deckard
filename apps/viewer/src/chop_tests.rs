@@ -217,7 +217,7 @@ fn key_shift_puts_a_slice_on_the_next_empty_sound() {
     assert_eq!(zones.len(), 1);
     assert_eq!((zones[0].play_range, zones[0].key_range, zones[0].root_key), ((11_025, 22_049), (0, 127), 60));
     assert_eq!(zones[0].sample.path, before[app.sound].sampler.as_ref().unwrap().zones[0].sample.path);
-    assert!(new.new_sampler.is_some(), "a New Sampler");
+    assert!(new.new_sampler.is_some(), "a Sampler Preview");
     // A Sampler's zone has no tempo: said to play as a sampler does (left unsaid, the
     // analysis of a New Sampler zone would put a loop in Sync).
     let m = zones[0].meta.clone().expect("how it plays is set");

@@ -192,8 +192,9 @@ units.
   overview is hidden (black), the info bar texts are hidden, buttons 5, 6 and 8 are disabled,
   7 is hidden, and the knob-touch icons are off.
 
-DECKARD note: with a New Sampler zone the EDIT knob pages go on with DECKARD's own
-(TEMPO / PITCH, PLAYBACK, TAIL / MOTION, SYNC, STEMS, WARP). TAIL / MOTION has **TAIL**
+DECKARD note: with a New Sampler zone (named Sampler Preview in the app) the EDIT knob
+pages go on with DECKARD's own (TEMPO / PITCH, PLAYBACK, TAIL / MOTION, SYNC, STEMS; WARP
+and the warp edit functions are held back for now: `beat::WARPS`). TAIL / MOTION has **TAIL**
 (0 to 2000 ms in steps of 10: at its end the slice plays back from there, fading) and
 **MOTION** (Off, Next, Random: every note plays the next, or a random, slice of the
 sound). MUNGE (swing and the eighths of a bar) is in the software's EDIT tools
