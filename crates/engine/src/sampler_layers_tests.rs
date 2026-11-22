@@ -328,3 +328,35 @@ fn a_layers_level_and_pan_move_under_a_held_note() {
     assert!(out.last().unwrap().abs() < after * 0.01, "{}", out.last().unwrap());
     assert_eq!(s.voices(), 1);
 }
+
+/// A key struck again fast: what still rings of it from before makes way (else the two
+/// add or cancel by where each is in its wave, and the level jumps from hit to hit).
+#[test]
+fn a_key_struck_again_takes_over_its_release() {
+    // (One-shot, where only the layers' releases end a note, and ADSR.)
+    for env_type in [0, 2] {
+        struck_again(env_type);
+    }
+}
+
+fn struck_again(env_type: i64) {
+    let l = Layer { release: 1.0, ..Layer::default() };
+    let mut s = sound(vec![zone(sine(220.0), 60, l, true), zone(sine(331.0), 60, l, true)], Morph::default());
+    s.settings.env_type = env_type;
+    let mut peaks = Vec::new();
+    for k in 0..16u64 {
+        s.note_on(k + 1, 60, 127, &CTX);
+        let mut out = run(&mut s, 0.05 + 0.0007 * k as f64);
+        s.note_off(k + 1, 60);
+        out.extend(run(&mut s, 0.07));
+        // (Past the 10 ms the earlier one takes to go.)
+        peaks.push(out[960..].iter().fold(0f32, |m, v| m.max(v.abs())));
+        assert!(s.voices() <= 2, "only the last note's layers ring on: {}", s.voices());
+    }
+    let (lo, hi) = peaks.iter().fold((f32::MAX, 0f32), |(a, b), &p| (a.min(p), b.max(p)));
+    assert!(hi - lo < 0.02, "every hit as loud as the first: {peaks:.2?}");
+    // Another key's release rings on beside it.
+    s.note_on(100, 64, 127, &CTX);
+    run(&mut s, 0.05);
+    assert_eq!(s.voices(), 4);
+}

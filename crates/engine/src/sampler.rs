@@ -1753,6 +1753,12 @@ impl SamplerRt {
             self.first_note = note;
             (self.glide, self.glide_target, self.glide_step) = (0.0, 0.0, 0.0);
         }
+        // A layered sound's key struck again: what still rings of it from before (let go
+        // already) makes way. The two would add or cancel by where each is in its wave,
+        // so the level would jump from one hit to the next. [DECKARD's choice]
+        for v in self.voices.iter_mut().filter(|v| v.note == note && v.released && v.layer_env.is_some()) {
+            v.fade_out(self.sr);
+        }
         self.clock += 1;
         let age = self.clock;
         // (Chosen here: a legato note that only glides takes no turn.)
