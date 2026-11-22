@@ -550,7 +550,8 @@ pub struct ControlView {
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
-    /// The focused Replicant: its patch's preview beside its picture.
+    /// The focused built-in synth (Replicant, Plaits, an internal instrument): its
+    /// patch's preview beside its picture.
     pub scope: Option<ScopeView>,
     /// The sound's Generate page in Euclidean mode: its circle on the right screen.
     pub euclid: Option<EuclidView>,

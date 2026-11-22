@@ -1300,6 +1300,9 @@ pub struct App {
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
     /// The focused synth's scope (chain, slot) as last shown, while the audio thread has it.
     scope_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::ScopeView)>>,
+    /// The preview last rendered of an internal synth, with the module and the parameters
+    /// it was rendered from: rendered again only when they change.
+    internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }

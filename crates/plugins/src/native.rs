@@ -276,6 +276,9 @@ pub struct Instance {
     dirty: std::sync::atomic::AtomicBool,
     /// One second of the preview note at the current knob values: what the scope draws.
     preview: Option<Vec<f32>>,
+    /// Counts the knob changes that dropped the preview: a render from older values
+    /// isn't kept.
+    preview_version: u64,
     /// The Maschine chunk last applied.
     pub(crate) chunk: Vec<u8>,
 }
@@ -299,6 +302,7 @@ impl Instance {
             sample_rate,
             dirty: Default::default(),
             preview: None,
+            preview_version: 0,
             chunk: Vec::new(),
         }
     }
@@ -342,7 +346,7 @@ impl Instance {
             self.engine.set_param(p.id, *v);
         }
         self.values = values;
-        self.preview = None;
+        self.drop_preview();
         self.held = [false; 128];
         self.sustained = [false; 128];
         self.pedal = false;
@@ -394,7 +398,7 @@ impl Instance {
         let v = if p.steps > 0 { (v.clamp(0.0, 1.0) * p.steps as f64).round() / p.steps as f64 } else { v.clamp(0.0, 1.0) };
         if self.values[i] != v {
             self.values[i] = v;
-            self.preview = None;
+            self.drop_preview();
             // Modulation holds it until it lets go (then the knob's value plays).
             if self.modded[i].is_none() {
                 self.engine.set_param(id, v);
@@ -549,26 +553,79 @@ impl Instance {
         self.engine.readout()
     }
 
-    /// What the synth's scope draws: a short preview note rendered from the current
-    /// knob values, downsampled to `columns`. `None` for a plug-in without a scope.
-    #[allow(dead_code)]
-    pub(crate) fn scope(&mut self, columns: usize) -> Option<Scope> {
-        self.scope_at(columns, 0)
-    }
-
-    pub(crate) fn scope_at(&mut self, columns: usize, phase: usize) -> Option<Scope> {
+    /// What the synth's scope draws: the preview note last rendered for the current knob
+    /// values, downsampled to `columns`. `None` for a plug-in without a scope, and while
+    /// the knobs have moved since the last render ([`Self::preview_job`] says what to
+    /// render). It never renders: the audio thread waits on whoever holds the instance.
+    pub(crate) fn scope(&self, columns: usize) -> Option<Scope> {
         if columns == 0 || !self.class.scope {
             return None;
         }
-        if self.preview.is_none() {
-            self.preview = Some(self.render_preview());
-        }
-        Some(scope_of(self.preview.as_deref().unwrap_or(&[]), columns, phase))
+        self.preview.as_deref().map(|mono| scope_of(mono, columns))
     }
 
-    /// Render the preview note with the current knob values: an A4 held for part of the
-    /// second, then released, as mono samples.
-    fn render_preview(&self) -> Vec<f32> {
+    /// What to render for the scope, when the preview is out of date: a copy of the knob
+    /// values, to render with the instance let go ([`PreviewJob::render`]) and hand back
+    /// ([`Self::set_preview`]). `None` with a preview that is current, or no scope.
+    pub(crate) fn preview_job(&self) -> Option<PreviewJob> {
+        (self.class.scope && self.preview.is_none()).then(|| PreviewJob {
+            class: self.class,
+            values: self.values.clone(),
+            sample_rate: self.sample_rate,
+            version: self.preview_version,
+        })
+    }
+
+    /// Keep a rendered preview, unless a knob moved since its job was taken (the next
+    /// look renders it again). Whether it was kept.
+    pub(crate) fn set_preview(&mut self, rendered: Preview) -> bool {
+        let current = rendered.version == self.preview_version && std::ptr::eq(rendered.class, self.class);
+        if current {
+            self.preview = Some(rendered.mono);
+        }
+        current
+    }
+
+    /// The scope as the screens get it: the preview rendered first, if it is out of date.
+    #[cfg(test)]
+    pub(crate) fn rendered_scope(&mut self, columns: usize) -> Option<Scope> {
+        if let Some(job) = self.preview_job() {
+            assert!(self.set_preview(job.render()));
+        }
+        self.scope(columns)
+    }
+
+    /// The preview no longer shows the knobs: the next look renders it again.
+    fn drop_preview(&mut self) {
+        self.preview = None;
+        self.preview_version += 1;
+    }
+
+    pub(crate) fn changed(&self) -> bool {
+        self.engine.changed()
+    }
+}
+
+/// A synth's knob values, copied out of its instance to render its preview note from
+/// with the instance let go: a render takes far longer than the audio thread can wait.
+pub struct PreviewJob {
+    class: &'static Class,
+    values: Vec<f64>,
+    sample_rate: f64,
+    version: u64,
+}
+
+/// A rendered preview note, for [`Instance::set_preview`].
+pub struct Preview {
+    class: &'static Class,
+    mono: Vec<f32>,
+    version: u64,
+}
+
+impl PreviewJob {
+    /// Render the preview note with the copied knob values, on an engine of its own: an
+    /// A4 held for part of the second, then released, as mono samples.
+    pub fn render(self) -> Preview {
         let mut engine = (self.class.make)(self.sample_rate);
         for (p, v) in self.class.params.iter().zip(&self.values) {
             engine.set_param(p.id, *v);
@@ -596,17 +653,20 @@ impl Instance {
             mono.extend(l.iter().zip(r.iter()).map(|(a, b)| 0.5 * (a + b)));
             done += n;
         }
-        mono
+        Preview { class: self.class, mono, version: self.version }
     }
+}
 
-    pub(crate) fn changed(&self) -> bool {
-        self.engine.changed()
+impl Preview {
+    /// The picture of it, `columns` wide.
+    pub fn scope(&self, columns: usize) -> Scope {
+        scope_of(&self.mono, columns)
     }
 }
 
 /// A preview note (mono) as a scope draws it: the waveform of a slice, and the note's
 /// envelope over all of it.
-pub fn scope_of(mono: &[f32], columns: usize, phase: usize) -> Scope {
+pub fn scope_of(mono: &[f32], columns: usize) -> Scope {
     let n = mono.len();
     let mut wave = Vec::with_capacity(columns);
     let mut envelope = Vec::with_capacity(columns);
@@ -621,13 +681,9 @@ pub fn scope_of(mono: &[f32], columns: usize, phase: usize) -> Scope {
         }
         envelope.push((peak * SCOPE_GAIN).clamp(0.0, 1.0));
     }
-    // Show a slice of the note. At phase 0 it sits at 30 % of the note's length (the
-    // familiar triggered picture); as the phase advances the slice slides through the
-    // note, so the wave moves instead of staying frozen. A rising-zero snap keeps the
-    // picture from tearing while it travels.
-    let base = (n * 3 / 10).min(n);
-    let max_start = n.saturating_sub(SCOPE_WINDOW).max(1);
-    let start = if phase == 0 { base } else { (base + phase * 256) % max_start }.min(n);
+    // Show a slice of the note, at 30 % of its length (the familiar triggered picture),
+    // from a rising zero crossing.
+    let start = (n * 3 / 10).min(n);
     let window = &mono[start..(start + SCOPE_WINDOW).min(n)];
     let at = (1..window.len()).find(|&i| window[i - 1] < 0.0 && window[i] >= 0.0).unwrap_or(0);
     let window = &window[at..];
@@ -753,7 +809,8 @@ mod tests {
         scope: false,
     };
 
-    static PLAIN: Class = Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain), scope: false };
+    static PLAIN: Class =
+        Class { cid: [8; 16], name: "Plain", instrument: true, params: &[], pages: &[], make: |_| Box::new(Plain), scope: false };
 
     /// A native plug-in says how many output buses it has and what they're called.
     #[test]
@@ -885,7 +942,7 @@ mod tests {
     /// inverted low/high pair.
     #[test]
     fn the_scope_picture_keeps_nan_out() {
-        let s = scope_of(&[0.1, f32::NAN, -0.1, f32::NAN], 4, 0);
+        let s = scope_of(&[0.1, f32::NAN, -0.1, f32::NAN], 4);
         assert!(s.wave.iter().all(|(lo, hi)| lo.is_finite() && hi.is_finite() && lo <= hi));
         assert!(s.envelope.iter().all(|v| v.is_finite()));
     }
@@ -894,14 +951,16 @@ mod tests {
     #[test]
     fn the_preview_renders_once_until_a_knob_changes() {
         let mut inst = Instance::new(&crate::replicant::CLASS, 48_000.0);
-        inst.scope(8);
+        inst.rendered_scope(8);
+        assert!(inst.preview_job().is_none(), "rendered: nothing to render");
         inst.preview = Some(vec![0.5; 32]);
-        inst.scope(16);
+        inst.rendered_scope(16);
         assert_eq!(inst.preview.as_deref(), Some(&[0.5f32; 32][..]), "the cached preview is reused");
         let id = inst.class.params[0].id;
         inst.set_param(id, 1.0);
         assert!(inst.preview.is_none(), "a knob drops the preview");
-        inst.scope(16);
+        assert!(inst.scope(16).is_none(), "and there is no picture of the old values");
+        inst.rendered_scope(16);
         assert!(inst.preview.as_ref().is_some_and(|p| p.len() != 32), "the next look renders it again");
     }
 
@@ -909,8 +968,64 @@ mod tests {
     #[test]
     fn loading_a_state_drops_the_preview() {
         let mut inst = Instance::new(&crate::replicant::CLASS, 48_000.0);
-        inst.scope(8);
+        inst.rendered_scope(8);
         inst.load(&[]).unwrap();
         assert!(inst.preview.is_none());
+    }
+
+    /// Engines made for [`COUNTED`]: one for the instance, one more for each render.
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static COUNTED: Class = Class {
+        cid: [10; 16],
+        name: "Counted",
+        instrument: true,
+        params: &[],
+        pages: &[],
+        make: |_| {
+            MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::new(Plain)
+        },
+        scope: true,
+    };
+
+    /// The preview is never rendered with the plug-in locked, which the audio thread
+    /// waits on: looking at the scope makes no engine and plays nothing; the render runs
+    /// on a copy of the knobs, with the lock free (here taken by someone else meanwhile),
+    /// and is stored afterwards.
+    #[test]
+    fn the_preview_renders_with_the_plugin_unlocked() {
+        let made = || MADE.load(std::sync::atomic::Ordering::SeqCst);
+        let id = crate::PluginId::parse(&COUNTED.plugin_id(), COUNTED.name).unwrap();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(crate::Plugin::native(&COUNTED, id, "Counted", 48_000.0)));
+        let before = made();
+        let job = {
+            let p = shared.lock().unwrap();
+            assert!(p.scope(8).is_none(), "nothing rendered yet");
+            p.preview_job().expect("a preview to render")
+        };
+        assert_eq!(made(), before, "neither the look nor the job rendered anything");
+        let rendered = {
+            // (As the audio thread has it for a block: the render doesn't need it.)
+            let _audio = shared.try_lock().expect("not held");
+            job.render()
+        };
+        assert_eq!(made(), before + 1, "the render has an engine of its own");
+        let mut p = shared.lock().unwrap();
+        assert!(p.set_preview(rendered));
+        assert_eq!(p.scope(8).map(|s| s.wave.len()), Some(8));
+        assert!(p.preview_job().is_none());
+        assert_eq!(made(), before + 1, "showing it renders nothing more");
+    }
+
+    /// A render from knob values that have moved since isn't kept: the next look renders
+    /// the new ones.
+    #[test]
+    fn a_stale_render_is_not_kept() {
+        let mut inst = Instance::new(&crate::replicant::CLASS, 48_000.0);
+        let job = inst.preview_job().unwrap();
+        let id = inst.class.params[0].id;
+        inst.set_param(id, 1.0);
+        assert!(!inst.set_preview(job.render()));
+        assert!(inst.scope(8).is_none() && inst.preview_job().is_some());
     }
 }

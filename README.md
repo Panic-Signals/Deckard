@@ -445,9 +445,13 @@ Replicant is a classic subtractive synth:
   detuned copies, their detune and their mix.
 
 Its pages are Oscillators, Filter, Amp, Modulation and Super. Add it from **+ ▸
-Internal ▸ Replicant**. Its Control page previews the patch on the right screen,
-beside its picture: a waveform of the current sound and the note's amplitude
-envelope, redrawn as knobs turn (it needs nothing playing).
+Internal ▸ Replicant**.
+
+On the controller, the Control page of Replicant, of Plaits and of the internal
+instruments (Kick, Snare, Hi-hat, Tom, Percussion, Cymbal, Bass Synth, Poly Synth)
+previews the patch on the right screen, beside its picture: a waveform of the
+current sound and the note's amplitude envelope, redrawn as knobs turn (it needs
+nothing playing).
 
 ### Plaits
 

@@ -840,7 +840,7 @@ mod tests {
         for (id, v) in set {
             inst.set_param(*id, *v);
         }
-        inst.scope(columns).expect("Replicant has a scope")
+        inst.rendered_scope(columns).expect("Replicant has a scope")
     }
 
     #[test]
@@ -852,7 +852,7 @@ mod tests {
         assert!(s.envelope.iter().any(|&v| v > 0.2), "the preview note sounds");
         assert!(s.wave.iter().all(|&(lo, hi)| lo.is_finite() && hi.is_finite() && lo >= -1.0 && hi <= 1.0 && lo <= hi));
         let mut inst = Instance::new(&CLASS, 48_000.0);
-        assert!(inst.scope(0).is_none(), "no columns, nothing to draw");
+        assert!(inst.rendered_scope(0).is_none(), "no columns, nothing to draw");
     }
 
     #[test]
@@ -893,20 +893,22 @@ mod tests {
     #[test]
     fn scope_ignores_modulation() {
         let mut inst = Instance::new(&CLASS, 48_000.0);
-        let plain = inst.scope(48).expect("a scope");
+        let plain = inst.rendered_scope(48).expect("a scope");
         inst.modulate(CUTOFF, 0.1);
-        assert_eq!(inst.scope(48), Some(plain), "modulation does not move the preview");
+        assert_eq!(inst.rendered_scope(48), Some(plain), "modulation does not move the preview");
     }
 
     #[test]
-    fn scope_is_only_replicant_and_works_at_44_khz() {
+    fn scope_is_only_for_synths_with_one_and_works_at_44_khz() {
         let mut other = Instance::new(&crate::zhora::CLASS, 44_100.0);
-        assert!(other.scope(16).is_none(), "Zhora has no scope");
+        assert!(other.rendered_scope(16).is_none(), "Zhora has no scope");
+        let mut plaits = Instance::new(&crate::plaits::CLASS, 44_100.0);
+        assert_eq!(plaits.rendered_scope(16).map(|s| s.wave.len()), Some(16), "Plaits has one");
         let mut inst = Instance::new(&CLASS, 44_100.0);
         for (id, v) in [(A_ATTACK, 1.0), (A_RELEASE, 1.0), (F_ATTACK, 1.0)] {
             inst.set_param(id, v);
         }
-        let s = inst.scope(32).expect("a scope");
+        let s = inst.rendered_scope(32).expect("a scope");
         assert!(s.wave.iter().all(|&(lo, hi)| lo.is_finite() && hi.is_finite() && lo <= hi));
         assert!(s.envelope.iter().all(|&v| v.is_finite() && (0.0..=1.0).contains(&v)));
     }
