@@ -395,6 +395,7 @@ impl App {
                 result.map_or_else(Outcome::Err, |()| Outcome::Ok)
             }
             Step::Done => {
+                self.ensure_idle_engine();
                 boot.ready_at = Some(Instant::now());
                 Outcome::Ok
             }

@@ -25,13 +25,26 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set(
         "state",
         lua.create_function(move |lua, ()| {
-            let id = sh.borrow().view_id;
+            let (id, cur) = {
+                let b = sh.borrow();
+                (b.view_id, b.view.clone())
+            };
             if lua.named_registry_value::<Option<u64>>("deckard.state_id").ok().flatten() == Some(id)
                 && let Ok(Some(t)) = lua.named_registry_value::<Option<Table>>("deckard.state_cache")
             {
                 return Ok(t);
             }
-            let t = state(lua, &sh.borrow().view)?;
+            if let Some(prev) = lua.app_data_ref::<StatePrev>().map(|p| p.0.clone())
+                && can_patch_state_in_place(&prev, &cur)
+                && let Ok(Some(t)) = lua.named_registry_value::<Option<Table>>("deckard.state_cache")
+                && patch_state_in_place(lua, &t, &prev, &cur).is_ok()
+            {
+                lua.set_app_data(StatePrev(cur));
+                lua.set_named_registry_value("deckard.state_id", id)?;
+                return Ok(t);
+            }
+            let t = state(lua, &cur)?;
+            lua.set_app_data(StatePrev(cur));
             lua.set_named_registry_value("deckard.state_id", id)?;
             lua.set_named_registry_value("deckard.state_cache", t.clone())?;
             Ok(t)
@@ -1661,6 +1674,8 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
     Ok(ct)
 }
 
+struct StatePrev(Rc<View>);
+
 struct LazyEntry {
     view: Rc<View>,
     group: Option<usize>,
@@ -1668,6 +1683,240 @@ struct LazyEntry {
 }
 
 impl mlua::UserData for LazyEntry {}
+
+fn mix_static_eq(a: &crate::MixView, b: &crate::MixView) -> bool {
+    a.level == b.level && a.pan == b.pan && a.plugins == b.plugins && a.aux == b.aux && a.swing == b.swing && a.tune == b.tune
+}
+
+fn sound_static_eq(a: &crate::SoundView, b: &crate::SoundView) -> bool {
+    a.name == b.name
+        && a.rgb == b.rgb
+        && a.color == b.color
+        && a.muted == b.muted
+        && a.used == b.used
+        && a.choke_group == b.choke_group
+        && a.choke_mode == b.choke_mode
+        && a.link_group == b.link_group
+        && a.link_mode == b.link_mode
+        && a.base_key == b.base_key
+        && a.default_color == b.default_color
+        && a.touch_mode == b.touch_mode
+        && a.touch_cc == b.touch_cc
+        && a.touch_curve == b.touch_curve
+        && a.touch_min == b.touch_min
+        && a.touch_max == b.touch_max
+        && a.prob_locked == b.prob_locked
+        && a.selected == b.selected
+        && a.audio == b.audio
+        && mix_static_eq(&a.mix, &b.mix)
+}
+
+fn group_static_eq(a: &crate::GroupView, b: &crate::GroupView) -> bool {
+    a.name == b.name
+        && a.rgb == b.rgb
+        && a.color == b.color
+        && a.muted == b.muted
+        && a.default_color == b.default_color
+        && a.perform == b.perform
+        && a.perform_mode == b.perform_mode
+        && a.scene_pattern == b.scene_pattern
+        && a.patterns == b.patterns
+        && mix_static_eq(&a.mix, &b.mix)
+        && a.sounds.len() == b.sounds.len()
+        && a.sounds.iter().zip(&b.sounds).all(|(x, y)| sound_static_eq(x, y))
+}
+
+fn can_patch_state_in_place(old: &View, new: &View) -> bool {
+    old.project == new.project
+        && old.tempo == new.tempo
+        && old.swing == new.swing
+        && old.master_volume == new.master_volume
+        && old.master_db == new.master_db
+        && old.playing == new.playing
+        && old.recording == new.recording
+        && old.looping == new.looping
+        && old.metronome == new.metronome
+        && old.auto_write == new.auto_write
+        && old.strip_position == new.strip_position
+        && old.touch_auto_write == new.touch_auto_write
+        && old.keep_focus == new.keep_focus
+        && old.relative_strips == new.relative_strips
+        && old.fixed_velocity == new.fixed_velocity
+        && old.velocity == new.velocity
+        && old.cue_level == new.cue_level
+        && old.input_levels == new.input_levels
+        && old.scale_root == new.scale_root
+        && old.scale_bank == new.scale_bank
+        && old.scale_kind == new.scale_kind
+        && old.user_chords == new.user_chords
+        && old.follow == new.follow
+        && old.grid == new.grid
+        && old.recent == new.recent
+        && old.settings == new.settings
+        && old.lock == new.lock
+        && old.lfo_focus == new.lfo_focus
+        && old.mod_slots == new.mod_slots
+        && old.note_repeat == new.note_repeat
+        && old.numerator == new.numerator
+        && old.denominator == new.denominator
+        && old.scene_name == new.scene_name
+        && old.scene_color == new.scene_color
+        && old.scenes == new.scenes
+        && old.scene == new.scene
+        && old.playing_scene == new.playing_scene
+        && old.queued_scene == new.queued_scene
+        && old.song_view == new.song_view
+        && old.sections == new.sections
+        && old.section == new.section
+        && old.pattern == new.pattern
+        && old.pattern_start == new.pattern_start
+        && old.pattern_length == new.pattern_length
+        && old.pattern_auto == new.pattern_auto
+        && old.notes == new.notes
+        && old.group == new.group
+        && old.sound == new.sound
+        && old.browser == new.browser
+        && old.sampling == new.sampling
+        && old.loading == new.loading
+        && old.groups.len() == new.groups.len()
+        && old.groups.iter().zip(&new.groups).all(|(x, y)| group_static_eq(x, y))
+}
+
+fn patch_meter_pair(t: &Table, key: &str, m: (f32, f32)) -> mlua::Result<()> {
+    let pair: Table = t.raw_get(key)?;
+    pair.raw_set(1, db(m.0))?;
+    pair.raw_set(2, db(m.1))
+}
+
+fn patch_mix_telemetry(t: &Table, old: &crate::MixView, new: &crate::MixView) -> mlua::Result<()> {
+    if old.meter != new.meter {
+        patch_meter_pair(t, "meter", new.meter)?;
+    }
+    if old.headroom != new.headroom {
+        t.raw_set("headroom", db(new.headroom))?;
+    }
+    Ok(())
+}
+
+const fn part_bit(parts: &[&str], target: &str) -> u32 {
+    let tb = target.as_bytes();
+    let mut i = 0;
+    while i < parts.len() {
+        let pb = parts[i].as_bytes();
+        if pb.len() == tb.len() {
+            let mut j = 0;
+            let mut eq = true;
+            while j < pb.len() {
+                if pb[j] != tb[j] {
+                    eq = false;
+                    break;
+                }
+                j += 1;
+            }
+            if eq {
+                return 1 << i;
+            }
+        }
+        i += 1;
+    }
+    panic!("missing part name")
+}
+
+fn patch_state_in_place(lua: &Lua, t: &Table, old: &Rc<View>, new: &Rc<View>) -> mlua::Result<()> {
+    const LFOS_BIT: u32 = part_bit(STATE_PARTS, "lfos");
+    const GROUPS_BIT: u32 = part_bit(STATE_PARTS, "groups");
+    const CONTROL_BIT: u32 = part_bit(STATE_PARTS, "control");
+    const SOUNDS_BIT: u32 = part_bit(GROUP_PARTS, "sounds");
+
+    let lazy_map: Table = lua.named_registry_value("deckard.lazy")?;
+    let Some(ud) = lazy_map.raw_get::<Option<mlua::AnyUserData>>(t.clone())? else {
+        return Err(mlua::Error::runtime("missing lazy entry"));
+    };
+    let mut made = {
+        let mut e = ud.borrow_mut::<LazyEntry>()?;
+        e.view = new.clone();
+        e.made.get()
+    };
+    if old.position != new.position {
+        t.raw_set("position", new.position)?;
+    }
+    if old.progress != new.progress {
+        t.raw_set("progress", new.progress)?;
+    }
+    if old.pattern_position != new.pattern_position {
+        t.raw_set("pattern_position", new.pattern_position)?;
+    }
+    if old.master_meter != new.master_meter {
+        patch_meter_pair(t, "master_meter", new.master_meter)?;
+    }
+    if old.cue_meter != new.cue_meter {
+        patch_meter_pair(t, "cue_meter", new.cue_meter)?;
+    }
+    if old.input_meters != new.input_meters {
+        let inputs: Table = t.raw_get("input_meters")?;
+        for k in 0..2 {
+            if old.input_meters[k] != new.input_meters[k] {
+                let pair: Table = inputs.raw_get(k + 1)?;
+                pair.raw_set(1, db(new.input_meters[k].0))?;
+                pair.raw_set(2, db(new.input_meters[k].1))?;
+            }
+        }
+    }
+    if old.lfos != new.lfos && (made & LFOS_BIT) != 0 {
+        made &= !LFOS_BIT;
+        t.raw_set("lfos", Value::Nil)?;
+    }
+    if old.control != new.control && (made & CONTROL_BIT) != 0 {
+        made &= !CONTROL_BIT;
+        t.raw_set("control", Value::Nil)?;
+    }
+    ud.borrow::<LazyEntry>()?.made.set(made);
+
+    if (made & GROUPS_BIT) != 0 {
+        let groups: Table = t.raw_get("groups")?;
+        for (i, (og, ng)) in old.groups.iter().zip(&new.groups).enumerate() {
+            let gt: Table = groups.raw_get(i + 1)?;
+            let g_made = if let Some(gud) = lazy_map.raw_get::<Option<mlua::AnyUserData>>(gt.clone())? {
+                let mut ge = gud.borrow_mut::<LazyEntry>()?;
+                ge.view = new.clone();
+                ge.made.get()
+            } else {
+                0
+            };
+            if og.playing != ng.playing {
+                gt.raw_set("playing", ng.playing)?;
+            }
+            if og.progress != ng.progress {
+                gt.raw_set("progress", ng.progress)?;
+            }
+            if og.playing_progress != ng.playing_progress {
+                gt.raw_set("playing_progress", ng.playing_progress)?;
+            }
+            patch_mix_telemetry(&gt, &og.mix, &ng.mix)?;
+            if (g_made & SOUNDS_BIT) != 0 {
+                let mut sounds_tbl: Option<Table> = None;
+                for (j, (os, ns)) in og.sounds.iter().zip(&ng.sounds).enumerate() {
+                    if os.playing == ns.playing && os.mix.meter == ns.mix.meter && os.mix.headroom == ns.mix.headroom {
+                        continue;
+                    }
+                    let sounds = match &sounds_tbl {
+                        Some(s) => s,
+                        None => {
+                            sounds_tbl = Some(gt.raw_get("sounds")?);
+                            sounds_tbl.as_ref().unwrap()
+                        }
+                    };
+                    let st: Table = sounds.raw_get(j + 1)?;
+                    if os.playing != ns.playing {
+                        st.raw_set("playing", ns.playing)?;
+                    }
+                    patch_mix_telemetry(&st, &os.mix, &ns.mix)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 fn install_lazy(lua: &Lua) -> mlua::Result<()> {
     let weak_mt = lua.create_table()?;

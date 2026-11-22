@@ -178,7 +178,7 @@ pub struct Ctx<'a> {
     /// The knob of a plug-in parameter (by object id), for a macro controlling it.
     pub plugin_knob: &'a dyn Fn(u64) -> Option<super::Knob>,
     /// The MIDI input plug-in on a group.
-    pub midi_input: &'a dyn Fn(usize) -> Option<deckard_engine::midi_input::Info>,
+    pub midi_input: &'a dyn Fn(usize) -> Option<std::sync::Arc<deckard_engine::midi_input::Info>>,
 }
 
 pub fn page(c: &Ctx, level: Level, set: usize, page: usize) -> Page {
@@ -919,7 +919,7 @@ mod io_tests {
         let io = crate::settings::Settings::default();
         let groove = |_: usize, _: usize, _: &str| None;
         let echo = BUILT_IN[0];
-        let chosen = Info::of(built_in(echo).unwrap().as_ref());
+        let chosen = std::sync::Arc::new(Info::of(built_in(echo).unwrap().as_ref()));
         let on = |g: usize| (g == 1).then(|| chosen.clone());
         let c = Ctx {
             doc: &doc,

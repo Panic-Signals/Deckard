@@ -349,7 +349,7 @@ pub struct Output {
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
     /// The MIDI input plug-ins by group, since the plug-ins are on the audio thread.
-    midi_inputs: Mutex<std::collections::BTreeMap<usize, crate::midi_input::Info>>,
+    midi_inputs: Mutex<std::collections::BTreeMap<usize, Arc<crate::midi_input::Info>>>,
     /// Plug-ins put in with no engine playing, for the next one played.
     midi_inputs_waiting: Mutex<std::collections::BTreeMap<usize, Box<dyn crate::midi_input::MidiInput>>>,
     _stream: Playing,
@@ -1036,7 +1036,7 @@ impl Output {
         if group < crate::midi_input::SLOTS {
             let mut table = self.midi_inputs.lock().unwrap();
             match plugin.as_deref() {
-                Some(p) => table.insert(group, crate::midi_input::Info::of(p)),
+                Some(p) => table.insert(group, Arc::new(crate::midi_input::Info::of(p))),
                 None => table.remove(&group),
             };
         }
@@ -1070,7 +1070,7 @@ impl Output {
         swap(&mut self.midi_inputs_waiting.lock().unwrap(), a, b);
     }
 
-    pub fn midi_input(&self, group: usize) -> Option<crate::midi_input::Info> {
+    pub fn midi_input(&self, group: usize) -> Option<Arc<crate::midi_input::Info>> {
         self.midi_inputs.lock().unwrap().get(&group).cloned()
     }
 
@@ -1079,7 +1079,8 @@ impl Output {
     pub fn set_midi_input_param(&self, group: usize, id: u32, value: f64) -> Option<f64> {
         let value = {
             let mut table = self.midi_inputs.lock().unwrap();
-            let param = table.get_mut(&group)?.params.iter_mut().find(|p| p.desc.id == id)?;
+            let info = Arc::make_mut(table.get_mut(&group)?);
+            let param = info.params.iter_mut().find(|p| p.desc.id == id)?;
             param.value = param.desc.fit(value);
             param.value
         };

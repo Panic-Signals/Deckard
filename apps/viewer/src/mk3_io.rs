@@ -216,15 +216,31 @@ impl Touching {
 
 #[derive(Clone)]
 pub enum ScreenFrame {
-    Picture(deckard_surface::Picture),
+    Picture(Arc<deckard_surface::Picture>),
     Pixels(Arc<Vec<[u8; 4]>>),
 }
 
 impl ScreenFrame {
+    #[cfg(test)]
     pub fn into_pixels(self) -> Vec<[u8; 4]> {
+        let mut out = Vec::new();
+        self.write_pixels(&mut out);
+        out
+    }
+
+    pub fn write_pixels(self, out: &mut Vec<[u8; 4]>) {
         match self {
-            ScreenFrame::Picture(p) => p.into_pixels(),
-            ScreenFrame::Pixels(px) => Arc::unwrap_or_clone(px),
+            ScreenFrame::Picture(p) => match Arc::try_unwrap(p) {
+                Ok(mut pic) => pic.rasterize_into(out),
+                Err(shared) => {
+                    let mut pic = (*shared).clone();
+                    pic.rasterize_into(out);
+                }
+            },
+            ScreenFrame::Pixels(px) => {
+                out.clear();
+                out.extend_from_slice(&px);
+            }
         }
     }
 }
@@ -332,18 +348,26 @@ impl Mk3Io {
         }
     }
 
-    /// Set the displays' backlight (0..=100), now and whenever an MK3 connects.
+    /// Set the displays' backlight (0..=100), now if it changed and whenever an MK3
+    /// connects or its displays reopen.
     pub fn set_display_brightness(&self, level: u8) {
         let mut s = self.shared.lock().unwrap();
-        s.display_brightness = Some(level.min(100));
-        s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
+        let level = Some(level.min(100));
+        if s.display_brightness != level {
+            s.display_brightness = level;
+            s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
+        }
     }
 
-    /// Set the LEDs' global level (0..=100 %), now and whenever an MK3 connects.
+    /// Set the LEDs' global level (0..=100 %), now if it changed and whenever an MK3
+    /// connects.
     pub fn set_led_brightness(&self, level: u8) {
         let mut s = self.shared.lock().unwrap();
-        s.led_brightness = Some(level.min(100));
-        s.led_stamp = s.led_stamp.wrapping_add(1);
+        let level = Some(level.min(100));
+        if s.led_brightness != level {
+            s.led_brightness = level;
+            s.led_stamp = s.led_stamp.wrapping_add(1);
+        }
     }
 
     /// Set the pads' sensitivity (0..=100 %), now if it changed and whenever an MK3
@@ -708,14 +732,34 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
     use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
     let mut left = vec![0u16; WIDTH * HEIGHT];
     let mut right = vec![0u16; WIDTH * HEIGHT];
+    let mut px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
+    let mut last_px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
     // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
     let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let [r, g, b, _] = px.get(y * WIDTH * 2 + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
-                out[y * WIDTH + x] = rgb565(r, g, b);
+        let stride = WIDTH * 2;
+        if px.len() >= stride * HEIGHT && x0 + WIDTH <= stride {
+            for y in 0..HEIGHT {
+                let src = &px[y * stride + x0..y * stride + x0 + WIDTH];
+                let dst = &mut out[y * WIDTH..(y + 1) * WIDTH];
+                for (o, &[r, g, b, _]) in dst.iter_mut().zip(src) {
+                    *o = rgb565(r, g, b);
+                }
+            }
+        } else {
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let [r, g, b, _] = px.get(y * stride + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
+                    out[y * WIDTH + x] = rgb565(r, g, b);
+                }
             }
         }
+    };
+    let half_changed = |a: &[[u8; 4]], b: &[[u8; 4]], x0: usize| -> bool {
+        let stride = WIDTH * 2;
+        if a.len() != b.len() || a.len() < stride * HEIGHT {
+            return true;
+        }
+        (0..HEIGHT).any(|y| a[y * stride + x0..y * stride + x0 + WIDTH] != b[y * stride + x0..y * stride + x0 + WIDTH])
     };
     loop {
         {
@@ -752,7 +796,7 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
             set_agent_holding(&mut s, false);
         }
         let mut shown = None;
-        let mut last_px: Vec<[u8; 4]> = Vec::new();
+        last_px.clear();
         loop {
             let (closing, released, next_screen) = {
                 let mut s = shared.lock().unwrap();
@@ -772,9 +816,9 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 }
             };
             if let Some(goodbye) = closing {
-                let px = goodbye.map_or_else(Vec::new, |p| p.to_vec());
-                fill_half(&px, 0, &mut left);
-                fill_half(&px, WIDTH, &mut right);
+                let gpx = goodbye.as_deref().map_or(&[][..], Vec::as_slice);
+                fill_half(gpx, 0, &mut left);
+                fill_half(gpx, WIDTH, &mut right);
                 let _ = d.show(0, &left).and_then(|_| d.show(1, &right));
                 shared.lock().unwrap().displays_closed = true;
                 return;
@@ -788,17 +832,26 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 break;
             }
             if let Some((n, frame)) = next_screen {
-                let px = frame.into_pixels();
-                if px != last_px {
-                    fill_half(&px, 0, &mut left);
-                    fill_half(&px, WIDTH, &mut right);
-                    if let Err(e) = d.show(0, &left).and_then(|_| d.show(1, &right)) {
+                frame.write_pixels(&mut px);
+                let left_dirty = half_changed(&px, &last_px, 0);
+                let right_dirty = half_changed(&px, &last_px, WIDTH);
+                if left_dirty || right_dirty {
+                    let mut res = Ok(());
+                    if left_dirty {
+                        fill_half(&px, 0, &mut left);
+                        res = d.show(0, &left);
+                    }
+                    if res.is_ok() && right_dirty {
+                        fill_half(&px, WIDTH, &mut right);
+                        res = d.show(1, &right);
+                    }
+                    if let Err(e) = res {
                         let mut s = shared.lock().unwrap();
                         s.display_status = e;
                         s.displays_connected = false;
                         break;
                     }
-                    last_px = px;
+                    std::mem::swap(&mut last_px, &mut px);
                 }
                 shown = Some(n);
             }
@@ -1056,5 +1109,24 @@ mod tests {
     fn pressure_on_a_silent_pad_is_dropped() {
         let r = route(mode(TouchMode::PolyAt));
         assert_eq!(Touching::default().pressure(1, None, 0.5, &r), vec![]);
+    }
+
+    #[test]
+    fn unchanged_brightness_levels_do_not_bump_feature_stamps() {
+        let io = Mk3Io { shared: Arc::new(Mutex::new(Shared::default())), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.set_display_brightness(80);
+        io.set_led_brightness(75);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 1);
+        assert_eq!(io.shared.lock().unwrap().led_stamp, 1);
+        io.set_display_brightness(80);
+        io.set_led_brightness(75);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 1);
+        assert_eq!(io.shared.lock().unwrap().led_stamp, 1);
+        io.set_display_brightness(120);
+        io.set_led_brightness(60);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 2);
+        assert_eq!(io.shared.lock().unwrap().led_stamp, 2);
+        io.set_display_brightness(100);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 2);
     }
 }

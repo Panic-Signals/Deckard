@@ -97,7 +97,7 @@ pub enum Op {
 }
 
 /// The part of the project a parameter belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
     Project,
     Song,
@@ -156,6 +156,12 @@ impl Step {
 /// Changes to the same parameters within this time make one undo step (a knob turn).
 const MERGE_WINDOW: Duration = Duration::from_millis(1500);
 
+#[derive(Clone)]
+pub(crate) struct CachedParam {
+    pub(crate) value_path: Result<Box<[u32]>, String>,
+    pub(crate) oid: Option<u64>,
+}
+
 pub struct Document {
     /// The file as read (or last saved): its container is kept when saving.
     file: Vec<u8>,
@@ -194,6 +200,10 @@ pub struct Document {
     /// objects do not scan the whole tree looking for dangling references.
     references: Option<std::collections::HashMap<u64, usize>>,
     session_values: std::collections::BTreeMap<String, u64>,
+    /// Cached `Target -> owner Path` and `(Target, field) -> (value_path, oid)`.
+    /// Invalidated whenever any non-leaf-scalar tree change occurs.
+    pub(crate) owner_cache: RefCell<std::collections::HashMap<Target, Option<Box<[u32]>>>>,
+    pub(crate) param_cache: RefCell<std::collections::HashMap<Target, std::collections::HashMap<Box<str>, CachedParam>>>,
 }
 
 /// The project file as it would be saved at one moment ([`Document::snapshot`]); `Send`.
@@ -289,6 +299,8 @@ impl Document {
             event_sequence: None,
             references: None,
             session_values: Default::default(),
+            owner_cache: Default::default(),
+            param_cache: Default::default(),
         };
         d.next_oid = max_oid + 1;
         d.read_block();
@@ -366,7 +378,21 @@ impl Document {
 
     // ---- changing parameters ---------------------------------------------------
 
+    pub(crate) fn clear_path_caches(&self) {
+        self.owner_cache.borrow_mut().clear();
+        self.param_cache.borrow_mut().clear();
+    }
+
     fn owner(&self, t: Target) -> Option<Path> {
+        if let Some(cached) = self.owner_cache.borrow().get(&t) {
+            return cached.as_ref().map(|p| p.to_vec());
+        }
+        let computed = self.owner_uncached(t);
+        self.owner_cache.borrow_mut().insert(t, computed.as_deref().map(Box::from));
+        computed
+    }
+
+    fn owner_uncached(&self, t: Target) -> Option<Path> {
         let a = &self.addresses;
         match t {
             Target::Project => Some(Vec::new()),
@@ -449,20 +475,52 @@ impl Document {
         Some(path)
     }
 
+    pub(crate) fn resolve_param(&self, target: Target, field: &str) -> CachedParam {
+        let entry = match self.owner(target) {
+            None => CachedParam { value_path: Err(format!("no {target:?} in this project")), oid: None },
+            Some(owner) => match self.field_in(&owner, field) {
+                None => CachedParam { value_path: Err(format!("{target:?} has no {field}")), oid: None },
+                Some(fp) => match self.tree.at(&[owner.as_slice(), &fp].concat()) {
+                    Some(Value::Obj(param)) => {
+                        let oid = param.oid;
+                        let value_path = match param.find_path("value") {
+                            Some(vp) => Ok([owner.as_slice(), &fp, &vp].concat().into_boxed_slice()),
+                            None => Err(format!("{target:?}.{field} has no value")),
+                        };
+                        CachedParam { value_path, oid }
+                    }
+                    _ => CachedParam {
+                        value_path: Err(format!("{target:?}.{field} is shared with another object and can't be changed here")),
+                        oid: None,
+                    },
+                },
+            },
+        };
+        self.param_cache.borrow_mut().entry(target).or_default().insert(field.into(), entry.clone());
+        entry
+    }
+
     /// Path of `field.value` of the parameter `field` on `target`'s object.
     pub fn param_path(&self, target: Target, field: &str) -> Result<Path, String> {
-        let owner = self.owner(target).ok_or_else(|| format!("no {target:?} in this project"))?;
-        let fp = self.field_in(&owner, field).ok_or_else(|| format!("{target:?} has no {field}"))?;
-        let Some(Value::Obj(param)) = self.tree.at(&[owner.as_slice(), &fp].concat()) else {
-            return Err(format!("{target:?}.{field} is shared with another object and can't be changed here"));
-        };
-        let vp = param.find_path("value").ok_or_else(|| format!("{target:?}.{field} has no value"))?;
-        Ok([owner.as_slice(), &fp, &vp].concat())
+        {
+            let cache = self.param_cache.borrow();
+            if let Some(c) = cache.get(&target).and_then(|m| m.get(field)) {
+                return c.value_path.as_ref().map(|p| p.to_vec()).map_err(Clone::clone);
+            }
+        }
+        self.resolve_param(target, field).value_path.map(|p| p.into_vec())
     }
 
     /// The value of parameter `field` of `target`, as stored.
     pub fn value(&self, target: Target, field: &str) -> Option<&Value> {
-        self.tree.at(&self.param_path(target, field).ok()?)
+        {
+            let cache = self.param_cache.borrow();
+            if let Some(c) = cache.get(&target).and_then(|m| m.get(field)) {
+                return self.tree.at(c.value_path.as_deref().ok()?);
+            }
+        }
+        let c = self.resolve_param(target, field);
+        self.tree.at(c.value_path.as_deref().ok()?)
     }
 
     /// A number parameter (or a switch, 0/1; or a choice, its index).
@@ -982,12 +1040,15 @@ impl Document {
             count_refs(&self.tree, &mut refs, true);
             self.references = Some(refs);
         }
+        let is_scalar = |op: &Op| matches!(op, Op::Session { .. } | Op::Set { value: Value::Int(_) | Value::Float(_) | Value::Str(_), .. });
+        let mut structural = false;
         // In order (an op may set a value inside one an earlier op put there); if one
         // has nowhere to go, those before it are taken back.
         let mut inverse = Vec::with_capacity(ops.len());
         for op in ops {
             match run_one(&mut self.tree, &mut self.session_values, op) {
                 Some(undo) => {
+                    structural |= !is_scalar(op) || !is_scalar(&undo);
                     let refs = self.references.as_mut().unwrap();
                     if let Some(v) = op_value(&undo) {
                         count_refs(v, refs, false);
@@ -1002,9 +1063,13 @@ impl Document {
                         let _ = run_one(&mut self.tree, &mut self.session_values, undo);
                     }
                     self.references = None;
+                    self.clear_path_caches();
                     return Err(format!("no value at {:?}", op_path(op)));
                 }
             }
+        }
+        if structural {
+            self.clear_path_caches();
         }
         inverse.reverse();
         Ok(inverse)
@@ -1162,6 +1227,7 @@ impl Document {
         let (project, addresses) = Project::read(self.root());
         self.project = Project { expressions: self.expressions.clone(), ..project };
         self.addresses = addresses;
+        self.clear_path_caches();
         self.revision += 1;
     }
 

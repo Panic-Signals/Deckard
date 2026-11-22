@@ -68,6 +68,7 @@ impl Document {
         self.expressions = state.expressions;
         self.native_pressure = state.native_pressure;
         self.session_values = state.session_values;
+        self.clear_path_caches();
         // Keep live file/save/screen metadata and all previous undo steps.
         self.undo.push(step);
         self.redo.clear();
@@ -98,6 +99,8 @@ impl EditSnapshot {
             note_event: None,
             event_sequence: None,
             references: None,
+            owner_cache: Default::default(),
+            param_cache: Default::default(),
             types: mxprj::types::Types::new(),
             undo: Vec::new(),
             joined: None,
