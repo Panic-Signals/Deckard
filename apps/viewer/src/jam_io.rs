@@ -320,7 +320,14 @@ impl App {
         if self.jam_settings_wanted {
             self.refresh_surface_settings();
         }
-        let view = self.surface_view();
+        if self.jam_device.is_none() {
+            return (Leds::default(), PadMap::default());
+        }
+        let stamp = self.surface_view_stamp();
+        let mut view = match self.frame_surface_view.take() {
+            Some((s, v)) if s == stamp => v,
+            _ => self.surface_view(),
+        };
         let Some(mut d) = self.jam_device.take() else { return (Leds::default(), PadMap::default()) };
         let mut asked = d.poll(now);
         for e in coalesced(events) {
@@ -332,10 +339,15 @@ impl App {
             });
         }
         asked.extend(d.tick(&view, now));
+        let had_asked = !asked.is_empty();
+        self.jam_device = Some(d);
         self.jam_asked(asked);
         self.follow_edits();
         self.update_slot_view();
-        let view = self.surface_view();
+        if had_asked || self.surface_view_stamp() != stamp {
+            view = self.surface_view();
+        }
+        let Some(mut d) = self.jam_device.take() else { return (Leds::default(), PadMap::default()) };
         let (leds, route) = (d.leds(&view, now), d.pad_map(&view, now));
         let error = d.error();
         if error != self.jam_error {
