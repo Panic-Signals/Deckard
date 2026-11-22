@@ -231,7 +231,7 @@ fn main() {
         }
         return;
     }
-    // --goodbye OUT.png: draw what the MK3's displays show after closing, and stop.
+    // --goodbye OUT.png: draw the standby picture, and stop. Closing leaves the displays black.
     if let Some(out) = flag("--goodbye") {
         let px: Vec<u8> = goodbye::picture().into_iter().flatten().collect();
         let image = egui::ColorImage::from_rgba_unmultiplied([goodbye::WIDTH, goodbye::HEIGHT], &px);
@@ -12378,7 +12378,7 @@ impl eframe::App for App {
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
-            m.shut_down(goodbye::picture());
+            m.shut_down();
         }
         if let Some(j) = &self.jam {
             j.shut_down();

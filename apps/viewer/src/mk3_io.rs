@@ -280,10 +280,9 @@ struct Shared {
     /// when it changes: it's a feature report read and written back, not worth every frame.
     pad_sensitivity: Option<u8>,
     sensitivity_stamp: u64,
-    /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
-    /// (`shut_down`).
+    /// DECKARD is closing: dark LEDs, black displays, then stop (`shut_down`).
+    /// A picture left on the panels is a screen-burn risk.
     closing: bool,
-    goodbye: Option<Arc<Vec<[u8; 4]>>>,
     /// Whether the controller and the displays are open, and whether each has been left
     /// dark since `closing`.
     connected: bool,
@@ -328,14 +327,10 @@ impl Mk3Io {
         Mk3Io { shared, display_wake }
     }
 
-    /// Leave the controller dark but for `picture` on the displays (both, 960 × 272
-    /// RGBA): LEDs off. Waits (up to a second) for both threads to do it.
-    pub fn shut_down(&self, picture: Vec<[u8; 4]>) {
-        {
-            let mut s = self.shared.lock().unwrap();
-            s.goodbye = Some(Arc::new(picture));
-            s.closing = true;
-        }
+    /// Leave the controller dark: LEDs off and both displays black. Waits (up to a
+    /// second) for both threads to do it.
+    pub fn shut_down(&self) {
+        self.shared.lock().unwrap().closing = true;
         self.display_wake.notify_all();
         let until = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < until {
@@ -802,24 +797,24 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 let mut s = shared.lock().unwrap();
                 loop {
                     if s.closing {
-                        break (Some(s.goodbye.clone()), s.displays_released, None);
+                        break (true, s.displays_released, None);
                     }
                     if s.displays_released {
-                        break (None, true, None);
+                        break (false, true, None);
                     }
                     if let Some((n, frame)) = &s.screens
                         && shown != Some(*n)
                     {
-                        break (None, false, Some((*n, frame.clone())));
+                        break (false, false, Some((*n, frame.clone())));
                     }
                     s = wake.wait(s).unwrap();
                 }
             };
-            if let Some(goodbye) = closing {
-                let gpx = goodbye.as_deref().map_or(&[][..], Vec::as_slice);
-                fill_half(gpx, 0, &mut left);
-                fill_half(gpx, WIDTH, &mut right);
-                let _ = d.show(0, &left).and_then(|_| d.show(1, &right));
+            if closing {
+                // Black, not the standby picture: that wordmark sits until something
+                // else draws, which is how a panel burns.
+                left.fill(0);
+                let _ = d.show(0, &left).and_then(|_| d.show(1, &left));
                 shared.lock().unwrap().displays_closed = true;
                 return;
             }
