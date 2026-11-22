@@ -217,6 +217,12 @@ impl Recorder {
         self.view.status = RecStatus::Recording;
     }
 
+    /// (Tests: as if the engine's tap were held, for a meter or a take.)
+    #[cfg(test)]
+    pub fn fake_tap(&mut self) {
+        self.tap = Some(Arc::new(Mutex::new(Vec::new())));
+    }
+
     /// The group and sound focused when recording was started, while it runs.
     pub fn focus(&self) -> Option<(usize, usize)> {
         self.run.as_ref().map(|r| r.focus)
@@ -225,6 +231,12 @@ impl Recorder {
     /// Listening to the chosen source for the RECORD tab's input meter.
     pub fn is_metering(&self) -> bool {
         self.meter_key.is_some()
+    }
+
+    /// Holding the engine's master/internal tap (metering or recording an internal
+    /// source): a session recording must not grab the same tap at the same time.
+    pub fn is_internal_active(&self) -> bool {
+        self.tap.is_some()
     }
 
     /// Whether START can be pressed: Auto needs something to play.
@@ -1152,6 +1164,14 @@ mod tests {
         assert_eq!(sample.frames[9][0], 0.1);
         assert_eq!(sample.frames[10][0], 0.5);
         assert_eq!(r.view.status, RecStatus::Idle);
+    }
+
+    #[test]
+    fn internal_active_tracks_the_tap() {
+        let mut r = Recorder::new();
+        assert!(!r.is_internal_active());
+        r.tap = Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        assert!(r.is_internal_active());
     }
 
     #[test]

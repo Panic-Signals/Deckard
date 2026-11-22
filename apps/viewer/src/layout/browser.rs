@@ -328,7 +328,7 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                 // The heart: a click adds or removes the favorite (as the right-click menu does).
                 let heart = Rect::from_center_size(r.left_center() + Vec2::new(12.0, 0.0), Vec2::splat(RESULT_ROW));
                 let tip = if item.favorite { "Remove from Favorites" } else { "Add to Favorites" };
-                let hr = ui.interact(heart, Id::new(("browser-favorite", &item.path)), Sense::click()).on_hover_text(tip);
+                let hr = ui.interact(heart, Id::new(("browser-favorite", &item.path, &item.uuid)), Sense::click()).on_hover_text(tip);
                 hr.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
                 let (glyph, color) = match (item.favorite, hr.hovered(), resp.hovered()) {
                     (true, _, _) => ("♥", FAVORITE),

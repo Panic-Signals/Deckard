@@ -5,7 +5,8 @@
 --                     the last makes a new one
 --   display 3-6       DOUBLE, DUPLICATE, CREATE, DELETE
 --   display 7 / 8     the previous / next sixteen patterns
---   LEFT / RIGHT      the knobs' pages: Pattern (POSITION, START, LENGTH), Color
+--   LEFT / RIGHT      the knobs' pages: Pattern (POSITION, START, LENGTH; SHIFT
+--                     for a sixteenth at a time), Color
 --   jog wheel         the previous / next pattern
 
 local widgets = require("lib.widgets")
@@ -113,7 +114,11 @@ function pattern.knob(n, amount)
       local to = math.max(0, snap(s, start, steps, fine))
       if to < start + length then deckard.pattern_span(to, start + length - to) end
     elseif n == 4 then
-      -- Half a bar, then whole powers of two, including when SHIFT is held.
+      -- Half a bar, then whole powers of two; with SHIFT, a sixteenth (as START).
+      if fine then
+        deckard.pattern_length(math.max(240, snap(s, length, steps, true)))
+        return true
+      end
       local half = math.max(1, snap(s, 0, 1, false) // 2)
       local next = half
       if steps > 0 then

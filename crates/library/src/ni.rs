@@ -138,31 +138,22 @@ impl NiIndex {
             characters.entry(r.get(0).map_err(err)?).or_default().push(r.get(1).map_err(err)?);
         }
 
-        let has_vendor = db
-            .prepare("PRAGMA table_info(k_sound_info)")
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map([], |r| r.get::<_, String>(1)).ok().map(|rows| rows.filter_map(Result::ok).any(|name| name == "vendor"))
-            })
-            .unwrap_or(false);
+        let has_vendor = has_column(db, "k_sound_info", "vendor");
         let vendor = if has_vendor { "coalesce(k.vendor, '')" } else { "''" };
         // A product Maschine has marked as gone (state 4) keeps its rows, but its files aren't
         // there to load. An older index may have no state.
-        let has_state: bool = db
-            .query_row("SELECT count(*) FROM pragma_table_info('k_content_path') WHERE name = 'state'", [], |r| r.get::<_, i64>(0))
-            .map_err(err)?
-            > 0;
+        let has_state = has_column(db, "k_content_path", "state");
         let installed = if has_state { "AND coalesce(c.state, 0) <> 4" } else { "" };
         let favorites = favorite_ids(&self.path);
         // The section's table has the id (`k_sound_info`'s may be empty); an older index may not.
-        let has_id: bool = db
-            .query_row("SELECT count(*) FROM pragma_table_info(?1) WHERE name = 'favorite_id'", [&table], |r| r.get::<_, i64>(0))
-            .map_err(err)?
-            > 0;
+        let has_id = has_column(db, &table, "favorite_id");
         let favorite_id = if has_id { "p.favorite_id" } else { "NULL" };
+        let uuid_col = if has_column(db, "k_sound_info", "uuid") { "k.uuid" } else { "NULL" };
+        let upid_col = if has_column(db, "k_content_path", "upid") { "c.upid" } else { "NULL" };
         let sql = format!(
             "SELECT p.id, k.name, k.file_name, k.tempo, coalesce(k.author, ''), p.entry1, p.entry2, p.entry3, \
-             COALESCE(NULLIF(p.entry1, ''), CASE WHEN c.content_type = 2 THEN c.alias END), {favorite_id}, {vendor} \
+             COALESCE(NULLIF(p.entry1, ''), CASE WHEN c.content_type = 2 THEN c.alias END), {favorite_id}, {vendor}, \
+             {uuid_col}, {upid_col}, c.path \
              FROM {table} p JOIN k_sound_info k ON k.id = p.id LEFT JOIN k_content_path c ON c.id = k.content_path_id \
              WHERE k.hidden_for = 0 {installed}"
         );
@@ -186,12 +177,17 @@ impl NiIndex {
                 continue;
             }
             let name: String = r.get(1).map_err(err)?;
+            let path = PathBuf::from(r.get::<_, String>(2).map_err(err)?);
+            let uuid = r.get::<_, Option<String>>(11).ok().flatten().filter(|s| !s.is_empty());
+            let upid = r.get::<_, Option<String>>(12).ok().flatten();
+            let content_root = r.get::<_, Option<String>>(13).ok().flatten();
+            let preview_subpath = preview_subpath(&path, content_root.as_deref(), upid.as_deref());
             let tempo = r.get::<_, Option<f64>>(3).map_err(err)?.filter(|t| *t > 0.0).or_else(|| crate::names::tempo_in_name(&name));
             let item = Item {
                 vendor: vendor_str,
                 kind: q.kind,
                 user: q.user,
-                path: PathBuf::from(r.get::<_, String>(2).map_err(err)?),
+                path,
                 product,
                 bank,
                 types: deepest(types.remove(&id).unwrap_or_default()),
@@ -200,6 +196,8 @@ impl NiIndex {
                 author: r.get(4).map_err(err)?,
                 favorite: r.get::<_, Option<String>>(9).map_err(err)?.is_some_and(|id| favorites.contains(&id)),
                 name,
+                uuid,
+                preview_subpath,
             };
             if q.admits(&item) {
                 items.push(item);
@@ -319,9 +317,41 @@ fn walk_unindexed_dir(dir: &Path, product: &str, fx_default: bool, out: &mut Vec
                 tempo,
                 author: String::new(),
                 favorite: false,
+                uuid: None,
+                preview_subpath: None,
             });
         }
     }
+}
+
+fn has_column(db: &Connection, table: &str, col: &str) -> bool {
+    db.query_row("SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2", [table, col], |r| r.get::<_, i64>(0)).is_ok_and(|n| n > 0)
+}
+
+/// Relative folder under NI's central Previews `Samples` directory (`<upid>/<rel_dir>`).
+fn preview_subpath(file: &Path, root: Option<&str>, upid: Option<&str>) -> Option<PathBuf> {
+    let upid = upid.filter(|u| !u.is_empty())?;
+    let root = root.filter(|r| !r.is_empty())?;
+    let dir = file.parent()?;
+    let norm = |s: &str| s.replace('\\', "/");
+    let dir_s = norm(&dir.to_string_lossy());
+    let root_s = norm(root);
+    let root_trimmed = root_s.trim_end_matches('/');
+    let rel = if dir_s.eq_ignore_ascii_case(root_trimmed) {
+        ""
+    } else if dir_s.len() > root_trimmed.len()
+        && dir_s.as_bytes()[root_trimmed.len()] == b'/'
+        && dir_s[..root_trimmed.len()].eq_ignore_ascii_case(root_trimmed)
+    {
+        &dir_s[root_trimmed.len() + 1..]
+    } else {
+        return None;
+    };
+    let mut out = PathBuf::from(upid);
+    for seg in rel.split('/').filter(|s| !s.is_empty()) {
+        out.push(seg);
+    }
+    Some(out)
 }
 
 /// Open it read-only. While Maschine has it open (its `-wal` is there) the read

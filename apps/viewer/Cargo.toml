@@ -6,6 +6,7 @@ description = "Read-only viewer for Maschine projects"
 
 [dependencies]
 serde_json = "1"
+fs4 = "1.1"
 eframe = "0.36"
 sysinfo = "0.36.1"
 deckard-plugins = { path = "../../crates/plugins" }
@@ -30,6 +31,7 @@ midly = "0.5.3"
 deckard-nwl = { version = "0.1.0", path = "../../crates/nwl" }
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 sha2 = "0.11.1"
+hound = "3.5"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -38,7 +40,7 @@ objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_System_Services", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_System_Services", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry"] }
 
 [features]
 # Windows: ASIO as well as WASAPI (Preferences ▸ Audio). See DEVELOPMENT.md for what it needs.
