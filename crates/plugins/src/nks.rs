@@ -469,20 +469,206 @@ pub fn native_preset(ext: &str, bytes: &[u8], installed: &[Entry]) -> Option<Res
         "nrkt" | "rkplr" | "ens" => "Reaktor 6",
         _ => return None,
     };
-    let resolve = || -> Result<Resolved, String> {
+    Some(native_preset_for_plugin(&ext, plugin, bytes, installed))
+}
+
+fn native_preset_for_plugin(ext: &str, plugin: &str, bytes: &[u8], installed: &[Entry]) -> Result<Resolved, String> {
+    let e = installed
+        .iter()
+        .find(|e| e.kind == Kind::Vst3 && e.name.eq_ignore_ascii_case(plugin))
+        .ok_or_else(|| format!("{plugin} isn't installed as VST3"))?;
+    let cid = hex16(&e.cid).ok_or("the plug-in has no class id")?;
+    let id = e.maschine_id().ok_or("the plug-in has no id")?;
+    let component = wrap_nisound_preset(ext, bytes).unwrap_or_else(|| bytes.to_vec());
+    let pages = parse_dsiny(bytes);
+    let state = State { component, controller: Vec::new() };
+    let chunk = wrap_chunk(&state, Format::Vst3, &cid);
+    Ok(Resolved { id, name: e.name.clone(), chunk, pages })
+}
+
+/// Resolve a native preset at `path` from disk. Multi-snapshot Reaktor `.ens` / `.rkplr`
+/// ensembles are opened via Reaktor's NKS `LOAD_BY_PATH` command (`0x6E690008`) instead of
+/// reading the 45–125 MB ensemble on the UI thread, and `.ens` / `.rkplr` / `.nrkt` effects
+/// route to `"Reaktor 6 FX"`.
+pub fn native_preset_file(
+    path: &std::path::Path,
+    uuid: Option<&str>,
+    effect: bool,
+    installed: &[Entry],
+) -> Option<Result<Resolved, String>> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if matches!(ext.as_str(), "ens" | "rkplr") {
+        #[cfg(windows)]
+        return Some(reaktor_ens::state(path, uuid, effect, installed));
+        #[cfg(not(windows))]
+        {
+            let _ = (uuid, effect, installed);
+            return Some(Err(format!("{}: .{ext} presets can only be loaded on Windows", path.display())));
+        }
+    }
+    if !matches!(ext.as_str(), "nfm8" | "nmsv" | "nksn" | "nki" | "nrkt") {
+        return None;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return Some(Err(format!("{}: {e}", path.display()))),
+    };
+    if ext == "nrkt" && effect {
+        return Some(native_preset_for_plugin(&ext, "Reaktor 6 FX", &bytes, installed));
+    }
+    native_preset(&ext, &bytes, installed)
+}
+
+mod reaktor_ens {
+    /// Name a hosted Reaktor ensemble slot after its ensemble file (e.g. `"Monark"`,
+    /// `"Prism FX"`), falling back to the Reaktor host name when the path has no stem.
+    pub fn ensemble_name(path: &std::path::Path, fallback: &str) -> String {
+        path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or(fallback).to_string()
+    }
+
+    /// Convert `k_sound_info.uuid` into the 16-byte nibble-swapped trailer Maschine sends in
+    /// Reaktor's `LOAD_BY_PATH` payload (`0x6E690008`). Missing or malformed UUIDs give `[0; 16]`.
+    pub fn nibble_swap_uuid(uuid: Option<&str>) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        let Some(u) = uuid else { return out };
+        let hex: Vec<u8> = u.bytes().filter(|&b| b != b'-').collect();
+        if hex.len() != 32 {
+            return out;
+        }
+        for (slot, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+            let Ok(s) = std::str::from_utf8(pair) else { return [0; 16] };
+            let Ok(b) = u8::from_str_radix(s, 16) else { return [0; 16] };
+            *slot = (b >> 4) | (b << 4);
+        }
+        out
+    }
+
+    #[cfg(windows)]
+    pub fn state(
+        path: &std::path::Path,
+        uuid: Option<&str>,
+        effect: bool,
+        installed: &[crate::scan::Entry],
+    ) -> Result<super::Resolved, String> {
+        use std::ffi::c_void;
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+        use std::time::SystemTime;
+
+        type Key = (PathBuf, [u8; 16], bool, u64, Option<SystemTime>);
+        static RECENT: Mutex<Vec<(Key, super::Resolved)>> = Mutex::new(Vec::new());
+        const KEEP: usize = 8;
+
+        struct Com(*mut c_void);
+        impl Com {
+            unsafe fn method(&self, index: usize) -> usize {
+                unsafe { *(*(self.0 as *const *const usize)).add(index) }
+            }
+        }
+        impl Drop for Com {
+            fn drop(&mut self) {
+                type Release = unsafe extern "system" fn(*mut c_void) -> u32;
+                if !self.0.is_null() {
+                    unsafe {
+                        let release: Release = std::mem::transmute(self.method(2));
+                        release(self.0);
+                    }
+                }
+            }
+        }
+
+        // Native Instruments' private NKS command interface (`45AF934E-90A4684C-BF41B535-443028AE`).
+        const NKS_COMMANDS: [u8; 16] = [0x45, 0xAF, 0x93, 0x4E, 0x90, 0xA4, 0x68, 0x4C, 0xBF, 0x41, 0xB5, 0x35, 0x44, 0x30, 0x28, 0xAE];
+        const LOAD_BY_PATH: u32 = 0x6E69_0008;
+
+        fn nks_load_payload(path: &str, id: [u8; 16]) -> Vec<u8> {
+            let mut payload = Vec::with_capacity(4 + 4 + path.len() + 16);
+            for v in [1u32, path.len() as u32] {
+                payload.extend_from_slice(&v.to_le_bytes());
+            }
+            payload.extend_from_slice(path.as_bytes());
+            payload.extend_from_slice(&id);
+            payload
+        }
+
+        unsafe fn command_load(component: *mut c_void, payload: &[u8]) -> bool {
+            type Query = unsafe extern "system" fn(*mut c_void, *const [u8; 16], *mut *mut c_void) -> i32;
+            type Command = unsafe extern "system" fn(*mut c_void, u32, u64, *const c_void, u64, *mut c_void) -> i64;
+            let component = Com(component);
+            let mut nks = std::ptr::null_mut();
+            let answered = unsafe {
+                let query: Query = std::mem::transmute(component.method(0));
+                query(component.0, &NKS_COMMANDS, &mut nks)
+            };
+            // Borrowed from `ComPtr<IComponent>`: not ours to release.
+            std::mem::forget(component);
+            if answered != 0 || nks.is_null() {
+                return false;
+            }
+            let nks = Com(nks);
+            let mut data = Vec::with_capacity(20);
+            data.extend_from_slice(&(payload.as_ptr() as u64).to_le_bytes());
+            data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            data.extend_from_slice(&[0; 8]);
+            let mut result = [0u8; 256];
+            unsafe {
+                let command: Command = std::mem::transmute(nks.method(3));
+                command(nks.0, LOAD_BY_PATH, data.len() as u64, data.as_mut_ptr() as *const c_void, 0, result.as_mut_ptr() as *mut c_void);
+            }
+            true
+        }
+
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let id_16 = nibble_swap_uuid(uuid);
+        let key: Key = (path.to_path_buf(), id_16, effect, meta.len(), meta.modified().ok());
+        if let Some((_, resolved)) = RECENT.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return Ok(resolved.clone());
+        }
+        if !crate::on_main_thread() {
+            return Err("Reaktor can only open a file on the main thread".into());
+        }
+        let plugin_name = if effect { "Reaktor 6 FX" } else { "Reaktor 6" };
         let e = installed
             .iter()
-            .find(|e| e.kind == Kind::Vst3 && e.name.eq_ignore_ascii_case(plugin))
-            .ok_or_else(|| format!("{plugin} isn't installed as VST3"))?;
-        let cid = hex16(&e.cid).ok_or("the plug-in has no class id")?;
+            .find(|e| e.kind == crate::scan::Kind::Vst3 && e.name.eq_ignore_ascii_case(plugin_name))
+            .ok_or_else(|| format!("{plugin_name} isn't installed as VST3"))?;
         let id = e.maschine_id().ok_or("the plug-in has no id")?;
-        let component = wrap_nisound_preset(&ext, bytes).unwrap_or_else(|| bytes.to_vec());
-        let pages = parse_dsiny(bytes);
-        let state = State { component, controller: Vec::new() };
-        let chunk = wrap_chunk(&state, Format::Vst3, &cid);
-        Ok(Resolved { id, name: e.name.clone(), chunk, pages })
-    };
-    Some(resolve())
+        let absolute = std::path::absolute(path).map_err(|err| err.to_string())?;
+        let text = absolute.to_str().ok_or("the file's path isn't valid Unicode")?.replace('/', "\\");
+
+        let mut host = crate::Host::default();
+        let plugin = host.instance(crate::Slot::Sound { group: 0, sound: 0 }, &id, &e.name, &[], 48_000.0)?;
+        let empty_len = plugin.lock().map_err(|_| "Reaktor is unavailable")?.save_chunk().len();
+        let payload = nks_load_payload(&text, id_16);
+        let sent = {
+            let p = plugin.lock().map_err(|_| "Reaktor is unavailable")?;
+            let component = p.component().ok_or("not a VST3 Reaktor")?;
+            unsafe { command_load(component.as_ptr().cast(), &payload) }
+        };
+        if !sent {
+            return Err(format!("{}: {plugin_name} did not accept NKS load", path.display()));
+        }
+        let (chunk, state) = {
+            let mut p = plugin.lock().map_err(|_| "Reaktor is unavailable")?;
+            let state = p.state();
+            let chunk = super::wrap_chunk(&state, p.id.format, &p.id.cid);
+            (chunk, state)
+        };
+        drop(plugin);
+        drop(host);
+        if chunk.len() <= empty_len {
+            return Err(format!("{}: {plugin_name} did not open the preset", path.display()));
+        }
+        let pages = super::parse_reaktor_state_dsiny(&state.component);
+        let resolved = super::Resolved { id, name: ensemble_name(path, &e.name), chunk, pages };
+        let mut recent = RECENT.lock().unwrap();
+        recent.retain(|(k, _)| (&k.0, k.1, k.2) != (&key.0, key.1, key.2));
+        recent.push((key, resolved.clone()));
+        if recent.len() > KEEP {
+            recent.remove(0);
+        }
+        Ok(resolved)
+    }
 }
 
 fn find_tag(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -700,9 +886,19 @@ fn fastlz_compress(input: &[u8]) -> Vec<u8> {
 
 /// Controller pages from the `DSINy` chunk of an `NISound` (`.nfm8`, `.nmsv`) preset.
 fn parse_dsiny(raw: &[u8]) -> Vec<Vec<Knob>> {
+    let Some(header) = raw.get(..8).and_then(|h| h.try_into().ok()) else { return Vec::new() };
+    let root_size = u64::from_le_bytes(header) as usize;
+    let buf = &raw[..root_size.min(raw.len())];
+    parse_dsiny_in(buf).unwrap_or_default()
+}
+
+/// Controller pages from an embedded `DSINy` frame inside Reaktor's saved VST3 component state.
+fn parse_reaktor_state_dsiny(component: &[u8]) -> Vec<Vec<Knob>> {
+    parse_dsiny_in(component).unwrap_or_default()
+}
+
+fn parse_dsiny_in(buf: &[u8]) -> Option<Vec<Vec<Knob>>> {
     let parse = || -> Option<Vec<Vec<Knob>>> {
-        let root_size = u64::from_le_bytes(raw.get(..8)?.try_into().ok()?) as usize;
-        let buf = raw.get(..root_size.min(raw.len()))?;
         // Both the outer resource and its NISound payload carry DSINy. Only
         // the inner tag has the hsin frame whose offsets are parsed below.
         let y_idx = buf
@@ -777,7 +973,7 @@ fn parse_dsiny(raw: &[u8]) -> Vec<Vec<Knob>> {
         }
         Some(pages)
     };
-    parse().unwrap_or_default()
+    parse()
 }
 
 /// A MessagePack value, as far as `PLID` needs one.
@@ -1346,5 +1542,67 @@ mod tests {
             n += 1;
         }
         assert!(n > 0);
+    }
+
+    #[test]
+    fn ensemble_name_uses_file_stem_instead_of_reaktor_host() {
+        assert_eq!(reaktor_ens::ensemble_name(std::path::Path::new("C:/Users/Public/Documents/Monark/Monark.ens"), "Reaktor 6"), "Monark");
+        assert_eq!(
+            reaktor_ens::ensemble_name(std::path::Path::new("C:/Users/Public/Documents/Prism/Prism FX.rkplr"), "Reaktor 6 FX"),
+            "Prism FX"
+        );
+        assert_eq!(reaktor_ens::ensemble_name(std::path::Path::new(""), "Reaktor 6"), "Reaktor 6");
+    }
+
+    #[test]
+    fn nibble_swap_matches_maschines_nks_uuid() {
+        assert_eq!(
+            reaktor_ens::nibble_swap_uuid(Some("6d63bc67-8fd2-9fb4-786f-75f05c168407")),
+            [0xd6, 0x36, 0xcb, 0x76, 0xf8, 0x2d, 0xf9, 0x4b, 0x87, 0xf6, 0x57, 0x0f, 0xc5, 0x61, 0x48, 0x70]
+        );
+        assert_eq!(reaktor_ens::nibble_swap_uuid(None), [0; 16]);
+        assert_eq!(reaktor_ens::nibble_swap_uuid(Some("short")), [0; 16]);
+    }
+
+    #[test]
+    fn parse_reaktor_state_dsiny_finds_embedded_pages() {
+        let mut hsin = vec![0u8; 92];
+        hsin[12..16].copy_from_slice(b"hsin");
+        hsin[48..56].copy_from_slice(b"DSINy\0\0\0");
+        hsin.extend_from_slice(&1u32.to_le_bytes());
+        hsin.extend_from_slice(&1u32.to_le_bytes());
+        hsin.extend_from_slice(&1u32.to_le_bytes());
+        hsin.extend_from_slice(&4u32.to_le_bytes());
+        for ch in "Main".encode_utf16() {
+            hsin.extend_from_slice(&ch.to_le_bytes());
+        }
+        hsin.extend_from_slice(&1u32.to_le_bytes());
+        hsin.extend_from_slice(&6u32.to_le_bytes());
+        for ch in "Cutoff".encode_utf16() {
+            hsin.extend_from_slice(&ch.to_le_bytes());
+        }
+        hsin.extend_from_slice(&0u32.to_le_bytes());
+        hsin.extend_from_slice(&0u32.to_le_bytes());
+        hsin.extend_from_slice(&42u32.to_le_bytes());
+        hsin.extend_from_slice(&1u32.to_le_bytes());
+        let actual_len = hsin.len();
+        hsin[..8].copy_from_slice(&(actual_len as u64).to_le_bytes());
+
+        let mut wrapper = 16u64.to_le_bytes().to_vec();
+        wrapper.extend_from_slice(b"\x014RIN\x11\0\0\0\0\x01BEER");
+        wrapper.extend_from_slice(&hsin);
+        wrapper.extend_from_slice(b"trailing bytes");
+
+        assert!(parse_dsiny(&wrapper).is_empty());
+        let pages = parse_reaktor_state_dsiny(&wrapper);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0][0].name, "Cutoff");
+        assert_eq!(pages[0][0].section, "Main");
+        assert_eq!(pages[0][0].id, Some(42));
+    }
+
+    #[test]
+    fn native_preset_file_ignores_unknown_extensions() {
+        assert!(native_preset_file(std::path::Path::new("Kit.mxfx"), None, true, &[]).is_none());
     }
 }

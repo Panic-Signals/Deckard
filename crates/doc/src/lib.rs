@@ -22,7 +22,7 @@ mod clips;
 pub use block::SavedScreen;
 pub use clips::CLIP;
 mod chain;
-pub use chain::{Chain, NewModule};
+pub use chain::{Chain, CopiedSlot, NewModule};
 pub use files::{FileItem, Samples, sample_refs};
 mod audio;
 mod lanes;

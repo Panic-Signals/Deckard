@@ -19,6 +19,7 @@ pub static CLASS: Class = Class {
     params: PARAMS,
     pages: PAGES,
     make: |sr| Box::new(Tuner::new(sr)),
+    scope: false,
 };
 
 /// Whether `id` (a saved `plugin_id`) is the Tuner.

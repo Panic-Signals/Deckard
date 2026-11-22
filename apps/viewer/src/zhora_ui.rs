@@ -9,7 +9,7 @@ use deckard_plugins::native::{InputSource, Readout, TuneState};
 use deckard_plugins::zhora::{
     ATTACK, CHECK, DECAY, HOLD, HOLD_NOTE, INPUT, LIVE, OUTS, RELEASE, SIGNAL_NAMES, SUSTAIN, TUNE, input_of, is_zhora,
 };
-use deckard_surface::{TunerView, ZhoraView};
+use deckard_surface::{ScopeView, TunerView, ZhoraView};
 
 use crate::App;
 use crate::settings::Settings;
@@ -239,6 +239,15 @@ pub fn view(r: &Readout, live: bool, hold_note: &str, input: String, problem: Op
 /// Samples in the envelope's picture.
 const ENV_POINTS: usize = 240;
 
+/// Columns in the scope beside the picture (1 px each: 218 px inside its frame).
+const SCOPE_COLUMNS: usize = 218;
+
+#[cfg(test)]
+thread_local! {
+    /// Preview notes of internal synths rendered on this thread.
+    static INTERNAL_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The picture of an envelope whose knobs are at `[attack, decay, sustain, release]`
 /// (0..1), as the LFO page draws one, and where it shows the note off.
 pub fn env_picture([a, d, s, r]: [f64; 4]) -> (Vec<f32>, f32) {
@@ -283,6 +292,86 @@ impl App {
         let v = tuner_view(&r, reference);
         *shown = Some((key, v.clone()));
         Some(v)
+    }
+
+    /// What the right screen shows of the focused synth's preview. Read without waiting
+    /// on the audio thread: while it has the instance, the last picture stays. A preview
+    /// the knobs have moved past is rendered here with the instance let go (the audio
+    /// thread waits for whoever holds it, and a render is a second of sound).
+    pub(crate) fn scope_view(&self) -> Option<ScopeView> {
+        let chain = self.chain();
+        let i = self.slot.filter(|_| !self.channel)?;
+        let key = (chain, i);
+        // Internal synths (drum synths, Bass/Poly Synth): render a preview note, once for
+        // each setting of the knobs.
+        let slot = self.doc.as_ref()?.borrow().chain_slots(chain)?.get(i)?.clone();
+        if deckard_model::INTERNAL_INSTRUMENTS.contains(&slot.module.as_str()) {
+            let mut rendered = self.internal_scope.borrow_mut();
+            if let Some((_, _, v)) = rendered.as_ref().filter(|(module, params, _)| *module == slot.module && *params == slot.params) {
+                return Some(v.clone());
+            }
+            let scope = self.render_internal_scope(&slot.module, &slot.params)?;
+            let v = ScopeView { wave: scope.wave, envelope: scope.envelope };
+            *rendered = Some((slot.module, slot.params, v.clone()));
+            return Some(v);
+        }
+        let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, i))?;
+        let mut shown = self.scope_shown.borrow_mut();
+        let Ok(p) = inst.try_lock() else {
+            return shown.as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
+        };
+        let (scope, job) = (p.scope(SCOPE_COLUMNS), p.preview_job());
+        drop(p);
+        let scope = match job {
+            Some(job) => {
+                let rendered = job.render();
+                let scope = rendered.scope(SCOPE_COLUMNS);
+                // (Kept for the next look; with the instance busy, that look renders again.)
+                if let Ok(mut p) = inst.try_lock() {
+                    p.set_preview(rendered);
+                }
+                Some(scope)
+            }
+            None => scope,
+        };
+        let Some(scope) = scope else {
+            *shown = None;
+            return None;
+        };
+        let v = ScopeView { wave: scope.wave, envelope: scope.envelope };
+        *shown = Some((key, v.clone()));
+        Some(v)
+    }
+
+    fn render_internal_scope(&self, module: &str, params: &[(String, f64)]) -> Option<deckard_plugins::native::Scope> {
+        #[cfg(test)]
+        INTERNAL_RENDERS.with(|n| n.set(n.get() + 1));
+        let sr = 48000.0;
+        let mut synth = deckard_engine::synth::make(module, params, sr)?;
+        let total = (sr * deckard_plugins::native::PREVIEW_SECONDS).round() as usize;
+        let hold = (sr * deckard_plugins::native::PREVIEW_HOLD).round() as usize;
+        let mut mono = Vec::with_capacity(total);
+        let mut left = vec![0.0f32; deckard_plugins::MAX_BLOCK];
+        let mut right = vec![0.0f32; deckard_plugins::MAX_BLOCK];
+        synth.note_on(69, 100);
+        let mut done = 0;
+        let mut released = false;
+        while done < total {
+            if !released && done >= hold {
+                synth.note_off(69);
+                released = true;
+            }
+            let until = if released { total } else { hold.min(total) };
+            let n = (until - done).min(deckard_plugins::MAX_BLOCK);
+            left[..n].fill(0.0);
+            right[..n].fill(0.0);
+            synth.process(&mut left[..n], &mut right[..n]);
+            for i in 0..n {
+                mono.push((left[i] + right[i]) * 0.5);
+            }
+            done += n;
+        }
+        Some(deckard_plugins::native::scope_of(&mono, SCOPE_COLUMNS))
     }
 
     /// The focused slot, when it is a Zhora playing a sound: (group, sound, slot).
@@ -624,6 +713,81 @@ mod tests {
         assert!(peak(&after) > peak(&before), "a longer attack peaks later");
         crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PluginPage(2)]);
         assert!(env(&app).is_empty(), "LEVELS");
+    }
+
+    /// A new project with `class` (an internal synth) on its first sound, focused.
+    fn app_with_internal(class: &'static str) -> App {
+        let mut app = App { settings: Settings::default(), ..App::default() };
+        app.new_project();
+        (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, crate::layout::ChainTab::Sound, false);
+        app.add_slot(crate::layout::AddWhat::Instrument(class));
+        app.slot = Some(0);
+        app
+    }
+
+    /// An internal synth's preview is rendered once for each setting of its knobs: the
+    /// screens ask every frame, and a look with nothing changed renders nothing.
+    #[test]
+    fn an_internal_synths_preview_renders_only_when_its_knobs_change() {
+        let app = app_with_internal("Kick");
+        let renders = || INTERNAL_RENDERS.with(|n| n.get());
+        let before = renders();
+        let first = app.scope_view().expect("the Kick has a scope");
+        assert_eq!((first.wave.len(), first.envelope.len()), (SCOPE_COLUMNS, SCOPE_COLUMNS));
+        assert!(first.envelope.iter().any(|&v| v > 0.05), "the preview note sounds");
+        assert_eq!(renders(), before + 1);
+        assert_eq!(app.scope_view(), Some(first.clone()));
+        assert_eq!(app.surface_view().control.scope, Some(first), "on the Control page");
+        assert_eq!(renders(), before + 1, "nothing changed: nothing rendered");
+        // A knob moves: one render more, then none.
+        let doc = app.doc.clone().unwrap();
+        doc.borrow_mut().set("Decay", deckard_doc::Target::Module(0, 0, 0), "decay", mxprj::decode::Value::Float(0.9)).unwrap();
+        app.scope_view().expect("still a scope");
+        app.scope_view();
+        assert_eq!(renders(), before + 2, "Decay moved: rendered again, once");
+    }
+
+    /// Every internal synth has a preview; a channel's page and a slot without a synth
+    /// have none.
+    #[test]
+    fn every_internal_synth_has_a_preview() {
+        for class in deckard_model::INTERNAL_INSTRUMENTS {
+            let app = app_with_internal(class);
+            let v = app.scope_view().unwrap_or_else(|| panic!("{class} has a scope"));
+            assert!(v.wave.iter().all(|(lo, hi)| lo.is_finite() && hi.is_finite() && lo <= hi), "{class}");
+        }
+        let mut app = app_with_internal("Kick");
+        app.channel = true;
+        assert_eq!(app.scope_view(), None, "the channel's page");
+        assert_eq!(app_with_zhora().scope_view(), None, "Zhora has no scope");
+    }
+
+    /// Replicant's preview: rendered at the first look and kept in its instance, which
+    /// is free while it renders; with the instance busy (the audio thread has it) the
+    /// last picture stays, and a knob turned gives a new one.
+    #[test]
+    fn replicants_preview_is_rendered_off_its_lock_and_kept() {
+        let mut app = App { settings: Settings::default(), ..App::default() };
+        app.new_project();
+        (app.group, app.sound, app.chain_tab, app.channel) = (0, 0, crate::layout::ChainTab::Sound, false);
+        let class = deckard_plugins::native::CLASSES.iter().find(|c| c.name == "Replicant").unwrap();
+        app.add_slot(crate::layout::AddWhat::Plugin(crate::layout::native_entry(class)));
+        app.slot = Some(0);
+        let inst = app.slot_plugin_in(Chain::Sound(0, 0), 0).unwrap();
+        assert!(inst.lock().unwrap().scope(SCOPE_COLUMNS).is_none(), "nothing rendered yet");
+        let first = app.scope_view().expect("Replicant has a scope");
+        assert_eq!(first.wave.len(), SCOPE_COLUMNS);
+        assert!(inst.lock().unwrap().preview_job().is_none(), "kept in the instance");
+        assert_eq!(app.scope_view(), Some(first.clone()));
+        let id = class.params.iter().find(|p| p.name == "Cutoff").unwrap().id;
+        let now = inst.lock().unwrap().param_value(id);
+        inst.lock().unwrap().set_param(id, if now > 0.5 { 0.1 } else { 0.9 });
+        {
+            let _audio = inst.lock().unwrap();
+            assert_eq!(app.scope_view(), Some(first.clone()), "busy: the last picture stays");
+        }
+        let turned = app.scope_view().expect("a scope");
+        assert_ne!(turned, first, "Cutoff changes the picture");
     }
 
     /// The tuner reads the instance for the Control page only.
