@@ -160,10 +160,12 @@ struct SessionRun {
     wav: SessionWav,
     rate: u32,
     written: u64,
-    /// The last free-space reading and when it was taken, so `poll` can throttle the
-    /// `statvfs` syscall to about once a second instead of running it every frame.
-    free_cache: u64,
-    free_checked: Option<Instant>,
+    /// The recorded time at which audio last arrived (or the recording began).
+    fed_at: f64,
+    /// How many frames the file trailed the wall clock (negative: led it) when audio last
+    /// arrived: block jitter and the drift of the device's clock against the computer's.
+    /// That is how the two clocks run, not missing audio, so it is never padded.
+    lag: i64,
 }
 
 /// A snapshot of the recorder for the UI: everything a window needs to draw, and nothing
@@ -194,9 +196,21 @@ const WAVE_BUCKETS: usize = 240;
 /// one enormous silent buffer.
 const MAX_PAD_SECONDS: u64 = 4;
 
-/// Records the master output to a WAV file, filling silent gaps so the file's length always
-/// equals wall-clock elapsed time. The real-time `poll` wrapper (drain tap, read rate, compute
-/// elapsed) is wired in a later task; the testable core is `poll_at`.
+/// How long no audio must have arrived, and how much must be missing, before the gap is
+/// filled with silence. Audio arrives a block at a time (at most some 4096 frames, under
+/// 0.1 s) and a little unevenly, so anything shorter is jitter: padding it would splice
+/// zeros into the middle of the music. Half a second is well clear of every block size,
+/// and short enough that an engine that really stopped delivering is noticed at once.
+/// (The price: after such a gap the file may trail the recorded time by up to this much.)
+const GAP_SECONDS: f64 = 0.5;
+
+/// Room for the tap's buffer (interleaved samples): more than a frame's worth of audio, so
+/// the audio thread seldom has to grow it.
+const TAP_ROOM: usize = 16_384;
+
+/// Records the master output to a WAV file, filling the gaps where the engine delivered
+/// nothing with silence, so the file's length follows the recorded time. `poll` is the
+/// real-time wrapper (drain tap, read rate, compute elapsed); the testable core is `poll_at`.
 pub struct SessionRecorder {
     pub view: SessionView,
     phase: SessionPhase,
@@ -207,6 +221,10 @@ pub struct SessionRecorder {
     /// counted, so the file's length always equals the recorded time.
     played_before: f64,
     play_started: Option<Instant>,
+    /// The last free-space reading and when it was taken, so `poll` can throttle the
+    /// `statvfs` syscall to about once a second instead of running it every frame.
+    free_cache: u64,
+    free_checked: Option<Instant>,
 }
 
 impl SessionRecorder {
@@ -218,6 +236,8 @@ impl SessionRecorder {
             tap: None,
             played_before: 0.0,
             play_started: None,
+            free_cache: u64::MAX,
+            free_checked: None,
         }
     }
 
@@ -243,6 +263,7 @@ impl SessionRecorder {
         self.run = None;
         self.played_before = 0.0;
         self.play_started = None;
+        self.free_checked = None;
         self.phase = SessionPhase::Armed;
         self.view = SessionView { phase: SessionPhase::Armed, rate, reserve, path: Some(path), ..SessionView::default() };
     }
@@ -289,7 +310,7 @@ impl SessionRecorder {
     /// Creates the shared sample buffer the caller hands to `Output::set_tap`, keeping a clone
     /// for its own `poll` to drain.
     pub fn attach_tap(&mut self) -> Arc<Mutex<Vec<f32>>> {
-        let buf = Arc::new(Mutex::new(Vec::new()));
+        let buf = Arc::new(Mutex::new(Vec::with_capacity(TAP_ROOM)));
         self.tap = Some(buf.clone());
         buf
     }
@@ -303,14 +324,7 @@ impl SessionRecorder {
         }
         let Some(output) = output else { return };
         let rate = output.rate;
-        // The engine's tap holds interleaved stereo; chunk it back into frames.
-        let new: Vec<[f32; 2]> = match &self.tap {
-            Some(tap) => {
-                let raw = std::mem::take(&mut *tap.lock().unwrap());
-                raw.as_chunks::<2>().0.to_vec()
-            }
-            None => Vec::new(),
-        };
+        let new = self.drain_tap();
         let elapsed = self.recorded_elapsed();
         let free = self.free_throttled();
         if self.poll_at(elapsed, rate, &new, free) {
@@ -318,24 +332,32 @@ impl SessionRecorder {
         }
     }
 
+    /// Takes what the engine's tap has gathered (interleaved stereo), as frames. A buffer
+    /// with room is left in its place: the audio thread fills it, and should not have to
+    /// allocate one from nothing every frame.
+    fn drain_tap(&mut self) -> Vec<[f32; 2]> {
+        let Some(tap) = &self.tap else { return Vec::new() };
+        let raw = std::mem::replace(&mut *tap.lock().unwrap(), Vec::with_capacity(TAP_ROOM));
+        raw.as_chunks::<2>().0.to_vec()
+    }
+
     /// Free space on the recording's disk, re-read from the OS at most about once a second
     /// and otherwise served from the cached value (a `statvfs` every display frame is waste).
     fn free_throttled(&mut self) -> u64 {
         let now = Instant::now();
-        let fresh = self.run.as_ref().and_then(|r| r.free_checked).is_some_and(|t| now.duration_since(t).as_secs_f64() < 1.0);
-        if fresh {
-            return self.run.as_ref().map_or(u64::MAX, |r| r.free_cache);
+        if self.free_checked.is_some_and(|t| now.duration_since(t).as_secs_f64() < 1.0) {
+            return self.free_cache;
         }
         let free = self.view.path.as_ref().map_or(u64::MAX, |p| free_bytes(p.parent().unwrap_or(p)).unwrap_or(u64::MAX));
-        if let Some(run) = self.run.as_mut() {
-            run.free_cache = free;
-            run.free_checked = Some(now);
-        }
+        self.free_cache = free;
+        self.free_checked = Some(now);
         free
     }
 
-    /// The testable core. Pads silent frames so the file reaches `floor(elapsed * rate)` total
-    /// frames, then writes `new`. Returns `true` when it just auto- or clean-stopped.
+    /// The testable core. Writes `new`, after the silence for a gap in which the engine
+    /// delivered nothing (see `GAP_SECONDS`), so that the file reaches `floor(elapsed * rate)`
+    /// frames less the lag it had while audio flowed. Returns `true` when it just auto- or
+    /// clean-stopped.
     pub fn poll_at(&mut self, elapsed: f64, rate: u32, new: &[[f32; 2]], free: u64) -> bool {
         match self.phase {
             SessionPhase::Idle => return false,
@@ -356,7 +378,7 @@ impl SessionRecorder {
             None => {
                 let Some(path) = self.view.path.clone() else { return false };
                 match SessionWav::create(&path, rate) {
-                    Ok(wav) => self.run = Some(SessionRun { wav, rate, written: 0, free_cache: u64::MAX, free_checked: None }),
+                    Ok(wav) => self.run = Some(SessionRun { wav, rate, written: 0, fed_at: 0.0, lag: 0 }),
                     Err(e) => return self.fail(e),
                 }
             }
@@ -376,8 +398,20 @@ impl SessionRecorder {
             // sleeping mid-record) can't force a multi-GB allocation in one poll: the next
             // poll catches up, or the ceiling clean-stops first.
             let max_pad = (rate as u64).saturating_mul(MAX_PAD_SECONDS);
-            let want_pad = target.saturating_sub(run.written + new.len() as u64);
+            // What is missing since audio last arrived: the shortfall against the wall clock
+            // beyond the lag the file had then. Only a real gap is padded (no audio for
+            // `GAP_SECONDS`, and that much missing): late blocks and a device clock slower
+            // than the computer's leave the audio as it came, with nothing spliced in.
+            let short = target as i64 - (run.written + new.len() as u64) as i64;
+            let missing = (short - run.lag).max(0) as u64;
+            let gap = elapsed - run.fed_at > GAP_SECONDS && missing as f64 > GAP_SECONDS * rate as f64;
+            let want_pad = if gap { missing } else { 0 };
             let pad = want_pad.min(max_pad);
+            // Audio arrived, and nothing is left to catch up: this is the lag from here on.
+            if !new.is_empty() && pad == want_pad {
+                run.fed_at = elapsed;
+                run.lag = short - pad as i64;
+            }
             (|| -> Result<bool, String> {
                 let mut room = ceiling_frames.saturating_sub(run.written);
                 // Silent pad first (to keep the timeline), never past the ceiling.
@@ -586,6 +620,104 @@ mod tests {
         // First second (96_000 samples) is silence; signal appears after it.
         assert!(samples[..96_000].iter().all(|&x| x == 0));
         assert!(samples[96_000..].iter().any(|&x| x != 0));
+    }
+
+    /// The signal of the delivery tests: never zero, so every zero in the file was padded.
+    const TONE: [f32; 2] = [0.5, 0.5];
+
+    /// The frames of `path`, as (how many, how many of them silent).
+    fn frames_and_silent(path: &std::path::Path) -> (usize, usize) {
+        let mut r = hound::WavReader::open(path).unwrap();
+        let samples: Vec<i32> = r.samples::<i32>().map(Result::unwrap).collect();
+        (samples.len() / 2, samples.chunks(2).filter(|f| f[0] == 0 && f[1] == 0).count())
+    }
+
+    /// Audio arrives in blocks, some of them late, from a device whose clock runs slower
+    /// than the computer's (by far more than a real one, to trail it by over a second
+    /// here): nothing is missing, so no silence is spliced into it.
+    #[test]
+    fn late_blocks_and_a_slow_device_clock_insert_no_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = started(dir.path());
+        let (block, device_rate) = (512u64, 48_000.0 * 0.95);
+        let (mut delivered, mut held) = (0u64, 0u64);
+        for poll in 1..=(25 * 60u64) {
+            let elapsed = poll as f64 / 60.0;
+            // What the device has produced by now, in whole blocks; every seventh poll its
+            // newest block comes late (with the next poll).
+            let mut ready = (elapsed * device_rate) as u64 / block * block;
+            if poll % 7 == 0 {
+                ready = ready.saturating_sub(block).max(delivered);
+            }
+            let new = vec![TONE; (ready - delivered) as usize];
+            delivered = ready;
+            held = held.max((elapsed * 48_000.0) as u64 - delivered);
+            assert!(!s.poll_at(elapsed, 48_000, &new, u64::MAX));
+        }
+        assert!(held > 48_000, "the file trailed the wall clock by over a second ({held} frames)");
+        s.stop();
+        let (frames, silent) = frames_and_silent(&dir.path().join("s.wav"));
+        assert_eq!(silent, 0, "no silence in audio that kept coming");
+        assert_eq!(frames as u64, delivered, "the file is the audio delivered, and nothing else");
+    }
+
+    /// The engine stops delivering for three seconds in the middle of a recording whose
+    /// device clock is slow: the gap is filled with silence, and only the gap.
+    #[test]
+    fn a_real_gap_is_padded_and_the_drift_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = started(dir.path());
+        let device_rate = 48_000.0 * 0.99;
+        let (mut delivered, mut device_time) = (0u64, 0.0f64);
+        for poll in 1..=(8 * 60u64) {
+            let elapsed = poll as f64 / 60.0;
+            // Seconds 2 to 5: nothing arrives (and the device's clock doesn't run).
+            let stalled = (2.0..5.0).contains(&elapsed);
+            if !stalled {
+                device_time += 1.0 / 60.0;
+            }
+            let ready = (device_time * device_rate) as u64;
+            let new = vec![TONE; (ready - delivered) as usize];
+            delivered = ready;
+            s.poll_at(elapsed, 48_000, &new, u64::MAX);
+        }
+        s.stop();
+        let (frames, silent) = frames_and_silent(&dir.path().join("s.wav"));
+        assert_eq!(frames as u64 - silent as u64, delivered, "all the audio is there");
+        // Three seconds, less at most the half second a gap's end may go unfilled.
+        assert!((120_000..=144_000 + 800).contains(&silent), "the gap was filled with {silent} silent frames");
+    }
+
+    /// The free space is asked of the system once, then kept for a while: also while armed,
+    /// before there is a file.
+    #[test]
+    fn free_space_is_cached_while_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = SessionRecorder::new();
+        s.arm(dir.path().join("s.wav"), 48_000, 0);
+        assert!(s.free_checked.is_none());
+        let free = s.free_throttled();
+        let asked = s.free_checked.expect("asked once");
+        assert_eq!(s.free_cache, free);
+        s.free_cache = 7;
+        assert_eq!(s.free_throttled(), 7, "served from the cache within the second");
+        assert_eq!(s.free_checked, Some(asked));
+        // Arming again starts afresh.
+        s.arm(dir.path().join("t.wav"), 48_000, 0);
+        assert!(s.free_checked.is_none());
+    }
+
+    /// The tap's buffer is handed over with room in it, and left with room when drained.
+    #[test]
+    fn the_tap_buffer_keeps_its_room() {
+        let mut s = SessionRecorder::new();
+        let tap = s.attach_tap();
+        assert!(tap.lock().unwrap().capacity() >= TAP_ROOM);
+        tap.lock().unwrap().extend([0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(s.drain_tap(), vec![[0.1, 0.2], [0.3, 0.4]]);
+        assert!(tap.lock().unwrap().is_empty());
+        assert!(tap.lock().unwrap().capacity() >= TAP_ROOM, "not a buffer the audio thread must grow from nothing");
+        assert!(SessionRecorder::new().drain_tap().is_empty(), "no tap, no audio");
     }
 
     #[test]

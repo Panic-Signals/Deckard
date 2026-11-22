@@ -128,6 +128,8 @@ mod sampling_hw;
 mod scene_tempo_tests;
 mod session_backup;
 mod session_record;
+#[cfg(test)]
+mod session_tests;
 mod session_window;
 mod settings;
 mod splash;
@@ -8629,17 +8631,7 @@ impl App {
             self.stop_session_record();
             return;
         }
-        if self.recorder.is_internal_active() {
-            self.error = Some("Can't start a session recording while Sampling is recording from an internal source. Stop it first.".into());
-            return;
-        }
-        let rate = match &self.output {
-            Some(Ok(o)) => o.rate,
-            _ => {
-                self.error = Some("No audio output to record from.".into());
-                return;
-            }
-        };
+        let Some(rate) = self.session_record_rate() else { return };
         let project = self.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned());
         let default = session_record::session_filename(project.as_deref(), &session_record::session_stamp());
         let mut dialog = rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(default);
@@ -8647,16 +8639,54 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else { return };
+        self.arm_session_record(path, rate);
+    }
+
+    /// The rate a session recording would be made at, if one can start now: not while
+    /// Sampling records an internal source (it holds the engine's one tap), and only with
+    /// an engine to tap. Says why not.
+    fn session_record_rate(&mut self) -> Option<u32> {
+        if self.recorder.busy() && self.recorder.is_internal_active() {
+            self.error = Some("Can't start a session recording while Sampling is recording from an internal source. Stop it first.".into());
+            return None;
+        }
+        // The tap is the engine's: without one (nothing played yet) it would be dropped, and
+        // the whole recording would be silence.
+        self.ensure_engine();
+        match &self.output {
+            Some(Ok(o)) if o.has_engine() => Some(o.rate),
+            Some(Ok(_)) => {
+                self.error = Some("Nothing to record a session from: open a project first.".into());
+                None
+            }
+            _ => {
+                self.error = Some("No audio output to record from.".into());
+                None
+            }
+        }
+    }
+
+    /// Arm a session recording to `path`, at the output's `rate`.
+    fn arm_session_record(&mut self, path: PathBuf, rate: u32) {
         let reserve = self.settings.session_reserve_mb as u64 * 1024 * 1024;
         let free = session_record::free_bytes(path.parent().unwrap_or(&path)).unwrap_or(u64::MAX);
         if !session_record::can_start(free, reserve) {
             self.error = Some("Not enough free disk space to start a session recording.".into());
             return;
         }
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        // Sampling only metering an internal source makes way: its meter lets the tap go,
+        // and takes it up again when the session ends.
+        if self.recorder.is_internal_active() {
+            self.recorder.cancel(output);
+        }
         // Arm: attach the master tap now so the window meters live, but write nothing until Play.
         let buffer = self.session.attach_tap();
         self.session.arm(path.clone(), rate, reserve);
-        if let Some(Ok(o)) = &self.output {
+        if let Some(o) = output {
             o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
         }
         self.settings.session_dir = path.parent().map(Path::to_path_buf);
@@ -11704,6 +11734,9 @@ impl eframe::App for App {
     /// Leave the MK3 dark, as it was before DECKARD started.
     fn on_exit(&mut self) {
         self.end_session();
+        // A session recording is finalized here (the app leaves without running destructors,
+        // and the file would be short of what was written since its last flush).
+        self.session.stop();
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {

@@ -217,6 +217,12 @@ impl Recorder {
         self.view.status = RecStatus::Recording;
     }
 
+    /// (Tests: as if the engine's tap were held, for a meter or a take.)
+    #[cfg(test)]
+    pub fn fake_tap(&mut self) {
+        self.tap = Some(Arc::new(Mutex::new(Vec::new())));
+    }
+
     /// The group and sound focused when recording was started, while it runs.
     pub fn focus(&self) -> Option<(usize, usize)> {
         self.run.as_ref().map(|r| r.focus)
