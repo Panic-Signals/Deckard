@@ -687,22 +687,29 @@ impl Document {
     }
 
     pub fn set_pattern_length(&mut self, g: usize, p: usize, ticks: i64) -> Result<(), String> {
-        let ops = self.param_ops(Target::Pattern(g, p), "length", Value::Int(ticks.max(deckard_model::PPQ / 4)))?;
+        let t = Target::Pattern(g, p);
+        let ops = self.param_ops(t, "length", Value::Int(ticks.max(deckard_model::PPQ / 4)))?;
         if ops.is_empty() {
             return Ok(());
         }
-        self.apply("Pattern Length", ops)
+        let params = vec![Some((t, "length".to_string())); ops.len()];
+        self.apply_with("Pattern Length", ops, params)
     }
 
     /// A pattern's start (where in its notes it begins, ticks, from 0) and length, as one
     /// edit.
     pub fn set_pattern_span(&mut self, g: usize, p: usize, start: i64, length: i64) -> Result<(), String> {
-        let mut ops = self.param_ops(Target::Pattern(g, p), "start", Value::Int(start.max(0)))?;
-        ops.extend(self.param_ops(Target::Pattern(g, p), "length", Value::Int(length.max(deckard_model::PPQ / 4)))?);
-        if ops.is_empty() {
+        let t = Target::Pattern(g, p);
+        let start_ops = self.param_ops(t, "start", Value::Int(start.max(0)))?;
+        let len_ops = self.param_ops(t, "length", Value::Int(length.max(deckard_model::PPQ / 4)))?;
+        if start_ops.is_empty() && len_ops.is_empty() {
             return Ok(());
         }
-        self.apply("Pattern Start", ops)
+        let mut params = vec![Some((t, "start".to_string())); start_ops.len()];
+        params.extend(std::iter::repeat_n(Some((t, "length".to_string())), len_ops.len()));
+        let mut ops = start_ops;
+        ops.extend(len_ops);
+        self.apply_with("Pattern Start", ops, params)
     }
 
     /// The groove of a sound (`Target::Sound`), group (`Target::Group`) or the master
@@ -1007,6 +1014,16 @@ impl Document {
             self.revision += 1;
             return;
         }
+        if !params.is_empty()
+            && params.iter().all(|p| matches!(p, Some((Target::Scene(_), f)) if f == "__patterns"))
+            && params.iter().all(|p| match p {
+                Some((Target::Scene(s), _)) => self.patch_scene_patterns(*s),
+                _ => false,
+            })
+        {
+            self.revision += 1;
+            return;
+        }
         let patched = params.iter().all(|p| match p {
             Some((target, field)) => self.patch(*target, field),
             None => false,
@@ -1091,6 +1108,20 @@ impl Document {
             (Target::Sound(g, s), "input_gain", Some(n), _) => p.groups[g].sounds[s].channel.input_gain = n,
             (Target::Sound(g, s), "transpose", Some(n), _) => p.groups[g].sounds[s].channel.transpose = n as i64,
             (Target::Pattern(g, i), "name", _, Some(t)) if i < clips::CLIP => p.groups[g].patterns[i].name = t,
+            (Target::Pattern(g, i), "start", Some(n), _) if i < clips::CLIP => p.groups[g].patterns[i].start = n as i64,
+            (Target::Pattern(g, i), "length", Some(n), _) if i < clips::CLIP => {
+                p.groups[g].patterns[i].length = n as i64;
+                for sc in 0..p.scenes.len() {
+                    if p.scenes[sc].patterns.contains(&(g, i)) {
+                        let len = p.scene_length(sc);
+                        for sec in &mut p.sections {
+                            if sec.auto && sec.scene == Some(sc) {
+                                sec.length = len;
+                            }
+                        }
+                    }
+                }
+            }
             (Target::Scene(s), "name", _, Some(t)) => p.scenes[s].name = t,
             (Target::Zone(g, s, z), f, Some(n), _) => {
                 let zone = p.groups[g].sounds[s].sampler.as_mut().and_then(|smp| smp.zones.get_mut(z));

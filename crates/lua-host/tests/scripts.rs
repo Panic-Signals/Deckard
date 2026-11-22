@@ -1867,14 +1867,17 @@ fn mk3_auto_writes_and_erase_clears_modulation() {
     host.tick();
     assert_ne!(set(&mut host), Some(false), "pinned");
 
-    // ERASE + knob 3 in Control mode.
+    // ERASE + knob 3 in Control mode (turn or tap).
     let control = host.constant("NI.HW.ENC_MODE_CONTROL").unwrap();
     host.state.borrow_mut().hw.encoder_mode = control;
     host.state.borrow_mut().control_requests.clear();
     host.button("BUTTON_ERASE", true).unwrap();
     host.encoder("ENCODER_SCREEN_3", 0.05).unwrap();
+    host.button("BUTTON_CAP_4", true).unwrap();
+    host.button("BUTTON_CAP_4", false).unwrap();
     host.button("BUTTON_ERASE", false).unwrap();
     assert!(host.state.borrow().control_requests.contains(&ControlRequest::Erase { pos: 2 }));
+    assert!(host.state.borrow().control_requests.contains(&ControlRequest::Erase { pos: 3 }));
 
     // SHIFT + pad 10: modulation written on a sound with one of Maschine's effects.
     let found = {

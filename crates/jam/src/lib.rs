@@ -40,17 +40,35 @@ impl Jam {
 
     /// Show `leds`: only the reports that differ from what's showing go out.
     pub fn show(&mut self, leds: &Leds) -> Result<(), String> {
-        let was = self.shown.as_ref();
-        if was.is_none_or(|w| w.buttons != leds.buttons) {
+        let mut ignore = Vec::new();
+        self.show_polling(leds, &mut ignore)
+    }
+
+    /// Show `leds`, draining any arriving input reports (`poll(0)`) between changed LED
+    /// writes so a three-report beat update never delays a pad or button press.
+    pub fn show_polling(&mut self, leds: &Leds, out: &mut Vec<Event>) -> Result<(), String> {
+        let (b, p, s) = match self.shown.as_ref() {
+            Some(w) => (w.buttons != leds.buttons, w.pads != leds.pads, w.strips != leds.strips),
+            None => (true, true, true),
+        };
+        if b {
             self.dev.write(&leds.buttons).map_err(|e| e.to_string())?;
+            if p || s {
+                self.poll(0, out)?;
+            }
         }
-        if was.is_none_or(|w| w.pads != leds.pads) {
+        if p {
             self.dev.write(&leds.pads).map_err(|e| e.to_string())?;
+            if s {
+                self.poll(0, out)?;
+            }
         }
-        if was.is_none_or(|w| w.strips != leds.strips) {
+        if s {
             self.dev.write(&leds.strips).map_err(|e| e.to_string())?;
         }
-        self.shown = Some(leds.clone());
+        if b || p || s {
+            self.shown = Some(leds.clone());
+        }
         Ok(())
     }
 

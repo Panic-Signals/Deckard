@@ -128,6 +128,65 @@ impl Document {
         }
         self.apply("Save Plug-in Pages", vec![Op::Set { path: items, value: Value::List(list) }])
     }
+
+    /// Ensure parameter `id` of the plug-in in slot `slot` of `c` has a saved
+    /// `PluginParameter` object so modulation can reference it, even when the preset
+    /// already saved partial NKS pages that omitted `id`.
+    pub fn ensure_plugin_param(&mut self, c: Chain, slot: usize, id: u32, fallback_pages: &[PluginPageSpec]) -> Result<(), String> {
+        if self.plugin_param_oid(c, slot, id).is_some() {
+            return Ok(());
+        }
+        if self.plugin_param_objs(c, slot).is_empty() {
+            return self.save_plugin_pages(c, slot, fallback_pages);
+        }
+        let items_path = self.plugin_pages_path(c, slot).ok_or("the slot holds no plug-in")?;
+        let Some(Value::List(mut list)) = self.tree.at(&items_path).cloned() else {
+            return Err("bad plug-in pages".into());
+        };
+        // Reuse a trailing unnamed overflow page's unused slot if one exists; otherwise append one.
+        let mut placed = false;
+        if let Some(last) = list.last_mut().and_then(|v| px_mut(v).ok()) {
+            let unnamed =
+                matches!(last.find("name"), Some(Value::Obj(n)) if matches!(n.find("value"), Some(Value::Str(s)) if s.is_empty()));
+            if unnamed && let Some(Value::Obj(arr)) = last.get_mut("parameters") {
+                for (_, v) in arr.fields.iter_mut().filter(|(n, _)| n == "item") {
+                    if let Ok(o) = px_mut(v)
+                        && o.get("index").and_then(Value::as_int) == Some(UNUSED)
+                    {
+                        *o.get_mut("index").ok_or("bad plug-in parameter")? = Value::Int(id as i64);
+                        placed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !placed {
+            let mut item = self.build(|b| b.item(PAGE))?;
+            let page = px_mut(&mut item)?;
+            if let Some(Value::Obj(n)) = page.find_mut("name")
+                && let Some(v) = n.find_mut("value")
+            {
+                *v = Value::Str(String::new());
+            }
+            let mut params = Vec::new();
+            for k in 0..8 {
+                let mut p = self.build(|b| b.item(PARAM))?;
+                let o = px_mut(&mut p)?;
+                let index = if k == 0 { id as i64 } else { UNUSED };
+                let custom_field = if o.get("custom_name").is_some() { "custom_name" } else { "custom_name_nis_mapping" };
+                *o.get_mut("index").ok_or("bad plug-in parameter")? = Value::Int(index);
+                *o.get_mut(custom_field).ok_or("bad plug-in parameter")? = Value::Str(String::new());
+                *o.get_mut("section_name").ok_or("bad plug-in parameter")? = Value::Str(String::new());
+                params.push(("item".to_string(), p));
+            }
+            let Some(Value::Obj(arr)) = page.get_mut("parameters") else { return Err("bad plug-in page".into()) };
+            arr.fields.retain(|(n, _)| n != "item" && n != "count");
+            arr.fields.push(("count".into(), Value::Int(8)));
+            arr.fields.extend(params);
+            list.push(item);
+        }
+        self.apply("Save Plug-in Pages", vec![Op::Set { path: items_path, value: Value::List(list) }])
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +260,27 @@ mod tests {
         assert_eq!(back.macro_pages(snd)[0].macros[0].target.and_then(|id| back.plugin_param_at(id)), Some((c, 0, 7)));
         d.remove_macros_to(snd, cutoff).unwrap();
         assert_eq!(d.macro_pages(snd)[0].macros[0].target, None);
+    }
+
+    #[test]
+    fn ensure_plugin_param_appends_to_partial_saved_pages() {
+        let mut d = with_plugin();
+        let c = Chain::Sound(0, 0);
+        // Preset saved only parameters 7 and 8 on a named NKS page.
+        d.save_plugin_pages(
+            c,
+            0,
+            &[PluginPageSpec { name: "NKS".into(), knobs: vec![(7, String::new()), (8, String::new())], custom_names: Vec::new() }],
+        )
+        .unwrap();
+        let seven = d.plugin_param_oid(c, 0, 7).unwrap();
+        assert_eq!(d.plugin_param_oid(c, 0, 169), None);
+
+        // Modulating an extra mapped parameter (e.g. DJFAM Step Pitch 169, Prob 59) creates an OID without altering existing ones.
+        d.ensure_plugin_param(c, 0, 169, &[]).unwrap();
+        d.ensure_plugin_param(c, 0, 59, &[]).unwrap();
+        assert_eq!(d.plugin_param_oid(c, 0, 7), Some(seven));
+        assert!(d.plugin_param_oid(c, 0, 169).is_some());
+        assert!(d.plugin_param_oid(c, 0, 59).is_some());
     }
 }

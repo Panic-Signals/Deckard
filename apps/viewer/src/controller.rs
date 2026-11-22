@@ -89,6 +89,7 @@ pub struct Controller {
     selection: Option<(usize, usize, Vec<deckard_model::Note>)>,
     /// Link and MIDI sync as last shared with the app.
     sync: deckard_lua_host::state::SyncView,
+    pin_ids: Vec<(&'static str, i64)>,
 }
 
 const TICK: Duration = Duration::from_millis(50);
@@ -126,6 +127,19 @@ impl Controller {
         host.boot().map_err(|e| e.to_string())?;
         host.tick();
         let sampling_page = host.constant("NI.HW.PAGE_SAMPLING").ok();
+        let pin_ids = [
+            ("EVENTS", "NI.HW.PAGE_EVENTS"),
+            ("PATTERN", "NI.HW.PAGE_PATTERN"),
+            ("SCENE", "NI.HW.PAGE_SCENE"),
+            ("MUTE", "NI.HW.PAGE_MUTE"),
+            ("SOLO", "NI.HW.PAGE_SOLO"),
+            ("SELECT", "NI.HW.PAGE_SELECT"),
+            ("FOLLOW", "NI.HW.PAGE_GRID"),
+            ("NOTE_REPEAT", "NI.HW.PAGE_REPEAT"),
+        ]
+        .into_iter()
+        .filter_map(|(name, c)| Some((name, host.constant(c).ok()?)))
+        .collect();
         Ok(Controller {
             host,
             model: model.to_string(),
@@ -151,7 +165,25 @@ impl Controller {
             texture: None,
             selection: None,
             sync: Default::default(),
+            pin_ids,
         })
+    }
+
+    pub fn set_pinned(&self, pinned: &std::collections::BTreeSet<String>) {
+        let mut st = self.host.state.borrow_mut();
+        for &(name, id) in &self.pin_ids {
+            st.hw.pinned.insert(id, pinned.contains(name));
+        }
+    }
+
+    pub fn sync_pins(&self, pinned: &mut std::collections::BTreeSet<String>) -> bool {
+        let st = self.host.state.borrow();
+        let mut changed = false;
+        for &(name, id) in &self.pin_ids {
+            let on = st.hw.pinned.get(&id).copied().unwrap_or(false);
+            changed |= if on { pinned.insert(name.to_string()) } else { pinned.remove(name) };
+        }
+        changed
     }
 
     /// The displays drawn as the scripts have them now (both, 960 × 272), redrawn
