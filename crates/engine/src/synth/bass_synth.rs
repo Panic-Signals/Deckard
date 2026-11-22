@@ -765,6 +765,13 @@ impl Synth for BassSynth {
         self.release((note & 0x7f) as u32);
     }
 
+    fn all_notes_off(&mut self) {
+        self.boundary = true;
+        while let Some(k) = self.keys.last() {
+            self.release(k as u32);
+        }
+    }
+
     fn stop(&mut self) {
         self.boundary = true;
         self.choke();

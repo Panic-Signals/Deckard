@@ -97,7 +97,16 @@ mod tests {
             if d.project().groups[0].patterns.is_empty() {
                 d.add_pattern(0, usize::MAX, "Pattern 1").unwrap();
             }
-            let n = Note { expr: None, sound: 0, position: 0, length: PPQ, pitch: 60, velocity: 100, probability: 100 };
+            let n = Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: 0,
+                length: PPQ,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            };
             d.edit_notes("Notes", 0, 0, &[], &[n]).unwrap();
             d.assign_pattern(0, 0, Some(0)).unwrap();
             d.add_section(0).unwrap();

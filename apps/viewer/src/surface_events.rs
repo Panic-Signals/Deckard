@@ -5,6 +5,7 @@
 use crate::App;
 use crate::layout::{self, Act};
 use deckard_model::Note;
+use deckard_model::ratchet::{self, Ratchet, Shape};
 
 /// The finest step notes move and grow by (a 128th triplet's worth: Maschine's
 /// smallest snap).
@@ -89,6 +90,19 @@ impl App {
             }
             "velocity" => self.edit_events("Velocity", sel, |x, _, _| Note { velocity: (x.velocity + n).clamp(1, 127), ..x }),
             "probability" => self.edit_events("Probability", sel, |x, _, _| Note { probability: (x.probability + n).clamp(0, 100), ..x }),
+            "ratchet" => self.edit_events("Ratchet", sel, |x, _, _| {
+                let repeats = (i64::from(x.ratchet.repeats) + n).clamp(1, i64::from(ratchet::MOST)) as u8;
+                Note { ratchet: Ratchet { repeats, ..x.ratchet }, ..x }
+            }),
+            "ratchet_shape" => self.edit_events("Ratchet", sel, |x, _, _| {
+                let at = Shape::ALL.iter().position(|&s| s == x.ratchet.shape).unwrap_or(0) as i64;
+                Note { ratchet: Ratchet { shape: Shape::ALL[(at + n).clamp(0, 2) as usize], ..x.ratchet }, ..x }
+            }),
+            // Each note's own target: a Down note's floor, an Up note's ceiling; Flat has none.
+            "ratchet_target" => self.edit_events("Ratchet", sel, |x, _, _| match x.ratchet.target() {
+                Some(t) => Note { ratchet: x.ratchet.with_target((i64::from(t) + n).clamp(0, 127) as u8), ..x },
+                None => x,
+            }),
             "velocity_to" => self.edit_events("Velocity", sel, |x, _, _| Note { velocity: n.clamp(1, 127), ..x }),
             "probability_to" => self.edit_events("Probability", sel, |x, _, _| Note { probability: n.clamp(0, 100), ..x }),
             "length" | "length_fine" => {
@@ -168,10 +182,15 @@ impl App {
                 true
             }
             "clear_modulation" => {
-                // (The focused sound's, as the scripts' Clear Auto; a touch still open
-                // would write its movement back.)
+                // (The channel shown's, in the pattern playing for its group, as the
+                // scripts' Clear Auto; a touch still open would write its movement back.)
                 self.end_mod_take();
-                let r = doc.borrow_mut().clear_pattern_modulation(deckard_doc::Chain::Sound(self.group, self.sound), self.pattern);
+                let chain = match self.chain_tab {
+                    crate::layout::ChainTab::Group => deckard_doc::Chain::Group(self.group),
+                    _ => deckard_doc::Chain::Sound(self.group, self.sound),
+                };
+                let pat = self.active_modulation_pattern(self.group);
+                let r = doc.borrow_mut().clear_pattern_modulation(chain, pat);
                 if let Err(e) = r {
                     self.status = format!("can't remove the modulation: {e}");
                 }
@@ -216,7 +235,8 @@ impl App {
         else {
             return;
         };
-        let n = Note { expr: None, sound: self.sound, position: at, length, pitch, velocity, probability: 100 };
+        let n =
+            Note { ratchet: Default::default(), expr: None, sound: self.sound, position: at, length, pitch, velocity, probability: 100 };
         let mut acts = Vec::new();
         if self.scene_pattern(self.group).is_none() {
             acts.push(Act::AssignPattern(self.scene, self.group, Some(self.pattern)));
@@ -251,8 +271,10 @@ impl App {
             return;
         }
         let sound = self.sound;
-        let add: Vec<Note> =
-            missing.into_iter().map(|pitch| Note { expr: None, sound, position: at, length, pitch, velocity, probability: 100 }).collect();
+        let add: Vec<Note> = missing
+            .into_iter()
+            .map(|pitch| Note { ratchet: Default::default(), expr: None, sound, position: at, length, pitch, velocity, probability: 100 })
+            .collect();
         let mut chosen = there;
         chosen.extend_from_slice(&add);
         let mut acts = Vec::new();

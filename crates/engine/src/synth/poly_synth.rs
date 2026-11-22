@@ -184,6 +184,13 @@ impl Synth for PolySynth {
         self.p5.note_off(note.clamp(0, 127) as u8);
     }
 
+    fn all_notes_off(&mut self) {
+        self.p5.sustain_pedal(false);
+        for n in 0..=127u8 {
+            self.p5.note_off(n);
+        }
+    }
+
     fn control(&mut self, kind: MidiKind) {
         match kind {
             MidiKind::Controller { number: 1, value } => self.p5.mod_wheel(value.min(127)),

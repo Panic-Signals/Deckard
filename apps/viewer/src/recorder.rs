@@ -15,7 +15,6 @@
 //! open only while armed.
 
 use crate::layout::sampling::{AutoParams, RecStatus, RecorderView};
-use cpal::traits::StreamTrait;
 use deckard_engine::output::Output;
 use deckard_engine::sample::Sample;
 use deckard_engine::{Tap, TapSource};
@@ -160,7 +159,7 @@ pub struct Recorder {
     peaks: Arc<[AtomicU32; 2]>,
     recording: Arc<AtomicBool>,
     polled_at: Option<Instant>,
-    stream: Option<cpal::Stream>,
+    stream: Option<deckard_engine::devices::InputStream>,
     tap: Option<Arc<Mutex<Vec<f32>>>>,
     run: Option<Run>,
     midi: Option<midir::MidiOutputConnection>,
@@ -375,11 +374,8 @@ impl Recorder {
 
     /// Open the interface input for the chosen Ext. input; returns its rate.
     fn open_input(&mut self, with: &StartWith) -> Result<u32, String> {
-        let (device, config) = deckard_engine::devices::open_input(with.device.as_deref())?;
-        if !deckard_engine::devices::format_ok(config.sample_format()) {
-            return Err(format!("input format {:?} is not supported", config.sample_format()));
-        }
-        let channels = config.channels() as usize;
+        let format = deckard_engine::devices::input_format(with.device.as_deref())?;
+        let channels = format.channels;
         let route = |i: usize| with.routing.get(i).copied().unwrap_or(Some(i)).filter(|&c| c < channels);
         // Maschine's input channels, and the interface's they read.
         let (in_l, in_r) = if self.view.source == 1 {
@@ -391,7 +387,7 @@ impl Recorder {
         let inputs = with.inputs.clone();
         if l.is_none() && r.is_none() {
             let name = if self.view.source == 1 { mono_input_name(self.view.ext_mono) } else { stereo_input_name(self.view.ext_stereo) };
-            return Err(format!("{name} isn't connected to a channel of {} (Preferences > Audio > Routing)", device_name(&device)));
+            return Err(format!("{name} isn't connected to a channel of {} (Preferences > Audio > Routing)", format.device));
         }
         let incoming = self.incoming.clone();
         *incoming.lock().unwrap() = Vec::with_capacity(INCOMING_ROOM);
@@ -400,10 +396,9 @@ impl Recorder {
         peaks[1].store(0, Relaxed);
         let recording = self.recording.clone();
         let monitor = self.view.monitor.then(|| with.output.map(Output::monitor)).flatten();
-        let rate = config.sample_rate();
-        let stream = deckard_engine::devices::build_input(
-            &device,
-            config,
+        let rate = format.rate;
+        let stream = deckard_engine::devices::open_input_stream(
+            with.device.as_deref(),
             move |data: &[f32]| {
                 let at = |f: &[f32], input: usize, c: Option<usize>| c.map_or(0.0, |c| f[c] * inputs.gain(input));
                 // The meter is kept here; what arrives is kept only while recording.
@@ -429,9 +424,7 @@ impl Recorder {
                 }
             },
             |e| eprintln!("audio input error: {e}"),
-        )
-        .map_err(|e| format!("audio input: {e}"))?;
-        stream.play().map_err(|e| format!("audio input: {e}"))?;
+        )?;
         self.stream = Some(stream);
         Ok(rate)
     }
@@ -825,7 +818,7 @@ fn connect_midi(name: &str) -> Result<midir::MidiOutputConnection, String> {
     out.connect(&port, "DECKARD Auto Sampler").map_err(|e| e.to_string())
 }
 
-pub use deckard_engine::devices::{default_input, device_name};
+pub use deckard_engine::devices::default_input;
 
 /// A note's name as Maschine shows it: C3 = 60, C-2 = 0.
 pub fn note_name(n: u8) -> String {

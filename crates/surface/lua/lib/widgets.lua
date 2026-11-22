@@ -327,6 +327,7 @@ local function macro_icon(screen, cx, cy, colour)
 end
 
 -- (`params[k].macro`: a macro controls it, the macro icon at the top right.)
+-- (`params[k].modulated`: automated in the pattern, a dot at the top right.)
 function widgets.params(screen, theme, x0, groups, page, params)
   for _, g in ipairs(groups or {}) do
     local x = x0 + (g.at - 1) * 120
@@ -340,8 +341,11 @@ function widgets.params(screen, theme, x0, groups, page, params)
     if p then
       local x = x0 + (k - 1) * 120
       if k > 1 then screen:rect(x, 233, 1, 39, "separator") end
-      screen:label(x + 11, 233, 100, 14, p.name or "", style(theme, "param_name"), "left", "top")
+      local icons = (p.macro and 1 or 0) + (p.modulated and 1 or 0)
+      local name_w = icons == 2 and 78 or (icons == 1 and 90 or 100)
+      screen:label(x + 11, 233, name_w, 14, p.name or "", style(theme, "param_name"), "left", "top")
       if p.macro then macro_icon(screen, x + 108, 240, style(theme, "param_name").color) end
+      if p.modulated then screen:circle(x + (p.macro and 96 or 108), 240, 3.5, "record") end
       local w = screen:label(x + 11, 248, 104, 27, p.value or "", style(theme, "param_value"), "left", "top")
       if p.unit and p.unit ~= "" then
         screen:label(x + 11 + w + 6, 248, 104 - w - 6, 25, p.unit, style(theme, "param_unit"), "left", "bottom")

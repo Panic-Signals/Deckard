@@ -23,7 +23,7 @@ fn plugin_state_saves_and_undoes() {
         .groups
         .iter()
         .enumerate()
-        .find_map(|(g, gr)| gr.sounds.iter().enumerate().find_map(|(s, snd)| snd.plugin.as_ref().map(|p| (g, s, p.chunk.clone()))))
+        .find_map(|(g, gr)| gr.sounds.iter().enumerate().find_map(|(s, snd)| snd.plugin.as_ref().map(|p| (g, s, p.chunk.to_vec()))))
     else {
         return;
     };
@@ -55,7 +55,16 @@ fn notes_edit_in_plugin_groups() {
     for g in groups {
         let sound = d.project().groups[g].sounds.iter().position(|s| s.plugin.is_some()).unwrap();
         for p in 0..d.project().groups[g].patterns.len() {
-            let n = deckard_model::Note { expr: None, sound, position: 7, length: 120, pitch: 61, velocity: 90, probability: 100 };
+            let n = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound,
+                position: 7,
+                length: 120,
+                pitch: 61,
+                velocity: 90,
+                probability: 100,
+            };
             d.add_note(g, p, n).unwrap_or_else(|e| panic!("group {g} pattern {p}: add: {e}"));
             assert!(d.project().groups[g].patterns[p].notes.contains(&n), "group {g} pattern {p}: added");
             let m = deckard_model::Note { pitch: 62, ..n };
@@ -82,6 +91,7 @@ fn add_after_deleting_everything() {
             d.delete_notes(g, p, &all).unwrap_or_else(|e| panic!("group {g} pattern {p}: delete all: {e}"));
             assert!(d.project().groups[g].patterns[p].notes.is_empty(), "group {g} pattern {p}: all gone");
             let n = deckard_model::Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: all[0].sound,
                 position: d.project().groups[g].patterns[p].start + 240,

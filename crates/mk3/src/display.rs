@@ -25,31 +25,61 @@ pub fn rgb565(r: u8, g: u8, b: u8) -> u16 {
 
 /// The transfer that draws rows `y0..y1` of `px` (one display's pixels, row by row).
 pub fn encode(display: u8, px: &[u16], y0: usize, y1: usize) -> Vec<u8> {
+    encode_diff(display, px, None, y0, y1)
+}
+
+/// Like [`encode`], skipping runs of pixel pairs that already match `old` (`0x02`).
+pub fn encode_diff(display: u8, px: &[u16], old: Option<&[u16]>, y0: usize, y1: usize) -> Vec<u8> {
     let mut f = vec![0x84, 0x00, display, 0x60, 0, 0, 0, 0];
     for v in [0, y0, WIDTH, y1 - y0] {
         f.extend_from_slice(&(v as u16).to_be_bytes());
     }
-    let pairs: Vec<[u16; 2]> = px[y0 * WIDTH..y1 * WIDTH].chunks_exact(2).map(|p| [p[0], p[1]]).collect();
+    let band = &px[y0 * WIDTH..y1 * WIDTH];
+    let old_band = old.map(|o| &o[y0 * WIDTH..y1 * WIDTH]);
+    let pair_count = band.len() / 2;
+    let pair = |b: &[u16], i: usize| [b[i * 2], b[i * 2 + 1]];
+    let eq_old = |i: usize| old_band.is_some_and(|o| pair(o, i) == pair(band, i));
     let count = |f: &mut Vec<u8>, cmd: u8, n: usize| f.extend_from_slice(&[cmd, (n >> 16) as u8, (n >> 8) as u8, n as u8]);
     let mut i = 0;
-    while i < pairs.len() {
-        let run = pairs[i..].iter().take_while(|p| **p == pairs[i]).count();
-        if run >= 4 {
-            count(&mut f, 0x01, run);
-            for v in pairs[i] {
-                f.extend_from_slice(&v.to_be_bytes());
+    while i < pair_count {
+        if eq_old(i) {
+            let start = i;
+            i += 1;
+            while i < pair_count && eq_old(i) {
+                i += 1;
             }
-            i += run;
+            count(&mut f, 0x02, i - start);
             continue;
         }
-        // Pixels as they are, up to the next run worth repeating.
+        let p0 = pair(band, i);
+        if i + 4 <= pair_count && (1..4).all(|k| pair(band, i + k) == p0) {
+            let mut end = i + 4;
+            while end < pair_count && pair(band, end) == p0 {
+                end += 1;
+            }
+            count(&mut f, 0x01, end - i);
+            for v in p0 {
+                f.extend_from_slice(&v.to_be_bytes());
+            }
+            i = end;
+            continue;
+        }
+        // Pixels as they are, up to the next run worth repeating or skipping.
         let start = i;
-        while i < pairs.len() && !(i + 4 <= pairs.len() && pairs[i..i + 4].iter().all(|p| *p == pairs[i])) {
+        i += 1;
+        while i < pair_count {
+            if (i + 3 <= pair_count && eq_old(i) && eq_old(i + 1) && eq_old(i + 2)) || (i + 2 == pair_count && eq_old(i) && eq_old(i + 1)) {
+                break;
+            }
+            let p = pair(band, i);
+            if i + 4 <= pair_count && (1..4).all(|k| pair(band, i + k) == p) {
+                break;
+            }
             i += 1;
         }
         count(&mut f, 0x00, i - start);
-        for p in &pairs[start..i] {
-            for v in p {
+        for j in start..i {
+            for v in pair(band, j) {
                 f.extend_from_slice(&v.to_be_bytes());
             }
         }
@@ -181,10 +211,11 @@ impl Displays {
     }
 
     /// Show `px` (WIDTH × HEIGHT, row by row) on display 0 (left) or 1, sending only
-    /// the rows that changed.
+    /// what changed since the previous frame.
     pub fn show(&mut self, display: usize, px: &[u16]) -> Result<(), String> {
         assert_eq!(px.len(), WIDTH * HEIGHT);
-        let (y0, y1) = match &self.shown[display] {
+        let old = self.shown[display].as_deref();
+        let (y0, y1) = match old {
             Some(old) => {
                 let row_eq = |y: usize| old[y * WIDTH..(y + 1) * WIDTH] == px[y * WIDTH..(y + 1) * WIDTH];
                 let Some(y0) = (0..HEIGHT).find(|&y| !row_eq(y)) else { return Ok(()) };
@@ -193,13 +224,16 @@ impl Displays {
             }
             None => (0, HEIGHT),
         };
-        self.out.submit(encode(display as u8, px, y0, y1).into());
+        self.out.submit(encode_diff(display as u8, px, old, y0, y1).into());
         let done = self.out.wait_next_complete(Duration::from_secs(1)).ok_or("display write timed out")?;
         if let Err(e) = done.status {
             self.shown[display] = None;
             return Err(e.to_string());
         }
-        self.shown[display] = Some(px.to_vec());
+        match &mut self.shown[display] {
+            Some(prev) => prev.copy_from_slice(px),
+            slot @ None => *slot = Some(px.to_vec()),
+        }
         Ok(())
     }
 }
@@ -240,5 +274,28 @@ mod tests {
         assert_eq!(&f[16..20], &[0x00, 0, 0, 2]);
         assert_eq!(&f[28..32], &[0x01, 0, 0, 238]);
         assert_eq!(&f[f.len() - 8..], &[0x03, 0, 0, 0, 0x40, 0, 0, 0]);
+    }
+
+    #[test]
+    fn diff_skips_unchanged_pairs_on_playhead_move() {
+        let mut old = vec![0u16; WIDTH * HEIGHT];
+        for y in 40..250 {
+            for x in 0..WIDTH {
+                old[y * WIDTH + x] = ((x * 7 + y * 13) & 0xffff) as u16;
+            }
+            old[y * WIDTH + 100] = 0xffff;
+        }
+        let mut next = old.clone();
+        for y in 40..250 {
+            next[y * WIDTH + 100] = ((100 * 7 + y * 13) & 0xffff) as u16;
+            next[y * WIDTH + 101] = 0xffff;
+        }
+        let full = encode(0, &next, 40, 250);
+        let diff = encode_diff(0, &next, Some(&old), 40, 250);
+        assert!(diff.len() < full.len() / 20, "diff ({} B) should be <5% of full ({} B)", diff.len(), full.len());
+        let mut d = Decoder::default();
+        d.px[0].copy_from_slice(&old);
+        assert_eq!(d.feed(&diff), vec![0]);
+        assert_eq!(d.px[0], next);
     }
 }

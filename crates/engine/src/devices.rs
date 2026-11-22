@@ -34,7 +34,7 @@ pub enum AudioDriver {
 }
 
 /// Whether this build can play through ASIO.
-pub const ASIO_BUILT: bool = cfg!(all(windows, feature = "asio"));
+pub const ASIO_BUILT: bool = cfg!(any(all(windows, feature = "asio"), native_asio));
 
 impl AudioDriver {
     pub fn name(self) -> &'static str {
@@ -101,6 +101,13 @@ fn open_preferring_in<T>(
 /// asked (a stream open on one stops the others loading; the last list is kept then).
 pub fn rescan() {
     asio::rescan();
+}
+
+/// At the end of the process, after the streams are closed: let a native ASIO driver go, so it
+/// isn't left initialized. Nothing to do for the others.
+pub fn shut_down() {
+    #[cfg(native_asio)]
+    crate::native_asio::shut_down();
 }
 
 pub fn device_name(d: &cpal::Device) -> String {
@@ -421,6 +428,57 @@ pub(crate) fn hold_asio_inputs(device: &cpal::Device) -> Option<cpal::Stream> {
     build_input(device, config, |_| {}, |e| eprintln!("audio input error: {e}")).ok()
 }
 
+/// What an input runs at: the device's name, its rate and its channels.
+pub struct InputFormat {
+    pub device: String,
+    pub rate: u32,
+    pub channels: usize,
+}
+
+/// What the input called `name` (see [`input_devices`]; `None`: the system's default) runs at.
+/// On native ASIO the input is the playing output's driver (it opens with the output).
+pub fn input_format(name: Option<&str>) -> Result<InputFormat, String> {
+    #[cfg(native_asio)]
+    if driver() == AudioDriver::Asio {
+        let (device, rate, channels) = crate::native_asio::input_format(name)?;
+        return Ok(InputFormat { device, rate, channels });
+    }
+    let (device, config) = open_input(name)?;
+    if !format_ok(config.sample_format()) {
+        return Err(format!("input format {:?} is not supported", config.sample_format()));
+    }
+    Ok(InputFormat { device: device_name(&device), rate: config.sample_rate(), channels: config.channels() as usize })
+}
+
+/// An input being read; dropping it lets go of the input.
+pub enum InputStream {
+    Cpal(#[allow(dead_code)] cpal::Stream),
+    #[cfg(native_asio)]
+    Native(#[allow(dead_code)] crate::native_asio::InputGuard),
+}
+
+/// Start reading the input called `name` (as [`input_format`] tells), f32 frames of its channels
+/// into `on_data`, on the audio system's thread: nothing there that can wait.
+pub fn open_input_stream<D, E>(name: Option<&str>, on_data: D, on_error: E) -> Result<InputStream, String>
+where
+    D: FnMut(&[f32]) + Send + 'static,
+    E: FnMut(cpal::Error) + Send + 'static,
+{
+    use cpal::traits::StreamTrait;
+    #[cfg(native_asio)]
+    if driver() == AudioDriver::Asio {
+        drop(on_error);
+        return crate::native_asio::attach_input(name, Box::new(on_data)).map(InputStream::Native);
+    }
+    let (device, config) = open_input(name)?;
+    if !format_ok(config.sample_format()) {
+        return Err(format!("input format {:?} is not supported", config.sample_format()));
+    }
+    let stream = build_input(&device, config, on_data, on_error).map_err(|e| format!("audio input: {e}"))?;
+    stream.play().map_err(|e| format!("audio input: {e}"))?;
+    Ok(InputStream::Cpal(stream))
+}
+
 /// The rate to open a driver at that doesn't tell its own until it runs (Realtek's):
 /// DECKARD's usual one if it can, else its highest.
 #[cfg_attr(not(all(windows, feature = "asio")), allow(dead_code))]
@@ -489,8 +547,27 @@ mod asio {
     }
 }
 
+/// Transit's native ASIO, with no SDK: the listing is the registry's (`crate::native_asio`),
+/// and a stream opens through that, not through a cpal device.
+#[cfg(native_asio)]
+mod asio {
+    use super::{Dir, Opened};
+
+    pub fn rescan() {
+        crate::native_asio::rescan();
+    }
+
+    pub fn list(dir: Dir) -> Vec<(String, usize)> {
+        crate::native_asio::list(dir == Dir::In)
+    }
+
+    pub fn open(_: Option<&str>, _: Dir) -> Result<Opened, String> {
+        Err("ASIO opens through its own streams, not a cpal device".into())
+    }
+}
+
 /// Nothing without ASIO: [`set_driver`] and [`AudioDriver::usable`] keep it from being reached.
-#[cfg(not(all(windows, feature = "asio")))]
+#[cfg(not(any(all(windows, feature = "asio"), native_asio)))]
 mod asio {
     use super::{Dir, Opened};
 

@@ -140,8 +140,8 @@ function chain.draw(screen, theme, c)
     if first > 1 or last < #c.chain then
       local range = last >= first and (first == last and tostring(first) or first .. "-" .. last) or "+"
       screen:label(16, 174, 448, 18, range .. " / " .. #c.chain, { size = 12, color = "text" }, "right", "center")
-      if first > 1 then screen:triangle(4, 149, 7, 11, "left", "text") end
-      if last < #c.chain then screen:triangle(469, 149, 7, 11, "right", "text") end
+      if first > 1 then screen:triangle(4, 143, 18, 28, "left", "text") end
+      if last < #c.chain then screen:triangle(458, 143, 18, 28, "right", "text") end
     end
   end
   for i = first, #c.chain do

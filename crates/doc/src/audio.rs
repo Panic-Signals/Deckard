@@ -275,7 +275,16 @@ mod tests {
             // (A first pattern from nothing; the others like it.)
             d.add_pattern(g, if n == 0 { usize::MAX } else { 0 }, &format!("Pattern {}", n + 1)).unwrap();
         }
-        let note = |position| Note { expr: None, sound: s, position, length: PPQ, pitch: 60, velocity: 100, probability: 100 };
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: s,
+            position,
+            length: PPQ,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         let other = Note { sound: 0, ..note(0) };
         d.edit_notes("Notes", g, 0, &[], &[note(0), other]).unwrap();
         d.edit_notes("Notes", g, 2, &[], &[note(PPQ)]).unwrap();

@@ -288,6 +288,7 @@ impl App {
                 for e in mine {
                     match e.midi {
                         None => track.notes.push(deckard_model::Note {
+                            ratchet: Default::default(),
                             expr: None,
                             sound: s,
                             position: e.tick,
@@ -708,7 +709,16 @@ mod tests {
             if d.project().groups[0].patterns.is_empty() {
                 d.add_pattern(0, usize::MAX, "Pattern 1").unwrap();
             }
-            let note = Note { expr: None, sound: 2, position: PPQ, length: PPQ, pitch: 64, velocity: 100, probability: 100 };
+            let note = Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 2,
+                position: PPQ,
+                length: PPQ,
+                pitch: 64,
+                velocity: 100,
+                probability: 100,
+            };
             d.edit_notes("Notes", 0, 0, &[], &[note]).unwrap();
             d.set_pattern_length(0, 0, 4 * PPQ).unwrap();
             d.assign_pattern(0, 0, Some(0)).unwrap();

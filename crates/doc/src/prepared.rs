@@ -23,6 +23,12 @@ pub struct PreparedEdit {
     step: Option<Step>,
 }
 
+impl PreparedEdit {
+    pub fn project(&self) -> &Project {
+        &self.state.project
+    }
+}
+
 impl Document {
     /// A Send snapshot of the current edit state, excluding potentially large history.
     pub fn edit_snapshot(&self) -> EditSnapshot {

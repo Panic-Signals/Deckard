@@ -156,7 +156,16 @@ mod tests {
     fn a_version_1_block_still_reads() {
         let mut d = Document::new_project().unwrap();
         d.add_pattern(0, 0, "Pattern 1").unwrap();
-        let n = deckard_model::Note { expr: None, sound: 0, position: 0, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let n = deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         d.add_note(0, 0, n).unwrap();
         let e = deckard_model::Expression { release_velocity: Some(64), ..Default::default() };
         let id = d.add_expression(e.clone());

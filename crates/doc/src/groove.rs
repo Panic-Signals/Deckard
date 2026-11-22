@@ -1,8 +1,9 @@
 //! The Groove pages' Variation and Generate (docs/channel-software.md §5): edits of a
 //! sound's notes in a pattern, from the settings saved with the sound.
 
-use super::{Document, Target};
-use deckard_model::Note;
+use super::{Document, Op, Target};
+use deckard_model::{GROOVE, Note};
+use mxprj::decode::Value;
 
 /// A small random source (xorshift), seeded from the clock: like Maschine, each
 /// press gives a different result.
@@ -102,15 +103,92 @@ pub fn euclid(n: usize, k: usize, r: usize) -> Vec<bool> {
 pub type Settings<'a> = &'a dyn Fn(&str) -> Option<f64>;
 
 impl Document {
-    /// The settings saved with sound `s` of group `g` (projects from Maschine 3 keep
-    /// them; older ones have none).
+    /// Variation or Generate setting `field` of sound `s` of group `g`: the project's
+    /// own (projects from Maschine 3 keep them), else DECKARD's, kept with the sound.
     pub fn groove_setting(&self, g: usize, s: usize, field: &str) -> Option<f64> {
-        self.num(Target::Sound(g, s), field)
+        if self.has_groove_settings(g, s) { self.num(Target::Sound(g, s), field) } else { self.kept_groove(g, s, field) }
+    }
+
+    /// Set Variation or Generate setting `field` of sound `s` of group `g`, where
+    /// [`Document::groove_setting`] reads it (one undo step; a knob turn is one).
+    pub fn set_groove_setting(&mut self, g: usize, s: usize, field: &str, v: f64) -> Result<(), String> {
+        if self.has_groove_settings(g, s) {
+            return self.set("Channel Property", Target::Sound(g, s), field, Value::Float(v));
+        }
+        let ops = self.groove_ops(g, s, field, v)?;
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.apply_with("Channel Property", ops, vec![Some((Target::Sound(g, s), GROOVE.to_string()))])
+    }
+
+    /// The Groove page (0 Swing, 1 Variation, 2 Generate) sound `s` of group `g` was
+    /// left on, if it has been shown.
+    pub fn groove_page(&self, g: usize, s: usize) -> Option<usize> {
+        self.kept_groove(g, s, "page").map(|p| (p.max(0.0) as usize).min(2))
+    }
+
+    /// Keep the Groove page sound `s` of group `g` shows: saved and copied with the
+    /// sound, but no edit (no undo step, and an unchanged project stays unchanged).
+    pub fn set_groove_page(&mut self, g: usize, s: usize, page: usize) {
+        if self.groove_page(g, s) == Some(page) {
+            return;
+        }
+        let Ok(ops) = self.groove_ops(g, s, "page", page as f64) else { return };
+        let clean = !self.is_dirty();
+        if self.run(&ops).is_ok() {
+            self.update(&[Some((Target::Sound(g, s), GROOVE.to_string()))]);
+            if clean {
+                self.saved_revision = self.revision;
+            }
+        }
+    }
+
+    fn kept_groove(&self, g: usize, s: usize, field: &str) -> Option<f64> {
+        let snd = self.project.groups.get(g)?.sounds.get(s)?;
+        snd.groove.iter().find(|(k, _)| k == field).map(|(_, v)| *v)
+    }
+
+    /// The op that sets `field` of sound (`g`, `s`)'s DECKARD Groove field to `v`
+    /// (none if it is).
+    pub(crate) fn groove_ops(&self, g: usize, s: usize, field: &str, v: f64) -> Result<Vec<Op>, String> {
+        let snd = self.project.groups.get(g).and_then(|x| x.sounds.get(s)).ok_or("no such sound")?;
+        let mut kept = snd.groove.clone();
+        match kept.iter_mut().find(|(k, _)| k == field) {
+            Some((_, x)) if *x == v => return Ok(Vec::new()),
+            Some((_, x)) => *x = v,
+            None => kept.push((field.to_string(), v)),
+        }
+        kept.sort_by(|a, b| a.0.cmp(&b.0));
+        self.groove_text_ops(g, s, &deckard_model::groove_to_text(&kept))
+    }
+
+    /// The op that sets sound (`g`, `s`)'s DECKARD Groove field to `text`.
+    pub(crate) fn groove_text_ops(&self, g: usize, s: usize, text: &str) -> Result<Vec<Op>, String> {
+        let path = self.owner(Target::Sound(g, s)).ok_or_else(|| format!("no sound {} in group {}", s + 1, g + 1))?;
+        let value = (!text.is_empty()).then(|| Value::Str(text.to_string()));
+        Ok(vec![Op::SetField { path, field: GROOVE.to_string(), value }])
+    }
+
+    /// Copy sound `target`'s DECKARD Groove field from the tree into the model.
+    pub(crate) fn patch_groove(&mut self, target: Target) -> bool {
+        let Target::Sound(g, s) = target else { return false };
+        let Some(path) = self.owner(target) else { return false };
+        let groove = match self.tree.at(&path) {
+            Some(Value::Obj(o)) => match o.get(GROOVE) {
+                Some(Value::Str(t)) => deckard_model::groove_from_text(t),
+                _ => Vec::new(),
+            },
+            _ => return false,
+        };
+        let Some(snd) = self.project.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) else { return false };
+        snd.groove = groove;
+        true
     }
 
     /// Whether sound `s` of group `g` keeps Variation and Generate settings.
     pub fn has_groove_settings(&self, g: usize, s: usize) -> bool {
-        self.groove_setting(g, s, "sequence_variation/velocity_amount").is_some()
+        self.num(Target::Sound(g, s), "sequence_variation/velocity_amount").is_some()
     }
 
     /// Humanize sound `s`'s notes in pattern `p` of group `g` with its Variation
@@ -217,6 +295,7 @@ impl Document {
         let velocity = 100.0;
         let grid = grid.max(1);
         let note = |position: i64, pitch: i64, vel: i64, length: i64| Note {
+            ratchet: Default::default(),
             expr: None,
             sound: s,
             position,
@@ -414,5 +493,58 @@ mod tests {
         d.undo();
         assert_eq!(d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).copied().collect::<Vec<_>>(), before);
         assert!(!d.has_groove_settings(0, 0), "this project predates them");
+    }
+
+    /// A sound's settings (here the project's own) and its Groove page are kept with
+    /// the sound: undone, saved, and copied with it.
+    #[test]
+    fn groove_settings_are_kept_with_the_sound() {
+        let mut d = Document::new_project().unwrap();
+        d.set_groove_setting(0, 0, "sequence_generation/mode", 1.0).unwrap();
+        d.set_groove_setting(0, 0, "sequence_generation/fills", 3.0).unwrap();
+        assert_eq!(d.groove_setting(0, 0, "sequence_generation/fills"), Some(3.0));
+        assert_ne!(d.groove_setting(0, 1, "sequence_generation/fills"), Some(3.0), "only that sound's");
+        // The page is no edit.
+        let dirty = d.is_dirty();
+        let steps = d.undo_labels().len();
+        d.set_groove_page(0, 0, 2);
+        assert_eq!((d.groove_page(0, 0), d.groove_page(0, 1)), (Some(2), None));
+        assert_eq!((d.is_dirty(), d.undo_labels().len()), (dirty, steps));
+        // Saved.
+        let back = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(back.groove_setting(0, 0, "sequence_generation/fills"), Some(3.0));
+        assert_eq!(back.groove_page(0, 0), Some(2));
+        // Copied.
+        let clip = d.copy_sound(0, 0).unwrap();
+        d.paste_sounds(0, 5, &[clip]).unwrap();
+        assert_eq!(d.groove_setting(0, 5, "sequence_generation/mode"), Some(1.0));
+        assert_eq!(d.groove_setting(0, 5, "sequence_generation/fills"), Some(3.0));
+        assert_eq!(d.groove_page(0, 5), Some(2));
+    }
+
+    /// A sound from a format with no place for the settings (a kit from before
+    /// Maschine 3) keeps them in DECKARD's field: undone, copied, and not left
+    /// on its pad for a sound pasted over it.
+    #[test]
+    fn a_sound_without_a_place_keeps_its_settings_in_deckards_field() {
+        let mut d = Document::new_project().unwrap();
+        d.tree.walk_mut(&mut |o| o.fields.retain(|(f, _)| f != "sequence_variation" && f != "sequence_generation"));
+        d.refresh();
+        assert!(!d.has_groove_settings(0, 0));
+        d.set_groove_setting(0, 0, "sequence_generation/mode", 1.0).unwrap();
+        d.set_groove_setting(0, 0, "sequence_generation/fills", 3.0).unwrap();
+        assert_eq!(d.groove_setting(0, 0, "sequence_generation/fills"), Some(3.0));
+        assert_eq!(d.undo_labels().len(), 1, "one knob session");
+        // (Saving is `groove_settings_are_kept_with_the_sound`'s page: the same block.)
+        let clip = d.copy_sound(0, 0).unwrap();
+        d.paste_sounds(0, 5, &[clip]).unwrap();
+        assert_eq!(d.groove_setting(0, 5, "sequence_generation/fills"), Some(3.0));
+        let empty = d.copy_sound(0, 1).unwrap();
+        d.paste_sounds(0, 0, &[empty]).unwrap();
+        assert_eq!(d.groove_setting(0, 0, "sequence_generation/fills"), None, "the pasted sound's own");
+        d.undo();
+        d.undo();
+        d.undo();
+        assert_eq!(d.groove_setting(0, 0, "sequence_generation/fills"), None);
     }
 }

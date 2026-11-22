@@ -267,9 +267,19 @@ impl Plugin {
     /// plug-ins set themselves up on their first blocks (2–3 ms each for some, most of
     /// a 128-frame block's time). Only for an instance nothing else plays yet.
     pub fn warm_up(&mut self) {
+        let was_dirty = match &self.kind {
+            Kind::Vst3(v) => v.edits.lock().is_ok_and(|e| e.dirty),
+            _ => false,
+        };
         let silence = [0f32; MAX_BLOCK];
         for _ in 0..4 {
             self.process_input(MAX_BLOCK, &Transport::default(), Some((&silence, &silence)));
+        }
+        if let Kind::Vst3(v) = &mut self.kind
+            && !was_dirty
+            && let Ok(mut e) = v.edits.lock()
+        {
+            e.dirty = false;
         }
     }
 
@@ -741,6 +751,11 @@ impl Vst3 {
         }
         self.held = [false; 128];
         self.set_active(true);
+        // Restoring saved state is not an edit in the plug-in's UI (some VST3 controllers
+        // call `restartComponent` or `performEdit` inside `setComponentState`/`setState`).
+        if let Ok(mut e) = self.edits.lock() {
+            e.dirty = false;
+        }
         result
     }
 
@@ -1330,6 +1345,31 @@ impl Host {
         let shared = Arc::new(Mutex::new(p));
         self.instances.insert(slot, shared.clone());
         Ok(shared)
+    }
+
+    /// Build and warm up a Deckard-native plug-in off the main thread (`None` for VST3/AU).
+    pub fn prepare_native(plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64) -> Option<Result<Shared, String>> {
+        let id = PluginId::parse(plugin_id, name)?;
+        let class = native::find(&id.cid)?;
+        let mut p = Plugin::native(class, id, name, sample_rate);
+        if let Err(e) = p.load_chunk(chunk) {
+            return Some(Err(format!("{name}: {e}")));
+        }
+        p.warm_up();
+        Some(Ok(Arc::new(Mutex::new(p))))
+    }
+
+    /// Install a pre-built native instance into `slot`, keeping an unchanged existing one.
+    pub fn adopt_prepared(&mut self, slot: Slot, plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64, prepared: Shared) {
+        if let Some(id) = PluginId::parse(plugin_id, name)
+            && let Some(shared) = self.instances.get(&slot)
+        {
+            let p = shared.lock().unwrap();
+            if module::same_class(&p.id.cid, &id.cid) && p.sample_rate() == sample_rate && p.chunk() == chunk {
+                return;
+            }
+        }
+        self.instances.insert(slot, prepared);
     }
 
     /// The instance already playing `slot` as plug-in `plugin_id`, if one is loaded

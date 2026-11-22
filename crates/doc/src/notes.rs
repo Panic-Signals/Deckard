@@ -35,7 +35,8 @@ fn note_model_and_reference_index_match_full_reads_through_history() {
     }
     let mut d = Document::new_project().unwrap();
     d.add_pattern(0, 0, "Notes").unwrap();
-    let a = Note { expr: None, sound: 0, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let a =
+        Note { ratchet: Default::default(), expr: None, sound: 0, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
     let b = Note { sound: 1, position: 240, ..a };
     d.edit_notes("Insert", 0, 0, &[], &[a, b]).unwrap();
     check(&d);
@@ -60,7 +61,8 @@ fn note_model_and_reference_index_match_full_reads_through_history() {
 fn event_edit_keeps_other_references_to_the_old_note() {
     let mut d = Document::new_project().unwrap();
     d.add_pattern(0, 0, "Notes").unwrap();
-    let a = Note { expr: None, sound: 0, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
+    let a =
+        Note { ratchet: Default::default(), expr: None, sound: 0, position: 0, length: 120, pitch: 60, velocity: 100, probability: 100 };
     let b = Note { sound: 1, ..a };
     d.edit_notes("Seed", 0, 0, &[], &[a, b]).unwrap();
     let paths = d.object_paths();
@@ -282,7 +284,15 @@ impl Document {
                                 .and_then(Value::as_int)
                                 .or_else(|| ev.find("muted").and_then(Value::as_int).map(|m| if m != 0 { 0 } else { 100 }))
                                 .unwrap_or(100);
-                            notes.push(Note { expr, sound, position, length, pitch, velocity, probability });
+                            let ratchet = if let Value::Obj(te) = &item.event {
+                                te.get(deckard_model::ratchet::FIELD)
+                                    .and_then(Value::as_int)
+                                    .map(deckard_model::ratchet::Ratchet::from_int)
+                                    .unwrap_or_default()
+                            } else {
+                                Default::default()
+                            };
+                            notes.push(Note { ratchet, expr, sound, position, length, pitch, velocity, probability });
                         }
                     }
                 }
@@ -356,6 +366,7 @@ impl Document {
         let Value::Obj(t) = &mut te else { unreachable!() };
         *t.get_mut("position").ok_or("TimedEvent without position")? = Value::Int(n.position);
         super::expression::set_expr_field(t, n.expr);
+        super::expression::set_ratchet_field(t, n.ratchet);
         let Some(Value::Obj(ev)) = t.get_mut("event") else { unreachable!() };
         set_int(ev, "length", n.length.max(1));
         set_int(ev, "note", n.pitch.clamp(0, 127));

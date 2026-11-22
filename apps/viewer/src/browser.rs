@@ -24,8 +24,10 @@ enum Job {
     Forget(PathBuf),
 }
 
-/// A query's answer: its number, the results, and why NI's index isn't there.
-type Answer = (u64, Results, Option<String>);
+/// A query's answer: its number, the results, why NI's index isn't there, and, when
+/// `query.product` wasn't in the new view's products (or matched with different casing),
+/// the reconciled product choice.
+type Answer = (u64, Results, Option<String>, Option<Option<String>>);
 
 pub struct Browser {
     pub open: bool,
@@ -108,7 +110,7 @@ impl Browser {
                         // Answer every query with the error.
                         while let Ok(job) = rx.recv() {
                             if let Job::Query(n, _) = job
-                                && tx.send((n, Results::default(), Some(e.clone()))).is_err()
+                                && tx.send((n, Results::default(), Some(e.clone()), None)).is_err()
                             {
                                 return;
                             }
@@ -127,9 +129,22 @@ impl Browser {
                             Err(_) => break,
                         }
                     }
-                    if let Job::Query(n, q) = job {
-                        let r = lib.query(&q);
-                        if tx.send((n, r, lib.ni_error.clone())).is_err() {
+                    if let Job::Query(n, mut q) = job {
+                        let mut r = lib.query(&q);
+                        let product = if let Some(want) = &q.product
+                            && !r.products.contains(want)
+                        {
+                            let next = r.products.iter().find(|p| p.eq_ignore_ascii_case(want)).cloned();
+                            if next.is_none() {
+                                q.bank.clear();
+                            }
+                            q.product = next.clone();
+                            r = lib.query(&q);
+                            Some(next)
+                        } else {
+                            None
+                        };
+                        if tx.send((n, r, lib.ni_error.clone(), product)).is_err() {
                             return;
                         }
                     } else {
@@ -198,8 +213,14 @@ impl Browser {
                 newest = Some(a);
             }
         }
-        let Some((n, results, error)) = newest else { return false };
+        let Some((n, results, error, product)) = newest else { return false };
         self.rev += 1;
+        if let Some(product) = product {
+            if product.is_none() {
+                self.query.bank.clear();
+            }
+            self.query.product = product;
+        }
         // An old filter's results can omit the selected preset and send focus
         // back to the first row. Only the current query may replace the list.
         self.shown = n;
@@ -463,11 +484,11 @@ mod query_order_tests {
             results: Results { items: items.clone(), ..Default::default() },
             ..Default::default()
         };
-        answers.send((1, Results { items: vec![items[0].clone()], ..Default::default() }, None)).unwrap();
+        answers.send((1, Results { items: vec![items[0].clone()], ..Default::default() }, None, None)).unwrap();
         assert!(!browser.poll());
         assert_eq!(browser.selected_item().unwrap().name, "Second");
         assert!(browser.waiting());
-        answers.send((2, Results { items, ..Default::default() }, None)).unwrap();
+        answers.send((2, Results { items, ..Default::default() }, None, None)).unwrap();
         assert!(browser.poll());
         assert_eq!(browser.selected_item().unwrap().name, "Second");
         assert!(!browser.waiting());
@@ -484,8 +505,8 @@ mod current_query_tests {
         let mut browser = Browser { worker: Some((jobs, received)), asked: 2, ..Default::default() };
         let current =
             Item { path: "current.nksf".into(), name: "Current".into(), kind: deckard_library::Kind::Instrument, ..Default::default() };
-        answers.send((2, Results { items: vec![current], ..Default::default() }, None)).unwrap();
-        answers.send((1, Results::default(), Some("old failure".into()))).unwrap();
+        answers.send((2, Results { items: vec![current], ..Default::default() }, None, None)).unwrap();
+        answers.send((1, Results::default(), Some("old failure".into()), None)).unwrap();
         assert!(browser.poll());
         assert_eq!(browser.results.items[0].name, "Current");
         assert!(browser.error.is_none());
@@ -522,5 +543,85 @@ mod current_query_tests {
         app.prehear_item(&item(Kind::Instrument, "Missing.nksf"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toggling_user_keeps_product_when_present_and_resets_when_absent() {
+        use deckard_library::Kind;
+        use deckard_plugins::nks;
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let ni_path = deckard_library::testing::fixture(d);
+
+        let mut roots = Vec::new();
+        for (prod, preset) in [("Massive X", "Factory Lead"), ("Monark", "Factory Bass"), ("Pigments", "Factory Pad")] {
+            let root = d.join("Factory").join(prod);
+            deckard_library::testing::tagged_file(&root.join(format!("{preset}.mxinst")), preset, &[], &[]);
+            roots.push(Root { path: root, factory: true, product: Some(prod.into()) });
+        }
+        let user_root = d.join("User Content");
+        for (prod, preset) in [("Massive X", "User Lead"), ("Omnisphere", "User Arp"), ("PIGMENTS", "User Pad")] {
+            let path = user_root.join(prod).join(format!("{preset}.nksf"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, nks::fixture(None, 0, prod, b"state")).unwrap();
+        }
+        roots.push(Root { path: user_root, factory: false, product: None });
+
+        let mut app = crate::App::default();
+        app.browser.start(Some(ni_path), d.join("library.db3"), roots);
+        app.browser.wait();
+
+        let item_names = |app: &crate::App| -> Vec<String> { app.browser.results.items.iter().map(|i| i.name.clone()).collect() };
+
+        // 1. Product present in both Factory and User ("Massive X"): kept across USER toggles.
+        app.browse(BrowseAct::Kind(Kind::Instrument));
+        app.browser.wait();
+        app.browse(BrowseAct::Product(Some("Massive X".into())));
+        app.browser.wait();
+        assert_eq!(item_names(&app), ["Factory Lead"]);
+        assert_eq!(app.browser.view().product, Some(0));
+
+        let call = app.browser.from_controller(deckard_lua_host::state::BrowseCall::User(true)).unwrap();
+        app.browse(call);
+        app.browser.wait();
+        assert!(app.browser.query.user);
+        assert_eq!(app.browser.query.product.as_deref(), Some("Massive X"));
+        assert_eq!(item_names(&app), ["User Lead"]);
+        assert_eq!(app.browser.view().product, Some(0));
+
+        app.browse(BrowseAct::User(false));
+        app.browser.wait();
+        assert!(!app.browser.query.user);
+        assert_eq!(app.browser.query.product.as_deref(), Some("Massive X"));
+        assert_eq!(item_names(&app), ["Factory Lead"]);
+
+        // 2. Product present in the new view with different casing ("Pigments" <-> "PIGMENTS"): kept.
+        app.browse(BrowseAct::Product(Some("Pigments".into())));
+        app.browser.wait();
+        assert_eq!(item_names(&app), ["Factory Pad"]);
+        app.browse(BrowseAct::User(true));
+        app.browser.wait();
+        assert_eq!(app.browser.query.product.as_deref(), Some("PIGMENTS"));
+        assert_eq!(item_names(&app), ["User Pad"]);
+        assert_eq!(app.browser.view().product, Some(2));
+
+        // 3. Product absent in the new view ("Omnisphere" only in User, "Monark" only in Factory): reset to None.
+        app.browse(BrowseAct::Product(Some("Omnisphere".into())));
+        app.browser.wait();
+        assert_eq!(item_names(&app), ["User Arp"]);
+        app.browse(BrowseAct::User(false));
+        app.browser.wait();
+        assert_eq!(app.browser.query.product, None);
+        assert_eq!(app.browser.view().product, None);
+        assert_eq!(item_names(&app), ["Factory Bass", "Factory Lead", "Factory Pad"]);
+
+        app.browse(BrowseAct::Product(Some("Monark".into())));
+        app.browser.wait();
+        assert_eq!(item_names(&app), ["Factory Bass"]);
+        app.browse(BrowseAct::User(true));
+        app.browser.wait();
+        assert_eq!(app.browser.query.product, None);
+        assert_eq!(app.browser.view().product, None);
+        assert_eq!(item_names(&app), ["User Arp", "User Lead", "User Pad"]);
     }
 }

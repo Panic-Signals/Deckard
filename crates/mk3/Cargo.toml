@@ -21,3 +21,4 @@ hidapi = { version = "2.6.7", default-features = false, features = ["windows-nat
 
 [dev-dependencies]
 png = "0.18.1"
+midir = "0.11.1"
