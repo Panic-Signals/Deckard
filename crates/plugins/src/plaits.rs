@@ -25,6 +25,7 @@ pub static CLASS: Class = Class {
     params: PARAMS,
     pages: PAGES,
     make: |sr| Box::new(PlaitsSynth::new(sr)),
+    scope: true,
 };
 
 // Parameter ids (saved in projects: never renumber).

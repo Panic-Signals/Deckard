@@ -195,3 +195,39 @@ fn opening_creates_no_files_beside_the_index() {
     let after: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name()).collect();
     assert_eq!(after, before);
 }
+
+#[test]
+fn ensemble_rows_carry_uuid_and_preview_subpath() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let path = testing::fixture(d);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "ALTER TABLE k_content_path ADD COLUMN upid TEXT;
+         ALTER TABLE k_sound_info ADD COLUMN uuid TEXT;
+         INSERT INTO k_content_path (id, path, content_type, alias, upid)
+             VALUES (3, 'C:/Users/Public/Documents/Kontour', 2, 'Kontour', 'kontour-upid');
+         INSERT INTO k_sound_info (id, name, author, tempo, content_path_id, file_name, hidden_for, uuid)
+             VALUES
+             (40, 'Bass Sting', 'Native Instruments', 0, 3, 'C:/Users/Public/Documents/Kontour/Presets/Bass Sting/Kontour.ens', 0, '6d63bc67-8fd2-9fb4-786f-75f05c168407'),
+             (41, 'Bello', 'Native Instruments', 0, 3, 'C:/Users/Public/Documents/Kontour/Presets/Bello/Kontour.ens', 0, 'aaaa1111-2222-3333-4444-555566667777');
+         INSERT INTO p_sound_info_Instrument_2 (id, name, entry1, entry2, entry3, content_path_id, favorite_id)
+             VALUES
+             (40, 'Bass Sting', 'Kontour', NULL, NULL, 3, 'fav-bass-sting'),
+             (41, 'Bello', 'Kontour', NULL, NULL, 3, 'fav-bello');",
+    )
+    .unwrap();
+    drop(db);
+
+    let ni = NiIndex::open(&path).unwrap();
+    let r = ni.query(&Query { kind: Kind::Instrument, ..Query::default() }).unwrap();
+    assert_eq!(r.items.len(), 2);
+    assert_eq!(r.items[0].name, "Bass Sting");
+    assert_eq!(r.items[0].uuid.as_deref(), Some("6d63bc67-8fd2-9fb4-786f-75f05c168407"));
+    assert_eq!(r.items[0].preview_subpath.as_deref(), Some(std::path::Path::new("kontour-upid/Presets/Bass Sting")));
+    assert_eq!(
+        r.items[0].favorite_key(),
+        "C:/Users/Public/Documents/Kontour/Presets/Bass Sting/Kontour.ens#6d63bc67-8fd2-9fb4-786f-75f05c168407"
+    );
+    assert!(!r.items[0].favorite);
+}
