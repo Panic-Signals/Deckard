@@ -21,6 +21,7 @@
 
 local widgets = require("lib.widgets")
 local chain = require("lib.chain")
+local knob_lib = require("lib.knobs")
 local zhora = require("lib.zhora")
 
 local control = {}
@@ -81,6 +82,14 @@ local function shift_button(c, n)
 end
 
 function control.button(name, down)
+  local cap = tonumber(name:match("^CAP_(%d)$"))
+  if cap then
+    if not down then knob_lib.erased[cap] = nil end
+    if deckard.held("ERASE") then
+      if down then knob_lib.erase(cap) end
+      return true
+    end
+  end
   if not down then return end
   local s = deckard.state()
   local c = s.control
@@ -112,6 +121,10 @@ function control.button(name, down)
 end
 
 function control.knob(n, amount)
+  if deckard.held("ERASE") then
+    knob_lib.erase(n)
+    return true
+  end
   deckard.turn_knob(n, amount, deckard.held("SHIFT"))
   return true
 end
@@ -228,7 +241,13 @@ local function knobs(screen, theme, c, no_page, knob_of)
           groups[#groups + 1] = { text = knob.section, at = k }
         end
         local value, unit = split(knob.text)
-        params[k] = { name = knob.name:upper(), value = value, unit = unit, macro = knob.macro }
+        params[k] = {
+          name = knob.name:upper(),
+          value = value,
+          unit = unit,
+          macro = knob.macro,
+          modulated = knob.modulated,
+        }
       end
     end
     local page = nil
@@ -242,7 +261,14 @@ end
 -- modulated, its modulation where the song is in place of its value.
 local function auto_knob(knob)
   if not knob.modulatable then return nil end
-  return { name = knob.name, section = knob.section, value = knob.value, text = knob.auto_mod or knob.text }
+  return {
+    name = knob.name,
+    section = knob.section,
+    value = knob.value,
+    text = knob.auto_mod or knob.text,
+    macro = knob.macro,
+    modulated = knob.modulated,
+  }
 end
 
 -- The built-in effect on the right screen, the same on every page. `kind` is freq

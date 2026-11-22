@@ -182,10 +182,15 @@ impl App {
                 true
             }
             "clear_modulation" => {
-                // (The focused sound's, as the scripts' Clear Auto; a touch still open
-                // would write its movement back.)
+                // (The channel shown's, in the pattern playing for its group, as the
+                // scripts' Clear Auto; a touch still open would write its movement back.)
                 self.end_mod_take();
-                let r = doc.borrow_mut().clear_pattern_modulation(deckard_doc::Chain::Sound(self.group, self.sound), self.pattern);
+                let chain = match self.chain_tab {
+                    crate::layout::ChainTab::Group => deckard_doc::Chain::Group(self.group),
+                    _ => deckard_doc::Chain::Sound(self.group, self.sound),
+                };
+                let pat = self.active_modulation_pattern(self.group);
+                let r = doc.borrow_mut().clear_pattern_modulation(chain, pat);
                 if let Err(e) = r {
                     self.status = format!("can't remove the modulation: {e}");
                 }

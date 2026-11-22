@@ -493,7 +493,7 @@ mod tests {
         for &(k, v) in params {
             p.set_param(k, v);
         }
-        let pr = PluginRef { id: class.plugin_id(), name: class.name.into(), chunk: p.save_chunk(), ..Default::default() };
+        let pr = PluginRef { id: class.plugin_id(), name: class.name.into(), chunk: p.save_chunk().into(), ..Default::default() };
         Sound {
             plugin: Some(pr.clone()),
             slots: vec![SlotInfo { module: "PluginHost".into(), name: pr.name.clone(), active: true, plugin: Some(pr), params: vec![] }],

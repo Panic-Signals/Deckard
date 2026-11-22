@@ -1499,3 +1499,40 @@ fn an_unrecordable_control_does_not_end_another_knobs_touch() {
     assert_eq!(app.mod_takes.len(), 1);
     app.end_mod_take();
 }
+
+/// SHIFT + Pad 10 clears the channel shown (Group or Sound) in the pattern its group is
+/// playing, not always the focused Sound's focused pattern.
+#[test]
+fn clear_modulation_pad_clears_the_shown_channel_in_the_playing_pattern() {
+    use deckard_doc::{Chain, NewModule};
+    let (mut app, edit, _) = filter_app();
+    let doc = app.doc.clone().unwrap();
+    {
+        let mut d = doc.borrow_mut();
+        d.add_slot_in(Chain::Group(0), 0, &NewModule::Effect("Filter")).unwrap();
+        // The scene plays pattern 1 while pattern 0 stays focused.
+        d.add_pattern(0, 0, "Pattern 2").unwrap();
+        d.assign_pattern(0, 0, Some(1)).unwrap();
+    }
+    let (c, t) = crate::modulation::mod_target(edit).unwrap();
+    let gt = deckard_model::ModTarget { slot: Some(0), ..t.clone() };
+    {
+        let mut d = doc.borrow_mut();
+        d.set_modulation(c, &t, 1, (0, 0), &[(1000, -0.5)]).unwrap();
+        d.set_modulation(Chain::Group(0), &gt, 1, (0, 0), &[(1000, -0.5)]).unwrap();
+    }
+    let mods = |app: &crate::App| {
+        let d = app.doc.as_ref().unwrap().borrow();
+        let ps = &d.project().groups[0].patterns;
+        (ps[1].mods.iter().filter(|m| m.sound.is_some()).count(), ps[1].mods.iter().filter(|m| m.sound.is_none()).count())
+    };
+    assert_eq!(mods(&app), (1, 1));
+    app.scene = 0;
+    app.pattern = 0;
+    app.chain_tab = crate::layout::ChainTab::Group;
+    app.surface_act(deckard_surface::Action::Edit("clear_modulation"));
+    assert_eq!(mods(&app), (1, 0), "the Group's, in the scene's pattern");
+    app.chain_tab = crate::layout::ChainTab::Sound;
+    app.surface_act(deckard_surface::Action::Edit("clear_modulation"));
+    assert_eq!(mods(&app), (0, 0), "then the Sound's");
+}

@@ -184,7 +184,7 @@ mod tests {
         for &(k, v) in params {
             p.set_param(k, v);
         }
-        PluginRef { id: class.plugin_id(), name: class.name.into(), chunk: p.save_chunk(), ..Default::default() }
+        PluginRef { id: class.plugin_id(), name: class.name.into(), chunk: p.save_chunk().into(), ..Default::default() }
     }
 
     /// Sound `s` of `p` played by Zhora (`params`).

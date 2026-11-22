@@ -86,25 +86,26 @@ impl Document {
         let Some(Value::Obj(h)) = self.tree.at(&host) else { return false };
         let Some(Value::Obj(c)) = h.find("chunk") else { return false };
         let Some(Value::Bytes(bytes)) = c.find("size_data").cloned() else { return false };
+        let chunk = deckard_model::PluginChunk::from(bytes);
         match target {
             crate::Target::Sound(g, s) => {
                 let Some(snd) = self.project.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) else { return false };
                 if let Some(pr) = &mut snd.plugin {
-                    pr.chunk = bytes.clone();
+                    pr.chunk = chunk.clone();
                 }
                 if let Some(pr) = snd.slots.iter_mut().find_map(|x| x.plugin.as_mut()) {
-                    pr.chunk = bytes;
+                    pr.chunk = chunk;
                 }
                 true
             }
             crate::Target::ChainModule(crate::Chain::Sound(g, s), i) => {
                 let Some(snd) = self.project.groups.get_mut(g).and_then(|x| x.sounds.get_mut(s)) else { return false };
                 let Some(pr) = snd.slots.get_mut(i).and_then(|x| x.plugin.as_mut()) else { return false };
-                pr.chunk = bytes.clone();
+                pr.chunk = chunk.clone();
                 if i == 0
                     && let Some(pr) = &mut snd.plugin
                 {
-                    pr.chunk = bytes;
+                    pr.chunk = chunk;
                 }
                 true
             }
@@ -112,12 +113,12 @@ impl Document {
                 let Some(pr) = self.project.groups.get_mut(g).and_then(|x| x.slots.get_mut(i)).and_then(|x| x.plugin.as_mut()) else {
                     return false;
                 };
-                pr.chunk = bytes;
+                pr.chunk = chunk;
                 true
             }
             crate::Target::ChainModule(crate::Chain::Master, i) => {
                 let Some(pr) = self.project.master_slots.get_mut(i).and_then(|x| x.plugin.as_mut()) else { return false };
-                pr.chunk = bytes;
+                pr.chunk = chunk;
                 true
             }
             _ => false,

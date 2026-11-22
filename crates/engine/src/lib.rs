@@ -443,6 +443,84 @@ fn cue_take(e: &NoteEvent) -> Option<(usize, f64)> {
     }
 }
 
+/// How many sounding sounds [`Engine::catch_beat_hits`] tracks at once.
+const SOUNDING_ROOM: usize = 64;
+
+/// How long after a beat's tick a mute or pattern switch still catches that beat's hit
+/// (compensating for output buffer latency plus the controller-to-adopt round-trip).
+const BEAT_GRACE_SECONDS: f64 = 0.055;
+
+/// Recent live notes tracked so [`Engine::catch_beat_hits`] never double-triggers one.
+const RECENT_LIVE_ROOM: usize = 16;
+
+/// Whether note `e` is already sounding at timeline position `at` (`0..len`).
+fn sounding_in_pass(e: &NoteEvent, fired: bool, at: f64, len: f64, looping: bool) -> Option<f64> {
+    if e.length == HELD || e.length <= 0 || e.midi.is_some() || e.cue.is_some() || e.velocity <= 0 {
+        return None;
+    }
+    let (start, end) = (e.tick as f64, (e.tick + e.length) as f64);
+    if fired && start <= at && at < end {
+        return Some(at - start);
+    }
+    if looping && end > len && start <= at + len && at + len < end {
+        return Some(at + len - start);
+    }
+    None
+}
+
+/// Frames since `ev_frame` passed on a timeline of `end` frames, if within `1..=window`.
+/// Events at `cur` (`d == 0`) are still ahead in `self.next` and play normally.
+fn frames_since_beat(cur: u64, end: u64, looping: bool, window: u64, ev_frame: u64) -> Option<u64> {
+    if window == 0 {
+        return None;
+    }
+    if ev_frame < cur {
+        let d = cur - ev_frame;
+        return (d <= window).then_some(d);
+    }
+    if looping && end > 0 && ev_frame > cur && ev_frame < end {
+        let d = (end - ev_frame).saturating_add(cur);
+        return (d > 0 && d <= window).then_some(d);
+    }
+    None
+}
+
+/// Per-group signature of which pattern slot `mode` plays (`0` when silent), so
+/// [`Engine::catch_beat_hits`] distinguishes pattern switches from note edits/recording.
+fn group_pattern_sigs(project: &Project, mode: Mode) -> Vec<u64> {
+    let slot_of = |g: usize, pi: usize| project.groups.get(g).and_then(|grp| grp.patterns.get(pi)).map_or(pi, |p| p.slot) as u64 + 1;
+    (0..project.groups.len())
+        .map(|g| match mode {
+            Mode::Pattern(pg, pi) => {
+                if g == pg {
+                    slot_of(g, pi)
+                } else {
+                    0
+                }
+            }
+            Mode::Scene(s) => {
+                project.scenes.get(s).and_then(|sc| sc.patterns.iter().find(|x| x.0 == g)).map_or(0, |&(_, pi)| slot_of(g, pi))
+            }
+            Mode::Arrangement => {
+                let mut h = 0xcbf2_9ce4_8422_2325u64;
+                let mut any = false;
+                for (si, sec) in project.sections.iter().enumerate() {
+                    let v = sec
+                        .scene
+                        .and_then(|s| project.scenes.get(s))
+                        .and_then(|sc| sc.patterns.iter().find(|x| x.0 == g))
+                        .map_or(0, |&(_, pi)| slot_of(g, pi));
+                    if v != 0 {
+                        any = true;
+                    }
+                    h ^= (si as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ v;
+                    h = h.wrapping_mul(0x0100_0000_01b3);
+                }
+                if any { h | 1 } else { 0 }
+            }
+        })
+        .collect()
+}
 fn pattern_length(p: &Project, g: usize, pi: usize) -> i64 {
     own_length(p, &p.groups[g].patterns[pi])
 }
@@ -691,7 +769,7 @@ pub fn sound_bus(p: &Project, g: usize, s: usize) -> Option<usize> {
 /// [`sound_gain`] and [`sound_bus`].
 fn sound_route(p: &Project, g: usize, s: usize) -> Route {
     let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return SILENT };
-    if !snd.cue && has_sound_bus(snd) && reaches_main(p, snd.channel.dest, (g, Some(s)), Some(g), 0) {
+    if !snd.cue && has_sound_bus(p, g, s) && reaches_main(p, snd.channel.dest, (g, Some(s)), Some(g), 0) {
         return SILENT;
     }
     let own = fader_gain(snd.level, snd.pan, &snd.modulators);
@@ -800,7 +878,7 @@ fn channel_faders(p: &Project) -> (Vec<Fader>, Vec<Vec<Vec<usize>>>, Vec<Vec<usi
             }
             D::Group(g) => into(g, out),
             D::Sound(g, s) => {
-                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|bus| !has_sound_bus(bus)) {
+                if let Some(bus) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|_| !has_sound_bus(p, g, s)) {
                     out.extend(place(g, Some(s)));
                     if !bus.cue {
                         after_dest(p, bus.channel.dest, Some(g), depth + 1, place, out);
@@ -947,7 +1025,7 @@ fn dest_cued(p: &Project, dest: deckard_model::AudioDest, parent: Option<usize>,
             .groups
             .get(g)
             .and_then(|x| x.sounds.get(s))
-            .is_some_and(|bus| !has_sound_bus(bus) && (bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))),
+            .is_some_and(|bus| !has_sound_bus(p, g, s) && (bus.cue || dest_cued(p, bus.channel.dest, Some(g), depth + 1))),
         D::None | D::Master | D::Ext(_) => false,
     }
 }
@@ -1121,15 +1199,18 @@ fn has_bus(grp: &deckard_model::Group) -> bool {
     !grp.slots.is_empty() || grp.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
 }
 
-/// Whether sound `snd` has a bus: active effects in its chain, or an Aux send.
-fn has_sound_bus(snd: &deckard_model::Sound) -> bool {
-    !effect_slots(snd).is_empty() || snd.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
+/// Whether sound (`g`, `s`) needs its own bus buffer when fed by another channel:
+/// active effects in its chain, an Aux send, or a side-chain tap listening to it.
+fn has_sound_bus(p: &Project, g: usize, s: usize) -> bool {
+    let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(s)) else { return false };
+    !effect_slots(snd).is_empty()
+        || snd.channel.aux_dest.iter().any(|d| *d != deckard_model::AudioDest::None)
+        || sound_feeds_sidechain(p, g, s)
 }
 
 /// Whether sound (`g`, `s`) has a bus and another channel routes or sends audio into it.
 fn is_sound_bus(p: &Project, g: usize, s: usize) -> bool {
-    let Some(snd) = p.groups.get(g).and_then(|grp| grp.sounds.get(s)) else { return false };
-    if !has_sound_bus(snd) {
+    if !has_sound_bus(p, g, s) {
         return false;
     }
     let target = deckard_model::AudioDest::Sound(g, s);
@@ -1146,10 +1227,10 @@ fn is_sound_bus(p: &Project, g: usize, s: usize) -> bool {
 
 fn sound_in_route(p: &Project, g: usize, s: usize, depth: u8) -> Route {
     let Some((grp, bus)) = p.groups.get(g).and_then(|grp| Some((grp, grp.sounds.get(s)?))) else { return SILENT };
-    if (grp.muted || (bus.muted && bus.channel.audio_mute)) && !(has_sound_bus(bus) && sound_feeds_strip(p, g, s)) {
+    if (grp.muted || (bus.muted && bus.channel.audio_mute)) && !(has_sound_bus(p, g, s) && sound_feeds_strip(p, g, s)) {
         return SILENT;
     }
-    if has_sound_bus(bus) {
+    if has_sound_bus(p, g, s) {
         return (Some(sound_bus_id(g, s)), (1.0, 1.0));
     }
     let (to, gain) = if bus.cue { cue_route(p) } else { dest_route(p, bus.channel.dest, Some(g), depth) };
@@ -2308,6 +2389,10 @@ pub struct Engine {
     /// Each sound's MIDI output, and which sounds are muted, `[group][sound]`.
     midi_routes: Vec<Vec<Option<midi::OutRoute>>>,
     sound_muted: Vec<Vec<bool>>,
+    pattern_sigs: Vec<u64>,
+    pattern_sigs_mode: Mode,
+    recent_live: [(u64, usize, usize, i64); RECENT_LIVE_ROOM],
+    recent_live_at: usize,
     /// Pad mode's choke and link groups, for live notes (the timeline has them already).
     pads: pads::Pads,
     /// Where MIDI for output ports goes (a thread that sends it); none: dropped.
@@ -3093,6 +3178,8 @@ impl Engine {
         }
         // Sounds that must play live: they take audio or MIDI input, feed or hear a
         // side-chain, or pass notes to another sound.
+        let listeners = sidechain_listeners(project);
+        let sound_buses = sound_buses_of(project, &listeners);
         let routes = midi::out_routes(project);
         let routed_to = |g: usize, s: usize| routes.get(g).is_some_and(|r| r.iter().any(|x| x == &Some(midi::OutRoute::Sound(s))));
         let explicit = |src: &str| !matches!(src, "Default" | "Focus" | "None" | "");
@@ -3119,8 +3206,8 @@ impl Engine {
                             || (gr.channel.key_mode == 2 && explicit(&gr.channel.midi_source))
                             // Its strips are mixed where it plays.
                             || sound_has_strip(project, g, s)
-                            // A sound bus waits for the channels that feed it.
-                            || is_sound_bus(project, g, s)
+                            // A sound bus (or a sound listening to one) waits for the channels that feed it.
+                            || sound_buses[g][s]
                             // Its CV leaves with the outputs.
                             || zhora_rt::is_zhora(snd)
                     })
@@ -3142,7 +3229,7 @@ impl Engine {
                         let has = sounds.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || instruments.get(g).and_then(|r| r.get(s)).is_some_and(Option::is_some)
                             || takes_in
-                            || is_sound_bus(project, g, s);
+                            || sound_buses[g][s];
                         let smp_gain = if has_fx(g, s) {
                             (1.0, 1.0)
                         } else if muting(project, g, s).hushed {
@@ -3226,15 +3313,9 @@ impl Engine {
         let (sound_aux, group_aux) = aux::build(project, &faders);
         let sound_routes: Vec<Vec<Option<usize>>> =
             project.groups.iter().enumerate().map(|(g, grp)| (0..grp.sounds.len()).map(|s| sound_bus(project, g, s)).collect()).collect();
-        let sound_buses: Vec<Vec<bool>> = project
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(g, grp)| (0..grp.sounds.len()).map(|s| is_sound_bus(project, g, s)).collect())
-            .collect();
         let strips: Vec<(Owner, usize, Channels, StripRoute)> =
             project.extra_outs.iter().map(|x| (x.owner, x.bus, x.channels, strip_route(project, x))).collect();
-        let order = aux::order(&buses, &group_aux, &sound_buses, &sound_routes, &sound_aux, &strips);
+        let order = aux::order(&buses, &group_aux, &sound_buses, &sound_routes, &sound_aux, &strips, &listeners);
         let engine = Engine {
             sr: sr_f,
             tempo: project.tempo,
@@ -3329,6 +3410,10 @@ impl Engine {
                 .enumerate()
                 .map(|(g, grp)| (0..grp.sounds.len()).map(|s| muting(project, g, s).muted).collect())
                 .collect(),
+            pattern_sigs: group_pattern_sigs(project, mode),
+            pattern_sigs_mode: mode,
+            recent_live: [(u64::MAX, 0, 0, 0); RECENT_LIVE_ROOM],
+            recent_live_at: 0,
             lfos: lfo_rt::lfos_of(project),
             cc_routes: lfo_rt::ccs_of(project),
             cv_routes: project.cv_routes.clone(),
@@ -3427,6 +3512,9 @@ impl Engine {
         self.keep_parts(&mut fresh);
         std::mem::swap(&mut self.live_hint, &mut fresh.live_hint);
         let ticks = self.position();
+        let old_frame = self.frame;
+        let old_spt = self.samples_per_tick();
+        let sigs_valid = self.pattern_sigs_mode == self.mode && fresh.mode == self.mode;
         // Sounding Sampler voices carry over to the same sounds; sounds that went away
         // fade out.
         for (g, row) in std::mem::take(&mut self.sounds).into_iter().enumerate() {
@@ -3512,6 +3600,13 @@ impl Engine {
         std::mem::swap(&mut self.sound_muted, &mut fresh.sound_muted);
         std::mem::swap(&mut self.silent, &mut fresh.silent);
         std::mem::swap(&mut self.pads, &mut fresh.pads);
+        for g in 0..self.sound_muted.len() {
+            for s in 0..self.sound_muted[g].len() {
+                if self.sound_muted[g][s] {
+                    self.release_muted_sound(g, s);
+                }
+            }
+        }
         // Gains glide on from where they are.
         for (row, old) in fresh.bufs.iter_mut().zip(&self.bufs) {
             for (b, ob) in row.iter_mut().zip(old) {
@@ -3572,11 +3667,14 @@ impl Engine {
             }
         }
         self.stale = false;
+        let mut swapped_from_timelines = false;
         if fresh.keep_timeline {
             // The same timelines: this one's play on.
         } else if fresh.mode == self.mode {
             std::mem::swap(&mut self.timeline, &mut fresh.timeline);
-        } else if !timelines.swap_into(self.mode, &mut self.timeline) {
+        } else if timelines.swap_into(self.mode, &mut self.timeline) {
+            swapped_from_timelines = true;
+        } else {
             self.stale = true;
         }
         if !fresh.keep_timeline
@@ -3584,6 +3682,10 @@ impl Engine {
             && !timelines.swap_into(*mode, t)
         {
             self.stale = true;
+        }
+        if !self.stale {
+            std::mem::swap(&mut self.pattern_sigs, &mut fresh.pattern_sigs);
+            self.pattern_sigs_mode = self.mode;
         }
         let len = self.timeline.length as f64;
         let ticks = if self.looping && len > 0.0 { ticks % len } else { ticks };
@@ -3599,10 +3701,201 @@ impl Engine {
         std::mem::swap(&mut self.audio_sounds, &mut fresh.audio_sounds);
         if self.sequencing {
             self.recue();
+            let timeline_changed = !fresh.keep_timeline && !self.stale;
+            let old_tl = if !timeline_changed {
+                None
+            } else if swapped_from_timelines {
+                timelines.0.iter().find(|(m, _)| *m == self.mode).map(|(_, t)| t)
+            } else {
+                Some(&fresh.timeline)
+            };
+            self.catch_beat_hits(
+                old_tl,
+                &fresh.sound_muted,
+                &fresh.pattern_sigs,
+                sigs_valid && !self.stale,
+                timeline_changed,
+                old_frame,
+                old_spt,
+            );
         }
         fresh
     }
 
+    fn played_live_within(&self, group: usize, sound: usize, pitch: i64, window: u64) -> bool {
+        self.recent_live
+            .iter()
+            .any(|&(t, g, s, p)| t != u64::MAX && (g, s, p) == (group, sound, pitch) && self.time.saturating_sub(t) <= window)
+    }
+
+    fn fade_beat_sound(&mut self, group: usize, sound: usize) {
+        self.lfo_release(group, sound, None);
+        if self.link_ahead(group, sound).is_some() {
+            self.send_live(group, sound, ahead::Ev::Stop);
+            return;
+        }
+        if let Some(Some(snd)) = self.sounds.get_mut(group).and_then(|r| r.get_mut(sound)) {
+            snd.fade_all();
+        }
+        if let Some(Some(inst)) = self.instruments.get(group).and_then(|r| r.get(sound))
+            && let Ok(mut p) = inst.plugin.lock()
+        {
+            p.all_notes_off();
+        }
+        let now = self.time;
+        for o in self.note_offs.iter_mut().filter(|o| (o.1, o.2) == (group, sound) && o.0 > now) {
+            o.0 = now;
+        }
+    }
+
+    /// When a mute or pattern switch arrives just after a beat (within
+    /// [`BEAT_GRACE_SECONDS`] and half a 16th note), catch that beat's hit: fade a sound
+    /// that just triggered and is now muted or dropped, and trigger a hit that was muted
+    /// or absent when the beat passed. No allocating: runs on the audio thread.
+    #[allow(clippy::too_many_arguments)]
+    fn catch_beat_hits(
+        &mut self,
+        old_timeline: Option<&Timeline>,
+        old_muted: &[Vec<bool>],
+        old_sigs: &[u64],
+        sigs_valid: bool,
+        timeline_changed: bool,
+        old_frame: u64,
+        old_spt: f64,
+    ) {
+        if !self.sequencing || self.time == 0 {
+            return;
+        }
+        let spt = self.samples_per_tick();
+        if spt <= 0.0 || old_spt <= 0.0 {
+            return;
+        }
+        let step_half = ((PPQ as f64 / 8.0) * spt).round().max(1.0) as u64;
+        let grace = ((BEAT_GRACE_SECONDS * self.sr).round().max(1.0) as u64).min(step_half);
+        let window = grace.min(self.time);
+        if window == 0 {
+            return;
+        }
+        let any_mute_diff = self.sound_muted != old_muted;
+        let any_pat_diff = sigs_valid && timeline_changed && self.pattern_sigs != old_sigs;
+        if !any_mute_diff && !any_pat_diff {
+            return;
+        }
+        let pat_changed = |new_sigs: &[u64], g: usize| sigs_valid && timeline_changed && new_sigs.get(g) != old_sigs.get(g);
+        let old_step_half = ((PPQ as f64 / 8.0) * old_spt).round().max(1.0) as u64;
+        let old_window = ((BEAT_GRACE_SECONDS * self.sr).round().max(1.0) as u64).min(old_step_half).min(self.time);
+        let old_len = old_timeline.map_or(self.timeline.length, |t| t.length);
+        let old_end = if old_len > 0 { (old_len as f64 * old_spt).round().max(0.0) as u64 } else { 0 };
+        let end = self.frame_of(self.timeline.length);
+
+        if old_len > 0 {
+            let mut faded = [(0usize, 0usize); SOUNDING_ROOM];
+            let mut faded_n = 0usize;
+            let new_len = self.timeline.length;
+            let new_at = if new_len > 0 { self.position().rem_euclid(new_len as f64) } else { 0.0 };
+            let old_count = old_timeline.map_or(self.timeline.events.len(), |t| t.events.len());
+            for i in 0..old_count {
+                let oe = match old_timeline {
+                    Some(ot) => ot.events[i],
+                    None => self.timeline.events[i],
+                };
+                if oe.midi.is_some() || oe.cue.is_some() || oe.velocity <= 0 || note_muted(old_muted, &oe) {
+                    continue;
+                }
+                let oef = (oe.tick as f64 * old_spt).round().max(0.0) as u64;
+                if frames_since_beat(old_frame, old_end, self.looping, old_window, oef).is_none() {
+                    continue;
+                }
+                let key = (oe.group, oe.sound);
+                if faded[..faded_n].contains(&key) {
+                    continue;
+                }
+                let muted_now = note_muted(&self.sound_muted, &oe);
+                let dropped_by_pattern = !muted_now
+                    && pat_changed(&self.pattern_sigs, oe.group)
+                    && (new_len <= 0
+                        || !self.timeline.events.iter().any(|e| {
+                            (e.group, e.sound) == key
+                                && e.midi.is_none()
+                                && e.cue.is_none()
+                                && e.velocity > 0
+                                && !note_muted(&self.sound_muted, e)
+                                && (sounding_in_pass(e, e.tick as f64 <= new_at, new_at, new_len as f64, self.looping).is_some()
+                                    || frames_since_beat(self.frame, end, self.looping, window, self.frame_of(e.tick)).is_some())
+                        }));
+                if muted_now || dropped_by_pattern {
+                    self.fade_beat_sound(oe.group, oe.sound);
+                    if faded_n < SOUNDING_ROOM {
+                        faded[faded_n] = key;
+                        faded_n += 1;
+                    }
+                }
+            }
+        }
+
+        if self.timeline.length <= 0 {
+            return;
+        }
+        let tps = 1.0 / spt;
+        for i in 0..self.timeline.events.len() {
+            let e = self.timeline.events[i];
+            if e.midi.is_some() || e.cue.is_some() || e.velocity <= 0 || e.probability < 100 || note_muted(&self.sound_muted, &e) {
+                continue;
+            }
+            if self.repeat_replaces(&e) {
+                continue;
+            }
+            let Some(d) = frames_since_beat(self.frame, end, self.looping, window, self.frame_of(e.tick)) else {
+                continue;
+            };
+            let mute_unmuted = note_muted(old_muted, &e);
+            if !mute_unmuted && !pat_changed(&self.pattern_sigs, e.group) {
+                continue;
+            }
+            if self.played_live_within(e.group, e.sound, e.pitch, window) {
+                continue;
+            }
+            let already_fired = match old_timeline {
+                None => !mute_unmuted,
+                Some(ot) => {
+                    old_len > 0
+                        && ot.events.iter().any(|oe| {
+                            (oe.group, oe.sound, oe.pitch) == (e.group, e.sound, e.pitch)
+                                && oe.midi.is_none()
+                                && oe.cue.is_none()
+                                && oe.velocity > 0
+                                && !note_muted(old_muted, oe)
+                                && frames_since_beat(
+                                    old_frame,
+                                    old_end,
+                                    self.looping,
+                                    old_window,
+                                    (oe.tick as f64 * old_spt).round().max(0.0) as u64,
+                                )
+                                .is_some()
+                        })
+                }
+            };
+            if already_fired {
+                continue;
+            }
+            let into_ticks = (d as f64 * tps).round() as i64;
+            let rem_length = if e.length == HELD { HELD } else { (e.length - into_ticks).max(1) };
+            if self.link_ahead(e.group, e.sound).is_some() {
+                let gate = (rem_length != HELD).then(|| ((rem_length as f64) * spt).max(1.0) as u64);
+                let id = self.ahead.as_mut().map_or(0, |a| {
+                    a.next_id += 1;
+                    a.next_id
+                });
+                let ev = ahead::Ev::NoteOn { id, pitch: e.pitch, velocity: e.velocity, gate, beats: self.position() / PPQ as f64 };
+                self.send_live(e.group, e.sound, ev);
+            } else {
+                self.from_timeline = true;
+                self.trigger(NoteEvent { length: rem_length, ..e }, tps);
+                self.from_timeline = false;
+            }
+        }
+    }
     /// Every strip of the sounds playing here, and of the groups' and the master's
     /// chains, takes where it is and where it goes from [`Engine::strips`] (after an
     /// edit, which may keep the parts that have them). No allocating.
@@ -3728,6 +4021,7 @@ impl Engine {
                     }
                 }
                 (parts.smp, parts.inst, parts.chain) = (smp, inst, chain);
+                parts.muted = fresh.sound_muted.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
                 // From a frame its player can't have rendered yet (as live input), so the
                 // edit lands at the same frame every time.
                 if let Err(ahead::Msg::Adopt(_, parts)) = link.inbox.push(ahead::Msg::Adopt(edit_at, parts)) {
@@ -3818,6 +4112,8 @@ impl Engine {
         self.queued = None;
         self.timeline = timeline(project, mode);
         self.mode = mode;
+        self.pattern_sigs = group_pattern_sigs(project, mode);
+        self.pattern_sigs_mode = mode;
         self.frame = 0;
         self.next = 0;
         self.sequencing = true;
@@ -4472,6 +4768,7 @@ impl Engine {
                         parts.smp = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take);
                         parts.inst = self.instruments.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take);
                         parts.chain = self.fx.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::take);
+                        parts.muted = self.sound_muted.get(g).and_then(|r| r.get(s)).copied().unwrap_or(false);
                         let smp_gain =
                             self.bufs.get(g).and_then(|r| r.get(s)).and_then(Option::as_deref).map_or((1.0, 1.0), |b| b.smp_gain);
                         link.gains[0] = parts.chain.as_ref().map_or(smp_gain, |c| c.gain);
@@ -4902,6 +5199,51 @@ impl Engine {
         self.midi_inputs_unsettled |= 1 << group;
         self.play_midi_input_out(group, clock.now, &out);
         self.midi_input_out = out;
+    }
+
+    fn mute_midi_input_sound(&mut self, group: usize, sound: usize) {
+        self.live.retain(|(_, e)| {
+            !matches!(
+                e,
+                Live::MidiInputOut {
+                    group: g,
+                    note: midi_input::NoteOut::On { sound: s, .. } | midi_input::NoteOut::Off { sound: s, .. },
+                } if (*g, *s) == (group, sound)
+            )
+        });
+        let Some(mut p) = self.midi_inputs.get_mut(group).and_then(Option::take) else { return };
+        let clock = self.midi_input_clock(0.0);
+        let mut out = std::mem::take(&mut self.midi_input_out);
+        p.mute_sound(sound, clock, &mut midi_input::Outbox::new(&mut out));
+        self.midi_inputs[group] = Some(p);
+        self.play_midi_input_out(group, clock.now, &out);
+        self.midi_input_out = out;
+    }
+
+    /// Release every held note of a sound that is now muted, leaving one-shot tails and
+    /// effect echoes to ring out naturally. No allocating: runs on the audio thread.
+    fn release_muted_sound(&mut self, group: usize, sound: usize) {
+        if self.has_midi_input(group) {
+            self.mute_midi_input_sound(group, sound);
+        }
+        let mut i = 0;
+        while i < self.midi_offs.len() {
+            let (g, s, _) = self.midi_offs[i].held;
+            if (g, s) == (group, sound) {
+                let n = self.midi_offs.remove(i);
+                self.end_midi_note(n);
+            } else {
+                i += 1;
+            }
+        }
+        self.lfo_release(group, sound, None);
+        self.touch.retain(|t| (t.group, t.sound) != (group, sound));
+        self.note_offs.retain(|&(_, g, s, ..)| (g, s) != (group, sound));
+        if self.link_ahead(group, sound).is_none()
+            && let Some(Some(smp)) = self.sounds.get_mut(group).and_then(|r| r.get_mut(sound))
+        {
+            smp.all_notes_off();
+        }
     }
 
     /// Every note due at this instant is in: the plug-ins that had one work on them.
@@ -5843,6 +6185,10 @@ impl Engine {
             self.midi_input_note(e.group, midi_input::NoteIn::On { sound: e.sound, pitch: e.pitch, velocity: e.velocity, length });
             return;
         }
+        if e.midi.is_none() && e.velocity > 0 && !self.from_timeline {
+            self.recent_live[self.recent_live_at] = (self.time, e.group, e.sound, e.pitch);
+            self.recent_live_at = (self.recent_live_at + 1) % self.recent_live.len();
+        }
         let frames = (e.length != HELD).then(|| ((e.length.max(1) as f64) / tps).max(1.0) as u64);
         // A note that sounds (not a choke or a controller) restarts the LFOs it triggers
         // and plays its envelopes; a choke ends their notes.
@@ -6432,6 +6778,82 @@ fn sidechain_sources(project: &Project, src: deckard_model::ScSource) -> Vec<(us
     }
 }
 
+/// Side-chain links between buses, as `(source, listener)` bus ids (a group's index, or
+/// [`sound_bus_id`]): a sound that feeds a side-chain, and each group or sound whose
+/// active effects listen to it. Computed directly from `project` rather than `fresh.fx`,
+/// because incremental [`Engine::new_after`] edits leave reused sound chains as `None`
+/// in `fresh.fx` until [`Engine::keep_parts`] runs.
+fn sidechain_listeners(project: &Project) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (lg, grp) in project.groups.iter().enumerate() {
+        for &(slot, src) in &grp.channel.sidechain {
+            if src != deckard_model::ScSource::Group(lg) && grp.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                for (sg, ss, _) in sidechain_sources(project, src) {
+                    out.push((sound_bus_id(sg, ss), lg));
+                }
+            }
+        }
+        for (ls, snd) in grp.sounds.iter().enumerate() {
+            for &(slot, src) in &snd.channel.sidechain {
+                if snd.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) {
+                    for (sg, ss, _) in sidechain_sources(project, src) {
+                        if (sg, ss) != (lg, ls) {
+                            out.push((sound_bus_id(sg, ss), sound_bus_id(lg, ls)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Which sounds run in [`Engine::run_buses`] rather than [`Engine::render_pass`]: bus
+/// Sounds ([`is_sound_bus`]), plus any non-silent sound whose side-chain listens
+/// (directly or transitively) to one, so its source bus Sound fills `sc_bufs` first.
+fn sound_buses_of(project: &Project, listeners: &[(usize, usize)]) -> Vec<Vec<bool>> {
+    let mut buses: Vec<Vec<bool>> =
+        project.groups.iter().enumerate().map(|(g, grp)| (0..grp.sounds.len()).map(|s| is_sound_bus(project, g, s)).collect()).collect();
+    let cap = project.groups.iter().map(|g| g.sounds.len()).sum::<usize>();
+    for _ in 0..cap {
+        let mut changed = false;
+        for &(src, dst) in listeners {
+            let (Some((sg, ss)), Some((lg, ls))) = (decode_sound_bus(src), decode_sound_bus(dst)) else { continue };
+            if buses.get(sg).and_then(|r| r.get(ss)).copied().unwrap_or(false)
+                && let Some(cell) = buses.get_mut(lg).and_then(|r| r.get_mut(ls))
+                && !*cell
+                && !muting(project, lg, ls).silent
+            {
+                *cell = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    buses
+}
+
+/// Whether sound (`g`, `s`) feeds any active effect's side-chain.
+fn sound_feeds_sidechain(project: &Project, g: usize, s: usize) -> bool {
+    let feeds = |src| sidechain_sources(project, src).into_iter().any(|(sg, ss, _)| (sg, ss) == (g, s));
+    project.groups.iter().enumerate().any(|(gi, grp)| {
+        grp.channel.sidechain.iter().any(|&(slot, src)| {
+            src != deckard_model::ScSource::Group(gi) && grp.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) && feeds(src)
+        }) || grp.sounds.iter().enumerate().any(|(si, snd)| {
+            (gi, si) != (g, s)
+                && snd
+                    .channel
+                    .sidechain
+                    .iter()
+                    .any(|&(slot, src)| snd.slots.get(slot).is_some_and(|x| x.active && !x.is_instrument()) && feeds(src))
+        })
+    })
+}
+
 /// Which sounds feed side-chains, each with its buffer: keys (group, sound, after the
 /// fader).
 fn sidechain_index(project: &Project) -> HashMap<(usize, usize, bool), usize> {
@@ -6483,7 +6905,10 @@ struct Reuse {
 fn same_timelines(a: &Project, b: &Project) -> bool {
     let same_slot = |sa: Option<&deckard_model::SlotInfo>, sb: Option<&deckard_model::SlotInfo>| match (sa, sb) {
         (Some(x), Some(y)) if x.plugin.is_none() && y.plugin.is_none() => x.module == y.module && x.params == y.params,
-        (x, y) => x.map(|s| &s.plugin) == y.map(|s| &s.plugin),
+        (x, y) => {
+            x.and_then(|s| s.plugin.as_ref().map(|p| (p.id.as_str(), p.name.as_str())))
+                == y.and_then(|s| s.plugin.as_ref().map(|p| (p.id.as_str(), p.name.as_str())))
+        }
     };
     a.scenes == b.scenes
         && a.sections == b.sections
@@ -7393,6 +7818,153 @@ mod tests {
     }
 
     #[test]
+    fn shaker_performer_and_held_notes_release_on_mute() {
+        let mut playing = project();
+        playing.groups[0].sounds[0].sampler = None;
+        playing.groups[0].sounds[0].instrument = "Perc".into();
+        playing.groups[0].sounds[0].slots = vec![deckard_model::SlotInfo {
+            module: "Perc".into(),
+            name: "Perc".into(),
+            active: true,
+            plugin: None,
+            params: vec![("mode".into(), 2.0), ("shaker_env_mode".into(), 2.0), ("shaker_release".into(), 0.1)],
+        }];
+        playing.groups[0].patterns[0] = Pattern {
+            length: 4 * PPQ,
+            notes: vec![Note { sound: 0, position: 0, length: 4 * PPQ, pitch: 60, velocity: 127, probability: 100, ..Default::default() }],
+            ..Default::default()
+        };
+        let mut muted = playing.clone();
+        muted.groups[0].sounds[0].muted = true;
+
+        let peak_of = |buf: &[f32]| buf.iter().fold(0f32, |m, v| m.max(v.abs()));
+
+        for (with_echo, ahead) in [(false, None), (true, None), (false, Some(512u64))] {
+            let mut cache = SampleCache::default();
+            let (mut e, _) = Engine::new(&playing, None, 48_000, Mode::Scene(0), &mut cache);
+            if with_echo {
+                e.set_midi_input(0, midi_input::built_in(note_echo::NAME));
+            }
+            if let Some(la) = ahead {
+                e.set_focus(Some(1));
+                e.render_ahead(la, 1, 256, true);
+            }
+            e.jump(&playing, Mode::Scene(0));
+            e.looping = true;
+
+            // 1) Play ~250 ms into the 1-bar Performer note, stop transport mid-note, then
+            // restart: Performer must not latch its held-note count across the stop.
+            let mut buf = vec![0f32; 2 * 256];
+            let mut pre_peak = 0f32;
+            for _ in 0..48 {
+                e.process(&mut buf);
+                pre_peak = pre_peak.max(peak_of(&buf));
+            }
+            assert!(pre_peak > 0.01, "Performer shaking before stop ({with_echo}, {ahead:?}): {pre_peak}");
+
+            e.stop();
+            for _ in 0..20 {
+                e.process(&mut buf);
+            }
+            e.jump(&playing, Mode::Scene(0));
+            if with_echo {
+                e.note_hold(0, 0, 64, 100);
+            }
+            let mut resumed = 0f32;
+            for _ in 0..48 {
+                e.process(&mut buf);
+                resumed = resumed.max(peak_of(&buf));
+            }
+            assert!(resumed > 0.01, "Performer shaking after restart ({with_echo}, {ahead:?}): {resumed}");
+
+            // 2) Mute mid-bar: Performer releases immediately and queued Note Echo repeats
+            // are cancelled instead of shaking through the rest of the bar.
+            let (fresh, _) = Engine::new_after(&muted, Some((&playing, &[])), None, 48_000, Mode::Scene(0), &mut cache);
+            drop(e.adopt(fresh, &muted));
+            for _ in 0..40 {
+                e.process(&mut buf);
+            }
+            let mut muted_peak = 0f32;
+            for _ in 0..120 {
+                e.process(&mut buf);
+                muted_peak = muted_peak.max(peak_of(&buf));
+            }
+            assert!(muted_peak < 1e-4, "Performer silent while muted across bar ({with_echo}, {ahead:?}): {muted_peak}");
+        }
+
+        // 3) Gated Sampler, AudioModule Gate mode, and MIDI-out sounds also release held
+        // notes on mute while one-shot Sampler voices ring out naturally.
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("tone.wav");
+        edit::write_wav(&wav, &sample::Sample { rate: 1000, frames: vec![[0.6, 0.6]; 2000] }).unwrap();
+
+        let mut smp_proj = project();
+        smp_proj.groups[0].patterns[0].notes.clear();
+        let other = smp_proj.groups[0].sounds[0].clone();
+        smp_proj.groups[0].sounds.push(other.clone());
+        smp_proj.groups[0].sounds.push(other);
+        // Sound 0: ADSR gated looped Sampler; Sound 1: One-shot Sampler; Sound 2: AudioModule Gate + MIDI out.
+        {
+            let smp = smp_proj.groups[0].sounds[0].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, 1999);
+            smp.zones[0].loop_active = true;
+            smp.zones[0].loop_range = (0, 1999);
+            smp.set("envelope_type", 2.0);
+            smp.set("volume_envelope/sustain", 1.0);
+            smp.set("volume_envelope/release", 0.0);
+        }
+        {
+            let smp = smp_proj.groups[0].sounds[1].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, 1999);
+            smp.set("envelope_type", 0.0);
+        }
+        {
+            let s2 = &mut smp_proj.groups[0].sounds[2];
+            s2.sampler = None;
+            s2.instrument = "AudioModule".into();
+            s2.audio = Some(deckard_model::AudioLoop {
+                mode: deckard_model::AudioMode::Gate,
+                takes: vec![deckard_model::Take {
+                    sample: deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() },
+                    beats: 4.0,
+                    play_range: (0, 0),
+                }],
+                pitchbend: 0.5,
+                fade: 0.0,
+                ..Default::default()
+            });
+            s2.channel.midi_out = deckard_model::MidiDest::Port("Synth".into());
+            s2.channel.midi_out_channel = 0;
+        }
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&smp_proj, None, 1000, Mode::Scene(0), &mut cache);
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        e.midi_tx = Some(tx);
+        e.note_hold(0, 0, 60, 127);
+        e.note_on(0, 1, 60, 127, 200);
+        e.note_hold(0, 2, 60, 100);
+        let mut b = vec![0f32; 2 * 50];
+        e.process(&mut b);
+        assert_eq!(rx.try_iter().map(|m| m.bytes().to_vec()).collect::<Vec<_>>(), vec![vec![0x90, 60, 100]]);
+
+        let mut smp_muted = smp_proj.clone();
+        smp_muted.groups[0].sounds[0].muted = true;
+        smp_muted.groups[0].sounds[1].muted = true;
+        smp_muted.groups[0].sounds[2].muted = true;
+        let (fresh, _) = Engine::new_after(&smp_muted, Some((&smp_proj, &[])), None, 1000, Mode::Scene(0), &mut cache);
+        drop(e.adopt(fresh, &smp_muted));
+        assert_eq!(rx.try_iter().map(|m| m.bytes().to_vec()).collect::<Vec<_>>(), vec![vec![0x80, 60, 0]], "MIDI out note ended on mute");
+
+        let mut after = vec![0f32; 2 * 200];
+        e.process(&mut after);
+        assert_eq!(e.sounds[0][0].as_ref().unwrap().voices(), 0, "gated ADSR sampler released");
+        assert_eq!(e.sounds[0][2].as_ref().unwrap().voices(), 0, "AudioModule gate released");
+        assert_eq!(e.sounds[0][1].as_ref().unwrap().voices(), 1, "one-shot sampler keeps ringing out");
+    }
+
+    #[test]
     fn onsets_are_sample_accurate() {
         // 120 BPM: a quarter note is 0.5 s = 24000 frames at 48 kHz.
         let mut e = click_engine(48_000);
@@ -7620,6 +8192,206 @@ mod tests {
         e.update(&p, None, &mut cache);
         e.process(&mut out);
         assert_eq!(e.tempo(), 90.0);
+    }
+
+    fn loop_engine(p: &Project, cache: &mut SampleCache) -> Engine {
+        let (mut e, _) = Engine::new(p, None, 1000, Mode::Scene(0), cache);
+        e.jump(p, Mode::Scene(0));
+        e.looping = true;
+        e
+    }
+
+    fn adopt_at_1k(e: &mut Engine, p: &Project, q: &Project, cache: &mut SampleCache) {
+        let (fresh, _) = Engine::new_after(q, Some((p, &[])), None, 1000, Mode::Scene(0), cache);
+        drop(e.adopt(fresh, q));
+    }
+    #[test]
+    fn beat_grace_catches_on_beat_unmute_and_pattern_switch_without_double_firing() {
+        let dir = tempfile::tempdir().unwrap();
+        let kick_wav = dir.path().join("kick.wav");
+        let hat_wav = dir.path().join("hat.wav");
+        edit::write_wav(&kick_wav, &sample::Sample { rate: 1000, frames: vec![[0.6, 0.0]; 200] }).unwrap();
+        edit::write_wav(&hat_wav, &sample::Sample { rate: 1000, frames: vec![[0.0, 0.4]; 200] }).unwrap();
+
+        let mut base = project();
+        let hat_sound = base.groups[0].sounds[0].clone();
+        base.groups[0].sounds.push(hat_sound);
+        for (s, wav) in [(0, &kick_wav), (1, &hat_wav)] {
+            let smp = base.groups[0].sounds[s].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, 199);
+            smp.set("envelope_type", 0.0); // one-shot
+        }
+        base.groups[0].patterns[0].notes = vec![
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 1,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            },
+        ];
+
+        let mut cache = SampleCache::default();
+        // 1) Unmuting sound 0 25 ms after beat 0 catches beat 0's kick without re-triggering sound 1's hat.
+        let mut muted_kick = base.clone();
+        muted_kick.groups[0].sounds[0].muted = true;
+        let mut e = loop_engine(&muted_kick, &mut cache);
+        let mut before = vec![0f32; 2 * 25];
+        e.process(&mut before);
+        assert!(before.chunks_exact(2).all(|f| f[0].abs() < 1e-6), "muted kick silent before unmute");
+        let hat_before = before[2 * 20 + 1];
+        assert!(hat_before > 0.1, "hat playing on right channel: {hat_before}");
+
+        adopt_at_1k(&mut e, &muted_kick, &base, &mut cache);
+        let mut after = vec![0f32; 2 * 60];
+        e.process(&mut after);
+        let kick_peak = after.chunks_exact(2).map(|f| f[0]).fold(0f32, f32::max);
+        let hat_peak = after.chunks_exact(2).map(|f| f[1]).fold(0f32, f32::max);
+        assert!(kick_peak > 0.2, "on-beat unmute catches beat 0 kick: {kick_peak}");
+        assert!((hat_peak - hat_before).abs() < 0.05, "already-unmuted hat is not double-fired: {hat_peak} vs {hat_before}");
+
+        // 2) Switching from an empty pattern slot (slot 7) back to pattern 0 (slot 0) 25 ms after beat 0 catches beat 0.
+        let mut drop_proj = base.clone();
+        drop_proj.groups[0].patterns.push(Pattern { slot: 7, length: 4 * PPQ, notes: vec![], ..Default::default() });
+        drop_proj.scenes[0].patterns = vec![(0, 1)];
+        let mut e = loop_engine(&drop_proj, &mut cache);
+        e.process(&mut vec![0f32; 2 * 25]);
+        adopt_at_1k(&mut e, &drop_proj, &base, &mut cache);
+        let mut after_switch = vec![0f32; 2 * 60];
+        e.process(&mut after_switch);
+        assert!(after_switch.chunks_exact(2).any(|f| f[0] > 0.2), "on-beat pattern return catches beat 0 kick");
+
+        // 3) Adding a step/note to an already-playing pattern (same slot, same mute) 25 ms behind playhead does NOT fire it.
+        let mut no_kick_note = base.clone();
+        no_kick_note.groups[0].patterns[0].notes.retain(|n| n.sound != 0);
+        let mut e = loop_engine(&no_kick_note, &mut cache);
+        e.process(&mut vec![0f32; 2 * 25]);
+        adopt_at_1k(&mut e, &no_kick_note, &base, &mut cache);
+        let mut after_edit = vec![0f32; 2 * 60];
+        e.process(&mut after_edit);
+        assert!(after_edit.chunks_exact(2).all(|f| f[0].abs() < 1e-6), "note edit behind playhead waits for next cycle");
+    }
+
+    #[test]
+    fn beat_grace_fades_just_fired_kick_on_mute_or_drop_but_keeps_mid_beat_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let kick_wav = dir.path().join("kick48.wav");
+        let hat_wav = dir.path().join("hat48.wav");
+        edit::write_wav(&kick_wav, &sample::Sample { rate: 48_000, frames: vec![[0.7, 0.0]; 12_000] }).unwrap();
+        edit::write_wav(&hat_wav, &sample::Sample { rate: 48_000, frames: vec![[0.0, 0.4]; 12_000] }).unwrap();
+
+        let mut playing = project();
+        let hat_sound = playing.groups[0].sounds[0].clone();
+        playing.groups[0].sounds.push(hat_sound);
+        for (s, wav) in [(0, &kick_wav), (1, &hat_wav)] {
+            let smp = playing.groups[0].sounds[s].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, 11_999);
+            smp.set("envelope_type", 0.0); // one-shot
+        }
+        playing.groups[0].patterns[0].notes = vec![
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 1,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            },
+        ];
+        let mut muted = playing.clone();
+        muted.groups[0].sounds[0].muted = true;
+
+        let mut cache = SampleCache::default();
+        // 1) One-shot Sampler kick muted 20 ms (960 frames @ 48 kHz) into beat 0 fades out within 15 ms; hat keeps playing.
+        let (mut e, _) = Engine::new(&playing, None, 48_000, Mode::Scene(0), &mut cache);
+        e.jump(&playing, Mode::Scene(0));
+        e.looping = true;
+        let mut start = vec![0f32; 2 * 960];
+        e.process(&mut start);
+        assert!(start[2 * 500] > 0.2, "kick started on beat 0");
+        let (fresh, _) = Engine::new_after(&muted, Some((&playing, &[])), None, 48_000, Mode::Scene(0), &mut cache);
+        drop(e.adopt(fresh, &muted));
+        let mut fade = vec![0f32; 2 * 1440]; // 30 ms
+        e.process(&mut fade);
+        let tail_kick = fade[2 * 720..].chunks_exact(2).map(|f| f[0].abs()).fold(0f32, f32::max);
+        let tail_hat = fade[2 * 720..].chunks_exact(2).map(|f| f[1].abs()).fold(0f32, f32::max);
+        assert!(tail_kick < 1e-4, "one-shot kick faded within 15 ms of on-beat mute: {tail_kick}");
+        assert!(tail_hat > 0.1, "unmuted hat unaffected by kick mute: {tail_hat}");
+
+        // 2) Muting mid-beat (100 ms = 4800 frames after attack) lets the one-shot tail ring out as Event Mute specifies.
+        let (mut e, _) = Engine::new(&playing, None, 48_000, Mode::Scene(0), &mut cache);
+        e.jump(&playing, Mode::Scene(0));
+        e.looping = true;
+        e.process(&mut vec![0f32; 2 * 4800]);
+        let (fresh, _) = Engine::new_after(&muted, Some((&playing, &[])), None, 48_000, Mode::Scene(0), &mut cache);
+        drop(e.adopt(fresh, &muted));
+        let mut mid = vec![0f32; 2 * 960];
+        e.process(&mut mid);
+        let mid_kick = mid[2 * 720..].chunks_exact(2).map(|f| f[0].abs()).fold(0f32, f32::max);
+        assert!(mid_kick > 0.2, "mid-beat mute leaves existing one-shot tail ringing: {mid_kick}");
+
+        // 3) Drum Synth Kick muted 20 ms into beat 0 also chokes cleanly instead of booming through the beat.
+        let mut ds_play = playing.clone();
+        ds_play.groups[0].sounds[0].sampler = None;
+        ds_play.groups[0].sounds[0].slots = vec![deckard_model::SlotInfo {
+            module: "Kick".into(),
+            name: "Kick".into(),
+            active: true,
+            plugin: None,
+            params: vec![("decay".into(), 0.9)],
+        }];
+        let mut ds_mute = ds_play.clone();
+        ds_mute.groups[0].sounds[0].muted = true;
+        let (mut e, _) = Engine::new(&ds_play, None, 48_000, Mode::Scene(0), &mut cache);
+        e.jump(&ds_play, Mode::Scene(0));
+        e.looping = true;
+        let mut ds_start = vec![0f32; 2 * 960];
+        e.process(&mut ds_start);
+        assert!(ds_start.chunks_exact(2).any(|f| f[0].abs() > 0.05), "drum synth kick sounding on beat 0");
+        let (mut e_ref, _) = Engine::new(&ds_play, None, 48_000, Mode::Scene(0), &mut cache);
+        e_ref.jump(&ds_play, Mode::Scene(0));
+        e_ref.looping = true;
+        e_ref.process(&mut vec![0f32; 2 * 960]);
+        let mut ds_unchoked = vec![0f32; 2 * 1920];
+        e_ref.process(&mut ds_unchoked);
+        let unchoked_tail = ds_unchoked[2 * 1680..].chunks_exact(2).map(|f| f[0].abs()).fold(0f32, f32::max);
+
+        let (fresh, _) = Engine::new_after(&ds_mute, Some((&ds_play, &[])), None, 48_000, Mode::Scene(0), &mut cache);
+        drop(e.adopt(fresh, &ds_mute));
+        let mut ds_fade = vec![0f32; 2 * 1920];
+        e.process(&mut ds_fade);
+        let ds_tail = ds_fade[2 * 1680..].chunks_exact(2).map(|f| f[0].abs()).fold(0f32, f32::max);
+        assert!(
+            ds_tail < 0.005 && unchoked_tail > 0.1,
+            "drum synth kick choked vs unchoked tail: choked={ds_tail}, unchoked={unchoked_tail}"
+        );
     }
 
     #[test]
@@ -11288,7 +12060,12 @@ mod tests {
                 module: "PluginHost".into(),
                 name: "Duck".into(),
                 active: true,
-                plugin: Some(deckard_model::PluginRef { id: plugin_id.clone(), name: "Duck".into(), chunk: Vec::new(), pages: Vec::new() }),
+                plugin: Some(deckard_model::PluginRef {
+                    id: plugin_id.clone(),
+                    name: "Duck".into(),
+                    chunk: Default::default(),
+                    pages: Vec::new(),
+                }),
                 params: vec![
                     ("side_chain_filter/gain".into(), sc_gain),
                     ("side_chain_filter/center_freq".into(), 0.5),
@@ -13567,6 +14344,119 @@ mod tests {
             slots: vec![passive_fx_slot()],
             channel: deckard_model::SoundChannel { dest: deckard_model::AudioDest::Master, ..Default::default() },
             ..Default::default()
+        }
+    }
+
+    /// A sound plays into a bus Sound, which goes to the master; a group's or sound's
+    /// Limiter is side-chained from that bus Sound. The bus Sound runs with the buses,
+    /// so it must run before its listeners both initially and after incremental edits.
+    #[test]
+    fn sidechain_from_a_bus_sound_ducks_groups_and_sounds_across_edits() {
+        let mut p = project();
+        let click = p.groups[0].sounds[0].clone();
+        let mut bus = bus_sound_with_fx();
+        bus.slots[0].active = true;
+        bus.level = 0.0;
+        let mut kick = click.clone();
+        kick.channel.dest = deckard_model::AudioDest::Sound(0, 1);
+        p.groups[0].sounds = vec![click, bus, kick];
+        let lim = vec![("mode".into(), 1.0), ("threshold".into(), -30.0), ("release".into(), 0.5), ("ceiling".into(), 1.0)];
+        p.groups[0].slots = vec![deckard_model::SlotInfo {
+            module: "Limiter".into(),
+            name: "Limiter".into(),
+            active: true,
+            plugin: None,
+            params: lim.clone(),
+        }];
+        p.groups[0].channel.sidechain = vec![(0, deckard_model::ScSource::Sound(0, 1))];
+
+        for bare_bus in [false, true] {
+            for incremental in [false, true] {
+                let mut base = p.clone();
+                if bare_bus {
+                    base.groups[0].sounds[1].slots.clear();
+                }
+                let run = |with_source: bool| {
+                    let mut cache = SampleCache::default();
+                    let (mut e, rep) = Engine::new(&base, None, 48_000, Mode::Arrangement, &mut cache);
+                    let mut frames = vec![[0f32; 2]; 100];
+                    frames[0] = [1.0, 1.0];
+                    set_sample(&mut e, frames, &[], false);
+                    if incremental {
+                        let mut edited = base.clone();
+                        edited.master_level = 0.78;
+                        let (fresh, _) =
+                            Engine::new_after(&edited, Some((&base, rep.chains.as_slice())), None, 48_000, Mode::Arrangement, &mut cache);
+                        drop(e.adopt(fresh, &edited));
+                    }
+                    let at = |n: usize| e.bus_order.iter().position(|&x| x == n);
+                    assert!(
+                        at(sound_bus_id(0, 1)).is_some() && at(sound_bus_id(0, 1)) < at(0),
+                        "bare_bus={bare_bus} incremental={incremental}: {:?}",
+                        e.bus_order
+                    );
+                    e.sequencing = false;
+                    e.note_on(0, 0, 60, 127, 960);
+                    if with_source {
+                        e.note_on(0, 2, 60, 127, 960);
+                    }
+                    let mut out = vec![0f32; 2 * 4800];
+                    e.process(&mut out);
+                    out.iter().fold(0f32, |m, v| m.max(v.abs()))
+                };
+                let (alone, ducked) = (run(false), run(true));
+                assert!(alone > 0.4, "bare_bus={bare_bus} incremental={incremental}: alone={alone}");
+                assert!(ducked < alone * 0.1, "bare_bus={bare_bus} incremental={incremental}: ducked={ducked} vs {alone}");
+            }
+        }
+
+        let mut sp = project();
+        let mut listener = sp.groups[0].sounds[0].clone();
+        listener.slots.push(deckard_model::SlotInfo {
+            module: "Limiter".into(),
+            name: "Limiter".into(),
+            active: true,
+            plugin: None,
+            params: lim,
+        });
+        let listen_slot = listener.slots.len() - 1;
+        listener.channel.sidechain = vec![(listen_slot, deckard_model::ScSource::Sound(0, 1))];
+        let mut bus = bus_sound_with_fx();
+        bus.slots[0].active = true;
+        bus.level = 0.0;
+        let mut kick = sp.groups[0].sounds[0].clone();
+        kick.channel.dest = deckard_model::AudioDest::Sound(0, 1);
+        sp.groups[0].sounds = vec![listener, bus, kick];
+        sp.groups[0].slots =
+            vec![deckard_model::SlotInfo { module: "EQ".into(), name: "EQ".into(), active: true, plugin: None, params: Vec::new() }];
+        for incremental in [false, true] {
+            let run = |with_source: bool| {
+                let mut cache = SampleCache::default();
+                let (mut e, rep) = Engine::new(&sp, None, 48_000, Mode::Arrangement, &mut cache);
+                let mut frames = vec![[0f32; 2]; 100];
+                frames[0] = [1.0, 1.0];
+                set_sample(&mut e, frames, &[], false);
+                if incremental {
+                    let mut edited = sp.clone();
+                    edited.master_level = 0.78;
+                    let (fresh, _) =
+                        Engine::new_after(&edited, Some((&sp, rep.chains.as_slice())), None, 48_000, Mode::Arrangement, &mut cache);
+                    drop(e.adopt(fresh, &edited));
+                }
+                let at = |n: usize| e.bus_order.iter().position(|&x| x == n);
+                assert!(at(sound_bus_id(0, 1)) < at(sound_bus_id(0, 0)) && at(sound_bus_id(0, 0)) < at(0));
+                e.sequencing = false;
+                e.note_on(0, 0, 60, 127, 960);
+                if with_source {
+                    e.note_on(0, 2, 60, 127, 960);
+                }
+                let mut out = vec![0f32; 2 * 4800];
+                e.process(&mut out);
+                out.iter().fold(0f32, |m, v| m.max(v.abs()))
+            };
+            let (alone, ducked) = (run(false), run(true));
+            assert!(alone > 0.4, "incremental={incremental}: sound alone={alone}");
+            assert!(ducked < alone * 0.1, "incremental={incremental}: sound ducked={ducked} vs {alone}");
         }
     }
 

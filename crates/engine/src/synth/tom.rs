@@ -197,6 +197,12 @@ impl Synth for Tom {
         self.engines[self.current].note_off((note & 0x7f) as u32);
     }
 
+    fn all_notes_off(&mut self) {
+        for n in 0..128u32 {
+            self.engines[self.current].note_off(n);
+        }
+    }
+
     // `control`: Maschine's sound consumes host CCs before the module; All Sound Off
     // (CC 120), which the wrapper would turn into a choke, does not reach it (§2.2).
 

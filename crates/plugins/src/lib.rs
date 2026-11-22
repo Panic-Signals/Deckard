@@ -267,9 +267,19 @@ impl Plugin {
     /// plug-ins set themselves up on their first blocks (2–3 ms each for some, most of
     /// a 128-frame block's time). Only for an instance nothing else plays yet.
     pub fn warm_up(&mut self) {
+        let was_dirty = match &self.kind {
+            Kind::Vst3(v) => v.edits.lock().is_ok_and(|e| e.dirty),
+            _ => false,
+        };
         let silence = [0f32; MAX_BLOCK];
         for _ in 0..4 {
             self.process_input(MAX_BLOCK, &Transport::default(), Some((&silence, &silence)));
+        }
+        if let Kind::Vst3(v) = &mut self.kind
+            && !was_dirty
+            && let Ok(mut e) = v.edits.lock()
+        {
+            e.dirty = false;
         }
     }
 
@@ -757,6 +767,11 @@ impl Vst3 {
         }
         self.held = [false; 128];
         self.set_active(true);
+        // Restoring saved state is not an edit in the plug-in's UI (some VST3 controllers
+        // call `restartComponent` or `performEdit` inside `setComponentState`/`setState`).
+        if let Ok(mut e) = self.edits.lock() {
+            e.dirty = false;
+        }
         result
     }
 

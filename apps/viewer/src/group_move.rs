@@ -66,6 +66,9 @@ impl App {
                 self.held = None;
             }
             self.group = remap(self.group, a, b);
+            if let Some(grow) = &mut self.grow {
+                grow.group = remap(grow.group, a, b);
+            }
             if self.meters.len() > a.max(b) {
                 self.meters.swap(a, b);
             }
