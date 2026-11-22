@@ -790,12 +790,16 @@ fn new_picture_invalidates_cached_drawing_commands() {
     for recorded in [false, true] {
         let (mut surface, mut v) = (Surface::new(), view());
         v.control.chain[0].picture = Some("late-image".into());
-        surface.add_picture("late-image", true, 16, 16, vec![[10, 200, 30, 255]; 256]);
+        // (No knobs on the right: the plug-in's logo shows there.)
+        for k in 4..8 {
+            v.control.knobs[k] = None;
+        }
+        surface.add_picture("late-image", false, 16, 16, vec![[10, 200, 30, 255]; 256]);
         let draw = |s: &mut Surface| if recorded { s.screen_picture(&v).is_some() } else { s.screens(&v).is_some() };
         assert!(draw(&mut surface));
         assert!(!draw(&mut surface), "identical commands are cached");
         let shared = &surface;
-        shared.add_picture("late-image", true, 16, 16, vec![[255; 4]; 256]);
+        shared.add_picture("late-image", false, 16, 16, vec![[255; 4]; 256]);
         assert!(draw(&mut surface), "new image data invalidates the cache through a shared surface");
         assert!(!draw(&mut surface), "the invalidation is consumed once");
     }
@@ -825,6 +829,10 @@ fn browse_and_chain_draw_product_and_hosted_plugin_pictures() {
     v.control.slot_index = Some(0);
     v.control.chain =
         vec![SlotView { name: "Massive X".into(), instrument: true, active: true, plugin: true, picture: Some("massivex".into()) }];
+    // (On the right screen, with no knobs there: the chain strip has no pictures.)
+    for k in 4..8 {
+        v.control.knobs[k] = None;
+    }
     let generic_px = s.picture(&v);
     s.add_picture("massivex", true, 16, 16, vec![[200, 120, 30, 255]; 256]);
     s.add_picture("massivex", false, 16, 16, vec![[30, 200, 120, 255]; 256]);
@@ -2070,8 +2078,9 @@ fn the_effect_picture_stays_on_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
-/// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it in the chain (its
-/// thumbnail) and on the right display (its logo); one without shows a drawing.
+/// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it on the right display
+/// (its logo); one without shows a drawing. The chain strip shows neither: its kind's
+/// icon and its name.
 #[test]
 fn plugin_pictures_show_on_the_plugin_page() {
     let (s, mut v) = (Surface::new(), view());
@@ -2096,13 +2105,12 @@ fn plugin_pictures_show_on_the_plugin_page() {
         px.iter().enumerate().filter(|(i, p)| p[..3] == c[..3] && ((i % 960) >= 480) == right).count()
     };
     let px = s.picture(&v);
-    // (Small: the chain is the strip over the picture band.)
-    assert!(count(&px, thumb, false) > 300, "the thumbnail in the chain: {}", count(&px, thumb, false));
+    assert!(count(&px, thumb, false) < 80, "no thumbnail in the chain strip: {}", count(&px, thumb, false));
     assert!(count(&px, logo, true) > 5000, "the logo on the right: {}", count(&px, logo, true));
     // Without the picture: a drawing. A few of its pixels can land on the same grey.
     v.control.chain[0].picture = Some("nothing".into());
     let px = s.picture(&v);
-    assert!(count(&px, thumb, false) < 80, "the thumbnail is gone");
+    assert!(count(&px, thumb, false) < 80, "no thumbnail in the chain strip");
     assert!(count(&px, logo, true) < 80, "the logo is gone");
     assert_eq!(s.error(), None);
 }
@@ -3831,7 +3839,7 @@ fn with_pictures_the_chain_is_a_strip_with_its_own_overflow() {
         let picture = surface.draw_picture(&v);
         assert!(picture.texts.iter().any(|s| s.starts_with(starts) && s.ends_with(ends) && s.contains(" / ")), "{:?}", picture.texts);
         assert!(picture.ops.iter().any(
-            |o| matches!(o, screen::DrawOp::Triangle { x, y: 76, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 61, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
         ));
     }
     v.control.chain.truncate(3);

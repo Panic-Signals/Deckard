@@ -610,7 +610,7 @@ function control.draw(screen, theme, opts)
     -- it is, at its own size (shrunk, or in the theme's colours, it smudges).
     -- (At its own size at the left margin, between the strip and the section names;
     -- centred under the bar otherwise.)
-    -- (Not DECKARD's own devices: the strip already shows their picture whole.)
+    -- (Not DECKARD's own devices: a hosted plug-in's picture only.)
     if theme.plugin_showcase and left_free and slot and slot.plugin and slot.picture then
       local w, h = screen:image_size(slot.picture, true)
       if theme.knobs_left and w then
