@@ -6,7 +6,7 @@
 use deckard_library::user::Root;
 use deckard_library::{Item, Library, Query, Results};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 
 /// The browser's tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,7 +18,7 @@ pub enum Tab {
 
 enum Job {
     Query(u64, Query),
-    Favorite(PathBuf, bool),
+    Favorite(String, bool),
     Saved(PathBuf),
     Scan(Vec<Root>),
     Forget(PathBuf),
@@ -182,8 +182,8 @@ impl Browser {
         self.send(Job::Query(n, q));
     }
 
-    pub fn set_favorite(&mut self, path: &Path, on: bool) {
-        self.send(Job::Favorite(path.to_path_buf(), on));
+    pub fn set_favorite(&mut self, key: &str, on: bool) {
+        self.send(Job::Favorite(key.to_string(), on));
         self.refresh();
     }
 
@@ -224,14 +224,14 @@ impl Browser {
         // An old filter's results can omit the selected preset and send focus
         // back to the first row. Only the current query may replace the list.
         self.shown = n;
-        let keep = self.selected.and_then(|i| self.results.items.get(i)).map(|i| i.path.clone());
+        let keep = self.selected.and_then(|i| self.results.items.get(i)).map(|i| (i.path.clone(), i.uuid.clone()));
         match self.query.types.len() {
             0 => self.top_types = results.types.iter().map(|t| t.0.clone()).collect(),
             1 => self.sub_types = results.types.iter().map(|t| t.0.clone()).collect(),
             _ => {}
         }
         self.results = results;
-        self.selected = keep.and_then(|p| self.results.items.iter().position(|i| i.path == p));
+        self.selected = keep.and_then(|(p, u)| self.results.items.iter().position(|i| i.path == p && i.uuid == u));
         self.error = error;
         true
     }
@@ -322,7 +322,7 @@ impl Browser {
 
 fn run(lib: &mut Library, job: Job) {
     match job {
-        Job::Favorite(p, on) => lib.set_favorite(&p, on),
+        Job::Favorite(key, on) => lib.set_favorite_key(&key, on),
         Job::Saved(p) => lib.add_saved(&p),
         Job::Scan(roots) => {
             let _ = lib.scan(&roots);
@@ -387,26 +387,93 @@ pub fn can_prehear(item: &Item) -> bool {
 /// effect, the preview Maschine keeps beside it (`.previews/<file name>.ogg`, or a `.wav`
 /// preview in `.previews/`) when there is one.
 pub fn prehear_file(item: &Item) -> Option<PathBuf> {
+    prehear_file_with_nbpl(item, nbpl_samples_dir())
+}
+
+pub(crate) fn prehear_file_with_nbpl(item: &Item, nbpl_samples: Option<&Path>) -> Option<PathBuf> {
     use deckard_library::Kind;
     match item.kind {
         Kind::Loop | Kind::OneShot => Some(item.path.clone()),
         Kind::Sound | Kind::Group | Kind::Instrument | Kind::Effect => {
-            let previews = item.path.parent()?.join(".previews");
             let name = item.path.file_name()?.to_string_lossy();
-            let ogg = previews.join(format!("{name}.ogg"));
-            if ogg.is_file() {
-                return Some(ogg);
+            let stem = item.path.file_stem().map(|s| s.to_string_lossy());
+            let uuid = item.uuid.as_deref();
+            if let Some(parent) = item.path.parent()
+                && let Some(hit) = preview_in_dir(&parent.join(".previews"), &name, stem.as_deref(), uuid)
+            {
+                return Some(hit);
             }
-            let wav_full = previews.join(format!("{name}.wav"));
-            if wav_full.is_file() {
-                return Some(wav_full);
-            }
-            let stem = item.path.file_stem()?.to_string_lossy();
-            let wav_stem = previews.join(format!("{stem}.wav"));
-            wav_stem.is_file().then_some(wav_stem)
+            let nbpl_previews = nbpl_samples?.join(item.preview_subpath.as_ref()?).join(".previews");
+            preview_in_dir(&nbpl_previews, &name, stem.as_deref(), uuid)
         }
         Kind::Project => None,
     }
+}
+
+fn preview_in_dir(previews: &Path, name: &str, stem: Option<&str>, uuid: Option<&str>) -> Option<PathBuf> {
+    if let Some(uuid) = uuid.filter(|u| !u.is_empty()) {
+        for ext in ["ogg", "wav"] {
+            let p = previews.join(format!("{name}-{uuid}.{ext}"));
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    for ext in ["ogg", "wav"] {
+        let p = previews.join(format!("{name}.{ext}"));
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let stem = stem?;
+    let wav_stem = previews.join(format!("{stem}.wav"));
+    wav_stem.is_file().then_some(wav_stem)
+}
+
+fn nbpl_samples_dir() -> Option<&'static Path> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(find_nbpl_samples_dir).as_deref()
+}
+
+#[cfg(windows)]
+fn find_nbpl_samples_dir() -> Option<PathBuf> {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let val = wide("ContentDir");
+    for subkey in [
+        "SOFTWARE\\Native Instruments\\Native Browser Preview Library",
+        "SOFTWARE\\WOW6432Node\\Native Instruments\\Native Browser Preview Library",
+    ] {
+        let subkey_w = wide(subkey);
+        let mut buf = [0u16; 4096];
+        let mut size = (buf.len() * 2) as u32;
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey_w.as_ptr(),
+                val.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if rc == 0 {
+            let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+            if len > 0 {
+                let samples = PathBuf::from(String::from_utf16_lossy(&buf[..len])).join("Samples");
+                if samples.is_dir() {
+                    return Some(samples);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn find_nbpl_samples_dir() -> Option<PathBuf> {
+    None
 }
 
 /// A FILES row: a folder, or a file the browser can load.
@@ -623,5 +690,45 @@ mod current_query_tests {
         assert_eq!(app.browser.query.product, None);
         assert_eq!(app.browser.view().product, None);
         assert_eq!(item_names(&app), ["User Arp", "User Lead", "User Pad"]);
+    }
+
+    #[test]
+    fn prehear_file_resolves_uuid_and_nbpl_previews_for_ensembles() {
+        use deckard_library::Kind;
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+
+        // 1. Sibling .previews/<file_name>-<uuid>.ogg (Monark / Prism layout)
+        let sibling = d.join("Monark/.previews");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let uuid = "6d63bc67-8fd2-9fb4-786f-75f05c168407";
+        let monark_ogg = sibling.join(format!("Monark.ens-{uuid}.ogg"));
+        std::fs::write(&monark_ogg, b"test").unwrap();
+        let monark = Item {
+            kind: Kind::Instrument,
+            path: d.join("Monark/Monark.ens"),
+            name: "Bass Sting".into(),
+            uuid: Some(uuid.into()),
+            ..Default::default()
+        };
+        assert_eq!(prehear_file_with_nbpl(&monark, None), Some(monark_ogg));
+
+        // 2. Central NBPL Samples/<preview_subpath>/.previews/<file_name>-<uuid>.ogg (Kontour / Reaktor Factory layout)
+        let nbpl_samples = d.join("Previews/Samples");
+        let nbpl_previews = nbpl_samples.join("kontour-upid/Presets/Bass/.previews");
+        std::fs::create_dir_all(&nbpl_previews).unwrap();
+        let kontour_uuid = "11112222-3333-4444-5555-666677778888";
+        let kontour_ogg = nbpl_previews.join(format!("Kontour.ens-{kontour_uuid}.ogg"));
+        std::fs::write(&kontour_ogg, b"test").unwrap();
+        let kontour = Item {
+            kind: Kind::Instrument,
+            path: d.join("Kontour/Presets/Bass/Kontour.ens"),
+            name: "Sub".into(),
+            uuid: Some(kontour_uuid.into()),
+            preview_subpath: Some(PathBuf::from("kontour-upid/Presets/Bass")),
+            ..Default::default()
+        };
+        assert_eq!(prehear_file_with_nbpl(&kontour, None), None);
+        assert_eq!(prehear_file_with_nbpl(&kontour, Some(&nbpl_samples)), Some(kontour_ogg));
     }
 }

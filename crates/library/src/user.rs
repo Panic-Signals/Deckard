@@ -194,6 +194,8 @@ impl UserIndex {
                     characters: split(r.get(5)?),
                     tempo: r.get(6)?,
                     author: r.get(7)?,
+                    uuid: None,
+                    preview_subpath: None,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -215,10 +217,13 @@ impl UserIndex {
     }
 
     pub fn set_favorite(&mut self, path: &Path, on: bool) -> Result<(), String> {
+        self.set_favorite_key(&path_text(path), on)
+    }
+
+    pub fn set_favorite_key(&mut self, key: &str, on: bool) -> Result<(), String> {
         let (add, remove) = if on { ("favorites", "not_favorites") } else { ("not_favorites", "favorites") };
-        let path = path_text(path);
-        self.db.execute(&format!("INSERT OR IGNORE INTO {add} VALUES (?1)"), [&path]).map_err(|e| e.to_string())?;
-        self.db.execute(&format!("DELETE FROM {remove} WHERE path = ?1"), [&path]).map(|_| ()).map_err(|e| e.to_string())
+        self.db.execute(&format!("INSERT OR IGNORE INTO {add} VALUES (?1)"), [key]).map_err(|e| e.to_string())?;
+        self.db.execute(&format!("DELETE FROM {remove} WHERE path = ?1"), [key]).map(|_| ()).map_err(|e| e.to_string())
     }
 
     pub fn favorites(&self) -> HashSet<PathBuf> {
@@ -230,9 +235,23 @@ impl UserIndex {
         self.paths_in("not_favorites")
     }
 
+    pub fn favorite_keys(&self) -> HashSet<String> {
+        self.keys_in("favorites")
+    }
+
+    /// Keys (`<path>`, or `<path>#<uuid>` for ensemble snapshots) taken off the
+    /// favourites here, which Maschine's may still list.
+    pub fn not_favorite_keys(&self) -> HashSet<String> {
+        self.keys_in("not_favorites")
+    }
+
     fn paths_in(&self, table: &str) -> HashSet<PathBuf> {
+        self.keys_in(table).into_iter().map(PathBuf::from).collect()
+    }
+
+    fn keys_in(&self, table: &str) -> HashSet<String> {
         let Ok(mut st) = self.db.prepare(&format!("SELECT path FROM {table}")) else { return HashSet::new() };
-        st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().map(PathBuf::from).collect()).unwrap_or_default()
+        st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 }
 
