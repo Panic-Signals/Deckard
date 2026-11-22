@@ -184,7 +184,7 @@ impl Document {
     }
 
     /// The file's object with ids of this project's (as a paste).
-    fn fresh_obj(&mut self, root: Obj) -> Result<Obj, String> {
+    pub(crate) fn fresh_obj(&mut self, root: Obj) -> Result<Obj, String> {
         let Value::Obj(o) = self.fresh_copy(&Value::Obj(root)) else { return Err("bad file".into()) };
         let classes = crate::build::class_table(Some(self.root()));
         let before = Value::Obj(o.clone());
@@ -496,7 +496,7 @@ fn legacy_track(o: &mut Obj) {
 
 /// `obj` with every object it refers back to but doesn't define (defined earlier in
 /// the project) copied in at its first reference, so it stands as a file of its own.
-fn self_contained(obj: Obj, tree: &Value) -> Obj {
+pub(crate) fn self_contained(obj: Obj, tree: &Value) -> Obj {
     let mut v = Value::Obj(obj);
     for _ in 0..10_000 {
         let Some(id) = first_dangling(&v) else { break };

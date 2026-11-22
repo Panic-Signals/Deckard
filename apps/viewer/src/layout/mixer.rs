@@ -1305,7 +1305,7 @@ fn slot_rows(
         acts.push(Act::FocusChainSlot(chain, usize::MAX));
     }
     let instruments = is_sound && st.slots.is_empty();
-    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, instruments, acts));
+    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu_in(ui, app, chain, instruments, acts));
 }
 
 /// Which optional parts of the strips the Mixer shows.
@@ -1434,6 +1434,75 @@ mod tests {
         h.get_by_label("Bass Synth").click();
         h.run_steps(3);
         assert_eq!(doc.borrow().project().groups[0].sounds[1].slots[0].module, "BassSynth", "{}", h.state().status);
+    }
+
+    #[test]
+    fn copy_and_paste_an_effect_between_group_strips() {
+        use deckard_doc::{Chain, NewModule};
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = crate::App::default();
+        app.new_project();
+        app.mixer = true;
+        app.mixer_sounds = false;
+        let doc = app.doc.clone().unwrap();
+        let target = doc.borrow_mut().add_group().unwrap();
+        doc.borrow_mut().add_slot_in(Chain::Group(0), 0, &NewModule::Effect("Compressor")).unwrap();
+        doc.borrow_mut().set_slot_active_in(Chain::Group(0), 0, false).unwrap();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Group(0), 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Copy").click();
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Group(target), 0);
+        click_at(&mut h, at);
+        h.get_by_label("Paste").click();
+        h.run_steps(3);
+        let d = doc.borrow();
+        let slots = d.chain_slots(Chain::Group(target)).unwrap();
+        assert_eq!(slots.len(), 1, "{}", h.state().status);
+        assert_eq!(slots[0].module, "Compressor");
+        assert!(!slots[0].active);
+        assert_eq!(d.chain_slots(Chain::Group(0)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn right_click_paste_replaces_the_instrument_and_keeps_effects() {
+        use deckard_doc::{Chain, NewModule};
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = crate::App::default();
+        app.new_project();
+        (app.mixer, app.mixer_sounds) = (true, true);
+        let doc = app.doc.clone().unwrap();
+        let source = Chain::Sound(0, 1);
+        let target = Chain::Sound(0, 2);
+        let instrument = NewModule::Instrument { class: "BassSynth".into(), params: Vec::new() };
+        doc.borrow_mut().add_slot_in(source, 0, &instrument).unwrap();
+        doc.borrow_mut().add_slot_in(target, 0, &NewModule::Sampler).unwrap();
+        doc.borrow_mut().add_slot_in(target, 1, &NewModule::Effect("Compressor")).unwrap();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Sound(0, 1), 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Copy").click();
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Sound(0, 2), 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Paste").click();
+        h.run_steps(3);
+
+        let modules = |d: &deckard_doc::Document| d.chain_slots(target).unwrap().iter().map(|s| s.module.clone()).collect::<Vec<_>>();
+        assert_eq!(modules(&doc.borrow()), ["BassSynth", "Compressor"], "{}", h.state().status);
+        assert!(doc.borrow_mut().undo());
+        assert_eq!(modules(&doc.borrow()), ["Sampler", "Compressor"]);
     }
 
     fn right_click_at(h: &mut egui_kittest::Harness<'static, crate::App>, pos: egui::Pos2) {
