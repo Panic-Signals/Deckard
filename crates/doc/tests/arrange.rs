@@ -218,3 +218,37 @@ fn arp_presets_are_read_changed_and_saved() {
     assert_eq!(d.project().arp_presets[0], (3, 0));
     assert!(d.set_arp_preset(4, 4, 0).is_err(), "four presets");
 }
+
+/// Creating a new empty pattern after one whose playback start moved (e.g. a take begun
+/// in bar 3) resets the new pattern's start to 0 and clears group modulation, whereas
+/// duplicating or copying preserves the source pattern's start.
+#[test]
+fn new_pattern_resets_start_to_zero_while_duplicate_keeps_it() {
+    let mut d = deckard_doc::Document::new_project().unwrap();
+    let bar = d.project().bar_length();
+    d.add_pattern_in_slot(0, 0, 0, "Pattern 1").unwrap();
+    d.set_pattern_span(0, 0, 2 * bar, 2 * bar).unwrap();
+    let note = deckard_model::Note {
+        ratchet: Default::default(),
+        expr: None,
+        sound: 0,
+        position: 2 * bar + 240,
+        length: 240,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+    };
+    d.edit_notes("seed", 0, 0, &[], &[note]).unwrap();
+
+    let fresh = d.add_pattern_in_slot(0, 0, 1, "Pattern 2").unwrap();
+    assert_eq!(d.project().groups[0].patterns[fresh].start, 0, "new empty pattern starts at bar 1");
+    assert!(d.project().groups[0].patterns[fresh].notes.is_empty());
+
+    let dup = d.duplicate_pattern(0, 0).unwrap();
+    assert_eq!(d.project().groups[0].patterns[dup].start, 2 * bar, "duplicate keeps non-zero start");
+    assert_eq!(d.project().groups[0].patterns[dup].notes[0].position, 2 * bar + 240);
+
+    let copied = d.copy_pattern(0, 0, 5).unwrap();
+    assert_eq!(d.project().groups[0].patterns[copied].start, 2 * bar, "copy_pattern keeps non-zero start");
+    assert_eq!(d.project().groups[0].patterns[copied].notes[0].position, 2 * bar + 240);
+}

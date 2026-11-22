@@ -442,9 +442,9 @@ const CV_NOTE: &str = "Not sent: this output isn't CV only, or an earlier route 
 pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, acts: &mut Vec<Act>) {
     let p = d.project();
     let painter = ui.painter_at(r);
-    painter.rect_filled(r, 0.0, S00);
+    painter.rect_filled(r, 0.0, s00());
     let list = Rect::from_min_size(r.min, Vec2::new(LIST_W, r.height()));
-    painter.rect_filled(list, 0.0, S05);
+    painter.rect_filled(list, 0.0, s05());
     painter.vline(list.right() - 0.5, list.y_range(), Stroke::new(1.0, Color32::BLACK));
     let mut side = ui.new_child(UiBuilder::new().max_rect(list.shrink(8.0)).layout(egui::Layout::top_down(egui::Align::Min)));
     side.label(egui::RichText::new("LFOs").size(11.0).color(white(140)));
@@ -495,7 +495,7 @@ pub fn lfo_panel(ui: &mut Ui, app: &App, d: &deckard_doc::Document, r: Rect, act
         return;
     };
     // The wave.
-    painter.rect_filled(pic, 3.0, S01);
+    painter.rect_filled(pic, 3.0, s01());
     painter.hline(pic.x_range(), pic.center().y, Stroke::new(1.0, white(20)));
     // The window stays two beats (or two seconds). The wave travels so the rate shows.
     if !lfo.env {

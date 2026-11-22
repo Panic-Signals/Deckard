@@ -22,9 +22,8 @@ pub struct PadRoute {
     pub chords: Option<[[i64; 16]; 16]>,
     /// Fixed Velocity: every hit plays at this velocity, however hard.
     pub velocity: Option<i64>,
-    /// Pad sensitivity, 0..1, and velocity scaling, -3 (Soft 3) … 3 (Hard 3) (see
-    /// [`pad_velocity`]).
-    pub sensitivity: f64,
+    /// Velocity scaling, -3 (Soft 3) … 3 (Hard 3) (see [`pad_velocity`]). The pad
+    /// sensitivity isn't here: the controller applies it (`Mk3Io::set_pad_sensitivity`).
     pub scaling: i8,
     /// The song's Fixed Velocity value: what hits play at in the pressure pad modes.
     pub fixed: i64,
@@ -39,15 +38,19 @@ impl PadRoute {
     }
 }
 
-/// A pad's pressure (0..1, from the MK3) as velocity (0..1), by the sensitivity (0..1): at
-/// 0 as it comes; higher, light presses count for more (a gain up to ×4, and a curve that
-/// lifts the low end), so a gentle press isn't too quiet to hear. Then the velocity
-/// scaling (-3 … 3) bends it: Soft lifts what's short of full, Hard holds it back (a
-/// power of 1.5 a step).
-pub fn pad_velocity(pressure: f64, sensitivity: f64, scaling: i8) -> f64 {
-    let s = sensitivity.clamp(0.0, 1.0);
-    let v = (pressure.max(0.0) * (1.0 + 3.0 * s)).min(1.0).powf(1.0 - 0.5 * s);
-    v.powf(1.5f64.powi(i32::from(scaling.clamp(-3, 3))))
+/// Each velocity scaling's curve, Soft 3 … Hard 3: (m, n) in [`pad_velocity`].
+const VELOCITY_CURVES: [(f64, f64); 7] = [(1.71, 2.5), (1.50, 2.5), (1.26, 2.5), (1.0, 1.0), (0.82, 4.0), (0.60, 4.0), (0.32, 4.0)];
+
+/// A pad's pressure (0..1, the MK3's report as the pad was hit) as velocity (0..1), by
+/// the velocity scaling (-3 Soft 3 … 3 Hard 3), as Maschine plays it. With u = √pressure,
+/// the velocity is min(1, m·u + (1 − m)·uⁿ): Linear is u itself, and m is the slope at
+/// the light end (Soft above 1, Hard below), n how late it bends to full. Measured
+/// against Maschine 3 on an MK3, within a velocity step at every setting
+/// (docs/mk3-usb.md).
+pub fn pad_velocity(pressure: f64, scaling: i8) -> f64 {
+    let u = pressure.clamp(0.0, 1.0).sqrt();
+    let (m, n) = VELOCITY_CURVES[(scaling.clamp(-3, 3) + 3) as usize];
+    (m * u + (1.0 - m) * u.powf(n)).clamp(0.0, 1.0)
 }
 
 /// A held pad's pressure (0..1) shaped by a curve (0..1, 0.5 straight): above 0.5 light
@@ -151,7 +154,7 @@ impl Touching {
         h.touch = now;
         let (value, live) = match h.touch.mode {
             TouchMode::Velocity => {
-                let v = ((pad_velocity(pressure, route.sensitivity, route.scaling) * 127.0).round() as i64).clamp(1, 127);
+                let v = ((pad_velocity(pressure, route.scaling) * 127.0).round() as i64).clamp(1, 127);
                 (v as u8, Some(Live::RepeatPressure { group: g, sound: s, pitch, velocity: v }))
             }
             TouchMode::PolyAt => {
@@ -238,6 +241,7 @@ struct Shared {
     repaint: Option<eframe::egui::Context>,
     /// What the LEDs should show.
     leds: Option<deckard_mk3::leds::Leds>,
+    leds_seq: u64,
     #[cfg(test)]
     leds_applied: Option<(deckard_mk3::leds::Leds, Instant)>,
     /// What the displays should show: both side by side, 960 × 272 RGBA, and its number.
@@ -256,6 +260,10 @@ struct Shared {
     brightness_stamp: u64,
     /// The same for the LEDs' level, which a replug also resets.
     led_stamp: u64,
+    /// The pads' sensitivity, 0..=100 % (`set_pad_sensitivity`), and a stamp bumped only
+    /// when it changes: it's a feature report read and written back, not worth every frame.
+    pad_sensitivity: Option<u8>,
+    sensitivity_stamp: u64,
     /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
     /// (`shut_down`).
     closing: bool,
@@ -272,6 +280,7 @@ struct Shared {
 
 pub struct Mk3Io {
     shared: Arc<Mutex<Shared>>,
+    display_wake: Arc<std::sync::Condvar>,
 }
 
 /// The pitch pads play: a sound's base key (Maschine's default, C3).
@@ -292,11 +301,13 @@ impl Mk3Io {
     /// Start looking for an MK3 (and keep looking: it may be plugged in later).
     pub fn start() -> Mk3Io {
         let shared: Arc<Mutex<Shared>> = Arc::default();
+        let display_wake = Arc::new(std::sync::Condvar::new());
         let s = shared.clone();
         std::thread::Builder::new().name("DECKARD MK3".into()).spawn(move || run(&s)).ok();
         let s = shared.clone();
-        std::thread::Builder::new().name("DECKARD MK3 displays".into()).spawn(move || run_displays(&s)).ok();
-        Mk3Io { shared }
+        let w = display_wake.clone();
+        std::thread::Builder::new().name("DECKARD MK3 displays".into()).spawn(move || run_displays(&s, &w)).ok();
+        Mk3Io { shared, display_wake }
     }
 
     /// Leave the controller dark but for `picture` on the displays (both, 960 × 272
@@ -307,6 +318,7 @@ impl Mk3Io {
             s.goodbye = Some(Arc::new(picture));
             s.closing = true;
         }
+        self.display_wake.notify_all();
         let until = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < until {
             let s = self.shared.lock().unwrap();
@@ -330,6 +342,17 @@ impl Mk3Io {
         let mut s = self.shared.lock().unwrap();
         s.led_brightness = Some(level.min(100));
         s.led_stamp = s.led_stamp.wrapping_add(1);
+    }
+
+    /// Set the pads' sensitivity (0..=100 %), now if it changed and whenever an MK3
+    /// connects. The controller applies it to the pressure it reports, as with Maschine.
+    pub fn set_pad_sensitivity(&self, level: u8) {
+        let mut s = self.shared.lock().unwrap();
+        let level = Some(level.min(100));
+        if s.pad_sensitivity != level {
+            s.pad_sensitivity = level;
+            s.sensitivity_stamp = s.sensitivity_stamp.wrapping_add(1);
+        }
     }
 
     pub fn set_context(&self, ctx: &eframe::egui::Context) {
@@ -358,7 +381,9 @@ impl Mk3Io {
 
     /// Light the LEDs so (sent when they change).
     pub fn set_leds(&self, leds: deckard_mk3::leds::Leds) {
-        self.shared.lock().unwrap().leds = Some(leds);
+        let mut s = self.shared.lock().unwrap();
+        s.leds = Some(leds);
+        s.leds_seq = s.leds_seq.wrapping_add(1);
     }
 
     #[cfg(test)]
@@ -372,6 +397,7 @@ impl Mk3Io {
         let mut s = self.shared.lock().unwrap();
         if s.screens.as_ref().is_none_or(|(m, _)| *m != n) {
             s.screens = Some((n, frame));
+            self.display_wake.notify_one();
         }
     }
 
@@ -396,6 +422,7 @@ impl Mk3Io {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn release_displays(&self, released: bool) {
         self.shared.lock().unwrap().displays_released = released;
+        self.display_wake.notify_one();
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -434,6 +461,7 @@ fn run(shared: &Mutex<Shared>) {
         let mut events = Vec::new();
         // Shown on the LEDs: none yet, so the first state is sent.
         let mut shown = None;
+        let mut checked_leds_seq = 0u64;
         // The backlight write that succeeded, so a failed one is tried again and a
         // screen reconnect (a new stamp) is sent even when the level did not change.
         let mut applied_stamp = 0u64;
@@ -441,6 +469,9 @@ fn run(shared: &Mutex<Shared>) {
         // The same for the LEDs' level (report `0xf3`), which is not read back.
         let mut applied_led_stamp = 0u64;
         let mut led_retry = Instant::now();
+        // The same for the pads' sensitivity: written on connecting, then as it changes.
+        let mut applied_sensitivity_stamp = 0u64;
+        let mut sensitivity_retry = Instant::now();
         // What each pad started, so it stops the same note however the route changed
         // (a chord's first note; its others in `chord_rest`).
         let mut sounding: [Option<(usize, usize, i64)>; 16] = [None; 16];
@@ -453,11 +484,109 @@ fn run(shared: &Mutex<Shared>) {
                 shared.lock().unwrap().leds_closed = true;
                 return;
             }
-            if let Err(e) = dev.poll(2, &mut events) {
+            if let Err(e) = dev.poll(1, &mut events) {
                 let mut s = shared.lock().unwrap();
                 s.status = format!("Maschine MK3: {e}");
                 s.connected = false;
                 break;
+            }
+            // Dispatch arrived pad/button events immediately before any LED/feature writes.
+            if !events.is_empty() {
+                let mut s = shared.lock().unwrap();
+                let route = s.route.unwrap_or(PadRoute {
+                    play: true,
+                    group: 0,
+                    keys: None,
+                    chords: None,
+                    velocity: None,
+                    scaling: 0,
+                    fixed: 100,
+                    touches: [PadTouch::default(); 16],
+                });
+                let out = s.output.clone().filter(Sender::has_engine);
+                let monitor = s.monitor.clone().filter(crate::midi_monitor::Monitor::is_open);
+                let shown_mon = |pad: usize, slot: Option<(usize, usize, i64)>, ev| {
+                    if let Some(m) = &monitor {
+                        m.pad(pad, slot.map(|x| x.2), ev);
+                    }
+                };
+                // What a pad's pressure (or release) sends, to the engine and the monitor.
+                let send = |pad: usize, slot: Option<(usize, usize, i64)>, lives: Vec<Live>| {
+                    use crate::midi_monitor::Pad;
+                    for l in lives {
+                        let ev = match l {
+                            Live::RepeatPressure { velocity, .. } => Pad::Pressure(velocity.clamp(0, 127) as u8),
+                            Live::Expression { value, .. } => Pad::PolyAt((value * 127.0).round() as u8),
+                            Live::ControlIn { kind, .. } => Pad::Control(kind),
+                            _ => continue,
+                        };
+                        if let Some(o) = &out {
+                            o.live(l);
+                        }
+                        shown_mon(pad, slot, ev);
+                    }
+                };
+                for e in &events {
+                    if let Event::PadPressure(p, v) = *e {
+                        let slot = p.checked_sub(1).and_then(|i| sounding.get(i)).copied().flatten();
+                        if out.is_some() {
+                            send(p, slot, touching.pressure(p, slot, v, &route));
+                        }
+                        continue;
+                    }
+                    let (pad, from_pressure) = match *e {
+                        Event::PadOn(p, v) => (p, ((pad_velocity(v, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
+                        Event::PadOff(p) => (p, 0),
+                        _ => continue,
+                    };
+                    let slot = pad.checked_sub(1).and_then(|i| sounding.get_mut(i));
+                    let rest = pad.checked_sub(1).and_then(|i| chord_rest.get_mut(i));
+                    if from_pressure == 0 {
+                        let rest = rest.map(std::mem::take).unwrap_or_default();
+                        if let (Some(o), Some(Some((group, sound, pitch)))) = (&out, slot.map(Option::take)) {
+                            for &(group, sound, pitch) in &rest {
+                                o.live(Live::NoteRelease { group, sound, pitch });
+                            }
+                            o.live(Live::NoteRelease { group, sound, pitch });
+                            shown_mon(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::Off);
+                            send(pad, Some((group, sound, pitch)), touching.release(pad, (group, sound, pitch), &route));
+                        } else if out.is_none() && route.play && route.keys.is_none() {
+                            s.pending.push((route.group, pad - 1, PAD_PITCH, 0));
+                        }
+                        continue;
+                    }
+                    if !route.play {
+                        continue;
+                    }
+                    let notes = pad_notes(&route, pad);
+                    let Some(&(sound, pitch)) = notes.first() else { continue };
+                    let group = route.group;
+                    let velocity = Touching::hit_velocity(&route, group, sound, from_pressure);
+                    match &out {
+                        Some(o) => {
+                            // Held until the pad is let go (Note Repeat / the Arp take held notes).
+                            o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
+                            shown_mon(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::On(velocity));
+                            touching.hit(pad, (group, sound, pitch), &route);
+                            if let Some(slot) = slot {
+                                *slot = Some((group, sound, pitch));
+                            }
+                            // (A chord's other notes sound with it; its pressure goes to the first.)
+                            let others: Vec<_> = notes[1..].iter().map(|&(sound, pitch)| (group, sound, pitch)).collect();
+                            for &(group, sound, pitch) in &others {
+                                o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
+                            }
+                            if let Some(rest) = rest {
+                                *rest = others;
+                            }
+                        }
+                        None => s.pending.extend(notes.iter().map(|&(sound, pitch)| (group, sound, pitch, velocity))),
+                    }
+                }
+                s.events.append(&mut events);
+                if let Some(ctx) = &s.repaint {
+                    ctx.request_repaint();
+                }
             }
             let (wanted, stamp) = {
                 let s = shared.lock().unwrap();
@@ -491,7 +620,31 @@ fn run(shared: &Mutex<Shared>) {
                     }
                 }
             }
-            let leds = shared.lock().unwrap().leds.clone();
+            let (wanted_sensitivity, sensitivity_stamp) = {
+                let s = shared.lock().unwrap();
+                (s.pad_sensitivity, s.sensitivity_stamp)
+            };
+            if let Some(level) = wanted_sensitivity
+                && sensitivity_stamp != applied_sensitivity_stamp
+                && Instant::now() >= sensitivity_retry
+            {
+                match dev.set_pad_sensitivity(level) {
+                    Ok(()) => applied_sensitivity_stamp = sensitivity_stamp,
+                    Err(e) => {
+                        shared.lock().unwrap().status = format!("pad sensitivity: {e}");
+                        sensitivity_retry = Instant::now() + Duration::from_secs(1);
+                    }
+                }
+            }
+            let leds = {
+                let s = shared.lock().unwrap();
+                if s.leds_seq != checked_leds_seq {
+                    checked_leds_seq = s.leds_seq;
+                    s.leds.clone()
+                } else {
+                    None
+                }
+            };
             if leds.is_some() && leds != shown {
                 if let Some(l) = &leds
                     && let Err(e) = dev.write_leds(l)
@@ -506,105 +659,6 @@ fn run(shared: &Mutex<Shared>) {
                     shared.lock().unwrap().leds_applied = Some((l.clone(), Instant::now()));
                 }
                 shown = leds;
-            }
-            if events.is_empty() {
-                continue;
-            }
-            let mut s = shared.lock().unwrap();
-            let route = s.route.unwrap_or(PadRoute {
-                play: true,
-                group: 0,
-                keys: None,
-                chords: None,
-                velocity: None,
-                sensitivity: 0.5,
-                scaling: 0,
-                fixed: 100,
-                touches: [PadTouch::default(); 16],
-            });
-            let out = s.output.clone().filter(Sender::has_engine);
-            let monitor = s.monitor.clone().filter(crate::midi_monitor::Monitor::is_open);
-            let shown = |pad: usize, slot: Option<(usize, usize, i64)>, ev| {
-                if let Some(m) = &monitor {
-                    m.pad(pad, slot.map(|x| x.2), ev);
-                }
-            };
-            // What a pad's pressure (or release) sends, to the engine and the monitor.
-            let send = |pad: usize, slot: Option<(usize, usize, i64)>, lives: Vec<Live>| {
-                use crate::midi_monitor::Pad;
-                for l in lives {
-                    let ev = match l {
-                        Live::RepeatPressure { velocity, .. } => Pad::Pressure(velocity.clamp(0, 127) as u8),
-                        Live::Expression { value, .. } => Pad::PolyAt((value * 127.0).round() as u8),
-                        Live::ControlIn { kind, .. } => Pad::Control(kind),
-                        _ => continue,
-                    };
-                    if let Some(o) = &out {
-                        o.live(l);
-                    }
-                    shown(pad, slot, ev);
-                }
-            };
-            for e in &events {
-                if let Event::PadPressure(p, v) = *e {
-                    let slot = p.checked_sub(1).and_then(|i| sounding.get(i)).copied().flatten();
-                    if out.is_some() {
-                        send(p, slot, touching.pressure(p, slot, v, &route));
-                    }
-                    continue;
-                }
-                let (pad, from_pressure) = match *e {
-                    Event::PadOn(p, v) => (p, ((pad_velocity(v, route.sensitivity, route.scaling) * 127.0).round() as i64).clamp(1, 127)),
-                    Event::PadOff(p) => (p, 0),
-                    _ => continue,
-                };
-                let slot = pad.checked_sub(1).and_then(|i| sounding.get_mut(i));
-                let rest = pad.checked_sub(1).and_then(|i| chord_rest.get_mut(i));
-                if from_pressure == 0 {
-                    let rest = rest.map(std::mem::take).unwrap_or_default();
-                    if let (Some(o), Some(Some((group, sound, pitch)))) = (&out, slot.map(Option::take)) {
-                        for &(group, sound, pitch) in &rest {
-                            o.live(Live::NoteRelease { group, sound, pitch });
-                        }
-                        o.live(Live::NoteRelease { group, sound, pitch });
-                        shown(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::Off);
-                        send(pad, Some((group, sound, pitch)), touching.release(pad, (group, sound, pitch), &route));
-                    } else if out.is_none() && route.play && route.keys.is_none() {
-                        s.pending.push((route.group, pad - 1, PAD_PITCH, 0));
-                    }
-                    continue;
-                }
-                if !route.play {
-                    continue;
-                }
-                let notes = pad_notes(&route, pad);
-                let Some(&(sound, pitch)) = notes.first() else { continue };
-                let group = route.group;
-                let velocity = Touching::hit_velocity(&route, group, sound, from_pressure);
-                match &out {
-                    Some(o) => {
-                        // Held until the pad is let go (Note Repeat / the Arp take held notes).
-                        o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
-                        shown(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::On(velocity));
-                        touching.hit(pad, (group, sound, pitch), &route);
-                        if let Some(slot) = slot {
-                            *slot = Some((group, sound, pitch));
-                        }
-                        // (A chord's other notes sound with it; its pressure goes to the first.)
-                        let others: Vec<_> = notes[1..].iter().map(|&(sound, pitch)| (group, sound, pitch)).collect();
-                        for &(group, sound, pitch) in &others {
-                            o.live(Live::NoteOn { group, sound, pitch, velocity, length: i64::MAX });
-                        }
-                        if let Some(rest) = rest {
-                            *rest = others;
-                        }
-                    }
-                    None => s.pending.extend(notes.iter().map(|&(sound, pitch)| (group, sound, pitch, velocity))),
-                }
-            }
-            s.events.append(&mut events);
-            if let Some(ctx) = &s.repaint {
-                ctx.request_repaint();
             }
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -622,11 +676,26 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
-fn run_displays(shared: &Mutex<Shared>) {
+fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
     use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
+    let mut left = vec![0u16; WIDTH * HEIGHT];
+    let mut right = vec![0u16; WIDTH * HEIGHT];
+    // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
+    let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let [r, g, b, _] = px.get(y * WIDTH * 2 + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
+                out[y * WIDTH + x] = rgb565(r, g, b);
+            }
+        }
+    };
     loop {
         {
             let mut s = shared.lock().unwrap();
+            if s.closing {
+                s.displays_closed = true;
+                return;
+            }
             if s.displays_released {
                 set_agent_holding(&mut s, false);
                 drop(s);
@@ -657,51 +726,53 @@ fn run_displays(shared: &Mutex<Shared>) {
         let mut shown = None;
         let mut last_px: Vec<[u8; 4]> = Vec::new();
         loop {
-            // One display's half of a 960-wide picture, as the display takes it.
-            let half = |px: &[[u8; 4]], x0: usize| -> Vec<u16> {
-                let mut out = Vec::with_capacity(WIDTH * HEIGHT);
-                for y in 0..HEIGHT {
-                    for x in x0..x0 + WIDTH {
-                        let [r, g, b, _] = px.get(y * WIDTH * 2 + x).copied().unwrap_or([0, 0, 0, 255]);
-                        out.push(rgb565(r, g, b));
+            let (closing, released, next_screen) = {
+                let mut s = shared.lock().unwrap();
+                loop {
+                    if s.closing {
+                        break (Some(s.goodbye.clone()), s.displays_released, None);
                     }
+                    if s.displays_released {
+                        break (None, true, None);
+                    }
+                    if let Some((n, frame)) = &s.screens
+                        && shown != Some(*n)
+                    {
+                        break (None, false, Some((*n, frame.clone())));
+                    }
+                    s = wake.wait(s).unwrap();
                 }
-                out
             };
-            let (closing, released) = {
-                let s = shared.lock().unwrap();
-                (s.closing.then(|| s.goodbye.clone()), s.displays_released)
-            };
-            if released && closing.is_none() {
-                // Clear both screens before letting go. Otherwise the panels keep the
-                // last picture after the driver changes.
-                let black = vec![0u16; WIDTH * HEIGHT];
-                let _ = d.show(0, &black).and_then(|_| d.show(1, &black));
-                shared.lock().unwrap().displays_connected = false;
-                break;
-            }
             if let Some(goodbye) = closing {
                 let px = goodbye.map_or_else(Vec::new, |p| p.to_vec());
-                let _ = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH)));
+                fill_half(&px, 0, &mut left);
+                fill_half(&px, WIDTH, &mut right);
+                let _ = d.show(0, &left).and_then(|_| d.show(1, &right));
                 shared.lock().unwrap().displays_closed = true;
                 return;
             }
-            let latest = shared.lock().unwrap().screens.clone();
-            match latest {
-                Some((n, frame)) if shown != Some(n) => {
-                    let px = frame.into_pixels();
-                    if px != last_px {
-                        if let Err(e) = d.show(0, &half(&px, 0)).and_then(|_| d.show(1, &half(&px, WIDTH))) {
-                            let mut s = shared.lock().unwrap();
-                            s.display_status = e;
-                            s.displays_connected = false;
-                            break;
-                        }
-                        last_px = px;
+            if released {
+                // Clear both screens before letting go. Otherwise the panels keep the
+                // last picture after the driver changes.
+                left.fill(0);
+                let _ = d.show(0, &left).and_then(|_| d.show(1, &left));
+                shared.lock().unwrap().displays_connected = false;
+                break;
+            }
+            if let Some((n, frame)) = next_screen {
+                let px = frame.into_pixels();
+                if px != last_px {
+                    fill_half(&px, 0, &mut left);
+                    fill_half(&px, WIDTH, &mut right);
+                    if let Err(e) = d.show(0, &left).and_then(|_| d.show(1, &right)) {
+                        let mut s = shared.lock().unwrap();
+                        s.display_status = e;
+                        s.displays_connected = false;
+                        break;
                     }
-                    shown = Some(n);
+                    last_px = px;
                 }
-                _ => std::thread::sleep(Duration::from_millis(8)),
+                shown = Some(n);
             }
         }
         // Let go now: the screens' driver may be about to change.
@@ -719,7 +790,7 @@ mod tests {
     fn route(touch: PadTouch) -> PadRoute {
         let mut touches = [PadTouch::default(); 16];
         touches[0] = touch;
-        PadRoute { play: true, group: 0, keys: None, chords: None, velocity: None, sensitivity: 0.5, scaling: 0, fixed: 90, touches }
+        PadRoute { play: true, group: 0, keys: None, chords: None, velocity: None, scaling: 0, fixed: 90, touches }
     }
 
     fn mode(mode: TouchMode) -> PadTouch {

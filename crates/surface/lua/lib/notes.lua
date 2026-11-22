@@ -74,6 +74,56 @@ function notes.probability_param(s)
   return { name = "PROBABILITY", value = notes.value(s, "probability", function(v) return v .. "%" end) }
 end
 
+-- A ratchet's shapes, by `ratchet_shape`.
+local SHAPES = { [0] = "Flat", "Down", "Up" }
+
+-- What `field` shows over `list`: "*" when the notes differ.
+local function same(list, field)
+  local v = list[1][field]
+  for _, n in ipairs(list) do
+    if n[field] ~= v then return "*" end
+  end
+  return tostring(v)
+end
+
+-- Knob page 2 of the Events and Step pages: PROBABILITY, then the selected notes'
+-- ratchet: RATCHET (how many hits each plays inside its length), SHAPE (their velocities
+-- Flat, Down or Up) and where the shape heads: FLOOR for notes going Down, CEILING for
+-- notes going Up, TARGET when both are selected (none while all are Flat).
+function notes.page2_params(s)
+  local p = {
+    notes.probability_param(s),
+    { name = "RATCHET", value = notes.value(s, "ratchet", tostring) },
+    { name = "SHAPE", value = notes.value(s, "ratchet_shape", function(v) return SHAPES[v] end) },
+  }
+  local down, up = {}, {}
+  for _, n in ipairs(notes.selected(s)) do
+    if n.ratchet_shape == 1 then down[#down + 1] = n elseif n.ratchet_shape == 2 then up[#up + 1] = n end
+  end
+  if #down > 0 and #up > 0 then
+    p[4] = { name = "TARGET", value = "*" }
+  elseif #down > 0 then
+    p[4] = { name = "FLOOR", value = same(down, "ratchet_floor") }
+  elseif #up > 0 then
+    p[4] = { name = "CEILING", value = same(up, "ratchet_ceiling") }
+  end
+  return p
+end
+
+-- A knob of page 2 turned `steps`.
+function notes.page2_knob(n, steps)
+  if steps == 0 then return end
+  if n == 1 then
+    deckard.events("probability", steps)
+  elseif n == 2 then
+    deckard.events("ratchet", steps)
+  elseif n == 3 then
+    deckard.events("ratchet_shape", steps)
+  elseif n == 4 then
+    deckard.events("ratchet_target", steps)
+  end
+end
+
 -- An edit knob turned `steps`: 1-4 POSITION, PITCH, VELOCITY, LENGTH (SHIFT finer).
 function notes.edit_knob(n, steps)
   local fine = deckard.held("SHIFT")

@@ -23,6 +23,8 @@ pub(crate) struct ExprVoice {
     pub sound: usize,
     pub pitch: i64,
     pub started: u64,
+    /// Where in its curves it started (ticks): a ratchet's later hits, past the start.
+    pub from: i64,
     pub until: u64,
     pub tps: f64,
     pub expr: ExprId,
@@ -43,7 +45,17 @@ pub(crate) struct HeldKey {
 impl Engine {
     /// A note of sound (`group`, `sound`) starts now, for `frames` (`None`: until
     /// released): a held key, and a recorded note's curves.
-    pub(crate) fn touch_start(&mut self, group: usize, sound: usize, pitch: i64, frames: Option<u64>, tps: f64, expr: Option<ExprId>) {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn touch_start(
+        &mut self,
+        group: usize,
+        sound: usize,
+        pitch: i64,
+        frames: Option<u64>,
+        tps: f64,
+        expr: Option<ExprId>,
+        from: i64,
+    ) {
         let now = self.time;
         match (frames, expr) {
             (None, _) => self.touch_hold(group, sound, pitch),
@@ -53,7 +65,7 @@ impl Engine {
                     self.touch.remove(0);
                 }
                 self.touch_order += 1;
-                self.touch.push(ExprVoice { group, sound, pitch, started: now, until: now + f, tps, expr, order: self.touch_order });
+                self.touch.push(ExprVoice { group, sound, pitch, started: now, from, until: now + f, tps, expr, order: self.touch_order });
             }
             (Some(_), None) => {}
         }
@@ -121,7 +133,7 @@ impl Engine {
         }
         for v in self.touch.iter().filter(|v| v.group == group && v.sound == sound && v.until > self.time) {
             let Some(expr) = self.expression(v.expr) else { continue };
-            let at = ((self.time - v.started) as f64 * v.tps) as i64;
+            let at = v.from + ((self.time - v.started) as f64 * v.tps) as i64;
             for (i, d) in Dim::ALL.iter().enumerate() {
                 if let Some(c) = expr.curve(*d) {
                     take(i, c.value_at(at), v.order);

@@ -104,6 +104,22 @@ impl Take {
     pub fn new_recordings(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.empty_at_start.intersection(&self.recorded_into).copied()
     }
+
+    /// Empty pattern `at` was inserted into `group` during an active take: indices at or
+    /// above `at` in `group` shifted up by one.
+    pub fn insert_empty_pattern(&mut self, group: usize, at: usize) {
+        let shift = |set: &mut HashSet<(usize, usize)>| {
+            *set = set.drain().map(|(g, pi)| (g, if g == group && pi >= at { pi + 1 } else { pi })).collect();
+        };
+        shift(&mut self.empty_at_start);
+        shift(&mut self.recorded_into);
+        for h in self.held.values_mut() {
+            if h.on.group == group && h.pattern >= at {
+                h.pattern += 1;
+            }
+        }
+        self.empty_at_start.insert((group, at));
+    }
     /// Take in a recorded on or release: the edits it makes. A note goes in at once, a
     /// placeholder long (a tick, a grid step quantized, a repeat note its own length),
     /// replacing notes of its sound and pitch starting in that span; a release sets
@@ -369,11 +385,15 @@ pub struct Grow {
     pub before: i64,
     bar: i64,
     bars: i64,
+    /// Bar from which the strip's progress is currently measured (resets on empty bars).
+    strip_from_bar: i64,
+    seen_bar: Option<i64>,
+    recorded_bar: Option<i64>,
 }
 
 impl Grow {
     pub fn new(group: usize, pattern: usize, bar: i64) -> Grow {
-        Grow { group, pattern, before: bar, bar: bar.max(1), bars: 1 }
+        Grow { group, pattern, before: bar, bar: bar.max(1), bars: 1, strip_from_bar: 0, seen_bar: None, recorded_bar: None }
     }
 
     pub fn length(&self) -> i64 {
@@ -390,10 +410,75 @@ impl Grow {
         self.bars = b + 2;
         Some(self.length())
     }
+
+    /// Playback reached `at` ticks into the pattern: reset the strip's origin to this
+    /// bar whenever the previous bar passed with nothing recorded during it.
+    pub fn advance_bar(&mut self, at: i64) {
+        let b = at.max(0) / self.bar;
+        match self.seen_bar {
+            None => {
+                self.strip_from_bar = if b > 0 && self.recorded_bar == Some(b - 1) { b - 1 } else { b };
+                self.seen_bar = Some(b);
+            }
+            Some(prev) if b > prev => {
+                if self.recorded_bar != Some(b - 1) {
+                    self.strip_from_bar = b;
+                }
+                self.seen_bar = Some(b);
+            }
+            Some(prev) if b < prev => {
+                self.strip_from_bar = b;
+                self.seen_bar = Some(b);
+                if self.recorded_bar.is_some_and(|r| r >= b) {
+                    self.recorded_bar = None;
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Something was recorded `at` ticks into the pattern.
+    pub fn record_at(&mut self, at: i64) {
+        let b = at.max(0) / self.bar;
+        self.recorded_bar = Some(self.recorded_bar.map_or(b, |prev| prev.max(b)));
+    }
+
+    pub fn has_recorded(&self) -> bool {
+        self.recorded_bar.is_some()
+    }
+
+    /// MK3 touchstrip progress (0..1) at `at` ticks into the growing pattern: spans the
+    /// bars since the last empty bar, resetting at each bar where nothing was recorded.
+    pub fn strip_progress(&self, at: i64) -> f64 {
+        let at = at.max(0);
+        let b = at / self.bar;
+        let origin = match self.seen_bar {
+            None => {
+                if b > 0 && self.recorded_bar == Some(b - 1) {
+                    b - 1
+                } else {
+                    b
+                }
+            }
+            Some(prev) if b > prev => {
+                if self.recorded_bar == Some(b - 1) {
+                    self.strip_from_bar
+                } else {
+                    b
+                }
+            }
+            Some(prev) if b < prev => b,
+            Some(_) => self.strip_from_bar,
+        };
+        let origin = origin.min(b);
+        let span = ((b - origin + 1) * self.bar).max(1);
+        ((at - origin * self.bar) as f64 / span as f64).clamp(0.0, 1.0)
+    }
 }
 
 fn note(on: &Recorded, position: i64, length: i64) -> Note {
     Note {
+        ratchet: Default::default(),
         expr: None,
         sound: on.sound,
         position,
@@ -432,6 +517,28 @@ mod grow_tests {
             g.reach(b * BAR + 100);
         }
         assert_eq!(g.length(), 21 * BAR);
+    }
+
+    #[test]
+    fn strip_progress_resets_every_bar_when_nothing_was_recorded() {
+        let mut g = Grow::new(0, 0, BAR);
+        // Bar 0: empty -> 0..1 across bar 0.
+        g.advance_bar(0);
+        assert!((g.strip_progress(0) - 0.0).abs() < 1e-9);
+        assert!((g.strip_progress(BAR / 2) - 0.5).abs() < 1e-9);
+        // Bar 1: nothing recorded in bar 0 -> resets to 0..1 across bar 1.
+        g.advance_bar(BAR);
+        assert!((g.strip_progress(BAR) - 0.0).abs() < 1e-9);
+        assert!((g.strip_progress(BAR + BAR / 4) - 0.25).abs() < 1e-9);
+        // Record in bar 1, then advance into bar 2 -> continues across 2 bars (0.5..1.0).
+        g.record_at(BAR + BAR / 4);
+        g.advance_bar(2 * BAR);
+        assert!((g.strip_progress(2 * BAR) - 0.5).abs() < 1e-9);
+        assert!((g.strip_progress(2 * BAR + BAR / 2) - 0.75).abs() < 1e-9);
+        // Nothing recorded in bar 2 -> bar 3 resets back to 0..1.
+        g.advance_bar(3 * BAR);
+        assert!((g.strip_progress(3 * BAR) - 0.0).abs() < 1e-9);
+        assert!((g.strip_progress(3 * BAR + BAR / 2) - 0.5).abs() < 1e-9);
     }
 }
 
@@ -488,7 +595,7 @@ mod tests {
     const FREE: Placing = Placing { quantize: None };
 
     fn note(sound: usize, pitch: i64, position: i64, length: i64) -> Note {
-        Note { sound, pitch, position, length, velocity: 90, probability: 100, expr: None }
+        Note { ratchet: Default::default(), sound, pitch, position, length, velocity: 90, probability: 100, expr: None }
     }
 
     /// Pattern 0 of group 0 (1 bar from tick 960) holding `notes`.

@@ -194,13 +194,17 @@ impl Document {
         let mut at = 0;
         self.transaction("Duplicate Pattern", |d| {
             at = d.insert_pattern(g, p, p + 1, &pat.name)?;
+            if pat.start != 0 {
+                d.set_pattern_span(g, at, pat.start, pat.length)?;
+            }
             let start = d.project.groups[g].patterns[at].start;
             let shift = |pos: i64| pos - pat.start + start;
             let notes: Vec<Note> = pat.notes.iter().map(|n| Note { position: shift(n.position), ..*n }).collect();
             let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
             let ops = d.event_ops(g, at, &[], &notes, &[], &midi)?;
             if !ops.is_empty() {
-                d.apply("Duplicate Pattern", ops)?;
+                let params = vec![Some((crate::Target::Group(g), "__events".into())); ops.len()];
+                d.apply_with("Duplicate Pattern", ops, params)?;
             }
             d.copy_pattern_modulation(g, &pat, at, start - pat.start)
         })?;
@@ -254,6 +258,9 @@ impl Document {
         self.transaction("Duplicate Pattern", |d| {
             if existing.is_none() {
                 at = d.add_pattern_in_slot(g, from_idx, to, &pat.name)?;
+                if pat.start != 0 {
+                    d.set_pattern_span(g, at, pat.start, pat.length)?;
+                }
             }
             let target = d.project.groups[g].patterns[at].clone();
             let shift = |pos: i64| pos - pat.start + target.start;
@@ -261,7 +268,8 @@ impl Document {
             let midi: Vec<MidiEvent> = pat.midi.iter().map(|m| MidiEvent { position: shift(m.position), ..*m }).collect();
             let ops = d.event_ops(g, at, &target.notes, &notes, &target.midi, &midi)?;
             if !ops.is_empty() {
-                d.apply("Duplicate Pattern", ops)?;
+                let params = vec![Some((crate::Target::Group(g), "__events".into())); ops.len()];
+                d.apply_with("Duplicate Pattern", ops, params)?;
             }
             if pat.length > 0 && pat.length != target.length {
                 d.set_pattern_length(g, at, pat.length)?;
@@ -339,7 +347,16 @@ mod tests {
     #[test]
     fn a_pattern_is_copied_onto_another_or_past_the_last() {
         let mut d = Document::new_project().unwrap();
-        let note = |position| Note { expr: None, sound: 2, position, length: 240, pitch: 60, velocity: 100, probability: 100 };
+        let note = |position| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 2,
+            position,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         let first = d.add_pattern(0, usize::MAX, "A").unwrap_or(0);
         d.edit_notes("Add", 0, first, &[], &[note(480)]).unwrap();
         d.set_pattern_length(0, first, 7680).unwrap();
@@ -448,6 +465,7 @@ mod tests {
         for p in 0..3 {
             let start = d.project().groups[0].patterns[p].start;
             let note = |sound, at: i64| Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound,
                 position: start + at,

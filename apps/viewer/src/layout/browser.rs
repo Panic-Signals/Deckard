@@ -4,7 +4,7 @@
 //! (docs/superpowers/specs/2026-10-22-browser-design.md). The LIBRARY tab starts with
 //! a Splice button (DECKARD's referral link, see `splice`).
 
-use super::{Act, ContextMenu, S00, S01, S02, S03, apply, font, white};
+use super::{Act, ContextMenu, apply, font, s00, s01, s02, s03, white};
 use crate::App;
 use crate::browser::{BrowseAct, Tab};
 use deckard_library::Kind;
@@ -44,7 +44,7 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
     egui::Panel::left("browser")
         .exact_size(WIDTH)
         .resizable(false)
-        .frame(egui::Frame::new().fill(S00).inner_margin(egui::Margin { left: 6, right: 6, top: 9, bottom: 6 }))
+        .frame(egui::Frame::new().fill(s00()).inner_margin(egui::Margin { left: 6, right: 6, top: 9, bottom: 6 }))
         .show(ui, |ui| {
             let panel_rect = ui.max_rect().expand2(Vec2::new(6.0, 0.0));
             ui.painter().rect_filled(
@@ -200,17 +200,17 @@ fn splice_button(ui: &mut Ui) {
     let resp = resp.on_hover_text(crate::splice::DISCLOSURE);
     // Same greys as the Projects / Groups / Sounds chips: S02 at rest, S03 under the pointer.
     let fill = if resp.is_pointer_button_down_on() {
-        S01
+        s01()
     } else if resp.hovered() {
-        S03
+        s03()
     } else {
-        S02
+        s02()
     };
     ui.painter().rect_filled(r, 6.0, fill);
     let [w, h] = logo.size();
     let size = Vec2::new(SPLICE_LOGO_HEIGHT * w as f32 / h as f32, SPLICE_LOGO_HEIGHT);
     let logo_rect = Rect::from_center_size(r.center(), size);
-    ui.painter().image(logo.id(), logo_rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+    ui.painter().image(logo.id(), logo_rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), crate::layout::ink());
     if resp.clicked() {
         crate::splice::open(ui.ctx(), None);
     }
@@ -241,11 +241,11 @@ fn results(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
                 let fill = if selected {
                     Color32::from_rgb(0x33, 0x40, 0x5A)
                 } else if resp.hovered() {
-                    S02
+                    s02()
                 } else if i % 2 == 0 {
-                    S01
+                    s01()
                 } else {
-                    S00
+                    s00()
                 };
                 ui.painter().rect_filled(r, 0.0, fill);
                 // The heart: a click adds or removes the favorite (as the right-click menu does).
@@ -368,11 +368,11 @@ fn files(app: &App, ui: &mut Ui, acts: &mut Vec<Act>) {
             let fill = if selected {
                 Color32::from_rgb(0x33, 0x40, 0x5A)
             } else if resp.hovered() {
-                S02
+                s02()
             } else if i % 2 == 0 {
-                S01
+                s01()
             } else {
-                S00
+                s00()
             };
             ui.painter().rect_filled(r, 0.0, fill);
             let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -437,12 +437,12 @@ pub(super) fn chip(ui: &mut Ui, text: &str, on: bool, size: f32) -> egui::Respon
     let fill = if on {
         ACCENT
     } else if resp.hovered() {
-        S03
+        s03()
     } else {
-        S02
+        s02()
     };
     ui.painter().rect_filled(r, 9.0, fill);
-    ui.painter().galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    ui.painter().galley(r.center() - galley.size() / 2.0, galley, crate::layout::ink());
     resp
 }
 
