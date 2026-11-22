@@ -55,6 +55,8 @@ pub enum Command {
     MidiChange,
     /// View ▸ MIDI Monitor.
     MidiMonitor,
+    /// View ▸ Audio & CPU Monitor.
+    AudioMonitor,
     /// File ▸ Export Audio….
     ExportAudio,
     /// File ▸ Export MIDI… (the song, or the focused scene).
@@ -225,6 +227,7 @@ pub fn menus(app: &App) -> Vec<(&'static str, Vec<Item>)> {
         cmd("Note Repeat / Arp", Command::RepeatPanel).checked(app.repeat_panel),
         cmd("Lock", Command::LockPanel).checked(app.lock_panel),
         cmd("MIDI Monitor", Command::MidiMonitor).checked(app.midi_monitor),
+        cmd("Audio & CPU Monitor", Command::AudioMonitor).checked(app.audio_monitor),
         cmd("Session Recorder", Command::SessionRecorderWindow).checked(app.session_window_open),
         Item::Separator,
         cmd("Follow Playback", Command::Follow).checked(app.follow),
