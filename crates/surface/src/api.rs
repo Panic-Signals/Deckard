@@ -18,6 +18,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     // (Lua's own `next`, for the `pairs` of a `deckard.state()` table, whatever the scripts
     // do to the global.)
     lua.set_named_registry_value("deckard.next", lua.globals().get::<Function>("next")?)?;
+    install_lazy(lua)?;
 
     // Reading.
     let sh = shared.clone();
@@ -105,6 +106,50 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
     let sh = shared.clone();
     d.set("page", lua.create_function(move |_, ()| Ok(sh.borrow().page.clone()))?)?;
+    {
+        let sh = shared.clone();
+        d.set("pinned", lua.create_function(move |_, name: String| Ok(sh.borrow().pinned.contains(&name)))?)?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
+            "set_pinned",
+            lua.create_function(move |_, (name, on): (String, bool)| {
+                let mut b = sh.borrow_mut();
+                if on {
+                    b.pinned.insert(name);
+                } else {
+                    b.pinned.remove(&name);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
+            "shown_pin",
+            lua.create_function(move |lua, ()| match &sh.borrow().shown_pin {
+                Some((button, back)) => {
+                    let t = lua.create_table()?;
+                    t.set("button", button.as_str())?;
+                    t.set("back", back.as_str())?;
+                    Ok(Value::Table(t))
+                }
+                None => Ok(Value::Nil),
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
+            "set_shown_pin",
+            lua.create_function(move |_, (button, back): (Option<String>, Option<String>)| {
+                sh.borrow_mut().shown_pin = button.map(|b| (b, back.unwrap_or_else(|| crate::FIRST_PAGE.to_string())));
+                Ok(())
+            })?,
+        )?;
+    }
     let sh = shared.clone();
     // (The mod matrix left for a page shown while a button is held: it's coming back.)
     let parked = std::cell::Cell::new(false);
@@ -138,7 +183,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             let byte = match &how {
                 Value::String(s) => match (s.to_str()?.as_ref(), deckard_mk3::leds::is_colour(&hw)) {
                     ("off", true) => 0,
-                    ("off" | "dark", false) => leds::OFF,
+                    ("off", false) => leds::BACKLIGHT,
+                    ("dark", false) => leds::OFF,
                     ("dark", _) => 0,
                     ("dim", false) => leds::DIM,
                     ("on", false) => leds::ON,
@@ -767,7 +813,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set(
         "events",
         lua.create_function(move |_, (what, n): (String, Option<i64>)| {
-            const WHAT: [&str; 22] = [
+            const WHAT: [&str; 25] = [
                 "nudge",
                 "nudge_fine",
                 "pitch",
@@ -775,6 +821,9 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                 "length",
                 "length_fine",
                 "probability",
+                "ratchet",
+                "ratchet_shape",
+                "ratchet_target",
                 "nudge_shown",
                 "nudge_shown_fine",
                 "transpose",
@@ -967,6 +1016,17 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    let sh = shared.clone();
+    d.set(
+        "erase_knob",
+        lua.create_function(move |_, knob: usize| {
+            if knob > 8 {
+                return Err(mlua::Error::runtime("there are 8 knobs"));
+            }
+            act(&sh, Action::EraseKnob(index(knob, "a knob")?));
+            Ok(())
+        })?,
+    )?;
 
     lua.globals().set("deckard", d)
 }
@@ -1147,8 +1207,7 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     t.set("denominator", v.denominator)?;
     t.set("group", v.group + 1)?;
     t.set("sound", v.sound + 1)?;
-    let v = v.clone();
-    lazy(lua, &t, STATE_PARTS, move |lua, part| state_part(lua, &v, part))?;
+    attach_lazy(lua, &t, v.clone(), None, "deckard.state_mt")?;
     Ok(t)
 }
 
@@ -1234,6 +1293,10 @@ fn state_part(lua: &Lua, v: &Rc<View>, part: &str) -> mlua::Result<Value> {
                 nt.set("pitch", n.pitch)?;
                 nt.set("velocity", n.velocity)?;
                 nt.set("probability", n.probability)?;
+                nt.set("ratchet", n.ratchet.repeats)?;
+                nt.set("ratchet_shape", deckard_model::ratchet::Shape::ALL.iter().position(|&x| x == n.ratchet.shape).unwrap_or(0))?;
+                nt.set("ratchet_floor", n.ratchet.floor)?;
+                nt.set("ratchet_ceiling", n.ratchet.ceiling)?;
                 nt.set("selected", n.selected)?;
                 notes.set(i + 1, nt)?;
             }
@@ -1335,8 +1398,7 @@ fn group(lua: &Lua, v: &Rc<View>, i: usize) -> mlua::Result<Table> {
     gt.set("scene_pattern", g.scene_pattern.map(|i| i + 1))?;
     gt.set("progress", g.progress)?;
     gt.set("playing_progress", g.playing_progress)?;
-    let v = v.clone();
-    lazy(lua, &gt, GROUP_PARTS, move |lua, part| group_part(lua, &v.groups[i], part))?;
+    attach_lazy(lua, &gt, v.clone(), Some(i), "deckard.group_mt")?;
     Ok(gt)
 }
 
@@ -1534,6 +1596,7 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
                 kt.set("step_mod", knob.step_mod.as_deref())?;
                 kt.set("auto_mod", knob.auto_mod.as_deref())?;
                 kt.set("macro", knob.in_macro)?;
+                kt.set("modulated", knob.modulated)?;
                 Value::Table(kt)
             }
             _ => Value::Boolean(false),
@@ -1554,73 +1617,121 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
     Ok(ct)
 }
 
-/// Give `t` the fields `parts`, each made by `make` the first time a script reads it (or
-/// walks `t` with `pairs`), from the view `t` was made for. `deckard.state()` is made
-/// again whenever the app changes, every frame while the song plays, and most handlers
-/// read a few of its fields: the long lists (every group's sounds, the library's results)
-/// are made only for those that read them. To the scripts it's a plain table: a field
-/// they set or clear stays as they left it, and `pairs` sees every part.
-fn lazy(
-    lua: &Lua,
-    t: &Table,
-    parts: &'static [&'static str],
-    make: impl Fn(&Lua, &str) -> mlua::Result<Value> + 'static,
-) -> mlua::Result<()> {
+struct LazyEntry {
+    view: Rc<View>,
+    group: Option<usize>,
+    made: std::cell::Cell<u32>,
+}
+
+impl mlua::UserData for LazyEntry {}
+
+fn install_lazy(lua: &Lua) -> mlua::Result<()> {
+    let weak_mt = lua.create_table()?;
+    weak_mt.raw_set("__mode", "k")?;
+    let lazy_map = lua.create_table()?;
+    lazy_map.set_metatable(Some(weak_mt))?;
+    lua.set_named_registry_value("deckard.lazy", lazy_map.clone())?;
+    let next: Function = lua.named_registry_value("deckard.next")?;
+    lua.set_named_registry_value("deckard.state_mt", make_lazy_mt(lua, &lazy_map, &next, STATE_PARTS, false)?)?;
+    lua.set_named_registry_value("deckard.group_mt", make_lazy_mt(lua, &lazy_map, &next, GROUP_PARTS, true)?)?;
+    Ok(())
+}
+
+fn attach_lazy(lua: &Lua, t: &Table, view: Rc<View>, group: Option<usize>, mt_key: &str) -> mlua::Result<()> {
+    let lazy_map: Table = lua.named_registry_value("deckard.lazy")?;
+    let entry = lua.create_any_userdata(LazyEntry { view, group, made: std::cell::Cell::new(0) })?;
+    lazy_map.raw_set(t.clone(), entry)?;
+    let mt: Table = lua.named_registry_value(mt_key)?;
+    t.set_metatable(Some(mt))
+}
+
+fn lazy_part_value(lua: &Lua, view: &Rc<View>, group: Option<usize>, part: &str) -> mlua::Result<Value> {
+    match group {
+        Some(i) => group_part(lua, &view.groups[i], part),
+        None => state_part(lua, view, part),
+    }
+}
+
+/// Shared metatable for `deckard.state()` (`STATE_PARTS`) and each group (`GROUP_PARTS`).
+/// Parts are built on first read (or `pairs`), and the table behaves as a plain table if
+/// a script sets or clears a key.
+fn make_lazy_mt(lua: &Lua, lazy_map: &Table, next: &Function, parts: &'static [&'static str], _is_group: bool) -> mlua::Result<Table> {
     debug_assert!(parts.len() <= 32);
-    // (A bit for each part made, or set by the script, which only ever happens once.)
-    let made = Rc::new(std::cell::Cell::new(0u32));
-    let place = move |key: &Value| match key {
-        Value::String(s) => parts.iter().position(|p| s.as_bytes() == p.as_bytes()),
+    let place = |key: &Value| match key {
+        Value::String(s) => s.to_str().ok().and_then(|k| parts.iter().position(|p| k.as_bytes() == p.as_bytes())),
         _ => None,
     };
-    let first = {
-        let made = made.clone();
-        move |i: usize| {
-            let fresh = made.get() & 1 << i == 0;
-            made.set(made.get() | 1 << i);
-            fresh
-        }
-    };
-    let make = Rc::new(make);
     let mt = lua.create_table()?;
     {
-        let (first, make) = (first.clone(), make.clone());
+        let lazy_map = lazy_map.clone();
         mt.raw_set(
             "__index",
             lua.create_function(move |lua, (t, key): (Table, Value)| {
-                let Some(i) = place(&key).filter(|&i| first(i)) else { return Ok(Value::Nil) };
-                let value = make(lua, parts[i])?;
+                let Some(i) = place(&key) else { return Ok(Value::Nil) };
+                let Some(ud) = lazy_map.raw_get::<Option<mlua::AnyUserData>>(t.clone())? else {
+                    return Ok(Value::Nil);
+                };
+                let (view, group) = {
+                    let e = ud.borrow::<LazyEntry>()?;
+                    let m = e.made.get();
+                    if m & (1 << i) != 0 {
+                        return Ok(Value::Nil);
+                    }
+                    e.made.set(m | (1 << i));
+                    (e.view.clone(), e.group)
+                };
+                let value = lazy_part_value(lua, &view, group, parts[i])?;
                 t.raw_set(key, &value)?;
                 Ok(value)
             })?,
         )?;
     }
     {
-        let first = first.clone();
+        let lazy_map = lazy_map.clone();
         mt.raw_set(
             "__newindex",
             lua.create_function(move |_, (t, key, value): (Table, Value, Value)| {
-                if let Some(i) = place(&key) {
-                    first(i);
+                if let Some(i) = place(&key)
+                    && let Some(ud) = lazy_map.raw_get::<Option<mlua::AnyUserData>>(t.clone())?
+                    && let Ok(e) = ud.borrow::<LazyEntry>()
+                {
+                    e.made.set(e.made.get() | (1 << i));
                 }
                 t.raw_set(key, value)
             })?,
         )?;
     }
-    mt.raw_set(
-        "__pairs",
-        lua.create_function(move |lua, t: Table| {
-            for (i, part) in parts.iter().enumerate() {
-                // (Not over one a script `rawset`.)
-                if first(i) && t.raw_get::<Value>(*part)?.is_nil() {
-                    t.raw_set(*part, make(lua, part)?)?;
+    {
+        let lazy_map = lazy_map.clone();
+        let next = next.clone();
+        mt.raw_set(
+            "__pairs",
+            lua.create_function(move |lua, t: Table| {
+                if let Some(ud) = lazy_map.raw_get::<Option<mlua::AnyUserData>>(t.clone())? {
+                    let (view, group) = {
+                        let e = ud.borrow::<LazyEntry>()?;
+                        (e.view.clone(), e.group)
+                    };
+                    for (i, part) in parts.iter().enumerate() {
+                        let fresh = {
+                            let e = ud.borrow::<LazyEntry>()?;
+                            let m = e.made.get();
+                            let f = m & (1 << i) == 0;
+                            if f {
+                                e.made.set(m | (1 << i));
+                            }
+                            f
+                        };
+                        if fresh && t.raw_get::<Value>(*part)?.is_nil() {
+                            t.raw_set(*part, lazy_part_value(lua, &view, group, part)?)?;
+                        }
+                    }
                 }
-            }
-            let next: Function = lua.named_registry_value("deckard.next")?;
-            Ok((next, t, Value::Nil))
-        })?,
-    )?;
-    t.set_metatable(Some(mt))
+                Ok((next.clone(), t, Value::Nil))
+            })?,
+        )?;
+    }
+    Ok(mt)
 }
 
 /// The Sampling page's view (tabs, pages, slices and zones from 1; frames from 0).

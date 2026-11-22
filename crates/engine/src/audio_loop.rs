@@ -23,8 +23,10 @@ use std::sync::Arc;
 
 /// Frames rendered at once (the engine's blocks are split to this).
 const CHUNK: usize = 512;
-/// Fade when the loop stops or starts outside Gate mode (no click), seconds.
+/// Fade when a Gate note starts or stops at FADE = 0 (no click), seconds.
 const EDGE_FADE: f64 = 0.004;
+/// Fade when a Loop starts or stops (matching Deckard's 10 ms mute/stop glide), seconds.
+const LOOP_FADE: f64 = 0.01;
 /// Gate mode's FADE at its top (normalized 1), seconds. [Maschine's scale is
 /// unconfirmed; its new 0.1222 makes about 12 ms.]
 const FADE_MAX: f64 = 0.1;
@@ -77,6 +79,8 @@ pub struct LoopRt {
     tempo: f64,
     /// Playing: the take, and the song beat its first beat fell on.
     cued: Option<(usize, f64)>,
+    /// Last active cue kept while fading out so phase and stretcher stay continuous.
+    last_cued: Option<(usize, f64)>,
     /// Gate mode's held notes `(id, pitch)` in order of trigger; the pitch wheel (−1…1).
     gates: Vec<(u64, i64)>,
     bend: f64,
@@ -103,6 +107,7 @@ impl LoopRt {
             beats: 0.0,
             tempo: 120.0,
             cued: None,
+            last_cued: None,
             gates: Vec::with_capacity(16),
             bend: 0.0,
             gain: 0.0,
@@ -126,8 +131,11 @@ impl LoopRt {
         if cue.is_some_and(|(t, _)| t >= self.takes.len()) {
             return;
         }
-        if cue.map(|c| c.0) != self.cued.map(|c| c.0) {
-            self.synced = false;
+        if let Some((t, o)) = cue {
+            if self.last_cued.map(|c| c.0) != Some(t) {
+                self.synced = false;
+            }
+            self.last_cued = Some((t, o));
         }
         self.cued = cue;
     }
@@ -159,6 +167,10 @@ impl LoopRt {
         self.gates.retain(|&(_, n)| n != note);
     }
 
+    pub fn release_all(&mut self) {
+        self.gates.clear();
+    }
+
     pub fn control(&mut self, kind: MidiKind) {
         if let MidiKind::PitchBend(v) = kind {
             self.bend = f64::from(v) / 8192.0 - 1.0;
@@ -178,13 +190,14 @@ impl LoopRt {
     /// Keep `old`'s place (the same sound before an edit), if it plays the same take.
     pub fn adopt(&mut self, mut old: LoopRt) {
         self.cued = old.cued;
+        self.last_cued = old.last_cued;
         if self.settings.mode == AudioMode::Gate {
             std::mem::swap(&mut self.gates, &mut old.gates);
         }
         self.bend = old.bend;
         self.gain = old.gain;
         let same = |a: &TakeRt, b: &TakeRt| Arc::ptr_eq(&a.sample, &b.sample) && a.range == b.range;
-        let active_take = old.cued.map(|c| c.0).or_else(|| {
+        let active_take = old.cued.or(old.last_cued).map(|c| c.0).or_else(|| {
             (self.settings.mode == AudioMode::Gate && !old.takes.is_empty()).then(|| old.settings.focused.min(old.takes.len() - 1))
         });
         let kept = active_take.is_some_and(|t| old.takes.get(t).zip(self.takes.get(t)).is_some_and(|(a, b)| same(a, b)));
@@ -239,15 +252,19 @@ impl LoopRt {
             AudioMode::Loop => self.cued.is_some(),
             AudioMode::Gate => !self.takes.is_empty() && !self.gates.is_empty(),
         };
-        let fade_s = if self.settings.mode == AudioMode::Gate { (self.settings.fade * FADE_MAX).max(EDGE_FADE) } else { EDGE_FADE };
+        let fade_s = if self.settings.mode == AudioMode::Gate { (self.settings.fade * FADE_MAX).max(EDGE_FADE) } else { LOOP_FADE };
         let step = (1.0 / (fade_s * self.sr)) as f32;
         let target = if open { 1.0 } else { 0.0 };
         if self.gain == 0.0 && target == 0.0 {
+            self.last_cued = None;
+            self.synced = false;
             out.fill(0.0);
             return;
         }
-        let Some((ti, origin)) =
-            self.cued.or_else(|| (!self.takes.is_empty()).then(|| (self.settings.focused.min(self.takes.len() - 1), 0.0)))
+        let Some((ti, origin)) = self
+            .cued
+            .or(self.last_cued)
+            .or_else(|| (!self.takes.is_empty()).then(|| (self.settings.focused.min(self.takes.len() - 1), 0.0)))
         else {
             out.fill(0.0);
             return;
@@ -265,11 +282,16 @@ impl LoopRt {
             }
             _ => self.render_stretched(ti, at, rate, out, n),
         }
-        // The loudness, gliding to where it's going.
+        // The loudness, gliding to where it's going (smoothstep avoids slope clicks).
         for f in 0..n {
             self.gain = if self.gain < target { (self.gain + step).min(target) } else { (self.gain - step).max(target) };
-            out[f * 2] *= self.gain;
-            out[f * 2 + 1] *= self.gain;
+            let g = self.gain * self.gain * (3.0 - 2.0 * self.gain);
+            out[f * 2] *= g;
+            out[f * 2 + 1] *= g;
+        }
+        if self.gain == 0.0 && target == 0.0 {
+            self.last_cued = None;
+            self.synced = false;
         }
     }
 
@@ -481,5 +503,48 @@ mod tests {
         p.render(&mut out);
         let first = out.chunks_exact(2).position(|f| f[0].abs() > 0.5).expect("the mark");
         assert!(first < 600, "the loop's start, at {first}");
+    }
+
+    #[test]
+    fn turning_loop_off_fades_without_a_discontinuity() {
+        let sine_take = |bpm: f64, beats: f64, hz: f64| {
+            let frames = (SR * 60.0 / bpm * beats) as usize;
+            let tone = (0..frames)
+                .map(|i| {
+                    let t = i as f32 / SR as f32;
+                    let v = (t * hz as f32 * std::f32::consts::TAU).sin() * 0.8;
+                    [v, v]
+                })
+                .collect();
+            TakeRt { sample: Arc::new(Sample { rate: SR as u32, frames: tone }), range: (0, frames), beats }
+        };
+        for engine in [AudioEngine::Repitch, AudioEngine::Stretch, AudioEngine::Formant] {
+            for (origin, cued_take, focused) in [(0.0, 0, 0), (1.37, 0, 0), (0.0, 1, 0)] {
+                let takes = vec![sine_take(120.0, 4.0, 220.0), sine_take(120.0, 4.0, 330.0)];
+                let mut p =
+                    LoopRt::new(takes, Settings { mode: AudioMode::Loop, engine, focused, tune: 0.0, bend_range: 2.0, fade: 0.1222 }, SR);
+                p.set_song(2.1, 120.0);
+                p.cue(Some((cued_take, origin)));
+                let mut out = Vec::new();
+                for _ in 0..10 {
+                    let mut block = vec![0.0; 256 * 2];
+                    p.render(&mut block);
+                    out.extend(block.chunks_exact(2).map(|f| f[0]));
+                }
+                let cut = out.len();
+                p.cue(None);
+                for _ in 0..10 {
+                    let mut block = vec![0.0; 256 * 2];
+                    p.render(&mut block);
+                    out.extend(block.chunks_exact(2).map(|f| f[0]));
+                }
+                assert!(!p.runs(), "{engine:?} origin={origin} take={cued_take}: should finish fading out");
+                let max_step = out[cut - 4..cut + 64].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+                assert!(
+                    max_step < 0.08,
+                    "{engine:?} origin={origin} take={cued_take} focused={focused}: click at loop off (max sample step {max_step})"
+                );
+            }
+        }
     }
 }

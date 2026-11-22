@@ -76,13 +76,17 @@ fn track_events(
         let (c, pitch) = note_map(n);
         let ch = u4::new(c.min(15));
         let key = u7::new(pitch.clamp(0, 127) as u8);
-        let vel = u7::new(n.velocity.clamp(1, 127) as u8);
-        events.push((n.position, 2, TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOn { key, vel } }));
-        events.push((
-            n.position + n.length.max(1),
-            1,
-            TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOff { key, vel: u7::new(0) } },
-        ));
+        // A ratcheted note is written as its hits; an ordinary one is its one hit.
+        for hit in n.ratchet.hits(n.length, n.velocity) {
+            let vel = u7::new(hit.velocity.clamp(1, 127) as u8);
+            let at = n.position + hit.offset;
+            events.push((at, 2, TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOn { key, vel } }));
+            events.push((
+                at + hit.length.max(1),
+                1,
+                TrackEventKind::Midi { channel: ch, message: MidiMessage::NoteOff { key, vel: u7::new(0) } },
+            ));
+        }
     }
     for m in midi {
         let message = match m.kind {
@@ -149,6 +153,7 @@ pub fn import_channels(path: &Path) -> Result<Channels, String> {
                     notes.push((
                         c,
                         Note {
+                            ratchet: Default::default(),
                             expr: None,
                             sound,
                             position: start,
@@ -189,9 +194,36 @@ mod tests {
     #[test]
     fn notes_survive_export_and_import() {
         let notes = vec![
-            Note { expr: None, sound: 3, position: 0, length: 240, pitch: 60, velocity: 100, probability: 100 },
-            Note { expr: None, sound: 3, position: 480, length: 960, pitch: 64, velocity: 90, probability: 100 },
-            Note { expr: None, sound: 3, position: 480, length: 120, pitch: 67, velocity: 127, probability: 100 },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 480,
+                length: 960,
+                pitch: 64,
+                velocity: 90,
+                probability: 100,
+            },
+            Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 480,
+                length: 120,
+                pitch: 67,
+                velocity: 127,
+                probability: 100,
+            },
         ];
         let midi = vec![
             MidiEvent { sound: 3, position: 0, kind: MidiKind::Controller { number: 64, value: 127 } },
@@ -206,11 +238,35 @@ mod tests {
         assert_eq!(end, 1440);
     }
 
+    /// A ratcheted note goes out as its hits, each a note of its own.
+    #[test]
+    fn a_ratchet_exports_as_its_hits() {
+        use deckard_model::ratchet::{Ratchet, Shape};
+        let ratchet = Ratchet { repeats: 4, shape: Shape::Down, floor: 0, ceiling: 127 };
+        let note = Note { ratchet, expr: None, sound: 3, position: 0, length: 480, pitch: 60, velocity: 100, probability: 100 };
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ratchet.mid");
+        export_mapped(&path, &[note], &[], 120.0, 4, 4, &|n| (0, n.pitch), &|_| 0).unwrap();
+        let (n, _, _) = import(&path, 3).unwrap();
+        let got: Vec<(i64, i64, i64, Ratchet)> = n.iter().map(|n| (n.position, n.length, n.velocity, n.ratchet)).collect();
+        let plain = Ratchet::default();
+        assert_eq!(got, [(0, 120, 100, plain), (120, 120, 75, plain), (240, 120, 50, plain), (360, 120, 25, plain)]);
+    }
+
     /// A group's (or the song's) file: type 1, a tempo track then a track per sound
     /// in order, named, the empty ones kept; each on its channel, transposed.
     #[test]
     fn tracks_export_as_type_1_with_empty_tracks_kept() {
-        let note = |position, pitch| Note { expr: None, sound: 0, position, length: 240, pitch, velocity: 100, probability: 100 };
+        let note = |position, pitch| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: 240,
+            pitch,
+            velocity: 100,
+            probability: 100,
+        };
         let tracks = vec![
             Track { name: "Kick".into(), notes: vec![note(0, 36)], midi: vec![], channel: 9, transpose: 0 },
             Track { name: "Empty".into(), notes: vec![], midi: vec![], channel: 0, transpose: 0 },

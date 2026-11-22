@@ -829,7 +829,8 @@ fn group_browser_toggles_routing_and_patterns_on_load() {
     }
     save_as(&mut h, deckard_doc::FileItem::Group(0), false, "Saved Kit");
     // Now set the current group's own pattern and routing that we want to keep.
-    let note = Note { expr: None, sound: 0, position: 480, length: 240, pitch: 72, velocity: 90, probability: 100 };
+    let note =
+        Note { ratchet: Default::default(), expr: None, sound: 0, position: 480, length: 240, pitch: 72, velocity: 90, probability: 100 };
     {
         let doc = h.state().doc.clone().unwrap();
         let mut d = doc.borrow_mut();

@@ -866,7 +866,16 @@ fn long_notes_stay_in_the_pattern_editor() {
     v.pattern_start = 0;
     v.pattern_length = 3840;
     hold(&mut s, &v, "BUTTON_PATTERN", true);
-    let note = |length| NoteView { sound: 1, position: 1920, length, pitch: 60, velocity: 100, probability: 100, selected: false };
+    let note = |length| NoteView {
+        sound: 1,
+        position: 1920,
+        length,
+        pitch: 60,
+        velocity: 100,
+        probability: 100,
+        selected: false,
+        ratchet: Default::default(),
+    };
     v.notes = vec![note(1920)];
     let cut = s.picture(&v);
     v.notes = vec![note(30_000)];
@@ -912,10 +921,9 @@ fn song(v: &mut View) {
 }
 
 /// The Ideas view's display buttons: the scenes that are there can be picked (dim, the
-/// focused one bright), and a button past the last scene is dark — the panel has only two
-/// lit levels, so "dimmer than dim" is nothing (docs/mk3-usb.md).
+/// focused one bright), and a button past the last scene is off (its faint backlight).
 #[test]
-fn a_display_button_past_the_last_scene_is_dark() {
+fn a_display_button_past_the_last_scene_is_off() {
     let (mut s, mut v) = (Surface::new(), view());
     song(&mut v);
     // The shape it was reported in: six scenes, so buttons 7 and 8 have none.
@@ -927,7 +935,7 @@ fn a_display_button_past_the_last_scene_is_dark() {
         assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::DIM), "a scene to pick: {i}");
     }
     for i in 7..=8 {
-        assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::OFF), "no scene: {i}");
+        assert_eq!(leds.get(&format!("LED_SCREEN_BUTTON_{i}")), Some(deckard_mk3::leds::BACKLIGHT), "no scene: {i}");
     }
 }
 
@@ -1089,7 +1097,16 @@ fn notes_side_by_side_are_drawn_apart() {
     press(&mut s, &v, "BUTTON_STEP");
     let empty = s.picture(&v);
     v.notes = (0..16)
-        .map(|i| NoteView { sound: v.sound, position: i * 240, length: 240, pitch: 60, velocity: 100, probability: 100, selected: false })
+        .map(|i| NoteView {
+            sound: v.sound,
+            position: i * 240,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+            selected: false,
+            ratchet: Default::default(),
+        })
         .collect();
     let notes = s.picture(&v);
     // The row with the most changed runs: the notes.
@@ -1377,7 +1394,7 @@ fn shift_follow_shows_the_grid_while_follow_is_held() {
     assert_eq!(s.page(), "grid", "FOLLOW still held");
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "PERFORM");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(deckard_mk3::leds::OFF), "only STEP's");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(deckard_mk3::leds::BACKLIGHT), "only STEP's");
     assert_eq!(leds.get("LED_PAD_2"), Some(deckard_mk3::leds::palette(16, 4)), "1/16, the second column's first");
     assert_eq!(leds.get("LED_PAD_15"), Some(0), "PERFORM has six values");
     assert!(hold(&mut s, &v, "BUTTON_FOLLOW", false).is_empty());
@@ -1459,7 +1476,7 @@ fn file_shows_the_file_page() {
     assert_eq!(s.page(), "file");
     let leds = s.leds(&v);
     assert_eq!((leds.get("LED_FILE"), leds.get("LED_SCREEN_BUTTON_1")), (Some(crate::leds::ON), Some(crate::leds::ON)));
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::OFF), "no recent projects");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::BACKLIGHT), "no recent projects");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::File("new", 0)]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::File("save_copy", 0)]);
     assert_eq!(s.page(), "control", "back");
@@ -1509,8 +1526,10 @@ fn the_save_page_saves_the_project_a_group_or_a_sound() {
 }
 
 /// Whether `led` is lit (not off).
+/// Lit: a colour LED not dark, a one-colour button above its backlight.
 fn lit(s: &Surface, v: &View, led: &str) -> bool {
-    s.leds(v).get(led).is_some_and(|c| c != 0)
+    let hw = deckard_mk3::leds::is_colour(led);
+    s.leds(v).get(led).is_some_and(|c| if hw { c != 0 } else { c > deckard_mk3::leds::BACKLIGHT })
 }
 
 #[test]
@@ -1637,7 +1656,7 @@ fn set_macro_turns_the_pages() {
     hold(&mut s, &v, "BUTTON_SHIFT", false);
     assert_eq!(s.page(), "macro_set");
     let leds = s.leds(&v);
-    assert_eq!((leds.get("LED_LEFT"), leds.get("LED_RIGHT")), (Some(deckard_mk3::leds::OFF), Some(deckard_mk3::leds::DIM)));
+    assert_eq!((leds.get("LED_LEFT"), leds.get("LED_RIGHT")), (Some(deckard_mk3::leds::BACKLIGHT), Some(deckard_mk3::leds::DIM)));
     assert_eq!(press(&mut s, &v, "BUTTON_RIGHT"), [Action::Page(true)]);
     assert_eq!(s.page(), "macro_set", "still setting macros");
     assert!(s.screen_text(&v).contains(&"1/2".to_string()), "the page shown");
@@ -1648,7 +1667,7 @@ fn lock_takes_and_recalls_the_focused_snapshot() {
     let (mut s, mut v) = (Surface::new(), view());
     assert_eq!(press(&mut s, &v, "BUTTON_LOCK"), [Action::Lock("button", 0)]);
     assert_eq!(s.page(), "control", "no page");
-    assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::OFF));
+    assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::BACKLIGHT));
     v.lock.active = true;
     assert_eq!(s.leds(&v).get("LED_LOCK"), Some(deckard_mk3::leds::DIM), "dim while locked");
 }
@@ -1663,7 +1682,7 @@ fn shift_lock_shows_the_snapshots() {
     assert_eq!(s.page(), "lock");
     let leds = s.leds(&v);
     assert_eq!((leds.get("LED_LOCK"), leds.get("LED_SCREEN_BUTTON_1")), (Some(crate::leds::ON), Some(crate::leds::ON)));
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::OFF), "UPDATE: no snapshot focused");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(deckard_mk3::leds::BACKLIGHT), "UPDATE: no snapshot focused");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_8"), Some(deckard_mk3::leds::DIM), "the next bank");
     assert_eq!(s.event(&Event::PadOn(1, 0.8), &v, now), [Action::Lock("pad", 0)], "a pad takes or recalls");
     assert!(!s.pads(&v).play, "and plays nothing");
@@ -1701,11 +1720,11 @@ fn variation_shows_the_sounds_groove_variation() {
     assert_eq!(s.page(), "control", "from any page");
     assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(crate::leds::ON), "lit while held");
     hold(&mut s, &v, "BUTTON_VARIATION", false);
-    assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(deckard_mk3::leds::OFF));
+    assert_eq!(s.leds(&v).get("LED_VARIATION"), Some(deckard_mk3::leds::BACKLIGHT));
 }
 
 fn event_note(sound: usize, position: i64, selected: bool) -> crate::NoteView {
-    crate::NoteView { sound, position, length: 240, pitch: 60, velocity: 100, probability: 100, selected }
+    crate::NoteView { sound, position, length: 240, pitch: 60, velocity: 100, probability: 100, selected, ratchet: Default::default() }
 }
 
 #[test]
@@ -1749,6 +1768,29 @@ fn events_held_edits_the_selected_notes() {
     assert!(lit(&s, &v, "LED_LEFT") && !lit(&s, &v, "LED_RIGHT"));
     assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::Events("probability", 1)]);
     assert!(s.screen_text(&v).join("|").contains("PROBABILITY"));
+    // And the selected notes' ratchet: RATCHET, SHAPE, and where the shape heads.
+    use deckard_model::ratchet::{Ratchet, Shape};
+    assert_eq!(s.event(&Event::Knob(1, 0.1), &v, now), [Action::Events("ratchet", 1)]);
+    assert_eq!(s.event(&Event::Knob(2, 0.2), &v, now), [Action::Events("ratchet_shape", 1)]);
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::Events("ratchet_target", -1)]);
+    let params = |s: &Surface, v: &View| s.screen_text(v).join("|");
+    let flat = params(&s, &v);
+    assert!(flat.contains("RATCHET") && flat.contains("SHAPE") && flat.contains("Flat"), "{flat}");
+    assert!(!flat.contains("FLOOR") && !flat.contains("CEILING") && !flat.contains("TARGET"), "Flat heads nowhere: {flat}");
+    v.notes[1].ratchet = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+    let down = params(&s, &v);
+    assert!(down.contains("Down") && down.contains("FLOOR") && down.contains("20") && !down.contains("CEILING"), "{down}");
+    v.notes[1].ratchet.shape = Shape::Up;
+    let up = params(&s, &v);
+    assert!(up.contains("Up") && up.contains("CEILING") && up.contains("127") && !up.contains("FLOOR"), "{up}");
+    // A Down note and an Up note selected: one knob for each one's own target.
+    v.notes[0].selected = true;
+    v.notes[0].ratchet = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+    let mixed = params(&s, &v);
+    assert!(mixed.contains("TARGET") && !mixed.contains("FLOOR") && !mixed.contains("CEILING"), "{mixed}");
+    v.notes[0].selected = false;
+    v.notes[0].ratchet = Ratchet::default();
+    v.notes[1].ratchet = Ratchet::default();
     // The 4-D encoder: a note after another, nudges, other sounds.
     assert_eq!(s.event(&Event::Wheel(1), &v, now), [Action::Events("select_step", 1)]);
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Events("nudge_shown", 1)]);
@@ -2514,6 +2556,44 @@ fn the_events_zoom_knobs_show_icons_while_touched() {
     assert!(!boxed(&mut s), "let go: gone");
 }
 
+/// Browse: touching or turning knob 5, 6 or 7 shows all its values over the right
+/// screen, as Maschine's; it goes when let go, when the 4D wheel turns, or a moment
+/// after the last turn.
+#[test]
+fn browse_attribute_knobs_show_their_values() {
+    let (mut s, mut v) = (Surface::new(), view());
+    library(&mut v);
+    v.browser.attributes[0].1 = Some(1);
+    press(&mut s, &v, "BUTTON_BROWSE");
+    let shown = |s: &Surface, v: &View| {
+        let t = s.screen_text(v);
+        t.contains(&"TYPES".to_string()) && t.contains(&"Drums".to_string()) && t.contains(&"Bass".to_string())
+    };
+    assert!(!shown(&s, &v), "not before a touch");
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    assert!(shown(&s, &v), "touched: the Types");
+    hold(&mut s, &v, "BUTTON_CAP_8", true);
+    assert!(!shown(&s, &v), "knob 8 touched closes it");
+    hold(&mut s, &v, "BUTTON_CAP_8", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(!shown(&s, &v), "let go: gone");
+    hold(&mut s, &v, "BUTTON_CAP_6", true);
+    assert!(!s.screen_text(&v).contains(&"SUB-TYPES".to_string()), "no Sub-types to show");
+    hold(&mut s, &v, "BUTTON_CAP_6", false);
+    let now = Instant::now();
+    s.event(&Event::Knob(4, 0.01), &v, now);
+    assert!(shown(&s, &v), "turned: the Types");
+    s.event(&Event::Wheel(1), &v, now);
+    assert!(!shown(&s, &v), "turning the 4D wheel closes it");
+    s.event(&Event::Knob(4, 0.01), &v, now);
+    assert!(shown(&s, &v), "turned again: the Types");
+    s.tick(&v, now + std::time::Duration::from_millis(500));
+    assert!(shown(&s, &v), "still, half a second on");
+    s.tick(&v, now + std::time::Duration::from_secs(2));
+    assert!(!shown(&s, &v), "gone a moment after the last turn");
+    assert_eq!(s.error(), None);
+}
+
 /// With AUTO on, the Control page's knobs are only what can be modulated, each showing
 /// its modulation where the song is as a percentage, as the MK3 manual has it (C31).
 #[test]
@@ -2545,6 +2625,143 @@ fn a_knob_a_macro_controls_shows_the_macro_icon() {
     assert!(!changed.is_empty(), "an icon");
     // Knob 3 is x 240-360 on the left screen; its name 233-247 down.
     assert!(changed.iter().all(|&(x, y)| (330..360).contains(&x) && (231..250).contains(&y)), "{changed:?}");
+}
+
+/// Turning knob 5 on the Step page zooms the right screen and updates the left screen's
+/// overview frame; knob 6 pans smoothly when zoomed in and pages 16 steps otherwise.
+#[test]
+fn the_step_page_knob_5_zooms_the_right_screen() {
+    let (mut s, mut v) = (Surface::new(), view());
+    (v.pattern_length, v.grid.step_ticks) = (4 * 3840, 240);
+    v.notes.clear();
+    let now = Instant::now();
+    press(&mut s, &v, "BUTTON_STEP");
+    let has = |s: &Surface, v: &View, label: &str| s.screen_text(v).iter().any(|t| t == label);
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "1.3"), "default 16 steps: 1 bar on the right screen");
+    // Tiny encoder steps leaving 1-bar zoom never chatter back into the snap.
+    for _ in 0..20 {
+        s.event(&Event::Knob(4, 0.01), &v, now);
+    }
+    assert!(!has(&s, &v, "1.3"), "small knob 5 steps zoom in smoothly past 1.3 without snap chatter");
+    s.event(&Event::Knob(5, 0.25), &v, now);
+    assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.1"), "knob 6 pans smoothly within bar 1 when zoomed in");
+    // Crossing 1-bar width while panned off-bar holds 1-bar width without jumping `from`.
+    s.event(&Event::Knob(4, -0.25), &v, now);
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "2.1"), "1-bar width from panned position keeps window start without jumping");
+    // Releasing CAP_5 clears the detent; double-tapping CAP_5 resets to aligned 1-bar view.
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "1.4") && !has(&s, &v, "2.1"), "double-tapping knob 5 resets to bar 1");
+    // Paging to bar 2, zooming out to full pattern (window at start), and zooming back in
+    // to 1 bar keeps the window at bar 1 instead of jumping to bar 2.
+    s.event(&Event::Knob(5, 0.1), &v, now);
+    assert!(has(&s, &v, "2.2") && !has(&s, &v, "1.2"), "knob 6 paged to bar 2");
+    s.event(&Event::Knob(4, -0.6), &v, now);
+    s.event(&Event::Knob(4, -0.6), &v, now);
+    assert!(!has(&s, &v, "2.2"), "zoomed out to whole pattern");
+    // Pads stay on bar 1 when zoomed out to the whole pattern rather than jumping to bar 3.
+    s.event(&Event::PadOn(1, 0.5), &v, now);
+    assert_eq!(s.event(&Event::PadOff(1), &v, now), [Action::StepToggle { at: 0, length: 240, velocity: 64 }]);
+    s.event(&Event::Knob(4, 0.6), &v, now);
+    s.event(&Event::Knob(4, 0.6), &v, now);
+    assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.2"), "zooming in from full pattern stays at start instead of jumping to bar 2");
+
+    // Multi-bar snaps: in an 8-bar pattern, zooming out from 1 bar snaps to 2 bars and
+    // 4 bars, and knob 6 still pans 1 bar at a time per gather step.
+    v.pattern_length = 8 * 3840;
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    hold(&mut s, &v, "BUTTON_CAP_5", true);
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    assert!(has(&s, &v, "1.2") && !has(&s, &v, "2.1"), "reset to 1 bar");
+    s.event(&Event::Knob(4, -0.3), &v, now);
+    assert!(has(&s, &v, "2.1") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "zooming out snaps to 2 bars (bars 1-2)");
+    s.event(&Event::Knob(5, 0.1), &v, now);
+    assert!(has(&s, &v, "2.1") && has(&s, &v, "3.3") && !has(&s, &v, "1.2") && !has(&s, &v, "4.1"), "knob 6 pans 1 bar (bars 2-3)");
+    s.event(&Event::Knob(5, -0.1), &v, now);
+    assert!(has(&s, &v, "1.2") && has(&s, &v, "2.3") && !has(&s, &v, "3.1"), "knob 6 pans back to bars 1-2");
+    let right_has = |s: &Surface, v: &View, label: &str| {
+        s.draw_picture(v).ops.iter().any(|o| matches!(o, screen::DrawOp::Text { x, text, .. } if *x >= 500 && text == label))
+    };
+    hold(&mut s, &v, "BUTTON_CAP_5", false);
+    s.event(&Event::Knob(4, -0.5), &v, now);
+    assert!(right_has(&s, &v, "1") && right_has(&s, &v, "4") && !right_has(&s, &v, "5"), "zooming out snaps to 4 bars (bars 1-4)");
+    s.event(&Event::Knob(5, 0.1), &v, now);
+    assert!(
+        right_has(&s, &v, "2") && right_has(&s, &v, "5") && !right_has(&s, &v, "1") && !right_has(&s, &v, "6"),
+        "knob 6 pans 1 bar (bars 2-5)"
+    );
+    assert_eq!(s.error(), None);
+}
+
+/// An automated knob shows an indicator dot at the top right of its name (beside the
+/// macro icon when both apply, and while AUTO is on too), and disappears when cleared.
+#[test]
+fn an_automated_knob_shows_an_indicator_beside_its_name() {
+    let (mut s, mut v) = (Surface::new(), view());
+    for k in v.control.knobs.iter_mut().flatten() {
+        k.modulatable = true;
+        k.auto_mod = Some("0%".into());
+    }
+    let plain = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = true;
+    let with_auto = s.picture(&v);
+    let diff = |a: &[[u8; 4]], b: &[[u8; 4]]| -> Vec<(usize, usize)> {
+        (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| (i % 960, i / 960)).collect()
+    };
+    let changed = diff(&plain, &with_auto);
+    assert!(!changed.is_empty(), "modulated indicator drawn");
+    assert!(changed.iter().all(|&(x, y)| (340..360).contains(&x) && (234..247).contains(&y)), "{changed:?}");
+
+    // Alongside the macro icon: both show without colliding.
+    v.control.knobs[2].as_mut().unwrap().in_macro = true;
+    let both = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = false;
+    let macro_only = s.picture(&v);
+    let shifted = diff(&macro_only, &both);
+    assert!(!shifted.is_empty(), "modulated indicator beside macro icon");
+    assert!(shifted.iter().all(|&(x, y)| (330..343).contains(&x) && (234..247).contains(&y)), "{shifted:?}");
+
+    // Still shown while Auto-write is on, and on the monotone LCD theme.
+    v.auto_write = true;
+    let auto_plain = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = true;
+    assert!(!diff(&auto_plain, &s.picture(&v)).is_empty(), "shown while AUTO is on");
+
+    s.set_lcd("yellow");
+    s.set_theme("lcd");
+    let lcd_with = s.picture(&v);
+    v.control.knobs[2].as_mut().unwrap().modulated = false;
+    assert!(!diff(&s.picture(&v), &lcd_with).is_empty(), "shown on LCD theme");
+}
+
+/// ERASE + tapping (or turning) a knob on the Control page removes its modulation, and
+/// doesn't trigger Touch Auto-write while the finger lifts.
+#[test]
+fn erase_and_tapping_a_knob_removes_its_modulation() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.playing, v.auto_write, v.touch_auto_write) = (true, true, true);
+    hold(&mut s, &v, "BUTTON_ERASE", true);
+    assert_eq!(hold(&mut s, &v, "BUTTON_CAP_3", true), [Action::EraseKnob(2)], "ERASE + tap");
+    assert!(s.tick(&v, now).is_empty(), "no TouchWrite while ERASE is held");
+    // Even if ERASE comes up before the finger leaves the knob, that tap doesn't write.
+    hold(&mut s, &v, "BUTTON_ERASE", false);
+    assert!(s.tick(&v, now).is_empty(), "no TouchWrite before CAP_3 lifts");
+    assert!(hold(&mut s, &v, "BUTTON_CAP_3", false).is_empty());
+    // Next plain touch writes as usual.
+    hold(&mut s, &v, "BUTTON_CAP_3", true);
+    assert!(s.tick(&v, now).contains(&Action::TouchWrite(2)));
+    hold(&mut s, &v, "BUTTON_CAP_3", false);
+
+    // ERASE + turning a knob also erases instead of turning.
+    hold(&mut s, &v, "BUTTON_ERASE", true);
+    assert_eq!(s.event(&Event::Knob(4, 0.05), &v, now), [Action::EraseKnob(4)], "ERASE + turn");
+    hold(&mut s, &v, "BUTTON_ERASE", false);
 }
 
 #[test]
@@ -3025,7 +3242,7 @@ fn lfo_page_in_envelope_mode() {
     }
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_7"), Some(crate::leds::ON), "ENV lit");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::OFF), "the shapes dark");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::BACKLIGHT), "the shapes dark");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_6"), Some(crate::leds::ON), "RETRIG on");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty(), "no shapes");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Lfo("retrigger", 1, 0.0)]);
@@ -3290,7 +3507,7 @@ fn the_step_grid_places_the_focused_sound_in_pad_mode() {
     let leds = s.leds(&v);
     assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), Some(deckard_mk3::leds::DIM), "empty");
     assert_eq!(leds.get("LED_SCREEN_BUTTON_2"), Some(crate::leds::ON), "a note");
-    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::OFF), "past the end");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_4"), Some(deckard_mk3::leds::BACKLIGHT), "past the end");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
 }
 
@@ -3451,7 +3668,7 @@ fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
 
 #[test]
 fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
-    let (mut surface, mut v) = (Surface::new(), view());
+    let (surface, mut v) = (Surface::new(), view());
     v.control.modules_visible = true;
     v.control.chain = (0..3)
         .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
@@ -3460,7 +3677,9 @@ fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
         v.control.slot_index = Some(slot);
         let picture = surface.draw_picture(&v);
         assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
-        assert!(picture.ops.iter().any(|o| matches!(o,screen::DrawOp::Triangle{x,y:149,dir,..}if (*x==4||*x==469)&&dir==direction)));
+        assert!(picture.ops.iter().any(
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 143, w: 18, h: 28, dir, .. } if (*x == 4 || *x == 458) && dir == direction)
+        ));
     }
     for slot in &mut v.control.chain {
         slot.instrument = false;
@@ -3783,4 +4002,50 @@ fn a_long_pad_name_wraps_onto_a_second_line() {
     assert!(wrapped("ClosedHH Bionic 2") && !texts.iter().any(|t| t == "ClosedHH Bionic"), "{texts:?}");
     assert!(wrapped("dt02_kick-punchy_crunch"), "{texts:?}");
     assert!(texts.iter().any(|t| t == "Kick"), "a short name, one line: {texts:?}");
+}
+
+#[test]
+fn pinned_events_screen_persists_across_reloads_and_restarts() {
+    let (mut s, v) = (Surface::new(), view());
+    let now = Instant::now();
+    hold(&mut s, &v, "BUTTON_EVENTS", true);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_1").is_empty());
+    hold(&mut s, &v, "BUTTON_EVENTS", false);
+    assert_eq!(s.page(), "events");
+    assert!(s.pinned().contains("EVENTS"));
+    assert_eq!(s.pinned_open().as_deref(), Some("EVENTS"));
+    assert_eq!(s.leds(&v).get("LED_EVENTS"), Some(crate::leds::ON));
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Theme changes keep both the pin and the open pinned page.
+    s.set_theme("palenight");
+    assert_eq!(s.page(), "events");
+    assert_eq!(s.pinned_open().as_deref(), Some("EVENTS"));
+    assert_eq!(s.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Restart while the pinned Events screen was open: reopens on Events over the
+    // project's saved base page, and restores the project's pad mode.
+    let mut s2 = Surface::new();
+    s2.set_pinned(s.pinned(), s.pinned_open().as_deref());
+    s2.set_theme("palenight");
+    let acts = s2.restore("mixer", "keyboard", &v, now);
+    assert!(acts.contains(&Action::KeyboardMode(true)), "{acts:?}");
+    assert_eq!(s2.page(), "events");
+    assert_eq!(s2.screen(), Some(("mixer".to_string(), "keyboard".to_string())));
+    assert_eq!(s2.leds(&v).get("LED_EVENTS"), Some(crate::leds::ON));
+    assert_eq!(s2.leds(&v).get("LED_SCREEN_BUTTON_1"), Some(crate::leds::ON));
+
+    // Tapping EVENTS closes back to the base page, while keeping EVENTS pinned.
+    press(&mut s2, &v, "BUTTON_EVENTS");
+    assert_eq!(s2.page(), "mixer");
+    assert!(s2.pinned().contains("EVENTS"));
+    assert_eq!(s2.pinned_open(), None);
+
+    // Restart with EVENTS pinned (not open): starts on Control, and a tap locks Events open.
+    let mut s3 = Surface::new();
+    s3.set_pinned(s2.pinned(), s2.pinned_open().as_deref());
+    assert_eq!(s3.page(), FIRST_PAGE);
+    press(&mut s3, &v, "BUTTON_EVENTS");
+    assert_eq!(s3.page(), "events");
+    assert_eq!(s3.pinned_open().as_deref(), Some("EVENTS"));
 }

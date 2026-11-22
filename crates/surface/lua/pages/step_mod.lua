@@ -11,6 +11,7 @@
 --                     (no step taken or removed)
 
 local control = require("pages.control")
+local knobs = require("lib.knobs")
 local step = require("pages.step")
 
 local page = {}
@@ -26,6 +27,10 @@ function page.button(name, down)
 end
 
 function page.knob(n, amount)
+  if deckard.held("ERASE") then
+    knobs.erase(n)
+    return true
+  end
   local c = deckard.state().control
   local knob = c.knobs[n]
   if knob and knob.modulatable then step.mod_knob(n, amount) end
@@ -49,7 +54,14 @@ end
 local function knob_of(knob)
   if not knob.modulatable then return nil end
   if not knob.step_mod then return knob end
-  return { name = knob.name, section = knob.section, value = knob.value, text = knob.step_mod }
+  return {
+    name = knob.name,
+    section = knob.section,
+    value = knob.value,
+    text = knob.step_mod,
+    macro = knob.macro,
+    modulated = knob.modulated,
+  }
 end
 
 function page.draw(screen, theme)

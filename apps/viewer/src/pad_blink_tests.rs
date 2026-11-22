@@ -11,7 +11,21 @@ use std::time::{Duration, Instant};
 const FLASH: Duration = deckard_engine::output::FLASH;
 
 fn note(tick: i64, sound: usize, length: i64) -> NoteEvent {
-    NoteEvent { tick, group: 0, sound, pitch: 60, velocity: 100, length, probability: 100, midi: None, cue: None, expr: None, from: None }
+    NoteEvent {
+        expr_at: 0,
+        roll: None,
+        tick,
+        group: 0,
+        sound,
+        pitch: 60,
+        velocity: 100,
+        length,
+        probability: 100,
+        midi: None,
+        cue: None,
+        expr: None,
+        from: None,
+    }
 }
 
 fn timeline(events: Vec<NoteEvent>) -> Timeline {

@@ -37,7 +37,7 @@ fn path(p: &Project, fs: &[Fader], d: deckard_model::AudioDest, parent: Option<u
         }
         D::Sound(g, s) => {
             if let Some(snd) = p.groups.get(g).and_then(|g| g.sounds.get(s)) {
-                if has_sound_bus(snd) {
+                if has_sound_bus(p, g, s) {
                     return;
                 }
                 if let Some(i) = fs.iter().position(|f| (f.group, f.sound) == (g, Some(s))) {
@@ -134,6 +134,7 @@ pub(super) fn order(
     routes: &[Vec<Option<usize>>],
     sound_sends: &[Vec<Vec<Send>>],
     strips: &[(Owner, usize, Channels, StripRoute)],
+    listeners: &[(usize, usize)],
 ) -> Vec<usize> {
     fn bus_node(bus: Option<usize>) -> Option<usize> {
         match bus {
@@ -151,6 +152,7 @@ pub(super) fn order(
         rts: &[Vec<Option<usize>>],
         sa: &[Vec<Vec<Send>>],
         st: &[(Owner, usize, Channels, StripRoute)],
+        ls: &[(usize, usize)],
         memo: &mut [Option<usize>],
         busy: &mut [bool],
     ) -> usize {
@@ -163,7 +165,7 @@ pub(super) fn order(
         busy[idx] = true;
         let node = nodes[idx];
         let step = |target: usize, memo: &mut [Option<usize>], busy: &mut [bool]| {
-            nodes.iter().position(|&x| x == target).map_or(0, |next_idx| 1 + depth(next_idx, nodes, bs, ss, rts, sa, st, memo, busy))
+            nodes.iter().position(|&x| x == target).map_or(0, |next_idx| 1 + depth(next_idx, nodes, bs, ss, rts, sa, st, ls, memo, busy))
         };
         let value = if let Some((g, s)) = decode_sound_bus(node) {
             let main = rts.get(g).and_then(|r| r.get(s)).copied().flatten();
@@ -188,6 +190,10 @@ pub(super) fn order(
             let targets: Vec<usize> = std::iter::once(normal).chain(aux).chain(ext).filter_map(bus_node).collect();
             targets.into_iter().map(|t| step(t, memo, busy)).max().unwrap_or(0)
         };
+        // A side-chain source runs before the buses whose effects listen to it (its
+        // buffer is filled as it runs, and cleared each span).
+        let heard = ls.iter().filter(|&&(src, _)| src == node).map(|&(_, dst)| step(dst, memo, busy)).max().unwrap_or(0);
+        let value = value.max(heard);
         busy[idx] = false;
         memo[idx] = Some(value);
         value
@@ -206,7 +212,7 @@ pub(super) fn order(
     let mut memo = vec![None; nodes.len()];
     let mut busy = vec![false; nodes.len()];
     let depths: Vec<usize> =
-        (0..nodes.len()).map(|i| depth(i, &nodes, buses, sends, routes, sound_sends, strips, &mut memo, &mut busy)).collect();
+        (0..nodes.len()).map(|i| depth(i, &nodes, buses, sends, routes, sound_sends, strips, listeners, &mut memo, &mut busy)).collect();
     let mut indices: Vec<usize> = (0..nodes.len()).collect();
     indices.sort_by_key(|&i| std::cmp::Reverse(depths[i]));
     indices.into_iter().map(|i| nodes[i]).collect()

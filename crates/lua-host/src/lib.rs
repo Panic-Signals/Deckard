@@ -368,6 +368,13 @@ impl Host {
         self.event("onSwitchEvent", (id, pressed));
         if pressed && let Some(n) = button.strip_prefix("BUTTON_CAP_").and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=8).contains(n))
         {
+            let control = self.constant("NI.HW.ENC_MODE_CONTROL").ok();
+            let erase = self.constant("NI.HW.BUTTON_ERASE").ok().is_some_and(|b| self.state.borrow().hw.held.contains(&b));
+            if erase && control.is_some_and(|c| self.state.borrow().hw.encoder_mode == c) {
+                self.knob_taps[n - 1] = None;
+                self.state.borrow_mut().control_requests.push(crate::state::ControlRequest::Erase { pos: n - 1 });
+                return Ok(());
+            }
             let now = std::time::Instant::now();
             let double = self.knob_taps[n - 1].is_some_and(|t| now.duration_since(t) < DOUBLE_TAP);
             self.knob_taps[n - 1] = if double { None } else { Some(now) };

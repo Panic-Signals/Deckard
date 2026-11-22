@@ -6,6 +6,7 @@ use crate::remote::{AssignTab, RemoteAct};
 use crate::{App, Playhead, modulation, sampler_ui};
 use deckard_doc::Target;
 use deckard_engine::Mode;
+use deckard_model::ratchet::{self, Ratchet, Shape};
 use deckard_model::{Color, LaneRef, MidiEvent, MidiKind, Note, PPQ, Project, SWING_CYCLES, Swing};
 use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use mxprj::decode::Value;
@@ -28,14 +29,107 @@ pub(crate) use mixer::silent_master_note;
 pub(crate) use mixer::strip_cv_flag;
 pub use mixer::{Channel, MixerSection, MixerSections};
 
-// Surfaces (Definitions/Colors.txt).
-pub const S00: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
-const S05: Color32 = Color32::from_rgb(0x21, 0x21, 0x21);
-const S01: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
-const S02: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
-const S03: Color32 = Color32::from_rgb(0x3C, 0x3C, 0x3C);
-const FOCUS_ROW: Color32 = Color32::from_rgb(0x29, 0x29, 0x29);
-const LANE: Color32 = Color32::from_rgb(0x12, 0x12, 0x12);
+/// The window's surfaces, darkest use first, and what is written on them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Desk {
+    s00: Color32,
+    s05: Color32,
+    s01: Color32,
+    s02: Color32,
+    s03: Color32,
+    focus_row: Color32,
+    lane: Color32,
+    ink: Color32,
+}
+
+/// The ordinary dark window (Definitions/Colors.txt).
+const PLAIN: Desk = Desk {
+    s00: Color32::from_rgb(0x18, 0x18, 0x18),
+    s05: Color32::from_rgb(0x21, 0x21, 0x21),
+    s01: Color32::from_rgb(0x26, 0x26, 0x26),
+    s02: Color32::from_rgb(0x32, 0x32, 0x32),
+    s03: Color32::from_rgb(0x3C, 0x3C, 0x3C),
+    focus_row: Color32::from_rgb(0x29, 0x29, 0x29),
+    lane: Color32::from_rgb(0x12, 0x12, 0x12),
+    ink: Color32::WHITE,
+};
+
+impl Desk {
+    /// A theme's window: its field, and each raised surface as far from the field
+    /// toward the writing as the ordinary window's greys are from its ground toward white.
+    fn themed(paper: Color32, ink: Color32) -> Desk {
+        let ground = f32::from(PLAIN.s00.r());
+        let step = |grey: Color32| {
+            let t = (f32::from(grey.r()) - ground) / (255.0 - ground);
+            let m = |p: u8, i: u8| (f32::from(p) + (f32::from(i) - f32::from(p)) * t).round().clamp(0.0, 255.0) as u8;
+            Color32::from_rgb(m(paper.r(), ink.r()), m(paper.g(), ink.g()), m(paper.b(), ink.b()))
+        };
+        Desk {
+            s00: paper,
+            s05: step(PLAIN.s05),
+            s01: step(PLAIN.s01),
+            s02: step(PLAIN.s02),
+            s03: step(PLAIN.s03),
+            focus_row: step(PLAIN.focus_row),
+            lane: dim(paper, f32::from(PLAIN.lane.r()) / ground),
+            ink,
+        }
+    }
+}
+
+thread_local! {
+    /// What the window is drawn with: the desktop theme's, or the ordinary dark one.
+    static DESK: std::cell::Cell<Desk> = const { std::cell::Cell::new(PLAIN) };
+}
+
+fn desk() -> Desk {
+    DESK.with(|d| d.get())
+}
+
+/// The window's ground.
+pub fn s00() -> Color32 {
+    desk().s00
+}
+fn s05() -> Color32 {
+    desk().s05
+}
+fn s01() -> Color32 {
+    desk().s01
+}
+fn s02() -> Color32 {
+    desk().s02
+}
+fn s03() -> Color32 {
+    desk().s03
+}
+fn focus_row() -> Color32 {
+    desk().focus_row
+}
+fn lane_fill() -> Color32 {
+    desk().lane
+}
+/// A grey of the ordinary window as the theme has it: below the ground it is the
+/// field darkened, above it the field on its way to the writing.
+pub(crate) fn grey(v: u8) -> Color32 {
+    let d = desk();
+    if d == PLAIN {
+        return Color32::from_gray(v);
+    }
+    let ground = f32::from(PLAIN.s00.r());
+    let v = f32::from(v);
+    if v <= ground {
+        return dim(d.s00, v / ground);
+    }
+    let t = (v - ground) / (255.0 - ground);
+    let m = |p: u8, i: u8| (f32::from(p) + (f32::from(i) - f32::from(p)) * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(m(d.s00.r(), d.ink.r()), m(d.s00.g(), d.ink.g()), m(d.s00.b(), d.ink.b()))
+}
+
+/// The window's writing at full strength: white, or the theme's.
+pub(crate) fn ink() -> Color32 {
+    desk().ink
+}
+
 const PLAY_ON: Color32 = Color32::from_rgb(0xBD, 0xF1, 0x64);
 const REC_ON: Color32 = Color32::from_rgb(0xE3, 0x42, 0x3F);
 
@@ -82,8 +176,10 @@ pub(crate) const PALETTE: [[u8; 3]; 17] = [
     [0xFF, 0xFF, 0xFF],
 ];
 
+/// The window's writing at strength `a`: white on the ordinary window.
 fn white(a: u8) -> Color32 {
-    Color32::from_white_alpha(a)
+    let i = ink();
+    Color32::from_rgba_unmultiplied(i.r(), i.g(), i.b(), a)
 }
 
 fn black(a: u8) -> Color32 {
@@ -105,26 +201,25 @@ thread_local! {
     static LCD_PAPER: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
     /// The LCD's pixel, the colour that reads on the field.
     static LCD_INK: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
-    /// Pads and groups: the mode's one colour.
-    static LCD_HUE: std::cell::Cell<Option<Color32>> = const { std::cell::Cell::new(None) };
-    /// The pair last given to egui, and whether groups collapsed to one hue.
-    static LCD_APPLIED: std::cell::Cell<Option<([u8; 3], [u8; 3], bool)>> = const { std::cell::Cell::new(None) };
+    /// The pair last given to egui.
+    static LCD_APPLIED: std::cell::Cell<Option<([u8; 3], [u8; 3])>> = const { std::cell::Cell::new(None) };
 }
 
-/// The software window for `theme`: field, writing, and the LCD's one group colour.
-/// Maschine (and anything unknown) is `None`, the ordinary dark window, so an LCD
-/// controller does not restyle the software.
-fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3], Option<[u8; 3]>)> {
+/// The software window for `theme`: its field and its writing. Groups, sounds,
+/// patterns and scenes keep their own colours in every theme. Maschine (and anything
+/// unknown) is `None`, the ordinary dark window, so an LCD controller does not
+/// restyle the software.
+fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3])> {
     match theme {
         "lcd" => {
             let look = deckard_surface::lcd::look(mode);
-            Some((look.paper, look.ink, Some(look.hue)))
+            Some((look.paper, look.ink))
         }
         // Solarized's field and text. Palenight's writing on black.
-        "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1], None)),
-        "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff], None)),
+        "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1])),
+        "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff])),
         // Palenight on its blue-grey field.
-        "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff], None)),
+        "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff])),
         _ => None,
     }
 }
@@ -148,21 +243,21 @@ fn lcd_readable(fill: Color32) -> Option<Color32> {
 
 /// The window's ground: the LCD's field, or the ordinary dark surface.
 fn field() -> Color32 {
-    LCD_PAPER.with(|c| c.get()).unwrap_or(S00)
+    s00()
 }
 
 /// A sound row that SELECT has, besides the focused one.
 fn sound_base(app: &App, sound: usize) -> Color32 {
-    if sound != app.sound && app.sound_selection.contains(&sound) { S01 } else { field() }
+    if sound != app.sound && app.sound_selection.contains(&sound) { s01() } else { field() }
 }
 
 /// The software window follows the desktop theme. The controller keeps its own.
 /// Maschine restores the ordinary dark window.
 fn sync_lcd(ctx: &egui::Context, app: &App) {
-    let Some((paper, ink, hue)) = desktop_look(&app.settings.desktop_theme, &app.settings.lcd_mode) else {
+    let Some((paper, ink)) = desktop_look(&app.settings.desktop_theme, &app.settings.lcd_mode) else {
         LCD_PAPER.with(|c| c.set(None));
         LCD_INK.with(|c| c.set(None));
-        LCD_HUE.with(|c| c.set(None));
+        DESK.with(|d| d.set(PLAIN));
         if LCD_APPLIED.with(|c| c.take()).is_some() {
             dark_style(ctx);
         }
@@ -170,8 +265,8 @@ fn sync_lcd(ctx: &egui::Context, app: &App) {
     };
     LCD_PAPER.with(|c| c.set(Some(Color32::from_rgb(paper[0], paper[1], paper[2]))));
     LCD_INK.with(|c| c.set(Some(Color32::from_rgb(ink[0], ink[1], ink[2]))));
-    LCD_HUE.with(|c| c.set(hue.map(|h| Color32::from_rgb(h[0], h[1], h[2]))));
-    let key = (paper, ink, hue.is_some());
+    DESK.with(|d| d.set(Desk::themed(Color32::from_rgb(paper[0], paper[1], paper[2]), Color32::from_rgb(ink[0], ink[1], ink[2]))));
+    let key = (paper, ink);
     if LCD_APPLIED.with(|c| c.replace(Some(key))) != Some(key) {
         apply_lcd(ctx, Color32::from_rgb(paper[0], paper[1], paper[2]), Color32::from_rgb(ink[0], ink[1], ink[2]));
     }
@@ -218,11 +313,8 @@ fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
 }
 
 /// A colour slot; `Default` falls back to `default_slot` (our guess at Maschine's
-/// default, two slots per index). On the LCD every slot is the mode's one colour.
+/// default, two slots per index). The same in every desktop theme.
 fn palette(c: Color, default_slot: usize) -> Color32 {
-    if let Some(hue) = LCD_HUE.with(|cell| cell.get()) {
-        return hue;
-    }
     let i = match c {
         Color::Palette(i) => i as usize,
         Color::Default => default_slot % 16,
@@ -285,7 +377,7 @@ fn sound_color(p: &Project, g: usize, s: usize) -> Color32 {
 fn pattern_color(p: &Project, g: usize, pi: usize) -> Color32 {
     let parent = group_color(p, g);
     let c = inherit(p.groups[g].patterns[pi].color, parent);
-    if p.groups[g].muted { Color32::from_gray(0x80) } else { c }
+    if p.groups[g].muted { grey(0x80) } else { c }
 }
 
 fn scene_color(p: &Project, s: usize) -> Color32 {
@@ -336,7 +428,7 @@ fn label(painter: &Painter, rect: Rect, indent: f32, text: &str, size: f32, colo
 /// and its end ("Drums Acoustic Kit 2" → "Drums A…Kit 2"): as many characters as fit,
 /// split evenly (the start gets the odd one), with no spaces next to the "…".
 pub(crate) fn elide_middle(painter: &Painter, text: &str, size: f32, width: f32) -> String {
-    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font(size), Color32::WHITE).size().x <= width;
+    let fits = |t: &str| painter.layout_no_wrap(t.to_string(), font(size), ink()).size().x <= width;
     if fits(text) {
         return text.to_string();
     }
@@ -509,7 +601,7 @@ fn pattern_span_handles(
         // The ends: a bright bar with a tab into the ruler.
         if !matches!(part, Part::Body) {
             let x = if matches!(part, Part::Start) { x0 } else { end_x };
-            let ink = if hovered { Color32::WHITE } else { white(170) };
+            let ink = if hovered { ink() } else { white(170) };
             painter.vline(x, tl.y_range(), Stroke::new(2.0, ink));
             let tab = if matches!(part, Part::Start) {
                 Rect::from_min_size(Pos2::new(x, tl.top()), Vec2::new(5.0, 6.0))
@@ -552,7 +644,7 @@ pub fn deckard_logo_scaled(painter: &Painter, left_center: Pos2, scale: f32) -> 
     }
     let font = FontId::proportional(18.0 * scale);
     let spacing = 2.5 * scale;
-    let galleys: Vec<_> = "DECKARD".chars().map(|c| painter.layout_no_wrap(c.to_string(), font.clone(), Color32::WHITE)).collect();
+    let galleys: Vec<_> = "DECKARD".chars().map(|c| painter.layout_no_wrap(c.to_string(), font.clone(), ink())).collect();
     let width: f32 = galleys.iter().map(|g| g.size().x).sum::<f32>() + spacing * (galleys.len() - 1) as f32;
     let h = galleys[0].size().y;
     let rect = Rect::from_min_size(Pos2::new(left_center.x + 4.0, left_center.y - h / 2.0), Vec2::new(width, h));
@@ -814,8 +906,14 @@ pub enum Act {
     ReplaceSlotIn(deckard_doc::Chain, usize, AddWhat),
     /// Move slot `.0` of the focused sound's chain to position `.1`.
     MoveSlot(usize, usize),
+    /// Move slot `.1` of chain `.0` to position `.2`.
+    MoveSlotIn(deckard_doc::Chain, usize, usize),
+    /// Move slot `.1` of chain `.0` to position `.3` of chain `.2`.
+    MoveSlotBetween(deckard_doc::Chain, usize, deckard_doc::Chain, usize),
     SlotActive(usize, bool),
     OpenSlotEditor(usize),
+    /// Open the window of the plug-in in slot `.1` of chain `.0`.
+    OpenSlotEditorIn(deckard_doc::Chain, usize),
     /// Set parameter `id` of the plug-in in slot `.0` (normalized).
     PluginParam(usize, u32, f64),
     /// [`Act::PluginParam`] of the plug-in in slot `.1` of chain `.0` (a macro's: any
@@ -1334,6 +1432,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             Act::AddSlot(what) => app.add_slot(what),
             Act::MoveSlot(from, to) => app.move_slot(from, to),
+            Act::MoveSlotIn(c, from, to) => app.move_slot_in(c, from, to),
+            Act::MoveSlotBetween(from, from_at, to, to_at) => app.move_slot_between(from, from_at, to, to_at),
             Act::RemoveSlot(i) => apply(app, vec![Act::RemoveSlotIn(app.chain(), i)]),
             Act::RemoveSlotIn(c, i) => {
                 let key = app.plugin_slot_key(c, i);
@@ -1357,6 +1457,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
+            Act::OpenSlotEditorIn(c, i) => app.open_slot_editor_in(c, i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::Zhora(what) => app.zhora_press(what),
             Act::PluginParamIn(c, i, id, v) => set_plugin_param(app, c, i, id, v),
@@ -1538,15 +1639,18 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     Target::Module(..) | Target::ChainModule(..) => "Effect Parameter",
                     _ => "Channel Property",
                 };
-                // Variation and Generate settings of a project from before Maschine 3:
-                // kept for the session.
+                // Variation and Generate settings of a sound from before Maschine 3:
+                // kept in DECKARD's field on the sound.
                 if let Target::Sound(g, s) = t
                     && field.starts_with("sequence_")
                     && !doc.borrow().has_groove_settings(g, s)
                 {
                     const WHOLE: [&str; 9] = ["mode", "distribution", "division", "steps", "fills", "rotate", "note_count", "low", "high"];
                     let v = if WHOLE.iter().any(|w| field.ends_with(w)) { v.round() } else { v };
-                    app.groove_settings.insert((g, s, field.to_string()), v);
+                    if let Err(e) = doc.borrow_mut().set_groove_setting(g, s, field, v) {
+                        app.status = format!("can't change {field}: {e}");
+                        continue;
+                    }
                     app.live_groove(g, s, field);
                     continue;
                 }
@@ -2106,7 +2210,7 @@ fn master_fader(ui: &mut Ui, level: f64, meter: (f32, f32), acts: &mut Vec<Act>)
     // The level: a white line through both.
     let lit = resp.hovered() || resp.dragged();
     let line = Rect::from_center_size(Pos2::new(x(level), bars.center().y), Vec2::new(if lit { 3.0 } else { 2.0 }, bars.height() + 8.0));
-    p.rect_filled(line, 1.0, if lit { Color32::WHITE } else { white(230) });
+    p.rect_filled(line, 1.0, if lit { ink() } else { white(230) });
     value_entry::gestures(
         ui,
         &resp,
@@ -2194,7 +2298,7 @@ fn link_button(ui: &mut Ui, view: Option<(u64, f64)>) -> Response {
 fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> {
     const GREEN: Color32 = Color32::from_rgb(0x2e, 0x9e, 0x4f);
     const GREEN_HOVER: Color32 = Color32::from_rgb(0x38, 0xb4, 0x5c);
-    let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), Color32::WHITE);
+    let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), ink());
     let size = Vec2::new(10.0 + 14.0 + 6.0 + text.size().x + 10.0, 22.0);
     let gap = 10.0;
     if ui.cursor().left() + gap + size.x + gap > before {
@@ -2209,21 +2313,21 @@ fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> 
     let rad = 5.0;
     let (a0, a1) = (-0.35 * std::f32::consts::PI, 1.35 * std::f32::consts::PI);
     let pts: Vec<Pos2> = (0..=20).map(|i| a0 + (a1 - a0) * i as f32 / 20.0).map(|a| c + rad * Vec2::new(a.cos(), a.sin())).collect();
-    p.add(egui::Shape::line(pts, Stroke::new(1.6, Color32::WHITE)));
+    p.add(egui::Shape::line(pts, Stroke::new(1.6, ink())));
     let tip = c + rad * Vec2::new(a0.cos(), a0.sin());
     p.add(egui::Shape::convex_polygon(
         vec![tip + Vec2::new(-3.5, -2.0), tip + Vec2::new(2.5, -3.0), tip + Vec2::new(1.0, 3.0)],
-        Color32::WHITE,
+        ink(),
         Stroke::NONE,
     ));
-    p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, Color32::WHITE);
+    p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, ink());
     note_rect(ui, "update", r);
     Some(resp.on_hover_text(format!("DECKARD {version} is out: click to see it and update (Help ▸ About)")))
 }
 
 fn separator(ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, HEADER), Sense::hover());
-    ui.painter().vline(r.center().x, r.y_range().shrink(6.5), Stroke::new(1.0, S02));
+    ui.painter().vline(r.center().x, r.y_range().shrink(6.5), Stroke::new(1.0, s02()));
 }
 
 /// The rounded display: tempo, signature, position and the scene name.
@@ -2241,13 +2345,13 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
     };
     let (rect, _) = ui.allocate_exact_size(DISPLAY_SIZE, Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 5.0, Color32::from_gray(10));
+    painter.rect_filled(rect, 5.0, grey(10));
     // The cells, left to right, each with a divider after it.
     let mut x = rect.left() + 4.0;
     let mut cell = |w: f32| {
         let r = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(w, rect.height()));
         x += w;
-        painter.vline(x, rect.y_range().shrink(5.0), Stroke::new(1.0, S03));
+        painter.vline(x, rect.y_range().shrink(5.0), Stroke::new(1.0, s03()));
         r
     };
     let (bpm, swing, sig, position) = (cell(96.0), cell(100.0), cell(64.0), cell(66.0));
@@ -2320,7 +2424,7 @@ fn display_box(ui: &mut Ui, app: &App, p: &Project, acts: &mut Vec<Act>) {
 /// sized to `text` plus optional dropdown chevron).
 fn pill_menu_at(ui: &mut Ui, rect: Rect, text: String, chevron: bool, stay_open: bool, add: impl FnOnce(&mut Ui)) -> Response {
     use egui::containers::menu::{MenuButton, MenuConfig};
-    let text_w = ui.painter().layout_no_wrap(text.clone(), font(11.0), Color32::WHITE).size().x;
+    let text_w = ui.painter().layout_no_wrap(text.clone(), font(11.0), ink()).size().x;
     let w = if chevron { (text_w + 26.0).ceil().max(46.0) } else { (text_w + 18.0).ceil() };
     let pill = Rect::from_min_size(rect.min, Vec2::new(w, rect.height()));
     let mut child = ui.new_child(UiBuilder::new().max_rect(pill).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -2344,9 +2448,9 @@ fn pill_menu_at(ui: &mut Ui, rect: Rect, text: String, chevron: bool, stay_open:
     resp.rect = pill;
     let p = ui.painter();
     let hot = resp.hovered() || resp.has_focus();
-    p.rect_filled(pill, 3.0, if hot { S03 } else { S01 });
-    p.rect_stroke(pill, 3.0, Stroke::new(1.0, if hot { white(80) } else { S03 }), StrokeKind::Inside);
-    let ink = if hot { Color32::WHITE } else { white(215) };
+    p.rect_filled(pill, 3.0, if hot { s03() } else { s01() });
+    p.rect_stroke(pill, 3.0, Stroke::new(1.0, if hot { white(80) } else { s03() }), StrokeKind::Inside);
+    let ink = if hot { ink() } else { white(215) };
     if chevron {
         p.text(Pos2::new(pill.left() + 8.0, pill.center().y), Align2::LEFT_CENTER, &text, font(11.0), ink);
         let cx = pill.right() - 8.5;
@@ -2579,7 +2683,7 @@ fn strip(ui: &mut Ui, rect: Rect, fill: Color32, top: f32, buttons: &[StripButto
         let r = Rect::from_min_size(Pos2::new(rect.left(), rect.top() + top + i as f32 * 28.0), Vec2::new(STRIP, 24.0));
         let resp = ui.interact(r, ui.id().with(("strip", rect.top() as i32, i)), Sense::click()).on_hover_text(*tip);
         if *on {
-            ui.painter().rect_filled(r.shrink2(Vec2::new(3.0, 0.0)), 3.0, S03);
+            ui.painter().rect_filled(r.shrink2(Vec2::new(3.0, 0.0)), 3.0, s03());
         } else if resp.hovered() {
             ui.painter().rect_filled(r.shrink2(Vec2::new(3.0, 0.0)), 3.0, white(20));
         }
@@ -2644,7 +2748,7 @@ fn piano_icon(p: &Painter, r: Rect, c: Color32) {
 
 fn view_switch(ui: &mut Ui, app: &App, rect: Rect, acts: &mut Vec<Act>) {
     let strip_rect = Rect::from_min_size(rect.min, Vec2::new(STRIP, rect.height()));
-    match strip(ui, strip_rect, S05, 6.0, &[(!app.song_view, "Ideas view", ideas_icon), (app.song_view, "Song view", song_icon)]) {
+    match strip(ui, strip_rect, s05(), 6.0, &[(!app.song_view, "Ideas view", ideas_icon), (app.song_view, "Song view", song_icon)]) {
         Some(0) => acts.push(Act::SongView(false)),
         Some(1) => acts.push(Act::SongView(true)),
         _ => {}
@@ -2693,7 +2797,7 @@ fn zoom_bar(
             Rect::from_min_max(Pos2::new(track.left() + 2.0, lo), Pos2::new(track.right() - 2.0, hi))
         }
     };
-    painter.rect_filled(track, 0.0, S00);
+    painter.rect_filled(track, 0.0, s00());
     let thumb = span(a, b);
     let h = if zoom { 6.0_f32.min((b - a) / 3.0) } else { 0.0 };
     #[derive(Clone, Copy, PartialEq)]
@@ -2790,7 +2894,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
 
     // Scene tabs.
     let tabs = Rect::from_min_size(area.min, Vec2::new(area.width(), SCENE_ROW));
-    painter.rect_filled(tabs, 0.0, S05);
+    painter.rect_filled(tabs, 0.0, s05());
     if let Some(first) = app.show_scenes {
         ui.data_mut(|d| d.insert_temp(ui.id().with("scene-tabs"), first as f32 * IDEA_W));
         acts.push(Act::ScenesShown);
@@ -2817,7 +2921,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("scene-drop"))).vline(
                     x,
                     tabs.y_range(),
-                    Stroke::new(2.0, Color32::WHITE),
+                    Stroke::new(2.0, ink()),
                 );
             }
         }
@@ -2828,9 +2932,9 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let fill = if focused && !blink {
             col
         } else if resp.hovered() {
-            S03
+            s03()
         } else {
-            S01
+            s01()
         };
         let inner = r.shrink2(Vec2::new(0.5, 4.0));
         painter.rect_filled(inner, 2.0, fill);
@@ -2888,14 +2992,14 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
             .show(|ui| scene_menu(ui, p, s, app.scene_tempo_available(), acts));
     }
     // Focus line.
-    painter.rect_filled(Rect::from_min_size(Pos2::new(area.left(), tabs.bottom()), Vec2::new(area.width(), 3.0)), 0.0, S03);
+    painter.rect_filled(Rect::from_min_size(Pos2::new(area.left(), tabs.bottom()), Vec2::new(area.width(), 3.0)), 0.0, s03());
 
     // Patterns, one column per group, and the group tiles.
     let tiles = Rect::from_min_max(Pos2::new(area.left(), area.bottom() - TILE_H), area.max);
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-tiles"), tiles));
     let cells = Rect::from_min_max(Pos2::new(area.left(), tabs.bottom() + 4.0), Pos2::new(area.right(), tiles.top() - 1.0));
-    painter.rect_filled(cells, 0.0, S05);
-    painter.rect_filled(tiles, 0.0, S05);
+    painter.rect_filled(cells, 0.0, s05());
+    painter.rect_filled(tiles, 0.0, s05());
     let columns = Rect::from_min_max(cells.min, tiles.max);
     let gx = hscroll(ui, "idea-columns", columns, p.groups.len() as f32 * IDEA_W + 27.0);
     // A row per place; one more than the last pattern, for a new one.
@@ -2939,7 +3043,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                     } else {
                         let target = place(to).shrink2(Vec2::new(3.0, 2.0));
                         let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("pattern-drop")));
-                        fg.with_clip_rect(cells).rect_stroke(target, 3.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+                        fg.with_clip_rect(cells).rect_stroke(target, 3.0, Stroke::new(2.0, ink()), StrokeKind::Outside);
                     }
                 }
             }
@@ -2959,7 +3063,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 let f = (t / pattern_len(p, g, pi) as f64) as f32;
                 let x = shape.left() + shape.width() * f;
                 cell_painter.rect_filled(Rect::from_min_max(shape.min, Pos2::new(x, shape.bottom())), 3.0, black(70));
-                cell_painter.vline(x, shape.y_range(), Stroke::new(2.0, Color32::WHITE));
+                cell_painter.vline(x, shape.y_range(), Stroke::new(2.0, ink()));
             }
             let name = &group.patterns[pi].name;
             let ink = if assigned { black(245) } else { col };
@@ -3024,13 +3128,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         let tile = Rect::from_min_size(Pos2::new(x, tiles.top()), Vec2::new(IDEA_W - 1.0, TILE_H)).shrink(1.0);
         let resp = ui.interact(tile.intersect(tiles), ui.id().with(("tile", g)), Sense::click());
         note_rect(ui, &format!("group tile {g}"), tile);
-        let gcol = if group.muted && LCD_HUE.with(|c| c.get()).is_none() {
-            Color32::from_gray(0x7D)
-        } else if group.muted {
-            dim(group_color(p, g), 0.45)
-        } else {
-            group_color(p, g)
-        };
+        let gcol = if group.muted { grey(0x7D) } else { group_color(p, g) };
         let focused = g == app.group;
         let tp = painter.with_clip_rect(tiles);
         if focused {
@@ -3069,7 +3167,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 progress_strip(&tp, strip, bars, 2.0, played, filled, unfilled);
             }
             None => {
-                tp.rect_filled(strip, 0.0, if focused { black(61) } else { S01 });
+                tp.rect_filled(strip, 0.0, if focused { black(61) } else { s01() });
             }
         }
         // A double-click mutes or unmutes the group (renaming is in its menu).
@@ -3084,7 +3182,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     let plus = Rect::from_min_size(Pos2::new(tiles.left() + p.groups.len() as f32 * IDEA_W - gx, tiles.top()), Vec2::new(27.0, TILE_H));
     if plus.intersects(tiles) {
         let resp = ui.interact(plus.intersect(tiles), ui.id().with("add-group"), Sense::click());
-        painter.rect_filled(plus.shrink(1.0).intersect(tiles), 2.0, if resp.hovered() { S03 } else { S01 });
+        painter.rect_filled(plus.shrink(1.0).intersect(tiles), 2.0, if resp.hovered() { s03() } else { s01() });
         plus_glyph(&painter.with_clip_rect(tiles), plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New group").clicked() {
             acts.push(Act::AddGroup);
@@ -3094,7 +3192,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
     let plus = Rect::from_min_size(Pos2::new(tabs.left() + p.scenes.len() as f32 * IDEA_W - sx, tabs.top()), Vec2::new(27.0, SCENE_ROW));
     if plus.intersects(tabs) {
         let resp = ui.interact(plus.intersect(tabs), ui.id().with("add-scene"), Sense::click());
-        painter.rect_filled(plus.shrink2(Vec2::new(0.5, 4.0)).intersect(tabs), 2.0, if resp.hovered() { S03 } else { S01 });
+        painter.rect_filled(plus.shrink2(Vec2::new(0.5, 4.0)).intersect(tabs), 2.0, if resp.hovered() { s03() } else { s01() });
         plus_glyph(&painter, plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New scene").clicked() {
             acts.push(Act::AddScene);
@@ -3265,7 +3363,7 @@ fn group_row(
     base: Color32,
     meter: (f32, f32),
 ) {
-    painter.rect_filled(rect, 0.0, if focused { FOCUS_ROW } else { base });
+    painter.rect_filled(rect, 0.0, if focused { focus_row() } else { base });
     painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, black(90)));
     if let Some(c) = color {
         painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height() - 1.0)), 0.0, c);
@@ -3275,7 +3373,7 @@ fn group_row(
     // grey where there is none).
     let id_ink = match (lit, focused, muted, color) {
         (true, ..) => {
-            let fill = lighter(color.unwrap_or(Color32::from_gray(0x9B)));
+            let fill = lighter(color.unwrap_or(grey(0x9B)));
             painter.rect_filled(idr, 0.0, fill);
             lcd_readable(fill).unwrap_or_else(field)
         }
@@ -3283,12 +3381,12 @@ fn group_row(
             painter.rect_filled(idr, 0.0, c);
             lcd_readable(c).unwrap_or_else(field)
         }
-        (_, _, true, _) => Color32::from_gray(0x66),
+        (_, _, true, _) => grey(0x66),
         _ => lcd_readable(base).unwrap_or(white(164)),
     };
     painter.text(idr.center(), Align2::CENTER_CENTER, id, font(12.0), id_ink);
     let name_ink = if focused {
-        Color32::WHITE
+        ink()
     } else if let Some(ink) = lcd_readable(base) {
         if muted { dim(ink, 0.82) } else { ink }
     } else if muted {
@@ -3301,7 +3399,7 @@ fn group_row(
     // stereo level meter next to it.
     if let Some(c) = color {
         let mb = mute_box(rect);
-        painter.rect_filled(mb, 1.0, if muted { Color32::from_gray(0x55) } else { c });
+        painter.rect_filled(mb, 1.0, if muted { grey(0x55) } else { c });
         for (i, level) in [meter.0, meter.1].into_iter().enumerate() {
             let bar = Rect::from_min_max(
                 Pos2::new(mb.left() - 9.0 + i as f32 * 3.0, mb.top()),
@@ -3359,7 +3457,7 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
                     || egui::DragAndDrop::payload::<crate::layout::browser::DraggedFile>(ui.ctx()).is_some()
                     || egui::DragAndDrop::payload::<crate::layout::sampling::DraggedTake>(ui.ctx()).is_some());
         if over {
-            ui.painter().rect_stroke(r.shrink(1.0), 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
+            ui.painter().rect_stroke(r.shrink(1.0), 2.0, Stroke::new(2.0, ink()), StrokeKind::Inside);
         }
     }
     let key = ui.id().with(("row", format!("{target:?}")));
@@ -3427,12 +3525,70 @@ fn event_menu(ui: &mut Ui, app: &App, at: crate::clipboard::PasteAt, acts: &mut 
         acts,
     );
     ui.separator();
+    ratchet_menu(ui, app, acts);
     ui.menu_button("Nudge Grid", |ui| {
         for (i, name) in deckard_lua_host::api::pattern_editor::NUDGE_GRIDS.iter().enumerate() {
             if ui.add(egui::Button::new(*name).selected(app.nudge.0 == i)).clicked() {
                 acts.push(Act::NudgeGrid(i));
                 ui.close();
             }
+        }
+    });
+}
+
+/// The selected notes with `change` made to each one's ratchet, as one "Ratchet" edit
+/// (none when nothing changes).
+pub(crate) fn ratchet_edit(app: &App, change: impl Fn(Ratchet) -> Ratchet) -> Option<Act> {
+    let (remove, add): (Vec<Note>, Vec<Note>) =
+        app.selected.iter().map(|n| (*n, Note { ratchet: change(n.ratchet), ..*n })).filter(|(a, b)| a != b).unzip();
+    (!remove.is_empty()).then_some(Act::EditNotes { g: app.group, p: app.pattern, label: "Ratchet", remove, add })
+}
+
+/// A number in a menu, dragged or typed: its new value once the drag ends or the typing
+/// is done (so a drag is one edit, not one a frame).
+fn menu_number(ui: &mut Ui, name: &str, now: i64, range: std::ops::RangeInclusive<i64>) -> Option<i64> {
+    let id = ui.id().with(("menu-number", name));
+    let mut v = ui.data(|d| d.get_temp::<i64>(id)).unwrap_or(now);
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(name);
+            ui.add(egui::DragValue::new(&mut v).range(range).speed(0.2))
+        })
+        .inner;
+    let done = resp.drag_stopped() || resp.lost_focus();
+    if resp.dragged() || resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, v));
+    } else {
+        ui.data_mut(|d| d.remove_temp::<i64>(id));
+    }
+    (done && v != now).then_some(v)
+}
+
+/// The selected notes' ratchet: how many hits each plays inside its length, and how
+/// their velocities run.
+fn ratchet_menu(ui: &mut Ui, app: &App, acts: &mut Vec<Act>) {
+    let Some(first) = app.selected.first().map(|n| n.ratchet) else {
+        ui.add_enabled(false, egui::Button::new("Ratchet"));
+        return;
+    };
+    ui.menu_button("Ratchet", |ui| {
+        ui.set_min_width(140.0);
+        if let Some(v) = menu_number(ui, "Repeats", i64::from(first.repeats), 1..=i64::from(ratchet::MOST)) {
+            acts.extend(ratchet_edit(app, |r| Ratchet { repeats: v as u8, ..r }));
+        }
+        ui.separator();
+        for shape in Shape::ALL {
+            if ui.add(egui::Button::new(shape.label()).selected(first.shape == shape)).clicked() {
+                acts.extend(ratchet_edit(app, |r| Ratchet { shape, ..r }));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if let Some(v) = menu_number(ui, "Floor", i64::from(first.floor), 0..=127) {
+            acts.extend(ratchet_edit(app, |r| Ratchet { floor: v as u8, ..r }));
+        }
+        if let Some(v) = menu_number(ui, "Ceiling", i64::from(first.ceiling), 0..=127) {
+            acts.extend(ratchet_edit(app, |r| Ratchet { ceiling: v as u8, ..r }));
         }
     });
 }
@@ -3468,7 +3624,7 @@ fn color_menu(ui: &mut Ui, current: Color, targets: Vec<Target>, acts: &mut Vec<
                     let (r, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
                     ui.painter().rect_filled(r, 2.0, palette(Color::Palette(i), 0));
                     if current == Color::Palette(i) {
-                        ui.painter().rect_stroke(r, 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+                        ui.painter().rect_stroke(r, 2.0, Stroke::new(2.0, ink()), StrokeKind::Outside);
                     } else if resp.hovered() {
                         ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, white(200)), StrokeKind::Outside);
                     }
@@ -3594,8 +3750,8 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let col = Rect::from_min_size(Pos2::new(rect.left() + STRIP + 1.0, rect.top()), Vec2::new(COLUMN, rect.height()));
     let ed = Rect::from_min_max(Pos2::new(col.right() + 1.0, rect.top()), rect.max);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(col, 0.0, S05);
-    painter.rect_filled(ed, 0.0, S05);
+    painter.rect_filled(col, 0.0, s05());
+    painter.rect_filled(ed, 0.0, s05());
 
     // Column title: 32 + timeline 18.
     let title = Rect::from_min_size(col.min, Vec2::new(COLUMN, 32.0));
@@ -3619,7 +3775,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
             g == app.group,
             gr.muted,
             app.lit.iter().any(|&(lg, _)| lg == g),
-            S05,
+            s05(),
             app.meter(g, None),
         );
         row_input(ui, app, p, r, rows, Target::Group(g), &gr.name, Act::FocusGroup(g), acts);
@@ -3629,7 +3785,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     if plus.intersects(rows) {
         let resp = ui.interact(plus.intersect(rows), ui.id().with("song-add-group"), Sense::click());
         if resp.hovered() {
-            row_painter.rect_filled(plus.shrink(1.0), 2.0, S03);
+            row_painter.rect_filled(plus.shrink(1.0), 2.0, s03());
         }
         plus_glyph(&row_painter, Pos2::new(plus.left() + 16.0, plus.center().y), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text("New group").clicked() {
@@ -3665,7 +3821,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     ep.hline(timeline.x_range(), timeline.bottom(), Stroke::new(1.0, Color32::BLACK));
     painter.hline(col.x_range(), rows_top - 0.5, Stroke::new(1.0, Color32::BLACK));
     let end_x = x_of(p.arrangement_length() as f64);
-    ep.rect_filled(Rect::from_min_max(Pos2::new(end_x, tracks.top()), tracks.max), 0.0, S00);
+    ep.rect_filled(Rect::from_min_max(Pos2::new(end_x, tracks.top()), tracks.max), 0.0, s00());
     // Bars and beats.
     let step = (40.0 / ppb).ceil().max(1.0) as i64;
     for b in 0..=(total.max(16.0) as i64) {
@@ -3725,7 +3881,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
                 ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("section-drop"))).vline(
                     x_of(edge as f64),
                     Rect::from_min_max(secs.min, tracks.max).y_range(),
-                    Stroke::new(2.0, Color32::WHITE),
+                    Stroke::new(2.0, ink()),
                 );
             }
         }
@@ -3738,11 +3894,11 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
             r,
             0.0,
             if focused {
-                Color32::from_rgb(0x46, 0x46, 0x46)
+                grey(0x46)
             } else if resp.hovered() {
-                S03
+                s03()
             } else {
-                S02
+                s02()
             },
         );
         if queued == Some(i) {
@@ -3837,13 +3993,13 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
                 let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("section-len")));
                 let nx = x_of((section_start + len) as f64);
                 let ghost = Rect::from_min_max(Pos2::new(x0, secs.top() + 4.0), Pos2::new(nx, tracks.bottom()));
-                fg.rect_stroke(ghost, 0.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
+                fg.rect_stroke(ghost, 0.0, Stroke::new(2.0, ink()), StrokeKind::Inside);
                 fg.text(
                     Pos2::new(nx + 6.0, secs.center().y),
                     Align2::LEFT_CENTER,
                     format!("{bars} bar{}", if bars == 1 { "" } else { "s" }),
                     font(12.0),
-                    Color32::WHITE,
+                    ink(),
                 );
             }
         }
@@ -3852,7 +4008,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     if !p.sections.is_empty() && !p.scenes.is_empty() {
         let plus = Rect::from_min_size(Pos2::new(end_x + 1.0, secs.top() + 4.0), Vec2::new(27.0, secs.height() - 8.0));
         let resp = ui.interact(plus.intersect(secs), ui.id().with("add-section"), Sense::click());
-        ep.rect_filled(plus, 0.0, if resp.hovered() { S03 } else { S01 });
+        ep.rect_filled(plus, 0.0, if resp.hovered() { s03() } else { s01() });
         plus_glyph(&ep, plus.center(), 16.0, white(if resp.hovered() { 245 } else { 142 }));
         if resp.on_hover_text(format!("New section playing {}", scene_name(p, app.scene.min(p.scenes.len() - 1)))).clicked() {
             acts.push(Act::AddSection(app.scene.min(p.scenes.len() - 1)));
@@ -3860,7 +4016,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     }
     if let Some(h) = head.filter(|h| h.mode == Mode::Arrangement) {
         let x = x_of(h.position);
-        ep.vline(x, Rect::from_min_max(timeline.min, ed.max).y_range(), Stroke::new(1.0, Color32::WHITE));
+        ep.vline(x, Rect::from_min_max(timeline.min, ed.max).y_range(), Stroke::new(1.0, ink()));
     }
 }
 
@@ -3885,7 +4041,7 @@ fn clip_lanes(ui: &mut Ui, app: &App, p: &Project, tracks: Rect, top: f32, x_of:
             let color = inherit(grp.clip_patterns.get(clip.pattern).map_or(Color::Default, |x| x.color), group_color(p, g));
             tp.rect_filled(r, 3.0, color);
             if app.clip == Some((g, c)) {
-                tp.rect_stroke(r, 3.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
+                tp.rect_stroke(r, 3.0, Stroke::new(2.0, ink()), StrokeKind::Inside);
             }
             let name = grp.clip_patterns.get(clip.pattern).map_or("", |x| x.name.as_str());
             label(&tp, r, 7.0, if name.is_empty() { "Clip" } else { name }, 12.0, black(245));
@@ -3910,7 +4066,7 @@ fn clip_lanes(ui: &mut Ui, app: &App, p: &Project, tracks: Rect, top: f32, x_of:
                     fg.rect_stroke(
                         r.translate(Vec2::new(x_of(to as f64) - x_of(clip.position as f64), 0.0)),
                         3.0,
-                        Stroke::new(2.0, Color32::WHITE),
+                        Stroke::new(2.0, ink()),
                         StrokeKind::Inside,
                     );
                 }
@@ -3927,7 +4083,7 @@ fn clip_lanes(ui: &mut Ui, app: &App, p: &Project, tracks: Rect, top: f32, x_of:
                     fg.rect_stroke(
                         Rect::from_min_max(r.min, Pos2::new(x_of(end as f64), r.bottom())),
                         3.0,
-                        Stroke::new(2.0, Color32::WHITE),
+                        Stroke::new(2.0, ink()),
                         StrokeKind::Inside,
                     );
                 }
@@ -4473,7 +4629,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     let p = doc.project();
     let strip_r = Rect::from_min_size(rect.min, Vec2::new(STRIP, rect.height()));
     // The far-left icons: channel properties (a knob) and plug-ins (a plug).
-    match strip(ui, strip_r, S05, 6.0, &[(app.channel, "Channel properties", channel_icon), (!app.channel, "Plug-ins", plug_icon)]) {
+    match strip(ui, strip_r, s05(), 6.0, &[(app.channel, "Channel properties", channel_icon), (!app.channel, "Plug-ins", plug_icon)]) {
         Some(0) => acts.push(Act::ChannelMode(true)),
         Some(1) => acts.push(Act::ChannelMode(false)),
         _ => {}
@@ -4504,8 +4660,8 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     }
     let col = Rect::from_min_size(Pos2::new(rect.left() + STRIP + 1.0, rect.top()), Vec2::new(COLUMN, rect.height()));
     let ed = Rect::from_min_max(Pos2::new(col.right() + 1.0, rect.top()), rect.max);
-    painter.rect_filled(col, 0.0, S05);
-    painter.rect_filled(ed, 0.0, S05);
+    painter.rect_filled(col, 0.0, s05());
+    painter.rect_filled(ed, 0.0, s05());
     let assign_h = if app.remote.assign.is_some() { assign::ASSIGN_H } else { 0.0 };
     let group = p.groups.get(app.group);
     let sound = group.and_then(|g| g.sounds.get(app.sound));
@@ -4515,7 +4671,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     let mut x = col.left() + 6.0;
     for (tab, name) in [(ChainTab::Master, "MASTER"), (ChainTab::Group, "GROUP"), (ChainTab::Sound, "SOUND")] {
         // Each tab as wide as its name and a little room, 8 apart.
-        let w = painter.layout_no_wrap(name.to_string(), font(12.0), Color32::WHITE).size().x + 4.0;
+        let w = painter.layout_no_wrap(name.to_string(), font(12.0), ink()).size().x + 4.0;
         let r = Rect::from_min_size(Pos2::new(x, col.top()), Vec2::new(w, 32.0));
         let resp = ui.interact(r, ui.id().with(("tab", name)), Sense::click());
         let ink = if app.chain_tab == tab {
@@ -4640,7 +4796,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 && page > 0
                 && !doc.has_groove_settings(g, s)
             {
-                hint = Some("Kept for this session (this project's format has no place for them)".into());
+                hint = Some("Kept by DECKARD (this sound's format has no place for them)".into());
             }
         }
     } else {
@@ -4827,7 +4983,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     if let Some(i) = window_button {
         let b = Rect::from_min_size(Pos2::new(header.right() - 130.0, header.top() + 5.0), Vec2::new(120.0, 22.0));
         let resp = ui.interact(b, ui.id().with("plugin-window"), Sense::click());
-        painter.rect_filled(b, 2.0, if resp.hovered() { S03 } else { S02 });
+        painter.rect_filled(b, 2.0, if resp.hovered() { s03() } else { s02() });
         painter.text(b.center(), Align2::CENTER_CENTER, "PLUG-IN WINDOW", font(11.0), white(if resp.hovered() { 245 } else { 164 }));
         if resp.clicked() {
             acts.push(Act::OpenSlotEditor(i));
@@ -4843,7 +4999,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         } else {
             "Show the waveform"
         });
-        painter.rect_filled(b, 2.0, if resp.hovered() { S03 } else { S02 });
+        painter.rect_filled(b, 2.0, if resp.hovered() { s03() } else { s02() });
         wave_icon(&painter, b, if on { gcol } else { white(142) });
         if resp.clicked() {
             acts.push(Act::ToggleWaveform);
@@ -4852,7 +5008,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     }
     if let Some((names, page, act)) = tabs {
         // Left-aligned, after the heading.
-        let heading_w = painter.layout_no_wrap(heading.clone(), font(12.0), Color32::WHITE).size().x;
+        let heading_w = painter.layout_no_wrap(heading.clone(), font(12.0), ink()).size().x;
         let left = header.left() + 10.0 + heading_w + 24.0;
         let tab_resps = page_tabs(
             ui,
@@ -4917,7 +5073,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     if let Some(b) = groove_button {
         // After the eight slots: a divider, then the button.
         let x = slot_x(8) - 6.0;
-        painter.vline(x, (knob_y + 6.0)..=(knob_y + 70.0), Stroke::new(1.0, S02));
+        painter.vline(x, (knob_y + 6.0)..=(knob_y + 70.0), Stroke::new(1.0, s02()));
         let br = Rect::from_min_size(Pos2::new(x + 9.0, knob_y + 30.0), Vec2::new(70.0, 24.0));
         let text = match b {
             GrooveButton::ApplyVariation => "Apply",
@@ -4928,7 +5084,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             GrooveButton::ApplyVariation => "Vary the focused sound's notes in the focused pattern",
             GrooveButton::Generate => "Make new notes for the focused sound in the focused pattern",
         });
-        painter.rect_filled(br, 3.0, if resp.hovered() { S03 } else { S02 });
+        painter.rect_filled(br, 3.0, if resp.hovered() { s03() } else { s02() });
         painter.text(br.center(), Align2::CENTER_CENTER, text, font(11.0), white(if resp.hovered() { 245 } else { 164 }));
         if resp.clicked() {
             acts.push(Act::Groove(b));
@@ -4942,7 +5098,6 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     // Where the knobs are, for tests to point at.
     #[cfg(test)]
     ui.data_mut(|d| d.insert_temp(egui::Id::new("knob-rects"), knob_rects.clone()));
-    let macro_targets = if macro_view.is_none() { doc.macro_targets() } else { Default::default() };
     for (i, k) in params.iter().enumerate() {
         let Some((name, value, amount, edit)) = k else { continue };
         let r = Rect::from_min_size(Pos2::new(slot_x(i), knob_y), Vec2::new(70.0, 84.0));
@@ -4977,7 +5132,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             strip_resp.menu_on_right_click(|ui| plugin_macro_menu(ui, doc, app.chain(), slot, id, acts));
         }
         // A parameter a macro controls: the macro icon at the top right.
-        if macro_view.is_none() && edit.and_then(|e| edit_param_oid(app, doc, e)).is_some_and(|id| macro_targets.contains(&id)) {
+        if macro_view.is_none()
+            && let Some(id) = edit.and_then(|e| edit_param_oid(app, doc, e))
+            && app.doc_cache(doc).macro_targets.contains(&id)
+        {
             macro_icon(&painter, Pos2::new(r.right() - 7.0, r.top() + 8.0), white(142));
         }
         if let Some(Edit::Choice(t, f, options, cur, _)) = *edit {
@@ -5010,9 +5168,9 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             let fill = if on {
                 gcol
             } else if resp.hovered() {
-                S03
+                s03()
             } else {
-                S02
+                s02()
             };
             painter.rect_filled(b, 3.0, fill);
             painter.text(
@@ -5112,7 +5270,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     if let Some(t) = &tuner {
         // After its knobs, as the MK3's right screen.
         let r = Rect::from_min_max(Pos2::new(slot_x(8) - 6.0, header.bottom() + 8.0), Pos2::new(ed.right() - 10.0, knob_y + 84.0));
-        painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
+        painter.vline(r.left(), r.y_range(), Stroke::new(1.0, s02()));
         let left = r.left() + 12.0;
         tuner_dial(&painter, Pos2::new(left, r.top() + 50.0), t.note.as_deref(), t.cents, t.in_tune);
         let bar = if t.muted { format!("A4 = {} \u{b7} Muted", t.reference) } else { format!("A4 = {}", t.reference) };
@@ -5136,7 +5294,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
 /// -50..+50 cents, and the bar (a message in its place).
 fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::ZhoraView, gcol: Color32, acts: &mut Vec<Act>) {
     let amber = Color32::from_rgb(0xff, 0xc2, 0x3a);
-    painter.vline(r.left(), r.y_range(), Stroke::new(1.0, S02));
+    painter.vline(r.left(), r.y_range(), Stroke::new(1.0, s02()));
     let left = r.left() + 12.0;
     for (k, (what, on)) in [("tune", z.tune), ("check", z.check), ("live", z.live), ("hold", z.hold)].into_iter().enumerate() {
         let b = Rect::from_min_size(Pos2::new(left + k as f32 * 64.0, r.top()), Vec2::new(58.0, 22.0));
@@ -5146,9 +5304,9 @@ fn zhora_panel(ui: &mut Ui, painter: &Painter, r: Rect, z: &deckard_surface::Zho
         let fill = if on {
             gcol
         } else if resp.hovered() {
-            S03
+            s03()
         } else {
-            S02
+            s02()
         };
         painter.rect_filled(b, 3.0, fill);
         painter.text(b.center(), Align2::CENTER_CENTER, &name, font(11.0), if on { Color32::BLACK } else { white(200) });
@@ -5363,9 +5521,9 @@ fn property_tiles(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, level: 
         let resp = ui.interact(r, ui.id().with(("prop-set", i)), Sense::click());
         let on = app.prop_set == i && enabled;
         if on {
-            painter.rect_filled(r, 3.0, S03);
+            painter.rect_filled(r, 3.0, s03());
         } else if resp.hovered() && enabled {
-            painter.rect_filled(r, 3.0, S02);
+            painter.rect_filled(r, 3.0, s02());
         }
         let ink = if !enabled {
             white(50)
@@ -5408,7 +5566,7 @@ fn selector(
         let c = if !enabled {
             white(30)
         } else if resp.hovered() {
-            Color32::WHITE
+            ink()
         } else {
             color
         };
@@ -5471,7 +5629,7 @@ pub fn choice_list<'a>(resp: &egui::Response, options: impl IntoIterator<Item = 
         ui.set_min_width(resp.rect.width().max(110.0));
         for (k, o) in options.into_iter().enumerate() {
             let text = egui::RichText::new(o).size(12.0);
-            let text = if k == cur { text.color(Color32::WHITE) } else { text };
+            let text = if k == cur { text.color(ink()) } else { text };
             if ui.selectable_label(k == cur, text).clicked() {
                 picked = Some(k);
             }
@@ -5503,21 +5661,21 @@ fn page_tabs(
     let mut out = Vec::new();
     let mut x = area.left();
     for (i, name) in names.iter().enumerate() {
-        let w = 14.0 + painter.layout_no_wrap(name.clone(), font(11.0), Color32::WHITE).size().x;
+        let w = 14.0 + painter.layout_no_wrap(name.clone(), font(11.0), ink()).size().x;
         if x + w > area.right() {
             break;
         }
         let r = Rect::from_min_max(Pos2::new(x, area.top() + 4.0), Pos2::new(x + w, area.bottom() - 4.0));
         let resp = ui.interact(r, ui.id().with(("page-tab", i)), Sense::click());
         let on = i == page;
-        let ink = if on || resp.hovered() { Color32::WHITE } else { white(142) };
+        let ink = if on || resp.hovered() { ink() } else { white(142) };
         if name == "+" {
             plus_glyph(painter, r.center(), 11.0, ink);
         } else {
             painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
         }
         if on {
-            painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), area.bottom() - 1.0, Stroke::new(2.0, Color32::WHITE));
+            painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), area.bottom() - 1.0, Stroke::new(2.0, white(255)));
         }
         if resp.clicked() {
             acts.push(act(i));
@@ -5560,11 +5718,11 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                         ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("slot-drop"))).hline(
                             r.x_range(),
                             y,
-                            Stroke::new(2.0, Color32::WHITE),
+                            Stroke::new(2.0, ink()),
                         );
                     }
                 }
-                p.rect_filled(r, 2.0, S03);
+                p.rect_filled(r, 2.0, s03());
                 slot_icon(&p, icon_rect(r).center(), slot.is_instrument(), white(245));
                 p.text(Pos2::new(r.left() + NAME_AT, r.center().y), Align2::LEFT_CENTER, &slot.name, font(12.0), white(245));
             }
@@ -5574,11 +5732,11 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                     r,
                     2.0,
                     if on {
-                        S03
+                        s03()
                     } else if resp.hovered() {
-                        S02
+                        s02()
                     } else {
-                        S01
+                        s01()
                     },
                 );
                 let ink = if !slot.active {
@@ -5953,7 +6111,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             let name = if pt.name.is_empty() { "Pattern" } else { &pt.name };
             let y = header.center().y;
             let sep = |p: &Painter, x: f32| {
-                p.vline(x, (y - 8.0)..=(y + 8.0), Stroke::new(1.0, S02));
+                p.vline(x, (y - 8.0)..=(y + 8.0), Stroke::new(1.0, s02()));
             };
             let r = painter.text(Pos2::new(header.left() + 10.0, y), Align2::LEFT_CENTER, name, font(15.0), gcol);
             let mut x = r.right() + 14.0;
@@ -5975,12 +6133,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             let r = painter.text(Pos2::new(x, y), Align2::LEFT_CENTER, "LENGTH", font(10.0), white(120));
             let at = Rect::from_min_size(Pos2::new(r.right() + 6.0, y - 10.0), Vec2::new(64.0, 20.0));
             // Auto (no length chosen): an empty pattern grows as it's recorded into.
-            let auto = app.doc.as_ref().is_some_and(|d| d.borrow().length_is_auto(g, pi));
-            let text = if auto && pt.notes.is_empty() {
-                "Auto".to_string()
-            } else {
-                format!("{}:{}:{}", len / bar, len % bar / beat, len % beat / (PPQ / 4))
-            };
+            let auto = pt.notes.is_empty() && app.doc.as_ref().is_some_and(|d| d.borrow().length_is_auto(g, pi));
+            let text = if auto { "Auto".to_string() } else { format!("{}:{}:{}", len / bar, len % bar / beat, len % beat / (PPQ / 4)) };
             let len_drawn = menu_at(ui, at, text, |ui| {
                 if ui
                     .selectable_label(auto, "Auto")
@@ -6157,10 +6311,10 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // Ticks under an x (the inverse of `x_of`).
     let tick_at = |x: f32| ((x - grid.left()) / scale) as f64 + shown_from;
     let tl = Rect::from_min_max(Pos2::new(timeline.left(), timeline.top() + 1.0), timeline.max);
-    painter.rect_filled(tl, 0.0, S00);
+    painter.rect_filled(tl, 0.0, s00());
     let painter_all = painter.clone();
     let painter = painter.with_clip_rect(Rect::from_min_max(Pos2::new(grid.left(), rect.top()), Pos2::new(grid.right(), rect.bottom())));
-    painter.rect_filled(Rect::from_min_max(Pos2::new(x_of(start as f64), tl.top()), Pos2::new(x_of(end as f64), tl.bottom())), 0.0, S01);
+    painter.rect_filled(Rect::from_min_max(Pos2::new(x_of(start as f64), tl.top()), Pos2::new(x_of(end as f64), tl.bottom())), 0.0, s01());
     let beat = PPQ * 4 / p.denominator.max(1);
     let step = app.grid.max(1);
     let bars_step = ((48.0 / (bar as f32 * scale)).ceil() as i64).max(1);
@@ -6300,20 +6454,20 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         if app.piano_roll {
             let pitch = hi - r as i64;
             let black_key = matches!(pitch.rem_euclid(12), 1 | 3 | 6 | 8 | 10);
-            gp.rect_filled(band, 0.0, if black_key { S00 } else { S05 });
+            gp.rect_filled(band, 0.0, if black_key { s00() } else { s05() });
             if pitch.rem_euclid(12) == 0 {
                 gp.hline(grid.x_range(), band.bottom() - 0.5, Stroke::new(1.0, white(24)));
             }
             // The keyboard: white and black keys, C labelled; a click plays the pitch.
             let key = Rect::from_min_size(Pos2::new(keys.left(), y), Vec2::new(keys.width(), row_h));
-            kp.rect_filled(key, 0.0, if black_key { S00 } else { Color32::from_gray(0x9B) });
+            kp.rect_filled(key, 0.0, if black_key { s00() } else { grey(0x9B) });
             // Out of the scale: red over the key and its row.
             let (root, bank, kind) = app.scale;
             if !deckard_lua_host::api::scales::in_scale(bank, kind, root, pitch) {
                 kp.rect_filled(key, 0.0, Color32::from_rgba_unmultiplied(220, 40, 40, 110));
                 gp.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(220, 40, 40, 28));
             }
-            kp.hline(key.x_range(), key.bottom() - 0.5, Stroke::new(1.0, S00));
+            kp.hline(key.x_range(), key.bottom() - 0.5, Stroke::new(1.0, s00()));
             if pitch.rem_euclid(12) == 0 {
                 label(&kp, key, 4.0, &note_name(pitch), 9.0, Color32::BLACK);
             }
@@ -6342,7 +6496,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             (0x21, 0x1C)
         };
         if t % every == 0 {
-            gp.vline(x_of(t as f64), grid.y_range(), Stroke::new(1.0, Color32::from_gray(if inside { c_in } else { c_out })));
+            gp.vline(x_of(t as f64), grid.y_range(), Stroke::new(1.0, grey(if inside { c_in } else { c_out })));
         }
         t += step;
     }
@@ -6454,6 +6608,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         };
         let rel = snapped(pos.x);
         (0..view).contains(&rel).then_some(Note {
+            ratchet: Default::default(),
             expr: None,
             sound,
             position: rel,
@@ -6518,11 +6673,21 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         if let Some(r) = note_rect(n) {
             let a = 80 + (n.velocity.clamp(0, 127) * 175 / 127) as u8;
             // Muted notes: Maschine's grey.
-            let c = if deckard_doc::note_tools::muted(n) { Color32::from_rgb(128, 128, 128) } else { sound_color(p, app.group, n.sound) };
+            let c = if deckard_doc::note_tools::muted(n) { grey(128) } else { sound_color(p, app.group, n.sound) };
             gp.rect_filled(r, 1.0, with_alpha(c, a));
+            // A ratcheted note: a tick where each later hit starts.
+            if !n.ratchet.is_plain() {
+                let hits = n.ratchet.hits(n.length, n.velocity);
+                if r.width() / hits.len() as f32 >= 3.0 {
+                    for hit in hits.iter().skip(1) {
+                        let x = (r.left() + r.width() * hit.offset as f32 / n.length.max(1) as f32).round();
+                        gp.vline(x, r.y_range(), Stroke::new(1.0, black(140)));
+                    }
+                }
+            }
             if let Some(c) = outline {
                 gp.rect_filled(r, 1.0, white(90));
-                gp.rect_stroke(r, 1.0, Stroke::new(1.0, S00), StrokeKind::Inside);
+                gp.rect_stroke(r, 1.0, Stroke::new(1.0, s00()), StrokeKind::Inside);
                 gp.rect_stroke(r, 1.0, Stroke::new(2.0, c), StrokeKind::Outside);
             }
             // Its pitch curve, in the piano roll: a line over it, bent by as many rows.
@@ -6550,7 +6715,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     };
     for n in &notes {
         if !moving.iter().any(|(o, _)| o == *n) {
-            draw(n, app.selected.contains(n).then_some(Color32::WHITE));
+            draw(n, app.selected.contains(n).then_some(ink()));
         }
         // Swing: where the note actually plays, if the groove moves it.
         let played = deckard_engine::swung(p, app.group, n.sound, n.position);
@@ -6558,15 +6723,15 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             && let Some(r) = note_rect(n)
         {
             let x = x_of(played as f64);
-            gp.line_segment([Pos2::new(x, r.top() - 1.0), Pos2::new(x, r.bottom() + 1.0)], Stroke::new(2.0, Color32::WHITE));
+            gp.line_segment([Pos2::new(x, r.top() - 1.0), Pos2::new(x, r.bottom() + 1.0)], Stroke::new(2.0, ink()));
             gp.line_segment([Pos2::new(r.left(), r.center().y), Pos2::new(x, r.center().y)], Stroke::new(1.0, white(160)));
         }
     }
     for (_, m) in &moving {
-        draw(m, Some(Color32::WHITE));
+        draw(m, Some(ink()));
     }
     match &drag {
-        Some(NoteDrag::Paint { notes: ns }) => ns.iter().for_each(|n| draw(n, Some(Color32::WHITE))),
+        Some(NoteDrag::Paint { notes: ns }) => ns.iter().for_each(|n| draw(n, Some(ink()))),
         Some(NoteDrag::Select { origin, to }) => {
             let r = Rect::from_two_pos(*origin, *to);
             gp.rect_filled(r, 0.0, white(16));
@@ -6606,7 +6771,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     {
         let x = x_of(cut_at(pos.x) as f64);
         if x > r.left() && x < r.right() {
-            gp.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], Stroke::new(1.5, Color32::WHITE));
+            gp.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.bottom())], Stroke::new(1.5, ink()));
         }
     }
     if resp.drag_started()
@@ -6821,7 +6986,11 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let paste_at = ui.data(|d| d.get_temp::<Pos2>(menu_id)).map_or(crate::clipboard::PasteAt::Keys, |pos| {
         crate::clipboard::PasteAt::Mouse { tick: tick_at(pos.x) as i64, pitch: app.piano_roll.then(|| hi - row_at(pos.y)) }
     });
-    resp.menu_on_right_click(|ui| event_menu(ui, app, paste_at, acts));
+    // (Stays open for Ratchet's numbers; its other items close it.)
+    egui::Popup::context_menu(&resp)
+        .style(menu_style)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| event_menu(ui, app, paste_at, acts));
     // ⌘X / ⌘C / ⌘V (macOS sends them as Cut, Copy and Paste).
     if !ui.ctx().egui_wants_keyboard_input() && app.key_focus == KeyFocus::Events {
         let (cut, copy, paste) = ui.input_mut(|i| {
@@ -6935,9 +7104,9 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             Some(&l) => {
                 let on = l == app.lane;
                 if on {
-                    lp.rect_filled(r.shrink2(Vec2::new(4.0, 1.0)), 2.0, S02);
+                    lp.rect_filled(r.shrink2(Vec2::new(4.0, 1.0)), 2.0, s02());
                 }
-                let col = if on || resp.hovered() { Color32::WHITE } else { white(142) };
+                let col = if on || resp.hovered() { ink() } else { white(142) };
                 lp.text(Pos2::new(r.left() + 8.0, y), Align2::LEFT_CENTER, l.name(), font(12.0), col);
                 if resp.clicked() {
                     acts.push(Act::Lane(l));
@@ -6945,7 +7114,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 items.push((l, r));
             }
             None => {
-                let col = if app.lanes_dialog || resp.hovered() { Color32::WHITE } else { white(142) };
+                let col = if app.lanes_dialog || resp.hovered() { ink() } else { white(142) };
                 lp.text(Pos2::new(r.left() + 8.0, y - 2.0), Align2::LEFT_CENTER, "+", font(16.0), col);
                 if resp.on_hover_text("Add or remove MIDI controller lanes").clicked() {
                     acts.push(Act::LanesDialog(!app.lanes_dialog));
@@ -6957,7 +7126,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // The list's rows (the last one is "+"), for tests that drive the window.
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-lane-list"), items));
 
-    painter.rect_filled(lane, 0.0, LANE);
+    painter.rect_filled(lane, 0.0, lane_fill());
     let vp = painter.with_clip_rect(Rect::from_min_max(lane.min, Pos2::new(grid.right(), lane.bottom())));
     let lane_in = lane.shrink2(Vec2::new(0.0, 7.0));
     for f in [0.25, 0.5, 0.75] {
@@ -6967,7 +7136,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     let mut t = 0;
     while t <= view {
         if t % every == 0 {
-            vp.vline(x_of(t as f64), lane.y_range(), Stroke::new(1.0, Color32::from_gray(if t % bar == 0 { 0x48 } else { 0x21 })));
+            vp.vline(x_of(t as f64), lane.y_range(), Stroke::new(1.0, grey(if t % bar == 0 { 0x48 } else { 0x21 })));
         }
         t += beat;
     }
@@ -6998,8 +7167,19 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                 let v = edited.unwrap_or_else(|| kind.get(n));
                 let x = bar_x(n);
                 let h = lane_in.height() * v.clamp(0, max) as f32 / max as f32;
-                let col = if edited.is_some() || app.selected.contains(n) { Color32::WHITE } else { scol };
+                let col = if edited.is_some() || app.selected.contains(n) { ink() } else { scol };
                 vp.rect_filled(Rect::from_min_max(Pos2::new(x, lane_in.bottom() - h), Pos2::new(x + 3.0, lane_in.bottom())), 0.0, col);
+                // A ratcheted note: its later hits' velocities, fainter; or its count.
+                if kind == LaneKind::Velocity {
+                    for hit in LaneKind::Velocity.with(*n, v).ratchet.hits(n.length, v).iter().skip(1) {
+                        let x = bar_x(&Note { position: n.position + hit.offset, ..*n });
+                        let h = lane_in.height() * hit.velocity.clamp(0, max) as f32 / max as f32;
+                        let r = Rect::from_min_max(Pos2::new(x, lane_in.bottom() - h), Pos2::new(x + 2.0, lane_in.bottom()));
+                        vp.rect_filled(r, 0.0, with_alpha(col, 110));
+                    }
+                } else if kind == LaneKind::Ratchet && v > 1 {
+                    vp.text(Pos2::new(x + 5.0, lane_in.bottom() - h), Align2::LEFT_TOP, v.to_string(), font(9.0), white(164));
+                }
             }
             if pat.is_none() {
                 break 'notes;
@@ -7119,11 +7299,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
             // The jump from the previous value (or the lane's base).
             let prev = if i == 0 { base } else { y_of(shown[i - 1].1) };
             vp.vline(x, prev.min(y)..=prev.max(y), Stroke::new(1.5, scol));
-            vp.rect_filled(
-                Rect::from_center_size(Pos2::new(x + 1.0, y), Vec2::splat(5.0)),
-                1.0,
-                if *painted { Color32::WHITE } else { scol },
-            );
+            vp.rect_filled(Rect::from_center_size(Pos2::new(x + 1.0, y), Vec2::splat(5.0)), 1.0, if *painted { ink() } else { scol });
         }
         if shown.is_empty() {
             vp.text(lane.center(), Align2::CENTER_CENTER, format!("No {} events: click or drag to draw", l.name()), font(11.0), white(61));
@@ -7329,7 +7505,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         .or_else(|| head.filter(|_| app.playing.is_none()).map(|h| h.position.rem_euclid(plen as f64)));
     if let Some(t) = playhead_pos {
         let x = x_of(start as f64 + t);
-        painter.vline(x, Rect::from_min_max(tl.min, rect.max).y_range(), Stroke::new(1.0, Color32::WHITE));
+        painter.vline(x, Rect::from_min_max(tl.min, rect.max).y_range(), Stroke::new(1.0, ink()));
     }
 }
 
@@ -7374,6 +7550,8 @@ enum NoteDrag {
 enum LaneKind {
     Velocity,
     Probability,
+    /// How many hits the note plays (its ratchet's repeats).
+    Ratchet,
 }
 
 impl LaneKind {
@@ -7381,6 +7559,7 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => "Velocity",
             LaneKind::Probability => "Probability",
+            LaneKind::Ratchet => "Ratchet",
         }
     }
 
@@ -7388,6 +7567,7 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => n.velocity,
             LaneKind::Probability => n.probability,
+            LaneKind::Ratchet => i64::from(n.ratchet.repeats),
         }
     }
 
@@ -7395,12 +7575,13 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => Note { velocity: v, ..n },
             LaneKind::Probability => Note { probability: v, ..n },
+            LaneKind::Ratchet => Note { ratchet: Ratchet { repeats: v.clamp(1, i64::from(ratchet::MOST)) as u8, ..n.ratchet }, ..n },
         }
     }
 
     fn min(self) -> i64 {
         match self {
-            LaneKind::Velocity => 1,
+            LaneKind::Velocity | LaneKind::Ratchet => 1,
             LaneKind::Probability => 0,
         }
     }
@@ -7409,6 +7590,7 @@ impl LaneKind {
         match self {
             LaneKind::Velocity => 127,
             LaneKind::Probability => 100,
+            LaneKind::Ratchet => i64::from(ratchet::MOST),
         }
     }
 }
@@ -7419,6 +7601,8 @@ pub enum Lane {
     #[default]
     Velocity,
     Probability,
+    /// Each note's ratchet: how many hits it plays (DECKARD's own).
+    Ratchet,
     Controller(u8),
     PitchBend,
     /// Channel pressure (Maschine's "Aftertouch" lane).
@@ -7434,6 +7618,7 @@ impl Lane {
         match self {
             Lane::Velocity => "Velocity".into(),
             Lane::Probability => "Probability".into(),
+            Lane::Ratchet => "Ratchet".into(),
             Lane::PitchBend => "Pitch Bend".into(),
             Lane::ChannelPressure => "Aftertouch".into(),
             Lane::Expr(d) => d.name().into(),
@@ -7449,6 +7634,7 @@ impl Lane {
         match self {
             Lane::Velocity => Some(LaneKind::Velocity),
             Lane::Probability => Some(LaneKind::Probability),
+            Lane::Ratchet => Some(LaneKind::Ratchet),
             _ => None,
         }
     }
@@ -7605,11 +7791,11 @@ fn cc_name(n: u8) -> Option<&'static str> {
     })
 }
 
-/// The lanes the list offers: velocity, probability, then the sound's saved MIDI
+/// The lanes the list offers: velocity, probability, ratchet, then the sound's saved MIDI
 /// lanes in their order, and any others it has events in.
 fn lane_list(app: &App, p: &Project, midi: &[MidiEvent]) -> Vec<Lane> {
     let saved = p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).map_or(&[][..], |s| &s.lanes[..]);
-    let mut out = vec![Lane::Velocity, Lane::Probability];
+    let mut out = vec![Lane::Velocity, Lane::Probability, Lane::Ratchet];
     // The Expression editor's lanes the sound's notes here have (BUGS #18).
     let pat = p.groups.get(app.group).and_then(|g| g.patterns.get(app.pattern));
     let exprs: Vec<deckard_model::Expression> = pat.map_or(Vec::new(), |pt| {
@@ -7679,7 +7865,7 @@ mod elide_middle_tests {
 
     /// `f` with a painter (fonts loaded).
     fn with_painter(f: impl FnOnce(&Painter)) {
-        let ctx = egui::Context::default();
+        let ctx = super::egui::Context::default();
         let mut f = Some(f);
         ctx.run_ui(Default::default(), |ui| {
             if let Some(f) = f.take() {
@@ -7694,7 +7880,7 @@ mod elide_middle_tests {
     #[test]
     fn a_long_name_keeps_its_start_and_end() {
         with_painter(|p| {
-            let w = |t: &str| p.layout_no_wrap(t.to_string(), font(12.0), Color32::WHITE).size().x;
+            let w = |t: &str| p.layout_no_wrap(t.to_string(), font(12.0), ink()).size().x;
             assert_eq!(elide_middle(p, "Drums", 12.0, 200.0), "Drums", "short: unchanged");
             let long = "Drums Acoustic Kit 2";
             let width = w(long) * 0.6;
@@ -7757,7 +7943,7 @@ mod theme_tests {
     /// on Windows): the app is dark whatever the system is.
     #[test]
     fn a_light_system_gets_the_dark_style() {
-        let ctx = egui::Context::default();
+        let ctx = super::egui::Context::default();
         dark_style(&ctx);
         for _ in 0..2 {
             let input = egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
@@ -7779,10 +7965,10 @@ mod header_icon_tests {
 
     #[test]
     fn browser_icon_separates_magnifying_glass_from_shelf_lines() {
-        let ctx = egui::Context::default();
+        let ctx = super::egui::Context::default();
         let rect = Rect::from_min_size(Pos2::new(100.0, 8.0), Vec2::new(32.0, 24.0));
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            draw_browser_icon(ui.painter(), rect, Color32::WHITE);
+            draw_browser_icon(ui.painter(), rect, ink());
         });
         out.textures_delta.clear();
         let shapes = out.shapes;
@@ -7815,10 +8001,10 @@ mod header_icon_tests {
 
     #[test]
     fn mixer_icon_centres_fader_knobs_on_vertical_lines() {
-        let ctx = egui::Context::default();
+        let ctx = super::egui::Context::default();
         let rect = Rect::from_min_size(Pos2::new(140.0, 8.0), Vec2::new(32.0, 24.0));
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            draw_mixer_icon(ui.painter(), rect, Color32::WHITE);
+            draw_mixer_icon(ui.painter(), rect, ink());
         });
         out.textures_delta.clear();
         let shapes = out.shapes;
@@ -7858,5 +8044,72 @@ mod desktop_theme_tests {
         for t in deckard_surface::Surface::new().themes() {
             assert_eq!(super::desktop_look(&t, "yellow").is_some(), t != "maschine", "{t}");
         }
+    }
+
+    /// A theme changes the window's grounds and writing; groups, sounds, patterns and
+    /// scenes keep their own colours, on the LCD too.
+    #[test]
+    fn a_theme_keeps_the_groups_colours() {
+        use super::{App, Color, DESK, PLAIN, palette, sync_lcd};
+        let ctx = super::egui::Context::default();
+        let mut app = App::default();
+        let colours = || (0..16).map(|i| palette(Color::Palette(i), 0)).collect::<Vec<_>>();
+        sync_lcd(&ctx, &app);
+        let plain = colours();
+        for theme in ["lcd", "solarized_dark", "palenight"] {
+            for mode in ["yellow", "red", "blue"] {
+                app.settings.desktop_theme = theme.into();
+                app.settings.lcd_mode = mode.into();
+                sync_lcd(&ctx, &app);
+                assert_eq!(colours(), plain, "{theme} {mode}");
+            }
+        }
+        app.settings.desktop_theme = "maschine".into();
+        sync_lcd(&ctx, &app);
+        DESK.with(|d| d.set(PLAIN));
+    }
+
+    /// A theme's surfaces are its own field on the way to its writing, in the ordinary
+    /// window's order; the ordinary window keeps its greys and white.
+    #[test]
+    fn a_theme_colours_every_surface() {
+        use super::{Color32, DESK, Desk, PLAIN, grey, s00, s01, s02, s03, s05, white};
+        assert_eq!((s00(), s03(), grey(0x2a), white(255)), (PLAIN.s00, PLAIN.s03, Color32::from_gray(0x2a), Color32::WHITE));
+        assert_eq!(white(128), Color32::from_white_alpha(128));
+        let (paper, ink) = (Color32::from_rgb(0x0f, 0x11, 0x1a), Color32::from_rgb(0xee, 0xff, 0xff));
+        DESK.with(|d| d.set(Desk::themed(paper, ink)));
+        let y = |c: Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+        assert_eq!((s00(), white(255), grey(0x18), grey(0xff)), (paper, ink, paper, ink));
+        let steps = [grey(0), grey(0x12), s00(), s05(), s01(), s02(), s03(), grey(0x84)];
+        assert!(steps.windows(2).all(|w| y(w[0]) < y(w[1])), "{steps:?}");
+        assert!(steps.iter().all(|c| c.b() >= c.r()), "each keeps the field's blue: {steps:?}");
+        DESK.with(|d| d.set(PLAIN));
+    }
+}
+
+#[cfg(test)]
+mod ratchet_tests {
+    use super::*;
+
+    /// The Ratchet lane shows a note's repeats and sets them, kept within 1–16.
+    #[test]
+    fn the_ratchet_lane_is_a_notes_repeats() {
+        let n = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
+        let k = Lane::Ratchet.note_kind().unwrap();
+        assert_eq!((k.label(), k.min(), k.max(), k.get(&n)), ("Ratchet", 1, 16, 1));
+        assert_eq!(k.get(&k.with(n, 4)), 4);
+        assert_eq!((k.with(n, 99).ratchet.repeats, k.with(n, 0).ratchet.repeats), (16, 1));
+        let down = Note { ratchet: Ratchet { repeats: 2, shape: Shape::Down, floor: 30, ceiling: 127 }, ..n };
+        assert_eq!(k.with(down, 8).ratchet, Ratchet { repeats: 8, ..down.ratchet }, "only the repeats change");
+        assert_eq!(Lane::Ratchet.name(), "Ratchet");
     }
 }
