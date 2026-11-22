@@ -306,7 +306,7 @@ pub fn waveform(
     }
     if let Some(f) = playhead {
         painter.vline(x_of(f as i64), rect.shrink(1.0).y_range(), Stroke::new(1.0, Color32::from_rgb(0xff, 0xd8, 0x40)));
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
     }
     // Drag the nearest marker.
     let resp = ui

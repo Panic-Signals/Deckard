@@ -161,6 +161,8 @@ pub(crate) struct Plate {
     countdown: i32,
     ticks: i32,
     kinc: f32,
+    silent: bool,
+    quiet_samples: usize,
 }
 
 impl Plate {
@@ -233,6 +235,8 @@ impl Plate {
             countdown: 0,
             ticks: 0,
             kinc: 0.0,
+            silent: true,
+            quiet_samples: 0,
         });
         p.on_init();
         p.set_sample_rate(44100.0, 128);
@@ -318,6 +322,8 @@ impl Plate {
         self.px = [0.0; 4];
         self.py = [0.0; 4];
         self.ap = [0.0; 20];
+        self.silent = true;
+        self.quiet_samples = 0;
     }
 
     fn pack(&mut self) {
@@ -567,6 +573,8 @@ impl Plate {
         self.px = [0.0; 4];
         self.py = [0.0; 4];
         self.ap = [0.0; 20];
+        self.silent = true;
+        self.quiet_samples = 0;
     }
 
     /// `onResume()`: from now on parameters ramp.
@@ -603,10 +611,70 @@ impl Plate {
         }
     }
 
+    #[inline]
+    fn can_fast_skip(&self) -> bool {
+        self.silent && !self.ramping && !self.dirty && self.inc == [0.0; 8]
+    }
+
+    fn skip_silent(&mut self, k: usize) {
+        if k == 0 {
+            return;
+        }
+        self.ew = ((self.ew as usize + k) % EARLY_LEN) as i32;
+        for t in &mut self.tap1 {
+            *t = ((*t as usize + k) % EARLY_LEN) as i32;
+        }
+        for t in &mut self.tap2 {
+            *t = ((*t as usize + k) % EARLY_LEN) as i32;
+        }
+        for w in &mut self.w {
+            *w = ((*w as usize + k) % LINE_LEN) as i32;
+        }
+        for r in &mut self.r {
+            *r = ((*r as usize + k) % LINE_LEN) as i32;
+        }
+        self.pd_w = ((self.pd_w as usize + k) % PD_LEN) as i32;
+        self.pd_r = ((self.pd_r as usize + k) % PD_LEN) as i32;
+    }
+
+    fn enter_sleep(&mut self) {
+        self.early.fill(0.0);
+        self.out = [0.0; LINES];
+        self.lines.fill(0.0);
+        for b in &mut self.pd {
+            b.fill(0.0);
+        }
+        self.x1 = [0.0; LINES];
+        self.x2 = [0.0; LINES];
+        self.y1 = [0.0; LINES];
+        self.y2 = [0.0; LINES];
+        self.px = [0.0; 4];
+        self.py = [0.0; 4];
+        self.ap = [0.0; 20];
+        self.silent = true;
+        self.quiet_samples = 0;
+    }
+
     /// One block of `processAudioImpl<false>` (stereo in and out), in place.
     pub(crate) fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
-        for (xl, xr) in l.iter_mut().zip(r.iter_mut()) {
-            (*xl, *xr) = self.tick(*xl, *xr);
+        let n = l.len().min(r.len());
+        let mut i = 0;
+        while i < n {
+            if self.can_fast_skip() {
+                let mut end = i;
+                while end < n && l[end] == 0.0 && r[end] == 0.0 {
+                    end += 1;
+                }
+                if end > i {
+                    self.skip_silent(end - i);
+                    i = end;
+                    continue;
+                }
+            }
+            let (ol, or) = self.tick(l[i], r[i]);
+            l[i] = ol;
+            r[i] = or;
+            i += 1;
         }
     }
 
@@ -645,6 +713,11 @@ impl Plate {
     }
 
     fn tick(&mut self, in_l: f32, in_r: f32) -> (f32, f32) {
+        let has_input = in_l != 0.0 || in_r != 0.0;
+        if has_input {
+            self.silent = false;
+            self.quiet_samples = 0;
+        }
         self.ramp();
         // Mono sum, then 20 allpasses.
         let mut x = 0.5 * ((0.0 + in_l) + in_r);
@@ -662,7 +735,11 @@ impl Plate {
         self.px = nx;
         self.py = ny;
         let ew = self.ew;
-        self.early[ew as usize] = ny[0];
+        let early_ptr = self.early.as_mut_ptr();
+        // SAFETY: `ew`, `tap1[k]`, `tap2[k]` are maintained in `0..EARLY_LEN` (`0..=23999`).
+        unsafe {
+            *early_ptr.add(ew as usize) = ny[0];
+        }
         self.ew = if ew > 23998 { 0 } else { ew + 1 };
         // Early taps: two sets of 32, the first feeds the lines, the second the output.
         let mut acc = [0.0f32; 16];
@@ -672,11 +749,11 @@ impl Plate {
                 let k = g * 4 + lane;
                 let j = (g & 3) * 4 + lane;
                 let i1 = self.tap1[k];
-                acc[j] += self.early[i1 as usize];
+                acc[j] += unsafe { *early_ptr.add(i1 as usize) };
                 self.tap1[k] = if i1 > 23998 { 0 } else { i1 + 1 };
                 let coef = EARLY_GAIN * c(TAP_W[k]);
                 let i2 = self.tap2[k];
-                direct[lane] += self.early[i2 as usize] * coef;
+                direct[lane] += unsafe { *early_ptr.add(i2 as usize) } * coef;
                 self.tap2[k] = if i2 > 23998 { 0 } else { i2 + 1 };
             }
         }
@@ -694,16 +771,25 @@ impl Plate {
         }
         // A 16-point Hadamard transform, as the binary orders it.
         let h = hadamard16(&u);
+        let mut peak = ny[0].abs();
+        let lines_ptr = self.lines.as_mut_ptr();
         let mut sum = [0.0f32; 4];
         for (set, outs) in [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]].iter().enumerate() {
             for &i in outs {
                 let w = self.w[i];
-                self.lines[i * LINE_LEN + w as usize] = h[i];
+                let hv = h[i];
+                peak = peak.max(hv.abs());
+                // SAFETY: `i < LINES` and `0 <= w < LINE_LEN` (`0..=21199`).
+                unsafe {
+                    *lines_ptr.add(i * LINE_LEN + w as usize) = hv;
+                }
                 self.w[i] = if w > 21198 { 0 } else { w + 1 };
             }
             for &i in outs {
                 let rr = self.r[i];
-                self.out[i] = self.lines[i * LINE_LEN + rr as usize];
+                let ov = unsafe { *lines_ptr.add(i * LINE_LEN + rr as usize) };
+                peak = peak.max(ov.abs());
+                self.out[i] = ov;
                 self.r[i] = if rr > 21198 { 0 } else { rr + 1 };
             }
             for lane in 0..4 {
@@ -722,13 +808,29 @@ impl Plate {
         let kd = (1.0 - mix) * c(0x3f00_4dce);
         let kw = (mix * self.wet_gain) * c(0x3d2c_ba15);
         let mut o = [0.0f32; 2];
+        let pd_w = self.pd_w as usize;
+        let pd_r = self.pd_r as usize;
         for ch in 0..2 {
-            self.pd[ch][self.pd_w as usize] = wet[ch];
-            let s = self.pd[ch][self.pd_r as usize];
-            o[ch] = kw.mul_add(s, kd * dry[ch]);
+            // SAFETY: `pd_w` and `pd_r` are maintained in `0..PD_LEN` (`0..=96099`).
+            unsafe {
+                *self.pd[ch].get_unchecked_mut(pd_w) = wet[ch];
+                let s = *self.pd[ch].get_unchecked(pd_r);
+                o[ch] = kw.mul_add(s, kd * dry[ch]);
+            }
         }
+        peak = peak.max(o[0].abs()).max(o[1].abs()).max(wet[0].abs()).max(wet[1].abs());
         self.pd_w = if self.pd_w > PD_WRAP - 1 { 0 } else { self.pd_w + 1 };
         self.pd_r = if self.pd_r > PD_WRAP - 1 { 0 } else { self.pd_r + 1 };
+        if !self.silent {
+            if !has_input && !self.ramping && !self.dirty && peak < 1e-15 {
+                self.quiet_samples += 1;
+                if self.quiet_samples >= PD_LEN + LINE_LEN + EARLY_LEN {
+                    self.enter_sleep();
+                }
+            } else {
+                self.quiet_samples = 0;
+            }
+        }
         (o[0], o[1])
     }
 }

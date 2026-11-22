@@ -813,6 +813,7 @@ impl Document {
         set(te);
         let events = super::notes::events_with(&events, &items);
         *self.tree.at_mut(&events_path).ok_or("events")? = Value::Obj(events);
+        self.clear_path_caches();
         Ok(())
     }
 }

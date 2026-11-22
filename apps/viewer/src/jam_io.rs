@@ -346,7 +346,14 @@ impl App {
         // (The scripts read the settings on every page: this is a comparison against
         // the last build, so it costs nothing when nothing moved.)
         self.refresh_surface_settings();
-        let view = self.surface_view();
+        if self.jam_device.is_none() {
+            return (Leds::default(), PadMap::default());
+        }
+        let stamp = self.surface_view_stamp();
+        let mut view = match self.frame_surface_view.take() {
+            Some((s, v)) if s == stamp => v,
+            _ => self.surface_view(),
+        };
         let Some(mut d) = self.jam_device.take() else { return (Leds::default(), PadMap::default()) };
         let mut asked = d.poll(now);
         for e in coalesced(events) {
@@ -377,11 +384,17 @@ impl App {
         // from before its FX went in). One more tick over what the host now holds
         // republishes it — and it publishes only: applying its requests again would
         // double the ones a tick emits by nature (a held strip's touch-write).
+        //
+        // (It republishes against the page as the host now holds it, and it applies
+        // nothing, so that one build also serves the lights below. `applied == 0` can
+        // still leave the page stale — a press the script handled without asking
+        // anything of the app moves its own cursor — hence the stamp check.)
+        if applied > 0 || self.surface_view_stamp() != stamp {
+            view = self.surface_view();
+        }
         if applied > 0 {
-            let view = self.surface_view();
             self.jam_republish(d.tick(&view, now));
         }
-        let view = self.surface_view();
         let (leds, route) = (d.leds(&view, now), d.pad_map(&view, now));
         let error = d.error();
         if error != self.jam_error {
