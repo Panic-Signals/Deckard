@@ -273,7 +273,6 @@ fn sync_lcd(ctx: &egui::Context, app: &App) {
 }
 
 fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
-    let y_of = |c: Color32| 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
     ctx.set_theme(egui::Theme::Dark);
     let mut v = egui::Visuals::dark();
     v.panel_fill = paper;
@@ -293,10 +292,14 @@ fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
         w.bg_stroke = edge;
         w.fg_stroke = Stroke::new(1.0, ink);
     }
-    v.widgets.active.bg_fill = ink;
-    // Brown field-colour on a bright segment does not read. Black does.
-    let on_fill = if y_of(ink) > y_of(paper) { Color32::BLACK } else { paper };
-    v.widgets.active.fg_stroke = Stroke::new(1.0, on_fill);
+    // A pressed widget: part of the way from the field to the writing, under the
+    // writing itself. Its writing is also what egui gives strong text (the titles in
+    // Preferences), so it can't be the dark colour that would read on a fill of the
+    // writing's own: those titles were black on the field.
+    let part = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * 0.4) as u8;
+    let pressed = Color32::from_rgb(part(paper.r(), ink.r()), part(paper.g(), ink.g()), part(paper.b(), ink.b()));
+    v.widgets.active.bg_fill = pressed;
+    v.widgets.active.weak_bg_fill = pressed;
     v.widgets.hovered.weak_bg_fill = dim(ink, 0.4);
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
@@ -8392,6 +8395,30 @@ mod desktop_theme_tests {
                 sync_lcd(&ctx, &app);
                 assert_eq!(colours(), plain, "{theme} {mode}");
             }
+        }
+        app.settings.desktop_theme = "maschine".into();
+        sync_lcd(&ctx, &app);
+        DESK.with(|d| d.set(PLAIN));
+    }
+
+    /// Strong text (Preferences' titles: "Input level", "Routing", "Ports") is the
+    /// theme's writing, as the rest of the text is: it was black on the dark field.
+    #[test]
+    fn a_themes_titles_are_its_writing() {
+        use super::{App, Color32, DESK, PLAIN, sync_lcd};
+        let ctx = super::egui::Context::default();
+        let mut app = App::default();
+        for (theme, ink) in
+            [("palenight_blue_green", [0xee, 0xff, 0xff]), ("palenight", [0xee, 0xff, 0xff]), ("solarized_dark", [0x93, 0xa1, 0xa1])]
+        {
+            app.settings.desktop_theme = theme.into();
+            sync_lcd(&ctx, &app);
+            let v = ctx.style_of(super::egui::Theme::Dark).visuals.clone();
+            let ink = Color32::from_rgb(ink[0], ink[1], ink[2]);
+            assert_eq!(v.strong_text_color(), ink, "{theme}");
+            let y = |c: Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+            assert!(y(ink) > y(v.widgets.active.bg_fill) + 150, "{theme}: the writing reads on a pressed widget");
+            assert!(y(v.widgets.active.bg_fill) > y(v.panel_fill), "{theme}: a pressed widget stands off the field");
         }
         app.settings.desktop_theme = "maschine".into();
         sync_lcd(&ctx, &app);
