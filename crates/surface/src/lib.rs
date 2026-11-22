@@ -407,6 +407,9 @@ pub struct SoundView {
     pub used: bool,
     /// One of its notes is sounding.
     pub playing: bool,
+    /// The pitches of its notes that have just started (sequenced or played): what its
+    /// pad, and in Keyboard mode each note's pad, flashes white for.
+    pub hits: Vec<i64>,
     /// The Mixer: its level (dB, −∞ silent), pan (−1..1), meters (left, right;
     /// amplitude), headroom (its loudest since reset; amplitude) and plug-ins.
     pub mix: MixView,

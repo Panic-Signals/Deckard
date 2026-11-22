@@ -1430,6 +1430,7 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("muted", s.muted)?;
                 st.set("used", s.used)?;
                 st.set("playing", s.playing)?;
+                st.set("hits", lua.create_sequence_from(s.hits.iter().copied())?)?;
                 st.set("choke_group", s.choke_group)?;
                 st.set("choke_mode", s.choke_mode)?;
                 st.set("link_group", s.link_group)?;

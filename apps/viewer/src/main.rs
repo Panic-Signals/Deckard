@@ -1195,6 +1195,9 @@ pub struct App {
     blinks: blink::Blinks,
     /// The (group, sound)s playing a note now, sequenced or live: their numbers flash.
     pub lit: std::collections::HashSet<(usize, usize)>,
+    /// The notes that have just started, sequenced or played, (group, sound, pitch): the
+    /// controller's pads flash white for them.
+    pub hits: std::collections::HashSet<(usize, usize, i64)>,
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
@@ -5942,6 +5945,12 @@ impl App {
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
                                     || noted.is_some_and(|n| n.contains(&s)),
                                 playing: self.lit.contains(&(g, s)),
+                                hits: {
+                                    let mut hits: Vec<i64> =
+                                        self.hits.iter().filter(|&&(hg, hs, _)| (hg, hs) == (g, s)).map(|&(_, _, p)| p).collect();
+                                    hits.sort_unstable();
+                                    hits
+                                },
                                 mix: deckard_surface::MixView {
                                     aux: snd.aux,
                                     swing: snd.swing.amount,
@@ -11677,8 +11686,10 @@ impl App {
     fn sync_notes_played(&mut self) {
         let played = self.notes_played();
         self.lit = played.iter().map(|&(g, s, _)| (g, s)).collect();
+        self.hits.clone_from(&played);
         if let Some(Ok(out)) = &self.output {
             self.lit.extend(out.played_sounds());
+            self.hits.extend(out.played_notes());
         }
         if !matches!(self.controller, Some(Ok(_))) {
             return;
@@ -12072,7 +12083,7 @@ impl App {
         // Hardware controllers and MIDI run before plug-in editor timers and UI panels so
         // mutes, pattern switches and transport commands reach the audio thread at once.
         self.sync_notes_played();
-        if !self.lit.is_empty() {
+        if !self.lit.is_empty() || !self.hits.is_empty() {
             // Unlight the flashed numbers on time.
             ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
         }

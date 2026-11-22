@@ -2443,7 +2443,8 @@ fn holding_a_step_modulates_it() {
 }
 
 /// A knob touched twice quickly: on the Events and Step pages VELOCITY and PROBABILITY
-/// back to 100, on the Mixer the strip back to 0 dB.
+/// back to 100. Not on the Mixer: a knob turned fast is touched, let go and touched
+/// again, and its strip isn't to jump to 0 dB.
 #[test]
 fn a_knob_tapped_twice_resets_it() {
     use std::time::Duration;
@@ -2472,10 +2473,7 @@ fn a_knob_tapped_twice_resets_it() {
 
     press(&mut s, &v, "BUTTON_MIX");
     tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_secs(5));
-    assert_eq!(
-        tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)),
-        [Action::ChannelLevel { group: v.group, sound: Some(1), db: 0.0 }]
-    );
+    assert!(tap(&mut s, "BUTTON_CAP_2", t0 + Duration::from_millis(5100)).is_empty(), "the Mixer's knobs don't reset");
 }
 
 /// The Pattern page's pads are places: a pattern lights where it is, whatever's between,
