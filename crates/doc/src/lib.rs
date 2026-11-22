@@ -729,7 +729,7 @@ impl Document {
         if ops.is_empty() {
             return Ok(());
         }
-        self.apply_with(label, ops, params)
+        self.apply_step(label, ops, params, true)
     }
 
     // ---- applying, undo, redo ------------------------------------------------------
@@ -741,7 +741,16 @@ impl Document {
         self.apply_with(label, ops, params)
     }
 
-    fn apply_with(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>) -> Result<(), String> {
+    fn apply_with(&mut self, label: &str, ops: Vec<Op>, params: Vec<Option<(Target, String)>>) -> Result<(), String> {
+        self.apply_step(label, ops, params, false)
+    }
+
+    /// `apply_with`; with `batch` (an edit to several targets at once, [`Self::set_many`])
+    /// a step that changes only some of the previous step's values extends it too: a
+    /// sound at its rail drops out of a drag without splitting the drag in two. Any
+    /// other edit extends the previous step only when it changes the very same values,
+    /// so two settings turned one after the other undo in turn.
+    fn apply_step(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>, batch: bool) -> Result<(), String> {
         let mut undo = self.run(&ops)?;
         // An edit that took away an object's definition: anything still referring to
         // it keeps it (see `rehomed`).
@@ -753,12 +762,18 @@ impl Document {
         }
         let now = Instant::now();
         let unique = |xs: &[Op]| (0..xs.len()).all(|i| xs[..i].iter().all(|a| op_target(a) != op_target(&xs[i])));
+        let same = |s: &Step| s.redo.len() == ops.len() && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b));
+        let some_of = |s: &Step| {
+            batch
+                && !ops.is_empty()
+                && unique(&s.redo)
+                && unique(&ops)
+                && ops.iter().all(|b| s.redo.iter().any(|a| op_target(a) == op_target(b)))
+        };
         let can_merge = |s: &Step| {
             s.label == label
-                && !ops.is_empty()
                 && !s.redo.iter().chain(&ops).any(|op| matches!(op, Op::Append { .. } | Op::Pop { .. }))
-                && ((s.redo.len() == ops.len() && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b)))
-                    || (unique(&s.redo) && unique(&ops) && ops.iter().all(|b| s.redo.iter().any(|a| op_target(a) == op_target(b)))))
+                && (same(s) || some_of(s))
         };
         match self.undo.last_mut() {
             Some(last) if can_merge(last) && now.duration_since(last.at) < MERGE_WINDOW => {
