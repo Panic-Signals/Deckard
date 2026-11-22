@@ -672,6 +672,8 @@ pub struct SaveDialog {
     pub samples: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
+    /// Why the last Save didn't write it, shown in the dialog.
+    pub error: Option<String>,
 }
 
 /// A file saved: where, its tags, and whether with its samples.
@@ -9302,6 +9304,7 @@ impl App {
             },
             samples: mode == SaveMode::WithSamples,
             confirm_overwrite: false,
+            error: None,
         });
     }
 
@@ -9423,6 +9426,7 @@ impl App {
         let name = dlg.name.trim().replace(['/', '\\', ':'], "-");
         if name.is_empty() {
             self.status = "a name, to save it".into();
+            dlg.error = Some("It needs a name.".into());
             return;
         }
         let path = dlg.folder.join(format!("{name}.{ext}"));
@@ -9455,6 +9459,9 @@ impl App {
         let saved = Saved { id, path, info, samples: dlg.samples };
         if self.write_item(what, saved) {
             self.save_dialog = None;
+        } else if let Some(d) = &mut self.save_dialog {
+            // The status line is easy to miss behind the dialog.
+            d.error = Some(self.status.clone());
         }
     }
 
