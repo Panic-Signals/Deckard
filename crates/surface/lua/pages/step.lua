@@ -15,7 +15,8 @@
 --   knobs 1-4         POSITION, PITCH, VELOCITY (FIXEDVELOCITY: the fixed velocity),
 --                     LENGTH of the selected notes; page 2 PROBABILITY, RATCHET, SHAPE,
 --                     FLOOR / CEILING
---   knob 6            the next or previous 16 steps; knob 8 Keyboard mode's pitches
+--   knob 6            the next or previous 16 steps; knob 8 Keyboard mode's pitches;
+--                     touching knobs 5-8 shows what they do in a box over each
 --   4-D encoder       as the Events page's (lib/notes.lua)
 --   knob 5            zoom the right screen (double-tap: 16 steps)
 
@@ -402,6 +403,16 @@ end
 
 local LIST_W = 20
 
+-- While any of knobs 5-8 is touched, the boxes over those that do something: 6 the
+-- 16 steps shown, 8 (Keyboard mode) the pitches.
+local function knob_icons(screen, theme, keyboard)
+  if not (deckard.held("CAP_5") or deckard.held("CAP_6") or deckard.held("CAP_7") or deckard.held("CAP_8")) then
+    return
+  end
+  widgets.knob_icon(screen, theme, 6, "scroll")
+  if keyboard then widgets.knob_icon(screen, theme, 8, "pitch") end
+end
+
 function page.draw(screen, theme)
   local s = deckard.state()
   sync(s)
@@ -464,6 +475,7 @@ function page.draw(screen, theme)
       screen:label(480, my - 6, LIST_W - 2, 12, tostring(m), small, "right", "center")
     end
   end
+  knob_icons(screen, theme, keyboard)
 end
 
 return page

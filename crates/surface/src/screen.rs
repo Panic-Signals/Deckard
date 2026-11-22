@@ -884,6 +884,34 @@ mod tests {
         assert_eq!(s.error(), None);
     }
 
+    /// Pad mode's page: a sound's tile on the right screen, and a group's on the left,
+    /// shows its level as two slim bars (left, right) up its right edge, each taller the
+    /// louder its side is, and nothing while it's silent.
+    #[test]
+    fn tiles_show_their_levels_in_stereo() {
+        let (mut s, mut v) = (Surface::new(), view());
+        s.event(&deckard_mk3::Event::Button("BUTTON_PAD_MODE", true), &v, std::time::Instant::now());
+        let (_, silent) = s.screens(&v).expect("a picture");
+        assert_eq!(s.error(), None);
+        let changed =
+            |px: &[[u8; 4]], x: usize, y0: usize, y1: usize| (y0..y1).filter(|&y| px[y * WIDTH + x] != silent[y * WIDTH + x]).count();
+        // Pad 2's tile: x 603..718, y 213..267; its bars x 709..711 and 712..714.
+        v.groups[0].sounds[1].mix.meter = (1.0, 0.03);
+        // The second group's: x 123..238, y 63..131; its bars x 229..231 and 232..234.
+        v.groups[1].mix.meter = (0.03, 1.0);
+        let (_, px) = s.screens(&v).expect("a new picture");
+        assert_eq!(s.error(), None);
+        let (l, r) = (changed(&px, 709, 213, 267), changed(&px, 712, 213, 267));
+        assert!(r > 0 && l > r && l < 44, "the sound's: left {l}, right {r}");
+        assert_eq!((changed(&px, 710, 213, 267), changed(&px, 713, 213, 267)), (l, r), "2 px wide each");
+        assert_eq!(changed(&px, 711, 213, 267), 0, "a gap between them");
+        let (l, r) = (changed(&px, 229, 63, 131), changed(&px, 232, 63, 131));
+        assert!(l > 0 && r > l && r < 58, "the group's: left {l}, right {r}");
+        let bars = |x: usize| (709..714).contains(&x) || (229..234).contains(&x);
+        let elsewhere = (0..WIDTH * HEIGHT).filter(|&i| px[i] != silent[i] && !bars(i % WIDTH)).count();
+        assert_eq!(elsewhere, 0, "only the bars change");
+    }
+
     fn lit(px: &[[u8; 4]], x0: usize, x1: usize, y0: usize, y1: usize) -> usize {
         (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| px[y * WIDTH + x][0] > 0x80).count()
     }

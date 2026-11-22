@@ -127,11 +127,12 @@ pub struct Sender {
 pub const FLASH: Duration = Duration::from_millis(90);
 
 /// Live notes sent, so the UI can light the sounds they play: the pitches held per
-/// (group, sound), and when a note last started.
+/// (group, sound), when a note last started, and when each pitch last did.
 #[derive(Default)]
 struct Played {
     held: std::collections::HashMap<(usize, usize), Vec<i64>>,
     last: std::collections::HashMap<(usize, usize), Instant>,
+    started: std::collections::HashMap<(usize, usize, i64), Instant>,
 }
 
 impl Sender {
@@ -169,6 +170,7 @@ impl Sender {
         match *event {
             Live::NoteOn { group, sound, pitch, length, .. } => {
                 p.last.insert((group, sound), Instant::now());
+                p.started.insert((group, sound, pitch), Instant::now());
                 if length == i64::MAX {
                     p.held.entry((group, sound)).or_default().push(pitch);
                 }
@@ -176,6 +178,7 @@ impl Sender {
             Live::NoteIn { group, sound, pitch, velocity, .. } => {
                 p.last.insert((group, sound), Instant::now());
                 if velocity > 0 {
+                    p.started.insert((group, sound, pitch), Instant::now());
                     p.held.entry((group, sound)).or_default().push(pitch);
                 }
             }
@@ -202,6 +205,15 @@ impl Sender {
         let now = Instant::now();
         p.last.retain(|_, t| now.duration_since(*t) < FLASH);
         p.held.keys().chain(p.last.keys()).copied().collect()
+    }
+
+    /// The (group, sound, pitch)s of the live notes that started within [`FLASH`]: a
+    /// held note is here only as it starts, so its pad flashes once.
+    pub fn played_notes(&self) -> std::collections::HashSet<(usize, usize, i64)> {
+        let Ok(mut p) = self.played.lock() else { return Default::default() };
+        let now = Instant::now();
+        p.started.retain(|_, t| now.duration_since(*t) < FLASH);
+        p.started.keys().copied().collect()
     }
 
     /// Whether an engine was sent to play.
@@ -596,6 +608,7 @@ impl Output {
             let mut ext = vec![vec![0f32; 16_384]; crate::OUTPUTS];
             let mut stereo = vec![0f32; 16_384];
             let mut engine: Option<Box<Engine>> = None;
+            let mut standalone_prehear = crate::prehear::Prehear::default();
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
             #[cfg(windows)]
@@ -624,7 +637,13 @@ impl Output {
                         Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
                         cmd => cmd,
                     };
-                    if let Some(back) = apply(&mut engine, cmd, started, period, rate as f64, frames, exact)
+                    let result = match cmd {
+                        Command::Prehear(sample, gain) if engine.is_none() => {
+                            Some(Command::Prehear(standalone_prehear.set(sample, gain), 0.0))
+                        }
+                        cmd => apply(&mut engine, cmd, started, period, rate as f64, frames, exact),
+                    };
+                    if let Some(back) = result
                         && let Err(back) = garbage.push(back)
                     {
                         // Nobody is collecting: free it here rather than leak.
@@ -651,6 +670,7 @@ impl Output {
                         }
                     }
                 }
+                standalone_prehear.mix(buf, rate as f64);
                 // Never waits: if the UI is reading, the next block publishes
                 // (peaks keep adding up meanwhile).
                 if let Ok(mut t) = telemetry.try_lock() {
@@ -1076,6 +1096,11 @@ impl Output {
     /// See [`Sender::played_sounds`].
     pub fn played_sounds(&self) -> std::collections::HashSet<(usize, usize)> {
         self.sender.played_sounds()
+    }
+
+    /// See [`Sender::played_notes`].
+    pub fn played_notes(&self) -> std::collections::HashSet<(usize, usize, i64)> {
+        self.sender.played_notes()
     }
 
     /// Copy audio from inside the engine to `tap` (or stop, with `None`).

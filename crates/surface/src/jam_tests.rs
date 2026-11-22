@@ -413,7 +413,7 @@ fn step_mode_toggles_steps_with_a_chasing_light() {
     v.pattern_position = Some(960);
     assert_eq!(pad_light(&mut d, &v, 2, 1), colour(0, SHADE_BRIGHT), "a note");
     assert_eq!(pad_light(&mut d, &v, 3, 1), colour(0, 3), "an accent is brighter");
-    assert_eq!(pad_light(&mut d, &v, 4, 1), colour(0, SHADE_FAINT), "another sound's note isn't this one's");
+    assert_eq!(pad_light(&mut d, &v, 4, 1), colour(WHITE, SHADE_FAINT), "an empty step in the focused sound");
     assert_eq!(pad_light(&mut d, &v, 5, 1), colour(WHITE, SHADE_BRIGHT), "the light chases");
     // (32 steps is a two-bar pattern: past it, nothing.)
     assert_eq!(pad_light(&mut d, &v, 1, 5), 0);

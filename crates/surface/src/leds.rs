@@ -121,6 +121,35 @@ mod tests {
         assert_eq!(byte(&l, "LED_MUTE"), ON);
     }
 
+    /// A note that has just started flashes its pad white, whatever the pad's colour and
+    /// whether it's the focused (bright) one or held.
+    #[test]
+    fn a_hit_flashes_its_pad_white() {
+        let (mut s, mut v) = (Surface::new(), view());
+        v.groups[0].sounds[0].hits = vec![60];
+        v.groups[0].sounds[2].hits = vec![48, 72];
+        s.event(&Event::PadOn(3, 1.0), &v, Instant::now());
+        let l = s.leds(&v);
+        assert_eq!(byte(&l, "LED_PAD_1"), leds::palette(16, 5), "the focused sound's pad");
+        assert_eq!(byte(&l, "LED_PAD_3"), leds::palette(16, 5), "a held pad");
+        assert_eq!(byte(&l, "LED_PAD_2"), leds::palette(0, 2), "the rest as they were");
+    }
+
+    /// In Keyboard mode the pads of the focused sound's notes that have just started
+    /// flash white: each note's own pad, not the whole keyboard.
+    #[test]
+    fn keyboard_flashes_the_notes_played() {
+        let (mut s, mut v) = (Surface::new(), view());
+        s.event(&Event::Button("BUTTON_KEYBOARD", true), &v, Instant::now());
+        v.groups[0].sounds[0].hits = vec![60, 61];
+        v.groups[0].sounds[1].hits = vec![62];
+        let l = s.leds(&v);
+        assert_eq!(byte(&l, "LED_PAD_1"), leds::palette(16, 5), "C3, a root");
+        assert_eq!(byte(&l, "LED_PAD_2"), leds::palette(16, 5), "C#3");
+        assert_eq!(byte(&l, "LED_PAD_3"), leds::palette(0, 2), "D3: another sound's note");
+        assert_eq!(byte(&l, "LED_PAD_13"), leds::palette(0, 4), "C4: not played");
+    }
+
     #[test]
     fn keyboard_lights_the_roots() {
         let (mut s, v) = (Surface::new(), view());

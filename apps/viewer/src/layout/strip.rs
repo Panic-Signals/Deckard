@@ -529,7 +529,7 @@ pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: R
     }
     // A sound has one instrument, in its first slot.
     let instruments = snd.slots.is_empty();
-    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| add_menu(ui, app, instruments, acts));
+    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| add_menu_in(ui, app, chain, instruments, acts));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-strip-add"), (add, area)));
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-strip-panels"), panels));
 }

@@ -564,6 +564,34 @@ impl Plugin {
         }
     }
 
+    /// A synth's preview for its scope: the waveform's columns and the note's envelope;
+    /// `None` for a plug-in without one, and until the preview of the current knob
+    /// values is rendered ([`Self::preview_job`]). It never renders.
+    pub fn scope(&self, columns: usize) -> Option<native::Scope> {
+        match &self.kind {
+            Kind::Native(p) => p.scope(columns),
+            _ => None,
+        }
+    }
+
+    /// What to render for the scope when the knobs moved since the last preview: render
+    /// it with this plug-in unlocked (the audio thread waits on its lock), then
+    /// [`Self::set_preview`].
+    pub fn preview_job(&self) -> Option<native::PreviewJob> {
+        match &self.kind {
+            Kind::Native(p) => p.preview_job(),
+            _ => None,
+        }
+    }
+
+    /// Keep a rendered preview, if the knobs are still where its job found them.
+    pub fn set_preview(&mut self, rendered: native::Preview) -> bool {
+        match &mut self.kind {
+            Kind::Native(p) => p.set_preview(rendered),
+            _ => false,
+        }
+    }
+
     /// Whether the plug-in's state changed by itself (a finished Tune) and is to be
     /// stored, without taking the news (as [`Plugin::take_dirty`] does).
     pub fn changed_by_itself(&self) -> bool {

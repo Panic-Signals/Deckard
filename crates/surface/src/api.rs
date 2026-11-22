@@ -1443,6 +1443,7 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("muted", s.muted)?;
                 st.set("used", s.used)?;
                 st.set("playing", s.playing)?;
+                st.set("hits", lua.create_sequence_from(s.hits.iter().copied())?)?;
                 st.set("choke_group", s.choke_group)?;
                 st.set("choke_mode", s.choke_mode)?;
                 st.set("link_group", s.link_group)?;
@@ -1564,6 +1565,13 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
         t.set("reference", format!("A4 = {}", tv.reference))?;
         t.set("muted", tv.muted)?;
         ct.set("tuner", t)?;
+    }
+    // The focused synth's preview: the wave's low/high columns and the note's envelope.
+    if let Some(s) = &c.scope {
+        let t = lua.create_table()?;
+        t.set("wave", lua.create_sequence_from(s.wave.iter().flat_map(|(lo, hi)| [*lo, *hi]))?)?;
+        t.set("env", lua.create_sequence_from(s.envelope.iter().copied())?)?;
+        ct.set("scope", t)?;
     }
     // The Generate page's Euclidean circle.
     if let Some(e) = &c.euclid {
