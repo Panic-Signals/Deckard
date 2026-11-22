@@ -550,3 +550,25 @@ fn every_control_runs() {
     assert_eq!(app.jam_error, None);
     let _ = project(&app);
 }
+
+/// SHIFT + GROUP_E's Variation page turns its Mode through Humanize, Random and Euclid,
+/// and the page must follow the mode the turn wrote (work-item 35). It reads the mode
+/// back out of `deckard.state()`, whose table the perf work patches in place between
+/// frames: a field left out of that patch is a page that never leaves its first mode.
+#[test]
+fn the_variation_page_follows_its_mode() {
+    let mode = |app: &crate::App| app.doc.as_ref().map(|d| d.borrow().variation(app.group, app.sound).mode);
+    let page = |app: &crate::App| app.jam_strip().map(|(t, n, _)| (t, n));
+    let mut app = app();
+    run(&mut app, vec![Event::Button("SHIFT", true)]);
+    press(&mut app, "GROUP_E");
+    run(&mut app, vec![Event::Button("SHIFT", false)]);
+    assert_eq!(page(&app), Some(("Variation".to_string(), 5)), "Humanize's five settings");
+    press(&mut app, "ENCODER");
+    run(&mut app, vec![Event::Encoder(1)]);
+    assert_eq!(mode(&app), Some(1), "the turn reached the app");
+    assert_eq!(page(&app), Some(("Variation".to_string(), 8)), "and the page is Random's eight, not still Humanize's five");
+    run(&mut app, vec![Event::Encoder(1)]);
+    assert_eq!(mode(&app), Some(2), "and on to Euclid, which Humanize's page used to hide behind a frozen mode");
+    assert_eq!(page(&app), Some(("Euclid".to_string(), 6)), "whose page is its own six");
+}

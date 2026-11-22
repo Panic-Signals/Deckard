@@ -1815,10 +1815,17 @@ fn group_static_eq(a: &crate::GroupView, b: &crate::GroupView) -> bool {
         && a.sounds.iter().zip(&b.sounds).all(|(x, y)| sound_static_eq(x, y))
 }
 
+/// Whether `deckard.state()`'s table may be patched field by field instead of made again.
+///
+/// The invariant: a `View` field either appears here (so a change to it rebuilds the
+/// table) or is written by `patch_state_in_place` below. A field in neither is a value
+/// the scripts keep reading at its old setting — the Variation page's mode was one, and
+/// its page never left Humanize. **A new `View` field goes here** unless it is patched.
 fn can_patch_state_in_place(old: &View, new: &View) -> bool {
     old.project == new.project
         && old.tempo == new.tempo
         && old.swing == new.swing
+        && old.variation == new.variation
         && old.master_volume == new.master_volume
         && old.master_db == new.master_db
         && old.playing == new.playing
@@ -1865,6 +1872,8 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         && old.group == new.group
         && old.sound == new.sound
         && old.browser == new.browser
+        && old.browser_open == new.browser_open
+        && old.page == new.page
         && old.sampling == new.sampling
         && old.loading == new.loading
         && old.groups.len() == new.groups.len()

@@ -254,6 +254,79 @@ local function chord_of(s, note)
   return (deckard.chord(note, spec, nil))
 end
 
+-- A PAD LAYOUT setting as the viewer publishes it (`jam_keyboard_layout` …, and the
+-- Settings page's keys), read here rather than through `oso_layout_value`, which is
+-- defined below this.
+local function pad_layout_value(s, key)
+  local vals = s.settings and s.settings.values
+  return vals and vals[key] or nil
+end
+
+-- The isomorphic layouts' row shift, in notes (NI's `getIsomorphicLayoutPadOffset`):
+-- 3rds shifts 3, or 5 in a scale's degrees; 4ths shifts 4, or 6; Sequential leaves the
+-- room an eight-pad row has left of the scale; 0 is the linear grid.
+local function iso_offset(s)
+  -- In Key walks the scale, so a 3rd is five degrees of it; Chromatic walks semitones.
+  local chromatic_scale = s.scale.bank == 1 and s.scale.kind == 1
+  local shifted = not chromatic_scale and pad_layout_value(s, "jam_iso_type") ~= "Chromatic"
+  local layout = pad_layout_value(s, "jam_iso_layout")
+  if layout == "Sequential" then
+    -- Rows step by the scale's own size: an eight-pad row of a seven-note scale wraps by one.
+    return shifted and math.max(0, 8 - #scale_steps(s)) or 0
+  elseif layout == "4ths" then
+    return shifted and 6 or 4
+  elseif layout == "3rds" then
+    return shifted and 5 or 3
+  end
+  return 0
+end
+
+-- The keyboard's 64 notes, indexed as `key_note` has them: 0 at the bottom left, up the
+-- rows. Linear, or the isomorphic grid NI builds (`updateJamKeyboardNoteMap`): each row
+-- start re-anchors `offset` notes back, and Horizontal transposes the eight-by-eight.
+local grid = { key = nil, notes = nil }
+
+local function keyboard_notes(s)
+  local iso = pad_layout_value(s, "jam_keyboard_layout") == "Isomorph"
+  local horizontal = pad_layout_value(s, "jam_iso_dir") == "Horizontal"
+  local key = table.concat({
+    keyboard_base(s), s.scale.bank, s.scale.kind, iso and 1 or 0,
+    iso and iso_offset(s) or 0, horizontal and 1 or 0,
+  }, "/")
+  if grid.key == key then return grid.notes end
+  local notes, at, offset, d = {}, {}, iso and iso_offset(s) or 0, 0
+  for i = 0, 63 do
+    if offset ~= 0 and i >= 8 and i % 8 == 0 then
+      -- The row begins at the note the array already holds `offset` entries back, and the
+      -- walk resumes just past it — so each row steps by `8 - offset` (NI's build: it
+      -- derives the next index from the copied note the same way). `at` keeps that degree.
+      notes[i] = notes[i - offset]
+      d = at[i - offset] + 1
+    else
+      notes[i] = degree_note(s, keyboard_base(s), d)
+      at[i] = d
+      d = d + 1
+    end
+  end
+  if horizontal then
+    -- The pads count their rows down from the top while `notes` counts up (`key_note`'s
+    -- index), so the transpose NI applies is composed with that flip: turn the grid on its
+    -- side in pad order, then read it back into `notes` order.
+    local pad, turned = {}, {}
+    for k = 0, 63 do
+      pad[(7 - k // 8) * 8 + k % 8] = notes[k]
+    end
+    for p = 0, 63 do
+      turned[p] = pad[(p % 8) * 8 + p // 8]
+    end
+    for k = 0, 63 do
+      notes[k] = turned[(7 - k // 8) * 8 + k % 8]
+    end
+  end
+  grid.key, grid.notes = key, notes
+  return notes
+end
+
 -- The note of a Keyboard pad: up from the bottom left. With a chord set, 12 pads, each a
 -- semitone, each its chord (manual 6.3.4.3).
 local function key_note(s, col, row)
@@ -262,7 +335,7 @@ local function key_note(s, col, row)
     if k >= 12 then return nil end
     return keyboard_base(s) + k
   end
-  local note = degree_note(s, keyboard_base(s), k)
+  local note = keyboard_notes(s)[k]
   return (note >= 0 and note <= 127) and note or nil
 end
 

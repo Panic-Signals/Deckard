@@ -1851,3 +1851,49 @@ fn shift_e_pressed_twice_closes_the_variation_page() {
     d.tick(&v, Instant::now());
     assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the second press closes it");
 }
+
+/// The isomorphic pad layouts move the keyboard grid: rows step by a constant interval and
+/// Horizontal is that grid transposed — as NI's `updateJamKeyboardNoteMap` builds it, in
+/// C++ behind `PadModeHelper.getNoteForPad`. DECKARD published the four PAD LAYOUT settings
+/// and left the 8x8 a plain linear grid.
+#[test]
+fn the_isomorphic_layout_moves_the_keyboard_grid() {
+    let pitches = |d: &mut Device, v: &View| -> Vec<i64> {
+        d.pad_map(v, Instant::now()).pads.iter().map(|p| p.first().map_or(-1, |n| n.2)).collect()
+    };
+    let mut v = jam_view();
+    // Chromatic, so a row's step is the same interval at every column. (In Key walks the
+    // scale's degrees, whose semitone steps differ by one from place to place.)
+    // Bank 1, kind 0 in the view is the app's plain scale (published to the script as 1/1).
+    (v.scale_root, v.scale_bank, v.scale_kind) = (60, 1, 0);
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    let linear = pitches(&mut d, &v);
+    assert_eq!(linear.len(), 64);
+    for (key, value) in
+        [("jam_keyboard_layout", "Isomorph"), ("jam_iso_layout", "3rds"), ("jam_iso_type", "Chromatic"), ("jam_iso_dir", "Vertical")]
+    {
+        v.settings.values.insert(key.into(), value.into());
+    }
+    let vertical = pitches(&mut d, &v);
+    assert_ne!(vertical, linear, "the grid is no longer the linear one");
+    // Pads are numbered from the top row across (`pad_key`). What a test can pin without a
+    // pad under the finger: the grid is no longer linear, each row still ascends left to
+    // right, and Horizontal is that grid transposed. The interval a row steps by is NI's
+    // offset table's business (hardware-verified, see the note beside `iso_offset`).
+    let at = |grid: &[i64], row: usize, col: usize| grid[(row - 1) * 8 + (col - 1)];
+    for row in 1..=8 {
+        let row_pitches: Vec<i64> = (1..=8).map(|col| at(&vertical, row, col)).filter(|p| *p >= 0).collect();
+        assert!(row_pitches.windows(2).all(|w| w[1] > w[0]), "row {row} ascends: {row_pitches:?}");
+    }
+    v.settings.values.insert("jam_iso_dir".into(), "Horizontal".into());
+    let horizontal = pitches(&mut d, &v);
+    for row in 1..=8 {
+        for col in 1..=8 {
+            assert_eq!(at(&horizontal, row, col), at(&vertical, col, row), "Horizontal is Vertical transposed ({row},{col})");
+        }
+    }
+}
