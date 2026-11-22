@@ -1973,8 +1973,9 @@ pub fn logo_font() -> Vec<u8> {
 }
 
 /// The app's fonts: IBM Plex Sans (regular, bold) and IBM Plex Mono, egui's fallbacks,
-/// the logo's, and the emoji font for names.
-fn font_definitions() -> egui::FontDefinitions {
+/// the logo's, and the emoji font for names. Last of all egui's Hack, for the symbols no
+/// other font has (▸ in "Preferences ▸ General", ⇕).
+pub(crate) fn font_definitions() -> egui::FontDefinitions {
     let bytes = logo_font();
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
@@ -1991,6 +1992,9 @@ fn font_definitions() -> egui::FontDefinitions {
     let mono_fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
     let mut prop = vec!["plex".into(), EMOJI_FONT.into()];
     prop.extend(prop_fallbacks);
+    if fonts.font_data.contains_key("Hack") && !prop.iter().any(|f| f == "Hack") {
+        prop.push("Hack".into());
+    }
     fonts.families.insert(egui::FontFamily::Proportional, prop.clone());
     let mut mono = vec!["plex-mono".into(), EMOJI_FONT.into()];
     mono.extend(mono_fallbacks);
@@ -2069,6 +2073,25 @@ pub fn dialog_style(ui: &mut Ui) {
     s.icon_spacing = 6.0;
 }
 
+/// The tallest a dialog can be and still fit the window, with room round it. Past it
+/// a dialog's contents scroll instead of running off the bottom of a short screen.
+pub fn dialog_max_height(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - 64.0).max(160.0)
+}
+
+/// The widest a dialog can be and still fit the window (a laptop's 1366 px, a small
+/// window), with room round it.
+pub fn dialog_max_width(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().width() - 32.0).max(320.0)
+}
+
+/// A modal's contents, scrolling when they're taller than the window has room for
+/// ([`dialog_max_height`], less the modal's own frame).
+pub fn fit_dialog<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let max = dialog_max_height(ui.ctx()) - 32.0;
+    egui::ScrollArea::vertical().max_height(max).show(ui, add).inner
+}
+
 /// Draws the browser header icon (three equidistant shelf lines on the left and a magnifying glass on the right).
 fn draw_browser_icon(p: &Painter, r: Rect, c: Color32) {
     let x0 = (r.center().x - 9.0).floor() + 0.5;
@@ -2132,7 +2155,20 @@ pub fn header(app: &mut App, ui: &mut Ui) {
             let t = Vec2::new(32.0, 24.0);
             let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
             let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
-            let mid_left = full.center().x - group / 2.0;
+            // Centred, as Maschine's, but between the left group and the right one (where
+            // they ended last frame): in a narrow window (a laptop's 1280 px) the transport
+            // moves over rather than covering Save. Where it can't fit between them at all,
+            // it stays centred.
+            let (left_end, right_start) = ui.ctx().data(|d| {
+                (
+                    d.get_temp::<f32>(egui::Id::new("header-left-end")).unwrap_or(0.0),
+                    d.get_temp::<f32>(egui::Id::new("header-right-start")).unwrap_or(full.right()),
+                )
+            });
+            let centred = full.center().x - group / 2.0;
+            // (The right group's own spacing already ends it with a gap.)
+            let (lo, hi) = (left_end + 8.0, right_start - group);
+            let mid_left = if lo <= hi { centred.clamp(lo, hi) } else { centred };
             // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
             // and a new release's button.
             ui.horizontal_centered(|ui| {
@@ -2206,16 +2242,19 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     let dirty = d.is_dirty();
                     let save_tip =
                         if dirty { "Save (⌘S); the first save keeps the original as .mxprj.bak" } else { "No unsaved changes" };
-                    if icon_button(ui, t, dirty, PLAY_ON, save_tip, |p, r, c| {
+                    let save = icon_button(ui, t, dirty, PLAY_ON, save_tip, |p, r, c| {
                         let b = Rect::from_center_size(r.center(), Vec2::splat(12.0));
                         p.rect_stroke(b, 1.0, Stroke::new(1.5, c), StrokeKind::Inside);
                         p.rect_filled(Rect::from_min_size(b.min + Vec2::new(3.0, 0.0), Vec2::new(6.0, 4.0)), 0.0, c);
-                    })
-                    .clicked()
-                    {
+                    });
+                    note_rect(ui, "save", save.rect);
+                    if save.clicked() {
                         acts.push(Act::Save);
                     }
                 }
+                // (Before the update button, which only shows where there's room for it.)
+                let end = ui.cursor().left();
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("header-left-end"), end));
                 if let Some(rel) = app.update.available()
                     && update_button(ui, mid_left, rel.version_text()).is_some_and(|r| r.clicked())
                 {
@@ -2408,6 +2447,9 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     }
                     ui.add_space(8.0);
                 }
+                // (Before an error's text, which takes whatever room is left.)
+                let start = ui.cursor().max.x;
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("header-right-start"), start));
                 if let Some(e) = &app.error {
                     let path = app.path.as_deref().map(|p| p.display().to_string()).unwrap_or_default();
                     ui.colored_label(REC_ON, format!("{path}: {e}"));
@@ -7702,9 +7744,15 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     if app.lanes_dialog {
         let mut open = true;
         let sound = p.groups[app.group].sounds.get(app.sound).map_or(String::new(), |s| s.name.clone());
-        egui::Window::new("MIDI Lanes").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(
-            ui.ctx(),
-            |ui| {
+        egui::Window::new("MIDI Lanes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .max_height(dialog_max_height(ui.ctx()))
+            .max_width(dialog_max_width(ui.ctx()))
+            .vscroll(true)
+            .show(ui.ctx(), |ui| {
                 dialog_style(ui);
                 ui.label(egui::RichText::new(format!("Lanes for {sound}")).weak());
                 ui.add_space(4.0);
@@ -7768,8 +7816,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                         }
                     }
                 });
-            },
-        );
+            });
         if !open {
             acts.push(Act::LanesDialog(false));
         }
