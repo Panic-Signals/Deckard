@@ -566,6 +566,8 @@ pub enum RecordAct {
     ScanMidi,
     FocusTake(usize),
     DeleteTake(usize),
+    /// Take `.0` onto lane `.1` of the focused sound (past its layers: a new one).
+    TakeToLayer(usize, usize),
 }
 
 fn sact(a: SamplingAct) -> Act {
@@ -2656,7 +2658,7 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         }
         let resp = ui
             .interact(rr, ui.id().with(("take", i)), Sense::click_and_drag())
-            .on_hover_text("Click to load it into the focused sound; drag it onto a sound");
+            .on_hover_text("Click to load it into the focused sound; drag it onto a sound; right-click to put it on a layer");
         if resp.drag_started() {
             resp.dnd_set_drag_payload(DraggedTake(take.clone()));
         }
@@ -2683,6 +2685,23 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         let del = Rect::from_min_size(Pos2::new(rr.right() - 16.0, rr.bottom() - 16.0), Vec2::splat(14.0));
         let dr = ui.interact(del, ui.id().with(("take-del", i)), Sense::click()).on_hover_text("Delete the take (its file stays)");
         painter.text(del.center(), Align2::CENTER_CENTER, "×", font(12.0), if dr.hovered() { white(245) } else { white(110) });
+        // Right-clicked: onto a layer of the focused sound.
+        if crate::layers::can_layer(p, app.group, app.sound) {
+            let have = crate::layers::layers_in(p, app.group, app.sound).len();
+            resp.context_menu(|ui| {
+                for k in 0..have {
+                    if ui.button(format!("To layer {}", k + 1)).on_hover_text("Replace this layer's sample; its settings stay").clicked() {
+                        acts.push(sact(SamplingAct::Record(RecordAct::TakeToLayer(i, k))));
+                        ui.close();
+                    }
+                }
+                if have < deckard_model::layers::MAX_LAYERS && ui.button(if have == 0 { "To layer 1" } else { "To a new layer" }).clicked()
+                {
+                    acts.push(sact(SamplingAct::Record(RecordAct::TakeToLayer(i, have))));
+                    ui.close();
+                }
+            });
+        }
         if dr.clicked() {
             acts.push(sact(SamplingAct::Record(RecordAct::DeleteTake(i))));
         } else if resp.clicked() {
@@ -2761,6 +2780,14 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
                 ..field("NOTE ON", ms_text(a.note_on_ms), step(RecParam::NoteOnMs, a.note_on_ms as i64, 100, 100, 30_000))
             });
         }
+    }
+    // Where the take goes, on a sound that can have layers.
+    if let Some((options, at, values)) = crate::layers::take_choices(p, app.group, app.sound, rec) {
+        let mut f = choice_field("LAYER", options, at, move |k| {
+            sact(SamplingAct::Record(RecordAct::Set(RecParam::Layer, values.get(k).copied().unwrap_or(0))))
+        });
+        f.tip = "The layer the next take goes to: one it has (its sample replaced, its settings kept), or a new one";
+        fields.push(f);
     }
     let y = footer.top() + 6.0;
     let mut nx = group_box(ui, &painter, footer.left() + 8.0, y, "RECORDING", &fields, acts);
@@ -2888,6 +2915,8 @@ pub enum RecParam {
     Mode,
     Length,
     Target,
+    /// The lane a take goes to; `MAX_LAYERS`: a new layer.
+    Layer,
     Monitor,
     Channel,
     NoteOnMs,
@@ -3004,6 +3033,9 @@ pub struct RecorderView {
     /// 1, 2, 4, 8 or 16 bars, or FREE; Loop's target: Take, Sound or Pattern.
     pub length: usize,
     pub target: usize,
+    /// The layer a take goes to on a sound with layers: its lane, or `MAX_LAYERS` for a
+    /// new one.
+    pub layer: usize,
     pub monitor: bool,
     pub auto: AutoParams,
     /// MIDI outputs there are (Auto ▸ MIDI To).
@@ -3036,6 +3068,7 @@ impl RecorderView {
             RecParam::Mode => self.mode = v.clamp(0, 3) as usize,
             RecParam::Length => self.length = v.clamp(0, 5) as usize,
             RecParam::Target => self.target = v.clamp(0, 2) as usize,
+            RecParam::Layer => self.layer = v.clamp(0, deckard_model::layers::MAX_LAYERS as i64) as usize,
             RecParam::Monitor => self.monitor = v != 0,
             RecParam::Channel => a.channel = v.clamp(1, 16) as u8,
             RecParam::NoteOnMs => {

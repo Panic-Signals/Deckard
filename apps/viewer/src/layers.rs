@@ -41,6 +41,44 @@ pub(crate) fn layered(p: &Project, g: usize, s: usize) -> bool {
         .is_some_and(|snd| snd.new_sampler.is_some() && snd.sampler.as_ref().is_some_and(|x| !layers::zones(x).is_empty()))
 }
 
+/// RECORD's LAYER for sound (`g`, `s`): the choices, the one shown, and what each sets
+/// (a lane, or `MAX_LAYERS` for a new layer). None: the sound can't have layers, or the
+/// recorder's mode has a target of its own (Loop, Auto).
+pub(crate) fn take_choices(
+    p: &Project,
+    g: usize,
+    s: usize,
+    rec: &crate::layout::sampling::RecorderView,
+) -> Option<(Vec<String>, usize, Vec<i64>)> {
+    if rec.mode > 1 || !can_layer(p, g, s) {
+        return None;
+    }
+    let have = layers_in(p, g, s).len();
+    let mut options: Vec<String> = (1..=have.max(1)).map(|k| k.to_string()).collect();
+    let mut values: Vec<i64> = (0..have.max(1) as i64).collect();
+    if have > 0 && have < MAX_LAYERS {
+        options.push("New".into());
+        values.push(MAX_LAYERS as i64);
+    }
+    let at = if rec.layer < have { rec.layer } else { options.len() - 1 };
+    Some((options, at, values))
+}
+
+/// The lane a take recorded for sound (`g`, `s`) goes to, as RECORD's LAYER has it.
+/// None: it is the sound's sample as before (a sound without layers whose one sample is
+/// recorded again stays unlayered, so it can still be sliced).
+pub(crate) fn take_lane(p: &Project, g: usize, s: usize, layer: usize) -> Option<usize> {
+    if !can_layer(p, g, s) {
+        return None;
+    }
+    let have = layers_in(p, g, s).len();
+    match (have, layer < have) {
+        (0, _) => None,
+        (_, true) => layered(p, g, s).then_some(layer),
+        (_, false) => Some(have),
+    }
+}
+
 fn zones_of(d: &Document, g: usize, s: usize) -> Vec<deckard_model::Zone> {
     d.project().groups[g].sounds[s].sampler.as_ref().map(|x| x.zones.clone()).unwrap_or_default()
 }
@@ -121,6 +159,26 @@ impl App {
     /// The focused sound's layers ([`layers_in`]).
     pub(crate) fn layers_of(&self) -> Vec<(usize, Layer)> {
         self.doc.as_ref().map_or_else(Vec::new, |d| layers_in(d.borrow().project(), self.group, self.sound))
+    }
+
+    /// A take for sound (`g`, `s`): onto the layer RECORD's LAYER names, else the sound's
+    /// one sample ([`App::load_take`]).
+    pub(crate) fn take_into(&mut self, g: usize, s: usize, path: &std::path::Path, frames: usize) {
+        let lane = self.doc.as_ref().and_then(|d| take_lane(d.borrow().project(), g, s, self.recorder.view.layer));
+        match lane {
+            Some(lane) => self.take_to_layer(g, s, path, lane),
+            None => self.load_take(g, s, path, frames),
+        }
+    }
+
+    /// `path` onto lane `lane` of sound (`g`, `s`) (past its layers: a new one).
+    pub(crate) fn take_to_layer(&mut self, g: usize, s: usize, path: &std::path::Path, lane: usize) {
+        let keep = (self.group, self.sound, self.zone);
+        (self.group, self.sound) = (g, s);
+        self.layer_files(lane, &[path.to_path_buf()]);
+        if (g, s) != (keep.0, keep.1) {
+            (self.group, self.sound, self.zone) = keep;
+        }
     }
 
     /// `files` onto the focused sound's lanes from `lane` on: an empty lane gets a new

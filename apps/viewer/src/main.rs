@@ -8381,6 +8381,13 @@ impl App {
                         self.place_take(g, s, &p);
                     }
                 }
+                RecordAct::TakeToLayer(i, lane) => {
+                    self.recorder.view.focused = Some(i);
+                    if let Some(p) = self.recorder.view.takes.get(i).cloned() {
+                        let (g, s) = (self.group, self.sound);
+                        self.take_to_layer(g, s, &p, lane);
+                    }
+                }
                 RecordAct::DeleteTake(i) => {
                     if i < self.recorder.view.takes.len() {
                         let path = self.recorder.view.takes.remove(i);
@@ -9065,7 +9072,7 @@ impl App {
         let at = (self.group, self.sound, self.zone);
         let pages = self.doc.as_ref().map(|d| {
             let d = d.borrow();
-            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project());
+            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound));
             (
                 sampling_hw::pages(record, &self.sampling, d.project(), at),
                 sampling_hw::sample_view(&self.sampling, d.project(), at, focus_slice),
@@ -9452,7 +9459,7 @@ impl App {
                         let ticks = if mode == 0 { (ticks / sixteenth).round().max(1.0) * sixteenth } else { ticks };
                         self.put_audio_take(g, s, &path, sample.frames.len(), sample.rate, ticks, 0, true, "Record");
                     } else {
-                        self.load_take(g, s, &path, sample.frames.len());
+                        self.take_into(g, s, &path, sample.frames.len());
                     }
                 }
                 if let Some(doc) = &self.doc
@@ -10784,7 +10791,7 @@ impl App {
                 }
             }
             (0 | 1, _) => self.put_audio_take(g, s, path, smp.frames.len(), smp.rate, ticks, 0, true, "Place Take"),
-            (2, _) => self.load_take(g, s, path, smp.frames.len()),
+            (2, _) => self.take_into(g, s, path, smp.frames.len()),
             _ => self.status = "a take goes on an empty sound, an Audio plug-in or a Sampler".into(),
         }
     }

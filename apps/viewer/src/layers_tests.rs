@@ -1,9 +1,9 @@
 //! A New Sampler's layers, as the app edits them.
 
 use crate::App;
-use crate::layers::{can_layer, layers_in, window_moved};
+use crate::layers::{can_layer, layered, layers_in, take_choices, window_moved};
 use crate::layout::sampling::{LayerAct, MorphAct};
-use deckard_model::layers::{Layer, Morph, Shape, spread};
+use deckard_model::layers::{Layer, MAX_LAYERS, Morph, Shape, spread};
 use std::path::PathBuf;
 
 /// A tone on `hz`, two seconds, as a file `name` in `dir`.
@@ -44,6 +44,10 @@ pub(crate) fn three() -> (tempfile::TempDir, App) {
 
 pub(crate) fn zones(app: &App) -> Vec<deckard_model::Zone> {
     app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones.clone()
+}
+
+fn project(app: &App) -> deckard_model::Project {
+    app.doc.as_ref().unwrap().borrow().project().clone()
 }
 
 fn morph(app: &App) -> Morph {
@@ -363,4 +367,64 @@ fn dragging_keys_is_one_undo_step() {
     assert_eq!(labels(&app).len(), before + 1, "{:?}", labels(&app));
     assert!(app.doc.as_ref().unwrap().borrow_mut().undo());
     assert!(zones(&app).iter().all(|z| z.key_range == (0, 127)));
+}
+
+/// A take goes where RECORD's LAYER says: the first is the sound's sample, New adds a
+/// layer each time, a number records that layer again and keeps its settings.
+#[test]
+fn takes_go_to_the_layer_chosen() {
+    use crate::layout::sampling::RecParam;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app();
+    let take = |app: &mut App, name: &str, hz: f32| {
+        let f = tone(dir.path(), name, hz);
+        app.take_into(0, 0, &f, 48_000);
+    };
+    take(&mut app, "one.wav", 220.0);
+    assert_eq!(names(&app), ["one.wav"]);
+    // Again on 1, without layers: the sample is recorded again, the sound stays plain.
+    take(&mut app, "again.wav", 220.0);
+    assert_eq!(names(&app), ["again.wav"]);
+    assert!(!layered(&project(&app), 0, 0), "it can still be sliced");
+    // New: one more layer, each time.
+    app.recorder.view.set(RecParam::Layer, MAX_LAYERS as i64);
+    take(&mut app, "two.wav", 330.0);
+    take(&mut app, "three.wav", 440.0);
+    assert_eq!(names(&app), ["again.wav", "two.wav", "three.wav"]);
+    assert!(layered(&project(&app), 0, 0));
+    // A number: that layer again, its settings its own.
+    app.layer_act(1, LayerAct::Level(0.3));
+    app.recorder.view.set(RecParam::Layer, 1);
+    take(&mut app, "redo.wav", 330.0);
+    assert_eq!(names(&app), ["again.wav", "redo.wav", "three.wav"]);
+    assert!((zones(&app)[1].gain - 0.3).abs() < 1e-9, "{}", zones(&app)[1].gain);
+    // One undo step a take.
+    app.undo();
+    assert_eq!(names(&app), ["again.wav", "two.wav", "three.wav"]);
+}
+
+/// LAYER lists the sound's layers and New; a take's menu puts it on one.
+#[test]
+fn the_layer_choices_follow_the_sound() {
+    use crate::layout::sampling::{RecParam, RecordAct, SamplingAct};
+    let (dir, mut app) = three();
+    let choices = |app: &App| take_choices(&project(app), 0, 0, &app.recorder.view).map(|c| (c.0, c.1));
+    let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_eq!(choices(&app), Some((s(&["1", "2", "3", "New"]), 0)));
+    app.recorder.view.set(RecParam::Layer, MAX_LAYERS as i64);
+    assert_eq!(choices(&app).unwrap().1, 3, "New");
+    // Loop has a target of its own.
+    app.recorder.view.set(RecParam::Mode, 2);
+    assert_eq!(choices(&app), None);
+    app.recorder.view.set(RecParam::Mode, 0);
+    // The MK3's RECORDING page has it too.
+    let knobs = crate::record_knobs::knobs(&app.recorder.view, &app.settings, &project(&app), (0, 0));
+    let k = knobs.pages[0].knobs.iter().find(|k| k.name == "LAYER").expect("a LAYER knob");
+    assert_eq!((k.text.as_str(), k.max), ("New", 3.0));
+    // A take, right-clicked: onto layer 2.
+    let f = tone(dir.path(), "take.wav", 500.0);
+    app.recorder.view.takes.push(f);
+    app.sampling_act(SamplingAct::Record(RecordAct::TakeToLayer(0, 1)));
+    assert_eq!(names(&app)[1], "take.wav");
+    assert_eq!(zones(&app).len(), 3);
 }

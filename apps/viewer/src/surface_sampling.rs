@@ -11,7 +11,7 @@ impl App {
     /// The knob pages of every tab, with what each knob sets.
     fn sampling_pages(&self) -> Option<sampling_hw::Pages> {
         let d = self.doc.as_ref()?.borrow();
-        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project());
+        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound));
         Some(sampling_hw::pages(record, &self.sampling, d.project(), (self.group, self.sound, self.zone)))
     }
 
