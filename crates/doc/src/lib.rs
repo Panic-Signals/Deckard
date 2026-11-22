@@ -629,22 +629,29 @@ impl Document {
     }
 
     pub fn set_pattern_length(&mut self, g: usize, p: usize, ticks: i64) -> Result<(), String> {
-        let ops = self.param_ops(Target::Pattern(g, p), "length", Value::Int(ticks.max(deckard_model::PPQ / 4)))?;
+        let t = Target::Pattern(g, p);
+        let ops = self.param_ops(t, "length", Value::Int(ticks.max(deckard_model::PPQ / 4)))?;
         if ops.is_empty() {
             return Ok(());
         }
-        self.apply("Pattern Length", ops)
+        let params = vec![Some((t, "length".to_string())); ops.len()];
+        self.apply_with("Pattern Length", ops, params)
     }
 
     /// A pattern's start (where in its notes it begins, ticks, from 0) and length, as one
     /// edit.
     pub fn set_pattern_span(&mut self, g: usize, p: usize, start: i64, length: i64) -> Result<(), String> {
-        let mut ops = self.param_ops(Target::Pattern(g, p), "start", Value::Int(start.max(0)))?;
-        ops.extend(self.param_ops(Target::Pattern(g, p), "length", Value::Int(length.max(deckard_model::PPQ / 4)))?);
-        if ops.is_empty() {
+        let t = Target::Pattern(g, p);
+        let start_ops = self.param_ops(t, "start", Value::Int(start.max(0)))?;
+        let len_ops = self.param_ops(t, "length", Value::Int(length.max(deckard_model::PPQ / 4)))?;
+        if start_ops.is_empty() && len_ops.is_empty() {
             return Ok(());
         }
-        self.apply("Pattern Start", ops)
+        let mut params = vec![Some((t, "start".to_string())); start_ops.len()];
+        params.extend(std::iter::repeat_n(Some((t, "length".to_string())), len_ops.len()));
+        let mut ops = start_ops;
+        ops.extend(len_ops);
+        self.apply_with("Pattern Start", ops, params)
     }
 
     /// The groove of a sound (`Target::Sound`), group (`Target::Group`) or the master
@@ -972,6 +979,16 @@ impl Document {
             self.revision += 1;
             return;
         }
+        if !params.is_empty()
+            && params.iter().all(|p| matches!(p, Some((Target::Scene(_), f)) if f == "__patterns"))
+            && params.iter().all(|p| match p {
+                Some((Target::Scene(s), _)) => self.patch_scene_patterns(*s),
+                _ => false,
+            })
+        {
+            self.revision += 1;
+            return;
+        }
         let patched = params.iter().all(|p| match p {
             Some((target, field)) => self.patch(*target, field),
             None => false,
@@ -988,6 +1005,9 @@ impl Document {
     fn patch(&mut self, target: Target, field: &str) -> bool {
         if field == "plugin_chunk" {
             return self.patch_plugin_chunk(target);
+        }
+        if field == deckard_model::GROOVE {
+            return self.patch_groove(target);
         }
         let Ok(path) = self.param_path(target, field) else { return false };
         let value = match self.tree.at(&path) {
@@ -1056,6 +1076,20 @@ impl Document {
             (Target::Sound(g, s), "input_gain", Some(n), _) => p.groups[g].sounds[s].channel.input_gain = n,
             (Target::Sound(g, s), "transpose", Some(n), _) => p.groups[g].sounds[s].channel.transpose = n as i64,
             (Target::Pattern(g, i), "name", _, Some(t)) if i < clips::CLIP => p.groups[g].patterns[i].name = t,
+            (Target::Pattern(g, i), "start", Some(n), _) if i < clips::CLIP => p.groups[g].patterns[i].start = n as i64,
+            (Target::Pattern(g, i), "length", Some(n), _) if i < clips::CLIP => {
+                p.groups[g].patterns[i].length = n as i64;
+                for sc in 0..p.scenes.len() {
+                    if p.scenes[sc].patterns.contains(&(g, i)) {
+                        let len = p.scene_length(sc);
+                        for sec in &mut p.sections {
+                            if sec.auto && sec.scene == Some(sc) {
+                                sec.length = len;
+                            }
+                        }
+                    }
+                }
+            }
             (Target::Scene(s), "name", _, Some(t)) => p.scenes[s].name = t,
             (Target::Zone(g, s, z), f, Some(n), _) => {
                 let zone = p.groups[g].sounds[s].sampler.as_mut().and_then(|smp| smp.zones.get_mut(z));
@@ -1264,6 +1298,7 @@ mod tests {
         d.begin_take("Record");
         for k in 0..3 {
             let note = deckard_model::Note {
+                ratchet: Default::default(),
                 expr: None,
                 sound: 2,
                 position: 100 + k * 960,
@@ -1301,8 +1336,16 @@ mod tests {
     fn an_edit_during_a_take_is_its_own_step() {
         let mut d = Document::new_project().unwrap();
         d.add_pattern(0, 0, "P").unwrap();
-        let note =
-            |position| deckard_model::Note { expr: None, sound: 0, position, length: 240, pitch: 60, velocity: 90, probability: 100 };
+        let note = |position| deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position,
+            length: 240,
+            pitch: 60,
+            velocity: 90,
+            probability: 100,
+        };
         let positions = |d: &Document| d.project().groups[0].patterns[0].notes.iter().map(|n| n.position).collect::<Vec<_>>();
         d.begin_take("Record");
         d.edit_notes("Record", 0, 0, &[], &[note(10)]).unwrap();
@@ -1328,8 +1371,16 @@ mod tests {
         let steps = d.undo_labels().len();
         d.begin_take("Record");
         for k in 0..3 {
-            let note =
-                deckard_model::Note { expr: None, sound: 0, position: k * 960, length: 240, pitch: 60, velocity: 90, probability: 100 };
+            let note = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 0,
+                position: k * 960,
+                length: 240,
+                pitch: 60,
+                velocity: 90,
+                probability: 100,
+            };
             d.add_note(0, 0, note).unwrap();
             if let Some(last) = d.undo.last_mut() {
                 last.at -= MERGE_WINDOW * 2;
@@ -1358,8 +1409,21 @@ mod tests {
         assert_eq!(notes(&d), 0);
         assert!(d.redo());
         // Outside a take, a step is an undo.
-        d.add_note(0, 0, deckard_model::Note { expr: None, sound: 1, position: 0, length: 240, pitch: 60, velocity: 90, probability: 100 })
-            .unwrap();
+        d.add_note(
+            0,
+            0,
+            deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 1,
+                position: 0,
+                length: 240,
+                pitch: 60,
+                velocity: 90,
+                probability: 100,
+            },
+        )
+        .unwrap();
         assert_eq!(notes(&d), 4);
         assert!(d.undo_step());
         assert_eq!(notes(&d), 3);
@@ -1405,7 +1469,16 @@ mod tests {
         // Empty, and its notes are its own.
         assert!(p.notes.is_empty());
         let before = d.project().groups[0].patterns[0].notes.clone();
-        let note = deckard_model::Note { expr: None, sound: 0, position: p.start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let note = deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: p.start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         d.edit_notes("Add", 0, i, &[], &[note]).unwrap();
         assert_eq!(d.project().groups[0].patterns[i].notes, vec![note]);
         assert_eq!(d.project().groups[0].patterns[0].notes, before);

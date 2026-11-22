@@ -38,6 +38,7 @@ pub(crate) struct Parts {
     pub settings: Option<Box<crate::sampler::Settings>>,
     pub params: Vec<(usize, Vec<(String, f64)>)>,
     pub inst_gain: ((f32, f32), bool),
+    pub muted: bool,
 }
 
 impl Parts {
@@ -51,6 +52,7 @@ impl Parts {
             settings: None,
             params: Vec::new(),
             inst_gain: ((1.0, 1.0), false),
+            muted: false,
         }
     }
 }
@@ -319,12 +321,31 @@ impl Player {
                 if let (Some(new), Some(o)) = (fresh.chain.as_mut(), old.chain.as_mut()) {
                     new.adopt(o);
                 }
+                if fresh.muted {
+                    if let Some(smp) = fresh.smp.as_mut() {
+                        smp.all_notes_off();
+                    }
+                    if let Some(inst) = fresh.inst.as_ref()
+                        && let Ok(mut pl) = inst.plugin.lock()
+                    {
+                        pl.all_notes_off();
+                    }
+                    self.offs.clear();
+                } else if !fresh.keep[1]
+                    && let Some(old_inst) = old.inst.as_ref()
+                {
+                    let same = fresh.inst.as_ref().is_some_and(|n| Arc::ptr_eq(&n.plugin, &old_inst.plugin));
+                    if !same && let Ok(mut pl) = old_inst.plugin.lock() {
+                        pl.all_notes_off();
+                    }
+                }
                 std::mem::swap(&mut fresh.scratch, &mut old.scratch);
                 std::mem::swap(old, &mut fresh);
                 // `fresh` now holds what was replaced: freed here (off the
                 // audio thread), and the box goes back for the next edit.
                 (fresh.smp, fresh.inst, fresh.chain) = (None, None, None);
                 (fresh.keep, fresh.settings) = ([false; 3], None);
+                fresh.muted = false;
                 fresh.params.clear();
                 let _ = back.push(Back::Spare { g: self.g, s: self.s, parts: fresh });
             }
@@ -359,6 +380,9 @@ impl Player {
         let Some(p) = self.parts.as_mut() else { return };
         match ev {
             Ev::NoteOn { id, pitch, velocity, gate, beats } => {
+                if p.muted {
+                    return;
+                }
                 if let Some(inst) = &p.inst {
                     if inst.muted {
                         return;

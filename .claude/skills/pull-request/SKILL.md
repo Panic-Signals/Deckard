@@ -136,9 +136,8 @@ If nothing qualifies, don't ask. Write "None" under **Manual**.
    `<kbd>…</kbd>`, settings and on-screen labels in **bold** as they appear. Link
    related sections with `[text](#section-slug)`. Don't number headings; the site does
    that.
-4. If the DECKARD change isn't in a release yet, mark it: in a new chapter set
-   `preview: Only in the next release.` in the front matter; in an existing chapter
-   start the section with `> **Note:** Only in the next release.`
+4. Don't mark the change as "Only in the next release" (no `preview:` front matter, no
+   note). Manual changes go to `prerelease`, which is made public with the release.
 5. A new chapter takes the next free `order` (or shifts the ones after it), and
    `tests/e2e/manual.spec.ts` counts the chapters and checks some by position. Update it.
 6. Keep to the public-docs rules: no mention of how anything in Maschine was worked
@@ -234,8 +233,7 @@ gh pr create --repo Panic-Signals/panic-signals-site --base prerelease \
 Never open it against `main`.
 
 The body says what was added and where, lists the screenshots and diagrams, and asks for
-it to be merged once the DECKARD pull request is merged (or released, if it isn't
-marked as a preview). Open the manual pull request **before** the DECKARD one, then:
+it to be merged once the DECKARD pull request is merged. Open the manual pull request **before** the DECKARD one, then:
 
 1. Put the manual pull request's link under **Manual** in the DECKARD pull request
    description: `Manual: Panic-Signals/panic-signals-site#<n>`, with one line on what

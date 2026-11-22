@@ -126,7 +126,7 @@ pub(super) fn knob_face(
         painter.add(egui::Shape::line(pts, Stroke::new(w, col)));
     };
     let w = if r > 18.0 { 5.0 } else { 4.0 };
-    arc(start, start + sweep, Color32::from_rgb(0x3a, 0x3a, 0x3a), w);
+    arc(start, start + sweep, crate::layout::grey(0x3a), w);
     let a = amount.clamp(0.0, 1.0);
     if centred {
         if (a - 0.5).abs() > 0.004 {
@@ -176,7 +176,7 @@ pub(super) fn choice_pick(
     let name = options.get(cur).copied().unwrap_or("");
     let name_r = Rect::from_center_size(center, Vec2::new(width, 20.0));
     let resp = ui.interact(name_r, id, Sense::click());
-    painter.text(center, Align2::CENTER_CENTER, name, font(13.0), if resp.hovered() { Color32::WHITE } else { white(220) });
+    painter.text(center, Align2::CENTER_CENTER, name, font(13.0), if resp.hovered() { crate::layout::ink() } else { white(220) });
     if let Some(i) = choice_list(&resp, options.iter().copied(), cur)
         && i != cur
     {
@@ -190,7 +190,7 @@ pub(super) fn choice_pick(
         let ink = if !ok {
             white(40)
         } else if r.hovered() {
-            Color32::WHITE
+            crate::layout::ink()
         } else {
             white(150)
         };
@@ -219,9 +219,9 @@ fn toggle_at(ui: &mut Ui, painter: &Painter, c: Pos2, k: &Knob, id: egui::Id, co
         if on {
             color
         } else if resp.hovered() {
-            S03
+            s03()
         } else {
-            S02
+            s02()
         },
     );
     painter.text(
@@ -268,7 +268,7 @@ fn meter_fader(
     acts: &mut Vec<Act>,
 ) {
     let bar = Rect::from_min_size(Pos2::new(col.left() + 30.0, col.top()), Vec2::new(10.0, col.height()));
-    painter.rect_filled(bar, 0.0, Color32::from_rgb(0x2c, 0x2c, 0x2c));
+    painter.rect_filled(bar, 0.0, crate::layout::grey(0x2c));
     let y_of = |db: f32| bar.top() + (-db / span).clamp(0.0, 1.0) * bar.height();
     for &m in marks {
         painter.text(Pos2::new(bar.left() - 6.0, y_of(m)), Align2::RIGHT_CENTER, format!("{m:.0}"), font(10.0), white(90));
@@ -343,7 +343,7 @@ fn compressor(
     painter.text(Pos2::new(thr.left() + 34.0, body.bottom() - 18.0), Align2::CENTER_CENTER, "Threshold", font(12.0), white(160));
     // Gain reduction: down from the top, over 60 dB.
     let gr = Rect::from_min_size(Pos2::new(thr.right() + 22.0, top), Vec2::new(10.0, h));
-    painter.rect_filled(gr, 0.0, Color32::from_rgb(0x2c, 0x2c, 0x2c));
+    painter.rect_filled(gr, 0.0, crate::layout::grey(0x2c));
     let red = (meters.1 / 60.0).clamp(0.0, 1.0);
     if red > 0.002 {
         painter.rect_filled(
@@ -468,7 +468,7 @@ fn page_stepper(ui: &mut Ui, painter: &Painter, center: Pos2, names: &[String], 
             if !ok {
                 white(40)
             } else if r.hovered() {
-                Color32::WHITE
+                crate::layout::ink()
             } else {
                 white(150)
             },
@@ -490,7 +490,7 @@ type PluginShown = (usize, usize, Vec<String>);
 pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, acts: &mut Vec<Act>) {
     let p = doc.project();
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(0x1b, 0x1b, 0x1b));
+    painter.rect_filled(rect, 0.0, crate::layout::grey(0x1b));
     let (g, s) = (app.group, app.sound);
     let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)) else { return };
     let color = group_color(p, g);
@@ -518,7 +518,7 @@ pub fn plugin_strip(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: R
     let add = Rect::from_min_size(Pos2::new(add_x, area.top() + PANEL_TOP), Vec2::new(ADD_W, area.height() - PANEL_TOP - 10.0));
     let resp = ui.interact(add.intersect(area), ui.id().with("strip-add"), Sense::click()).on_hover_text("Add a plug-in");
     // Over the panels it's pinned above.
-    clip.rect_filled(add, 3.0, Color32::from_rgb(0x1b, 0x1b, 0x1b));
+    clip.rect_filled(add, 3.0, crate::layout::grey(0x1b));
     clip.rect_stroke(add, 3.0, Stroke::new(1.0, if resp.hovered() { white(120) } else { white(50) }), StrokeKind::Inside);
     super::plus_glyph(&clip, add.center(), 20.0, white(if resp.hovered() { 230 } else { 150 }));
     // The "+" menu adds to the focused chain: this strip shows the sound's, whatever tab
@@ -553,7 +553,7 @@ fn panel(
     let focused = app.slot == Some(i);
     // The header bar.
     let bar = Rect::from_min_size(r.min, Vec2::new(r.width(), BAR_H));
-    painter.rect_filled(bar, 2.0, Color32::from_rgb(0x2a, 0x2a, 0x2a));
+    painter.rect_filled(bar, 2.0, crate::layout::grey(0x2a));
     painter.rect_stroke(bar, 2.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
     let power = Rect::from_center_size(Pos2::new(bar.left() + 12.0, bar.center().y), Vec2::splat(14.0));
     let pr = ui.interact(power, id.with("bypass"), Sense::click()).on_hover_text(if slot.active { "Bypass" } else { "Turn on" });
@@ -578,7 +578,7 @@ fn panel(
     nr.menu_on_right_click(|ui| super::slot_menu(ui, app, deckard_doc::Chain::Sound(g, s), i, slot.is_instrument(), acts));
     // The body.
     let body = Rect::from_min_max(Pos2::new(r.left(), bar.bottom() + 4.0), r.max);
-    painter.rect_filled(body, 3.0, Color32::from_rgb(0x22, 0x22, 0x22));
+    painter.rect_filled(body, 3.0, crate::layout::grey(0x22));
     if focused {
         painter.rect_stroke(body, 3.0, Stroke::new(1.0, white(40)), StrokeKind::Inside);
     }

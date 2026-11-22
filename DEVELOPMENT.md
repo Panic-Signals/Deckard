@@ -28,17 +28,29 @@ mise's pinned Rust, so it isn't on `PATH` in a plain shell.
   hardware agents (NIHardwareAgent, NIHostIntegrationAgent) first.
 
 
-### ASIO (Windows, optional)
+### ASIO (Windows)
 
 WASAPI's shared mode can't go below the system's audio period, so low latency on Windows
-takes ASIO. It's the `asio` feature of `deckard` (and `deckard-engine`), off by default:
-default builds, CI and the release packages don't have it and need nothing for it.
+takes ASIO. There are two ways to have it, and a build uses one:
+
+- **Native (no SDK, the default).** The `asio-native` feature of `deckard` (and
+  `deckard-engine`) is on by default, so a plain `cargo build -p deckard` on x86_64 Windows
+  plays through ASIO using [transit's](https://github.com/transit-audio/transit) backend,
+  vendored in `crates/transit-audio-asio`. It needs nothing besides the Visual Studio Build
+  Tools: no SDK, no libclang. `--no-default-features` leaves ASIO out. How it's kept up to
+  date is in `crates/transit-audio-asio/NOTICE.md`.
+- **The real SDK.** The `asio` feature goes through `cpal` and Steinberg's SDK. When it's on,
+  it is used and the native backend isn't. The rest of this section is about that one.
 
 ```powershell
 $env:CPAL_ASIO_DIR = "C:\path\to\ASIOSDK"            # Steinberg's ASIO SDK, unpacked
 $env:LIBCLANG_PATH = "C:\path\to\llvm\bin"           # the folder with libclang.dll
 cargo build --release -p deckard --features asio
 ```
+
+`cargo run --release -p deckard-engine --example asio-probe --features asio-native -- "<driver>" 256 10`
+(or `--features asio`) opens a driver as the app does and prints its block cadence, latency
+and faults over 10 seconds, to compare the two.
 
 - **What it needs:** [Steinberg's ASIO SDK](https://www.steinberg.net/asiosdk) and
   libclang (LLVM's `clang+llvm-*-x86_64-pc-windows-msvc` release; only `bin\libclang.dll`
@@ -63,6 +75,10 @@ cargo build --release -p deckard --features asio
     from the start, as adding them later stops the driver for a moment.
   - Drivers' I32, I24 and I16 are converted to and from the engine's f32 around the
     callbacks, with buffers made up front.
+  - Native: `crates/engine/src/native_asio.rs` adapts transit's backend. The driver's input
+    opens with its output (a driver makes both sets of buffers together) and feeds a tap
+    that the recorder and live input attach to, rather than opening the driver again. A
+    driver reset or stall asks the app to reopen it, as the SDK path does.
 
 ## Testing
 

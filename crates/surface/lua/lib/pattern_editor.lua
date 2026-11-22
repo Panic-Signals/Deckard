@@ -105,7 +105,7 @@ local function timeline(screen, theme, s, x, y, w, h, t0, t1)
 end
 
 -- A note drawn in its row (`top`, `height`) from `x0` to `x1`: selected, outlined in
--- white (a sliver of a note all white).
+-- white (a sliver of a note all white); ratcheted, lined at its hits.
 local function note_box(screen, theme, x0, x1, top, height, palette, n)
   -- (A pixel short of `x1`, so notes side by side read as notes: 2 between them.)
   local w = math.max(1, x1 - x0 - 1)
@@ -116,6 +116,13 @@ local function note_box(screen, theme, x0, x1, top, height, palette, n)
     screen:rect(x0 + 1, top + 1, w - 2, height - 2, note_colour(theme, palette, n.velocity))
   else
     screen:rect(x0, top, w, height, note_colour(theme, palette, n.velocity))
+  end
+  -- A ratcheted note: a line where each later hit starts (when they're 3 apart or more).
+  local hits = n.ratchet or 1
+  if hits > 1 and w / hits >= 3 then
+    for k = 1, hits - 1 do
+      screen:rect(x0 + math.floor(w * k / hits + 0.5), top, 1, height, "on_colour")
+    end
   end
 end
 

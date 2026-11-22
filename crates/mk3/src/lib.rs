@@ -14,8 +14,6 @@
 pub mod display;
 pub mod leds;
 
-use std::time::{Duration, Instant};
-
 /// Native Instruments' USB vendor id.
 pub const VENDOR: u16 = 0x17cc;
 /// The Maschine MK3.
@@ -155,9 +153,6 @@ pub struct Decoder {
     knob_dir: [i32; 8],
     knob_back: [i32; 8],
     strip: [u16; 2],
-    /// Pads waiting for their velocity: the highest pressure so far, the reports seen,
-    /// and when they were pressed.
-    pending: [Option<(u16, u8, Instant)>; 16],
     held: [bool; 16],
 }
 
@@ -165,13 +160,6 @@ pub struct Decoder {
 /// resting between two counts flickers by one, which would otherwise wobble whatever it
 /// turns (the Sampling page's zoom re-centres the waveform on every change).
 const KNOB_REVERSE: i32 = 2;
-
-/// Pressure reports a hit's velocity is taken over (its peak; ~1 ms each).
-const VELOCITY_REPORTS: u8 = 3;
-/// The longest a hit waits for them: the MK3 reports a pad's pressure only as it changes,
-/// so a pad pressed and held steady (often, with others held) may send no more. Then
-/// the hit plays with the peak so far.
-const VELOCITY_WAIT: Duration = Duration::from_millis(4);
 
 impl Decoder {
     pub fn new() -> Decoder {
@@ -207,14 +195,9 @@ impl Decoder {
 
     /// The events in one HID input report (report id first).
     pub fn decode(&mut self, r: &[u8], out: &mut Vec<Event>) {
-        self.decode_at(r, Instant::now(), out);
-    }
-
-    /// The events in one HID input report that came at `now`.
-    pub fn decode_at(&mut self, r: &[u8], now: Instant, out: &mut Vec<Event>) {
         match r.first() {
             Some(1) if r.len() >= 34 => self.controls(r, out),
-            Some(2) => self.pads(&r[1..], now, out),
+            Some(2) => self.pads(&r[1..], out),
             _ => {}
         }
     }
@@ -262,7 +245,7 @@ impl Decoder {
         }
     }
 
-    fn pads(&mut self, b: &[u8], now: Instant, out: &mut Vec<Event>) {
+    fn pads(&mut self, b: &[u8], out: &mut Vec<Event>) {
         for e in b.chunks_exact(3) {
             let word = u16::from_be_bytes([e[1], e[2]]);
             if word == 0 && e[0] == 0 {
@@ -272,51 +255,23 @@ impl Decoder {
             let pad = pad_number(e[0]);
             let pressure = word & 0x0fff;
             match word >> 12 {
-                // A press: 1 struck, 0 pressed slowly (starting light).
+                // A press: 1 struck, 0 pressed slowly (starting light). It plays at once,
+                // with the pressure it came with: what Maschine takes as the velocity
+                // (measured, docs/mk3-usb.md).
                 0 | 1 => {
-                    self.pending[slot] = Some((pressure, 1, now));
+                    out.push(Event::PadOn(pad, pressure as f64 / 4095.0));
                     self.held[slot] = true;
                 }
                 // Pressure only from held pads: the MK3 keeps reporting a released pad's
                 // pressure as it springs back, which isn't a press.
-                4 if self.held[slot] => match &mut self.pending[slot] {
-                    Some((peak, n, _)) => {
-                        *peak = (*peak).max(pressure);
-                        *n += 1;
-                        if *n >= VELOCITY_REPORTS {
-                            out.push(Event::PadOn(pad, *peak as f64 / 4095.0));
-                            self.pending[slot] = None;
-                        }
-                    }
-                    None => out.push(Event::PadPressure(pad, pressure as f64 / 4095.0)),
-                },
+                4 if self.held[slot] => out.push(Event::PadPressure(pad, pressure as f64 / 4095.0)),
                 // A release: 3 for a struck pad, 2 for one pressed slowly.
                 2 | 3 => {
-                    if let Some((peak, ..)) = self.pending[slot].take() {
-                        out.push(Event::PadOn(pad, peak as f64 / 4095.0));
-                    }
                     if std::mem::take(&mut self.held[slot]) {
                         out.push(Event::PadOff(pad));
                     }
                 }
                 _ => {}
-            }
-        }
-        self.flush_at(now, out);
-    }
-
-    /// Play the hits that have waited [`VELOCITY_WAIT`] for their pressure reports.
-    pub fn flush(&mut self, out: &mut Vec<Event>) {
-        self.flush_at(Instant::now(), out);
-    }
-
-    fn flush_at(&mut self, now: Instant, out: &mut Vec<Event>) {
-        for slot in 0..16 {
-            if let Some((peak, _, at)) = self.pending[slot]
-                && now.duration_since(at) >= VELOCITY_WAIT
-            {
-                out.push(Event::PadOn(pad_number(slot as u8), peak as f64 / 4095.0));
-                self.pending[slot] = None;
             }
         }
     }
@@ -332,6 +287,10 @@ pub fn brightness_level(percent: u8) -> u8 {
 
 /// Where the backlight level sits in a display's settings report.
 const DISPLAY_BRIGHTNESS_BYTE: usize = 8;
+
+/// The pads' settings feature report, and where the sensitivity (a percent) sits in it.
+const PAD_SETTINGS_REPORT: u8 = 0xd0;
+const PAD_SENSITIVITY_BYTE: usize = 7;
 
 /// An open controller (its HID interface, shared with NI's agent if that runs).
 pub struct Device {
@@ -365,8 +324,6 @@ impl Device {
         loop {
             let n = self.hid.read_timeout(&mut buf, wait).map_err(|e| e.to_string())?;
             if n == 0 {
-                // No more reports: hits still waiting for theirs play now if it's time.
-                self.decoder.flush(out);
                 return Ok(());
             }
             self.decoder.decode(&buf[..n], out);
@@ -408,6 +365,24 @@ impl Device {
     /// until it's powered off.
     pub fn set_led_brightness(&self, level: u8) -> Result<(), String> {
         self.write(&[LED_LEVEL_REPORT, brightness_level(level)])
+    }
+
+    /// The pads' sensitivity, 0..=100 %. The controller applies it to the pressure it
+    /// reports. It lives in the pads' settings, feature report `0xd0`, byte 7, which is
+    /// where Maschine writes its Preferences > Hardware > Pad Sensitivity (measured,
+    /// docs/mk3-usb.md). Only the MK3's is known: on another model this does nothing.
+    pub fn set_pad_sensitivity(&self, level: u8) -> Result<(), String> {
+        if self.model.product != PRODUCT {
+            return Ok(());
+        }
+        let mut buf = [0u8; 64];
+        buf[0] = PAD_SETTINGS_REPORT;
+        let n = self.hid.get_feature_report(&mut buf).map_err(|e| e.to_string())?;
+        if n <= PAD_SENSITIVITY_BYTE {
+            return Err(format!("pad settings 0x{PAD_SETTINGS_REPORT:02x}: {n} bytes"));
+        }
+        buf[PAD_SENSITIVITY_BYTE] = level.min(100);
+        self.hid.send_feature_report(&buf[..n]).map_err(|e| e.to_string())
     }
 
     /// The displays' backlight, 0..=100. Each display's settings are a feature report
@@ -541,24 +516,30 @@ mod tests {
         assert_eq!(ev, [Event::Knob(0, -0.002), Event::Knob(0, -0.001)], "turned back");
     }
 
+    /// A hit plays at once with its first report's pressure, as Maschine does; what comes
+    /// after is pressure on the held pad.
     #[test]
-    fn pads_take_their_peak_as_velocity() {
+    fn pads_take_their_first_report_as_velocity() {
         assert_eq!(pad_number(12), 1);
         assert_eq!(pad_number(3), 16);
         let mut d = Decoder::new();
         let mut ev = Vec::new();
-        // HID pad 12 (pad 1): press at 0x0ba, pressure 0x287, 0xc13, then 0x400, release,
-        // all at one moment (the reports' own times, however slowly the test runs).
-        let now = Instant::now();
+        // HID pad 12 (pad 1): press at 0x0ba, pressure 0x287, 0xc13, then 0x400, release.
         for w in [0x10ba_u16, 0x4287, 0x4c13, 0x4400, 0x3000] {
             let mut r = vec![2u8, 12];
             r.extend_from_slice(&w.to_be_bytes());
-            d.decode_at(&r, now, &mut ev);
-            std::thread::sleep(VELOCITY_WAIT + Duration::from_millis(1));
+            d.decode(&r, &mut ev);
         }
-        assert_eq!(ev[0], Event::PadOn(1, 0xc13 as f64 / 4095.0));
-        assert_eq!(ev[1], Event::PadPressure(1, 0x400 as f64 / 4095.0));
-        assert_eq!(ev[2], Event::PadOff(1));
+        assert_eq!(
+            ev,
+            [
+                Event::PadOn(1, 0x0ba as f64 / 4095.0),
+                Event::PadPressure(1, 0x287 as f64 / 4095.0),
+                Event::PadPressure(1, 0xc13 as f64 / 4095.0),
+                Event::PadPressure(1, 0x400 as f64 / 4095.0),
+                Event::PadOff(1),
+            ]
+        );
     }
 
     /// A pad pressed slowly comes as event 0 and goes as event 2 (seen on the MK3, with
@@ -569,8 +550,7 @@ mod tests {
         let mut ev = Vec::new();
         // Pad 1 (HID 12): press at 60, then the pressure rising.
         d.decode(&[2, 12, 0x00, 60, 12, 0x43, 0x09], &mut ev);
-        d.flush_at(Instant::now() + VELOCITY_WAIT, &mut ev);
-        assert_eq!(ev, [Event::PadOn(1, 0x309 as f64 / 4095.0)]);
+        assert_eq!(ev, [Event::PadOn(1, 60.0 / 4095.0), Event::PadPressure(1, 0x309 as f64 / 4095.0)]);
         ev.clear();
         d.decode(&[2, 12, 0x20, 0x00], &mut ev);
         assert_eq!(ev, [Event::PadOff(1)]);
@@ -585,22 +565,18 @@ mod tests {
         assert_eq!(ev, [Event::PadOn(1, 0x800 as f64 / 4095.0), Event::PadOff(1)]);
         ev.clear();
         d.decode(&[2, 12, 0x41, 0x00], &mut ev);
-        d.flush_at(Instant::now() + VELOCITY_WAIT, &mut ev);
         assert!(ev.is_empty(), "no hanging note: {ev:?}");
     }
 
     /// A pad pressed and held steady (no more pressure reports, as with other pads held)
-    /// still plays, once it has waited for them, with the pressure it came with.
+    /// plays with the pressure it came with, without waiting for more.
     #[test]
     fn a_held_pad_plays_without_more_reports() {
         let mut d = Decoder::new();
         let mut ev = Vec::new();
         // Pad 1 (HID 12) pressed at 0x800 and nothing more.
         d.decode(&[2, 12, 0x18, 0x00], &mut ev);
-        assert!(ev.is_empty(), "waits for its pressure");
-        d.flush_at(Instant::now() + VELOCITY_WAIT, &mut ev);
         assert_eq!(ev, [Event::PadOn(1, 0x800 as f64 / 4095.0)]);
-        // Released: off only (it played already).
         ev.clear();
         d.decode(&[2, 12, 0x30, 0x00], &mut ev);
         assert_eq!(ev, [Event::PadOff(1)]);

@@ -38,6 +38,17 @@ impl Document {
     /// Remove `target`'s modulation: its lane and its points in every pattern, as one
     /// undo step.
     pub fn clear_modulation(&mut self, c: Chain, target: &ModTarget) -> Result<(), String> {
+        if let Some(i) = target.slot {
+            let items = self.field_path(&self.chain_of(c)?, &["slots", "objects", "items"])?;
+            let Some(Value::List(list)) = self.tree.at(&items) else { return Err("chain without slots".into()) };
+            let m = crate::chain::module_of(list.get(i).ok_or("no such slot")?).ok_or("the slot's module isn't stored there")?;
+            if m.type_name == "NI::MASCHINE::DATA::PluginHost" {
+                let Ok(id) = target.field.parse::<u32>() else { return Ok(()) };
+                let Some(oid) = self.plugin_param_oid(c, i, id) else { return Ok(()) };
+                let ops = self.drop_modulation_ops(&HashSet::from([oid]), &vec![u32::MAX], false)?;
+                return if ops.is_empty() { Ok(()) } else { self.apply("Remove Modulation", ops) };
+            }
+        }
         let (oid, _) = self.mod_param(c, target)?;
         // Nothing is skipped: no path starts with this.
         let ops = self.drop_modulation_ops(&HashSet::from([oid]), &vec![u32::MAX], false)?;
@@ -374,6 +385,16 @@ mod tests {
         d.clear_modulation(c, &cutoff()).unwrap();
         assert!(points(d.project(), Some(0)).is_empty());
         assert!(d.project().groups[0].sounds[0].modulators.is_empty());
+    }
+
+    #[test]
+    fn clearing_an_unsaved_plugin_parameter_is_a_noop() {
+        let mut d = Document::new_project().unwrap();
+        let c = Chain::Sound(0, 0);
+        d.add_slot_in(c, 0, &NewModule::Plugin { id: "Test:VST3:FX:0000".into(), name: "Test".into(), chunk: Vec::new() }).unwrap();
+        let steps = d.undo_labels().len();
+        d.clear_modulation(c, &ModTarget { slot: Some(0), field: "0".into() }).unwrap();
+        assert_eq!(d.undo_labels().len(), steps);
     }
 
     #[test]

@@ -24,7 +24,8 @@ fn a_sound_with_notes_lights() {
     app.new_project();
     apply_acts(&mut app, vec![Act::AddGroup, Act::NewPattern(0, 1)]);
     let (g, pi) = (app.group, app.pattern);
-    let note = Note { expr: None, sound: 3, position: 0, length: 960, pitch: 60, velocity: 100, probability: 100 };
+    let note =
+        Note { ratchet: Default::default(), expr: None, sound: 3, position: 0, length: 960, pitch: 60, velocity: 100, probability: 100 };
     app.doc.as_ref().unwrap().borrow_mut().add_note(g, pi, note).unwrap();
     assert!(used(&app, g)[3], "{:?}", used(&app, g));
 }

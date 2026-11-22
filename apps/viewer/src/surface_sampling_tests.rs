@@ -72,3 +72,42 @@ fn the_slice_tab_slices_and_applies() {
     assert_eq!(d.project().groups[app.group].sounds[app.sound].sampler.as_ref().unwrap().zones.len(), 16);
     drop(d);
 }
+
+#[test]
+fn play_range_start_and_end_support_shift_on_edit_and_zone() {
+    use deckard_mk3::Event;
+    let (mut app, _tmp) = app();
+    let now = std::time::Instant::now();
+    let turn = |app: &mut crate::App, ev: Event| {
+        let v = app.surface_view();
+        let acts = app.surface.event(&ev, &v, now);
+        for a in acts {
+            app.surface_act(a);
+        }
+        app.update_sampling();
+    };
+    turn(&mut app, Event::Button("BUTTON_SAMPLE", true));
+    turn(&mut app, Event::Button("BUTTON_SAMPLE", false));
+
+    // EDIT ▸ PLAY RANGE: 0.01 turn without SHIFT moves 441 frames; with SHIFT, 44 frames.
+    app.surface_act(A::SamplingTab(1));
+    app.update_sampling();
+    turn(&mut app, Event::Knob(0, 0.01));
+    turn(&mut app, Event::Knob(1, -0.01));
+    assert_eq!(zone(&app).play_range, (441, 44_099 - 441));
+
+    turn(&mut app, Event::Button("BUTTON_SHIFT", true));
+    turn(&mut app, Event::Knob(0, 0.01));
+    turn(&mut app, Event::Knob(1, -0.01));
+    assert_eq!(zone(&app).play_range, (441 + 44, 44_099 - 441 - 44));
+    turn(&mut app, Event::Button("BUTTON_SHIFT", false));
+
+    // ZONE ▸ PLAY RANGE: SHIFT moves START and END finely too.
+    app.surface_act(A::SamplingTab(3));
+    app.update_sampling();
+    turn(&mut app, Event::Button("BUTTON_SHIFT", true));
+    turn(&mut app, Event::Knob(0, 0.01));
+    turn(&mut app, Event::Knob(1, -0.01));
+    assert_eq!(zone(&app).play_range, (441 + 88, 44_099 - 441 - 88));
+    turn(&mut app, Event::Button("BUTTON_SHIFT", false));
+}

@@ -283,3 +283,77 @@ fn manual_shots() {
     feed(h.state_mut(), Chain::Sound(0, 0), 0, flat_e, 6, true);
     window(&mut h, "tuner.png", Some(CONTROL));
 }
+
+/// Ratcheted notes in the pattern editor, with the Ratchet lane and then the Velocity
+/// lane under them; and the MK3's Step page, its second knob page.
+#[test]
+#[ignore]
+fn ratchet_shots() {
+    use deckard_model::Note;
+    use deckard_model::ratchet::{Ratchet, Shape};
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let note = |position, length, velocity, ratchet| Note {
+        ratchet,
+        expr: None,
+        sound: 0,
+        position,
+        length,
+        pitch: 60,
+        velocity,
+        probability: 100,
+    };
+    let down = Ratchet { repeats: 4, shape: Shape::Down, floor: 20, ceiling: 127 };
+    let up = Ratchet { repeats: 8, shape: Shape::Up, floor: 0, ceiling: 127 };
+    let notes = vec![note(0, 960, 110, down), note(1920, 1920, 40, up), note(1440, 240, 100, Ratchet::default())];
+    apply_acts(&mut app, vec![Act::EditNotes { g: 0, p: 0, label: "t", remove: Vec::new(), add: notes.clone() }]);
+    app.selected = vec![notes[0]];
+    let mut h = harness(app);
+    // (The first frame shows the sound's saved lane.)
+    h.state_mut().lane = crate::layout::Lane::Ratchet;
+    window(&mut h, "ratchet-lane.png", Some((0, 520, 1950, 410)));
+    h.state_mut().lane = crate::layout::Lane::Velocity;
+    window(&mut h, "ratchet-velocity.png", Some((0, 520, 1950, 410)));
+    // The MK3: STEP, then the second knob page.
+    use deckard_mk3::Event;
+    for name in ["BUTTON_STEP", "BUTTON_RIGHT"] {
+        for down in [true, false] {
+            let app = h.state_mut();
+            let v = app.surface_view();
+            for a in app.surface.event(&Event::Button(name, down), &v, Instant::now()) {
+                app.surface_act(a);
+            }
+            h.run_steps(2);
+        }
+    }
+    mk3(&mut h, "mk3-ratchet.png");
+}
+
+/// The whole window in the desktop theme `$DECKARD_SHOT_DESKTOP` (LCD: `$DECKARD_SHOT_LCD`):
+/// the Ideas, Song, Mix and LFO views, and the Sampling page.
+#[test]
+#[ignore]
+fn desktop_theme_shots() {
+    let theme = std::env::var("DECKARD_SHOT_DESKTOP").unwrap_or("palenight".into());
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    app.settings.desktop_theme = theme.clone();
+    if let Ok(mode) = std::env::var("DECKARD_SHOT_LCD") {
+        app.settings.lcd_mode = mode;
+    }
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+    window(&mut h, &format!("desktop-{theme}-ideas.png"), None);
+    h.state_mut().song_view = true;
+    window(&mut h, &format!("desktop-{theme}-song.png"), None);
+    h.state_mut().song_view = false;
+    h.state_mut().mixer = true;
+    window(&mut h, &format!("desktop-{theme}-mix.png"), None);
+    h.state_mut().mixer = false;
+    h.state_mut().lfos = true;
+    window(&mut h, &format!("desktop-{theme}-lfos.png"), None);
+    h.state_mut().lfos = false;
+    h.state_mut().sampling_open = true;
+    window(&mut h, &format!("desktop-{theme}-sampling.png"), None);
+}

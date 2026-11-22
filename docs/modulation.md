@@ -35,7 +35,9 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
     Control mode. The knobs show the deviation in percent. On DECKARD's own layer AUTO
     is a toggle; with Maschine's scripts it writes while held, SHIFT + AUTO pinning it
     on, as Maschine's.
-  - **ERASE** + a knob removes that knob's modulation.
+  - A modulated knob shows an indicator beside its name on the screen.
+  - **ERASE** + touching (or turning) a knob removes that knob's modulation and its
+    indicator.
   - **SHIFT + pad 10** (Clear Auto) removes the focused sound's modulation in the
     focused pattern.
 - **LFOs as a source.** Up to 16 LFOs, one a pad (LFO 1 … LFO 16), each a route

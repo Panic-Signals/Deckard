@@ -35,7 +35,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
         (AssignTab::Midi, "MIDI", true),
         (AssignTab::Mod, "MOD", sound_chain.is_some()),
     ] {
-        let w = painter.layout_no_wrap(name.to_string(), font(11.0), Color32::WHITE).size().x + 8.0;
+        let w = painter.layout_no_wrap(name.to_string(), font(11.0), crate::layout::ink()).size().x + 8.0;
         let r = Rect::from_min_size(Pos2::new(x, f.tabs.top() + 6.0), Vec2::new(w, 22.0));
         let resp = ui.interact(r, ui.id().with(("assign-tab", name)), if enabled { Sense::click() } else { Sense::hover() });
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
@@ -102,7 +102,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                     (Some(id), None) => super::plugin_macro_knob(app, doc, id).map_or("(Other)".into(), |k| k.0.to_string()),
                     (None, _) => "Select".into(),
                 };
-                let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(S02));
+                let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(s02()));
                 if resp.clicked() {
                     acts.push(Act::Remote(RemoteAct::Focus(slot)));
                 }
@@ -169,7 +169,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                         Some(k) => deckard_doc::remote::midi_key_name(k),
                         None => "Learn".into(),
                     };
-                    let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(if learning { gcol } else { S02 }));
+                    let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(if learning { gcol } else { s02() }));
                     let resp = resp.on_hover_text("Click, then move a control on your MIDI controller (Esc: stop)");
                     if resp.clicked() {
                         acts.push(Act::Remote(match (plugin, param) {
@@ -189,7 +189,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                     let id = doc.host_slot_for(param);
                     let text = id.map_or("Enable".to_string(), |s| format!("ID {}", s + 1));
                     let resp = ui
-                        .put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(S02))
+                        .put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(s02()))
                         .on_hover_text("An automation ID for the host (Maschine as a plug-in); click again to remove it");
                     if resp.clicked() {
                         acts.push(Act::Remote(RemoteAct::Host(param)));

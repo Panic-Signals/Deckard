@@ -200,7 +200,7 @@ impl App {
             b.held = Some(p);
         }
         self.boot_next();
-        ui.painter().rect_filled(ui.max_rect(), 0.0, layout::S00);
+        ui.painter().rect_filled(ui.max_rect(), 0.0, layout::s00());
         if let Some(b) = self.boot.as_mut() {
             crate::splash::show(&ctx, b);
         }
@@ -282,6 +282,7 @@ impl App {
                 let jam = jam_io::JamIo::start();
                 let outcome = found(jam.connected());
                 self.jam = Some(jam);
+                self.midi_port_watch = Some(crate::midi_ports::Watcher::start());
                 outcome
             }
             Step::Surface => {

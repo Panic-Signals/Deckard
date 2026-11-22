@@ -296,7 +296,16 @@ fn notes_with_expression_are_marked() {
         let pat = &d.project().groups[g].patterns[pi];
         let (old, start) = (pat.notes.clone(), pat.start);
         let id = d.add_expression(Expression { release_velocity: Some(30), ..Expression::default() });
-        let plain = Note { sound: s, position: start, length: 240, pitch: 60, velocity: 100, probability: 100, expr: None };
+        let plain = Note {
+            ratchet: Default::default(),
+            sound: s,
+            position: start,
+            length: 240,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+            expr: None,
+        };
         let marked = Note { position: start + 480, expr: Some(id), ..plain };
         assert!(crate::layout::has_expression_mark(&marked) && !crate::layout::has_expression_mark(&plain));
         d.edit_notes("t", g, pi, &old, &[plain, marked]).unwrap();

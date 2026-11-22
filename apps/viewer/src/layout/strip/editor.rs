@@ -218,7 +218,7 @@ pub fn draw(
             }
             Kind::Bar { w: bw, h, from_top } => {
                 let bar = Rect::from_min_size(at(w.x, w.y), Vec2::new(bw * k, h * k));
-                painter.rect_filled(bar, 0.0, Color32::from_rgb(0x2c, 0x2c, 0x2c));
+                painter.rect_filled(bar, 0.0, crate::layout::grey(0x2c));
                 let red = (meters.1 / span).clamp(0.0, 1.0);
                 if red > 0.002 {
                     let fill = if *from_top {
@@ -235,11 +235,7 @@ pub fn draw(
                 painter.text(at(w.x, w.y + 8.0), Align2::LEFT_CENTER, w.label, font(12.0), white(110));
             }
             Kind::Line { w: lw, h } => {
-                painter.rect_filled(
-                    Rect::from_min_size(at(w.x, w.y), Vec2::new(lw * k, (h * k).max(1.0))),
-                    0.0,
-                    Color32::from_rgb(0x32, 0x32, 0x32),
-                );
+                painter.rect_filled(Rect::from_min_size(at(w.x, w.y), Vec2::new(lw * k, (h * k).max(1.0))), 0.0, crate::layout::grey(0x32));
             }
         }
     }
@@ -266,7 +262,7 @@ pub(super) fn power_at(
     } else if resp.hovered() {
         white(150)
     } else {
-        Color32::from_rgb(0x4f, 0x4f, 0x4f)
+        crate::layout::grey(0x4f)
     };
     painter.circle_stroke(icon + Vec2::new(0.0, 1.0), 5.0, Stroke::new(1.6, ink));
     painter.line_segment([icon + Vec2::new(0.0, -6.0), icon + Vec2::new(0.0, 0.0)], Stroke::new(1.6, ink));
