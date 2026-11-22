@@ -62,6 +62,7 @@ struct Strip {
     muted: bool,
     cue: bool,
     focused: bool,
+    selected: bool,
     meter: (f32, f32),
     /// Held peaks (left, right).
     peak: (f32, f32),
@@ -456,6 +457,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             muted: x.muted,
             cue: false,
             focused: false,
+            selected: false,
             meter: app.extra_meters.get(i).copied().unwrap_or((0.0, 0.0)),
             peak: held(Channel::Extra(i)),
             slots: Vec::new(),
@@ -482,6 +484,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     muted: snd.muted,
                     cue: snd.cue,
                     focused: app.sound == s,
+                    selected: app.is_sound_selected(app.group, s),
                     meter: app.meters.get(app.group).and_then(|r| r.get(s)).copied().unwrap_or((0.0, 0.0)),
                     peak: held(Channel::Sound(app.group, s)),
                     slots: snd.slots.clone(),
@@ -507,6 +510,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 muted: gr.muted,
                 cue: gr.cue,
                 focused: app.group == g,
+                selected: app.group == g,
                 meter: gmeter(g),
                 peak: held(Channel::Group(g)),
                 slots: gr.slots.clone(),
@@ -545,6 +549,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             muted: gr.muted,
             cue: gr.cue,
             focused: true,
+            selected: true,
             meter: gmeter(app.group),
             peak: held(Channel::Group(app.group)),
             slots: gr.slots.clone(),
@@ -567,6 +572,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             muted: false,
             cue: false,
             focused: false,
+            selected: false,
             meter: app.master_meter,
             peak: held(Channel::Master),
             slots: p.master_slots.clone(),
@@ -690,10 +696,11 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let vis = |x: Rect| x.intersect(clip);
     // Body.
     let body = Rect::from_min_max(Pos2::new(r.left(), r.top() + HEAD + 4.0), r.max);
-    let body_fill = match (extra, st.focused) {
-        (Some(_), _) => EXTRA_BG,
-        (None, true) => crate::layout::grey(0x14),
-        (None, false) => s05(),
+    let body_fill = match (extra, st.focused, st.selected) {
+        (Some(_), _, _) => EXTRA_BG,
+        (None, true, _) => crate::layout::grey(0x14),
+        (None, false, true) => crate::layout::grey(0x1c),
+        (None, false, false) => s05(),
     };
     painter.rect_filled(if extra.is_some() { r } else { body }, 0.0, body_fill);
     painter.vline(r.right() + 0.5, r.y_range(), Stroke::new(1.0, Color32::BLACK));
@@ -701,20 +708,26 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     // Header: ID and mini meter, then the name.
     let head = Rect::from_min_size(r.min, Vec2::new(r.width(), HEAD));
     let mute_col = mute_col();
-    let (bg, id_ink, name_ink) = match (st.focused && !master, st.muted) {
+    let (bg, id_ink, name_ink) = match (st.focused && !master, st.selected && !master, st.muted) {
         _ if extra.is_some() => (EXTRA_BG, EXTRA_INK, if st.muted { white(142) } else { white(245) }),
-        (true, false) => {
+        (true, _, false) => {
             let on = super::lcd_readable(st.color).unwrap_or(Color32::from_black_alpha(245));
             (st.color, on, on)
         }
-        (true, true) => {
+        (true, _, true) => {
             let on = super::lcd_readable(mute_col).unwrap_or(Color32::from_black_alpha(245));
             (mute_col, on, on)
         }
-        (false, true) => (if sounds { s00() } else { s05() }, mute_col, white(142)),
-        (false, false) => (if matches!(st.ch, Channel::Sound(..)) { s00() } else { s05() }, st.color, white(245)),
+        (false, true, true) => (s02(), mute_col, white(190)),
+        (false, true, false) => (s02(), st.color, white(255)),
+        (false, false, true) => (if sounds { s00() } else { s05() }, mute_col, white(142)),
+        (false, false, false) => (if matches!(st.ch, Channel::Sound(..)) { s00() } else { s05() }, st.color, white(245)),
     };
     painter.rect_filled(head, 0.0, bg);
+    if st.selected && !st.focused && !master && extra.is_none() {
+        let accent = if st.muted { mute_col } else { st.color };
+        painter.rect_filled(Rect::from_min_size(head.min, Vec2::new(head.width(), 2.0)), 0.0, accent);
+    }
     let row1 = Rect::from_min_size(Pos2::new(head.left() + 4.0, head.top()), Vec2::new(37.0, 20.0));
     if master {
         painter.text(Pos2::new(head.left() + 4.0, head.top() + 10.0), Align2::LEFT_CENTER, "MASTER", font(11.0), white(245));
@@ -770,7 +783,15 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         if resp.clicked() {
             match st.ch {
                 Channel::Group(g) => acts.push(Act::FocusGroup(g)),
-                Channel::Sound(_, s) => acts.push(Act::FocusSound(s)),
+                Channel::Sound(g, s) => {
+                    if g == app.group {
+                        let (shift, toggle) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                        acts.push(Act::ClickSound { sound: s, shift, toggle });
+                    } else {
+                        acts.push(Act::FocusGroup(g));
+                        acts.push(Act::FocusSound(s));
+                    }
+                }
                 Channel::Master | Channel::Extra(_) => {}
             }
         }

@@ -746,6 +746,14 @@ pub enum Act {
     FocusGroup(usize),
     FocusPattern(usize, usize),
     FocusSound(usize),
+    ClickSound {
+        sound: usize,
+        shift: bool,
+        toggle: bool,
+    },
+    FocusSelectedSound(usize),
+    /// Apply an edit at its exact value across selected sounds (reset or typed entry).
+    Exact(Box<Act>),
     SongView(bool),
     PianoRoll(bool),
     /// The Ideas view has scrolled to the scene asked for.
@@ -1108,12 +1116,21 @@ pub fn apply_acts(app: &mut App, acts: Vec<Act>) {
 }
 
 fn apply(app: &mut App, acts: Vec<Act>) {
+    apply_with_mode(app, acts, false)
+}
+
+fn apply_with_mode(app: &mut App, acts: Vec<Act>, exact: bool) {
     for a in acts {
+        if let Act::Exact(inner) = a {
+            apply_with_mode(app, vec![*inner], true);
+            continue;
+        }
         app.macro_learn_saw(&a);
         match a {
+            Act::Exact(_) => unreachable!(),
             Act::LaunchScene(s) => app.launch_scene(s),
             Act::SetSceneTempo(s, bpm) => {
-                let Some(doc) = app.doc.clone() else { continue };
+                let Some(doc) = app.doc.clone() else { return };
                 if let Err(e) = doc.borrow_mut().set_scene_tempo(s, bpm) {
                     app.status = format!("can't set the scene's tempo: {e}");
                 }
@@ -1128,6 +1145,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.pattern = p;
             }
             Act::FocusSound(s) => app.focus_sound(s),
+            Act::ClickSound { sound, shift, toggle } => app.click_sound(sound, shift, toggle),
+            Act::FocusSelectedSound(s) => app.focus_selected_sound(s),
             Act::SongView(v) => app.song_view = v,
             Act::PianoRoll(v) => app.piano_roll = v,
             Act::ScenesShown => app.show_scenes = None,
@@ -1368,7 +1387,15 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     app.status = format!("can't rename: {e}");
                 }
             }
-            Act::Quantize(_) | Act::PatternLength(..) | Act::PatternSpan(..) | Act::TimeSignature(..) | Act::SetSwing(..) => app.arrange(a),
+            Act::Quantize(_) | Act::PatternLength(..) | Act::PatternSpan(..) | Act::TimeSignature(..) => app.arrange(a),
+            Act::SetSwing(t, sw) => {
+                if let Target::Sound(g, s) = t
+                    && app.set_multi_sound_swing(g, s, sw, exact)
+                {
+                    continue;
+                }
+                app.arrange(Act::SetSwing(t, sw));
+            }
             Act::SamplerPage(i) => app.sampler_page = i,
             Act::Nothing => {}
             Act::ChannelMode(on) => app.channel = on,
@@ -1580,17 +1607,48 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::Cue(t, on) => {
-                if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().set_cue(t, on)
-                {
+                let Some(doc) = app.doc.clone() else { continue };
+                let done = {
+                    let mut d = doc.borrow_mut();
+                    if let Target::Sound(g, s) = t
+                        && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                    {
+                        let edits: Vec<_> =
+                            sounds.into_iter().map(|si| (Target::Sound(g, si), "cue_enabled", Value::Int(on as i64))).collect();
+                        d.set_many("Cue", &edits)
+                    } else {
+                        d.set_cue(t, on)
+                    }
+                };
+                if let Err(e) = done {
                     app.status = format!("can't cue: {e}");
                 }
             }
             Act::Solo(ch) => app.solo(ch),
             Act::SetAux(t, k, v) => {
-                if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().set("Aux Send", t, if k == 0 { "aux1_level" } else { "aux2_level" }, Value::Float(v))
-                {
+                let Some(doc) = app.doc.clone() else { continue };
+                let field = if k == 0 { "aux1_level" } else { "aux2_level" };
+                let v = v.clamp(0.0, 1.0);
+                let done = {
+                    let mut d = doc.borrow_mut();
+                    if let Target::Sound(g, s) = t
+                        && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                    {
+                        let cur = d.project().groups[g].sounds[s].aux[k];
+                        let delta = v - cur;
+                        let edits: Vec<_> = sounds
+                            .into_iter()
+                            .map(|si| {
+                                let to = if exact { v } else { (d.project().groups[g].sounds[si].aux[k] + delta).clamp(0.0, 1.0) };
+                                (Target::Sound(g, si), field, Value::Float(to))
+                            })
+                            .collect();
+                        d.set_many("Aux Send", &edits)
+                    } else {
+                        d.set("Aux Send", t, field, Value::Float(v))
+                    }
+                };
+                if let Err(e) = done {
                     app.status = format!("can't change the send: {e}");
                 }
             }
@@ -1618,7 +1676,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             // An Audio plug-in take's TEMPO: its length in beats over its frames.
             Act::TypeValue(what, typed, shown) => match value_entry::resolve(app, what, &typed, &shown) {
-                Some(act) => apply(app, vec![act]),
+                Some(act) => apply_with_mode(app, vec![act], true),
                 None => app.status = format!("Couldn't read \"{typed}\" as a value here"),
             },
             Act::SetParam(Target::Take(g, s, k), "tempo", bpm) => {
@@ -1656,6 +1714,9 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         continue;
                     }
                     app.live_groove(g, s, field);
+                    continue;
+                }
+                if apply_multi_sound_param(app, &doc, label, t, field, v, exact) {
                     continue;
                 }
                 if let Err(e) = doc.borrow_mut().set(label, t, field, Value::Float(v)) {
@@ -1699,16 +1760,60 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         Some(s) => d.set_scene_tempo(s, Some(bpm)),
                         None => d.set_tempo(bpm),
                     },
-                    Act::SetLevel(t, v) => d.set_level(t, v),
-                    Act::SetPan(t, v) => d.set_pan(t, v),
+                    Act::SetLevel(t, v) => {
+                        let v = v.clamp(0.0, 1.0);
+                        if let Target::Sound(g, s) = t
+                            && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                        {
+                            let cur = d.project().groups[g].sounds[s].level;
+                            let delta = v - cur;
+                            let edits: Vec<_> = sounds
+                                .into_iter()
+                                .map(|si| {
+                                    let to = if exact { v } else { (d.project().groups[g].sounds[si].level + delta).clamp(0.0, 1.0) };
+                                    (Target::Sound(g, si), "level", Value::Float(to))
+                                })
+                                .collect();
+                            d.set_many("Level", &edits)
+                        } else {
+                            d.set_level(t, v)
+                        }
+                    }
+                    Act::SetPan(t, v) => {
+                        let v = v.clamp(-1.0, 1.0);
+                        if let Target::Sound(g, s) = t
+                            && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                        {
+                            let cur = d.project().groups[g].sounds[s].pan;
+                            let delta = v - cur;
+                            let edits: Vec<_> = sounds
+                                .into_iter()
+                                .map(|si| {
+                                    let to = if exact { v } else { (d.project().groups[g].sounds[si].pan + delta).clamp(-1.0, 1.0) };
+                                    (Target::Sound(g, si), "pan", Value::Float(to))
+                                })
+                                .collect();
+                            d.set_many("Pan", &edits)
+                        } else {
+                            d.set_pan(t, v)
+                        }
+                    }
                     Act::ToggleMute(t) => {
                         let p = d.project();
-                        let muted = match t {
-                            Target::Group(g) => p.groups[g].muted,
-                            Target::Sound(g, s) => p.groups[g].sounds[s].muted,
-                            _ => false,
-                        };
-                        d.set_mute(t, !muted)
+                        if let Target::Sound(g, s) = t
+                            && let Some(sounds) = p.groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                        {
+                            let mute = !p.groups[g].sounds[s].muted;
+                            let mutes: Vec<_> = sounds.into_iter().map(|si| (Target::Sound(g, si), mute)).collect();
+                            d.set_mutes(if mute { "Mute" } else { "Unmute" }, &mutes)
+                        } else {
+                            let muted = match t {
+                                Target::Group(g) => p.groups[g].muted,
+                                Target::Sound(g, s) => p.groups[g].sounds[s].muted,
+                                _ => false,
+                            };
+                            d.set_mute(t, !muted)
+                        }
                     }
                     _ => unreachable!(),
                 };
@@ -1718,6 +1823,136 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
         }
     }
+}
+
+/// Apply `Act::SetParam` across all selected sounds when `t` belongs to one of them.
+fn apply_multi_sound_param(
+    app: &mut App,
+    doc: &deckard_doc::Shared,
+    label: &str,
+    t: Target,
+    field: &'static str,
+    v: f64,
+    exact: bool,
+) -> bool {
+    let (g, s) = match t {
+        Target::Sound(g, s) if !field.starts_with("sequence_") && !field.starts_with("midi_macro/") => (g, s),
+        Target::Sampler(g, s) | Target::Module(g, s, _) => (g, s),
+        _ => return false,
+    };
+    let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+    let Some(sounds) = app.selected_sounds_for(g, s, count) else { return false };
+
+    let bounds = if exact {
+        None
+    } else {
+        let d = doc.borrow();
+        let p = d.project();
+        let page_bounds = match t {
+            Target::Sampler(_, _) | Target::Module(_, _, _) => app.slot.and_then(|slot| slot_page(app, p, slot)).and_then(|pg| {
+                pg.knobs.into_iter().flatten().find_map(|(_, _, _, edit)| match edit? {
+                    Edit::Param(et, ef, lo, hi, _) | Edit::Log(et, ef, lo, hi, _) | Edit::Int(et, ef, lo, hi, _)
+                        if et == t && ef == field =>
+                    {
+                        Some(Some((lo, hi)))
+                    }
+                    Edit::Choice(et, ef, ..) | Edit::Toggle(et, ef, _) if et == t && ef == field => Some(None),
+                    _ => None,
+                })
+            }),
+            _ => None,
+        };
+        page_bounds.unwrap_or_else(|| match t {
+            Target::Sound(..) => match field {
+                "input_gain" | "aux1_level" | "aux2_level" => Some((0.0, 1.0)),
+                "transpose" => Some((-48.0, 48.0)),
+                "base_key" => Some((0.0, 127.0)),
+                _ => None,
+            },
+            Target::Sampler(..) => match field {
+                "envelope_type" | "reverse" | "mode" | "polyphony" | "filter_type" | "drive_type" | "lfo_shape" | "lfo_retrigger"
+                | "editor_tab" => None,
+                "tune" => Some((-36.0, 36.0)),
+                f if f.contains("_mod/") => Some((-1.0, 1.0)),
+                _ => Some((0.0, 1.0)),
+            },
+            Target::Module(_, _, slot) => {
+                let is_bipolar = p
+                    .groups
+                    .get(g)
+                    .and_then(|gr| gr.sounds.get(s))
+                    .and_then(|snd| snd.slots.get(slot))
+                    .is_some_and(|sl| sl.module == "AudioModule" && field == "tune");
+                if is_bipolar { Some((-1.0, 1.0)) } else { Some((0.0, 1.0)) }
+            }
+            _ => None,
+        })
+    };
+
+    let edits: Vec<(Target, &str, Value)> = {
+        let d = doc.borrow();
+        let p = d.project();
+        let cur_s = d.num(t, field);
+        let module_kind = match t {
+            Target::Module(_, _, slot) => p
+                .groups
+                .get(g)
+                .and_then(|gr| gr.sounds.get(s))
+                .and_then(|snd| snd.slots.get(slot))
+                .filter(|sl| sl.plugin.is_none())
+                .map(|sl| sl.module.clone()),
+            _ => None,
+        };
+        let whole_int = matches!((t, field), (Target::Sound(..), "transpose" | "base_key"));
+        sounds
+            .iter()
+            .copied()
+            .filter_map(|si| {
+                let ti = match t {
+                    Target::Sound(..) => Target::Sound(g, si),
+                    Target::Sampler(..) => Target::Sampler(g, si),
+                    Target::Module(_, _, slot) => {
+                        let m = module_kind.as_deref()?;
+                        let same = p
+                            .groups
+                            .get(g)
+                            .and_then(|gr| gr.sounds.get(si))
+                            .and_then(|snd| snd.slots.get(slot))
+                            .is_some_and(|sl| sl.plugin.is_none() && sl.module == m);
+                        if !same {
+                            return None;
+                        }
+                        Target::Module(g, si, slot)
+                    }
+                    _ => return None,
+                };
+                d.param_path(ti, field).ok()?;
+                let val = match (bounds, cur_s, d.num(ti, field)) {
+                    (Some((lo, hi)), Some(cs), Some(ci)) => {
+                        let raw = (ci + (v - cs)).clamp(lo, hi);
+                        if whole_int { raw.round() } else { raw }
+                    }
+                    _ => v,
+                };
+                Some((ti, field, Value::Float(val)))
+            })
+            .collect()
+    };
+    if edits.is_empty() {
+        return false;
+    }
+    if let Err(e) = doc.borrow_mut().set_many(label, &edits) {
+        app.status = format!("can't change {field}: {e}");
+        return true;
+    }
+    if matches!(t, Target::Sound(..)) && field == "base_key" {
+        for (ti, ..) in &edits {
+            if let Target::Sound(gg, si) = *ti {
+                app.live_groove(gg, si, field);
+            }
+        }
+    }
+    true
 }
 
 /// The family name of the logo font, and its size.
@@ -3486,8 +3721,19 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
     if resp.double_clicked() {
         // A group's double-click mutes or unmutes it (renaming is in its menu).
         acts.push(if matches!(target, Target::Group(_)) { Act::ToggleMute(target) } else { Act::StartRename(target) });
-    } else if resp.clicked() || resp.secondary_clicked() {
-        acts.push(focus);
+    } else if resp.clicked() {
+        match target {
+            Target::Sound(g, s) if g == app.group => {
+                let (shift, toggle) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                acts.push(Act::ClickSound { sound: s, shift, toggle });
+            }
+            _ => acts.push(focus),
+        }
+    } else if resp.secondary_clicked() {
+        match target {
+            Target::Sound(g, s) if g == app.group => acts.push(Act::FocusSelectedSound(s)),
+            _ => acts.push(focus),
+        }
     }
     resp.menu_on_right_click(|ui| match target {
         Target::Sound(g, s) => sound_menu(ui, app, p, g, s, acts),
@@ -3669,7 +3915,11 @@ fn sound_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, s: usize, acts: &mu
     item(ui, "Export MIDI...", true, || Act::ExportMidi(g, s), acts);
     ui.separator();
     let color = p.groups.get(g).and_then(|x| x.sounds.get(s)).map_or(Color::Default, |x| x.color);
-    color_menu(ui, color, vec![Target::Sound(g, s)], acts);
+    let count = p.groups.get(g).map_or(0, |x| x.sounds.len());
+    let targets = app
+        .selected_sounds_for(g, s, count)
+        .map_or_else(|| vec![Target::Sound(g, s)], |xs| xs.into_iter().map(|i| Target::Sound(g, i)).collect());
+    color_menu(ui, color, targets, acts);
     ui.separator();
     item(ui, "Cut", true, || Act::CutSound(g, s), acts);
     item(ui, "Copy", true, || Act::CopySound(g, s), acts);
@@ -8139,5 +8389,185 @@ mod ratchet_tests {
         let down = Note { ratchet: Ratchet { repeats: 2, shape: Shape::Down, floor: 30, ceiling: 127 }, ..n };
         assert_eq!(k.with(down, 8).ratchet, Ratchet { repeats: 8, ..down.ratchet }, "only the repeats change");
         assert_eq!(Lane::Ratchet.name(), "Ratchet");
+    }
+}
+
+#[cfg(test)]
+mod multi_sound_tests {
+    use super::*;
+    use deckard_doc::{NewModule, SoundRoute, Target};
+    use deckard_model::{AudioDest, Color, Swing};
+
+    #[test]
+    fn shift_and_toggle_sound_selection_and_batch_parameter_edits() {
+        let mut app = App::default();
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        {
+            let mut d = doc.borrow_mut();
+            for (s, (lvl, pan)) in [(0.80, -0.20), (0.60, 0.00), (0.50, 0.20), (0.40, 0.40)].into_iter().enumerate() {
+                d.set_level(Target::Sound(0, s), lvl).unwrap();
+                d.set_pan(Target::Sound(0, s), pan).unwrap();
+            }
+            d.sampler_only(0, 0).unwrap();
+            d.sampler_only(0, 1).unwrap();
+            d.add_slot(0, 0, 1, &NewModule::Effect("Filter")).unwrap();
+            d.add_slot(0, 1, 1, &NewModule::Effect("Filter")).unwrap();
+            d.add_slot(0, 2, 0, &NewModule::Effect("Compressor")).unwrap();
+            d.set("Cutoff", Target::Module(0, 0, 1), "cutoff", Value::Float(0.30)).unwrap();
+            d.set("Cutoff", Target::Module(0, 1, 1), "cutoff", Value::Float(0.50)).unwrap();
+        }
+
+        // Shift range forward (0..=2) and backward, plus Cmd/Ctrl toggle on/off.
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 0, shift: false, toggle: false }]);
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 2, shift: true, toggle: false }]);
+        assert_eq!(app.sound, 2);
+        assert_eq!(app.selected_sounds_for(0, 2, 16), Some(vec![0, 1, 2]));
+        assert!(app.is_sound_selected(0, 1));
+
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 3, shift: false, toggle: true }]);
+        assert_eq!(app.selected_sounds_for(0, 3, 16), Some(vec![0, 1, 2, 3]));
+        // Toggle the focused sound (3) off: focus moves to a remaining selected sound.
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 3, shift: false, toggle: true }]);
+        assert_eq!(app.selected_sounds_for(0, 0, 16), Some(vec![0, 1, 2]));
+
+        // Right-clicking an already-selected sound focuses it without dropping the selection;
+        // right-clicking an unselected sound moves selection to that sound alone.
+        apply_acts(&mut app, vec![Act::FocusSelectedSound(1)]);
+        assert_eq!(app.sound, 1);
+        assert_eq!(app.selected_sounds_for(0, 1, 16), Some(vec![0, 1, 2]));
+        apply_acts(&mut app, vec![Act::FocusSelectedSound(5)]);
+        assert_eq!(app.sound, 5);
+        assert_eq!(app.selected_sounds_for(0, 5, 16), None);
+
+        // Re-select 0..=2 with a backward Shift-click from anchor 2 to 0.
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 2, shift: false, toggle: false }]);
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 0, shift: true, toggle: false }]);
+        assert_eq!(app.selected_sounds_for(0, 0, 16), Some(vec![0, 1, 2]));
+
+        // Continuous relative level drag merges into a single undo step even when Sound 0 clamps.
+        let steps_before = doc.borrow().undo_labels().len();
+        apply_acts(&mut app, vec![Act::SetLevel(Target::Sound(0, 2), 0.70)]);
+        apply_acts(&mut app, vec![Act::SetLevel(Target::Sound(0, 2), 0.75)]);
+        assert_eq!(doc.borrow().undo_labels().len(), steps_before + 1);
+        {
+            let d = doc.borrow();
+            let ss = &d.project().groups[0].sounds;
+            assert!((ss[0].level - 1.00).abs() < 1e-6);
+            assert!((ss[1].level - 0.85).abs() < 1e-6);
+            assert!((ss[2].level - 0.75).abs() < 1e-6);
+            assert!((ss[3].level - 0.40).abs() < 1e-6);
+        }
+        assert!(doc.borrow_mut().undo());
+        assert!((doc.borrow().project().groups[0].sounds[0].level - 0.80).abs() < 1e-6);
+        assert!(doc.borrow_mut().redo());
+
+        // Exact reset sets every selected sound to 0.75 (0 dB).
+        apply_acts(&mut app, vec![Act::Exact(Box::new(Edit::Level(Target::Sound(0, 1)).reset()))]);
+        for s in 0..3 {
+            assert!((doc.borrow().project().groups[0].sounds[s].level - 0.75).abs() < 1e-6);
+        }
+
+        // Pan, Aux, Cue, Mute, Swing (relative and exact), and Route (skipping self-route).
+        apply_acts(&mut app, vec![Act::SetPan(Target::Sound(0, 0), -0.10)]);
+        apply_acts(&mut app, vec![Act::Exact(Box::new(Edit::Pan(Target::Sound(0, 1)).reset()))]);
+        apply_acts(&mut app, vec![Act::SetAux(Target::Sound(0, 0), 0, 0.50)]);
+        apply_acts(&mut app, vec![Act::Exact(Box::new(Act::SetAux(Target::Sound(0, 0), 0, 0.75)))]);
+        apply_acts(&mut app, vec![Act::Cue(Target::Sound(0, 1), true)]);
+        apply_acts(&mut app, vec![Act::ToggleMute(Target::Sound(0, 2))]);
+        apply_acts(&mut app, vec![Act::SetSwing(Target::Sound(0, 0), Swing { amount: 0.25, cycle: 2, invert: true })]);
+        apply_acts(
+            &mut app,
+            vec![Act::Exact(Box::new(Act::SetSwing(Target::Sound(0, 0), Swing { amount: 0.0, cycle: 0, invert: false })))],
+        );
+        apply_acts(&mut app, vec![Act::SetRoute(RouteSet::Sound(0, 0, SoundRoute::Output(AudioDest::Sound(0, 1))))]);
+        {
+            let d = doc.borrow();
+            let ss = &d.project().groups[0].sounds;
+            for s in 0..3 {
+                assert!(ss[s].pan.abs() < 1e-6);
+                assert!((ss[s].aux[0] - 0.75).abs() < 1e-6);
+                assert!(ss[s].cue);
+                assert!(ss[s].muted);
+                assert!(ss[s].swing.amount.abs() < 1e-6);
+            }
+            assert_eq!(ss[0].channel.dest, AudioDest::Sound(0, 1));
+            assert_eq!(ss[1].channel.dest, AudioDest::Parent, "Sound 1 skips routing to itself");
+            assert_eq!(ss[2].channel.dest, AudioDest::Sound(0, 1));
+        }
+
+        // Sampler, matching Module (Sounds 0 & 1 have Filter in slot 1; Sound 2 does not), and Sound params.
+        app.slot = Some(1);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Module(0, 0, 1), "cutoff", 0.45)]);
+        app.slot = Some(0);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Sampler(0, 0), "tune", 5.0)]);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Sound(0, 0), "transpose", 3.0)]);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Sound(0, 0), "base_key", 64.0)]);
+        {
+            let d = doc.borrow();
+            assert!((d.num(Target::Module(0, 0, 1), "cutoff").unwrap() - 0.45).abs() < 1e-6);
+            assert!((d.num(Target::Module(0, 1, 1), "cutoff").unwrap() - 0.65).abs() < 1e-6);
+            assert!((d.num(Target::Sampler(0, 1), "tune").unwrap() - 5.0).abs() < 1e-6);
+            for s in 0..3 {
+                assert_eq!(d.project().groups[0].sounds[s].channel.transpose, 3);
+                assert_eq!(d.project().groups[0].sounds[s].channel.base_key, 64);
+            }
+        }
+
+        // Surface SoundSetting + Color, and ResetSound across all selected sounds.
+        app.surface_act(deckard_surface::Action::SoundSetting("choke_group", 4));
+        app.surface_act(deckard_surface::Action::Color { of: deckard_surface::ColorOf::Sound, color: Some(3) });
+        {
+            let d = doc.borrow();
+            for s in 0..3 {
+                let snd = &d.project().groups[0].sounds[s];
+                assert_eq!(snd.channel.choke_group, 4);
+                assert_eq!(snd.color, Color::Palette(3));
+            }
+        }
+        apply_acts(&mut app, vec![Act::ResetSound(0, 1)]);
+        for s in 0..3 {
+            assert!(doc.borrow().project().groups[0].sounds[s].slots.is_empty(), "Sound {s} reset");
+        }
+    }
+
+    #[test]
+    fn sound_list_and_mixer_render_multi_selection_and_shortcuts() {
+        let mut app = App::default();
+        app.new_project();
+        app.key_focus = KeyFocus::Sounds;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(2);
+
+        // Cmd+A selects all 16 sounds; Escape clears secondary selection; Shift+Down extends.
+        let cmd = egui::Modifiers { command: true, ..Default::default() };
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: cmd });
+        h.step();
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: false, repeat: false, modifiers: cmd });
+        h.step();
+        assert_eq!(h.state().selected_sounds_for(0, 0, 16).as_ref().map(Vec::len), Some(16));
+
+        // Render Mixer with multi-selection active so selected SoundStrip headers paint.
+        (h.state_mut().mixer, h.state_mut().mixer_sounds) = (true, true);
+        h.run_steps(2);
+        h.state_mut().mixer = false;
+
+        h.event(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        h.step();
+        assert_eq!(h.state().selected_sounds_for(0, 0, 16), None);
+
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        h.event(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: shift });
+        h.step();
+        assert_eq!(h.state().selected_sounds_for(0, 1, 16), Some(vec![0, 1]));
     }
 }

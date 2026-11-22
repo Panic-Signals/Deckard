@@ -411,7 +411,7 @@ impl App {
             pg.knobs
         };
         if let Some(Some((_, _, _, Some(edit)))) = knobs.get(pos).cloned() {
-            crate::layout::apply_acts(self, vec![edit.reset()]);
+            crate::layout::apply_acts(self, vec![crate::layout::Act::Exact(Box::new(edit.reset()))]);
         }
     }
 }
