@@ -1,7 +1,9 @@
 # The DECKARD block
 
 This is what DECKARD keeps in a project that Maschine has no place for. Today that's
-per-note expression (MPE), channel pressure, and each sound's Pad Touch.
+per-note expression (MPE), channel pressure, each sound's Pad Touch, notes' ratchets, and
+each sound's Groove page (and its Variation and Generate settings when its format has no
+place for them).
 
 It is saved as one extra item at the root of the `.mxprj` hsin tree, after Maschine's
 `MAS2/PROJ`:
@@ -25,18 +27,18 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 12
+## Payload, version 14
 
-Version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 14 is version 13 with the sounds' Groove settings at the end; version 13 is version 12 with the notes' ratchets at the end; version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 12
-and reads all twelve.
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 14
+and reads all fourteen.
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
 IEEE single.
 
 ```text
-u32 version = 12       (11: without the Audio offsets; 10: without the CV routes either; 9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
+u32 version = 14       (13: without the Groove settings; 12: without the ratchets; 11: without the Audio offsets; 10: without the CV routes either; 9: without the app's view; 8: without the extra-output strips; 7: without the scene settings; 6: without the CC routes; 5: without the LFOs either; 4: without the screen either; 3: without the PROB LOCK section either;
                        2: without routes either; 1: without Pad Touch either)
 u32 pattern_count
 pattern × pattern_count:
@@ -105,7 +107,29 @@ offset × offset_count:
   u32 group, u32 pattern      the pattern (clip patterns are 2^24 + k)
   u32 sound                   the sound whose audio it is
   i64 ticks                   from 1.1.1 (negative: earlier)
+u32 ratchet_count             version 13: the notes that ratchet (play as several hits
+                              inside their length), those not an ordinary note
+ratchet × ratchet_count:
+  u32 group, u32 pattern      the pattern (clip patterns are 2^24 + k)
+  u32 sound                   index in the group
+  i64 position                the note's position (ticks from the pattern's start)
+  i32 pitch
+  u32 ordinal                 as for expression entries
+  u32 ratchet                 bits 0–7 repeats (1–16), 8–15 shape (0 Flat, 1 Down,
+                              2 Up), 16–23 floor (0–127), 24–31 ceiling (0–127)
+u32 groove_count              version 14: the sounds with Groove settings DECKARD keeps
+groove × groove_count:
+  u32 group, u32 sound        indexes in the project and the group
+  u32 len, u8 × len           UTF-8 text, `<field> <value>` a line: the Groove page
+                              shown (`page`, 0 Swing, 1 Variation, 2 Generate), and the
+                              Variation and Generate settings (`sequence_variation/…`,
+                              `sequence_generation/…`) when the sound's format has none
 ```
+
+**A ratchet** plays its note as `repeats` hits, the note's length split evenly between
+them. Flat plays each at the note's velocity; Down runs from it toward `floor`, which the
+note's end would reach; Up runs from it to `ceiling`, which the last hit plays
+(`deckard_model::ratchet`).
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's
 own tempo (`tempo <scene> <bpm>`) and Edit ▸ MIDI Change's blocks (`scene_recall <trigger>

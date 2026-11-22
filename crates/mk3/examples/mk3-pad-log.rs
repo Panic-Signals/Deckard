@@ -17,9 +17,7 @@ fn main() {
     loop {
         let n = dev.read_timeout(&mut buf, 2).expect("read");
         let mut events = Vec::new();
-        if n == 0 {
-            decoder.flush(&mut events);
-        } else if buf[0] == 2 {
+        if n > 0 && buf[0] == 2 {
             let ms = start.elapsed().as_secs_f64() * 1000.0;
             for e in buf[1..n].chunks_exact(3) {
                 let word = u16::from_be_bytes([e[1], e[2]]);

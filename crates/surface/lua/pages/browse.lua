@@ -10,7 +10,9 @@
 --   display 8         load the focused result; SHIFT: prehear on or off (samples)
 --   SHIFT + 5 / 6     the previous / next plug-in slot (where an instrument loads)
 --   knobs 1-8         category, product, bank, sub-bank, type, sub-type, character,
---                     the focused result (SHIFT: twenty at a time)
+--                     the focused result (SHIFT: twenty at a time); touching or
+--                     turning knob 5, 6 or 7 shows all its values over the right
+--                     screen (the tag browser), the chosen one filled
 --   jog wheel         turns the bracketed knob's choice; pressed, loads the focused
 --                     result (SHIFT: a favourite, or not)
 --   jog wheel left / right
@@ -45,6 +47,12 @@ local product_page = 0
 
 -- SHIFT + knob 8 / 4D wheel jumps one page of 7 results.
 local JUMP = 7
+
+-- The values overlay (knobs 5-7): the last of them touched or turned, and when it
+-- last turned. It stays while touched, and this long (seconds) after a turn, until
+-- knob 8 is touched or the 4D wheel turns.
+local OVERLAY_HOLD = 1.0
+local overlay_knob, turned_at = nil, nil
 
 local function lib(s)
   return s.browser
@@ -166,6 +174,8 @@ local function step_and_load(b, by)
 end
 
 function browse.button(name, down)
+  local cap = tonumber(name:match("^CAP_(%d)$"))
+  if down and cap and cap >= 5 and cap <= 7 then overlay_knob = cap end
   if not down then return end
   local s = deckard.state()
   local b = lib(s)
@@ -224,6 +234,7 @@ function browse.button(name, down)
 end
 
 function browse.knob(n, amount)
+  if n >= 5 and n <= 7 then overlay_knob, turned_at = n, deckard.now() end
   local steps = knobs.gather(n, amount)
   if steps ~= 0 then
     if n == RESULTS then focus = RESULTS end
@@ -235,6 +246,7 @@ end
 function browse.wheel(steps)
   -- (TEMPO, SWING and VOLUME keep the wheel.)
   if wheel.mode then return end
+  if steps ~= 0 then overlay_knob, turned_at = nil, nil end
   step(lib(deckard.state()), focus, steps)
   return true
 end
@@ -388,12 +400,62 @@ local function params(screen, theme, b)
   end
 end
 
+-- The knob whose values the overlay shows: 5-7 while touched or just turned, with
+-- values to choose, and knob 8 not touched (touching it closes the overlay); else none.
+local function overlay_shown(b)
+  local n = overlay_knob
+  if not n or count(b, n) == 0 or deckard.held("CAP_8") then return nil end
+  if deckard.held("CAP_" .. n) or (turned_at and deckard.now() - turned_at < OVERLAY_HOLD) then return n end
+  return nil
+end
+
+-- The tag browser (docs/controller-browse-page.md section 9) over the right screen's
+-- logo and results: the attribute's name, then its values as tags flowing in rows, the
+-- chosen one filled, scrolled to keep it in view.
+local OV_X, OV_Y, OV_W, OV_H, OV_PAD = 480, 36, 480, 196, 12
+local TAG_H, TAG_STEP, TAG_PAD, TAG_GAP, TAG_ROWS, TAG_TOP = 20, 25, 8, 6, 6, 26
+local function overlay(screen, theme, b, n)
+  local a = b.attributes[n - 4]
+  screen:rect(OV_X, OV_Y, OV_W, OV_H, "background")
+  screen:triangle(OV_X + OV_PAD, OV_Y + 9, 6, 8, "right", "weak")
+  screen:label(OV_X + OV_PAD + 11, OV_Y + 4, 300, 18, all_caption(b, n):sub(5):upper(),
+    style(theme, "param_name"), "left", "center")
+  -- Lay the tags out in rows, each as wide as its text.
+  local st = style(theme, "default", nil, 13)
+  local right = OV_X + OV_W - OV_PAD - 8
+  local tags, x, row = {}, OV_X + OV_PAD, 0
+  for i, v in ipairs(a.values) do
+    local w = math.min(screen:text_width(v, st) + 2 * TAG_PAD, right - OV_X - OV_PAD)
+    if x > OV_X + OV_PAD and x + w > right then x, row = OV_X + OV_PAD, row + 1 end
+    tags[i] = { x = x, w = w, row = row }
+    x = x + w + TAG_GAP
+  end
+  local rows = row + 1
+  local chosen_row = a.chosen and tags[a.chosen] and tags[a.chosen].row or 0
+  local top = util.clamp(chosen_row - TAG_ROWS // 2, 0, math.max(0, rows - TAG_ROWS))
+  for i, t in ipairs(tags) do
+    if t.row >= top and t.row < top + TAG_ROWS then
+      local y = OV_Y + TAG_TOP + (t.row - top) * TAG_STEP
+      local on = i == a.chosen
+      screen:rect(t.x, y, t.w, TAG_H, on and "text" or "browse_tile", theme.corner)
+      st.color = on and "on_colour" or "text"
+      screen:label(t.x + TAG_PAD, y, t.w - 2 * TAG_PAD, TAG_H, a.values[i], st, "left", "center")
+    end
+  end
+  if rows > TAG_ROWS then
+    local h = TAG_ROWS * TAG_STEP
+    screen:rect(955, OV_Y + TAG_TOP + h * top // rows, 5, math.max(4, h * TAG_ROWS // rows), "text")
+  end
+end
+
 function browse.draw(screen, theme)
   local s = deckard.state()
   local b = lib(s)
   widgets.buttons(screen, theme, buttons(s, deckard.held("SHIFT")))
   products(screen, theme, b)
   results(screen, theme, b)
+  local n = overlay_shown(b)
+  if n then overlay(screen, theme, b, n) end
   params(screen, theme, b)
 end
 

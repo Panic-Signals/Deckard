@@ -271,7 +271,16 @@ mod tests {
             let n = d.project().groups[0].patterns.len();
             d.add_pattern(0, if n == 0 { usize::MAX } else { 0 }, &format!("Pattern {}", n + 1)).unwrap();
         }
-        let note = Note { expr: None, sound: 0, position: 0, length: PPQ, pitch: 60, velocity: 100, probability: 100 };
+        let note = Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: PPQ,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         d.edit_notes("Notes", 0, 0, &[], &[note]).unwrap();
         d.edit_notes("Notes", 0, 2, &[], &[note]).unwrap();
         drop(d);

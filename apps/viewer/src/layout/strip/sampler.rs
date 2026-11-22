@@ -10,8 +10,12 @@ use deckard_model::{Sampler, Zone};
 /// The panel's width (Maschine's is 871).
 pub const WIDTH: f32 = 880.0;
 /// Separator and wave-box border grey (#2A2A2A); the displays' background (#181818).
-const LINE: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
-const DISPLAY: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
+fn line() -> Color32 {
+    crate::layout::grey(0x2a)
+}
+fn display() -> Color32 {
+    crate::layout::grey(0x18)
+}
 /// Section titles on the FX page (#a3FFFFFF).
 const HEAD: Color32 = Color32::from_rgba_premultiplied(0xa3, 0xa3, 0xa3, 0xa3);
 
@@ -49,11 +53,11 @@ pub fn panel(
     let mut page = ui.data(|d| d.get_temp::<usize>(page_id)).unwrap_or(0);
     let mut x = body.right() - 14.0;
     for (k, name) in ["FX", "Main"].into_iter().enumerate().map(|(k, n)| (1 - k, n)) {
-        let galley = painter.layout_no_wrap(name.into(), font(15.0), Color32::WHITE);
+        let galley = painter.layout_no_wrap(name.into(), font(15.0), crate::layout::ink());
         let r = Rect::from_min_size(Pos2::new(x - galley.size().x, body.top() + 8.0), galley.size());
         let resp = ui.interact(r.expand(3.0), id.with(("tab", k)), Sense::click());
         let ink = if k == page {
-            Color32::WHITE
+            crate::layout::ink()
         } else if resp.hovered() {
             white(200)
         } else {
@@ -92,9 +96,9 @@ fn main_page(
     id: egui::Id,
     acts: &mut Vec<Act>,
 ) {
-    painter.rect_filled(area, 3.0, DISPLAY);
+    painter.rect_filled(area, 3.0, display());
     let wave = Rect::from_min_size(area.min, Vec2::new(area.width(), (area.height() - 43.0).max(40.0)));
-    painter.rect_stroke(wave, 2.0, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    painter.rect_stroke(wave, 2.0, Stroke::new(1.0, line()), StrokeKind::Inside);
     let zi = app.zone.min(smp.zones.len().saturating_sub(1));
     let Some(zone) = smp.zones.get(zi) else {
         painter.text(wave.center(), Align2::CENTER_CENTER, "No sample", font(12.0), white(110));
@@ -117,11 +121,11 @@ fn main_page(
     let mut x = row.left() + 12.0;
     let hf = heading_font(ui, 13.0);
     let section = |painter: &Painter, x: f32, text: &str| -> f32 {
-        let r = painter.text(Pos2::new(x, base), Align2::LEFT_BOTTOM, text, hf.clone(), Color32::WHITE);
+        let r = painter.text(Pos2::new(x, base), Align2::LEFT_BOTTOM, text, hf.clone(), crate::layout::ink());
         r.right()
     };
     let separator = |painter: &Painter, x: f32| {
-        painter.vline(x, Rect::from_min_size(row.min, Vec2::new(0.0, row.height() - 4.0)).y_range(), Stroke::new(1.0, LINE))
+        painter.vline(x, Rect::from_min_size(row.min, Vec2::new(0.0, row.height() - 4.0)).y_range(), Stroke::new(1.0, line()))
     };
     let frames = |v: i64| v.to_string();
     let (lo, hi) = zone.play_range;
@@ -193,7 +197,8 @@ fn main_page(
     let glide = if legato { format!("{:.2}", gl * gl) } else { "0.00".into() };
     // (Dragged from its own value when a route moves it.)
     let own = super::super::mod_routes::ui_base(ui, st, "glide", gl);
-    if let Some(v) = numeric(ui, painter, Pos2::new(x, label_y), base, "GLIDE", &glide, Color32::WHITE, legato, id.with("glide"), own, 1.0)
+    if let Some(v) =
+        numeric(ui, painter, Pos2::new(x, label_y), base, "GLIDE", &glide, crate::layout::ink(), legato, id.with("glide"), own, 1.0)
     {
         acts.push(Act::SetParam(st, "glide", v.clamp(0.0, 1.0)));
     }
@@ -385,13 +390,13 @@ fn waveform(
     }
     // Start and end: white lines with their S and E.
     for (x, letter) in [(x_of(lo), "S"), (x_of(hi), "E")] {
-        clip.vline(x, rect.top() + ruler_h..=rect.bottom() - 6.0, Stroke::new(1.5, Color32::WHITE));
+        clip.vline(x, rect.top() + ruler_h..=rect.bottom() - 6.0, Stroke::new(1.5, crate::layout::ink()));
         let c = Pos2::new(x.clamp(rect.left() + 8.0, rect.right() - 8.0), rect.bottom() - 9.0);
-        clip.circle_filled(c, 8.0, Color32::WHITE);
+        clip.circle_filled(c, 8.0, crate::layout::ink());
         clip.text(c, Align2::CENTER_CENTER, letter, font(11.0), Color32::BLACK);
     }
     if let Some(f) = playhead {
-        clip.vline(x_of(f as i64), lanes.y_range(), Stroke::new(1.0, Color32::WHITE));
+        clip.vline(x_of(f as i64), lanes.y_range(), Stroke::new(1.0, crate::layout::ink()));
         ui.ctx().request_repaint();
     }
     // Drag the nearest marker.
@@ -440,7 +445,7 @@ fn fx_page(
     let fx = sampler_ui::page(smp, g, s, 2);
     let st = Target::Sampler(g, s);
     let top = area.top();
-    let sep = |painter: &Painter, x: f32| painter.vline(x, top + 2.0..=area.bottom() - 4.0, Stroke::new(1.0, LINE));
+    let sep = |painter: &Painter, x: f32| painter.vline(x, top + 2.0..=area.bottom() - 4.0, Stroke::new(1.0, line()));
     let hf = heading_font(ui, 12.0);
     let title = |painter: &Painter, x: f32, text: &str| {
         painter.text(Pos2::new(x, top + 6.0), Align2::CENTER_CENTER, text, hf.clone(), HEAD);
@@ -521,7 +526,7 @@ fn knob_row(ui: &mut Ui, painter: &Painter, cx: f32, cy: f32, knobs: &[Option<Kn
 fn cycler(ui: &mut Ui, painter: &Painter, center: Pos2, options: &[&str], cur: usize, id: egui::Id) -> Option<usize> {
     let name_r = Rect::from_center_size(center, Vec2::new(60.0, 16.0));
     let resp = ui.interact(name_r, id, Sense::click());
-    painter.text(center, Align2::CENTER_CENTER, options[cur], font(12.0), if resp.hovered() { Color32::WHITE } else { HEAD });
+    painter.text(center, Align2::CENTER_CENTER, options[cur], font(12.0), if resp.hovered() { crate::layout::ink() } else { HEAD });
     let mut pick = choice_list(&resp, options.iter().copied(), cur).filter(|&i| i != cur);
     for (dir, x) in [(-1i64, name_r.left() - 4.0), (1, name_r.right() + 4.0)] {
         let b = Rect::from_center_size(Pos2::new(x, center.y), Vec2::new(12.0, 16.0));
@@ -537,7 +542,7 @@ fn cycler(ui: &mut Ui, painter: &Painter, center: Pos2, options: &[&str], cur: u
         let ink = if !ok {
             white(40)
         } else if r.hovered() {
-            Color32::WHITE
+            crate::layout::ink()
         } else {
             HEAD
         };
@@ -590,7 +595,7 @@ fn filter_display(
     id: egui::Id,
     acts: &mut Vec<Act>,
 ) {
-    painter.rect_filled(r, 2.0, DISPLAY);
+    painter.rect_filled(r, 2.0, display());
     let clip = painter.with_clip_rect(r);
     if mode == 0 {
         curve(&clip, r, &[(0.0, 0.5), (1.0, 0.5)], color);
@@ -654,7 +659,7 @@ fn envelope_display(
     id: egui::Id,
     acts: &mut Vec<Act>,
 ) {
-    painter.rect_filled(r, 2.0, DISPLAY);
+    painter.rect_filled(r, 2.0, display());
     let inner = r.shrink(10.0);
     let v = |k: &str| smp.get(&format!("volume_envelope/{k}"));
     let (a, h, d, s, rel) = (v("attack"), v("hold"), v("decay"), v("sustain"), v("release"));

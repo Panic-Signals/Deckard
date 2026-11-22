@@ -13,10 +13,12 @@
 --                     held a moment, the Step Mod page (pages/step_mod.lua) for the steps
 --                     held
 --   knobs 1-4         POSITION, PITCH, VELOCITY (FIXEDVELOCITY: the fixed velocity),
---                     LENGTH of the selected notes; page 2 PROBABILITY
+--                     LENGTH of the selected notes; page 2 PROBABILITY, RATCHET, SHAPE,
+--                     FLOOR / CEILING
 --   knob 6            the next or previous 16 steps; knob 8 Keyboard mode's pitches;
 --                     touching knobs 5-8 shows what they do in a box over each
 --   4-D encoder       as the Events page's (lib/notes.lua)
+--   knob 5            zoom the right screen (double-tap: 16 steps)
 
 local widgets = require("lib.widgets")
 local knobs = require("lib.knobs")
@@ -28,11 +30,15 @@ local notes = require("lib.notes")
 local page = {}
 
 -- The 16 steps shown (from 0), following the playhead, the knob page, probability
--- shown, Keyboard mode's highest pitch shown, and the pads held (their velocities).
+-- shown, the zoomed view (nil: the 16 steps), Keyboard mode's highest pitch shown,
+-- and the pads held (their velocities).
 local segment = 0
 local follow = false
 local knob_page = 1
 local probability = false
+local view_from, view_to = nil, nil
+local in_detent = false
+local detent_turn = 0
 local top_pitch = nil
 local held = {}
 
@@ -69,12 +75,42 @@ local function step_time(s, pad)
   return (pad - 1 + 16 * segment) * step(s)
 end
 
+-- The 16 steps of the current segment.
+local function segment_span(s)
+  local from = first_step(s) + segment * 16 * step(s)
+  return from, from + 16 * step(s)
+end
+
+-- Keep the zoomed view aligned with the current segment when paging.
+local function shift_view(s)
+  if not view_from then return end
+  local a, b = notes.span(s)
+  local width = view_to - view_from
+  local seg_from = first_step(s) + segment * 16 * step(s)
+  local from = util.clamp(seg_from, a, math.max(a, b - width))
+  view_from, view_to = from, from + width
+end
+
+-- What the right screen shows: the zoomed view (kept inside the pattern), or the 16
+-- steps of the current segment.
+local function view_span(s)
+  local seg_from, seg_to = segment_span(s)
+  if not view_from then return seg_from, seg_to end
+  local a, b = notes.span(s)
+  local max_w = math.max(b - a, 16 * step(s))
+  local width = util.clamp(view_to - view_from, 1, max_w)
+  local from = util.clamp(view_from, a, math.max(a, b - width))
+  return from, from + width
+end
+
 -- The segment shown: kept in the pattern, and with FOLLOW on where the playhead is.
 local function sync(s)
+  local old = segment
   if follow and s.playing and s.pattern_position then
     segment = (s.pattern_position - s.pattern_start) // (step(s) * 16)
   end
   segment = util.clamp(segment, 0, segments(s) - 1)
+  if segment ~= old then shift_view(s) end
 end
 
 -- Whether step `pad` has a note of the focused sound starting in it.
@@ -92,11 +128,17 @@ end
 
 function page.shown()
   knob_page, probability, held, held_at, modding = 1, false, {}, {}, false
+  in_detent, detent_turn = false, 0
 end
 
 function page.button(name, down)
+  if name == "CAP_5" and not down then
+    in_detent, detent_turn = false, 0
+  end
   local tapped = knobs.double_tap(name, down)
-  if tapped and not (knob_page == 1 and tapped == 3 and deckard.state().fixed_velocity) then
+  if tapped == 5 then
+    view_from, view_to, in_detent, detent_turn = nil, nil, false, 0
+  elseif tapped and tapped <= 4 and not (knob_page == 1 and tapped == 3 and deckard.state().fixed_velocity) then
     notes.reset_knob(tapped, knob_page)
   end
   local n = tonumber(name:match("^SCREEN_(%d)$"))
@@ -128,23 +170,121 @@ local function pitch_top(s)
   return top_pitch or editor.pitch_top(s, KEY_ROWS)
 end
 
+-- How far knob 5 zooms a tenth of a turn (same curve as Events), and the turn
+-- absorbed at each power-of-two bar snap detent (1, 2, 4, ... bars) before continuing.
+local ZOOM = 1.6
+local SNAP_HOLD = 0.06
+
+-- Whether `w` is a power-of-two multiple of `seg_w` (1 bar, 2 bars, 4 bars, ...).
+local function is_snap_width(w, seg_w)
+  if w < seg_w or w % seg_w ~= 0 then return false end
+  local m = w // seg_w
+  return (m & (m - 1)) == 0
+end
+
+-- Store `[from, from + width)` without ever jumping `from`; switch back to aligned
+-- segment mode (`view_from = nil`) only when `from` already sits on a 16-step bar.
+local function set_view(s, from, width, seg_w)
+  local rel = from - first_step(s)
+  if width == seg_w and rel >= 0 and rel % seg_w == 0 then
+    local k = rel // seg_w
+    if k >= 0 and k < segments(s) then
+      segment = k
+      view_from, view_to = nil, nil
+      return
+    end
+  end
+  view_from, view_to = from, from + width
+  local anchor = from + math.min(width, seg_w) // 2
+  segment = util.clamp((anchor - first_step(s)) // seg_w, 0, segments(s) - 1)
+end
+
 function page.knob(n, amount)
   local s = deckard.state()
-  if n == 6 then
+  if n == 5 then
+    if amount == 0 then return true end
+    if follow and s.playing then follow = false end
+    sync(s)
+    if in_detent then
+      detent_turn = detent_turn + amount
+      if math.abs(detent_turn) < SNAP_HOLD then return true end
+      amount = detent_turn - (detent_turn > 0 and SNAP_HOLD or -SNAP_HOLD)
+      in_detent, detent_turn = false, 0
+      if amount == 0 then return true end
+    end
+    local a, b = notes.span(s)
+    local seg_w = 16 * step(s)
+    local from, to = view_span(s)
+    local width = math.max(1, to - from)
+    local min_w = math.min(960, seg_w, b - a)
+    local max_w = math.max(b - a, seg_w)
+    local new = math.floor(width / ZOOM ^ (amount * 10) + 0.5)
+    if new == width then new = width + (amount > 0 and -1 or 1) end
+    new = util.clamp(new, min_w, max_w)
+    local snap = nil
+    if amount < 0 and new > width then
+      local t = seg_w
+      while t < max_w do
+        if width < t and new >= t then
+          snap = t
+          break
+        end
+        t = t * 2
+      end
+    elseif amount > 0 and new < width then
+      local t = seg_w
+      while t * 2 < max_w do t = t * 2 end
+      while t >= seg_w do
+        if width > t and new <= t then
+          snap = t
+          break
+        end
+        t = t // 2
+      end
+    end
+    if snap then
+      new = snap
+      in_detent, detent_turn = true, 0
+    end
+    from = util.clamp(from, a, math.max(a, b - new))
+    set_view(s, from, new, seg_w)
+  elseif n == 6 then
     -- (Moving by hand ends FOLLOW while the pattern plays.)
-    local steps = knobs.gather(n, amount)
-    if steps ~= 0 then
-      if follow and s.playing then follow = false end
+    local a, b = notes.span(s)
+    local seg_w = 16 * step(s)
+    if view_from and view_to - view_from < b - a then
       sync(s)
-      segment = util.clamp(segment + steps, 0, segments(s) - 1)
+      local from, to = view_span(s)
+      local width = to - from
+      if is_snap_width(width, seg_w) then
+        local steps = knobs.gather(n, amount)
+        if steps ~= 0 then
+          if follow and s.playing then follow = false end
+          local rel = from - a
+          local bar_idx = steps > 0 and (rel // seg_w + steps) or (-(-rel // seg_w) + steps)
+          from = util.clamp(a + bar_idx * seg_w, a, math.max(a, b - width))
+          set_view(s, from, width, seg_w)
+        end
+      else
+        if follow and s.playing then follow = false end
+        from = util.clamp(math.floor(from + amount * width + 0.5), a, math.max(a, b - width))
+        set_view(s, from, width, seg_w)
+      end
+    else
+      local steps = knobs.gather(n, amount)
+      if steps ~= 0 then
+        if follow and s.playing then follow = false end
+        sync(s)
+        segment = util.clamp(segment + steps, 0, segments(s) - 1)
+        shift_view(s)
+      end
     end
   elseif n == 8 then
     local steps = knobs.gather(n, amount, 0.05)
     if pads.keyboard() and steps ~= 0 then top_pitch = util.clamp(pitch_top(s) + steps, KEY_ROWS - 1, 127) end
   elseif n <= 4 then
     if knob_page == 2 then
-      local steps = knobs.gather(n, amount, 0.05)
-      if n == 1 and steps ~= 0 then deckard.events("probability", steps) end
+      notes.page2_knob(n, knobs.gather(n, amount, n == 3 and 0.15 or 0.05))
     elseif n == 3 and s.fixed_velocity then
       local steps = knobs.each(amount)
       if steps ~= 0 then deckard.velocity(util.clamp(s.velocity + steps, 0, 127)) end
@@ -287,17 +427,16 @@ function page.draw(screen, theme)
   })
   widgets.info_bar(screen, theme, widgets.focus_info(s))
 
-  -- The left screen: the whole pattern, the 16 steps shown framed.
+  -- The left screen: the whole pattern, the right screen's view framed.
   local a, b = notes.span(s)
-  local from = first_step(s) + segment * 16 * step(s)
-  local to = from + 16 * step(s)
+  local from, to = view_span(s)
   editor.draw(screen, theme, s, 0, 60, 480, 145, false)
   local function x_of(t) return math.floor((t - a) / math.max(1, b - a) * 480 + 0.5) end
   local x0, x1 = x_of(from), math.min(x_of(to), 480)
   screen:frame(x0, 60 + editor.HEADER, math.max(1, x1 - x0), 145 - editor.HEADER, "text")
   local p
   if knob_page == 2 then
-    p = { notes.probability_param(s) }
+    p = notes.page2_params(s)
   else
     p = notes.edit_params(s)
     if s.fixed_velocity then p[3] = { name = "FIXEDVELOCITY", value = tostring(s.velocity) } end

@@ -418,6 +418,104 @@ impl Document {
         self.prune_extra_outs()
     }
 
+    /// Move an effect from slot `from_at` of chain `from` to slot `to_at` of chain `to`
+    /// (one undo step). Same-chain moves delegate to [`Document::move_slot_in`].
+    pub fn move_slot_between(&mut self, from: Chain, from_at: usize, to: Chain, to_at: usize) -> Result<(), String> {
+        if from == to {
+            return self.move_slot_in(from, from_at, to_at);
+        }
+        let from_slots = self.chain_slots(from).map(<[_]>::to_vec).ok_or("no such chain")?;
+        let to_slots = self.chain_slots(to).map(<[_]>::to_vec).ok_or("no such chain")?;
+        if from_at >= from_slots.len() {
+            return Err("no such slot".into());
+        }
+        if from_slots[from_at].is_instrument() {
+            return Err("an instrument stays in its sound's first slot".into());
+        }
+        if to_at == 0 && to_slots.first().is_some_and(|s| s.is_instrument()) {
+            return Err("effects go after the instrument".into());
+        }
+        let from_path = self.chain_of(from)?;
+        let to_path = self.chain_of(to)?;
+        let Some(Value::Obj(mut from_chain)) = self.tree.at(&from_path).cloned() else {
+            return Err("the source has no chain".into());
+        };
+        let Some(Value::Obj(mut to_chain)) = self.tree.at(&to_path).cloned() else {
+            return Err("the target has no chain".into());
+        };
+
+        let Some(Value::Obj(from_sl)) = from_chain.get_mut("slots") else {
+            return Err("chain without slots".into());
+        };
+        let (item, removed_id, gone) = {
+            let Some(Value::Obj(objs)) = from_sl.get_mut("objects") else {
+                return Err("slots without objects".into());
+            };
+            let Some(Value::List(items)) = objs.get_mut("items") else {
+                return Err("slots without items".into());
+            };
+            if from_at >= items.len() {
+                return Err("no such slot".into());
+            }
+            let removed = items.remove(from_at);
+            let gone = crate::automation::defined_ids(&removed);
+            let id = match &removed {
+                Value::Obj(p) => match p.get("px") {
+                    Some(Value::Obj(slot)) => slot.oid,
+                    _ => None,
+                },
+                _ => None,
+            };
+            (removed, id, gone)
+        };
+        if let (Some(id), Some(cur)) = (removed_id, from_sl.get_mut("current"))
+            && *cur == Value::Ref(id)
+        {
+            *cur = Value::Null;
+        }
+        let qb = from_chain
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _))| n == "quick_browse")
+            .nth(from_at)
+            .map(|(i, _)| i)
+            .map(|i| from_chain.fields.remove(i).1);
+
+        let to_sl = crate::build::obj_mut(&mut to_chain, "slots")?;
+        let to_objs = crate::build::obj_mut(to_sl, "objects")?;
+        if !to_objs.fields.iter().any(|(n, _)| n == "items#item_version") {
+            crate::build::push_items(to_objs, Vec::new(), 1)?;
+        }
+        let Some(Value::List(to_items)) = to_objs.get_mut("items") else {
+            return Err("slots without items".into());
+        };
+        let to_at = to_at.min(to_items.len());
+        to_items.insert(to_at, item);
+        if let Some(qb) = qb {
+            let first_qb = to_chain.fields.iter().position(|(n, _)| n == "quick_browse").unwrap_or(to_chain.fields.len());
+            to_chain.fields.insert(first_qb + to_at, ("quick_browse".into(), qb));
+        }
+
+        let mut ops = self.drop_automation_ops(&gone, &from_path)?;
+        ops.push(Op::Set { path: from_path, value: Value::Obj(from_chain) });
+        ops.push(Op::Set { path: to_path, value: Value::Obj(to_chain) });
+        let shift_down = |k: usize| match k.cmp(&from_at) {
+            std::cmp::Ordering::Less => Some(k),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(k - 1),
+        };
+        ops.extend(self.sidechain_rekey(from, shift_down));
+        ops.extend(self.mod_routes_rekey(from, shift_down));
+        ops.extend(self.extra_outs_rekey(from, shift_down));
+        let shift_up = |k: usize| Some(if k >= to_at { k + 1 } else { k });
+        ops.extend(self.sidechain_rekey(to, shift_up));
+        ops.extend(self.mod_routes_rekey(to, shift_up));
+        ops.extend(self.extra_outs_rekey(to, shift_up));
+        self.apply("Move Module", ops)?;
+        self.prune_extra_outs()
+    }
+
     /// Bypass (`active` false) or enable slot `at` of sound `s`.
     pub fn set_slot_active(&mut self, g: usize, s: usize, at: usize, active: bool) -> Result<(), String> {
         self.set_slot_active_in(Chain::Sound(g, s), at, active)

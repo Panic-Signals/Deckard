@@ -696,7 +696,16 @@ mod tests {
         let a = d.add_pattern_in_slot(0, 0, 0, "A").unwrap();
         let b = d.add_pattern_in_slot(0, 0, 3, "B").unwrap();
         let start = d.project().groups[0].patterns[a].start;
-        let note = deckard_model::Note { expr: None, sound: 0, position: start, length: 960, pitch: 60, velocity: 100, probability: 100 };
+        let note = deckard_model::Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: start,
+            length: 960,
+            pitch: 60,
+            velocity: 100,
+            probability: 100,
+        };
         d.edit_notes("Add", 0, a, &[], &[note]).unwrap();
         d.assign_pattern(0, 0, Some(a)).unwrap();
         let places = |d: &Document| d.project().groups[0].patterns.iter().map(|p| (p.name.clone(), p.slot)).collect::<Vec<_>>();
@@ -825,7 +834,16 @@ mod tests {
         // A pattern, in the scene, with notes and a controller.
         assert_eq!(d.add_pattern(0, 0, "Pattern 1").unwrap(), 0);
         d.assign_pattern(0, 0, Some(0)).unwrap();
-        let note = |sound, position, pitch| Note { expr: None, sound, position, length: 480, pitch, velocity: 100, probability: 100 };
+        let note = |sound, position, pitch| Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound,
+            position,
+            length: 480,
+            pitch,
+            velocity: 100,
+            probability: 100,
+        };
         d.edit_notes("Add", 0, 0, &[], &[note(0, 0, 60), note(0, 960, 64), note(1, 1920, 60)]).unwrap();
         let cc = MidiEvent { sound: 0, position: 480, kind: MidiKind::Controller { number: 1, value: 64 } };
         d.edit_midi("Add", 0, 0, &[], &[cc]).unwrap();

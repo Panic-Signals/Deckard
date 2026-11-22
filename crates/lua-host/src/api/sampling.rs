@@ -411,14 +411,17 @@ pub(super) fn turn(lua: &Lua, p: &Value, inc: f64, fine: bool) -> bool {
     let Some(k) = knob(lua, p) else { return false };
     let st = state(lua);
     let mut st = st.borrow_mut();
+    let (step, each) =
+        if fine && k.step > 1.0 && k.step == k.step.trunc() && k.turn <= 0.01 { (1.0, k.turn / k.step) } else { (k.step, k.turn) };
+    let each = each.max(1e-12);
     let acc = st.sampling_turns.entry(k.key.clone()).or_default();
     *acc += inc * if fine { 0.1 } else { 1.0 };
-    let n = (*acc / k.turn.max(1e-6)).trunc();
+    let n = (*acc / each + acc.signum() * 1e-9).trunc();
     if n == 0.0 {
         return true;
     }
-    *acc -= n * k.turn;
-    set(&mut st, &k, k.value + n * k.step);
+    *acc -= n * each;
+    set(&mut st, &k, k.value + n * step);
     true
 }
 

@@ -43,7 +43,7 @@ impl crate::App {
         if !pages.iter().any(|p| p.knobs.iter().any(|(k, _)| *k == id)) {
             pages.push(PluginPageSpec { name: String::new(), knobs: vec![(id, String::new())], custom_names: Vec::new() });
         }
-        let _ = doc.borrow_mut().save_plugin_pages(chain, slot, &pages);
+        let _ = doc.borrow_mut().ensure_plugin_param(chain, slot, id, &pages);
     }
 
     /// The pages of the plug-in in slot `slot` of `chain` (to save before one of its

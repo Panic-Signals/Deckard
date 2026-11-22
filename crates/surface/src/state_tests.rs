@@ -150,6 +150,7 @@ fn big_view() -> View {
             velocity: 100,
             probability: 100,
             selected: false,
+            ratchet: Default::default(),
         })
         .collect();
     v.pattern_length = 2 * 3840;

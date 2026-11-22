@@ -59,7 +59,7 @@ mod additive_routes {
         let mut e = engine(&p, &mut cache);
         let board = Arc::new(meters::RouteTravels::default());
         e.set_route_travels(&board);
-        e.touch_start(0, 1, 60, None, 0.0, None);
+        e.touch_start(0, 1, 60, None, 0.0, None, 0);
         e.touch_live((0, 1, 60), ExprKind::Dim(Dim::Pressure), 0.2);
         e.apply_routes();
         assert_eq!(e.mod_routes.len(), 1, "one prepared target");
@@ -108,7 +108,7 @@ mod additive_routes {
         p.groups[0].sounds[1].mod_routes = vec![r, add(ModSource::Lfo(1), 0.4), add(ModSource::Pressure, 0.3)];
         let mut cache = SampleCache::default();
         let mut e = engine(&p, &mut cache);
-        e.touch_start(0, 1, 60, None, 0.0, None);
+        e.touch_start(0, 1, 60, None, 0.0, None, 0);
         e.touch_live((0, 1, 60), ExprKind::Dim(Dim::Pressure), f32::INFINITY);
         e.apply_routes();
         near(decay_now(&e), 0.4);

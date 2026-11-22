@@ -237,7 +237,7 @@ pub fn loop_switch(ui: &Ui, rect: Rect, zone: &Zone, target: Target, acts: &mut 
     p.rect_filled(
         r,
         2.0,
-        if on { Color32::from_rgb(0x2a, 0x5a, 0x2a) } else { Color32::from_gray(if resp.hovered() { 0x3c } else { 0x2a }) },
+        if on { Color32::from_rgb(0x2a, 0x5a, 0x2a) } else { crate::layout::grey(if resp.hovered() { 0x3c } else { 0x2a }) },
     );
     p.text(
         r.center(),
@@ -266,8 +266,8 @@ pub fn waveform(
 ) {
     ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-waveform"), rect));
     let painter = &ui.painter_at(rect.expand(1.0));
-    painter.rect_filled(rect, 2.0, Color32::from_gray(0x12));
-    painter.rect_stroke(rect, 2.0, Stroke::new(1.0, Color32::from_gray(0x2a)), egui::StrokeKind::Inside);
+    painter.rect_filled(rect, 2.0, crate::layout::grey(0x12));
+    painter.rect_stroke(rect, 2.0, Stroke::new(1.0, crate::layout::grey(0x2a)), egui::StrokeKind::Inside);
     let len = wf.len.max(1) as f32;
     let x_of = |f: i64| rect.left() + rect.width() * (f as f32 / len).clamp(0.0, 1.0);
     let (lo, hi) = if zone.play_range.1 > zone.play_range.0 { zone.play_range } else { (0, wf.len as i64 - 1) };

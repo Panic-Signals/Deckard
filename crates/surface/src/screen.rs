@@ -3,6 +3,7 @@
 //! stylesheet every page shares: named colours, and named text styles. DECKARD's own
 //! fonts are Ubuntu Light and Hack (from egui).
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings};
@@ -39,12 +40,34 @@ pub const FONTS: [(&str, &[u8]); 12] = [
     ("roboto-mono-bold", include_bytes!("../fonts/RobotoMono-Bold.ttf")),
 ];
 
+fn byte_channel(v: f64) -> u8 {
+    v.clamp(0.0, 255.0) as u8
+}
+
+fn channel(t: &Table, i: usize, k: &str) -> mlua::Result<Option<f64>> {
+    if let Some(v) = t.raw_get::<Option<f64>>(i)? {
+        return Ok(Some(v));
+    }
+    if let Some(v) = t.raw_get::<Option<f64>>(k)? {
+        return Ok(Some(v));
+    }
+    if t.metatable().is_some() {
+        if let Some(v) = t.get::<Option<f64>>(i)? {
+            return Ok(Some(v));
+        }
+        return t.get::<Option<f64>>(k);
+    }
+    Ok(None)
+}
+
 /// A colour as the scripts write it: `{r, g, b}` (0..255) or `{r = , g = , b = }`.
 pub fn rgb(t: &Table) -> mlua::Result<[u8; 3]> {
-    let get = |i: usize, k: &str| -> mlua::Result<u8> {
-        let v = t.get::<Option<f64>>(i)?.or(t.get::<Option<f64>>(k)?).unwrap_or(0.0);
-        Ok(v.clamp(0.0, 255.0) as u8)
-    };
+    if let Some(r) = t.raw_get::<Option<f64>>(1)? {
+        let g = t.raw_get::<Option<f64>>(2)?.unwrap_or(0.0);
+        let b = t.raw_get::<Option<f64>>(3)?.unwrap_or(0.0);
+        return Ok([byte_channel(r), byte_channel(g), byte_channel(b)]);
+    }
+    let get = |i: usize, k: &str| -> mlua::Result<u8> { Ok(byte_channel(channel(t, i, k)?.unwrap_or(0.0))) };
     Ok([get(1, "r")?, get(2, "g")?, get(3, "b")?])
 }
 
@@ -56,8 +79,107 @@ pub struct Paint {
 }
 
 fn rgba(t: &Table) -> mlua::Result<Paint> {
-    let a = t.get::<Option<f64>>(4)?.or(t.get::<Option<f64>>("a")?).unwrap_or(255.0);
+    if let Some(r) = t.raw_get::<Option<f64>>(1)? {
+        let g = t.raw_get::<Option<f64>>(2)?.unwrap_or(0.0);
+        let b = t.raw_get::<Option<f64>>(3)?.unwrap_or(0.0);
+        let a = t.raw_get::<Option<f64>>(4)?.unwrap_or(255.0);
+        return Ok(Paint { rgb: [byte_channel(r), byte_channel(g), byte_channel(b)], alpha: (a / 255.0).clamp(0.0, 1.0) as f32 });
+    }
+    let a = channel(t, 4, "a")?.unwrap_or(255.0);
     Ok(Paint { rgb: rgb(t)?, alpha: (a / 255.0).clamp(0.0, 1.0) as f32 })
+}
+
+/// Resolved colours, fonts and styles from `deckard.theme`, built once on theme load.
+pub struct ThemeCache {
+    colors: HashMap<String, Paint>,
+    fonts: HashMap<String, usize>,
+    styles: HashMap<String, Style>,
+    default_style: Style,
+    pub background: [u8; 3],
+    pub text: [u8; 3],
+    pub accent: [u8; 3],
+    pub animates: bool,
+}
+
+impl ThemeCache {
+    pub fn from_theme(theme: &Table) -> mlua::Result<ThemeCache> {
+        let mut colors = HashMap::new();
+        if let Some(ct) = theme.get::<Option<Table>>("colors")? {
+            for pair in ct.pairs::<Value, Value>() {
+                if let Ok((Value::String(k), Value::Table(t))) = pair
+                    && let Ok(name) = k.to_str()
+                    && let Ok(p) = rgba(&t)
+                {
+                    colors.insert(name.to_string(), p);
+                }
+            }
+        }
+        let mut fonts = HashMap::new();
+        if let Some(ft) = theme.get::<Option<Table>>("fonts")? {
+            for pair in ft.pairs::<Value, Value>() {
+                if let Ok((Value::String(k), Value::String(v))) = pair
+                    && let (Ok(alias), Ok(real)) = (k.to_str(), v.to_str())
+                    && let Ok(idx) = font_index(&real)
+                {
+                    fonts.insert(alias.to_string(), idx);
+                }
+            }
+        }
+        let resolve_color = |v: &Value| -> Option<Paint> {
+            match v {
+                Value::Table(t) => rgba(t).ok(),
+                Value::String(s) => s.to_str().ok().and_then(|n| colors.get(n.as_ref()).copied()),
+                _ => None,
+            }
+        };
+        let resolve_font = |v: &Value| -> Option<usize> {
+            let Value::String(s) = v else { return None };
+            let name = s.to_str().ok()?;
+            fonts.get(name.as_ref()).copied().or_else(|| font_index(&name).ok())
+        };
+        let base_font = font_index("ubuntu").expect("built in");
+        let fallback_default =
+            Style { font_idx: base_font, font: font_at(base_font), size: 15.0, colour: Paint { rgb: [255; 3], alpha: 1.0 } };
+        let parse_style = |t: &Table, base: Style| -> Option<Style> {
+            let font_idx = match t.raw_get::<Value>("font").ok()? {
+                Value::Nil => base.font_idx,
+                v => resolve_font(&v)?,
+            };
+            let size = match t.raw_get::<Value>("size").ok()? {
+                Value::Integer(n) => (n as f32).clamp(4.0, 200.0),
+                Value::Number(n) => (n as f32).clamp(4.0, 200.0),
+                Value::Nil => base.size,
+                _ => 15.0,
+            };
+            let colour = match t.raw_get::<Value>("color").ok()? {
+                Value::Nil => base.colour,
+                ref c => resolve_color(c)?,
+            };
+            Some(Style { font_idx, font: font_at(font_idx), size, colour })
+        };
+        let mut styles = HashMap::new();
+        let mut default_style = fallback_default;
+        if let Some(st) = theme.get::<Option<Table>>("styles")? {
+            if let Some(def_t) = st.get::<Option<Table>>("default")?
+                && let Some(def) = parse_style(&def_t, fallback_default)
+            {
+                default_style = def;
+            }
+            for pair in st.pairs::<Value, Value>() {
+                if let Ok((Value::String(k), Value::Table(t))) = pair
+                    && let Ok(name) = k.to_str()
+                    && let Some(parsed) = parse_style(&t, default_style)
+                {
+                    styles.insert(name.to_string(), parsed);
+                }
+            }
+        }
+        let background = colors.get("background").map_or([0; 3], |p| p.rgb);
+        let text = colors.get("text").map_or([255; 3], |p| p.rgb);
+        let accent = colors.get("accent").map_or([0xff, 0xa5, 0x2a], |p| p.rgb);
+        let animates = theme.get::<Value>("chase").is_ok_and(|c| !c.is_nil());
+        Ok(ThemeCache { colors, fonts, styles, default_style, background, text, accent, animates })
+    }
 }
 
 /// A colour, or the name of one of the theme's `colors`.
@@ -70,7 +192,13 @@ pub fn paint(lua: &Lua, v: &Value) -> mlua::Result<Paint> {
     match v {
         Value::Table(t) => rgba(t),
         Value::String(s) => {
-            let name = s.to_str()?.to_string();
+            let name = s.to_str()?;
+            if let Some(cache) = lua.app_data_ref::<ThemeCache>()
+                && let Some(p) = cache.colors.get(name.as_ref())
+            {
+                return Ok(*p);
+            }
+            let name = name.to_string();
             let theme: Table = lua.named_registry_value("deckard.theme")?;
             let colors: Table = theme.get("colors")?;
             match colors.get::<Option<Table>>(name.as_str())? {
@@ -110,6 +238,47 @@ fn font_at(i: usize) -> &'static Font {
 }
 
 fn style(lua: &Lua, v: &Value) -> mlua::Result<Style> {
+    if let Some(cache) = lua.app_data_ref::<ThemeCache>() {
+        match v {
+            Value::String(s) => {
+                let name = s.to_str()?;
+                if let Some(st) = cache.styles.get(name.as_ref()) {
+                    return Ok(*st);
+                }
+            }
+            Value::Nil => return Ok(cache.default_style),
+            Value::Table(t) if t.metatable().is_none() => {
+                let def = cache.default_style;
+                let font_idx = match t.raw_get::<Value>("font")? {
+                    Value::Nil => def.font_idx,
+                    Value::String(s) => {
+                        let name = s.to_str()?;
+                        match cache.fonts.get(name.as_ref()) {
+                            Some(&idx) => idx,
+                            None => font_index(&name)?,
+                        }
+                    }
+                    _ => font_index("ubuntu")?,
+                };
+                let size = match t.raw_get::<Value>("size")? {
+                    Value::Integer(n) => (n as f32).clamp(4.0, 200.0),
+                    Value::Number(n) => (n as f32).clamp(4.0, 200.0),
+                    Value::Nil => def.size,
+                    _ => 15.0,
+                };
+                let colour = match t.raw_get::<Value>("color")? {
+                    Value::Nil => def.colour,
+                    ref c => {
+                        // Drop app_data_ref before calling paint (which also acquires app_data_ref).
+                        drop(cache);
+                        return Ok(Style { font_idx, font: font_at(font_idx), size, colour: paint(lua, c)? });
+                    }
+                };
+                return Ok(Style { font_idx, font: font_at(font_idx), size, colour });
+            }
+            _ => {}
+        }
+    }
     let theme: Table = lua.named_registry_value("deckard.theme")?;
     let styles: Table = theme.get("styles")?;
     let own = match v {

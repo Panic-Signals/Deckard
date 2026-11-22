@@ -27,7 +27,16 @@ fn printed(app: &crate::App) -> Option<(i64, Vec<(usize, i64, i64, i64, i64)>)> 
 
 fn add(app: &crate::App, sound: usize, position: i64, pitch: i64) {
     let d = app.doc.as_ref().unwrap();
-    let n = deckard_model::Note { sound, position, length: 240, pitch, velocity: 90, probability: 100, expr: None };
+    let n = deckard_model::Note {
+        ratchet: Default::default(),
+        sound,
+        position,
+        length: 240,
+        pitch,
+        velocity: 90,
+        probability: 100,
+        expr: None,
+    };
     d.borrow_mut().edit_notes("Add", app.group, app.pattern, &[], &[n]).unwrap();
 }
 

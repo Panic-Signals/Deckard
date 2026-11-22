@@ -30,6 +30,9 @@ pub enum PasteAt {
     Mouse { tick: i64, pitch: Option<i64> },
     /// ⌘V.
     Keys,
+    /// ⌘V while stopped with the playhead put in the pattern: at the playhead (`tick`
+    /// from the pattern's start).
+    Playhead(i64),
 }
 
 /// The notes a paste adds: the first copied note on the step grid (`grid` from the
@@ -40,6 +43,7 @@ pub enum PasteAt {
 /// - From ⌘V with the focus unchanged: from the first step after the copied notes; with
 ///   the focus changed: at the same times, onto the focused sound as above (Keyboard
 ///   view: at the same pitches).
+/// - From ⌘V at the playhead: there, onto the sounds as from ⌘V.
 ///
 /// Sounds past the group's `sounds` are dropped.
 pub fn paste(clip: &NoteClip, at: PasteAt, sound: usize, keyboard: bool, start: i64, grid: i64, sounds: usize) -> Vec<Note> {
@@ -51,6 +55,7 @@ pub fn paste(clip: &NoteClip, at: PasteAt, sound: usize, keyboard: bool, start: 
     let moved_focus = sound != clip.sound;
     let to = match at {
         PasteAt::Mouse { tick, .. } => snap(tick),
+        PasteAt::Playhead(tick) => start + tick.max(0),
         PasteAt::Keys if moved_focus => snap(first),
         PasteAt::Keys => {
             let end = notes.iter().map(|n| n.position + n.length).max().unwrap_or(first);
@@ -68,7 +73,7 @@ pub fn paste(clip: &NoteClip, at: PasteAt, sound: usize, keyboard: bool, start: 
         .filter_map(|n| {
             let s = match at {
                 // ⌘V with the focus where it was: the same sounds.
-                PasteAt::Keys if !moved_focus => n.sound,
+                PasteAt::Keys | PasteAt::Playhead(_) if !moved_focus => n.sound,
                 _ if keyboard => sound,
                 _ => sound + (n.sound - top),
             };
@@ -82,7 +87,7 @@ mod tests {
     use super::*;
 
     fn n(sound: usize, position: i64, pitch: i64) -> Note {
-        Note { expr: None, sound, position, length: 240, pitch, velocity: 100, probability: 100 }
+        Note { ratchet: Default::default(), expr: None, sound, position, length: 240, pitch, velocity: 100, probability: 100 }
     }
 
     #[test]
@@ -102,6 +107,16 @@ mod tests {
         assert_eq!(paste(&clip, PasteAt::Keys, 5, false, 0, 240, 16), [n(5, 240, 60), n(6, 840, 60)]);
         // Past the group's sounds: dropped.
         assert_eq!(paste(&clip, PasteAt::Keys, 15, false, 0, 240, 16), [n(15, 240, 60)]);
+    }
+
+    #[test]
+    fn keys_paste_at_the_playhead() {
+        let clip = NoteClip { notes: vec![n(2, 120, 60), n(3, 720, 60)], sound: 2 };
+        // At the playhead (from the pattern's start, here 3840), keeping the offsets
+        // and the sounds.
+        assert_eq!(paste(&clip, PasteAt::Playhead(480), 2, false, 3840, 240, 16), [n(2, 4320, 60), n(3, 4920, 60)]);
+        // The focus moved: onto it.
+        assert_eq!(paste(&clip, PasteAt::Playhead(480), 5, false, 3840, 240, 16), [n(5, 4320, 60), n(6, 4920, 60)]);
     }
 
     #[test]

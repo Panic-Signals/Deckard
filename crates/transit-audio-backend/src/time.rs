@@ -1,0 +1,79 @@
+//! Host time: the process origin every stamp is relative to, and the stamp itself.
+
+/// Quality of a timestamp, worst first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Quality {
+    Invalid,
+    Arrival,
+    BackendEstimate,
+    Measured,
+}
+
+/// Backend times are integer nanoseconds in this stream's explicitly identified domain.
+/// `host_callback_ns` is in a common process origin. An arrival observation can have an
+/// unknown dispatch bias; the residual jitter of a fit does not bound that bias. The backend
+/// times are signed offsets from the stream's first callback: negative values are legal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub host_callback_ns: u64,
+    pub backend_callback_ns: i64,
+    pub backend_frame_ns: i64,
+    pub quality: Quality,
+    pub offset_uncertainty_ns: Option<u64>,
+}
+
+impl Stamp {
+    /// A stamp that claims nothing (a block with no frames, or a clock that could not be read).
+    pub const INVALID: Stamp =
+        Stamp { host_callback_ns: 0, backend_callback_ns: 0, backend_frame_ns: 0, quality: Quality::Invalid, offset_uncertainty_ns: None };
+}
+
+/// A loopback calibration of one device pair at one mode, rate and period, as the Player hands it
+/// to the streams it opens. The input stream carries all of it, so the output's presentation time
+/// stays the reference, and both streams then report [`Quality::Measured`] with `uncertainty_ns`.
+///
+/// What `round_trip_ns` counts depends on the backend's stamps:
+/// - **Native WASAPI:** the delay the stamps do not account for, measured in the stamps' own time
+///   (the output's presented frame to the input's captured frame of the same click).
+/// - **Native ASIO:** the whole loop, measured by a click in the driver's sample positions (the
+///   output frame at position `p` comes back at input position `p` plus the round trip). The
+///   driver's `getLatencies` figures are close by position but unverified per driver and phase
+///   (known issue K31); the measured loop replaces them for a calibrated capture stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Calibration {
+    pub round_trip_ns: u64,
+    pub uncertainty_ns: u64,
+}
+
+/// Initialized on control. Reading the cached origin performs no lazy callback initialization.
+#[derive(Clone, Copy)]
+pub struct HostOrigin {
+    instant: std::time::Instant,
+}
+
+impl std::fmt::Debug for HostOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostOrigin")
+    }
+}
+
+impl Default for HostOrigin {
+    fn default() -> Self {
+        {
+            static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            Self { instant: *ORIGIN.get_or_init(std::time::Instant::now) }
+        }
+    }
+}
+
+impl HostOrigin {
+    /// The exact origin used by native audio observations. Pass this to other
+    /// device adapters rather than comparing nanoseconds from separate origins.
+    pub fn instant(self) -> std::time::Instant {
+        self.instant
+    }
+
+    pub fn now_ns(self) -> Option<u64> {
+        u64::try_from(self.instant.elapsed().as_nanos()).ok()
+    }
+}

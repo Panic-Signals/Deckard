@@ -92,7 +92,7 @@ fn first_note_of_a_sound_creates_its_sequence() {
     let mut d = open(&dir, "7-section-length");
     let before = notes(d.project(), 0, 4);
     let sound = (0..d.project().groups[0].sounds.len()).find(|s| before.iter().all(|n| n.sound != *s)).unwrap();
-    let n = Note { expr: None, sound, position: 960, length: 240, pitch: 60, velocity: 100, probability: 100 };
+    let n = Note { ratchet: Default::default(), expr: None, sound, position: 960, length: 240, pitch: 60, velocity: 100, probability: 100 };
     d.add_note(0, 4, n).unwrap();
     assert!(notes(d.project(), 0, 4).contains(&n));
     let m = Note { position: 1920, ..n };

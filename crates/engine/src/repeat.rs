@@ -45,6 +45,11 @@ struct Held {
     sound: usize,
     pitch: i64,
     velocity: i64,
+    /// A step has played since it was pressed.
+    stepped: bool,
+    /// Let go before any step played: it plays on the next one, then leaves (a tap
+    /// shorter than the wait for the grid still sounds).
+    released: bool,
 }
 
 pub struct Repeater {
@@ -84,8 +89,9 @@ impl Repeater {
         }
         self.down.retain(|d| *d != (group, sound, pitch));
         self.down.push((group, sound, pitch));
-        if !self.held.iter().any(|h| (h.group, h.sound, h.pitch) == (group, sound, pitch)) {
-            self.held.push(Held { group, sound, pitch, velocity });
+        match self.held.iter_mut().find(|h| (h.group, h.sound, h.pitch) == (group, sound, pitch)) {
+            Some(h) => h.released = false,
+            None => self.held.push(Held { group, sound, pitch, velocity, stepped: false, released: false }),
         }
     }
 
@@ -111,7 +117,11 @@ impl Repeater {
         if self.arp.hold {
             self.latched = self.down.is_empty();
         } else {
-            self.held.retain(|h| (h.group, h.sound, h.pitch) != key);
+            // One that hasn't played yet stays for the next step (see `Held::released`).
+            for h in self.held.iter_mut().filter(|h| (h.group, h.sound, h.pitch) == key) {
+                h.released = true;
+            }
+            self.held.retain(|h| !(h.released && h.stepped));
         }
         true
     }
@@ -172,7 +182,20 @@ impl Repeater {
         self.next_at = Some(next);
     }
 
+    /// One step at `at`. Once a step has played something, the pads let go before it
+    /// leave.
     fn fire(&mut self, at: f64, out: &mut Vec<Fired>) {
+        let before = out.len();
+        self.fire_step(at, out);
+        if out.len() > before {
+            for h in &mut self.held {
+                h.stepped = true;
+            }
+            self.held.retain(|h| !h.released);
+        }
+    }
+
+    fn fire_step(&mut self, at: f64, out: &mut Vec<Fired>) {
         let length = ((self.arp.rate as f64 * self.arp.gate).round() as i64).max(1);
         let vel = |v: i64, dynamic: f64| ((v as f64 * dynamic).round() as i64).clamp(1, 127);
         match self.mode {
@@ -324,6 +347,49 @@ mod tests {
         // Pressed at song tick 100: the next 1/16 is 240.
         let fired = r.due(1000.0, 400.0, Some(100.0));
         assert_eq!(fired.iter().map(|f| f.at).collect::<Vec<_>>(), [1140.0, 1380.0]);
+    }
+
+    /// A tap let go before the grid line it waits for still plays, once, on that line.
+    #[test]
+    fn a_tap_shorter_than_the_wait_plays_once_on_the_line() {
+        let mut r = Repeater::new(arp(ArpType::Up), RepeatMode::NoteRepeat);
+        r.press(0, 13, 60, 90);
+        // Let go at song tick 100, before the 1/16 at 240.
+        assert!(r.release(0, 13, 60), "still its own to end");
+        let fired = r.due(1000.0, 600.0, Some(100.0));
+        assert_eq!(fired.iter().map(|f| (f.at, f.sound, f.velocity)).collect::<Vec<_>>(), [(1140.0, 13, 90)]);
+        assert!(r.due(1600.0, 960.0, Some(700.0)).is_empty(), "and no more");
+        assert!(!r.active());
+    }
+
+    /// A pad held through a step and then let go stops at once, as before; pressed
+    /// again before its first step, a released tap goes on repeating.
+    #[test]
+    fn held_pads_stop_on_release_and_a_tap_pressed_again_repeats() {
+        let mut r = Repeater::new(arp(ArpType::Up), RepeatMode::NoteRepeat);
+        r.press(0, 3, 60, 100);
+        assert_eq!(r.due(0.0, 240.0, Some(0.0)).len(), 1);
+        r.release(0, 3, 60);
+        assert!(r.due(240.0, 480.0, Some(240.0)).is_empty(), "it had played: gone");
+        r.press(0, 5, 60, 100);
+        r.release(0, 5, 60);
+        r.press(0, 5, 60, 100);
+        assert_eq!(r.due(720.0, 720.0, Some(720.0)).len(), 3, "held again: repeats");
+    }
+
+    /// Two quick taps in the wait: both play together on the line (the Arp's cycle
+    /// has both there).
+    #[test]
+    fn quick_taps_on_two_pads_both_play() {
+        let mut r = Repeater::new(arp(ArpType::Up), RepeatMode::NoteRepeat);
+        r.press(0, 13, 60, 100);
+        r.release(0, 13, 60);
+        r.press(0, 0, 60, 100);
+        r.release(0, 0, 60);
+        let mut sounds: Vec<usize> = r.due(1000.0, 240.0, Some(100.0)).iter().map(|f| f.sound).collect();
+        sounds.sort_unstable();
+        assert_eq!(sounds, [0, 13]);
+        assert!(!r.active());
     }
 
     #[test]
