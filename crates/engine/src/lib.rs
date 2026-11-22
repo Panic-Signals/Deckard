@@ -5503,6 +5503,11 @@ impl Engine {
         }
     }
 
+    /// The master's level as a gain (what the recorder's monitor is heard through).
+    pub fn master_gain(&self) -> f32 {
+        self.master
+    }
+
     /// The external output the master plays on (Out n, from 0).
     pub fn master_bus(&self) -> Option<usize> {
         self.master_bus

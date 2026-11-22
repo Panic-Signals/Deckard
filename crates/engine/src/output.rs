@@ -46,6 +46,31 @@ pub struct Stats {
     pub late_commands: AtomicU64,
 }
 
+/// The recorder's monitor (interleaved stereo) onto `buf`, its gain going from `from`
+/// to `to` over the block (a move of the master's level doesn't step).
+fn mix_monitor(buf: &mut [f32], monitor: impl Iterator<Item = f32>, from: f32, to: f32) {
+    let frames = (buf.len() / 2).max(1) as f32;
+    for (k, (o, v)) in buf.iter_mut().zip(monitor).enumerate() {
+        let g = from + (to - from) * ((k / 2 + 1) as f32 / frames);
+        *o = (*o + v * g).clamp(-4.0, 4.0);
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    /// The monitor is as loud as the master lets it be, and gets there over the block.
+    #[test]
+    fn the_monitor_goes_through_the_master() {
+        let mut buf = [0.0f32; 8];
+        super::mix_monitor(&mut buf, [1.0f32; 8].into_iter(), 0.1, 0.1);
+        assert!(buf.iter().all(|v| (v - 0.1).abs() < 1e-6), "{buf:?}");
+        let mut buf = [0.0f32; 8];
+        super::mix_monitor(&mut buf, [1.0f32; 8].into_iter(), 1.0, 0.0);
+        assert!(buf[0] < 1.0 && buf[0] > buf[2] && buf[6] == 0.0, "{buf:?}");
+        assert_eq!(buf[0], buf[1], "both sides alike");
+    }
+}
+
 impl Stats {
     /// "callbacks, missed, late, peak %, average %".
     pub fn summary(&self) -> String {
@@ -605,6 +630,8 @@ impl Output {
             let mut engine: Option<Box<Engine>> = None;
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
+            // The master's level the monitor was last heard at.
+            let mut monitor_gain = 1.0f32;
             #[cfg(windows)]
             let mut promoted = false;
             move |out: &mut [f32], ahead: Duration| {
@@ -674,10 +701,11 @@ impl Output {
                 if let Ok(mut m) = monitor.try_lock()
                     && !m.is_empty()
                 {
+                    // Heard through the master's level, as everything else is.
+                    let to = engine.as_ref().map_or(1.0, |e| e.master_gain());
                     let n = m.len().min(buf.len());
-                    for (o, v) in buf.iter_mut().zip(m.drain(..n)) {
-                        *o = (*o + v).clamp(-4.0, 4.0);
-                    }
+                    mix_monitor(&mut buf[..n], m.drain(..n), monitor_gain, to);
+                    monitor_gain = to;
                     // Don't let it fall behind (more than ~0.1 s).
                     if m.len() > 9_600 {
                         let extra = m.len() - 9_600;
