@@ -3733,6 +3733,25 @@ fn pattern_page_knobs_gather_turns_and_step_length_by_powers_of_two() {
     }
 }
 
+#[test]
+fn pattern_page_shift_steps_length_by_a_sixteenth_like_start() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    (v.pattern_start, v.pattern_length) = (3840, 3840);
+    hold(&mut s, &v, "BUTTON_PATTERN", true);
+    hold(&mut s, &v, "BUTTON_SHIFT", true);
+    assert_eq!(s.event(&Event::Knob(2, 0.1), &v, now), [Action::PatternSpan { start: 3840 + 240, length: 3840 - 240 }], "START");
+    assert_eq!(s.event(&Event::Knob(0, 0.1), &v, now), [Action::PatternSpan { start: 3840 + 240, length: 3840 }], "POSITION");
+    assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(3840 + 240)], "LENGTH: a sixteenth longer");
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(3840 - 240)], "a sixteenth shorter");
+    // Off the grid, it snaps to the sixteenths; it never goes below one.
+    v.pattern_length = 3840 + 100;
+    assert_eq!(s.event(&Event::Knob(3, 0.1), &v, now), [Action::PatternLength(3840 + 240)]);
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(3840)]);
+    v.pattern_length = 240;
+    assert_eq!(s.event(&Event::Knob(3, -0.1), &v, now), [Action::PatternLength(240)]);
+}
+
 /// A view with Zhora focused: its four pages, an A3 heard 2 cents sharp.
 fn zhora_view() -> View {
     let mut v = view();
