@@ -2662,9 +2662,12 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         if rr.right() > top.right() {
             break;
         }
-        let resp = ui
-            .interact(rr, ui.id().with(("take", i)), Sense::click_and_drag())
-            .on_hover_text("Click to load it into the focused sound; drag it onto a sound; right-click to put it on a layer");
+        let kept = !crate::layers::layers_in(p, app.group, app.sound).is_empty();
+        let resp = ui.interact(rr, ui.id().with(("take", i)), Sense::click_and_drag()).on_hover_text(if kept {
+            "Right-click to put it on a layer of the focused sound; drag it onto a sound"
+        } else {
+            "Click to load it into the focused sound; drag it onto a sound"
+        });
         if resp.drag_started() {
             resp.dnd_set_drag_payload(DraggedTake(take.clone()));
         }

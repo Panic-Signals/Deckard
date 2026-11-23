@@ -428,3 +428,30 @@ fn the_layer_choices_follow_the_sound() {
     assert_eq!(names(&app)[1], "take.wav");
     assert_eq!(zones(&app).len(), 3);
 }
+
+/// A take clicked is only focused on a Sampler Preview that has a sample: the first
+/// layer stays the take it was given (the take's menu puts another there). An empty one
+/// gets the take clicked.
+#[test]
+fn a_take_clicked_leaves_the_layers_alone() {
+    use crate::layout::sampling::{RecordAct, SamplingAct};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app();
+    for (name, hz) in [("one.wav", 220.0), ("two.wav", 330.0)] {
+        app.recorder.view.takes.push(tone(dir.path(), name, hz));
+    }
+    let click = |app: &mut App, i: usize| app.sampling_act(SamplingAct::Record(RecordAct::FocusTake(i)));
+    click(&mut app, 0);
+    assert_eq!(names(&app), ["one.wav"], "an empty sound gets the take");
+    click(&mut app, 1);
+    assert_eq!(names(&app), ["one.wav"], "the sample stays");
+    assert_eq!(app.recorder.view.focused, Some(1), "the take is focused all the same");
+    // With layers, the same.
+    app.sampling_act(SamplingAct::Record(RecordAct::TakeToLayer(1, 1)));
+    click(&mut app, 1);
+    click(&mut app, 0);
+    assert_eq!(names(&app), ["one.wav", "two.wav"]);
+    // Its menu still replaces the first.
+    app.sampling_act(SamplingAct::Record(RecordAct::TakeToLayer(1, 0)));
+    assert_eq!(names(&app), ["two.wav", "two.wav"]);
+}

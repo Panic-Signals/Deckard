@@ -9119,8 +9119,11 @@ impl App {
                 RecordAct::Set(..) | RecordAct::Threshold(_) | RecordAct::MidiTo(_) => {}
                 RecordAct::FocusTake(i) => {
                     self.recorder.view.focused = Some(i);
-                    if let Some(p) = self.recorder.view.takes.get(i).cloned() {
-                        let (g, s) = (self.group, self.sound);
+                    let (g, s) = (self.group, self.sound);
+                    // A Sampler Preview with a sample keeps it: a take clicked is only
+                    // focused, and its menu puts it on a layer. [DECKARD's choice]
+                    let kept = self.doc.as_ref().is_some_and(|d| !layers::layers_in(d.borrow().project(), g, s).is_empty());
+                    if let Some(p) = self.recorder.view.takes.get(i).cloned().filter(|_| !kept) {
                         self.place_take(g, s, &p);
                     }
                 }

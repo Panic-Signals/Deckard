@@ -118,6 +118,10 @@ every timer tick and redraws the buttons when it changes.
 
 ### 3.3 Pads
 
+- DECKARD's choice: a take focused (a pad, PREVIOUS, NEXT, or a click in the window) is
+  loaded into the sound only if the sound isn't a Sampler Preview that already has a
+  sample. There the sample (its layers) stays, and the take's right-click menu in the
+  window puts it on a layer.
 - **Takes on pads off** (default): pads play the sounds as usual (sound pad mode), and the
   pad LEDs are the normal sound LEDs.
 - **Takes on pads on**: pad n focuses take `n + 16·bank`, loads it into the sound and
