@@ -72,7 +72,7 @@ fn names(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
 }
 
-pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project) -> Knobs {
+pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usize)) -> Knobs {
     let mut out = Knobs::default();
     let a = &rec.auto;
     let auto = rec.mode == 3;
@@ -104,6 +104,10 @@ pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project) -> Knobs {
             recording.push(number("SampleMs", "SAMPLE", ms_text(a.sample_ms), a.sample_ms.into(), ms, RecParam::SampleMs));
             recording.push(number("NoteOnMs", "NOTE ON", ms_text(a.note_on_ms), a.note_on_ms.into(), ms, RecParam::NoteOnMs));
         }
+    }
+    // Where the take goes, on a sound that can have layers.
+    if let Some((options, at, values)) = crate::layers::take_choices(p, focus.0, focus.1, rec) {
+        recording.push(choice("Layer", "LAYER", &options, at, Apply::Param(RecParam::Layer, Some(values))));
     }
     out.page("RECORDING", recording);
 
@@ -204,7 +208,7 @@ mod tests {
         let mut d = deckard_doc::Document::new_project().unwrap();
         d.add_slot(0, 1, 0, &deckard_doc::NewModule::Effect(deckard_model::PERFORM_FX.0)).unwrap();
         let rec = RecorderView { source: 2, internal: TapSource::Sound(0, 1), ..Default::default() };
-        let k = knobs(&rec, &Settings::default(), d.project());
+        let k = knobs(&rec, &Settings::default(), d.project(), (0, 0));
         let input = k.pages.iter().flat_map(|p| &p.knobs).find(|k| k.key == "Input").expect("an INPUT knob");
         assert_eq!(input.value, 2.0, "the sound chosen: after the Master and the group");
         assert_eq!(input.max, 2.0, "the Master, the group, the one sound with a plug-in");

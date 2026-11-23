@@ -5,19 +5,23 @@ use deckard_surface::{Action as A, SamplingCall};
 
 /// A new project whose focused sound plays a second of a tone (written to a temporary
 /// folder), the Sampling page open.
-fn app() -> (crate::App, tempfile::TempDir) {
+pub(crate) fn app() -> (crate::App, tempfile::TempDir) {
+    let rate = 44_100;
+    app_with(deckard_engine::sample::Sample {
+        rate,
+        frames: (0..rate as usize).map(|i| [(i as f32 * 220.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5; 2]).collect(),
+    })
+}
+
+/// [`app`], the focused sound playing `tone` (saved as Tone.wav in the folder).
+pub(crate) fn app_with(tone: deckard_engine::sample::Sample) -> (crate::App, tempfile::TempDir) {
     let mut app = crate::App::default();
     app.new_project();
     let tmp = tempfile::tempdir().unwrap();
-    let rate = 44_100;
-    let tone = deckard_engine::sample::Sample {
-        rate,
-        frames: (0..rate as usize).map(|i| [(i as f32 * 220.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5; 2]).collect(),
-    };
     let path = tmp.path().join("Tone.wav");
     deckard_engine::edit::write_wav(&path, &tone).unwrap();
     let (g, s) = (app.group, app.sound);
-    app.load_take(g, s, &path, rate as usize);
+    app.load_take(g, s, &path, tone.frames.len());
     app.surface_act(A::Sampling(true));
     app.update_sampling();
     (app, tmp)

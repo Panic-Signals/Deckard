@@ -425,8 +425,8 @@ Auto/Manual), `Adjust`, `Mouse Mode` (Slice/Remove tool), `Zero-X`, `Show Focus 
 
 - **APPLY** exports to the **same sound** (`Sampler::initializeAsSlices`):
   - one zone per slice, all on the same sample file, play range = the slice;
-  - slice *i* mapped to one key, starting at **C1 (MIDI 36)**, from the manual's C-2 in
-    Maschine's naming [inferred mapping];
+  - slice *i* mapped to one key, starting at **C3 (MIDI 60)**, the key a pad plays
+    [DECKARD's choice];
   - root key = that key, full velocity range;
   - the editor switches to Keyboard view.
 - The **dragger** onto a **group** puts the first 16 slices into sound slots 1–16, one

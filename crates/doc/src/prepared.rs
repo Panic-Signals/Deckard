@@ -103,6 +103,7 @@ impl EditSnapshot {
             param_cache: Default::default(),
             types: mxprj::types::Types::new(),
             undo: Vec::new(),
+            joined: None,
             redo: Vec::new(),
             take: None,
         };

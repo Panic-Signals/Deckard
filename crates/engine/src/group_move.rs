@@ -117,7 +117,8 @@ fn live_group(e: &Live) -> Option<usize> {
         | Live::ControlIn { group, .. }
         | Live::Expression { group, .. }
         | Live::RepeatPressure { group, .. }
-        | Live::ChokeGroup { group } => Some(*group),
+        | Live::ChokeGroup { group }
+        | Live::ChokeSound { group, .. } => Some(*group),
         Live::ChokeAll => None,
     }
 }
@@ -184,7 +185,8 @@ fn remap_live(e: &mut Live, a: usize, b: usize) {
         | Live::ControlIn { group, .. }
         | Live::Expression { group, .. }
         | Live::RepeatPressure { group, .. }
-        | Live::ChokeGroup { group } => *group = moved(*group, a, b),
+        | Live::ChokeGroup { group }
+        | Live::ChokeSound { group, .. } => *group = moved(*group, a, b),
         Live::ChokeAll => {}
     }
 }

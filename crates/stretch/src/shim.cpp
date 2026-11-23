@@ -5,12 +5,14 @@ using Stretch = signalsmith::stretch::SignalsmithStretch<float>;
 
 extern "C" {
 
-void *deckard_stretch_new(int channels, float sample_rate, int cheaper) {
+// `spread`: each block's work done a little with every frame out (an interval more
+// latency), not all at once.
+void *deckard_stretch_new(int channels, float sample_rate, int cheaper, int spread) {
     auto *s = new Stretch(1234L);
     if (cheaper) {
         s->presetCheaper(channels, sample_rate);
     } else {
-        s->presetDefault(channels, sample_rate);
+        s->presetDefault(channels, sample_rate, spread != 0);
     }
     return s;
 }

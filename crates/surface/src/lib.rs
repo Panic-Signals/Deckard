@@ -144,10 +144,10 @@ pub struct View {
 /// The app's sampler and recorder as the Sampling page's tabs show them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SamplingView {
-    /// The tab: 0 RECORD, 1 EDIT, 2 SLICE, 3 ZONE.
+    /// The tab: 0 RECORD, 1 EDIT, 2 SLICE, 3 ZONE, 4 LAYERS.
     pub tab: usize,
     /// Each tab's knob pages (SLICE's knobs are its slicer's: `slice`).
-    pub pages: [Vec<KnobPage>; 4],
+    pub pages: [Vec<KnobPage>; 5],
     pub slice: Vec<SamplingKnob>,
     /// The focused zone's sample, if it has one.
     pub sample: Option<SampleView>,

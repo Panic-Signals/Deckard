@@ -285,6 +285,22 @@ pub fn render_output(
 ) -> Option<Rendered> {
     let rate = fmt.rate.max(1);
     let (mut engine, _) = Engine::new(p, project_path, rate, mode, cache);
+    // The New Sampler's stretched renders are made first (while playing, a zone plays
+    // repitched until its render comes: an export has the render itself). Keys asks for
+    // its notes once its root's is made, so more than once.
+    for _ in 0..4 {
+        let jobs = cache.wanted_renders();
+        if jobs.is_empty() {
+            break;
+        }
+        for j in &jobs {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            cache.add_render(j, j.run());
+        }
+        engine = Engine::new(p, project_path, rate, mode, cache).0;
+    }
     let output = output.filter(|&n| n < crate::OUTPUTS);
     engine.set_connected_outputs(u16::MAX);
     let mut ext: Vec<Vec<f32>> = if output.is_some() { vec![vec![0f32; 1024]; crate::OUTPUTS] } else { Vec::new() };

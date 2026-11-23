@@ -118,6 +118,35 @@ mod additive_routes {
         assert!(e.mod_routes[0].now.is_finite());
     }
 
+    /// MORPH is a destination of a sound with layers (its POSITION is what moves), and
+    /// of no other.
+    #[test]
+    fn morph_is_a_target_of_a_layered_sound() {
+        let (_tmp, mut p, _) = modulated_project();
+        p.groups[0].patterns[0].mods.clear();
+        let snd = &mut p.groups[0].sounds[1];
+        snd.mod_routes = vec![ModRoute { low: 0.2, high: 0.8, ..route(ModSource::Pressure, 0, "Sampler", field("morph")) }];
+        let mut cache = SampleCache::default();
+        let mut e = engine(&p, &mut cache);
+        press(&mut e, 0.5, 20);
+        near(f64::from(e.sounds[0][1].as_ref().unwrap().morph_pos()), 0.0);
+        // With a layer, and POSITION at 0.1.
+        let snd = &mut p.groups[0].sounds[1];
+        let mut n = deckard_model::new_sampler::NewSampler::default();
+        n.morph.position = 0.1;
+        snd.new_sampler = Some(n);
+        let z = &mut snd.sampler.as_mut().unwrap().zones[0];
+        z.meta = Some(deckard_model::new_sampler::ZoneMeta { file: z.sample.path.clone(), layer: Some(Default::default()), ..Default::default() });
+        let mut e = engine(&p, &mut cache);
+        near(f64::from(e.sounds[0][1].as_ref().unwrap().morph_pos()), 0.1);
+        press(&mut e, 0.5, 20);
+        near(f64::from(e.sounds[0][1].as_ref().unwrap().morph_pos()), 0.5);
+        // Let go, a range route rests at its low end (as for any destination).
+        e.note_release(0, 1, 60);
+        blocks(&mut e, 20);
+        near(f64::from(e.sounds[0][1].as_ref().unwrap().morph_pos()), 0.2);
+    }
+
     #[test]
     fn sampler_and_effect_add_to_their_own_stored_bases() {
         let (_tmp, mut p, base) = modulated_project();

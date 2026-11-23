@@ -11,7 +11,7 @@ impl App {
     /// The knob pages of every tab, with what each knob sets.
     fn sampling_pages(&self) -> Option<sampling_hw::Pages> {
         let d = self.doc.as_ref()?.borrow();
-        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project());
+        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound));
         Some(sampling_hw::pages(record, &self.sampling, d.project(), (self.group, self.sound, self.zone)))
     }
 
@@ -30,7 +30,7 @@ impl App {
             return SamplingView { record, ..Default::default() };
         }
         let mut out = SamplingView {
-            tab: self.sampling.tab.min(3),
+            tab: self.sampling.tab.min(4),
             record,
             takes: v.takes.len(),
             take_waves: v.takes.iter().map(|t| v.take_waves.get(t).cloned().unwrap_or_default()).collect(),
@@ -95,10 +95,10 @@ impl App {
         match a {
             Action::Sampling(true) => self.sample_focused_sound(),
             Action::Sampling(false) => self.sampling_open = false,
-            Action::SamplingTab(t) => self.sampling_act(SamplingAct::Tab(t.min(3))),
+            Action::SamplingTab(t) => self.sampling_act(SamplingAct::Tab(t.min(4))),
             Action::SamplingKnob { page, knob, value } => {
                 let Some(p) = self.sampling_pages() else { return };
-                let tab = self.sampling.tab.min(3);
+                let tab = self.sampling.tab.min(4);
                 let key = if tab == 2 {
                     p.slice.get(knob).map(|k| k.key.clone())
                 } else {

@@ -67,6 +67,8 @@ pub(crate) enum Ev {
         velocity: i64,
         gate: Option<u64>,
         beats: f64,
+        /// Played live while the song runs.
+        live: bool,
     },
     /// A note held live ends.
     Release {
@@ -379,7 +381,7 @@ impl Player {
         let pos = self.pos;
         let Some(p) = self.parts.as_mut() else { return };
         match ev {
-            Ev::NoteOn { id, pitch, velocity, gate, beats } => {
+            Ev::NoteOn { id, pitch, velocity, gate, beats, live } => {
                 if p.muted {
                     return;
                 }
@@ -395,7 +397,7 @@ impl Player {
                         self.offs.push((pos + g, 0, pitch));
                     }
                 } else if let Some(smp) = p.smp.as_mut() {
-                    smp.note_on(id, pitch, velocity.clamp(0, 127), &Context { tempo: self.position.3, beats });
+                    smp.note_on(id, pitch, velocity.clamp(0, 127), &Context { tempo: self.position.3, beats, live });
                     if let Some(g) = gate {
                         self.offs.push((pos + g, id, pitch));
                     }
@@ -475,6 +477,13 @@ impl Player {
                 let (at, ev, _) = self.pending.remove(i);
                 if let Ev::Position { frame, playing, tempo, numerator, denominator } = ev {
                     if at >= self.position.0 {
+                        // Another tempo: the notes sounding end where they're written.
+                        let was = self.position.3;
+                        if tempo != was && was > 0.0 && tempo > 0.0 {
+                            for o in &mut self.offs {
+                                o.0 = pos + (o.0.saturating_sub(pos) as f64 * was / tempo).round() as u64;
+                            }
+                        }
                         self.position = (at, frame, playing, tempo, numerator, denominator);
                     }
                 } else {
