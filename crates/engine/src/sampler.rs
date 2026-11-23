@@ -2141,6 +2141,18 @@ impl SamplerRt {
         self.turn = 0;
     }
 
+    /// Whether a loop is actively playing now (a cued Loop-mode Audio plug-in, or a
+    /// looped Sampler voice that hasn't been released or choked).
+    pub fn loop_playing(&self) -> bool {
+        if let Some(a) = &self.audio {
+            return a.loop_playing();
+        }
+        if self.synth.is_some() {
+            return false;
+        }
+        self.voices.iter().any(|v| v.stream.looped.is_some() && !v.stream.done && v.fade.is_none() && !v.released)
+    }
+
     /// Mix the voices into interleaved `out`; returns the peak (left, right).
     pub fn render(&mut self, out: &mut [f32]) -> (f32, f32) {
         if self.synth.is_some() {

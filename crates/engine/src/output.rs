@@ -248,6 +248,12 @@ impl Sender {
         p.started.keys().copied().collect()
     }
 
+    /// Live note pitches currently held per `(group, sound)`.
+    pub fn held_pitches(&self) -> std::collections::HashMap<(usize, usize), Vec<i64>> {
+        let Ok(p) = self.played.lock() else { return Default::default() };
+        p.held.clone()
+    }
+
     /// Whether an engine was sent to play.
     pub fn has_engine(&self) -> bool {
         self.has_engine.load(Ordering::Acquire)
@@ -713,7 +719,10 @@ impl Output {
                 if let Ok(mut t) = telemetry.try_lock() {
                     match engine.as_mut() {
                         Some(e) => e.publish(&mut t),
-                        None => t.finished = true,
+                        None => {
+                            t.finished = true;
+                            t.loop_playing.fill(0);
+                        }
                     }
                     t.has_engine = engine.is_some();
                     t.actions = applied;
@@ -1158,6 +1167,11 @@ impl Output {
         self.sender.played_notes()
     }
 
+    /// See [`Sender::held_pitches`].
+    pub fn held_pitches(&self) -> std::collections::HashMap<(usize, usize), Vec<i64>> {
+        self.sender.held_pitches()
+    }
+
     /// Copy audio from inside the engine to `tap` (or stop, with `None`).
     pub fn set_tap(&self, tap: Option<Tap>) {
         self.sender.send(Command::SetTap(tap));
@@ -1271,6 +1285,12 @@ impl Output {
     /// The cue bus's peaks since the last call (reset).
     pub fn take_cue_peak(&self) -> (f32, f32) {
         self.telemetry(|t| std::mem::take(&mut t.cue_peak))
+    }
+
+    /// Per-group bitmask (`1 << sound`, up to 64 sounds) of unmuted sounds actively
+    /// playing a loop (`SamplerRt::loop_playing`).
+    pub fn loop_playing(&self) -> Vec<u64> {
+        self.telemetry(|t| t.loop_playing.clone())
     }
 
     /// Where zone `zone` of a sound plays, as last published; it is watched from now

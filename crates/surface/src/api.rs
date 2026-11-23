@@ -1722,6 +1722,8 @@ fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
         prob_locked,
         selected,
         audio,
+        loop_mode,
+        loop_playing,
         mix,
         playing: _,
         hits: _,
@@ -1745,6 +1747,8 @@ fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
         && *prob_locked == new.prob_locked
         && *selected == new.selected
         && *audio == new.audio
+        && *loop_mode == new.loop_mode
+        && *loop_playing == new.loop_playing
         && mix_static_eq(mix, &new.mix)
 }
 

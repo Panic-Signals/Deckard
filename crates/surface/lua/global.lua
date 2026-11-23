@@ -613,9 +613,10 @@ function global.leds()
     local sound = sounds[i]
     local name = "PAD_" .. i
     local chosen = sound and (sound.selected or i == s.sound)
+    local loop_on = (pads.mode == "pad" and sound and sound.loop_playing) or false
     if sound and #sound.hits > 0 then
       deckard.led(name, WHITE, true, true)
-    elseif not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
+    elseif not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing and not loop_on) then
       deckard.led(name, "off")
     elseif muting then
       deckard.led(name, sound.palette, not sound.muted, sound.playing and not deckard.pad_held(i))
@@ -623,9 +624,10 @@ function global.leds()
       -- A selected empty slot: Maschine lights it in its empty-slot colour.
       deckard.led(name, EMPTY_SLOT, true)
     else
-      -- Selected pads (and loops playing now) are fully lit, the others half lit.
-      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen or sound.loop_playing or false,
-        sound.playing and not deckard.pad_held(i))
+      -- Selected pads are bright; active loops in Pad mode hold the full white-mixed
+      -- highlight, and the others are half lit.
+      local flash = loop_on or (not sound.loop_mode and sound.playing and not deckard.pad_held(i)) or false
+      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen or loop_on or false, flash)
     end
   end
 end

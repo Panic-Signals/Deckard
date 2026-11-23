@@ -438,8 +438,8 @@ pub struct SoundView {
     /// Its Audio plug-in plays in Loop mode (with the pattern, not with notes): in Pad
     /// mode its pad switches the loop on or off ([`Action::ToggleAudioLoop`]).
     pub loop_mode: bool,
-    /// Its Loop-mode Audio plug-in is playing now (the song runs and the loop is on in
-    /// the pattern the group plays).
+    /// A loop on this sound is active now (an enabled Loop-mode Audio plug-in in the
+    /// active pattern, or an unmuted looped Sampler / New Sampler voice playing).
     pub loop_playing: bool,
 }
 
