@@ -158,20 +158,54 @@ impl Document {
 }
 
 impl Document {
-    /// The edit just made, undone if the project would no longer open (a file from a
-    /// Maschine version whose layout DECKARD can't convert).
-    fn check_reopens(&mut self) -> Result<(), String> {
-        let ok = self.to_bytes().and_then(|b| {
-            let p = mxprj::Project::parse(&b).map_err(|e| e.to_string())?;
-            p.decode(&self.types).map(drop).map_err(|(e, _)| e.to_string())
+    /// Verify `obj` matches the project's class versions and round-trips through
+    /// encode + decode without modifying the document.
+    fn check_subtree_reopens(
+        &self,
+        kind: [u8; 4],
+        type_name: &str,
+        obj: &Obj,
+        classes: &HashMap<String, (u32, bool)>,
+    ) -> Result<(), String> {
+        let mut seen: HashMap<String, u32> = HashMap::new();
+        let mut mismatch: Option<String> = None;
+        obj.walk_paths(&mut |o, _| {
+            if mismatch.is_some() || o.type_name.is_empty() {
+                return;
+            }
+            if let Some(&(ver, _)) = classes.get(&o.type_name) {
+                if o.version != ver {
+                    mismatch = Some(format!("class {} version {} != project version {}", o.type_name, o.version, ver));
+                }
+            } else if let Some(&prev) = seen.get(&o.type_name) {
+                if o.version != prev {
+                    mismatch = Some(format!("class {} has multiple versions ({} vs {})", o.type_name, prev, o.version));
+                }
+            } else {
+                seen.insert(o.type_name.clone(), o.version);
+            }
         });
-        if let Err(e) = ok {
-            self.undo();
-            // Not to be redone.
-            self.redo.pop();
-            return Err(format!("this file's format can't be converted ({e})"));
+        if let Some(msg) = mismatch {
+            return Err(format!("this file's format can't be converted ({msg})"));
         }
-        Ok(())
+        let ok = mxprj::Project::parse(&self.file)
+            .map_err(|e| e.to_string())
+            .and_then(|p| {
+                mxprj::decode::encode(obj.clone(), type_name, p.header, &self.types.loaders, &self.types.exports)
+                    .map_err(|(e, at)| format!("{e} in {at}"))
+            })
+            .and_then(|(archive, _)| {
+                let bytes = mxprj::container::new_file(
+                    kind,
+                    &archive,
+                    mxprj::types::classes::APP_VERSION,
+                    &SoundInfo::default(),
+                    &mut crate::build::uuids(),
+                );
+                let p = mxprj::Project::parse(&bytes).map_err(|e| e.to_string())?;
+                p.decode(&self.types).map(drop).map_err(|(e, _)| e.to_string())
+            });
+        ok.map_err(|e| format!("this file's format can't be converted ({e})"))
     }
 
     /// The document of a Maschine file of `kind` (`SND `, `GRP `, `SLOT`).
@@ -183,16 +217,19 @@ impl Document {
         p.decode(&self.types).map_err(|(e, at)| format!("{e} in {at}"))
     }
 
-    /// The file's object with ids of this project's (as a paste).
-    pub(crate) fn fresh_obj(&mut self, root: Obj) -> Result<Obj, String> {
+    /// The file's object with ids of this project's (as a paste), fitted and validated
+    /// for saving/reopening before mutating the document.
+    pub(crate) fn fresh_obj(&mut self, root: Obj, kind: [u8; 4], type_name: &str) -> Result<Obj, String> {
         let Value::Obj(o) = self.fresh_copy(&Value::Obj(root)) else { return Err("bad file".into()) };
-        let classes = crate::build::class_table(Some(self.root()));
+        let classes = self.cached_classes().clone();
         let before = Value::Obj(o.clone());
         let fitted = self.build(|b| Ok(fit_versions(b, &classes, Value::Obj(o))))?;
         let Value::Obj(fitted) = fitted else { return Err("bad file".into()) };
         // A definition a rebuilt object dropped (a field its version doesn't have),
         // put back at its first remaining reference.
-        Ok(self_contained(fitted, &before))
+        let out = self_contained(fitted, &before);
+        self.check_subtree_reopens(kind, type_name, &out, &classes)?;
+        Ok(out)
     }
 
     /// Load a sound file (`.mxsnd`) into sound `s` of group `g`: the sound replaced, its
@@ -201,15 +238,15 @@ impl Document {
         let root = self.file_root(bytes, *b"SND ")?;
         let path = self.owner(Target::Sound(g, s)).ok_or("no such sound")?;
         let Some(Value::Obj(old)) = self.tree.at(&path).cloned() else { return Err("no such sound".into()) };
-        let mut new = self.fresh_obj(root)?;
+        let mut new = self.fresh_obj(root, *b"SND ", "NI::MASCHINE::DATA::Sound")?;
         // The slot keeps its identity (patterns refer to it) and its own sequences.
         take_id(&mut new, &old);
         if let (Some(i), Some(seq)) = (new.fields.iter().position(|(f, _)| f == "sequences"), old.get("sequences")) {
             new.fields[i].1 = seq.clone();
         }
+        self.note_classes(&new);
         self.apply("Load Sound", vec![Op::Set { path, value: Value::Obj(new) }])?;
-        self.prune_extra_outs()?;
-        self.check_reopens()
+        self.prune_extra_outs()
     }
 
     /// Load a group file (`.mxgrp`) into group `g`: its sounds, chain and patterns
@@ -225,7 +262,7 @@ impl Document {
         let root = self.file_root(bytes, *b"GRP ")?;
         let path = self.owner(Target::Group(g)).ok_or("no such group")?;
         let Some(Value::Obj(old)) = self.tree.at(&path).cloned() else { return Err("no such group".into()) };
-        let mut new = self.fresh_obj(root)?;
+        let mut new = self.fresh_obj(root, *b"GRP ", "NI::MASCHINE::DATA::Group")?;
         take_id(&mut new, &old);
         let group_oid = old.oid;
         let (keep_kit_out, keep_kit_aux) = if !routing { inspect_kit_routing(&old, &new, group_oid) } else { Default::default() };
@@ -238,7 +275,7 @@ impl Document {
                 }
             })
             .collect();
-        let mut repoints = Vec::new();
+        let mut repoints = HashMap::new();
         let mut inlined_sounds = Vec::new();
         if let Some(Value::Obj(sounds)) = new.get_mut("sounds")
             && let Some(Value::Obj(objs)) = sounds.get_mut("objects")
@@ -250,7 +287,7 @@ impl Document {
                     continue;
                 };
                 if let (Some(from), Some(to)) = (new_s.oid, old_s.oid) {
-                    repoints.push((from, to));
+                    repoints.insert(from, to);
                     if !sp.starts_with(&path) {
                         inlined_sounds.push((sp.clone(), to));
                     }
@@ -271,7 +308,7 @@ impl Document {
                         {
                             continue;
                         }
-                        copy_field_repoint(old_s, new_s, f, &mut repoints);
+                        record_repoint(old_s, new_s, f, &mut repoints);
                     }
                 }
             }
@@ -294,22 +331,73 @@ impl Document {
                 None => new.fields.insert(at + k, (name.to_string(), v)),
             }
         }
-        // The project's routing, as the group had it.
-        copy_field_repoint(&old, &mut new, "event_input", &mut repoints);
+        // Record routing parameter repoints before cloning `old`'s routing fields (which
+        // can contain inline Groups) so single-pass repoint & event stripping stay local
+        // to the loaded group.
+        record_repoint(&old, &new, "event_input", &mut repoints);
         if !routing {
             for f in GROUP_ROUTING_FIELDS {
-                copy_field_repoint(&old, &mut new, f, &mut repoints);
+                record_repoint(&old, &new, f, &mut repoints);
+            }
+        }
+        if let (Some(Value::Obj(ot)), Some(Value::Obj(nt))) =
+            (old.get("<NI::MASCHINE::DATA::Track>"), new.get("<NI::MASCHINE::DATA::Track>"))
+        {
+            for n in ["audio_output", "aux1_output", "aux2_output"] {
+                record_repoint(ot, nt, n, &mut repoints);
+            }
+            if !routing {
+                for n in TRACK_ROUTING_FIELDS {
+                    record_repoint(ot, nt, n, &mut repoints);
+                }
+            }
+        }
+        if !repoints.is_empty() {
+            new.fields.iter_mut().for_each(|(_, v)| repoint_all(v, &repoints));
+        }
+        if !patterns {
+            let mut v = Value::Obj(new);
+            strip_pattern_events(&mut v);
+            let Value::Obj(o) = v else { unreachable!() };
+            new = o;
+        }
+        if !routing
+            && let Some(Value::Obj(sounds)) = new.get_mut("sounds")
+            && let Some(Value::Obj(objs)) = sounds.get_mut("objects")
+            && let Some(Value::List(items)) = objs.get_mut("items")
+        {
+            for (s, item) in items.iter_mut().enumerate() {
+                let Some(new_s) = crate::arrange::px_mut(item) else { continue };
+                let Some((_, old_s)) = old_sounds.get(s).and_then(Option::as_ref) else {
+                    continue;
+                };
+                // (A kit bus the file's sounds send to keeps the file's levels, as recorded above.)
+                let keep_aux = keep_kit_aux.get(s).copied().unwrap_or([false; 2]);
+                for f in SOUND_ROUTING_FIELDS {
+                    if (keep_aux[0] && matches!(*f, "aux1_level" | "aux1_order"))
+                        || (keep_aux[1] && matches!(*f, "aux2_level" | "aux2_order"))
+                    {
+                        continue;
+                    }
+                    copy_field(old_s, new_s, f);
+                }
+            }
+        }
+        copy_field(&old, &mut new, "event_input");
+        if !routing {
+            for f in GROUP_ROUTING_FIELDS {
+                copy_field(&old, &mut new, f);
             }
         }
         if let (Some(Value::Obj(ot)), Some(Value::Obj(nt))) =
             (old.get("<NI::MASCHINE::DATA::Track>"), new.get_mut("<NI::MASCHINE::DATA::Track>"))
         {
             for n in ["audio_output", "aux1_output", "aux2_output"] {
-                copy_field_repoint(ot, nt, n, &mut repoints);
+                copy_field(ot, nt, n);
             }
             if !routing {
                 for n in TRACK_ROUTING_FIELDS {
-                    copy_field_repoint(ot, nt, n, &mut repoints);
+                    copy_field(ot, nt, n);
                 }
             }
         }
@@ -338,33 +426,21 @@ impl Document {
                 }
             }
         }
-        for (from, to) in repoints {
-            new.fields.iter_mut().for_each(|(_, v)| repoint(v, from, to));
-        }
-        if !patterns {
-            let mut by_id = HashMap::new();
-            self.root().walk_paths(&mut |o, _| {
-                if let Some(id) = o.oid {
-                    by_id.entry(id).or_insert(o);
-                }
-            });
-            let mut v = Value::Obj(new);
-            strip_pattern_events(&mut v, &by_id);
-            let Value::Obj(o) = v else { unreachable!() };
-            new = o;
-        }
         let oid = old.oid.ok_or("group without id")?;
         let new_val = Value::Obj(new);
         let kept = crate::automation::defined_ids(&new_val);
-        let mut old_ids = crate::automation::defined_ids(&Value::Obj(old));
+        let mut old_ids = std::collections::HashSet::new();
+        crate::automation::extend_defined_ids(&old, &mut old_ids);
         for (_, old_s) in old_sounds.iter().flatten() {
-            old_ids.extend(crate::automation::defined_ids(&Value::Obj(old_s.clone())));
+            crate::automation::extend_defined_ids(old_s, &mut old_ids);
         }
         let gone: std::collections::HashSet<u64> = old_ids.into_iter().filter(|id| !kept.contains(id)).collect();
         let mut ops = self.drop_automation_ops(&gone, &path)?;
         for (sp, to) in inlined_sounds {
             ops.push(Op::Set { path: sp, value: Value::Ref(to) });
         }
+        let Value::Obj(new_obj) = &new_val else { unreachable!() };
+        self.note_classes(new_obj);
         ops.push(Op::Set { path, value: new_val });
         if patterns {
             // Its slot in every scene, empty.
@@ -384,15 +460,15 @@ impl Document {
             }
         }
         self.apply("Load Group", ops)?;
-        self.prune_extra_outs()?;
-        self.check_reopens()
+        self.prune_extra_outs()
     }
 
     /// Load a preset (`.mxinst`, `.mxfx`) into slot `slot` of sound `s`'s chain, in place
     /// of what's there or (`slot` = the chain's length) after the last. One undo step.
     pub fn load_slot_file(&mut self, g: usize, s: usize, slot: usize, bytes: &[u8]) -> Result<(), String> {
         let root = self.file_root(bytes, *b"SLOT")?;
-        let new = self.fresh_obj(root)?;
+        let new = self.fresh_obj(root, *b"SLOT", "NI::MASCOMMON::DATA::Slot")?;
+        self.note_classes(&new);
         let (item, qb) = self.build(|b| Ok((b.shared(SLOT, new), Value::Obj(b.blank(QUICK_BROWSE)?))))?;
         let chain_path = self.chain_path(g, s)?;
         let Some(Value::Obj(mut chain)) = self.tree.at(&chain_path).cloned() else { return Err("the sound has no chain".into()) };
@@ -411,8 +487,7 @@ impl Document {
             chain.fields.insert(first_qb + at, ("quick_browse".into(), qb));
         }
         self.apply("Load Preset", vec![Op::Set { path: chain_path, value: Value::Obj(chain) }])?;
-        self.prune_extra_outs()?;
-        self.check_reopens()
+        self.prune_extra_outs()
     }
 }
 
@@ -659,6 +734,19 @@ fn repoint(v: &mut Value, from: u64, to: u64) {
     }
 }
 
+fn repoint_all(v: &mut Value, map: &HashMap<u64, u64>) {
+    match v {
+        Value::Ref(o) => {
+            if let Some(&to) = map.get(o) {
+                *o = to;
+            }
+        }
+        Value::List(items) => items.iter_mut().for_each(|i| repoint_all(i, map)),
+        Value::Obj(o) => o.fields.iter_mut().for_each(|(_, v)| repoint_all(v, map)),
+        _ => {}
+    }
+}
+
 /// `new` takes `old`'s place: its id (what refers to `old` refers to it) and export
 /// name; its references to itself follow.
 fn take_id(new: &mut Obj, old: &Obj) {
@@ -676,16 +764,13 @@ fn copy_field(from: &Obj, to: &mut Obj, field: &str) {
     }
 }
 
-/// [`copy_field`], recording `(to_oid, from_oid)` when both are tracked parameter objects.
-fn copy_field_repoint(from: &Obj, to: &mut Obj, field: &str, repoints: &mut Vec<(u64, u64)>) {
-    let Some(v) = from.get(field) else { return };
-    let Some(slot) = to.get_mut(field) else { return };
-    if let (Value::Obj(fo), Value::Obj(to_o)) = (v, &*slot)
-        && let (Some(from_id), Some(to_id)) = (to_o.oid, fo.oid)
-    {
-        repoints.push((from_id, to_id));
+/// Record `to_oid -> from_oid` when both `from` and `to` have tracked parameter objects at `field`.
+fn record_repoint(from: &Obj, to: &Obj, field: &str, repoints: &mut HashMap<u64, u64>) {
+    let Some(Value::Obj(fo)) = from.get(field) else { return };
+    let Some(Value::Obj(to_o)) = to.get(field) else { return };
+    if let (Some(from_id), Some(to_id)) = (to_o.oid, fo.oid) {
+        repoints.insert(from_id, to_id);
     }
-    *slot = v.clone();
 }
 
 /// An `ObjectVector`'s items, current and selection emptied.
@@ -722,7 +807,15 @@ fn empty_group_clips(v: &mut Value) {
 
 /// Strip modulation and audio events from every `Sequence` in `v` (their target
 /// parameters and audio takes belonged to the replaced group).
-fn strip_pattern_events(v: &mut Value, by_id: &HashMap<u64, &Obj>) {
+fn strip_pattern_events(v: &mut Value) {
+    let mut drop_ids = std::collections::HashSet::new();
+    v.walk(&mut |o| {
+        if let Some(id) = o.oid
+            && (o.type_name.contains("ModulationEvent") || o.type_name.contains("AudioEvent"))
+        {
+            drop_ids.insert(id);
+        }
+    });
     v.walk_mut(&mut |o| {
         if o.type_name != "NI::MASCOMMON::DATA::Sequence" {
             return;
@@ -733,19 +826,26 @@ fn strip_pattern_events(v: &mut Value, by_id: &HashMap<u64, &Obj>) {
         let kept: Vec<_> = items
             .iter()
             .filter(|it| {
-                let ev = match &it.event {
+                let drop = match &it.event {
                     Value::Obj(te) => match te.get("event") {
-                        Some(Value::Obj(e)) => Some(e),
-                        Some(Value::Ref(id)) => by_id.get(id).copied(),
-                        _ => None,
+                        Some(Value::Obj(ev)) => {
+                            let hit = ev.type_name.contains("ModulationEvent") || ev.type_name.contains("AudioEvent");
+                            if hit && let Some(id) = ev.oid {
+                                removed.insert(id);
+                            }
+                            hit
+                        }
+                        Some(Value::Ref(id)) => {
+                            let hit = drop_ids.contains(id);
+                            if hit {
+                                removed.insert(*id);
+                            }
+                            hit
+                        }
+                        _ => false,
                     },
-                    _ => None,
+                    _ => false,
                 };
-                let Some(ev) = ev else { return true };
-                let drop = ev.type_name.contains("ModulationEvent") || ev.type_name.contains("AudioEvent");
-                if drop && let Some(id) = ev.oid {
-                    removed.insert(id);
-                }
                 !drop
             })
             .cloned()

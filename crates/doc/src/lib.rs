@@ -151,6 +151,22 @@ impl Step {
         let params = vec![None; redo.len()];
         Step::new(label, undo, redo, params, Instant::now() - MERGE_WINDOW)
     }
+
+    /// One step doing owned `steps` in order (undone in reverse) without cloning their ops.
+    fn merged_owned(label: &str, mut steps: Vec<Step>) -> Step {
+        if steps.len() == 1 {
+            let mut step = steps.pop().unwrap();
+            step.label = label.to_string();
+            step.at = Instant::now() - MERGE_WINDOW;
+            step.parts.clear();
+            step.of_take = false;
+            return step;
+        }
+        let undo: Vec<Op> = steps.iter_mut().rev().flat_map(|s| std::mem::take(&mut s.undo)).collect();
+        let redo: Vec<Op> = steps.into_iter().flat_map(|s| s.redo).collect();
+        let params = vec![None; redo.len()];
+        Step::new(label, undo, redo, params, Instant::now() - MERGE_WINDOW)
+    }
 }
 
 /// Changes to the same parameters within this time make one undo step (a knob turn).
@@ -199,6 +215,8 @@ pub struct Document {
     /// Updated with each operation, so edits that remove unreferenced event
     /// objects do not scan the whole tree looking for dangling references.
     references: Option<std::collections::HashMap<u64, usize>>,
+    /// Cached project class version/tracking table for building and file compatibility checks.
+    classes: Option<std::collections::HashMap<String, (u32, bool)>>,
     session_values: std::collections::BTreeMap<String, u64>,
     /// Cached `Target -> owner Path` and `(Target, field) -> (value_path, oid)`.
     /// Invalidated whenever any non-leaf-scalar tree change occurs.
@@ -298,6 +316,7 @@ impl Document {
             note_event: None,
             event_sequence: None,
             references: None,
+            classes: None,
             session_values: Default::default(),
             owner_cache: Default::default(),
             param_cache: Default::default(),
@@ -817,12 +836,23 @@ impl Document {
     fn apply_step(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>, batch: bool) -> Result<(), String> {
         let mut undo = self.run(&ops)?;
         // An edit that took away an object's definition: anything still referring to
-        // it keeps it (see `rehomed`).
-        if loses_referenced_objects(&undo, &ops, self.references.as_ref().unwrap()) {
-            self.run(&undo).expect("undo of ops just applied");
-            ops = self.rehomed(label, ops)?;
-            params.resize(ops.len(), None);
-            undo = self.run(&ops)?;
+        // it keeps it (see `rehome_applied`).
+        let lost = lost_referenced_ids(&undo, &ops, self.references.as_ref().unwrap());
+        if !lost.is_empty() {
+            let (extra_ops, extra_undo) = match self.rehome_applied(label, &undo, &ops, lost) {
+                Ok(res) => res,
+                Err(e) => {
+                    self.run(&undo).expect("undo of ops just applied");
+                    return Err(e);
+                }
+            };
+            if !extra_ops.is_empty() {
+                ops.extend(extra_ops);
+                let mut combined = extra_undo;
+                combined.extend(undo);
+                undo = combined;
+                params.resize(ops.len(), None);
+            }
         }
         let now = Instant::now();
         let unique = |xs: &[Op]| (0..xs.len()).all(|i| xs[..i].iter().all(|a| op_target(a) != op_target(&xs[i])));
@@ -889,7 +919,7 @@ impl Document {
         if steps.is_empty() {
             return Ok(());
         }
-        self.undo.push(Step::merged(label, &steps));
+        self.undo.push(Step::merged_owned(label, steps));
         Ok(())
     }
 
@@ -924,7 +954,7 @@ impl Document {
             return;
         }
         let steps: Vec<Step> = self.undo.drain(before..).collect();
-        self.undo.push(Step::merged(label, &steps));
+        self.undo.push(Step::merged_owned(label, steps));
     }
 
     /// Start a take (a recording): the edits until [`Document::end_take`] undo as one
@@ -1281,24 +1311,40 @@ fn strip(t: Target) -> Target {
     }
 }
 
-/// Whether an op's value holds an object's definition (one with an id others may
-/// refer back to). Run on an edit's undo: what it replaced.
-fn loses_referenced_objects(before: &[Op], after: &[Op], refs: &std::collections::HashMap<u64, usize>) -> bool {
-    fn ids(ops: &[Op]) -> std::collections::HashSet<u64> {
-        let mut out = std::collections::HashSet::new();
-        for op in ops {
-            if let Some(value) = op_value(op) {
-                value.walk(&mut |o| {
-                    out.extend(o.oid);
-                });
+/// Candidate object ids whose definition was in `before`, is not in `after`, and
+/// that still have at least one reference according to `refs`.
+pub(crate) fn lost_referenced_ids(before: &[Op], after: &[Op], refs: &std::collections::HashMap<u64, usize>) -> Vec<u64> {
+    let mut lost = std::collections::HashSet::new();
+    for op in before {
+        if let Some(value) = op_value(op) {
+            value.walk(&mut |o| {
+                if let Some(id) = o.oid
+                    && refs.get(&id).copied().unwrap_or(0) > 0
+                {
+                    lost.insert(id);
+                }
+            });
+        }
+    }
+    if lost.is_empty() {
+        return Vec::new();
+    }
+    for op in after {
+        if let Some(value) = op_value(op) {
+            value.walk(&mut |o| {
+                if let Some(id) = o.oid {
+                    lost.remove(&id);
+                }
+            });
+            if lost.is_empty() {
+                return Vec::new();
             }
         }
-        out
     }
-    ids(before).difference(&ids(after)).any(|id| refs.get(id).copied().unwrap_or(0) > 0)
+    lost.into_iter().collect()
 }
 
-fn op_value(op: &Op) -> Option<&Value> {
+pub(crate) fn op_value(op: &Op) -> Option<&Value> {
     match op {
         Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } => Some(value),
         _ => None,
