@@ -646,8 +646,9 @@ function control.draw(screen, theme, opts)
       elseif c.filter then eq_curve(screen, theme, c.filter)
       elseif c.picture then eq_curve(screen, theme, c.picture)
       else
-        -- (Over two cells with no list: knobs 5 and 6, else 7 and 8, else not at all.)
-        local at = not (listed[5] or listed[6]) and 480 or not (listed[7] or listed[8]) and 720 or nil
+        -- (Over two cells with no list: knobs 5 and 6, else 7 and 8, else not at all. A
+        -- synth's scope has 7 and 8.)
+        local at = not (listed[5] or listed[6]) and 480 or not (c.scope or listed[7] or listed[8]) and 720 or nil
         if at then chain.thumbnail(screen, theme, at, 68, 240, 136, slot, false) end
         if c.scope then scope_view(screen, c.scope) end
       end
