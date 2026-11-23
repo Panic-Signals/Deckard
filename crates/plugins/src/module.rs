@@ -173,6 +173,16 @@ mod platform {
 
     const UTF8: u32 = 0x0800_0100;
 
+    /// The executable inside the bundle, or the path itself when it is already a file.
+    pub fn plugin_file(bundle: &Path) -> Option<PathBuf> {
+        if bundle.is_file() {
+            return Some(bundle.to_path_buf());
+        }
+        let name = bundle.file_stem()?;
+        let bin = bundle.join("Contents/MacOS").join(name);
+        bin.is_file().then_some(bin)
+    }
+
     unsafe fn symbol(bundle: CFTypeRef, name: &CStr) -> *const c_void {
         unsafe {
             let s = CFStringCreateWithCString(std::ptr::null(), name.as_ptr(), UTF8);
@@ -233,6 +243,11 @@ mod platform {
         unsafe { CStr::from_ptr(u.machine.as_ptr()) }.to_string_lossy().into_owned()
     }
 
+    /// The shared library inside the bundle, or the path itself when it is already a file.
+    pub fn plugin_file(bundle: &Path) -> Option<PathBuf> {
+        if bundle.is_file() { Some(bundle.to_path_buf()) } else { library_path(bundle).ok() }
+    }
+
     /// The shared library inside the bundle.
     pub fn library_path(bundle: &Path) -> Result<PathBuf, String> {
         let name = bundle.file_stem().ok_or("bad plug-in path")?;
@@ -275,6 +290,11 @@ mod platform {
 mod platform {
     use super::*;
     use libloading::os::windows::Library;
+
+    /// The DLL inside the bundle, or the path itself when it is already a file.
+    pub fn plugin_file(bundle: &Path) -> Option<PathBuf> {
+        if bundle.is_file() { Some(bundle.to_path_buf()) } else { library_path(bundle).ok() }
+    }
 
     /// The DLL inside the bundle.
     pub fn library_path(bundle: &Path) -> Result<PathBuf, String> {
@@ -319,6 +339,15 @@ mod platform {
     pub unsafe fn load(_path: &Path) -> Result<*mut IPluginFactory, String> {
         Err("plug-in hosting is not implemented on this system".into())
     }
+
+    pub fn plugin_file(_bundle: &Path) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// The plug-in's own binary, so a scan can see an update without loading it.
+pub fn plugin_file(bundle: &Path) -> Option<PathBuf> {
+    platform::plugin_file(bundle)
 }
 
 #[cfg(test)]

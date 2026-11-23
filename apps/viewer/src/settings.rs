@@ -933,15 +933,9 @@ pub struct Catalog {
 
 enum ScanMsg {
     Progress(String),
-    Done(Vec<Entry>, Vec<(String, u64)>),
-}
-
-fn mtime(p: &Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs())
+    /// The entries, each VST3 bundle with the stamp of its binary, and how many
+    /// bundles were actually read (the rest came from the last scan).
+    Done(Vec<Entry>, Vec<(String, String)>, usize),
 }
 
 impl Catalog {
@@ -961,10 +955,11 @@ impl Catalog {
         self.scanning.is_some()
     }
 
-    /// Scan again, in the background. VST3 bundles without a `moduleinfo.json` are
-    /// loaded by a helper process (this program with `--scan-vst3 <bundle>`), so a
-    /// plug-in that crashes can't take the app down; bundles that didn't change since
-    /// the last scan are taken from it.
+    /// Scan again, in the background. A VST3 already scanned is kept when its binary
+    /// and `moduleinfo.json` are unchanged, so a new plug-in is picked up and an
+    /// updated one is read again, without loading the rest. Bundles without a
+    /// `moduleinfo.json` are loaded by a helper process (this program with
+    /// `--scan-vst3 <bundle>`), so a plug-in that crashes can't take the app down.
     pub fn rescan(&mut self, settings: &Settings) {
         if self.scanning.is_some() {
             return;
@@ -979,43 +974,46 @@ impl Catalog {
                 let _ = tx.send(ScanMsg::Progress("Syncing Windows plug-ins (yabridge)…".into()));
                 let _ = crate::wine::sync();
             }
-            // Bundles scanned before, with their mtime, and their entries.
-            let mut known: Vec<(String, u64, Vec<Entry>)> = Vec::new();
+            // Bundles scanned before, with the stamp of their binary, and their entries.
+            let mut known: Vec<(String, String, Vec<Entry>)> = Vec::new();
             for line in old.lines() {
                 if let Some(rest) = line.strip_prefix("#bundle\t") {
                     let (p, t) = rest.rsplit_once('\t').unwrap_or((rest, "0"));
-                    known.push((p.to_string(), t.parse().unwrap_or(0), Vec::new()));
+                    known.push((p.to_string(), t.to_string(), Vec::new()));
                 } else if let (Some(e), Some(last)) = (Entry::from_line(line), known.last_mut()) {
                     last.2.push(e);
                 }
             }
+            let _ = tx.send(ScanMsg::Progress("Checking plug-ins…".into()));
             let mut entries = Vec::new();
             let mut bundles = Vec::new();
+            let mut scanned = 0;
             let dirs = s.scan_dirs();
             for b in scan::vst3_bundles(&dirs) {
                 let key = b.display().to_string();
-                let t = mtime(&b);
-                let _ = tx.send(ScanMsg::Progress(format!(
-                    "Scanning {}",
-                    b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
-                )));
-                let found = if let Some(e) = unchanged_scan(&known, &key, t) {
+                let stamp = scan::bundle_stamp(&b);
+                let found = if let Some(e) = unchanged_scan(&known, &key, &b, &stamp) {
                     e.clone()
-                } else if let Some(e) = scan::vst3_from_moduleinfo(&b) {
-                    e
                 } else {
-                    scan_in_helper(&b)
+                    scanned += 1;
+                    let _ = tx.send(ScanMsg::Progress(format!(
+                        "Scanning {}",
+                        b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
+                    )));
+                    if let Some(e) = scan::vst3_from_moduleinfo(&b) { e } else { scan_in_helper(&b) }
                 };
-                bundles.push((key, t));
+                bundles.push((key, stamp));
                 entries.push(found);
             }
             let mut all: Vec<Entry> = entries.concat();
+            // VST2 is named from its file, and Audio Units come from the system registry.
+            // Neither loads the plug-in; listing them is how a new one is found.
             all.extend(scan::vst2_entries(&dirs));
             all.extend(scan::audio_units());
-            let _ = tx.send(ScanMsg::Done(all, bundles));
+            let _ = tx.send(ScanMsg::Done(all, bundles, scanned));
         });
         self.scanning = Some(rx);
-        self.status = "Scanning plug-ins…".into();
+        self.status = "Checking plug-ins…".into();
     }
 
     /// Take up scan progress (call every frame).
@@ -1025,8 +1023,8 @@ impl Catalog {
         while let Ok(m) = rx.try_recv() {
             match m {
                 ScanMsg::Progress(p) => self.status = p,
-                ScanMsg::Done(entries, bundles) => {
-                    // The cache: per VST3 bundle, its mtime and entries; then the rest.
+                ScanMsg::Done(entries, bundles, scanned) => {
+                    // The cache: per VST3 bundle, the stamp of its binary and its entries.
                     let mut out = String::new();
                     for (b, t) in &bundles {
                         out += &format!("#bundle\t{b}\t{t}\n");
@@ -1044,7 +1042,11 @@ impl Catalog {
                         }
                         let _ = std::fs::write(f, out);
                     }
-                    self.status = format!("{} plug-ins found", entries.len());
+                    self.status = if scanned == 0 {
+                        format!("{} plug-ins, nothing new", entries.len())
+                    } else {
+                        format!("{} plug-ins, {scanned} scanned", entries.len())
+                    };
                     self.entries = entries;
                     self.scanning = None;
                     changed = true;
@@ -1056,11 +1058,11 @@ impl Catalog {
     }
 }
 
-/// What the last scan found in bundle `key`, if it hasn't changed since. A scan that found
-/// nothing doesn't count: the helper was killed or crashed (a plug-in slow to start, say),
-/// and the bundle is scanned again rather than left out for good.
-fn unchanged_scan<'a>(known: &'a [(String, u64, Vec<Entry>)], key: &str, mtime: u64) -> Option<&'a Vec<Entry>> {
-    known.iter().find(|(p, t, e)| p == key && *t == mtime && !e.is_empty()).map(|(_, _, e)| e)
+/// What the last scan found in bundle `key`, if its binary is unchanged. A scan that
+/// found nothing doesn't count: the helper was killed or crashed (a plug-in slow to
+/// start, say), and the bundle is scanned again rather than left out for good.
+fn unchanged_scan<'a>(known: &'a [(String, String, Vec<Entry>)], key: &str, bundle: &Path, stamp: &str) -> Option<&'a Vec<Entry>> {
+    known.iter().find(|(p, saved, e)| p == key && !e.is_empty() && scan::stamp_matches(saved, bundle, stamp)).map(|(_, _, e)| e)
 }
 
 /// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
