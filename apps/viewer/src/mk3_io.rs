@@ -280,9 +280,10 @@ struct Shared {
     /// when it changes: it's a feature report read and written back, not worth every frame.
     pad_sensitivity: Option<u8>,
     sensitivity_stamp: u64,
-    /// DECKARD is closing: dark LEDs, black displays, then stop (`shut_down`).
-    /// A picture left on the panels is a screen-burn risk.
+    /// DECKARD is closing: dark LEDs, a black frame on the displays, then stop
+    /// (`shut_down`). The frame is black so a still picture is not left to burn in.
     closing: bool,
+    goodbye: Option<Arc<Vec<[u8; 4]>>>,
     /// Whether the controller and the displays are open, and whether each has been left
     /// dark since `closing`.
     connected: bool,
@@ -302,6 +303,12 @@ pub struct Mk3Io {
 
 /// The pitch pads play: a sound's base key (Maschine's default, C3).
 const PAD_PITCH: i64 = 60;
+
+/// Both displays side by side, every pixel black. Closing sends this so the panels
+/// are not left showing a still picture.
+fn black_displays() -> Vec<[u8; 4]> {
+    vec![[0, 0, 0, 255]; deckard_mk3::display::WIDTH * 2 * deckard_mk3::display::HEIGHT]
+}
 
 /// The notes (sound, pitch) a hit on `pad` (1–16) plays: its sound at C3, its key in
 /// Keyboard mode, or its chord in Chords mode; none for a pad with nothing to play.
@@ -330,7 +337,11 @@ impl Mk3Io {
     /// Leave the controller dark: LEDs off and both displays black. Waits (up to a
     /// second) for both threads to do it.
     pub fn shut_down(&self) {
-        self.shared.lock().unwrap().closing = true;
+        {
+            let mut s = self.shared.lock().unwrap();
+            s.goodbye = Some(Arc::new(black_displays()));
+            s.closing = true;
+        }
         self.display_wake.notify_all();
         let until = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < until {
@@ -341,6 +352,18 @@ impl Mk3Io {
             drop(s);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// An MK3 handle with no USB threads, for tests that only check the close request.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Mk3Io {
+        Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) }
+    }
+
+    /// The frame `shut_down` queued, if it has.
+    #[cfg(test)]
+    pub(crate) fn queued_frame(&self) -> Option<Vec<[u8; 4]>> {
+        self.shared.lock().unwrap().goodbye.as_deref().cloned()
     }
 
     /// Set the displays' backlight (0..=100), now if it changed and whenever an MK3
@@ -797,24 +820,24 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 let mut s = shared.lock().unwrap();
                 loop {
                     if s.closing {
-                        break (true, s.displays_released, None);
+                        break (Some(s.goodbye.clone()), s.displays_released, None);
                     }
                     if s.displays_released {
-                        break (false, true, None);
+                        break (None, true, None);
                     }
                     if let Some((n, frame)) = &s.screens
                         && shown != Some(*n)
                     {
-                        break (false, false, Some((*n, frame.clone())));
+                        break (None, false, Some((*n, frame.clone())));
                     }
                     s = wake.wait(s).unwrap();
                 }
             };
-            if closing {
-                // Black, not the standby picture: that wordmark sits until something
-                // else draws, which is how a panel burns.
-                left.fill(0);
-                let _ = d.show(0, &left).and_then(|_| d.show(1, &left));
+            if let Some(goodbye) = closing {
+                let gpx = goodbye.as_deref().map_or(&[][..], Vec::as_slice);
+                fill_half(gpx, 0, &mut left);
+                fill_half(gpx, WIDTH, &mut right);
+                let _ = d.show(0, &left).and_then(|_| d.show(1, &right));
                 shared.lock().unwrap().displays_closed = true;
                 return;
             }
@@ -882,6 +905,18 @@ mod tests {
         io.shared.lock().unwrap().probed = true;
         let t = std::time::Instant::now();
         assert!(!io.found(Duration::from_secs(5)) && t.elapsed() < Duration::from_secs(1), "looked, not there: no at once");
+    }
+
+    /// Closing queues a black frame for both displays. No controller is opened.
+    #[test]
+    fn closing_queues_a_black_frame() {
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.shut_down();
+        let s = io.shared.lock().unwrap();
+        assert!(s.closing);
+        let px = s.goodbye.as_deref().expect("a frame is queued");
+        assert_eq!(px.len(), black_displays().len());
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]), "every pixel is black");
     }
 
     fn route(touch: PadTouch) -> PadRoute {

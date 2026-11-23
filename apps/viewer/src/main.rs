@@ -1435,6 +1435,21 @@ fn project_of_app(app: &App) -> deckard_model::Project {
     app.doc.as_ref().unwrap().borrow().project().clone()
 }
 
+#[cfg(test)]
+mod exit_screens {
+    use super::*;
+
+    /// Quitting asks the MK3 thread for a black frame. The thread itself is not started.
+    #[test]
+    fn quitting_blanks_the_maschine_screens() {
+        let mut app = App::default();
+        app.mk3 = Some(mk3_io::Mk3Io::detached());
+        eframe::App::on_exit(&mut app);
+        let px = app.mk3.as_ref().unwrap().queued_frame().expect("a frame is queued");
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]));
+    }
+}
+
 /// How often notes held while recording are grown in the pattern.
 const TAKE_GROW: std::time::Duration = std::time::Duration::from_millis(100);
 
