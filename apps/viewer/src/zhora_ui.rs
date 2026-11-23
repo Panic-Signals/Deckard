@@ -242,6 +242,14 @@ const ENV_POINTS: usize = 240;
 /// Columns in the scope beside the picture (1 px each: 218 px inside its frame).
 const SCOPE_COLUMNS: usize = 218;
 
+/// A hosted plug-in's live scope ([`App::live_scope_view`]).
+pub(crate) struct LiveScope {
+    key: (deckard_doc::Chain, usize),
+    instance: deckard_plugins::Shared,
+    reader: deckard_plugins::tap::Reader,
+    view: ScopeView,
+}
+
 #[cfg(test)]
 thread_local! {
     /// Preview notes of internal synths rendered on this thread.
@@ -318,8 +326,14 @@ impl App {
         let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, i))?;
         let mut shown = self.scope_shown.borrow_mut();
         let Ok(p) = inst.try_lock() else {
-            return shown.as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
+            return shown.as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone()).or_else(|| self.live_scope_seen(key, &inst));
         };
+        // A VST3 or Audio Unit: what it plays, as it plays.
+        if !p.is_native() {
+            drop(p);
+            *shown = None;
+            return self.live_scope_view(key, &inst);
+        }
         let (scope, job) = (p.scope(SCOPE_COLUMNS), p.preview_job());
         drop(p);
         let scope = match job {
@@ -341,6 +355,32 @@ impl App {
         let v = ScopeView { wave: scope.wave, envelope: scope.envelope };
         *shown = Some((key, v.clone()));
         Some(v)
+    }
+
+    /// A hosted plug-in's live output (what it plays, instrument or effect), through a tap
+    /// put on it the first time it's looked at (and again on a new instance). The tap
+    /// stops by itself when the picture's no longer asked for: its reader is dropped as
+    /// soon as another slot's scope is.
+    fn live_scope_view(&self, key: (deckard_doc::Chain, usize), inst: &deckard_plugins::Shared) -> Option<ScopeView> {
+        let mut live = self.live_scope.borrow_mut();
+        if live.as_ref().is_none_or(|l| l.key != key || !std::sync::Arc::ptr_eq(&l.instance, inst)) {
+            *live = None;
+            let (tap, reader) = deckard_plugins::tap::channel();
+            // (Busy: next look.)
+            inst.try_lock().ok()?.set_tap(Some(tap));
+            *live = Some(LiveScope { key, instance: inst.clone(), reader, view: ScopeView::default() });
+        }
+        let l = live.as_mut()?;
+        if let Some(s) = l.reader.scope(SCOPE_COLUMNS) {
+            l.view = ScopeView { wave: s.wave, envelope: s.envelope };
+        }
+        Some(l.view.clone())
+    }
+
+    /// The live scope last made for `key`'s instance, without reading a new one.
+    fn live_scope_seen(&self, key: (deckard_doc::Chain, usize), inst: &deckard_plugins::Shared) -> Option<ScopeView> {
+        let live = self.live_scope.borrow();
+        live.as_ref().filter(|l| l.key == key && std::sync::Arc::ptr_eq(&l.instance, inst)).map(|l| l.view.clone())
     }
 
     fn render_internal_scope(&self, module: &str, params: &[(String, f64)]) -> Option<deckard_plugins::native::Scope> {
@@ -713,6 +753,39 @@ mod tests {
         assert!(peak(&after) > peak(&before), "a longer attack peaks later");
         crate::layout::apply_acts(&mut app, vec![crate::layout::Act::PluginPage(2)]);
         assert!(env(&app).is_empty(), "LEVELS");
+    }
+
+    /// A hosted plug-in's scope is its live output, through a tap put on the instance the
+    /// first time it's looked at: empty until the plug-in has played a window, then what
+    /// it played (here the Tuner passing a sine through, standing in for a VST3, which
+    /// tests can't load); a new instance in the slot gets a tap of its own.
+    #[test]
+    fn a_live_scope_shows_what_the_plugin_plays() {
+        let app = App { settings: Settings::default(), ..App::default() };
+        let class = &deckard_plugins::tuner::CLASS;
+        let make = || {
+            let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+            std::sync::Arc::new(std::sync::Mutex::new(deckard_plugins::Plugin::native(class, id, "Tuner", 48_000.0)))
+        };
+        let inst = make();
+        let key = (Chain::Sound(0, 0), 0);
+        let first = app.live_scope_view(key, &inst).expect("a scope");
+        assert!(first.wave.is_empty(), "nothing played yet");
+        let sine: Vec<f32> = (0..deckard_plugins::MAX_BLOCK).map(|i| 0.5 * (i as f32 * 0.05).sin()).collect();
+        let t = deckard_plugins::Transport::default();
+        for _ in 0..deckard_plugins::tap::FRAMES / deckard_plugins::MAX_BLOCK {
+            inst.lock().unwrap().process_input(deckard_plugins::MAX_BLOCK, &t, Some((&sine, &sine)));
+        }
+        let v = app.live_scope_view(key, &inst).expect("a scope");
+        assert_eq!(v.wave.len(), SCOPE_COLUMNS);
+        let top = v.wave.iter().fold(0f32, |m, &(_, hi)| m.max(hi));
+        assert!((top - 0.5).abs() < 0.02, "the sine, at its level: {top}");
+        assert_eq!(app.live_scope_view(key, &inst), Some(v.clone()), "nothing new: the same picture");
+        assert_eq!(app.live_scope_seen(key, &inst), Some(v), "kept for a look while the instance is busy");
+        // A reloaded plug-in: a new instance, tapped afresh.
+        let again = make();
+        assert!(app.live_scope_view(key, &again).unwrap().wave.is_empty());
+        assert_eq!(app.live_scope_seen(key, &inst), None);
     }
 
     /// A new project with `class` (an internal synth) on its first sound, focused.

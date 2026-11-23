@@ -23,6 +23,7 @@ mod replicant;
 pub mod runloop;
 pub mod scan;
 pub mod state;
+pub mod tap;
 
 use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream};
 use module::Module;
@@ -204,6 +205,8 @@ pub struct Plugin {
     pub name: String,
     pub id: PluginId,
     kind: Kind,
+    /// Where its audio goes for the UI to look at ([`Plugin::set_tap`]).
+    tap: Option<tap::Tap>,
 }
 
 enum Kind {
@@ -238,12 +241,12 @@ impl Plugin {
     /// `sample_rate`, with no state set yet.
     pub fn new(module: &Arc<Module>, id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let v = Vst3::new(module, &id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)) })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)), tap: None })
     }
 
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
-        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))) }
+        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))), tap: None }
     }
 
     /// An instance of the Audio Unit `id` names, ready to process at `sample_rate`, with
@@ -251,7 +254,7 @@ impl Plugin {
     #[cfg(target_os = "macos")]
     pub fn audio_unit(id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let au = au::AudioUnit::new(&id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)) })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)), tap: None })
     }
 
     /// What an Audio Unit shares with its window; none for any other plug-in.
@@ -490,7 +493,21 @@ impl Plugin {
         input: Option<(&[f32], &[f32])>,
         sidechain: Option<(&[f32], &[f32])>,
     ) -> (&[f32], &[f32]) {
-        each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain))
+        let out = each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain));
+        if let Some(tap) = &mut self.tap {
+            match input {
+                Some(input) => tap.push(input, out),
+                None => tap.push_output(out),
+            }
+        }
+        out
+    }
+
+    /// Copy its main input and output to `tap` as it plays (any kind of plug-in), or stop
+    /// with `None`. Make the tap off the audio thread ([`tap::channel`]); its reader
+    /// going away stops it as well.
+    pub fn set_tap(&mut self, tap: Option<tap::Tap>) {
+        self.tap = tap;
     }
 
     /// A way to read and change a VST3's or an Audio Unit's parameters without holding
