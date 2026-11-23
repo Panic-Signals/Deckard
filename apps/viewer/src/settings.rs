@@ -987,7 +987,10 @@ impl Catalog {
             let _ = tx.send(ScanMsg::Progress("Checking plug-ins…".into()));
             let dirs = s.scan_dirs();
             let (entries, bundles, scanned) = collect_vst3(&dirs, &known, |b| {
-                let _ = tx.send(ScanMsg::Progress(format!("Scanning {}", b.file_name().map_or_else(|| b.display().to_string(), |n| n.to_string_lossy().into_owned()))));
+                let _ = tx.send(ScanMsg::Progress(format!(
+                    "Scanning {}",
+                    b.file_name().map_or_else(|| b.display().to_string(), |n| n.to_string_lossy().into_owned())
+                )));
             });
             let mut all: Vec<Entry> = entries.concat();
             // VST2 is named from its file, and Audio Units come from the system registry.
@@ -1045,7 +1048,11 @@ impl Catalog {
 /// VST3 bundles in `dirs`: entries kept from `known` when the binary is unchanged,
 /// and read otherwise. `on_scan` is told about each bundle that is read. Returns the
 /// entries per bundle, each bundle's stamp, and how many were read.
-fn collect_vst3(dirs: &[PathBuf], known: &[(String, String, Vec<Entry>)], mut on_scan: impl FnMut(&Path)) -> (Vec<Vec<Entry>>, Vec<(String, String)>, usize) {
+fn collect_vst3(
+    dirs: &[PathBuf],
+    known: &[(String, String, Vec<Entry>)],
+    mut on_scan: impl FnMut(&Path),
+) -> (Vec<Vec<Entry>>, Vec<(String, String)>, usize) {
     let mut entries = Vec::new();
     let mut bundles = Vec::new();
     let mut scanned = 0;
@@ -1340,7 +1347,8 @@ mod catalog_tests {
     #[test]
     fn a_scan_that_found_nothing_is_tried_again() {
         let entry = entry();
-        let known = vec![("a.vst3".to_string(), "5-1+0-0".into(), vec![entry.clone()]), ("failed.vst3".to_string(), "5-1+0-0".into(), Vec::new())];
+        let known =
+            vec![("a.vst3".to_string(), "5-1+0-0".into(), vec![entry.clone()]), ("failed.vst3".to_string(), "5-1+0-0".into(), Vec::new())];
         let same = Path::new("a.vst3");
         assert_eq!(unchanged_scan(&known, "a.vst3", same, "5-1+0-0"), Some(&vec![entry]));
         assert_eq!(unchanged_scan(&known, "a.vst3", same, "9-2+0-0"), None, "the bundle changed");
@@ -1379,7 +1387,8 @@ mod catalog_tests {
         // Empty.vst3 is not on disk; its failed scan is not in this folder. The changed
         // bundle is on disk with a stamp that doesn't match.
         let mut read = Vec::new();
-        let (entries, _, scanned) = collect_vst3(&[root.clone()], &known, |b| read.push(b.file_name().unwrap().to_string_lossy().into_owned()));
+        let (entries, _, scanned) =
+            collect_vst3(&[root.clone()], &known, |b| read.push(b.file_name().unwrap().to_string_lossy().into_owned()));
         let names: Vec<_> = entries.iter().flatten().map(|e| e.name.clone()).collect();
         assert_eq!(scanned, 2, "the kept bundle is not read");
         assert!(!names.iter().any(|n| n == "Kept"));
