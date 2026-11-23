@@ -32,8 +32,9 @@ return {
     button_off = BASE02,
     arrow_off = BASE01,
     bar = BASE02,
-    wave_off = BASE02,
-    wave_selection = BASE02,
+    -- (The ground behind what's selected is darker than a waveform's unplayed part.)
+    wave_off = { 0x1a, 0x3a, 0x44 },
+    wave_selection = { 0x01, 0x18, 0x1e },
     slice_focus = BASE02,
     meter_empty = BASE02,
     marker = BASE1,

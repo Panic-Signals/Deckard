@@ -52,16 +52,27 @@ fn open_id() -> egui::Id {
 /// A double-click on `resp` types its value, ⌘-click sets its default, and while it's being
 /// typed the box sits over `resp`. `shown`: the value as it's shown now.
 pub fn gestures(ui: &Ui, resp: &Response, what: What, shown: &str, acts: &mut Vec<Act>) {
-    if resp.double_clicked() {
-        if what.typed() {
-            ui.data_mut(|d| d.insert_temp(open_id(), Open { at: resp.id, text: shown.trim().to_string(), fresh: true }));
-        } else {
+    if !what.typed() {
+        if resp.double_clicked() || (resp.clicked() && ui.input(|i| i.modifiers.command)) {
             acts.push(what.reset());
         }
-    } else if resp.clicked() && ui.input(|i| i.modifiers.command) {
+        return;
+    }
+    if !resp.double_clicked() && resp.clicked() && ui.input(|i| i.modifiers.command) {
         acts.push(what.reset());
     }
-    let Some(mut open) = ui.data(|d| d.get_temp::<Open>(open_id())).filter(|o| o.at == resp.id) else { return };
+    if let Some(text) = entry(ui, resp, shown) {
+        acts.push(Act::TypeValue(what, text, shown.to_string()));
+    }
+}
+
+/// A double-click on `resp` opens a box over it holding `shown`, to type over. Returns what
+/// was typed when Enter keeps it (Esc or clicking away drops it).
+pub fn entry(ui: &Ui, resp: &Response, shown: &str) -> Option<String> {
+    if resp.double_clicked() {
+        ui.data_mut(|d| d.insert_temp(open_id(), Open { at: resp.id, text: shown.trim().to_string(), fresh: true }));
+    }
+    let mut open = ui.data(|d| d.get_temp::<Open>(open_id())).filter(|o| o.at == resp.id)?;
     let (r, fresh) = (box_over(resp.rect), open.fresh);
     let out = egui::Area::new(resp.id.with("value-entry")).order(egui::Order::Foreground).fixed_pos(r.min).show(ui.ctx(), |ui| {
         egui::TextEdit::singleline(&mut open.text).desired_width(r.width()).horizontal_align(egui::Align::Center).show(ui)
@@ -75,13 +86,66 @@ pub fn gestures(ui: &Ui, resp: &Response, what: What, shown: &str, acts: &mut Ve
         open.fresh = false;
     }
     if edit.response.lost_focus() || (!fresh && !edit.response.has_focus()) {
-        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            acts.push(Act::TypeValue(what, open.text.clone(), shown.to_string()));
-        }
+        let kept = ui.input(|i| i.key_pressed(egui::Key::Enter));
         ui.data_mut(|d| d.remove::<Open>(open_id()));
+        kept.then_some(open.text)
     } else {
         ui.data_mut(|d| d.insert_temp(open_id(), open));
+        None
     }
+}
+
+/// A number as typed, whatever unit follows it.
+pub(crate) fn plain(typed: &str) -> Option<f64> {
+    number(typed).map(|(v, _)| v).filter(|v| v.is_finite())
+}
+
+/// A time as typed, in seconds: "250 ms", "1.5 s". A plain number is in the unit `shown`
+/// is in, else milliseconds if `ms`.
+pub(crate) fn time(typed: &str, shown: &str, ms: bool) -> Option<f64> {
+    let unit = |s: &str| {
+        let s = s.trim().to_ascii_lowercase();
+        let u = s.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '+' | '\u{2212}')).trim();
+        match u {
+            "ms" => Some(0.001),
+            "s" | "sec" => Some(1.0),
+            _ => None,
+        }
+    };
+    let v = plain(typed)?;
+    Some(v * unit(typed).or_else(|| unit(shown)).unwrap_or(if ms { 0.001 } else { 1.0 }))
+}
+
+/// A note as typed: its name ("C3", "f#2", "Bb-1"; 60 is C3) or its number.
+pub(crate) fn note(typed: &str) -> Option<i64> {
+    let t = typed.trim().replace('\u{2212}', "-");
+    if let Ok(n) = t.parse::<f64>() {
+        return Some((n.round() as i64).clamp(0, 127));
+    }
+    let mut cs = t.chars().peekable();
+    let mut semi: i64 = match cs.next()?.to_ascii_uppercase() {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    while let Some(c) = cs.peek().copied() {
+        match c {
+            '#' | '\u{266f}' => semi += 1,
+            'b' | '\u{266d}' => semi -= 1,
+            _ => break,
+        }
+        cs.next();
+    }
+    let rest: String = cs.collect();
+    let rest = rest.trim_start();
+    let end = rest.char_indices().find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && c == '-'))).map_or(rest.len(), |(i, _)| i);
+    let octave: i64 = rest[..end].parse().ok()?;
+    Some((octave + 2) * 12 + semi).filter(|n| (0..=127).contains(n))
 }
 
 fn box_over(r: Rect) -> Rect {
@@ -222,7 +286,7 @@ pub fn resolve(app: &crate::App, what: What, typed: &str, shown: &str) -> Option
 }
 
 /// A level typed in dB ("off" or "inf": silent).
-fn level(typed: &str) -> Option<f64> {
+pub(crate) fn level(typed: &str) -> Option<f64> {
     let t = typed.trim().to_ascii_lowercase();
     if t == "off" || t.contains("inf") || t.contains('\u{221e}') {
         return Some(0.0);
@@ -231,7 +295,7 @@ fn level(typed: &str) -> Option<f64> {
 }
 
 /// A pan typed as −100..100, or "L30", "R30", "C".
-fn pan(typed: &str) -> Option<f64> {
+pub(crate) fn pan(typed: &str) -> Option<f64> {
     let t = typed.trim().to_ascii_lowercase();
     if t == "c" || t == "center" || t == "centre" {
         return Some(0.0);
@@ -283,6 +347,25 @@ mod tests {
         let names = |a: f32| Some(if a < 0.5 { "Sine" } else { "Saw" }.to_string());
         assert!(along("saw", "Sine", names).unwrap() >= 0.5);
         assert!(along("SINE", "Saw", names).unwrap() < 0.5);
+    }
+
+    #[test]
+    fn times_and_notes() {
+        assert_eq!(time("250", "5 ms", false), Some(0.25));
+        assert_eq!(time("2", "1.50 s", true), Some(2.0));
+        assert_eq!(time("1.5 s", "5 ms", true), Some(1.5));
+        assert_eq!(time("40", "Off", true), Some(0.04));
+        assert_eq!(time("soon", "5 ms", true), None);
+        assert_eq!(note("C3"), Some(60));
+        assert_eq!(note("f#2"), Some(54));
+        assert_eq!(note("Bb-1"), Some(22));
+        assert_eq!(note("C-2"), Some(0));
+        assert_eq!(note("G8"), Some(127));
+        assert_eq!(note("E3?"), Some(64));
+        assert_eq!(note("64"), Some(64));
+        assert_eq!(note("A9"), None);
+        assert_eq!(note("H2"), None);
+        assert_eq!(note("C"), None);
     }
 
     #[test]

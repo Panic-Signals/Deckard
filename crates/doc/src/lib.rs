@@ -28,6 +28,7 @@ mod audio;
 mod lanes;
 mod zones;
 pub use audio::TakeSpec;
+pub use new_sampler::TakeZone;
 pub use zones::{ZoneFrom, ZoneSpec};
 mod cc_routes;
 mod cv_routes;
@@ -36,6 +37,7 @@ mod extra_outs;
 mod files;
 mod lfos;
 mod mod_routes;
+mod new_sampler;
 pub mod note_tools;
 mod notes;
 mod pad_touch;
@@ -170,6 +172,9 @@ pub struct Document {
     types: mxprj::types::Types,
     undo: Vec<Step>,
     redo: Vec<Step>,
+    /// The last `transaction_joined`: how many undo steps there were after it, its
+    /// label and when.
+    joined: Option<(usize, String, Instant)>,
     /// An open take (`begin_take`): its name and where its steps start.
     take: Option<(String, usize)>,
     revision: u64,
@@ -279,6 +284,7 @@ impl Document {
             addresses,
             types,
             undo: Vec::new(),
+            joined: None,
             redo: Vec::new(),
             take: None,
             revision: 0,
@@ -884,6 +890,24 @@ impl Document {
             return Ok(());
         }
         self.undo.push(Step::merged(label, &steps));
+        Ok(())
+    }
+
+    /// [`Document::transaction`], joined to the one before when that was one of these
+    /// with the same label, a moment ago and with nothing done since: a value dragged
+    /// through many steps, each several edits, is one undo step.
+    pub fn transaction_joined(&mut self, label: &str, f: impl FnOnce(&mut Document) -> Result<(), String>) -> Result<(), String> {
+        let before = self.undo.len();
+        self.transaction(label, f)?;
+        if self.undo.len() != before + 1 {
+            return Ok(());
+        }
+        let joins = self.joined.take().is_some_and(|(len, l, at)| len == before && l == label && at.elapsed() < MERGE_WINDOW);
+        if joins && before > 0 {
+            let steps: Vec<Step> = self.undo.drain(before - 1..).collect();
+            self.undo.push(Step::merged(label, &steps));
+        }
+        self.joined = Some((self.undo.len(), label.to_string(), Instant::now()));
         Ok(())
     }
 

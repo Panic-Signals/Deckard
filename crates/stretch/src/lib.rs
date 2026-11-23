@@ -8,7 +8,7 @@
 use std::ffi::{c_int, c_void};
 
 unsafe extern "C" {
-    fn deckard_stretch_new(channels: c_int, sample_rate: f32, cheaper: c_int) -> *mut c_void;
+    fn deckard_stretch_new(channels: c_int, sample_rate: f32, cheaper: c_int, spread: c_int) -> *mut c_void;
     fn deckard_stretch_free(s: *mut c_void);
     fn deckard_stretch_reset(s: *mut c_void);
     fn deckard_stretch_input_latency(s: *mut c_void) -> c_int;
@@ -32,7 +32,14 @@ impl Stretch {
     /// less CPU.
     pub fn new(sample_rate: f32, cheaper: bool) -> Stretch {
         // SAFETY: the shim allocates an instance, freed in Drop.
-        Stretch { raw: unsafe { deckard_stretch_new(2, sample_rate, c_int::from(cheaper)) } }
+        Stretch { raw: unsafe { deckard_stretch_new(2, sample_rate, c_int::from(cheaper), 0) } }
+    }
+
+    /// At the default quality, each block's work spread over the frames it gives (for
+    /// playing live: no frame costs much more than another), an interval more latency.
+    pub fn spread(sample_rate: f32) -> Stretch {
+        // SAFETY: the shim allocates an instance, freed in Drop.
+        Stretch { raw: unsafe { deckard_stretch_new(2, sample_rate, 0, 1) } }
     }
 
     pub fn reset(&mut self) {

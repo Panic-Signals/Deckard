@@ -64,7 +64,7 @@ impl Kind {
         if let Some(k) = Kind::of_extension(ext) {
             return Some(k);
         }
-        let sample = ["wav", "aif", "aiff", "aifc"].iter().any(|e| ext.eq_ignore_ascii_case(e));
+        let sample = ["wav", "aif", "aiff", "aifc", "mp3"].iter().any(|e| ext.eq_ignore_ascii_case(e));
         let name = path.file_stem()?.to_string_lossy();
         sample.then(|| if names::tempo_in_name(&name).is_some() { Kind::Loop } else { Kind::OneShot })
     }

@@ -38,6 +38,37 @@ pub struct Stats {
     /// Underruns the device reported ("A buffer underrun or overrun occurred"): also
     /// at start and restart, when the device itself takes a moment.
     pub device_errors: AtomicU64,
+    /// The last late block: how long it took and lasts (µs), how long of that went on
+    /// what other threads asked for (edits, notes), and how many of those there were.
+    pub late_busy_us: AtomicU64,
+    pub late_audio_us: AtomicU64,
+    pub late_apply_us: AtomicU64,
+    pub late_commands: AtomicU64,
+}
+
+/// The recorder's monitor (interleaved stereo) onto `buf`, its gain going from `from`
+/// to `to` over the block (a move of the master's level doesn't step).
+fn mix_monitor(buf: &mut [f32], monitor: impl Iterator<Item = f32>, from: f32, to: f32) {
+    let frames = (buf.len() / 2).max(1) as f32;
+    for (k, (o, v)) in buf.iter_mut().zip(monitor).enumerate() {
+        let g = from + (to - from) * ((k / 2 + 1) as f32 / frames);
+        *o = (*o + v * g).clamp(-4.0, 4.0);
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    /// The monitor is as loud as the master lets it be, and gets there over the block.
+    #[test]
+    fn the_monitor_goes_through_the_master() {
+        let mut buf = [0.0f32; 8];
+        super::mix_monitor(&mut buf, [1.0f32; 8].into_iter(), 0.1, 0.1);
+        assert!(buf.iter().all(|v| (v - 0.1).abs() < 1e-6), "{buf:?}");
+        let mut buf = [0.0f32; 8];
+        super::mix_monitor(&mut buf, [1.0f32; 8].into_iter(), 1.0, 0.0);
+        assert!(buf[0] < 1.0 && buf[0] > buf[2] && buf[6] == 0.0, "{buf:?}");
+        assert_eq!(buf[0], buf[1], "both sides alike");
+    }
 }
 
 impl Stats {
@@ -195,7 +226,8 @@ impl Sender {
             | Live::RepeatPressure { .. }
             | Live::MidiInputOut { .. }
             | Live::ChokeAll
-            | Live::ChokeGroup { .. } => {}
+            | Live::ChokeGroup { .. }
+            | Live::ChokeSound { .. } => {}
         }
     }
 
@@ -611,6 +643,8 @@ impl Output {
             let mut standalone_prehear = crate::prehear::Prehear::default();
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
+            // The master's level the monitor was last heard at.
+            let mut monitor_gain = 1.0f32;
             #[cfg(windows)]
             let mut promoted = false;
             move |out: &mut [f32], ahead: Duration| {
@@ -631,8 +665,10 @@ impl Output {
                 // What other threads asked for since the last block.
                 let period = Duration::from_secs_f64(frames as f64 / rate as f64);
                 let exact = exact.load(Ordering::Relaxed);
+                let mut asked = 0u64;
                 while let Some(cmd) = commands.pop() {
                     applied += 1;
+                    asked += 1;
                     let cmd = match cmd {
                         Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
                         cmd => cmd,
@@ -650,6 +686,7 @@ impl Output {
                         drop(back);
                     }
                 }
+                let apply_us = started.elapsed().as_micros() as u64;
                 let ext_len = (frames * 2).min(16_384);
                 for b in &mut ext {
                     b[..ext_len].fill(0.0);
@@ -684,10 +721,11 @@ impl Output {
                 if let Ok(mut m) = monitor.try_lock()
                     && !m.is_empty()
                 {
+                    // Heard through the master's level, as everything else is.
+                    let to = engine.as_ref().map_or(1.0, |e| e.master_gain());
                     let n = m.len().min(buf.len());
-                    for (o, v) in buf.iter_mut().zip(m.drain(..n)) {
-                        *o = (*o + v).clamp(-4.0, 4.0);
-                    }
+                    mix_monitor(&mut buf[..n], m.drain(..n), monitor_gain, to);
+                    monitor_gain = to;
                     // Don't let it fall behind (more than ~0.1 s).
                     if m.len() > 9_600 {
                         let extra = m.len() - 9_600;
@@ -718,6 +756,10 @@ impl Output {
                 stats.audio_us.fetch_add(audio, Ordering::Relaxed);
                 if busy > audio {
                     stats.late.fetch_add(1, Ordering::Relaxed);
+                    stats.late_busy_us.store(busy, Ordering::Relaxed);
+                    stats.late_audio_us.store(audio, Ordering::Relaxed);
+                    stats.late_apply_us.store(apply_us, Ordering::Relaxed);
+                    stats.late_commands.store(asked, Ordering::Relaxed);
                 }
                 if let Some(load) = (busy * 1000).checked_div(audio) {
                     stats.peak_load.fetch_max(load, Ordering::Relaxed);
@@ -761,7 +803,20 @@ impl Output {
                                     invalidated.store(true, Ordering::Relaxed);
                                 }
                             }
-                            eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
+                            // (With how the engine has done: none late means the device or the
+                            // system was behind, not the engine.)
+                            let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+                            let ms = |a: &AtomicU64| l(a) as f64 / 1000.0;
+                            eprintln!(
+                                "audio error: {e} (after {} blocks; {} computed late, peak load {:.0} %; the last late one took {:.2} ms of {:.2}, {:.2} ms of it on {} edits or notes)",
+                                l(&err_stats.callbacks),
+                                l(&err_stats.late),
+                                l(&err_stats.peak_load) as f64 / 10.0,
+                                ms(&err_stats.late_busy_us),
+                                ms(&err_stats.late_audio_us),
+                                ms(&err_stats.late_apply_us),
+                                l(&err_stats.late_commands)
+                            );
                         },
                     )
                 };
@@ -1232,6 +1287,20 @@ impl Output {
                 t.watch.push(key);
                 // Sized here, so the audio thread doesn't allocate.
                 t.zones.resize(t.watch.len(), None);
+                None
+            }
+        })
+    }
+
+    /// Where the morph of a sound's layers is, as last published; it is watched from
+    /// now on.
+    pub fn morph_position(&self, group: usize, sound: usize) -> Option<f32> {
+        self.telemetry(|t| {
+            if t.morph_watch == Some((group, sound)) {
+                t.morph
+            } else {
+                t.morph_watch = Some((group, sound));
+                t.morph = None;
                 None
             }
         })

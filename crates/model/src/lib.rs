@@ -9,8 +9,10 @@
 pub mod chords;
 pub mod expression;
 pub mod extra_out;
+pub mod layers;
 pub mod lfo;
 pub mod mod_matrix;
+pub mod new_sampler;
 pub mod pad_touch;
 pub mod ratchet;
 pub mod sampling_view;
@@ -496,6 +498,9 @@ pub struct Sound {
     /// PROB LOCK: its notes' chances rolled once and kept (DECKARD's [`PROB_LOCK`]
     /// field; Maschine's sound has its own, not in its saved projects).
     pub probability_locked: bool,
+    /// The New Sampler's settings: `Some` when the sound's instrument is a Sampler marked
+    /// DECKARD's ([`new_sampler::FIELD`]).
+    pub new_sampler: Option<new_sampler::NewSampler>,
     /// What DECKARD keeps of its Groove pages ([`GROOVE`]): the Variation and Generate
     /// settings when the project's format has no place for them, and the page it shows.
     /// By field, sorted.
@@ -799,6 +804,9 @@ pub struct Zone {
     /// Zone fade-in and fade-out (`attack`, `decay`), in sample frames.
     pub fade_in: i64,
     pub fade_out: i64,
+    /// What DECKARD knows about the sample (New Sampler); `None` when not analysed, or
+    /// the analysis is of another file.
+    pub meta: Option<new_sampler::ZoneMeta>,
 }
 
 impl Zone {
@@ -1721,8 +1729,20 @@ fn sound(ix: &Index, s: &Obj, config: Option<&Obj>, t: &Targets) -> Sound {
 
 fn sound_own(ix: &Index, s: &Obj) -> Sound {
     let modules = chain_modules(ix, s);
-    let slots = chain_slots(ix, s);
+    let mut slots = chain_slots(ix, s);
     let (lanes, lane) = lanes_of(ix, s);
+    // Only a Sampler can be a New Sampler: the field stays when the slot changes.
+    let new_sampler = match s.get(new_sampler::FIELD) {
+        Some(Value::Str(t)) if modules.first().is_some_and(|m| m.type_name == "NI::MASCOMMON::DATA::Sampler") => {
+            Some(new_sampler::NewSampler::from_text(t))
+        }
+        _ => None,
+    };
+    if new_sampler.is_some()
+        && let Some(first) = slots.first_mut()
+    {
+        first.name = "Sampler Preview".into();
+    }
     Sound {
         instrument: modules.first().map_or(String::new(), |m| m.type_name.rsplit("::").next().unwrap_or("").to_string()),
         name: param_str(s, "name"),
@@ -1752,6 +1772,7 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
             _ => Vec::new(),
         },
         probability_locked: s.get(PROB_LOCK).and_then(Value::as_int).is_some_and(|v| v != 0),
+        new_sampler,
         groove: match s.get(GROOVE) {
             Some(Value::Str(t)) => groove_from_text(t),
             _ => Vec::new(),
@@ -2395,6 +2416,10 @@ fn sample_ref(z: &Obj) -> SampleRef {
 
 fn zone(z: &Obj) -> Zone {
     let sample = sample_ref(z);
+    let meta = match z.get(new_sampler::ZONE_FIELD) {
+        Some(Value::Str(t)) => new_sampler::ZoneMeta::from_text(t).filter(|m| m.file == sample.path),
+        _ => None,
+    };
     Zone {
         sample,
         root_key: param_i64(z, "root_key").unwrap_or(60),
@@ -2410,6 +2435,7 @@ fn zone(z: &Obj) -> Zone {
         x_fade: param_i64(z, "x_fade").unwrap_or(0),
         fade_in: param_i64(z, "attack").unwrap_or(0),
         fade_out: param_i64(z, "decay").unwrap_or(0),
+        meta,
     }
 }
 
