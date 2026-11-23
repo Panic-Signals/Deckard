@@ -74,6 +74,9 @@ pub(crate) enum Ev {
     Release {
         pitch: i64,
     },
+    /// Its pattern went: the long sample voices the timeline started (longer than a beat,
+    /// or looped) fade out now; hits ring on.
+    FadeLongPatternVoices,
     Control(MidiKind),
     /// The Audio plug-in's loop: play take `.0` from song beat `.1` on, or stop (none).
     Cue(Option<usize>, f64),
@@ -259,7 +262,7 @@ impl Player {
                     if self.pending.len() < self.pending.capacity() {
                         self.pending.push((at, ev, live));
                     } else {
-                        self.apply(ev);
+                        self.apply(ev, live);
                     }
                 }
                 Msg::Install { at, parts, offs } => {
@@ -377,11 +380,12 @@ impl Player {
         }
     }
 
-    fn apply(&mut self, ev: Ev) {
+    /// `live`: it came live, not from the timeline.
+    fn apply(&mut self, ev: Ev, live: bool) {
         let pos = self.pos;
         let Some(p) = self.parts.as_mut() else { return };
         match ev {
-            Ev::NoteOn { id, pitch, velocity, gate, beats, live } => {
+            Ev::NoteOn { id, pitch, velocity, gate, beats, live: played_live } => {
                 if p.muted {
                     return;
                 }
@@ -397,10 +401,17 @@ impl Player {
                         self.offs.push((pos + g, 0, pitch));
                     }
                 } else if let Some(smp) = p.smp.as_mut() {
-                    smp.note_on(id, pitch, velocity.clamp(0, 127), &Context { tempo: self.position.3, beats, live });
+                    smp.from_timeline = !live;
+                    smp.note_on(id, pitch, velocity.clamp(0, 127), &Context { tempo: self.position.3, beats, live: played_live });
+                    smp.from_timeline = false;
                     if let Some(g) = gate {
                         self.offs.push((pos + g, id, pitch));
                     }
+                }
+            }
+            Ev::FadeLongPatternVoices => {
+                if let Some(smp) = p.smp.as_mut() {
+                    smp.fade_long_pattern_voices(self.position.3);
                 }
             }
             Ev::Release { pitch } => {
@@ -474,7 +485,7 @@ impl Player {
         let mut i = 0;
         while i < self.pending.len() {
             if self.pending[i].0 <= pos {
-                let (at, ev, _) = self.pending.remove(i);
+                let (at, ev, live) = self.pending.remove(i);
                 if let Ev::Position { frame, playing, tempo, numerator, denominator } = ev {
                     if at >= self.position.0 {
                         // Another tempo: the notes sounding end where they're written.
@@ -487,7 +498,7 @@ impl Player {
                         self.position = (at, frame, playing, tempo, numerator, denominator);
                     }
                 } else {
-                    self.apply(ev);
+                    self.apply(ev, live);
                 }
             } else {
                 i += 1;

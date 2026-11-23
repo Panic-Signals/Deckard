@@ -1261,6 +1261,8 @@ struct Voice {
     rise: u32,
     /// Linear fade-out (stolen, CC 120, stop): (frames left, total).
     fade: Option<(u32, u32)>,
+    /// A playing pattern started it (not a pad, key or MIDI).
+    timeline: bool,
     released: bool,
     sustained: bool,
     /// A layer's voice: its envelope, its gain (window, mute, solo) on its way to
@@ -1343,6 +1345,8 @@ pub struct SamplerRt {
     sweep: f64,
     /// Where the song was at the last render (beats), and whether it had moved.
     song: (f64, bool),
+    /// The note starting now comes from a playing pattern (set around a note-on).
+    pub from_timeline: bool,
 }
 
 impl SamplerRt {
@@ -1389,6 +1393,7 @@ impl SamplerRt {
             synth_glide: None,
             audio: None,
             tempo: 0.0,
+            from_timeline: false,
         }
     }
 
@@ -1709,6 +1714,26 @@ impl SamplerRt {
         lfo_rate(self.settings.lfo_speed as f64).0
     }
 
+    /// Its pattern went (turned off, or switched for another): the voices a pattern
+    /// started whose zone is longer than a beat at `tempo`, or loops, fade out now (in
+    /// 10 ms). A one-shot zone doesn't stop at its note's end, so without this a long
+    /// sample played on after its pattern had gone. Hits (a beat or shorter) ring on.
+    pub fn fade_long_pattern_voices(&mut self, tempo: f64) {
+        if self.audio.is_some() || self.synth.is_some() {
+            return;
+        }
+        let beat_secs = 60.0 / tempo.max(1.0);
+        for v in &mut self.voices {
+            let long = v.timeline
+                && self.zones.get(v.zone).is_some_and(|z| {
+                    z.looped.is_some() || z.play.1.saturating_sub(z.play.0) as f64 / z.sample.rate.max(1) as f64 > beat_secs
+                });
+            if long {
+                v.fade_out(self.sr);
+            }
+        }
+    }
+
     /// Note-on (§9). `id` identifies the note for its note-off.
     pub fn note_on(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context) {
         self.tempo = ctx.tempo;
@@ -1988,6 +2013,7 @@ impl SamplerRt {
             wait,
             rise,
             fade: None,
+            timeline: self.from_timeline,
             released: false,
             sustained: false,
             once: z.once,

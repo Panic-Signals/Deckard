@@ -459,6 +459,11 @@ fn cue_take(e: &NoteEvent) -> Option<(usize, f64)> {
 /// How many sounding sounds [`Engine::catch_beat_hits`] tracks at once.
 const SOUNDING_ROOM: usize = 64;
 
+/// Sound `s` of group `g`'s notes on timeline `tl`, as (tick, pitch, length, velocity).
+fn sound_notes(tl: &Timeline, g: usize, s: usize) -> impl Iterator<Item = (i64, i64, i64, i64)> + '_ {
+    tl.events.iter().filter(move |e| (e.group, e.sound) == (g, s) && e.velocity > 0).map(|e| (e.tick, e.pitch, e.length, e.velocity))
+}
+
 /// How long after a beat's tick a mute or pattern switch still catches that beat's hit
 /// (compensating for output buffer latency plus the controller-to-adopt round-trip).
 const BEAT_GRACE_SECONDS: f64 = 0.055;
@@ -3971,6 +3976,7 @@ impl Engine {
             } else {
                 Some(&fresh.timeline)
             };
+            self.stop_long_samples_on_pattern_off(old_tl, &fresh.pattern_sigs, sigs_valid && timeline_changed);
             self.catch_beat_hits(
                 old_tl,
                 &fresh.sound_muted,
@@ -3982,6 +3988,31 @@ impl Engine {
             );
         }
         fresh
+    }
+
+    /// A group's pattern turned off or switched for another while the song plays: its
+    /// sounds' long sample voices that a pattern started (a zone longer than a beat, or
+    /// looped) fade out now, leaving drum hits to ring out. (`active`: the timeline
+    /// changed and the old pattern signatures `old_sigs` are comparable.)
+    fn stop_long_samples_on_pattern_off(&mut self, old_tl: Option<&Timeline>, old_sigs: &[u64], active: bool) {
+        let Some(old) = old_tl.filter(|_| active) else { return };
+        let tempo = self.tempo;
+        for g in 0..self.sounds.len() {
+            if self.pattern_sigs.get(g) == old_sigs.get(g) {
+                continue;
+            }
+            for s in 0..self.sounds[g].len() {
+                // (A sound whose notes the switch left as they were plays on.)
+                if sound_notes(old, g, s).next().is_none() || sound_notes(old, g, s).eq(sound_notes(&self.timeline, g, s)) {
+                    continue;
+                }
+                if self.link_ahead(g, s).is_some() {
+                    self.send_live(g, s, ahead::Ev::FadeLongPatternVoices);
+                } else if let Some(smp) = self.sounds[g][s].as_mut() {
+                    smp.fade_long_pattern_voices(tempo);
+                }
+            }
+        }
     }
 
     fn played_live_within(&self, group: usize, sound: usize, pitch: i64, window: u64) -> bool {
@@ -6641,7 +6672,9 @@ impl Engine {
         let Some(Some(snd)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound)) else { return };
         self.clock += 1;
         let id = self.clock;
+        snd.from_timeline = self.from_timeline;
         snd.note_on(id, e.pitch, e.velocity.clamp(0, 127), &ctx);
+        snd.from_timeline = false;
         if e.length != HELD {
             let gate = ((e.length.max(1) as f64) / tps).max(1.0) as u64;
             self.note_offs.push((self.time + gate, e.group, e.sound, e.pitch, id));
@@ -8530,6 +8563,63 @@ mod tests {
     fn adopt_at_1k(e: &mut Engine, p: &Project, q: &Project, cache: &mut SampleCache) {
         let (fresh, _) = Engine::new_after(q, Some((p, &[])), None, 1000, Mode::Scene(0), cache);
         drop(e.adopt(fresh, q));
+    }
+
+    /// A pattern turned off while the song plays: its long one-shot sample (2 s, longer
+    /// than a beat) stops at once, though a one-shot plays past its note's end; its short
+    /// hit (0.2 s) rings out.
+    #[test]
+    fn a_pattern_turned_off_stops_its_long_samples_and_lets_hits_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let (long, hit) = (dir.path().join("long.wav"), dir.path().join("hit.wav"));
+        edit::write_wav(&long, &sample::Sample { rate: 1000, frames: vec![[0.5, 0.5]; 2000] }).unwrap();
+        edit::write_wav(&hit, &sample::Sample { rate: 1000, frames: vec![[0.5, 0.5]; 200] }).unwrap();
+        let mut p = project();
+        let second = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(second);
+        for (s, (wav, len)) in [(&long, 2000), (&hit, 200)].into_iter().enumerate() {
+            let smp = p.groups[0].sounds[s].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, len - 1);
+            smp.set("envelope_type", 0.0);
+        }
+        p.groups[0].patterns[0].notes = (0..2)
+            .map(|sound| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound,
+                position: 0,
+                length: PPQ / 4,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
+            .collect();
+        let mut off = p.clone();
+        off.scenes[0].patterns.clear();
+        let mut cache = SampleCache::default();
+        let mut e = loop_engine(&p, &mut cache);
+        let voices = |e: &Engine, s: usize| e.sounds[0][s].as_ref().unwrap().voices();
+        // Past the sixteenth's note-off: both one-shots still play.
+        let mut out = vec![0f32; 2 * 150];
+        e.process(&mut out);
+        assert!(voices(&e, 0) > 0 && voices(&e, 1) > 0, "both playing");
+        adopt_at_1k(&mut e, &p, &off, &mut cache);
+        let mut out = vec![0f32; 2 * 25];
+        e.process(&mut out);
+        assert_eq!(voices(&e, 0), 0, "the long sample stops within its 10 ms fade");
+        assert!(voices(&e, 1) > 0, "the hit rings out");
+        // The same sample on its pad, played live, isn't the pattern's: it plays on.
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 150];
+        e.process(&mut out);
+        e.note_on(0, 0, 62, 127, PPQ / 4);
+        e.process(&mut out[..2 * 10]);
+        assert_eq!(voices(&e, 0), 2, "the pattern's and the pad's");
+        adopt_at_1k(&mut e, &p, &off, &mut cache);
+        let mut out = vec![0f32; 2 * 25];
+        e.process(&mut out);
+        assert_eq!(voices(&e, 0), 1, "the pad's plays on");
     }
     #[test]
     fn beat_grace_catches_on_beat_unmute_and_pattern_switch_without_double_firing() {
