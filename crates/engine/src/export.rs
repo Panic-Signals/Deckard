@@ -602,6 +602,102 @@ pub fn bounce_project(p: &Project, g: usize, s: usize) -> Project {
     q
 }
 
+/// Seconds of a preview a held note sounds, and the most it runs to with its tail.
+const PREVIEW_HOLD: f64 = 1.5;
+const PREVIEW_MAX: f64 = 4.0;
+/// Seconds a preview fades out over (and rings on after the last audible frame).
+const PREVIEW_FADE: f64 = 0.25;
+
+/// Project prepared for rendering a single sound's preview: only sound `(g, s)` is
+/// kept active (other sounds' and groups' plug-ins and sampler zones are cleared so
+/// building the engine only loads this sound), and its output is routed to Master so
+/// external/bus routing never silences the preview.
+pub fn preview_project(p: &Project, g: usize, s: usize) -> Project {
+    let mut q = bounce_project(p, g, s);
+    q.master_output = deckard_model::AudioDest::Ext(0);
+    q.sections.clear();
+    q.scenes.clear();
+    for (gi, grp) in q.groups.iter_mut().enumerate() {
+        grp.patterns.clear();
+        grp.modulators.clear();
+        if gi != g {
+            grp.slots.clear();
+        } else {
+            grp.channel.dest = deckard_model::AudioDest::Master;
+        }
+        for (si, snd) in grp.sounds.iter_mut().enumerate() {
+            if gi == g && si == s {
+                snd.channel.dest = deckard_model::AudioDest::Group(g);
+            } else {
+                snd.plugin = None;
+                snd.slots.clear();
+                snd.sampler = None;
+                snd.modulators.clear();
+            }
+        }
+    }
+    q
+}
+
+/// Build the engine for a preview of sound `(g, s)` and trigger its C3 note. Call on
+/// the main thread when the sound may host VST3 plug-ins, then pass the returned
+/// [`Engine`] to [`render_preview_engine`] on a worker thread.
+pub fn preview_engine(p: &Project, project_path: Option<&Path>, (g, s): (usize, usize), rate: u32, cache: &mut SampleCache) -> Engine {
+    let q = preview_project(p, g, s);
+    let (mut engine, _) = Engine::new(&q, project_path, rate.max(1), Mode::Arrangement, cache);
+    engine.set_connected_outputs(u16::MAX);
+    engine.sequencing = false;
+    engine.looping = false;
+    engine.metronome = false;
+    let ticks = (PREVIEW_HOLD * q.tempo.max(1.0) / 60.0 * PPQ as f64).round() as i64;
+    engine.note_on(g, s, 60, 100, ticks.max(1));
+    engine
+}
+
+/// Render a preview [`Engine`] (built by [`preview_engine`]) to interleaved stereo at
+/// `rate`, trimmed and faded out. `None` when `cancel` was set.
+pub fn render_preview_engine(mut engine: Engine, rate: u32, cancel: &AtomicBool) -> Option<Vec<f32>> {
+    let total = (PREVIEW_MAX * rate as f64) as usize;
+    let mut audio = vec![0f32; total * 2];
+    let mut done = 0;
+    while done < total {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let n = (total - done).min(512);
+        engine.process(&mut audio[done * 2..(done + n) * 2]);
+        done += n;
+    }
+    // Up to the last audible frame, a fade after it (or over the end, if it rings on).
+    let last = audio.as_chunks::<2>().0.iter().rposition(|f| f[0].abs().max(f[1].abs()) > QUIET).map_or(0, |i| i + 1);
+    let fade = (PREVIEW_FADE * rate as f64) as usize;
+    let end = (last + fade / 2).min(total);
+    audio.truncate(end * 2);
+    let fade = fade.min(end);
+    for i in 0..fade {
+        let gain = 1.0 - (i + 1) as f32 / fade as f32;
+        let at = (end - fade + i) * 2;
+        audio[at] *= gain;
+        audio[at + 1] *= gain;
+    }
+    Some(audio)
+}
+
+/// A short audio preview of sound `s` of group `g`: that sound alone (its effects in,
+/// level and pan neutral) playing C3 for a moment and ringing out, as interleaved
+/// stereo at `rate`, faded out so it doesn't end abruptly. `None` when `cancel` was set.
+pub fn render_preview(
+    p: &Project,
+    project_path: Option<&Path>,
+    gs: (usize, usize),
+    rate: u32,
+    cache: &mut SampleCache,
+    cancel: &AtomicBool,
+) -> Option<Vec<f32>> {
+    let engine = preview_engine(p, project_path, gs, rate, cache);
+    render_preview_engine(engine, rate, cancel)
+}
+
 /// One file of an export: what plays, whose output, and its name (less the tempo and
 /// extension, which [`file_stem`] adds).
 #[derive(Debug, Clone, PartialEq)]
@@ -750,6 +846,29 @@ mod tests {
 
     fn energy(a: &[f32]) -> f32 {
         a.iter().map(|s| s * s).sum()
+    }
+
+    #[test]
+    fn a_preview_is_the_sound_alone_faded_out() {
+        let (_tmp, p) = project();
+        let run = |g| render_preview(&p, None, (g, 0), 48_000, &mut SampleCache::default(), &AtomicBool::new(false)).unwrap();
+        // The short tone (0.1 s) ends soon after; the long one (1.5 s) plays longer.
+        let (short, long) = (run(0), run(1));
+        assert!(energy(&short) > 0.0 && energy(&long) > 0.0, "the sound is heard");
+        assert!(short.len() < long.len(), "trimmed to the sound's own length");
+        assert!(long.len() / 2 < 4 * 48_000, "never past the cap");
+        assert_eq!(&long[long.len() - 2..], [0.0, 0.0], "faded to silence");
+        // The same sound renders the same preview every time.
+        assert_eq!(short, run(0));
+        let cancelled = render_preview(&p, None, (0, 0), 48_000, &mut SampleCache::default(), &AtomicBool::new(true));
+        assert!(cancelled.is_none());
+
+        // Routing the sound or its group to an external output still renders an audible preview.
+        let mut routed = p.clone();
+        routed.groups[0].sounds[0].channel.dest = deckard_model::AudioDest::Ext(2);
+        routed.groups[0].channel.dest = deckard_model::AudioDest::Ext(3);
+        let preview = render_preview(&routed, None, (0, 0), 48_000, &mut SampleCache::default(), &AtomicBool::new(false)).unwrap();
+        assert!(energy(&preview) > 0.0, "external-routed sound still previews");
     }
 
     /// A bar at 120 BPM and 48 kHz.
