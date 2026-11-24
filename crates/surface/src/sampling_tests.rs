@@ -565,7 +565,6 @@ fn button_four_goes_between_zone_and_layers() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
     let v = layered(4, 3, 0);
     let text = s.screen_text(&v);
-    assert!(text.iter().any(|t| t == "LAYERS") && !text.iter().any(|t| t == "ZONE"), "{text:?}");
     assert!(text.iter().any(|t| t == "Layer 2.wav"), "{text:?}");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     // From another tab, button 4 is ZONE as ever.
@@ -584,6 +583,58 @@ fn button_four_goes_between_zone_and_layers() {
     press(&mut s, &v, "BUTTON_SAMPLE");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
+}
+
+/// Button 4 says both where the sound has layers: the tab showing first (large), the
+/// other under it (small), so it reads as the toggle it is. Plain ZONE elsewhere.
+#[test]
+fn tab_button_4_says_zone_and_layers() {
+    let (mut s, v) = (Surface::new(), layered(3, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let order = |s: &mut Surface, v: &View| {
+        let text = s.screen_text(v);
+        let at = |t: &str| text.iter().position(|x| x == t);
+        (at("ZONE"), at("LAYERS"))
+    };
+    let (zone, layers) = order(&mut s, &v);
+    assert!(zone.is_some() && layers.is_some() && zone < layers, "ZONE, LAYERS under it: {zone:?} {layers:?}");
+    let (zone, layers) = order(&mut s, &layered(4, 3, 0));
+    assert!(zone.is_some() && layers.is_some() && layers < zone, "LAYERS, ZONE under it: {zone:?} {layers:?}");
+    // From RECORD too, so it can be found.
+    let (zone, layers) = order(&mut s, &layered(0, 3, 0));
+    assert!(zone.is_some() && layers.is_some() && zone < layers);
+    // A lone zone not yet a layer has it as well.
+    let mut lone = layered(3, 1, 0);
+    lone.sampling.sample.as_mut().unwrap().layered = false;
+    assert!(order(&mut s, &lone).1.is_some());
+    // No layers: no LAYERS.
+    let (mut s, v) = (Surface::new(), sampled(3));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(order(&mut s, &v).1, None);
+}
+
+/// RECORD's button 8 is APPLY: lit, and the take's layer applied, only while one is
+/// chosen. The pads' sixteen takes are those around the focused one.
+#[test]
+fn record_button_8_applies_a_takes_layer() {
+    let (mut s, mut v) = (Surface::new(), sampled(0));
+    (v.sampling.takes, v.sampling.take) = (20, Some(18));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "APPLY") && !text.iter().any(|t| t.starts_with("BANK")), "{text:?}");
+    let dark = s.leds(&v).get("LED_SCREEN_BUTTON_8");
+    assert_ne!(dark, s.leds(&v).get("LED_SCREEN_BUTTON_6"), "nothing chosen: darker than DELETE");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    v.sampling.layer_pending = true;
+    let lit = s.leds(&v).get("LED_SCREEN_BUTTON_8");
+    assert!(lit != dark && lit != s.leds(&v).get("LED_SCREEN_BUTTON_6"), "chosen: lit, brighter than DELETE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::ApplyTakeLayer)]);
+    // TAKES: the pads have takes 17 to 20, the focused take's sixteen.
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    let now = Instant::now();
+    assert_eq!(s.event(&Event::PadOn(3, 0.8), &v, now), [Action::Take { index: 18, delete: false }]);
+    assert!(s.event(&Event::PadOn(5, 0.8), &v, now).is_empty(), "no 21st take");
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(16, 4)), "the focused take bright");
 }
 
 /// On LAYERS, display buttons 5 to 8 mute the four layers shown (those with the focused

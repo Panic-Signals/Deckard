@@ -115,3 +115,24 @@ fn play_range_start_and_end_support_shift_on_edit_and_zone() {
     assert_eq!(zone(&app).play_range, (441 + 88, 44_099 - 441 - 88));
     turn(&mut app, Event::Button("BUTTON_SHIFT", false));
 }
+
+/// RECORD: the page knows a layer was chosen for the focused take (APPLY lights), and
+/// APPLY puts the take there.
+#[test]
+fn the_record_page_says_a_layer_choice_is_pending() {
+    use crate::layout::sampling::RecParam;
+    let (dir, mut app) = crate::layers_tests::three();
+    app.surface_act(A::Sampling(true));
+    app.recorder.view.takes.push(crate::layers_tests::tone(dir.path(), "take.wav", 500.0));
+    app.recorder.view.focused = Some(0);
+    let view = app.sampling_surface_view();
+    let layer = view.pages[0][0].knobs.iter().find(|k| k.name == "LAYER").expect("RECORDING has LAYER");
+    assert_eq!(layer.text, "None");
+    assert!(!view.layer_pending);
+    app.recorder.view.set(RecParam::Layer, 1);
+    assert!(app.sampling_surface_view().layer_pending);
+    app.surface_act(A::SamplingCall(SamplingCall::ApplyTakeLayer));
+    assert!(!app.sampling_surface_view().layer_pending);
+    let names: Vec<String> = crate::layers_tests::zones(&app).iter().map(|z| crate::analysis::file_name_of(&z.sample.path)).collect();
+    assert_eq!(names, ["a2.wav", "take.wav", "a4.wav"]);
+}

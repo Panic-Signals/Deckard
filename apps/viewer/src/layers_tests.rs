@@ -422,7 +422,7 @@ fn the_layer_choices_are_the_focused_takes() {
     record(&mut app, RecordAct::Set(RecParam::Layer, NO_LAYER));
     assert_eq!(pending(&app), None, "it is on none");
     // The MK3's RECORDING page has it too.
-    let knobs = crate::record_knobs::knobs(&app.recorder.view, &app.settings, &project(&app), (0, 0));
+    let knobs = crate::record_knobs::knobs(&app.recorder.view, &app.settings, &project(&app), (0, 0), true);
     let k = knobs.pages[0].knobs.iter().find(|k| k.name == "LAYER").expect("a LAYER knob");
     assert_eq!((k.text.as_str(), k.max), ("None", 4.0));
     // Loop has a target of its own.

@@ -11,7 +11,7 @@ impl App {
     /// The knob pages of every tab, with what each knob sets.
     fn sampling_pages(&self) -> Option<sampling_hw::Pages> {
         let d = self.doc.as_ref()?.borrow();
-        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound));
+        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), true);
         Some(sampling_hw::pages(record, &self.sampling, d.project(), (self.group, self.sound, self.zone)))
     }
 
@@ -35,6 +35,10 @@ impl App {
             takes: v.takes.len(),
             take_waves: v.takes.iter().map(|t| v.take_waves.get(t).cloned().unwrap_or_default()).collect(),
             take: v.focused,
+            layer_pending: self
+                .doc
+                .as_ref()
+                .is_some_and(|d| crate::layers::layer_pending(d.borrow().project(), self.group, self.sound, v).is_some()),
             stems: self
                 .stems
                 .as_ref()

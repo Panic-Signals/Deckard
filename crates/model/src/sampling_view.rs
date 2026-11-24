@@ -150,6 +150,8 @@ pub enum SamplingCall {
     LayerMute(usize),
     LayerSolo(usize),
     RemoveLayer(usize),
+    /// RECORD's APPLY: the focused take onto the layer LAYER was turned to.
+    ApplyTakeLayer,
     LayerLevel(f64),
     SpreadLayers,
 }

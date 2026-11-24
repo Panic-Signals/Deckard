@@ -72,7 +72,9 @@ fn names(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
 }
 
-pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usize)) -> Knobs {
+/// `layer`: with RECORD's LAYER, for a page that has an APPLY to go with it (NI's own
+/// scripts have no button for one).
+pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usize), layer: bool) -> Knobs {
     let mut out = Knobs::default();
     let a = &rec.auto;
     let auto = rec.mode == 3;
@@ -105,8 +107,8 @@ pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usiz
             recording.push(number("NoteOnMs", "NOTE ON", ms_text(a.note_on_ms), a.note_on_ms.into(), ms, RecParam::NoteOnMs));
         }
     }
-    // Where the take goes, on a sound that can have layers.
-    if let Some((options, at, values)) = crate::layers::take_choices(p, focus.0, focus.1, rec) {
+    // The focused take's layer, on a sound that can have layers.
+    if layer && let Some((options, at, values)) = crate::layers::take_choices(p, focus.0, focus.1, rec) {
         recording.push(choice("Layer", "LAYER", &options, at, Apply::Param(RecParam::Layer, Some(values))));
     }
     out.page("RECORDING", recording);
@@ -208,11 +210,23 @@ mod tests {
         let mut d = deckard_doc::Document::new_project().unwrap();
         d.add_slot(0, 1, 0, &deckard_doc::NewModule::Effect(deckard_model::PERFORM_FX.0)).unwrap();
         let rec = RecorderView { source: 2, internal: TapSource::Sound(0, 1), ..Default::default() };
-        let k = knobs(&rec, &Settings::default(), d.project(), (0, 0));
+        let k = knobs(&rec, &Settings::default(), d.project(), (0, 0), false);
         let input = k.pages.iter().flat_map(|p| &p.knobs).find(|k| k.key == "Input").expect("an INPUT knob");
         assert_eq!(input.value, 2.0, "the sound chosen: after the Master and the group");
         assert_eq!(input.max, 2.0, "the Master, the group, the one sound with a plug-in");
         let values = [TapSource::Master, TapSource::Group(0), TapSource::Sound(0, 1)].map(internal_value).to_vec();
         assert_eq!(k.apply["Input"], Apply::Param(RecParam::Internal, Some(values)));
+    }
+
+    /// NI's own scripts have no button for APPLY: their RECORDING page has no LAYER.
+    #[test]
+    fn the_scripts_route_has_no_layer_knob() {
+        let (_dir, mut app) = crate::layers_tests::three();
+        app.recorder.view.takes.push(std::path::PathBuf::from("take.wav"));
+        app.recorder.view.focused = Some(0);
+        let p = app.doc.as_ref().unwrap().borrow().project().clone();
+        let has = |layer: bool| knobs(&app.recorder.view, &app.settings, &p, (0, 0), layer).apply.contains_key("Layer");
+        assert!(has(true), "DECKARD's own page");
+        assert!(!has(false), "the scripts' page");
     }
 }

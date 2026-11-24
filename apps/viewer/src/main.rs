@@ -9986,7 +9986,7 @@ impl App {
         let at = (self.group, self.sound, self.zone);
         let pages = self.doc.as_ref().map(|d| {
             let d = d.borrow();
-            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound));
+            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), false);
             (
                 sampling_hw::pages(record, &self.sampling, d.project(), at),
                 sampling_hw::sample_view(&self.sampling, d.project(), at, focus_slice),
@@ -10239,6 +10239,7 @@ impl App {
             C::LayerMute(k) => S::Layer(k, layout::sampling::LayerAct::Mute),
             C::LayerSolo(k) => S::Layer(k, layout::sampling::LayerAct::Solo),
             C::RemoveLayer(k) => S::Layer(k, layout::sampling::LayerAct::Remove),
+            C::ApplyTakeLayer => S::Record(layout::sampling::RecordAct::ApplyLayer),
             C::LayerLevel(v) => S::Layer(self.zone, layout::sampling::LayerAct::Level(v)),
             C::SpreadLayers => S::Morph(layout::sampling::MorphAct::Spread),
             C::LaneMute(k) => S::Lane(k, layout::sampling::LaneAct::Mute),
