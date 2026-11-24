@@ -13,6 +13,7 @@ pub mod editor;
 pub mod module;
 pub mod native;
 pub mod nks;
+pub mod spectrum;
 pub mod tuner;
 pub mod zhora;
 /// Mutable Instruments' licence (Plaits), for the About box.
@@ -204,6 +205,7 @@ pub struct Plugin {
     pub name: String,
     pub id: PluginId,
     kind: Kind,
+    spectrum_tap: Option<spectrum::Tap>,
 }
 
 enum Kind {
@@ -238,12 +240,12 @@ impl Plugin {
     /// `sample_rate`, with no state set yet.
     pub fn new(module: &Arc<Module>, id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let v = Vst3::new(module, &id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)) })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)), spectrum_tap: None })
     }
 
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
-        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))) }
+        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))), spectrum_tap: None }
     }
 
     /// An instance of the Audio Unit `id` names, ready to process at `sample_rate`, with
@@ -251,7 +253,7 @@ impl Plugin {
     #[cfg(target_os = "macos")]
     pub fn audio_unit(id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let au = au::AudioUnit::new(&id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)) })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)), spectrum_tap: None })
     }
 
     /// What an Audio Unit shares with its window; none for any other plug-in.
@@ -490,7 +492,19 @@ impl Plugin {
         input: Option<(&[f32], &[f32])>,
         sidechain: Option<(&[f32], &[f32])>,
     ) -> (&[f32], &[f32]) {
-        each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain))
+        let out = each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain));
+        if let Some(tap) = &mut self.spectrum_tap {
+            match input {
+                Some(input) => tap.push(input, out),
+                None => tap.push_output(out),
+            }
+        }
+        out
+    }
+
+    /// Attach a tap prepared off the audio thread.
+    pub fn set_spectrum_tap(&mut self, tap: spectrum::Tap) {
+        self.spectrum_tap = Some(tap);
     }
 
     /// A way to read and change a VST3's or an Audio Unit's parameters without holding

@@ -16,6 +16,7 @@ use channel_sends as aux;
 #[cfg(feature = "output")]
 pub mod devices;
 pub mod edit;
+pub mod eq_spectrum;
 pub mod export;
 pub mod fx;
 pub mod glide;
@@ -42,6 +43,7 @@ mod prehear;
 pub mod queue;
 pub mod render;
 pub mod repeat;
+pub mod spectrum;
 pub use ahead::Junk;
 pub mod sample;
 pub mod sampler;
@@ -1388,6 +1390,7 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
         dr: vec![0.0; MAX_BLOCK],
         fade: (FX_FADE_SECONDS * sr_f).round() as u32,
         meters: None,
+        spectrum: None,
         tap: Vec::new(),
         sl: vec![0.0; MAX_BLOCK],
         sr: vec![0.0; MAX_BLOCK],
@@ -1477,6 +1480,13 @@ fn run_chain(chain: &mut FxChain, buf: &mut [f32], frames: usize, at: impl Fn(us
 
 /// A sound's effect plug-ins (its chain after the instrument), in order, and the
 /// sound's level and pan, which come after them.
+#[derive(Clone, Copy)]
+enum SpectrumChain {
+    Sound(usize, usize),
+    Group(usize),
+    Master,
+}
+
 struct FxChain {
     units: Vec<Unit>,
     gain: (f32, f32),
@@ -1489,6 +1499,7 @@ struct FxChain {
     fade: u32,
     /// Where metered effects post their meters, and this chain's sound (group, sound).
     meters: Option<(Arc<meters::FxMeters>, usize, usize)>,
+    spectrum: Option<(Arc<eq_spectrum::EqSpectrum>, SpectrumChain)>,
     /// This sound feeds side-chains: per tap, its buffer and gain (1 before its fader,
     /// for a sound source; its fader, for its group's sum).
     tap: Vec<(usize, (f32, f32))>,
@@ -1830,22 +1841,39 @@ impl FxChain {
                     drop(p);
                     timed(shared, started);
                 }
-                FxUnit::Internal { fx, glide, .. } => {
+                FxUnit::Internal { class, fx, glide, .. } => {
                     fx.set_transport(transport.playing.then_some(transport.quarters));
-                    // Gliding to new settings: a step of it every glide::STEP frames.
-                    let mut at = 0;
-                    while at < n {
-                        let to = if glide.gliding() { (at + glide::STEP).min(n) } else { n };
-                        if glide.tick() {
-                            fx.set(glide.now());
+                    let mut run = |l: &mut [f32], r: &mut [f32]| {
+                        // Gliding to new settings: a step of it every glide::STEP frames.
+                        let mut at = 0;
+                        while at < n {
+                            let to = if glide.gliding() { (at + glide::STEP).min(n) } else { n };
+                            if glide.tick() {
+                                fx.set(glide.now());
+                            }
+                            let (l, r) = (&mut l[at..to], &mut r[at..to]);
+                            if sources.is_empty() {
+                                fx.process(l, r)
+                            } else {
+                                fx.process_sc(l, r, Some((&self.sl[at..to], &self.sr[at..to])))
+                            }
+                            at = to;
                         }
-                        let (l, r) = (&mut self.l[at..to], &mut self.r[at..to]);
-                        if sources.is_empty() {
-                            fx.process(l, r)
-                        } else {
-                            fx.process_sc(l, r, Some((&self.sl[at..to], &self.sr[at..to])))
-                        }
-                        at = to;
+                    };
+                    let (l, r) = (&mut self.l[..n], &mut self.r[..n]);
+                    if class == "EQ"
+                        && !unit.ghost
+                        && unit.target > 0.0
+                        && let Some((board, chain)) = &self.spectrum
+                    {
+                        let owner = match *chain {
+                            SpectrumChain::Sound(g, s) => Owner::Chain(g, s, unit.slot),
+                            SpectrumChain::Group(g) => Owner::Group(g, unit.slot),
+                            SpectrumChain::Master => Owner::Master(unit.slot),
+                        };
+                        board.process(owner, l, r, run);
+                    } else {
+                        run(l, r);
                     }
                 }
             }
@@ -3160,6 +3188,7 @@ impl Engine {
                     dr: vec![0.0; MAX_BLOCK],
                     fade: (FX_FADE_SECONDS * sr_f).round() as u32,
                     meters: None,
+                    spectrum: None,
                     tap,
                     sl: vec![0.0; MAX_BLOCK],
                     sr: vec![0.0; MAX_BLOCK],
@@ -4968,6 +4997,25 @@ impl Engine {
                     c.meters = Some((m.clone(), g, s));
                 }
             }
+        }
+    }
+
+    /// Route any internal EQs to the output's spectrum monitor.
+    pub fn set_fx_spectrum(&mut self, board: &Arc<eq_spectrum::EqSpectrum>) {
+        for (g, row) in self.fx.iter_mut().enumerate() {
+            for (s, chain) in row.iter_mut().enumerate() {
+                if let Some(chain) = chain {
+                    chain.spectrum = Some((board.clone(), SpectrumChain::Sound(g, s)));
+                }
+            }
+        }
+        for (g, bus) in self.buses.iter_mut().enumerate() {
+            if let Some(bus) = bus {
+                bus.chain.spectrum = Some((board.clone(), SpectrumChain::Group(g)));
+            }
+        }
+        if let Some(chain) = &mut self.master_fx {
+            chain.spectrum = Some((board.clone(), SpectrumChain::Master));
         }
     }
 
@@ -12656,6 +12704,53 @@ mod tests {
         assert!(held <= 10f32.powf(-40.05 / 20.0) * 1.01, "the new ceiling holds it down: {held}");
     }
 
+    #[test]
+    fn internal_eq_spectrum_captures_the_selected_slot_before_and_after_processing() {
+        let board = Arc::new(eq_spectrum::EqSpectrum::default());
+        let transport = Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
+        let rate = 48_000.0;
+        let params = vec![("output_gain".into(), -0.5)];
+        let frames = deckard_plugins::spectrum::FRAMES;
+        for (route, owner) in [
+            (SpectrumChain::Sound(1, 2), Owner::Chain(1, 2, 3)),
+            (SpectrumChain::Group(1), Owner::Group(1, 3)),
+            (SpectrumChain::Master, Owner::Master(3)),
+        ] {
+            let fx = FxUnit::Internal {
+                class: "EQ".into(),
+                params: params.clone(),
+                fx: fx::make("EQ", &params, rate).unwrap(),
+                glide: glide::Glide::new(&params, rate),
+                modded: params.clone(),
+                hit: false,
+                modulated: false,
+            };
+            let mut chain = bare_chain(vec![Unit::new(fx, 3, Vec::new(), true)], rate);
+            chain.spectrum = Some((board.clone(), route));
+            let mut run = || {
+                for offset in (0..frames).step_by(128) {
+                    for i in 0..128 {
+                        let x = (std::f32::consts::TAU * (offset + i) as f32 / 64.0).sin() * 0.5;
+                        chain.l[i] = x;
+                        chain.r[i] = -x;
+                    }
+                    chain.run(128, &transport, &[], 0);
+                }
+            };
+            let mut other = board.watch(Owner::Master(7));
+            run();
+            assert!(other.receive().is_none());
+            let mut watched = board.watch(owner);
+            run();
+            let window = watched.receive().expect("the selected slot's window");
+            let peak = |channel| window.iter().map(|f| f[channel]).fold(0.0f32, f32::max);
+            assert!((peak(0) - 0.5).abs() < 0.001);
+            assert!((peak(1) - 0.5).abs() < 0.001);
+            assert!(peak(2) > 0.0 && peak(2) < 0.45, "the EQ attenuates the captured signal");
+            assert!((peak(2) - peak(3)).abs() < 0.001);
+        }
+    }
+
     /// An effect that keeps the last value of its first setting (as its output).
     struct LastSet(Arc<std::sync::Mutex<Vec<f64>>>);
     impl fx::Effect for LastSet {
@@ -12696,6 +12791,7 @@ mod tests {
             dr: vec![0.0; MAX_BLOCK],
             fade: 0,
             meters: None,
+            spectrum: None,
             tap: Vec::new(),
             sl: vec![0.0; MAX_BLOCK],
             sr: vec![0.0; MAX_BLOCK],

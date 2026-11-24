@@ -729,27 +729,31 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
 fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
-    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
+    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565_dithered, rgb565_rounded};
+    // (A picture's pixels, marked by the surface, rounded rather than dithered.)
+    let to565 = |x: usize, y: usize, [r, g, b, a]: [u8; 4]| {
+        if a == deckard_surface::PICTURE_ALPHA { rgb565_rounded(r, g, b) } else { rgb565_dithered(x, y, r, g, b) }
+    };
     let mut left = vec![0u16; WIDTH * HEIGHT];
     let mut right = vec![0u16; WIDTH * HEIGHT];
     let mut px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
     let mut last_px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
-    // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
+    // Fill `out` with one 480×272 half of a 960-wide RGBA picture, dithered to the
+    // displays' 5-6-5 levels (the one place the picture loses its low bits).
     let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
         let stride = WIDTH * 2;
         if px.len() >= stride * HEIGHT && x0 + WIDTH <= stride {
             for y in 0..HEIGHT {
                 let src = &px[y * stride + x0..y * stride + x0 + WIDTH];
                 let dst = &mut out[y * WIDTH..(y + 1) * WIDTH];
-                for (o, &[r, g, b, _]) in dst.iter_mut().zip(src) {
-                    *o = rgb565(r, g, b);
+                for (x, (o, &p)) in dst.iter_mut().zip(src).enumerate() {
+                    *o = to565(x, y, p);
                 }
             }
         } else {
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
-                    let [r, g, b, _] = px.get(y * stride + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
-                    out[y * WIDTH + x] = rgb565(r, g, b);
+                    out[y * WIDTH + x] = to565(x, y, px.get(y * stride + x0 + x).copied().unwrap_or([0, 0, 0, 255]));
                 }
             }
         }
@@ -797,6 +801,7 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
         }
         let mut shown = None;
         last_px.clear();
+        let mut previous: Option<deckard_surface::Picture> = None;
         loop {
             let (closing, released, next_screen) = {
                 let mut s = shared.lock().unwrap();
@@ -832,11 +837,56 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 break;
             }
             if let Some((n, frame)) = next_screen {
-                frame.write_pixels(&mut px);
-                let left_dirty = half_changed(&px, &last_px, 0);
-                let right_dirty = half_changed(&px, &last_px, WIDTH);
-                if left_dirty || right_dirty {
-                    let mut res = Ok(());
+                let region = match frame {
+                    ScreenFrame::Picture(picture) => {
+                        let mut picture = Arc::try_unwrap(picture).unwrap_or_else(|shared| (*shared).clone());
+                        let region = previous.as_ref().and_then(|old| picture.rasterize_spectrum_update(old, &mut px));
+                        if region.is_none() {
+                            picture.rasterize_into(&mut px);
+                        }
+                        previous = Some(picture);
+                        region
+                    }
+                    ScreenFrame::Pixels(pixels) => {
+                        previous = None;
+                        px.clear();
+                        px.extend_from_slice(&pixels);
+                        None
+                    }
+                };
+                let mut res = Ok(());
+                if let Some((x0, y0, x1, y1)) = region {
+                    for (panel, rgb) in [&mut left, &mut right].into_iter().enumerate() {
+                        let start = x0.max(panel * WIDTH);
+                        let end = x1.min((panel + 1) * WIDTH);
+                        if start >= end {
+                            continue;
+                        }
+                        let mut changed = false;
+                        for y in y0..y1 {
+                            let wide_row = y * (2 * WIDTH);
+                            for x in start..end {
+                                let pixel = px[wide_row + x];
+                                if last_px[wide_row + x] != pixel {
+                                    last_px[wide_row + x] = pixel;
+                                    let x = x - panel * WIDTH;
+                                    let dst = &mut rgb[y * WIDTH + x];
+                                    let value = to565(x, y, pixel);
+                                    changed |= *dst != value;
+                                    *dst = value;
+                                }
+                            }
+                        }
+                        if changed {
+                            res = d.show(panel, rgb);
+                            if res.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    let left_dirty = half_changed(&px, &last_px, 0);
+                    let right_dirty = half_changed(&px, &last_px, WIDTH);
                     if left_dirty {
                         fill_half(&px, 0, &mut left);
                         res = d.show(0, &left);
@@ -845,13 +895,13 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                         fill_half(&px, WIDTH, &mut right);
                         res = d.show(1, &right);
                     }
-                    if let Err(e) = res {
-                        let mut s = shared.lock().unwrap();
-                        s.display_status = e;
-                        s.displays_connected = false;
-                        break;
-                    }
                     std::mem::swap(&mut last_px, &mut px);
+                }
+                if let Err(e) = res {
+                    let mut s = shared.lock().unwrap();
+                    s.display_status = e;
+                    s.displays_connected = false;
+                    break;
                 }
                 shown = Some(n);
             }
