@@ -369,11 +369,9 @@ fn dragging_keys_is_one_undo_step() {
     assert!(zones(&app).iter().all(|z| z.key_range == (0, 127)));
 }
 
-/// A take goes where RECORD's LAYER says: the first is the sound's sample, New adds a
-/// layer each time, a number records that layer again and keeps its settings.
+/// The first take is the sound's sample; the next ones wait in the list, on no layer.
 #[test]
-fn takes_go_to_the_layer_chosen() {
-    use crate::layout::sampling::RecParam;
+fn later_takes_go_on_no_layer() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app();
     let take = |app: &mut App, name: &str, hz: f32| {
@@ -382,51 +380,135 @@ fn takes_go_to_the_layer_chosen() {
     };
     take(&mut app, "one.wav", 220.0);
     assert_eq!(names(&app), ["one.wav"]);
-    // Again on 1, without layers: the sample is recorded again, the sound stays plain.
-    take(&mut app, "again.wav", 220.0);
-    assert_eq!(names(&app), ["again.wav"]);
     assert!(!layered(&project(&app), 0, 0), "it can still be sliced");
-    // New: one more layer, each time.
-    app.recorder.view.set(RecParam::Layer, MAX_LAYERS as i64);
     take(&mut app, "two.wav", 330.0);
-    take(&mut app, "three.wav", 440.0);
-    assert_eq!(names(&app), ["again.wav", "two.wav", "three.wav"]);
-    assert!(layered(&project(&app), 0, 0));
-    // A number: that layer again, its settings its own.
-    app.layer_act(1, LayerAct::Level(0.3));
-    app.recorder.view.set(RecParam::Layer, 1);
-    take(&mut app, "redo.wav", 330.0);
-    assert_eq!(names(&app), ["again.wav", "redo.wav", "three.wav"]);
-    assert!((zones(&app)[1].gain - 0.3).abs() < 1e-9, "{}", zones(&app)[1].gain);
-    // One undo step a take.
-    app.undo();
-    assert_eq!(names(&app), ["again.wav", "two.wav", "three.wav"]);
+    assert_eq!(names(&app), ["one.wav"], "the sound plays what it did");
 }
 
-/// LAYER lists the sound's layers and New; a take's menu puts it on one.
-#[test]
-fn the_layer_choices_follow_the_sound() {
-    use crate::layout::sampling::{RecParam, RecordAct, SamplingAct};
+/// Three layers, and a take focused that is on none of them.
+fn three_and_a_take() -> (tempfile::TempDir, App, PathBuf) {
     let (dir, mut app) = three();
+    let f = tone(dir.path(), "take.wav", 500.0);
+    app.recorder.view.takes.push(f.clone());
+    app.recorder.view.focused = Some(0);
+    (dir, app, f)
+}
+
+fn record(app: &mut App, a: crate::layout::sampling::RecordAct) {
+    app.sampling_act(crate::layout::sampling::SamplingAct::Record(a));
+}
+
+/// LAYER is the focused take's: None, the sound's layers, New. Turning it changes
+/// nothing in the sound.
+#[test]
+fn the_layer_choices_are_the_focused_takes() {
+    use crate::layers::{NO_LAYER, layer_pending};
+    use crate::layout::sampling::{RecParam, RecordAct};
+    let (_dir, mut app) = three();
     let choices = |app: &App| take_choices(&project(app), 0, 0, &app.recorder.view).map(|c| (c.0, c.1));
+    let pending = |app: &App| layer_pending(&project(app), 0, 0, &app.recorder.view);
     let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    assert_eq!(choices(&app), Some((s(&["1", "2", "3", "New"]), 0)));
-    app.recorder.view.set(RecParam::Layer, MAX_LAYERS as i64);
-    assert_eq!(choices(&app).unwrap().1, 3, "New");
-    // Loop has a target of its own.
-    app.recorder.view.set(RecParam::Mode, 2);
-    assert_eq!(choices(&app), None);
-    app.recorder.view.set(RecParam::Mode, 0);
+    assert_eq!(choices(&app), None, "no take focused");
+    let f = tone(_dir.path(), "take.wav", 500.0);
+    app.recorder.view.takes.push(f);
+    app.recorder.view.focused = Some(0);
+    assert_eq!(choices(&app), Some((s(&["None", "1", "2", "3", "New"]), 0)));
+    assert_eq!(pending(&app), None);
+    let before = (names(&app), labels(&app).len());
+    record(&mut app, RecordAct::Set(RecParam::Layer, 1));
+    assert_eq!(choices(&app).unwrap().1, 2);
+    assert_eq!(pending(&app), Some(1));
+    assert_eq!((names(&app), labels(&app).len()), before, "only chosen");
+    record(&mut app, RecordAct::Set(RecParam::Layer, NO_LAYER));
+    assert_eq!(pending(&app), None, "it is on none");
     // The MK3's RECORDING page has it too.
     let knobs = crate::record_knobs::knobs(&app.recorder.view, &app.settings, &project(&app), (0, 0));
     let k = knobs.pages[0].knobs.iter().find(|k| k.name == "LAYER").expect("a LAYER knob");
-    assert_eq!((k.text.as_str(), k.max), ("New", 3.0));
-    // A take, right-clicked: onto layer 2.
-    let f = tone(dir.path(), "take.wav", 500.0);
-    app.recorder.view.takes.push(f);
-    app.sampling_act(SamplingAct::Record(RecordAct::TakeToLayer(0, 1)));
-    assert_eq!(names(&app)[1], "take.wav");
-    assert_eq!(zones(&app).len(), 3);
+    assert_eq!((k.text.as_str(), k.max), ("None", 4.0));
+    // Loop has a target of its own.
+    app.recorder.view.set(RecParam::Mode, 2);
+    assert_eq!(choices(&app), None);
+}
+
+/// APPLY puts the take on the layer chosen (New: one more); None takes its layer away.
+/// One undo step each.
+#[test]
+fn apply_puts_the_take_on_the_layer_chosen() {
+    use crate::layers::{NO_LAYER, take_layer};
+    use crate::layout::sampling::{RecParam, RecordAct};
+    let (_dir, mut app, f) = three_and_a_take();
+    let on = |app: &App| take_layer(&project(app), 0, 0, &f);
+    app.layer_act(1, LayerAct::Level(0.3));
+    let before = labels(&app).len();
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(labels(&app).len(), before, "nothing chosen: nothing done");
+    record(&mut app, RecordAct::Set(RecParam::Layer, 1));
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(names(&app), ["a2.wav", "take.wav", "a4.wav"]);
+    assert!((zones(&app)[1].gain - 0.3).abs() < 1e-9, "the layer's settings stay");
+    assert_eq!((on(&app), app.recorder.view.layer_choice), (Some(1), None));
+    assert_eq!(labels(&app).len(), before + 1);
+    // New.
+    record(&mut app, RecordAct::Set(RecParam::Layer, MAX_LAYERS as i64));
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(names(&app), ["a2.wav", "take.wav", "a4.wav", "take.wav"]);
+    // On two layers: it shows the first, and None takes only that one away.
+    assert_eq!(on(&app), Some(1));
+    let before = labels(&app).len();
+    record(&mut app, RecordAct::Set(RecParam::Layer, NO_LAYER));
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(names(&app), ["a2.wav", "a4.wav", "take.wav"]);
+    assert_eq!(labels(&app).len(), before + 1);
+    app.undo();
+    assert_eq!(names(&app), ["a2.wav", "take.wav", "a4.wav", "take.wav"]);
+}
+
+/// A choice not applied goes when another take is focused or the focused one deleted,
+/// when a take is recorded, and counts for nothing where it can't be had.
+#[test]
+fn a_pending_choice_is_dropped() {
+    use crate::layers::layer_pending;
+    use crate::layout::sampling::{RecParam, RecordAct};
+    let (dir, mut app, f) = three_and_a_take();
+    let pending = |app: &App| layer_pending(&project(app), 0, 0, &app.recorder.view);
+    let choose = |app: &mut App, v: i64| record(app, RecordAct::Set(RecParam::Layer, v));
+    app.recorder.view.takes.push(tone(dir.path(), "other.wav", 600.0));
+    choose(&mut app, 1);
+    record(&mut app, RecordAct::FocusTake(1));
+    assert_eq!(app.recorder.view.layer_choice, None, "another take focused");
+    choose(&mut app, 1);
+    record(&mut app, RecordAct::DeleteTake(1));
+    assert_eq!(app.recorder.view.layer_choice, None, "the take deleted");
+    // A take recorded: it is focused, on no layer.
+    app.recorder.view.focused = Some(0);
+    choose(&mut app, 1);
+    app.path = Some(dir.path().join("p.mxprj"));
+    let sample = deckard_engine::sample::Sample { rate: 48_000, frames: vec![[0.1, 0.1]; 4800] };
+    app.finish_recording(crate::recorder::Finished::Take { sample, channels: 2, mode: 0, ticks: 960.0, focus: (0, 0) });
+    assert_eq!((app.recorder.view.focused, app.recorder.view.layer_choice), (Some(1), None));
+    assert_eq!(names(&app), ["a2.wav", "a3.wav", "a4.wav"]);
+    // The take's file gone: APPLY says so and changes nothing.
+    app.recorder.view.focused = Some(0);
+    std::fs::remove_file(&f).unwrap();
+    choose(&mut app, 1);
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(names(&app), ["a2.wav", "a3.wav", "a4.wav"]);
+    assert_eq!(app.recorder.view.layer_choice, None);
+    assert!(app.status.contains("take.wav"), "{}", app.status);
+    // Every layer taken: no New, and one chosen before counts for nothing.
+    let more: Vec<PathBuf> = (3..MAX_LAYERS).map(|k| tone(dir.path(), &format!("l{k}.wav"), 100.0 + k as f32)).collect();
+    app.layer_files(3, &more);
+    assert_eq!(zones(&app).len(), MAX_LAYERS);
+    app.recorder.view.layer_choice = Some(MAX_LAYERS as i64);
+    assert_eq!(pending(&app), None);
+    assert!(!take_choices(&project(&app), 0, 0, &app.recorder.view).unwrap().0.contains(&"New".to_string()));
+    // A sound that can't have layers: no LAYER, and APPLY does nothing.
+    choose(&mut app, 1);
+    app.sound = 1;
+    assert_eq!(take_choices(&project(&app), 0, 1, &app.recorder.view), None);
+    let before = labels(&app).len();
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(labels(&app).len(), before);
 }
 
 /// A take clicked is only focused on a Sampler Preview that has a sample: the first

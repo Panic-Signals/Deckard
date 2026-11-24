@@ -568,6 +568,8 @@ pub enum RecordAct {
     DeleteTake(usize),
     /// Take `.0` onto lane `.1` of the focused sound (past its layers: a new one).
     TakeToLayer(usize, usize),
+    /// The focused take onto the layer LAYER was turned to.
+    ApplyLayer,
 }
 
 fn sact(a: SamplingAct) -> Act {
@@ -2924,7 +2926,7 @@ pub enum RecParam {
     Mode,
     Length,
     Target,
-    /// The lane a take goes to; `MAX_LAYERS`: a new layer.
+    /// The layer chosen for the focused take (`RecorderView::layer_choice`).
     Layer,
     Monitor,
     Channel,
@@ -3042,9 +3044,9 @@ pub struct RecorderView {
     /// 1, 2, 4, 8 or 16 bars, or FREE; Loop's target: Take, Sound or Pattern.
     pub length: usize,
     pub target: usize,
-    /// The layer a take goes to on a sound with layers: its lane, or `MAX_LAYERS` for a
-    /// new one.
-    pub layer: usize,
+    /// The layer RECORD's LAYER was turned to for the focused take, until APPLY puts it
+    /// there: `layers::NO_LAYER`, a lane, or `MAX_LAYERS` for a new one.
+    pub layer_choice: Option<i64>,
     pub monitor: bool,
     pub auto: AutoParams,
     /// MIDI outputs there are (Auto ▸ MIDI To).
@@ -3077,7 +3079,7 @@ impl RecorderView {
             RecParam::Mode => self.mode = v.clamp(0, 3) as usize,
             RecParam::Length => self.length = v.clamp(0, 5) as usize,
             RecParam::Target => self.target = v.clamp(0, 2) as usize,
-            RecParam::Layer => self.layer = v.clamp(0, deckard_model::layers::MAX_LAYERS as i64) as usize,
+            RecParam::Layer => self.layer_choice = Some(v.clamp(crate::layers::NO_LAYER, deckard_model::layers::MAX_LAYERS as i64)),
             RecParam::Monitor => self.monitor = v != 0,
             RecParam::Channel => a.channel = v.clamp(1, 16) as u8,
             RecParam::NoteOnMs => {

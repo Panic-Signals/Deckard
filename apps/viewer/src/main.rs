@@ -9268,6 +9268,7 @@ impl App {
                 RecordAct::Set(..) | RecordAct::Threshold(_) | RecordAct::MidiTo(_) => {}
                 RecordAct::FocusTake(i) => {
                     self.recorder.view.focused = Some(i);
+                    self.recorder.view.layer_choice = None;
                     let (g, s) = (self.group, self.sound);
                     // A Sampler Preview with a sample keeps it: a take clicked is only
                     // focused, and its menu puts it on a layer. [DECKARD's choice]
@@ -9276,8 +9277,10 @@ impl App {
                         self.place_take(g, s, &p);
                     }
                 }
+                RecordAct::ApplyLayer => self.apply_take_layer(),
                 RecordAct::TakeToLayer(i, lane) => {
                     self.recorder.view.focused = Some(i);
+                    self.recorder.view.layer_choice = None;
                     if let Some(p) = self.recorder.view.takes.get(i).cloned() {
                         let (g, s) = (self.group, self.sound);
                         self.take_to_layer(g, s, &p, lane);
@@ -9290,6 +9293,7 @@ impl App {
                         self.unload_take(&path);
                     }
                     self.recorder.view.focused = None;
+                    self.recorder.view.layer_choice = None;
                 }
             },
         }
@@ -10454,6 +10458,7 @@ impl App {
                 self.recorder.view.take_waves.insert(path.clone(), recorder::mini_wave(&sample.frames));
                 self.recorder.view.takes.push(path.clone());
                 self.recorder.view.focused = Some(self.recorder.view.takes.len() - 1);
+                self.recorder.view.layer_choice = None;
                 if mode == 2 {
                     self.finish_loop(&path, sample.frames.len(), sample.rate, ticks, focus);
                 } else {
