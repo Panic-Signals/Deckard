@@ -58,6 +58,18 @@ pub struct Settings {
     pub asio_device: Option<String>,
     /// The Sampler pages show the focused zone's waveform (Maschine doesn't).
     pub show_waveform: bool,
+    /// Preferences > Audio: capture the recent master output in the scrolling sampler.
+    pub scrolling_sampler: bool,
+    /// Seconds retained by the scrolling sampler.
+    pub scrolling_seconds: u32,
+    /// Scrolling sampler waveform palette.
+    pub scrolling_palette: u8,
+    /// Custom scrolling sampler waveform colour as packed RGB (`0xRRGGBB`).
+    pub scrolling_color: u32,
+    /// Remove leading and trailing low-level silence when exporting a selection.
+    pub scrolling_remove_silence: bool,
+    /// Fade duration applied at selection edges, in milliseconds.
+    pub scrolling_fade_ms: u32,
     /// The browser's FILES tab: folders pinned to its top.
     pub favorite_folders: Vec<PathBuf>,
     /// The browser's `+ ROUTING` and `+ PATTERNS`: loading a group brings its routing
@@ -370,6 +382,12 @@ impl Default for Settings {
             audio_driver: AudioDriver::default(),
             asio_device: None,
             show_waveform: true,
+            scrolling_sampler: false,
+            scrolling_seconds: 120,
+            scrolling_palette: 0,
+            scrolling_color: 0xb9bfc3,
+            scrolling_remove_silence: false,
+            scrolling_fade_ms: 5,
             midi_off: BTreeSet::new(),
             mpe: Default::default(),
             mpe_out: Default::default(),
@@ -467,6 +485,14 @@ impl Settings {
                 "scan_on_start" => s.scan_on_start = v == "true",
                 "bridge_windows" => s.bridge_windows = v == "true",
                 "show_waveform" => s.show_waveform = v == "true",
+                "scrolling_sampler" => s.scrolling_sampler = v == "true",
+                "scrolling_seconds" => s.scrolling_seconds = v.parse().unwrap_or(120).clamp(30, 600),
+                "scrolling_palette" => s.scrolling_palette = v.parse().unwrap_or(0).min(2),
+                "scrolling_color" => {
+                    s.scrolling_color = u32::from_str_radix(v.trim_start_matches('#'), 16).unwrap_or(0xb9bfc3) & 0x00ff_ffff
+                }
+                "scrolling_remove_silence" => s.scrolling_remove_silence = v == "true",
+                "scrolling_fade_ms" => s.scrolling_fade_ms = v.parse().unwrap_or(5).clamp(1, 10),
                 "dir" => dirs.push(PathBuf::from(v)),
                 "favorite_folder" => s.favorite_folders.push(PathBuf::from(v)),
                 "load_group_routing" => s.load_group_routing = v != "false",
@@ -752,8 +778,18 @@ impl Settings {
     /// The settings as saved: lines of `key = value`.
     pub fn to_text(&self) -> String {
         let mut out = format!(
-            "use_vst3 = {}\nuse_vst2 = {}\nuse_au = {}\nscan_on_start = {}\nshow_waveform = {}\n",
-            self.use_vst3, self.use_vst2, self.use_au, self.scan_on_start, self.show_waveform
+            "use_vst3 = {}\nuse_vst2 = {}\nuse_au = {}\nscan_on_start = {}\nshow_waveform = {}\nscrolling_sampler = {}\nscrolling_seconds = {}\nscrolling_palette = {}\nscrolling_color = {:06x}\nscrolling_remove_silence = {}\nscrolling_fade_ms = {}\n",
+            self.use_vst3,
+            self.use_vst2,
+            self.use_au,
+            self.scan_on_start,
+            self.show_waveform,
+            self.scrolling_sampler,
+            self.scrolling_seconds,
+            self.scrolling_palette,
+            self.scrolling_color,
+            self.scrolling_remove_silence,
+            self.scrolling_fade_ms
         );
         if !self.bridge_windows {
             out += "bridge_windows = false\n";

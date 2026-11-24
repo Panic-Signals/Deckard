@@ -40,6 +40,7 @@ pub mod pool;
 mod prehear;
 pub mod queue;
 pub mod repeat;
+pub mod scrolling;
 pub use ahead::Junk;
 pub mod sample;
 pub mod sampler;

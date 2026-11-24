@@ -126,6 +126,7 @@ mod sampler_ui;
 mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
+mod scrolling_sampler;
 mod session_backup;
 mod settings;
 mod splash;
@@ -247,20 +248,21 @@ fn main() {
         p.exists().then_some(p)
     });
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
+    let splash = boot::splash_wanted(&args);
     // (flag, value) pairs for --press/--pad, in order.
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
     let app_icon = settings::Settings::load().app_icon;
+    let root_size = if splash && splash::wayland() { splash::size() } else { egui::vec2(width, 930.0) };
     let options = eframe::NativeOptions {
         // The icon picked in Preferences ▸ General, from the start.
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([width, 930.0])
+            .with_inner_size(root_size)
             .with_drag_and_drop(true)
             .with_icon(std::sync::Arc::new(app_icon.icon_data())),
         ..Default::default()
     };
-    let splash = boot::splash_wanted(&args);
     let result = eframe::run_native(
         "DECKARD",
         options,
@@ -856,6 +858,21 @@ enum WineAction {
 
 #[derive(Default)]
 pub struct App {
+    /// Scrolling sampler view state; these are session/UI values, never project data.
+    scroll_view_seconds: f32,
+    scroll_pan_frames: u64,
+    scroll_selection: Option<(u64, u64)>,
+    scroll_drag_start: Option<u64>,
+    scroll_dragging_selection: bool,
+    scroll_cached_selection: Option<(u64, u64)>,
+    scroll_cached_remove_silence: bool,
+    scroll_cached_fade_ms: u32,
+    scroll_cached_path: Option<PathBuf>,
+    scroll_export: Option<std::sync::mpsc::Receiver<(u64, u64, bool, u32, PathBuf, Result<(), String>)>>,
+    /// Selection edge currently being resized: 0 = left, 1 = right.
+    scroll_resize_edge: Option<u8>,
+    /// Whether the scrolling sampler strip is hidden; capture continues while hidden.
+    scroll_collapsed: bool,
     group_load: Option<preset_load::GroupLoad>,
     /// A non-group library load held back a couple of frames so the MK3 "loading" overlay is drawn first.
     item_load: Option<preset_load::ItemLoad>,
@@ -2444,6 +2461,76 @@ impl App {
         let mut size = self.settings.buffer_frames;
         let mut restart = false;
         egui::Grid::new("audio-engine").num_columns(2).show(ui, |ui| {
+            ui.label("Scrolling sampler");
+            let mut scrolling = self.settings.scrolling_sampler;
+            ui.checkbox(&mut scrolling, "Capture recent master output");
+            ui.end_row();
+            if scrolling != self.settings.scrolling_sampler {
+                self.settings.scrolling_sampler = scrolling;
+                self.settings.save();
+                if let Some(Ok(out)) = &self.output {
+                    out.scrolling().sync(scrolling, self.settings.scrolling_seconds as f32);
+                }
+            }
+                if self.settings.scrolling_sampler {
+                ui.label("Buffer");
+                let mut seconds = self.settings.scrolling_seconds;
+                crate::layout::combo("scrolling-buffer").selected_text(format!("{seconds} seconds")).show_ui(ui, |ui| {
+                    for value in [30, 60, 120, 300, 600] {
+                        ui.selectable_value(&mut seconds, value, format!("{value} seconds"));
+                    }
+                });
+                ui.end_row();
+                if seconds != self.settings.scrolling_seconds {
+                    self.settings.scrolling_seconds = seconds;
+                    self.settings.save();
+                }
+                ui.label("Waveform colour");
+                let mut palette = self.settings.scrolling_palette;
+                crate::layout::combo("scrolling-palette").selected_text(["Theme", "Custom", "Rainbow"][palette as usize]).show_ui(ui, |ui| {
+                    for (value, label) in [(0, "Theme"), (1, "Custom"), (2, "Rainbow")] {
+                        ui.selectable_value(&mut palette, value, label);
+                    }
+                });
+                ui.end_row();
+                if palette != self.settings.scrolling_palette {
+                    self.settings.scrolling_palette = palette;
+                    self.settings.save();
+                }
+                if self.settings.scrolling_palette == 1 {
+                    ui.label("Custom colour");
+                    let mut color = egui::Color32::from_rgb(
+                        (self.settings.scrolling_color >> 16) as u8,
+                        (self.settings.scrolling_color >> 8) as u8,
+                        self.settings.scrolling_color as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut color).changed() {
+                        self.settings.scrolling_color = (u32::from(color.r()) << 16) | (u32::from(color.g()) << 8) | u32::from(color.b());
+                        self.settings.save();
+                    }
+                    ui.end_row();
+                }
+                ui.label("Selection cleanup");
+                let mut remove_silence = self.settings.scrolling_remove_silence;
+                ui.checkbox(&mut remove_silence, "Remove leading and trailing silence");
+                ui.end_row();
+                if remove_silence != self.settings.scrolling_remove_silence {
+                    self.settings.scrolling_remove_silence = remove_silence;
+                    self.settings.save();
+                }
+                ui.label("Fade to zero crossing");
+                let mut fade = self.settings.scrolling_fade_ms;
+                egui::ComboBox::from_id_salt("scrolling-fade").selected_text(format!("{fade} ms")).show_ui(ui, |ui| {
+                    for value in 1..=10 {
+                        ui.selectable_value(&mut fade, value, format!("{value} ms"));
+                    }
+                });
+                ui.end_row();
+                if fade != self.settings.scrolling_fade_ms {
+                    self.settings.scrolling_fade_ms = fade;
+                    self.settings.save();
+                }
+            }
             ui.label("Buffer size");
             crate::layout::combo("buffer-size").selected_text(format!("{size} samples ({:.1} ms)", ms(size))).show_ui(ui, |ui| {
                 for n in BUFFER_SIZES {
@@ -11860,6 +11947,9 @@ impl App {
             out.set_focus(Some(self.group));
         }
         self.update_meters(ctx, std::time::Duration::ZERO);
+        if self.settings.scrolling_sampler {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
 
         layout::header(self, ui);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::F4)) {
@@ -11962,6 +12052,16 @@ impl App {
             let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
             if let Some(&(_, gs)) = rows.iter().find(|(r, _)| r.contains(p)) {
                 self.browse(browser::BrowseAct::LoadFile(dragged.0.clone(), Some(gs)));
+            }
+        }
+        if ctx.input(|i| i.pointer.any_released())
+            && egui::DragAndDrop::has_payload_of_type::<scrolling_sampler::DraggedSelection>(ctx)
+            && let Some(dragged) = egui::DragAndDrop::take_payload::<scrolling_sampler::DraggedSelection>(ctx)
+            && let Some(p) = ctx.input(|i| i.pointer.interact_pos())
+        {
+            let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
+            if let Some(&(_, (g, s))) = rows.iter().find(|(r, _)| r.contains(p)) {
+                self.drop_samples((g, s), std::slice::from_ref(&dragged.0));
             }
         }
         if self.save_dialog.is_some() {

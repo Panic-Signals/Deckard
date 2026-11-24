@@ -2129,6 +2129,27 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 if keys.clicked() {
                     acts.push(Act::ToggleKeys);
                 }
+                ui.add_space(2.0);
+                let sampler_tip =
+                    if app.scroll_collapsed { "Show scrolling sampler" } else { "Hide scrolling sampler (capture continues)" };
+                let sampler = icon_button(ui, t, !app.scroll_collapsed, white(245), sampler_tip, |p, r, c| {
+                    let center = r.center();
+                    let left = center + Vec2::new(-5.0, 0.0);
+                    let right = center + Vec2::new(5.0, 0.0);
+                    let reel_stroke = Stroke::new(1.2, c);
+                    p.line_segment([left + Vec2::new(3.8, 0.0), right - Vec2::new(3.8, 0.0)], Stroke::new(1.0, c));
+                    p.line_segment([left + Vec2::new(0.0, -4.0), right + Vec2::new(0.0, -4.0)], Stroke::new(1.0, c));
+                    p.circle_stroke(left, 4.2, reel_stroke);
+                    p.circle_stroke(right, 4.2, reel_stroke);
+                    p.circle_stroke(left, 1.4, Stroke::new(1.0, c));
+                    p.circle_stroke(right, 1.4, Stroke::new(1.0, c));
+                    p.line_segment([left + Vec2::new(-2.0, -2.0), left + Vec2::new(2.0, 2.0)], Stroke::new(0.9, c));
+                    p.line_segment([right + Vec2::new(-2.0, 2.0), right + Vec2::new(2.0, -2.0)], Stroke::new(0.9, c));
+                });
+                note_rect(ui, "scrolling-sampler-toggle", sampler.rect);
+                if sampler.clicked() {
+                    app.scroll_collapsed = !app.scroll_collapsed;
+                }
             }
             let middle_end = mid_rect.right();
             // Right, as Maschine's: the controller view, the master fader, the CPU meter.
@@ -2586,7 +2607,8 @@ pub fn body(app: &mut App, ui: &mut Ui) {
         let chain_h = CHAIN_H + if app.remote.assign.is_some() { assign::ASSIGN_H } else { 0.0 };
         let song_h = song_height(all.height(), chain_h, app.settings.song_panel_h);
         let song = Rect::from_min_size(all.min, Vec2::new(all.width(), song_h));
-        let chain = Rect::from_min_size(Pos2::new(all.left(), song.bottom() + GAP), Vec2::new(all.width(), chain_h));
+        let sampler_h = if app.settings.scrolling_sampler && !app.scroll_collapsed { crate::scrolling_sampler::HEIGHT + GAP } else { 0.0 };
+        let chain = Rect::from_min_size(Pos2::new(all.left(), song.bottom() + GAP + sampler_h), Vec2::new(all.width(), chain_h));
         let group = Rect::from_min_max(Pos2::new(all.left(), chain.bottom() + GAP), all.max);
         // (Stopped: where STOP left it.)
         let head = app.shown_playhead();
@@ -2616,6 +2638,11 @@ pub fn body(app: &mut App, ui: &mut Ui) {
             song_view(ui, app, project, song, head, &mut acts);
         } else {
             ideas_view(ui, app, project, song, head, &mut acts);
+        }
+        if app.settings.scrolling_sampler && !app.scroll_collapsed {
+            let sampler =
+                Rect::from_min_size(Pos2::new(all.left(), song.bottom() + GAP), Vec2::new(all.width(), crate::scrolling_sampler::HEIGHT));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(sampler), |ui| crate::scrolling_sampler::panel(ui, app));
         }
         chain_area(ui, app, &d, chain, &mut acts);
         group_panel(ui, app, project, group, head, &mut acts);
@@ -3455,7 +3482,8 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
             || ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p))
                 && (egui::DragAndDrop::payload::<crate::layout::browser::Dragged>(ui.ctx()).is_some()
                     || egui::DragAndDrop::payload::<crate::layout::browser::DraggedFile>(ui.ctx()).is_some()
-                    || egui::DragAndDrop::payload::<crate::layout::sampling::DraggedTake>(ui.ctx()).is_some());
+                    || egui::DragAndDrop::payload::<crate::layout::sampling::DraggedTake>(ui.ctx()).is_some()
+                    || egui::DragAndDrop::payload::<crate::scrolling_sampler::DraggedSelection>(ui.ctx()).is_some());
         if over {
             ui.painter().rect_stroke(r.shrink(1.0), 2.0, Stroke::new(2.0, ink()), StrokeKind::Inside);
         }
@@ -5942,43 +5970,45 @@ fn module_menu(
     // A group's and the master's chains take effects only.
     let sound = matches!(chain, deckard_doc::Chain::Sound(..));
     ui.menu_button("Internal", |ui| {
-        if sound {
-            internal_instruments(ui, instruments, pick, acts);
-            ui.separator();
-        }
-        for (class, _) in deckard_model::INTERNAL_EFFECTS {
-            if ui.button(deckard_model::module_label(class)).clicked() {
-                acts.push(pick(AddWhat::Effect(class)));
-                ui.close();
-            }
-            if deckard_model::EFFECT_GROUP_ENDS.contains(class) {
+        egui::ScrollArea::vertical().max_height(520.0).auto_shrink([false, false]).show(ui, |ui| {
+            if sound {
+                internal_instruments(ui, instruments, pick, acts);
                 ui.separator();
             }
-        }
-        // DECKARD's own effects.
-        for c in native(false) {
-            if ui.button(c.name).clicked() {
-                acts.push(pick(AddWhat::Plugin(native_entry(c))));
-                ui.close();
+            for (class, _) in deckard_model::INTERNAL_EFFECTS {
+                if ui.button(deckard_model::module_label(class)).clicked() {
+                    acts.push(pick(AddWhat::Effect(class)));
+                    ui.close();
+                }
+                if deckard_model::EFFECT_GROUP_ENDS.contains(class) {
+                    ui.separator();
+                }
             }
-        }
-        // A group's Perform FX: one, first in its chain (Maschine's last category).
-        if let (true, deckard_doc::Chain::Group(g)) = (perform, chain) {
-            ui.separator();
-            let has = app.perform_slot(g).is_some();
-            ui.add_enabled_ui(!has, |ui| {
-                ui.menu_button("Perform FX", |ui| {
-                    for (mode, name) in crate::module_ui::PERFORM_MODES.iter().enumerate() {
-                        if ui.button(*name).clicked() {
-                            acts.push(Act::AddPerformFx(g, mode));
-                            ui.close();
+            // DECKARD's own effects.
+            for c in native(false) {
+                if ui.button(c.name).clicked() {
+                    acts.push(pick(AddWhat::Plugin(native_entry(c))));
+                    ui.close();
+                }
+            }
+            // A group's Perform FX: one, first in its chain (Maschine's last category).
+            if let (true, deckard_doc::Chain::Group(g)) = (perform, chain) {
+                ui.separator();
+                let has = app.perform_slot(g).is_some();
+                ui.add_enabled_ui(!has, |ui| {
+                    ui.menu_button("Perform FX", |ui| {
+                        for (mode, name) in crate::module_ui::PERFORM_MODES.iter().enumerate() {
+                            if ui.button(*name).clicked() {
+                                acts.push(Act::AddPerformFx(g, mode));
+                                ui.close();
+                            }
                         }
-                    }
-                })
-                .response
-                .on_disabled_hover_text("A group has one Perform FX");
-            });
-        }
+                    })
+                    .response
+                    .on_disabled_hover_text("A group has one Perform FX");
+                });
+            }
+        });
     });
     // Plug-ins by format, then vendor, as in Maschine.
     use deckard_plugins::scan::Kind;
@@ -5990,32 +6020,36 @@ fn module_menu(
         }
         entries.sort_by_key(|e| (e.vendor.to_lowercase(), e.name.to_lowercase()));
         ui.menu_button(title, |ui| {
-            let vendor = |e: &deckard_plugins::scan::Entry| if e.vendor.is_empty() { "Other".to_string() } else { e.vendor.clone() };
-            let mut vendors: Vec<String> = entries.iter().map(|e| vendor(e)).collect();
-            vendors.dedup();
-            for v in vendors {
-                ui.menu_button(&v, |ui| {
-                    for e in entries.iter().filter(|e| vendor(e) == v) {
-                        let text = if e.instrument { e.name.clone() } else { format!("{}  (effect)", e.name) };
-                        if e.instrument && !sound {
-                            continue;
-                        }
-                        let allowed = instruments || !e.instrument;
-                        let b = ui.add_enabled(e.hostable() && allowed, egui::Button::new(text));
-                        let b = if !e.hostable() {
-                            b.on_disabled_hover_text(format!("{} plug-ins can't be hosted yet", e.kind.label()))
-                        } else if !allowed {
-                            b.on_disabled_hover_text(AFTER_FX)
-                        } else {
-                            b
-                        };
-                        if b.clicked() {
-                            acts.push(pick(AddWhat::Plugin((*e).clone())));
-                            ui.close();
-                        }
-                    }
-                });
-            }
+            egui::ScrollArea::vertical().max_height(520.0).auto_shrink([false, false]).show(ui, |ui| {
+                let vendor = |e: &deckard_plugins::scan::Entry| if e.vendor.is_empty() { "Other".to_string() } else { e.vendor.clone() };
+                let mut vendors: Vec<String> = entries.iter().map(|e| vendor(e)).collect();
+                vendors.dedup();
+                for v in vendors {
+                    ui.menu_button(&v, |ui| {
+                        egui::ScrollArea::vertical().max_height(520.0).auto_shrink([false, false]).show(ui, |ui| {
+                            for e in entries.iter().filter(|e| vendor(e) == v) {
+                                let text = if e.instrument { e.name.clone() } else { format!("{}  (effect)", e.name) };
+                                if e.instrument && !sound {
+                                    continue;
+                                }
+                                let allowed = instruments || !e.instrument;
+                                let b = ui.add_enabled(e.hostable() && allowed, egui::Button::new(text));
+                                let b = if !e.hostable() {
+                                    b.on_disabled_hover_text(format!("{} plug-ins can't be hosted yet", e.kind.label()))
+                                } else if !allowed {
+                                    b.on_disabled_hover_text(AFTER_FX)
+                                } else {
+                                    b
+                                };
+                                if b.clicked() {
+                                    acts.push(pick(AddWhat::Plugin((*e).clone())));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                }
+            });
         });
     }
     if app.catalog.entries.is_empty() {

@@ -12,6 +12,14 @@ pub const DISCORD_URL: &str = "https://discord.gg/SGSpFaUnNh";
 /// The window's size.
 const SIZE: Vec2 = Vec2::new(760.0, 480.0);
 
+pub fn wayland() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var("WINIT_UNIX_BACKEND").as_deref() != Ok("x11")
+}
+
+pub fn size() -> Vec2 {
+    SIZE
+}
+
 const FG: Color32 = Color32::from_rgb(0x4f, 0xe0, 0xcf);
 const DIM: Color32 = Color32::from_rgb(0x1f, 0x7a, 0x70);
 const BG: Color32 = Color32::from_rgb(0x01, 0x17, 0x16);
@@ -64,8 +72,12 @@ pub fn splash_position(main: Option<Rect>, monitor: Option<Vec2>) -> Option<Pos2
 
 /// Open or update the splash window (unless it was closed), centred on the main
 /// window.
-pub fn show(ctx: &egui::Context, boot: &mut Boot) {
+pub fn show(ctx: &egui::Context, ui: &mut egui::Ui, boot: &mut Boot) {
     if boot.hidden {
+        return;
+    }
+    if wayland() {
+        paint_root(ui, boot);
         return;
     }
     let mut builder = egui::ViewportBuilder::default()
@@ -73,6 +85,7 @@ pub fn show(ctx: &egui::Context, boot: &mut Boot) {
         .with_inner_size(SIZE)
         .with_decorations(false)
         .with_resizable(false)
+        .with_visible(true)
         .with_window_level(egui::WindowLevel::AlwaysOnTop);
     let (main, monitor) = ctx.input_for(egui::ViewportId::ROOT, |i| (i.viewport().outer_rect, i.viewport().monitor_size));
     if let Some(at) = splash_position(main, monitor) {
@@ -81,16 +94,25 @@ pub fn show(ctx: &egui::Context, boot: &mut Boot) {
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("deckard-splash"), builder, |ui, class| {
         let rect =
             if class == egui::ViewportClass::EmbeddedWindow { ui.allocate_exact_size(SIZE, Sense::hover()).0 } else { ui.max_rect() };
-        paint(ui, rect, boot);
+        paint_ui(ui, rect, boot);
+        if ui.ctx().input(|i| i.viewport().focused != Some(true)) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         if ui.ctx().input(|i| i.viewport().close_requested()) {
             boot.hidden = true;
         }
     });
 }
 
+fn paint_root(ui: &mut egui::Ui, boot: &Boot) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, BG);
+    paint_ui(ui, rect, boot);
+}
+
 /// The splash in `rect`: the tube, the header, the logo, the log, the bar and the
 /// buttons.
-fn paint(ui: &mut egui::Ui, rect: Rect, boot: &Boot) {
+fn paint_ui(ui: &mut egui::Ui, rect: Rect, boot: &Boot) {
     let painter = ui.painter_at(rect);
     // The bezel and the tube in it, with rounded corners.
     painter.rect_filled(rect, 0.0, Color32::from_gray(0x11));
