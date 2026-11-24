@@ -64,7 +64,7 @@ fn profile_real_mk3_jam_led_delivery() {
     struct Hardware(crate::mk3_io::Mk3Io, crate::jam_io::JamIo);
     impl Drop for Hardware {
         fn drop(&mut self) {
-            self.0.shut_down(Vec::new());
+            self.0.shut_down();
             self.1.shut_down();
         }
     }

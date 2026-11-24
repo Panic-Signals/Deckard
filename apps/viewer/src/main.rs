@@ -249,7 +249,7 @@ fn main() {
         }
         return;
     }
-    // --goodbye OUT.png: draw what the MK3's displays show after closing, and stop.
+    // --goodbye OUT.png: draw the standby picture, and stop. Closing leaves the displays black.
     if let Some(out) = flag("--goodbye") {
         let px: Vec<u8> = goodbye::picture().into_iter().flatten().collect();
         let image = egui::ColorImage::from_rgba_unmultiplied([goodbye::WIDTH, goodbye::HEIGHT], &px);
@@ -1500,6 +1500,21 @@ pub struct Playhead {
 #[cfg(test)]
 fn project_of_app(app: &App) -> deckard_model::Project {
     app.doc.as_ref().unwrap().borrow().project().clone()
+}
+
+#[cfg(test)]
+mod exit_screens {
+    use super::*;
+
+    /// Quitting asks the MK3 thread for a black frame. The thread itself is not started.
+    #[test]
+    fn quitting_blanks_the_maschine_screens() {
+        let mut app = App::default();
+        app.mk3 = Some(mk3_io::Mk3Io::detached());
+        eframe::App::on_exit(&mut app);
+        let px = app.mk3.as_ref().unwrap().queued_frame().expect("a frame is queued");
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]));
+    }
 }
 
 /// How often notes held while recording are grown in the pattern.
@@ -13722,7 +13737,7 @@ impl eframe::App for App {
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
-            m.shut_down(goodbye::picture());
+            m.shut_down();
         }
         if let Some(j) = &self.jam {
             j.shut_down();

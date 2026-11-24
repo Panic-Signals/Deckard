@@ -226,7 +226,7 @@ deckard [file.mxprj] [--screenshot out.png] [--view ideas|song|mix|lfos]
         [--lanes-dialog] [--plugin-window] [--input FILE]
         [--scripts DIR] [--controller M3] [--press BUTTON_X]... [--hold BUTTON_X]... [--pad N]...
 deckard --write-icon OUT.png [SIZE] [--icon-style television|letter]  # draw the app icon and exit
-deckard --goodbye OUT.png               # draw what the MK3's screens show after closing
+deckard --goodbye OUT.png               # draw the standby picture (closing leaves the screens black)
 ```
 
 - **`--screenshot`** renders, saves a PNG and exits: after 2 s when playing, or after
