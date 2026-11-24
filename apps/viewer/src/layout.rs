@@ -7026,12 +7026,32 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // Selected notes (and previews) are lit and framed: a white wash, a dark inner
     // line and a white outer one, as Maschine marks a selection.
     let marks = std::cell::RefCell::new(Vec::new());
+    let colour = |n: &Note| if deckard_doc::note_tools::muted(n) { grey(128) } else { sound_color(p, app.group, n.sound) };
+    let draw_tail = |n: &Note| {
+        let length = n.ratchet.loop_tail(n.position, n.length, start..end);
+        if length > 0
+            && let Some(mut r) = note_rect(&Note { position: start, length, ..*n })
+        {
+            r.max.x = r.max.x.min(x_of(end as f64));
+            gp.rect_filled(r, 1.0, with_alpha(colour(n), 68));
+        }
+    };
+    // The carried gate has no attack or hit target here. Draw it below real notes.
+    for n in &notes {
+        if !moving.iter().any(|(o, _)| o == *n) {
+            draw_tail(n);
+        }
+    }
+    for (_, n) in &moving {
+        draw_tail(n);
+    }
+    if let Some(NoteDrag::Paint { notes: ns }) = &drag {
+        ns.iter().for_each(draw_tail);
+    }
     let draw = |n: &Note, outline: Option<Color32>| {
         if let Some(r) = note_rect(n) {
             let a = 80 + (n.velocity.clamp(0, 127) * 175 / 127) as u8;
-            // Muted notes: Maschine's grey.
-            let c = if deckard_doc::note_tools::muted(n) { grey(128) } else { sound_color(p, app.group, n.sound) };
-            gp.rect_filled(r, 1.0, with_alpha(c, a));
+            gp.rect_filled(r, 1.0, with_alpha(colour(n), a));
             // A ratcheted note: a tick where each later hit starts.
             if !n.ratchet.is_plain() {
                 let hits = n.ratchet.hits(n.length, n.velocity);

@@ -866,8 +866,7 @@ fn every_theme_draws_every_page() {
     }
 }
 
-/// A note running past the pattern editor's end is cut off at its edge, not drawn on
-/// over the right screen (C16).
+/// A note running past the pattern editor's end stays inside the editor (C16).
 #[test]
 fn long_notes_stay_in_the_pattern_editor() {
     let (mut s, mut v) = (Surface::new(), view());
@@ -886,11 +885,15 @@ fn long_notes_stay_in_the_pattern_editor() {
     };
     v.notes = vec![note(1920)];
     let cut = s.picture(&v);
+    v.notes = vec![note(2400)];
+    let tail = s.picture(&v);
+    let changed_x: Vec<_> = cut.iter().zip(&tail).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i % 960).collect();
+    assert!(!changed_x.is_empty(), "the continuation appears at the start");
+    assert!(changed_x.iter().all(|&x| x < 120), "only the first quarter of the left screen changes");
     v.notes = vec![note(30_000)];
     let long = s.picture(&v);
     let right = |px: &[[u8; 4]]| px.chunks(960).flat_map(|row| row[480..].to_vec()).collect::<Vec<_>>();
     assert!(right(&cut) == right(&long), "the right screen is the same");
-    assert!(cut == long, "and the left");
 }
 
 /// Held from Keyboard mode, PATTERN shows the Pattern page's buttons, not the

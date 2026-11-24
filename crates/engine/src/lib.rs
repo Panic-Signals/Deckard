@@ -6188,7 +6188,10 @@ impl Engine {
             if let Some(at) = self.note_offs.iter().map(|o| o.0).min() {
                 until = until.min(at.saturating_sub(self.time).max(1));
             }
-            // (A note sent out over MIDI has no note-off here; CV follows its envelope by the frame.)
+            if let Some(at) = self.midi_offs.iter().map(|o| o.at).min() {
+                until = until.min(at.saturating_sub(self.time).max(1));
+            }
+            // CV follows its envelope by the frame.
             if self.cv_channels != 0
                 && let Some(at) = self.lfo_note_end()
             {
@@ -14754,6 +14757,39 @@ mod tests {
         e.process_outputs(&mut out, &mut ext);
         assert!(out.iter().all(|x| x.abs() < 1e-6), "not on the master: {out:?}");
         assert!(ext[1][100].abs() > 0.1, "on Out 2: {:?}", ext[1]);
+    }
+
+    #[test]
+    fn midi_note_tail_releases_at_its_deadline_past_the_last_bar() {
+        let mut p = project();
+        let bar = 4 * PPQ;
+        p.sections[0].length = bar;
+        p.groups[0].sounds[0].sampler = None;
+        p.groups[0].sounds[0].channel.midi_out = deckard_model::MidiDest::Port("Synth".into());
+        let pattern = &mut p.groups[0].patterns[0];
+        let mut note = pattern.notes[0].clone();
+        note.position = bar - 60;
+        note.length = 100;
+        pattern.notes = vec![note, Note { position: bar + 42, pitch: 61, ..note }];
+
+        // At 1920 Hz and 120 BPM one tick is one frame. The gate ends 40 frames
+        // past the bar, partway through the second process call.
+        let mut cache = SampleCache::default();
+        for (mode, looping) in [(Mode::Arrangement, false), (Mode::Scene(0), true)] {
+            let (mut e, _) = Engine::new(&p, None, 1920, mode, &mut cache);
+            e.looping = looping;
+            let (tx, rx) = std::sync::mpsc::sync_channel(16);
+            e.midi_tx = Some(tx);
+            e.process(&mut vec![0.0; 2 * (bar as usize + 39)]);
+            let on = rx.try_recv().expect("late note in the last bar plays");
+            assert_eq!(on.bytes(), &[0x90, 60, 127]);
+            assert!(rx.try_recv().is_err(), "the note is still held past the bar");
+
+            e.process(&mut [0.0; 16]);
+            let off = rx.try_recv().expect("note-off is sent inside the block containing its deadline");
+            assert_eq!(off.bytes(), &[0x80, 60, 0]);
+            assert!(rx.try_recv().is_err(), "the note that starts beyond the pattern length stays silent");
+        }
     }
 
     /// A sound sends its notes to its MIDI output: its channel, transposed, with
