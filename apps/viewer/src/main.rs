@@ -16444,6 +16444,61 @@ mod tests {
         assert_eq!((touch(&h).mode, touch(&h).min, touch(&h).max), (TouchMode::Cc, 0, 100), "one undo step back");
     }
 
+    /// Wheel input over either the sound names or drum lanes moves both together.
+    #[test]
+    fn sound_list_scrolls_with_drum_lanes() {
+        for over_names in [true, false] {
+            let mut h = blank_harness(false);
+            h.state_mut().piano_roll = false;
+            h.state_mut().mouse = layout::MouseMode::Draw;
+            h.state().doc.as_ref().unwrap().borrow_mut().add_pattern(0, 0, "Pattern 1").unwrap();
+            h.run_steps(3);
+            let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
+            assert!(grid.height() < 16.0 * 24.0 - 48.0, "room to scroll two rows");
+            let name = Pos2::new(grid.left() - 80.0, grid.top() + 12.0);
+            let note = Pos2::new(grid.left() + 10.0, name.y);
+            for (delta, sound) in [(-48.0, 2), (48.0, 0)] {
+                h.hover_at(if over_names { name } else { grid.center() });
+                h.step();
+                h.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.run_steps(30);
+                click(&mut h, name);
+                assert_eq!(h.state().sound, sound, "sound name after scrolling {delta} over names={over_names}");
+                click(&mut h, note);
+                assert!(notes_of(&h).iter().any(|n| n.sound == sound), "the lane beside the name belongs to sound {sound}");
+            }
+        }
+    }
+
+    /// Piano-roll pitches are independent of the sound list's rows.
+    #[test]
+    fn sound_list_scroll_keeps_piano_roll_pitches_in_place() {
+        let mut h = blank_harness(false);
+        h.state_mut().piano_roll = true;
+        h.run_steps(3);
+        let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
+        let key = egui::Id::new(("piano-zoom", h.state().group, h.state().sound));
+        let pitches = h.ctx.data(|d| d.get_temp::<(f32, f32)>(key)).expect("pitches shown");
+        let name = Pos2::new(grid.left() - 100.0, grid.top() + 12.0);
+        h.hover_at(name);
+        h.step();
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -48.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(30);
+        assert_eq!(h.ctx.data(|d| d.get_temp::<(f32, f32)>(key)), Some(pitches), "scrolling names does not scroll pitches");
+        click(&mut h, name);
+        assert_eq!(h.state().sound, 2, "the sound list still scrolls in piano-roll mode");
+    }
+
     /// The Pattern Editor's horizontal zooming scroll bar (as the manual has it): drag it
     /// up to zoom in round where it was grabbed, along to scroll, double-click it to see
     /// the whole pattern; ⌘ + scroll zooms too.
