@@ -735,6 +735,8 @@ pub struct SaveDialog {
     pub library: String,
     pub folder: PathBuf,
     pub samples: bool,
+    /// Render an audio preview beside a sound for the browser to prehear.
+    pub preview: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
     /// Why the last Save didn't write it, shown in the dialog.
@@ -749,6 +751,7 @@ pub struct Saved {
     path: PathBuf,
     info: mxprj::sound_info::SoundInfo,
     samples: bool,
+    preview: bool,
 }
 
 /// A slot's hosted plug-in whose preset saves as NKS ([`App::nks_plugin`]).
@@ -1111,6 +1114,8 @@ pub struct App {
     /// Where each sound, group and preset was last saved, with its tags (Save writes
     /// there again).
     saved: std::collections::HashMap<deckard_doc::FileItem, Saved>,
+    /// "Create audio preview" was unticked in the Save dialog (for the session).
+    preview_declined: bool,
     /// Maschine's user folder, when not the usual one (tests).
     user_dir_override: Option<PathBuf>,
     prefs: Option<usize>,
@@ -10970,7 +10975,7 @@ impl App {
         let Some(info) = info else { return };
         let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
         if id.is_some() {
-            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false });
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false, preview: false });
         }
     }
 
@@ -11012,6 +11017,7 @@ impl App {
                 None => self.user_dir().join(folder),
             },
             samples: mode == SaveMode::WithSamples,
+            preview: !self.preview_declined,
             confirm_overwrite: false,
             error: None,
         });
@@ -11165,7 +11171,10 @@ impl App {
         }
         let what = dlg.what;
         let id = doc.borrow().file_item_id(what);
-        let saved = Saved { id, path, info, samples: dlg.samples };
+        let saved = Saved { id, path, info, samples: dlg.samples, preview: dlg.preview };
+        if matches!(what, deckard_doc::FileItem::Sound(..)) {
+            self.preview_declined = !saved.preview;
+        }
         if self.write_item(what, saved) {
             self.save_dialog = None;
         } else if let Some(d) = &mut self.save_dialog {
@@ -11188,6 +11197,11 @@ impl App {
             Ok(()) => {
                 self.status = format!("saved {}", s.path.display());
                 self.browser.add_saved(&s.path);
+                if s.preview
+                    && let deckard_doc::FileItem::Sound(g, n) = what
+                {
+                    self.start_preview(g, n, &s.path);
+                }
                 self.saved.insert(what, s);
                 true
             }
@@ -11196,6 +11210,24 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Render sound (`g`, `n`)'s audio preview beside its saved file `file`, for the
+    /// browser to prehear; the engine is built on the main thread (so plug-ins can load)
+    /// and rendered on a worker thread so saving doesn't wait for it.
+    fn start_preview(&mut self, g: usize, n: usize, file: &Path) {
+        self.store_plugin_states();
+        let Some(doc) = &self.doc else { return };
+        let (p, path, rate) = (doc.borrow().project().clone(), self.path.clone(), self.render_rate());
+        let mut cache = SampleCache::default();
+        cache.library_dirs = self.samples.library_dirs.clone();
+        let engine = deckard_engine::export::preview_engine(&p, path.as_deref(), (g, n), rate, &mut cache);
+        let out = browser::preview_path(file);
+        // Nobody waits for it: the file appearing is the result.
+        drop(export::Offline::start("Preview", move |_, cancel| {
+            let audio = deckard_engine::export::render_preview_engine(engine, rate, cancel).ok_or("cancelled")?;
+            browser::write_preview(&out, &audio, rate)
+        }));
     }
 
     /// Open…: a sound, group or preset file chosen in a dialog, loaded into `what`.

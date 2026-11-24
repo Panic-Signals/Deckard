@@ -389,7 +389,7 @@ pub fn can_prehear(item: &Item) -> bool {
 
 /// The file to prehear for `item`: a sample itself; for a sound, group, instrument or
 /// effect, the preview Maschine keeps beside it (`.previews/<file name>.ogg`, or a `.wav`
-/// preview in `.previews/`) when there is one.
+/// preview in `.previews/`, as Save Sound writes: [`preview_path`]) when there is one.
 pub fn prehear_file(item: &Item) -> Option<PathBuf> {
     prehear_file_with_nbpl(item, nbpl_samples_dir())
 }
@@ -478,6 +478,22 @@ fn find_nbpl_samples_dir() -> Option<PathBuf> {
 #[cfg(not(windows))]
 fn find_nbpl_samples_dir() -> Option<PathBuf> {
     None
+}
+
+/// Where the audio preview of the sound, group, instrument or effect file `file` goes:
+/// `.previews/<file name>.wav` beside it, which [`prehear_file`] finds.
+pub fn preview_path(file: &Path) -> PathBuf {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    file.parent().unwrap_or(Path::new("")).join(".previews").join(format!("{name}.wav"))
+}
+
+/// Write `audio` (interleaved stereo at `rate`) as the 16-bit WAV preview `out`.
+pub fn write_preview(out: &Path, audio: &[f32], rate: u32) -> Result<(), String> {
+    use deckard_engine::export::{BitDepth, FileType, encode};
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(out, encode(audio, rate, FileType::Wav, BitDepth::Int16, None)).map_err(|e| format!("{}: {e}", out.display()))
 }
 
 /// A FILES row: a folder, or a file the browser can load.
