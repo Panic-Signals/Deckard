@@ -787,12 +787,20 @@ fn open_output(settings: &settings::Settings, fallback: &mut Option<String>) -> 
     });
     // ASIO not being in use says more than which system device stood in.
     *fallback = no_asio.or(fallback.take());
-    let out = out?;
+    Ok(set_up_output(out?, settings))
+}
+
+/// An output just opened, with the settings' routing and timing.
+fn set_up_output(out: Output, settings: &settings::Settings) -> Output {
     out.set_routing(&settings.output_routing, settings.cv_mask());
     out.set_sample_accurate(settings.exact_timing);
     out.set_render_ahead(settings.render_ahead_ms as f64 / 1000.0);
-    Ok(out)
+    out
 }
+
+/// ASIO tried again after it didn't open: this often, this many times.
+const ASIO_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+const ASIO_RETRIES: u32 = 5;
 
 /// The interface input as Maschine's 32 input channels (Preferences ▸ Audio ▸
 /// Routing), frame by frame into `live`.
@@ -1142,6 +1150,8 @@ pub struct App {
     midi_device_error: Option<String>,
     /// Held while the app runs: macOS doesn't slow it in the background (C46).
     _running: Option<keep_running::Activity>,
+    /// Held while the song plays or something records: the computer stays awake.
+    awake: keep_running::StayAwake,
     /// Knob travel the controller's knobs have built up toward a stepped value's next step.
     knob_acc: [f64; 8],
     /// When each of the controller's knobs was last turned (a route's whole name shows
@@ -1200,6 +1210,9 @@ pub struct App {
     fallback_told: Option<String>,
     asio_reopen_due: bool,
     asio_reopened: Option<std::time::Instant>,
+    /// ASIO wanted but not playing (often just after the computer wakes): when it was
+    /// last tried again, and how many times since the output was opened.
+    asio_retry: Option<(std::time::Instant, u32)>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
     /// Asking to quit NI's agent, which holds the MK3's screens.
@@ -2736,6 +2749,7 @@ impl App {
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
+        self.asio_retry = None;
         if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
             self.recorder.release_input();
         }
@@ -2790,6 +2804,49 @@ impl App {
         self.close_output();
         devices::rescan();
         self.open_output_now();
+    }
+
+    /// ASIO wanted but the system's driver standing in (or nothing playing): the driver
+    /// often isn't ready yet when the computer wakes, so try it again a few times, a few
+    /// seconds apart, keeping what plays until it opens. Not while the song plays or
+    /// anything records, which the switch would stop. An interface that stays away is
+    /// left alone after that (loading its driver holds the screen up a moment) until the
+    /// output is opened again.
+    fn retry_asio(&mut self) {
+        use deckard_engine::devices::{self, ASIO_BUILT, AudioDriver};
+        let missing = ASIO_BUILT
+            && self.settings.audio_driver == AudioDriver::Asio
+            && self.settings.asio_device.is_some()
+            && self.output.is_some()
+            && self.output_fallback.is_some();
+        if !missing {
+            self.asio_retry = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let (last, tries) = *self.asio_retry.get_or_insert((now, 0));
+        if tries >= ASIO_RETRIES
+            || now.duration_since(last) < ASIO_RETRY_GAP
+            || self.asio_reopen_due
+            || self.playing.is_some()
+            || self.recorder.busy()
+            || self.session.active()
+        {
+            return;
+        }
+        self.asio_retry = Some((now, tries + 1));
+        devices::set_driver(AudioDriver::Asio);
+        match Output::with_device(self.settings.asio_device.as_deref(), self.settings.buffer_frames, self.settings.multicore) {
+            Ok(out) => {
+                // close_output lets the recorder's input go too, as ASIO is the driver now.
+                self.close_output();
+                self.output = Some(Ok(set_up_output(out, &self.settings)));
+                self.output_fallback = None;
+                self.asio_retry = None;
+                self.open_output_now();
+            }
+            Err(_) => devices::set_driver(AudioDriver::System),
+        }
     }
 
     fn audio_preferences(&mut self, ui: &mut egui::Ui) {
@@ -18972,6 +19029,57 @@ mod tests {
         assert_eq!(mode(&h), Some(deckard_model::AudioMode::Gate), "Sync keeps Gate");
         audio_sound(&mut h, s, &tone_of(1.0), bar);
         assert_eq!(mode(&h), Some(deckard_model::AudioMode::Loop), "{}", h.state().status);
+    }
+
+    /// ASIO wanted but the system's driver standing in (the computer just woke, say):
+    /// ASIO is tried again a few seconds apart, five times at most, never while the
+    /// song plays; opening the output afresh starts the count again.
+    #[test]
+    fn asio_is_tried_again_five_times_while_a_fallback_plays() {
+        use deckard_engine::devices::{ASIO_BUILT, AudioDriver};
+        let mut app = App { settings: settings::Settings::default(), ..App::default() };
+        app.settings.audio_driver = AudioDriver::Asio;
+        app.settings.asio_device = Some("DECKARD test: no such ASIO driver".into());
+        let fall_back = |app: &mut App| {
+            app.output = Some(Err("no output in tests".into()));
+            app.output_fallback = Some("the driver isn't ready".into());
+        };
+        fall_back(&mut app);
+        let tries = |app: &App| app.asio_retry.map(|(_, n)| n);
+        let due = |app: &mut App| {
+            if let Some((at, _)) = &mut app.asio_retry {
+                *at -= ASIO_RETRY_GAP * 2;
+            }
+        };
+        app.retry_asio();
+        if !ASIO_BUILT {
+            assert_eq!(tries(&app), None, "no ASIO to try");
+            return;
+        }
+        assert_eq!(tries(&app), Some(0), "not at once");
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(0), "not before the gap");
+        app.playing = Some(Mode::Scene(0));
+        due(&mut app);
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(0), "not while the song plays");
+        app.playing = None;
+        for n in 1..=ASIO_RETRIES {
+            due(&mut app);
+            app.retry_asio();
+            assert_eq!(tries(&app), Some(n));
+            assert_eq!(deckard_engine::devices::driver(), AudioDriver::System, "the stand-in's driver again");
+        }
+        due(&mut app);
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(ASIO_RETRIES), "five tries at most");
+        app.close_output();
+        fall_back(&mut app);
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(0), "opened afresh: counted again");
+        app.output_fallback = None;
+        app.retry_asio();
+        assert_eq!(tries(&app), None, "ASIO in use: nothing to try");
     }
 
     #[test]
