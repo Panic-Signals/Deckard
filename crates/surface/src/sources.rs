@@ -107,7 +107,11 @@ impl Sources {
                 }
             }
         }
-        paths.iter().find_map(|p| SHIPPED.iter().find(|(s, _)| s == p)).map(|(p, text)| (format!("@{p}"), text.to_string()))
+        paths.iter().find_map(|p| SHIPPED.iter().find(|(s, _)| s == p).map(|(p, text)| (format!("@{p}"), text.to_string()))).or_else(|| {
+            // A stock palette has no file of its own; the editor's form is generated.
+            let id = paths.iter().find_map(|p| p.strip_prefix("themes/")?.strip_suffix(".lua"))?;
+            crate::theme_file::source(id).map(|text| (format!("@themes/{id}.lua"), text))
+        })
     }
 
     /// The names of the scripts in folder `dir` (`themes`): DECKARD's and the user's,
@@ -120,6 +124,9 @@ impl Sources {
             && let Ok(entries) = std::fs::read_dir(user.join(dir))
         {
             out.extend(entries.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".lua").map(str::to_string)));
+        }
+        if dir == "themes" {
+            out.extend(crate::theme_file::stock().iter().map(|t| t.id.to_string()));
         }
         out.sort();
         out.dedup();

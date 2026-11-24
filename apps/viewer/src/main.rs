@@ -49,6 +49,7 @@ mod github;
 mod goodbye;
 mod group_move;
 mod icon;
+mod theme_editor;
 
 /// The version shown: the release's (`DECKARD_VERSION`, set by the build scripts), else
 /// the crate's.
@@ -3416,7 +3417,26 @@ impl App {
                         controller_change = Some(choice);
                     }
                     ui.end_row();
-                    ui.label("Controller theme").on_hover_text("The MK3's screens, pads and groups.");
+                    ui.label("Desktop theme").on_hover_text("The software window. It does not change the hardware.");
+                    let mut desktop = self.settings.desktop_theme.clone();
+                    egui::ComboBox::from_id_salt("desktop-theme").selected_text(theme_name(&desktop)).show_ui(ui, |ui| {
+                        for t in self.surface.themes() {
+                            // Stock palettes are hardware themes. The window only has a look
+                            // for the hand-written themes, so the rest would be a no-op here.
+                            if deckard_surface::theme_file::source(&t).is_some() && t != desktop {
+                                continue;
+                            }
+                            let name = theme_name(&t);
+                            ui.selectable_value(&mut desktop, t, name);
+                        }
+                    });
+                    if desktop != self.settings.desktop_theme {
+                        self.settings.desktop_theme = desktop;
+                        self.settings.desktop_background = None;
+                        self.settings.desktop_text = None;
+                    }
+                    ui.end_row();
+                    ui.label("Hardware theme").on_hover_text("The Maschine's screens, pads and groups.");
                     let mut theme = self.settings.controller_theme.clone();
                     crate::layout::combo("controller-theme").selected_text(theme_name(&theme)).show_ui(ui, |ui| {
                         for t in self.surface.themes() {
@@ -3428,18 +3448,6 @@ impl App {
                         self.surface.set_lcd(&self.settings.lcd_mode);
                         self.surface.set_theme(&theme);
                         self.settings.controller_theme = self.surface.theme().to_string();
-                    }
-                    ui.end_row();
-                    ui.label("Desktop theme").on_hover_text("The software window. It does not change the controller.");
-                    let mut desktop = self.settings.desktop_theme.clone();
-                    egui::ComboBox::from_id_salt("desktop-theme").selected_text(theme_name(&desktop)).show_ui(ui, |ui| {
-                        for t in self.surface.themes() {
-                            let name = theme_name(&t);
-                            ui.selectable_value(&mut desktop, t, name);
-                        }
-                    });
-                    if desktop != self.settings.desktop_theme {
-                        self.settings.desktop_theme = desktop;
                     }
                     ui.end_row();
                     if self.settings.controller_theme == "lcd" || self.settings.desktop_theme == "lcd" {
@@ -3458,6 +3466,7 @@ impl App {
                         }
                         ui.end_row();
                     }
+                    theme_editor::show(ui, self);
                     ui.label("Maschine JAM");
                     ui.checkbox(&mut self.settings.relative_strips, "Relative level touchstrips").on_hover_text(
                         "On the mixer strips (LEVEL, AUX, SWING, TUNE, MACRO), a touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. CONTROL mode keeps absolute-fader behaviour. Off: a touch sets the value.",
@@ -13963,6 +13972,15 @@ mod tests {
         assert_eq!(theme_name("lcd"), "LCD");
     }
 
+    #[test]
+    fn opening_the_controller_folder_copies_the_stock_themes() {
+        let dir = controller_folder().unwrap();
+        let nord = std::fs::read_to_string(dir.join("defaults/themes/nord.lua")).unwrap();
+        assert!(nord.contains("base = \"maschine\""));
+        let readme = std::fs::read_to_string(dir.join("README.txt")).unwrap();
+        assert!(readme.contains("import or export"));
+    }
+
     /// TAP on the controller sets the song's tempo from the taps; SHIFT + TAP and the
     /// header's switch turn the metronome on and off in both.
     #[test]
@@ -19805,13 +19823,19 @@ fn controller_folder() -> std::io::Result<PathBuf> {
         }
         std::fs::write(to, text)?;
     }
+    for theme in deckard_surface::theme_file::stock() {
+        if let Some(text) = deckard_surface::theme_file::source(theme.id) {
+            std::fs::write(defaults.join(format!("themes/{}.lua", theme.id)), text)?;
+        }
+    }
     std::fs::write(
         dir.join("README.txt"),
         "DECKARD's controller scripts: one file per page (docs/controller-api.md in DECKARD's source).\n\n\
          defaults/ holds DECKARD's own scripts, refreshed each time this folder is opened.\n\
          To change one, copy it from defaults/ to the same place here (defaults/pages/control.lua\n\
          to pages/control.lua) and edit it: DECKARD loads it as you save. Delete it to go back.\n\
-         A new theme in themes/ shows in Preferences > Hardware > Controller theme.\n\
+         A new theme in themes/ shows in Preferences > Hardware > Hardware theme.\n\
+         Preferences > Hardware can also edit colours and import or export a theme file.\n\
          Files under devices/mk3/ apply to the MK3 only.\n",
     )?;
     Ok(dir)

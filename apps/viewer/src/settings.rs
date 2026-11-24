@@ -171,6 +171,9 @@ pub struct Settings {
     pub controller_theme: String,
     /// The software window's theme (Preferences > Hardware). Independent of the controller.
     pub desktop_theme: String,
+    /// Colours chosen in the theme editor's Desktop tab. Absent: the desktop theme's own.
+    pub desktop_background: Option<[u8; 3]>,
+    pub desktop_text: Option<[u8; 3]>,
     /// LCD colour while that theme is on: `yellow`, `red` or `blue`.
     pub lcd_mode: String,
     /// Ableton Link (the header's LINK): joined, and starting and stopping with the
@@ -241,6 +244,14 @@ pub fn default_routing() -> Vec<Option<usize>> {
 /// A mono channel's own name: "In 1 L", "Out 16 R".
 pub fn channel_name(kind: &str, i: usize) -> String {
     format!("{kind} {} {}", i / 2 + 1, if i % 2 == 0 { "L" } else { "R" })
+}
+
+fn parse_rgb(text: &str) -> Option<[u8; 3]> {
+    let mut n = text.split(',').map(|p| p.trim().parse::<u16>().ok());
+    let r = n.next()??;
+    let g = n.next()??;
+    let b = n.next()??;
+    (r <= 255 && g <= 255 && b <= 255).then_some([r as u8, g as u8, b as u8])
 }
 
 impl Settings {
@@ -413,6 +424,8 @@ impl Default for Settings {
             controller: ControllerChoice::default(),
             controller_theme: CONTROLLER_THEME.to_string(),
             desktop_theme: "maschine".to_string(),
+            desktop_background: None,
+            desktop_text: None,
             lcd_mode: "yellow".to_string(),
             link: false,
             link_start_stop: false,
@@ -566,6 +579,8 @@ impl Settings {
                 "exact_timing" => s.exact_timing = v != "false",
                 "controller_theme" if !v.is_empty() => s.controller_theme = v.to_string(),
                 "desktop_theme" if !v.is_empty() => s.desktop_theme = v.to_string(),
+                "desktop_background" => s.desktop_background = parse_rgb(v),
+                "desktop_text" => s.desktop_text = parse_rgb(v),
                 "lcd_mode" => s.lcd_mode = deckard_surface::lcd::mode(v).to_string(),
                 "controller" => {
                     s.controller = match v {
@@ -867,6 +882,12 @@ impl Settings {
         }
         if self.desktop_theme != "maschine" {
             out += &format!("desktop_theme = {}\n", self.desktop_theme);
+        }
+        if let Some(c) = self.desktop_background {
+            out += &format!("desktop_background = {},{},{}\n", c[0], c[1], c[2]);
+        }
+        if let Some(c) = self.desktop_text {
+            out += &format!("desktop_text = {},{},{}\n", c[0], c[1], c[2]);
         }
         if self.lcd_mode != "yellow" {
             out += &format!("lcd_mode = {}\n", self.lcd_mode);
@@ -1289,6 +1310,9 @@ mod routing_tests {
         assert_eq!(Settings::parse(&lcd.to_text()).lcd_mode, "blue");
         assert_eq!(Settings::parse(&lcd.to_text()).desktop_theme, "lcd");
         assert_eq!(Settings::parse(&lcd.to_text()).controller_theme, "palenight", "the window's theme does not change the controller");
+        let painted = Settings { desktop_background: Some([12, 16, 24]), desktop_text: Some([220, 224, 230]), ..Settings::default() };
+        let back = Settings::parse(&painted.to_text());
+        assert_eq!((back.desktop_background, back.desktop_text), (Some([12, 16, 24]), Some([220, 224, 230])));
         assert_eq!(Settings::parse("lcd_mode = white").lcd_mode, "yellow");
         assert_eq!(Settings::parse("lcd_mode = purple").lcd_mode, "yellow");
     }
