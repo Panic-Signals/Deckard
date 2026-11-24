@@ -10,6 +10,7 @@
 pub mod au;
 pub mod com;
 pub mod editor;
+pub mod kontakt;
 pub mod module;
 pub mod native;
 pub mod nks;
