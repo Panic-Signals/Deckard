@@ -295,3 +295,28 @@ fn the_two_slice_boxes_are_each_their_own() {
     type_into(&mut h, r, "22");
     assert_eq!(zones(h.state())[0].meta.as_ref().unwrap().tail_ms(), 0.0);
 }
+
+/// RECORD's LAYER is the focused take's; APPLY shows once it is turned, and puts the take
+/// on that layer.
+#[test]
+fn the_record_footer_applies_a_takes_layer() {
+    use crate::layout::sampling::RecParam;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);
+    h.state_mut().recorder.view.takes.push(tone(dir.path(), "take.wav", 330.0));
+    h.state_mut().recorder.view.focused = Some(0);
+    h.state_mut().sampling.tab = 0;
+    h.run_steps(4);
+    let at = |h: &Harness<'static, App>, label: &str| -> Option<egui::Rect> {
+        h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sample-field", "RECORDING".to_string(), label.to_string()))))
+    };
+    assert!(at(&h, "LAYER").is_some(), "the take's LAYER");
+    h.state_mut().recorder.view.set(RecParam::Layer, 1);
+    h.run_steps(3);
+    let apply = at(&h, "TAKE").expect("APPLY, once a layer is chosen");
+    click(&mut h, apply.center());
+    h.run_steps(3);
+    assert_eq!(names(&h), ["a.wav", "take.wav"]);
+    assert_eq!(h.state().recorder.view.layer_choice, None);
+}

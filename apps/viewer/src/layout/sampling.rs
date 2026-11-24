@@ -2797,8 +2797,13 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         let mut f = choice_field("LAYER", options, at, move |k| {
             sact(SamplingAct::Record(RecordAct::Set(RecParam::Layer, values.get(k).copied().unwrap_or(0))))
         });
-        f.tip = "The layer the next take goes to: one it has (its sample replaced, its settings kept), or a new one";
+        f.tip = "The layer this take plays on. Pick one, then APPLY: a layer's sample is replaced, its settings kept; None takes it off";
         fields.push(f);
+        // Chosen, not yet done: APPLY puts the take there.
+        if crate::layers::layer_pending(p, app.group, app.sound, rec).is_some() {
+            let apply = || sact(SamplingAct::Record(RecordAct::ApplyLayer));
+            fields.push(Field { value: "APPLY".into(), tip: "Put the take on the layer chosen", ..toggle_field("TAKE", false, apply) });
+        }
     }
     let y = footer.top() + 6.0;
     let mut nx = group_box(ui, &painter, footer.left() + 8.0, y, "RECORDING", &fields, acts);
