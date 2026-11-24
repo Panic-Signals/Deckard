@@ -830,6 +830,7 @@ mod tests {
         let knobs_name = "DECKARD Test Knobs";
         let Ok(knobs_out) = midir::MidiOutput::new("test knobs") else { return };
         let Ok(mut knobs) = knobs_out.create_virtual(knobs_name) else { return };
+        let knobs_name = test_port_name(&midir::MidiInput::new("test discovery").unwrap(), knobs_name);
         let mut io = MidiIo::default();
         io.set_remote(false, [7].into());
         io.listen(&[knobs_name.to_string()]);
@@ -856,6 +857,15 @@ mod tests {
     #[cfg(unix)]
     use midir::os::unix::{VirtualInput, VirtualOutput};
 
+    /// ALSA includes the client name and numeric address; CoreMIDI keeps the label.
+    /// Discover the full name from the side that will connect to the virtual port.
+    #[cfg(unix)]
+    fn test_port_name(io: &impl midir::MidiIO, label: &str) -> String {
+        let names: Vec<_> = io.ports().iter().filter_map(|p| io.port_name(p).ok()).filter(|n| n.contains(label)).collect();
+        assert_eq!(names.len(), 1, "expected one virtual port containing {label:?}, found {names:?}");
+        names.into_iter().next().unwrap()
+    }
+
     /// A note from a keyboard port plays the sound that takes it, which sends it (thru,
     /// on its channel, transposed) to the synth on its MIDI output. (Virtual ports: not
     /// on Windows.)
@@ -870,11 +880,13 @@ mod tests {
         let Ok(_synth) = synth_in.create_virtual(synth_name, move |_, b, _| g2.lock().unwrap().push(b.to_vec()), ()) else { return };
         let Ok(keys_out) = midir::MidiOutput::new("test keys") else { return };
         let Ok(mut keys) = keys_out.create_virtual(keys_name) else { return };
+        let synth_name = test_port_name(&midir::MidiOutput::new("test discovery").unwrap(), synth_name);
+        let keys_name = test_port_name(&midir::MidiInput::new("test discovery").unwrap(), keys_name);
         let p = Project {
             groups: vec![Group {
                 sounds: vec![Sound {
                     channel: SoundChannel {
-                        midi_source: keys_name.into(),
+                        midi_source: keys_name.clone(),
                         midi_thru: true,
                         midi_out: MidiDest::Port(synth_name.into()),
                         midi_out_channel: 4,
@@ -929,6 +941,7 @@ mod tests {
     fn timed_messages_wait_until_due() {
         let name = "DECKARD Test Clock Out";
         let Some((_conn, got)) = listener(name) else { return };
+        let name = test_port_name(&midir::MidiOutput::new("test discovery").unwrap(), name);
         let io = MidiIo::default();
         let t0 = std::time::Instant::now();
         let port: Arc<str> = name.into();
@@ -957,6 +970,7 @@ mod tests {
         let name = "DECKARD Test Clock In";
         let Ok(out) = midir::MidiOutput::new("test clock") else { return };
         let Ok(mut clock) = out.create_virtual(name) else { return };
+        let name = test_port_name(&midir::MidiInput::new("test discovery").unwrap(), name);
         let mut io = MidiIo::default();
         let follower = Arc::new(deckard_engine::sync::ClockFollower::default());
         io.set_clock_follower(Some(follower.clone()));
