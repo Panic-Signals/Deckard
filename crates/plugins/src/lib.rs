@@ -13,6 +13,8 @@ pub mod editor;
 pub mod module;
 pub mod native;
 pub mod nks;
+#[cfg(windows)]
+mod reaktor_preset;
 pub mod tuner;
 pub mod zhora;
 /// Mutable Instruments' licence (Plaits), for the About box.
