@@ -75,7 +75,7 @@ fn render_takes(
 
 impl App {
     /// The rate offline renders for the project use: the audio output's, else 44.1 kHz.
-    fn render_rate(&self) -> u32 {
+    pub fn render_rate(&self) -> u32 {
         match &self.output {
             Some(Ok(o)) => o.rate,
             _ => RATE,

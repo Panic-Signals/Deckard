@@ -140,6 +140,7 @@ mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+mod plugin_spectrum;
 #[cfg(test)]
 mod preferences_tests;
 mod preset_load;
@@ -251,7 +252,7 @@ fn main() {
         }
         return;
     }
-    // --goodbye OUT.png: draw what the MK3's displays show after closing, and stop.
+    // --goodbye OUT.png: draw the standby picture, and stop. Closing leaves the displays black.
     if let Some(out) = flag("--goodbye") {
         let px: Vec<u8> = goodbye::picture().into_iter().flatten().collect();
         let image = egui::ColorImage::from_rgba_unmultiplied([goodbye::WIDTH, goodbye::HEIGHT], &px);
@@ -529,9 +530,14 @@ fn saved_page_name(pg: &deckard_model::PluginPage) -> String {
 }
 
 /// The plug-in's own pages (DECKARD's: they follow the plug-in, even once saved for a
-/// macro), the pages saved with it, or Maschine's automatic ones: its first 128
+/// macro), the pages saved with it, or else its mapping's pages (`mapped`, from the
+/// controller scripts' `mappings/`) followed by Maschine's automatic ones: its first 128
 /// automatable parameters, eight per page.
-fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) -> Vec<ViewPage> {
+fn view_pages(
+    p: &deckard_plugins::Plugin,
+    saved: &[deckard_model::PluginPage],
+    mapped: Option<&[deckard_surface::widget::mapping::PageParams]>,
+) -> Vec<ViewPage> {
     let own = p.pages();
     if !own.is_empty() {
         let all = p.parameter_list(false);
@@ -572,13 +578,38 @@ fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) 
             .filter(|pg| !pg.knobs.is_empty())
             .collect()
     } else {
-        p.parameters()
-            .into_iter()
-            .take(128)
-            .collect::<Vec<_>>()
-            .chunks(8)
-            .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
-            .collect()
+        let mut params = p.parameters();
+        // The mapping's pages first, in its order (each knob found by id, title or name);
+        // the parameters they leave follow, eight a page.
+        let mut pages = Vec::new();
+        for pg in mapped.unwrap_or_default() {
+            let knobs: Vec<_> = pg
+                .knobs
+                .iter()
+                .flatten()
+                .filter_map(|r| {
+                    let found =
+                        r.id.and_then(|id| params.iter().position(|i| i.id == id))
+                            .or_else(|| r.title.as_ref().and_then(|t| params.iter().position(|i| i.title.eq_ignore_ascii_case(t))))
+                            .or_else(|| params.iter().position(|i| r.knob.iter().any(|n| n.eq_ignore_ascii_case(&i.title))))?;
+                    let info = params.remove(found);
+                    Some((info.clone(), info.title.clone(), pg.name.clone()))
+                })
+                .collect();
+            if !knobs.is_empty() {
+                pages.push(ViewPage::new(p, pg.name.clone(), knobs));
+            }
+        }
+        let rest = 128usize.saturating_sub(pages.len() * 8);
+        pages.extend(
+            params
+                .into_iter()
+                .take(rest)
+                .collect::<Vec<_>>()
+                .chunks(8)
+                .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect())),
+        );
+        pages
     };
     name_unnamed_pages(&mut pages);
     pages
@@ -707,6 +738,8 @@ pub struct SaveDialog {
     pub library: String,
     pub folder: PathBuf,
     pub samples: bool,
+    /// Render an audio preview beside a sound for the browser to prehear.
+    pub preview: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
     /// Why the last Save didn't write it, shown in the dialog.
@@ -721,6 +754,7 @@ pub struct Saved {
     path: PathBuf,
     info: mxprj::sound_info::SoundInfo,
     samples: bool,
+    preview: bool,
 }
 
 /// A slot's hosted plug-in whose preset saves as NKS ([`App::nks_plugin`]).
@@ -1083,6 +1117,8 @@ pub struct App {
     /// Where each sound, group and preset was last saved, with its tags (Save writes
     /// there again).
     saved: std::collections::HashMap<deckard_doc::FileItem, Saved>,
+    /// "Create audio preview" was unticked in the Save dialog (for the session).
+    preview_declined: bool,
     /// Maschine's user folder, when not the usual one (tests).
     user_dir_override: Option<PathBuf>,
     prefs: Option<usize>,
@@ -1190,6 +1226,10 @@ pub struct App {
     /// Each plug-in's parameters (by chain and slot, with the plug-in's id), for the
     /// macros that control them.
     plugin_params: std::cell::RefCell<std::collections::HashMap<(deckard_doc::Chain, usize), (String, Vec<deckard_plugins::ParamInfo>)>>,
+    /// A stepped plug-in parameter's names as last read (by instance, id and steps):
+    /// [`App::knob_choices`] reads them with `try_lock`, and a frame that finds the
+    /// plug-in busy shows these rather than dropping the list for a dial.
+    step_names: std::cell::RefCell<std::collections::HashMap<(usize, u32, i32), Vec<String>>>,
     /// Open the focused sound's plug-in window one second after start-up
     /// (`--plugin-window`).
     pending_editor: bool,
@@ -1385,6 +1425,7 @@ pub struct App {
     /// The preview last rendered of an internal synth, with the module and the parameters
     /// it was rendered from: rendered again only when they change.
     internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
+    plugin_spectrum: std::cell::RefCell<Option<plugin_spectrum::Focus>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -1467,6 +1508,21 @@ pub struct Playhead {
 #[cfg(test)]
 fn project_of_app(app: &App) -> deckard_model::Project {
     app.doc.as_ref().unwrap().borrow().project().clone()
+}
+
+#[cfg(test)]
+mod exit_screens {
+    use super::*;
+
+    /// Quitting asks the MK3 thread for a black frame. The thread itself is not started.
+    #[test]
+    fn quitting_blanks_the_maschine_screens() {
+        let mut app = App::default();
+        app.mk3 = Some(mk3_io::Mk3Io::detached());
+        eframe::App::on_exit(&mut app);
+        let px = app.mk3.as_ref().unwrap().queued_frame().expect("a frame is queued");
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]));
+    }
 }
 
 /// How often notes held while recording are grown in the pattern.
@@ -5088,6 +5144,78 @@ impl App {
         self.mod_amount(edit).map(f64::from)
     }
 
+    /// What knob `k` of the page shows with its parameter at `at` (0..1): the plug-in's
+    /// own text for a hosted one, the module's for a built-in one. `None` where it can't say.
+    /// The values a knob's parameter picks among, if it's a choice of a few (at most
+    /// six): DECKARD's choices and switches by name, a plug-in's stepped parameter by its
+    /// text at each step. Empty otherwise (the MK3 draws a dial, or nothing, over it).
+    fn knob_choices(&self, edit: layout::Edit) -> Vec<String> {
+        use layout::Edit;
+        const MAX: usize = 6;
+        let stepped = |chain: deckard_doc::Chain, slot: usize, id: u32| -> Option<Vec<String>> {
+            let v = self.plugin_views.get(&(chain, slot))?;
+            let page = v.pages.get(v.page)?;
+            let i = page.knobs.iter().position(|(info, ..)| info.id == id)?;
+            if let Some(names) = page.choices.get(i).filter(|c| !c.is_empty()) {
+                return Some(names.clone());
+            }
+            let steps = page.knobs[i].0.steps;
+            if !(1..MAX as i32).contains(&steps) {
+                return None;
+            }
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, slot))?;
+            let key = (std::sync::Arc::as_ptr(&inst) as *const () as usize, id, steps);
+            let Ok(p) = inst.try_lock() else { return self.step_names.borrow().get(&key).cloned() };
+            let names: Vec<String> = (0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect();
+            self.step_names.borrow_mut().insert(key, names.clone());
+            Some(names)
+        };
+        let names = match edit {
+            Edit::Choice(_, _, names, ..) => Some(names.iter().map(|s| s.to_string()).collect()),
+            Edit::Toggle(..) => Some(vec!["Off".to_string(), "On".to_string()]),
+            Edit::PluginChoice(slot, id, ..) | Edit::Plugin(slot, id, _) => stepped(self.chain(), slot, id),
+            Edit::PluginIn(c, i, id, _) => stepped(c, i, id),
+            _ => None,
+        };
+        names.filter(|n: &Vec<String>| (2..=MAX).contains(&n.len())).unwrap_or_default()
+    }
+
+    fn mod_text(&self, edit: layout::Edit, k: usize, at: f64) -> Option<String> {
+        use layout::Edit;
+        let (chain, target) = modulation::mod_target(edit)?;
+        let slot_i = target.slot?;
+        if let Edit::PluginIn(c, i, id, _) = edit {
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(c, i))?;
+            let text = inst.try_lock().ok()?.param_text(id, at);
+            let units = self
+                .plugin_views
+                .get(&(c, i))
+                .and_then(|v| v.pages.get(v.page)?.knobs.iter().find(|(info, ..)| info.id == id))
+                .map(|(info, ..)| info.units.clone())
+                .unwrap_or_default();
+            return Some(if units.is_empty() || text.ends_with(&units) { text } else { format!("{text} {units}") });
+        }
+        let layout::Act::SetParam(t, field, value) = edit.to_act(at as f32) else { return None };
+        let doc = self.doc.as_ref()?.borrow();
+        let p = doc.project();
+        let slots = match chain {
+            deckard_doc::Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.slots,
+            deckard_doc::Chain::Group(g) => &p.groups.get(g)?.slots,
+            deckard_doc::Chain::Master => return None,
+        };
+        let pg = if let deckard_doc::Target::Sampler(g, s) = t {
+            let mut smp = p.groups.get(g)?.sounds.get(s)?.sampler.clone()?;
+            smp.set(field, value);
+            sampler_ui::page(&smp, g, s, self.sampler_page.min(sampler_ui::PAGES.len() - 1))
+        } else {
+            let mut slot = slots.get(slot_i)?.clone();
+            slot.params.iter_mut().find(|(f, _)| f == field)?.1 = value;
+            let names = crate::module_ui::pages(&slot.module)?;
+            module_ui::page_for(&slot, t, self.plugin_page.min(names.len().saturating_sub(1)))
+        };
+        pg.slots.into_iter().nth(k).flatten().map(|knob| knob.1)
+    }
+
     /// Auto-write: the MK3's AUTO and the header's are one switch. The knob being
     /// written is let go when it goes off or the song stops.
     fn sync_auto_write(&mut self) {
@@ -5715,6 +5843,9 @@ impl App {
             return None;
         }
         let pace = controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering());
+        if self.plugin_spectrum.borrow().as_ref().is_some_and(plugin_spectrum::Focus::is_live) {
+            return Some(pace.min(plugin_spectrum::FRAME_INTERVAL));
+        }
         Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             pace.min(std::time::Duration::from_millis(30))
         } else {
@@ -5778,6 +5909,7 @@ impl App {
             side_live: shot.side_live,
             dim: shot.dim,
             preview: shot.preview,
+            ..Default::default()
         })
     }
 
@@ -6076,6 +6208,7 @@ impl App {
             }
             _ => text.to_string(),
         };
+        let mod_at: Vec<Option<f64>> = (0..8).map(|i| edits.get(i).copied().flatten().and_then(|e| self.mod_position(e))).collect();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -6103,6 +6236,17 @@ impl App {
                 .enumerate()
                 .map(|(i, k)| {
                     k.as_ref().map(|k| KnobView {
+                        mod_position: mod_at[i],
+                        mod_text: mod_at[i].and_then(|at| edits.get(i).copied().flatten().and_then(|e| self.mod_text(e, i, at))),
+                        choices: edits.get(i).copied().flatten().map(|e| self.knob_choices(e)).unwrap_or_default(),
+                        param_id: match edits.get(i).copied().flatten() {
+                            Some(
+                                layout::Edit::Plugin(_, id, _)
+                                | layout::Edit::PluginChoice(_, id, ..)
+                                | layout::Edit::PluginIn(_, _, id, _),
+                            ) => Some(id),
+                            _ => None,
+                        },
                         name: k.name.clone(),
                         section: k.section.clone(),
                         text: knob_text(i, &k.text),
@@ -6120,6 +6264,7 @@ impl App {
             eq: None,
             filter: None,
             picture: None,
+            output_spectrum: Vec::new(),
             zhora: None,
             tuner: None,
             scope: None,
@@ -6173,14 +6318,18 @@ impl App {
                 patterns: b.patterns,
             };
         }
-        let Some(doc) = &self.doc else { return v };
+        let Some(doc) = &self.doc else {
+            self.plugin_spectrum.borrow_mut().take();
+            return v;
+        };
         let d = doc.borrow();
         let p = d.project();
+        let chain = self.chain();
+        let slot = d.chain_slots(chain).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+        (v.control.eq, v.control.output_spectrum) = self.plugin_spectrum_view(chain, self.slot.zip(slot));
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
         if !self.channel {
-            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
-            v.control.eq = slot.and_then(Self::eq_curve);
             let tempo = v.tempo;
             let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
@@ -10829,7 +10978,7 @@ impl App {
         let Some(info) = info else { return };
         let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
         if id.is_some() {
-            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false });
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false, preview: false });
         }
     }
 
@@ -10871,6 +11020,7 @@ impl App {
                 None => self.user_dir().join(folder),
             },
             samples: mode == SaveMode::WithSamples,
+            preview: !self.preview_declined,
             confirm_overwrite: false,
             error: None,
         });
@@ -11024,7 +11174,10 @@ impl App {
         }
         let what = dlg.what;
         let id = doc.borrow().file_item_id(what);
-        let saved = Saved { id, path, info, samples: dlg.samples };
+        let saved = Saved { id, path, info, samples: dlg.samples, preview: dlg.preview };
+        if matches!(what, deckard_doc::FileItem::Sound(..)) {
+            self.preview_declined = !saved.preview;
+        }
         if self.write_item(what, saved) {
             self.save_dialog = None;
         } else if let Some(d) = &mut self.save_dialog {
@@ -11047,6 +11200,11 @@ impl App {
             Ok(()) => {
                 self.status = format!("saved {}", s.path.display());
                 self.browser.add_saved(&s.path);
+                if s.preview
+                    && let deckard_doc::FileItem::Sound(g, n) = what
+                {
+                    self.start_preview(g, n, &s.path);
+                }
                 self.saved.insert(what, s);
                 true
             }
@@ -11055,6 +11213,24 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Render sound (`g`, `n`)'s audio preview beside its saved file `file`, for the
+    /// browser to prehear; the engine is built on the main thread (so plug-ins can load)
+    /// and rendered on a worker thread so saving doesn't wait for it.
+    fn start_preview(&mut self, g: usize, n: usize, file: &Path) {
+        self.store_plugin_states();
+        let Some(doc) = &self.doc else { return };
+        let (p, path, rate) = (doc.borrow().project().clone(), self.path.clone(), self.render_rate());
+        let mut cache = SampleCache::default();
+        cache.library_dirs = self.samples.library_dirs.clone();
+        let engine = deckard_engine::export::preview_engine(&p, path.as_deref(), (g, n), rate, &mut cache);
+        let out = browser::preview_path(file);
+        // Nobody waits for it: the file appearing is the result.
+        drop(export::Offline::start("Preview", move |_, cancel| {
+            let audio = deckard_engine::export::render_preview_engine(engine, rate, cancel).ok_or("cancelled")?;
+            browser::write_preview(&out, &audio, rate)
+        }));
     }
 
     /// Open…: a sound, group or preset file chosen in a dialog, loaded into `what`.
@@ -12124,7 +12300,7 @@ impl App {
             let cid = deckard_plugins::state::PluginId::parse(&pr.id, &pr.name).map(|i| i.cid);
             let (pages, sc) = match p.try_lock() {
                 // (Still the slot's old plug-in: once it's replaced.)
-                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved), sidechain(&g)),
+                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g)),
                 Ok(_) | Err(std::sync::TryLockError::WouldBlock) => return None,
                 Err(_) => (Vec::new(), false),
             };
@@ -12143,7 +12319,7 @@ impl App {
                             let _ = g.load_chunk(&nks.chunk);
                             g.mark_saved(Vec::new());
                         }
-                        (view_pages(&g, &saved), sidechain(&g))
+                        (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g))
                     })
                     .unwrap_or_default();
                 Some(view(pages, sc, std::sync::Arc::downgrade(&p), None))
@@ -13596,7 +13772,7 @@ impl eframe::App for App {
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
-            m.shut_down(goodbye::picture());
+            m.shut_down();
         }
         if let Some(j) = &self.jam {
             j.shut_down();
