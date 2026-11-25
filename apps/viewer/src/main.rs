@@ -1298,6 +1298,10 @@ pub struct App {
     /// The notes that have just started, sequenced or played, (group, sound, pitch): the
     /// controller's pads flash white for them.
     pub hits: std::collections::HashSet<(usize, usize, i64)>,
+    /// The (group, sound)s actively playing a loop in the engine now.
+    pub loop_lit: std::collections::HashSet<(usize, usize)>,
+    /// Live note pitches currently held per `(group, sound)`.
+    held_pitches: std::collections::HashMap<(usize, usize), Vec<i64>>,
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
@@ -4550,7 +4554,22 @@ impl App {
         Some(at as f64 / length as f64)
     }
 
-    fn scene_pattern(&self, group: usize) -> Option<usize> {
+    /// Sound `s` of group `g`'s Audio plug-in loop switched on (its focused take) or off
+    /// in the pattern the group plays (the focused one, for the focused group with none),
+    /// as Maschine's step pad and the pattern editor's double-click do. One undo step.
+    fn toggle_audio_loop(&mut self, g: usize, s: usize) -> Result<(), String> {
+        let doc = self.doc.clone().ok_or("no project")?;
+        let pi = self.scene_pattern(g).or((g == self.group).then_some(self.pattern)).ok_or("the group plays no pattern")?;
+        let mut d = doc.borrow_mut();
+        let p = d.project();
+        let snd = p.groups.get(g).and_then(|x| x.sounds.get(s)).ok_or("no such sound")?;
+        let take = snd.audio.as_ref().ok_or("the sound has no Audio plug-in")?.focused;
+        let pattern = p.groups[g].patterns.get(pi).ok_or("no such pattern")?;
+        let on = pattern.audio.iter().any(|c| c.sound == s);
+        if on { d.set_audio_in(g, s, &[pi], None, "Audio Off") } else { d.set_audio_in(g, s, &[pi], Some(take), "Audio On") }
+    }
+
+    pub(crate) fn scene_pattern(&self, group: usize) -> Option<usize> {
         let d = self.doc.as_ref()?.borrow();
         let s = d.project().scenes.get(self.scene)?;
         s.patterns.iter().find(|(g, _)| *g == group).map(|&(_, pi)| pi)
@@ -6457,12 +6476,35 @@ impl App {
             .collect();
         v.section = self.focused_section(p);
         let bar = (p.numerator.max(1) * 3840 / p.denominator.max(1)).max(1) as f64;
+        let (has_live_engine, out_is_current) = match &self.output {
+            Some(Ok(out)) if out.has_engine() => (true, out.is_current()),
+            _ => (false, false),
+        };
+        let active_mode = self.playing.map(|m| live.map_or(m, |h| h.mode));
         v.groups = (0..p.groups.len())
             .map(|g| {
                 let grp = &p.groups[g];
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
                 let noted = doc_cache.group_noted.get(g);
+                let scene_pattern = p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi));
+                let loop_pattern = match active_mode {
+                    Some(Mode::Pattern(pg, pi)) => (pg == g).then(|| grp.patterns.get(pi)).flatten(),
+                    Some(Mode::Scene(sc)) => {
+                        p.scenes.get(sc).and_then(|s| s.patterns.iter().find(|&&(pg, _)| pg == g)).and_then(|&(_, pi)| grp.patterns.get(pi))
+                    }
+                    Some(Mode::Arrangement) => head
+                        .and_then(|h| p.section_at(h.position as i64))
+                        .and_then(|i| p.sections[i].scene)
+                        .and_then(|sc| p.scenes.get(sc))
+                        .and_then(|s| s.patterns.iter().find(|&&(pg, _)| pg == g))
+                        .map(|&(_, pi)| pi)
+                        .or(scene_pattern)
+                        .and_then(|pi| grp.patterns.get(pi)),
+                    None => scene_pattern.or((g == self.group).then_some(self.pattern)).and_then(|pi| grp.patterns.get(pi)),
+                };
+                let group_ahead = self.settings.render_ahead_ms > 0 && g != self.group;
+                let pat_at = if v.playing { self.pattern_at(g, head).map(|(at, _)| at) } else { None };
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -6500,7 +6542,7 @@ impl App {
                             slot: pt.slot,
                         })
                         .collect(),
-                    scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
+                    scene_pattern,
                     progress: head.and_then(|_| layout::group_progress(p, head, self.scene, g)).map(|(bars, played)| played / bars as f64),
                     playing_progress: head
                         .and_then(|h| {
@@ -6511,6 +6553,8 @@ impl App {
                     sounds: (0..grp.sounds.len())
                         .map(|s| {
                             let snd = &grp.sounds[s];
+                            let loop_mode = snd.instrument == "AudioModule"
+                                && snd.audio.as_ref().is_some_and(|a| a.mode == deckard_model::AudioMode::Loop);
                             SoundView {
                                 name: snd.name.clone(),
                                 rgb: layout::rgb(p, g, Some(s)),
@@ -6550,6 +6594,63 @@ impl App {
                                 prob_locked: snd.probability_locked,
                                 selected: g == self.group && (s == self.sound || self.sound_selection.contains(&s)),
                                 audio: if g == self.group { self.loop_view(p, g, s) } else { None },
+                                loop_mode,
+                                loop_playing: {
+                                    let audio_loop_active = loop_mode
+                                        && !grp.muted
+                                        && !snd.muted
+                                        && loop_pattern.is_some_and(|pt| pt.audio.iter().any(|c| c.sound == s));
+                                    let sampler_loop_active = !grp.muted
+                                        && !snd.muted
+                                        && snd.sampler.as_ref().is_some_and(|smp| {
+                                            if smp.envelope_type == 0 {
+                                                return false;
+                                            }
+                                            let zone_loops = |pitch: i64, vel: Option<i64>| {
+                                                smp.zones.iter().any(|z| {
+                                                    z.loop_active
+                                                        && z.loop_range.1 > z.loop_range.0
+                                                        && (z.key_range.0..=z.key_range.1).contains(&pitch)
+                                                        && vel.is_none_or(|v| (z.velocity_range.0..=z.velocity_range.1).contains(&v))
+                                                })
+                                            };
+                                            if has_live_engine && !group_ahead && self.loop_lit.contains(&(g, s)) {
+                                                return true;
+                                            }
+                                            if !out_is_current {
+                                                if self
+                                                    .held_pitches
+                                                    .get(&(g, s))
+                                                    .is_some_and(|ps| ps.iter().any(|&pt| zone_loops(pt, None)))
+                                                {
+                                                    return true;
+                                                }
+                                                if matches!(self.held, Some((hg, hs, hp)) if (hg, hs) == (g, s) && zone_loops(hp, None)) {
+                                                    return true;
+                                                }
+                                            }
+                                            if v.playing && (!has_live_engine || !out_is_current || group_ahead) {
+                                                if let Some(pt) = loop_pattern {
+                                                    return match pat_at {
+                                                        Some(at) => {
+                                                            let tick = pt.start + at;
+                                                            pt.notes.iter().any(|n| {
+                                                                n.sound == s
+                                                                    && n.position <= tick
+                                                                    && tick < n.position + n.length
+                                                                    && zone_loops(n.pitch, Some(n.velocity))
+                                                            })
+                                                        }
+                                                        None => {
+                                                            pt.notes.iter().any(|n| n.sound == s && zone_loops(n.pitch, Some(n.velocity)))
+                                                        }
+                                                    };
+                                                }
+                                            }
+                                            false
+                                        });
+                                    audio_loop_active || sampler_loop_active
+                                },
                             }
                         })
                         .collect(),
@@ -6899,6 +7000,11 @@ impl App {
             A::DeletePattern { group, pattern } => {
                 if project(self).is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
                     layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
+                }
+            }
+            A::ToggleAudioLoop { group, sound } => {
+                if let Err(e) = self.toggle_audio_loop(group, sound) {
+                    self.status = format!("can't switch the loop: {e}");
                 }
             }
             A::CopyPattern { group, from, to } => {
@@ -13607,9 +13713,20 @@ impl App {
         let played = self.notes_played();
         self.lit = played.iter().map(|&(g, s, _)| (g, s)).collect();
         self.hits.clone_from(&played);
+        self.loop_lit.clear();
+        self.held_pitches.clear();
         if let Some(Ok(out)) = &self.output {
             self.lit.extend(out.played_sounds());
             self.hits.extend(out.played_notes());
+            self.held_pitches = out.held_pitches();
+            for (g, mask) in out.loop_playing().into_iter().enumerate() {
+                let mut m = mask;
+                while m != 0 {
+                    let s = m.trailing_zeros() as usize;
+                    self.loop_lit.insert((g, s));
+                    m &= m - 1;
+                }
+            }
         }
         if !matches!(self.controller, Some(Ok(_))) {
             return;
@@ -14037,6 +14154,8 @@ impl App {
         if !self.lit.is_empty() || !self.hits.is_empty() {
             // Unlight the flashed numbers on time.
             ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
+        } else if !self.loop_lit.is_empty() {
+            ui.ctx().request_repaint_after(BACKGROUND_PACE);
         }
         let mut hw_requests = Vec::new();
         self.frame_surface_view = None;
@@ -15618,6 +15737,90 @@ mod tests {
         let names: Vec<String> = p.groups[groups].sounds[..4].iter().map(|s| s.name.clone()).collect();
         assert!(names[0].ends_with(" Drums") && names[3].ends_with(" Vocal"), "{names:?}");
         let _ = std::fs::remove_dir_all(settings);
+    }
+
+    /// A Loop-mode Audio plug-in's pad (MK3 Pad mode) switches its loop off in the
+    /// pattern the group plays, and on again with its focused take.
+    #[test]
+    fn toggling_an_audio_loop_switches_it_in_the_playing_pattern() {
+        let mut app = App::default();
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "Part").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("Loop 120 bpm.wav");
+        {
+            let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+            let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+            for i in 0..96_000 {
+                w.write_sample(((i as f64 * 0.05).sin() * 8_000.0) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let smp = deckard_engine::sample::Sample::load(&wav).unwrap();
+        app.load_loop(0, 2, &wav, &smp).unwrap();
+        let on = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[0].audio.iter().any(|c| c.sound == 2);
+        let loop_playing = |app: &App| app.surface_view().groups[0].sounds[2].loop_playing;
+        assert!(on(&app), "a loop loaded is on in the pattern");
+        assert!(loop_playing(&app), "active in the pattern even while stopped");
+        app.playing = Some(deckard_engine::Mode::Scene(0));
+        assert!(loop_playing(&app), "song playing and on in the group's pattern");
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "another sound");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(!on(&app), "the pad switches it off");
+        assert!(!loop_playing(&app), "off in the pattern: no longer active");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(on(&app), "and on again");
+        assert!(loop_playing(&app), "on again while song plays");
+        let slot =
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[2].slots.iter().position(|x| x.module == "AudioModule").unwrap();
+        layout::apply_acts(&mut app, vec![layout::Act::SetParam(deckard_doc::Target::Module(0, 2, slot), "mode", 1.0)]);
+        assert!(!loop_playing(&app), "Gate mode plays with notes, not the pattern");
+        assert!(app.toggle_audio_loop(0, 3).is_err(), "a sound without an Audio plug-in");
+
+        // A looped sustaining Sampler sound stays flagged as `loop_playing` while active in the pattern or engine.
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_slot(0, 3, 0, &deckard_doc::NewModule::Sampler).unwrap();
+            let spec = deckard_doc::ZoneSpec {
+                from: deckard_doc::ZoneFrom::Template,
+                file: Some(wav.clone()),
+                set: vec![
+                    ("key_range/low".into(), 0.0),
+                    ("key_range/high".into(), 127.0),
+                    ("velocity_range/low".into(), 0.0),
+                    ("velocity_range/high".into(), 127.0),
+                    ("root_key".into(), 60.0),
+                    ("play_range/low".into(), 0.0),
+                    ("play_range/high".into(), 95_999.0),
+                    ("loop_active".into(), 1.0),
+                    ("loop_range/low".into(), 0.0),
+                    ("loop_range/high".into(), 95_999.0),
+                ],
+            };
+            d.set_zones(0, 3, &[spec], "Loop").unwrap();
+            d.set("Sustaining", deckard_doc::Target::Sampler(0, 3), "envelope_type", mxprj::decode::Value::Int(2)).unwrap();
+            let note = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 0,
+                length: 3840,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            };
+            d.edit_notes("Loop note", 0, 0, &[], &[note]).unwrap();
+        }
+        assert!(app.surface_view().groups[0].sounds[3].loop_playing, "looped Sampler note active in playing pattern");
+        app.playing = None;
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "stopped with no held note: Sampler loop inactive");
+        app.held = Some((0, 3, 60));
+        assert!(app.surface_view().groups[0].sounds[3].loop_playing, "held looped Sampler pad: active");
+        app.held = None;
     }
 
     #[test]

@@ -294,6 +294,11 @@ function global.pad(n, velocity)
   local s = deckard.state()
   local group = s.groups[s.group]
   if not group or n > #group.sounds then return true end
+  -- A sound whose Audio plug-in is in Loop mode plays with the pattern, not with notes:
+  -- in Pad mode its pad switches the loop on or off (and focuses it, as any pad).
+  if pads.mode == "pad" and not acting and not deckard.held("ERASE") and group.sounds[n].loop_mode then
+    deckard.toggle_audio_loop(s.group, n)
+  end
   if pin.active("SELECT") then
     -- MULTI (Button 8) adds the pad. Off, an unselected pad replaces the selection.
     deckard.select_pad(n, require("pages.hold").multi == true)
@@ -608,9 +613,10 @@ function global.leds()
     local sound = sounds[i]
     local name = "PAD_" .. i
     local chosen = sound and (sound.selected or i == s.sound)
+    local loop_on = (pads.mode == "pad" and sound and sound.loop_playing) or false
     if sound and #sound.hits > 0 then
       deckard.led(name, WHITE, true, true)
-    elseif not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing) then
+    elseif not sound or (not sound.used and not chosen and not deckard.pad_held(i) and not sound.playing and not loop_on) then
       deckard.led(name, "off")
     elseif muting then
       deckard.led(name, sound.palette, not sound.muted, sound.playing and not deckard.pad_held(i))
@@ -618,8 +624,10 @@ function global.leds()
       -- A selected empty slot: Maschine lights it in its empty-slot colour.
       deckard.led(name, EMPTY_SLOT, true)
     else
-      -- Selected pads are fully lit, the others half lit.
-      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen, sound.playing and not deckard.pad_held(i))
+      -- Selected pads are bright; active loops in Pad mode hold the full white-mixed
+      -- highlight, and the others are half lit.
+      local flash = loop_on or (not sound.loop_mode and sound.playing and not deckard.pad_held(i)) or false
+      deckard.led(name, sound.palette, deckard.pad_held(i) or chosen or loop_on or false, flash)
     end
   end
 end
