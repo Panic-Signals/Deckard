@@ -261,6 +261,12 @@ impl Device {
         self.run.as_ref().map_or_else(deckard_jam::Leds::default, |run| run.lights.borrow().clone())
     }
 
+    /// The Jam script's focused OSO page, as `deckard.oso` last published it. Read
+    /// without Lua: the store the viewer renders in Task 3, mirroring `leds`.
+    pub fn oso(&self) -> Option<crate::OsoPage> {
+        self.run.as_ref()?.shared.borrow().oso.clone()
+    }
+
     /// Where a HID device's pads play now: its `pads()`, which returns
     /// `{ velocity = n, [column + (row − 1) × 8] = { group, sound, pitch, pitch … } }`, or
     /// `nil` for nothing played. Groups and sounds count from 1 in the script.
@@ -351,6 +357,7 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
         leds: leds::blank(),
         pinned: Default::default(),
         shown_pin: None,
+        oso: None,
     }));
     api::install(&lua, &shared)?;
     let outs = Rc::new(RefCell::new(Vec::new()));

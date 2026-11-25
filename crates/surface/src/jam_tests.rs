@@ -8,7 +8,7 @@ use deckard_jam::map::METER_LEDS;
 
 use crate::device::{Device, Out, devices};
 use crate::tests_support::view;
-use crate::{Action, GroupView, PatternView, SceneView, View};
+use crate::{Action, GroupView, PatternView, SceneView, VariationView, View};
 
 const WHITE: i64 = 16;
 
@@ -122,7 +122,7 @@ fn project_view_shows_scenes_patterns_and_groups() {
     let mut d = jam();
     let v = jam_view();
     assert_eq!(pad_light(&mut d, &v, 1, 2), colour(3, SHADE_BRIGHT), "the scene plays it");
-    assert_eq!(pad_light(&mut d, &v, 1, 1), colour(2, SHADE_FAINT), "it doesn't");
+    assert_eq!(pad_light(&mut d, &v, 1, 1), colour(2, SHADE_DIM), "it doesn't: half-lit, as this page's own rule says");
     assert_eq!(pad_light(&mut d, &v, 1, 4), 0, "no pattern there");
     assert_eq!(pad_light(&mut d, &v, 3, 1), 0, "no group");
     let l = d.leds(&v, Instant::now());
@@ -217,7 +217,7 @@ fn duplicate_changes_source_color_and_flashes_destination() {
     let mut d = jam();
     let v = jam_view();
     let start = Instant::now();
-    assert_eq!(d.leds(&v, start).pads[1 + 8], colour(2, SHADE_FAINT));
+    assert_eq!(d.leds(&v, start).pads[1 + 8], colour(2, SHADE_DIM), "a pattern the focused scene doesn't play is half-lit");
 
     hold(&mut d, &v, "DUPLICATE");
     pad(&mut d, &v, 1, 1);
@@ -351,6 +351,27 @@ fn song_pins_a_temporary_mode() {
     press(&mut d, &v, "SONG");
     release(&mut d, &v, "MUTE");
     assert_eq!(apps(&press(&mut d, &v, "GROUP_A")), [Action::FocusGroup(0)], "unpinned");
+}
+
+/// SONG asks the app for the other arrangement view (manual: "Use the SONG button to switch
+/// between Ideas view and Song view"), and its light follows the app — not the script's own view,
+/// which is "song" whichever way the press went.
+#[test]
+fn the_song_button_turns_the_apps_view_over_and_its_light_follows() {
+    let mut d = jam();
+    let mut v = jam_view();
+    v.song_view = false;
+    assert!(apps(&press(&mut d, &v, "SONG")).contains(&Action::SongView(true)), "the press asks for Song view");
+    v.song_view = true;
+    assert!(apps(&press(&mut d, &v, "SONG")).contains(&Action::SongView(false)), "and asks for Ideas again");
+    v.song_view = true;
+    assert_ne!(button_light(&mut d, &v, "SONG"), 0, "lit while the app shows Song view");
+    v.song_view = false;
+    assert_eq!(
+        button_light(&mut d, &v, "SONG"),
+        deckard_jam::leds::BACKLIGHT,
+        "back to its backlight while the app shows Ideas, though the script's view is song"
+    );
 }
 
 /// The 64 pads play the focused sound chromatically from C1, the root white.
@@ -764,6 +785,9 @@ fn the_encoder_sets_what_the_meter_shows_and_says_so() {
     v.cue_level = 0.75;
     assert!(matches!(apps(&d.encoder(1, &v, Instant::now()))[..], [Action::CueDb(_)]));
     press(&mut d, &v, "TEMPO");
+    // The OSO opens browsing; the ENCODER press is what starts the edit (OSO_TEMPO in the HIL
+    // capture: "wheel-press toggles edit on"), and only then does the turn set the value.
+    press(&mut d, &v, "ENCODER");
     v.tempo = 120.0;
     assert_eq!(apps(&d.encoder(3, &v, Instant::now())), [Action::Tempo(123.0)]);
 }
@@ -829,15 +853,23 @@ fn touching_the_encoder_opens_the_scale_and_it_closes_by_itself() {
     assert!(messages(&d.button("ENCODER_TOUCH", true, &v, t)).is_empty(), "Project View has none");
     d.button("ENCODER_TOUCH", false, &v, t);
     hold(&mut d, &v, "SHIFT");
-    press(&mut d, &v, "PAD_MODE");
+    let out = press(&mut d, &v, "PAD_MODE");
     release(&mut d, &v, "SHIFT");
-    let out = d.button("ENCODER_TOUCH", true, &v, t);
-    assert_eq!(messages(&out), ["SCALE ▸ Root Note: C"]);
+    assert_eq!(messages(&out), ["SCALE ▸ Root Note: C3"], "the keyboard view opens its scales");
+    // (The touch that used to be what opened it now finds it open, so it adds nothing.)
+    assert!(messages(&d.button("ENCODER_TOUCH", true, &v, t)).is_empty(), "already open");
     d.button("ENCODER_TOUCH", false, &v, t);
     press(&mut d, &v, "ENCODER");
     assert_eq!(apps(&d.encoder(2, &v, t)), [Action::Scale { root: 62, bank: 0, kind: 0 }]);
-    d.tick(&v, t + Duration::from_secs(10));
-    assert_eq!(apps(&d.encoder(2, &v, t + Duration::from_secs(10))), [Action::VolumeDb(1.0)], "closed: the encoder's the master's again");
+    // Two seconds after the last use, as the machine does it: open inside that, gone after.
+    // (Neither tick nor `oso()` counts as a use — only a press or a turn does.)
+    let open = Duration::from_millis(1500);
+    d.tick(&v, t + open);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("Scale"), "still showing at 1.5 s");
+    let closed = Duration::from_millis(2500);
+    d.tick(&v, t + closed);
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the strip is empty by 2.5 s");
+    assert_eq!(apps(&d.encoder(2, &v, t + closed)), [Action::VolumeDb(1.0)], "closed: the encoder's the master's again");
 }
 
 /// Chord modes: each pad plays its chord, on the same thread as a note.
@@ -873,8 +905,11 @@ fn note_repeat_and_the_arp() {
     let out = press(&mut d, &v, "NOTE_REPEAT");
     release(&mut d, &v, "SHIFT");
     assert_eq!(apps(&out), [Action::KeyboardMode(true), Action::Repeat("on", 1.0)]);
+    // (The status line says the repeat went on, then the page's own line: both belong to the press.)
+    assert_eq!(messages(&out), ["Arp: On", "ARP ▸ Type: -"], "the Arp's page opens on the press (2026-11-21)");
     assert_eq!(d.pad_map(&v, Instant::now()).pads[0].len(), 1, "Keyboard mode: every pad");
-    assert_eq!(messages(&d.button("ENCODER_TOUCH", true, &v, Instant::now())), ["ARP ▸ Type: -"]);
+    // (The touch that used to be what opened it now finds it open, so it adds nothing.)
+    assert!(messages(&d.button("ENCODER_TOUCH", true, &v, Instant::now())).is_empty());
 }
 
 /// The library opens as the main window's panel, and the encoder and D-pad walk it.
@@ -1199,4 +1234,672 @@ fn strips_are_absolute_unless_relative_is_on() {
     assert!((swing_of(&strip_touch(&mut d, &v, 1, "down", 0.9, t)) - 90.0).abs() < 1e-6);
     assert!((swing_of(&strip_touch(&mut d, &v, 1, "move", 0.2, t)) - 20.0).abs() < 1e-6);
     assert!(!View::default().relative_strips);
+}
+
+/// The Jam script composes the OSO page and publishes it: SCALE is one page of nine,
+/// ARP is three pages of 8 / 7 / 2, KEYBOARD's second page exists only while the
+/// keyboard layout is isomorphic, and titles read `n/N`. No NI install in the loop.
+#[test]
+fn jam_oso_pages_come_from_maschine_jam() {
+    let mut v = jam_view();
+    v.settings.values.insert("jam_keyboard_layout".into(), "Isomorph".into());
+    v.settings.values.insert("jam_iso_layout".into(), "Sequential".into());
+    v.settings.values.insert("jam_iso_type".into(), "In Key".into());
+    v.settings.values.insert("jam_iso_dir".into(), "Vertical".into());
+    let setting = |key: &str, text: &str| crate::RepeatSetting {
+        key: key.into(),
+        name: text.into(),
+        text: text.into(),
+        value: 0.0,
+        min: 0.0,
+        max: 10.0,
+        step: 1.0,
+        turn: 1.0,
+    };
+    v.note_repeat.settings = vec![
+        setting("type", "Up"),
+        setting("rate", "1/16"),
+        setting("rate_unit", "Normal"),
+        setting("sequence", "Off"),
+        setting("octaves", "3"),
+        setting("dynamic", "87.0 %"),
+        setting("gate", "19.0 %"),
+    ];
+    v.note_repeat.hold = false;
+    v.note_repeat.locked = false;
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    let filled = |d: &Device| d.oso().map(|p| p.slots.iter().filter(|s| s.is_some()).count());
+    // Keyboard view, then the SCALE menu; chord mode on so no slot is a hole.
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    assert_eq!(d.error(), None, "ENCODER_TOUCH");
+    d.encoder(3, &v, Instant::now());
+    press(&mut d, &v, "ENCODER");
+    d.encoder(1, &v, Instant::now());
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    let scale = d.oso().expect("SCALE page published");
+    assert_eq!(scale.title, "Scale");
+    assert_eq!((scale.page, scale.pages), (1, 2), "the Scale OSO is paged eight then one");
+    assert_eq!(filled(&d), Some(8), "SCALE page 1 has 8 slots");
+    assert!(scale.slots.iter().all(|s| s.as_ref().is_none_or(|s| !s.value.is_empty())), "holes, not zero-length labels");
+    // ARP: SHIFT + NOTE REPEAT, then its menu; three pages of 8 / 7 / 2.
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "NOTE_REPEAT");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    assert_eq!(d.error(), None, "ARP menu");
+    d.tick(&v, Instant::now());
+    let p1 = d.oso().expect("ARP page 1");
+    assert_eq!(p1.title, "Arpeggiator");
+    assert_eq!((p1.page, p1.pages), (1, 3));
+    assert_eq!(filled(&d), Some(8), "ARP page 1 has 8 slots");
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let p2 = d.oso().expect("ARP page 2");
+    assert_eq!((p2.page, p2.pages), (2, 3));
+    assert_eq!(filled(&d), Some(7), "ARP page 2 has 7 slots");
+    d.encoder(7, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let p3 = d.oso().expect("ARP page 3");
+    assert_eq!((p3.page, p3.pages), (3, 3));
+    assert_eq!(filled(&d), Some(2), "ARP page 3 has 2 slots");
+    assert_eq!(format!("{} {}/{}", p1.title, p1.page, p1.pages), "Arpeggiator 1/3");
+    assert_eq!(format!("{} {}/{}", p2.title, p2.page, p2.pages), "Arpeggiator 2/3");
+    assert_eq!(format!("{} {}/{}", p3.title, p3.page, p3.pages), "Arpeggiator 3/3");
+    // KEYBOARD shows the keyboard's scales: the view switch opens the Scale OSO itself, never a
+    // page of the viewer's own. (Until 2026-11-21 this asserted an empty strip — the rig now has
+    // it the other way round.)
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    let scales = d.oso().expect("the keyboard view publishes the Scale OSO");
+    assert_eq!(scales.title, "Scale");
+    assert!(!scales.slots.is_empty(), "and it is the Scale page, not an empty one");
+    // The Scale OSO's own second page is the layout's direction, so it exists only while
+    // the layout is isomorphic. (ARP is still on from above; turn it off so the encoder's
+    // menu is the Scale OSO.)
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "NOTE_REPEAT");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let scale2 = d.oso().expect("Scale 2/2 published");
+    assert_eq!(format!("{} {}/{}", scale2.title, scale2.page, scale2.pages), "Scale 2/2");
+    assert_eq!(filled(&d), Some(1), "the second page holds one slot");
+    assert_eq!(scale2.slots.iter().flatten().map(|s| s.value.as_str()).collect::<Vec<_>>(), ["Vertical"], "the layout's direction");
+    v.settings.values.insert("jam_keyboard_layout".into(), "Standard".into());
+    d.tick(&v, Instant::now());
+    let scale = d.oso().expect("Scale page published");
+    assert_eq!((scale.page, scale.pages), (1, 1), "no second page when Standard");
+}
+
+/// Finding 1: the published page carries the script's cursor. Turning the encoder on
+/// a menu page steps `menu.at`, and the published `focus` must follow it — the strip's
+/// underline renders that, instead of sitting on slot 0. The Scale OSO is also the paged
+/// one: the cursor decides which of its two pages shows.
+#[test]
+fn menu_cursor_moves_the_published_focus() {
+    let mut v = jam_view();
+    for (key, value) in
+        [("jam_keyboard_layout", "Isomorph"), ("jam_iso_layout", "Sequential"), ("jam_iso_type", "In Key"), ("jam_iso_dir", "Vertical")]
+    {
+        v.settings.values.insert(key.into(), value.into());
+    }
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    // Keyboard view, then the SCALE menu through ENCODER_TOUCH, as on the hardware.
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let scale = d.oso().expect("SCALE page published");
+    assert_eq!((scale.focus, scale.editing), (0, false), "browsing starts on the first slot");
+    // The encoder steps the script's cursor; the published focus follows it.
+    d.encoder(1, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("SCALE page").focus, 1, "the focus follows menu.at, not slot 0");
+    d.encoder(1, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("SCALE page").focus, 2);
+    // ENCODER press is the menu's edit toggle; the flag follows it.
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().expect("SCALE page").editing, "the press edits the focused slot");
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    assert!(!d.oso().expect("SCALE page").editing, "and back to browsing");
+    // ARP: stepping past the page end turns the page, the cursor focused on it.
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "NOTE_REPEAT");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let arp = d.oso().expect("ARP page 1");
+    assert_eq!((arp.page, arp.focus), (1, 0));
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let arp = d.oso().expect("ARP page 2");
+    assert_eq!((arp.page, arp.focus), (2, 0), "the cursor crosses onto the new page");
+    // The keyboard view opens its own scales on the view switch (2026-11-21): the Scale OSO.
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("the keyboard view publishes").title, "Scale");
+    // Touching the encoder opens the Scale OSO, paged eight then one: the ninth slot is the
+    // layout's direction, which exists only while the layout is isomorphic.
+    // (ARP is still on from above, so turn it off: the encoder's menu is the Scale OSO.)
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "NOTE_REPEAT");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let scale = d.oso().expect("SCALE page");
+    assert_eq!((scale.page, scale.pages, scale.slots.len()), (1, 2, 8));
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let scale = d.oso().expect("SCALE page");
+    assert_eq!((scale.page, scale.pages), (2, 2), "the cursor crosses onto the second page");
+    assert_eq!((scale.focus, scale.slots.len()), (0, 1), "which holds the one remaining slot");
+    d.encoder(-1, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("SCALE page").page, 1, "and turning back returns to the first");
+    assert_eq!(d.error(), None);
+}
+
+/// A page whose fill changes underneath its cursor: the Scale OSO's second page exists only
+/// while the keyboard layout is isomorphic, so switching to Standard while the cursor sits
+/// on it leaves a page that no longer exists. Nothing is underlined there, and one turn
+/// recovers onto a filled slot instead of stranding the cursor.
+#[test]
+fn a_published_page_keeps_its_cursor_on_a_slot_when_its_fill_changes() {
+    let mut v = jam_view();
+    for (key, value) in
+        [("jam_keyboard_layout", "Isomorph"), ("jam_iso_layout", "Sequential"), ("jam_iso_type", "In Key"), ("jam_iso_dir", "Vertical")]
+    {
+        v.settings.values.insert(key.into(), value.into());
+    }
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let p2 = d.oso().expect("Scale 2/2 published");
+    assert_eq!((p2.page, p2.pages), (2, 2), "two pages while isomorphic");
+    // The layout goes Standard: page 2 stops existing and the layout detail becomes holes.
+    v.settings.values.insert("jam_keyboard_layout".into(), "Standard".into());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.error(), None);
+    let page = d.oso().expect("Scale page");
+    assert_eq!((page.page, page.pages), (1, 1), "no second page when Standard");
+    assert!(page.focus < page.slots.len(), "the cursor stays inside the page that exists");
+    // One turn back lands on something that shows, rather than leaving the strip blank.
+    d.encoder(-1, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Scale page");
+    assert!(page.slots.get(page.focus).is_some_and(|s| s.is_some()), "a turn recovers onto a filled slot (focus {})", page.focus);
+}
+
+/// TEMPO publishes its OSO: one slot, the tempo as the reference draws it (`120.00`), with no
+/// header and no sub-label. It is static — a page change closes it — and the first ENCODER press
+/// starts the edit rather than the OSO opening in edit.
+#[test]
+fn the_tempo_button_publishes_its_oso() {
+    let mut v = jam_view();
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "nothing shows at rest");
+    press(&mut d, &v, "TEMPO");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("TEMPO page published");
+    assert_eq!((page.title.as_str(), page.slots.len()), ("Tempo", 1));
+    assert!(!page.editing, "it opens browsing, as the reference does");
+    let slot = page.slots[0].as_ref().expect("the slot");
+    assert_eq!(slot.value, format!("{:.2}", v.tempo));
+    assert_eq!((slot.group.as_deref(), slot.sub.as_deref()), (None, None), "no header, no sub-label");
+    // The ENCODER press starts the edit; the turn then sets the tempo.
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().expect("TEMPO page").editing, "the press starts the edit");
+    let out = d.encoder(1, &v, Instant::now());
+    assert!(apps(&out).iter().any(|a| matches!(a, Action::Tempo(_))), "the turn sets the tempo: {:?}", apps(&out));
+    // Static: the controller's page changing closes it, and so does the button.
+    v.page = "step".into();
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "a static OSO dies with its page");
+    press(&mut d, &v, "TEMPO");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_some_and(|p| p.title == "Tempo"), "the button shows it again");
+    press(&mut d, &v, "TEMPO");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "and the button closes it");
+}
+
+/// A static OSO belongs to the page it was opened on: the controller's page changing drops it,
+/// as NI's `onControllerPageChanged` does. A non-static one is left alone — its idle timer is
+/// its own business.
+#[test]
+fn a_page_change_drops_a_static_oso() {
+    let mut v = jam_view();
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    // SHIFT + GRID: REC MODE is a static OSO, shown by its own key.
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GRID");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    let rec = d.oso().expect("REC MODE published");
+    assert_eq!(rec.title, "REC MODE");
+    // The controller's page changes: the OSO goes with the page it belonged to.
+    v.page = "step".into();
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "a static OSO does not survive the page change");
+    // The Scale OSO is non-static: the same page change leaves it up.
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("SCALE page").title, "Scale");
+    v.page = "control".into();
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("SCALE page").title, "Scale", "a non-static OSO waits for its timer");
+}
+
+/// The epic's point, in one test: every OSO page comes from DECKARD's own
+/// `maschine_jam` script with no NI install. `DECKARD_SCRIPTS` is removed for the
+/// run, so a reintroduced NI dependency (anything read from that path) fails here
+/// instead of on the rig. Each page is reached through the real input path and
+/// asserts the hardware-confirmed shape: SCALE 9, ARP 8 / 7 / 2, KEYBOARD two
+/// pages iff isomorphic, PERFORM FX one slot iff an FX is loaded.
+#[test]
+fn jam_oso_pages_need_no_ni_install() {
+    let saved = std::env::var_os("DECKARD_SCRIPTS");
+    // SAFETY: no test in this binary reads `DECKARD_SCRIPTS` (grep it), and the
+    // viewer and lua-host suites run in their own processes, so nothing observes
+    // the gap. Restored at the end.
+    unsafe { std::env::remove_var("DECKARD_SCRIPTS") };
+    assert_eq!(std::env::var_os("DECKARD_SCRIPTS"), None, "the proof runs with no NI scripts path");
+    let mut v = jam_view();
+    v.settings.values.insert("jam_keyboard_layout".into(), "Isomorph".into());
+    v.settings.values.insert("jam_iso_layout".into(), "Sequential".into());
+    v.settings.values.insert("jam_iso_type".into(), "In Key".into());
+    v.settings.values.insert("jam_iso_dir".into(), "Vertical".into());
+    let setting = |key: &str, text: &str| crate::RepeatSetting {
+        key: key.into(),
+        name: text.into(),
+        text: text.into(),
+        value: 0.0,
+        min: 0.0,
+        max: 10.0,
+        step: 1.0,
+        turn: 1.0,
+    };
+    v.note_repeat.settings = vec![
+        setting("type", "Up"),
+        setting("rate", "1/16"),
+        setting("rate_unit", "Normal"),
+        setting("sequence", "Off"),
+        setting("octaves", "3"),
+        setting("dynamic", "87.0 %"),
+        setting("gate", "19.0 %"),
+    ];
+    v.note_repeat.hold = false;
+    v.note_repeat.locked = false;
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    let filled = |d: &Device| d.oso().map(|p| p.slots.iter().filter(|s| s.is_some()).count());
+    // SCALE, through the keyboard view's encoder menu; chord mode on so no slot
+    // is a hole. A menu page: the script owns the press.
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.encoder(3, &v, Instant::now());
+    press(&mut d, &v, "ENCODER");
+    d.encoder(1, &v, Instant::now());
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.error(), None);
+    let scale = d.oso().expect("SCALE page published");
+    assert_eq!(scale.title, "Scale");
+    assert_eq!((scale.page, scale.pages), (1, 2), "the Scale OSO is paged eight then one");
+    assert_eq!(filled(&d), Some(8), "SCALE page 1 has 8 slots");
+    // ARP: SHIFT + NOTE REPEAT, then its menu; three pages of 8 / 7 / 2.
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "NOTE_REPEAT");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    assert_eq!(d.error(), None, "ARP menu");
+    d.tick(&v, Instant::now());
+    let p1 = d.oso().expect("ARP page 1");
+    assert_eq!(p1.title, "Arpeggiator");
+    assert_eq!((p1.page, p1.pages), (1, 3));
+    assert_eq!(filled(&d), Some(8), "ARP page 1 has 8 slots");
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(filled(&d), Some(7), "ARP page 2 has 7 slots");
+    d.encoder(7, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let p3 = d.oso().expect("ARP page 3");
+    assert_eq!((p3.page, p3.pages), (3, 3));
+    assert_eq!(filled(&d), Some(2), "ARP page 3 has 2 slots");
+    // KEYBOARD publishes the Scale OSO on the view switch, and that page's second half exists
+    // only while the layout is isomorphic.
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().expect("the keyboard view publishes").title, "Scale");
+    // (ARP is still on from above; its menu would open instead of the Scale OSO's.)
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "NOTE_REPEAT");
+    release(&mut d, &v, "SHIFT");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.encoder(8, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    let scale2 = d.oso().expect("Scale 2/2 published");
+    assert_eq!((scale2.page, scale2.pages, filled(&d)), (2, 2, Some(1)));
+    v.settings.values.insert("jam_keyboard_layout".into(), "Standard".into());
+    d.tick(&v, Instant::now());
+    let scale = d.oso().expect("Scale page published");
+    assert_eq!((scale.page, scale.pages), (1, 1), "no second page when Standard");
+    // PERFORM FX with no FX loaded: the page closes instead of a default.
+    hold(&mut d, &v, "SHIFT");
+    let out = press(&mut d, &v, "PERFORM");
+    release(&mut d, &v, "SHIFT");
+    assert!(apps(&out).contains(&Action::PerformFx), "the host is asked to add one");
+    d.tick(&v, Instant::now());
+    let fx = d.oso().expect("PERFORM FX page published");
+    assert_eq!(fx.title, "PERFORM FX");
+    assert_eq!(filled(&d), Some(0), "no FX loaded: the page closes");
+    // With an FX loaded the slot shows its mode.
+    v.groups[0].perform = Some((false, 0.5));
+    v.groups[0].perform_mode = Some((2, "Burst Echo".into()));
+    press(&mut d, &v, "SONG");
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PERFORM");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.error(), None);
+    let fx = d.oso().expect("PERFORM FX page published");
+    assert_eq!(filled(&d), Some(1), "FX loaded: its slot shows");
+    let slot = fx.slots.iter().flatten().next().expect("the slot");
+    assert_eq!(slot.value.as_str(), "Burst Echo", "the FX's mode is the slot's value");
+    assert_eq!(slot.group.as_deref(), Some("PERFORM FX"));
+    unsafe {
+        if let Some(s) = saved {
+            std::env::set_var("DECKARD_SCRIPTS", s);
+        }
+    }
+}
+
+/// PERFORM FX is **static**: the timer does not take it, the encoder's press closes it — the rig
+/// had it the other way round first (2026-11-21), and the machine's own press is the closer.
+#[test]
+fn perform_fx_stays_up_and_closes_on_the_encoder_press() {
+    let mut d = jam();
+    let mut v = jam_view();
+    v.groups[0].perform = Some((false, 0.5));
+    v.groups[0].perform_mode = Some((2, "Burst Echo".into()));
+    let t = Instant::now();
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PERFORM");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, t);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("PERFORM FX"), "shows on the press");
+    d.tick(&v, t + Duration::from_millis(2500));
+    assert!(d.oso().is_some_and(|p| !p.slots.is_empty()), "static: still up at 2.5 s");
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the encoder's press closes it");
+}
+
+/// With GRID showing, SHIFT + GRID enters REC MODE — and GRID stays lit, as on the machine.
+#[test]
+fn shift_grid_enters_record_mode_over_the_grid() {
+    let mut d = jam();
+    let v = jam_view();
+    press(&mut d, &v, "GRID");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("GRID"));
+    hold(&mut d, &v, "SHIFT");
+    let out = press(&mut d, &v, "GRID");
+    release(&mut d, &v, "SHIFT");
+    assert_eq!(messages(&out), ["REC MODE ▸ Metronome Level: -"], "the record mode opened over the grid");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("REC MODE"), "the record mode's page");
+    assert_eq!(button_light(&mut d, &v, "GRID"), deckard_jam::leds::ON, "and GRID stays lit");
+}
+
+/// SWING and TUNE go on the timer, and an encoder touch brings them back — the view is still theirs.
+#[test]
+fn swing_comes_back_on_an_encoder_touch_after_the_timer() {
+    let mut d = jam();
+    let v = jam_view();
+    let t = Instant::now();
+    press(&mut d, &v, "SWING");
+    d.tick(&v, t);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("SWING"));
+    d.tick(&v, t + Duration::from_millis(2500));
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "gone by 2.5 s");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("SWING"), "and back on a touch");
+}
+
+/// The piano roll's Scale page is the scale's own three settings: root, bank, type, one page.
+#[test]
+fn the_piano_roll_shows_the_scales_own_three_settings() {
+    let mut d = jam();
+    let v = jam_view();
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "STEP");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("the piano roll publishes the Scale page");
+    assert_eq!((page.title.as_str(), page.pages), ("Scale", 1), "one page, no counter");
+    let subs: Vec<Option<&str>> = page.slots.iter().flatten().map(|s| s.sub.as_deref()).collect();
+    assert_eq!(subs, [Some("Root Note"), Some("Bank"), Some("Type")], "three slots, no chord or layout");
+    let groups: Vec<Option<&str>> = page.slots.iter().flatten().map(|s| s.group.as_deref()).collect();
+    assert_eq!(groups, [Some("SCALE"), Some("SCALE"), Some("SCALE")], "under one SCALE header");
+}
+
+/// The lock view opens its page on the switch, on the timer, and a touch brings it back — the same
+/// rule the keyboard and piano-roll views follow (the rig, 2026-11-21).
+#[test]
+fn the_lock_view_opens_its_page_and_the_timer_takes_it() {
+    let mut d = jam();
+    let v = jam_view();
+    let t = Instant::now();
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "LOCK");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, t);
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("LOCK"), "open on the switch");
+    d.tick(&v, t + Duration::from_millis(2500));
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "gone by 2.5 s");
+    d.button("ENCODER_TOUCH", true, &v, Instant::now());
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("LOCK"), "and back on a touch");
+}
+
+/// SHIFT + GROUP 5 (`GROUP_E`) puts the focused sound's Variation page on the OSO, static
+/// as the reference has it: five settings in Humanize, and the two Random pages in a
+/// keyboard layout, with the encoder turning the setting under the cursor (work-item 35).
+#[test]
+fn the_variation_page_publishes_its_settings() {
+    let mut v = jam_view();
+    v.variation = Some(VariationView {
+        mode: 0,
+        velocity_lo: 100,
+        velocity_hi: 127,
+        time_shift: 0.0,
+        probability: 50,
+        note_lo: 60,
+        note_hi: 72,
+        note_count: 1,
+        steps: 1.0,
+        dist_note_count: 3,
+        dist_notes: 1,
+        dist_note_length: 2,
+        euclid_steps: 8,
+        fills: 5,
+        rotate: 0,
+        division: 0,
+        keyboard: true,
+    });
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    let out = press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    assert_eq!(apps(&out), [Action::GroovePage(1)], "the strips show it as they ever did");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Variation page published");
+    assert_eq!((page.title.as_str(), page.page, page.pages), ("Variation", 1, 1));
+    assert_eq!(page.slots.len(), 5, "Humanize is five settings");
+    let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
+    assert_eq!((slot(0).value.as_str(), slot(0).sub.as_deref()), ("Humanize", Some("Mode")));
+    assert_eq!((slot(1).value.as_str(), slot(1).sub.as_deref()), ("Apply", None), "a button has no sub-label");
+    assert_eq!(slot(2).group.as_deref(), Some("VELOCITY RANGE"));
+    assert_eq!((slot(2).value.as_str(), slot(3).value.as_str()), ("100", "127"));
+    assert_eq!((slot(4).value.as_str(), slot(4).group.as_deref()), ("± 0 %", Some("TIME SHIFT")));
+    // The MODE setting turns to Random; the page then has two, eight settings on the first.
+    press(&mut d, &v, "ENCODER");
+    d.tick(&v, Instant::now());
+    let out = d.encoder(1, &v, Instant::now());
+    assert!(apps(&out).iter().any(|a| matches!(a, Action::Variation { field: "mode", value } if *value == 1.0)), "{:?}", apps(&out));
+    v.variation.as_mut().expect("a sound").mode = 1;
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Random page");
+    assert_eq!((page.title.as_str(), page.page, page.pages), ("Variation", 1, 2), "the host adds the 1/2");
+    assert_eq!(page.slots.len(), 8, "Mode, Apply, Probability, Note Lo and Hi, Velocity Lo and Hi, Chords");
+    let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
+    assert_eq!((slot(2).value.as_str(), slot(2).group.as_deref()), ("50 %", Some("PROBABILITY")));
+    assert_eq!((slot(3).value.as_str(), slot(4).value.as_str()), ("C3", "C4"), "the note range reads as C3 and C4");
+    assert_eq!((slot(7).value.as_str(), slot(7).group.as_deref()), ("1", Some("CHORDS")));
+    // Apply is the page's button: the press asks the app to vary the sound's notes.
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert!(!d.oso().expect("page").editing, "it opens browsing");
+    d.encoder(1, &v, Instant::now()); // the cursor onto Apply
+    let out = press(&mut d, &v, "ENCODER");
+    assert!(apps(&out).contains(&Action::ApplyVariation), "{:?}", apps(&out));
+}
+
+/// The page's third mode is DECKARD's own: the generator's Euclidean settings, on one
+/// page of six, with the reference's two modes untouched before it.
+#[test]
+fn the_variation_page_shows_euclid_as_its_third_mode() {
+    let mut v = jam_view();
+    v.variation = Some(VariationView { mode: 2, euclid_steps: 8, fills: 5, rotate: 2, division: 3, keyboard: true, ..Default::default() });
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    let page = d.oso().expect("Euclid page published");
+    assert_eq!((page.title.as_str(), page.pages), ("Euclid", 1));
+    assert_eq!(page.slots.len(), 6, "Mode, Apply, Steps, Fills, Rotate, Division");
+    let slot = |i: usize| page.slots[i].as_ref().expect("a slot").clone();
+    assert_eq!((slot(0).value.as_str(), slot(0).sub.as_deref()), ("Euclid", Some("Mode")));
+    assert_eq!((slot(2).value.as_str(), slot(2).group.as_deref()), ("8", Some("EUCLID")));
+    assert_eq!((slot(3).value.as_str(), slot(3).sub.as_deref()), ("5", Some("Fills")));
+    assert_eq!((slot(5).value.as_str(), slot(5).sub.as_deref()), ("1/16", Some("Division")));
+}
+
+/// SHIFT + E twice: the page goes on the second press, as the reference's static pages do,
+/// whichever mode it was showing (the menu keeps its own title through the mode's pages).
+#[test]
+fn shift_e_pressed_twice_closes_the_variation_page() {
+    let mut v = jam_view();
+    v.variation = Some(VariationView { mode: 2, euclid_steps: 8, fills: 5, keyboard: true, ..Default::default() });
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    d.open(&v, Instant::now());
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "GROUP_E");
+    d.tick(&v, Instant::now());
+    assert_eq!(d.oso().map(|p| p.title).as_deref(), Some("Euclid"), "the third mode's page");
+    press(&mut d, &v, "GROUP_E");
+    release(&mut d, &v, "SHIFT");
+    d.tick(&v, Instant::now());
+    assert!(d.oso().is_none_or(|p| p.slots.is_empty()), "the second press closes it");
+}
+
+/// The isomorphic pad layouts move the keyboard grid: rows step by a constant interval and
+/// Horizontal is that grid transposed — as NI's `updateJamKeyboardNoteMap` builds it, in
+/// C++ behind `PadModeHelper.getNoteForPad`. DECKARD published the four PAD LAYOUT settings
+/// and left the 8x8 a plain linear grid.
+#[test]
+fn the_isomorphic_layout_moves_the_keyboard_grid() {
+    let pitches = |d: &mut Device, v: &View| -> Vec<i64> {
+        d.pad_map(v, Instant::now()).pads.iter().map(|p| p.first().map_or(-1, |n| n.2)).collect()
+    };
+    let mut v = jam_view();
+    // Chromatic, so a row's step is the same interval at every column. (In Key walks the
+    // scale's degrees, whose semitone steps differ by one from place to place.)
+    // Bank 1, kind 0 in the view is the app's plain scale (published to the script as 1/1).
+    (v.scale_root, v.scale_bank, v.scale_kind) = (60, 1, 0);
+    let mut d = Device::new("maschine_jam", None);
+    assert_eq!(d.error(), None);
+    hold(&mut d, &v, "SHIFT");
+    press(&mut d, &v, "PAD_MODE");
+    release(&mut d, &v, "SHIFT");
+    let linear = pitches(&mut d, &v);
+    assert_eq!(linear.len(), 64);
+    for (key, value) in
+        [("jam_keyboard_layout", "Isomorph"), ("jam_iso_layout", "3rds"), ("jam_iso_type", "Chromatic"), ("jam_iso_dir", "Vertical")]
+    {
+        v.settings.values.insert(key.into(), value.into());
+    }
+    let vertical = pitches(&mut d, &v);
+    assert_ne!(vertical, linear, "the grid is no longer the linear one");
+    // Pads are numbered from the top row across (`pad_key`). What a test can pin without a
+    // pad under the finger: the grid is no longer linear, each row still ascends left to
+    // right, and Horizontal is that grid transposed. The interval a row steps by is NI's
+    // offset table's business (hardware-verified, see the note beside `iso_offset`).
+    let at = |grid: &[i64], row: usize, col: usize| grid[(row - 1) * 8 + (col - 1)];
+    for row in 1..=8 {
+        let row_pitches: Vec<i64> = (1..=8).map(|col| at(&vertical, row, col)).filter(|p| *p >= 0).collect();
+        assert!(row_pitches.windows(2).all(|w| w[1] > w[0]), "row {row} ascends: {row_pitches:?}");
+    }
+    v.settings.values.insert("jam_iso_dir".into(), "Horizontal".into());
+    let horizontal = pitches(&mut d, &v);
+    for row in 1..=8 {
+        for col in 1..=8 {
+            assert_eq!(at(&horizontal, row, col), at(&vertical, col, row), "Horizontal is Vertical transposed ({row},{col})");
+        }
+    }
 }

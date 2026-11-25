@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use mlua::{Function, Lua, Table, Value};
 
-use crate::{Action, Browse, ColorOf, Shared, View, leds, names};
+use crate::{Action, Browse, ColorOf, OsoPage, OsoSlot, Shared, View, leds, names};
 
 /// Tempos the app takes: 10–400 BPM.
 pub fn tempo_in_range(bpm: f64) -> f64 {
@@ -113,7 +113,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     let sh = shared.clone();
     d.set("held", lua.create_function(move |_, name: String| Ok(sh.borrow().held.contains(&name)))?)?;
     let sh = shared.clone();
-    d.set("pad_held", lua.create_function(move |_, n: usize| Ok(n >= 1 && n <= 16 && sh.borrow().pads[n - 1]))?)?;
+    d.set("pad_held", lua.create_function(move |_, n: usize| Ok((1..=16).contains(&n) && sh.borrow().pads[n - 1]))?)?;
     d.set("device", lua.create_function(|_, ()| Ok(crate::sources::DEVICE))?)?;
     let sh = shared.clone();
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
@@ -291,6 +291,40 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("auto_write", (on: bool) => Action::AutoWrite(on));
     request!("tempo", (bpm: f64) => Action::Tempo(tempo_in_range(bpm)));
     request!("swing", (amount: f64) => Action::Swing(amount.clamp(0.0, 100.0)));
+    {
+        // The Variation page's settings (work-item 35), by the names the page uses.
+        const FIELDS: [&str; 16] = [
+            "mode",
+            "velocity_lo",
+            "velocity_hi",
+            "time_shift",
+            "probability",
+            "note_lo",
+            "note_hi",
+            "note_count",
+            "steps",
+            "dist_note_count",
+            "dist_notes",
+            "dist_note_length",
+            "euclid_steps",
+            "fills",
+            "rotate",
+            "division",
+        ];
+        let sh = shared.clone();
+        d.set(
+            "variation",
+            lua.create_function(move |_, (field, value): (String, f64)| {
+                let Some(name) = FIELDS.iter().find(|f| **f == field) else {
+                    return Err(mlua::Error::runtime(format!("no variation setting \"{field}\" ({})", FIELDS.join(", "))));
+                };
+                act(&sh, Action::Variation { field: name, value });
+                Ok(())
+            })?,
+        )?;
+    }
+    request!("apply_variation", () => Action::ApplyVariation);
+
     request!("volume", (level: f64) => Action::Volume(level.clamp(0.0, 1.0)));
     request!("volume_db", (db: f64) => Action::VolumeDb(db.min(MAX_DB)));
     request!("fixed_velocity", (on: bool) => Action::FixedVelocity(on));
@@ -431,7 +465,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         d.set(
             "setting",
             lua.create_function(move |_, (name, step, index): (String, i64, Option<usize>)| {
-                const NAMES: [&str; 31] = [
+                const NAMES: [&str; 35] = [
                     "count_in",
                     "numerator",
                     "denominator",
@@ -463,6 +497,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "pattern_length",
                     "pattern_length_fine",
                     "pattern_grow",
+                    "jam_keyboard_layout",
+                    "jam_iso_layout",
+                    "jam_iso_type",
+                    "jam_iso_dir",
                 ];
                 let Some(&name) = NAMES.iter().find(|n| **n == name) else {
                     return Err(mlua::Error::runtime(format!("no setting \"{name}\" ({})", NAMES.join(", "))));
@@ -1092,6 +1130,60 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
         })?,
     )?;
 
+    // The Jam script's focused OSO page (`deckard.oso(page)`): the host stores it so
+    // the viewer reads it without Lua, mirroring `leds` and the status line. Holes
+    // are `false` (never an empty label); `sub`/`group` are nil where the reference
+    // leaves the row blank. The cursor (`focus`) and its edit flag come from the script
+    // on every page; the strip draws them and routes the ENCODER to the script.
+    let sh = shared.clone();
+    d.set(
+        "oso",
+        lua.create_function(move |_, page: Table| {
+            let title: String = page.get("title")?;
+            let cur: usize = page.get("page")?;
+            let total: usize = page.get("pages")?;
+            let pages = total.max(1);
+            let slots_t: Table = page.get("slots")?;
+            let len = slots_t.len()? as usize;
+            let mut slots = Vec::with_capacity(len);
+            for i in 1..=len {
+                let v: Value = slots_t.get(i)?;
+                let slot = match v {
+                    Value::Nil => None,
+                    Value::Boolean(false) => None,
+                    Value::Table(t) => {
+                        // (The script's own key stays in the script: see `OsoSlot`.)
+                        // No display text is no slot: a hole, as `false` is, rather than an
+                        // error that stops the device's script.
+                        let value: Option<String> = t.get("value")?;
+                        match value.filter(|v| !v.is_empty()) {
+                            None => None,
+                            Some(value) => {
+                                let sub: Option<String> = t.get("sub")?;
+                                let group: Option<String> = t.get("group")?;
+                                let sub = sub.filter(|s| !s.is_empty());
+                                let group = group.filter(|s| !s.is_empty());
+                                Some(OsoSlot { value, sub, group })
+                            }
+                        }
+                    }
+                    _ => return Err(mlua::Error::runtime("oso slots hold tables or false")),
+                };
+                slots.push(slot);
+            }
+            let focus: Option<usize> = page.get("focus")?;
+            let editing: Option<bool> = page.get("editing")?;
+            sh.borrow_mut().oso = Some(OsoPage {
+                title,
+                page: cur.clamp(1, pages),
+                pages,
+                slots,
+                focus: focus.unwrap_or(0),
+                editing: editing.unwrap_or(false),
+            });
+            Ok(())
+        })?,
+    )?;
     lua.globals().set("deckard", d)
 }
 
@@ -1227,6 +1319,34 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     t.set("pattern_position", v.pattern_position)?;
     t.set("tempo", v.tempo)?;
     t.set("swing", v.swing)?;
+    t.set(
+        "variation",
+        match &v.variation {
+            None => mlua::Value::Nil,
+            Some(x) => {
+                let t2 = lua.create_table()?;
+                t2.set("mode", x.mode)?;
+                t2.set("velocity_lo", x.velocity_lo)?;
+                t2.set("velocity_hi", x.velocity_hi)?;
+                t2.set("time_shift", x.time_shift)?;
+                t2.set("probability", x.probability)?;
+                t2.set("note_lo", x.note_lo)?;
+                t2.set("note_hi", x.note_hi)?;
+                t2.set("note_count", x.note_count)?;
+                t2.set("steps", x.steps)?;
+                t2.set("dist_note_count", x.dist_note_count)?;
+                t2.set("dist_notes", x.dist_notes)?;
+                t2.set("dist_note_length", x.dist_note_length)?;
+                t2.set("euclid_steps", x.euclid_steps)?;
+                t2.set("fills", x.fills)?;
+                t2.set("rotate", x.rotate)?;
+                t2.set("division", x.division)?;
+                t2.set("keyboard", x.keyboard)?;
+                mlua::Value::Table(t2)
+            }
+        },
+    )?;
+
     t.set("volume", v.master_volume)?;
     t.set("volume_db", v.master_db)?;
     t.set("master_meter", lua.create_sequence_from([db(v.master_meter.0), db(v.master_meter.1)])?)?;
@@ -1239,6 +1359,11 @@ fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     t.set("input_meters", inputs)?;
     t.set("input_levels", lua.create_sequence_from(v.input_levels)?)?;
     t.set("playing", v.playing)?;
+    // The desktop library panel is open: the strip is hidden, so a script declines an
+    // ENCODER press there rather than setting an edit nobody can see.
+    t.set("browser_open", v.browser_open)?;
+    // The controller's page, which a page change closes a static OSO with.
+    t.set("surface_page", v.page.as_str())?;
     t.set("recording", v.recording)?;
     t.set("looping", v.looping)?;
     t.set("metronome", v.metronome)?;
@@ -1808,6 +1933,12 @@ fn group_static_eq(old: &crate::GroupView, new: &crate::GroupView) -> bool {
         && sounds.iter().zip(&new.sounds).all(|(x, y)| sound_static_eq(x, y))
 }
 
+/// Whether `deckard.state()`'s table may be patched field by field instead of made again.
+///
+/// The invariant: a `View` field either appears here (so a change to it rebuilds the
+/// table) or is written by `patch_state_in_place` below. A field in neither is a value
+/// the scripts keep reading at its old setting — the Variation page's mode was one, and
+/// its page never left Humanize. **A new `View` field goes here** unless it is patched.
 fn can_patch_state_in_place(old: &View, new: &View) -> bool {
     // Every field is named, with no `..`: a field added to the struct doesn't build until it's
     // put with the compared ones (a change rebuilds the table) or the patched ones (`_`, which
@@ -1816,6 +1947,7 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         project,
         tempo,
         swing,
+        variation,
         master_volume,
         master_db,
         playing,
@@ -1862,6 +1994,8 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         group,
         sound,
         browser,
+        browser_open,
+        page,
         sampling,
         loading,
         groups,
@@ -1877,6 +2011,7 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
     *project == new.project
         && *tempo == new.tempo
         && *swing == new.swing
+        && *variation == new.variation
         && *master_volume == new.master_volume
         && *master_db == new.master_db
         && *playing == new.playing
@@ -1923,6 +2058,8 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         && *group == new.group
         && *sound == new.sound
         && *browser == new.browser
+        && *browser_open == new.browser_open
+        && *page == new.page
         && *sampling == new.sampling
         && *loading == new.loading
         && groups.len() == new.groups.len()

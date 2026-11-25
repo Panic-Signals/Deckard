@@ -36,6 +36,8 @@ pub struct View {
     pub tempo: f64,
     /// The song's swing, 0–100 %.
     pub swing: f64,
+    /// The focused sound's Variation settings, when there is a sound to show.
+    pub variation: Option<VariationView>,
     /// The master level as stored (0..1, 0.75 unity).
     pub master_volume: f64,
     /// The master level in dB (−∞ silent).
@@ -127,6 +129,13 @@ pub struct View {
     pub control: ControlView,
     /// The library as BROWSE shows it.
     pub browser: BrowserView,
+    /// The desktop library panel is open, so the strip is hidden: a script must not set
+    /// an edit nobody can see there (one that survives the panel closing).
+    pub browser_open: bool,
+    /// The controller page the app is showing (`control`, `step`, `song`…), as the MK3's
+    /// scripts leave it: the fact NI hands a device when the controller's page changes,
+    /// which is what closes a static OSO.
+    pub page: String,
     /// What the Sampling page (SAMPLE) shows.
     pub sampling: SamplingView,
     /// A group or sound is loading: the name, shown over both screens until it's in.
@@ -527,6 +536,36 @@ pub struct MixView {
     pub tune: Option<f64>,
 }
 
+/// The focused sound's Variation page (work-item 35): what the Jam's RANDOMIZER shows
+/// and sets. `mode` is 0 Humanize or 1 Random; the distributions are 0 Equal, 1 Gauss,
+/// 2 ½ Gauss, 3 Fixed; `keyboard` says whether the pads are in a keyboard layout, which
+/// shows Note Range and Chords (pad mode hides them).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VariationView {
+    pub mode: i64,
+    pub velocity_lo: i64,
+    pub velocity_hi: i64,
+    /// Per cent of a grid step, 0–50.
+    pub time_shift: f64,
+    /// Per cent, 10–100.
+    pub probability: i64,
+    pub note_lo: i64,
+    pub note_hi: i64,
+    pub note_count: i64,
+    /// A note's length in grid steps, 1–6.
+    pub steps: f64,
+    pub dist_note_count: i64,
+    pub dist_notes: i64,
+    pub dist_note_length: i64,
+    /// The generator's Euclidean settings, which `Euclid` (mode 2) shows.
+    pub euclid_steps: i64,
+    pub fills: i64,
+    pub rotate: i64,
+    /// Its Division, as `layout::channel::DIVISIONS` lists it (0 Grid … 10 Fit Bar).
+    pub division: i64,
+    pub keyboard: bool,
+}
+
 /// The app's Control area: what the eight knobs turn.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ControlView {
@@ -757,6 +796,14 @@ pub enum Action {
     Volume(f64),
     /// The master level in dB (at most +10).
     VolumeDb(f64),
+    /// Set one of the focused sound's Variation settings (work-item 35): `field` as the
+    /// page names it (`mode`, `velocity_lo`, …, `dist_notes`), `value` as it shows it.
+    Variation {
+        field: &'static str,
+        value: f64,
+    },
+    /// The Variation page's Apply: vary the focused sound's notes in the focused pattern.
+    ApplyVariation,
     FocusGroup(usize),
     /// Focus sound `.0` of the focused group.
     FocusSound(usize),
@@ -1144,6 +1191,39 @@ pub enum Action {
     SettingsWanted(bool),
 }
 
+/// One OSO slot as the Jam script publishes it (`deckard.oso`): what the strip draws,
+/// and nothing else. `value` is the display text, `sub` the transcribed third-row
+/// sub-label (`None` where the reference leaves the row blank), `group` the spanning
+/// header (`None` where the reference shows none). Holes are `None` in the page's
+/// `slots`. The script's own key for the parameter (`RootNote`) stays in the script: no
+/// host code looks a slot up by name, and a required field nobody reads only failed
+/// scripts that had a slot the host ignored.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsoSlot {
+    pub value: String,
+    pub sub: Option<String>,
+    pub group: Option<String>,
+}
+
+/// The Jam script's focused OSO page (`deckard.oso`): the title without its counter,
+/// the 1-based `page` and total `pages` for the `n/N` counter, the page-scoped slots
+/// (`None` is a hole), and the script's own cursor — `focus`, a 0-based page slot with
+/// holes counted, and whether it is being changed (`editing`).
+///
+/// The cursor is the script's on every page, menu or tab: the strip draws it and routes
+/// the ENCODER to the script, which owns the press and the turn alike. A viewer-side
+/// cursor existed once and drifted from the script's (three places kept a copy and the
+/// underline sat on a slot the encoder was not on). Stored so the viewer reads it
+/// without Lua.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsoPage {
+    pub title: String,
+    pub page: usize,
+    pub pages: usize,
+    pub slots: Vec<Option<OsoSlot>>,
+    pub focus: usize,
+    pub editing: bool,
+}
 /// Where the pads play.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PadSetup {
@@ -1154,7 +1234,6 @@ pub struct PadSetup {
     /// Chords mode: every pad plays its chord's notes instead (128: none).
     pub chords: Option<[[i64; 16]; 16]>,
 }
-
 /// The page shown when the scripts start.
 pub const FIRST_PAGE: &str = "control";
 
@@ -1183,6 +1262,8 @@ pub(crate) struct Shared {
     pub leds: Leds,
     pub pinned: BTreeSet<String>,
     pub shown_pin: Option<(String, String)>,
+    /// The Jam script's focused OSO page, as `deckard.oso` last published it.
+    pub oso: Option<OsoPage>,
 }
 
 impl Shared {
@@ -1573,10 +1654,8 @@ impl Surface {
                 self.call_global(run, "knob_turned", ());
                 self.dispatch(run, "knob", (k + 1, amount));
             }
-            Event::Wheel(steps) => {
-                if !self.call_global(run, "wheel_mode", steps) {
-                    self.dispatch(run, "wheel", steps);
-                }
+            Event::Wheel(steps) if !self.call_global(run, "wheel_mode", steps) => {
+                self.dispatch(run, "wheel", steps);
             }
             // (Fingers from 1; "down", "move" or "up".)
             Event::Touch(finger, kind, pos) => {
@@ -1983,6 +2062,7 @@ fn start(
         leds: leds::blank(),
         pinned,
         shown_pin,
+        oso: None,
     }));
     api::install(&lua, &shared)?;
     sources::install_require(&lua, sources.clone())?;

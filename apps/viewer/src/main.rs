@@ -95,8 +95,10 @@ mod group_edit_tests;
 mod header_tests;
 mod input_levels;
 mod jam_io;
+mod jam_strip;
 #[cfg(test)]
 mod jam_tests;
+mod jam_window;
 mod keep_running;
 mod keys;
 mod layers;
@@ -284,6 +286,21 @@ fn main() {
         p.exists().then_some(p)
     });
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
+    // `--jam KEY` (repeatable): press a Jam control through the script, so the strip and its
+    // window can be looked at with no Jam on the wire. An unknown name is named back.
+    let jam_shot = args.iter().any(|a| a == "--jam-shot");
+    let jam_hil_presses: Vec<&'static str> = args
+        .windows(2)
+        .filter(|w| w[0] == "--jam")
+        .filter_map(|w| {
+            let name = w[1].as_str();
+            let known = deckard_jam::map::BUTTON_LEDS.iter().copied().chain(["ENCODER_TOUCH", "ENCODER"]).find(|n| *n == name);
+            if known.is_none() {
+                eprintln!("--jam: no Jam control called {name}");
+            }
+            known
+        })
+        .collect();
     // (flag, value) pairs for --press/--pad, in order.
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
@@ -313,6 +330,9 @@ fn main() {
                 screenshot,
                 scripts,
                 model,
+                jam_hil: !jam_hil_presses.is_empty(),
+                jam_hil_presses,
+                jam_shot,
                 show_controller: false,
                 meter_inputs: true,
                 follow: true,
@@ -873,13 +893,25 @@ type VariationBase = ((usize, usize, usize), Vec<Note>, Vec<Note>);
 type InputKey = (Option<String>, Vec<Option<usize>>);
 
 /// The Variation and Generate settings (fields of a sound).
-const GROOVE_FIELDS: [&str; 17] = [
+const GROOVE_FIELDS: [&str; 28] = [
     "sequence_variation/velocity_amount",
     "sequence_variation/time_shift",
     "sequence_variation/length_scale",
     "sequence_variation/length_variation",
     "sequence_variation/distribution",
     "sequence_variation/live",
+    // The Variation page (work-item 35).
+    "sequence_variation/mode",
+    "sequence_variation/velocity_range/low",
+    "sequence_variation/velocity_range/high",
+    "sequence_variation/probability",
+    "sequence_variation/note_range/low",
+    "sequence_variation/note_range/high",
+    "sequence_variation/note_count",
+    "sequence_variation/steps",
+    "sequence_variation/dist/note_count",
+    "sequence_variation/dist/notes",
+    "sequence_variation/dist/note_length",
     "sequence_generation/mode",
     "sequence_generation/probability",
     "sequence_generation/velocity_amount",
@@ -892,6 +924,31 @@ const GROOVE_FIELDS: [&str; 17] = [
     "sequence_generation/rotate",
     "sequence_generation/division",
 ];
+
+/// The Variation page's short names (`deckard.variation`) as the sound's fields keep
+/// them (work-item 35).
+fn variation_field(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "mode" => "sequence_variation/mode",
+        "velocity_lo" => "sequence_variation/velocity_range/low",
+        "velocity_hi" => "sequence_variation/velocity_range/high",
+        "time_shift" => "sequence_variation/time_shift",
+        "probability" => "sequence_generation/probability",
+        "note_lo" => "sequence_generation/note_range/low",
+        "note_hi" => "sequence_generation/note_range/high",
+        "note_count" => "sequence_generation/note_count",
+        "steps" => "sequence_variation/steps",
+        "dist_note_count" => "sequence_variation/dist/note_count",
+        "dist_notes" => "sequence_variation/dist/notes",
+        "dist_note_length" => "sequence_variation/dist/note_length",
+        // Euclid's own, which the generator keeps under its module.
+        "euclid_steps" => "sequence_generation/steps",
+        "fills" => "sequence_generation/fills",
+        "rotate" => "sequence_generation/rotate",
+        "division" => "sequence_generation/division",
+        _ => return None,
+    })
+}
 
 /// The stem separation model's install, offered the first time DECKARD starts without
 /// it (the .deb and .rpm can't ask; a download of [`stems::MODEL_MB`] MB).
@@ -1001,8 +1058,10 @@ pub struct App {
     clip: Option<(usize, usize)>,
     /// When the controller's Settings ▸ Audio was last told the audio interface.
     audio_view_at: Option<std::time::Instant>,
-    /// What the own layer's Settings page shows, and when it was looked up.
+    /// What the own layer's Settings page shows, the settings it was built from (so a
+    /// change anywhere rebuilds it), and when its live part was last looked up.
     surface_settings: deckard_surface::SettingsView,
+    surface_settings_from: Option<crate::settings::Settings>,
     surface_settings_at: Option<std::time::Instant>,
     /// A Lock recall morphing its way.
     lock_morph: Option<lock::LockMorph>,
@@ -1168,8 +1227,15 @@ pub struct App {
     /// it's connected.
     jam: Option<jam_io::JamIo>,
     jam_device: Option<deckard_surface::device::Device>,
-    /// The JAM's script wants the Settings page's values (its REC MODE readout).
-    jam_settings_wanted: bool,
+    /// `--jam`: run the Jam's script, and press `jam_hil_presses` on it, with no Jam plugged
+    /// in — how the on-screen overlay and its window are looked at without hardware
+    /// (`docs/superpowers/plans/2026-11-21-jam-overlay.md`, "HIL").
+    jam_hil: bool,
+    jam_hil_presses: Vec<&'static str>,
+    /// `--jam-shot`: draw the strip window's content into the app's own viewport, so
+    /// `--screenshot` captures what that window shows. A second viewport is not in the main
+    /// one's picture, and Screen Recording is not always granted (`hil/strip-window-2026-11-21.md`).
+    jam_shot: bool,
     /// The last JAM script error shown.
     jam_error: Option<String>,
     /// Same-frame `View` built by `mk3_events` and handed off to `jam_events` when
@@ -1482,7 +1548,7 @@ fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
-fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
+pub(crate) fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), image.size[0] as u32, image.size[1] as u32);
     enc.set_color(png::ColorType::Rgba);
@@ -3556,6 +3622,17 @@ impl App {
                     ui.checkbox(&mut self.settings.relative_strips, "Relative level touchstrips").on_hover_text(
                         "On the mixer strips (LEVEL, AUX, SWING, TUNE, MACRO), a touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. CONTROL mode keeps absolute-fader behaviour. Off: a touch sets the value.",
                     );
+                    ui.end_row();
+                    ui.label("");
+                    if ui
+                        .checkbox(&mut self.settings.show_overlay, "Show the on-screen overlay")
+                        .on_hover_text(
+                            "The Jam's on-screen overlay — the page its script publishes (the OSO) — drawn in its own small window over the app. Off: the pages still run, so the encoders, the lights and every page behave as they ever did, but nothing is drawn. Switching it puts the window back beside the app. (The Jam's touchstrips are unaffected.)",
+                        )
+                        .changed()
+                    {
+                        self.settings.jam_strip_pos = None;
+                    }
                     ui.end_row();
                     ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };
@@ -6293,6 +6370,9 @@ impl App {
         let mut v = View {
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
             settings: self.surface_settings.clone(),
+            // (The strip hides while this is open, so a script declines an ENCODER press there.)
+            browser_open: self.browser.open,
+            page: self.surface.page(),
             lock: self.lock_view(),
             // (The waves' pictures, and the mod matrix's slots, only while their pages show.)
             lfos: self.lfo_views(self.surface.page() == "lfo"),
@@ -6377,6 +6457,30 @@ impl App {
         v.velocity = d.num(deckard_doc::Target::Song, "fixed_velocity").map_or(100, |v| (v as i64).clamp(0, 127));
         (_, v.scale_bank, v.scale_kind) = self.scale;
         let song = |field: &str, default: f64| d.num(deckard_doc::Target::Song, field).unwrap_or(default) as i64;
+        // The focused sound's Variation page (work-item 35).
+        v.variation = self.doc.as_ref().map(|doc| {
+            let d = doc.borrow();
+            let x = d.variation(self.group, self.sound);
+            deckard_surface::VariationView {
+                mode: x.mode,
+                velocity_lo: x.velocity_lo,
+                velocity_hi: x.velocity_hi,
+                time_shift: x.time_shift,
+                probability: x.probability,
+                note_lo: x.note_lo,
+                note_hi: x.note_hi,
+                note_count: x.note_count,
+                steps: x.steps,
+                dist_note_count: x.dist_note_count,
+                dist_notes: x.dist_notes,
+                dist_note_length: x.dist_note_length,
+                euclid_steps: d.groove_setting(self.group, self.sound, "sequence_generation/steps").unwrap_or(8.0) as i64,
+                fills: d.groove_setting(self.group, self.sound, "sequence_generation/fills").unwrap_or(5.0) as i64,
+                rotate: d.groove_setting(self.group, self.sound, "sequence_generation/rotate").unwrap_or(0.0) as i64,
+                division: d.groove_setting(self.group, self.sound, "sequence_generation/division").unwrap_or(0.0) as i64,
+                keyboard: self.piano_roll,
+            }
+        });
         v.grid = deckard_surface::GridView {
             perform: song("perform_grid", 5.0),
             arrange: song("arrange_grid", 0.0),
@@ -6708,6 +6812,17 @@ impl App {
             }
             A::Volume(level) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, level)]),
             A::VolumeDb(db) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, deckard_model::level_from_db(db))]),
+            A::Variation { field, value } => {
+                let Some(name) = variation_field(field) else { return };
+                let Some(doc) = self.doc.clone() else { return };
+                let (g, s) = (self.group, self.sound);
+                let done = doc.borrow_mut().set_groove_setting(g, s, name, value);
+                match done {
+                    Err(e) => self.status = format!("can't set that: {e}"),
+                    Ok(()) => self.live_groove(g, s, name),
+                }
+            }
+            A::ApplyVariation => self.groove(layout::GrooveButton::ApplyVariation),
             A::FocusGroup(group) => self.focus_group(group),
             A::FocusSound(s) => self.focus_sound(s),
             A::SelectPad { index, multi } => self.select_pad(index, multi),
@@ -7084,7 +7199,9 @@ impl App {
             }
             A::ResetKnob(knob) => self.jam_reset_knob(knob),
             A::PerformMode { group, mode } => self.jam_perform_mode(group, mode),
-            A::SettingsWanted(on) => self.jam_settings_wanted = on,
+            // (A script asking for the Settings page's values is satisfied by
+            // construction: the View carries them as they are, whoever is looking.)
+            A::SettingsWanted(_) => {}
             A::Lfo(what, pad, v) => self.surface_lfo(what, pad, v),
             A::ModSlot(slot, row, steps) => mod_slots::step(self, slot, row, steps),
             A::ModSlotsClosed => self.mod_draft = None,
@@ -12589,12 +12706,28 @@ impl App {
         let (root, bank, kind) = self.scale;
         let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
         let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
+        // What the sound has there now, so Apply can say when it changed nothing (a
+        // Humanize at 100–127 and no time shift does exactly that, as Maschine's does).
+        let sound_notes = |d: &deckard_doc::Document| -> Vec<deckard_model::Note> {
+            d.project()
+                .groups
+                .get(g)
+                .and_then(|x| x.patterns.get(p))
+                .map_or(Vec::new(), |pat| pat.notes.iter().filter(|n| n.sound == s).copied().collect())
+        };
+        let before = sound_notes(&doc.borrow());
         let done = match b {
-            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_variation(g, p, s, grid, &get),
+            // The page's one action: Humanize varies what is there, Random and Euclid run
+            // the generator — the same code the Jam's Apply asks for.
+            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_groove_page(g, p, s, grid, polyphonic, in_scale, &get),
             layout::GrooveButton::Generate => doc.borrow_mut().generate(g, p, s, grid, polyphonic, in_scale, &get),
         };
-        if let Err(e) = done {
-            self.status = format!("can't do that: {e}");
+        match done {
+            Err(e) => self.status = format!("can't do that: {e}"),
+            Ok(()) if matches!(b, layout::GrooveButton::ApplyVariation) && sound_notes(&doc.borrow()) == before => {
+                self.status = "Apply changed nothing: mind the mode, the ranges and the time shift".into();
+            }
+            Ok(()) => {}
         }
     }
 
@@ -12629,7 +12762,12 @@ impl App {
             GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let grid = self.grid;
-        if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, &get, &base) {
+        let polyphonic = self.piano_roll;
+        // The scale Random keeps to (the controller's Keyboard scale too; Chromatic is none).
+        let (root, bank, kind) = self.scale;
+        let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
+        let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
+        if let Err(e) = doc.borrow_mut().apply_groove_page_from(g, p, s, grid, polyphonic, in_scale, &get, &base) {
             self.status = format!("can't vary: {e}");
             return;
         }
@@ -14256,7 +14394,36 @@ impl App {
                 self.follow_root(from, now.0);
             }
         }
+        // The Jam's strip is its own window: the page its script published, shown and hidden
+        // by that page's own lifetime (never by a mode), over whatever view is showing, and
+        // never in front of the mouse. No page draws no window.
+        let shown = self.jam_shown();
+        let strip = if self.settings.show_overlay { shown.as_ref().map(|(page, rows)| (page, rows.as_slice())) } else { None };
+        let saved = self.settings.jam_strip_pos.map(|(x, y)| egui::Vec2::new(x, y));
+        if let Some(offset) = crate::jam_window::show(ctx, strip, saved) {
+            // Where the window manager put it, which is where the user has it now.
+            self.settings.jam_strip_pos = Some((offset.x, offset.y));
+            #[cfg(not(test))]
+            self.settings.save();
+        }
         layout::body(self, ui);
+        if self.jam_shot
+            && let Some((page, rows)) = &shown
+        {
+            // The window's own drawing, at its own size, over the app: `--screenshot` captures
+            // it and the run crops the corner back out. (A second viewport is not in the main
+            // one's picture, and Screen Recording is not always granted.)
+            let width = crate::jam_strip::width_for(ui.max_rect().width());
+            let size = crate::jam_window::window_size(width);
+            let at = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), size);
+            let (name, counter) = (crate::jam_strip::name(page), crate::jam_strip::counter(page));
+            egui::Area::new(egui::Id::new("jam strip preview")).fixed_pos(at.min).order(egui::Order::Foreground).show(ctx, |ui| {
+                ui.painter().rect_filled(at, 0.0, egui::Color32::BLACK);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                    crate::jam_window::paint(ui, &name, counter.as_deref(), rows, width, false);
+                });
+            });
+        }
         self.update_slot_view();
         self.follow_edits();
         if !self.dropped_samples.is_empty() {
@@ -14550,6 +14717,40 @@ mod tests {
         }
         app.open(Path::new(&path));
         Some(harness_of(app, song_view))
+    }
+
+    /// The Jam's VARIATION page's Apply reaches the app: the sound's pattern gains notes
+    /// where it had none, which is what the rig found missing (work-item 35).
+    #[test]
+    fn the_jams_apply_variation_reaches_the_app() {
+        let mut h = blank_harness(false);
+        let doc = h.state().doc.clone().expect("a project");
+        {
+            let mut d = doc.borrow_mut();
+            d.add_pattern(0, 0, "P").expect("a pattern");
+            let notes: Vec<deckard_model::Note> = (0..4)
+                .map(|i| deckard_model::Note {
+                    ratchet: Default::default(),
+                    expr: None,
+                    sound: 0,
+                    position: i * 960,
+                    length: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    probability: 100,
+                })
+                .collect();
+            d.edit_notes("Seed", 0, 0, &[], &notes).expect("seeded");
+            for (field, value) in [("mode", 1.0), ("probability", 100.0)] {
+                d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).expect("the page's setting");
+            }
+        }
+        let count = |d: &deckard_doc::Document| d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count();
+        assert_eq!(count(&doc.borrow()), 4, "four to the bar");
+        h.state_mut().surface_act(deckard_surface::Action::ApplyVariation);
+        h.run_steps(2);
+        let after = count(&doc.borrow());
+        assert!(after > 4, "the empty steps fill: {after} notes, status {:?}", h.state().status);
     }
 
     /// [`harness`] on a new project (one group of 16 empty sounds, one scene), so the

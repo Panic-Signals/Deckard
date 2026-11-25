@@ -451,11 +451,24 @@ Evidence from the Maschine 3 binary (embedded Lua and stylesheet):
 Conclusion: in Maschine 3, **Groove properties of a Sound** have three pages, **Swing** (index 0),
 **Variation** (index 1) and **Generate** (index 2 (?)). Group and Master keep only **Swing** (?).
 Variation and Generate are per-Sound and end in an **Apply** / **Generate** action button. Their
-parameter labels, ranges and algorithms are **not documented** by NI. Likely the Variation page is
-the per-Sound successor of §5.2 (Humanize/Random, velocity range, time shift…; 4 floats + mode enum
-fit "Velocity Lo/Hi, Time Shift, Probability + Humanize|Random"), and Generate drives a pattern
-generator with a "live" mode (?). Labels need recovering from the GUI (screenshot of the running
-app) or the parameter label tables (`tools/re-tools label-refs`).
+parameter labels, ranges and algorithms are **not documented** by NI; the labels are now recovered
+from captures of the running app on a Jam (2026-11-21, `hil/oso-test-sheet.md`), which show the
+Variation page as the Jam's OSO carries it:
+
+- **Mode** first (`Humanize` | `Random`), then **Apply** as a button with no sub-label.
+- *Humanize*, one page: `VELOCITY RANGE` Velocity Lo, Velocity Hi · `TIME SHIFT` Step — five slots
+  with Mode and Apply, and exactly the parameter set §5.2 gives Humanize.
+- *Random*, two pages: 1/2 `PROBABILITY` Probability · `NOTE RANGE` Note Lo, Note Hi ·
+  `VELOCITY RANGE` Velocity Lo, Velocity Hi · `CHORDS` Note Count; 2/2 `NOTE LENGTH` Steps ·
+  `TIME SHIFT` Step · `DISTRIBUTIONS` Note Count, Notes, Note Length. Thirteen settings over the
+  two pages, and the page is **static** (no idle timer; the encoder's press on Apply or the
+  button's own page change closes it).
+
+Which module holds which of those numbers is still open: §5.2 records that in 2.x these randomiser
+parameters were **global Workspace parameters** (`getRandomize*Parameter`), not per-Sound, while
+§5.3's modules are per-Sound and the Variation one holds only four floats. The published formats
+therefore cannot be the whole story for the Random page, and DECKARD keeps the difference in its
+own field (see `channel-software.md` §5.3).
 
 ---
 
