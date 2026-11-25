@@ -69,6 +69,8 @@ pub(crate) enum Ev {
         beats: f64,
         /// Played live while the song runs.
         live: bool,
+        /// Beats since it started: a note joined late (Sampler zones only).
+        skip: f64,
     },
     /// A note held live ends.
     Release {
@@ -381,12 +383,13 @@ impl Player {
         let pos = self.pos;
         let Some(p) = self.parts.as_mut() else { return };
         match ev {
-            Ev::NoteOn { id, pitch, velocity, gate, beats, live } => {
+            Ev::NoteOn { id, pitch, velocity, gate, beats, live, skip } => {
                 if p.muted {
                     return;
                 }
                 if let Some(inst) = &p.inst {
-                    if inst.muted {
+                    // (A plug-in's note can't be joined late.)
+                    if inst.muted || skip > 0.0 {
                         return;
                     }
                     if let Ok(mut pl) = inst.plugin.lock() {
@@ -397,7 +400,7 @@ impl Player {
                         self.offs.push((pos + g, 0, pitch));
                     }
                 } else if let Some(smp) = p.smp.as_mut() {
-                    smp.note_on(id, pitch, velocity.clamp(0, 127), &Context { tempo: self.position.3, beats, live });
+                    smp.note_on_at(id, pitch, velocity.clamp(0, 127), &Context { tempo: self.position.3, beats, live }, skip);
                     if let Some(g) = gate {
                         self.offs.push((pos + g, id, pitch));
                     }

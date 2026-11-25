@@ -1663,6 +1663,7 @@ local function press_pad_view(s, col, row)
   elseif active("DUPLICATE") then
     duplicate("sound", s.group, n, function(from, to) deckard.copy_sound(from, to) end)
   else
+    if g.sounds[n].loop_mode then deckard.toggle_audio_loop(s.group, n) end
     deckard.focus_sound(n)
   end
 end
@@ -2351,7 +2352,7 @@ local function light_sounds(s)
       deckard.pad_led(col, row, dup_flash_on() and WHITE or "off", true)
     elseif dup_is("sound", s.group, n) then
       deckard.pad_led(col, row, dup_color(x.used and x.palette or WHITE), true)
-    elseif st.pressed[pad_key(col, row)] then
+    elseif st.pressed[pad_key(col, row)] or (st.view == "pad" and x.loop_playing) then
       deckard.pad_led(col, row, x.palette, "pale")
     elseif n == s.sound then
       deckard.pad_led(col, row, x.used and x.palette or WHITE, true)

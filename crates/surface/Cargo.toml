@@ -15,3 +15,4 @@ epaint_default_fonts = "0.36.2"
 [dev-dependencies]
 tempfile = "3.27.0"
 png = "0.18.1"
+serde_json = "1.0.154"

@@ -11,7 +11,7 @@
 use crate::notes::{events_with, items_of};
 use crate::{Document, Op};
 use mxprj::decode::{Obj, Path, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const MODULATORS: &str = "NI::ML::TM::ObjectVector<NI::MASCHINE::DATA::Modulator>";
 const SEQUENCE: &str = "NI::MASCOMMON::DATA::Sequence";
@@ -26,6 +26,15 @@ pub(crate) fn defined_ids(v: &Value) -> HashSet<u64> {
         }
     });
     ids
+}
+
+/// Extend `ids` with every object id defined in `o` without cloning `o`.
+pub(crate) fn extend_defined_ids(o: &Obj, ids: &mut HashSet<u64>) {
+    o.walk_paths(&mut |obj, _| {
+        if let Some(id) = obj.oid {
+            ids.insert(id);
+        }
+    });
 }
 
 /// The object id a pointer field holds (a back-reference, or the object itself).
@@ -89,17 +98,19 @@ impl Document {
         if gone.is_empty() {
             return Ok(Vec::new());
         }
-        // Objects by id, to follow events written as back-references.
-        let mut by_id: HashMap<u64, &Obj> = HashMap::new();
-        self.root().walk_paths(&mut |o, _| {
-            if let Some(id) = o.oid {
-                by_id.entry(id).or_insert(o);
-            }
-        });
+        // Single pass: record matching ModulationEvent ids for back-reference resolution,
+        // emit Modulators/Forward edits directly, and defer Sequence checks until after.
+        let mut hit_mod_ids: HashSet<u64> = HashSet::new();
+        let mut sequences: Vec<(Path, &Obj)> = Vec::new();
         let mut ops = Vec::new();
-        let mut err = None;
         self.root().walk_paths(&mut |o, path| {
-            if path.starts_with(skip) || err.is_some() {
+            if let Some(id) = o.oid
+                && o.type_name.contains("ModulationEvent")
+                && pointee(o.get("parameter")).is_some_and(|p| gone.contains(&p))
+            {
+                hit_mod_ids.insert(id);
+            }
+            if path.starts_with(skip) {
                 return;
             }
             match o.type_name.as_str() {
@@ -108,11 +119,7 @@ impl Document {
                         ops.push(Op::Set { path: path.to_vec(), value: Value::Obj(ov) });
                     }
                 }
-                SEQUENCE => match without_events(o, gone, &by_id) {
-                    Ok(Some(seq)) => ops.push(Op::Set { path: path.to_vec(), value: Value::Obj(seq) }),
-                    Ok(None) => {}
-                    Err(e) => err = Some(e),
-                },
+                SEQUENCE => sequences.push((path.to_vec(), o)),
                 FORWARD if macros => {
                     if pointee(o.get("target")).is_some_and(|t| gone.contains(&t))
                         && let Some(i) = o.fields.iter().position(|(n, _)| n == "target")
@@ -123,35 +130,44 @@ impl Document {
                 _ => {}
             }
         });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(ops),
+        for (path, o) in sequences {
+            if let Some(seq) = without_events(o, gone, &hit_mod_ids)? {
+                ops.push(Op::Set { path, value: Value::Obj(seq) });
+            }
         }
+        Ok(ops)
     }
 }
 
 /// A sequence without its modulation events of parameters in `gone`; `None` if it has
 /// none.
-fn without_events(seq: &Obj, gone: &HashSet<u64>, by_id: &HashMap<u64, &Obj>) -> Result<Option<Obj>, String> {
+fn without_events(seq: &Obj, gone: &HashSet<u64>, hit_mod_ids: &HashSet<u64>) -> Result<Option<Obj>, String> {
     let Some(Value::Obj(events)) = seq.get("events") else { return Ok(None) };
     let items = items_of(events)?;
-    fn event_of<'a>(te: &'a Value, by_id: &HashMap<u64, &'a Obj>) -> Option<&'a Obj> {
-        let Value::Obj(te) = te else { return None };
-        match te.get("event")? {
-            Value::Obj(e) => Some(e),
-            Value::Ref(id) => by_id.get(id).copied(),
-            _ => None,
-        }
-    }
     let mut removed = HashSet::new();
     let kept: Vec<_> = items
         .iter()
         .filter(|it| {
-            let Some(ev) = event_of(&it.event, by_id) else { return true };
-            let hit = ev.type_name.contains("ModulationEvent") && pointee(ev.get("parameter")).is_some_and(|p| gone.contains(&p));
-            if hit && let Some(id) = ev.oid {
-                removed.insert(id);
-            }
+            let hit = match it.event {
+                Value::Obj(ref te) => match te.get("event") {
+                    Some(Value::Obj(ev)) => {
+                        let m = ev.type_name.contains("ModulationEvent") && pointee(ev.get("parameter")).is_some_and(|p| gone.contains(&p));
+                        if m && let Some(id) = ev.oid {
+                            removed.insert(id);
+                        }
+                        m
+                    }
+                    Some(Value::Ref(id)) => {
+                        let m = hit_mod_ids.contains(id);
+                        if m {
+                            removed.insert(*id);
+                        }
+                        m
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
             !hit
         })
         .cloned()

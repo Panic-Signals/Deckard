@@ -76,6 +76,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 });
             }
             ui.checkbox(&mut d.samples, "With samples (copied beside it)");
+            if matches!(d.what, deckard_doc::FileItem::Sound(..)) {
+                ui.checkbox(&mut d.preview, "Create audio preview");
+            }
             if d.confirm_overwrite {
                 ui.colored_label(egui::Color32::from_rgb(0xE3, 0x42, 0x3F), format!("\"{}\" is there already: replace it?", d.name.trim()));
             }

@@ -560,7 +560,8 @@ impl Document {
     /// Paste as a new instance with fresh object IDs.
     pub fn paste_slot(&mut self, c: Chain, copy: &CopiedSlot) -> Result<usize, String> {
         let at = self.slot_paste_position(c, copy)?;
-        let slot = self.fresh_obj(copy.slot.clone())?;
+        let slot = self.fresh_obj(copy.slot.clone(), *b"SLOT", "NI::MASCOMMON::DATA::Slot")?;
+        self.note_classes(&slot);
         let (item, qb) = self.build(|b| Ok((b.shared(SLOT, slot), Value::Obj(b.blank(QUICK_BROWSE)?))))?;
         self.insert_slot(c, at, item, qb, "Paste Plug-in")?;
         Ok(at)

@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use deckard_jam::leds::{SHADE_BRIGHT, SHADE_DIM, SHADE_FAINT, colour};
+use deckard_jam::leds::{SHADE_BRIGHT, SHADE_DIM, SHADE_FAINT, SHADE_PALE, colour};
 use deckard_jam::map::METER_LEDS;
 
 use crate::device::{Device, Out, devices};
@@ -304,6 +304,12 @@ fn pad_mode_plays_the_printed_block() {
     assert_eq!(pad_light(&mut d, &v, 6, 8), colour(0, SHADE_DIM), "a used one");
     assert_eq!(pad_light(&mut d, &v, 5, 7), 0, "an empty one");
     assert_eq!(pad_light(&mut d, &v, 1, 1), 0, "outside the block");
+
+    let mut lv = v.clone();
+    lv.groups[0].sounds[1].loop_mode = true;
+    lv.groups[0].sounds[1].loop_playing = true;
+    assert_eq!(pad_light(&mut d, &lv, 6, 8), colour(0, SHADE_PALE), "active loop pad stays at full pale highlight");
+    assert_eq!(apps(&pad(&mut d, &lv, 6, 8)), [Action::ToggleAudioLoop { group: 0, sound: 1 }, Action::FocusSound(1)]);
 }
 
 /// Held, these make the matrix the sounds in any view, and the pads stop playing.

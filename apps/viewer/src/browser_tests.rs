@@ -427,6 +427,53 @@ fn save_sound_writes_mxsnd_with_tags_and_lists_it_under_user() {
 }
 
 #[test]
+fn preview_goes_where_the_browser_prehears_it() {
+    let file = PathBuf::from("Maschine 3/Sounds/My Kick.mxsnd");
+    let preview = crate::browser::preview_path(&file);
+    assert_eq!(preview, PathBuf::from("Maschine 3/Sounds/.previews/My Kick.mxsnd.wav"));
+    let (_tmp, dir) = temp();
+    let file = dir.join("Kick.mxsnd");
+    std::fs::write(&file, b"x").unwrap();
+    crate::browser::write_preview(&crate::browser::preview_path(&file), &[0.5, -0.5], 44_100).unwrap();
+    let item = deckard_library::Item { path: file, kind: Kind::Sound, ..Default::default() };
+    assert_eq!(crate::browser::prehear_file(&item), Some(crate::browser::preview_path(&item.path)));
+}
+
+#[test]
+fn save_sound_with_preview_ticked_writes_the_preview() {
+    let Some((_tmp, mut h, dir)) = saving() else { return };
+    let (g, s) = sound_with_sampler(&h);
+    let what = deckard_doc::FileItem::Sound(g, s);
+    let file = dir.join("Maschine 3/Sounds/Heard.mxsnd");
+    let preview = crate::browser::preview_path(&file);
+    // Unticked: no preview, and the choice is remembered.
+    layout::apply_acts(h.state_mut(), vec![Act::SaveItem(what, crate::SaveMode::SaveAs)]);
+    assert!(h.state().save_dialog.as_ref().unwrap().preview, "on to begin with");
+    h.state_mut().save_dialog.as_mut().unwrap().preview = false;
+    h.state_mut().save_dialog.as_mut().unwrap().name = "Heard".into();
+    h.state_mut().confirm_save();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!preview.exists());
+    layout::apply_acts(h.state_mut(), vec![Act::SaveItem(what, crate::SaveMode::SaveAs)]);
+    assert!(!h.state().save_dialog.as_ref().unwrap().preview, "remembered");
+    // Ticked: the preview appears, and the browser finds it.
+    let d = h.state_mut().save_dialog.as_mut().unwrap();
+    d.preview = true;
+    d.name = "Heard".into();
+    d.confirm_overwrite = true;
+    h.state_mut().confirm_save();
+    for _ in 0..200 {
+        if preview.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(preview.is_file(), "the preview is written beside the sound");
+    let item = deckard_library::Item { path: file, kind: Kind::Sound, ..Default::default() };
+    assert_eq!(crate::browser::prehear_file(&item), Some(preview));
+}
+
+#[test]
 fn save_as_existing_name_asks() {
     let Some((_tmp, mut h, dir)) = saving() else { return };
     let file = dir.join("Maschine 3/Sounds/Taken.mxsnd");

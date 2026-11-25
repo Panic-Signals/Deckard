@@ -117,6 +117,17 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set("device", lua.create_function(|_, ()| Ok(crate::sources::DEVICE))?)?;
     let sh = shared.clone();
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
+    // A page's timer that ends with no event (a touch focus fading): the screens are
+    // drawn often until `t` (on the `now` clock), as with a moving border.
+    let sh = shared.clone();
+    d.set(
+        "redraw_until",
+        lua.create_function(move |_, t: f64| {
+            let mut sh = sh.borrow_mut();
+            sh.redraw_until = sh.redraw_until.max(t);
+            Ok(())
+        })?,
+    )?;
     let sh = shared.clone();
     d.set("page", lua.create_function(move |_, ()| Ok(sh.borrow().page.clone()))?)?;
     {
@@ -1059,6 +1070,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     // the values it shows on its strips.
     request!("choke_all", () => Action::ChokeAll);
     request!("delete_pattern", (group: usize, pattern: usize) => Action::DeletePattern { group: index(group, "a group")?, pattern: index(pattern, "a pattern")? });
+    request!("toggle_audio_loop", (group: usize, sound: usize) => Action::ToggleAudioLoop {
+        group: index(group, "a group")?,
+        sound: index(sound, "a sound")?,
+    });
     request!("copy_pattern", (group: usize, from: usize, to: usize) => Action::CopyPattern {
         group: index(group, "a group")?,
         from: index(from, "a pattern")?,
@@ -1613,6 +1628,8 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("default_color", s.default_color)?;
                 st.set("prob_locked", s.prob_locked)?;
                 st.set("selected", s.selected)?;
+                st.set("loop_mode", s.loop_mode)?;
+                st.set("loop_playing", s.loop_playing)?;
                 if let Some(a) = &s.audio {
                     let at = lua.create_table()?;
                     // (Flat: min, max, min, max, …; a column a pixel or two.)
@@ -1668,6 +1685,11 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
         let Some(curve) = curve else { continue };
         let t = lua.create_table()?;
         t.set("points", lua.create_sequence_from(curve.points.iter().copied())?)?;
+        for (key, points) in ["spectrum_in", "spectrum_out"].into_iter().zip(&curve.spectrum) {
+            if !points.is_empty() {
+                t.set(key, lua.create_sequence_from(points.iter().copied())?)?;
+            }
+        }
         let bands = lua.create_table()?;
         for (i, (x, y)) in curve.bands.iter().enumerate() {
             let b = lua.create_table()?;
@@ -1775,6 +1797,12 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
                 kt.set("text", knob.text.as_str())?;
                 kt.set("value", knob.value)?;
                 kt.set("modulatable", knob.modulatable)?;
+                kt.set("mod_position", knob.mod_position)?;
+                kt.set("id", knob.param_id)?;
+                if !knob.choices.is_empty() {
+                    kt.set("choices", lua.create_sequence_from(knob.choices.iter().map(String::as_str))?)?;
+                }
+                kt.set("mod_text", knob.mod_text.as_deref())?;
                 kt.set("step_mod", knob.step_mod.as_deref())?;
                 kt.set("auto_mod", knob.auto_mod.as_deref())?;
                 kt.set("macro", knob.in_macro)?;
@@ -1809,46 +1837,100 @@ struct LazyEntry {
 
 impl mlua::UserData for LazyEntry {}
 
-fn mix_static_eq(a: &crate::MixView, b: &crate::MixView) -> bool {
-    a.level == b.level && a.pan == b.pan && a.plugins == b.plugins && a.aux == b.aux && a.swing == b.swing && a.tune == b.tune
+fn mix_static_eq(old: &crate::MixView, new: &crate::MixView) -> bool {
+    // Every field is named, with no `..`: a field added to the struct doesn't build until it's
+    // put with the compared ones (a change rebuilds the table) or the patched ones (`_`, which
+    // patch_state_in_place updates), so the cached table can't silently keep a stale value.
+    let crate::MixView { level, pan, plugins, aux, swing, tune, meter: _, headroom: _ } = old;
+    *level == new.level && *pan == new.pan && *plugins == new.plugins && *aux == new.aux && *swing == new.swing && *tune == new.tune
 }
 
-fn sound_static_eq(a: &crate::SoundView, b: &crate::SoundView) -> bool {
-    a.name == b.name
-        && a.rgb == b.rgb
-        && a.color == b.color
-        && a.muted == b.muted
-        && a.used == b.used
-        && a.choke_group == b.choke_group
-        && a.choke_mode == b.choke_mode
-        && a.link_group == b.link_group
-        && a.link_mode == b.link_mode
-        && a.base_key == b.base_key
-        && a.default_color == b.default_color
-        && a.touch_mode == b.touch_mode
-        && a.touch_cc == b.touch_cc
-        && a.touch_curve == b.touch_curve
-        && a.touch_min == b.touch_min
-        && a.touch_max == b.touch_max
-        && a.prob_locked == b.prob_locked
-        && a.selected == b.selected
-        && a.audio == b.audio
-        && mix_static_eq(&a.mix, &b.mix)
+fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
+    // Every field is named, with no `..`: a field added to the struct doesn't build until it's
+    // put with the compared ones (a change rebuilds the table) or the patched ones (`_`, which
+    // patch_state_in_place updates), so the cached table can't silently keep a stale value.
+    let crate::SoundView {
+        name,
+        rgb,
+        color,
+        muted,
+        used,
+        choke_group,
+        choke_mode,
+        link_group,
+        link_mode,
+        base_key,
+        default_color,
+        touch_mode,
+        touch_cc,
+        touch_curve,
+        touch_min,
+        touch_max,
+        prob_locked,
+        selected,
+        audio,
+        loop_mode,
+        loop_playing,
+        mix,
+        playing: _,
+        hits: _,
+    } = old;
+    *name == new.name
+        && *rgb == new.rgb
+        && *color == new.color
+        && *muted == new.muted
+        && *used == new.used
+        && *choke_group == new.choke_group
+        && *choke_mode == new.choke_mode
+        && *link_group == new.link_group
+        && *link_mode == new.link_mode
+        && *base_key == new.base_key
+        && *default_color == new.default_color
+        && *touch_mode == new.touch_mode
+        && *touch_cc == new.touch_cc
+        && *touch_curve == new.touch_curve
+        && *touch_min == new.touch_min
+        && *touch_max == new.touch_max
+        && *prob_locked == new.prob_locked
+        && *selected == new.selected
+        && *audio == new.audio
+        && *loop_mode == new.loop_mode
+        && *loop_playing == new.loop_playing
+        && mix_static_eq(mix, &new.mix)
 }
 
-fn group_static_eq(a: &crate::GroupView, b: &crate::GroupView) -> bool {
-    a.name == b.name
-        && a.rgb == b.rgb
-        && a.color == b.color
-        && a.muted == b.muted
-        && a.default_color == b.default_color
-        && a.perform == b.perform
-        && a.perform_mode == b.perform_mode
-        && a.scene_pattern == b.scene_pattern
-        && a.patterns == b.patterns
-        && mix_static_eq(&a.mix, &b.mix)
-        && a.sounds.len() == b.sounds.len()
-        && a.sounds.iter().zip(&b.sounds).all(|(x, y)| sound_static_eq(x, y))
+fn group_static_eq(old: &crate::GroupView, new: &crate::GroupView) -> bool {
+    // Every field is named, with no `..`: a field added to the struct doesn't build until it's
+    // put with the compared ones (a change rebuilds the table) or the patched ones (`_`, which
+    // patch_state_in_place updates), so the cached table can't silently keep a stale value.
+    let crate::GroupView {
+        name,
+        rgb,
+        color,
+        muted,
+        default_color,
+        perform,
+        perform_mode,
+        scene_pattern,
+        patterns,
+        mix,
+        sounds,
+        playing: _,
+        progress: _,
+        playing_progress: _,
+    } = old;
+    *name == new.name
+        && *rgb == new.rgb
+        && *color == new.color
+        && *muted == new.muted
+        && *default_color == new.default_color
+        && *perform == new.perform
+        && *perform_mode == new.perform_mode
+        && *scene_pattern == new.scene_pattern
+        && *patterns == new.patterns
+        && mix_static_eq(mix, &new.mix)
+        && sounds.len() == new.sounds.len()
+        && sounds.iter().zip(&new.sounds).all(|(x, y)| sound_static_eq(x, y))
 }
 
 /// Whether `deckard.state()`'s table may be patched field by field instead of made again.
@@ -1858,62 +1940,130 @@ fn group_static_eq(a: &crate::GroupView, b: &crate::GroupView) -> bool {
 /// the scripts keep reading at its old setting — the Variation page's mode was one, and
 /// its page never left Humanize. **A new `View` field goes here** unless it is patched.
 fn can_patch_state_in_place(old: &View, new: &View) -> bool {
-    old.project == new.project
-        && old.tempo == new.tempo
-        && old.swing == new.swing
-        && old.variation == new.variation
-        && old.master_volume == new.master_volume
-        && old.master_db == new.master_db
-        && old.playing == new.playing
-        && old.recording == new.recording
-        && old.looping == new.looping
-        && old.metronome == new.metronome
-        && old.auto_write == new.auto_write
-        && old.strip_position == new.strip_position
-        && old.touch_auto_write == new.touch_auto_write
-        && old.keep_focus == new.keep_focus
-        && old.relative_strips == new.relative_strips
-        && old.fixed_velocity == new.fixed_velocity
-        && old.velocity == new.velocity
-        && old.cue_level == new.cue_level
-        && old.input_levels == new.input_levels
-        && old.scale_root == new.scale_root
-        && old.scale_bank == new.scale_bank
-        && old.scale_kind == new.scale_kind
-        && old.user_chords == new.user_chords
-        && old.follow == new.follow
-        && old.grid == new.grid
-        && old.recent == new.recent
-        && old.settings == new.settings
-        && old.lock == new.lock
-        && old.lfo_focus == new.lfo_focus
-        && old.mod_slots == new.mod_slots
-        && old.note_repeat == new.note_repeat
-        && old.numerator == new.numerator
-        && old.denominator == new.denominator
-        && old.scene_name == new.scene_name
-        && old.scene_color == new.scene_color
-        && old.scenes == new.scenes
-        && old.scene == new.scene
-        && old.playing_scene == new.playing_scene
-        && old.queued_scene == new.queued_scene
-        && old.song_view == new.song_view
-        && old.sections == new.sections
-        && old.section == new.section
-        && old.pattern == new.pattern
-        && old.pattern_start == new.pattern_start
-        && old.pattern_length == new.pattern_length
-        && old.pattern_auto == new.pattern_auto
-        && old.notes == new.notes
-        && old.group == new.group
-        && old.sound == new.sound
-        && old.browser == new.browser
-        && old.browser_open == new.browser_open
-        && old.page == new.page
-        && old.sampling == new.sampling
-        && old.loading == new.loading
-        && old.groups.len() == new.groups.len()
-        && old.groups.iter().zip(&new.groups).all(|(x, y)| group_static_eq(x, y))
+    // Every field is named, with no `..`: a field added to the struct doesn't build until it's
+    // put with the compared ones (a change rebuilds the table) or the patched ones (`_`, which
+    // patch_state_in_place updates), so the cached table can't silently keep a stale value.
+    let View {
+        project,
+        tempo,
+        swing,
+        variation,
+        master_volume,
+        master_db,
+        playing,
+        recording,
+        looping,
+        metronome,
+        auto_write,
+        strip_position,
+        touch_auto_write,
+        keep_focus,
+        relative_strips,
+        fixed_velocity,
+        velocity,
+        cue_level,
+        input_levels,
+        scale_root,
+        scale_bank,
+        scale_kind,
+        user_chords,
+        follow,
+        grid,
+        recent,
+        settings,
+        lock,
+        lfo_focus,
+        mod_slots,
+        note_repeat,
+        numerator,
+        denominator,
+        scene_name,
+        scene_color,
+        scenes,
+        scene,
+        playing_scene,
+        queued_scene,
+        song_view,
+        sections,
+        section,
+        pattern,
+        pattern_start,
+        pattern_length,
+        pattern_auto,
+        notes,
+        group,
+        sound,
+        browser,
+        browser_open,
+        page,
+        sampling,
+        loading,
+        groups,
+        master_meter: _,
+        cue_meter: _,
+        input_meters: _,
+        lfos: _,
+        position: _,
+        progress: _,
+        pattern_position: _,
+        control: _,
+    } = old;
+    *project == new.project
+        && *tempo == new.tempo
+        && *swing == new.swing
+        && *variation == new.variation
+        && *master_volume == new.master_volume
+        && *master_db == new.master_db
+        && *playing == new.playing
+        && *recording == new.recording
+        && *looping == new.looping
+        && *metronome == new.metronome
+        && *auto_write == new.auto_write
+        && *strip_position == new.strip_position
+        && *touch_auto_write == new.touch_auto_write
+        && *keep_focus == new.keep_focus
+        && *relative_strips == new.relative_strips
+        && *fixed_velocity == new.fixed_velocity
+        && *velocity == new.velocity
+        && *cue_level == new.cue_level
+        && *input_levels == new.input_levels
+        && *scale_root == new.scale_root
+        && *scale_bank == new.scale_bank
+        && *scale_kind == new.scale_kind
+        && *user_chords == new.user_chords
+        && *follow == new.follow
+        && *grid == new.grid
+        && *recent == new.recent
+        && *settings == new.settings
+        && *lock == new.lock
+        && *lfo_focus == new.lfo_focus
+        && *mod_slots == new.mod_slots
+        && *note_repeat == new.note_repeat
+        && *numerator == new.numerator
+        && *denominator == new.denominator
+        && *scene_name == new.scene_name
+        && *scene_color == new.scene_color
+        && *scenes == new.scenes
+        && *scene == new.scene
+        && *playing_scene == new.playing_scene
+        && *queued_scene == new.queued_scene
+        && *song_view == new.song_view
+        && *sections == new.sections
+        && *section == new.section
+        && *pattern == new.pattern
+        && *pattern_start == new.pattern_start
+        && *pattern_length == new.pattern_length
+        && *pattern_auto == new.pattern_auto
+        && *notes == new.notes
+        && *group == new.group
+        && *sound == new.sound
+        && *browser == new.browser
+        && *browser_open == new.browser_open
+        && *page == new.page
+        && *sampling == new.sampling
+        && *loading == new.loading
+        && groups.len() == new.groups.len()
+        && groups.iter().zip(&new.groups).all(|(x, y)| group_static_eq(x, y))
 }
 
 fn patch_meter_pair(t: &Table, key: &str, m: (f32, f32)) -> mlua::Result<()> {
@@ -2030,7 +2180,8 @@ fn patch_state_in_place(lua: &Lua, t: &Table, old: &Rc<View>, new: &Rc<View>) ->
             if (g_made & SOUNDS_BIT) != 0 {
                 let mut sounds_tbl: Option<Table> = None;
                 for (j, (os, ns)) in og.sounds.iter().zip(&ng.sounds).enumerate() {
-                    if os.playing == ns.playing && os.mix.meter == ns.mix.meter && os.mix.headroom == ns.mix.headroom {
+                    if os.playing == ns.playing && os.hits == ns.hits && os.mix.meter == ns.mix.meter && os.mix.headroom == ns.mix.headroom
+                    {
                         continue;
                     }
                     let sounds = match &sounds_tbl {
@@ -2043,6 +2194,9 @@ fn patch_state_in_place(lua: &Lua, t: &Table, old: &Rc<View>, new: &Rc<View>) ->
                     let st: Table = sounds.raw_get(j + 1)?;
                     if os.playing != ns.playing {
                         st.raw_set("playing", ns.playing)?;
+                    }
+                    if os.hits != ns.hits {
+                        st.raw_set("hits", lua.create_sequence_from(ns.hits.iter().copied())?)?;
                     }
                     patch_mix_telemetry(&st, &os.mix, &ns.mix)?;
                 }
