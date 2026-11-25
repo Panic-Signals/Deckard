@@ -2301,6 +2301,7 @@ dependencies = [
 name = "deckard-plugins"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "deckard-mi",
  "deckard-model",
  "libc",

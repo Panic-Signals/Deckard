@@ -6741,8 +6741,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         let row_h = grid.height() / count;
         (row_h, first * row_h)
     } else {
-        // The sound slots: a plain scroll bar.
-        let y0 = scroll(ui, "pattern-rows", grid, rows as f32 * ROW);
+        // The sound names and drum lanes share one offset and accept wheel input over either.
+        let y0 = scroll(ui, "pattern-rows", list.union(grid), rows as f32 * ROW);
         let total = rows as f32 * ROW;
         let y0 = match zoom_bar(
             ui,

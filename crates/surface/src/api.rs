@@ -1032,6 +1032,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     // the values it shows on its strips.
     request!("choke_all", () => Action::ChokeAll);
     request!("delete_pattern", (group: usize, pattern: usize) => Action::DeletePattern { group: index(group, "a group")?, pattern: index(pattern, "a pattern")? });
+    request!("toggle_audio_loop", (group: usize, sound: usize) => Action::ToggleAudioLoop {
+        group: index(group, "a group")?,
+        sound: index(sound, "a sound")?,
+    });
     request!("copy_pattern", (group: usize, from: usize, to: usize) => Action::CopyPattern {
         group: index(group, "a group")?,
         from: index(from, "a pattern")?,
@@ -1499,6 +1503,8 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("default_color", s.default_color)?;
                 st.set("prob_locked", s.prob_locked)?;
                 st.set("selected", s.selected)?;
+                st.set("loop_mode", s.loop_mode)?;
+                st.set("loop_playing", s.loop_playing)?;
                 if let Some(a) = &s.audio {
                     let at = lua.create_table()?;
                     // (Flat: min, max, min, max, …; a column a pixel or two.)
@@ -1738,6 +1744,8 @@ fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
         prob_locked,
         selected,
         audio,
+        loop_mode,
+        loop_playing,
         mix,
         playing: _,
         hits: _,
@@ -1761,6 +1769,8 @@ fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
         && *prob_locked == new.prob_locked
         && *selected == new.selected
         && *audio == new.audio
+        && *loop_mode == new.loop_mode
+        && *loop_playing == new.loop_playing
         && mix_static_eq(mix, &new.mix)
 }
 

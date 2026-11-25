@@ -2229,6 +2229,9 @@ pub struct Telemetry {
     /// Peak (left, right) of each extra output's strip since the UI last took them, as
     /// `project.extra_outs` lists them (after the strip's level and pan).
     pub extra_meters: Vec<(f32, f32)>,
+    /// Per-group bitmask (`1 << sound`, up to 64 sounds) of unmuted sounds currently
+    /// playing a loop (`SamplerRt::loop_playing`).
+    pub loop_playing: Vec<u64>,
 }
 
 /// Strips whose meters [`Engine::publish`] hands over without allocating (more: once,
@@ -6903,6 +6906,20 @@ impl Engine {
         t.stale = self.stale;
         t.sounds_ahead = self.sounds_ahead();
         t.ahead_underruns = self.ahead_underruns();
+        if t.loop_playing.len() != self.sounds.len() {
+            t.loop_playing.resize(self.sounds.len(), 0);
+        }
+        for (g, (mask, row)) in t.loop_playing.iter_mut().zip(&self.sounds).enumerate() {
+            let mut bits = 0u64;
+            let mrow = self.sound_muted.get(g);
+            for (s, smp) in row.iter().enumerate().take(64) {
+                let muted = mrow.and_then(|r| r.get(s)).copied().unwrap_or(false);
+                if !muted && smp.as_ref().is_some_and(|smp| smp.loop_playing()) {
+                    bits |= 1u64 << s;
+                }
+            }
+            *mask = bits;
+        }
         self.publish_heard(t);
         t.zones.resize(t.watch.len(), None);
         for (pos, &(g, s, z)) in t.zones.iter_mut().zip(&t.watch) {
@@ -16060,6 +16077,58 @@ mod tests {
         // Input 0.5 -> Split bus 1 (x0.5 = 0.25) -> strip (level 1.0) -> Sound(0, 1) (HalfGainEffect x0.5 = 0.125).
         let (master, _) = s.block(0.5);
         assert!(near(master.0, 0.125) && near(master.1, 0.125), "strip->sound bus got={master:?}, want 0.125");
+    }
+
+    #[test]
+    fn telemetry_tracks_active_sampler_loops_until_released_or_choked() {
+        let mut p = project();
+        let s0 = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(s0);
+        p.groups[0].sounds[0].channel.choke_group = 1;
+        p.groups[0].sounds[0].channel.choke_mode = 0;
+        p.groups[0].sounds[1].channel.choke_group = 1;
+        p.groups[0].sounds[1].channel.choke_mode = 0;
+        let mut e = click_engine_for(&p, 48_000);
+        e.sequencing = false;
+        set_sample(&mut e, vec![[0.4, 0.4]; 24_000], &[("envelope_type", 2.0)], true);
+        // Give sound 1 a non-looped one-shot in Choke Group 1.
+        let s1_smp = deckard_model::Sampler { envelope_type: 0, ..Default::default() };
+        let z1 = sampler::ZoneRt {
+            sample: Arc::new(sample::Sample { rate: 48_000, frames: vec![[0.4, 0.4]; 12_000] }),
+            root: 60,
+            keys: (0, 127),
+            vels: (0, 127),
+            gain: 1.0,
+            pan: 0.0,
+            tune: 0.0,
+            play: (0, 12_000),
+            looped: None,
+            x_fade: 0,
+            fade_in: 0,
+            fade_out: 0,
+            sync: None,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
+        };
+        e.sounds[0][1] = Some(SamplerRt::new(sampler::Settings::new(&s1_smp, 48_000.0), vec![z1], (1.0, 1.0), 48_000.0));
+
+        let mut out = vec![0.0f32; 2 * 512];
+        let mut t = Telemetry::with_room();
+
+        e.play_live(Live::NoteOn { group: 0, sound: 0, pitch: 60, velocity: 100, length: i64::MAX });
+        e.process(&mut out);
+        e.publish(&mut t);
+        assert_eq!(t.loop_playing[0] & 1, 1, "looped sustaining voice publishes loop_playing");
+
+        // Choking with sound 1 (Choke Group 1) stops sound 0's loop highlight and leaves non-looped sound 1 unflagged.
+        e.play_live(Live::NoteOn { group: 0, sound: 1, pitch: 60, velocity: 100, length: i64::MAX });
+        e.process(&mut out);
+        e.publish(&mut t);
+        assert_eq!(t.loop_playing[0] & 1, 0, "choked loop clears loop_playing immediately");
+        assert_eq!(t.loop_playing[0] & 2, 0, "non-looped one-shot does not set loop_playing");
     }
 }
 

@@ -173,6 +173,70 @@ fn shift_and_erase_show_the_groups() {
     assert_eq!(groups(&s, &v), before, "with ERASE: the groups");
 }
 
+/// A sound whose Audio plug-in is in Loop mode (it plays with the pattern, not with
+/// notes): in Pad mode its pad switches the loop on or off, and focuses it as any pad.
+#[test]
+fn a_loop_mode_sounds_pad_toggles_its_loop() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.groups[v.group].sounds[2].loop_mode = true;
+    let now = Instant::now();
+    let a = s.event(&Event::PadOn(3, 0.8), &v, now);
+    assert_eq!(a, [Action::ToggleAudioLoop { group: v.group, sound: 2 }, Action::FocusSound(2)]);
+    s.event(&Event::PadOff(3), &v, now);
+    assert_eq!(s.event(&Event::PadOn(2, 0.8), &v, now), [Action::FocusSound(1)], "other sounds just focus");
+    hold(&mut s, &v, "BUTTON_TRANSPORT_ERASE", true);
+    assert!(!s.event(&Event::PadOn(3, 0.8), &v, now).iter().any(|a| matches!(a, Action::ToggleAudioLoop { .. })), "not with ERASE");
+}
+
+#[test]
+fn a_playing_loops_pad_stays_bright() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let now = Instant::now();
+    s.event(&Event::Button("BUTTON_PAD_MODE", true), &v, now);
+    s.event(&Event::Button("BUTTON_PAD_MODE", false), &v, now);
+    assert_eq!(s.page(), "pad_mode");
+
+    let pad3_tile_px = |s: &mut Surface, v: &View| {
+        let mut px = Vec::new();
+        s.draw_picture(v).rasterize_into(&mut px);
+        // Pad 3 is bottom row (row 0), col 2: x = 484 + 2 * 119 = 722, y = 213.
+        px[235 * 960 + 760]
+    };
+    let off_px = pad3_tile_px(&mut s, &v);
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 2)), "unfocused and idle: dim");
+
+    // Active loop in Pad mode: holds the full white-mixed highlight (state 5) and fills its screen tile,
+    // both during the press and after releasing the pad.
+    v.groups[v.group].sounds[2].loop_mode = true;
+    v.groups[v.group].sounds[2].loop_playing = true;
+    s.event(&Event::PadOn(3, 0.8), &v, now);
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 5)), "held while loop active: full highlight");
+    s.event(&Event::PadOff(3), &v, now);
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 5)), "released while loop active: stays at full highlight");
+    let on_px = pad3_tile_px(&mut s, &v);
+    assert_ne!(on_px, off_px, "Pad Mode screen tile is filled while loop is active");
+
+    // Switching the loop off drops the white-mixed flash cleanly, even while `playing` is still true from the press.
+    v.sound = 2;
+    v.groups[v.group].sounds[2].loop_playing = false;
+    v.groups[v.group].sounds[2].playing = true;
+    assert_eq!(
+        s.leds(&v).get("LED_PAD_3"),
+        Some(deckard_mk3::leds::palette(0, 4)),
+        "loop switched off on focused pad: solid bright, no white flash"
+    );
+    v.sound = 0;
+    v.groups[v.group].sounds[2].playing = false;
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 2)), "unfocused and off: dim again");
+
+    // MUTE held still shows muted state.
+    v.groups[v.group].sounds[2].loop_playing = true;
+    v.groups[v.group].sounds[2].muted = true;
+    hold(&mut s, &v, "BUTTON_MUTE", true);
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(0, 2)), "MUTE held still shows muted");
+    hold(&mut s, &v, "BUTTON_MUTE", false);
+}
+
 #[test]
 fn pads_focus_their_sound() {
     let (mut s, v) = (Surface::new(), view());
