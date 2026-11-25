@@ -118,19 +118,31 @@ every timer tick and redraws the buttons when it changes.
 
 ### 3.3 Pads
 
+- DECKARD's choice: a Sampler Preview has a mode, SAMPLER (the last knob page of
+  RECORD, three buttons in the window's header): Original (what the classic Sampler
+  does, and no more), Advanced (Sync and Keys, stems on a zone's lanes, slices that
+  play on) or Layers (every sample is a layer). A sound with a sample is asked before
+  its mode changes, since the change keeps the sample shown and loses the sound's other
+  changes: the displays say "Changing the mode loses all changes to this sound." with
+  CANCEL on display button 7 and OK on 8, the window asks the same in a dialog, and
+  either answers both. While it is asked the other display buttons, the page arrows and
+  the other knobs do nothing. Original made Advanced loses nothing and isn't asked.
 - DECKARD's choice: a take focused (a pad, PREVIOUS, NEXT, or a click in the window) is
-  loaded into the sound only if the sound isn't a Sampler Preview that already has a
-  sample. There the sample (its layers) stays, and so it does when a take is recorded:
-  the take waits in the list. RECORD's LAYER (a knob of the RECORDING page, a field in
+  loaded into the sound only if the sound isn't a Sampler Preview in Layers that
+  already has a sample. There the sample (its layers) stays, and so it does when a take
+  is recorded: the take waits in the list, and EDIT works on the take itself (an edit
+  is a new file in the list; the sound isn't changed) until it has a layer. A take
+  that is on a layer is edited as that layer, and stays its layer. RECORD's LAYER (a knob of the RECORDING page, a field in
   the window) is the focused take's layer: None, 1 to n, New. Turning it only chooses;
   APPLY (display button 8, lit while a layer is chosen; a field beside LAYER in the
   window) puts the take there, an existing layer keeping its settings, and None takes
   the take's layer away. The take's right-click menu in the window still puts it on a
   layer at once. So display button 8 isn't BANK on DECKARD's own layer: the pads have
   the focused take's sixteen (SHIFT + 7 / 8, PREVIOUS / NEXT, walks through them).
-- DECKARD's choice: on a sound with layers, display button 4 has both ZONE and LAYERS on
-  it, the tab showing in the row's letters and the other small under it, and goes
-  between the two.
+- DECKARD's choice: in Layers, display button 4 has both ZONE and LAYERS on it, the tab
+  showing in the row's letters and the other small under it, and goes between the two
+  (LAYERS alone until the sound has a sample); display button 3 does nothing, a sound
+  in Layers having no slices.
 - **Takes on pads off** (default): pads play the sounds as usual (sound pad mode), and the
   pad LEDs are the normal sound LEDs.
 - **Takes on pads on**: pad n focuses take `n + 16·bank`, loads it into the sound and

@@ -7,11 +7,18 @@ use crate::layout::sampling::{RecordAct, SamplingAct};
 use crate::{App, record_knobs, sampling_hw};
 use deckard_surface::{Action, NoSample, RecordPress, RecordState, SamplingView};
 
+/// A Sampler Preview mode as the controller's view has it: 0 Original, 1 Advanced, 2
+/// Layers.
+fn mode_number(m: deckard_model::new_sampler::SamplerMode) -> u8 {
+    deckard_model::new_sampler::SamplerMode::ALL.iter().position(|x| *x == m).unwrap_or(1) as u8
+}
+
 impl App {
     /// The knob pages of every tab, with what each knob sets.
     fn sampling_pages(&self) -> Option<sampling_hw::Pages> {
         let d = self.doc.as_ref()?.borrow();
-        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), true);
+        let asked = self.sampler_ask.map(|a| a.1);
+        let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), true, asked);
         Some(sampling_hw::pages(record, &self.sampling, d.project(), (self.group, self.sound, self.zone)))
     }
 
@@ -43,6 +50,8 @@ impl App {
                 .stems
                 .as_ref()
                 .map(|j| deckard_surface::StemsRun { focused: j.source == (self.group, self.sound, self.zone), progress: j.progress() }),
+            sampler: self.doc.as_ref().and_then(|d| crate::layers::mode_of(d.borrow().project(), self.group, self.sound)).map(mode_number),
+            sampler_ask: self.sampler_ask.filter(|a| a.0 == (self.group, self.sound)).map(|a| mode_number(a.1)),
             ..Default::default()
         };
         if let Some(p) = self.sampling_pages() {
@@ -53,6 +62,19 @@ impl App {
             out.sample = sampling_hw::sample_view(&self.sampling, doc.borrow().project(), (self.group, self.sound, self.zone), None);
             if out.sample.is_none() {
                 out.no_sample = self.no_sample();
+            }
+        }
+        // A take on no layer, being edited: its file as a take's (RECORD and EDIT; the
+        // zone knobs aren't its).
+        if let (Some((_, file)), Some(s), Some(audio)) = (self.shown_take(), out.sample.as_mut(), self.sampling.sample.as_ref()) {
+            s.name = crate::analysis::file_name_of(&file.to_string_lossy());
+            s.path = file.to_string_lossy().into();
+            (s.frames, s.rate) = (audio.frames.len(), audio.rate);
+            (s.play, s.looped, s.take) = ((0, audio.frames.len()), None, true);
+            s.slices.clear();
+            s.lanes.clear();
+            for page in &mut out.pages[1..] {
+                page.clear();
             }
         }
         out

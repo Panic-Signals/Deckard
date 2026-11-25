@@ -39,6 +39,13 @@ pub(crate) fn app_in(mode: SamplerMode) -> App {
     app
 }
 
+/// The focused sound's Sampler Preview put in Advanced (a classic Sampler converted
+/// starts in Original).
+pub(crate) fn advanced(app: &App) {
+    let doc = app.doc.as_ref().unwrap();
+    doc.borrow_mut().set_sampler_mode(app.group, app.sound, SamplerMode::Advanced, None).unwrap();
+}
+
 /// An app with layers on A2, A3 and A4 (the files kept in the folder returned).
 pub(crate) fn three() -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir().unwrap();
@@ -457,7 +464,7 @@ fn the_layer_choices_are_the_focused_takes() {
     record(&mut app, RecordAct::Set(RecParam::Layer, NO_LAYER));
     assert_eq!(pending(&app), None, "it is on none");
     // The MK3's RECORDING page has it too.
-    let knobs = crate::record_knobs::knobs(&app.recorder.view, &app.settings, &project(&app), (0, 0), true);
+    let knobs = crate::record_knobs::knobs(&app.recorder.view, &app.settings, &project(&app), (0, 0), true, None);
     let k = knobs.pages[0].knobs.iter().find(|k| k.name == "LAYER").expect("a LAYER knob");
     assert_eq!((k.text.as_str(), k.max), ("None", 4.0));
     // Loop has a target of its own.
@@ -658,4 +665,142 @@ fn an_edited_take_is_still_on_its_layer() {
     assert_eq!(names(&app)[1], "take - 2.wav", "{}", app.status);
     assert_eq!(take_layer(&project(&app), 0, 0, &take), Some(1));
     assert_eq!(layer_pending(&project(&app), 0, 0, &app.recorder.view), None);
+}
+
+fn mode(app: &App) -> SamplerMode {
+    crate::layers::mode_of(&project(app), 0, 0).unwrap()
+}
+
+fn sampler(app: &mut App, m: SamplerMode) {
+    app.sampling_act(crate::layout::sampling::SamplingAct::Sampler(m));
+}
+
+fn answer(app: &mut App, ok: bool) {
+    app.sampling_act(crate::layout::sampling::SamplingAct::SamplerAnswer(ok));
+}
+
+/// SAMPLER on a sound with samples asks first; Cancel leaves it, OK keeps the sample
+/// shown as the sound's only one, in one undo step.
+#[test]
+fn a_mode_change_asks_first() {
+    let (_dir, mut app) = three();
+    sampler(&mut app, SamplerMode::Advanced);
+    assert_eq!(app.sampler_ask, Some(((0, 0), SamplerMode::Advanced)));
+    assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Layers, 3), "asked, not done");
+    answer(&mut app, false);
+    assert_eq!((app.sampler_ask, mode(&app), zones(&app).len()), (None, SamplerMode::Layers, 3), "Cancel");
+    answer(&mut app, true);
+    assert_eq!(mode(&app), SamplerMode::Layers, "nothing asked: nothing answered");
+    show(&mut app, 1);
+    sampler(&mut app, SamplerMode::Advanced);
+    let steps = labels(&app).len();
+    answer(&mut app, true);
+    assert_eq!((app.sampler_ask, mode(&app)), (None, SamplerMode::Advanced));
+    assert_eq!(names(&app), ["a3.wav"], "the sample shown stays");
+    let z = &zones(&app)[0];
+    assert_eq!((z.meta.clone(), z.key_range, z.play_range), (None, (0, 127), (0, 95_999)));
+    assert_eq!(app.zone, 0);
+    assert_eq!(labels(&app).len(), steps + 1, "one step");
+    assert!(app.doc.as_ref().unwrap().borrow_mut().undo());
+    assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Layers, 3));
+    // To the mode it has: nothing, and what was asked is dropped.
+    sampler(&mut app, SamplerMode::Original);
+    sampler(&mut app, SamplerMode::Layers);
+    assert_eq!(app.sampler_ask, None);
+}
+
+/// Nothing to lose: no question. (A sound without a sample; Original made Advanced.)
+#[test]
+fn an_empty_sound_changes_mode_at_once() {
+    let mut app = app();
+    sampler(&mut app, SamplerMode::Original);
+    assert_eq!((app.sampler_ask, mode(&app)), (None, SamplerMode::Original));
+    let dir = tempfile::tempdir().unwrap();
+    let f = tone(dir.path(), "one.wav", 220.0);
+    app.doc
+        .as_ref()
+        .unwrap()
+        .borrow_mut()
+        .set_zones(0, 0, &[crate::new_zone(&f, 96_000, deckard_doc::ZoneFrom::Template)], "Load")
+        .unwrap();
+    sampler(&mut app, SamplerMode::Advanced);
+    assert_eq!((app.sampler_ask, mode(&app), names(&app)), (None, SamplerMode::Advanced, vec!["one.wav".to_string()]));
+    // Back to Original would lose what Advanced has: asked.
+    sampler(&mut app, SamplerMode::Original);
+    assert_eq!((app.sampler_ask.map(|a| a.1), mode(&app)), (Some(SamplerMode::Original), SamplerMode::Advanced));
+}
+
+/// What was asked is dropped when another sound is focused, and nothing is asked while
+/// recording.
+#[test]
+fn a_pending_mode_is_dropped() {
+    let (_dir, mut app) = three();
+    sampler(&mut app, SamplerMode::Original);
+    assert!(app.sampler_ask.is_some());
+    app.sound = 1;
+    app.update_sampling();
+    assert_eq!(app.sampler_ask, None);
+    app.sound = 0;
+    answer(&mut app, true);
+    assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Layers, 3), "not the answer to anything");
+    app.recorder.fake_recording((0, 0));
+    sampler(&mut app, SamplerMode::Original);
+    assert_eq!(app.sampler_ask, None);
+    assert!(app.status.contains("recording"), "{}", app.status);
+}
+
+/// In Layers a take picked that is on no layer is what EDIT works on: the edit is a new
+/// file in the take list, the sound and its undo history as they were. A mode change
+/// then keeps that take.
+#[test]
+fn a_take_is_edited_before_it_is_on_a_layer() {
+    use crate::layout::sampling::{EditOp, RecordAct, SamplingAct};
+    let (dir, mut app, f) = three_and_a_take();
+    app.path = Some(dir.path().join("x.mxprj"));
+    app.sampling_open = true;
+    assert_eq!(app.shown_take(), None, "not picked yet");
+    record(&mut app, RecordAct::FocusTake(0));
+    assert_eq!(app.shown_take(), Some((0, f.clone())));
+    app.update_sampling();
+    assert_eq!(app.sampling.sample_key.as_ref().map(|k| (k.2, k.3.clone())), Some((usize::MAX, f.to_string_lossy().into_owned())));
+    let before = (names(&app), labels(&app).len());
+    app.sampling_act(SamplingAct::Edit(EditOp::Reverse));
+    let edited = app.recorder.view.takes[0].clone();
+    assert_eq!(edited, dir.path().join("Recordings").join("take - 2.wav"), "{}", app.status);
+    assert!(edited.exists() && f.exists(), "the original stays");
+    assert!(app.recorder.view.take_waves.contains_key(&edited));
+    assert_eq!((names(&app), labels(&app).len()), before, "the sound isn't touched");
+    assert_eq!(app.shown_take(), Some((0, edited.clone())), "still the take shown");
+    // What is a zone's isn't a take's.
+    app.sampling_act(SamplingAct::Edit(EditOp::AutoLoop));
+    assert!(app.status.contains("layer first"), "{}", app.status);
+    // A layer picked: EDIT is the layer's again.
+    app.sampling_act(SamplingAct::Layer(1, LayerAct::Focus));
+    assert_eq!(app.shown_take(), None);
+    // The mode changed with the take shown keeps the take.
+    record(&mut app, RecordAct::FocusTake(0));
+    sampler(&mut app, SamplerMode::Advanced);
+    assert!(app.sampler_ask.is_some());
+    answer(&mut app, true);
+    assert_eq!((mode(&app), names(&app)), (SamplerMode::Advanced, vec!["take - 2.wav".to_string()]), "{}", app.status);
+    assert_eq!(app.shown_take(), None);
+    assert!(app.doc.as_ref().unwrap().borrow_mut().undo());
+    assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Layers, 3), "one step");
+}
+
+/// A take picked that is on a layer is edited as that layer, and the list follows.
+#[test]
+fn an_edit_on_a_layer_renames_its_take_in_the_list() {
+    use crate::layout::sampling::{EditOp, RecordAct, SamplingAct};
+    let (dir, mut app) = three();
+    app.path = Some(dir.path().join("x.mxprj"));
+    app.recorder.view.takes.push(dir.path().join("a3.wav"));
+    record(&mut app, RecordAct::FocusTake(0));
+    assert_eq!((app.zone, app.shown_take()), (1, None), "its layer is shown");
+    show(&mut app, 1);
+    app.sampling_act(SamplingAct::Edit(EditOp::Reverse));
+    let file = PathBuf::from(&zones(&app)[1].sample.path);
+    assert_eq!(file.file_name().unwrap(), "a3 - 2.wav", "{}", app.status);
+    assert_eq!(app.recorder.view.takes[0].file_name(), file.file_name(), "the list has the layer's file");
+    assert_eq!(crate::layers::take_layer(&project(&app), 0, 0, &app.recorder.view.takes[0]), Some(1));
 }

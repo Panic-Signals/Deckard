@@ -52,6 +52,7 @@ fn catching_drops_a_slice_at_the_playhead_in_manual_mode() {
 fn a_caught_slice_lands_on_the_samples_eighths() {
     let (mut app, _tmp) = app();
     app.convert_instrument(true);
+    crate::layers_tests::advanced(&app);
     let (g, s) = (app.group, app.sound);
     let doc = app.doc.clone().unwrap();
     let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();
@@ -241,6 +242,7 @@ fn key_shift_puts_a_slice_on_the_next_empty_sound() {
 fn key_shift_of_a_sync_zone_plays_in_keys_and_leaves_its_notes() {
     let (mut app, _tmp) = app();
     app.convert_instrument(true);
+    crate::layers_tests::advanced(&app);
     let (g, s) = (app.group, app.sound);
     let doc = app.doc.clone().unwrap();
     let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();
@@ -295,6 +297,7 @@ fn loop_at_120(warped: bool) -> (crate::App, tempfile::TempDir) {
     let (mut app, tmp) = app();
     app.path = Some(tmp.path().join("Song.mxprj"));
     app.convert_instrument(true);
+    crate::layers_tests::advanced(&app);
     let (g, s) = (app.group, app.sound);
     let doc = app.doc.clone().unwrap();
     let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();

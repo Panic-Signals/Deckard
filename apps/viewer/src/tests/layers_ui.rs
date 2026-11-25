@@ -316,3 +316,40 @@ fn the_record_footer_applies_a_takes_layer() {
     assert_eq!(names(&h), ["a.wav", "take.wav"]);
     assert_eq!(h.state().recorder.view.layer_choice, None);
 }
+
+/// The header's SAMPLER picks the mode: a sound with samples is asked first, in a dialog
+/// with the words agreed, OK and Cancel.
+#[test]
+fn the_header_has_sampler() {
+    use deckard_model::new_sampler::SamplerMode;
+    use egui_kittest::kittest::Queryable;
+    const ASK: &str = "Changing the mode loses all changes to this sound.";
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    let mode = |h: &Harness<'static, App>| project_of_app(h.state()).groups[0].sounds[0].new_sampler.unwrap().mode;
+    let at = |h: &Harness<'static, App>, k: usize| -> Pos2 {
+        let r: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sampler-mode", k)))).expect("SAMPLER shown");
+        r.center()
+    };
+    h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);
+    h.run_steps(3);
+    let p = at(&h, 1);
+    click(&mut h, p);
+    h.run_steps(3);
+    h.get_by_label(ASK);
+    assert_eq!(mode(&h), SamplerMode::Layers, "asked first");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(h.query_by_label(ASK).is_none());
+    assert_eq!((mode(&h), zones(h.state()).len()), (SamplerMode::Layers, 2));
+    click(&mut h, p);
+    h.run_steps(3);
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert!(h.query_by_label(ASK).is_none());
+    assert_eq!((mode(&h), zones(h.state()).len()), (SamplerMode::Advanced, 1));
+    assert!(!tab_shown(&project_of_app(h.state()), 0, 0, h.state().sampling.tab, true, false) || h.state().sampling.tab != 4, "off LAYERS");
+    if let Ok(dir) = std::env::var("DECKARD_SHOTS") {
+        h.render().unwrap().save(std::path::Path::new(&dir).join("sampler-mode.png")).unwrap();
+    }
+}

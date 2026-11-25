@@ -446,6 +446,11 @@ pub struct LaneView {
 
 #[derive(Debug, Clone)]
 pub enum SamplingAct {
+    /// SAMPLER: the focused Sampler Preview's mode asked for. A sound with a sample asks
+    /// first ([`SamplingAct::SamplerAnswer`]): the change loses its changes.
+    Sampler(deckard_model::new_sampler::SamplerMode),
+    /// The mode change asked for: gone ahead with (`true`), or dropped.
+    SamplerAnswer(bool),
     /// A layer of the focused sound (its lane, from 0).
     Layer(usize, LayerAct),
     /// Its layers' morph, and what's the sound's.
@@ -605,7 +610,16 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::BLACK);
     let gcol = sound_color(p, app.group, app.sound);
-    let edited = edited(p, (app.group, app.sound, app.zone));
+    // In Layers a take on no layer is edited before it has one: shown as a take is
+    // (RECORD and EDIT), though no zone holds it.
+    let edited = match app.shown_take() {
+        Some((_, file)) => {
+            let sample = deckard_model::SampleRef { kind: 0, path: file.to_string_lossy().into(), ..Default::default() };
+            let z = deckard_model::Zone { sample, ..Default::default() };
+            Some((usize::MAX, z, Target::Zone(app.group, app.sound, usize::MAX), true))
+        }
+        None => edited(p, (app.group, app.sound, app.zone)),
+    };
     let (zi, zone, zt, take) = match &edited {
         Some((zi, z, t, take)) => (*zi, Some(z), *t, *take),
         None => (0, None, Target::Zone(app.group, app.sound, 0), false),
@@ -672,6 +686,47 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             }
         }
     }
+    // SAMPLER: which sampler a Sampler Preview is.
+    if let Some(mode) = crate::layers::mode_of(p, app.group, app.sound) {
+        use deckard_model::new_sampler::SamplerMode;
+        let (w, gap) = (64.0, 4.0);
+        let right = header.right() - if tab == 3 && zone.is_some() { 152.0 } else { 12.0 };
+        let x0 = right - 3.0 * w - 2.0 * gap;
+        painter.text(Pos2::new(x0 - 8.0, header.top() + 19.0), Align2::RIGHT_CENTER, "SAMPLER", font(10.0), white(142));
+        let busy = app.recorder.busy();
+        for (k, m) in SamplerMode::ALL.into_iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(x0 + k as f32 * (w + gap), header.top() + 9.0), Vec2::new(w, 20.0));
+            let tip = match m {
+                SamplerMode::Original => "Original: what Maschine's Sampler does, and no more",
+                SamplerMode::Advanced => "Advanced: Sync and Keys, stems on a zone's lanes, reverse, slices that play on",
+                SamplerMode::Layers => "Layers: every sample is a layer, morphed between",
+            };
+            let resp = ui.interact(r, ui.id().with(("sampler-mode", k)), if busy { Sense::hover() } else { Sense::click() }).on_hover_text(
+                if busy {
+                    "The mode can't be changed while recording".to_string()
+                } else {
+                    format!("{tip}. Changing the mode of a sound with a sample keeps that sample and loses its other changes")
+                },
+            );
+            let on = m == mode;
+            painter.rect_filled(
+                r,
+                2.0,
+                if on {
+                    s03()
+                } else if resp.hovered() && !busy {
+                    s02()
+                } else {
+                    s01()
+                },
+            );
+            painter.text(r.center(), Align2::CENTER_CENTER, m.name().to_uppercase(), font(10.0), if on { white(245) } else { white(142) });
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sampler-mode", k)), r));
+            if resp.clicked() && !on {
+                acts.push(sact(SamplingAct::Sampler(m)));
+            }
+        }
+    }
     // Info bar: play, name, duration, stereo/mono.
     let info = Rect::from_min_size(Pos2::new(rect.left(), header.bottom() + 1.0), Vec2::new(rect.width(), 16.0));
     painter.rect_filled(info, 0.0, s00());
@@ -713,7 +768,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             white(142),
         );
         // A New Sampler zone: what analysis found (its tempo, its root, how it plays).
-        if !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some()) {
+        if !take && crate::layers::own(p, app.group, app.sound) {
             painter.text(
                 Pos2::new(d.right() + 12.0, info.center().y),
                 Align2::LEFT_CENTER,
@@ -745,7 +800,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     }
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
     // A New Sampler zone's tempo and pitch, over its EDIT and SLICE pages.
-    let new_sampler = !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some());
+    let new_sampler = !take && crate::layers::own(p, app.group, app.sound);
     if let (true, 1 | 2, Some(z), Some(s)) = (new_sampler, tab, zone, &st.sample) {
         let bar = Rect::from_min_size(body.min, Vec2::new(body.width(), 62.0));
         beat_bar(ui, app, bar, z, zt, s.frames.len() as f64 / s.rate.max(1) as f64, gcol, acts);
@@ -2239,14 +2294,8 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
                 f
             },
             {
-                let to_end = st.slices_to_end(app.doc.as_ref().is_some_and(|d| {
-                    d.borrow()
-                        .project()
-                        .groups
-                        .get(app.group)
-                        .and_then(|g| g.sounds.get(app.sound))
-                        .is_some_and(|x| x.new_sampler.is_some())
-                }));
+                let to_end =
+                    st.slices_to_end(app.doc.as_ref().is_some_and(|d| crate::layers::own(d.borrow().project(), app.group, app.sound)));
                 let mut f = choice_field("EACH PLAYS TO", vec!["Next slice".into(), "Sample end".into()], usize::from(to_end), |k| {
                     sact(SamplingAct::SliceToEnd(k == 1))
                 });

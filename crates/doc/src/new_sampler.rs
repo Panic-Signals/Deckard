@@ -184,7 +184,7 @@ impl Document {
 
     /// Sound (`g`, `s`)'s Sampler Preview put in `mode`: one undo step, "Sampler Mode".
     /// `keep: None`: only the setting changes (a sound without a sample, or Original made
-    /// Advanced, which loses nothing). `keep: Some((z, frames))`: zone `z` becomes the
+    /// Advanced, which loses nothing: its zones are said to play in Repitch, as they did). `keep: Some((z, frames))`: zone `z` becomes the
     /// sound's only zone, on every key and velocity, its loop off, over its whole file
     /// (`frames` long; 0: its play range stays), with the mode's settings at their
     /// defaults. What DECKARD knew of it goes, as for a sample just loaded; in Layers it
@@ -200,6 +200,20 @@ impl Document {
         let label = "Sampler Mode";
         self.transaction(label, |d| {
             let Some((z, frames)) = keep else {
+                // Out of Original its zones play as they did (Repitch): said here, or their
+                // analysis would put a loop in Sync.
+                if now.mode == SamplerMode::Original {
+                    let files: Vec<(usize, String)> = d.project().groups[g].sounds[s]
+                        .sampler
+                        .iter()
+                        .flat_map(|x| x.zones.iter().enumerate())
+                        .filter(|(_, z)| z.meta.is_none())
+                        .map(|(k, z)| (k, z.sample.path.clone()))
+                        .collect();
+                    for (k, file) in files {
+                        d.set_zone_meta(g, s, k, &ZoneMeta { file, mode: PlayMode::Repitch, ..ZoneMeta::default() }, label)?;
+                    }
+                }
                 return d.set_new_sampler_as(g, s, &NewSampler { mode, ..now }, label);
             };
             let mut set = vec![
@@ -355,7 +369,13 @@ mod tests {
         let snd = sound(&d);
         assert_eq!(snd.sampler.as_ref().unwrap().zones.len(), 3);
         assert_eq!(snd.new_sampler, Some(NewSampler { mode: SamplerMode::Advanced, ..n }));
+        for z in &snd.sampler.as_ref().unwrap().zones {
+            let want = ZoneMeta { file: z.sample.path.clone(), mode: PlayMode::Repitch, ..Default::default() };
+            assert_eq!(z.meta, Some(want), "it plays as it did, whatever analysis finds");
+        }
         assert_eq!(d.undo_label(), Some("Sampler Mode"));
+        assert!(d.undo());
+        assert!(sound(&d).sampler.unwrap().zones.iter().all(|z| z.meta.is_none()), "one step back");
         let mut plain = doc("/s/a.wav");
         assert!(plain.set_sampler_mode(0, 0, SamplerMode::Layers, None).is_err(), "not a Sampler Preview");
     }

@@ -552,6 +552,7 @@ fn layered(tab: usize, n: usize, focus: usize) -> View {
     s.layer = focus;
     s.layered = true;
     s.morph = Some(MorphView { on: true, position: 0.3, round: true, power: false });
+    v.sampling.sampler = Some(2);
     v
 }
 
@@ -571,13 +572,18 @@ fn button_four_goes_between_zone_and_layers() {
     assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     // A layered sound has no SLICE.
     assert!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3").is_empty());
-    // A lone zone not yet a layer (the app shows it as the first lane): LAYERS can be
-    // opened, and SLICE is still there.
-    let mut lone = layered(3, 1, 0);
-    lone.sampling.sample.as_mut().unwrap().layered = false;
-    assert_eq!(press(&mut s, &lone, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
-    assert_eq!(press(&mut s, &lone, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
-    assert!(s.screen_text(&lone).iter().any(|t| t == "SLICE"));
+    // It is the mode that says so, not what the sound holds: in Layers without a sample
+    // there is no ZONE, and button 4 is LAYERS.
+    let mut empty = view();
+    empty.sampling.sampler = Some(2);
+    assert_eq!(press(&mut s, &empty, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
+    assert!(press(&mut s, &empty, "BUTTON_SCREEN_3").is_empty());
+    // The same zones in Advanced: ZONE stays ZONE, and SLICE is there.
+    let mut advanced = layered(3, 1, 0);
+    advanced.sampling.sampler = Some(1);
+    assert_eq!(press(&mut s, &advanced, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    assert_eq!(press(&mut s, &advanced, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
+    assert!(s.screen_text(&advanced).iter().any(|t| t == "SLICE"));
     // Without layers: ZONE stays ZONE, and SLICE is there.
     let (mut s, v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");
@@ -603,10 +609,14 @@ fn tab_button_4_says_zone_and_layers() {
     // From RECORD too, so it can be found.
     let (zone, layers) = order(&mut s, &layered(0, 3, 0));
     assert!(zone.is_some() && layers.is_some() && zone < layers);
-    // A lone zone not yet a layer has it as well.
-    let mut lone = layered(3, 1, 0);
-    lone.sampling.sample.as_mut().unwrap().layered = false;
-    assert!(order(&mut s, &lone).1.is_some());
+    // In Layers with no sample yet, too.
+    let mut empty = view();
+    empty.sampling.sampler = Some(2);
+    assert!(order(&mut s, &empty).1.is_some());
+    // The same zones in Advanced: ZONE alone.
+    let mut advanced = layered(3, 1, 0);
+    advanced.sampling.sampler = Some(1);
+    assert_eq!(order(&mut s, &advanced).1, None);
     // No layers: no LAYERS.
     let (mut s, v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");
@@ -620,6 +630,12 @@ fn record_button_8_applies_a_takes_layer() {
     let (mut s, mut v) = (Surface::new(), sampled(0));
     (v.sampling.takes, v.sampling.take) = (20, Some(18));
     press(&mut s, &v, "BUTTON_SAMPLE");
+    // Only in Layers.
+    assert!(!s.screen_text(&v).iter().any(|t| t == "APPLY"), "Advanced has no APPLY");
+    v.sampling.layer_pending = true;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    v.sampling.layer_pending = false;
+    v.sampling.sampler = Some(2);
     let text = s.screen_text(&v);
     assert!(text.iter().any(|t| t == "APPLY") && !text.iter().any(|t| t.starts_with("BANK")), "{text:?}");
     let dark = s.leds(&v).get("LED_SCREEN_BUTTON_8");
@@ -635,6 +651,31 @@ fn record_button_8_applies_a_takes_layer() {
     assert_eq!(s.event(&Event::PadOn(3, 0.8), &v, now), [Action::Take { index: 18, delete: false }]);
     assert!(s.event(&Event::PadOn(5, 0.8), &v, now).is_empty(), "no 21st take");
     assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(16, 4)), "the focused take bright");
+}
+
+/// A mode change that loses the sound's changes asks on the displays: 7 CANCEL, 8 OK,
+/// and nothing else acts.
+#[test]
+fn the_mode_change_is_confirmed_on_the_displays() {
+    let (mut s, mut v) = (Surface::new(), layered(0, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    v.sampling.sampler_ask = Some(1);
+    let text = s.screen_text(&v);
+    for want in ["Changing the mode loses", "all changes to this sound.", "CANCEL", "OK", "SAMPLER: ADVANCED"] {
+        assert!(text.iter().any(|t| t == want), "{want}: {text:?}");
+    }
+    assert!(!text.iter().any(|t| t == "START" || t == "RECORD"), "{text:?}");
+    for name in ["BUTTON_SCREEN_1", "BUTTON_SCREEN_4", "BUTTON_SCREEN_5", "BUTTON_SCREEN_6", "BUTTON_RIGHT"] {
+        assert!(press(&mut s, &v, name).is_empty(), "{name}");
+    }
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::SamplerAnswer(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::SamplerAnswer(true))]);
+    let leds = s.leds(&v);
+    assert_ne!(leds.get("LED_SCREEN_BUTTON_8"), leds.get("LED_SCREEN_BUTTON_1"), "OK lit, the tabs dark");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), leds.get("LED_SCREEN_BUTTON_5"));
+    // Answered: the page is as it was.
+    v.sampling.sampler_ask = None;
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::SamplingTab(1)]);
 }
 
 /// On LAYERS, display buttons 5 to 8 mute the four layers shown (those with the focused

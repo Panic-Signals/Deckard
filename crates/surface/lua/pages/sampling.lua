@@ -2,7 +2,7 @@
 -- time, as Maschine's (docs/sampling-controller.md).
 --
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
---   display 4 again   a sound with layers (a New Sampler's): between ZONE and LAYERS.
+--   display 4 again   a Sampler Preview in Layers: between ZONE and LAYERS.
 --                     The button has both names: the tab showing, the other small
 --                     under it
 --   LAYERS            knobs 1-6 the page's (LAYER, ENVELOPE, MORPH, WINDOW), knob 7
@@ -11,9 +11,13 @@
 --                     + 2 SPREAD their windows evenly; the pads play the sounds. The
 --                     left display: every layer's window on the morph and where it
 --                     is; the right: the four layers. (A layered sound has no SLICE.)
+--   SAMPLER           RECORD's last knob page: a Sampler Preview's mode (Original,
+--                     Advanced, Layers). A sound with a sample asks first, across
+--                     both displays: 7 CANCEL, 8 OK, and nothing else acts
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), TAKES (the takes on the
 --                     pads, the focused take's sixteen), APPLY (the focused take onto
---                     the layer knob LAYER was turned to: lit while one is chosen).
+--                     the layer knob LAYER was turned to: lit while one is chosen;
+--                     in Layers only).
 --                     SHIFT + 7 / 8: PREVIOUS, NEXT take
 --   EDIT 5-6 / 8      ◀ the edit function ▶, APPLY (STEMS: CANCEL while separating)
 --   EDIT, STEM …      a zone with stem lanes has three more edit functions: STEM ROOT,
@@ -239,9 +243,22 @@ local LAYER_COLOURS = {
   { 176, 124, 240 }, { 76, 201, 214 }, { 230, 210, 74 }, { 240, 116, 82 },
 }
 
--- The focused sound's layers (none: not a layered sound).
+-- The focused sound's layers (none yet, or not a sound in Layers).
 local function layers_of(v)
   return v.sample and v.sample.layers or {}
+end
+
+-- The focused sound is a Sampler Preview in Layers: it has LAYERS and no SLICE, with
+-- layers or none yet.
+local function in_layers(v)
+  return v.sampler == "layers"
+end
+
+-- A mode change waits for its answer (it loses the sound's changes): the displays ask,
+-- display button 7 drops it and 8 goes ahead; nothing else acts.
+local ASK = { original = "ORIGINAL", advanced = "ADVANCED", layers = "LAYERS" }
+local function asking(v)
+  return v.sampler_ask ~= nil
 end
 
 -- The first layer before the four shown: the focused one's four.
@@ -280,6 +297,14 @@ end
 -- What display buttons 5-8 show and do on the tab: { text, act = function, … }.
 local function buttons(v)
   local s = v.sample
+  if asking(v) then
+    return {
+      nil,
+      nil,
+      { text = "CANCEL", act = function() deckard.sampling_call("sampler_answer", 0) end },
+      { text = "OK", selected = true, act = function() deckard.sampling_call("sampler_answer", 1) end },
+    }
+  end
   if v.tab == 5 then return layer_buttons(v) end
   if v.tab == 1 then
     if busy(v) then
@@ -299,12 +324,12 @@ local function buttons(v)
       }
     end
     -- TAKES puts the takes on the pads (Maschine's "RecHistOnPads"): a pad plays its
-    -- take. APPLY puts the focused take on the layer LAYER was turned to.
+    -- take. In Layers, APPLY puts the focused take on the layer LAYER was turned to.
     return {
       { text = "START", act = function() deckard.record_sample() end },
       { text = "DELETE", disabled = not take, act = function() deckard.take(take, true) end },
       { text = "TAKES", selected = takes_on_pads, disabled = takes == 0 and not takes_on_pads, act = function() takes_on_pads = not takes_on_pads end },
-      { text = "APPLY", selected = v.layer_pending, disabled = not v.layer_pending, act = function() deckard.sampling_call("apply_take_layer") end },
+      in_layers(v) and { text = "APPLY", selected = v.layer_pending, disabled = not v.layer_pending, act = function() deckard.sampling_call("apply_take_layer") end } or nil,
     }
   elseif v.tab == 2 then
     local t = stem_buttons(v) or tempo_buttons(v)
@@ -393,16 +418,23 @@ function page.button(name, down)
   local n = tonumber(name:match("^SCREEN_(%d)$"))
   if n then
     if not down then return true end
+    if asking(v) then
+      -- (Only CANCEL and OK.)
+      local b = n > 4 and buttons(v)[n - 4]
+      if b and b.act then b.act() end
+      return true
+    end
     if n <= 4 then
       local layers = #layers_of(v)
       if v.tab == 5 and deckard.held("SHIFT") and n <= 2 then
         if layers > 0 then
           if n == 1 then deckard.sampling_call("remove_layer", v.sample.layer) else deckard.sampling_call("spread_layers") end
         end
-      elseif n == 4 and v.tab == 4 and layers > 0 then
+      elseif n == 4 and in_layers(v) and (v.tab == 4 or not v.sample) then
+        -- (Between ZONE and LAYERS; without a sample there is no ZONE.)
         deckard.sampling_tab(5)
-      elseif n == 3 and v.sample and v.sample.layered then
-        -- (A layered sound has no slices.)
+      elseif n == 3 and in_layers(v) then
+        -- (A sound in Layers has no slices.)
       elseif n <= tab_count(v) then
         deckard.sampling_tab(n)
       end
@@ -420,7 +452,7 @@ function page.button(name, down)
     return true
   end
   if name == "LEFT" or name == "RIGHT" then
-    if down then
+    if down and not asking(v) then
       local _, p, count = knob_page(v)
       at[v.tab] = math.max(1, math.min(count, p + (name == "RIGHT" and 1 or -1)))
     end
@@ -494,6 +526,12 @@ end
 
 function page.knob(n, amount)
   local v = view()
+  if asking(v) then
+    -- (Only SAMPLER still turns: to another mode, or back to the sound's own.)
+    local p = v.tab ~= 5 and knob_page(v)
+    local k = n <= 4 and p and p.knobs[n]
+    if not (k and k.key == "Sampler") then return true end
+  end
   if v.tab == 5 then
     layer_knob(v, n, amount)
     return true
@@ -559,11 +597,11 @@ end
 function page.leds()
   local v = view()
   if not require("lib.util").sample_led(deckard.state()) then deckard.led("SAMPLE", "on") end
-  local layered = v.sample ~= nil and v.sample.layered
+  local layered = in_layers(v)
   for i = 1, 4 do
     local on = i == v.tab or (i == 4 and v.tab == 5)
     local there = i <= tab_count(v) and not (i == 3 and layered)
-    deckard.led("SCREEN_" .. i, on and "on" or (there and "dim" or "off"))
+    deckard.led("SCREEN_" .. i, asking(v) and "off" or (on and "on" or (there and "dim" or "off")))
   end
   local b = buttons(v)
   -- (WAITING flashes, four times a second.)
@@ -876,9 +914,18 @@ end
 function page.draw(screen, theme)
   local s = deckard.state()
   local v = s.sampling
-  draw_tabs(screen, theme, v.tab, tab_count(v), v.sample ~= nil and v.sample.layered, #layers_of(v) > 0)
   local specs = {}
   for i, b in pairs(buttons(v)) do specs[i + 4] = b end
+  if asking(v) then
+    -- The question, across both displays, and nothing else.
+    widgets.buttons(screen, theme, specs)
+    widgets.info_bar(screen, theme, widgets.focus_info(s))
+    screen:label(0, 90, 480, 20, "SAMPLER: " .. (ASK[v.sampler_ask] or ""), { size = 14, color = "weak" }, "center", "center")
+    screen:label(0, 116, 480, 40, "Changing the mode loses", { font = "roboto-bold", size = 26, color = "text" }, "center", "center")
+    screen:label(480, 116, 480, 40, "all changes to this sound.", { font = "roboto-bold", size = 26, color = "text" }, "center", "center")
+    return
+  end
+  draw_tabs(screen, theme, v.tab, tab_count(v), in_layers(v), in_layers(v))
   if specs[5] and specs[5].arrows then specs[5].left, specs[5].right = not specs[5].disabled, not specs[5].disabled end
   widgets.buttons(screen, theme, specs)
   widgets.info_bar(screen, theme, widgets.focus_info(s))

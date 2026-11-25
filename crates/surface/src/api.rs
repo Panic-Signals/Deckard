@@ -666,6 +666,12 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "move_slice" => C::MoveSlice(n(a, "a slice")?, frame(b) as usize),
                     "apply_slices" => C::ApplySlices,
                     "apply_take_layer" => C::ApplyTakeLayer,
+                    "sampler_mode" => C::SamplerMode(match a.map(|x| x.round() as i64) {
+                        Some(m @ 1..=3) => (m - 1) as u8,
+                        _ => return Err(mlua::Error::runtime("sampling_call: a mode wanted (1 Original, 2 Advanced, 3 Layers)")),
+                    }),
+                    // (1: go ahead; else drop it.)
+                    "sampler_answer" => C::SamplerAnswer(a.is_some_and(|x| x >= 0.5)),
                     "remove_zone" => C::RemoveZone(n(a, "a zone")?),
                     "focus_zone" => C::FocusZone(n(a, "a zone")?),
                     "prehear" => C::Prehear(frame(a) as usize, frame(b) as usize),
@@ -2277,6 +2283,9 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
     t.set("take_waves", waves)?;
     t.set("take", v.take.map(|i| i + 1))?;
     t.set("layer_pending", v.layer_pending)?;
+    let mode = |m: u8| ["original", "advanced", "layers"].get(usize::from(m)).copied();
+    t.set("sampler", v.sampler.and_then(mode))?;
+    t.set("sampler_ask", v.sampler_ask.and_then(mode))?;
     if let Some(s) = v.stems {
         let st = lua.create_table()?;
         st.set("focused", s.focused)?;

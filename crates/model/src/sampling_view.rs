@@ -152,6 +152,11 @@ pub enum SamplingCall {
     RemoveLayer(usize),
     /// RECORD's APPLY: the focused take onto the layer LAYER was turned to.
     ApplyTakeLayer,
+    /// Sampler Preview's mode asked for (0 Original, 1 Advanced, 2 Layers): a sound with
+    /// a sample asks first ([`SamplingCall::SamplerAnswer`]).
+    SamplerMode(u8),
+    /// The mode change asked for: gone ahead with (`true`), or dropped.
+    SamplerAnswer(bool),
     LayerLevel(f64),
     SpreadLayers,
 }

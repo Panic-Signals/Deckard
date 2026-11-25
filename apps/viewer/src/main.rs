@@ -1262,6 +1262,12 @@ pub struct App {
     asio_reopened: Option<std::time::Instant>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
+    /// SAMPLER: a mode asked for the sound (group, sound) that waits for its
+    /// confirmation (the change loses the sound's changes).
+    pub(crate) sampler_ask: Option<((usize, usize), deckard_model::new_sampler::SamplerMode)>,
+    /// In Layers, a take was picked on the sound (group, sound): EDIT works on it while
+    /// it is on no layer ([`App::shown_take`]).
+    pub(crate) take_shown: Option<(usize, usize)>,
     /// Asking to quit NI's agent, which holds the MK3's screens.
     ni_agent: ni_agent::Ask,
     /// Asking to stop NI's services, which fight DECKARD over a JAM's lights.
@@ -3707,6 +3713,33 @@ impl App {
         }
     }
 
+    /// SAMPLER's question: a mode change keeps the sample shown and loses the rest.
+    fn sampler_mode_dialog(&mut self, ctx: &egui::Context) {
+        if self.sampler_ask.is_none() {
+            return;
+        }
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("sampler-mode")).show(ctx, |ui| {
+            crate::layout::fit_dialog(ui, |ui| {
+                crate::layout::dialog_style(ui);
+                ui.set_width(380.0);
+                ui.label(egui::RichText::new("Changing the mode loses all changes to this sound.").strong());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        answer = Some(false);
+                    }
+                });
+            })
+        });
+        if let Some(ok) = answer {
+            self.answer_sampler_mode(ok);
+        }
+    }
+
     /// The unsaved-changes question and the About box.
     /// The offer to install the stem separation model, and the install it starts.
     fn stems_offer_dialog(&mut self, ctx: &egui::Context) {
@@ -3886,6 +3919,7 @@ impl App {
             }
         }
         self.stems_offer_dialog(ctx);
+        self.sampler_mode_dialog(ctx);
         let holding = self.mk3.as_ref().is_some_and(mk3_io::Mk3Io::agent_holding);
         if let Some(failure) = ni_agent::take_failure() {
             self.status = failure;
@@ -8266,11 +8300,23 @@ impl App {
         self.sync_arp();
         self.sync_auto_write();
         self.tick_mod_take(self.playhead().map(|h| (h.mode, h.position)), std::time::Instant::now());
+        // What was asked of, or picked on, another sound is dropped with the focus.
+        let at = (self.group, self.sound);
+        if self.sampler_ask.is_some_and(|(of, _)| of != at) {
+            self.sampler_ask = None;
+        }
+        if self.take_shown.is_some_and(|of| of != at) {
+            self.take_shown = None;
+        }
         if !self.sampling_open {
             return;
         }
         let Some(doc) = self.doc.clone() else { return };
         let focused = self.focused_sample();
+        // A take on no layer: RECORD and EDIT only.
+        if self.shown_take().is_some() && self.sampling.tab > 1 {
+            self.sampling.tab = 1;
+        }
         // An Audio plug-in's take: RECORD and EDIT only.
         if focused.as_ref().is_some_and(|f| f.2.is_some()) && self.sampling.tab > 1 {
             self.sampling.tab = 1;
@@ -8295,8 +8341,9 @@ impl App {
                                 self.sampling.selection = z.and_then(|z| layout::sampling::first_selection(z, frames));
                             }
                             // Zoomed in elsewhere in the file: the zone's own part of it comes into view.
-                            let range =
-                                layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, zi)).map(|e| e.1.play_range);
+                            let range = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, zi))
+                                .filter(|_| zi != usize::MAX)
+                                .map(|e| e.1.play_range);
                             if let Some((lo, hi)) = range.filter(|r| r.1 > r.0) {
                                 self.sampling.reveal(lo as f64, hi as f64 + 1.0);
                             }
@@ -8323,7 +8370,7 @@ impl App {
                 // Its stem lanes' waveforms.
                 let files: [Option<String>; deckard_model::new_sampler::LANES] = {
                     let d = doc.borrow();
-                    let z = layout::sampling::edited(d.project(), (self.group, self.sound, self.zone)).filter(|e| !e.3);
+                    let z = layout::sampling::edited(d.project(), (self.group, self.sound, self.zone)).filter(|e| !e.3 && zi != usize::MAX);
                     let stems = z.and_then(|(_, z, ..)| z.meta).map(|m| m.stems).unwrap_or_default();
                     stems.map(|l| l.map(|l| l.file))
                 };
@@ -8503,6 +8550,11 @@ impl App {
     /// or its Audio plug-in's focused take's (with the take's length in beats); and
     /// which zone or take it is.
     fn focused_sample(&self) -> Option<(usize, deckard_model::SampleRef, Option<f64>)> {
+        // (In Layers, a take picked that is on no layer: no zone's, so no zone index.)
+        if let Some((_, file)) = self.shown_take() {
+            let sample = deckard_model::SampleRef { kind: 0, path: file.to_string_lossy().into(), ..Default::default() };
+            return Some((usize::MAX, sample, None));
+        }
         let doc = self.doc.as_ref()?.borrow();
         let snd = doc.project().groups.get(self.group)?.sounds.get(self.sound)?;
         if let Some(a) = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule") {
@@ -8526,7 +8578,8 @@ impl App {
                 let d = doc.borrow();
                 for (g, grp) in d.project().groups.iter().enumerate() {
                     for (s, snd) in grp.sounds.iter().enumerate() {
-                        let Some(smp) = snd.sampler.as_ref().filter(|_| snd.new_sampler.is_some()) else { continue };
+                        // (Not in Original: it knows of its zones what a Sampler does.)
+                        let Some(smp) = snd.sampler.as_ref().filter(|_| layers::own(d.project(), g, s)) else { continue };
                         for (z, zone) in smp.zones.iter().enumerate() {
                             if let Some(job) = done.iter().find(|j| zone.meta.is_none() && j.file == zone.sample.path) {
                                 let name = analysis::file_name_of(&zone.sample.path);
@@ -8548,7 +8601,9 @@ impl App {
         let mut wanted = Vec::new();
         {
             let d = doc.borrow();
-            for snd in d.project().groups.iter().flat_map(|g| &g.sounds).filter(|s| s.new_sampler.is_some()) {
+            let own =
+                |s: &&deckard_model::Sound| s.new_sampler.is_some_and(|n| n.mode != deckard_model::new_sampler::SamplerMode::Original);
+            for snd in d.project().groups.iter().flat_map(|g| &g.sounds).filter(own) {
                 for zone in snd.sampler.iter().flat_map(|x| &x.zones).filter(|z| z.meta.is_none() && !z.sample.path.is_empty()) {
                     wanted.push(zone.sample.clone());
                 }
@@ -8832,6 +8887,10 @@ impl App {
         if let Some(sel) = self.sampling.selection {
             return Some(sel);
         }
+        // (A take on no layer: all of it.)
+        if self.shown_take().is_some() {
+            return Some((0, self.sampling.len()));
+        }
         let doc = self.doc.as_ref()?.borrow();
         // The focused zone's play range, or an Audio plug-in's take's.
         let (_, z, ..) = layout::sampling::edited(doc.project(), (self.group, self.sound, self.zone))?;
@@ -8925,6 +8984,22 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let Some(key) = self.sampling.sample_key.clone() else { return };
         let original = PathBuf::from(&key.3);
+        // A take on no layer: the take list has the edited copy (the project isn't
+        // changed: the list isn't part of it), the original staying in Recordings.
+        if let Some((i, take)) = self.shown_take() {
+            let target = deckard_engine::edit::edited_path(&self.sample_dir("Recordings"), &take);
+            match deckard_engine::edit::write_wav(&target, &sample) {
+                Ok(()) => {
+                    let v = &mut self.recorder.view;
+                    v.take_waves.insert(target.clone(), recorder::mini_wave(&sample.frames));
+                    v.takes[i] = target.clone();
+                    self.status = format!("{label}: {}", target.display());
+                    self.sampling.selection = None;
+                }
+                Err(e) => self.status = format!("can't write the edited take: {e}"),
+            }
+            return;
+        }
         let target = deckard_engine::edit::edited_path(&self.sample_dir("Samples"), &original);
         if let Err(e) = deckard_engine::edit::write_wav(&target, &sample) {
             self.status = format!("can't write the edited sample: {e}");
@@ -8972,6 +9047,12 @@ impl App {
             Ok(()) => {
                 self.status = format!("{label}: {}", target.display());
                 self.sampling.selection = None;
+                // The take it was recorded as is this file now, in the list too.
+                let v = &mut self.recorder.view;
+                if let Some(t) = v.takes.iter_mut().find(|t| t.file_name() == original.file_name()) {
+                    v.take_waves.insert(target.clone(), recorder::mini_wave(&sample.frames));
+                    *t = target.clone();
+                }
             }
             Err(e) => self.status = format!("can't edit: {e}"),
         }
@@ -8981,7 +9062,24 @@ impl App {
     fn sampling_act(&mut self, a: layout::sampling::SamplingAct) {
         use deckard_engine::edit;
         use layout::sampling::{EditOp, RecordAct, SamplingAct as S};
+        // A take on no layer has no zone: only what works on its file, the recorder and
+        // the layers.
+        if self.shown_take().is_some() {
+            let file_edit = match &a {
+                S::Edit(op) => !matches!(op, EditOp::Stems | EditOp::AutoLoop | EditOp::Munge),
+                S::Open(_) | S::Tab(_) | S::Stereo | S::View(_) | S::Select(_) => true,
+                S::StretchOpen(_) | S::SetStretch(_) | S::StretchApply => true,
+                S::Record(_) | S::Layer(..) | S::Morph(_) | S::Sampler(_) | S::SamplerAnswer(_) => true,
+                _ => false,
+            };
+            if !file_edit {
+                self.status = "give the take a layer first (RECORD: LAYER, then APPLY)".into();
+                return;
+            }
+        }
         match a {
+            S::Sampler(mode) => self.ask_sampler_mode(mode),
+            S::SamplerAnswer(ok) => self.answer_sampler_mode(ok),
             S::Open(on) => self.sampling_open = on,
             S::Tab(i) => {
                 self.sampling.tab = i;
@@ -9313,6 +9411,18 @@ impl App {
                     self.recorder.view.focused = Some(i);
                     self.recorder.view.layer_choice = None;
                     let (g, s) = (self.group, self.sound);
+                    // In Layers the take picked is what EDIT works on: its layer, if it
+                    // is on one; else the take itself, until it has one.
+                    let on = self.doc.as_ref().and_then(|d| {
+                        let d = d.borrow();
+                        let take = self.recorder.view.takes.get(i)?;
+                        layers::can_layer(d.project(), g, s).then(|| layers::take_layer(d.project(), g, s, take))
+                    });
+                    match on {
+                        Some(Some(lane)) => (self.zone, self.take_shown) = (lane, None),
+                        Some(None) => self.take_shown = Some((g, s)),
+                        None => self.take_shown = None,
+                    }
                     // A Sampler Preview with a sample keeps it: a take clicked is only
                     // focused, and its menu puts it on a layer. [DECKARD's choice]
                     let kept = self.doc.as_ref().is_some_and(|d| !layers::layers_in(d.borrow().project(), g, s).is_empty());
@@ -9634,7 +9744,7 @@ impl App {
         let zone_of = |a: usize| was.0.iter().position(|&s| s == a).map_or(zi, |k| was.1[k]);
         let (g, snd) = (self.group, self.sound);
         // Start points: each slice plays on to the end, for as long as its pad is held.
-        let new_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(snd)).is_some_and(|x| x.new_sampler.is_some());
+        let new_sampler = layers::own(doc.borrow().project(), g, snd);
         let to_end = self.sampling.slices_to_end(new_sampler);
         // (Before the zones change: a Sync zone's notes go by its own tempo.)
         let ticks_per_frame = self.slice_ticks_per_frame(doc.borrow().project(), s.rate);
@@ -10029,7 +10139,7 @@ impl App {
         let at = (self.group, self.sound, self.zone);
         let pages = self.doc.as_ref().map(|d| {
             let d = d.borrow();
-            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), false);
+            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), false, None);
             (
                 sampling_hw::pages(record, &self.sampling, d.project(), at),
                 sampling_hw::sample_view(&self.sampling, d.project(), at, focus_slice),
@@ -10068,6 +10178,10 @@ impl App {
         let act = match self.record_apply.get(key).cloned() {
             Some(Apply::Record(a)) => {
                 use record_knobs::Apply as R;
+                if a == R::Sampler {
+                    let mode = deckard_model::new_sampler::SamplerMode::ALL[at.min(2)];
+                    return self.sampling_act(SamplingAct::Sampler(mode));
+                }
                 SamplingAct::Record(match a {
                     R::Param(p, None) => RecordAct::Set(p, value.round() as i64),
                     R::Param(p, Some(values)) => match values.get(at) {
@@ -10079,6 +10193,7 @@ impl App {
                         Some(p) => RecordAct::MidiTo(p.clone()),
                         None => return,
                     },
+                    R::Sampler => return,
                 })
             }
             Some(Apply::Zone(path)) => {
@@ -10283,6 +10398,8 @@ impl App {
             C::LayerSolo(k) => S::Layer(k, layout::sampling::LayerAct::Solo),
             C::RemoveLayer(k) => S::Layer(k, layout::sampling::LayerAct::Remove),
             C::ApplyTakeLayer => S::Record(layout::sampling::RecordAct::ApplyLayer),
+            C::SamplerMode(m) => S::Sampler(deckard_model::new_sampler::SamplerMode::ALL[usize::from(m).min(2)]),
+            C::SamplerAnswer(ok) => S::SamplerAnswer(ok),
             C::LayerLevel(v) => S::Layer(self.zone, layout::sampling::LayerAct::Level(v)),
             C::SpreadLayers => S::Morph(layout::sampling::MorphAct::Spread),
             C::LaneMute(k) => S::Lane(k, layout::sampling::LaneAct::Mute),
