@@ -1227,7 +1227,11 @@ mod tests {
         let mut t3 = 3u16.to_le_bytes().to_vec();
         t3.extend_from_slice(&[0; 8]);
         let raw = nki(&program_item(&[chunk(0x28, b"P"), chunk(0x4b, &t3)]));
-        assert_eq!(instrument_state(&raw, Path::new("C:\\x.nki"), "Kontakt 7", || Ok(fixture_multi())).unwrap_err(), NEW_TABLE);
+        // Past the checks above the file's folder is named by its drive, which only
+        // Windows paths have: elsewhere that is the refusal instead.
+        if cfg!(windows) {
+            assert_eq!(instrument_state(&raw, Path::new("C:\\x.nki"), "Kontakt 7", || Ok(fixture_multi())).unwrap_err(), NEW_TABLE);
+        }
     }
 
     #[test]
@@ -1253,7 +1257,11 @@ mod tests {
     fn library_paths_are_left_to_kontakt() {
         let samples = vec![vec![Seg::LibraryRoot, named(2, "Samples"), named(4, "a.ncw")]];
         let raw = nki(&program_item(&[chunk(0x28, b"P"), v2_table(&[], &samples, &[])]));
-        assert_eq!(instrument_state(&raw, Path::new("C:\\x.nki"), "Kontakt 7", || Ok(fixture_multi())).unwrap_err(), LIBRARY);
+        // Past the checks above the file's folder is named by its drive, which only
+        // Windows paths have: elsewhere that is the refusal instead.
+        if cfg!(windows) {
+            assert_eq!(instrument_state(&raw, Path::new("C:\\x.nki"), "Kontakt 7", || Ok(fixture_multi())).unwrap_err(), LIBRARY);
+        }
         // A snapshot naming its instrument inside its library is Kontakt's to resolve; one
         // naming a path that isn't there is refused.
         let others = vec![vec![Seg::LibraryRoot, named(2, "Instruments"), named(4, "Mint.nki")]];

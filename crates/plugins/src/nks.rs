@@ -650,9 +650,12 @@ mod reaktor_ens {
         const NKS_COMMANDS: [u8; 16] = [0x45, 0xAF, 0x93, 0x4E, 0x90, 0xA4, 0x68, 0x4C, 0xBF, 0x41, 0xB5, 0x35, 0x44, 0x30, 0x28, 0xAE];
         const LOAD_BY_PATH: u32 = 0x6E69_0008;
 
+        /// What the load-by-path command points at, as Maschine builds it (traced with
+        /// Kontakt, which takes the same command): `[u32 1][u32 1][u32 2][u32 length]`, the
+        /// absolute path in UTF-8 without a terminator, then the snapshot's 16-byte id.
         fn nks_load_payload(path: &str, id: [u8; 16]) -> Vec<u8> {
-            let mut payload = Vec::with_capacity(4 + 4 + path.len() + 16);
-            for v in [1u32, path.len() as u32] {
+            let mut payload = Vec::with_capacity(16 + path.len() + 16);
+            for v in [1u32, 1, 2, path.len() as u32] {
                 payload.extend_from_slice(&v.to_le_bytes());
             }
             payload.extend_from_slice(path.as_bytes());
@@ -1219,6 +1222,28 @@ pub fn fixture_with_pages(uid: Option<[u32; 4]>, magic: u32, name: &str, state: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reaktor opens an ensemble's snapshot itself, by path, as Maschine asks it: Monark's
+    /// Bass Sting and its default snapshot load as distinct states, named after the
+    /// ensemble, and opening one again is the kept state.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "loads live Reaktor 6 VST3 and Monark"]
+    fn reaktor_opens_ensemble_snapshots_by_path() {
+        let monark = std::path::Path::new(r"C:\Users\Public\Documents\Monark\Monark.ens");
+        if !monark.is_file() {
+            return;
+        }
+        let reaktor = vst3("Native Instruments", "Reaktor 6", true, "5653544E6952367265616B746F722036");
+        let installed = std::slice::from_ref(&reaktor);
+        let sting_id = Some("6d63bc67-8fd2-9fb4-786f-75f05c168407");
+        let sting = native_preset_file(monark, sting_id, false, installed).unwrap().unwrap();
+        let default = native_preset_file(monark, None, false, installed).unwrap().unwrap();
+        assert_eq!(sting.name, "Monark");
+        assert_ne!(sting.chunk, default.chunk, "distinct snapshots, distinct states");
+        assert_eq!(native_preset_file(monark, sting_id, false, installed).unwrap().unwrap().chunk, sting.chunk);
+    }
+
     use crate::state::{chunk_parts, parse_vstpreset};
 
     fn vst3(vendor: &str, name: &str, instrument: bool, cid: &str) -> Entry {

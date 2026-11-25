@@ -140,6 +140,7 @@ mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+mod plugin_spectrum;
 #[cfg(test)]
 mod preferences_tests;
 mod preset_load;
@@ -251,7 +252,7 @@ fn main() {
         }
         return;
     }
-    // --goodbye OUT.png: draw what the MK3's displays show after closing, and stop.
+    // --goodbye OUT.png: draw the standby picture, and stop. Closing leaves the displays black.
     if let Some(out) = flag("--goodbye") {
         let px: Vec<u8> = goodbye::picture().into_iter().flatten().collect();
         let image = egui::ColorImage::from_rgba_unmultiplied([goodbye::WIDTH, goodbye::HEIGHT], &px);
@@ -529,9 +530,14 @@ fn saved_page_name(pg: &deckard_model::PluginPage) -> String {
 }
 
 /// The plug-in's own pages (DECKARD's: they follow the plug-in, even once saved for a
-/// macro), the pages saved with it, or Maschine's automatic ones: its first 128
+/// macro), the pages saved with it, or else its mapping's pages (`mapped`, from the
+/// controller scripts' `mappings/`) followed by Maschine's automatic ones: its first 128
 /// automatable parameters, eight per page.
-fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) -> Vec<ViewPage> {
+fn view_pages(
+    p: &deckard_plugins::Plugin,
+    saved: &[deckard_model::PluginPage],
+    mapped: Option<&[deckard_surface::widget::mapping::PageParams]>,
+) -> Vec<ViewPage> {
     let own = p.pages();
     if !own.is_empty() {
         let all = p.parameter_list(false);
@@ -572,13 +578,38 @@ fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) 
             .filter(|pg| !pg.knobs.is_empty())
             .collect()
     } else {
-        p.parameters()
-            .into_iter()
-            .take(128)
-            .collect::<Vec<_>>()
-            .chunks(8)
-            .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
-            .collect()
+        let mut params = p.parameters();
+        // The mapping's pages first, in its order (each knob found by id, title or name);
+        // the parameters they leave follow, eight a page.
+        let mut pages = Vec::new();
+        for pg in mapped.unwrap_or_default() {
+            let knobs: Vec<_> = pg
+                .knobs
+                .iter()
+                .flatten()
+                .filter_map(|r| {
+                    let found =
+                        r.id.and_then(|id| params.iter().position(|i| i.id == id))
+                            .or_else(|| r.title.as_ref().and_then(|t| params.iter().position(|i| i.title.eq_ignore_ascii_case(t))))
+                            .or_else(|| params.iter().position(|i| r.knob.iter().any(|n| n.eq_ignore_ascii_case(&i.title))))?;
+                    let info = params.remove(found);
+                    Some((info.clone(), info.title.clone(), pg.name.clone()))
+                })
+                .collect();
+            if !knobs.is_empty() {
+                pages.push(ViewPage::new(p, pg.name.clone(), knobs));
+            }
+        }
+        let rest = 128usize.saturating_sub(pages.len() * 8);
+        pages.extend(
+            params
+                .into_iter()
+                .take(rest)
+                .collect::<Vec<_>>()
+                .chunks(8)
+                .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect())),
+        );
+        pages
     };
     name_unnamed_pages(&mut pages);
     pages
@@ -707,6 +738,8 @@ pub struct SaveDialog {
     pub library: String,
     pub folder: PathBuf,
     pub samples: bool,
+    /// Render an audio preview beside a sound for the browser to prehear.
+    pub preview: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
     /// Why the last Save didn't write it, shown in the dialog.
@@ -721,6 +754,7 @@ pub struct Saved {
     path: PathBuf,
     info: mxprj::sound_info::SoundInfo,
     samples: bool,
+    preview: bool,
 }
 
 /// A slot's hosted plug-in whose preset saves as NKS ([`App::nks_plugin`]).
@@ -1083,6 +1117,8 @@ pub struct App {
     /// Where each sound, group and preset was last saved, with its tags (Save writes
     /// there again).
     saved: std::collections::HashMap<deckard_doc::FileItem, Saved>,
+    /// "Create audio preview" was unticked in the Save dialog (for the session).
+    preview_declined: bool,
     /// Maschine's user folder, when not the usual one (tests).
     user_dir_override: Option<PathBuf>,
     prefs: Option<usize>,
@@ -1190,6 +1226,10 @@ pub struct App {
     /// Each plug-in's parameters (by chain and slot, with the plug-in's id), for the
     /// macros that control them.
     plugin_params: std::cell::RefCell<std::collections::HashMap<(deckard_doc::Chain, usize), (String, Vec<deckard_plugins::ParamInfo>)>>,
+    /// A stepped plug-in parameter's names as last read (by instance, id and steps):
+    /// [`App::knob_choices`] reads them with `try_lock`, and a frame that finds the
+    /// plug-in busy shows these rather than dropping the list for a dial.
+    step_names: std::cell::RefCell<std::collections::HashMap<(usize, u32, i32), Vec<String>>>,
     /// Open the focused sound's plug-in window one second after start-up
     /// (`--plugin-window`).
     pending_editor: bool,
@@ -1258,6 +1298,10 @@ pub struct App {
     /// The notes that have just started, sequenced or played, (group, sound, pitch): the
     /// controller's pads flash white for them.
     pub hits: std::collections::HashSet<(usize, usize, i64)>,
+    /// The (group, sound)s actively playing a loop in the engine now.
+    pub loop_lit: std::collections::HashSet<(usize, usize)>,
+    /// Live note pitches currently held per `(group, sound)`.
+    held_pitches: std::collections::HashMap<(usize, usize), Vec<i64>>,
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
@@ -1385,6 +1429,7 @@ pub struct App {
     /// The preview last rendered of an internal synth, with the module and the parameters
     /// it was rendered from: rendered again only when they change.
     internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
+    plugin_spectrum: std::cell::RefCell<Option<plugin_spectrum::Focus>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -1467,6 +1512,21 @@ pub struct Playhead {
 #[cfg(test)]
 fn project_of_app(app: &App) -> deckard_model::Project {
     app.doc.as_ref().unwrap().borrow().project().clone()
+}
+
+#[cfg(test)]
+mod exit_screens {
+    use super::*;
+
+    /// Quitting asks the MK3 thread for a black frame. The thread itself is not started.
+    #[test]
+    fn quitting_blanks_the_maschine_screens() {
+        let mut app = App::default();
+        app.mk3 = Some(mk3_io::Mk3Io::detached());
+        eframe::App::on_exit(&mut app);
+        let px = app.mk3.as_ref().unwrap().queued_frame().expect("a frame is queued");
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]));
+    }
 }
 
 /// How often notes held while recording are grown in the pattern.
@@ -4494,7 +4554,22 @@ impl App {
         Some(at as f64 / length as f64)
     }
 
-    fn scene_pattern(&self, group: usize) -> Option<usize> {
+    /// Sound `s` of group `g`'s Audio plug-in loop switched on (its focused take) or off
+    /// in the pattern the group plays (the focused one, for the focused group with none),
+    /// as Maschine's step pad and the pattern editor's double-click do. One undo step.
+    fn toggle_audio_loop(&mut self, g: usize, s: usize) -> Result<(), String> {
+        let doc = self.doc.clone().ok_or("no project")?;
+        let pi = self.scene_pattern(g).or((g == self.group).then_some(self.pattern)).ok_or("the group plays no pattern")?;
+        let mut d = doc.borrow_mut();
+        let p = d.project();
+        let snd = p.groups.get(g).and_then(|x| x.sounds.get(s)).ok_or("no such sound")?;
+        let take = snd.audio.as_ref().ok_or("the sound has no Audio plug-in")?.focused;
+        let pattern = p.groups[g].patterns.get(pi).ok_or("no such pattern")?;
+        let on = pattern.audio.iter().any(|c| c.sound == s);
+        if on { d.set_audio_in(g, s, &[pi], None, "Audio Off") } else { d.set_audio_in(g, s, &[pi], Some(take), "Audio On") }
+    }
+
+    pub(crate) fn scene_pattern(&self, group: usize) -> Option<usize> {
         let d = self.doc.as_ref()?.borrow();
         let s = d.project().scenes.get(self.scene)?;
         s.patterns.iter().find(|(g, _)| *g == group).map(|&(_, pi)| pi)
@@ -5086,6 +5161,78 @@ impl App {
             return Some((self.knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
         }
         self.mod_amount(edit).map(f64::from)
+    }
+
+    /// What knob `k` of the page shows with its parameter at `at` (0..1): the plug-in's
+    /// own text for a hosted one, the module's for a built-in one. `None` where it can't say.
+    /// The values a knob's parameter picks among, if it's a choice of a few (at most
+    /// six): DECKARD's choices and switches by name, a plug-in's stepped parameter by its
+    /// text at each step. Empty otherwise (the MK3 draws a dial, or nothing, over it).
+    fn knob_choices(&self, edit: layout::Edit) -> Vec<String> {
+        use layout::Edit;
+        const MAX: usize = 6;
+        let stepped = |chain: deckard_doc::Chain, slot: usize, id: u32| -> Option<Vec<String>> {
+            let v = self.plugin_views.get(&(chain, slot))?;
+            let page = v.pages.get(v.page)?;
+            let i = page.knobs.iter().position(|(info, ..)| info.id == id)?;
+            if let Some(names) = page.choices.get(i).filter(|c| !c.is_empty()) {
+                return Some(names.clone());
+            }
+            let steps = page.knobs[i].0.steps;
+            if !(1..MAX as i32).contains(&steps) {
+                return None;
+            }
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, slot))?;
+            let key = (std::sync::Arc::as_ptr(&inst) as *const () as usize, id, steps);
+            let Ok(p) = inst.try_lock() else { return self.step_names.borrow().get(&key).cloned() };
+            let names: Vec<String> = (0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect();
+            self.step_names.borrow_mut().insert(key, names.clone());
+            Some(names)
+        };
+        let names = match edit {
+            Edit::Choice(_, _, names, ..) => Some(names.iter().map(|s| s.to_string()).collect()),
+            Edit::Toggle(..) => Some(vec!["Off".to_string(), "On".to_string()]),
+            Edit::PluginChoice(slot, id, ..) | Edit::Plugin(slot, id, _) => stepped(self.chain(), slot, id),
+            Edit::PluginIn(c, i, id, _) => stepped(c, i, id),
+            _ => None,
+        };
+        names.filter(|n: &Vec<String>| (2..=MAX).contains(&n.len())).unwrap_or_default()
+    }
+
+    fn mod_text(&self, edit: layout::Edit, k: usize, at: f64) -> Option<String> {
+        use layout::Edit;
+        let (chain, target) = modulation::mod_target(edit)?;
+        let slot_i = target.slot?;
+        if let Edit::PluginIn(c, i, id, _) = edit {
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(c, i))?;
+            let text = inst.try_lock().ok()?.param_text(id, at);
+            let units = self
+                .plugin_views
+                .get(&(c, i))
+                .and_then(|v| v.pages.get(v.page)?.knobs.iter().find(|(info, ..)| info.id == id))
+                .map(|(info, ..)| info.units.clone())
+                .unwrap_or_default();
+            return Some(if units.is_empty() || text.ends_with(&units) { text } else { format!("{text} {units}") });
+        }
+        let layout::Act::SetParam(t, field, value) = edit.to_act(at as f32) else { return None };
+        let doc = self.doc.as_ref()?.borrow();
+        let p = doc.project();
+        let slots = match chain {
+            deckard_doc::Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.slots,
+            deckard_doc::Chain::Group(g) => &p.groups.get(g)?.slots,
+            deckard_doc::Chain::Master => return None,
+        };
+        let pg = if let deckard_doc::Target::Sampler(g, s) = t {
+            let mut smp = p.groups.get(g)?.sounds.get(s)?.sampler.clone()?;
+            smp.set(field, value);
+            sampler_ui::page(&smp, g, s, self.sampler_page.min(sampler_ui::PAGES.len() - 1))
+        } else {
+            let mut slot = slots.get(slot_i)?.clone();
+            slot.params.iter_mut().find(|(f, _)| f == field)?.1 = value;
+            let names = crate::module_ui::pages(&slot.module)?;
+            module_ui::page_for(&slot, t, self.plugin_page.min(names.len().saturating_sub(1)))
+        };
+        pg.slots.into_iter().nth(k).flatten().map(|knob| knob.1)
     }
 
     /// Auto-write: the MK3's AUTO and the header's are one switch. The knob being
@@ -5715,6 +5862,9 @@ impl App {
             return None;
         }
         let pace = controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering());
+        if self.plugin_spectrum.borrow().as_ref().is_some_and(plugin_spectrum::Focus::is_live) {
+            return Some(pace.min(plugin_spectrum::FRAME_INTERVAL));
+        }
         Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             pace.min(std::time::Duration::from_millis(30))
         } else {
@@ -5778,6 +5928,7 @@ impl App {
             side_live: shot.side_live,
             dim: shot.dim,
             preview: shot.preview,
+            ..Default::default()
         })
     }
 
@@ -6076,6 +6227,7 @@ impl App {
             }
             _ => text.to_string(),
         };
+        let mod_at: Vec<Option<f64>> = (0..8).map(|i| edits.get(i).copied().flatten().and_then(|e| self.mod_position(e))).collect();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
@@ -6103,6 +6255,17 @@ impl App {
                 .enumerate()
                 .map(|(i, k)| {
                     k.as_ref().map(|k| KnobView {
+                        mod_position: mod_at[i],
+                        mod_text: mod_at[i].and_then(|at| edits.get(i).copied().flatten().and_then(|e| self.mod_text(e, i, at))),
+                        choices: edits.get(i).copied().flatten().map(|e| self.knob_choices(e)).unwrap_or_default(),
+                        param_id: match edits.get(i).copied().flatten() {
+                            Some(
+                                layout::Edit::Plugin(_, id, _)
+                                | layout::Edit::PluginChoice(_, id, ..)
+                                | layout::Edit::PluginIn(_, _, id, _),
+                            ) => Some(id),
+                            _ => None,
+                        },
                         name: k.name.clone(),
                         section: k.section.clone(),
                         text: knob_text(i, &k.text),
@@ -6120,6 +6283,7 @@ impl App {
             eq: None,
             filter: None,
             picture: None,
+            output_spectrum: Vec::new(),
             zhora: None,
             tuner: None,
             scope: None,
@@ -6173,14 +6337,18 @@ impl App {
                 patterns: b.patterns,
             };
         }
-        let Some(doc) = &self.doc else { return v };
+        let Some(doc) = &self.doc else {
+            self.plugin_spectrum.borrow_mut().take();
+            return v;
+        };
         let d = doc.borrow();
         let p = d.project();
+        let chain = self.chain();
+        let slot = d.chain_slots(chain).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+        (v.control.eq, v.control.output_spectrum) = self.plugin_spectrum_view(chain, self.slot.zip(slot));
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
         if !self.channel {
-            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
-            v.control.eq = slot.and_then(Self::eq_curve);
             let tempo = v.tempo;
             let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
@@ -6308,12 +6476,35 @@ impl App {
             .collect();
         v.section = self.focused_section(p);
         let bar = (p.numerator.max(1) * 3840 / p.denominator.max(1)).max(1) as f64;
+        let (has_live_engine, out_is_current) = match &self.output {
+            Some(Ok(out)) if out.has_engine() => (true, out.is_current()),
+            _ => (false, false),
+        };
+        let active_mode = self.playing.map(|m| live.map_or(m, |h| h.mode));
         v.groups = (0..p.groups.len())
             .map(|g| {
                 let grp = &p.groups[g];
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
                 let noted = doc_cache.group_noted.get(g);
+                let scene_pattern = p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi));
+                let loop_pattern = match active_mode {
+                    Some(Mode::Pattern(pg, pi)) => (pg == g).then(|| grp.patterns.get(pi)).flatten(),
+                    Some(Mode::Scene(sc)) => {
+                        p.scenes.get(sc).and_then(|s| s.patterns.iter().find(|&&(pg, _)| pg == g)).and_then(|&(_, pi)| grp.patterns.get(pi))
+                    }
+                    Some(Mode::Arrangement) => head
+                        .and_then(|h| p.section_at(h.position as i64))
+                        .and_then(|i| p.sections[i].scene)
+                        .and_then(|sc| p.scenes.get(sc))
+                        .and_then(|s| s.patterns.iter().find(|&&(pg, _)| pg == g))
+                        .map(|&(_, pi)| pi)
+                        .or(scene_pattern)
+                        .and_then(|pi| grp.patterns.get(pi)),
+                    None => scene_pattern.or((g == self.group).then_some(self.pattern)).and_then(|pi| grp.patterns.get(pi)),
+                };
+                let group_ahead = self.settings.render_ahead_ms > 0 && g != self.group;
+                let pat_at = if v.playing { self.pattern_at(g, head).map(|(at, _)| at) } else { None };
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -6351,7 +6542,7 @@ impl App {
                             slot: pt.slot,
                         })
                         .collect(),
-                    scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
+                    scene_pattern,
                     progress: head.and_then(|_| layout::group_progress(p, head, self.scene, g)).map(|(bars, played)| played / bars as f64),
                     playing_progress: head
                         .and_then(|h| {
@@ -6362,6 +6553,8 @@ impl App {
                     sounds: (0..grp.sounds.len())
                         .map(|s| {
                             let snd = &grp.sounds[s];
+                            let loop_mode = snd.instrument == "AudioModule"
+                                && snd.audio.as_ref().is_some_and(|a| a.mode == deckard_model::AudioMode::Loop);
                             SoundView {
                                 name: snd.name.clone(),
                                 rgb: layout::rgb(p, g, Some(s)),
@@ -6401,6 +6594,63 @@ impl App {
                                 prob_locked: snd.probability_locked,
                                 selected: g == self.group && (s == self.sound || self.sound_selection.contains(&s)),
                                 audio: if g == self.group { self.loop_view(p, g, s) } else { None },
+                                loop_mode,
+                                loop_playing: {
+                                    let audio_loop_active = loop_mode
+                                        && !grp.muted
+                                        && !snd.muted
+                                        && loop_pattern.is_some_and(|pt| pt.audio.iter().any(|c| c.sound == s));
+                                    let sampler_loop_active = !grp.muted
+                                        && !snd.muted
+                                        && snd.sampler.as_ref().is_some_and(|smp| {
+                                            if smp.envelope_type == 0 {
+                                                return false;
+                                            }
+                                            let zone_loops = |pitch: i64, vel: Option<i64>| {
+                                                smp.zones.iter().any(|z| {
+                                                    z.loop_active
+                                                        && z.loop_range.1 > z.loop_range.0
+                                                        && (z.key_range.0..=z.key_range.1).contains(&pitch)
+                                                        && vel.is_none_or(|v| (z.velocity_range.0..=z.velocity_range.1).contains(&v))
+                                                })
+                                            };
+                                            if has_live_engine && !group_ahead && self.loop_lit.contains(&(g, s)) {
+                                                return true;
+                                            }
+                                            if !out_is_current {
+                                                if self
+                                                    .held_pitches
+                                                    .get(&(g, s))
+                                                    .is_some_and(|ps| ps.iter().any(|&pt| zone_loops(pt, None)))
+                                                {
+                                                    return true;
+                                                }
+                                                if matches!(self.held, Some((hg, hs, hp)) if (hg, hs) == (g, s) && zone_loops(hp, None)) {
+                                                    return true;
+                                                }
+                                            }
+                                            if v.playing && (!has_live_engine || !out_is_current || group_ahead) {
+                                                if let Some(pt) = loop_pattern {
+                                                    return match pat_at {
+                                                        Some(at) => {
+                                                            let tick = pt.start + at;
+                                                            pt.notes.iter().any(|n| {
+                                                                n.sound == s
+                                                                    && n.position <= tick
+                                                                    && tick < n.position + n.length
+                                                                    && zone_loops(n.pitch, Some(n.velocity))
+                                                            })
+                                                        }
+                                                        None => {
+                                                            pt.notes.iter().any(|n| n.sound == s && zone_loops(n.pitch, Some(n.velocity)))
+                                                        }
+                                                    };
+                                                }
+                                            }
+                                            false
+                                        });
+                                    audio_loop_active || sampler_loop_active
+                                },
                             }
                         })
                         .collect(),
@@ -6750,6 +7000,11 @@ impl App {
             A::DeletePattern { group, pattern } => {
                 if project(self).is_some_and(|p| p.groups.get(group).is_some_and(|grp| pattern < grp.patterns.len())) {
                     layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
+                }
+            }
+            A::ToggleAudioLoop { group, sound } => {
+                if let Err(e) = self.toggle_audio_loop(group, sound) {
+                    self.status = format!("can't switch the loop: {e}");
                 }
             }
             A::CopyPattern { group, from, to } => {
@@ -10829,7 +11084,7 @@ impl App {
         let Some(info) = info else { return };
         let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
         if id.is_some() {
-            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false });
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false, preview: false });
         }
     }
 
@@ -10871,6 +11126,7 @@ impl App {
                 None => self.user_dir().join(folder),
             },
             samples: mode == SaveMode::WithSamples,
+            preview: !self.preview_declined,
             confirm_overwrite: false,
             error: None,
         });
@@ -11024,7 +11280,10 @@ impl App {
         }
         let what = dlg.what;
         let id = doc.borrow().file_item_id(what);
-        let saved = Saved { id, path, info, samples: dlg.samples };
+        let saved = Saved { id, path, info, samples: dlg.samples, preview: dlg.preview };
+        if matches!(what, deckard_doc::FileItem::Sound(..)) {
+            self.preview_declined = !saved.preview;
+        }
         if self.write_item(what, saved) {
             self.save_dialog = None;
         } else if let Some(d) = &mut self.save_dialog {
@@ -11047,6 +11306,11 @@ impl App {
             Ok(()) => {
                 self.status = format!("saved {}", s.path.display());
                 self.browser.add_saved(&s.path);
+                if s.preview
+                    && let deckard_doc::FileItem::Sound(g, n) = what
+                {
+                    self.start_preview(g, n, &s.path);
+                }
                 self.saved.insert(what, s);
                 true
             }
@@ -11055,6 +11319,24 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Render sound (`g`, `n`)'s audio preview beside its saved file `file`, for the
+    /// browser to prehear; the engine is built on the main thread (so plug-ins can load)
+    /// and rendered on a worker thread so saving doesn't wait for it.
+    fn start_preview(&mut self, g: usize, n: usize, file: &Path) {
+        self.store_plugin_states();
+        let Some(doc) = &self.doc else { return };
+        let (p, path, rate) = (doc.borrow().project().clone(), self.path.clone(), self.render_rate());
+        let mut cache = SampleCache::default();
+        cache.library_dirs = self.samples.library_dirs.clone();
+        let engine = deckard_engine::export::preview_engine(&p, path.as_deref(), (g, n), rate, &mut cache);
+        let out = browser::preview_path(file);
+        // Nobody waits for it: the file appearing is the result.
+        drop(export::Offline::start("Preview", move |_, cancel| {
+            let audio = deckard_engine::export::render_preview_engine(engine, rate, cancel).ok_or("cancelled")?;
+            browser::write_preview(&out, &audio, rate)
+        }));
     }
 
     /// Open…: a sound, group or preset file chosen in a dialog, loaded into `what`.
@@ -12124,7 +12406,7 @@ impl App {
             let cid = deckard_plugins::state::PluginId::parse(&pr.id, &pr.name).map(|i| i.cid);
             let (pages, sc) = match p.try_lock() {
                 // (Still the slot's old plug-in: once it's replaced.)
-                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved), sidechain(&g)),
+                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g)),
                 Ok(_) | Err(std::sync::TryLockError::WouldBlock) => return None,
                 Err(_) => (Vec::new(), false),
             };
@@ -12143,7 +12425,7 @@ impl App {
                             let _ = g.load_chunk(&nks.chunk);
                             g.mark_saved(Vec::new());
                         }
-                        (view_pages(&g, &saved), sidechain(&g))
+                        (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g))
                     })
                     .unwrap_or_default();
                 Some(view(pages, sc, std::sync::Arc::downgrade(&p), None))
@@ -13431,9 +13713,20 @@ impl App {
         let played = self.notes_played();
         self.lit = played.iter().map(|&(g, s, _)| (g, s)).collect();
         self.hits.clone_from(&played);
+        self.loop_lit.clear();
+        self.held_pitches.clear();
         if let Some(Ok(out)) = &self.output {
             self.lit.extend(out.played_sounds());
             self.hits.extend(out.played_notes());
+            self.held_pitches = out.held_pitches();
+            for (g, mask) in out.loop_playing().into_iter().enumerate() {
+                let mut m = mask;
+                while m != 0 {
+                    let s = m.trailing_zeros() as usize;
+                    self.loop_lit.insert((g, s));
+                    m &= m - 1;
+                }
+            }
         }
         if !matches!(self.controller, Some(Ok(_))) {
             return;
@@ -13596,7 +13889,7 @@ impl eframe::App for App {
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
-            m.shut_down(goodbye::picture());
+            m.shut_down();
         }
         if let Some(j) = &self.jam {
             j.shut_down();
@@ -13861,6 +14154,8 @@ impl App {
         if !self.lit.is_empty() || !self.hits.is_empty() {
             // Unlight the flashed numbers on time.
             ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
+        } else if !self.loop_lit.is_empty() {
+            ui.ctx().request_repaint_after(BACKGROUND_PACE);
         }
         let mut hw_requests = Vec::new();
         self.frame_surface_view = None;
@@ -15444,6 +15739,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(settings);
     }
 
+    /// A Loop-mode Audio plug-in's pad (MK3 Pad mode) switches its loop off in the
+    /// pattern the group plays, and on again with its focused take.
+    #[test]
+    fn toggling_an_audio_loop_switches_it_in_the_playing_pattern() {
+        let mut app = App::default();
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "Part").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("Loop 120 bpm.wav");
+        {
+            let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+            let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+            for i in 0..96_000 {
+                w.write_sample(((i as f64 * 0.05).sin() * 8_000.0) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let smp = deckard_engine::sample::Sample::load(&wav).unwrap();
+        app.load_loop(0, 2, &wav, &smp).unwrap();
+        let on = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[0].audio.iter().any(|c| c.sound == 2);
+        let loop_playing = |app: &App| app.surface_view().groups[0].sounds[2].loop_playing;
+        assert!(on(&app), "a loop loaded is on in the pattern");
+        assert!(loop_playing(&app), "active in the pattern even while stopped");
+        app.playing = Some(deckard_engine::Mode::Scene(0));
+        assert!(loop_playing(&app), "song playing and on in the group's pattern");
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "another sound");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(!on(&app), "the pad switches it off");
+        assert!(!loop_playing(&app), "off in the pattern: no longer active");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(on(&app), "and on again");
+        assert!(loop_playing(&app), "on again while song plays");
+        let slot =
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[2].slots.iter().position(|x| x.module == "AudioModule").unwrap();
+        layout::apply_acts(&mut app, vec![layout::Act::SetParam(deckard_doc::Target::Module(0, 2, slot), "mode", 1.0)]);
+        assert!(!loop_playing(&app), "Gate mode plays with notes, not the pattern");
+        assert!(app.toggle_audio_loop(0, 3).is_err(), "a sound without an Audio plug-in");
+
+        // A looped sustaining Sampler sound stays flagged as `loop_playing` while active in the pattern or engine.
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_slot(0, 3, 0, &deckard_doc::NewModule::Sampler).unwrap();
+            let spec = deckard_doc::ZoneSpec {
+                from: deckard_doc::ZoneFrom::Template,
+                file: Some(wav.clone()),
+                set: vec![
+                    ("key_range/low".into(), 0.0),
+                    ("key_range/high".into(), 127.0),
+                    ("velocity_range/low".into(), 0.0),
+                    ("velocity_range/high".into(), 127.0),
+                    ("root_key".into(), 60.0),
+                    ("play_range/low".into(), 0.0),
+                    ("play_range/high".into(), 95_999.0),
+                    ("loop_active".into(), 1.0),
+                    ("loop_range/low".into(), 0.0),
+                    ("loop_range/high".into(), 95_999.0),
+                ],
+            };
+            d.set_zones(0, 3, &[spec], "Loop").unwrap();
+            d.set("Sustaining", deckard_doc::Target::Sampler(0, 3), "envelope_type", mxprj::decode::Value::Int(2)).unwrap();
+            let note = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 0,
+                length: 3840,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            };
+            d.edit_notes("Loop note", 0, 0, &[], &[note]).unwrap();
+        }
+        assert!(app.surface_view().groups[0].sounds[3].loop_playing, "looped Sampler note active in playing pattern");
+        app.playing = None;
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "stopped with no held note: Sampler loop inactive");
+        app.held = Some((0, 3, 60));
+        assert!(app.surface_view().groups[0].sounds[3].loop_playing, "held looped Sampler pad: active");
+        app.held = None;
+    }
+
     #[test]
     fn stems_make_a_new_group_of_audio_loops() {
         let Some(mut h) = harness(false, false) else { return };
@@ -16445,6 +16824,61 @@ mod tests {
         assert_eq!((touch(&h).min, touch(&h).max), (40, 40));
         h.state_mut().doc.as_ref().unwrap().borrow_mut().undo();
         assert_eq!((touch(&h).mode, touch(&h).min, touch(&h).max), (TouchMode::Cc, 0, 100), "one undo step back");
+    }
+
+    /// Wheel input over either the sound names or drum lanes moves both together.
+    #[test]
+    fn sound_list_scrolls_with_drum_lanes() {
+        for over_names in [true, false] {
+            let mut h = blank_harness(false);
+            h.state_mut().piano_roll = false;
+            h.state_mut().mouse = layout::MouseMode::Draw;
+            h.state().doc.as_ref().unwrap().borrow_mut().add_pattern(0, 0, "Pattern 1").unwrap();
+            h.run_steps(3);
+            let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
+            assert!(grid.height() < 16.0 * 24.0 - 48.0, "room to scroll two rows");
+            let name = Pos2::new(grid.left() - 80.0, grid.top() + 12.0);
+            let note = Pos2::new(grid.left() + 10.0, name.y);
+            for (delta, sound) in [(-48.0, 2), (48.0, 0)] {
+                h.hover_at(if over_names { name } else { grid.center() });
+                h.step();
+                h.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.run_steps(30);
+                click(&mut h, name);
+                assert_eq!(h.state().sound, sound, "sound name after scrolling {delta} over names={over_names}");
+                click(&mut h, note);
+                assert!(notes_of(&h).iter().any(|n| n.sound == sound), "the lane beside the name belongs to sound {sound}");
+            }
+        }
+    }
+
+    /// Piano-roll pitches are independent of the sound list's rows.
+    #[test]
+    fn sound_list_scroll_keeps_piano_roll_pitches_in_place() {
+        let mut h = blank_harness(false);
+        h.state_mut().piano_roll = true;
+        h.run_steps(3);
+        let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
+        let key = egui::Id::new(("piano-zoom", h.state().group, h.state().sound));
+        let pitches = h.ctx.data(|d| d.get_temp::<(f32, f32)>(key)).expect("pitches shown");
+        let name = Pos2::new(grid.left() - 100.0, grid.top() + 12.0);
+        h.hover_at(name);
+        h.step();
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -48.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(30);
+        assert_eq!(h.ctx.data(|d| d.get_temp::<(f32, f32)>(key)), Some(pitches), "scrolling names does not scroll pitches");
+        click(&mut h, name);
+        assert_eq!(h.state().sound, 2, "the sound list still scrolls in piano-roll mode");
     }
 
     /// The Pattern Editor's horizontal zooming scroll bar (as the manual has it): drag it
