@@ -62,11 +62,12 @@ fn window(h: &mut Harness<'static, App>, name: &str, crop: Option<(u32, u32, u32
     eprintln!("{}", path.display());
 }
 
-/// Both of the MK3's screens, after a few frames, in the Maschine theme.
+/// Both of the MK3's screens, after a few frames, in the Maschine theme (or
+/// `$DECKARD_SHOT_THEME`).
 fn mk3(h: &mut Harness<'static, App>, name: &str) {
     h.run_steps(4);
     let app = h.state_mut();
-    app.surface.set_theme("maschine");
+    app.surface.set_theme(&std::env::var("DECKARD_SHOT_THEME").unwrap_or("maschine".into()));
     let px = app.surface.picture(&app.surface_view());
     let path = dir().join(name);
     let f = std::fs::File::create(&path).unwrap();
@@ -282,6 +283,113 @@ fn manual_shots() {
     mk3(&mut h, "mk3-tuner.png");
     feed(h.state_mut(), Chain::Sound(0, 0), 0, flat_e, 6, true);
     window(&mut h, "tuner.png", Some(CONTROL));
+}
+
+/// The New Sampler's EDIT page: a 4-bar 120 BPM loop, analysed, in Sync (roadmap 1d).
+#[test]
+#[ignore]
+fn new_sampler_shots() {
+    let dir = tempfile::tempdir().unwrap();
+    let rate = 44_100u32;
+    let beat = rate as usize / 2;
+    let frames: Vec<[f32; 2]> = (0..beat * 16)
+        .map(|i| {
+            let k = i % beat;
+            let hit = if k < 3000 { (1.0 - k as f32 / 3000.0) * ((k as f32 * 0.05).sin()) } else { 0.0 };
+            let tone = (i as f32 * 110.0 * std::f32::consts::TAU / rate as f32).sin() * 0.2;
+            [hit * 0.8 + tone, hit * 0.7 + tone]
+        })
+        .collect();
+    let file = dir.path().join("Bass Loop 120bpm A1.wav");
+    deckard_engine::edit::write_wav_channels(&file, &deckard_engine::sample::Sample { rate, frames }, 2).unwrap();
+    let mut doc = deckard_doc::Document::new_project().unwrap();
+    if doc.project().groups[0].sounds[0].slots.is_empty() {
+        doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+    }
+    let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+    doc.set_zones(0, 0, &[spec], "Load").unwrap();
+    doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+    let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+    let meta = deckard_model::new_sampler::ZoneMeta {
+        file: path,
+        mode: deckard_model::new_sampler::PlayMode::Sync,
+        bpm: Some(120.0),
+        bpm_source: deckard_model::new_sampler::BpmSource::Name,
+        beats: Some(16.0),
+        root: Some(45),
+        cents: -12.0,
+        ..Default::default()
+    };
+    doc.note_zone_meta(0, 0, 0, &meta).unwrap();
+    let mut app = App::default();
+    app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+    app.sampling_open = true;
+    let mut h = harness(app);
+    h.run_steps(10);
+    window(&mut h, "new-sampler-edit.png", None);
+    // The MK3: SAMPLE, EDIT, its TEMPO / PITCH page; then SHIFT.
+    use deckard_mk3::Event;
+    let press = |h: &mut Harness<'static, App>, name: &'static str, down: bool| {
+        let app = h.state_mut();
+        let v = app.surface_view();
+        for a in app.surface.event(&Event::Button(name, down), &v, Instant::now()) {
+            app.surface_act(a);
+        }
+        h.run_steps(2);
+    };
+    for name in ["BUTTON_SAMPLE", "BUTTON_SCREEN_2", "BUTTON_RIGHT", "BUTTON_RIGHT"] {
+        press(&mut h, name, true);
+        press(&mut h, name, false);
+    }
+    mk3(&mut h, "mk3-new-sampler-tempo.png");
+    press(&mut h, "BUTTON_SHIFT", true);
+    mk3(&mut h, "mk3-new-sampler-shift.png");
+    press(&mut h, "BUTTON_SHIFT", false);
+    // Warp markers on its hits, the third pulled a little late.
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Detect);
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Move(2, 0.75));
+    h.run_steps(4);
+    window(&mut h, "new-sampler-warp.png", Some((200, 560, 1740, 240)));
+    // Stem lanes: the separation's result put on the zone, the drums muted, the bass down.
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Clear);
+    h.state_mut().path = Some(dir.path().join("x.mxprj"));
+    let n = beat * 16;
+    let stems = deckard_stems::Kind::ALL
+        .iter()
+        .enumerate()
+        .map(|(k, &kind)| deckard_stems::Stem {
+            kind,
+            frames: (0..n)
+                .map(|i| {
+                    let j = i % (beat * (k + 1) / 2).max(1);
+                    let hit = if j < 4000 { 1.0 - j as f32 / 4000.0 } else { 0.0 };
+                    [hit * (i as f32 * 0.02 * (k + 1) as f32).sin() * 0.7; 2]
+                })
+                .collect(),
+        })
+        .collect();
+    h.state_mut().finish_stem_lanes("Bass Loop 120bpm A1", rate, stems, (0, 0, 0));
+    h.state_mut().lane_act(0, crate::layout::sampling::LaneAct::Mute);
+    h.state_mut().lane_act(2, crate::layout::sampling::LaneAct::Gain(0.5));
+    h.run_steps(6);
+    window(&mut h, "new-sampler-lanes.png", Some((200, 560, 1740, 240)));
+    // The MK3: on to the PLAYBACK knob page, then STEMS (after TEMPO / PITCH and SYNC).
+    press(&mut h, "BUTTON_RIGHT", true);
+    press(&mut h, "BUTTON_RIGHT", false);
+    mk3(&mut h, "mk3-new-sampler-playback.png");
+    for name in ["BUTTON_RIGHT", "BUTTON_RIGHT"] {
+        press(&mut h, name, true);
+        press(&mut h, name, false);
+    }
+    mk3(&mut h, "mk3-new-sampler-stems.png");
+    // A slice of it: what it doesn't play shows dim, the ground behind it barely.
+    let doc = h.state().doc.clone().unwrap();
+    let (g, snd, z) = (h.state().group, h.state().sound, h.state().zone);
+    doc.borrow_mut()
+        .set("Start", deckard_doc::Target::Zone(g, snd, z), "play_range/low", mxprj::decode::Value::Float((n / 3) as f64))
+        .unwrap();
+    h.state_mut().sampling.selection = Some((n / 3, n));
+    mk3(&mut h, "mk3-new-sampler-slice.png");
 }
 
 /// Ratcheted notes in the pattern editor, with the Ratchet lane and then the Velocity

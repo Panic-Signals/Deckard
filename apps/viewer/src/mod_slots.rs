@@ -236,6 +236,15 @@ pub fn destinations(app: &App, g: usize, s: usize, i: usize) -> Vec<Destination>
             out.push(Destination { module, param, name: channel::title(&k.0), travel: k.2.clamp(0.0, 1.0) });
         }
     }
+    // A layered New Sampler: its layers' morph (no knob of the Control page).
+    let p = d.project();
+    if crate::layers::layered(p, g, s)
+        && let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s))
+        && snd.slots.get(i).is_some_and(|x| x.module == "Sampler")
+    {
+        let travel = snd.new_sampler.map_or(0.0, |n| n.morph.position.clamp(0.0, 1.0) as f32);
+        out.push(Destination { module: "Sampler".into(), param: ModParam::Field("morph".into()), name: "MORPH".into(), travel });
+    }
     out
 }
 

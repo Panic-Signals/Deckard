@@ -96,8 +96,10 @@ New to DECKARD? Start with the
 ### Opening and saving projects
 
 - **Opening:** use **File ▸ Open…**, pick from **File ▸ Open Recent**, or drag a
-  Maschine project (`.mxprj`) onto the window. Samples (WAV and other audio files)
-  dropped onto a sound load into it.
+  Maschine project (`.mxprj`) onto the window. Samples (WAV, AIFF or MP3)
+  dropped onto a sound load into it: an Audio plug-in on an empty sound, a zone in a
+  Sampler. An MP3 stays an MP3 in the project (Maschine may not read it there); an
+  edit of it (truncate, normalize…) writes a WAV.
 - **Saving:** **File ▸ Save** writes a normal Maschine project. The first time you save
   over a file in a session, the previous version is kept beside it as
   `<name>.mxprj.bak`.

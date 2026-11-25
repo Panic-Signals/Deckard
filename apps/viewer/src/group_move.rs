@@ -55,6 +55,8 @@ impl App {
             self.headroom = std::mem::take(&mut self.headroom).into_iter().map(|(c, v)| (channel(c), v)).collect();
             self.peaks = std::mem::take(&mut self.peaks).into_iter().map(|(c, v)| (channel(c), v)).collect();
             self.lit = std::mem::take(&mut self.lit).into_iter().map(|(g, s)| (remap(g, a, b), s)).collect();
+            self.loop_lit = std::mem::take(&mut self.loop_lit).into_iter().map(|(g, s)| (remap(g, a, b), s)).collect();
+            self.held_pitches = std::mem::take(&mut self.held_pitches).into_iter().map(|((g, s), v)| ((remap(g, a, b), s), v)).collect();
             self.clip = self.clip.map(|(g, c)| (remap(g, a, b), c));
             self.zone_of = self.zone_of.map(|(g, s)| (remap(g, a, b), s));
             self.lane_of = self.lane_of.map(|(g, s)| (remap(g, a, b), s));

@@ -280,8 +280,8 @@ struct Shared {
     /// when it changes: it's a feature report read and written back, not worth every frame.
     pad_sensitivity: Option<u8>,
     sensitivity_stamp: u64,
-    /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
-    /// (`shut_down`).
+    /// DECKARD is closing: dark LEDs, a black frame on the displays, then stop
+    /// (`shut_down`). The frame is black so a still picture is not left to burn in.
     closing: bool,
     goodbye: Option<Arc<Vec<[u8; 4]>>>,
     /// Whether the controller and the displays are open, and whether each has been left
@@ -303,6 +303,12 @@ pub struct Mk3Io {
 
 /// The pitch pads play: a sound's base key (Maschine's default, C3).
 const PAD_PITCH: i64 = 60;
+
+/// Both displays side by side, every pixel black. Closing sends this so the panels
+/// are not left showing a still picture.
+fn black_displays() -> Vec<[u8; 4]> {
+    vec![[0, 0, 0, 255]; deckard_mk3::display::WIDTH * 2 * deckard_mk3::display::HEIGHT]
+}
 
 /// The notes (sound, pitch) a hit on `pad` (1–16) plays: its sound at C3, its key in
 /// Keyboard mode, or its chord in Chords mode; none for a pad with nothing to play.
@@ -328,12 +334,12 @@ impl Mk3Io {
         Mk3Io { shared, display_wake }
     }
 
-    /// Leave the controller dark but for `picture` on the displays (both, 960 × 272
-    /// RGBA): LEDs off. Waits (up to a second) for both threads to do it.
-    pub fn shut_down(&self, picture: Vec<[u8; 4]>) {
+    /// Leave the controller dark: LEDs off and both displays black. Waits (up to a
+    /// second) for both threads to do it.
+    pub fn shut_down(&self) {
         {
             let mut s = self.shared.lock().unwrap();
-            s.goodbye = Some(Arc::new(picture));
+            s.goodbye = Some(Arc::new(black_displays()));
             s.closing = true;
         }
         self.display_wake.notify_all();
@@ -346,6 +352,18 @@ impl Mk3Io {
             drop(s);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// An MK3 handle with no USB threads, for tests that only check the close request.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Mk3Io {
+        Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) }
+    }
+
+    /// The frame `shut_down` queued, if it has.
+    #[cfg(test)]
+    pub(crate) fn queued_frame(&self) -> Option<Vec<[u8; 4]>> {
+        self.shared.lock().unwrap().goodbye.as_deref().cloned()
     }
 
     /// Set the displays' backlight (0..=100), now if it changed and whenever an MK3
@@ -729,27 +747,31 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
 fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
-    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
+    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565_dithered, rgb565_rounded};
+    // (A picture's pixels, marked by the surface, rounded rather than dithered.)
+    let to565 = |x: usize, y: usize, [r, g, b, a]: [u8; 4]| {
+        if a == deckard_surface::PICTURE_ALPHA { rgb565_rounded(r, g, b) } else { rgb565_dithered(x, y, r, g, b) }
+    };
     let mut left = vec![0u16; WIDTH * HEIGHT];
     let mut right = vec![0u16; WIDTH * HEIGHT];
     let mut px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
     let mut last_px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
-    // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
+    // Fill `out` with one 480×272 half of a 960-wide RGBA picture, dithered to the
+    // displays' 5-6-5 levels (the one place the picture loses its low bits).
     let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
         let stride = WIDTH * 2;
         if px.len() >= stride * HEIGHT && x0 + WIDTH <= stride {
             for y in 0..HEIGHT {
                 let src = &px[y * stride + x0..y * stride + x0 + WIDTH];
                 let dst = &mut out[y * WIDTH..(y + 1) * WIDTH];
-                for (o, &[r, g, b, _]) in dst.iter_mut().zip(src) {
-                    *o = rgb565(r, g, b);
+                for (x, (o, &p)) in dst.iter_mut().zip(src).enumerate() {
+                    *o = to565(x, y, p);
                 }
             }
         } else {
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
-                    let [r, g, b, _] = px.get(y * stride + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
-                    out[y * WIDTH + x] = rgb565(r, g, b);
+                    out[y * WIDTH + x] = to565(x, y, px.get(y * stride + x0 + x).copied().unwrap_or([0, 0, 0, 255]));
                 }
             }
         }
@@ -797,6 +819,7 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
         }
         let mut shown = None;
         last_px.clear();
+        let mut previous: Option<deckard_surface::Picture> = None;
         loop {
             let (closing, released, next_screen) = {
                 let mut s = shared.lock().unwrap();
@@ -832,11 +855,56 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 break;
             }
             if let Some((n, frame)) = next_screen {
-                frame.write_pixels(&mut px);
-                let left_dirty = half_changed(&px, &last_px, 0);
-                let right_dirty = half_changed(&px, &last_px, WIDTH);
-                if left_dirty || right_dirty {
-                    let mut res = Ok(());
+                let region = match frame {
+                    ScreenFrame::Picture(picture) => {
+                        let mut picture = Arc::try_unwrap(picture).unwrap_or_else(|shared| (*shared).clone());
+                        let region = previous.as_ref().and_then(|old| picture.rasterize_spectrum_update(old, &mut px));
+                        if region.is_none() {
+                            picture.rasterize_into(&mut px);
+                        }
+                        previous = Some(picture);
+                        region
+                    }
+                    ScreenFrame::Pixels(pixels) => {
+                        previous = None;
+                        px.clear();
+                        px.extend_from_slice(&pixels);
+                        None
+                    }
+                };
+                let mut res = Ok(());
+                if let Some((x0, y0, x1, y1)) = region {
+                    for (panel, rgb) in [&mut left, &mut right].into_iter().enumerate() {
+                        let start = x0.max(panel * WIDTH);
+                        let end = x1.min((panel + 1) * WIDTH);
+                        if start >= end {
+                            continue;
+                        }
+                        let mut changed = false;
+                        for y in y0..y1 {
+                            let wide_row = y * (2 * WIDTH);
+                            for x in start..end {
+                                let pixel = px[wide_row + x];
+                                if last_px[wide_row + x] != pixel {
+                                    last_px[wide_row + x] = pixel;
+                                    let x = x - panel * WIDTH;
+                                    let dst = &mut rgb[y * WIDTH + x];
+                                    let value = to565(x, y, pixel);
+                                    changed |= *dst != value;
+                                    *dst = value;
+                                }
+                            }
+                        }
+                        if changed {
+                            res = d.show(panel, rgb);
+                            if res.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    let left_dirty = half_changed(&px, &last_px, 0);
+                    let right_dirty = half_changed(&px, &last_px, WIDTH);
                     if left_dirty {
                         fill_half(&px, 0, &mut left);
                         res = d.show(0, &left);
@@ -845,13 +913,13 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                         fill_half(&px, WIDTH, &mut right);
                         res = d.show(1, &right);
                     }
-                    if let Err(e) = res {
-                        let mut s = shared.lock().unwrap();
-                        s.display_status = e;
-                        s.displays_connected = false;
-                        break;
-                    }
                     std::mem::swap(&mut last_px, &mut px);
+                }
+                if let Err(e) = res {
+                    let mut s = shared.lock().unwrap();
+                    s.display_status = e;
+                    s.displays_connected = false;
+                    break;
                 }
                 shown = Some(n);
             }
@@ -887,6 +955,18 @@ mod tests {
         io.shared.lock().unwrap().probed = true;
         let t = std::time::Instant::now();
         assert!(!io.found(Duration::from_secs(5)) && t.elapsed() < Duration::from_secs(1), "looked, not there: no at once");
+    }
+
+    /// Closing queues a black frame for both displays. No controller is opened.
+    #[test]
+    fn closing_queues_a_black_frame() {
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.shut_down();
+        let s = io.shared.lock().unwrap();
+        assert!(s.closing);
+        let px = s.goodbye.as_deref().expect("a frame is queued");
+        assert_eq!(px.len(), black_displays().len());
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]), "every pixel is black");
     }
 
     fn route(touch: PadTouch) -> PadRoute {
