@@ -4,7 +4,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     rc::{Rc, Weak as RcWeak},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 
 #[derive(Default)]
@@ -18,7 +18,7 @@ pub struct HostedLocks {
 
 #[derive(Clone)]
 pub(crate) struct HostedSnapshot {
-    instance: Weak<Mutex<deckard_plugins::Plugin>>,
+    instance: Weak<deckard_plugins::SharedPlugin>,
     values: Vec<(u32, i32, f64)>,
 }
 

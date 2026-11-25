@@ -443,7 +443,7 @@ pub struct PluginView {
     /// The slot's plug-in (its id in the project) when made: another there drops it.
     plugin_id: String,
     /// The instance it reads (another in the slot rebuilds the view).
-    instance: std::sync::Weak<std::sync::Mutex<deckard_plugins::Plugin>>,
+    instance: std::sync::Weak<deckard_plugins::SharedPlugin>,
     pub error: Option<String>,
     /// Values DECKARD sent (parameter, value, when) the plug-in may not report yet.
     pub sent: Vec<(u32, f64, std::time::Instant)>,
@@ -13351,8 +13351,8 @@ impl App {
         self.store_plugin_states_of(|_| true);
     }
 
-    /// [`App::store_plugin_states`] for the instances `which` picks (saving a
-    /// plug-in's state holds it, and the audio thread waits for it).
+    /// [`App::store_plugin_states`] for the instances `which` picks. Saving a
+    /// plug-in's state can make that instance skip audio until the lock is released.
     pub(crate) fn store_plugin_states_of(&mut self, which: impl Fn(&deckard_plugins::Slot) -> bool) {
         let Some(doc) = self.doc.clone() else { return };
         let mut stored = Vec::new();
