@@ -16020,6 +16020,12 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
         };
         e.sounds[0][1] = Some(SamplerRt::new(sampler::Settings::new(&s1_smp, 48_000.0), vec![z1], (1.0, 1.0), 48_000.0));
 
