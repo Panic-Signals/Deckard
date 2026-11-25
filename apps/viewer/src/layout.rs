@@ -778,6 +778,8 @@ pub enum Act {
     Restart,
     Stop,
     ToggleLoop,
+    /// Move or resize the Song-mode loop region.
+    SongLoop(i64, i64),
     ToggleMetronome,
     /// LINK: join or leave the Ableton Link session.
     ToggleLink,
@@ -1175,6 +1177,7 @@ fn apply_with_mode(app: &mut App, acts: Vec<Act>, exact: bool) {
             Act::ClearModulation(e) => app.clear_modulation(e),
             Act::Restart => app.restart(),
             Act::ToggleLoop => app.set_looping(!app.looping),
+            Act::SongLoop(start, end) => app.set_song_loop(start, end),
             Act::ToggleMetronome => app.set_metronome(!app.metronome),
             Act::ToggleLink => app.toggle_link(),
             Act::ToggleKeys => app.toggle_keys(),
@@ -4108,13 +4111,13 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let bar = p.bar_length().max(1) as f32;
     let clips_end = p.groups.iter().flat_map(|g| &g.clips).map(|c| c.position + c.length).max().unwrap_or(0);
     let total = p.arrangement_length().max(clips_end) as f32 / bar;
+    let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
+    let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
     // Leave room for the "+" after the last section.
     let ppb = ((ed.width() - 40.0) / total.max(16.0)).max(12.0);
     let hx = hscroll(ui, "song-x", ed, total.max(16.0) * ppb);
     let x_of = |ticks: f64| ed.left() + ticks as f32 / bar * ppb - hx;
-    let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
-    let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
     let tl_resp = ui.interact(timeline, ui.id().with("song-timeline"), Sense::click());
     if app.playing.is_none()
         && tl_resp.clicked()
@@ -4127,9 +4130,100 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         acts.push(Act::SeekArrangement(tick.max(0)));
     }
     let tracks = Rect::from_min_max(Pos2::new(ed.left(), rows_top), ed.max);
+    if app.looping && app.song_view {
+        let (loop_start, loop_end) = app.song_loop.unwrap_or((0, p.arrangement_length().max(0)));
+        let region = Rect::from_min_max(
+            Pos2::new(x_of(loop_start as f64).max(ed.left()), timeline.top()),
+            Pos2::new(x_of(loop_end as f64).min(ed.right()), timeline.bottom()),
+        );
+        let edge_zone = if region.width() < 48.0 { region.width() * 0.22 } else { 14.0 };
+        let region_fill = Color32::from_rgba_unmultiplied(PLAY_ON.r(), PLAY_ON.g(), PLAY_ON.b(), 38);
+        let region_outline = Color32::from_rgba_unmultiplied(PLAY_ON.r(), PLAY_ON.g(), PLAY_ON.b(), 255);
+        painter.rect_filled(region, 2.0, region_fill);
+        painter.rect_stroke(region, 2.0, Stroke::new(1.0, region_outline), egui::StrokeKind::Inside);
+        painter.hline(region.x_range(), region.top(), Stroke::new(1.0, region_outline));
+        painter.hline(region.x_range(), region.bottom() - 1.0, Stroke::new(1.0, region_outline));
+        let id = ui.id().with("song-loop-region");
+        let handle_y = 10.0;
+        let left_handle = Rect::from_min_max(
+            Pos2::new(region.left() - edge_zone, region.top() - handle_y),
+            Pos2::new(region.left() + edge_zone, region.bottom() + handle_y),
+        );
+        let right_handle = Rect::from_min_max(
+            Pos2::new(region.right() - edge_zone, region.top() - handle_y),
+            Pos2::new(region.right() + edge_zone, region.bottom() + handle_y),
+        );
+        let left_resp = ui.interact(left_handle, id.with("left"), Sense::click_and_drag());
+        let right_resp = ui.interact(right_handle, id.with("right"), Sense::click_and_drag());
+        let body_region =
+            Rect::from_min_max(Pos2::new(region.left() + edge_zone, region.top()), Pos2::new(region.right() - edge_zone, region.bottom()));
+        let body_resp = if body_region.width() > 0.0 {
+            ui.interact(body_region, id.with("body"), Sense::click_and_drag())
+        } else {
+            ui.interact(Rect::NOTHING, id.with("body"), Sense::click_and_drag())
+        };
+        if left_resp.hovered() || left_resp.dragged() || right_resp.hovered() || right_resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        let resp = if left_resp.dragged() || left_resp.drag_stopped() {
+            left_resp.clone()
+        } else if right_resp.dragged() || right_resp.drag_stopped() {
+            right_resp.clone()
+        } else {
+            body_resp.clone()
+        };
+        if (resp.dragged() || resp.drag_stopped())
+            && let Some(pos) = ui.ctx().pointer_latest_pos()
+        {
+            let raw = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+            let snap = p.bar_length().max(1);
+            let tick = (raw as f64 / snap as f64).round() as i64 * snap;
+            let length = loop_end - loop_start;
+            if resp.drag_started() {
+                let edge = if resp.id == left_resp.id {
+                    -1i8
+                } else if resp.id == right_resp.id {
+                    1
+                } else {
+                    0
+                };
+                ui.data_mut(|d| d.insert_temp(id.with("edge"), edge));
+                if edge == 0 {
+                    let grab = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+                    ui.data_mut(|d| d.insert_temp(id.with("grab"), grab - loop_start));
+                }
+            }
+            let edge = ui.data(|d| d.get_temp::<i8>(id.with("edge"))).unwrap_or(0);
+            let (start, end) = if edge < 0 {
+                (tick.min(loop_end - snap).max(0), loop_end)
+            } else if edge > 0 {
+                (loop_start, tick.max(loop_start + snap))
+            } else {
+                let grab = ui.data(|d| d.get_temp::<i64>(id.with("grab"))).unwrap_or(length / 2);
+                let pointer_tick = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+                let start = ((pointer_tick - grab) as f32 / snap as f32).round() as i64 * snap;
+                let start = start.clamp(0, p.arrangement_length() - length);
+                (start, start + length)
+            };
+            let vertical = resp.drag_delta().y.abs() > resp.drag_delta().x.abs();
+            if !vertical || edge != 0 {
+                acts.push(Act::SongLoop(start, end));
+            }
+        }
+    }
     let ep = painter.with_clip_rect(ed);
     ep.hline(timeline.x_range(), timeline.top(), Stroke::new(1.0, Color32::BLACK));
     ep.hline(timeline.x_range(), timeline.bottom(), Stroke::new(1.0, Color32::BLACK));
+    if app.looping && app.song_view {
+        let (loop_start, loop_end) = app.song_loop.unwrap_or((0, p.arrangement_length().max(0)));
+        let loop_region = Rect::from_min_max(
+            Pos2::new(x_of(loop_start as f64).max(ed.left()), timeline.top()),
+            Pos2::new(x_of(loop_end as f64).min(ed.right()), timeline.bottom()),
+        );
+        let region_outline = Color32::from_rgba_unmultiplied(PLAY_ON.r(), PLAY_ON.g(), PLAY_ON.b(), 255);
+        ep.hline(loop_region.x_range(), loop_region.top(), Stroke::new(1.0, region_outline));
+        ep.hline(loop_region.x_range(), loop_region.bottom() - 1.0, Stroke::new(1.0, region_outline));
+    }
     painter.hline(col.x_range(), rows_top - 0.5, Stroke::new(1.0, Color32::BLACK));
     let end_x = x_of(p.arrangement_length() as f64);
     ep.rect_filled(Rect::from_min_max(Pos2::new(end_x, tracks.top()), tracks.max), 0.0, s00());

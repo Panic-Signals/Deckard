@@ -107,6 +107,8 @@ pub enum Command {
     Seek(i64),
     /// Loop the timeline at its end (else stop there).
     Looping(bool),
+    /// Loop the timeline between ticks `start` and `end`.
+    LoopRange(i64, i64),
     /// Click on the beats (or not).
     Metronome(bool),
     /// Record live notes (REC) or stop.
@@ -429,6 +431,12 @@ pub(crate) fn apply(
         Command::Looping(on) => {
             if let Some(e) = engine.as_mut() {
                 e.looping = on;
+            }
+            None
+        }
+        Command::LoopRange(start, end) => {
+            if let Some(e) = engine.as_mut() {
+                e.set_loop_range(start, end);
             }
             None
         }
@@ -1032,6 +1040,11 @@ impl Output {
     /// Loop what plays at its end (else stop there).
     pub fn set_looping(&self, on: bool) {
         self.sender.send(Command::Looping(on));
+    }
+
+    /// Set the loop range in ticks without rebuilding the playing engine.
+    pub fn set_loop_range(&self, start: i64, end: i64) {
+        self.sender.send(Command::LoopRange(start, end));
     }
 
     /// Note Repeat / the Arp on (with its settings) or off.
