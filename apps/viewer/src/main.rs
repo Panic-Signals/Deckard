@@ -41,6 +41,26 @@ mod controller;
 #[cfg(test)]
 mod controller_quality_tests;
 mod controller_timing;
+/// A zone's meta after an edit took its sample from `old_len` frames to `new_len`:
+/// its warp markers go; stretched (`stretched`), its tempo follows; cut, its length in
+/// beats does, and its grid moves by the `shift` frames taken from the front.
+fn resized(meta: &mut deckard_model::new_sampler::ZoneMeta, old_len: usize, new_len: usize, rate: u32, (shift, stretched): (usize, bool)) {
+    if new_len == old_len || old_len == 0 {
+        return;
+    }
+    let ratio = new_len as f64 / old_len as f64;
+    meta.warps.clear();
+    if stretched {
+        meta.bpm = meta.bpm.map(|b| b / ratio);
+        meta.grid_offset = (meta.grid_offset as f64 * ratio) as u64;
+    } else {
+        meta.beats = meta.beats.map(|b| b * ratio);
+        if let Some(per) = meta.bpm.map(|b| f64::from(rate) * 60.0 / b).filter(|p| *p >= 1.0) {
+            meta.grid_offset = (meta.grid_offset as f64 - shift as f64).rem_euclid(per) as u64;
+        }
+    }
+}
+
 /// The stem lane the bass is on ([`deckard_model::new_sampler::LANE_NAMES`]).
 const BASS_LANE: usize = 2;
 
@@ -8450,17 +8470,25 @@ impl App {
         }
     }
 
+    /// Whether STEMS puts the focused zone's stems on its lanes: an analysed zone of a
+    /// Sampler Preview in Advanced (the lanes are that mode's).
+    pub(crate) fn stems_onto_lanes(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| {
+            let d = d.borrow();
+            let p = d.project();
+            layers::mode_of(p, self.group, self.sound) == Some(deckard_model::new_sampler::SamplerMode::Advanced)
+                && p.groups[self.group].sounds[self.sound]
+                    .sampler
+                    .as_ref()
+                    .and_then(|x| x.zones.get(self.zone))
+                    .is_some_and(|z| z.meta.is_some())
+        })
+    }
+
     /// STEMS: separate the focused zone's sample in the background.
     fn start_stems(&mut self, to_group: bool) {
         let (Some(sample), Some(dir)) = (self.sampling.sample.clone(), menu::settings_dir()) else { return };
-        // A New Sampler's analysed zone takes the stems as its lanes.
-        let into_lanes = !to_group
-            && self.doc.as_ref().is_some_and(|d| {
-                let d = d.borrow();
-                d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).is_some_and(|snd| {
-                    snd.new_sampler.is_some() && snd.sampler.as_ref().and_then(|x| x.zones.get(self.zone)).is_some_and(|z| z.meta.is_some())
-                })
-            });
+        let into_lanes = !to_group && self.stems_onto_lanes();
         let Some((_, sref, beats)) = self.focused_sample() else { return };
         let file = sref.path.rsplit(['/', '\\']).next().unwrap_or("Sample");
         let name = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string();
@@ -8632,8 +8660,8 @@ impl App {
         let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
             return;
         };
-        let (Some(mut meta), Some(sample)) = (zone.meta, self.sampling.sample.clone()) else {
-            self.status = "stems go on a Sampler Preview's zone (once it's analysed)".into();
+        let (Some(mut meta), Some(sample)) = (zone.meta.filter(|_| self.stems_onto_lanes()), self.sampling.sample.clone()) else {
+            self.status = "stems go on a zone of a Sampler Preview in Advanced (once it's analysed)".into();
             return;
         };
         let mut taken: [bool; 4] = std::array::from_fn(|k| meta.stems[k].is_some());
@@ -8855,19 +8883,29 @@ impl App {
             deckard_engine::edit::write_wav(&path, &out).ok()?;
             l.file = path.to_string_lossy().into();
         }
-        if new_len != old_len && old_len > 0 {
-            let ratio = new_len as f64 / old_len as f64;
-            meta.warps.clear();
-            if stretched {
-                meta.bpm = meta.bpm.map(|b| b / ratio);
-                meta.grid_offset = (meta.grid_offset as f64 * ratio) as u64;
-            } else {
-                meta.beats = meta.beats.map(|b| b * ratio);
-                if let Some(per) = meta.bpm.map(|b| f64::from(rate) * 60.0 / b).filter(|p| *p >= 1.0) {
-                    meta.grid_offset = (meta.grid_offset as f64 - shift as f64).rem_euclid(per) as u64;
-                }
-            }
+        resized(&mut meta, old_len, new_len, rate, (shift, stretched));
+        Some(meta)
+    }
+
+    /// A layer's meta for its edited file, `new_len` frames long: what it was, its tempo
+    /// and beats following the new length. None: the zone isn't a layer.
+    fn layer_meta_after(
+        &self,
+        key: &(usize, usize, usize, String),
+        new_len: usize,
+        how: (usize, bool),
+    ) -> Option<deckard_model::new_sampler::ZoneMeta> {
+        let doc = self.doc.clone()?;
+        let d = doc.borrow();
+        if !layers::can_layer(d.project(), key.0, key.1) {
+            return None;
         }
+        let mut meta =
+            d.project().groups[key.0].sounds[key.1].sampler.as_ref()?.zones.get(key.2)?.meta.clone().filter(|m| m.layer.is_some())?;
+        meta.stems = Default::default();
+        meta.stems_only = false;
+        let rate = self.sampling.sample.as_ref().map_or(0, |x| x.rate);
+        resized(&mut meta, self.sampling.len(), new_len, rate, how);
         Some(meta)
     }
 
@@ -8895,6 +8933,8 @@ impl App {
         let frames = sample.frames.len();
         let carried = lanes.and_then(|(lane, how)| self.carry_lanes(&key, frames, lane, how));
         // (The lanes are those carried: ones that couldn't be are left behind.)
+        // A layer stays one: its settings go with it to the new file.
+        let carried = carried.or_else(|| self.layer_meta_after(&key, frames, lanes.map_or((0, false), |l| l.1)));
         let (meta, params) = meta.unzip();
         let carried = match (meta, carried) {
             (Some(m), Some(c)) => Some(deckard_model::new_sampler::ZoneMeta { stems: c.stems, stems_only: c.stems_only, ..m }),
@@ -11744,10 +11784,9 @@ impl App {
         if g != self.group {
             self.focus_group(g);
         }
-        // A layered sound takes them as layers more (a plain zone beside its layers would
-        // leave it neither layered nor sliced).
+        // A sound in Layers takes them as layers more.
         let layers = layers::layers_in(doc.borrow().project(), g, s).len();
-        if layers::layered(doc.borrow().project(), g, s) {
+        if layers::can_layer(doc.borrow().project(), g, s) {
             self.sound = s;
             self.layer_files(layers, files);
             return;
@@ -13154,7 +13193,10 @@ impl App {
             }
             doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune, a.mode == deckard_model::AudioMode::Gate)
         } else if snd.sampler.is_some() && snd.new_sampler.is_none() {
-            doc.borrow_mut().transaction("Convert to Sampler Preview", |d| d.set_new_sampler(g, s, Some(&Default::default())))
+            // (In Original: it plays as it did.)
+            let n =
+                deckard_model::new_sampler::NewSampler { mode: deckard_model::new_sampler::SamplerMode::Original, ..Default::default() };
+            doc.borrow_mut().transaction("Convert to Sampler Preview", |d| d.set_new_sampler(g, s, Some(&n)))
         } else {
             return;
         };

@@ -13,13 +13,12 @@ pub mod layers;
 
 /// Which of the tabs sound (`g`, `s`) offers, its sample a zone's (`zone`) or an Audio
 /// plug-in's take (`take`): only RECORD without a sample; RECORD and EDIT for a take;
-/// LAYERS for a New Sampler without slices (even an empty one), which once it has a
-/// layer has no SLICE.
+/// LAYERS for a Sampler Preview in Layers (even an empty one), which has no SLICE.
 pub fn tab_shown(p: &Project, g: usize, s: usize, tab: usize, zone: bool, take: bool) -> bool {
     match tab {
         0 => true,
         4 => !take && crate::layers::can_layer(p, g, s),
-        2 => zone && !take && !crate::layers::layered(p, g, s),
+        2 => zone && !take && !crate::layers::can_layer(p, g, s),
         1 => zone,
         _ => zone && !take,
     }
@@ -2025,7 +2024,7 @@ fn edit_tab(
         if op == EditOp::Stems && stems.is_none() {
             ui.interact(r, ui.id().with("stems-menu"), Sense::click())
                 .on_hover_text(
-                    "Separate into stems: onto a Sampler Preview zone's lanes, else a new group (Shift, or right-click for more)",
+                    "Separate into stems: onto the zone's lanes in a Sampler Preview in Advanced, else a new group (Shift, or right-click for more)",
                 )
                 .context_menu(|ui| {
                     if ui.button("Separate onto the zone's lanes").clicked() {

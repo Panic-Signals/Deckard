@@ -7,23 +7,28 @@ use crate::layout::sampling::{LayerAct, MorphAct};
 use deckard_doc::{Document, Target, ZoneFrom, ZoneSpec};
 use deckard_model::Project;
 use deckard_model::layers::{self, FREE, Layer, MAX_LAYERS, SYNCED, TIME_MAX};
-use deckard_model::new_sampler::{Motion, NewSampler, PlayMode, ZoneMeta};
+use deckard_model::new_sampler::{Motion, NewSampler, PlayMode, SamplerMode, ZoneMeta};
 use mxprj::decode::Value;
 use std::path::PathBuf;
 
 /// The longest part of a dropped sample its root is heard in, seconds.
 const ROOT_SECONDS: usize = 20;
 
-/// Sound (`g`, `s`) can have layers: a New Sampler without slices (no zone, one, or
-/// layers only).
-pub(crate) fn can_layer(p: &Project, g: usize, s: usize) -> bool {
-    let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|x| x.new_sampler.is_some()) else { return false };
-    let Some(smp) = snd.sampler.as_ref() else { return false };
-    smp.zones.len() <= 1 || smp.zones.iter().all(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some()))
+/// Sound (`g`, `s`)'s Sampler Preview mode (None: it isn't one). What the sound offers
+/// is asked of this, never of what its zones hold.
+pub(crate) fn mode_of(p: &Project, g: usize, s: usize) -> Option<SamplerMode> {
+    let snd = p.groups.get(g)?.sounds.get(s)?;
+    snd.sampler.as_ref()?;
+    snd.new_sampler.map(|n| n.mode)
 }
 
-/// Its layers, a lane each: (the zone, the layer). A lone zone that isn't yet a layer is
-/// shown as the first.
+/// Sound (`g`, `s`) has layers: a Sampler Preview in Layers (with none yet, too).
+pub(crate) fn can_layer(p: &Project, g: usize, s: usize) -> bool {
+    mode_of(p, g, s) == Some(SamplerMode::Layers)
+}
+
+/// Its layers, a lane each: (the zone, the layer). In Layers every zone is one: a zone
+/// not yet given its layer data is shown with a new layer's (the next edit writes it).
 pub(crate) fn layers_in(p: &Project, g: usize, s: usize) -> Vec<(usize, Layer)> {
     if !can_layer(p, g, s) {
         return Vec::new();
@@ -32,23 +37,22 @@ pub(crate) fn layers_in(p: &Project, g: usize, s: usize) -> Vec<(usize, Layer)> 
     zones.iter().enumerate().map(|(k, z)| (k, z.meta.as_ref().and_then(|m| m.layer).unwrap_or_default())).take(MAX_LAYERS).collect()
 }
 
-/// Whether sound (`g`, `s`) has a layer (so its SLICE tab is hidden, and MORPH is a
-/// modulation destination).
+/// Whether sound (`g`, `s`) has a layer (so MORPH is a modulation destination).
 pub(crate) fn layered(p: &Project, g: usize, s: usize) -> bool {
-    p.groups
-        .get(g)
-        .and_then(|x| x.sounds.get(s))
-        .is_some_and(|snd| snd.new_sampler.is_some() && snd.sampler.as_ref().is_some_and(|x| !layers::zones(x).is_empty()))
+    !layers_in(p, g, s).is_empty()
 }
 
 /// RECORD's LAYER when the take is on no layer.
 pub(crate) const NO_LAYER: i64 = -1;
 
-/// The lane of sound (`g`, `s`) that plays `take` (the first, if several do).
+/// The lane of sound (`g`, `s`) that plays `take` (the first, if several do). A take
+/// and its edited copies (`name - N.wav`) are the same take, whichever the list or the
+/// layer holds.
 pub(crate) fn take_layer(p: &Project, g: usize, s: usize, take: &std::path::Path) -> Option<usize> {
-    let file = take.file_name()?.to_string_lossy();
+    use deckard_engine::edit::edited_base;
+    let base = edited_base(&take.file_name()?.to_string_lossy());
     let zones = &p.groups.get(g)?.sounds.get(s)?.sampler.as_ref()?.zones;
-    layers_in(p, g, s).iter().position(|(k, _)| crate::analysis::file_name_of(&zones[*k].sample.path) == file)
+    layers_in(p, g, s).iter().position(|(k, _)| edited_base(&crate::analysis::file_name_of(&zones[*k].sample.path)) == base)
 }
 
 /// What RECORD's LAYER can be for the focused take on sound (`g`, `s`): each choice's
@@ -175,12 +179,18 @@ impl App {
         self.doc.as_ref().map_or_else(Vec::new, |d| layers_in(d.borrow().project(), self.group, self.sound))
     }
 
-    /// A take recorded for sound (`g`, `s`): its sample, if it has none. A sound with
-    /// layers keeps them: the take waits in the list, for RECORD's LAYER and APPLY.
+    /// A take recorded for sound (`g`, `s`): its sample. In Layers the first take is the
+    /// first layer, and a sound with layers keeps them: the take waits in the list, for
+    /// RECORD's LAYER and APPLY.
     pub(crate) fn take_into(&mut self, g: usize, s: usize, path: &std::path::Path, frames: usize) {
-        let kept = self.doc.as_ref().is_some_and(|d| !layers_in(d.borrow().project(), g, s).is_empty());
-        if !kept {
-            self.load_take(g, s, path, frames);
+        let layers = self.doc.as_ref().and_then(|d| {
+            let d = d.borrow();
+            can_layer(d.project(), g, s).then(|| layers_in(d.project(), g, s).len())
+        });
+        match layers {
+            Some(0) => self.take_to_layer(g, s, path, 0),
+            Some(_) => {}
+            None => self.load_take(g, s, path, frames),
         }
     }
 
@@ -221,7 +231,7 @@ impl App {
         let (g, s) = (self.group, self.sound);
         let p = doc.borrow().project().clone();
         if !can_layer(&p, g, s) {
-            self.status = "layers are a Sampler Preview's, one without slices".into();
+            self.status = "layers are for a Sampler Preview in Layers".into();
             return;
         }
         let have = layers_in(&p, g, s).len();

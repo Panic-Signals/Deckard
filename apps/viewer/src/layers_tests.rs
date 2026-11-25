@@ -4,6 +4,7 @@ use crate::App;
 use crate::layers::{can_layer, layered, layers_in, take_choices, window_moved};
 use crate::layout::sampling::{LayerAct, MorphAct};
 use deckard_model::layers::{Layer, MAX_LAYERS, Morph, Shape, spread};
+use deckard_model::new_sampler::{NewSampler, SamplerMode};
 use std::path::PathBuf;
 
 /// A tone on `hz`, two seconds, as a file `name` in `dir`.
@@ -20,14 +21,19 @@ pub(crate) fn tone(dir: &std::path::Path, name: &str, hz: f32) -> PathBuf {
     file
 }
 
-/// An app on a new project whose first sound is an empty New Sampler.
+/// An app on a new project whose first sound is an empty Sampler Preview in Layers.
 pub(crate) fn app() -> App {
+    app_in(SamplerMode::Layers)
+}
+
+/// The same, in `mode`.
+pub(crate) fn app_in(mode: SamplerMode) -> App {
     let mut doc = deckard_doc::Document::new_project().unwrap();
     if doc.project().groups[0].sounds[0].slots.is_empty() {
         doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
     }
     doc.set_zones(0, 0, &[], "Empty").unwrap();
-    doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+    doc.set_new_sampler(0, 0, Some(&NewSampler { mode, ..Default::default() })).unwrap();
     let mut app = App { analysis: crate::analysis::Jobs::new(None), ..App::default() };
     app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
     app
@@ -221,29 +227,52 @@ fn the_morphs_settings() {
     assert_eq!(l[1].1, Layer { window: l[1].1.window, ..Default::default() });
 }
 
+/// One plain zone of `file` on the first sound.
+fn load_plain(app: &App, file: PathBuf) {
+    let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file), set: Vec::new() };
+    app.doc.as_ref().unwrap().borrow_mut().set_zones(0, 0, &[spec], "Load").unwrap();
+}
+
+/// What a sound offers is its mode's, whatever its zones hold.
 #[test]
-fn only_a_sound_without_slices_can_layer() {
-    let (dir, mut app) = three();
-    let p = |app: &App| app.doc.as_ref().unwrap().borrow().project().clone();
-    assert!(can_layer(&p(&app), 0, 0));
-    assert!(!can_layer(&p(&app), 0, 1), "not a Sampler Preview");
-    // Three plain zones (slices): no layers, and files don't go in.
-    {
-        let doc = app.doc.as_ref().unwrap();
-        let specs: Vec<_> =
-            (0..3).map(|k| deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Zone(k), file: None, set: Vec::new() }).collect();
-        let mut d = doc.borrow_mut();
-        d.set_zones(0, 0, &specs, "x").unwrap();
-        for k in 0..3 {
-            let z = d.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[k].clone();
-            let meta = deckard_model::new_sampler::ZoneMeta { layer: None, ..z.meta.unwrap() };
-            d.set_zone_meta(0, 0, k, &meta, "x").unwrap();
-        }
-    }
-    assert!(!can_layer(&p(&app), 0, 0));
-    assert!(layers_in(&p(&app), 0, 0).is_empty());
-    app.layer_files(0, &[tone(dir.path(), "e4.wav", 329.63)]);
-    assert_eq!(zones(&app).len(), 3);
+fn layers_are_the_modes() {
+    use crate::layout::sampling::tab_shown;
+    let dir = tempfile::tempdir().unwrap();
+    // Advanced, with one sample: no layers, a SLICE tab, and files don't become layers.
+    let mut app = app_in(SamplerMode::Advanced);
+    load_plain(&app, tone(dir.path(), "a.wav", 220.0));
+    let p = project(&app);
+    assert!(!can_layer(&p, 0, 0) && !layered(&p, 0, 0));
+    assert!(layers_in(&p, 0, 0).is_empty());
+    assert!(!tab_shown(&p, 0, 0, 4, true, false) && tab_shown(&p, 0, 0, 2, true, false));
+    assert!(!can_layer(&p, 0, 1), "not a Sampler Preview");
+    app.layer_files(1, &[tone(dir.path(), "e4.wav", 329.63)]);
+    assert_eq!(names(&app), ["a.wav"]);
+    assert_eq!(app.status, "layers are for a Sampler Preview in Layers");
+    // A take recorded is its sample, as a Sampler's.
+    let take = tone(dir.path(), "take.wav", 330.0);
+    app.take_into(0, 0, &take, 96_000);
+    assert_eq!(names(&app), ["take.wav"]);
+    assert!(zones(&app)[0].meta.as_ref().is_none_or(|m| m.layer.is_none()));
+    // Layers, empty: LAYERS is offered; with a sample, no SLICE.
+    let mut app = self::app();
+    let p = project(&app);
+    assert!(can_layer(&p, 0, 0) && !layered(&p, 0, 0));
+    assert!(tab_shown(&p, 0, 0, 4, false, false));
+    assert!(!tab_shown(&p, 0, 0, 2, true, false));
+    // Its first take is its first layer.
+    app.take_into(0, 0, &take, 96_000);
+    assert_eq!(names(&app), ["take.wav"]);
+    assert_eq!(zones(&app)[0].meta.as_ref().and_then(|m| m.layer).map(|l| l.window), Some(Layer::default().window));
+    assert!(layered(&project(&app), 0, 0));
+    // Stems go to a group, not onto lanes (those are Advanced's).
+    assert!(!app.stems_onto_lanes(), "{:?}", zones(&app)[0].meta);
+    let app = app_in(SamplerMode::Advanced);
+    load_plain(&app, tone(dir.path(), "a.wav", 220.0));
+    let file = zones(&app)[0].sample.path.clone();
+    let meta = deckard_model::new_sampler::ZoneMeta { file, ..Default::default() };
+    app.doc.as_ref().unwrap().borrow_mut().note_zone_meta(0, 0, 0, &meta).unwrap();
+    assert!(app.stems_onto_lanes(), "an analysed zone in Advanced");
 }
 
 #[test]
@@ -322,10 +351,10 @@ fn the_mk3_pages_turn_the_same_values() {
     assert_eq!(app.layers_of().len(), 2);
 }
 
-/// A lone plain zone shows as the first lane, but its sound isn't layered: the MK3 keeps
-/// its SLICE.
+/// In Layers a lone zone is a layer, for the MK3 too (no SLICE); in Advanced the sound
+/// has none.
 #[test]
-fn a_lone_zone_is_not_layered_for_the_controller() {
+fn a_lone_zone_is_layered_for_the_controller_in_layers() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app();
     {
@@ -337,10 +366,16 @@ fn a_lone_zone_is_not_layered_for_the_controller() {
     app.sampling_open = true;
     app.sampling.sample = Some(std::sync::Arc::new(deckard_engine::sample::Sample { rate: 44_100, frames: vec![[0.0; 2]; 4410] }));
     let s = app.sampling_surface_view().sample.unwrap();
-    assert_eq!((s.layers.len(), s.layered), (1, false));
+    assert_eq!((s.layers.len(), s.layered), (1, true));
     app.layer_files(1, &[tone(dir.path(), "b.wav", 330.0)]);
     let s = app.sampling_surface_view().sample.unwrap();
     assert_eq!((s.layers.len(), s.layered), (2, true));
+    let mut app = app_in(SamplerMode::Advanced);
+    load_plain(&app, tone(dir.path(), "a.wav", 220.0));
+    app.sampling_open = true;
+    app.sampling.sample = Some(std::sync::Arc::new(deckard_engine::sample::Sample { rate: 44_100, frames: vec![[0.0; 2]; 4410] }));
+    let s = app.sampling_surface_view().sample.unwrap();
+    assert_eq!((s.layers.len(), s.layered), (0, false));
 }
 
 /// A file dropped on a layered sound anywhere but a lane (its row, another tab) is a
@@ -369,7 +404,7 @@ fn dragging_keys_is_one_undo_step() {
     assert!(zones(&app).iter().all(|z| z.key_range == (0, 127)));
 }
 
-/// The first take is the sound's sample; the next ones wait in the list, on no layer.
+/// The first take is the first layer; the next ones wait in the list, on no layer.
 #[test]
 fn later_takes_go_on_no_layer() {
     let dir = tempfile::tempdir().unwrap();
@@ -380,7 +415,7 @@ fn later_takes_go_on_no_layer() {
     };
     take(&mut app, "one.wav", 220.0);
     assert_eq!(names(&app), ["one.wav"]);
-    assert!(!layered(&project(&app), 0, 0), "it can still be sliced");
+    assert!(zones(&app)[0].meta.as_ref().is_some_and(|m| m.layer.is_some()), "a layer from the start");
     take(&mut app, "two.wav", 330.0);
     assert_eq!(names(&app), ["one.wav"], "the sound plays what it did");
 }
@@ -577,4 +612,50 @@ fn a_take_dropped_on_a_layered_sound_is_a_new_layer() {
     let (_dir, mut app, take) = three_and_a_take();
     app.place_take(0, 0, &take);
     assert_eq!(names(&app), ["a2.wav", "a3.wav", "a4.wav", "take.wav"], "{}", app.status);
+}
+
+/// Bring lane `lane`'s sample up in the Sampling view, as a frame would.
+fn show(app: &mut App, lane: usize) {
+    app.zone = lane;
+    let sref = zones(app)[lane].sample.clone();
+    let s = app.samples.sample(&sref, None).expect("the layer's sample");
+    app.sampling.set_sample((0, 0, lane, sref.path.clone()), s);
+}
+
+/// EDIT on a layer's sample (a new file) leaves it the layer it was.
+#[test]
+fn an_edited_layer_stays_a_layer() {
+    use crate::layout::sampling::{EditOp, SamplingAct};
+    let (dir, mut app) = three();
+    app.path = Some(dir.path().join("x.mxprj"));
+    app.layer_act(1, LayerAct::Mute);
+    let before = app.layers_of();
+    for (op, selection) in [(EditOp::Normalize, None), (EditOp::Truncate, Some((0, 48_000))), (EditOp::Paste, Some((0, 100)))] {
+        show(&mut app, 1);
+        app.sampling.clipboard = app.sampling.sample.as_ref().map(|s| deckard_engine::edit::copy(s, (0, 1000)));
+        app.sampling.selection = selection;
+        let file = names(&app)[1].clone();
+        app.sampling_act(SamplingAct::Edit(op));
+        assert_ne!(names(&app)[1], file, "{op:?}: {}", app.status);
+        assert!(can_layer(&project(&app), 0, 0), "{op:?}");
+        assert_eq!(app.layers_of(), before, "{op:?}: its mute and window too");
+    }
+}
+
+/// A take edited on its layer is still on that layer for RECORD's LAYER.
+#[test]
+fn an_edited_take_is_still_on_its_layer() {
+    use crate::layers::{layer_pending, take_layer};
+    use crate::layout::sampling::{EditOp, RecordAct, SamplingAct};
+    let (dir, mut app, take) = three_and_a_take();
+    app.path = Some(dir.path().join("x.mxprj"));
+    app.recorder.view.choose_layer((0, 0), 1);
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(take_layer(&project(&app), 0, 0, &take), Some(1));
+    show(&mut app, 1);
+    app.sampling.selection = None;
+    app.sampling_act(SamplingAct::Edit(EditOp::Normalize));
+    assert_eq!(names(&app)[1], "take - 2.wav", "{}", app.status);
+    assert_eq!(take_layer(&project(&app), 0, 0, &take), Some(1));
+    assert_eq!(layer_pending(&project(&app), 0, 0, &app.recorder.view), None);
 }
