@@ -499,7 +499,7 @@ fn a_pending_choice_is_dropped() {
     let more: Vec<PathBuf> = (3..MAX_LAYERS).map(|k| tone(dir.path(), &format!("l{k}.wav"), 100.0 + k as f32)).collect();
     app.layer_files(3, &more);
     assert_eq!(zones(&app).len(), MAX_LAYERS);
-    app.recorder.view.layer_choice = Some(MAX_LAYERS as i64);
+    app.recorder.view.choose_layer((0, 0), MAX_LAYERS as i64);
     assert_eq!(pending(&app), None);
     assert!(!take_choices(&project(&app), 0, 0, &app.recorder.view).unwrap().0.contains(&"New".to_string()));
     // A sound that can't have layers: no LAYER, and APPLY does nothing.
@@ -536,4 +536,45 @@ fn a_take_clicked_leaves_the_layers_alone() {
     // Its menu still replaces the first.
     app.sampling_act(SamplingAct::Record(RecordAct::TakeToLayer(1, 0)));
     assert_eq!(names(&app), ["two.wav", "two.wav"]);
+}
+
+/// A layer chosen on one sound isn't a choice on another, nor after the mode was changed
+/// and changed back: APPLY there does nothing.
+#[test]
+fn a_choice_stays_with_its_sound() {
+    use crate::layers::layer_pending;
+    use crate::layout::sampling::{RecParam, RecordAct};
+    let (dir, mut app, _take) = three_and_a_take();
+    // A second sound with layers of its own.
+    app.sound = 1;
+    {
+        let doc = app.doc.clone().unwrap();
+        let mut d = doc.borrow_mut();
+        d.add_slot(0, 1, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        d.set_zones(0, 1, &[], "Empty").unwrap();
+        d.set_new_sampler(0, 1, Some(&Default::default())).unwrap();
+    }
+    app.layer_files(0, &[tone(dir.path(), "b1.wav", 150.0), tone(dir.path(), "b2.wav", 250.0)]);
+    app.sound = 0;
+    record(&mut app, RecordAct::Set(RecParam::Layer, 1));
+    assert_eq!(layer_pending(&project(&app), 0, 0, &app.recorder.view), Some(1));
+    app.sound = 1;
+    assert_eq!(layer_pending(&project(&app), 0, 1, &app.recorder.view), None, "chosen on the other sound");
+    let before = labels(&app).len();
+    record(&mut app, RecordAct::ApplyLayer);
+    assert_eq!(labels(&app).len(), before);
+    // The mode changed and back: the choice is gone.
+    app.sound = 0;
+    record(&mut app, RecordAct::Set(RecParam::Layer, 1));
+    record(&mut app, RecordAct::Set(RecParam::Mode, 2));
+    record(&mut app, RecordAct::Set(RecParam::Mode, 0));
+    assert_eq!(layer_pending(&project(&app), 0, 0, &app.recorder.view), None);
+}
+
+/// A take dragged onto a sound with layers is one more layer (its sample and layers stay).
+#[test]
+fn a_take_dropped_on_a_layered_sound_is_a_new_layer() {
+    let (_dir, mut app, take) = three_and_a_take();
+    app.place_take(0, 0, &take);
+    assert_eq!(names(&app), ["a2.wav", "a3.wav", "a4.wav", "take.wav"], "{}", app.status);
 }

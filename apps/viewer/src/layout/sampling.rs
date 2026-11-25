@@ -3052,6 +3052,8 @@ pub struct RecorderView {
     /// The layer RECORD's LAYER was turned to for the focused take, until APPLY puts it
     /// there: `layers::NO_LAYER`, a lane, or `MAX_LAYERS` for a new one.
     pub layer_choice: Option<i64>,
+    /// The sound (group, sound) it was chosen on.
+    pub layer_at: (usize, usize),
     pub monitor: bool,
     pub auto: AutoParams,
     /// MIDI outputs there are (Auto ▸ MIDI To).
@@ -3070,6 +3072,18 @@ pub struct RecorderView {
 }
 
 impl RecorderView {
+    /// RECORD's LAYER turned to `v` for the focused take, on sound `at`.
+    pub fn choose_layer(&mut self, at: (usize, usize), v: i64) {
+        self.set(RecParam::Layer, v);
+        self.layer_at = at;
+    }
+
+    /// The layer chosen for the focused take on sound `at` (one chosen on another sound
+    /// isn't a choice here).
+    pub fn layer_choice_for(&self, at: (usize, usize)) -> Option<i64> {
+        self.layer_choice.filter(|_| self.layer_at == at)
+    }
+
     /// Set a parameter, keeping Maschine's rules: Note On ≤ Sample, Lo ≤ Hi (moving the
     /// other), strides within 1..=max(1, Hi − Lo).
     pub fn set(&mut self, p: RecParam, v: i64) {
@@ -3081,7 +3095,10 @@ impl RecorderView {
             RecParam::ExtMono => self.ext_mono = v.clamp(0, 31) as usize,
             RecParam::Internal => self.internal = internal_from(v),
             RecParam::AutoSound => self.auto_sound = (v >= 0).then_some((v as usize / 16, v as usize % 16)),
-            RecParam::Mode => self.mode = v.clamp(0, 3) as usize,
+            RecParam::Mode => {
+                self.mode = v.clamp(0, 3) as usize;
+                self.layer_choice = None;
+            }
             RecParam::Length => self.length = v.clamp(0, 5) as usize,
             RecParam::Target => self.target = v.clamp(0, 2) as usize,
             RecParam::Layer => self.layer_choice = Some(v.clamp(crate::layers::NO_LAYER, deckard_model::layers::MAX_LAYERS as i64)),

@@ -300,7 +300,6 @@ fn the_two_slice_boxes_are_each_their_own() {
 /// on that layer.
 #[test]
 fn the_record_footer_applies_a_takes_layer() {
-    use crate::layout::sampling::RecParam;
     let dir = tempfile::tempdir().unwrap();
     let mut h = layers_harness();
     h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);
@@ -312,7 +311,7 @@ fn the_record_footer_applies_a_takes_layer() {
         h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sample-field", "RECORDING".to_string(), label.to_string()))))
     };
     assert!(at(&h, "LAYER").is_some(), "the take's LAYER");
-    h.state_mut().recorder.view.set(RecParam::Layer, 1);
+    h.state_mut().recorder.view.choose_layer((0, 0), 1);
     h.run_steps(3);
     let apply = at(&h, "TAKE").expect("APPLY, once a layer is chosen");
     click(&mut h, apply.center());

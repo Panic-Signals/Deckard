@@ -120,7 +120,6 @@ fn play_range_start_and_end_support_shift_on_edit_and_zone() {
 /// APPLY puts the take there.
 #[test]
 fn the_record_page_says_a_layer_choice_is_pending() {
-    use crate::layout::sampling::RecParam;
     let (dir, mut app) = crate::layers_tests::three();
     app.surface_act(A::Sampling(true));
     app.recorder.view.takes.push(crate::layers_tests::tone(dir.path(), "take.wav", 500.0));
@@ -129,7 +128,7 @@ fn the_record_page_says_a_layer_choice_is_pending() {
     let layer = view.pages[0][0].knobs.iter().find(|k| k.name == "LAYER").expect("RECORDING has LAYER");
     assert_eq!(layer.text, "None");
     assert!(!view.layer_pending);
-    app.recorder.view.set(RecParam::Layer, 1);
+    app.recorder.view.choose_layer((0, 0), 1);
     assert!(app.sampling_surface_view().layer_pending);
     app.surface_act(A::SamplingCall(SamplingCall::ApplyTakeLayer));
     assert!(!app.sampling_surface_view().layer_pending);

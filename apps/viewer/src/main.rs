@@ -9261,6 +9261,9 @@ impl App {
                     self.recorder.cancel(output);
                 }
                 // Parameters stay as they are while armed or recording.
+                RecordAct::Set(layout::sampling::RecParam::Layer, v) if !self.recorder.busy() => {
+                    self.recorder.view.choose_layer((self.group, self.sound), v)
+                }
                 RecordAct::Set(p, v) if !self.recorder.busy() => self.recorder.view.set(p, v),
                 RecordAct::Threshold(t) if !self.recorder.busy() => self.recorder.view.threshold = t.clamp(-60.0, 0.0),
                 RecordAct::MidiTo(m) if !self.recorder.busy() => self.recorder.view.auto.midi_to = m,
@@ -11909,7 +11912,11 @@ impl App {
                 }
             }
             (0 | 1, _) => self.put_audio_take(g, s, path, smp.frames.len(), smp.rate, ticks, 0, true, "Place Take"),
-            (2, _) => self.take_into(g, s, path, smp.frames.len()),
+            // A sound with layers keeps them: the take is one more.
+            (2, _) => match self.doc.as_ref().map_or(0, |d| layers::layers_in(d.borrow().project(), g, s).len()) {
+                0 => self.take_into(g, s, path, smp.frames.len()),
+                have => self.take_to_layer(g, s, path, have),
+            },
             _ => self.status = "a take goes on an empty sound, an Audio plug-in or a Sampler".into(),
         }
     }

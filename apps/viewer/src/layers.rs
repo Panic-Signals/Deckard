@@ -82,7 +82,7 @@ pub(crate) fn take_choices(
     rec: &crate::layout::sampling::RecorderView,
 ) -> Option<(Vec<String>, usize, Vec<i64>)> {
     let (options, values, on) = take_options(p, g, s, rec)?;
-    let shown = rec.layer_choice.filter(|c| values.contains(c)).unwrap_or(on);
+    let shown = rec.layer_choice_for((g, s)).filter(|c| values.contains(c)).unwrap_or(on);
     let at = values.iter().position(|&v| v == shown).unwrap_or(0);
     Some((options, at, values))
 }
@@ -90,7 +90,7 @@ pub(crate) fn take_choices(
 /// The layer chosen for the focused take and not yet applied (APPLY puts it there).
 pub(crate) fn layer_pending(p: &Project, g: usize, s: usize, rec: &crate::layout::sampling::RecorderView) -> Option<i64> {
     let (_, values, on) = take_options(p, g, s, rec)?;
-    rec.layer_choice.filter(|c| values.contains(c) && *c != on)
+    rec.layer_choice_for((g, s)).filter(|c| values.contains(c) && *c != on)
 }
 
 fn zones_of(d: &Document, g: usize, s: usize) -> Vec<deckard_model::Zone> {
