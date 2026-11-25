@@ -4,7 +4,8 @@
 use super::{Document, Op, Target};
 use crate::chain::{Chain, NewModule};
 use crate::zones::{ZoneFrom, ZoneSpec};
-use deckard_model::new_sampler::{FIELD, NewSampler, PlayMode, ZONE_FIELD, ZoneMeta};
+use deckard_model::layers::Layer;
+use deckard_model::new_sampler::{FIELD, NewSampler, PlayMode, SamplerMode, ZONE_FIELD, ZoneMeta};
 use deckard_model::{Note, PPQ};
 use mxprj::decode::Value;
 use std::path::PathBuf;
@@ -181,6 +182,51 @@ impl Document {
         })
     }
 
+    /// Sound (`g`, `s`)'s Sampler Preview put in `mode`: one undo step, "Sampler Mode".
+    /// `keep: None`: only the setting changes (a sound without a sample, or Original made
+    /// Advanced, which loses nothing). `keep: Some((z, frames))`: zone `z` becomes the
+    /// sound's only zone, on every key and velocity, its loop off, over its whole file
+    /// (`frames` long; 0: its play range stays), with the mode's settings at their
+    /// defaults. What DECKARD knew of it goes, as for a sample just loaded; in Layers it
+    /// is the first layer, and a One-shot envelope becomes ADSR (as a first layer makes
+    /// it).
+    pub fn set_sampler_mode(&mut self, g: usize, s: usize, mode: SamplerMode, keep: Option<(usize, usize)>) -> Result<(), String> {
+        let snd = self.project().groups.get(g).and_then(|x| x.sounds.get(s)).ok_or("no such sound")?;
+        let now = snd.new_sampler.ok_or("not a Sampler Preview")?;
+        let zones = snd.sampler.as_ref().map_or(0, |x| x.zones.len());
+        if keep.is_some_and(|(z, _)| z >= zones) {
+            return Err("no such zone".into());
+        }
+        let label = "Sampler Mode";
+        self.transaction(label, |d| {
+            let Some((z, frames)) = keep else {
+                return d.set_new_sampler_as(g, s, &NewSampler { mode, ..now }, label);
+            };
+            let mut set = vec![
+                ("key_range/low", 0.0),
+                ("key_range/high", 127.0),
+                ("velocity_range/low", 0.0),
+                ("velocity_range/high", 127.0),
+                ("loop_active", 0.0),
+            ];
+            if frames > 0 {
+                let end = (frames - 1) as f64;
+                set.extend([("play_range/low", 0.0), ("play_range/high", end), ("loop_range/low", 0.0), ("loop_range/high", end)]);
+            }
+            d.set_zones(g, s, &[ZoneSpec { from: ZoneFrom::Zone(z), file: None, set }], label)?;
+            let file = d.project().groups[g].sounds[s].sampler.as_ref().ok_or("no sampler")?.zones[0].sample.path.clone();
+            let meta = (mode == SamplerMode::Layers).then(|| ZoneMeta { file, layer: Some(Layer::default()), ..Default::default() });
+            let ops = d.zone_meta_ops(g, s, 0, meta.as_ref())?;
+            if !ops.is_empty() {
+                d.apply(label, ops)?;
+            }
+            if mode == SamplerMode::Layers && d.project().groups[g].sounds[s].sampler.as_ref().is_some_and(|x| x.envelope_type == 0) {
+                d.set(label, Target::Sampler(g, s), "envelope_type", Value::Float(2.0))?;
+            }
+            d.set_new_sampler_as(g, s, &NewSampler { mode, ..Default::default() }, label)
+        })
+    }
+
     /// Change how zone `z` plays (its mode, its tempo or root set by hand): one undo
     /// step, `label`.
     pub fn set_zone_meta(&mut self, g: usize, s: usize, z: usize, meta: &ZoneMeta, label: &str) -> Result<(), String> {
@@ -229,6 +275,89 @@ mod tests {
 
     fn zone_meta(d: &Document) -> Option<ZoneMeta> {
         d.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone()
+    }
+
+    fn sound(d: &Document) -> deckard_model::Sound {
+        d.project().groups[0].sounds[0].clone()
+    }
+
+    /// A Sampler Preview made before modes: in Layers if it has a layer, else Advanced;
+    /// a save keeps it.
+    #[test]
+    fn an_unwritten_mode_is_read_from_the_zones() {
+        let mut d = doc("/s/a.wav");
+        d.set_new_sampler(0, 0, Some(&NewSampler::default())).unwrap();
+        assert_eq!(sound(&d).new_sampler.unwrap().mode, SamplerMode::Advanced);
+        let file = path_of(&d);
+        let layer = ZoneMeta { file, layer: Some(Layer::default()), ..Default::default() };
+        d.set_zone_meta(0, 0, 0, &layer, "Layer").unwrap();
+        assert_eq!(sound(&d).new_sampler.unwrap().mode, SamplerMode::Layers);
+        let again = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(sound(&again).new_sampler.unwrap().mode, SamplerMode::Layers);
+        // Said, the mode is the one said, whatever the zones hold.
+        d.set_new_sampler(0, 0, Some(&NewSampler { mode: SamplerMode::Original, ..Default::default() })).unwrap();
+        assert_eq!(sound(&d).new_sampler.unwrap().mode, SamplerMode::Original);
+        let again = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(sound(&again).new_sampler.unwrap().mode, SamplerMode::Original);
+    }
+
+    fn three_zones() -> Document {
+        let mut d = doc("/s/a.wav");
+        let spec = |f: &str| crate::zones::ZoneSpec {
+            from: crate::zones::ZoneFrom::Template,
+            file: Some(f.into()),
+            set: vec![("key_range/low", 60.0), ("key_range/high", 60.0), ("play_range/low", 10.0), ("play_range/high", 20.0)],
+        };
+        d.set_zones(0, 0, &[spec("/s/a.wav"), spec("/s/b.wav"), spec("/s/c.wav")], "Load").unwrap();
+        d.set_new_sampler(0, 0, Some(&NewSampler { motion: deckard_model::new_sampler::Motion::Next, ..Default::default() })).unwrap();
+        d.set("Envelope", Target::Sampler(0, 0), "envelope_type", Value::Float(0.0)).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_mode_change_keeps_one_sample() {
+        let mut d = three_zones();
+        let b = sound(&d).sampler.unwrap().zones[1].sample.path.clone();
+        d.set_zone_meta(0, 0, 1, &meta(&b), "Zone Tempo").unwrap();
+        d.set_sampler_mode(0, 0, SamplerMode::Layers, Some((1, 1000))).unwrap();
+        let snd = sound(&d);
+        let smp = snd.sampler.as_ref().unwrap();
+        assert_eq!(smp.zones.len(), 1);
+        let z = &smp.zones[0];
+        assert_eq!((z.sample.path.as_str(), z.key_range, z.play_range), (b.as_str(), (0, 127), (0, 999)));
+        assert_eq!(z.meta, Some(ZoneMeta { file: b.clone(), layer: Some(Layer::default()), ..Default::default() }));
+        assert_eq!(snd.new_sampler, Some(NewSampler { mode: SamplerMode::Layers, ..Default::default() }));
+        assert_eq!(smp.envelope_type, 2, "ADSR: a layer's release has something to follow");
+        assert_eq!(d.undo_label(), Some("Sampler Mode"));
+        assert!(d.undo());
+        let snd = sound(&d);
+        let smp = snd.sampler.as_ref().unwrap();
+        assert_eq!((smp.zones.len(), smp.envelope_type), (3, 0), "one step back");
+        assert_eq!(smp.zones[1].meta, Some(meta(&b)));
+        assert_eq!(snd.new_sampler.unwrap().mode, SamplerMode::Advanced);
+        assert!(d.redo());
+        assert_eq!(sound(&d).sampler.unwrap().zones.len(), 1);
+        // To Advanced or Original: no layer; what was known of the sample goes.
+        d.set_sampler_mode(0, 0, SamplerMode::Original, Some((0, 0))).unwrap();
+        let snd = sound(&d);
+        assert_eq!(snd.sampler.as_ref().unwrap().zones[0].meta, None);
+        assert_eq!(snd.sampler.as_ref().unwrap().zones[0].play_range, (0, 999), "frames not known: the range stays");
+        assert_eq!(snd.new_sampler.unwrap().mode, SamplerMode::Original);
+        assert!(d.set_sampler_mode(0, 0, SamplerMode::Advanced, Some((4, 0))).is_err(), "no such zone");
+    }
+
+    #[test]
+    fn original_to_advanced_keeps_everything() {
+        let mut d = three_zones();
+        let n = NewSampler { mode: SamplerMode::Original, ..sound(&d).new_sampler.unwrap() };
+        d.set_new_sampler(0, 0, Some(&n)).unwrap();
+        d.set_sampler_mode(0, 0, SamplerMode::Advanced, None).unwrap();
+        let snd = sound(&d);
+        assert_eq!(snd.sampler.as_ref().unwrap().zones.len(), 3);
+        assert_eq!(snd.new_sampler, Some(NewSampler { mode: SamplerMode::Advanced, ..n }));
+        assert_eq!(d.undo_label(), Some("Sampler Mode"));
+        let mut plain = doc("/s/a.wav");
+        assert!(plain.set_sampler_mode(0, 0, SamplerMode::Layers, None).is_err(), "not a Sampler Preview");
     }
 
     #[test]

@@ -45,9 +45,34 @@ impl Motion {
     }
 }
 
+/// Which sampler a Sampler Preview is: what the sound offers is its mode's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SamplerMode {
+    /// What the classic Sampler does with the same zones, and no more.
+    Original,
+    /// Sync and Keys, stems on lanes, reverse, slices.
+    #[default]
+    Advanced,
+    /// Every zone is a layer ([`crate::layers`]).
+    Layers,
+}
+
+impl SamplerMode {
+    pub const ALL: [SamplerMode; 3] = [SamplerMode::Original, SamplerMode::Advanced, SamplerMode::Layers];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SamplerMode::Original => "Original",
+            SamplerMode::Advanced => "Advanced",
+            SamplerMode::Layers => "Layers",
+        }
+    }
+}
+
 /// The New Sampler's own settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NewSampler {
+    pub mode: SamplerMode,
     pub stretch: StretchEngine,
     pub motion: Motion,
     /// Its layers' morph ([`crate::layers`]).
@@ -353,6 +378,8 @@ fn from_word<T: Copy>(table: &[(T, &'static str)], w: &str) -> Option<T> {
 
 const STRETCH: &[(StretchEngine, &str)] = &[(StretchEngine::Rendered, "rendered"), (StretchEngine::Live, "live")];
 const MOTIONS: &[(Motion, &str)] = &[(Motion::Off, "off"), (Motion::Next, "next"), (Motion::Random, "random")];
+const SAMPLERS: &[(SamplerMode, &str)] =
+    &[(SamplerMode::Original, "original"), (SamplerMode::Advanced, "advanced"), (SamplerMode::Layers, "layers")];
 const SHAPES: &[(Shape, &str)] = &[(Shape::Round, "round"), (Shape::Back, "back")];
 const FADES: &[(Fade, &str)] = &[(Fade::Linear, "linear"), (Fade::Power, "power")];
 
@@ -411,6 +438,10 @@ impl NewSampler {
         if self.motion != Motion::Off {
             t += &format!("\nmotion {}", word(MOTIONS, self.motion, |a, b| a == b));
         }
+        // (Advanced, the default, isn't said: a project made before modes has none.)
+        if self.mode != SamplerMode::Advanced {
+            t += &format!("\nmode {}", word(SAMPLERS, self.mode, |a, b| a == b));
+        }
         let m = &self.morph;
         if *m != Morph::default() {
             t += &format!(
@@ -437,10 +468,17 @@ impl NewSampler {
                 "stretch" => n.stretch = from_word(STRETCH, v).unwrap_or(n.stretch),
                 "motion" => n.motion = from_word(MOTIONS, v).unwrap_or_default(),
                 "morph" => n.morph = morph_from(v).unwrap_or_default(),
+                "mode" => n.mode = from_word(SAMPLERS, v).unwrap_or_default(),
                 _ => {}
             }
         }
         n
+    }
+
+    /// Whether `text` says its mode (one made before modes, or in Advanced, doesn't: its
+    /// mode is then read from what its zones hold).
+    pub fn mode_written(text: &str) -> bool {
+        lines(text).any(|(k, v)| k == "mode" && from_word(SAMPLERS, v).is_some())
     }
 }
 
@@ -587,6 +625,19 @@ mod tests {
         assert_eq!(NewSampler::from_text(&n.to_text()), n);
         assert_eq!(NewSampler::from_text("v 1\nmorph 1 nonsense").morph, Morph::default());
         assert_eq!(NewSampler::from_text("v 1\nmorph 1 0.5 1 8 8 sideways 1 1 linear 1").morph, Morph::default());
+    }
+
+    #[test]
+    fn the_mode_is_written_unless_advanced() {
+        let n = |mode| NewSampler { mode, ..Default::default() };
+        assert_eq!(n(SamplerMode::Advanced).to_text(), "v 1\nstretch rendered");
+        for m in [SamplerMode::Original, SamplerMode::Layers] {
+            let t = n(m).to_text();
+            assert!(NewSampler::mode_written(&t), "{t}");
+            assert_eq!(NewSampler::from_text(&t).mode, m);
+        }
+        assert!(!NewSampler::mode_written("v 1\nstretch rendered"));
+        assert_eq!(NewSampler::from_text("v 1\nmode sideways").mode, SamplerMode::Advanced, "a mode not known");
     }
 
     #[test]
