@@ -248,6 +248,12 @@ impl Sender {
         p.started.keys().copied().collect()
     }
 
+    /// Live note pitches currently held per `(group, sound)`.
+    pub fn held_pitches(&self) -> std::collections::HashMap<(usize, usize), Vec<i64>> {
+        let Ok(p) = self.played.lock() else { return Default::default() };
+        p.held.clone()
+    }
+
     /// Whether an engine was sent to play.
     pub fn has_engine(&self) -> bool {
         self.has_engine.load(Ordering::Acquire)
@@ -346,6 +352,7 @@ pub struct Output {
     channels: usize,
     /// Effects' meters for their panels (the Compressor's).
     fx_meters: Arc<crate::meters::FxMeters>,
+    eq_spectrum: Arc<crate::eq_spectrum::EqSpectrum>,
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
     /// The MIDI input plug-ins by group, since the plug-ins are on the audio thread.
@@ -713,7 +720,10 @@ impl Output {
                 if let Ok(mut t) = telemetry.try_lock() {
                     match engine.as_mut() {
                         Some(e) => e.publish(&mut t),
-                        None => t.finished = true,
+                        None => {
+                            t.finished = true;
+                            t.loop_playing.fill(0);
+                        }
                     }
                     t.has_engine = engine.is_some();
                     t.actions = applied;
@@ -871,6 +881,7 @@ impl Output {
             focus: std::sync::atomic::AtomicUsize::new(usize::MAX),
             plays: AtomicU64::new(0),
             fx_meters: Arc::default(),
+            eq_spectrum: Arc::default(),
             route_travels: Arc::default(),
             midi_inputs: Mutex::default(),
             midi_inputs_waiting: Mutex::default(),
@@ -935,6 +946,7 @@ impl Output {
         engine.set_clock_out(self.clock_out.lock().unwrap().clone());
         engine.pool = self.pool.clone();
         engine.set_fx_meters(&self.fx_meters);
+        engine.set_fx_spectrum(&self.eq_spectrum);
         engine.set_route_travels(&self.route_travels);
         for (group, plugin) in std::mem::take(&mut *self.midi_inputs_waiting.lock().unwrap()) {
             engine.set_midi_input(group, Some(plugin));
@@ -959,6 +971,11 @@ impl Output {
     /// call: (input level, gain reduction in dB, output level).
     pub fn fx_meters(&self, g: usize, s: usize, slot: usize) -> (f32, f32, f32) {
         self.fx_meters.take(g, s, slot)
+    }
+
+    /// The monitor for the focused internal EQ.
+    pub fn eq_spectrum(&self) -> &Arc<crate::eq_spectrum::EqSpectrum> {
+        &self.eq_spectrum
     }
 
     /// Where route `k` of sound (`g`, `s`) has its knob now (0..1), as the playing
@@ -995,6 +1012,7 @@ impl Output {
     pub fn adopt(&self, fresh: Engine, project: &deckard_model::Project) {
         let mut fresh = fresh;
         fresh.set_fx_meters(&self.fx_meters);
+        fresh.set_fx_spectrum(&self.eq_spectrum);
         fresh.set_route_travels(&self.route_travels);
         let (mode, queued) = self.telemetry(|t| (t.mode, t.queued));
         // `fresh` already holds the timeline for `fresh.mode` when timelines changed.
@@ -1158,6 +1176,11 @@ impl Output {
         self.sender.played_notes()
     }
 
+    /// See [`Sender::held_pitches`].
+    pub fn held_pitches(&self) -> std::collections::HashMap<(usize, usize), Vec<i64>> {
+        self.sender.held_pitches()
+    }
+
     /// Copy audio from inside the engine to `tap` (or stop, with `None`).
     pub fn set_tap(&self, tap: Option<Tap>) {
         self.sender.send(Command::SetTap(tap));
@@ -1271,6 +1294,12 @@ impl Output {
     /// The cue bus's peaks since the last call (reset).
     pub fn take_cue_peak(&self) -> (f32, f32) {
         self.telemetry(|t| std::mem::take(&mut t.cue_peak))
+    }
+
+    /// Per-group bitmask (`1 << sound`, up to 64 sounds) of unmuted sounds actively
+    /// playing a loop (`SamplerRt::loop_playing`).
+    pub fn loop_playing(&self) -> Vec<u64> {
+        self.telemetry(|t| t.loop_playing.clone())
     }
 
     /// Where zone `zone` of a sound plays, as last published; it is watched from now

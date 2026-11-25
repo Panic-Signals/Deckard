@@ -2211,6 +2211,7 @@ dependencies = [
  "hound",
  "lewton",
  "plist",
+ "realfft",
  "symphonia",
  "tempfile",
  "transit-audio-asio",
@@ -2300,6 +2301,7 @@ dependencies = [
 name = "deckard-plugins"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "deckard-mi",
  "deckard-model",
  "libc",
@@ -2344,6 +2346,7 @@ dependencies = [
  "fontdue",
  "mlua",
  "png",
+ "serde_json",
  "tempfile",
 ]
 

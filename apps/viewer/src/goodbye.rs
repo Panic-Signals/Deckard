@@ -1,6 +1,7 @@
-//! What the MK3's displays show once DECKARD has closed: on each, an old CRT television
+//! The standby picture `--goodbye` draws: on each display, an old CRT television
 //! glowing teal, a little static on the tube, and DECKARD across it in the logo font
-//! (built in, or `logo.ttf` in the settings folder).
+//! (built in, or `logo.ttf` in the settings folder). Closing the app does not send
+//! this; the displays go black, so the wordmark is not left to burn in.
 
 /// Both displays side by side, as the display thread takes them.
 pub const WIDTH: usize = 960;

@@ -15,6 +15,7 @@ pub mod native;
 pub mod nks;
 #[cfg(windows)]
 mod reaktor_preset;
+pub mod spectrum;
 pub mod tuner;
 pub mod zhora;
 /// Mutable Instruments' licence (Plaits), for the About box.
@@ -24,13 +25,15 @@ mod replicant;
 #[cfg(target_os = "linux")]
 pub mod runloop;
 pub mod scan;
+pub mod seh;
 pub mod state;
+pub use seh::set_fault_logger;
 
 use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream};
 use module::Module;
 use state::{PluginId, State};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
@@ -151,8 +154,10 @@ impl KnobBases {
 
 /// A running VST3 plug-in.
 struct Vst3 {
-    component: ComPtr<IComponent>,
-    processor: ComPtr<IAudioProcessor>,
+    label: String,
+    faulted: Arc<AtomicBool>,
+    component: std::mem::ManuallyDrop<ComPtr<IComponent>>,
+    processor: std::mem::ManuallyDrop<ComPtr<IAudioProcessor>>,
     controller: Option<ComPtr<IEditController>>,
     /// The controller is a separate object (not the component itself).
     separate: bool,
@@ -206,6 +211,7 @@ pub struct Plugin {
     pub name: String,
     pub id: PluginId,
     kind: Kind,
+    spectrum_tap: Option<spectrum::Tap>,
 }
 
 enum Kind {
@@ -239,13 +245,21 @@ impl Plugin {
     /// Create an instance of `id`'s class from `module`, ready to process at
     /// `sample_rate`, with no state set yet.
     pub fn new(module: &Arc<Module>, id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
-        let v = Vst3::new(module, &id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)) })
+        let v = Vst3::new(module, &id, name, sample_rate)?;
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)), spectrum_tap: None })
+    }
+
+    /// True if this instance hit a native hardware fault and has been quarantined.
+    pub fn is_faulted(&self) -> bool {
+        match &self.kind {
+            Kind::Vst3(p) => p.faulted.load(Ordering::Relaxed),
+            _ => false,
+        }
     }
 
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
-        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))) }
+        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))), spectrum_tap: None }
     }
 
     /// An instance of the Audio Unit `id` names, ready to process at `sample_rate`, with
@@ -253,7 +267,7 @@ impl Plugin {
     #[cfg(target_os = "macos")]
     pub fn audio_unit(id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let au = au::AudioUnit::new(&id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)) })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)), spectrum_tap: None })
     }
 
     /// What an Audio Unit shares with its window; none for any other plug-in.
@@ -492,7 +506,19 @@ impl Plugin {
         input: Option<(&[f32], &[f32])>,
         sidechain: Option<(&[f32], &[f32])>,
     ) -> (&[f32], &[f32]) {
-        each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain))
+        let out = each!(mut self, p => p.process_input_sc(frames, transport, input, sidechain));
+        if let Some(tap) = &mut self.spectrum_tap {
+            match input {
+                Some(input) => tap.push(input, out),
+                None => tap.push_output(out),
+            }
+        }
+        out
+    }
+
+    /// Attach a tap prepared off the audio thread.
+    pub fn set_spectrum_tap(&mut self, tap: spectrum::Tap) {
+        self.spectrum_tap = Some(tap);
     }
 
     /// A way to read and change a VST3's or an Audio Unit's parameters without holding
@@ -606,7 +632,7 @@ impl Plugin {
     /// The VST3 component (to query buses and the like); none for DECKARD's own.
     pub fn component(&self) -> Option<&ComPtr<IComponent>> {
         match &self.kind {
-            Kind::Vst3(p) => Some(&p.component),
+            Kind::Vst3(p) if !p.faulted.load(Ordering::Relaxed) => Some(&p.component),
             _ => None,
         }
     }
@@ -617,20 +643,25 @@ fn ok(r: tresult, what: &str) -> Result<(), String> {
 }
 
 impl Vst3 {
-    fn new(module: &Arc<Module>, id: &PluginId, sample_rate: f64) -> Result<Vst3, String> {
+    fn new(module: &Arc<Module>, id: &PluginId, name: &str, sample_rate: f64) -> Result<Vst3, String> {
         let host = ComWrapper::new(HostApp);
         let host_ptr = host.as_com_ref::<IHostApplication>().unwrap().as_ptr() as *mut FUnknown;
         let mut obj = std::ptr::null_mut();
         // (As its factory knows it: the id may have come from another system.)
         let cid = module.class_id(&id.cid).unwrap_or(id.cid);
-        unsafe {
-            ok(
-                module.factory.createInstance(cid.as_ptr() as FIDString, IComponent::IID.as_ptr() as FIDString, &mut obj),
-                "creating the plug-in",
-            )?;
-        }
+        let created = seh::guard(name, "createInstance", || unsafe {
+            module.factory.createInstance(cid.as_ptr() as FIDString, IComponent::IID.as_ptr() as FIDString, &mut obj)
+        })?;
+        ok(created, "creating the plug-in")?;
         let component = unsafe { ComPtr::from_raw(obj as *mut IComponent) }.ok_or("the plug-in has no component")?;
-        unsafe { ok(component.initialize(host_ptr), "initializing the plug-in")? };
+        let inited = match seh::guard(name, "initialize", || unsafe { component.initialize(host_ptr) }) {
+            Ok(r) => r,
+            Err(e) => {
+                std::mem::forget(component);
+                return Err(e);
+            }
+        };
+        ok(inited, "initializing the plug-in")?;
         let processor = component.cast::<IAudioProcessor>().ok_or("the plug-in has no audio processor")?;
 
         // The edit controller: the component itself, or a separate class.
@@ -695,20 +726,25 @@ impl Vst3 {
             maxSamplesPerBlock: MAX_BLOCK as i32,
             sampleRate: sample_rate,
         };
-        unsafe { ok(processor.setupProcessing(&mut setup), "setting up processing")? };
+        let setup_res = seh::guard(name, "setupProcessing", || unsafe { processor.setupProcessing(&mut setup) })?;
+        ok(setup_res, "setting up processing")?;
 
         let mut midi_map = [None; 130];
         if let Some(m) = controller.as_ref().and_then(|c| c.cast::<IMidiMapping>()) {
-            for (cc, slot) in midi_map.iter_mut().enumerate() {
-                let mut id: ParamID = 0;
-                if unsafe { m.getMidiControllerAssignment(0, 0, cc as CtrlNumber, &mut id) } == kResultOk {
-                    *slot = Some(id);
+            let _ = seh::guard(name, "getMidiControllerAssignment", || {
+                for (cc, slot) in midi_map.iter_mut().enumerate() {
+                    let mut id: ParamID = 0;
+                    if unsafe { m.getMidiControllerAssignment(0, 0, cc as CtrlNumber, &mut id) } == kResultOk {
+                        *slot = Some(id);
+                    }
                 }
-            }
+            });
         }
         let mut p = Vst3 {
-            component,
-            processor,
+            label: name.to_string(),
+            faulted: Arc::new(AtomicBool::new(false)),
+            component: std::mem::ManuallyDrop::new(component),
+            processor: std::mem::ManuallyDrop::new(processor),
             controller,
             separate,
             connection,
@@ -754,38 +790,71 @@ impl Vst3 {
     }
 
     fn set_active(&mut self, on: bool) {
-        if self.active == on {
+        if self.active == on || self.faulted.load(Ordering::Relaxed) {
             return;
         }
-        unsafe {
+        let component = &*self.component;
+        let processor = &*self.processor;
+        let r = seh::guard(&self.label, if on { "setActive(1)" } else { "setActive(0)" }, || unsafe {
             if on {
-                self.component.setActive(1);
-                self.processor.setProcessing(1);
+                component.setActive(1);
+                processor.setProcessing(1);
             } else {
-                self.processor.setProcessing(0);
-                self.component.setActive(0);
+                processor.setProcessing(0);
+                component.setActive(0);
             }
+        });
+        if r.is_err() {
+            self.faulted.store(true, Ordering::Relaxed);
+            self.active = false;
+            return;
         }
         self.active = on;
     }
 
     fn set_state(&mut self, state: &State) -> Result<(), String> {
+        if self.faulted.load(Ordering::Relaxed) {
+            return Err("plug-in instance is quarantined after a prior fault".into());
+        }
         self.set_active(false);
+        if self.faulted.load(Ordering::Relaxed) {
+            return Err("plug-in faulted while deactivating before setState".into());
+        }
         let mut result = Ok(());
         if !state.component.is_empty() {
             let s = Stream::new(state.component.clone());
-            let r = unsafe { self.component.setState(s.as_com_ref::<IBStream>().unwrap().as_ptr()) };
+            let stream_ptr = s.as_com_ref::<IBStream>().unwrap().as_ptr();
+            let comp = &*self.component;
+            let r = match seh::guard(&self.label, "IComponent::setState", || unsafe { comp.setState(stream_ptr) }) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.faulted.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
+            };
             result = ok(r, "restoring the plug-in's state");
             if let Some(c) = &self.controller {
                 let s = Stream::new(state.component.clone());
-                unsafe { c.setComponentState(s.as_com_ref::<IBStream>().unwrap().as_ptr()) };
+                let stream_ptr = s.as_com_ref::<IBStream>().unwrap().as_ptr();
+                if let Err(e) = seh::guard(&self.label, "IEditController::setComponentState", || unsafe {
+                    c.setComponentState(stream_ptr);
+                }) {
+                    self.faulted.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
             }
         }
         if !state.controller.is_empty()
             && let Some(c) = &self.controller
         {
             let s = Stream::new(state.controller.clone());
-            unsafe { c.setState(s.as_com_ref::<IBStream>().unwrap().as_ptr()) };
+            let stream_ptr = s.as_com_ref::<IBStream>().unwrap().as_ptr();
+            if let Err(e) = seh::guard(&self.label, "IEditController::setState", || unsafe {
+                c.setState(stream_ptr);
+            }) {
+                self.faulted.store(true, Ordering::Relaxed);
+                return Err(e);
+            }
         }
         self.held = [false; 128];
         self.set_active(true);
@@ -820,7 +889,7 @@ impl Vst3 {
     /// Hand the processor the parameter changes waiting, at once: a process call of no
     /// frames, as VST3 allows for this (no notes go with it).
     fn flush_params(&mut self) {
-        if !self.active || self.outputs.first().is_none_or(|b| b.is_empty()) {
+        if !self.active || self.faulted.load(Ordering::Relaxed) || self.outputs.first().is_none_or(|b| b.is_empty()) {
             return;
         }
         let mut data = ProcessData {
@@ -837,20 +906,38 @@ impl Vst3 {
             outputEvents: std::ptr::null_mut(),
             processContext: std::ptr::null_mut(),
         };
-        unsafe { self.processor.process(&mut data) };
+        let proc = &*self.processor;
+        let data_ptr = &mut data as *mut ProcessData;
+        if seh::guard(&self.label, "IAudioProcessor::process(0)", || unsafe { proc.process(data_ptr) }).is_err() {
+            self.faulted.store(true, Ordering::Relaxed);
+            self.active = false;
+        }
         self.params_in.clear();
         self.params_out.clear();
     }
 
     fn read_state(&self) -> State {
+        if self.faulted.load(Ordering::Relaxed) {
+            return State { component: Vec::new(), controller: Vec::new() };
+        }
         let s = Stream::new(Vec::new());
-        unsafe { self.component.getState(s.as_com_ref::<IBStream>().unwrap().as_ptr()) };
+        let stream_ptr = s.as_com_ref::<IBStream>().unwrap().as_ptr();
+        let comp = &*self.component;
+        if seh::guard(&self.label, "IComponent::getState", || unsafe { comp.getState(stream_ptr) }).is_err() {
+            self.faulted.store(true, Ordering::Relaxed);
+            return State { component: Vec::new(), controller: Vec::new() };
+        }
         let component = s.take();
         let controller = match &self.controller {
             Some(c) if self.separate => {
                 let s = Stream::new(Vec::new());
-                unsafe { c.getState(s.as_com_ref::<IBStream>().unwrap().as_ptr()) };
-                s.take()
+                let stream_ptr = s.as_com_ref::<IBStream>().unwrap().as_ptr();
+                if seh::guard(&self.label, "IEditController::getState", || unsafe { c.getState(stream_ptr) }).is_err() {
+                    self.faulted.store(true, Ordering::Relaxed);
+                    Vec::new()
+                } else {
+                    s.take()
+                }
             }
             _ => Vec::new(),
         };
@@ -1086,7 +1173,7 @@ impl Vst3 {
         sidechain: Option<(&[f32], &[f32])>,
     ) -> (&[f32], &[f32]) {
         let frames = frames.min(MAX_BLOCK);
-        if !self.active || frames == 0 || self.outputs.first().is_none_or(|b| b.is_empty()) {
+        if !self.active || self.faulted.load(Ordering::Relaxed) || frames == 0 || self.outputs.first().is_none_or(|b| b.is_empty()) {
             self.events.events.borrow_mut().clear();
             return (&[], &[]);
         }
@@ -1165,7 +1252,21 @@ impl Vst3 {
             outputEvents: std::ptr::null_mut(),
             processContext: &mut ctx,
         };
-        unsafe { self.processor.process(&mut data) };
+        let proc = &*self.processor;
+        let data_ptr = &mut data as *mut ProcessData;
+        if seh::guard(&self.label, "IAudioProcessor::process", || unsafe { proc.process(data_ptr) }).is_err() {
+            self.faulted.store(true, Ordering::Relaxed);
+            self.active = false;
+            self.events.events.borrow_mut().clear();
+            self.params_in.clear();
+            self.params_out.clear();
+            for bus in &mut self.outputs {
+                for ch in bus {
+                    ch[..frames].fill(0.0);
+                }
+            }
+            return (&[], &[]);
+        }
         self.events.events.borrow_mut().clear();
         self.params_in.clear();
         // Parameter changes the processor reports go to the controller (its editor).
@@ -1203,20 +1304,49 @@ impl Vst3 {
 
 impl Drop for Vst3 {
     fn drop(&mut self) {
+        if self.faulted.load(Ordering::Relaxed) {
+            // Never call terminate() or Release() on a C++ instance that faulted.
+            std::mem::forget(self.connection.take());
+            std::mem::forget(self.controller.take());
+            return;
+        }
         self.set_active(false);
-        unsafe {
-            if let Some((a, b)) = self.connection.take() {
+        if self.faulted.load(Ordering::Relaxed) {
+            std::mem::forget(self.connection.take());
+            std::mem::forget(self.controller.take());
+            return;
+        }
+        let label = self.label.clone();
+        let conn = self.connection.take();
+        let ctrl = self.controller.take();
+        let separate = self.separate;
+        let comp = &*self.component;
+        let tore_down = seh::guard(&label, "terminate", || unsafe {
+            if let Some((a, b)) = &conn {
                 a.disconnect(b.as_ptr());
                 b.disconnect(a.as_ptr());
             }
-            if let Some(c) = &self.controller {
+            if let Some(c) = &ctrl {
                 c.setComponentHandler(std::ptr::null_mut());
-                if self.separate {
+                if separate {
                     c.terminate();
                 }
             }
-            self.component.terminate();
+            comp.terminate();
+        })
+        .is_ok();
+        if !tore_down {
+            self.faulted.store(true, Ordering::Relaxed);
+            std::mem::forget(conn);
+            std::mem::forget(ctrl);
+            return;
         }
+        let _ = seh::guard(&label, "Release", || unsafe {
+            drop(conn);
+            drop(ctrl);
+            std::mem::ManuallyDrop::drop(&mut self.processor);
+            std::mem::ManuallyDrop::drop(&mut self.component);
+        });
     }
 }
 
@@ -1340,21 +1470,33 @@ impl Host {
         if cfg!(not(target_os = "macos")) && id.format == state::Format::AudioUnit {
             return Err(format!("{name}: plug-in format not supported ({plugin_id})"));
         }
-        if let Some(shared) = self.instances.get(&slot) {
-            // `self.instances` holds the sole Arc when no live Engine/player shares it yet.
-            let unshared = Arc::strong_count(shared) == 1;
+        if let Some(shared) = self.instances.get(&slot).cloned() {
+            // `self.instances` holds the only other Arc when no live Engine/player shares it yet.
+            let unshared = Arc::strong_count(&shared) == 2;
             let mut p = shared.lock().unwrap();
-            if p.id.cid == id.cid && p.sample_rate() == sample_rate {
+            let was_faulted = p.is_faulted();
+            if !was_faulted && p.id.cid == id.cid && p.sample_rate() == sample_rate {
                 p.name = name.to_string();
-                p.id = id;
+                p.id = id.clone();
                 if p.chunk() != chunk {
-                    p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
+                    if let Err(e) = p.load_chunk(chunk) {
+                        let faulted = p.is_faulted();
+                        drop(p);
+                        if faulted {
+                            self.instances.remove(&slot);
+                        }
+                        return Err(format!("{name}: {e}"));
+                    }
                     if unshared {
                         p.warm_up();
                     }
                 }
                 drop(p);
-                return Ok(shared.clone());
+                return Ok(shared);
+            }
+            drop(p);
+            if was_faulted {
+                self.instances.remove(&slot);
             }
         }
         // DECKARD's own plug-ins need no module, and may be made on any thread.

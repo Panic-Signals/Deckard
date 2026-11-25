@@ -117,6 +117,17 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     d.set("device", lua.create_function(|_, ()| Ok(crate::sources::DEVICE))?)?;
     let sh = shared.clone();
     d.set("now", lua.create_function(move |_, ()| Ok(sh.borrow().now))?)?;
+    // A page's timer that ends with no event (a touch focus fading): the screens are
+    // drawn often until `t` (on the `now` clock), as with a moving border.
+    let sh = shared.clone();
+    d.set(
+        "redraw_until",
+        lua.create_function(move |_, t: f64| {
+            let mut sh = sh.borrow_mut();
+            sh.redraw_until = sh.redraw_until.max(t);
+            Ok(())
+        })?,
+    )?;
     let sh = shared.clone();
     d.set("page", lua.create_function(move |_, ()| Ok(sh.borrow().page.clone()))?)?;
     {
@@ -1021,6 +1032,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     // the values it shows on its strips.
     request!("choke_all", () => Action::ChokeAll);
     request!("delete_pattern", (group: usize, pattern: usize) => Action::DeletePattern { group: index(group, "a group")?, pattern: index(pattern, "a pattern")? });
+    request!("toggle_audio_loop", (group: usize, sound: usize) => Action::ToggleAudioLoop {
+        group: index(group, "a group")?,
+        sound: index(sound, "a sound")?,
+    });
     request!("copy_pattern", (group: usize, from: usize, to: usize) => Action::CopyPattern {
         group: index(group, "a group")?,
         from: index(from, "a pattern")?,
@@ -1488,6 +1503,8 @@ fn group_part(lua: &Lua, g: &crate::GroupView, part: &str) -> mlua::Result<Value
                 st.set("default_color", s.default_color)?;
                 st.set("prob_locked", s.prob_locked)?;
                 st.set("selected", s.selected)?;
+                st.set("loop_mode", s.loop_mode)?;
+                st.set("loop_playing", s.loop_playing)?;
                 if let Some(a) = &s.audio {
                     let at = lua.create_table()?;
                     // (Flat: min, max, min, max, …; a column a pixel or two.)
@@ -1543,6 +1560,11 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
         let Some(curve) = curve else { continue };
         let t = lua.create_table()?;
         t.set("points", lua.create_sequence_from(curve.points.iter().copied())?)?;
+        for (key, points) in ["spectrum_in", "spectrum_out"].into_iter().zip(&curve.spectrum) {
+            if !points.is_empty() {
+                t.set(key, lua.create_sequence_from(points.iter().copied())?)?;
+            }
+        }
         let bands = lua.create_table()?;
         for (i, (x, y)) in curve.bands.iter().enumerate() {
             let b = lua.create_table()?;
@@ -1650,6 +1672,12 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
                 kt.set("text", knob.text.as_str())?;
                 kt.set("value", knob.value)?;
                 kt.set("modulatable", knob.modulatable)?;
+                kt.set("mod_position", knob.mod_position)?;
+                kt.set("id", knob.param_id)?;
+                if !knob.choices.is_empty() {
+                    kt.set("choices", lua.create_sequence_from(knob.choices.iter().map(String::as_str))?)?;
+                }
+                kt.set("mod_text", knob.mod_text.as_deref())?;
                 kt.set("step_mod", knob.step_mod.as_deref())?;
                 kt.set("auto_mod", knob.auto_mod.as_deref())?;
                 kt.set("macro", knob.in_macro)?;
@@ -1716,6 +1744,8 @@ fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
         prob_locked,
         selected,
         audio,
+        loop_mode,
+        loop_playing,
         mix,
         playing: _,
         hits: _,
@@ -1739,6 +1769,8 @@ fn sound_static_eq(old: &crate::SoundView, new: &crate::SoundView) -> bool {
         && *prob_locked == new.prob_locked
         && *selected == new.selected
         && *audio == new.audio
+        && *loop_mode == new.loop_mode
+        && *loop_playing == new.loop_playing
         && mix_static_eq(mix, &new.mix)
 }
 

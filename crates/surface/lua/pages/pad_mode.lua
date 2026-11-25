@@ -154,7 +154,15 @@ function page.draw(screen, theme)
     end
     widgets.params(screen, theme, 0, { { text = "Choke", at = 1 }, { text = "Link", at = 3 } }, paged.label(pages), params)
   end
-  widgets.pad_grid(screen, theme, widgets.sound_pads(s))
+  local pad_tiles = widgets.sound_pads(s)
+  local grp = s.groups[s.group]
+  for i, p in ipairs(pad_tiles) do
+    local sound = grp and grp.sounds[i]
+    if sound and not p.empty and (sound.loop_playing or deckard.pad_held(i)) then
+      p.on = true
+    end
+  end
+  widgets.pad_grid(screen, theme, pad_tiles)
 end
 
 return page
