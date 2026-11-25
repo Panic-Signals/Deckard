@@ -498,8 +498,9 @@ mod app_tests {
             app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone().unwrap().stems
         };
         let l = lanes(&app);
+        // By the path's own separator: a backslash on Windows.
         let names: Vec<String> =
-            l.iter().map(|x| x.as_ref().unwrap().file.rsplit('/').next().unwrap().trim_end_matches(".wav").to_string()).collect();
+            l.iter().map(|x| std::path::Path::new(&x.as_ref().unwrap().file).file_stem().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["Hits Drums", "Hits Vocal", "Hits Bass", "Hits Other"], "{}", app.status);
         assert!(l.iter().flatten().all(|x| !x.mute && x.gain == 1.0 && std::path::Path::new(&x.file).exists()));
         assert_eq!(app.doc.as_ref().unwrap().borrow().undo_label(), Some("Stems"));

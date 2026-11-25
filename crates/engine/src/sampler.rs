@@ -1347,6 +1347,8 @@ pub struct SamplerRt {
     song: (f64, bool),
     /// The note starting now comes from a playing pattern (set around a note-on).
     pub from_timeline: bool,
+    /// Beats into the note starting now (see [`SamplerRt::note_on_at`]); 0 otherwise.
+    skip: f64,
 }
 
 impl SamplerRt {
@@ -1394,6 +1396,7 @@ impl SamplerRt {
             audio: None,
             tempo: 0.0,
             from_timeline: false,
+            skip: 0.0,
         }
     }
 
@@ -1734,6 +1737,24 @@ impl SamplerRt {
         }
     }
 
+    /// Whether this sound plays sample zones, which can join a pattern's note part-way
+    /// through (a synth or the Audio plug-in can't).
+    pub fn can_chase(&self) -> bool {
+        self.synth.is_none() && self.audio.is_none() && !self.zones.is_empty()
+    }
+
+    /// A note that started `skip` beats ago (its pattern put in under a playing song):
+    /// its zones play from as far in as they would be by now. Only zones: a synth's or
+    /// the Audio plug-in's note isn't joined late.
+    pub fn note_on_at(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context, skip: f64) {
+        if skip > 0.0 && !self.can_chase() {
+            return;
+        }
+        self.skip = skip.max(0.0);
+        self.note_on(id, note, velocity, ctx);
+        self.skip = 0.0;
+    }
+
     /// Note-on (§9). `id` identifies the note for its note-off.
     pub fn note_on(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context) {
         self.tempo = ctx.tempo;
@@ -1917,6 +1938,27 @@ impl SamplerRt {
                     rise = RISE.min((self.sr * 0.003) as u32).max(1);
                 }
             }
+        }
+        // A note joined late: as far in as it would be by now (a loop wrapped round),
+        // faded in rather than clicking.
+        if self.skip > 0.0 && forward && ctx.tempo > 0.0 {
+            let rate = z.sample.rate as f64;
+            let frames = match &z.sync {
+                Some(sy) if sy.tempo > 0.0 => self.skip * 60.0 / sy.tempo * rate,
+                _ => {
+                    let octaves = z.tune / 12.0 + s.tune + (note - z.root) as f32 / 12.0;
+                    self.skip * 60.0 / ctx.tempo * rate * 2f64.powf(octaves as f64)
+                }
+            };
+            let mut at = z.play.0 as i64 + offset + frames.round() as i64;
+            if let Some((a, b)) = z.looped.filter(|_| looping)
+                && at >= b as i64
+                && b > a
+            {
+                at = a as i64 + (at - a as i64).rem_euclid((b - a) as i64);
+            }
+            offset = (at - z.play.0 as i64).clamp(0, (len as i64 - 1).max(0));
+            rise = RISE.min((self.sr * 0.003) as u32).max(1);
         }
         let stream = Stream {
             pos: match z.looped {
@@ -2165,6 +2207,18 @@ impl SamplerRt {
         self.bend = 0.0;
         // Slice Motion starts over.
         self.turn = 0;
+    }
+
+    /// Whether a loop is actively playing now (a cued Loop-mode Audio plug-in, or a
+    /// looped Sampler voice that hasn't been released or choked).
+    pub fn loop_playing(&self) -> bool {
+        if let Some(a) = &self.audio {
+            return a.loop_playing();
+        }
+        if self.synth.is_some() {
+            return false;
+        }
+        self.voices.iter().any(|v| v.stream.looped.is_some() && !v.stream.done && v.fade.is_none() && !v.released)
     }
 
     /// Mix the voices into interleaved `out`; returns the peak (left, right).
