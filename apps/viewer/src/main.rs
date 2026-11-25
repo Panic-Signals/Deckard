@@ -1492,6 +1492,9 @@ pub struct App {
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
     /// The focused synth's scope (chain, slot) as last shown, while the audio thread has it.
     scope_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::ScopeView)>>,
+    /// A hosted plug-in's live output as its scope shows it: the slot, the instance tapped
+    /// (a reload makes a new one) and the tap's reader, and the picture last made.
+    live_scope: std::cell::RefCell<Option<zhora_ui::LiveScope>>,
     /// The preview last rendered of an internal synth, with the module and the parameters
     /// it was rendered from: rendered again only when they change.
     internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,

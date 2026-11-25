@@ -25,6 +25,7 @@ pub mod runloop;
 pub mod scan;
 pub mod seh;
 pub mod state;
+pub mod tap;
 pub use seh::set_fault_logger;
 
 use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream};
@@ -210,6 +211,8 @@ pub struct Plugin {
     pub id: PluginId,
     kind: Kind,
     spectrum_tap: Option<spectrum::Tap>,
+    /// Where its audio goes for the UI to look at ([`Plugin::set_tap`]).
+    tap: Option<tap::Tap>,
 }
 
 enum Kind {
@@ -244,7 +247,7 @@ impl Plugin {
     /// `sample_rate`, with no state set yet.
     pub fn new(module: &Arc<Module>, id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let v = Vst3::new(module, &id, name, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)), spectrum_tap: None })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::Vst3(Box::new(v)), spectrum_tap: None, tap: None })
     }
 
     /// True if this instance hit a native hardware fault and has been quarantined.
@@ -257,7 +260,13 @@ impl Plugin {
 
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
-        Plugin { name: name.to_string(), id, kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))), spectrum_tap: None }
+        Plugin {
+            name: name.to_string(),
+            id,
+            kind: Kind::Native(Box::new(native::Instance::new(class, sample_rate))),
+            spectrum_tap: None,
+            tap: None,
+        }
     }
 
     /// An instance of the Audio Unit `id` names, ready to process at `sample_rate`, with
@@ -265,7 +274,7 @@ impl Plugin {
     #[cfg(target_os = "macos")]
     pub fn audio_unit(id: PluginId, name: &str, sample_rate: f64) -> Result<Plugin, String> {
         let au = au::AudioUnit::new(&id, sample_rate)?;
-        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)), spectrum_tap: None })
+        Ok(Plugin { name: name.to_string(), id, kind: Kind::AudioUnit(Box::new(au)), spectrum_tap: None, tap: None })
     }
 
     /// What an Audio Unit shares with its window; none for any other plug-in.
@@ -511,12 +520,25 @@ impl Plugin {
                 None => tap.push_output(out),
             }
         }
+        if let Some(tap) = &mut self.tap {
+            match input {
+                Some(input) => tap.push(input, out),
+                None => tap.push_output(out),
+            }
+        }
         out
     }
 
     /// Attach a tap prepared off the audio thread.
     pub fn set_spectrum_tap(&mut self, tap: spectrum::Tap) {
         self.spectrum_tap = Some(tap);
+    }
+
+    /// Copy its main input and output to `tap` as it plays (any kind of plug-in), or stop
+    /// with `None`. Make the tap off the audio thread ([`tap::channel`]); its reader
+    /// going away stops it as well.
+    pub fn set_tap(&mut self, tap: Option<tap::Tap>) {
+        self.tap = tap;
     }
 
     /// A way to read and change a VST3's or an Audio Unit's parameters without holding
