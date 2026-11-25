@@ -352,6 +352,7 @@ pub struct Output {
     channels: usize,
     /// Effects' meters for their panels (the Compressor's).
     fx_meters: Arc<crate::meters::FxMeters>,
+    eq_spectrum: Arc<crate::eq_spectrum::EqSpectrum>,
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
     /// The MIDI input plug-ins by group, since the plug-ins are on the audio thread.
@@ -880,6 +881,7 @@ impl Output {
             focus: std::sync::atomic::AtomicUsize::new(usize::MAX),
             plays: AtomicU64::new(0),
             fx_meters: Arc::default(),
+            eq_spectrum: Arc::default(),
             route_travels: Arc::default(),
             midi_inputs: Mutex::default(),
             midi_inputs_waiting: Mutex::default(),
@@ -944,6 +946,7 @@ impl Output {
         engine.set_clock_out(self.clock_out.lock().unwrap().clone());
         engine.pool = self.pool.clone();
         engine.set_fx_meters(&self.fx_meters);
+        engine.set_fx_spectrum(&self.eq_spectrum);
         engine.set_route_travels(&self.route_travels);
         for (group, plugin) in std::mem::take(&mut *self.midi_inputs_waiting.lock().unwrap()) {
             engine.set_midi_input(group, Some(plugin));
@@ -968,6 +971,11 @@ impl Output {
     /// call: (input level, gain reduction in dB, output level).
     pub fn fx_meters(&self, g: usize, s: usize, slot: usize) -> (f32, f32, f32) {
         self.fx_meters.take(g, s, slot)
+    }
+
+    /// The monitor for the focused internal EQ.
+    pub fn eq_spectrum(&self) -> &Arc<crate::eq_spectrum::EqSpectrum> {
+        &self.eq_spectrum
     }
 
     /// Where route `k` of sound (`g`, `s`) has its knob now (0..1), as the playing
@@ -1004,6 +1012,7 @@ impl Output {
     pub fn adopt(&self, fresh: Engine, project: &deckard_model::Project) {
         let mut fresh = fresh;
         fresh.set_fx_meters(&self.fx_meters);
+        fresh.set_fx_spectrum(&self.eq_spectrum);
         fresh.set_route_travels(&self.route_travels);
         let (mode, queued) = self.telemetry(|t| (t.mode, t.queued));
         // `fresh` already holds the timeline for `fresh.mode` when timelines changed.

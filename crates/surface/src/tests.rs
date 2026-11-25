@@ -656,7 +656,7 @@ fn an_edit_of_the_same_size_reloads() {
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["lcd", "maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
+    assert_eq!(s.themes(), ["deep", "lcd", "maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -686,7 +686,7 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["lcd", "maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
+    assert_eq!(s.themes(), ["deep", "lcd", "maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
 }
 
 #[test]
@@ -854,12 +854,16 @@ fn new_picture_invalidates_cached_drawing_commands() {
     for recorded in [false, true] {
         let (mut surface, mut v) = (Surface::new(), view());
         v.control.chain[0].picture = Some("late-image".into());
-        surface.add_picture("late-image", true, 16, 16, vec![[10, 200, 30, 255]; 256]);
+        // (No knobs on the right: the plug-in's logo shows there.)
+        for k in 4..8 {
+            v.control.knobs[k] = None;
+        }
+        surface.add_picture("late-image", false, 16, 16, vec![[10, 200, 30, 255]; 256]);
         let draw = |s: &mut Surface| if recorded { s.screen_picture(&v).is_some() } else { s.screens(&v).is_some() };
         assert!(draw(&mut surface));
         assert!(!draw(&mut surface), "identical commands are cached");
         let shared = &surface;
-        shared.add_picture("late-image", true, 16, 16, vec![[255; 4]; 256]);
+        shared.add_picture("late-image", false, 16, 16, vec![[255; 4]; 256]);
         assert!(draw(&mut surface), "new image data invalidates the cache through a shared surface");
         assert!(!draw(&mut surface), "the invalidation is consumed once");
     }
@@ -889,6 +893,10 @@ fn browse_and_chain_draw_product_and_hosted_plugin_pictures() {
     v.control.slot_index = Some(0);
     v.control.chain =
         vec![SlotView { name: "Massive X".into(), instrument: true, active: true, plugin: true, picture: Some("massivex".into()) }];
+    // (On the right screen, with no knobs there: the chain strip has no pictures.)
+    for k in 4..8 {
+        v.control.knobs[k] = None;
+    }
     let generic_px = s.picture(&v);
     s.add_picture("massivex", true, 16, 16, vec![[200, 120, 30, 255]; 256]);
     s.add_picture("massivex", false, 16, 16, vec![[30, 200, 120, 255]; 256]);
@@ -1288,14 +1296,24 @@ fn the_info_bar_shows_a_wheel_change() {
     v.master_db = -1.5;
     let text = s.screen_text(&v);
     assert!(text.contains(&"-1.5 dB".to_string()) && text.contains(&"MASTER VOL".to_string()), "{text:?}");
-    press(&mut s, &v, "BUTTON_TEMPO");
-    s.event(&Event::Wheel(3), &v, now);
+    let at = |ms: u64| now + std::time::Duration::from_millis(ms);
+    let tap = |s: &mut Surface, v: &View, ms: u64| {
+        s.event(&Event::Button("BUTTON_TEMPO", true), v, at(ms));
+        s.event(&Event::Button("BUTTON_TEMPO", false), v, at(ms));
+    };
+    tap(&mut s, &v, 0);
+    s.event(&Event::Wheel(3), &v, at(0));
     v.tempo = 123.0;
     assert!(s.screen_text(&v).contains(&"123.00 BPM".to_string()));
+    s.tick(&v, at(3000));
     assert!(s.screen_text(&v).contains(&"123.00 BPM".to_string()), "it stays while TEMPO is on");
-    press(&mut s, &v, "BUTTON_TEMPO");
-    assert!(!s.screen_text(&v).contains(&"123.00 BPM".to_string()), "TEMPO off: the tempo and scene again");
-    press(&mut s, &v, "BUTTON_TEMPO");
+    s.event(&Event::Wheel(1), &v, at(3000));
+    tap(&mut s, &v, 3100);
+    assert!(s.screen_text(&v).contains(&"123.00 BPM".to_string()), "TEMPO off: still there a moment after the last turn");
+    assert!(s.animates(), "and drawn again when it's due to go");
+    s.tick(&v, at(4600));
+    assert!(!s.screen_text(&v).contains(&"123.00 BPM".to_string()), "then the tempo and scene again");
+    tap(&mut s, &v, 4700);
     assert!(!s.screen_text(&v).contains(&"123.00 BPM".to_string()), "on again: not before a turn");
 }
 
@@ -1911,6 +1929,8 @@ fn record(p: &[u8; 4]) -> bool {
 #[test]
 fn the_eq_curve_stays_on_the_right_screen() {
     let (s, mut v) = (Surface::new(), view());
+    // (No knobs: the left screen has no dials, so its accent is only a stray curve's.)
+    v.control.knobs = vec![None; 8];
     v.control.chain[0].name = "EQ".into();
     v.control.slot = Some("EQ".into());
     v.control.pages = vec!["Freq / Gain".into(), "Width / Output".into()];
@@ -1927,6 +1947,113 @@ fn the_eq_curve_stays_on_the_right_screen() {
         assert!(curve(&px) > 200, "page {}: the curve on the right", page + 1);
         assert!(left(&px) < 20, "page {}: not on the left screen", page + 1);
     }
+    assert_eq!(s.error(), None);
+}
+
+#[test]
+fn eq_spectrum_is_drawn_in_the_eq_curve_area() {
+    let dir = std::env::var_os("DECKARD_RIG_CONTROLLER").map(std::path::PathBuf::from);
+    let (s, mut v) = (Surface::with_user_dir(dir), view());
+    assert!(s.mapping_shows_eq("TDR Nova", "Tokyo Dawn Labs", ""));
+    assert!(!s.mapping_shows_eq("Monark", "Native Instruments", ""));
+    v.control.knobs = vec![None; 8];
+    v.control.chain[0].name = "TDR Nova".into();
+    v.control.chain[0].plugin = true;
+    v.control.slot = Some("TDR Nova".into());
+    v.control.eq = Some(crate::EqCurveView { kind: "spectrum".into(), points: vec![0.75; 96], side: vec![0.25; 96], ..Default::default() });
+    let pic = s.draw_picture(&v);
+    assert!(!pic.texts.iter().any(|text| matches!(text.as_str(), "IN" | "OUT")));
+    let changed = |with: &[[u8; 4]], without: &[[u8; 4]]| {
+        let mut count = 0;
+        for (i, (a, b)) in with.iter().zip(without).enumerate() {
+            if a != b {
+                assert!((488..944).contains(&(i % 960)));
+                count += 1;
+            }
+        }
+        assert!(count > 200);
+    };
+    let both = s.picture(&v);
+    v.control.eq.as_mut().unwrap().side.clear();
+    let output = s.picture(&v);
+    changed(&both, &output);
+    v.control.eq.as_mut().unwrap().points.clear();
+    changed(&output, &s.picture(&v));
+    assert_eq!(s.error(), None);
+}
+
+#[test]
+fn spectrum_partial_redraw_matches_full_redraw() {
+    let dir = std::env::var_os("DECKARD_RIG_CONTROLLER").map(std::path::PathBuf::from);
+    let (s, mut v) = (Surface::with_user_dir(dir), view());
+    v.control.knobs = vec![None; 8];
+    for internal in [false, true] {
+        let name = if internal { "EQ" } else { "TDR Nova" };
+        v.control.chain[0].name = name.into();
+        v.control.chain[0].plugin = !internal;
+        v.control.slot = Some(name.into());
+        v.control.eq = Some(crate::EqCurveView {
+            kind: if internal { "freq" } else { "spectrum" }.into(),
+            points: vec![0.5; 96],
+            bands: if internal { vec![(0.3, 0.5), (0.7, 0.5)] } else { vec![] },
+            spectrum: if internal { [vec![0.3; 96], vec![0.6; 96]] } else { Default::default() },
+            side: if internal { vec![] } else { vec![0.3; 96] },
+            ..Default::default()
+        });
+        let old = s.draw_picture(&v);
+        let mut patched = old.clone().into_pixels();
+        let eq = v.control.eq.as_mut().unwrap();
+        if internal {
+            eq.spectrum[0].fill(0.7);
+            eq.spectrum[1].fill(0.4);
+        } else {
+            eq.side.clear();
+            eq.points.fill(0.75);
+        }
+        let mut next = s.draw_picture(&v);
+        let expected = next.clone().into_pixels();
+        assert_ne!(patched, expected);
+        let (x0, y0, x1, y1) = next.rasterize_spectrum_update(&old, &mut patched).expect("spectrum-only update");
+        assert_eq!((x0, x1), (488, 944));
+        assert!(y0 > 0 && y1 < 272);
+        assert_eq!(patched, expected);
+        next.background[0] ^= 1;
+        assert!(next.rasterize_spectrum_update(&old, &mut patched).is_none(), "unrelated changes use a full redraw");
+    }
+    assert_eq!(s.error(), None);
+}
+
+#[test]
+fn the_internal_eq_shows_spectra_and_keeps_its_response_and_band_handles() {
+    let dir = std::env::var_os("DECKARD_RIG_CONTROLLER").map(std::path::PathBuf::from);
+    let (s, mut v) = (Surface::with_user_dir(dir), view());
+    assert!(s.mapping_shows_eq("EQ", "", ""));
+    assert!(!s.mapping_shows_eq("EQ", "Some Vendor", "Some Vendor:VST3:FX:1234"));
+    v.control.knobs = vec![None; 8];
+    v.control.chain[0].name = "EQ".into();
+    v.control.slot = Some("EQ".into());
+    v.control.eq = Some(crate::EqCurveView {
+        points: vec![0.5; 48],
+        bands: vec![(0.25, 0.5), (0.75, 0.5)],
+        spectrum: [vec![0.3; 48], vec![0.7; 48]],
+        ..Default::default()
+    });
+    let pic = s.draw_picture(&v);
+    assert!(!pic.texts.iter().any(|text| matches!(text.as_str(), "IN" | "OUT")));
+    for label in ["1", "2"] {
+        assert!(pic.texts.iter().any(|text| text == label), "{label}");
+    }
+    let overlay = s.picture(&v);
+    v.control.eq.as_mut().unwrap().spectrum = Default::default();
+    let response = s.picture(&v);
+    let mut different = 0;
+    for (i, (a, b)) in overlay.iter().zip(&response).enumerate() {
+        if a != b {
+            assert!((488..944).contains(&(i % 960)));
+            different += 1;
+        }
+    }
+    assert!(different > 700);
     assert_eq!(s.error(), None);
 }
 
@@ -1955,6 +2082,8 @@ fn the_right_screen_curve_follows_the_theme() {
 #[test]
 fn the_filter_curve_stays_on_the_right_screen() {
     let (s, mut v) = (Surface::new(), view());
+    // (No knobs: the left screen has no dials, so its accent is only a stray curve's.)
+    v.control.knobs = vec![None; 8];
     v.control.chain[0].name = "Filter".into();
     v.control.slot = Some("Filter".into());
     v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
@@ -1984,6 +2113,8 @@ fn the_filter_curve_stays_on_the_right_screen() {
 #[test]
 fn the_effect_picture_stays_on_the_right_screen() {
     let (s, mut v) = (Surface::new(), view());
+    // (No knobs: the left screen has no dials, so its accent is only a stray curve's.)
+    v.control.knobs = vec![None; 8];
     v.control.chain[0].name = "Compressor".into();
     v.control.slot = Some("Compressor".into());
     v.control.pages = vec!["Main".into(), "Side-Chain Input".into()];
@@ -2011,8 +2142,9 @@ fn the_effect_picture_stays_on_the_right_screen() {
     assert_eq!(s.error(), None);
 }
 
-/// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it in the chain (its
-/// thumbnail) and on the right display (its logo); one without shows a drawing.
+/// CONTROLLER-BUGS C47: a plug-in DECKARD has a picture of shows it on the right display
+/// (its logo); one without shows a drawing. The chain strip shows neither: its kind's
+/// icon and its name.
 #[test]
 fn plugin_pictures_show_on_the_plugin_page() {
     let (s, mut v) = (Surface::new(), view());
@@ -2029,15 +2161,20 @@ fn plugin_pictures_show_on_the_plugin_page() {
     let slot = crate::SlotView { name: "Sampler".into(), instrument: true, active: true, plugin: false, picture: Some("sampler".into()) };
     v.control.chain = vec![slot];
     (v.control.slot_count, v.control.slot_index) = (1, Some(0));
-    let count =
-        |px: &[[u8; 4]], c: [u8; 4], right: bool| px.iter().enumerate().filter(|(i, p)| **p == c && ((i % 960) >= 480) == right).count();
+    // (No knobs on the right: no dials there, the logo shows.)
+    for k in 4..8 {
+        v.control.knobs[k] = None;
+    }
+    let count = |px: &[[u8; 4]], c: [u8; 4], right: bool| {
+        px.iter().enumerate().filter(|(i, p)| p[..3] == c[..3] && ((i % 960) >= 480) == right).count()
+    };
     let px = s.picture(&v);
-    assert!(count(&px, thumb, false) > 2000, "the thumbnail in the chain: {}", count(&px, thumb, false));
+    assert!(count(&px, thumb, false) < 80, "no thumbnail in the chain strip: {}", count(&px, thumb, false));
     assert!(count(&px, logo, true) > 5000, "the logo on the right: {}", count(&px, logo, true));
     // Without the picture: a drawing. A few of its pixels can land on the same grey.
     v.control.chain[0].picture = Some("nothing".into());
     let px = s.picture(&v);
-    assert!(count(&px, thumb, false) < 80, "the thumbnail is gone");
+    assert!(count(&px, thumb, false) < 80, "no thumbnail in the chain strip");
     assert!(count(&px, logo, true) < 80, "the logo is gone");
     assert_eq!(s.error(), None);
 }
@@ -3749,20 +3886,27 @@ fn unfocused_pad_tiles_are_grey_under_their_coloured_text() {
 }
 
 #[test]
-fn chain_overflow_shows_range_and_direction_and_clears_when_all_slots_fit() {
+fn with_pictures_the_chain_is_a_strip_with_its_own_overflow() {
     let (surface, mut v) = (Surface::new(), view());
     v.control.modules_visible = true;
-    v.control.chain = (0..3)
+    // (A filter picture over knobs 1-2: the chain shrinks to a strip.)
+    for (k, name, text) in [(0, "Cutoff", "1.20 kHz"), (1, "Reso", "42 %")] {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    }
+    v.control.chain = (0..6)
         .map(|i| SlotView { name: format!("Instrument {i}"), instrument: true, active: true, plugin: true, ..Default::default() })
         .collect();
-    for (slot, direction, range) in [(0, "right", "1-2 / 3"), (2, "left", "2-3 / 3")] {
+    // (The chain strip: the range at the right, small arrows at the edges.)
+    for (slot, direction, starts, ends) in [(0, "right", "1-", " / 6"), (5, "left", "", "-6 / 6")] {
         v.control.slot_index = Some(slot);
         let picture = surface.draw_picture(&v);
-        assert!(picture.texts.iter().any(|s| s == range), "{:?}", picture.texts);
+        assert!(picture.texts.iter().any(|s| s.starts_with(starts) && s.ends_with(ends) && s.contains(" / ")), "{:?}", picture.texts);
         assert!(picture.ops.iter().any(
-            |o| matches!(o, screen::DrawOp::Triangle { x, y: 143, w: 18, h: 28, dir, .. } if (*x == 4 || *x == 458) && dir == direction)
+            |o| matches!(o, screen::DrawOp::Triangle { x, y: 61, w: 8, h: 16, dir, .. } if (*x == 1 || *x == 471) && dir == direction)
         ));
     }
+    v.control.chain.truncate(3);
     for slot in &mut v.control.chain {
         slot.instrument = false;
         slot.name = "FX".into();
@@ -4130,4 +4274,356 @@ fn pinned_events_screen_persists_across_reloads_and_restarts() {
     press(&mut s3, &v, "BUTTON_EVENTS");
     assert_eq!(s3.page(), "events");
     assert_eq!(s3.pinned_open().as_deref(), Some("EVENTS"));
+}
+
+/// The Control page draws pictures over the knobs they draw: a filter over Cutoff and
+/// Reso (knobs 1-2) in the left screen's picture band, nothing over knobs that match no
+/// picture.
+#[test]
+fn a_filter_picture_sits_over_cutoff_and_reso() {
+    let (s, mut v) = (Surface::new(), view());
+    let set = |v: &mut View, k: usize, name: &str, text: &str| {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    };
+    set(&mut v, 0, "Cutoff", "1.20 kHz");
+    set(&mut v, 1, "Reso", "42 %");
+    let px = s.picture(&v);
+    let lit = |x0: usize, x1: usize| (106..200).flat_map(|y| (x0..x1).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    assert!(lit(0, 240) > 200, "the filter's curve over knobs 1-2: {}", lit(0, 240));
+    // Knobs 3-4 have dials: a ring each, centred over the knob, nothing in the band's
+    // lower corners where a curve would run.
+    assert!(lit(240, 480) > 20, "dials over knobs 3-4");
+    let corner = (190..204).flat_map(|y| (245..255).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    assert_eq!(corner, 0, "not the filter's curve");
+    assert_eq!(s.error(), None);
+}
+
+/// A plug-in's live output spectrum goes behind each filter picture over its knobs,
+/// on panels the MK3 redraws alone; the surface says when a filter picture is drawn
+/// (the UI taps the output only then).
+#[test]
+fn filter_pictures_show_the_output_spectrum_and_redraw_alone() {
+    let (s, mut v) = (Surface::new(), view());
+    let knob = v.control.knobs[0].clone();
+    v.control.knobs = vec![knob; 8];
+    let set = |v: &mut View, k: usize, name: &str, text: &str| {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    };
+    for k in 0..8 {
+        set(&mut v, k, &format!("Level {k}"), "Off");
+    }
+    s.draw_picture(&v);
+    assert!(!s.drew_filter_picture(), "no filter, no spectrum wanted");
+    for k in [0, 4] {
+        set(&mut v, k, "Cutoff", "1.20 kHz");
+        set(&mut v, k + 1, "Reso", "42 %");
+    }
+    let plain = s.draw_picture(&v);
+    assert!(s.drew_filter_picture());
+    let panels = |p: &crate::screen::Picture| p.ops.iter().filter(|op| matches!(op, crate::screen::DrawOp::SpectrumPanel { .. })).count();
+    assert_eq!(panels(&plain), 0, "no spectrum yet: drawn as before");
+
+    v.control.output_spectrum = (0..96).map(|i| 0.7 - 0.005 * i as f32).collect();
+    let old = s.draw_picture(&v);
+    assert_eq!(panels(&old), 2, "both filters");
+    assert_ne!(old.clone().into_pixels(), plain.clone().into_pixels());
+    let mut patched = old.clone().into_pixels();
+    v.control.output_spectrum.iter_mut().for_each(|p| *p = 0.4);
+    let mut next = s.draw_picture(&v);
+    let expected = next.clone().into_pixels();
+    assert_ne!(patched, expected);
+    let (x0, _, x1, _) = next.rasterize_spectrum_update(&old, &mut patched).expect("spectrum-only update");
+    assert!(x0 < 240 && x1 > 480 && x1 <= 960, "{x0}..{x1}");
+    assert_eq!(patched, expected);
+    assert_eq!(s.error(), None);
+}
+
+/// Touching a knob lights what it moves in its picture (the filter writes the cutoff's
+/// value); three fingers (a resting hand) light nothing.
+#[test]
+fn touching_a_knob_focuses_its_picture() {
+    let (mut s, mut v) = (Surface::new(), view());
+    for (k, name, text) in [(0, "Cutoff", "1.20 kHz"), (1, "Reso", "42 %")] {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text) = (name.into(), text.into());
+    }
+    let before = s.picture(&v);
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+    s.event(&Event::Button("BUTTON_CAP_1", true), &v, t0);
+    s.tick(&v, ms(150));
+    let touched = s.picture(&v);
+    let band = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    assert_ne!(band(&before), band(&touched), "the cutoff lights in the picture");
+    s.event(&Event::Button("BUTTON_CAP_2", true), &v, ms(160));
+    s.event(&Event::Button("BUTTON_CAP_3", true), &v, ms(160));
+    s.tick(&v, ms(400));
+    let band_now = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    assert_eq!(band_now(&s.picture(&v)), band_now(&before), "a resting hand lights nothing");
+    for n in ["BUTTON_CAP_1", "BUTTON_CAP_2", "BUTTON_CAP_3"] {
+        s.event(&Event::Button(n, false), &v, ms(410));
+    }
+    s.tick(&v, ms(900));
+    assert_eq!(band(&s.picture(&v)), band(&before));
+    assert_eq!(s.error(), None);
+}
+
+/// Whether the cutoff has focus: its guide and handle change the left picture band
+/// from how a surface nobody has touched draws it.
+fn shows_cutoff(s: &Surface, v: &View) -> bool {
+    let band = |px: &[[u8; 4]]| (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).map(|i| px[i]).collect::<Vec<_>>();
+    band(&s.picture(v)) != band(&Surface::new().picture(v))
+}
+
+/// A finger must rest 120 ms before a knob takes focus, and focus stays 180 ms after
+/// it lifts; the screens are asked to keep drawing while that is pending.
+#[test]
+fn touch_focus_waits_and_lingers() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let knob = v.control.knobs[0].as_mut().unwrap();
+    (knob.name, knob.text) = ("Cutoff".into(), "1.20 kHz".into());
+    v.control.knobs[1].as_mut().unwrap().name = "Reso".into();
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+    // A brush: down and up within 100 ms lights nothing.
+    s.event(&Event::Button("BUTTON_CAP_1", true), &v, t0);
+    assert!(!shows_cutoff(&s, &v));
+    assert!(s.animates(), "a pending timer keeps the screens drawn");
+    s.tick(&v, ms(100));
+    assert!(!shows_cutoff(&s, &v));
+    s.event(&Event::Button("BUTTON_CAP_1", false), &v, ms(100));
+    s.tick(&v, ms(400));
+    assert!(!shows_cutoff(&s, &v), "a brush lights nothing, not even later");
+    // A rest: focus at 120 ms, held 180 ms past the lift, then gone.
+    s.event(&Event::Button("BUTTON_CAP_1", true), &v, ms(1000));
+    s.tick(&v, ms(1119));
+    assert!(!shows_cutoff(&s, &v));
+    s.tick(&v, ms(1125));
+    assert!(shows_cutoff(&s, &v));
+    s.event(&Event::Button("BUTTON_CAP_1", false), &v, ms(1500));
+    s.tick(&v, ms(1670));
+    assert!(shows_cutoff(&s, &v), "still lit 170 ms after the lift");
+    assert!(s.animates());
+    s.tick(&v, ms(1690));
+    assert!(!shows_cutoff(&s, &v), "gone after 180 ms");
+    s.tick(&v, ms(1800));
+    assert!(!s.animates(), "nothing pending any more");
+    assert_eq!(s.error(), None);
+}
+
+/// A knob turned with no touch registered has focus for a second after its last turn.
+#[test]
+fn an_untouched_turn_focuses_for_a_second() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let knob = v.control.knobs[0].as_mut().unwrap();
+    (knob.name, knob.text) = ("Cutoff".into(), "1.20 kHz".into());
+    v.control.knobs[1].as_mut().unwrap().name = "Reso".into();
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + std::time::Duration::from_millis(n);
+    s.event(&Event::Knob(0, 0.05), &v, ms(10));
+    assert!(shows_cutoff(&s, &v));
+    s.event(&Event::Knob(0, 0.05), &v, ms(600));
+    s.tick(&v, ms(1500));
+    assert!(shows_cutoff(&s, &v), "a second counts from the last turn");
+    s.tick(&v, ms(1650));
+    assert!(!shows_cutoff(&s, &v));
+    assert_eq!(s.error(), None);
+}
+
+/// Writes the Control page with pictures over its knobs (both screens) to the folder
+/// in `DECKARD_RENDER_DIR` (else the temporary folder), on every theme, to look at
+/// (`--ignored`): plain, and with knob 2 touched.
+#[test]
+#[ignore]
+fn render_control_pictures() {
+    let (mut s, mut v) = (Surface::new(), view());
+    let page = [
+        ("Filter", "Cutoff", "1.20 kHz", 0.55),
+        ("Filter", "Resonance", "42 %", 0.42),
+        ("Amp Env", "Attack", "4.0 ms", 0.1),
+        ("Amp Env", "Release", "380 ms", 0.4),
+        ("Comp", "Threshold", "-18.0 dB", 0.6),
+        ("Comp", "Ratio", "4.0:1", 0.3),
+        ("Comp", "Knee", "6.0 dB", 0.5),
+        ("Comp", "Makeup", "2.0 dB", 0.4),
+    ];
+    v.control.knobs = page
+        .iter()
+        .map(|(section, name, text, value)| {
+            Some(KnobView {
+                name: name.to_string(),
+                section: section.to_string(),
+                text: text.to_string(),
+                value: *value,
+                ..Default::default()
+            })
+        })
+        .collect();
+    v.control.chain = ["Pigments", "EQ", "Compressor", "Raum"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| crate::SlotView { name: n.to_string(), instrument: i == 0, active: true, plugin: i != 1 && i != 2, picture: None })
+        .collect();
+    (v.control.slot_count, v.control.slot_index, v.control.slot) = (4, Some(0), Some("Pigments".into()));
+    let dir = std::env::var("DECKARD_RENDER_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    for theme in s.themes() {
+        s.set_theme(&theme);
+        for touched in [false, true] {
+            hold(&mut s, &v, "BUTTON_CAP_2", touched);
+            let px = s.picture(&v);
+            let path = dir.join(format!("control-pictures-{theme}{}.png", if touched { "-touch2" } else { "" }));
+            let f = std::fs::File::create(&path).unwrap();
+            let mut e = png::Encoder::new(f, 960, 272);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+            eprintln!("{}", path.display());
+        }
+        hold(&mut s, &v, "BUTTON_CAP_2", false);
+    }
+    assert_eq!(s.error(), None);
+}
+
+/// A plug-in mapping in the user's folder gives the plug-in knob pages (for the app)
+/// and draws its pictures over the knobs it finds by parameter id; a broken one is
+/// reported and left out.
+#[test]
+fn a_users_mapping_gives_pages_and_pictures() {
+    let dir = tempfile::tempdir().unwrap();
+    let maps = dir.path().join("mappings").join("acme");
+    std::fs::create_dir_all(&maps).unwrap();
+    std::fs::write(
+        maps.join("ladder.lua"),
+        r#"return {
+          api = 1,
+          match = { name = "Ladder" },
+          params = {
+            cut = { id = 7, taper = { "log", 20, 20000 } },
+            res = { id = 8, taper = { "lin", 0, 1 } },
+          },
+          pictures = { response = { widget = "filter", needs = { "cut" }, model = { cutoff = "cut", resonance = "res" } } },
+          pages = { { name = "MAIN", knobs = { "cut", "res" } } },
+        }"#,
+    )
+    .unwrap();
+    let s = Surface::with_user_dir(Some(dir.path().to_path_buf()));
+    assert_eq!(s.error(), None);
+    let pages = s.mapping_pages("Ladder").expect("the mapping's pages");
+    assert_eq!(pages[0].name, "MAIN");
+    assert_eq!(pages[0].knobs[0].as_ref().and_then(|r| r.id), Some(7));
+    assert!(s.mapping_pages("Other").is_none());
+    // Knobs that say nothing in Hz: the mapping's taper gives the picture its units.
+    let mut v = view();
+    v.control.chain[0].name = "Ladder".into();
+    for (k, id, name) in [(0, 7, "Freq Dial"), (1, 8, "Peak Dial")] {
+        let knob = v.control.knobs[k].as_mut().unwrap();
+        (knob.name, knob.text, knob.param_id) = (name.into(), "5.1".into(), Some(id));
+    }
+    let px = s.picture(&v);
+    let lit = (106..200).flat_map(|y| (0..240).map(move |x| y * 960 + x)).filter(|&i| accent(&px[i])).count();
+    assert!(lit > 200, "the mapping's filter over knobs 1-2: {lit}");
+    // A broken mapping: the error names it, the scripts still run.
+    std::fs::write(
+        maps.join("broken.lua"),
+        "return { api = 1, match = { name = 'B' }, pictures = { p = { widget = 'filter', needs = { 'nope' } } } }",
+    )
+    .unwrap();
+    let s = Surface::with_user_dir(Some(dir.path().to_path_buf()));
+    assert!(s.error().is_some_and(|e| e.contains("broken.lua") && e.contains("nope")), "{:?}", s.error());
+    assert!(s.mapping_pages("Ladder").is_some());
+}
+
+/// Every knob no picture covers gets a dial; none over the right screen's curve of a
+/// built-in effect.
+#[test]
+fn bare_knobs_get_dials() {
+    let (s, mut v) = (Surface::new(), view());
+    let pic = s.draw_picture(&v);
+    let rings = |pic: &crate::screen::Picture, x0: f32, x1: f32| {
+        pic.ops
+            .iter()
+            .filter(|o| matches!(o, screen::DrawOp::Arc { centre, .. } if centre.0 >= x0 && centre.0 < x1 && centre.1 >= 106.0 && centre.1 < 232.0))
+            .count()
+    };
+    for k in 0..6 {
+        let x = k as f32 * 120.0;
+        assert!(rings(&pic, x, x + 120.0) >= 2, "a dial (track and value) over knob {}", k + 1);
+    }
+    assert_eq!(rings(&pic, 720.0, 960.0), 0, "knobs 7-8 have no parameter");
+    v.control.eq = Some(crate::EqCurveView { points: vec![0.5; 48], ..Default::default() });
+    let pic = s.draw_picture(&v);
+    assert!(rings(&pic, 0.0, 120.0) >= 2, "the left keeps its dials");
+    assert_eq!(rings(&pic, 480.0, 960.0), 0, "no dials over the EQ's curve");
+    assert_eq!(s.error(), None);
+}
+
+/// Writes, for a theme (`DECKARD_THEME`, else deep) and the controller folder in
+/// `DECKARD_CONTROLLER` if set, the Browse page and a Control page whose chain is a
+/// Cymbal then an EQ, in a few groups' colours, to `DECKARD_RENDER_DIR` (`--ignored`;
+/// to look at).
+#[test]
+#[ignore]
+fn render_browse_and_chain() {
+    let Ok(dir) = std::env::var("DECKARD_RENDER_DIR").map(std::path::PathBuf::from) else { return };
+    let mut s = Surface::with_user_dir(std::env::var("DECKARD_CONTROLLER").ok().map(std::path::PathBuf::from));
+    s.set_theme(&std::env::var("DECKARD_THEME").unwrap_or_else(|_| "deep".into()));
+    let mut v = view();
+    library(&mut v);
+    let write = |px: &[[u8; 4]], name: String| {
+        let f = std::fs::File::create(dir.join(&name)).unwrap();
+        let mut e = png::Encoder::new(f, 960, 272);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+        eprintln!("{}", dir.join(&name).display());
+    };
+    for (colour, rgb, idx) in [("red", [0xff, 0x13, 0x0f], 0), ("yellow", [0xff, 0xff, 0x00], 4), ("white", [0xff, 0xff, 0xff], 16)] {
+        v.groups[v.group].rgb = rgb;
+        v.groups[v.group].color = idx;
+        press(&mut s, &v, "BUTTON_BROWSE");
+        write(&s.picture(&v), format!("browse-{colour}.png"));
+        press(&mut s, &v, "BUTTON_BROWSE");
+        v.control.modules_visible = true;
+        v.control.chain = [("Cymbal", true), ("EQ", false)]
+            .iter()
+            .map(|(n, inst)| crate::SlotView { name: n.to_string(), instrument: *inst, active: true, plugin: false, picture: None })
+            .collect();
+        // (DECKARD's own pictures of them, as the app gives them.)
+        for slot in v.control.chain.iter_mut() {
+            let key = slot.name.to_lowercase();
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../apps/viewer/assets/plugins/{key}_Thumb.png"));
+            let Ok(f) = std::fs::File::open(path) else { continue };
+            let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+            dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+            let mut r = dec.read_info().unwrap();
+            let mut buf = vec![0; r.output_buffer_size().unwrap()];
+            let info = r.next_frame(&mut buf).unwrap();
+            let ch = info.color_type.samples();
+            let px = buf.chunks(ch).take((info.width * info.height) as usize).map(|p| match ch {
+                4 => [p[0], p[1], p[2], p[3]],
+                3 => [p[0], p[1], p[2], 255],
+                2 => [p[0], p[0], p[0], p[1]],
+                _ => [p[0], p[0], p[0], 255],
+            });
+            s.add_picture(&key, true, info.width as usize, info.height as usize, px.collect());
+            slot.picture = Some(key);
+        }
+        (v.control.slot_count, v.control.slot_index, v.control.slot) = (2, Some(1), Some("EQ".into()));
+        write(&s.picture(&v), format!("chain-{colour}.png"));
+        // (A chain longer than the strip, scrolled to its middle: an arrow at each side.)
+        let more = v.control.chain.clone();
+        for n in ["Reverb", "Delay", "Compressor", "Filter"] {
+            v.control.chain.push(crate::SlotView { name: n.into(), instrument: false, active: true, plugin: false, picture: None });
+        }
+        (v.control.slot_count, v.control.slot_index, v.control.slot) = (6, Some(3), Some("Delay".into()));
+        write(&s.picture(&v), format!("chain-long-{colour}.png"));
+        v.control.chain = more;
+        (v.control.slot_count, v.control.slot_index, v.control.slot) = (2, Some(1), Some("EQ".into()));
+        press(&mut s, &v, "BUTTON_PAD_MODE");
+        write(&s.picture(&v), format!("pad-{colour}.png"));
+        press(&mut s, &v, "BUTTON_PAD_MODE");
+    }
+    assert_eq!(s.error(), None);
 }

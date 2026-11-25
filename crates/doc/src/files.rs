@@ -529,6 +529,13 @@ fn fit_versions(b: &mut crate::build::Builder, classes: &HashMap<String, (u32, b
                     fresh.fields.insert(at + k, f);
                 }
             }
+            // A group file's Group (its archive root) has no `patterns`/`sequence`: they are
+            // written at project level only, and the blank is a project's. An older kit's
+            // rebuilt Group keeps without them, or it won't save as a group file (the loader
+            // puts the project's back).
+            if o.type_name == crate::build::GROUP && o.get("patterns").is_none() && o.get("sequence").is_none() {
+                fresh.fields.retain(|(n, _)| n != "patterns" && n != "sequence");
+            }
             if o.oid.is_some() {
                 fresh.oid = o.oid;
             }
@@ -1572,6 +1579,32 @@ mod tests {
 
         assert!(d.undo());
         assert_eq!(d.project().groups[0].sounds[0].name, "");
+    }
+
+    /// A kit saved by an older Maschine (the factory 808 Kit's Group is version 14) is
+    /// rebuilt in the project's version, from a project's blank: that has the
+    /// project-level `patterns`/`sequence` a group file never writes, and the kit failed
+    /// its check ("tree field name does not match the schema"), loading nothing.
+    #[test]
+    fn a_kit_from_an_older_maschine_loads() {
+        let mut src = Document::new_project().unwrap();
+        src.rename(crate::Target::Sound(0, 0), "Kick 808").unwrap();
+        let bytes = src.file_bytes(FileItem::Group(0), &tagged("Old Kit")).unwrap();
+        let mut d = Document::new_project().unwrap();
+        let mut root = d.file_root(&bytes, *b"GRP ").unwrap();
+        assert!(root.get("patterns").is_none() && root.get("sequence").is_none(), "a group file has neither");
+        root.version -= 1;
+        let fitted = d.fresh_obj(root, *b"GRP ", crate::build::GROUP).unwrap();
+        assert!(fitted.get("patterns").is_none());
+
+        // The real thing, where the factory library is installed.
+        let kit = std::path::Path::new(r"C:\Users\Public\Documents\Maschine 2 Factory Library\Groups\Kits\808 Kit.mxgrp");
+        if let Ok(bytes) = std::fs::read(kit) {
+            d.load_group_file(0, &bytes).unwrap();
+            assert_eq!(d.project().groups[0].sounds[0].name, "Kick 808 1");
+            let reopened = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+            assert_eq!(reopened.project().groups[0].sounds[15].name, "Cowbell 808");
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ use channel_sends as aux;
 #[cfg(feature = "output")]
 pub mod devices;
 pub mod edit;
+pub mod eq_spectrum;
 pub mod export;
 pub mod fx;
 pub mod glide;
@@ -42,6 +43,7 @@ mod prehear;
 pub mod queue;
 pub mod render;
 pub mod repeat;
+pub mod spectrum;
 pub use ahead::Junk;
 pub mod sample;
 pub mod sampler;
@@ -1388,6 +1390,7 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
         dr: vec![0.0; MAX_BLOCK],
         fade: (FX_FADE_SECONDS * sr_f).round() as u32,
         meters: None,
+        spectrum: None,
         tap: Vec::new(),
         sl: vec![0.0; MAX_BLOCK],
         sr: vec![0.0; MAX_BLOCK],
@@ -1477,6 +1480,13 @@ fn run_chain(chain: &mut FxChain, buf: &mut [f32], frames: usize, at: impl Fn(us
 
 /// A sound's effect plug-ins (its chain after the instrument), in order, and the
 /// sound's level and pan, which come after them.
+#[derive(Clone, Copy)]
+enum SpectrumChain {
+    Sound(usize, usize),
+    Group(usize),
+    Master,
+}
+
 struct FxChain {
     units: Vec<Unit>,
     gain: (f32, f32),
@@ -1489,6 +1499,7 @@ struct FxChain {
     fade: u32,
     /// Where metered effects post their meters, and this chain's sound (group, sound).
     meters: Option<(Arc<meters::FxMeters>, usize, usize)>,
+    spectrum: Option<(Arc<eq_spectrum::EqSpectrum>, SpectrumChain)>,
     /// This sound feeds side-chains: per tap, its buffer and gain (1 before its fader,
     /// for a sound source; its fader, for its group's sum).
     tap: Vec<(usize, (f32, f32))>,
@@ -1830,22 +1841,39 @@ impl FxChain {
                     drop(p);
                     timed(shared, started);
                 }
-                FxUnit::Internal { fx, glide, .. } => {
+                FxUnit::Internal { class, fx, glide, .. } => {
                     fx.set_transport(transport.playing.then_some(transport.quarters));
-                    // Gliding to new settings: a step of it every glide::STEP frames.
-                    let mut at = 0;
-                    while at < n {
-                        let to = if glide.gliding() { (at + glide::STEP).min(n) } else { n };
-                        if glide.tick() {
-                            fx.set(glide.now());
+                    let mut run = |l: &mut [f32], r: &mut [f32]| {
+                        // Gliding to new settings: a step of it every glide::STEP frames.
+                        let mut at = 0;
+                        while at < n {
+                            let to = if glide.gliding() { (at + glide::STEP).min(n) } else { n };
+                            if glide.tick() {
+                                fx.set(glide.now());
+                            }
+                            let (l, r) = (&mut l[at..to], &mut r[at..to]);
+                            if sources.is_empty() {
+                                fx.process(l, r)
+                            } else {
+                                fx.process_sc(l, r, Some((&self.sl[at..to], &self.sr[at..to])))
+                            }
+                            at = to;
                         }
-                        let (l, r) = (&mut self.l[at..to], &mut self.r[at..to]);
-                        if sources.is_empty() {
-                            fx.process(l, r)
-                        } else {
-                            fx.process_sc(l, r, Some((&self.sl[at..to], &self.sr[at..to])))
-                        }
-                        at = to;
+                    };
+                    let (l, r) = (&mut self.l[..n], &mut self.r[..n]);
+                    if class == "EQ"
+                        && !unit.ghost
+                        && unit.target > 0.0
+                        && let Some((board, chain)) = &self.spectrum
+                    {
+                        let owner = match *chain {
+                            SpectrumChain::Sound(g, s) => Owner::Chain(g, s, unit.slot),
+                            SpectrumChain::Group(g) => Owner::Group(g, unit.slot),
+                            SpectrumChain::Master => Owner::Master(unit.slot),
+                        };
+                        board.process(owner, l, r, run);
+                    } else {
+                        run(l, r);
                     }
                 }
             }
@@ -2408,6 +2436,8 @@ pub struct Engine {
     live_hint: Vec<Vec<bool>>,
     /// The event being played comes from the timeline (not live input).
     from_timeline: bool,
+    /// Beats into the note being played: one joined late (see [`Engine::follow_timeline`]).
+    chase_skip: f64,
     /// The group that plays live (pads, keys): its sounds aren't rendered ahead.
     focus: Option<usize>,
     /// An edit's engine: per sound, what to keep of the playing one's (see
@@ -3163,6 +3193,7 @@ impl Engine {
                     dr: vec![0.0; MAX_BLOCK],
                     fade: (FX_FADE_SECONDS * sr_f).round() as u32,
                     meters: None,
+                    spectrum: None,
                     tap,
                     sl: vec![0.0; MAX_BLOCK],
                     sr: vec![0.0; MAX_BLOCK],
@@ -3654,6 +3685,7 @@ impl Engine {
             ahead: None,
             live_hint,
             from_timeline: false,
+            chase_skip: 0.0,
             focus: None,
             reuse,
             keep_timeline,
@@ -3779,6 +3811,8 @@ impl Engine {
         let old_frame = self.frame;
         let old_spt = self.samples_per_tick();
         let sigs_valid = self.pattern_sigs_mode == self.mode && fresh.mode == self.mode;
+        // The notes the timeline sounds here, to set against the new one's (below).
+        let (sounding, sounding_n) = self.timeline_sounding(ticks);
         // Sounding Sampler voices carry over to the same sounds; sounds that went away
         // fade out.
         for (g, row) in std::mem::take(&mut self.sounds).into_iter().enumerate() {
@@ -3966,6 +4000,9 @@ impl Engine {
         std::mem::swap(&mut self.audio_sounds, &mut fresh.audio_sounds);
         if self.sequencing {
             self.recue();
+            if !fresh.keep_timeline {
+                self.follow_timeline(&sounding[..sounding_n]);
+            }
             let timeline_changed = !fresh.keep_timeline && !self.stale;
             let old_tl = if !timeline_changed {
                 None
@@ -3985,6 +4022,115 @@ impl Engine {
             );
         }
         fresh
+    }
+
+    /// The notes (group, sound, pitch) the timeline sounds at song position `ticks`,
+    /// as many as there's room for. (No allocating: this runs on the audio thread.)
+    fn timeline_sounding(&self, ticks: f64) -> ([(usize, usize, i64); SOUNDING_ROOM], usize) {
+        let mut out = [(0, 0, 0); SOUNDING_ROOM];
+        let mut n = 0;
+        let len = self.timeline.length as f64;
+        if !self.sequencing || len <= 0.0 {
+            return (out, 0);
+        }
+        let at = if self.looping { ticks.rem_euclid(len) } else { ticks };
+        for (i, e) in self.timeline.events.iter().enumerate() {
+            let key = (e.group, e.sound, e.pitch);
+            if n < SOUNDING_ROOM && sounding_in_pass(e, i < self.next, at, len, self.looping).is_some() && !out[..n].contains(&key) {
+                out[n] = key;
+                n += 1;
+            }
+        }
+        (out, n)
+    }
+
+    /// The timeline changed under a playing song (a pattern taken out of the scene or
+    /// put in, notes edited). A note the old one was sounding (`was`) that the new one
+    /// doesn't sound here stops now, rather than at its end; a long Sampler note the new
+    /// one sounds here that wasn't sounding starts now, as far in as it would be, rather
+    /// than next time round. A loop recorded into a pattern comes and goes at once.
+    /// Short notes (hits) wait for their next time, as do notes a group's MIDI input
+    /// plug-in plays and notes that only just started ([`Engine::catch_beat_hits`]
+    /// plays those from their start).
+    fn follow_timeline(&mut self, was: &[(usize, usize, i64)]) {
+        let len = self.timeline.length as f64;
+        if len <= 0.0 {
+            return;
+        }
+        let at = if self.looping { self.position().rem_euclid(len) } else { self.position() };
+        let now = self.time;
+        for &(g, s, pitch) in was {
+            let still = self.timeline.events.iter().enumerate().any(|(i, e)| {
+                (e.group, e.sound, e.pitch) == (g, s, pitch) && sounding_in_pass(e, i < self.next, at, len, self.looping).is_some()
+            });
+            if still {
+                continue;
+            }
+            if self.link_ahead(g, s).is_some() {
+                self.send_live(g, s, ahead::Ev::Release { pitch });
+            } else {
+                for o in self.note_offs.iter_mut().filter(|o| (o.1, o.2, o.3) == (g, s, pitch) && o.0 > now) {
+                    o.0 = now;
+                }
+            }
+        }
+        let spt = self.samples_per_tick();
+        if spt <= 0.0 {
+            return;
+        }
+        // (As catch_beat_hits reckons it.)
+        let step_half = ((PPQ as f64 / 8.0) * spt).round().max(1.0) as u64;
+        let grace = ((BEAT_GRACE_SECONDS * self.sr).round().max(1.0) as u64).min(step_half) as f64;
+        for i in 0..self.timeline.events.len() {
+            let e = self.timeline.events[i];
+            let Some(into) = sounding_in_pass(&e, i < self.next, at, len, self.looping) else { continue };
+            if e.length < PPQ
+                || e.probability < 100
+                || into * spt <= grace
+                || was.contains(&(e.group, e.sound, e.pitch))
+                || note_muted(&self.sound_muted, &e)
+                || self.has_midi_input(e.group)
+            {
+                continue;
+            }
+            let ahead = self.link_ahead(e.group, e.sound).is_some();
+            let local_sampler =
+                self.sounds.get(e.group).and_then(|r| r.get(e.sound)).and_then(Option::as_ref).is_some_and(sampler::SamplerRt::can_chase)
+                    && self.instruments.get(e.group).and_then(|r| r.get(e.sound)).is_none_or(Option::is_none);
+            if ahead {
+                // Its player takes it up after its lookahead.
+                let delay = self.ahead.as_ref().map_or(0, |a| a.lookahead + a.span) as f64 / spt;
+                let into = into + delay;
+                let left = e.length as f64 - into;
+                if left <= 0.0 {
+                    continue;
+                }
+                let id = self.ahead.as_mut().map_or(0, |a| {
+                    a.next_id += 1;
+                    a.next_id
+                });
+                let ev = ahead::Ev::NoteOn {
+                    id,
+                    pitch: e.pitch,
+                    velocity: e.velocity,
+                    gate: Some((left * spt).max(1.0) as u64),
+                    beats: self.position() / PPQ as f64,
+                    live: false,
+                    skip: into / PPQ as f64,
+                };
+                self.send_live(e.group, e.sound, ev);
+            } else if local_sampler {
+                let left = (e.length as f64 - into).round() as i64;
+                if left <= 0 {
+                    continue;
+                }
+                self.chase_skip = into / PPQ as f64;
+                self.from_timeline = true;
+                self.trigger_with(NoteEvent { length: left, ..e }, 1.0 / spt, false);
+                self.from_timeline = false;
+                self.chase_skip = 0.0;
+            }
+        }
     }
 
     fn played_live_within(&self, group: usize, sound: usize, pitch: i64, window: u64) -> bool {
@@ -4152,8 +4298,15 @@ impl Engine {
                     a.next_id += 1;
                     a.next_id
                 });
-                let ev =
-                    ahead::Ev::NoteOn { id, pitch: e.pitch, velocity: e.velocity, gate, beats: self.position() / PPQ as f64, live: false };
+                let ev = ahead::Ev::NoteOn {
+                    id,
+                    pitch: e.pitch,
+                    velocity: e.velocity,
+                    gate,
+                    beats: self.position() / PPQ as f64,
+                    live: false,
+                    skip: 0.0,
+                };
                 self.send_live(e.group, e.sound, ev);
             } else {
                 self.from_timeline = true;
@@ -4974,6 +5127,25 @@ impl Engine {
         }
     }
 
+    /// Route any internal EQs to the output's spectrum monitor.
+    pub fn set_fx_spectrum(&mut self, board: &Arc<eq_spectrum::EqSpectrum>) {
+        for (g, row) in self.fx.iter_mut().enumerate() {
+            for (s, chain) in row.iter_mut().enumerate() {
+                if let Some(chain) = chain {
+                    chain.spectrum = Some((board.clone(), SpectrumChain::Sound(g, s)));
+                }
+            }
+        }
+        for (g, bus) in self.buses.iter_mut().enumerate() {
+            if let Some(bus) = bus {
+                bus.chain.spectrum = Some((board.clone(), SpectrumChain::Group(g)));
+            }
+        }
+        if let Some(chain) = &mut self.master_fx {
+            chain.spectrum = Some((board.clone(), SpectrumChain::Master));
+        }
+    }
+
     /// Publish the routes' travels on `b` (for their knobs).
     pub fn set_route_travels(&mut self, b: &Arc<meters::RouteTravels>) {
         self.route_board = Some(b.clone());
@@ -5303,6 +5475,7 @@ impl Engine {
                             gate,
                             beats: frame as f64 / spt / PPQ as f64,
                             live: false,
+                            skip: 0.0,
                         }
                     }
                 };
@@ -6602,6 +6775,7 @@ impl Engine {
                             gate,
                             beats: self.position() / PPQ as f64,
                             live: self.sequencing,
+                            skip: 0.0,
                         }
                     }
                 };
@@ -6644,7 +6818,7 @@ impl Engine {
         let Some(Some(snd)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound)) else { return };
         self.clock += 1;
         let id = self.clock;
-        snd.note_on(id, e.pitch, e.velocity.clamp(0, 127), &ctx);
+        snd.note_on_at(id, e.pitch, e.velocity.clamp(0, 127), &ctx, self.chase_skip);
         if e.length != HELD {
             let gate = ((e.length.max(1) as f64) / tps).max(1.0) as u64;
             self.note_offs.push((self.time + gate, e.group, e.sound, e.pitch, id));
@@ -8547,6 +8721,86 @@ mod tests {
     fn adopt_at_1k(e: &mut Engine, p: &Project, q: &Project, cache: &mut SampleCache) {
         let (fresh, _) = Engine::new_after(q, Some((p, &[])), None, 1000, Mode::Scene(0), cache);
         drop(e.adopt(fresh, q));
+    }
+
+    /// A loop recorded into a pattern: a bar-long note on a sustaining Sampler, its sample
+    /// a slow ramp (the level says how far in it is), at 1 kHz and 120 BPM (a bar is 2000
+    /// frames). `on`: its pattern is in the scene.
+    fn loop_project(dir: &Path, on: bool) -> Project {
+        let wav = dir.join("loop.wav");
+        if !wav.exists() {
+            let frames = (0..8000).map(|i| [i as f32 / 10_000.0, i as f32 / 10_000.0]).collect();
+            edit::write_wav(&wav, &sample::Sample { rate: 1000, frames }).unwrap();
+        }
+        let mut p = project();
+        let smp = p.groups[0].sounds[0].sampler.as_mut().unwrap();
+        smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+        smp.zones[0].play_range = (0, 7999);
+        smp.set("envelope_type", 2.0);
+        smp.set("volume_envelope/release", 0.0);
+        p.groups[0].patterns[0].notes = vec![Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 4 * PPQ,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+        }];
+        if !on {
+            p.scenes[0].patterns.clear();
+        }
+        p
+    }
+
+    /// The loop's pattern taken out of the scene mid-bar: it stops at once, not at the
+    /// end of its note (the bar's end).
+    #[test]
+    fn a_loop_stops_when_its_pattern_is_taken_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, q) = (loop_project(dir.path(), true), loop_project(dir.path(), false));
+        let mut cache = SampleCache::default();
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1000];
+        e.process(&mut out);
+        assert!(out[2 * 999] > 0.01, "the loop plays: {}", out[2 * 999]);
+        adopt_at_1k(&mut e, &p, &q, &mut cache);
+        let mut out = vec![0f32; 2 * 500];
+        e.process(&mut out);
+        let loudest = out[2 * 20..].iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(loudest < 1e-4, "silent within 20 ms, not at the bar's end: {loudest}");
+    }
+
+    /// Put back in mid-bar: it plays at once, from where it would be had it played all
+    /// along, not from the next bar. Short notes (hits) still wait for their next time.
+    #[test]
+    fn a_loop_comes_back_where_it_would_be_when_its_pattern_is_put_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, q) = (loop_project(dir.path(), false), loop_project(dir.path(), true));
+        let mut cache = SampleCache::default();
+        // As it sounds having played from the start.
+        let mut all_along = loop_engine(&q, &mut cache);
+        let mut want = vec![0f32; 2 * 1500];
+        all_along.process(&mut want);
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1500];
+        e.process(&mut out[..2 * 1000]);
+        assert!(out[..2 * 1000].iter().all(|x| x.abs() < 1e-6), "nothing before");
+        adopt_at_1k(&mut e, &p, &q, &mut cache);
+        e.process(&mut out[2 * 1000..]);
+        for i in [1020, 1200, 1499] {
+            assert!(out[2 * i] > 0.01, "playing at frame {i}: {}", out[2 * i]);
+            assert!((out[2 * i] - want[2 * i]).abs() < 2e-3, "at frame {i}: {} where it'd be {}", out[2 * i], want[2 * i]);
+        }
+        let mut hits = q.clone();
+        hits.groups[0].patterns[0].notes[0].length = 240;
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1200];
+        e.process(&mut out[..2 * 100]);
+        adopt_at_1k(&mut e, &p, &hits, &mut cache);
+        e.process(&mut out[2 * 100..]);
+        assert!(out.iter().all(|x| x.abs() < 1e-6), "a hit isn't joined late");
     }
     #[test]
     fn beat_grace_catches_on_beat_unmute_and_pattern_switch_without_double_firing() {
@@ -12673,6 +12927,53 @@ mod tests {
         assert!(held <= 10f32.powf(-40.05 / 20.0) * 1.01, "the new ceiling holds it down: {held}");
     }
 
+    #[test]
+    fn internal_eq_spectrum_captures_the_selected_slot_before_and_after_processing() {
+        let board = Arc::new(eq_spectrum::EqSpectrum::default());
+        let transport = Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
+        let rate = 48_000.0;
+        let params = vec![("output_gain".into(), -0.5)];
+        let frames = deckard_plugins::spectrum::FRAMES;
+        for (route, owner) in [
+            (SpectrumChain::Sound(1, 2), Owner::Chain(1, 2, 3)),
+            (SpectrumChain::Group(1), Owner::Group(1, 3)),
+            (SpectrumChain::Master, Owner::Master(3)),
+        ] {
+            let fx = FxUnit::Internal {
+                class: "EQ".into(),
+                params: params.clone(),
+                fx: fx::make("EQ", &params, rate).unwrap(),
+                glide: glide::Glide::new(&params, rate),
+                modded: params.clone(),
+                hit: false,
+                modulated: false,
+            };
+            let mut chain = bare_chain(vec![Unit::new(fx, 3, Vec::new(), true)], rate);
+            chain.spectrum = Some((board.clone(), route));
+            let mut run = || {
+                for offset in (0..frames).step_by(128) {
+                    for i in 0..128 {
+                        let x = (std::f32::consts::TAU * (offset + i) as f32 / 64.0).sin() * 0.5;
+                        chain.l[i] = x;
+                        chain.r[i] = -x;
+                    }
+                    chain.run(128, &transport, &[], 0);
+                }
+            };
+            let mut other = board.watch(Owner::Master(7));
+            run();
+            assert!(other.receive().is_none());
+            let mut watched = board.watch(owner);
+            run();
+            let window = watched.receive().expect("the selected slot's window");
+            let peak = |channel| window.iter().map(|f| f[channel]).fold(0.0f32, f32::max);
+            assert!((peak(0) - 0.5).abs() < 0.001);
+            assert!((peak(1) - 0.5).abs() < 0.001);
+            assert!(peak(2) > 0.0 && peak(2) < 0.45, "the EQ attenuates the captured signal");
+            assert!((peak(2) - peak(3)).abs() < 0.001);
+        }
+    }
+
     /// An effect that keeps the last value of its first setting (as its output).
     struct LastSet(Arc<std::sync::Mutex<Vec<f64>>>);
     impl fx::Effect for LastSet {
@@ -12713,6 +13014,7 @@ mod tests {
             dr: vec![0.0; MAX_BLOCK],
             fade: 0,
             meters: None,
+            spectrum: None,
             tap: Vec::new(),
             sl: vec![0.0; MAX_BLOCK],
             sr: vec![0.0; MAX_BLOCK],
