@@ -145,6 +145,11 @@ impl LoopRt {
         self.cued.map(|c| c.0)
     }
 
+    /// Whether a Loop-mode take is currently cued to play.
+    pub fn loop_playing(&self) -> bool {
+        self.settings.mode == AudioMode::Loop && self.cued.is_some()
+    }
+
     pub fn note_on(&mut self, id: u64, note: i64) {
         if id != 0 {
             self.gates.retain(|&(gid, _)| gid != id);

@@ -13,6 +13,8 @@ use crate::sample::Sample;
 use crate::sampler_tables as t;
 use crate::synth::Synth;
 use deckard_model::MidiKind;
+use deckard_model::layers::{Layer, Morph};
+use deckard_model::new_sampler::Motion;
 use std::sync::Arc;
 
 /// Control rate: modulation, filter coefficients and smoothing are updated every
@@ -143,13 +145,59 @@ const C_ATTACK: f64 = -0.332;
 const C_DECAY: f64 = 0.44269788; // 0x3ee2a84c
 
 /// Envelope segment times and sustain level, for one envelope (§3, §5.1).
-#[derive(Clone, Copy, Default, PartialEq)]
-struct EnvTimes {
-    attack: u64,
-    hold: u64,
-    decay: u64,
-    release: u64,
-    sustain: f32,
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct EnvTimes {
+    pub(crate) attack: u64,
+    pub(crate) hold: u64,
+    pub(crate) decay: u64,
+    pub(crate) release: u64,
+    pub(crate) sustain: f32,
+}
+
+/// A zone that is a layer of its sound (`deckard_model::layers`): its own envelope on
+/// top of the sound's, and its window on the sound's morph.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LayerRt {
+    /// It is heard (not muted, nor left out by another's solo).
+    pub on: bool,
+    pub env: EnvTimes,
+    pub window: [f64; 4],
+}
+
+/// A layer's envelope times at `sr` (its sustain a plain level).
+pub fn layer_times(l: &Layer, sr: f64) -> EnvTimes {
+    let frames = |s: f64| if s.is_finite() { (s.clamp(0.0, deckard_model::layers::TIME_MAX) * sr).round() as u64 } else { 0 };
+    EnvTimes {
+        attack: frames(l.attack),
+        hold: 0,
+        decay: frames(l.decay),
+        release: frames(l.release),
+        sustain: if l.sustain.is_finite() { l.sustain.clamp(0.0, 1.0) as f32 } else { 1.0 },
+    }
+}
+
+/// A layer's gain changes (its window, mute, solo) take this long, so nothing clicks.
+const LAYER_RAMP_MS: f64 = 5.0;
+
+/// A zone's gain on each side, from its level and pan (§6.6).
+fn zone_amp(z: &ZoneRt) -> [f32; 2] {
+    let g = 2.3948107 * z.gain.powi(5) + 0.767467 * z.gain * z.gain;
+    let p = z.pan;
+    // 0.70711 and 0.29289 in Maschine.
+    const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    [(1.0 - K * p - (1.0 - K) * p * p) * g, (1.0 + K * p - (1.0 - K) * p * p) * g]
+}
+
+/// How loud layer `l` is to be, and where the morph is, `phase` through its cycle.
+fn layer_to(l: &LayerRt, morph: Option<&Morph>, position: f32, phase: f64) -> (f32, f32) {
+    let on = if l.on { 1.0 } else { 0.0 };
+    match morph.filter(|m| m.on) {
+        Some(m) => {
+            let p = m.at(f64::from(position), phase);
+            (on * deckard_model::layers::window_gain(l.window, p, m.shape, m.fade), p as f32)
+        }
+        None => (on, 0.0),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -260,6 +308,285 @@ pub struct ZoneRt {
     /// Zone fade-in and fade-out, frames (§6.5).
     pub fade_in: usize,
     pub fade_out: usize,
+    /// A New Sampler zone in Sync or Keys: kept in time with the song.
+    pub sync: Option<ZoneSync>,
+    /// Its stem lanes, if it has them.
+    pub lanes: Option<Lanes>,
+    /// It plays backwards (a sound that does too plays it forwards).
+    pub reverse: bool,
+    /// A one-shot: a note plays it to its end, whenever the note ends.
+    pub once: bool,
+    /// Its tail, ms of its sample (0: none): at its end it plays back from there, fading.
+    pub tail_ms: f32,
+    /// It is a layer of its sound.
+    pub layer: Option<LayerRt>,
+}
+
+/// A zone's stem lanes (roadmap 2b): each as long as the zone's sample, read at the same
+/// place. With every lane at unity a voice plays the sample itself; else the lanes'
+/// sum at their `levels` (0: muted), crossfading between the two and ramping the levels
+/// over [`LANE_RAMP_MS`] so sounding notes don't click.
+#[derive(Clone, Default)]
+pub struct Lanes {
+    pub samples: [Option<Arc<Sample>>; LANES],
+    pub levels: [f32; LANES],
+    /// A stem was taken away: the lanes play even at unity (the sample still has it).
+    pub only: bool,
+}
+
+pub const LANES: usize = deckard_model::new_sampler::LANES;
+const LANE_RAMP_MS: f64 = 5.0;
+
+impl Lanes {
+    /// Every lane there is plays at unity: the sample itself is what's heard.
+    fn all_on(&self) -> bool {
+        !self.only && (0..LANES).all(|k| self.samples[k].is_none() || self.levels[k] == 1.0)
+    }
+}
+
+/// How a New Sampler zone in Sync or Keys plays (roadmap 1c): its sample (usually a
+/// [`crate::render`] of it, its Tune already in) is in time with the song at `tempo`,
+/// and reads `song tempo / tempo` frames a frame, so it stays in time whatever the
+/// song does (repitched, until a render for the new tempo comes). Sync plays every
+/// note the same; Keys transposes by the note, from `notes` (renders by distance from
+/// the root, the same length) when it has the note, else by reading faster or slower.
+#[derive(Clone, Default)]
+pub struct ZoneSync {
+    pub tempo: f64,
+    pub keys: bool,
+    pub notes: Vec<(i64, Arc<Sample>)>,
+    /// The stem lanes' renders for `notes` (as many, or none): a note without them
+    /// plays whole, whatever is muted.
+    pub note_lanes: Vec<[Option<Arc<Sample>>; LANES]>,
+    /// Sync: notes played live start on this grid (beats; 0: when played). One up to
+    /// half a division early waits for the line; a later one starts at once, as far
+    /// into the sample as it is late.
+    pub grid: f64,
+    /// A render plays in the sample's place: (its frame, the sample's frame there),
+    /// rising, so the playhead shows where in the sample it is. Empty: the sample plays.
+    pub shown: Vec<(f64, f64)>,
+    /// Stretched as it plays (no render): the zone's sample is the file itself, each
+    /// voice time-stretches it to the song's tempo, its pitch moved by these semitones
+    /// (its Tune) and, in Keys, the note.
+    pub live: Option<f64>,
+}
+
+/// How many voices a sampler stretches at once (the rest play repitched), and the
+/// frames a stretcher makes at a time.
+const LIVE_ROOM: usize = 12;
+const LIVE_CHUNK: usize = 64;
+const NO_LIVE: u8 = u8::MAX;
+/// Frames between two stretchers' starts: a start costs several blocks' work at once, so
+/// notes that come together start this far apart (a chord of four over 8 ms at 48 kHz).
+const LIVE_APART: u64 = 128;
+/// The most a stretcher is fed for a chunk, and to start.
+const LIVE_IN: usize = 16_384;
+
+/// A voice's stretcher: fed the zone's frames as fast as the song goes, it gives them
+/// at the pitch they were (times `transpose`).
+struct Live {
+    /// The rate it was made for.
+    sr: f64,
+    st: deckard_stretch::Stretch,
+    /// Input frames it's fed ahead, output frames it comes out behind.
+    lat: (usize, usize),
+    buf: [Vec<f32>; 4],
+    /// Output frames made, and the next to give.
+    have: usize,
+    at: usize,
+    /// The fraction of an input frame owed.
+    owed: f64,
+    /// Input frames an output frame, and the pitch factor.
+    rate: f64,
+    /// The rate it was last fed at: it's fed ahead of what it gives by its latency at
+    /// that rate, so another rate owes it the difference (or it, the song).
+    fed: f64,
+    transpose: f32,
+    /// A voice was given it and hasn't started it.
+    fresh: bool,
+    /// Output frames left once the zone's frames ran out.
+    left: Option<u32>,
+}
+
+/// Stretchers of samplers no longer playing, by rate: every edit builds the engine
+/// again, and making a sampler's stretchers takes some 15 ms.
+static SPARE_LIVES: std::sync::Mutex<Vec<(u64, Vec<Live>)>> = std::sync::Mutex::new(Vec::new());
+/// The most sets kept.
+const SPARE_ROOM: usize = 32;
+
+/// A sampler's stretchers. Dropped (wherever its sampler is, the audio thread too) they
+/// go to the spare sets while there's room made for them.
+#[derive(Default)]
+struct Lives(Vec<Live>);
+
+impl std::ops::Deref for Lives {
+    type Target = Vec<Live>;
+    fn deref(&self) -> &Vec<Live> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Lives {
+    fn deref_mut(&mut self) -> &mut Vec<Live> {
+        &mut self.0
+    }
+}
+
+impl Drop for Lives {
+    fn drop(&mut self) {
+        if self.0.len() == LIVE_ROOM
+            && let Ok(mut spare) = SPARE_LIVES.try_lock()
+            && spare.len() < spare.capacity().min(SPARE_ROOM)
+            && let Some(l) = self.0.first()
+        {
+            let rate = l.sr.to_bits();
+            spare.push((rate, std::mem::take(&mut self.0)));
+        }
+    }
+}
+
+impl Live {
+    /// A sampler's stretchers: a set left by one before it, else made.
+    fn pool(sr: f64) -> Lives {
+        let kept = SPARE_LIVES.lock().ok().and_then(|mut spare| {
+            // (Room made here, off the audio thread, for the sets dropped on it.)
+            spare.reserve(SPARE_ROOM);
+            let i = spare.iter().position(|(r, _)| *r == sr.to_bits())?;
+            Some(spare.swap_remove(i).1)
+        });
+        Lives(kept.unwrap_or_else(|| (0..LIVE_ROOM).map(|_| Live::new(sr)).collect()))
+    }
+
+    fn new(sr: f64) -> Live {
+        let st = deckard_stretch::Stretch::spread(sr as f32);
+        let lat = st.latency();
+        let out = LIVE_CHUNK.max(lat.1);
+        let mut live = Live {
+            sr,
+            st,
+            lat,
+            buf: [vec![0.0; LIVE_IN], vec![0.0; LIVE_IN], vec![0.0; out], vec![0.0; out]],
+            have: 0,
+            at: 0,
+            owed: 0.0,
+            rate: 1.0,
+            fed: 1.0,
+            transpose: 1.0,
+            fresh: false,
+            left: None,
+        };
+        // Run once here (off the audio thread): its memory is touched before a note
+        // needs it.
+        live.start(&mut || [0.0; 2]);
+        live
+    }
+
+    /// Start at the frames `pull` gives next: silence before them, the latency run
+    /// through and dropped, so the first frame out is the first frame in.
+    fn start(&mut self, pull: &mut impl FnMut() -> [f32; 2]) {
+        let (lat_in, lat_out) = self.lat;
+        let [il, ir, ol, or] = &mut self.buf;
+        let rate = self.rate.clamp(0.05, 16.0);
+        self.st.reset();
+        self.st.set_transpose(self.transpose);
+        let pre = (lat_in * 2).max(4096).min(LIVE_IN);
+        let ahead = lat_in.min(pre);
+        il[..pre - ahead].fill(0.0);
+        ir[..pre - ahead].fill(0.0);
+        for k in pre - ahead..pre {
+            [il[k], ir[k]] = pull();
+        }
+        self.st.seek(&il[..pre], &ir[..pre], rate);
+        let m = ((lat_out as f64 * rate).round() as usize).min(LIVE_IN);
+        for k in 0..m {
+            [il[k], ir[k]] = pull();
+        }
+        let drop_n = lat_out.min(ol.len());
+        self.st.process(&il[..m], &ir[..m], &mut ol[..drop_n], &mut or[..drop_n]);
+        (self.have, self.at, self.owed, self.left, self.fresh) = (0, 0, 0.0, None, false);
+        self.fed = rate;
+    }
+
+    /// The next frame out.
+    fn next(&mut self, pull: &mut impl FnMut() -> [f32; 2]) -> [f32; 2] {
+        if self.fresh {
+            self.start(pull);
+        }
+        if self.at == self.have {
+            let [il, ir, ol, or] = &mut self.buf;
+            self.st.set_transpose(self.transpose);
+            let rate = self.rate.clamp(0.05, 16.0);
+            // Another tempo: what it holds was fed for the old one, so the note would be
+            // left ahead of the song (a slower one) or behind it by the latency's worth.
+            // That's taken back over the next chunks, at no less than half the rate and no
+            // more than twice.
+            self.owed += self.lat.1 as f64 * (rate - self.fed);
+            self.fed = rate;
+            let chunk = LIVE_CHUNK as f64 * rate;
+            let want = chunk + self.owed;
+            let m = (want.clamp(chunk * 0.5, chunk * 2.0).floor() as usize).min(LIVE_IN);
+            self.owed = want - m as f64;
+            for k in 0..m {
+                [il[k], ir[k]] = pull();
+            }
+            self.st.process(&il[..m], &ir[..m], &mut ol[..LIVE_CHUNK], &mut or[..LIVE_CHUNK]);
+            (self.have, self.at) = (LIVE_CHUNK, 0);
+        }
+        let x = [self.buf[2][self.at], self.buf[3][self.at]];
+        self.at += 1;
+        x
+    }
+
+    /// Output frames still to come once the zone's frames have run out.
+    fn after(&self) -> u32 {
+        (self.lat.1 as f64 + self.lat.0 as f64 / self.rate.clamp(0.05, 16.0)) as u32
+    }
+}
+
+impl ZoneSync {
+    /// The sample's frame played at the render's frame `pos`.
+    fn source(&self, pos: f64) -> f64 {
+        let i = self.shown.partition_point(|p| p.0 <= pos);
+        match (i.checked_sub(1).and_then(|j| self.shown.get(j)), self.shown.get(i)) {
+            (Some(a), Some(b)) if b.0 > a.0 => a.1 + (pos - a.0) / (b.0 - a.0) * (b.1 - a.1),
+            (Some(a), _) => a.1,
+            (None, Some(b)) => b.1,
+            (None, None) => pos,
+        }
+    }
+
+    /// The render for `offset` semitones from the root, in Keys.
+    fn note(&self, offset: i64) -> Option<usize> {
+        if self.keys { self.notes.iter().position(|(o, _)| *o == offset) } else { None }
+    }
+}
+
+impl ZoneRt {
+    /// The frames voice `variant` reads: a Keys note's render, or the zone's sample.
+    fn data(&self, variant: Option<usize>) -> &[[f32; 2]] {
+        match variant.and_then(|i| self.sync.as_ref()?.notes.get(i)) {
+            Some((_, s)) => &s.frames,
+            None => &self.sample.frames,
+        }
+    }
+
+    /// The lanes voice `variant` reads, and their levels: none when it has no lanes, or
+    /// they all play at unity.
+    fn lanes_of(&self, variant: Option<usize>) -> Option<(&[Option<Arc<Sample>>; LANES], &[f32; LANES])> {
+        let l = self.lanes.as_ref().filter(|l| !l.all_on())?;
+        match variant {
+            Some(i) => self.sync.as_ref()?.note_lanes.get(i).filter(|s| s.iter().any(Option::is_some)).map(|s| (s, &l.levels)),
+            None => Some((&l.samples, &l.levels)),
+        }
+    }
+
+    /// Speed at song tempo `tempo` (1 unless in Sync or Keys).
+    fn speed(&self, tempo: f64) -> f64 {
+        match &self.sync {
+            Some(s) if s.tempo > 0.0 && tempo > 0.0 => tempo / s.tempo,
+            _ => 1.0,
+        }
+    }
 }
 
 /// The Sampler's fields modulation can drive ([`Settings::set_field`]).
@@ -507,11 +834,16 @@ struct Stream {
     /// How long the loop crossfade under way runs (frames); 0: none is.
     fading: i64,
     done: bool,
+    /// The tail to come when the play range runs out (frames; 0: none, or it has begun),
+    /// and the tail under way: frames left of how many.
+    tail: i64,
+    tail_left: i64,
+    tail_len: i64,
 }
 
 impl Stream {
     /// Frame `p` under the zone's fades, by its place in the play range: nothing before it.
-    fn faded(&self, data: &[[f32; 2]], p: i64) -> [f32; 2] {
+    fn faded(&self, read: &impl Fn(usize) -> [f32; 2], p: i64) -> [f32; 2] {
         let (start, end) = self.play;
         let mut g = 1.0;
         if self.fade_in > 0 && p >= start && p - start < self.fade_in {
@@ -520,26 +852,47 @@ impl Stream {
         if self.fade_out > 0 && p < end && end - p <= self.fade_out {
             g *= (end - p) as f32 / self.fade_out as f32;
         }
-        let x = data[p as usize];
+        let x = read(p as usize);
         [x[0] * g, x[1] * g]
     }
 
     fn next(&mut self, data: &[[f32; 2]]) -> [f32; 2] {
+        self.next_by(data.len(), &|p| data[p])
+    }
+
+    /// [`Stream::next`] of `len` frames given by `read`.
+    fn next_by(&mut self, len: usize, read: &impl Fn(usize) -> [f32; 2]) -> [f32; 2] {
         if self.done {
             return [0.0; 2];
         }
         let (start, end) = self.play;
-        let p = self.pos;
+        let mut p = self.pos;
         if p < start || p >= end {
-            self.done = true;
-            return [0.0; 2];
+            if self.tail <= 0 || end <= start {
+                self.done = true;
+                return [0.0; 2];
+            }
+            // The tail: back from the edge it ran off, fading (the same audio the other
+            // way, so the turn can't click).
+            self.tail_len = self.tail.min(end - start);
+            self.tail_left = self.tail_len;
+            self.tail = 0;
+            self.forward = !self.forward;
+            p = if self.forward { start } else { end - 1 };
+            self.pos = p;
         }
-        let mut x = self.faded(data, p);
+        let mut x = self.faded(read, p);
+        if self.tail_len > 0 {
+            let g = self.tail_left as f32 / self.tail_len as f32;
+            x = [x[0] * g, x[1] * g];
+            self.tail_left -= 1;
+            self.done = self.tail_left <= 0;
+        }
         // Loop crossfade: the last frames before the jump back fade into what the jump
         // would otherwise skip, linearly (§6.5). That's in the sample whether or not it's
         // in the play range.
         if let Some((ls, le)) = self.looped {
-            let last = data.len() as i64;
+            let last = len as i64;
             let (left, room, other) = if self.forward {
                 (le - p, ls, ls - (le - p))
             } else {
@@ -554,7 +907,7 @@ impl Stream {
                 }
                 if other >= 0 && other < last {
                     let w = left as f32 / self.fading as f32;
-                    let y = self.faded(data, other);
+                    let y = self.faded(read, other);
                     x = [x[0] * w + y[0] * (1.0 - w), x[1] * w + y[1] * (1.0 - w)];
                 }
             }
@@ -579,6 +932,21 @@ impl Stream {
         }
         x
     }
+}
+
+/// Frame `p` of a zone: `whole` of its sample `data`, the rest of its stem lanes' sum
+/// at levels `lane` (lanes shorter than it are silent past their end).
+fn mixed(data: &[[f32; 2]], lanes: Option<&[Option<Arc<Sample>>; LANES]>, whole: f32, lane: &[f32; LANES], p: usize) -> [f32; 2] {
+    let x = data[p];
+    let Some(lanes) = lanes.filter(|_| whole < 1.0) else { return x };
+    let mut sum = [0f32; 2];
+    for (s, g) in lanes.iter().zip(lane) {
+        if let Some(f) = s.as_ref().and_then(|s| s.frames.get(p)).filter(|_| *g != 0.0) {
+            sum[0] += f[0] * g;
+            sum[1] += f[1] * g;
+        }
+    }
+    [x[0] * whole + sum[0] * (1.0 - whole), x[1] * whole + sum[1] * (1.0 - whole)]
 }
 
 /// The 8-point interpolator's tap weights for `t = 1 − frac` (§7), for taps
@@ -838,6 +1206,8 @@ const VOICE_ROOM: usize = 24;
 struct Voice {
     id: u64,
     note: i64,
+    /// The key its pitch is of: the note, or (Slice Motion) its zone's root.
+    pitch: i64,
     zone: usize,
     vel: f32,
     age: u64,
@@ -857,6 +1227,12 @@ struct Voice {
     /// Pitch in octaves, without glide and modulation.
     octaves: f32,
     rate_ratio: f64,
+    /// The Keys render it reads ([`ZoneSync::notes`]), if any.
+    variant: Option<usize>,
+    /// The stretcher it plays through ([`SamplerRt::lives`]), or [`NO_LIVE`].
+    live: u8,
+    /// Its zone is a one-shot: the note's end leaves it playing.
+    once: bool,
     inc: u32,
     /// Static gain (zone gain, velocity → volume) and zone pan, per channel.
     gain: [f32; 2],
@@ -875,17 +1251,42 @@ struct Voice {
     cutoff: f32,
     cutoff_set: bool,
     eq: Biquad,
+    /// Stem lanes: how much of the sample itself it plays (1: all of it, 0: the lanes'
+    /// sum), and each lane's level, both on their way to the zone's.
+    whole: f32,
+    lane: [f32; LANES],
+    /// Frames of silence before it starts (a Sync note waiting for its grid line).
+    wait: u32,
+    /// A short fade-in (a Sync note started late, inside its sample): frames left.
+    rise: u32,
     /// Linear fade-out (stolen, CC 120, stop): (frames left, total).
     fade: Option<(u32, u32)>,
     released: bool,
     sustained: bool,
+    /// A layer's voice: its envelope, its gain (window, mute, solo) on its way to
+    /// `layer_to`, how far through the morph's cycle it is (a sweep of its own), and
+    /// where that puts the morph.
+    layer_env: Option<Env>,
+    layer_gain: f32,
+    layer_to: f32,
+    /// What its velocity makes of its zone's gain, and the gain it's going to (its
+    /// zone's level or pan moved under it: a layer's).
+    vel_gain: f32,
+    gain_to: [f32; 2],
+    sweep: f64,
+    morph_at: f32,
 }
+
+/// The fade-in of a Sync note started inside its sample, frames at most.
+const RISE: u32 = 144;
 
 /// Modulation and transport state shared by the voices of one Sampler.
 pub struct Context {
     pub tempo: f64,
     /// Song position in beats (quarter notes), for the LFO's Lock mode.
     pub beats: f64,
+    /// The note is played live while the song runs (a Sync zone starts it on its grid).
+    pub live: bool,
 }
 
 /// One sound's Sampler: settings, zones, voices and the controllers.
@@ -920,13 +1321,49 @@ pub struct SamplerRt {
     synth_glide: Option<crate::glide::Glide>,
     /// The Audio plug-in's loop playing instead of zones.
     audio: Option<Box<crate::audio_loop::LoopRt>>,
+    /// The song's tempo (Sync and Keys zones follow it).
+    tempo: f64,
+    /// The stretchers of zones stretched as they play, made with it (off the audio
+    /// thread) and given to voices as they start.
+    lives: Lives,
+    /// Frames rendered, and the frame the next stretcher may start at.
+    frame: u64,
+    live_from: u64,
+    /// Slice Motion: which of the zones a note plays.
+    pub motion: Motion,
+    /// The next slice Next plays, and the one played last (both counted in key order
+    /// among the zones that can play).
+    turn: usize,
+    last: usize,
+    /// The morph of its layers (`None`: it has none), POSITION as it plays now (a
+    /// modulation may hold it elsewhere), and how far through its cycle the sound's
+    /// own sweep is.
+    morph: Option<Morph>,
+    morph_pos: f32,
+    sweep: f64,
+    /// Where the song was at the last render (beats), and whether it had moved.
+    song: (f64, bool),
+    /// Beats into the note starting now (see [`SamplerRt::note_on_at`]); 0 otherwise.
+    skip: f64,
 }
 
 impl SamplerRt {
     pub fn new(settings: Settings, zones: Vec<ZoneRt>, mix: (f32, f32), sr: f64) -> SamplerRt {
         let zones_len = zones.len();
         let base = settings.clone();
+        let live = zones.iter().any(|z| z.sync.as_ref().is_some_and(|s| s.live.is_some()));
+        let lives = if live { Live::pool(sr) } else { Lives::default() };
         SamplerRt {
+            lives,
+            frame: 0,
+            live_from: 0,
+            motion: Motion::Off,
+            turn: 0,
+            last: usize::MAX,
+            morph: None,
+            morph_pos: 0.0,
+            sweep: 0.0,
+            song: (0.0, false),
             settings,
             base,
             hit: false,
@@ -953,6 +1390,8 @@ impl SamplerRt {
             synth: None,
             synth_glide: None,
             audio: None,
+            tempo: 0.0,
+            skip: 0.0,
         }
     }
 
@@ -966,6 +1405,8 @@ impl SamplerRt {
     /// Where the song is (beats) and its tempo, at the start of the next render (the
     /// Audio plug-in follows it).
     pub fn set_song(&mut self, beats: f64, tempo: f64) {
+        self.tempo = tempo;
+        self.song = (beats, beats != self.song.0);
         if let Some(a) = self.audio.as_mut() {
             a.set_song(beats, tempo);
         }
@@ -1011,6 +1452,7 @@ impl SamplerRt {
     pub(crate) fn finish_modulation(&mut self) -> bool {
         if !self.hit && self.modulated {
             self.settings.copy_values_from(&self.base);
+            self.morph_pos = self.morph.map_or(0.0, |m| m.position.clamp(0.0, 1.0) as f32);
             if let Some((_, synth, ..)) = self.synth.as_mut() {
                 let params = &self.settings.synth;
                 match self.synth_glide.as_mut() {
@@ -1032,6 +1474,12 @@ impl SamplerRt {
     /// edit or modulation: a Sampler field ([`MODULATED`]), or a parameter of the synth
     /// playing (one it has; it glides there).
     pub fn modulate(&mut self, k: &str, v: f64) {
+        if k == "morph" {
+            if v.is_finite() {
+                self.morph_pos = v.clamp(0.0, 1.0) as f32;
+            }
+            return;
+        }
         let Some((_, synth, ..)) = self.synth.as_mut() else {
             self.settings.set_field(k, v, self.sr);
             return;
@@ -1046,6 +1494,11 @@ impl SamplerRt {
             Some(g) => synth.set(if g.retarget(params) { g.now() } else { params }),
             None => synth.set(params),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn morph_pos(&self) -> f32 {
+        self.morph_pos
     }
 
     #[cfg(test)]
@@ -1091,11 +1544,31 @@ impl SamplerRt {
     /// Where the newest voice playing zone `zone` is in its sample (frames), if any:
     /// the Sample Editor's playhead.
     pub fn play_position(&self, zone: usize) -> Option<usize> {
-        self.voices
-            .iter()
-            .filter(|v| v.zone == zone && !v.stream.done && v.fade.is_none())
-            .max_by_key(|v| v.age)
-            .map(|v| v.stream.pos.max(0) as usize)
+        // (A stretcher fed its zone's last frame still has its end to give: it plays on.)
+        let ending = |v: &Voice| self.lives.get(v.live as usize).and_then(|l| l.left).filter(|&n| n > 0);
+        let plays = |v: &&Voice| v.zone == zone && v.fade.is_none() && (!v.stream.done || ending(v).is_some());
+        self.voices.iter().filter(plays).max_by_key(|v| v.age).map(|v| {
+            let mut pos = v.stream.pos.max(0) as f64;
+            // A stretcher is fed ahead of what it gives: the frame heard is behind.
+            if let Some(l) = self.lives.get(v.live as usize) {
+                let mut ahead = l.lat.0 as f64 + l.lat.1 as f64 * l.rate;
+                // Fed to the end: what it has left to give, back from there.
+                if let (true, Some(left)) = (v.stream.done, ending(v)) {
+                    pos = if v.stream.forward { v.stream.play.1 as f64 } else { v.stream.play.0 as f64 };
+                    ahead = f64::from(left) * l.rate;
+                }
+                pos = if v.stream.forward {
+                    (pos - ahead).max(v.stream.play.0 as f64)
+                } else {
+                    (pos + ahead).min(v.stream.play.1 as f64 - 1.0)
+                };
+            }
+            // A render's frame, back to the sample's.
+            match self.zones.get(zone).and_then(|z| z.sync.as_ref()) {
+                Some(sync) => sync.source(pos).max(0.0) as usize,
+                None => pos as usize,
+            }
+        })
     }
 
     /// The peak level of the last [`SamplerRt::render`], before the engine's clamp.
@@ -1119,15 +1592,83 @@ impl SamplerRt {
             return;
         }
         let same = |a: &ZoneRt, b: &ZoneRt| {
-            Arc::ptr_eq(&a.sample, &b.sample)
-                || (a.sample.frames.len() == b.sample.frames.len()
-                    && a.sample.rate == b.sample.rate
-                    && a.play == b.play
-                    && a.looped == b.looped)
+            // (The same file loaded again is the same sample.)
+            Arc::ptr_eq(&a.sample, &b.sample) || (a.sample.frames.len() == b.sample.frames.len() && a.sample.rate == b.sample.rate)
         };
+        // Voices stretched as they play keep their stretchers.
+        if !old.lives.is_empty() && !self.lives.is_empty() {
+            std::mem::swap(&mut self.lives, &mut old.lives);
+        }
+        let stretched = !self.lives.is_empty();
         for mut v in old.voices.drain(..) {
-            match (old.zones.get(v.zone), self.zones.get(v.zone)) {
-                (Some(a), Some(b)) if same(a, b) => {}
+            // A layer's voice goes with its sample, wherever its layer is now. One whose
+            // layer is gone fades out on what it was playing (kept as a zone no key plays).
+            let was = v.zone;
+            if let Some(a) = old.zones.get(was).filter(|a| a.layer.is_some()) {
+                let its = |b: &ZoneRt| b.layer.is_some() && Arc::ptr_eq(&a.sample, &b.sample);
+                if !self.zones.get(was).is_some_and(its) {
+                    match self.zones.iter().position(its) {
+                        Some(i) => v.zone = i,
+                        None if self.zones.len() < self.zones.capacity() => {
+                            self.zones.push(ZoneRt { keys: (1, 0), ..a.clone() });
+                            v.zone = self.zones.len() - 1;
+                            v.fade_out(self.sr);
+                        }
+                        None => continue,
+                    }
+                }
+                // Its level or pan may have moved: it goes there (ramped as it plays).
+                if let Some(b) = self.zones.get(v.zone) {
+                    v.gain_to = zone_amp(b).map(|c| c * v.vel_gain);
+                }
+            }
+            let live = self.zones.get(v.zone).and_then(|b| b.sync.as_ref()).and_then(|sy| Some((sy.live?, sy.keys)));
+            match live {
+                // Its Tune may have moved.
+                Some((semis, keys)) if stretched && v.live != NO_LIVE => {
+                    let root = self.zones[v.zone].root;
+                    v.octaves = semis as f32 / 12.0 + if keys { (v.pitch - root) as f32 / 12.0 } else { 0.0 };
+                }
+                _ => v.live = NO_LIVE,
+            }
+            match (old.zones.get(was), self.zones.get(v.zone)) {
+                (Some(a), Some(b)) if same(a, b) && a.sync.is_none() == b.sync.is_none() => {
+                    v.variant =
+                        b.sync.as_ref().and_then(|sy| v.variant.and_then(|i| a.sync.as_ref()?.notes.get(i)).and_then(|(o, _)| sy.note(*o)));
+                    // Its play range, loop or fades moved (the sample its own still): it
+                    // goes on in the new ones, heard at once.
+                    let ranges = |z: &ZoneRt| (z.play, z.looped, z.x_fade, z.fade_in, z.fade_out);
+                    if v.variant.is_none() && ranges(a) != ranges(b) {
+                        v.stream.play = (b.play.0 as i64, b.play.1 as i64);
+                        if v.stream.looped.is_some() {
+                            v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
+                        }
+                        (v.stream.x_fade, v.stream.fade_in, v.stream.fade_out) = (b.x_fade as i64, b.fade_in as i64, b.fade_out as i64);
+                        v.stream.fading = 0;
+                    }
+                }
+                // A Sync or Keys zone given another render (a new tempo, or the first):
+                // its voices carry on from the same place in the music, in the new one.
+                (Some(a), Some(b)) if a.sync.is_some() && b.sync.is_some() && a.sample.rate == b.sample.rate => {
+                    let (la, lb) = ((a.play.1 - a.play.0).max(1) as f64, (b.play.1 - b.play.0) as f64);
+                    let at = (v.stream.pos - a.play.0 as i64) as f64 / la;
+                    v.stream.pos = b.play.0 as i64 + (at * lb) as i64;
+                    v.stream.play = (b.play.0 as i64, b.play.1 as i64);
+                    if v.stream.looped.is_some() {
+                        v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
+                    }
+                    v.stream.fade_in = b.fade_in as i64;
+                    v.stream.fade_out = b.fade_out as i64;
+                    v.stream.x_fade = b.x_fade as i64;
+                    v.stream.fading = 0;
+                    let offset = v.pitch - b.root;
+                    v.variant = b.sync.as_ref().and_then(|sy| sy.note(offset));
+                    let keys = b.sync.as_ref().is_some_and(|sy| sy.keys);
+                    v.octaves = if keys && v.variant.is_none() { offset as f32 / 12.0 } else { 0.0 };
+                    if (v.stream.pos.max(0) as usize) >= b.sample.frames.len() {
+                        continue;
+                    }
+                }
                 (Some(a), Some(b)) if a.sample.rate == b.sample.rate && (v.stream.pos.max(0) as usize) < b.sample.frames.len() => {
                     v.stream.play = (b.play.0 as i64, b.play.1 as i64);
                     v.stream.looped = b.looped.map(|(l, r)| (l as i64, r as i64));
@@ -1138,18 +1679,60 @@ impl SamplerRt {
             self.voices.push(v);
         }
         self.clock = old.clock;
+        (self.turn, self.last) = (old.turn, old.last);
+        (self.frame, self.live_from) = (old.frame, old.live_from);
         (self.mod_wheel, self.bend, self.pedal) = (old.mod_wheel, old.bend, old.pedal);
         self.held = old.held;
         (self.glide, self.glide_target, self.glide_step, self.first_note) = (old.glide, old.glide_target, old.glide_step, old.first_note);
         self.lfo_phase = old.lfo_phase;
+        // The morph goes on from where it was.
+        (self.sweep, self.song) = (old.sweep, old.song);
+    }
+
+    /// The sound's layers have this morph (`None`: it has no layers).
+    pub fn set_morph(&mut self, morph: Option<Morph>) {
+        self.morph = morph;
+        // Room for a held chord of them all, made here (off the audio thread).
+        if morph.is_some() {
+            self.voices.reserve(MAX_VOICES.saturating_sub(self.voices.len()));
+            // And for layers taken away while they sound ([`SamplerRt::adopt`]).
+            self.zones.reserve(deckard_model::layers::MAX_LAYERS);
+        }
+        self.morph_pos = morph.map_or(0.0, |m| m.position.clamp(0.0, 1.0) as f32);
+    }
+
+    /// Where the morph is (0 to 1) for the newest note sounding; `None` with the morph
+    /// off or nothing sounding.
+    pub fn morph_position(&self) -> Option<f32> {
+        self.morph.filter(|m| m.on)?;
+        self.voices.iter().filter(|v| v.layer_env.is_some() && v.fade.is_none()).max_by_key(|v| v.age).map(|v| v.morph_at)
     }
 
     fn free_lfo_hz(&self) -> f64 {
         lfo_rate(self.settings.lfo_speed as f64).0
     }
 
+    /// Whether this sound plays sample zones, which can join a pattern's note part-way
+    /// through (a synth or the Audio plug-in can't).
+    pub fn can_chase(&self) -> bool {
+        self.synth.is_none() && self.audio.is_none() && !self.zones.is_empty()
+    }
+
+    /// A note that started `skip` beats ago (its pattern put in under a playing song):
+    /// its zones play from as far in as they would be by now. Only zones: a synth's or
+    /// the Audio plug-in's note isn't joined late.
+    pub fn note_on_at(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context, skip: f64) {
+        if skip > 0.0 && !self.can_chase() {
+            return;
+        }
+        self.skip = skip.max(0.0);
+        self.note_on(id, note, velocity, ctx);
+        self.skip = 0.0;
+    }
+
     /// Note-on (§9). `id` identifies the note for its note-off.
     pub fn note_on(&mut self, id: u64, note: i64, velocity: i64, ctx: &Context) {
+        self.tempo = ctx.tempo;
         if let Some(a) = self.audio.as_mut() {
             a.set_song(ctx.beats, ctx.tempo);
             a.note_on(id, note);
@@ -1161,10 +1744,13 @@ impl SamplerRt {
             return;
         }
         let velocity = if velocity <= 0 { 64 } else { velocity.min(127) };
-        if !self
-            .zones
-            .iter()
-            .any(|z| (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0)
+        // Slice Motion: the note plays one slice, whichever key it is.
+        let in_motion = self.motion != Motion::Off && self.zones.iter().any(|z| z.play.1 > z.play.0);
+        if !in_motion
+            && !self
+                .zones
+                .iter()
+                .any(|z| (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0)
         {
             return;
         }
@@ -1188,19 +1774,37 @@ impl SamplerRt {
             self.first_note = note;
             (self.glide, self.glide_target, self.glide_step) = (0.0, 0.0, 0.0);
         }
+        // A layered sound's key struck again: what still rings of it from before (let go
+        // already) makes way. The two would add or cancel by where each is in its wave,
+        // so the level would jump from one hit to the next. [DECKARD's choice]
+        for v in self.voices.iter_mut().filter(|v| v.note == note && v.released && v.layer_env.is_some()) {
+            v.fade_out(self.sr);
+        }
         self.clock += 1;
         let age = self.clock;
+        // (Chosen here: a legato note that only glides takes no turn.)
+        let moved = if in_motion { self.next_slice() } else { None };
         let mut started = false;
         for zi in 0..self.zones.len() {
             let z = &self.zones[zi];
-            if !(z.keys.0..=z.keys.1).contains(&note) || !(z.vels.0..=z.vels.1).contains(&velocity) || z.play.1 <= z.play.0 {
+            let plays = match moved {
+                Some(m) => m == zi,
+                None => (z.keys.0..=z.keys.1).contains(&note) && (z.vels.0..=z.vels.1).contains(&velocity) && z.play.1 > z.play.0,
+            };
+            if !plays {
                 continue;
             }
-            let v = self.make_voice(id, note, velocity, zi, age, ctx);
+            // (A slice in motion plays at its own pitch.)
+            let pitch = if moved.is_some() { z.root } else { note };
+            let v = self.make_voice(id, note, pitch, velocity, zi, age, ctx);
+            // No room: the oldest note goes, all its voices (its layers) together.
             if self.voices.len() >= MAX_VOICES
-                && let Some(i) = self.voices.iter().enumerate().min_by_key(|(_, v)| v.age).map(|(i, _)| i)
+                && let Some(oldest) = self.voices.iter().map(|v| v.age).filter(|&a| a != age).min()
             {
-                self.voices.swap_remove(i);
+                self.voices.retain(|v| v.age != oldest);
+            }
+            if self.voices.len() >= MAX_VOICES {
+                continue;
             }
             self.voices.push(v);
             started = true;
@@ -1226,7 +1830,35 @@ impl SamplerRt {
         }
     }
 
-    fn make_voice(&mut self, id: u64, note: i64, velocity: i64, zi: usize, age: u64, ctx: &Context) -> Voice {
+    /// Slice Motion: the zone the next note plays (`None`: Motion is off, or no zone can
+    /// play). Without allocating: it runs on the audio thread.
+    fn next_slice(&mut self) -> Option<usize> {
+        if self.motion == Motion::Off {
+            return None;
+        }
+        let zones = &self.zones;
+        let playable = |i: usize| zones[i].play.1 > zones[i].play.0;
+        let n = (0..zones.len()).filter(|&i| playable(i)).count();
+        if n == 0 {
+            return None;
+        }
+        let k = if self.motion == Motion::Random && n > 1 {
+            self.seed = self.seed.wrapping_mul(0x0BB3_8435).wrapping_add(0x3619_636B);
+            let draw = (self.seed >> 8) as usize;
+            // One of the others than the last.
+            if self.last < n { (self.last + 1 + draw % (n - 1)) % n } else { draw % n }
+        } else {
+            self.turn % n
+        };
+        self.turn = (k + 1) % n;
+        self.last = k;
+        // The `k`th in key order (zones on one key: in their own order).
+        let before = |i: usize, j: usize| (zones[j].keys.0, j) < (zones[i].keys.0, i);
+        (0..zones.len()).find(|&i| playable(i) && (0..zones.len()).filter(|&j| playable(j) && before(i, j)).count() == k)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_voice(&mut self, id: u64, note: i64, pitch: i64, velocity: i64, zi: usize, age: u64, ctx: &Context) -> Voice {
         let s = self.settings.clone();
         let free_hz = self.free_lfo_hz();
         self.seed = self.seed.wrapping_mul(0x0BB3_8435).wrapping_add(0x3619_636B);
@@ -1263,10 +1895,53 @@ impl SamplerRt {
         let len = (z.play.1 - z.play.0) as f32;
         let start = (s.start + vel * s.vel_start + mw * s.mw_start).clamp(0.0, 1.0);
         let offset = (start * len) as i64;
-        let forward = !s.reverse;
+        let forward = s.reverse == z.reverse;
         let looping = amp_on && z.looped.is_some();
+        // A Sync note played live starts on its grid: the nearest line, waited for, or
+        // (late) caught up with by starting that far in.
+        let (mut wait, mut rise) = (0u32, 0u32);
+        let mut offset = offset;
+        if let Some(sy) = z.sync.as_ref().filter(|sy| ctx.live && !sy.keys && sy.grid > 0.0 && sy.tempo > 0.0 && ctx.tempo > 0.0) {
+            let late = ctx.beats.rem_euclid(sy.grid);
+            if late > sy.grid / 2.0 {
+                wait = ((sy.grid - late) * 60.0 / ctx.tempo * self.sr).round() as u32;
+            } else {
+                // Beats to frames of the zone's sample (in time at `sy.tempo`).
+                let skip = (late * 60.0 / sy.tempo * z.sample.rate as f64).round() as i64;
+                if skip > (z.sample.rate / 500) as i64 && offset + skip < len as i64 {
+                    offset += skip;
+                    rise = RISE.min((self.sr * 0.003) as u32).max(1);
+                }
+            }
+        }
+        // A note joined late: as far in as it would be by now (a loop wrapped round),
+        // faded in rather than clicking.
+        if self.skip > 0.0 && forward && ctx.tempo > 0.0 {
+            let rate = z.sample.rate as f64;
+            let frames = match &z.sync {
+                Some(sy) if sy.tempo > 0.0 => self.skip * 60.0 / sy.tempo * rate,
+                _ => {
+                    let octaves = z.tune / 12.0 + s.tune + (note - z.root) as f32 / 12.0;
+                    self.skip * 60.0 / ctx.tempo * rate * 2f64.powf(octaves as f64)
+                }
+            };
+            let mut at = z.play.0 as i64 + offset + frames.round() as i64;
+            if let Some((a, b)) = z.looped.filter(|_| looping)
+                && at >= b as i64
+                && b > a
+            {
+                at = a as i64 + (at - a as i64).rem_euclid((b - a) as i64);
+            }
+            offset = (at - z.play.0 as i64).clamp(0, (len as i64 - 1).max(0));
+            rise = RISE.min((self.sr * 0.003) as u32).max(1);
+        }
         let stream = Stream {
-            pos: if forward { z.play.0 as i64 + offset } else { z.play.1 as i64 - 1 - offset },
+            pos: match z.looped {
+                _ if forward => z.play.0 as i64 + offset,
+                // A slice of its own that loops backwards starts at its loop's end.
+                Some((a, b)) if looping && z.reverse => (b as i64 - 1 - offset).max(a as i64),
+                _ => z.play.1 as i64 - 1 - offset,
+            },
             forward,
             play: (z.play.0 as i64, z.play.1 as i64),
             looped: if looping { z.looped.map(|(a, b)| (a as i64, b as i64)) } else { None },
@@ -1275,16 +1950,21 @@ impl SamplerRt {
             fade_out: z.fade_out as i64,
             fading: 0,
             done: false,
+            // (A loop goes round instead; a zone fade at that edge has ended it already, and
+            // a note started at the very end has played nothing to come back through.)
+            tail: if looping || (if forward { z.fade_out } else { z.fade_in }) > 0 || offset >= len as i64 {
+                0
+            } else {
+                (f64::from(z.tail_ms.max(0.0)) / 1000.0 * f64::from(z.sample.rate)) as i64
+            },
+            tail_left: 0,
+            tail_len: 0,
         };
         // Gain and pan (§6.6).
-        let mut g = 2.3948107 * z.gain.powi(5) + 0.767467 * z.gain * z.gain;
         let a = s.vel_volume;
         let u = if a >= 0.0 { 1.0 - vel } else { vel };
-        g *= (1.0 - a.abs() * u).powi(3);
-        let p = z.pan;
-        // 0.70711 and 0.29289 in Maschine.
-        const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
-        let gain = [(1.0 - K * p - (1.0 - K) * p * p) * g, (1.0 + K * p - (1.0 - K) * p * p) * g];
+        let vel_gain = (1.0 - a.abs() * u).powi(3);
+        let gain = zone_amp(z).map(|c| c * vel_gain);
         // LFO (§4).
         let (lfo_hz, phase) = match s.lfo_sync {
             0 => (free_hz, self.lfo_phase + s.lfo_phase as f64),
@@ -1295,10 +1975,24 @@ impl SamplerRt {
                 if sync == 1 { (hz, s.lfo_phase as f64) } else { (hz, s.lfo_phase as f64 + ratio * ctx.beats.rem_euclid(1.0 / ratio)) }
             }
         };
-        let octaves = z.tune / 12.0 + s.tune + (note - z.root) as f32 / 12.0;
+        // Sync and Keys: Tune is in the render (the length stays); Keys transposes by
+        // the note, from its render if there is one.
+        let (octaves, variant) = match &z.sync {
+            None => (z.tune / 12.0 + s.tune + (pitch - z.root) as f32 / 12.0, None),
+            // Stretched as it plays: its Tune and (Keys) the note are the stretcher's.
+            Some(sy) if sy.live.is_some() => {
+                (sy.live.unwrap_or(0.0) as f32 / 12.0 + if sy.keys { (pitch - z.root) as f32 / 12.0 } else { 0.0 }, None)
+            }
+            Some(sy) => match sy.note(pitch - z.root) {
+                Some(i) => (0.0, Some(i)),
+                None if sy.keys => ((pitch - z.root) as f32 / 12.0, None),
+                None => (0.0, None),
+            },
+        };
         let mut v = Voice {
             id,
             note,
+            pitch,
             zone: zi,
             vel,
             age,
@@ -1315,6 +2009,8 @@ impl SamplerRt {
             lfo_seed: self.seed,
             octaves,
             rate_ratio: z.sample.rate as f64 / self.sr,
+            variant,
+            live: NO_LIVE,
             inc: 65536,
             gain,
             pan_mod: 0.0,
@@ -1329,14 +2025,46 @@ impl SamplerRt {
             cutoff: 0.0,
             cutoff_set: false,
             eq: Biquad::default(),
+            whole: if z.lanes_of(variant).is_some() { 0.0 } else { 1.0 },
+            lane: z.lanes.as_ref().map_or([1.0; LANES], |l| l.levels),
+            wait,
+            rise,
             fade: None,
             released: false,
             sustained: false,
+            once: z.once,
+            layer_env: z.layer.map(|l| Env::new(l.env, true)),
+            layer_gain: 1.0,
+            layer_to: 1.0,
+            vel_gain,
+            gain_to: gain,
+            sweep: 0.0,
+            morph_at: 0.0,
         };
+        if let Some(l) = &z.layer {
+            // A note's own sweep starts with it; the sound's is where it is.
+            let reset = self.morph.is_some_and(|m| m.reset);
+            v.sweep = if reset { 0.0 } else { self.sweep };
+            (v.layer_to, v.morph_at) = layer_to(l, self.morph.as_ref(), self.morph_pos, v.sweep);
+            v.layer_gain = v.layer_to;
+        }
+        // A zone stretched as it plays: a stretcher no voice has, if one is left (else
+        // it plays repitched).
+        if z.sync.as_ref().is_some_and(|sy| sy.live.is_some())
+            && let Some(i) = (0..self.lives.len()).find(|&i| !self.voices.iter().any(|w| w.live as usize == i))
+        {
+            v.live = i as u8;
+            self.lives[i].fresh = true;
+            let at = (self.frame + u64::from(v.wait)).max(self.live_from);
+            v.wait = (at - self.frame) as u32;
+            self.live_from = at + LIVE_APART;
+            return v;
+        }
         // Prime the interpolator: x[n] .. x[n+4] are the first frames.
-        let data = &z.sample.frames;
+        let data = z.data(variant);
+        let lanes = z.lanes_of(variant);
         for k in 3..8 {
-            v.hist[k] = v.stream.next(data);
+            v.hist[k] = v.stream.next_by(data.len(), &|p| mixed(data, lanes.map(|l| l.0), v.whole, &v.lane, p));
         }
         v
     }
@@ -1451,6 +2179,20 @@ impl SamplerRt {
         (self.glide, self.glide_target, self.glide_step) = (0.0, 0.0, 0.0);
         self.pedal = false;
         self.bend = 0.0;
+        // Slice Motion starts over.
+        self.turn = 0;
+    }
+
+    /// Whether a loop is actively playing now (a cued Loop-mode Audio plug-in, or a
+    /// looped Sampler voice that hasn't been released or choked).
+    pub fn loop_playing(&self) -> bool {
+        if let Some(a) = &self.audio {
+            return a.loop_playing();
+        }
+        if self.synth.is_some() {
+            return false;
+        }
+        self.voices.iter().any(|v| v.stream.looped.is_some() && !v.stream.done && v.fade.is_none() && !v.released)
     }
 
     /// Mix the voices into interleaved `out`; returns the peak (left, right).
@@ -1465,6 +2207,7 @@ impl SamplerRt {
             return peak;
         }
         let frames = out.len() / 2;
+        self.frame += frames as u64;
         let mut peak = (0f32, 0f32);
         self.last_peak = 0.0;
         let s = self.settings.clone();
@@ -1481,13 +2224,27 @@ impl SamplerRt {
         let free_inc = self.free_lfo_hz() / self.sr;
         let zones = &self.zones;
         let voices = &mut self.voices;
+        let lives = &mut self.lives;
         let sr = self.sr;
         let coeffs = self.coeffs;
         let comp_target = s.comp.clamp(0.0, 1.0) * 50.0;
         let mw = self.mod_wheel;
         let bend = self.bend * s.bend_range;
+        let tempo = self.tempo;
         let engine_gain = if s.mode == 1 { 0.8637621 } else { 1.0 };
         let quantize = s.mode >= 1;
+        let lane_step = (1000.0 / (LANE_RAMP_MS * self.sr)) as f32;
+        let layer_step = (1000.0 / (LAYER_RAMP_MS * self.sr)) as f32;
+        // The morph: a cycle of its sweep in frames, the sound's own in step with the
+        // song while that runs.
+        let (morph, morph_pos) = (self.morph, self.morph_pos);
+        let cycle = morph.map_or(1.0, |m| m.cycle_seconds(tempo) * self.sr).max(1.0);
+        if let Some(m) = morph.filter(|m| m.sync && !m.reset && self.song.1) {
+            self.sweep = (self.song.0 / (m.bars.max(deckard_model::layers::SYNCED[0]) * 4.0)).rem_euclid(1.0);
+        }
+        let sweep_from = self.sweep;
+        self.sweep = (self.sweep + frames as f64 / cycle).fract();
+        let own_sweep = morph.is_some_and(|m| m.reset);
         for f in 0..frames {
             // Glide (legato).
             if self.glide_step != 0.0 {
@@ -1502,6 +2259,10 @@ impl SamplerRt {
             let mut l = 0f32;
             let mut rr = 0f32;
             for v in voices.iter_mut() {
+                if v.wait > 0 {
+                    v.wait -= 1;
+                    continue;
+                }
                 let z = &zones[v.zone];
                 // Another filter type starts from rest, as Maschine's separate filters do.
                 if v.filter_mode != s.filter {
@@ -1516,9 +2277,14 @@ impl SamplerRt {
                     let lfo = v.lfo(s.lfo_type);
                     let env = v.modenv.level;
                     let octaves = v.octaves + glide + s.lfo_pitch * lfo_scale * lfo + s.env_pitch * env + bend;
-                    let ratio = 2f64.powf(octaves as f64) * v.rate_ratio;
+                    let ratio = 2f64.powf(octaves as f64) * v.rate_ratio * z.speed(tempo);
                     let ratio = if s.mode == 1 { ratio.min(1.49831) } else { ratio };
                     v.inc = (ratio * 65536.0).round().clamp(1.0, 65536.0 * 64.0) as u32;
+                    if let Some(live) = lives.get_mut(v.live as usize) {
+                        // The song's speed is the stretcher's rate, the pitch its own.
+                        live.rate = v.rate_ratio * z.speed(tempo);
+                        live.transpose = (2f64.powf(octaves as f64) * v.rate_ratio) as f32;
+                    }
                     let dmod = s.env_drive * env + s.lfo_drive * lfo_scale * lfo;
                     let d = (s.drive + dmod).clamp(0.0, 1.0);
                     v.drive_target = if d <= 0.0001 { 0.0 } else { d * 127.0 };
@@ -1545,6 +2311,16 @@ impl SamplerRt {
                     if let Some(c) = eq {
                         v.eq.set(c);
                     }
+                    if let Some(l) = &z.layer {
+                        if own_sweep {
+                            v.sweep = (v.sweep + CHUNK as f64 / cycle).fract();
+                        } else {
+                            v.sweep = (sweep_from + f as f64 / cycle).fract();
+                        }
+                        (v.layer_to, v.morph_at) = layer_to(l, morph.as_ref(), morph_pos, v.sweep);
+                    } else {
+                        v.layer_to = 1.0;
+                    }
                     let pm = s.lfo_pan * lfo_scale * lfo + s.env_pan * env + s.mw_pan * mw;
                     // Hard left to hard right at most (the amounts add up to ±3).
                     v.pan_target = pm.clamp(-1.0, 1.0);
@@ -1555,24 +2331,65 @@ impl SamplerRt {
                     }
                 }
                 v.ctl_left -= 1;
-                // Resample (§7).
-                let w = weights(1.0 - v.frac as f32 / 65536.0);
-                let mut x = [0f32; 2];
-                for (k, wk) in w.iter().enumerate() {
-                    x[0] += wk * v.hist[k][0];
-                    x[1] += wk * v.hist[k][1];
-                }
-                v.frac += v.inc;
-                while v.frac >= 65536 {
-                    v.frac -= 65536;
-                    v.hist.copy_within(1..8, 0);
-                    let mut next = v.stream.next(&z.sample.frames);
-                    if quantize {
-                        next = [(next[0] * 2048.0).trunc() / 2048.0, (next[1] * 2048.0).trunc() / 2048.0];
+                // The zone's next frame: its sample, or its stem lanes on their way to the
+                // zone's levels.
+                let source = |v: &mut Voice| -> [f32; 2] {
+                    // Stem lanes: toward the zone's levels, and between the sample itself
+                    // and the lanes' sum.
+                    let data = z.data(v.variant);
+                    let lanes = z.lanes_of(v.variant);
+                    if lanes.is_some() || v.whole < 1.0 {
+                        let toward = |x: &mut f32, to: f32| *x = if *x < to { (*x + lane_step).min(to) } else { (*x - lane_step).max(to) };
+                        toward(&mut v.whole, if lanes.is_some() { 0.0 } else { 1.0 });
+                        if let Some((_, levels)) = lanes {
+                            for k in 0..LANES {
+                                toward(&mut v.lane[k], levels[k]);
+                            }
+                        }
                     }
-                    v.hist[7] = next;
+                    // (Fading back to the sample itself, the lanes still sound.)
+                    let lane_samples = if v.whole < 1.0 {
+                        lanes.map(|l| l.0).or(match v.variant {
+                            Some(i) => z.sync.as_ref().and_then(|sy| sy.note_lanes.get(i)),
+                            None => z.lanes.as_ref().map(|l| &l.samples),
+                        })
+                    } else {
+                        None
+                    };
+                    let (whole, lane) = (v.whole, v.lane);
+                    v.stream.next_by(data.len(), &|p| mixed(data, lane_samples, whole, &lane, p))
+                };
+                let mut x = [0f32; 2];
+                if let Some(live) = lives.get_mut(v.live as usize) {
+                    // Stretched as it plays: the stretcher takes the zone's frames as fast
+                    // as the song goes.
+                    x = live.next(&mut || source(v));
                     if v.stream.done {
-                        v.tail += 1;
+                        let left = live.left.get_or_insert(live.after());
+                        *left = left.saturating_sub(1);
+                        if *left == 0 {
+                            v.tail = 8;
+                        }
+                    }
+                } else {
+                    // Resample (§7).
+                    let w = weights(1.0 - v.frac as f32 / 65536.0);
+                    for (k, wk) in w.iter().enumerate() {
+                        x[0] += wk * v.hist[k][0];
+                        x[1] += wk * v.hist[k][1];
+                    }
+                    v.frac += v.inc;
+                    while v.frac >= 65536 {
+                        v.frac -= 65536;
+                        v.hist.copy_within(1..8, 0);
+                        let mut next = source(v);
+                        if quantize {
+                            next = [(next[0] * 2048.0).trunc() / 2048.0, (next[1] * 2048.0).trunc() / 2048.0];
+                        }
+                        v.hist[7] = next;
+                        if v.stream.done {
+                            v.tail += 1;
+                        }
                     }
                 }
                 // Effects (§2, §8).
@@ -1607,7 +2424,28 @@ impl SamplerRt {
                     *left = left.saturating_sub(1);
                 }
                 let (pl, pr) = if *pm > 0.0 { (1.0 - *pm, 1.0) } else { (1.0, 1.0 + *pm) };
-                let k = amp * fade * engine_gain;
+                if v.rise > 0 {
+                    fade *= 1.0 - v.rise as f32 / RISE as f32;
+                    v.rise -= 1;
+                }
+                let mut k = amp * fade * engine_gain;
+                if let Some(e) = v.layer_env.as_mut() {
+                    v.layer_gain = if v.layer_gain < v.layer_to {
+                        (v.layer_gain + layer_step).min(v.layer_to)
+                    } else {
+                        (v.layer_gain - layer_step).max(v.layer_to)
+                    };
+                    k *= e.next() * v.layer_gain;
+                }
+                if v.gain != v.gain_to {
+                    for c in 0..2 {
+                        v.gain[c] = if v.gain[c] < v.gain_to[c] {
+                            (v.gain[c] + layer_step).min(v.gain_to[c])
+                        } else {
+                            (v.gain[c] - layer_step).max(v.gain_to[c])
+                        };
+                    }
+                }
                 l += x[0] * v.gain[0] * pl * k;
                 rr += x[1] * v.gain[1] * pr * k;
             }
@@ -1686,6 +2524,9 @@ impl Voice {
     }
 
     fn release(&mut self, pedal: bool) {
+        if self.once {
+            return;
+        }
         if pedal {
             self.sustained = true;
             return;
@@ -1694,6 +2535,9 @@ impl Voice {
             self.released = true;
             self.amp.release();
             self.modenv.release();
+            if let Some(e) = self.layer_env.as_mut() {
+                e.release();
+            }
         }
     }
 
@@ -1702,6 +2546,9 @@ impl Voice {
             return false;
         }
         if self.amp_on && self.amp.done() {
+            return false;
+        }
+        if self.layer_env.as_ref().is_some_and(Env::done) {
             return false;
         }
         // The stream ran out and the interpolator has emptied.
@@ -1764,10 +2611,16 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
         };
         let model = deckard_model::Sampler::default();
         let mut smp = SamplerRt::new(Settings::new(&model, 48_000.0), vec![zone], (1.0, 1.0), 48_000.0);
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         let buffer = smp.voices.as_ptr();
         let limit = smp.settings.note_limit();
         for n in 0..VOICE_ROOM.min(limit + 4) as i64 {
@@ -1778,11 +2631,567 @@ mod tests {
         assert!(sounding <= limit, "{sounding} notes sound, limit {limit}");
     }
 
+    /// A Sampler of one zone (a 2 s ramp at 48 kHz), in Sync or Keys when given.
+    fn synced(sync: Option<ZoneSync>) -> SamplerRt {
+        let sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: (0..96_000).map(|i| [i as f32 / 96_000.0; 2]).collect() });
+        let zone = ZoneRt {
+            sample,
+            root: 60,
+            keys: (0, 127),
+            vels: (0, 127),
+            gain: 1.0,
+            pan: 0.0,
+            tune: 5.0,
+            play: (0, 96_000),
+            looped: None,
+            x_fade: 0,
+            fade_in: 0,
+            fade_out: 0,
+            sync,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
+        };
+        SamplerRt::new(Settings::new(&deckard_model::Sampler::default(), 48_000.0), vec![zone], (1.0, 1.0), 48_000.0)
+    }
+
+    /// Frames its first voice read over `n` frames of output.
+    fn read(smp: &mut SamplerRt, n: usize) -> i64 {
+        let from = smp.voices[0].stream.pos;
+        let mut out = vec![0.0; n * 2];
+        smp.render(&mut out);
+        smp.voices[0].stream.pos - from
+    }
+
+    /// A zone in time at 100 BPM reads 1.2 frames a frame in a 120 BPM song, and
+    /// follows the song when its tempo moves; Tune (in the render) doesn't move it.
+    #[test]
+    fn sync_voices_follow_the_tempo() {
+        let mut smp = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
+        smp.set_song(0.0, 120.0);
+        smp.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0, live: false });
+        let got = read(&mut smp, 4800);
+        assert!((got - 5760).abs() <= 2, "read {got}");
+        smp.set_song(0.0, 100.0);
+        let got = read(&mut smp, 4800);
+        assert!((got - 4800).abs() <= 33, "read {got}");
+        // Repitch: the zone's Tune (5 semitones) moves the speed.
+        let mut plain = synced(None);
+        plain.set_song(0.0, 120.0);
+        plain.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.0, live: false });
+        let got = read(&mut plain, 4800);
+        assert!((got - (4800.0 * 2f64.powf(5.0 / 12.0)) as i64).abs() <= 2, "read {got}");
+    }
+
+    /// Sync plays every note alike; Keys transposes, from a note's render when it has
+    /// one (the same length), else by speed.
+    #[test]
+    fn sync_ignores_the_note_and_keys_plays_its_render() {
+        let ctx = Context { tempo: 100.0, beats: 0.0, live: false };
+        let mut smp = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
+        smp.set_song(0.0, 100.0);
+        smp.note_on(1, 72, 100, &ctx);
+        assert_eq!((smp.voices[0].octaves, smp.voices[0].variant), (0.0, None));
+        let up = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.25; 2]; 96_000] });
+        let mut keys = synced(Some(ZoneSync { tempo: 100.0, keys: true, notes: vec![(12, up)], ..ZoneSync::default() }));
+        keys.set_song(0.0, 100.0);
+        keys.note_on(1, 72, 100, &ctx);
+        keys.note_on(2, 67, 100, &ctx);
+        let (a, b) = (&keys.voices[0], &keys.voices[1]);
+        assert_eq!((a.octaves, a.variant), (0.0, Some(0)), "the octave's render");
+        assert_eq!((b.octaves, b.variant), (7.0 / 12.0, None), "no render: by speed");
+        assert_eq!(read(&mut keys, 480), 480, "a note's render plays at the tempo's speed");
+    }
+
+    /// A zone stretched as it plays: at a faster song it goes through its sample faster
+    /// and keeps its pitch; Tune moves the pitch and not the speed; it starts at once and
+    /// ends when the sample has.
+    #[test]
+    fn a_live_zone_keeps_its_pitch_at_any_tempo() {
+        let sr = 48_000.0;
+        // Two seconds of 220 Hz, in time at 100 BPM.
+        let tone = Arc::new(crate::sample::Sample {
+            rate: 48_000,
+            frames: (0..96_000).map(|i| [(std::f64::consts::TAU * 220.0 * i as f64 / sr).sin() as f32 * 0.5; 2]).collect(),
+        });
+        // (Rising zero crossings a second, over the half second from 0.25 s; the peak in the first 30 ms; the frames it took.)
+        let heard = |tempo: f64, semis: f64| {
+            let mut smp = synced(Some(ZoneSync { tempo: 100.0, live: Some(semis), ..ZoneSync::default() }));
+            smp.zones[0].tune = 0.0;
+            smp.zones[0].sample = tone.clone();
+            smp.set_song(0.0, tempo);
+            smp.note_on(1, 60, 127, &Context { tempo, beats: 0.0, live: false });
+            let mut out = vec![0.0; 48_000 * 2];
+            smp.render(&mut out);
+            let x: Vec<f32> = out.chunks(2).map(|f| f[0]).collect();
+            let ups = x[12_000..36_000].windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f64 * 2.0;
+            let early = x[..1440].iter().fold(0f32, |m, v| m.max(v.abs()));
+            (ups, early, smp.play_position(0).unwrap_or(0) as f64, smp)
+        };
+        let (hz, early, at, _) = heard(100.0, 0.0);
+        assert!((hz - 220.0).abs() < 4.0 && early > 0.1, "as it is: {hz} Hz, {early} at the start");
+        assert!((at - 48_000.0).abs() < 2400.0, "a second in: {at}");
+        let (hz, early, at, _) = heard(150.0, 0.0);
+        assert!((hz - 220.0).abs() < 4.0 && early > 0.1, "half as fast again, the same note: {hz} Hz, {early}");
+        assert!((at - 72_000.0).abs() < 2400.0, "a second and a half of it in a second: {at}");
+        let (hz, _, at, _) = heard(100.0, 12.0);
+        assert!((hz - 440.0).abs() < 8.0, "an octave up: {hz} Hz");
+        assert!((at - 48_000.0).abs() < 2400.0, "no faster: {at}");
+        // Twice as fast it's over in a second, and the voice goes.
+        let (_, _, _, mut smp) = heard(200.0, 0.0);
+        let mut out = vec![0.0; 24_000 * 2];
+        smp.render(&mut out);
+        assert!(smp.voices.is_empty(), "ended with its sample");
+        assert!(out[40_000..].iter().all(|v| v.abs() < 1e-3), "and silent");
+    }
+
+    /// A live zone's muted lane is out of what the stretcher is fed.
+    #[test]
+    fn a_live_zone_plays_its_lanes() {
+        let flat = |v: f32| Some(Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[v; 2]; 96_000] }));
+        let level = |levels: [f32; LANES]| {
+            let mut smp = synced(Some(ZoneSync { tempo: 100.0, live: Some(0.0), ..ZoneSync::default() }));
+            smp.zones[0].tune = 0.0;
+            smp.zones[0].sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.5; 2]; 96_000] });
+            smp.zones[0].lanes = Some(Lanes { samples: [flat(0.1), flat(0.2), None, flat(0.4)], levels, only: false });
+            smp.set_song(0.0, 120.0);
+            smp.note_on(1, 60, 127, &Context { tempo: 120.0, beats: 0.0, live: false });
+            let mut out = vec![0.0; 24_000 * 2];
+            smp.render(&mut out);
+            out[24_000]
+        };
+        let whole = level([1.0, 1.0, 0.0, 1.0]);
+        let muted = level([0.0, 1.0, 0.0, 1.0]);
+        assert!(whole > 0.0 && (muted / whole - 0.6 / 0.5).abs() < 0.05, "the other lanes' sum: {muted} against {whole}");
+    }
+
+    /// What stretching costs: `cargo test -p deckard-engine --lib live_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_cost() {
+        for voices in [1u64, 4, 12] {
+            let mut smp = synced(Some(ZoneSync { tempo: 100.0, live: Some(0.0), ..ZoneSync::default() }));
+            smp.settings.polyphony = 32;
+            smp.zones[0].sample = Arc::new(crate::sample::Sample {
+                rate: 48_000,
+                frames: (0..960_000u64).map(|i| [((i * 7919) % 1000) as f32 / 1000.0 - 0.5; 2]).collect(),
+            });
+            smp.zones[0].play = (0, 960_000);
+            smp.set_song(0.0, 120.0);
+            if voices == 1 {
+                let t = std::time::Instant::now();
+                let made: Vec<Live> = (0..LIVE_ROOM).map(|_| Live::new(48_000.0)).collect();
+                let t2 = std::time::Instant::now();
+                drop(Lives(made));
+                let again = Live::pool(48_000.0);
+                eprintln!("and had again in {:.3} ms", t2.elapsed().as_secs_f64() * 1000.0);
+                let made = again;
+                eprintln!("{} stretchers made in {:.1} ms", made.len(), t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let t = std::time::Instant::now();
+            for k in 0..voices {
+                smp.note_on(k + 1, 60, 127, &Context { tempo: 120.0, beats: 0.0, live: false });
+            }
+            // A block of 128 frames lasts 2.67 ms: the worst one is what a device hears.
+            let mut out = vec![0.0; 128 * 2];
+            smp.render(&mut out);
+            let first = t.elapsed().as_secs_f64();
+            let (mut worst, mut sum) = (0f64, 0f64);
+            let blocks = 5 * 48_000 / 128;
+            for _ in 0..blocks {
+                let t = std::time::Instant::now();
+                smp.render(&mut out);
+                let d = t.elapsed().as_secs_f64();
+                worst = worst.max(d);
+                sum += d;
+            }
+            eprintln!(
+                "{voices} voices: the first block {:.2} ms, then {:.1} % of real time, the worst block {:.2} ms of 2.67",
+                first * 1000.0,
+                sum / 5.0 * 100.0,
+                worst * 1000.0
+            );
+        }
+    }
+
+    /// More notes than stretchers: the rest play (repitched) all the same.
+    #[test]
+    fn notes_past_the_stretchers_still_play() {
+        let mut smp = synced(Some(ZoneSync { tempo: 100.0, live: Some(0.0), ..ZoneSync::default() }));
+        smp.settings.polyphony = 32;
+        let ctx = Context { tempo: 100.0, beats: 0.0, live: false };
+        for k in 0..LIVE_ROOM as u64 + 3 {
+            smp.note_on(k + 1, 60, 127, &ctx);
+        }
+        let live = smp.voices.iter().filter(|v| v.live != NO_LIVE).count();
+        assert_eq!(live, LIVE_ROOM.min(smp.voices.len()));
+        // Notes that come together start their stretchers a block apart (a start is
+        // several blocks' work); the ones without start at once.
+        let waits: Vec<u64> = smp.voices.iter().filter(|v| v.live != NO_LIVE).map(|v| u64::from(v.wait)).collect();
+        assert_eq!(waits, (0..live as u64).map(|k| k * LIVE_APART).collect::<Vec<_>>());
+        assert!(smp.voices.iter().filter(|v| v.live == NO_LIVE).all(|v| v.wait == 0));
+        let mut ids: Vec<u8> = smp.voices.iter().filter(|v| v.live != NO_LIVE).map(|v| v.live).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), live, "a stretcher a voice");
+        let mut out = vec![0.0; 4800 * 2];
+        smp.render(&mut out);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    /// A zone set to play backwards starts on its last frame and goes down (and a sound
+    /// that plays backwards plays it forwards again).
+    #[test]
+    fn a_reversed_zone_plays_backwards() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        // A ramp: frame f is f / 96,000.
+        let ramp = Arc::new(crate::sample::Sample { rate: 48_000, frames: (0..96_000).map(|f| [f as f32 / 96_000.0; 2]).collect() });
+        let heard = |reverse: bool| {
+            let mut smp = synced(None);
+            smp.zones[0].tune = 0.0;
+            smp.zones[0].sample = ramp.clone();
+            smp.zones[0].play = (24_000, 72_000);
+            smp.zones[0].reverse = reverse;
+            smp.note_on(1, 60, 127, &ctx);
+            let mut out = vec![0.0; 4800 * 2];
+            smp.render(&mut out);
+            (out[2 * 480], out[2 * 4799])
+        };
+        let (a, b) = heard(false);
+        assert!(a > 0.0 && b > a, "forwards it rises: {a} to {b}");
+        let (c, d) = heard(true);
+        assert!(c > b && d < c, "backwards it falls from its end: {c} to {d}");
+    }
+
+    /// A one-shot zone plays on when its note ends; a zone of its own direction that
+    /// loops goes round its loop backwards, from the loop's end.
+    #[test]
+    fn a_slice_plays_once_or_round_its_loop() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let ramp = Arc::new(crate::sample::Sample { rate: 48_000, frames: (0..96_000).map(|f| [f as f32 / 96_000.0; 2]).collect() });
+        let zone = |once: bool| {
+            let mut smp = synced(None);
+            smp.settings.env_type = 2;
+            smp.zones[0].tune = 0.0;
+            smp.zones[0].sample = ramp.clone();
+            smp.zones[0].play = (24_000, 72_000);
+            smp.zones[0].once = once;
+            smp
+        };
+        let after_the_note = |once: bool| {
+            let mut smp = zone(once);
+            smp.note_on(1, 60, 127, &ctx);
+            smp.note_off(1, 60);
+            let mut out = vec![0.0; 24_000 * 2];
+            smp.render(&mut out);
+            out[2 * 23_999]
+        };
+        assert!(after_the_note(true) > 0.4, "the one-shot plays on: {}", after_the_note(true));
+        assert!(after_the_note(false).abs() < 1e-3, "held, it ends with its note: {}", after_the_note(false));
+        // Backwards round frames 30,000 to 31,000: every frame heard is one of the loop's.
+        let mut smp = zone(false);
+        smp.zones[0].reverse = true;
+        smp.zones[0].looped = Some((30_000, 31_000));
+        smp.note_on(1, 60, 127, &ctx);
+        let mut out = vec![0.0; 4800 * 2];
+        smp.render(&mut out);
+        let tail: Vec<f32> = out[2 * 1200..].chunks(2).map(|f| f[0]).collect();
+        let (lo, hi) = tail.iter().fold((f32::MAX, 0f32), |a, x| (a.0.min(*x), a.1.max(*x)));
+        assert!(lo > 0.0 && hi / lo < 1.04, "it stays in its loop: {lo} to {hi}");
+        assert!(out[2 * 600] < out[2 * 300], "going down");
+        assert!(tail.windows(2).filter(|w| w[1] > w[0] * 1.01).count() >= 3, "and round again");
+    }
+
+    /// A sampler of the 2 s ramp cut in `plays`, a zone a key from 36 (Repitch, one-shot).
+    fn chopped(plays: &[(usize, usize)]) -> SamplerRt {
+        let mut smp = synced(None);
+        let z = ZoneRt { tune: 0.0, ..smp.zones[0].clone() };
+        smp.zones = plays.iter().enumerate().map(|(i, &play)| ZoneRt { play, keys: (36 + i as i64, 36 + i as i64), ..z.clone() }).collect();
+        smp
+    }
+
+    /// The first frame heard of a note of `key` (the ramp tells where in the sample).
+    fn first_heard(smp: &mut SamplerRt, id: u64, key: i64) -> usize {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        smp.voices.clear();
+        smp.note_on(id, key, 100, &ctx);
+        smp.voices.last().map_or(usize::MAX, |v| v.stream.play.0 as usize)
+    }
+
+    /// Slice Motion, Next: every note plays the next slice in key order, whichever key,
+    /// at the slice's own pitch; zones that can't play are passed over, one zone plays
+    /// every time, and stopping starts over.
+    #[test]
+    fn motion_plays_the_slices_in_turn() {
+        let mut smp = chopped(&[(0, 1000), (5000, 5000), (20_000, 21_000), (40_000, 41_000)]);
+        assert_eq!(first_heard(&mut smp, 1, 60), usize::MAX, "off: no zone on that key");
+        smp.motion = Motion::Next;
+        let heard: Vec<usize> = (0..4).map(|i| first_heard(&mut smp, 2 + i, 60)).collect();
+        assert_eq!(heard, [0, 20_000, 40_000, 0], "in turn, the empty one passed over");
+        assert_eq!(smp.voices.last().unwrap().octaves, 0.0, "at its own pitch, two octaves from its key");
+        assert_eq!(first_heard(&mut smp, 9, 37), 20_000, "whichever key");
+        smp.fade_all();
+        assert_eq!(first_heard(&mut smp, 10, 60), 0, "stopped, it starts over");
+        // Zones on one key go in their own order; one zone plays every time.
+        smp.zones[3].keys = (36, 36);
+        smp.fade_all();
+        assert_eq!([first_heard(&mut smp, 11, 60), first_heard(&mut smp, 12, 60)], [0, 40_000]);
+        let mut one = chopped(&[(300, 900)]);
+        one.motion = Motion::Random;
+        assert_eq!([first_heard(&mut one, 1, 50), first_heard(&mut one, 2, 51)], [300, 300]);
+        let mut none = chopped(&[(5, 5)]);
+        none.motion = Motion::Next;
+        assert_eq!(first_heard(&mut none, 1, 36), usize::MAX);
+        // Legato: a note that glides the sounding voice takes no turn.
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let mut smp = chopped(&[(0, 90_000), (20_000, 90_000), (40_000, 90_000)]);
+        smp.motion = Motion::Next;
+        smp.settings.polyphony = 0;
+        assert!(smp.settings.legato());
+        smp.note_on(1, 60, 100, &ctx);
+        smp.note_on(2, 62, 100, &ctx);
+        assert_eq!(smp.voices.len(), 1, "it glides");
+        smp.voices.clear();
+        smp.held.clear();
+        smp.note_on(3, 60, 100, &ctx);
+        assert_eq!(smp.voices[0].stream.play.0, 20_000, "the second slice, not the third");
+    }
+
+    #[test]
+    fn random_motion_never_repeats() {
+        let mut smp = chopped(&[(0, 1000), (20_000, 21_000), (40_000, 41_000)]);
+        smp.motion = Motion::Random;
+        let heard: Vec<usize> = (0..40).map(|i| first_heard(&mut smp, i, 60)).collect();
+        assert!(heard.windows(2).all(|w| w[0] != w[1]), "{heard:?}");
+        for a in [0, 20_000, 40_000] {
+            assert!(heard.contains(&a), "{a} in {heard:?}");
+        }
+        // Kept through an edit: the sampler made again goes on from where it was.
+        smp.motion = Motion::Next;
+        smp.fade_all();
+        first_heard(&mut smp, 50, 60);
+        let mut again = chopped(&[(0, 1000), (20_000, 21_000), (40_000, 41_000)]);
+        again.motion = Motion::Next;
+        again.adopt(smp);
+        assert_eq!(first_heard(&mut again, 51, 60), 20_000);
+    }
+
+    /// Tail: at the slice's end the note plays back from there, fading to nothing; no
+    /// longer than the slice; a reversed slice's tail goes forwards from its start.
+    #[test]
+    fn a_tail_plays_back_from_the_end_and_fades() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let heard = |tail_ms: f32, reverse: bool, n: usize| {
+            let mut smp = chopped(&[(48_000, 49_000)]);
+            smp.zones[0].keys = (0, 127);
+            smp.zones[0].tail_ms = tail_ms;
+            smp.zones[0].reverse = reverse;
+            smp.note_on(1, 60, 127, &ctx);
+            let mut out = vec![0.0; n * 2];
+            smp.render(&mut out);
+            out.chunks(2).map(|f| f[0]).collect::<Vec<f32>>()
+        };
+        let peak = |x: &[f32]| x.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let none = heard(0.0, false, 3000);
+        assert!(peak(&none[1010..]) < 1e-4, "no tail: silent past the end");
+        // 500 frames of tail (at 48 kHz).
+        let tail = heard(500.0 / 48.0, false, 3000);
+        assert!(tail[1100] > 0.2 && tail[1100] < none[900], "there, and quieter than the slice: {}", tail[1100]);
+        assert!(tail[1100] > tail[1300] && tail[1300] > tail[1480], "fading");
+        assert!(peak(&tail[1510..]) < 1e-4, "gone after 500 frames");
+        assert!((tail[1001] - tail[997]).abs() < 0.01, "no jump at the turn: {} {}", tail[997], tail[1001]);
+        let long = heard(1000.0, false, 4000);
+        assert!(long[1500] > 0.05 && peak(&long[2010..]) < 1e-4, "at most as long as the slice");
+        let back = heard(500.0 / 48.0, true, 3000);
+        assert!(back[1100] > 0.2 && peak(&back[1510..]) < 1e-4, "a reversed slice's tail");
+        // A loop has none.
+        let mut smp = chopped(&[(48_000, 49_000)]);
+        smp.settings.env_type = 2;
+        smp.zones[0].keys = (0, 127);
+        smp.zones[0].tail_ms = 100.0;
+        smp.zones[0].looped = Some((48_000, 49_000));
+        smp.note_on(1, 60, 127, &ctx);
+        assert_eq!(smp.voices[0].stream.tail, 0);
+        // Nor has a slice that fades out at that end.
+        let mut smp = chopped(&[(48_000, 49_000)]);
+        smp.zones[0].keys = (0, 127);
+        smp.zones[0].tail_ms = 100.0;
+        smp.note_on(1, 60, 127, &ctx);
+        assert!(smp.voices[0].stream.tail > 0);
+        smp.zones[0].fade_out = 200;
+        smp.note_on(2, 60, 127, &ctx);
+        assert_eq!(smp.voices[1].stream.tail, 0);
+    }
+
+    /// Stem lanes: with them all on a voice plays the sample itself; a muted lane leaves
+    /// the others' sum, reached over a few milliseconds on a sounding note, and unmuting
+    /// goes back to the sample.
+    #[test]
+    fn stem_lanes_mute_on_sounding_notes() {
+        let flat = |v: f32| Some(Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[v; 2]; 96_000] }));
+        let lanes = |levels| Lanes { samples: [flat(0.1), flat(0.2), None, flat(0.4)], levels, only: false };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let level = |smp: &mut SamplerRt, n: usize| {
+            let mut out = vec![0.0; n * 2];
+            smp.render(&mut out);
+            out[n * 2 - 2]
+        };
+        // The sample itself is 0.5 throughout (not the lanes' sum, 0.7).
+        let mut smp = synced(None);
+        smp.zones[0].tune = 0.0;
+        smp.zones[0].sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.5; 2]; 96_000] });
+        smp.zones[0].lanes = Some(lanes([1.0, 1.0, 0.0, 1.0]));
+        smp.note_on(1, 60, 127, &ctx);
+        let whole = level(&mut smp, 480);
+        assert!(whole > 0.0);
+        // The first lane muted, as an edit does it (a new Sampler adopting the voices).
+        let mut muted = synced(None);
+        muted.zones[0] = smp.zones[0].clone();
+        muted.zones[0].lanes = Some(lanes([0.0, 1.0, 0.0, 1.0]));
+        muted.adopt(smp);
+        let soon = level(&mut muted, 48);
+        assert!((soon - whole).abs() < whole * 0.25, "no jump: {soon} from {whole}");
+        let after = level(&mut muted, 960);
+        assert!((after / whole - 0.6 / 0.5).abs() < 1e-3, "the other lanes' sum: {after} against {whole}");
+        // A lane at half: 0.1 + 0.1 + 0.4.
+        let mut half = synced(None);
+        half.zones[0] = muted.zones[0].clone();
+        half.zones[0].lanes = Some(lanes([1.0, 0.5, 0.0, 1.0]));
+        half.adopt(muted);
+        let after = level(&mut half, 960);
+        assert!((after / whole - 0.6 / 0.5).abs() < 1e-3, "{after}");
+        // All on again: the sample itself.
+        let mut on = synced(None);
+        on.zones[0] = half.zones[0].clone();
+        on.zones[0].lanes = Some(lanes([1.0, 1.0, 0.0, 1.0]));
+        on.adopt(half);
+        let after = level(&mut on, 960);
+        assert!((after - whole).abs() < 1e-6, "{after} against {whole}");
+        assert_eq!(on.voices[0].whole, 1.0);
+        // A note begun with a lane muted starts on the sum.
+        let mut fresh = synced(None);
+        fresh.zones[0] = muted_zone(&on.zones[0], lanes([0.0, 1.0, 0.0, 1.0]));
+        fresh.note_on(1, 60, 127, &ctx);
+        let first = level(&mut fresh, 480);
+        assert!((first / whole - 0.6 / 0.5).abs() < 1e-3, "{first}");
+        // A stem taken away: the lanes left play, at unity too (0.1 + 0.2 + 0.4), not
+        // the sample, which still has it.
+        let mut left = synced(None);
+        left.zones[0] = muted_zone(&on.zones[0], Lanes { only: true, ..lanes([1.0, 1.0, 0.0, 1.0]) });
+        left.note_on(1, 60, 127, &ctx);
+        let first = level(&mut left, 480);
+        assert!((first / whole - 0.7 / 0.5).abs() < 1e-3, "{first}");
+    }
+
+    fn muted_zone(z: &ZoneRt, lanes: Lanes) -> ZoneRt {
+        ZoneRt { lanes: Some(lanes), ..z.clone() }
+    }
+
+    /// A Sync note played live starts on its grid: just early, it waits for the line;
+    /// just late, it starts at once that far into the sample. The song's own notes
+    /// (not live) start where they are.
+    #[test]
+    fn live_sync_notes_start_on_the_grid() {
+        // 120 BPM, a 1/16 grid: 6000 frames a division at 48 kHz.
+        let sync = || synced(Some(ZoneSync { tempo: 120.0, grid: 0.25, ..ZoneSync::default() }));
+        // 0.05 beats (1200 frames) before beat 1.
+        let mut early = sync();
+        early.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 0.95, live: true });
+        assert_eq!((early.voices[0].wait, early.voices[0].stream.pos), (1200, 5), "waits, from the start (5 frames primed)");
+        let mut out = vec![0.0; 2400];
+        early.render(&mut out);
+        assert!(out.iter().all(|x| *x == 0.0), "silent until the line");
+        assert_eq!(early.voices[0].wait, 0);
+        // 0.05 beats after it.
+        let mut late = sync();
+        late.note_on(1, 60, 100, &Context { tempo: 120.0, beats: 1.05, live: true });
+        assert_eq!((late.voices[0].wait, late.voices[0].stream.pos), (0, 1205), "starts 1200 frames in");
+        assert!(late.voices[0].rise > 0, "faded in");
+        // On the line, and from the timeline: as played.
+        for ctx in [Context { tempo: 120.0, beats: 1.0, live: true }, Context { tempo: 120.0, beats: 1.05, live: false }] {
+            let mut on = sync();
+            on.note_on(1, 60, 100, &ctx);
+            assert_eq!((on.voices[0].wait, on.voices[0].rise, on.voices[0].stream.pos), (0, 0, 5));
+        }
+    }
+
+    /// A Sync zone given a render for another tempo: its voice carries on from the
+    /// same place in the music.
+    #[test]
+    fn a_new_render_takes_over_where_the_music_is() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let mut old = synced(Some(ZoneSync { tempo: 100.0, ..ZoneSync::default() }));
+        old.set_song(0.0, 120.0);
+        old.note_on(1, 60, 100, &ctx);
+        read(&mut old, 9600);
+        let at = old.voices[0].stream.pos as f64 / 96_000.0;
+        // The render at 120: 100/120 as long.
+        let mut new = synced(Some(ZoneSync { tempo: 120.0, ..ZoneSync::default() }));
+        let len = 80_000;
+        new.zones[0].sample = Arc::new(crate::sample::Sample { rate: 48_000, frames: vec![[0.1; 2]; len] });
+        new.zones[0].play = (0, len);
+        new.adopt(old);
+        assert_eq!(new.voices.len(), 1, "it plays on");
+        let v = &new.voices[0];
+        assert!(v.fade.is_none(), "not faded out");
+        assert!(((v.stream.pos as f64 / len as f64) - at).abs() < 1e-3, "same place: {} vs {at}", v.stream.pos as f64 / len as f64);
+    }
+
+    /// A zone's loop and play range moved under a held note: the note goes on, in the new
+    /// ones (a loop end pulled back past where it is brings it round at once).
+    #[test]
+    fn a_held_note_follows_its_loop_and_end() {
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
+        let adsr = || {
+            let mut s = synced(None);
+            s.settings.env_type = 2;
+            s
+        };
+        let mut old = adsr();
+        old.zones[0].looped = Some((1000, 40_000));
+        old.note_on(1, 60, 100, &ctx);
+        assert!(old.voices[0].stream.looped.is_some(), "it loops");
+        read(&mut old, 12_000);
+        assert!(old.voices[0].stream.pos > 10_000);
+        let mut new = adsr();
+        new.zones[0].sample = old.zones[0].sample.clone();
+        (new.zones[0].play, new.zones[0].looped) = ((0, 60_000), Some((2000, 6000)));
+        new.adopt(old);
+        assert_eq!(new.voices.len(), 1);
+        let v = &new.voices[0];
+        assert!(v.fade.is_none(), "it plays on");
+        assert_eq!((v.stream.play, v.stream.looped), ((0, 60_000), Some((2000, 6000))));
+        read(&mut new, 64);
+        let pos = new.voices[0].stream.pos;
+        assert!((2000..6000).contains(&pos), "round the new loop: {pos}");
+        // The loop switched off: it plays out to the new end.
+        let mut off = adsr();
+        off.zones[0].sample = new.zones[0].sample.clone();
+        off.zones[0].play = (0, 30_000);
+        off.adopt(new);
+        assert_eq!((off.voices[0].stream.play, off.voices[0].stream.looped), ((0, 30_000), None));
+    }
+
     /// A stream over frames whose value is their index, so a mix shows what it read.
     fn stream(play: (i64, i64), looped: (i64, i64), x_fade: i64, forward: bool) -> (super::Stream, Vec<[f32; 2]>) {
         let data = (0..1000).map(|i| [i as f32, i as f32]).collect();
         let pos = if forward { play.0 } else { play.1 - 1 };
-        let st = super::Stream { pos, forward, play, looped: Some(looped), x_fade, fade_in: 0, fade_out: 0, fading: 0, done: false };
+        let st = super::Stream {
+            pos,
+            forward,
+            play,
+            looped: Some(looped),
+            x_fade,
+            fade_in: 0,
+            fade_out: 0,
+            fading: 0,
+            done: false,
+            tail: 0,
+            tail_left: 0,
+            tail_len: 0,
+        };
         (st, data)
     }
 
@@ -1969,11 +3378,17 @@ mod tests {
                 x_fade: 0,
                 fade_in: 0,
                 fade_out: 0,
+                sync: None,
+                lanes: None,
+                reverse: false,
+                once: false,
+                tail_ms: 0.0,
+                layer: None,
             }
         };
         let settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         let mut smp1 = SamplerRt::new(settings.clone(), vec![make_zone(sample1)], (1.0, 1.0), 48_000.0);
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         smp1.note_on(1, 60, 100, &ctx);
         assert_eq!(smp1.voices.len(), 1);
         assert!(smp1.voices[0].fade.is_none());
@@ -2007,12 +3422,18 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
         };
         let mut settings = Settings::new(&deckard_model::Sampler::default(), 48_000.0);
         settings.polyphony = 0; // Legato
         settings.glide = 0.5;
         let mut smp = SamplerRt::new(settings, vec![zone], (1.0, 1.0), 48_000.0);
-        let ctx = Context { tempo: 120.0, beats: 0.0 };
+        let ctx = Context { tempo: 120.0, beats: 0.0, live: false };
         smp.note_on(1, 60, 100, &ctx);
         assert_eq!(smp.voices.len(), 1);
         assert_eq!(smp.voices[0].note, 60);
@@ -2028,3 +3449,7 @@ mod tests {
         assert_eq!(smp.glide_step, 0.0);
     }
 }
+
+#[cfg(test)]
+#[path = "sampler_layers_tests.rs"]
+mod layers_tests;

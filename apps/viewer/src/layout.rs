@@ -218,6 +218,8 @@ fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3])> {
         // Solarized's field and text. Palenight's writing on black.
         "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1])),
         "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff])),
+        // Deep's cool white on black.
+        "deep" => Some(([0x00, 0x00, 0x00], [0xee, 0xf2, 0xf6])),
         // Palenight on its blue-grey field.
         "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff])),
         _ => None,
@@ -936,6 +938,9 @@ pub enum Act {
     MoveSlotBetween(deckard_doc::Chain, usize, deckard_doc::Chain, usize),
     SlotActive(usize, bool),
     OpenSlotEditor(usize),
+    /// The focused sound's instrument made a New Sampler (a Sampler or an Audio
+    /// plug-in), or a New Sampler made a plain Sampler (false).
+    ConvertInstrument(bool),
     /// Open the window of the plug-in in slot `.1` of chain `.0`.
     OpenSlotEditorIn(deckard_doc::Chain, usize),
     /// Set parameter `id` of the plug-in in slot `.0` (normalized).
@@ -1108,6 +1113,8 @@ pub enum ClipAct {
 #[derive(Debug, Clone)]
 pub enum AddWhat {
     Sampler,
+    /// DECKARD's sampler: a Sampler marked DECKARD's (`deckard_model::new_sampler`).
+    NewSampler,
     Audio,
     Plugin(deckard_plugins::scan::Entry),
     /// One of Maschine's effects (its class: "EQ", "BeatDelay", …).
@@ -1504,6 +1511,7 @@ fn apply_with_mode(app: &mut App, acts: Vec<Act>, exact: bool) {
                 }
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
+            Act::ConvertInstrument(to_new) => app.convert_instrument(to_new),
             Act::OpenSlotEditorIn(c, i) => app.open_slot_editor_in(c, i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::Zhora(what) => app.zhora_press(what),
@@ -6112,6 +6120,28 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                         ui.close();
                     }
                     change_menu(ui, app, app.chain(), i, !movable, acts);
+                    // The Sampler and the Audio plug-in become a New Sampler, and back.
+                    if i == 0 && matches!(app.chain(), deckard_doc::Chain::Sound(..)) {
+                        let new_sampler = slot.name == "Sampler Preview";
+                        if new_sampler {
+                            if ui
+                                .button("Convert to Sampler")
+                                .on_hover_text("A plain Sampler, as Maschine has it: Sync, Keys and the analysis go")
+                                .clicked()
+                            {
+                                acts.push(Act::ConvertInstrument(false));
+                                ui.close();
+                            }
+                        } else if (slot.module == "Sampler" || slot.module == "AudioModule")
+                            && ui
+                                .button("Convert to Sampler Preview")
+                                .on_hover_text("Keep its samples, in DECKARD's Sampler Preview (loops in Sync)")
+                                .clicked()
+                        {
+                            acts.push(Act::ConvertInstrument(true));
+                            ui.close();
+                        }
+                    }
                     if ui.button("Remove").clicked() {
                         acts.push(Act::RemoveSlot(i));
                         ui.close();
@@ -6194,7 +6224,7 @@ fn native(instrument: bool) -> impl Iterator<Item = &'static deckard_plugins::na
 /// "+" › Internal's instruments (a sound's first slot only): the Sampler and Audio,
 /// Maschine's synths, DECKARD's own.
 fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -> Act, acts: &mut Vec<Act>) {
-    for (name, what) in [("Sampler", AddWhat::Sampler), ("Audio", AddWhat::Audio)] {
+    for (name, what) in [("Sampler", AddWhat::Sampler), ("Sampler Preview", AddWhat::NewSampler), ("Audio", AddWhat::Audio)] {
         if ui.add_enabled(instruments, egui::Button::new(name)).on_disabled_hover_text(AFTER_FX).clicked() {
             acts.push(pick(what));
             ui.close();
@@ -6724,8 +6754,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         let row_h = grid.height() / count;
         (row_h, first * row_h)
     } else {
-        // The sound slots: a plain scroll bar.
-        let y0 = scroll(ui, "pattern-rows", grid, rows as f32 * ROW);
+        // The sound names and drum lanes share one offset and accept wheel input over either.
+        let y0 = scroll(ui, "pattern-rows", list.union(grid), rows as f32 * ROW);
         let total = rows as f32 * ROW;
         let y0 = match zoom_bar(
             ui,

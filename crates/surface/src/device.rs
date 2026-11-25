@@ -343,6 +343,7 @@ fn start(sources: &Sources, id: &str) -> mlua::Result<Run> {
         view: Rc::default(),
         view_id: 1,
         now: 0.0,
+        redraw_until: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
         actions: Vec::new(),

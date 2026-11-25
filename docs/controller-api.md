@@ -307,9 +307,9 @@ and `positions`.
 | `deckard.pick_pattern(n)` | The focused group plays its pattern `n` in the focused scene, focused. |
 | `deckard.scene_pattern(group, n)` | Group `group` plays its pattern `n` in the focused scene, or none with `n` nil (the focus stays). |
 | `deckard.sampling(open)` | The Sampling page opened (the focused sound's sample shown; RECORD if it has none) or closed. |
-| `deckard.sampling_tab(n)` | Its tab: 1 RECORD, 2 EDIT, 3 SLICE, 4 ZONE. |
+| `deckard.sampling_tab(n)` | Its tab: 1 RECORD, 2 EDIT, 3 SLICE, 4 ZONE, 5 LAYERS (a layered New Sampler sound's: `state().sampling.sample.layers`, `.layer` the focused one, `.morph`). |
 | `deckard.sampling_knob(page, n, value)` | Knob `n` of the tab's knob page `page` set to `value` (on SLICE, the slicer's knob `n`, its `index`; `page` is ignored). |
-| `deckard.sampling_call(what, a, b)` | Ask something of the focused sample: `edit` (function `a`: 1 TRUNCATE, 2 NORMALIZE, 3 REVERSE, 4 FADE IN, 5 FADE OUT, 6 FIX DC, 7 SILENCE, 8 CUT, 9 COPY, 10 PASTE, 11 DUPLICATE), `auto_loop`, `stems`, `cancel_stems`, `view` (show frames `a` to `b`), `split_slice` / `remove_slice` (slice `a`), `clear_slices`, `move_slice` (slice `a`'s start to frame `b`), `apply_slices` (the slices become the focused sound's zones), `remove_zone` / `focus_zone` (zone `a`), `prehear` (frames `a` to `b`). Slices and zones count from 1, frames from 0. |
+| `deckard.sampling_call(what, a, b)` | Ask something of the focused sample: `edit` (function `a`: 1 TRUNCATE, 2 NORMALIZE, 3 REVERSE, 4 FADE IN, 5 FADE OUT, 6 FIX DC, 7 SILENCE, 8 CUT, 9 COPY, 10 PASTE, 11 DUPLICATE), `auto_loop`, `stems`, `cancel_stems`, `view` (show frames `a` to `b`), `split_slice` / `remove_slice` (slice `a`), `clear_slices`, `move_slice` (slice `a`'s start to frame `b`), `apply_slices` (the slices become the focused sound's zones), `remove_zone` / `focus_zone` (zone `a`), `prehear` (frames `a` to `b`); for a layered New Sampler sound, `focus_layer` / `layer_mute` / `layer_solo` / `remove_layer` (layer `a`), `layer_level` (the focused layer's level, `a` from 0 to 1) and `spread_layers` (every layer's window spread evenly over the morph). Slices, zones and layers count from 1, frames from 0. |
 | `deckard.record_sample(cancel)` | RECORD's START (or STOP while waiting or recording); with `cancel` true, the recording cancelled. |
 | `deckard.take(n, delete)` | Take `n` focused (loaded into the focused sound), or with `delete` true removed from the list. |
 | `deckard.pattern_span(start, length)`, `deckard.pattern_length(length)` | Where the focused pattern starts and how long it is (ticks); a length chosen ends Auto. |
@@ -419,6 +419,274 @@ controller folder. **Export** saves that file to send to someone; **Import** loa
 theme file you were sent. **Remove my copy** deletes only your file, so a theme that
 came with DECKARD comes back. A file you wrote by hand is left as it is until you save
 over that name.
+
+## Plug-in mappings
+
+A plug-in's **mapping** is a small Lua file of data. It says what the plug-in's parameters
+mean (a cutoff in Hz on a log taper, a mode with four choices) and where they go on the MK3:
+which parameter is on which knob, and which pictures sit above which knobs. DECKARD's Rust
+code does all the drawing (a filter's curve, an envelope, an EQ's bands); a mapping only
+says what to draw from. A mapping has no functions and nothing in it runs per frame, and it
+changes nothing in a project: it is a file beside your controller scripts.
+
+Where a mapping has none, DECKARD lays pictures out on any plug-in's knobs from the knobs'
+own names and text ("Pictures on other pages").
+
+### Where mappings live
+
+```
+<controller folder>/mappings/<vendor>/<plugin>.lua
+```
+
+DECKARD ships some in `crates/surface/lua/mappings/`; yours go in the same place under the
+folder Controller ▸ Open Controller Scripts Folder opens. Folders go two deep at most.
+A mapping reloads when you save it. Where it sits doesn't decide what it matches (its
+`match` does), and your mapping of a given path replaces DECKARD's. When two mappings match
+one plug-in, yours wins, then the more specific match.
+
+A mapping that fails to load or check (no `api`, an undeclared name, a bad taper) shows its
+error in the script-error report, with the file and the reason, and is left out. The plug-in
+then shows as it would with no mapping.
+
+### The file
+
+```lua
+return {
+  api   = 1,
+  match = { name = "Ladder", vendor = "Acme" },
+  params   = { ... },
+  pictures = { ... },
+  pages    = { ... },
+}
+```
+
+`api` is the mapping format, 1 now. DECKARD loads mappings written for its own format or an
+older one and refuses a newer one. Set `kind = "eq"` on a hosted effect to show its live
+input and output spectra in the MK3's right-hand EQ curve area on the plug-in page.
+The chart spans 20 Hz to 20 kHz and −90 to 0 dBFS. A mapping can set this tag
+without defining any custom knob pages. The built-in EQ also shows live input and
+output spectra behind its response curve and band handles.
+
+#### `match`
+
+| Field | Matches |
+|---|---|
+| `name` | The plug-in's name, ignoring case. |
+| `vendor` | The vendor, ignoring case. Optional: left out, any vendor matches. |
+| `plugin_id` | The plug-in's identity exactly. Wins over a name. |
+| `builtin` | One of DECKARD's own plug-ins, by name or id (`builtin = "filter"`). |
+
+A mapping needs `name`, `plugin_id` or `builtin`. A match by `plugin_id` or `builtin` ranks
+above name and vendor, which ranks above a name alone.
+
+#### `params`
+
+A mapping names each parameter it uses once, and everything else in the file uses those
+names. A name used elsewhere that isn't declared here is an error.
+
+| Field | Meaning |
+|---|---|
+| `id` | The parameter's id (a number). |
+| `knob` | The name or names the knob carries on the slot's page (`{ "Cutoff", "Freq" }`), ignoring case. |
+| `section` | With `knob`: only a knob in this section. |
+| `name` | The parameter's title, for plug-ins with no stable ids. |
+| `taper` | How the knob's 0 to 1 position becomes real units. |
+| `choices` | The parameter is a list of named choices, such as `{ "LP24", "LP12", "BP", "HP" }`. Its value is the knob's text. |
+
+A parameter is found on the page's knobs by `id` first, then `knob` (and `section`), then
+`name`. One that isn't on the page leaves out the widget inputs that use it, and a picture
+whose `needs` aren't all on the page isn't drawn. Nothing is guessed.
+
+**Units.** A picture needs Hz, ms and dB, not 0.43. A parameter's value in real units is its
+knob's position through its `taper`, or without one the number and unit in the knob's text
+(`1.20 kHz`, `380 ms`, `-6.0 dB`). So a plug-in that already writes its values with units
+needs no taper. The knob always shows the plug-in's own text; a wrong taper bends the picture,
+never the number.
+
+| Taper | Meaning |
+|---|---|
+| `{ "lin", a, b }` | Straight from a to b. |
+| `{ "log", a, b }` | Logarithmic, both ends above 0: frequencies and times. `{ "log", 20, 20000 }` |
+| `{ "exp", a, b, curve }` | a to b along `t^curve` (2 if left out). |
+| `{ "db", a, b }` | Decibels, straight in dB. Minus infinity is the string `"-inf"`: `{ "db", "-inf", 12 }` |
+| `{ "table", {0, 20}, {0.5, 800}, {1, 20000} }` | Points of `{ position, value }`, straight between them. Two or more. |
+
+#### `pictures`
+
+```lua
+response = { widget = "filter", needs = { "cutoff" },
+             model = { shape = { from = "mode", map = { LP24 = { const = "ladder4" }, HP = { const = "svf_hp" } } },
+                       cutoff = "cutoff", resonance = "reso",
+                       decay_floor = { const = 5 } } },
+```
+
+- `widget`: one of the widgets below.
+- `needs`: the parameters the picture can't do without. It's drawn only where all of them
+  are on the page's knobs, and they decide where it goes on a page the mapping doesn't lay
+  out ("Pictures on other pages").
+- `model`: each of the widget's inputs, from one of three things:
+  - a declared parameter's name: the parameter's value in real units (`cutoff = "cutoff"`);
+  - a number or text constant, `{ const = 5 }` or `{ const = "bp" }`;
+  - a choice map, `{ from = "mode", map = { LP24 = { const = "ladder4" }, HP = { const = "svf_hp" } } }`: the
+    choice the `from` parameter's text reads (ignoring case) picks the entry. An entry is
+    again any of these three, so a switch can pick another parameter:
+    `release = { from = "rel_on", map = { On = "decay", Off = { const = 5 } } }`.
+
+  A choice with no entry, or a parameter off the page, leaves that input at the widget's
+  default.
+
+#### `pages`
+
+```lua
+{ name = "FILTER",
+  knobs = { "cutoff", "reso", false, "mode", "attack", "decay", "sustain", "release" },
+  pictures = { { "response", knobs = { 1, 3 } }, { "contour", knobs = { 5, 8 } } } },
+{ name = "MORE", left = "response", knobs = { ... } },
+```
+
+- `knobs`: eight parameter names, left to right. An empty knob is `false`, since a `nil`
+  would end a Lua list.
+- `left`, `right`: a picture over knobs 1 to 4 or 5 to 8.
+- `pictures`: `{ "name", knobs = { a, b } }`, a picture over knobs a to b. A picture covers
+  two to four knobs on one screen, never across the gap between knobs 4 and 5.
+
+Every name must be declared, and every picture must exist.
+
+**When a mapping's pages are used.** When the slot has no pages of its own (no NKS preset
+loaded, none edited), the mapping's pages come first, in its order, and automapping's
+remaining parameters follow them, so every parameter stays reachable. A slot with its own
+pages keeps them exactly as they are.
+
+### Pictures on other pages
+
+For a page that isn't one of the mapping's own, each picture of the mapping goes where its
+`needs` sit on **adjacent knobs of one screen**, widened to two cells if it's narrower.
+Pictures can't overlap; going through the mapping's pictures in the order of their names, the first to claim a knob keeps it.
+A page the mapping does lay out (all its parameters on the knobs the page says, and
+pictures placed) uses that placement.
+
+The generic patterns fill what the mapping leaves, on any plug-in, from the knobs' names
+(ignoring case; the last word counts, so "Filter Cutoff" is a cutoff) and the units in their
+text. The knobs must be adjacent and in one section. A pattern whose values don't read in
+units leaves the cells plain.
+
+| Adjacent knobs | Picture |
+|---|---|
+| Cutoff (or frequency) and resonance, either way round; a drive beside them joins | `filter` |
+| Attack, decay, sustain and release in order; or attack and decay; or attack and release | `envelope` |
+| Frequency, gain and Q | `band` |
+| Threshold and ratio; a knee and a makeup beside them join | `transfer` |
+| An LFO's rate next to its depth or shape | `lfo` |
+
+Candidates binding more knobs win, then the leftmost. A pattern split over knobs 4 and 5
+gets its picture on the screen holding its first knob, if there's room; the other knob still
+lights it on touch. A picture takes part of the band over its knobs only; the rest of the
+band, and knobs no picture covers, keep their plain cells.
+
+### Widgets
+
+Each widget draws in a box inside the picture band (104 px high), a whole number of knob
+cells (120 px) wide, at its minimum width or up to four cells. It uses the theme's colours,
+and has a flat look that reads on every theme. Every input is optional. Any input can have a
+`<input>_mod`, the same in the same units, where modulation has it.
+
+| Widget | Min. cells | Inputs | Touch `focus` names |
+|---|---|---|---|
+| `filter` | 2 | `shape` (`lp`, `hp`, `bp`, `notch`, `svf_lp`, `svf_hp`, `svf_bp`, `ladder4`), `cutoff` Hz, `resonance` 0..1, `slope` 12 or 24, `drive` dB, `mix` 0..1; `cutoff_mod`, `resonance_mod`; `spectrum` (points 0..1 for -90 to 0 dBFS, 20 Hz to 20 kHz: over the knobs, the focused plug-in's live output) | `cutoff`, `resonance` |
+| `envelope` | 2 | `delay`, `attack`, `hold`, `decay`, `release` in ms; `sustain` 0..1; `curve` -1..1; `amount` -1..1; `attack_mod`, `decay_mod`, `sustain_mod`, `release_mod`. Without `sustain` and `release`, an AD envelope | `delay`, `attack`, `hold`, `decay`, `sustain`, `release`, `amount`, `curve` |
+| `lfo` | 2 | `shape` (`sine`, `triangle`, `saw`, `ramp`, `square`, `random`, `wander`), `rate` Hz or `rate_text`, `phase`, `depth` 0..1, `position`; `depth_mod` | `rate`, `depth`, `shape`, `phase` |
+| `transfer` | 2 | `threshold` dB, `ratio`, `knee` dB, `makeup` dB, `level` dB, `reduction` dB; `threshold_mod`, `ratio_mod` | `threshold`, `ratio`, `knee`, `makeup` |
+| `band` | 2 | `freq` Hz, `gain` dB, `q`, `type` (`bell`, `low_shelf`, `high_shelf`, `low_cut`, `high_cut`), `on`; `freq_mod`, `gain_mod` | `freq`, `gain`, `q` |
+| `eq` | 3 | `bands` (up to 8 tables of `freq`, `gain`, `q`, `type`, `on`), `output` dB | `band1` to `band8` |
+| `curve` | 2 | A curve already worked out: `kind` (`freq`, `law`, `time`, `dots`), `points`, `extent`, `side`, `side_live`, `bands`, `lfo`, `dim`, `preview` | `bands` |
+| `value` | 1 | `name`, `text`, `value` 0..1, `bipolar`; `value_mod` | `value` |
+
+Defaults and drawing details are in each widget's doc comment in `crates/surface/src/widget/`.
+
+### Touch focus
+
+Each MK3 knob reports a finger resting on it. A knob a finger has rested on for 120 ms takes
+**focus**: the part of its picture it moves lights (the cutoff's guide line, a band's ring,
+an envelope segment) and the rest of the picture dims. Focus lasts 180 ms after the finger
+lifts, and a knob turned with no touch registered has it for 1 s after its last turn. The
+`focus` column above is the input each knob lights, taken from the `model` input the knob's parameter is
+bound to (in the generic patterns, the pattern's own names). One or two touched knobs each
+light; three or more at once is a resting hand and lights nothing. Touch events still reach
+pages as before.
+
+### Modulation
+
+Where modulation has moved a knob, its parameter's `<input>_mod` is the modulated position
+through the same taper or text, and the widget draws it over the base value (the base curve
+muted underneath). The knob cell shows the position on its bar. A plug-in on a group or the
+master shows its base only until modulation covers those chains.
+
+### From a script
+
+A page of your own can use the same drawing:
+
+| Call | Does |
+|---|---|
+| `screen:widget(kind, x, y, w, h, inputs)` | Draws the widget `kind` in the box. `inputs` is a table of the widget's inputs by name, plus `focus = "<input>"` to light one. An unknown `kind` is an error. |
+| `screen:pictures(knobs, touched, plugin)` | Draws the pictures over a page's eight knobs, in the picture band of both screens, and returns `{ { first, cells, kind }, ... }` (`first` from 1). `knobs` is the list of eight, each `{ name, section, text, value, id, mod_text, mod_position }` or nil; `touched` the knob numbers a finger rests on; `plugin` the slot's name, to find its mapping. A mapping's pictures go first, the generic patterns fill the rest. |
+
+The Control page calls `screen:pictures` for every plug-in; its built-in curve for
+DECKARD's own effects draws through `screen:widget("curve", ...)`.
+
+### Example: Acme Ladder
+
+A made-up filter and envelope synth. Its cutoff and filter envelope times read in Hz and ms,
+so they need no taper; its resonance, drive and mix are plain percentages.
+
+```lua
+-- <controller folder>/mappings/acme/ladder.lua
+return {
+  api   = 1,
+  match = { name = "Ladder", vendor = "Acme" },
+
+  params = {
+    cutoff = { id = 3, knob = { "Cutoff", "Freq" }, taper = { "log", 20, 20000 } },
+    reso   = { id = 4, knob = { "Resonance", "Reso" } },
+    drive  = { id = 5, taper = { "db", 0, 24 } },
+    mode   = { id = 6, choices = { "LP24", "LP12", "BP", "HP" } },
+    amount = { id = 9, knob = { "Env Amount" }, taper = { "lin", -1, 1 } },
+    attack = { id = 10, knob = { "Attack" } },       -- "4.0 ms": units from the text
+    decay  = { id = 11, knob = { "Decay" } },
+    sustain = { id = 12, knob = { "Sustain" } },
+    release = { id = 13, knob = { "Release" } },
+    mix    = { name = "Mix" },                        -- found by title
+  },
+
+  pictures = {
+    response = { widget = "filter", needs = { "cutoff", "reso" },
+                 model = { shape = { from = "mode", map = { LP24 = { const = "ladder4" }, LP12 = { const = "svf_lp" },
+                                                            BP = { const = "svf_bp" }, HP = { const = "svf_hp" } } },
+                           cutoff = "cutoff", resonance = "reso", drive = "drive" } },
+    contour  = { widget = "envelope", needs = { "attack", "decay" },
+                 model = { attack = "attack", decay = "decay",
+                           sustain = "sustain", release = "release", amount = "amount" } },
+  },
+
+  pages = {
+    { name = "FILTER",
+      knobs = { "cutoff", "reso", "drive", "mode", "amount", false, false, "mix" },
+      pictures = { { "response", knobs = { 1, 3 } } } },
+    { name = "ENVELOPE",
+      knobs = { "attack", "decay", "sustain", "release", "cutoff", "reso", false, "mix" },
+      left = "contour", pictures = { { "response", knobs = { 5, 6 } } } },
+  },
+}
+```
+
+On the FILTER page the response sits over Cutoff, Reso and Drive, and Mode and Env Amount
+keep plain cells. On ENVELOPE the envelope spans knobs 1 to 4 and the response knobs 5 and
+6. If the user loads an NKS preset whose page has Attack and Decay on knobs 3 and 4,
+Resonance on knob 5 and the cutoff on knob 6, the same mapping puts the envelope over
+knobs 3 and 4 and the response over 5 and 6, by `needs`.
+
+To write one, `plugin-probe dump` lists a plug-in's parameters and what each says at 64
+values, and `scripts/mapping-check.sh` renders a mapping's pages against a saved dump. The
+`plugin-mapping` Claude Code skill drafts a mapping from a dump. See `DEVELOPMENT.md`.
 
 ## MIDI controllers
 

@@ -358,10 +358,7 @@ pub fn edited_path(dir: &Path, original: &Path) -> PathBuf {
         Some((b, n)) if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() => b.to_string(),
         _ => stem,
     };
-    let ext =
-        original.extension().and_then(|e| e.to_str()).filter(|e| ["wav", "aif", "aiff", "aifc"].contains(&e.to_ascii_lowercase().as_str()));
-    // We always write WAV.
-    let _ = ext;
+    // We always write WAV, whatever the original was.
     (2..).map(|n| dir.join(format!("{base} - {n}.wav"))).find(|p| !p.exists()).unwrap()
 }
 
