@@ -157,6 +157,7 @@ fn shuffled_pads_play_in_another_order() {
 fn a_sync_zone_stays_in_sync_on_its_pad() {
     let (mut app, _tmp) = app();
     app.convert_instrument(true);
+    crate::layers_tests::advanced(&app);
     let (g, s) = (app.group, app.sound);
     let doc = app.doc.clone().unwrap();
     let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();
@@ -180,6 +181,32 @@ fn a_sync_zone_stays_in_sync_on_its_pad() {
     }
     // A New Sampler's slices play to the sample's end unless told otherwise.
     assert_eq!(p.groups[n].sounds[0].sampler.as_ref().unwrap().zones[0].play_range, (0, 44_099));
+}
+
+/// An Original sound's slices make Original sounds: no tempo or mode of DECKARD's, and
+/// each slice its own piece (a classic Sampler's way).
+#[test]
+fn slices_to_pads_keep_the_mode() {
+    use deckard_model::new_sampler::SamplerMode;
+    let (mut app, _tmp) = app();
+    app.convert_instrument(true);
+    let (g, s) = (app.group, app.sound);
+    assert_eq!(project(&app).groups[g].sounds[s].new_sampler.map(|n| n.mode), Some(SamplerMode::Original), "a Sampler converted");
+    app.update_sampling();
+    app.sampling_act(S::Tab(2));
+    app.sampling_act(S::SliceMode(3));
+    app.sampling.slices = vec![0, 22_050];
+    let n = project(&app).groups.len();
+    app.sampling_act(S::ApplyTo(1));
+    app.sampling_act(S::ApplySlices);
+    let p = project(&app);
+    assert_eq!(p.groups.len(), n + 1, "{}", app.status);
+    for pad in 0..2 {
+        let snd = &p.groups[n].sounds[pad];
+        assert_eq!(snd.new_sampler.map(|n| n.mode), Some(SamplerMode::Original));
+        assert_eq!(snd.sampler.as_ref().unwrap().zones[0].meta, None);
+    }
+    assert_eq!(p.groups[n].sounds[0].sampler.as_ref().unwrap().zones[0].play_range, (0, 22_049), "to the next slice");
 }
 
 #[test]
@@ -231,6 +258,7 @@ fn pads_that_play_to_the_end_are_ended_by_their_notes() {
 fn a_sync_zones_notes_go_by_its_own_tempo_and_each_slices_length() {
     let (mut app, _tmp) = app();
     app.convert_instrument(true);
+    crate::layers_tests::advanced(&app);
     let (g, s) = (app.group, app.sound);
     let doc = app.doc.clone().unwrap();
     let file = doc.borrow().project().groups[g].sounds[s].sampler.as_ref().unwrap().zones[0].sample.path.clone();

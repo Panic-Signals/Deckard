@@ -552,38 +552,181 @@ fn layered(tab: usize, n: usize, focus: usize) -> View {
     s.layer = focus;
     s.layered = true;
     s.morph = Some(MorphView { on: true, position: 0.3, round: true, power: false });
+    v.sampling.sampler = Some(2);
     v
 }
 
-/// Display button 4 pressed again goes between ZONE and LAYERS: only for a sound with
-/// layers (a sliced or plain sound's stays on ZONE).
+/// In Layers, display button 3 is LAYERS where SLICE was (a sound in Layers has no
+/// slices), and button 4 is ZONE alone: no button with two tabs on it.
 #[test]
-fn button_four_goes_between_zone_and_layers() {
+fn button_three_is_layers_in_layers() {
     let (mut s, v) = (Surface::new(), layered(3, 3, 0));
     press(&mut s, &v, "BUTTON_SAMPLE");
-    assert!(s.screen_text(&v).iter().any(|t| t == "ZONE"));
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
     let v = layered(4, 3, 0);
     let text = s.screen_text(&v);
-    assert!(text.iter().any(|t| t == "LAYERS") && !text.iter().any(|t| t == "ZONE"), "{text:?}");
     assert!(text.iter().any(|t| t == "Layer 2.wav"), "{text:?}");
+    // Button 4 is ZONE, from LAYERS and pressed again on ZONE.
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
-    // From another tab, button 4 is ZONE as ever.
-    assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
-    // A layered sound has no SLICE.
-    assert!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3").is_empty());
-    // A lone zone not yet a layer (the app shows it as the first lane): LAYERS can be
-    // opened, and SLICE is still there.
-    let mut lone = layered(3, 1, 0);
-    lone.sampling.sample.as_mut().unwrap().layered = false;
-    assert_eq!(press(&mut s, &lone, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
-    assert_eq!(press(&mut s, &lone, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
-    assert!(s.screen_text(&lone).iter().any(|t| t == "SLICE"));
-    // Without layers: ZONE stays ZONE, and SLICE is there.
+    assert_eq!(press(&mut s, &layered(3, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
+    // It is the mode that says so, not what the sound holds: in Layers without a sample.
+    let mut empty = view();
+    empty.sampling.sampler = Some(2);
+    assert_eq!(press(&mut s, &empty, "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
+    // The same zones in Advanced: SLICE is there.
+    let mut advanced = layered(3, 1, 0);
+    advanced.sampling.sampler = Some(1);
+    assert_eq!(press(&mut s, &advanced, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    assert_eq!(press(&mut s, &advanced, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
+    assert!(s.screen_text(&advanced).iter().any(|t| t == "SLICE"));
+    // Without layers: SLICE is there.
     let (mut s, v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
+}
+
+/// In Layers the tabs read RECORD, EDIT, LAYERS, ZONE: LAYERS before ZONE and no SLICE,
+/// whichever tab shows. Elsewhere no LAYERS.
+#[test]
+fn the_tabs_say_layers_where_slice_was() {
+    let (mut s, v) = (Surface::new(), layered(3, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let order = |s: &mut Surface, v: &View| {
+        let text = s.screen_text(v);
+        let at = |t: &str| text.iter().position(|x| x == t);
+        (at("ZONE"), at("LAYERS"), at("SLICE"))
+    };
+    for tab in [0, 3, 4] {
+        let (zone, layers, slice) = order(&mut s, &layered(tab, 3, 0));
+        assert!(zone.is_some() && layers.is_some() && layers < zone, "tab {tab}: LAYERS, ZONE: {layers:?} {zone:?}");
+        assert_eq!(slice, None, "tab {tab}");
+    }
+    // In Layers with no sample yet, too.
+    let mut empty = view();
+    empty.sampling.sampler = Some(2);
+    assert!(order(&mut s, &empty).1.is_some());
+    // The same zones in Advanced: no LAYERS.
+    let mut advanced = layered(3, 1, 0);
+    advanced.sampling.sampler = Some(1);
+    assert_eq!(order(&mut s, &advanced).1, None);
+    let (mut s, v) = (Surface::new(), sampled(3));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(order(&mut s, &v).1, None);
+}
+
+/// RECORD's button 8 is APPLY: lit, and the take's layer applied, only while one is
+/// chosen. The pads' sixteen takes are those around the focused one.
+#[test]
+fn record_button_8_applies_a_takes_layer() {
+    let (mut s, mut v) = (Surface::new(), sampled(0));
+    (v.sampling.takes, v.sampling.take) = (20, Some(18));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    // Only in Layers.
+    assert!(!s.screen_text(&v).iter().any(|t| t == "APPLY"), "Advanced has no APPLY");
+    v.sampling.layer_pending = true;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    v.sampling.layer_pending = false;
+    v.sampling.sampler = Some(2);
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "APPLY") && !text.iter().any(|t| t.starts_with("BANK")), "{text:?}");
+    let dark = s.leds(&v).get("LED_SCREEN_BUTTON_8");
+    assert_ne!(dark, s.leds(&v).get("LED_SCREEN_BUTTON_6"), "nothing chosen: darker than DELETE");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    v.sampling.layer_pending = true;
+    let lit = s.leds(&v).get("LED_SCREEN_BUTTON_8");
+    assert!(lit != dark && lit != s.leds(&v).get("LED_SCREEN_BUTTON_6"), "chosen: lit, brighter than DELETE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::ApplyTakeLayer)]);
+    // TAKES: the pads have takes 17 to 20, the focused take's sixteen.
+    press(&mut s, &v, "BUTTON_SCREEN_7");
+    let now = Instant::now();
+    assert_eq!(s.event(&Event::PadOn(3, 0.8), &v, now), [Action::Take { index: 18, delete: false }]);
+    assert!(s.event(&Event::PadOn(5, 0.8), &v, now).is_empty(), "no 21st take");
+    assert_eq!(s.leds(&v).get("LED_PAD_3"), Some(deckard_mk3::leds::palette(16, 4)), "the focused take bright");
+}
+
+/// A mode change that loses the sound's changes asks on the displays: 7 CANCEL, 8 OK,
+/// and nothing else acts.
+#[test]
+fn the_mode_change_is_confirmed_on_the_displays() {
+    let (mut s, mut v) = (Surface::new(), layered(0, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    v.sampling.sampler_ask = Some(1);
+    let text = s.screen_text(&v);
+    for want in ["Changing the mode loses", "all changes to this sound.", "CANCEL", "OK", "TYPE: ADVANCED"] {
+        assert!(text.iter().any(|t| t == want), "{want}: {text:?}");
+    }
+    assert!(!text.iter().any(|t| t == "START" || t == "RECORD"), "{text:?}");
+    for name in ["BUTTON_SCREEN_1", "BUTTON_SCREEN_4", "BUTTON_SCREEN_5", "BUTTON_SCREEN_6", "BUTTON_RIGHT"] {
+        assert!(press(&mut s, &v, name).is_empty(), "{name}");
+    }
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SamplingCall(SamplingCall::SamplerAnswer(false))]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SamplingCall(SamplingCall::SamplerAnswer(true))]);
+    let leds = s.leds(&v);
+    assert_ne!(leds.get("LED_SCREEN_BUTTON_8"), leds.get("LED_SCREEN_BUTTON_1"), "OK lit, the tabs dark");
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_1"), leds.get("LED_SCREEN_BUTTON_5"));
+    // Answered: the page is as it was.
+    v.sampling.sampler_ask = None;
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::SamplingTab(1)]);
+}
+
+/// TYPE (a Sampler Preview's mode) is RECORD's knob 5, on the right display, on the
+/// first knob page only; knobs 1 to 4 are RECORDING's as ever.
+#[test]
+fn type_is_record_knob_five_on_the_first_page() {
+    let (mut s, mut v) = (Surface::new(), layered(0, 3, 0));
+    let now = Instant::now();
+    let knob = |key: &str, name: &str, text: &str, value: f64| SamplingKnob {
+        key: key.into(),
+        name: name.into(),
+        text: text.into(),
+        value,
+        min: 0.0,
+        max: 2.0,
+        step: 1.0,
+        turn: 0.01,
+    };
+    v.sampling.pages[0] = vec![
+        KnobPage { name: "RECORDING".into(), knobs: vec![knob("Mode", "MODE", "Detect", 0.0), knob("Type", "TYPE", "Layers", 2.0)] },
+        KnobPage { name: "INPUT".into(), knobs: vec![knob("Source", "SOURCE", "Ext. Ster.", 0.0)] },
+    ];
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let text = s.screen_text(&v);
+    let at = |t: &str| text.iter().position(|x| x == t).unwrap_or_else(|| panic!("{t}: {text:?}"));
+    assert!(at("MODE") < at("TYPE") && at("TYPE") < at("Layers"), "{text:?}");
+    assert_eq!(text.iter().filter(|t| *t == "TYPE").count(), 1, "once, not among the left display's: {text:?}");
+    assert_eq!(s.event(&Event::Knob(4, -0.01), &v, now), [Action::SamplingKnob { page: 0, knob: 1, value: 1.0 }]);
+    assert!(s.event(&Event::Knob(1, -0.01), &v, now).is_empty(), "not knob 2");
+    // While it asks, only TYPE turns.
+    v.sampling.sampler_ask = Some(1);
+    assert!(s.event(&Event::Knob(0, 0.01), &v, now).is_empty());
+    assert_eq!(s.event(&Event::Knob(4, 0.01), &v, now), [Action::SamplingKnob { page: 0, knob: 1, value: 2.0 }]);
+    v.sampling.sampler_ask = None;
+    // The second page: no TYPE.
+    press(&mut s, &v, "BUTTON_RIGHT");
+    assert!(!s.screen_text(&v).iter().any(|t| t == "TYPE"));
+    assert!(s.event(&Event::Knob(4, -0.01), &v, now).is_empty());
+    if let Some(out) = std::env::var_os("DECKARD_TYPE_SHOT") {
+        press(&mut s, &v, "BUTTON_LEFT");
+        let px = s.picture(&v);
+        let mut e = png::Encoder::new(std::fs::File::create(out).unwrap(), crate::screen::WIDTH as u32, crate::screen::HEIGHT as u32);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+    }
+}
+
+/// (Review) A take on no layer shown (RECORD and EDIT only): display button 3 is still
+/// LAYERS, and there is no ZONE.
+#[test]
+fn layers_is_a_button_away_from_a_take() {
+    let (mut s, mut v) = (Surface::new(), layered(1, 3, 0));
+    v.sampling.sample.as_mut().unwrap().take = true;
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
+    assert!(!s.screen_text(&v).iter().any(|t| t == "ZONE"));
 }
 
 /// On LAYERS, display buttons 5 to 8 mute the four layers shown (those with the focused
@@ -647,6 +790,95 @@ fn knob_seven_picks_the_layer_and_eight_its_level() {
         e.set_depth(png::BitDepth::Eight);
         e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
     }
+}
+
+/// On LAYERS each layer shown has its envelope drawn over its waveform (as the window
+/// has): a longer attack changes that layer's row and no other.
+#[test]
+fn a_layers_envelope_is_drawn_over_it() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let before = s.picture(&v);
+    let mut slow = layered(4, 3, 0);
+    slow.sampling.sample.as_mut().unwrap().layers[1].envelope = [2.0, 0.5, 0.4, 1.0];
+    let after = s.picture(&slow);
+    // (The four rows are 36 high from y 60, on the right display.)
+    let changed = |y0: usize| {
+        (y0..y0 + 36)
+            .flat_map(|y| (480..960).map(move |x| (x, y)))
+            .filter(|&(x, y)| before[y * crate::screen::WIDTH + x] != after[y * crate::screen::WIDTH + x])
+            .count()
+    };
+    assert!(changed(96) > 20, "layer 2's envelope moved: {}", changed(96));
+    assert_eq!((changed(60), changed(132)), (0, 0), "the others' didn't");
+}
+
+/// With the morph off, LAYERS' left display is the focused layer's envelope, large
+/// (the windows on the morph mean nothing then); with it on, the windows as ever.
+#[test]
+fn morph_off_shows_the_focused_layers_envelope_on_the_left() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 1));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let with = |on: bool, env: [f64; 4], focus: usize| {
+        let mut v = layered(4, 3, focus);
+        let smp = v.sampling.sample.as_mut().unwrap();
+        smp.morph.as_mut().unwrap().on = on;
+        smp.layers[1].envelope = env;
+        v
+    };
+    // (The left display's picture, between the bars and the knobs.)
+    let left = |s: &mut Surface, v: &View| -> Vec<[u8; 4]> {
+        let px = s.picture(v);
+        (60..204).flat_map(|y| px[y * crate::screen::WIDTH..y * crate::screen::WIDTH + 480].to_vec()).collect()
+    };
+    let (quick, slow) = ([0.005, 0.0, 1.0, 0.05], [2.0, 0.5, 0.4, 1.0]);
+    assert_ne!(left(&mut s, &with(false, quick, 1)), left(&mut s, &with(false, slow, 1)), "the focused layer's envelope");
+    assert_eq!(left(&mut s, &with(false, quick, 0)), left(&mut s, &with(false, slow, 0)), "not another layer's");
+    assert_eq!(left(&mut s, &with(true, quick, 1)), left(&mut s, &with(true, slow, 1)), "morph on: the windows");
+    let text = s.screen_text(&with(false, slow, 1));
+    assert!(text.iter().any(|t| t == "ENVELOPE 2") && !text.iter().any(|t| t == "MORPH OFF"), "{text:?}");
+}
+
+/// A layer that plays has its playhead on its own row's waveform (680 to 869 across),
+/// where it is in the sample; one that doesn't has none.
+#[test]
+fn a_playing_layer_has_its_playhead_on_its_row() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let before = s.picture(&v);
+    let mut playing = layered(4, 3, 0);
+    playing.sampling.sample.as_mut().unwrap().layers[2].head = Some(0.5);
+    let after = s.picture(&playing);
+    let changed: Vec<(usize, usize)> = (0..crate::screen::HEIGHT)
+        .flat_map(|y| (0..crate::screen::WIDTH).map(move |x| (x, y)))
+        .filter(|&(x, y)| before[y * crate::screen::WIDTH + x] != after[y * crate::screen::WIDTH + x])
+        .collect();
+    assert!(changed.len() >= 20, "a line down the row: {}", changed.len());
+    assert!(changed.iter().all(|&(x, y)| x == 680 + 94 && (132..168).contains(&y)), "layer 3's row, half way: {changed:?}");
+}
+
+/// A layer that loops has a line at each loop point: on its row (680 to 869 across) on
+/// the right display and, with the morph off and it focused, on the left display's
+/// large waveform (8 to 471 across).
+#[test]
+fn a_looping_layer_has_its_loop_points_on_both_displays() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let columns = |s: &mut Surface, morph: bool| -> std::collections::BTreeSet<usize> {
+        let with = |looped: bool| {
+            let mut v = layered(4, 3, 1);
+            let smp = v.sampling.sample.as_mut().unwrap();
+            smp.morph.as_mut().unwrap().on = morph;
+            smp.layers[1].loop_points = looped.then_some((0.25, 0.75));
+            v
+        };
+        let (before, after) = (s.picture(&with(false)), s.picture(&with(true)));
+        (0..before.len()).filter(|&i| before[i] != after[i]).map(|i| i % crate::screen::WIDTH).collect()
+    };
+    let right = [680 + 47, 680 + 141];
+    assert_eq!(columns(&mut s, true).into_iter().collect::<Vec<_>>(), right, "morph on: its row only");
+    let left = [8 + 115, 8 + 347];
+    assert_eq!(columns(&mut s, false).into_iter().collect::<Vec<_>>(), [left[0], left[1], right[0], right[1]], "morph off: both");
 }
 
 /// LAYERS leaves the pads to the sounds.

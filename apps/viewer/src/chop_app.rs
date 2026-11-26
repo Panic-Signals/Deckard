@@ -301,7 +301,10 @@ impl App {
             d.paste_sounds(g, target, &[clip])?;
             d.set_zones(g, target, &[spec], label)?;
             d.set_new_sampler(g, target, Some(&settings))?;
-            d.set_zone_meta(g, target, 0, &meta, label)?;
+            // (In Original it knows of its zone what a Sampler does.)
+            if settings.mode != deckard_model::new_sampler::SamplerMode::Original {
+                d.set_zone_meta(g, target, 0, &meta, label)?;
+            }
             d.rename(deckard_doc::Target::Sound(g, target), &name)
         });
         self.status = match done {

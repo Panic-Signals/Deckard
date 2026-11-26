@@ -7,23 +7,41 @@ use crate::layout::sampling::{LayerAct, MorphAct};
 use deckard_doc::{Document, Target, ZoneFrom, ZoneSpec};
 use deckard_model::Project;
 use deckard_model::layers::{self, FREE, Layer, MAX_LAYERS, SYNCED, TIME_MAX};
-use deckard_model::new_sampler::{Motion, NewSampler, PlayMode, ZoneMeta};
+use deckard_model::new_sampler::{Motion, NewSampler, PlayMode, SamplerMode, ZoneMeta};
 use mxprj::decode::Value;
 use std::path::PathBuf;
 
 /// The longest part of a dropped sample its root is heard in, seconds.
 const ROOT_SECONDS: usize = 20;
 
-/// Sound (`g`, `s`) can have layers: a New Sampler without slices (no zone, one, or
-/// layers only).
-pub(crate) fn can_layer(p: &Project, g: usize, s: usize) -> bool {
-    let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s)).filter(|x| x.new_sampler.is_some()) else { return false };
-    let Some(smp) = snd.sampler.as_ref() else { return false };
-    smp.zones.len() <= 1 || smp.zones.iter().all(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some()))
+/// Sound (`g`, `s`)'s Sampler Preview mode (None: it isn't one). What the sound offers
+/// is asked of this, never of what its zones hold.
+pub(crate) fn mode_of(p: &Project, g: usize, s: usize) -> Option<SamplerMode> {
+    let snd = p.groups.get(g)?.sounds.get(s)?;
+    snd.sampler.as_ref()?;
+    snd.new_sampler.map(|n| n.mode)
 }
 
-/// Its layers, a lane each: (the zone, the layer). A lone zone that isn't yet a layer is
-/// shown as the first.
+/// Sound (`g`, `s`) has what is Sampler Preview's own (Sync and Keys, what analysis
+/// finds, slices that play to the sample's end): one not in Original, which does what a
+/// classic Sampler does and no more.
+pub(crate) fn own(p: &Project, g: usize, s: usize) -> bool {
+    mode_of(p, g, s).is_some_and(|m| m != SamplerMode::Original)
+}
+
+/// Sound (`g`, `s`) is a Sampler Preview in Advanced: its zones have a play mode (Sync,
+/// Keys), a speed, reverse, a tail and Motion.
+pub(crate) fn advanced(p: &Project, g: usize, s: usize) -> bool {
+    mode_of(p, g, s) == Some(SamplerMode::Advanced)
+}
+
+/// Sound (`g`, `s`) has layers: a Sampler Preview in Layers (with none yet, too).
+pub(crate) fn can_layer(p: &Project, g: usize, s: usize) -> bool {
+    mode_of(p, g, s) == Some(SamplerMode::Layers)
+}
+
+/// Its layers, a lane each: (the zone, the layer). In Layers every zone is one: a zone
+/// not yet given its layer data is shown with a new layer's (the next edit writes it).
 pub(crate) fn layers_in(p: &Project, g: usize, s: usize) -> Vec<(usize, Layer)> {
     if !can_layer(p, g, s) {
         return Vec::new();
@@ -32,51 +50,64 @@ pub(crate) fn layers_in(p: &Project, g: usize, s: usize) -> Vec<(usize, Layer)> 
     zones.iter().enumerate().map(|(k, z)| (k, z.meta.as_ref().and_then(|m| m.layer).unwrap_or_default())).take(MAX_LAYERS).collect()
 }
 
-/// Whether sound (`g`, `s`) has a layer (so its SLICE tab is hidden, and MORPH is a
-/// modulation destination).
+/// Whether sound (`g`, `s`) has a layer (so MORPH is a modulation destination).
 pub(crate) fn layered(p: &Project, g: usize, s: usize) -> bool {
-    p.groups
-        .get(g)
-        .and_then(|x| x.sounds.get(s))
-        .is_some_and(|snd| snd.new_sampler.is_some() && snd.sampler.as_ref().is_some_and(|x| !layers::zones(x).is_empty()))
+    !layers_in(p, g, s).is_empty()
 }
 
-/// RECORD's LAYER for sound (`g`, `s`): the choices, the one shown, and what each sets
-/// (a lane, or `MAX_LAYERS` for a new layer). None: the sound can't have layers, or the
+/// RECORD's LAYER when the take is on no layer.
+pub(crate) const NO_LAYER: i64 = -1;
+
+/// The lane of sound (`g`, `s`) that plays `take` (the first, if several do). A take
+/// and its edited copies (`name - N.wav`) are the same take, whichever the list or the
+/// layer holds.
+pub(crate) fn take_layer(p: &Project, g: usize, s: usize, take: &std::path::Path) -> Option<usize> {
+    use deckard_engine::edit::edited_base;
+    let base = edited_base(&take.file_name()?.to_string_lossy());
+    let zones = &p.groups.get(g)?.sounds.get(s)?.sampler.as_ref()?.zones;
+    layers_in(p, g, s).iter().position(|(k, _)| edited_base(&crate::analysis::file_name_of(&zones[*k].sample.path)) == base)
+}
+
+/// What RECORD's LAYER can be for the focused take on sound (`g`, `s`): each choice's
+/// name and what it sets (`NO_LAYER`, a lane, or `MAX_LAYERS` for a new layer), and the
+/// one the take is at. None: no take is focused, the sound can't have layers, or the
 /// recorder's mode has a target of its own (Loop, Auto).
+fn take_options(p: &Project, g: usize, s: usize, rec: &crate::layout::sampling::RecorderView) -> Option<(Vec<String>, Vec<i64>, i64)> {
+    let take = rec.focused.and_then(|i| rec.takes.get(i))?;
+    if rec.mode > 1 || !can_layer(p, g, s) {
+        return None;
+    }
+    let have = layers_in(p, g, s).len();
+    let mut options = vec!["None".to_string()];
+    let mut values = vec![NO_LAYER];
+    options.extend((1..=have).map(|k| k.to_string()));
+    values.extend(0..have as i64);
+    if have < MAX_LAYERS {
+        options.push("New".into());
+        values.push(MAX_LAYERS as i64);
+    }
+    let on = take_layer(p, g, s, take).map_or(NO_LAYER, |k| k as i64);
+    Some((options, values, on))
+}
+
+/// RECORD's LAYER: the choices, the one shown (the one chosen, until it is applied; else
+/// the focused take's layer), and what each sets.
 pub(crate) fn take_choices(
     p: &Project,
     g: usize,
     s: usize,
     rec: &crate::layout::sampling::RecorderView,
 ) -> Option<(Vec<String>, usize, Vec<i64>)> {
-    if rec.mode > 1 || !can_layer(p, g, s) {
-        return None;
-    }
-    let have = layers_in(p, g, s).len();
-    let mut options: Vec<String> = (1..=have.max(1)).map(|k| k.to_string()).collect();
-    let mut values: Vec<i64> = (0..have.max(1) as i64).collect();
-    if have > 0 && have < MAX_LAYERS {
-        options.push("New".into());
-        values.push(MAX_LAYERS as i64);
-    }
-    let at = if rec.layer < have { rec.layer } else { options.len() - 1 };
+    let (options, values, on) = take_options(p, g, s, rec)?;
+    let shown = rec.layer_choice_for((g, s)).filter(|c| values.contains(c)).unwrap_or(on);
+    let at = values.iter().position(|&v| v == shown).unwrap_or(0);
     Some((options, at, values))
 }
 
-/// The lane a take recorded for sound (`g`, `s`) goes to, as RECORD's LAYER has it.
-/// None: it is the sound's sample as before (a sound without layers whose one sample is
-/// recorded again stays unlayered, so it can still be sliced).
-pub(crate) fn take_lane(p: &Project, g: usize, s: usize, layer: usize) -> Option<usize> {
-    if !can_layer(p, g, s) {
-        return None;
-    }
-    let have = layers_in(p, g, s).len();
-    match (have, layer < have) {
-        (0, _) => None,
-        (_, true) => layered(p, g, s).then_some(layer),
-        (_, false) => Some(have),
-    }
+/// The layer chosen for the focused take and not yet applied (APPLY puts it there).
+pub(crate) fn layer_pending(p: &Project, g: usize, s: usize, rec: &crate::layout::sampling::RecorderView) -> Option<i64> {
+    let (_, values, on) = take_options(p, g, s, rec)?;
+    rec.layer_choice_for((g, s)).filter(|c| values.contains(c) && *c != on)
 }
 
 fn zones_of(d: &Document, g: usize, s: usize) -> Vec<deckard_model::Zone> {
@@ -90,7 +121,7 @@ fn settings_of(d: &Document, g: usize, s: usize) -> NewSampler {
 /// The sound's first use of layers: a lone plain zone becomes the first layer, over all
 /// keys and playing repitched; a One-shot amp envelope becomes ADSR (so notes end, and a
 /// layer's release has something to follow); Slice Motion goes off.
-fn make_layered(d: &mut Document, g: usize, s: usize, label: &str) -> Result<(), String> {
+pub(crate) fn make_layered(d: &mut Document, g: usize, s: usize, label: &str) -> Result<(), String> {
     let zones = zones_of(d, g, s);
     for (k, z) in zones.iter().enumerate() {
         if z.meta.as_ref().is_some_and(|m| m.layer.is_some()) {
@@ -156,18 +187,147 @@ pub(crate) fn window_moved(mut w: [f64; 4], point: usize, v: f64) -> [f64; 4] {
 }
 
 impl App {
+    /// In Layers, the take EDIT works on in place of a layer: the focused take, once it
+    /// was picked ([`crate::layout::sampling::RecordAct::FocusTake`]) and while it is on
+    /// no layer. (One that is on a layer is edited as that layer.) Its place in the take
+    /// list, and its file.
+    pub(crate) fn shown_take(&self) -> Option<(usize, PathBuf)> {
+        let (g, s) = (self.group, self.sound);
+        if self.take_shown != Some((g, s)) {
+            return None;
+        }
+        let v = &self.recorder.view;
+        let i = v.focused?;
+        let take = v.takes.get(i)?;
+        let d = self.doc.as_ref()?.borrow();
+        (can_layer(d.project(), g, s) && take_layer(d.project(), g, s, take).is_none()).then(|| (i, take.clone()))
+    }
+
+    /// TYPE: the focused sound's mode asked for. One with a sample asks first (the
+    /// change keeps that sample and loses the rest): [`App::answer_sampler_mode`]. One
+    /// without, and Original made Advanced (which loses nothing), change at once.
+    /// `knob`: from the controller's knob, where nothing changes until confirmed (a
+    /// knob is brushed, and passes Advanced on its way from Original to Layers).
+    pub(crate) fn ask_sampler_mode(&mut self, mode: SamplerMode, knob: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (g, s) = (self.group, self.sound);
+        let found = {
+            let d = doc.borrow();
+            mode_of(d.project(), g, s).map(|now| (now, d.project().groups[g].sounds[s].sampler.as_ref().map_or(0, |x| x.zones.len())))
+        };
+        let Some((now, zones)) = found else { return };
+        if self.recorder.busy() {
+            self.status = "the mode can't be changed while recording".into();
+            return;
+        }
+        self.sampler_ask = None;
+        if now == mode {
+            return;
+        }
+        let empty = zones == 0 && self.shown_take().is_none();
+        if empty || (!knob && now == SamplerMode::Original && mode == SamplerMode::Advanced) {
+            self.change_sampler_mode(mode, false);
+        } else {
+            self.sampler_ask = Some(((g, s), mode));
+        }
+    }
+
+    /// The mode change asked for, answered: OK goes ahead (if the sound it was asked of
+    /// is still the focused one, and nothing is being recorded).
+    pub(crate) fn answer_sampler_mode(&mut self, ok: bool) {
+        let Some((at, mode)) = self.sampler_ask.take() else { return };
+        if ok && at == (self.group, self.sound) && !self.recorder.busy() {
+            // (Original made Advanced keeps everything, asked or not.)
+            let now = self.doc.as_ref().and_then(|d| mode_of(d.borrow().project(), at.0, at.1));
+            self.change_sampler_mode(mode, !(now == Some(SamplerMode::Original) && mode == SamplerMode::Advanced));
+        }
+    }
+
+    /// The focused sound in `mode`, as one undo step. `keep`: with the sample the
+    /// Sampling view shows (a zone's, a layer's, or a take's on no layer) as its only
+    /// one; else as it is.
+    fn change_sampler_mode(&mut self, mode: SamplerMode, keep: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (g, s) = (self.group, self.sound);
+        let take = self.shown_take().filter(|_| keep);
+        let done = if let Some((_, file)) = &take {
+            match deckard_engine::sample::Sample::load(file) {
+                Ok(smp) => {
+                    let frames = smp.frames.len();
+                    doc.borrow_mut().transaction("Sampler Mode", |d| {
+                        let from = if zones_of(d, g, s).is_empty() { ZoneFrom::Template } else { ZoneFrom::Zone(0) };
+                        d.set_zones(g, s, &[crate::new_zone(file, frames, from)], "Sampler Mode")?;
+                        d.set_sampler_mode(g, s, mode, Some((0, frames)))
+                    })
+                }
+                Err(e) => Err(format!("can't read {}: {e}", file.display())),
+            }
+        } else if keep {
+            // The zone shown, and its file's length if that is the one loaded.
+            let key = self.sampling.sample_key.as_ref().filter(|k| (k.0, k.1) == (g, s));
+            let zone = key.map_or(self.zone, |k| k.2);
+            let frames = if key.is_some() { self.sampling.len() } else { 0 };
+            let zones = zones_of(&doc.borrow(), g, s).len();
+            doc.borrow_mut().set_sampler_mode(g, s, mode, Some((zone.min(zones.saturating_sub(1)), frames)))
+        } else {
+            doc.borrow_mut().set_sampler_mode(g, s, mode, None)
+        };
+        match done {
+            Ok(()) => {
+                if keep {
+                    self.zone = 0;
+                    self.sampling.selection = None;
+                    self.sampling.slices.clear();
+                }
+                self.take_shown = None;
+                // A tab the mode doesn't have: EDIT (RECORD without a sample).
+                let p = doc.borrow().project().clone();
+                let zone = !zones_of(&doc.borrow(), g, s).is_empty();
+                if !crate::layout::sampling::tab_shown(&p, g, s, self.sampling.tab, zone, false) {
+                    self.sampling.tab = usize::from(zone);
+                }
+                self.status = format!("Sampler: {}", mode.name());
+            }
+            Err(e) => self.status = format!("can't change the mode: {e}"),
+        }
+    }
+
     /// The focused sound's layers ([`layers_in`]).
     pub(crate) fn layers_of(&self) -> Vec<(usize, Layer)> {
         self.doc.as_ref().map_or_else(Vec::new, |d| layers_in(d.borrow().project(), self.group, self.sound))
     }
 
-    /// A take for sound (`g`, `s`): onto the layer RECORD's LAYER names, else the sound's
-    /// one sample ([`App::load_take`]).
+    /// A take recorded for sound (`g`, `s`): its sample. In Layers the first take is the
+    /// first layer, and a sound with layers keeps them: the take waits in the list, for
+    /// RECORD's LAYER and APPLY.
     pub(crate) fn take_into(&mut self, g: usize, s: usize, path: &std::path::Path, frames: usize) {
-        let lane = self.doc.as_ref().and_then(|d| take_lane(d.borrow().project(), g, s, self.recorder.view.layer));
-        match lane {
-            Some(lane) => self.take_to_layer(g, s, path, lane),
+        let layers = self.doc.as_ref().and_then(|d| {
+            let d = d.borrow();
+            can_layer(d.project(), g, s).then(|| layers_in(d.project(), g, s).len())
+        });
+        match layers {
+            Some(0) => self.take_to_layer(g, s, path, 0),
+            Some(_) => {}
             None => self.load_take(g, s, path, frames),
+        }
+    }
+
+    /// APPLY: the focused take onto the layer RECORD's LAYER was turned to; None takes
+    /// the layer it is on away.
+    pub(crate) fn apply_take_layer(&mut self) {
+        let (g, s) = (self.group, self.sound);
+        let v = &self.recorder.view;
+        let take = v.focused.and_then(|i| v.takes.get(i)).cloned();
+        let found = self.doc.as_ref().and_then(|d| {
+            let d = d.borrow();
+            let to = layer_pending(d.project(), g, s, v)?;
+            Some((to, take.as_ref().and_then(|t| take_layer(d.project(), g, s, t))))
+        });
+        self.recorder.view.layer_choice = None;
+        match (found, take) {
+            (Some((NO_LAYER, Some(lane))), _) => self.layer_act(lane, LayerAct::Remove),
+            (Some((to, _)), Some(take)) if to >= 0 => self.take_to_layer(g, s, &take, to as usize),
+            _ => {}
         }
     }
 
@@ -189,7 +349,7 @@ impl App {
         let (g, s) = (self.group, self.sound);
         let p = doc.borrow().project().clone();
         if !can_layer(&p, g, s) {
-            self.status = "layers are a Sampler Preview's, one without slices".into();
+            self.status = "layers are for a Sampler Preview in Layers".into();
             return;
         }
         let have = layers_in(&p, g, s).len();
@@ -377,7 +537,11 @@ impl App {
         match act {
             LayerAct::Files(files) => self.layer_files(lane, &files),
             _ if lane >= n => {}
-            LayerAct::Focus => self.zone = lane,
+            LayerAct::Focus => {
+                self.zone = lane;
+                // (EDIT works on the layer picked, not on a take picked before.)
+                self.take_shown = None;
+            }
             LayerAct::Mute => self.edit_layer(lane, "Layer Mute", |l| l.mute = !l.mute),
             LayerAct::Solo => self.edit_layer(lane, "Layer Solo", |l| l.solo = !l.solo),
             LayerAct::Level(v) => self.set_layer_zone(lane, "Layer Level", "gain", v.clamp(0.0, 1.0)),

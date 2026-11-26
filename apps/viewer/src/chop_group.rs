@@ -27,7 +27,8 @@ impl App {
         let was = self.chops().map(|c| (c.1, c.2)).unwrap_or_default();
         let focused = self.zone;
         let zone_of = |a: usize| was.0.iter().position(|&x| x == a).map_or(focused, |k| was.1[k]);
-        let to_end = self.sampling.slices_to_end(src.new_sampler.is_some());
+        let original = src.new_sampler.is_some_and(|n| n.mode == deckard_model::new_sampler::SamplerMode::Original);
+        let to_end = self.sampling.slices_to_end(src.new_sampler.is_some() && !original);
         let one_shot = sampler.envelope_type == 0;
         let settings = src.new_sampler.clone();
         let name = if src.name.trim().is_empty() { "Slice".to_string() } else { src.name.clone() };
@@ -74,7 +75,9 @@ impl App {
                     d.paste_sounds(ng, pad, std::slice::from_ref(&clip))?;
                     d.set_zones(ng, pad, &[spec], label)?;
                     d.set_new_sampler(ng, pad, settings.as_ref())?;
-                    d.set_zone_meta(ng, pad, 0, &meta, label)?;
+                    if !original {
+                        d.set_zone_meta(ng, pad, 0, &meta, label)?;
+                    }
                     // A one-shot would play on to the end whatever the pad does: the notes end it.
                     if to_end && one_shot {
                         let t = deckard_doc::Target::Sampler(ng, pad);

@@ -1732,8 +1732,10 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
     let mut slots = chain_slots(ix, s);
     let (lanes, lane) = lanes_of(ix, s);
     // Only a Sampler can be a New Sampler: the field stays when the slot changes.
+    let mut mode_written = false;
     let new_sampler = match s.get(new_sampler::FIELD) {
         Some(Value::Str(t)) if modules.first().is_some_and(|m| m.type_name == "NI::MASCOMMON::DATA::Sampler") => {
+            mode_written = new_sampler::NewSampler::mode_written(t);
             Some(new_sampler::NewSampler::from_text(t))
         }
         _ => None,
@@ -1743,7 +1745,7 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
     {
         first.name = "Sampler Preview".into();
     }
-    Sound {
+    let mut snd = Sound {
         instrument: modules.first().map_or(String::new(), |m| m.type_name.rsplit("::").next().unwrap_or("").to_string()),
         name: param_str(s, "name"),
         color: color(s),
@@ -1777,7 +1779,15 @@ fn sound_own(ix: &Index, s: &Obj) -> Sound {
             Some(Value::Str(t)) => groove_from_text(t),
             _ => Vec::new(),
         },
+    };
+    // A mode not said (a project made before modes): Layers if it has a layer.
+    if !mode_written
+        && let Some(n) = snd.new_sampler.as_mut()
+        && snd.sampler.as_ref().is_some_and(|x| x.zones.iter().any(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some())))
+    {
+        n.mode = new_sampler::SamplerMode::Layers;
     }
+    snd
 }
 
 /// The sound's `midi_automators` (each with its object, to find the current one).

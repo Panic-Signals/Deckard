@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::layers_tests::{tone, zones};
-use crate::layout::sampling::{layers::LANE_RECTS, tab_shown};
+use crate::layout::sampling::{TAB_ORDER, layers::LANE_RECTS, tab_shown};
 use deckard_model::layers::{Shape, spread};
 
 /// The window on a new project whose first sound is an empty New Sampler, its Sampling
@@ -18,7 +18,8 @@ fn layers_harness() -> Harness<'static, App> {
             d.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
         }
         d.set_zones(0, 0, &[], "Empty").unwrap();
-        d.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+        let layers = deckard_model::new_sampler::NewSampler { mode: deckard_model::new_sampler::SamplerMode::Layers, ..Default::default() };
+        d.set_new_sampler(0, 0, Some(&layers)).unwrap();
     }
     h.state_mut().sampling_open = true;
     h.state_mut().sampling.tab = 4;
@@ -45,44 +46,46 @@ fn names(h: &Harness<'static, App>) -> Vec<String> {
     zones(h.state()).iter().map(|z| crate::analysis::file_name_of(&z.sample.path)).collect()
 }
 
-/// RECORD and LAYERS for an empty New Sampler; all five with one zone; no SLICE once it
-/// has a layer; no LAYERS for a sliced sound, a take, or a plain Sampler.
+/// In Layers: RECORD and LAYERS when empty, and no SLICE with a sample. In the other
+/// modes no LAYERS, and SLICE. No LAYERS for a take or a plain Sampler.
 #[test]
 fn the_tab_is_offered_where_it_can_be() {
+    use deckard_model::new_sampler::SamplerMode;
     let dir = tempfile::tempdir().unwrap();
-    let mut app = crate::layers_tests::app();
     let shown = |app: &App, zone: bool| -> Vec<bool> {
         let p = project_of_app(app);
         (0..5).map(|i| tab_shown(&p, 0, 0, i, zone, false)).collect()
     };
-    assert_eq!(shown(&app, false), [true, false, false, false, true]);
-    {
+    let load = |app: &App| {
         let doc = app.doc.as_ref().unwrap();
         let spec =
             deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(tone(dir.path(), "a.wav", 220.0)), set: Vec::new() };
         doc.borrow_mut().set_zones(0, 0, &[spec], "Load").unwrap();
-    }
-    assert_eq!(shown(&app, true), [true; 5]);
+    };
+    let mut app = crate::layers_tests::app();
+    assert_eq!(shown(&app, false), [true, false, false, false, true]);
+    load(&app);
+    assert_eq!(shown(&app, true), [true, true, false, true, true], "Layers: no SLICE");
     app.layer_files(1, &[tone(dir.path(), "b.wav", 330.0)]);
-    assert_eq!(shown(&app, true), [true, true, false, true, true], "layered: no SLICE");
-    // Sliced: three plain zones.
-    {
-        let doc = app.doc.as_ref().unwrap();
-        let mut d = doc.borrow_mut();
-        let specs: Vec<_> = [0, 0, 0]
-            .iter()
-            .map(|&k| deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Zone(k), file: None, set: Vec::new() })
-            .collect();
-        d.set_zones(0, 0, &specs, "x").unwrap();
-        for k in 0..3 {
-            let z = d.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[k].clone();
-            d.set_zone_meta(0, 0, k, &deckard_model::new_sampler::ZoneMeta { layer: None, ..z.meta.unwrap() }, "x").unwrap();
-        }
+    assert_eq!(shown(&app, true), [true, true, false, true, true]);
+    for mode in [SamplerMode::Advanced, SamplerMode::Original] {
+        let app = crate::layers_tests::app_in(mode);
+        assert_eq!(shown(&app, false), [true, false, false, false, false], "{mode:?}");
+        load(&app);
+        assert_eq!(shown(&app, true), [true, true, true, true, false], "{mode:?}: SLICE, no LAYERS");
     }
-    assert_eq!(shown(&app, true), [true, true, true, true, false], "sliced: no LAYERS");
     let p = project_of_app(&app);
     assert!(!tab_shown(&p, 0, 1, 4, false, false), "not a Sampler Preview");
-    assert!(!tab_shown(&p, 0, 0, 4, true, true), "a take");
+}
+
+/// LAYERS is where SLICE would be, before ZONE: RECORD, EDIT, LAYERS, ZONE.
+#[test]
+fn layers_is_where_slice_was() {
+    use crate::layout::sampling::TABS;
+    let app = crate::layers_tests::app_in(deckard_model::new_sampler::SamplerMode::Layers);
+    let p = project_of_app(&app);
+    let names: Vec<&str> = TAB_ORDER.into_iter().filter(|&i| tab_shown(&p, 0, 0, i, true, false)).map(|i| TABS[i]).collect();
+    assert_eq!(names, ["RECORD", "EDIT", "LAYERS", "ZONE"]);
 }
 
 #[test]
@@ -275,7 +278,10 @@ fn the_two_slice_boxes_are_each_their_own() {
         let mut m = zones(h.state())[0].meta.clone().unwrap();
         (m.layer, m.bpm, m.beats) = (None, Some(120.0), Some(4.0));
         let doc = h.state().doc.clone().unwrap();
-        doc.borrow_mut().set_zone_meta(0, 0, 0, &m, "Plain").unwrap();
+        let mut d = doc.borrow_mut();
+        d.set_zone_meta(0, 0, 0, &m, "Plain").unwrap();
+        // (In Advanced: Layers has no SLICE.)
+        d.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
     }
     (h.state_mut().sampling.tab, h.state_mut().zone) = (2, 0);
     h.run_steps(4);
@@ -294,4 +300,65 @@ fn the_two_slice_boxes_are_each_their_own() {
     let r = at(&h, "SLICES");
     type_into(&mut h, r, "22");
     assert_eq!(zones(h.state())[0].meta.as_ref().unwrap().tail_ms(), 0.0);
+}
+
+/// RECORD's LAYER is the focused take's; APPLY shows once it is turned, and puts the take
+/// on that layer.
+#[test]
+fn the_record_footer_applies_a_takes_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);
+    h.state_mut().recorder.view.takes.push(tone(dir.path(), "take.wav", 330.0));
+    h.state_mut().recorder.view.focused = Some(0);
+    h.state_mut().sampling.tab = 0;
+    h.run_steps(4);
+    let at = |h: &Harness<'static, App>, label: &str| -> Option<egui::Rect> {
+        h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sample-field", "RECORDING".to_string(), label.to_string()))))
+    };
+    assert!(at(&h, "LAYER").is_some(), "the take's LAYER");
+    h.state_mut().recorder.view.choose_layer((0, 0), 1);
+    h.run_steps(3);
+    let apply = at(&h, "TAKE").expect("APPLY, once a layer is chosen");
+    click(&mut h, apply.center());
+    h.run_steps(3);
+    assert_eq!(names(&h), ["a.wav", "take.wav"]);
+    assert_eq!(h.state().recorder.view.layer_choice, None);
+}
+
+/// The header's TYPE picks the mode: a sound with samples is asked first, in a dialog
+/// with the words agreed, OK and Cancel.
+#[test]
+fn the_header_has_sampler() {
+    use deckard_model::new_sampler::SamplerMode;
+    use egui_kittest::kittest::Queryable;
+    const ASK: &str = "Changing the mode loses all changes to this sound.";
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = layers_harness();
+    let mode = |h: &Harness<'static, App>| project_of_app(h.state()).groups[0].sounds[0].new_sampler.unwrap().mode;
+    let at = |h: &Harness<'static, App>, k: usize| -> Pos2 {
+        let r: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sampler-mode", k)))).expect("TYPE shown");
+        r.center()
+    };
+    h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);
+    h.run_steps(3);
+    let p = at(&h, 1);
+    click(&mut h, p);
+    h.run_steps(3);
+    h.get_by_label(ASK);
+    assert_eq!(mode(&h), SamplerMode::Layers, "asked first");
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(h.query_by_label(ASK).is_none());
+    assert_eq!((mode(&h), zones(h.state()).len()), (SamplerMode::Layers, 2));
+    click(&mut h, p);
+    h.run_steps(3);
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert!(h.query_by_label(ASK).is_none());
+    assert_eq!((mode(&h), zones(h.state()).len()), (SamplerMode::Advanced, 1));
+    assert!(!tab_shown(&project_of_app(h.state()), 0, 0, h.state().sampling.tab, true, false) || h.state().sampling.tab != 4, "off LAYERS");
+    if let Ok(dir) = std::env::var("DECKARD_SHOTS") {
+        h.render().unwrap().save(std::path::Path::new(&dir).join("sampler-mode.png")).unwrap();
+    }
 }
