@@ -19630,6 +19630,10 @@ mod tests {
         click(&mut h, Pos2::new(3.0 + 16.0, panel_top + 7.0 + 4.0 * 28.0 + 12.0));
         h.run_steps(3);
         h.state_mut().convert_instrument(true);
+        // (Converted, it is in Original, which has no MUNGE: Advanced has.)
+        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Sampler(
+            deckard_model::new_sampler::SamplerMode::Advanced,
+        )));
         h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(1)));
         h.run_steps(3);
         let tool = |h: &Harness<'static, App>, id: &str| -> egui::Rect {
