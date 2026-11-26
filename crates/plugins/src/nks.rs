@@ -448,24 +448,92 @@ fn bare_state(bytes: &[u8]) -> State {
     State { component: bytes.to_vec(), controller: Vec::new() }
 }
 
-/// Why a Kontakt library file (`.nksn` snapshot, `.nki` instrument) isn't loaded.
-pub const KONTAKT_FILE: &str = "Kontakt library snapshots and instruments (.nksn, .nki) can't be loaded from DECKARD's browser: Kontakt only recalls them when it opens the file itself. Load it in Kontakt's own browser, or load a Maschine sound or group saved with it.";
+/// Why a Kontakt instrument (`.nki`) isn't loaded when its location isn't known: it names
+/// its samples relative to where it is.
+pub const KONTAKT_FILE: &str = "Kontakt instruments (.nki) can only be loaded from DECKARD's browser, which knows where the file is.";
+
+/// A preset in a plug-in's own file format (`.nfm8`, `.nmsv`, `.nrkt`, `.rkplr`,
+/// `.ens`, `.nki`), hosted through its VST3 plug-in, from the file at `path`.
+///
+/// Kontakt instruments are built into a state Kontakt recalls by
+/// [`crate::kontakt::instrument_state`], which needs the file's location; Kontakt snapshots
+/// are refused ([`crate::kontakt::SNAPSHOT`]).
+pub fn native_preset_at(path: &std::path::Path, bytes: &[u8], installed: &[Entry]) -> Option<Result<Resolved, String>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if ext != "nki" {
+        return native_preset(&ext, bytes, installed);
+    }
+    let resolve = || -> Result<Resolved, String> {
+        let e = latest_kontakt(installed).ok_or("Kontakt isn't installed as VST3")?;
+        let cid = hex16(&e.cid).ok_or("the plug-in has no class id")?;
+        let id = e.maschine_id().ok_or("the plug-in has no id")?;
+        let component = crate::kontakt::instrument_state(bytes, path, &e.name, || crate::kontakt::empty_multi(&id, &e.name))?;
+        let chunk = wrap_chunk(&State { component, controller: Vec::new() }, Format::Vst3, &cid);
+        Ok(Resolved { id, name: e.name.clone(), chunk, pages: parse_dsiny(bytes) })
+    };
+    Some(resolve())
+}
+
+/// [`native_preset_at`], and for a Kontakt snapshot, or an instrument DECKARD can't build
+/// a state for (encrypted, library-bound, or with a Kontakt 7 file list), the state
+/// Kontakt saves once it has opened the file itself, sent Maschine's load-by-path command
+/// ([`crate::kontakt::state_opened_by_kontakt`]).
+/// That makes a throwaway Kontakt and takes about a second or two: for loading a file the
+/// user picked, on the main thread, not for scanning a library.
+pub fn native_preset_or_open(path: &std::path::Path, bytes: &[u8], installed: &[Entry]) -> Option<Result<Resolved, String>> {
+    let resolved = native_preset_at(path, bytes, installed)?;
+    #[cfg(windows)]
+    {
+        let snapshot = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("nksn"));
+        let kontakts = matches!(
+            resolved.as_ref().err().map(String::as_str),
+            Some(crate::kontakt::ENCRYPTED | crate::kontakt::LIBRARY | crate::kontakt::NEW_TABLE | crate::kontakt::UNKNOWN_MULTI)
+        );
+        if snapshot || kontakts {
+            let open = || -> Result<Resolved, String> {
+                let e = latest_kontakt(installed).ok_or("Kontakt isn't installed as VST3")?;
+                if snapshot {
+                    crate::kontakt::check_snapshot(bytes, &e.name)?;
+                }
+                let id = e.maschine_id().ok_or("the plug-in has no id")?;
+                let chunk = crate::kontakt::state_opened_by_kontakt(path, &id, &e.name)?;
+                Ok(Resolved { id, name: e.name.clone(), chunk, pages: parse_dsiny(bytes) })
+            };
+            return Some(open());
+        }
+    }
+    Some(resolved)
+}
+
+/// The newest Kontakt installed as a VST3 instrument ("Kontakt" is 6).
+fn latest_kontakt(installed: &[Entry]) -> Option<&Entry> {
+    installed
+        .iter()
+        .filter(|e| e.kind == Kind::Vst3 && e.instrument)
+        .filter_map(|e| {
+            let name = e.name.to_ascii_lowercase();
+            let version = if name == "kontakt" { 6 } else { name.strip_prefix("kontakt ")?.parse::<u32>().ok()? };
+            Some((version, e))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, e)| e)
+}
 
 /// A preset in a plug-in's own file format (`.nfm8`, `.nmsv`, `.nrkt`, `.rkplr`,
 /// `.ens`), hosted through its VST3 plug-in.
 ///
-/// Kontakt library files are refused ([`KONTAKT_FILE`]). Kontakt 7 resolves a library
-/// instrument's content from where its file is; given the file's bytes as its state
-/// (raw, or inside the wrapper of a state Maschine saved), it can't, and stops in
-/// `setState` on a modal "cannot be recalled correctly, perhaps due to missing
-/// content" box, which froze the thread loading it. (Measured 2026-11-09 with Session
-/// Guitarist snapshots and instruments; a state Maschine saved still loads.)
+/// Kontakt files are never handed to Kontakt as they are: given a library file's bytes as
+/// its state it stops in `setState` on a modal "cannot be recalled correctly, perhaps due
+/// to missing content" box, which froze the thread loading it (measured 2026-11-09).
+/// Snapshots are refused ([`crate::kontakt::SNAPSHOT`]); instruments need their location
+/// ([`native_preset_at`]) and without it are refused ([`KONTAKT_FILE`]).
 pub fn native_preset(ext: &str, bytes: &[u8], installed: &[Entry]) -> Option<Result<Resolved, String>> {
     let ext = ext.to_ascii_lowercase();
     let plugin = match ext.as_str() {
         "nfm8" => "FM8",
         "nmsv" => "Massive",
-        "nksn" | "nki" => return Some(Err(KONTAKT_FILE.into())),
+        "nksn" => return Some(Err(crate::kontakt::SNAPSHOT.into())),
+        "nki" => return Some(Err(KONTAKT_FILE.into())),
         "nrkt" | "rkplr" | "ens" => "Reaktor 6",
         _ => return None,
     };
@@ -516,7 +584,8 @@ pub fn native_preset_file(
     if ext == "nrkt" && effect {
         return Some(native_preset_for_plugin(&ext, "Reaktor 6 FX", &bytes, installed));
     }
-    native_preset(&ext, &bytes, installed)
+    // (Kontakt snapshots and encrypted instruments are opened by Kontakt itself.)
+    native_preset_or_open(path, &bytes, installed)
 }
 
 mod reaktor_ens {
@@ -1189,6 +1258,68 @@ mod tests {
         vst3("Native Instruments", "Massive X", true, MASSIVE_X)
     }
 
+    /// Kontakt files are never handed to Kontakt as they are: it would stop on a modal
+    /// "missing content" box in setState. Snapshots are refused, instruments need their
+    /// location, and one that can't be read is refused before Kontakt is made.
+    #[test]
+    fn kontakt_library_files_are_refused_with_a_reason() {
+        let mut raw = vec![0; 32];
+        raw[12..16].copy_from_slice(b"hsin");
+        let kontakt = vst3("Native Instruments", "Kontakt 7", true, "11111111111111111111111111111111");
+        let installed = std::slice::from_ref(&kontakt);
+        for ext in ["nksn", "NKSN"] {
+            assert_eq!(native_preset(ext, &raw, installed).unwrap().err().as_deref(), Some(crate::kontakt::SNAPSHOT));
+        }
+        assert_eq!(native_preset("nki", &raw, installed).unwrap().err().as_deref(), Some(KONTAKT_FILE));
+        let at = std::path::Path::new(r"C:\Library\Piano.NKI");
+        assert!(native_preset_at(at, &raw, installed).unwrap().is_err());
+        assert!(native_preset_at(at, &raw, &[]).unwrap().unwrap_err().contains("isn't installed"));
+        // Other formats go the usual way.
+        assert!(native_preset_at(std::path::Path::new("x.wav"), &raw, installed).is_none());
+    }
+
+    /// Kontakt instruments load into the installed Kontakt 7: one DECKARD builds (into the
+    /// empty multi that Kontakt saves), and an encrypted library one Kontakt opens itself.
+    /// Each is loaded into a Kontakt, which then saves more than its empty state. Paths in
+    /// `DECKARD_TEST_NKI` (`;`-separated; a third-party library instrument and Cuba by default).
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "loads live Kontakt 7 VST3 and library instruments"]
+    fn kontakt_instruments_load_into_kontakt() {
+        if !std::path::Path::new(r"C:\Program Files\Common Files\VST3\Kontakt 7.vst3").exists() {
+            return;
+        }
+        let kontakt = vst3("Native Instruments", "Kontakt 7", true, "4E5453564B696B376F6E74616B742037");
+        let installed = std::slice::from_ref(&kontakt);
+        let paths = std::env::var("DECKARD_TEST_NKI").unwrap_or(String::from(
+            r"C:\Users\Public\Documents\ESW House Pianos - NI Kontakt\ESW - House Piano.nki;C:\Users\Public\Documents\Cuba\Instruments\2 - Single Percussion\Bongos.nki"
+        ));
+        let id = kontakt.maschine_id().unwrap();
+        let empty = crate::state::wrap_chunk(
+            &crate::state::State { component: crate::kontakt::empty_multi(&id, "Kontakt 7").unwrap(), controller: Vec::new() },
+            crate::state::Format::Vst3,
+            &hex16(&kontakt.cid).unwrap(),
+        );
+        for path in paths.split(';').map(std::path::Path::new).filter(|p| p.is_file()) {
+            let resolved = native_preset_file(path, None, false, installed).unwrap().unwrap();
+            let mut host = crate::Host::default();
+            let plugin =
+                host.instance(crate::Slot::Sound { group: 0, sound: 0 }, &resolved.id, "Kontakt 7", &resolved.chunk, 48_000.0).unwrap();
+            let saved = plugin.lock().unwrap().save_chunk();
+            println!("{}: {} bytes built, Kontakt saves {} (empty {})", path.display(), resolved.chunk.len(), saved.len(), empty.len());
+            assert!(saved.len() > empty.len() + 64, "{}: Kontakt holds no instrument", path.display());
+        }
+    }
+
+    #[test]
+    fn the_newest_kontakt_is_used() {
+        let k6 = vst3("Native Instruments", "Kontakt", true, "11111111111111111111111111111111");
+        let k8 = vst3("Native Instruments", "Kontakt 8", true, "22222222222222222222222222222222");
+        let fx = vst3("Native Instruments", "Kontakt 9 FX", false, "33333333333333333333333333333333");
+        assert_eq!(latest_kontakt(&[k6.clone(), k8, fx]).unwrap().name, "Kontakt 8");
+        assert_eq!(latest_kontakt(&[k6]).unwrap().name, "Kontakt");
+    }
+
     #[test]
     fn it_reads_what_a_preset_says() {
         let uid = [0x56535446, 0x55434B69, 0x6E66696C, 0x74726174];
@@ -1359,18 +1490,6 @@ mod tests {
         assert_eq!(&unwrapped[200..204], b"tsrp");
         assert_eq!(&unwrapped[204..204 + bare_preset.len()], bare_preset);
         assert_eq!(wrap_nisound_preset("nfm8", &state.component), None, "already wrapped");
-    }
-
-    /// Kontakt library files are refused before Kontakt is made: it would stop on a
-    /// modal "missing content" box in setState.
-    #[test]
-    fn kontakt_library_files_are_refused_with_a_reason() {
-        let mut raw = vec![0; 32];
-        raw[12..16].copy_from_slice(b"hsin");
-        let kontakt = vst3("Native Instruments", "Kontakt 7", true, "11111111111111111111111111111111");
-        for ext in ["nksn", "NKSN", "nki", "NKI"] {
-            assert_eq!(native_preset(ext, &raw, &[kontakt.clone()]), Some(Err(KONTAKT_FILE.into())), "{ext}");
-        }
     }
 
     fn info() -> SoundInfo {

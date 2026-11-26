@@ -139,6 +139,20 @@ impl Editor {
         Vst3Editor::open(plugin, title).map(Editor::Vst3)
     }
 
+    /// Open `plugin`'s editor in a window that is never shown: for handing the plug-in's
+    /// own view something, as [`crate::kontakt`] does. Must be called on the main thread.
+    #[cfg(windows)]
+    pub fn open_hidden(plugin: &Shared, title: &str) -> Result<Editor, String> {
+        Vst3Editor::open_window(plugin, title, false).map(Editor::Vst3)
+    }
+
+    /// The editor's window.
+    #[cfg(windows)]
+    pub fn hwnd(&self) -> windows_sys::Win32::Foundation::HWND {
+        let Editor::Vst3(e) = self;
+        e.window.hwnd
+    }
+
     /// Dispatch the window's pending messages. Only for programs without a message loop
     /// of their own (the app's loop dispatches them itself).
     #[cfg(windows)]
@@ -273,6 +287,11 @@ impl Vst3Editor {
     /// messages).
     #[cfg(windows)]
     pub fn open(plugin: &Shared, title: &str) -> Result<Vst3Editor, String> {
+        Self::open_window(plugin, title, true)
+    }
+
+    #[cfg(windows)]
+    fn open_window(plugin: &Shared, title: &str, show: bool) -> Result<Vst3Editor, String> {
         if !crate::on_main_thread() {
             return Err("plug-in windows can only be opened on the main thread".into());
         }
@@ -288,7 +307,9 @@ impl Vst3Editor {
             window.close();
             return Err(format!("the plug-in's editor could not be opened ({r})"));
         }
-        window.show();
+        if show {
+            window.show();
+        }
         Ok(Vst3Editor { plugin: plugin.clone(), view, frame, window })
     }
 
