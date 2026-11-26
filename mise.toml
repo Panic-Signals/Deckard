@@ -6,6 +6,7 @@
 #   mise run install:demucs           # just the model (Demucs htdemucs, 84 MB)
 #   mise run build                    # debug build
 #   mise run test                     # the workspace's tests
+#   mise run release:run              # build optimized and run it
 #   mise run release:macos [version]  # dist/DECKARD-<version>-macos-universal.zip
 #   mise run release:linux [version]  # dist/deckard-<version>-linux-<arch>.tar.gz, .deb, .rpm
 #   mise run release:windows [version]# dist/DECKARD-<version>-windows-x64.zip, -setup.exe
@@ -54,6 +55,10 @@ run = "cargo build --workspace"
 [tasks.test]
 description = "Run the workspace's tests"
 run = "cargo test --workspace"
+
+[tasks."release:run"]
+description = "Run the current release on your OS"
+run = "cargo run -p deckard --release"
 
 [tasks."release:macos"]
 description = "Universal DECKARD.app for macOS, zipped into dist/ (optional arg: version)"
