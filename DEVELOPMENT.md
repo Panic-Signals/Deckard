@@ -16,6 +16,13 @@ mise run build
 ./target/debug/deckard ["path/to/project.mxprj"]   # or drop a file on the window
 ```
 
+A debug build is slow at audio work. To build with optimizations and run the result in
+one step, on any system:
+
+```sh
+mise run release:run
+```
+
 The build and the other tasks (tests, releases, lint) are defined in `mise.toml`, with
 usage at its top. Use `mise run` rather than calling `cargo` directly: `cargo` comes from
 mise's pinned Rust, so it isn't on `PATH` in a plain shell.
