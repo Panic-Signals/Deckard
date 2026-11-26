@@ -114,6 +114,8 @@ local function fresh()
     accent_velocity = 127,
     step_used = false,
     step_entered = false,
+    -- Step pads held, by pad: the step each is on, and when it was pressed.
+    step_held = {},
     -- Keyboard, Piano Roll and Notes: octaves from the root, the lowest degree shown.
     octave = -2,
     roll_low = 0,
@@ -415,6 +417,59 @@ local function step_velocity()
   return st.accent and st.accent_velocity or st.velocity
 end
 
+-- The note of `sound` starting in the step at `at`, `length` long (of `pitch`, if given).
+local function note_in(s, sound, at, length, pitch)
+  for _, n in ipairs(s.notes) do
+    if n.sound == sound and n.position >= at and n.position < at + length and (not pitch or n.pitch == pitch) then return n end
+  end
+  return nil
+end
+
+-- ---- a held step's velocity ------------------------------------------------------------
+
+-- (A table, not locals: the chunk is near Lua's 200 locals.)
+local hold = {
+  -- A step pad held this long (seconds) selects its step, and 16 pads set its velocity.
+  TIME = 0.65,
+}
+
+-- The step held long enough to set its velocity: the first one pressed, in Step mode.
+function hold.current()
+  if st.view ~= "step" then return nil end
+  local first
+  for _, h in pairs(st.step_held) do
+    if deckard.now() - h.since >= hold.TIME and (not first or h.since < first.since) then first = h end
+  end
+  return first
+end
+
+-- The velocity pad (0 softest to 15 hardest) at a pad, or nil: the bottom-left 16 from the
+-- bottom row up, or the bottom-right 16 while the held step is itself in the bottom-left,
+-- so they never cover it.
+function hold.pad(col, row, h)
+  local c = col - ((h.col <= 4 and h.row >= 5) and 5 or 1)
+  if c < 0 or c > 3 or row < 5 then return nil end
+  return (8 - row) * 4 + c
+end
+
+-- A velocity pad's velocity, 8 to 127 in sixteen even steps; and the pad nearest a velocity.
+function hold.velocity(i)
+  return math.floor((i + 1) * 127 / 16 + 0.5)
+end
+
+function hold.pad_of(velocity)
+  return clamp(math.floor(velocity * 16 / 127 + 0.5) - 1, 0, 15)
+end
+
+-- The held step becomes the selection (a lane of another sound: focused for that and back).
+function hold.select(s, h)
+  if h.selected then return end
+  h.selected = true
+  if h.sound ~= s.sound then deckard.focus_sound(h.sound) end
+  deckard.select_events(h.at, h.at + h.length - 1)
+  if h.sound ~= s.sound then deckard.focus_sound(s.sound) end
+end
+
 local function toggle_follow(s)
   st.step_follow = not st.step_follow
   deckard.follow(st.step_follow)
@@ -433,6 +488,7 @@ local function set_view(view)
   if st.view == "song" or st.view == "pad" or st.view == "keyboard" then st.back = st.view end
   st.view = view
   st.step_page = 0
+  st.step_held = {}
   -- Navigating away closes whatever page was showing: a static one belongs to the page it was
   -- opened on, and a non-static one has no business outliving the view it was opened in.
   close_menu()
@@ -1668,15 +1724,45 @@ local function press_pad_view(s, col, row)
   end
 end
 
+-- A step in or out. (A lane of another sound: the step is that sound's, and the focus stays.)
+function hold.toggle(s, sound, at, length)
+  if sound ~= s.sound then deckard.focus_sound(sound) end
+  deckard.step(at, length, step_velocity())
+  if sound ~= s.sound then deckard.focus_sound(s.sound) end
+end
+
+-- An empty step goes in as it's pressed; one with a note comes out when it's let go, unless
+-- it was held to set its velocity.
 local function press_step(s, col, row)
   local sound, index = step_cell(s, col, row)
   local at = step_at(s, index)
   local g = focused_group(s)
   if not g or sound > #g.sounds or not step_in_pattern(s, at) then return end
-  -- (A lane of another sound: the step is that sound's, and the focus stays.)
-  if sound ~= s.sound then deckard.focus_sound(sound) end
-  deckard.step(at, step_ticks(s), step_velocity())
-  if sound ~= s.sound then deckard.focus_sound(s.sound) end
+  local length = step_ticks(s)
+  local empty = not note_in(s, sound, at, length)
+  st.step_held[pad_key(col, row)] = { since = deckard.now(), sound = sound, at = at, length = length, col = col, row = row, added = empty }
+  if empty then hold.toggle(s, sound, at, length) end
+end
+
+function hold.release(col, row)
+  local key = pad_key(col, row)
+  local h = st.step_held[key]
+  if not h then return end
+  st.step_held[key] = nil
+  if not h.added and not h.edited and deckard.now() - h.since < hold.TIME then
+    hold.toggle(deckard.state(), h.sound, h.at, h.length)
+  end
+end
+
+-- With a step held, a velocity pad sets its velocity.
+function hold.press(s, col, row)
+  local h = hold.current()
+  local i = h and hold.pad(col, row, h)
+  if not i then return false end
+  hold.select(s, h)
+  deckard.events("velocity_to", hold.velocity(i))
+  h.edited = true
+  return true
 end
 
 local function press_roll(s, col, row)
@@ -1737,7 +1823,10 @@ end
 
 function M.pad(col, row, down)
   st.pressed[pad_key(col, row)] = down or nil
-  if not down then return end
+  if not down then
+    hold.release(col, row)
+    return
+  end
   local s = deckard.state()
   if shift() then
     shift_pad(col, row)
@@ -1752,6 +1841,7 @@ function M.pad(col, row, down)
     if n then sound_action(s, n) end
     return
   end
+  if st.view == "step" and hold.press(s, col, row) then return end
   local press = VIEW_PRESS[st.view]
   if press then press(s, col, row) end
 end
@@ -2311,6 +2401,8 @@ function M.tick()
     st.group_bank = (s.group - 1) // 8
   end
   follow_steps(s)
+  local h = hold.current()
+  if h then hold.select(s, h) end
   -- A static OSO belongs to the page it was opened on: a controller page change drops it, as the
   -- reference drops every static OSO unless SWING/TUNE is held. A non-static one is the idle
   -- timer's business.
@@ -2411,13 +2503,6 @@ local function light_keyboard(s)
   end
 end
 
-local function note_in(s, sound, at, length, pitch)
-  for _, n in ipairs(s.notes) do
-    if n.sound == sound and n.position >= at and n.position < at + length and (not pitch or n.pitch == pitch) then return n end
-  end
-  return nil
-end
-
 local function light_steps(s)
   local g = focused_group(s)
   local now = playing_step(s)
@@ -2443,6 +2528,18 @@ local function light_steps(s)
       end
     end
   end
+  -- A step held: the velocity pads, its own velocity's bright, and the step flashing.
+  local h = hold.current()
+  if not h then return end
+  local n = note_in(s, h.sound, h.at, h.length)
+  local lit = n and hold.pad_of(n.velocity)
+  for col = 1, 8 do
+    for row = 5, 8 do
+      local i = hold.pad(col, row, h)
+      if i then deckard.pad_led(col, row, WHITE, i == lit) end
+    end
+  end
+  deckard.pad_led(h.col, h.row, blink() and WHITE or "off")
 end
 
 local function light_roll(s)

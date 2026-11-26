@@ -470,6 +470,103 @@ fn step_mode_shows_four_or_eight_sounds() {
     assert_eq!(apps(&pad(&mut d, &v, 2, 8)), lane(7), "one lane each");
 }
 
+fn pad_at(d: &mut Device, v: &View, col: u8, row: u8, down: bool, now: Instant) -> Vec<Action> {
+    let out = apps(&d.pad(col - 1, row - 1, down, v, now));
+    assert_eq!(d.error(), None, "pad {col}, {row}");
+    out
+}
+
+fn pad_light_at(d: &mut Device, v: &View, col: usize, row: usize, now: Instant) -> u8 {
+    let l = d.leds(v, now);
+    assert_eq!(d.error(), None);
+    l.pads[1 + 8 + (row - 1) * 8 + (col - 1)]
+}
+
+/// A step tapped comes out as it's let go; held, it's selected and the bottom-left 16 pads
+/// set its velocity, from the softest bottom-left to the hardest top-right, and letting go
+/// keeps it.
+#[test]
+fn step_held_sets_its_velocity_with_sixteen_pads() {
+    let mut d = jam();
+    let mut v = jam_view();
+    v.pattern_length = 4 * 3840;
+    press(&mut d, &v, "STEP");
+    v.notes = vec![crate::NoteView { sound: 0, position: 240, length: 240, pitch: 60, velocity: 100, ..Default::default() }];
+    let t = Instant::now();
+    let ms = |n| t + Duration::from_millis(n);
+    let toggle = Action::StepToggle { at: 240, length: 240, velocity: 100 };
+
+    assert_eq!(pad_at(&mut d, &v, 2, 1, true, t), [], "a step with a note waits for the release");
+    assert_eq!(pad_at(&mut d, &v, 2, 1, false, ms(200)), [toggle], "tapped: out");
+
+    assert_eq!(pad_at(&mut d, &v, 2, 1, true, ms(1000)), []);
+    assert_eq!(pad_light_at(&mut d, &v, 1, 8, ms(1500)), colour(WHITE, SHADE_FAINT), "not yet: a step");
+    assert_eq!(apps(&d.tick(&v, ms(1700))), [Action::EventsRange { start: 240, end: 479, low: 0, high: 127 }], "held: selected");
+    assert_eq!(apps(&d.tick(&v, ms(1750))), [], "once");
+    // Velocity 100 is pad 12 of 0-15: the top row's first.
+    assert_eq!(pad_light_at(&mut d, &v, 1, 5, ms(1750)), colour(WHITE, SHADE_BRIGHT));
+    assert_eq!(pad_light_at(&mut d, &v, 2, 5, ms(1750)), colour(WHITE, SHADE_DIM));
+    assert_eq!(pad_light_at(&mut d, &v, 4, 8, ms(1750)), colour(WHITE, SHADE_DIM));
+    assert_eq!(pad_light_at(&mut d, &v, 5, 8, ms(1750)), colour(WHITE, SHADE_FAINT), "the rest are steps");
+    assert_ne!(pad_light_at(&mut d, &v, 2, 1, ms(1750)), pad_light_at(&mut d, &v, 2, 1, ms(1875)), "the held step flashes");
+
+    assert_eq!(pad_at(&mut d, &v, 4, 5, true, ms(1800)), [Action::Events("velocity_to", 127)]);
+    assert_eq!(pad_at(&mut d, &v, 4, 5, false, ms(1850)), []);
+    assert_eq!(pad_at(&mut d, &v, 1, 8, true, ms(1900)), [Action::Events("velocity_to", 8)]);
+    assert_eq!(pad_at(&mut d, &v, 1, 8, false, ms(1950)), []);
+    assert_eq!(pad_at(&mut d, &v, 2, 1, false, ms(2000)), [], "held: kept");
+    assert_eq!(pad_light_at(&mut d, &v, 1, 5, ms(2000)), colour(WHITE, SHADE_FAINT), "the pads are steps again");
+
+    // Held long without a velocity pad, it stays as well.
+    assert_eq!(pad_at(&mut d, &v, 2, 1, true, ms(3000)), []);
+    assert_eq!(pad_at(&mut d, &v, 2, 1, false, ms(4000)), []);
+}
+
+/// Holding a step in the bottom-left, the velocity pads are the bottom-right 16, so they don't
+/// cover it, and the bottom-left stay steps.
+#[test]
+fn step_held_bottom_left_has_its_velocity_pads_bottom_right() {
+    let mut d = jam();
+    let mut v = jam_view();
+    v.pattern_length = 4 * 3840;
+    press(&mut d, &v, "STEP");
+    v.notes = vec![crate::NoteView { sound: 0, position: 56 * 240, length: 240, pitch: 60, velocity: 100, ..Default::default() }];
+    let t = Instant::now();
+    let ms = |n| t + Duration::from_millis(n);
+    assert_eq!(pad_at(&mut d, &v, 1, 8, true, t), []);
+    assert_eq!(apps(&d.tick(&v, ms(700))), [Action::EventsRange { start: 56 * 240, end: 57 * 240 - 1, low: 0, high: 127 }]);
+    assert_eq!(pad_light_at(&mut d, &v, 5, 5, ms(700)), colour(WHITE, SHADE_BRIGHT));
+    assert_eq!(pad_light_at(&mut d, &v, 6, 5, ms(700)), colour(WHITE, SHADE_DIM));
+    assert_eq!(pad_light_at(&mut d, &v, 8, 8, ms(700)), colour(WHITE, SHADE_DIM));
+    assert_eq!(pad_at(&mut d, &v, 5, 8, true, ms(710)), [Action::Events("velocity_to", 8)]);
+    assert_eq!(pad_at(&mut d, &v, 8, 5, true, ms(720)), [Action::Events("velocity_to", 127)]);
+    assert_eq!(pad_at(&mut d, &v, 2, 8, true, ms(730)), [Action::StepToggle { at: 57 * 240, length: 240, velocity: 100 }], "a step");
+}
+
+/// A held step in another sound's lane is that sound's: it's focused to select it, and back.
+#[test]
+fn step_held_in_another_lane_selects_that_sounds_step() {
+    let mut d = jam();
+    let mut v = jam_view();
+    hold(&mut d, &v, "STEP");
+    press(&mut d, &v, "SCENE_4");
+    release(&mut d, &v, "STEP");
+    v.notes = vec![crate::NoteView { sound: 1, position: 240, length: 240, pitch: 60, velocity: 30, ..Default::default() }];
+    let t = Instant::now();
+    let ms = |n| t + Duration::from_millis(n);
+    assert_eq!(pad_at(&mut d, &v, 2, 3, true, t), []);
+    assert_eq!(
+        apps(&d.tick(&v, ms(700))),
+        [Action::FocusSound(1), Action::EventsRange { start: 240, end: 479, low: 0, high: 127 }, Action::FocusSound(0)]
+    );
+    // Velocity 30 is pad 3: the bottom row's last.
+    assert_eq!(pad_light_at(&mut d, &v, 4, 8, ms(700)), colour(WHITE, SHADE_BRIGHT));
+    assert_eq!(pad_at(&mut d, &v, 2, 8, true, ms(710)), [Action::Events("velocity_to", 16)]);
+    // Leaving Step mode lets go of it.
+    press(&mut d, &v, "STEP");
+    assert_eq!(pad_at(&mut d, &v, 2, 3, false, ms(800)), []);
+}
+
 /// The numbered buttons pick the part shown; Follow moves it with the song.
 #[test]
 fn scene_buttons_pick_the_part_of_a_long_pattern() {
