@@ -765,7 +765,7 @@ mod tests {
         let class = &deckard_plugins::tuner::CLASS;
         let make = || {
             let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
-            std::sync::Arc::new(std::sync::Mutex::new(deckard_plugins::Plugin::native(class, id, "Tuner", 48_000.0)))
+            deckard_plugins::Plugin::native(class, id, "Tuner", 48_000.0).shared()
         };
         let inst = make();
         let key = (Chain::Sound(0, 0), 0);
