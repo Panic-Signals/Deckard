@@ -96,6 +96,8 @@ impl App {
     /// Each frame: the tab's changes in, and (now and then) the interface out.
     pub fn sync_audio_settings(&mut self) {
         self.watch_audio_driver();
+        self.retry_asio();
+        self.awake.want(self.playing.is_some() || self.recorder.busy() || self.session.active());
         let Some(Ok(c)) = &self.controller else { return };
         let edits = std::mem::take(&mut c.host.state.borrow_mut().audio_edits);
         let stale = !edits.is_empty() || self.audio_view_at.is_none_or(|t| t.elapsed() >= REFRESH);
