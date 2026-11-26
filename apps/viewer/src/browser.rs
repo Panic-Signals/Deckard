@@ -22,8 +22,16 @@ enum Job {
     Saved(PathBuf),
     Scan(Vec<Root>),
     Forget(PathBuf),
-    /// Find `name` among `kind`'s items, then ask for the list it's in (see [`locate`]).
-    Locate(u64, Query, String),
+    /// Find an item, then ask for the list it's in (see [`locate`]).
+    Locate(u64, Query, Find),
+}
+
+/// What Quick Browse looks for: an item's name (or file name without its extension), and
+/// the search that found it when it was loaded, if that's known.
+#[derive(Clone, Debug)]
+struct Find {
+    name: String,
+    recalled: Option<Query>,
 }
 
 /// A query's answer: its number, the results, why NI's index isn't there, when
@@ -40,6 +48,8 @@ pub struct Browser {
     pub selected: Option<usize>,
     /// A name to focus once its results are in (the controller's "show me this one").
     pub locate: Option<String>,
+    /// The searches that loaded items, for Quick Browse to recall.
+    pub searches: Searches,
     /// Prehear a sample when it's selected.
     pub prehear_auto: bool,
     pub prehear_gain: f32,
@@ -73,6 +83,7 @@ impl Default for Browser {
             results: Results::default(),
             selected: None,
             locate: None,
+            searches: Searches::default(),
             prehear_auto: true,
             prehear_gain: 0.8,
             routing: true,
@@ -102,6 +113,7 @@ impl Browser {
     /// Start the library: NI's index at `ni` (read-only), DECKARD's at `own`, the
     /// folders `roots` scanned into it; then the current query.
     pub fn start(&mut self, ni: Option<PathBuf>, own: PathBuf, roots: Vec<Root>) {
+        self.searches = Searches::load(own.with_file_name("quick_browse.json"));
         let (jobs, rx) = mpsc::channel::<Job>();
         let (tx, answers) = mpsc::channel::<Answer>();
         std::thread::Builder::new()
@@ -124,9 +136,9 @@ impl Browser {
                         return;
                     }
                 };
-                let reply = |lib: &mut Library, n: u64, mut q: Query, name: Option<&str>| -> bool {
-                    if let Some(name) = name {
-                        let (q, top, r) = locate(lib, &q, name);
+                let reply = |lib: &mut Library, n: u64, mut q: Query, find: Option<&Find>| -> bool {
+                    if let Some(find) = find {
+                        let (q, top, r) = locate(lib, &q, find);
                         return tx.send((n, r, lib.ni_error.clone(), None, Some((q, top)))).is_ok();
                     }
                     let mut r = lib.query(&q);
@@ -147,18 +159,18 @@ impl Browser {
                 };
                 // The last query answered. A folder walk that arrives on its own runs
                 // after it, then this query runs again so the new files show up.
-                let mut last: Option<(u64, Query, Option<String>)> = None;
+                let mut last: Option<(u64, Query, Option<Find>)> = None;
                 while let Ok(mut job) = rx.recv() {
                     loop {
                         let (current, later) = split_query(job, &rx);
                         let query = match current {
                             Job::Query(n, ref q) => Some((n, q.clone(), None)),
-                            Job::Locate(n, ref q, ref name) => Some((n, q.clone(), Some(name.clone()))),
+                            Job::Locate(n, ref q, ref find) => Some((n, q.clone(), Some(find.clone()))),
                             _ => None,
                         };
                         if let Some((n, q, name)) = query {
                             last = Some((n, q.clone(), name.clone()));
-                            if !reply(&mut lib, n, q, name.as_deref()) {
+                            if !reply(&mut lib, n, q, name.as_ref()) {
                                 return;
                             }
                             let again = !later.is_empty();
@@ -173,7 +185,7 @@ impl Browser {
                                     }
                                     Err(_) => {
                                         if let Some((n, q, name)) = last.clone()
-                                            && !reply(&mut lib, n, q, name.as_deref())
+                                            && !reply(&mut lib, n, q, name.as_ref())
                                         {
                                             return;
                                         }
@@ -191,7 +203,7 @@ impl Browser {
                                     }
                                     Err(_) => {
                                         if let Some((n, q, name)) = last.clone()
-                                            && !reply(&mut lib, n, q, name.as_deref())
+                                            && !reply(&mut lib, n, q, name.as_ref())
                                         {
                                             return;
                                         }
@@ -298,11 +310,15 @@ impl Browser {
     /// Show `name` (a `kind` item) as if it had been browsed to: its kind, user or factory
     /// content, product and top-level type chosen, no text or favourites filter, and it
     /// focused. Not in the library: `kind` with the filters cleared.
+    ///
+    /// The search that listed it when it was loaded comes back first, as it was (Quick
+    /// Browse), if [`Browser::searches`] knows it and it still lists the item.
     pub fn locate_item(&mut self, kind: deckard_library::Kind, name: String) {
         self.asked += 1;
         let base = Query { kind, ..self.query.clone() };
         self.locate = Some(name.clone());
-        self.send(Job::Locate(self.asked, base, name));
+        let recalled = self.searches.recall(kind, &name);
+        self.send(Job::Locate(self.asked, base, Find { name, recalled }));
     }
 
     /// Focus the result [`Browser::locate`] names, once the list is there.
@@ -420,9 +436,102 @@ fn split_query(mut job: Job, rx: &mpsc::Receiver<Job>) -> (Job, Vec<Job>) {
     (job, later)
 }
 
+/// The searches that loaded items, newest last, for Quick Browse to recall (as
+/// Maschine's does): an item's name, lower case, with the query that listed it. Kept in
+/// `quick_browse.json` beside DECKARD's library index.
+#[derive(Debug, Default)]
+pub struct Searches {
+    file: Option<PathBuf>,
+    saved: Vec<(String, Query)>,
+}
+
+/// How many searches are kept; the oldest go first.
+const SEARCHES_KEPT: usize = 500;
+
+impl Searches {
+    pub fn load(file: PathBuf) -> Searches {
+        let saved = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|e| Some((e.get("name")?.as_str()?.to_string(), query_from_json(e.get("query")?)?)))
+            .collect();
+        Searches { file: Some(file), saved }
+    }
+
+    /// `item` was loaded from what `query` listed.
+    pub fn remember(&mut self, item: &Item, query: &Query) {
+        let stem = item.path.file_stem().map(|s| s.to_string_lossy().to_lowercase());
+        let names = [Some(item.name.to_lowercase()), stem.filter(|s| !s.eq_ignore_ascii_case(&item.name))];
+        for name in names.into_iter().flatten().filter(|n| !n.is_empty()) {
+            self.saved.retain(|(n, _)| *n != name);
+            self.saved.push((name, query.clone()));
+        }
+        let over = self.saved.len().saturating_sub(SEARCHES_KEPT);
+        self.saved.drain(..over);
+        self.save();
+    }
+
+    /// The search that loaded `name`, a sample's (`kind` a loop or a one-shot) or a
+    /// preset's, the newest.
+    pub fn recall(&self, kind: deckard_library::Kind, name: &str) -> Option<Query> {
+        use deckard_library::Kind;
+        let sample = |k: Kind| matches!(k, Kind::Loop | Kind::OneShot);
+        let name = name.to_lowercase();
+        self.saved.iter().rev().find(|(n, q)| *n == name && sample(q.kind) == sample(kind)).map(|(_, q)| q.clone())
+    }
+
+    fn save(&self) {
+        let Some(file) = &self.file else { return };
+        let all: Vec<serde_json::Value> =
+            self.saved.iter().map(|(n, q)| serde_json::json!({ "name": n, "query": query_to_json(q) })).collect();
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, serde_json::Value::Array(all).to_string());
+    }
+}
+
+fn query_to_json(q: &Query) -> serde_json::Value {
+    serde_json::json!({
+        "kind": deckard_library::Kind::ALL.iter().position(|k| *k == q.kind).unwrap_or(0),
+        "user": q.user,
+        "products": q.products,
+        "vendor": q.vendor,
+        "product": q.product,
+        "bank": q.bank,
+        "types": q.types,
+        "characters": q.characters,
+        "text": q.text,
+        "favorites": q.favorites,
+    })
+}
+
+fn query_from_json(v: &serde_json::Value) -> Option<Query> {
+    let strings = |key: &str| -> Vec<String> {
+        v.get(key).and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    };
+    let text = |key: &str| v.get(key).and_then(|s| s.as_str()).map(str::to_string);
+    Some(Query {
+        kind: *deckard_library::Kind::ALL.get(v.get("kind")?.as_u64()? as usize)?,
+        user: v.get("user").and_then(|b| b.as_bool()).unwrap_or(false),
+        products: strings("products"),
+        vendor: text("vendor"),
+        product: text("product"),
+        bank: strings("bank"),
+        types: strings("types"),
+        characters: strings("characters"),
+        text: text("text").unwrap_or_default(),
+        favorites: v.get("favorites").and_then(|b| b.as_bool()).unwrap_or(false),
+    })
+}
+
 /// What the magnifier looks for in the library for `snd`: the sample of its Sampler's
 /// zone `zone` (a loop when its path says so, else a one-shot), by file name without the
-/// extension; else the sound's preset, by the sound's name. `None` when it has neither.
+/// extension; else the sound's preset, by the sound's name, when it has a plug-in. `None`
+/// when it has neither.
 pub fn locate_target(snd: &deckard_model::Sound, zone: usize) -> Option<(deckard_library::Kind, String)> {
     use deckard_library::Kind;
     let sample = snd.sampler.as_ref().and_then(|x| x.zones.get(zone.min(x.zones.len().saturating_sub(1)))).map(|z| z.sample.path.as_str());
@@ -432,17 +541,27 @@ pub fn locate_target(snd: &deckard_model::Sound, zone: usize) -> Option<(deckard
             let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
             (kind, file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string())
         }
-        None => (Kind::Sound, snd.name.clone()),
+        None if !snd.instrument.is_empty() => (Kind::Sound, snd.name.clone()),
+        None => return None,
     };
     (!name.is_empty()).then_some((kind, name))
 }
 
-/// The query that shows `name` (`base.kind`), its kind's top-level types, and its
-/// results. The item is looked for whatever `base` filters, in the user's content and
-/// the factory's.
-fn locate(lib: &mut Library, base: &Query, name: &str) -> (Query, Vec<String>, Results) {
+/// The query that shows `find`'s item, its kind's top-level types, and its results: the
+/// recalled search when it still lists the item; else its kind (`base.kind`) with the
+/// item's own user or factory side, product and top-level type, the item looked for
+/// whatever `base` filters, in the user's content and the factory's.
+fn locate(lib: &mut Library, base: &Query, find: &Find) -> (Query, Vec<String>, Results) {
+    let name = find.name.as_str();
     let wanted = name.to_lowercase();
     let is = |i: &Item| i.name.to_lowercase() == wanted || i.path.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == wanted);
+    if let Some(q) = &find.recalled {
+        let r = lib.query(q);
+        if r.items.iter().any(|i| is(i)) {
+            let top = if q.types.is_empty() { r.types.clone() } else { lib.query(&Query { types: Vec::new(), ..q.clone() }).types };
+            return (q.clone(), top.into_iter().map(|t| t.0).collect(), r);
+        }
+    }
     let found = [base.user, !base.user].into_iter().find_map(|user| {
         let q = Query { kind: base.kind, user, text: name.to_string(), ..Query::default() };
         lib.query(&q).items.into_iter().find(|i| is(i))
@@ -932,10 +1051,14 @@ mod locate_tests {
         assert_eq!(locate_target(&snd, 1), Some((Kind::Loop, "Snare[90] Dust".into())));
         assert_eq!(locate_target(&snd, 9), Some((Kind::Loop, "Snare[90] Dust".into())), "past the last: the last");
         // No sample: the sound's preset; nothing to look for: nothing.
-        let preset =
-            Sound { name: "Dusty Kit".into(), sampler: Some(Sampler { zones: vec![zone("")], ..Sampler::default() }), ..Sound::default() };
+        let preset = Sound {
+            name: "Dusty Kit".into(),
+            instrument: "Sampler".into(),
+            sampler: Some(Sampler { zones: vec![zone("")], ..Sampler::default() }),
+            ..Sound::default()
+        };
         assert_eq!(locate_target(&preset, 0), Some((Kind::Sound, "Dusty Kit".into())));
-        assert_eq!(locate_target(&Sound::default(), 0), None);
+        assert_eq!(locate_target(&Sound { name: "Sound 2".into(), ..Sound::default() }, 0), None, "an empty sound");
     }
 
     #[test]
@@ -953,6 +1076,56 @@ mod locate_tests {
         assert_eq!(q.types, ["Drums"]);
         assert!(b.top_types.contains(&"Bass".to_string()), "{:?}", b.top_types);
         assert_eq!(b.selected_item().map(|i| i.name.as_str()), Some("Snare[90] Dust"));
+    }
+
+    #[test]
+    fn locating_recalls_the_search_that_loaded_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut b = browser(tmp.path());
+        // Found with a text search, among the user's and the factory's loops.
+        let found = Query { kind: Kind::Loop, text: "snare".into(), ..Query::default() };
+        b.set_query(found.clone());
+        b.wait();
+        let item = b.results.items.iter().find(|i| i.name == "Snare[90] Dust").cloned().unwrap();
+        b.searches.remember(&item, &b.query);
+        // Elsewhere since; Quick Browse brings that search back, the item focused.
+        b.set_query(Query { kind: Kind::Sound, favorites: true, ..Query::default() });
+        b.wait();
+        b.locate_item(Kind::Loop, "Snare[90] Dust".into());
+        b.wait();
+        assert_eq!(b.query, found);
+        assert_eq!(b.selected_item().map(|i| i.name.as_str()), Some("Snare[90] Dust"));
+        // Kept beside the library's index, for the next time DECKARD starts.
+        let again = Searches::load(tmp.path().join("quick_browse.json"));
+        assert_eq!(again.recall(Kind::OneShot, "SNARE[90] DUST"), Some(found.clone()), "a sample's, whichever sample kind");
+        assert_eq!(again.recall(Kind::Sound, "Snare[90] Dust"), None, "not a preset's");
+        // A search that no longer lists it: the item's own filters instead.
+        b.searches.remember(&item, &Query { kind: Kind::Loop, text: "zzz".into(), ..Query::default() });
+        b.locate_item(Kind::Loop, "Snare[90] Dust".into());
+        b.wait();
+        assert_eq!((b.query.text.as_str(), b.query.product.as_deref()), ("", Some("Deep Matter")));
+        assert_eq!(b.selected_item().map(|i| i.name.as_str()), Some("Snare[90] Dust"));
+    }
+
+    #[test]
+    fn searches_keep_the_newest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = Searches::default();
+        let item =
+            |n: usize| Item { name: format!("Kick {n}"), path: format!("Kick {n}.wav").into(), kind: Kind::OneShot, ..Item::default() };
+        for n in 0..SEARCHES_KEPT + 5 {
+            s.remember(&item(n), &Query { text: n.to_string(), ..Query::default() });
+        }
+        assert_eq!(s.saved.len(), SEARCHES_KEPT);
+        assert_eq!(s.recall(Kind::OneShot, "Kick 4"), None);
+        assert_eq!(s.recall(Kind::OneShot, "kick 5").map(|q| q.text), Some("5".into()));
+        // The same item again: once, with its newest search.
+        s.remember(&item(5), &Query { text: "again".into(), ..Query::default() });
+        assert_eq!(s.saved.iter().filter(|(n, _)| n == "kick 5").count(), 1);
+        assert_eq!(s.recall(Kind::Loop, "Kick 5").map(|q| q.text), Some("again".into()));
+        // An unreadable file: none.
+        std::fs::write(tmp.path().join("bad.json"), "{").unwrap();
+        assert!(Searches::load(tmp.path().join("bad.json")).saved.is_empty());
     }
 
     #[test]

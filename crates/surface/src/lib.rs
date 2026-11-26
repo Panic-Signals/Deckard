@@ -245,6 +245,9 @@ pub enum Browse {
     Patterns(bool),
     /// Show the library at the focused sound's sample, or else its preset.
     Locate,
+    /// Quick Browse on the Control page: the list that found the focused sound's sample
+    /// or preset, scrolled to it (`true`), or closed (`false`).
+    Quick(bool),
 }
 
 /// The song's grids, as Maschine's Grid page lists them (each value its place in the
@@ -584,6 +587,9 @@ pub struct ControlView {
     pub level: usize,
     /// Plug-ins shown (else the channel's properties).
     pub modules_visible: bool,
+    /// Quick Browse's list shows over the right screen (the browser's results are in
+    /// [`View::browser`]).
+    pub quick_browse: bool,
     pub page_group: usize,
     pub page_groups: usize,
     /// The focused slot's name, if any.

@@ -619,6 +619,7 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("browse_set_favorite", () => Action::Browse(Browse::SetFavorite));
     request!("browse_prehear", () => Action::Browse(Browse::Prehear));
     request!("browse_locate", () => Action::Browse(Browse::Locate));
+    request!("browse_quick", (on: bool) => Action::Browse(Browse::Quick(on)));
     request!("browse_routing", (on: bool) => Action::Browse(Browse::Routing(on)));
     request!("browse_patterns", (on: bool) => Action::Browse(Browse::Patterns(on)));
     request!("song_view", (on: bool) => Action::SongView(on));
@@ -1675,6 +1676,7 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
     let ct = lua.create_table()?;
     ct.set("level", c.level + 1)?;
     ct.set("plugins", c.modules_visible)?;
+    ct.set("quick_browse", c.quick_browse)?;
     ct.set("page_group", c.page_group + 1)?;
     ct.set("page_groups", c.page_groups)?;
     ct.set("slot", c.slot.as_deref())?;

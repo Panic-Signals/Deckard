@@ -1289,8 +1289,11 @@ pub struct App {
     surface: deckard_surface::Surface,
     /// Its last script error, as shown in the status bar.
     surface_error: Option<String>,
-    /// Whether the MK3 showed its Browse page last frame (leaving it stops prehear).
+    /// Whether the MK3 showed its Browse page (or Quick Browse's list) last frame
+    /// (leaving it stops prehear).
     surface_was_browsing: bool,
+    /// Quick Browse's list shows on the MK3's Control page, for this group and sound.
+    quick_browse: Option<(usize, usize)>,
     /// The scripts' last screens sent to the MK3 (their draw count).
     mk3_screens_sent: u64,
     /// Commands sent to the output when the last edit went (see `follow_edits`).
@@ -6466,6 +6469,7 @@ impl App {
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
+            quick_browse: self.quick_browse.is_some(),
             page_group: c.page_group,
             page_groups: c.page_groups,
             slot: c.focus_slot.and_then(|i| c.slots.get(i)).map(|s| s.name.clone()),
@@ -6555,8 +6559,9 @@ impl App {
             sampling: self.sampling_surface_view(),
             ..Default::default()
         };
-        // (Only while BROWSE shows, or the JAM has the panel open: the results can be long.)
-        if self.surface.page() == "browse" || (self.jam_device.is_some() && self.browser.open) {
+        // (Only while BROWSE or Quick Browse's list shows, or the JAM has the panel open:
+        // the results can be long.)
+        if self.surface.page() == "browse" || self.quick_browse.is_some() || (self.jam_device.is_some() && self.browser.open) {
             let b = self.browser.view();
             for name in &b.products {
                 plugin_pictures::ensure_browser_product(&self.surface, name);
@@ -7146,6 +7151,10 @@ impl App {
                     B::Patterns(on) => C::Patterns(on),
                     B::Locate => {
                         self.browse_locate();
+                        return;
+                    }
+                    B::Quick(on) => {
+                        self.quick_browse = (on && self.browse_locate()).then_some((self.group, self.sound));
                         return;
                     }
                     B::SetFavorite => {
@@ -11806,19 +11815,21 @@ impl App {
     /// The controller's magnifier: the library on the focused sound's sample (its Sampler's
     /// focused zone), else its preset by name, with that result focused and the filters
     /// set to its own (user or factory, product, top-level type).
-    fn browse_locate(&mut self) {
-        let Some(doc) = self.doc.clone() else { return };
+    /// Whether it had something to look for.
+    fn browse_locate(&mut self) -> bool {
+        let Some(doc) = self.doc.clone() else { return false };
         let target = {
             let d = doc.borrow();
             d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|snd| browser::locate_target(snd, self.zone))
         };
-        let Some((kind, name)) = target else { return };
+        let Some((kind, name)) = target else { return false };
         if !self.browser.started() {
             self.browse(browser::BrowseAct::Toggle);
             self.browse(browser::BrowseAct::Toggle);
         }
         self.browser.touch();
         self.browser.locate_item(kind, name);
+        true
     }
 
     /// What the browser asks for.
@@ -11890,6 +11901,8 @@ impl App {
             B::Load(i, target) => {
                 let Some(item) = b.results.items.get(i).cloned() else { return };
                 b.selected = Some(i);
+                // (For Quick Browse to recall.)
+                b.searches.remember(&item, &b.query);
                 self.stop_prehear();
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
@@ -12042,9 +12055,14 @@ impl App {
         }
     }
 
-    /// The MK3 left its Browse page: what it was prehearing stops.
+    /// The MK3 left its Browse page, or Quick Browse's list closed: what it was
+    /// prehearing stops. The list closes with the Control page, or when another sound is
+    /// focused.
     fn stop_prehear_after_browse(&mut self) {
-        let browsing = self.surface.page() == "browse";
+        if self.quick_browse.is_some_and(|at| at != (self.group, self.sound) || self.surface.page() != "control") {
+            self.quick_browse = None;
+        }
+        let browsing = self.surface.page() == "browse" || self.quick_browse.is_some();
         if self.surface_was_browsing && !browsing {
             self.stop_prehear();
         }

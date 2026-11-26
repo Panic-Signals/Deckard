@@ -5,8 +5,11 @@
 --   display 5 / 6     PLUG-IN: the previous / next slot, on to the "+" after the last
 --                     (an empty one); CHANNEL: the previous / next page group (Input,
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
---   display 8         PLUG-IN: the magnifier, Browse at this sound's sample (its Sampler's
---                     focused zone) or else its preset, with that item's own filters
+--   display 8         PLUG-IN: the magnifier, Quick Browse: the result list that found this
+--                     sound's sample (its Sampler's focused zone) or else its preset, over
+--                     the right screen, scrolled to it; pressed again, closed. While it
+--                     shows, the jog wheel turns through the list (a sample preheard) and,
+--                     pressed, loads the focused result in place of the old one.
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
 --   LEFT / RIGHT      the previous / next page
 --   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages;
@@ -28,6 +31,11 @@ local zhora = require("lib.zhora")
 local touch = require("lib.touch")
 
 local control = {}
+
+-- Quick Browse's list: seven rows, as Browse draws its results.
+local QB_X, QB_Y, QB_W, QB_H, QB_STEP, QB_ROWS = 721, 44, 231, 21, 26, 7
+-- The content kinds whose results are samples (Browse's Loops and One-shots).
+local QB_SAMPLES = { [6] = true, [7] = true }
 
 local PAGE_GROUPS = { "INPUT", "OUTPUT", "GROOVE", "MACRO" }
 
@@ -113,6 +121,10 @@ function control.button(name, down)
     step(c, name == "WHEEL_RIGHT")
   elseif name == "WHEEL" then
     if not c.plugins or deckard.held("SHIFT") then return end
+    if c.quick_browse then
+      if #s.browser.results > 0 and not s.browser.busy then deckard.browse_load() end
+      return true
+    end
     deckard.show_page("module")
   else
     if not n then return end
@@ -123,8 +135,22 @@ function control.button(name, down)
     elseif n == 5 or n == 6 then
       step(c, n == 6)
     elseif n == 8 and c.plugins then
-      deckard.show_page("browse")
-      deckard.browse_locate()
+      deckard.browse_quick(not c.quick_browse)
+    end
+  end
+  return true
+end
+
+-- Quick Browse: the jog wheel turns through its list, a sample preheard as it's reached.
+function control.wheel(steps)
+  local s = deckard.state()
+  local c, b = s.control, s.browser
+  if not (c.plugins and c.quick_browse) or steps == 0 then return end
+  if #b.results > 0 and not b.busy then
+    local to = math.max(1, math.min(#b.results, b.focus + steps))
+    if to ~= b.focus then
+      deckard.browse_focus(to - b.focus)
+      if QB_SAMPLES[b.kind] then deckard.browse_prehear() end
     end
   end
   return true
@@ -168,7 +194,33 @@ function control.leds()
     if not z then deckard.led("SCREEN_6", "dim") end
     deckard.led("WHEEL_RIGHT", 16, false)
   end
-  if c.plugins and c.slot_index and not z then deckard.led("SCREEN_8", "dim") end
+  if c.plugins and not z then deckard.led("SCREEN_8", c.quick_browse and "on" or "dim") end
+end
+
+-- Quick Browse's list over the right half of the right screen: the results that found
+-- the sound's file, the focused one filled.
+local function quick_list(screen, theme, b)
+  screen:rect(QB_X - 5, 36, 960 - QB_X + 5, QB_Y + QB_ROWS * QB_STEP - 36, "background")
+  local n = #b.results
+  if n == 0 then
+    screen:label(QB_X + 9, QB_Y, QB_W - 14, QB_H, b.busy and "..." or "Nothing found", { color = theme.colors.text }, "left")
+    return
+  end
+  local top = math.max(1, math.min(b.focus - QB_ROWS // 2, n - QB_ROWS + 1))
+  for row = 1, QB_ROWS do
+    local i = top + row - 1
+    local r = b.results[i]
+    if not r then break end
+    local y = QB_Y + (row - 1) * QB_STEP
+    local focused = i == b.focus
+    screen:rect(QB_X, y, QB_W - 5, QB_H, focused and "text" or "browse_row", theme.corner)
+    local colour = focused and theme.colors.on_colour or theme.colors.text
+    screen:label(QB_X + 9, y, QB_W - 5 - 14, QB_H, r.name, { color = colour }, "left")
+  end
+  if n > QB_ROWS then
+    local h = 177
+    screen:rect(955, QB_Y + h * (top - 1) // n, 5, math.max(4, h * QB_ROWS // n), "text")
+  end
 end
 
 -- A channel properties group's icon: Input, Output, Groove or Macro.
@@ -582,10 +634,10 @@ function control.draw(screen, theme, opts)
     local slot = c.chain[slot_at(c)]
     -- Browse.
     if not shift_layer and not z and not opts.no_browse then
-      -- (A magnifying glass: the library, at this sound's sample or preset.)
-      widgets.buttons(screen, theme, { [8] = { text = " " } })
+      -- (A magnifying glass: Quick Browse, lit while its list shows.)
+      widgets.buttons(screen, theme, { [8] = { text = " ", selected = c.quick_browse } })
       local cx, cy = widgets.button_x(8) + 57, 16
-      local ink = theme.colors.text
+      local ink = c.quick_browse and (theme.colors.selected_text or theme.colors.on_colour) or theme.colors.text
       screen:circle(cx - 3, cy - 2, 5, ink, 1.8)
       screen:line(cx + 1, cy + 2, cx + 7, cy + 8, 2.2, ink)
     end
@@ -686,6 +738,7 @@ function control.draw(screen, theme, opts)
     end
   end
   knobs(screen, theme, c, false, knob_of, pictured)
+  if c.plugins and c.quick_browse and not opts.no_browse then quick_list(screen, theme, s.browser) end
 end
 
 -- The knobs' row as the page draws it (Set Macro shows it too).

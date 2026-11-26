@@ -206,7 +206,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `sections[i]`, `section` | The arrangement's sections (`{ scene, start, length, auto }`: the scene it plays or `nil`, where it starts and how long it is in ticks, its length following its scene's) and the focused one (`nil` with none). |
 | `pattern`, `pattern_start`, `pattern_length`, `pattern_auto`, `pattern_position` | The focused group's focused pattern: where it starts and how long it is (ticks), whether its length is Auto, and where playback is in it (`nil` unless the scene plays it). |
 | `notes[i]` | That pattern's notes: `{ sound, position, length, pitch, velocity, probability, selected }`. |
-| `browser` | The library, as BROWSE shows it (below). It's filled only while the `browse` page is on screen. |
+| `browser` | The library, as BROWSE shows it (below). It's filled only while the `browse` page is on screen, or Quick Browse's list on the Control page. |
 | `control` | The software's Control area, as below. |
 
 `state().control` holds:
@@ -215,6 +215,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 |---|---|
 | `level` | 1 Master, 2 Group, 3 Sound. |
 | `plugins` | `true` when the plug-ins are shown, `false` for the channel properties. |
+| `quick_browse` | `true` while Quick Browse's list shows (see `deckard.browse_quick`). |
 | `page_group`, `page_groups` | The channel properties' page group, and how many there are. |
 | `slot`, `slots`, `slot_index` | The focused slot's name, how many slots there are, and which is focused (`nil` on the "+" after the last). |
 | `chain[i]` | Each slot: `{ name, instrument, active, plugin, picture }` (`plugin`: a hosted plug-in, with an editor window; `picture`: the key of DECKARD's picture of one of its own plug-ins, for `screen:image`). |
@@ -353,6 +354,8 @@ and `positions`.
 | `deckard.browse_load()`, `deckard.browse_prehear()`, `deckard.browse_set_favorite()` | Load or prehear the focused result, or make it a favourite (or not). |
 | `deckard.load_module(n)` | Load `control.modules[n]` in place of the focused slot, or into the "+"; `nil` takes the focused slot out. |
 | `deckard.browse_favorites()` | Show only favourites, or everything. |
+| `deckard.browse_locate()` | Quick Browse in the library: recall the search that found the focused sound's sample (its Sampler's focused zone) or preset, else the filters that list it, and focus it. |
+| `deckard.browse_quick(on)` | The same, for the Control page: its list shows (`state().browser` holds the results while `control.quick_browse` is `true`), or closes (`false`). Leaving the Control page, or another sound focused, closes it. |
 
 ### Lights
 
