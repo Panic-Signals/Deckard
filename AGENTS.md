@@ -14,7 +14,8 @@ every edit to them risks a merge conflict. The reasons and the check that enforc
 are in [DEVELOPMENT.md, "Where code goes"](DEVELOPMENT.md#where-code-goes).
 
 - Put tests in their own file: `src/<topic>_tests.rs` beside the code (as
-  `apps/viewer/src/chop_tests.rs` is), declared with `#[cfg(test)] mod <topic>_tests;`.
+  `apps/viewer/src/chop_tests.rs` is), declared with `#[cfg(test)] mod <topic>_tests;`,
+  or, where the crate has a `src/tests/` folder (the engine does), a topic file in it.
   Never write a test inline in `main.rs` or a crate's `lib.rs`. A crate's top-level
   `tests/` folder is for Cargo's integration tests and can't see private items: unit
   tests don't go there.
