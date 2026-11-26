@@ -7144,6 +7144,10 @@ impl App {
                     B::Prehear => C::Prehear,
                     B::Routing(on) => C::Routing(on),
                     B::Patterns(on) => C::Patterns(on),
+                    B::Locate => {
+                        self.browse_locate();
+                        return;
+                    }
                     B::SetFavorite => {
                         let i = self.browser.selected.unwrap_or(0);
                         let Some(on) = self.browser.results.items.get(i).map(|r| !r.favorite) else { return };
@@ -11797,6 +11801,24 @@ impl App {
         if let Err(e) = r {
             self.status = e;
         }
+    }
+
+    /// The controller's magnifier: the library on the focused sound's sample (its Sampler's
+    /// focused zone), else its preset by name, with that result focused and the filters
+    /// set to its own (user or factory, product, top-level type).
+    fn browse_locate(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let target = {
+            let d = doc.borrow();
+            d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|snd| browser::locate_target(snd, self.zone))
+        };
+        let Some((kind, name)) = target else { return };
+        if !self.browser.started() {
+            self.browse(browser::BrowseAct::Toggle);
+            self.browse(browser::BrowseAct::Toggle);
+        }
+        self.browser.touch();
+        self.browser.locate_item(kind, name);
     }
 
     /// What the browser asks for.

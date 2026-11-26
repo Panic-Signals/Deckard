@@ -5,6 +5,8 @@
 --   display 5 / 6     PLUG-IN: the previous / next slot, on to the "+" after the last
 --                     (an empty one); CHANNEL: the previous / next page group (Input,
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
+--   display 8         PLUG-IN: the magnifier, Browse at this sound's sample (its Sampler's
+--                     focused zone) or else its preset, with that item's own filters
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
 --   LEFT / RIGHT      the previous / next page
 --   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages;
@@ -120,6 +122,9 @@ function control.button(name, down)
       deckard.level(n)
     elseif n == 5 or n == 6 then
       step(c, n == 6)
+    elseif n == 8 and c.plugins then
+      deckard.show_page("browse")
+      deckard.browse_locate()
     end
   end
   return true
@@ -577,7 +582,12 @@ function control.draw(screen, theme, opts)
     local slot = c.chain[slot_at(c)]
     -- Browse.
     if not shift_layer and not z and not opts.no_browse then
-      widgets.buttons(screen, theme, { [8] = { text = "BROWSE" } })
+      -- (A magnifying glass: the library, at this sound's sample or preset.)
+      widgets.buttons(screen, theme, { [8] = { text = " " } })
+      local cx, cy = widgets.button_x(8) + 57, 16
+      local ink = theme.colors.text
+      screen:circle(cx - 3, cy - 2, 5, ink, 1.8)
+      screen:line(cx + 1, cy + 2, cx + 7, cy + 8, 2.2, ink)
     end
     if z then
       zhora.right(screen, z)

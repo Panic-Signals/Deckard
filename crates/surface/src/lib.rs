@@ -243,6 +243,8 @@ pub enum Browse {
     Routing(bool),
     /// Load a group with (`true`) or without (`false`) its patterns (`+ PATTERNS`).
     Patterns(bool),
+    /// Show the library at the focused sound's sample, or else its preset.
+    Locate,
 }
 
 /// The song's grids, as Maschine's Grid page lists them (each value its place in the

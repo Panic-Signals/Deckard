@@ -30,7 +30,7 @@ local OWN = "DECKARD"
 -- How far knobs 5-8 turn for a step through the list.
 local LIST_STEP = 0.05
 
-local ROWS = 8
+local ROWS = 7
 local ROW_X, ROW_Y, ROW_W, ROW_H, ROW_STEP = 721, 44, 231, 21, 26
 
 local kind = INSTRUMENT
@@ -235,12 +235,13 @@ local function rows(screen, theme, c)
     if not names[i] then break end
     local y = ROW_Y + (row - 1) * ROW_STEP
     local focused = i == focus
-    if focused then screen:rect(ROW_X, y, ROW_W, ROW_H, "text") end
+    -- (As Browse draws its results: a row each, the focused one filled, the name at the left.)
+    screen:rect(ROW_X, y, ROW_W - 5, ROW_H, focused and "text" or "browse_row", theme.corner)
     local colour = focused and theme.colors.on_colour or theme.colors.text
-    screen:label(ROW_X + 9, y, ROW_W - 14, ROW_H, names[i], { color = colour }, "right")
+    screen:label(ROW_X + 9, y, ROW_W - 5 - 14, ROW_H, names[i], { color = colour }, "left")
   end
   if n > ROWS then
-    local h = 213
+    local h = 177
     screen:rect(955, ROW_Y + h * (top - 1) // n, 5, math.max(4, h * ROWS // n), "text")
   end
 end

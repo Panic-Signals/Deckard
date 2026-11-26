@@ -22,12 +22,15 @@ enum Job {
     Saved(PathBuf),
     Scan(Vec<Root>),
     Forget(PathBuf),
+    /// Find `name` among `kind`'s items, then ask for the list it's in (see [`locate`]).
+    Locate(u64, Query, String),
 }
 
-/// A query's answer: its number, the results, why NI's index isn't there, and, when
-/// `query.product` wasn't in the new view's products (or matched with different casing),
-/// the reconciled product choice.
-type Answer = (u64, Results, Option<String>, Option<Option<String>>);
+/// A query's answer: its number, the results, why NI's index isn't there, when
+/// `query.product` wasn't in the new view's products (or matched with different casing)
+/// the reconciled product choice, and, for a locate, the query it settled on with that
+/// kind's top-level types.
+type Answer = (u64, Results, Option<String>, Option<Option<String>>, Option<(Query, Vec<String>)>);
 
 pub struct Browser {
     pub open: bool,
@@ -35,6 +38,8 @@ pub struct Browser {
     pub query: Query,
     pub results: Results,
     pub selected: Option<usize>,
+    /// A name to focus once its results are in (the controller's "show me this one").
+    pub locate: Option<String>,
     /// Prehear a sample when it's selected.
     pub prehear_auto: bool,
     pub prehear_gain: f32,
@@ -67,6 +72,7 @@ impl Default for Browser {
             query: Query::default(),
             results: Results::default(),
             selected: None,
+            locate: None,
             prehear_auto: true,
             prehear_gain: 0.8,
             routing: true,
@@ -109,8 +115,8 @@ impl Browser {
                     Err(e) => {
                         // Answer every query with the error.
                         while let Ok(job) = rx.recv() {
-                            if let Job::Query(n, _) = job
-                                && tx.send((n, Results::default(), Some(e.clone()), None)).is_err()
+                            if let Job::Query(n, _) | Job::Locate(n, ..) = job
+                                && tx.send((n, Results::default(), Some(e.clone()), None, None)).is_err()
                             {
                                 return;
                             }
@@ -118,7 +124,11 @@ impl Browser {
                         return;
                     }
                 };
-                let reply = |lib: &mut Library, n: u64, mut q: Query| -> bool {
+                let reply = |lib: &mut Library, n: u64, mut q: Query, name: Option<&str>| -> bool {
+                    if let Some(name) = name {
+                        let (q, top, r) = locate(lib, &q, name);
+                        return tx.send((n, r, lib.ni_error.clone(), None, Some((q, top)))).is_ok();
+                    }
                     let mut r = lib.query(&q);
                     let product = if let Some(want) = &q.product
                         && !r.products.contains(want)
@@ -133,17 +143,22 @@ impl Browser {
                     } else {
                         None
                     };
-                    tx.send((n, r, lib.ni_error.clone(), product)).is_ok()
+                    tx.send((n, r, lib.ni_error.clone(), product, None)).is_ok()
                 };
                 // The last query answered. A folder walk that arrives on its own runs
                 // after it, then this query runs again so the new files show up.
-                let mut last: Option<(u64, Query)> = None;
+                let mut last: Option<(u64, Query, Option<String>)> = None;
                 while let Ok(mut job) = rx.recv() {
                     loop {
                         let (current, later) = split_query(job, &rx);
-                        if let Job::Query(n, q) = current {
-                            last = Some((n, q.clone()));
-                            if !reply(&mut lib, n, q) {
+                        let query = match current {
+                            Job::Query(n, ref q) => Some((n, q.clone(), None)),
+                            Job::Locate(n, ref q, ref name) => Some((n, q.clone(), Some(name.clone()))),
+                            _ => None,
+                        };
+                        if let Some((n, q, name)) = query {
+                            last = Some((n, q.clone(), name.clone()));
+                            if !reply(&mut lib, n, q, name.as_deref()) {
                                 return;
                             }
                             let again = !later.is_empty();
@@ -157,8 +172,8 @@ impl Browser {
                                         continue;
                                     }
                                     Err(_) => {
-                                        if let Some((n, q)) = last.clone()
-                                            && !reply(&mut lib, n, q)
+                                        if let Some((n, q, name)) = last.clone()
+                                            && !reply(&mut lib, n, q, name.as_deref())
                                         {
                                             return;
                                         }
@@ -175,8 +190,8 @@ impl Browser {
                                         continue;
                                     }
                                     Err(_) => {
-                                        if let Some((n, q)) = last.clone()
-                                            && !reply(&mut lib, n, q)
+                                        if let Some((n, q, name)) = last.clone()
+                                            && !reply(&mut lib, n, q, name.as_deref())
                                         {
                                             return;
                                         }
@@ -252,13 +267,17 @@ impl Browser {
                 newest = Some(a);
             }
         }
-        let Some((n, results, error, product)) = newest else { return false };
+        let Some((n, results, error, product, located)) = newest else { return false };
         self.rev += 1;
         if let Some(product) = product {
             if product.is_none() {
                 self.query.bank.clear();
             }
             self.query.product = product;
+        }
+        if let Some((q, top)) = located {
+            self.query = q;
+            self.top_types = top;
         }
         // An old filter's results can omit the selected preset and send focus
         // back to the first row. Only the current query may replace the list.
@@ -272,7 +291,34 @@ impl Browser {
         self.results = results;
         self.selected = keep.and_then(|(p, u)| self.results.items.iter().position(|i| i.path == p && i.uuid == u));
         self.error = error;
+        self.resolve_locate();
         true
+    }
+
+    /// Show `name` (a `kind` item) as if it had been browsed to: its kind, user or factory
+    /// content, product and top-level type chosen, no text or favourites filter, and it
+    /// focused. Not in the library: `kind` with the filters cleared.
+    pub fn locate_item(&mut self, kind: deckard_library::Kind, name: String) {
+        self.asked += 1;
+        let base = Query { kind, ..self.query.clone() };
+        self.locate = Some(name.clone());
+        self.send(Job::Locate(self.asked, base, name));
+    }
+
+    /// Focus the result [`Browser::locate`] names, once the list is there.
+    pub fn resolve_locate(&mut self) {
+        let Some(name) = self.locate.as_deref() else { return };
+        if self.waiting() {
+            return;
+        }
+        let stem = |p: &std::path::Path| p.file_stem().map(|s| s.to_string_lossy().to_lowercase());
+        let name = name.to_lowercase();
+        let at = self.results.items.iter().position(|i| i.name.to_lowercase() == name || stem(&i.path).is_some_and(|s| s == name));
+        self.locate = None;
+        if at.is_some() {
+            self.selected = at;
+            self.rev += 1;
+        }
     }
 
     /// Moves on with every change.
@@ -364,14 +410,56 @@ impl Browser {
 /// user's folders, and the expansions are already in the index.
 fn split_query(mut job: Job, rx: &mpsc::Receiver<Job>) -> (Job, Vec<Job>) {
     let mut later = Vec::new();
-    while matches!(job, Job::Query(..)) {
+    while matches!(job, Job::Query(..) | Job::Locate(..)) {
         match rx.try_recv() {
-            Ok(next @ Job::Query(..)) => job = next,
+            Ok(next @ (Job::Query(..) | Job::Locate(..))) => job = next,
             Ok(other) => later.push(other),
             Err(_) => break,
         }
     }
     (job, later)
+}
+
+/// What the magnifier looks for in the library for `snd`: the sample of its Sampler's
+/// zone `zone` (a loop when its path says so, else a one-shot), by file name without the
+/// extension; else the sound's preset, by the sound's name. `None` when it has neither.
+pub fn locate_target(snd: &deckard_model::Sound, zone: usize) -> Option<(deckard_library::Kind, String)> {
+    use deckard_library::Kind;
+    let sample = snd.sampler.as_ref().and_then(|x| x.zones.get(zone.min(x.zones.len().saturating_sub(1)))).map(|z| z.sample.path.as_str());
+    let (kind, name) = match sample.filter(|p| !p.is_empty()) {
+        Some(path) => {
+            let kind = if path.to_lowercase().contains("loop") { Kind::Loop } else { Kind::OneShot };
+            let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            (kind, file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string())
+        }
+        None => (Kind::Sound, snd.name.clone()),
+    };
+    (!name.is_empty()).then_some((kind, name))
+}
+
+/// The query that shows `name` (`base.kind`), its kind's top-level types, and its
+/// results. The item is looked for whatever `base` filters, in the user's content and
+/// the factory's.
+fn locate(lib: &mut Library, base: &Query, name: &str) -> (Query, Vec<String>, Results) {
+    let wanted = name.to_lowercase();
+    let is = |i: &Item| i.name.to_lowercase() == wanted || i.path.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == wanted);
+    let found = [base.user, !base.user].into_iter().find_map(|user| {
+        let q = Query { kind: base.kind, user, text: name.to_string(), ..Query::default() };
+        lib.query(&q).items.into_iter().find(|i| is(i))
+    });
+    let mut q = Query { kind: base.kind, user: base.user, ..Query::default() };
+    if let Some(item) = &found {
+        q.user = item.user;
+        q.product = item.product.clone();
+    }
+    let all = lib.query(&q);
+    let top: Vec<String> = all.types.iter().map(|t| t.0.clone()).collect();
+    let Some(ty) = found.as_ref().and_then(|i| i.types.first()).and_then(|levels| levels.first()).filter(|t| top.contains(t)) else {
+        return (q, top, all);
+    };
+    q.types = vec![ty.clone()];
+    let r = lib.query(&q);
+    (q, top, r)
 }
 
 fn run(lib: &mut Library, job: Job) {
@@ -382,7 +470,7 @@ fn run(lib: &mut Library, job: Job) {
             let _ = lib.scan(&roots);
         }
         Job::Forget(dir) => lib.forget(&dir),
-        Job::Query(..) => {}
+        Job::Query(..) | Job::Locate(..) => {}
     }
 }
 
@@ -640,11 +728,11 @@ mod query_order_tests {
             results: Results { items: items.clone(), ..Default::default() },
             ..Default::default()
         };
-        answers.send((1, Results { items: vec![items[0].clone()], ..Default::default() }, None, None)).unwrap();
+        answers.send((1, Results { items: vec![items[0].clone()], ..Default::default() }, None, None, None)).unwrap();
         assert!(!browser.poll());
         assert_eq!(browser.selected_item().unwrap().name, "Second");
         assert!(browser.waiting());
-        answers.send((2, Results { items, ..Default::default() }, None, None)).unwrap();
+        answers.send((2, Results { items, ..Default::default() }, None, None, None)).unwrap();
         assert!(browser.poll());
         assert_eq!(browser.selected_item().unwrap().name, "Second");
         assert!(!browser.waiting());
@@ -661,8 +749,8 @@ mod current_query_tests {
         let mut browser = Browser { worker: Some((jobs, received)), asked: 2, ..Default::default() };
         let current =
             Item { path: "current.nksf".into(), name: "Current".into(), kind: deckard_library::Kind::Instrument, ..Default::default() };
-        answers.send((2, Results { items: vec![current], ..Default::default() }, None, None)).unwrap();
-        answers.send((1, Results::default(), Some("old failure".into()), None)).unwrap();
+        answers.send((2, Results { items: vec![current], ..Default::default() }, None, None, None)).unwrap();
+        answers.send((1, Results::default(), Some("old failure".into()), None, None)).unwrap();
         assert!(browser.poll());
         assert_eq!(browser.results.items[0].name, "Current");
         assert!(browser.error.is_none());
@@ -819,5 +907,64 @@ mod current_query_tests {
         };
         assert_eq!(prehear_file_with_nbpl(&kontour, None), None);
         assert_eq!(prehear_file_with_nbpl(&kontour, Some(&nbpl_samples)), Some(kontour_ogg));
+    }
+}
+
+#[cfg(test)]
+mod locate_tests {
+    use super::*;
+    use deckard_library::Kind;
+
+    fn browser(dir: &Path) -> Browser {
+        let mut b = Browser::default();
+        b.start(Some(deckard_library::testing::fixture(dir)), dir.join("library.db3"), Vec::new());
+        b.wait();
+        b
+    }
+
+    #[test]
+    fn the_magnifier_looks_for_the_zones_sample_else_the_preset() {
+        use deckard_model::{SampleRef, Sampler, Sound, Zone};
+        let zone = |path: &str| Zone { sample: SampleRef { path: path.into(), ..SampleRef::default() }, ..Zone::default() };
+        let sampler = Sampler { zones: vec![zone("Samples/Drums/Kick Dust.wav"), zone(r"Loops\Snare[90] Dust.wav")], ..Sampler::default() };
+        let snd = Sound { name: "Dusty Kit".into(), sampler: Some(sampler), ..Sound::default() };
+        assert_eq!(locate_target(&snd, 0), Some((Kind::OneShot, "Kick Dust".into())));
+        assert_eq!(locate_target(&snd, 1), Some((Kind::Loop, "Snare[90] Dust".into())));
+        assert_eq!(locate_target(&snd, 9), Some((Kind::Loop, "Snare[90] Dust".into())), "past the last: the last");
+        // No sample: the sound's preset; nothing to look for: nothing.
+        let preset =
+            Sound { name: "Dusty Kit".into(), sampler: Some(Sampler { zones: vec![zone("")], ..Sampler::default() }), ..Sound::default() };
+        assert_eq!(locate_target(&preset, 0), Some((Kind::Sound, "Dusty Kit".into())));
+        assert_eq!(locate_target(&Sound::default(), 0), None);
+    }
+
+    #[test]
+    fn locating_sets_the_items_own_filters_and_focuses_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut b = browser(tmp.path());
+        // Filters that would hide it: the user's favourites, a text, another kind.
+        b.set_query(Query { kind: Kind::Sound, user: true, favorites: true, text: "zzz".into(), ..Query::default() });
+        b.wait();
+        b.locate_item(Kind::Loop, "Snare[90] Dust".into());
+        b.wait();
+        let q = &b.query;
+        assert_eq!((q.kind, q.user, q.favorites, q.text.as_str()), (Kind::Loop, false, false, ""));
+        assert_eq!(q.product.as_deref(), Some("Deep Matter"));
+        assert_eq!(q.types, ["Drums"]);
+        assert!(b.top_types.contains(&"Bass".to_string()), "{:?}", b.top_types);
+        assert_eq!(b.selected_item().map(|i| i.name.as_str()), Some("Snare[90] Dust"));
+    }
+
+    #[test]
+    fn an_item_not_in_the_library_leaves_its_kind_unfiltered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut b = browser(tmp.path());
+        b.set_query(Query { kind: Kind::Loop, favorites: true, text: "Kick".into(), ..Query::default() });
+        b.wait();
+        b.locate_item(Kind::Loop, "Nowhere".into());
+        b.wait();
+        assert_eq!((b.query.favorites, b.query.text.as_str(), b.query.types.len()), (false, "", 0));
+        assert_eq!(b.results.items.len(), 3);
+        assert!(b.locate.is_none());
     }
 }
