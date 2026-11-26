@@ -19,7 +19,8 @@ impl App {
         let d = self.doc.as_ref()?.borrow();
         let asked = self.sampler_ask.map(|a| a.1);
         let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), true, asked);
-        Some(sampling_hw::pages(record, &self.sampling, d.project(), (self.group, self.sound, self.zone)))
+        let file = self.shown_take().is_some();
+        Some(sampling_hw::pages(record, &self.sampling, d.project(), (self.group, self.sound, self.zone), file))
     }
 
     /// What the Sampling page shows (nothing while it's closed).
@@ -73,11 +74,15 @@ impl App {
             (s.play, s.looped, s.take) = ((0, audio.frames.len()), None, true);
             s.slices.clear();
             s.lanes.clear();
-            for page in &mut out.pages[1..] {
-                page.clear();
-            }
         }
         out
+    }
+
+    /// (Tests: the view as the open page has it.)
+    #[cfg(test)]
+    pub(crate) fn sampling_surface_view_open(&mut self) -> SamplingView {
+        self.sampling_open = true;
+        self.sampling_surface_view()
     }
 
     /// Why the focused sound has no sample to edit (C64): it plays an instrument, or
@@ -120,7 +125,7 @@ impl App {
     pub(crate) fn surface_sampling(&mut self, a: Action) {
         match a {
             Action::Sampling(true) => self.sample_focused_sound(),
-            Action::Sampling(false) => self.sampling_open = false,
+            Action::Sampling(false) => self.sampling_act(SamplingAct::Open(false)),
             Action::SamplingTab(t) => self.sampling_act(SamplingAct::Tab(t.min(4))),
             Action::SamplingKnob { page, knob, value } => {
                 let Some(p) = self.sampling_pages() else { return };

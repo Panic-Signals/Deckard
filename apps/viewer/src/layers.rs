@@ -29,6 +29,12 @@ pub(crate) fn own(p: &Project, g: usize, s: usize) -> bool {
     mode_of(p, g, s).is_some_and(|m| m != SamplerMode::Original)
 }
 
+/// Sound (`g`, `s`) is a Sampler Preview in Advanced: its zones have a play mode (Sync,
+/// Keys), a speed, reverse, a tail and Motion.
+pub(crate) fn advanced(p: &Project, g: usize, s: usize) -> bool {
+    mode_of(p, g, s) == Some(SamplerMode::Advanced)
+}
+
 /// Sound (`g`, `s`) has layers: a Sampler Preview in Layers (with none yet, too).
 pub(crate) fn can_layer(p: &Project, g: usize, s: usize) -> bool {
     mode_of(p, g, s) == Some(SamplerMode::Layers)
@@ -115,7 +121,7 @@ fn settings_of(d: &Document, g: usize, s: usize) -> NewSampler {
 /// The sound's first use of layers: a lone plain zone becomes the first layer, over all
 /// keys and playing repitched; a One-shot amp envelope becomes ADSR (so notes end, and a
 /// layer's release has something to follow); Slice Motion goes off.
-fn make_layered(d: &mut Document, g: usize, s: usize, label: &str) -> Result<(), String> {
+pub(crate) fn make_layered(d: &mut Document, g: usize, s: usize, label: &str) -> Result<(), String> {
     let zones = zones_of(d, g, s);
     for (k, z) in zones.iter().enumerate() {
         if z.meta.as_ref().is_some_and(|m| m.layer.is_some()) {
@@ -200,7 +206,9 @@ impl App {
     /// SAMPLER: the focused sound's mode asked for. One with a sample asks first (the
     /// change keeps that sample and loses the rest): [`App::answer_sampler_mode`]. One
     /// without, and Original made Advanced (which loses nothing), change at once.
-    pub(crate) fn ask_sampler_mode(&mut self, mode: SamplerMode) {
+    /// `knob`: from the controller's knob, where nothing changes until confirmed (a
+    /// knob is brushed, and passes Advanced on its way from Original to Layers).
+    pub(crate) fn ask_sampler_mode(&mut self, mode: SamplerMode, knob: bool) {
         let Some(doc) = self.doc.clone() else { return };
         let (g, s) = (self.group, self.sound);
         let found = {
@@ -216,8 +224,8 @@ impl App {
         if now == mode {
             return;
         }
-        let nothing_lost = (zones == 0 && self.shown_take().is_none()) || (now == SamplerMode::Original && mode == SamplerMode::Advanced);
-        if nothing_lost {
+        let empty = zones == 0 && self.shown_take().is_none();
+        if empty || (!knob && now == SamplerMode::Original && mode == SamplerMode::Advanced) {
             self.change_sampler_mode(mode, false);
         } else {
             self.sampler_ask = Some(((g, s), mode));
@@ -229,7 +237,9 @@ impl App {
     pub(crate) fn answer_sampler_mode(&mut self, ok: bool) {
         let Some((at, mode)) = self.sampler_ask.take() else { return };
         if ok && at == (self.group, self.sound) && !self.recorder.busy() {
-            self.change_sampler_mode(mode, true);
+            // (Original made Advanced keeps everything, asked or not.)
+            let now = self.doc.as_ref().and_then(|d| mode_of(d.borrow().project(), at.0, at.1));
+            self.change_sampler_mode(mode, !(now == Some(SamplerMode::Original) && mode == SamplerMode::Advanced));
         }
     }
 

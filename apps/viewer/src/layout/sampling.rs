@@ -17,7 +17,7 @@ pub mod layers;
 pub fn tab_shown(p: &Project, g: usize, s: usize, tab: usize, zone: bool, take: bool) -> bool {
     match tab {
         0 => true,
-        4 => !take && crate::layers::can_layer(p, g, s),
+        4 => crate::layers::can_layer(p, g, s),
         2 => zone && !take && !crate::layers::can_layer(p, g, s),
         1 => zone,
         _ => zone && !take,
@@ -800,7 +800,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     }
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
     // A New Sampler zone's tempo and pitch, over its EDIT and SLICE pages.
-    let new_sampler = !take && crate::layers::own(p, app.group, app.sound);
+    let new_sampler = !take && crate::layers::advanced(p, app.group, app.sound);
     if let (true, 1 | 2, Some(z), Some(s)) = (new_sampler, tab, zone, &st.sample) {
         let bar = Rect::from_min_size(body.min, Vec2::new(body.width(), 62.0));
         beat_bar(ui, app, bar, z, zt, s.frames.len() as f64 / s.rate.max(1) as f64, gcol, acts);

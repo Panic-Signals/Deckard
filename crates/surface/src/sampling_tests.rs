@@ -678,6 +678,17 @@ fn the_mode_change_is_confirmed_on_the_displays() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::SamplingTab(1)]);
 }
 
+/// (Review) A take on no layer shown (RECORD and EDIT only): display button 4 is still
+/// LAYERS.
+#[test]
+fn layers_is_a_button_away_from_a_take() {
+    let (mut s, mut v) = (Surface::new(), layered(1, 3, 0));
+    v.sampling.sample.as_mut().unwrap().take = true;
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_3").is_empty());
+}
+
 /// On LAYERS, display buttons 5 to 8 mute the four layers shown (those with the focused
 /// one), SHIFT solos; SHIFT + 1 removes the focused layer, SHIFT + 2 spreads them.
 #[test]

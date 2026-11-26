@@ -804,3 +804,103 @@ fn an_edit_on_a_layer_renames_its_take_in_the_list() {
     assert_eq!(app.recorder.view.takes[0].file_name(), file.file_name(), "the list has the layer's file");
     assert_eq!(crate::layers::take_layer(&project(&app), 0, 0, &app.recorder.view.takes[0]), Some(1));
 }
+
+/// (Review) From the controller a take on no layer can be selected in, so TRUNCATE has
+/// something to cut: EDIT's SELECTION RANGE is the take's, and there is no PLAY RANGE.
+#[test]
+fn a_take_on_no_layer_has_its_selection_knobs() {
+    use crate::layout::sampling::RecordAct;
+    let (_dir, mut app, _f) = three_and_a_take();
+    app.sampling_open = true;
+    record(&mut app, RecordAct::FocusTake(0));
+    app.update_sampling();
+    let v = app.sampling_surface_view();
+    let names: Vec<&str> = v.pages[1].iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SELECTION RANGE"]);
+    assert_eq!(v.pages[1][0].knobs[1].max, 95_999.0);
+    assert!(v.pages[2].is_empty() && v.pages[3].is_empty());
+    app.record_apply.insert("Sel.End".into(), crate::sampling_hw::Apply::Selection(true));
+    app.sampling_knob("Sel.End", 48_000.0);
+    assert_eq!(app.sampling.selection, Some((0, 48_000)));
+}
+
+/// (Review) LAYERS is still a tab while a take on no layer is shown, and going there
+/// leaves the take.
+#[test]
+fn layers_is_a_tab_away_from_a_take() {
+    use crate::layout::sampling::{RecordAct, SamplingAct, tab_shown};
+    let (_dir, mut app, _f) = three_and_a_take();
+    app.sampling_open = true;
+    record(&mut app, RecordAct::FocusTake(0));
+    app.update_sampling();
+    assert!(tab_shown(&project(&app), 0, 0, 4, true, true));
+    app.sampling_act(SamplingAct::Tab(4));
+    app.update_sampling();
+    assert_eq!((app.shown_take(), app.sampling.tab), (None, 4));
+}
+
+/// (Review) A layer has no play mode of its own: Sync, Keys, speed and reverse are
+/// Advanced's.
+#[test]
+fn layers_has_no_play_modes() {
+    use crate::layout::sampling::SamplingAct;
+    use deckard_model::new_sampler::PlayMode;
+    let (_dir, mut app) = three();
+    show(&mut app, 0);
+    let before = zones(&app)[0].meta.clone().unwrap();
+    app.sampling_act(SamplingAct::PlayMode(PlayMode::Sync));
+    app.sampling_act(SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { reverse: true, ..before.clone() }));
+    assert_eq!(zones(&app)[0].meta.clone().unwrap(), before);
+    let pages = app.sampling_surface_view_open().pages;
+    assert!(
+        !pages[1].iter().any(|p| p.name.contains("TEMPO") || p.name.contains("PLAYBACK") || p.name.contains("MOTION")),
+        "{:?}",
+        pages[1].iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    assert!(!crate::layers::advanced(&project(&app), 0, 0));
+}
+
+/// (Review) A sample the browser loads onto a sound in Layers is its layer.
+#[test]
+fn a_sample_from_the_browser_is_a_layer() {
+    let (dir, mut app) = three();
+    let f = tone(dir.path(), "new.wav", 330.0);
+    let item = deckard_library::Item { kind: deckard_library::Kind::OneShot, name: "new".into(), path: f, ..Default::default() };
+    app.load_item(&item, Some((0, 0))).unwrap();
+    assert_eq!(names(&app), ["new.wav"]);
+    let z = &zones(&app)[0];
+    assert!(z.meta.as_ref().is_some_and(|m| m.layer.is_some()), "a layer: {:?}", z.meta);
+    assert_eq!(z.key_range, (0, 127));
+}
+
+/// (Review) The question goes when the Sampling page is left.
+#[test]
+fn leaving_the_page_drops_the_question() {
+    let (_dir, mut app) = three();
+    app.sampling_open = true;
+    sampler(&mut app, SamplerMode::Advanced);
+    assert!(app.sampler_ask.is_some());
+    app.surface_sampling(deckard_surface::Action::Sampling(false));
+    assert_eq!(app.sampler_ask, None);
+    sampler(&mut app, SamplerMode::Advanced);
+    app.sampling_act(crate::layout::sampling::SamplingAct::Open(false));
+    assert_eq!(app.sampler_ask, None);
+}
+
+/// (Review) The SAMPLER knob changes nothing until confirmed, Original made Advanced
+/// too (a bumped knob mustn't change the sound); OK there keeps everything.
+#[test]
+fn the_knob_always_asks() {
+    let mut app = app_in(SamplerMode::Original);
+    let dir = tempfile::tempdir().unwrap();
+    let specs: Vec<_> = ["one.wav", "two.wav"]
+        .iter()
+        .map(|n| crate::new_zone(&tone(dir.path(), n, 220.0), 96_000, deckard_doc::ZoneFrom::Template))
+        .collect();
+    app.doc.as_ref().unwrap().borrow_mut().set_zones(0, 0, &specs, "Load").unwrap();
+    app.record_apply.insert("Sampler".into(), crate::sampling_hw::Apply::Record(crate::record_knobs::Apply::Sampler));
+    app.sampling_knob("Sampler", 1.0);
+    assert_eq!((app.sampler_ask, mode(&app)), (Some(((0, 0), SamplerMode::Advanced)), SamplerMode::Original));
+    answer(&mut app, true);
+    assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Advanced, 2), "nothing lost");
+}

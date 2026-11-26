@@ -434,12 +434,18 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
 }
 
 /// The knobs: RECORD's (`record_knobs`), and with a sample, EDIT's, SLICE's and ZONE's.
-pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, usize)) -> Pages {
+/// `file`: what is shown is a take on no layer (a file, no zone's): EDIT's selection only.
+pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, usize), file: bool) -> Pages {
     let mut out = Pages::default();
     out.tabs[0] = record.pages;
     out.apply.extend(record.apply.into_iter().map(|(k, a)| (k, Apply::Record(a))));
     layer_pages(&mut out, p, (g, s), zi);
-    let Some((_, z, _, take)) = crate::layout::sampling::edited(p, (g, s, zi)) else {
+    let shown = if file {
+        Some((deckard_model::Zone::default(), true))
+    } else {
+        crate::layout::sampling::edited(p, (g, s, zi)).map(|e| (e.1, e.3))
+    };
+    let Some((z, take)) = shown else {
         return out;
     };
     let Some(sample) = st.sample.as_ref() else { return out };
@@ -456,15 +462,17 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     let (sa, sb) = st.selection.map_or((lo, hi), |(a, b)| (a as i64, b as i64));
 
     // EDIT.
-    page(
-        &mut out,
-        1,
-        "PLAY RANGE",
-        vec![
-            frames("Edit.Start", "START", lo, (0.0, start_max), Apply::Zone("play_range/low")),
-            frames("Edit.End", "END", hi, (end_min, last), Apply::Zone("play_range/high")),
-        ],
-    );
+    if !file {
+        page(
+            &mut out,
+            1,
+            "PLAY RANGE",
+            vec![
+                frames("Edit.Start", "START", lo, (0.0, start_max), Apply::Zone("play_range/low")),
+                frames("Edit.End", "END", hi, (end_min, last), Apply::Zone("play_range/high")),
+            ],
+        );
+    }
     page(
         &mut out,
         1,
@@ -482,7 +490,8 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
 
     // A New Sampler zone: how it plays, its tempo and its pitch (roadmap 1d; the
     // display buttons have ×2, ½ and TO PROJECT under SHIFT).
-    let new_sampler = p.groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| x.new_sampler.is_some());
+    // (Advanced's: a layer has none of this.)
+    let new_sampler = crate::layers::advanced(p, g, s);
     if let (true, Some(m)) = (new_sampler, z.meta.as_ref()) {
         use deckard_model::new_sampler::PlayMode;
         let modes = ["Repitch".to_string(), "Sync".into(), "Keys".into()];

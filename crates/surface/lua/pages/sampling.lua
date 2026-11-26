@@ -430,7 +430,7 @@ function page.button(name, down)
         if layers > 0 then
           if n == 1 then deckard.sampling_call("remove_layer", v.sample.layer) else deckard.sampling_call("spread_layers") end
         end
-      elseif n == 4 and in_layers(v) and (v.tab == 4 or not v.sample) then
+      elseif n == 4 and in_layers(v) and (v.tab == 4 or not v.sample or v.sample.take) then
         -- (Between ZONE and LAYERS; without a sample there is no ZONE.)
         deckard.sampling_tab(5)
       elseif n == 3 and in_layers(v) then
@@ -600,7 +600,9 @@ function page.leds()
   local layered = in_layers(v)
   for i = 1, 4 do
     local on = i == v.tab or (i == 4 and v.tab == 5)
-    local there = i <= tab_count(v) and not (i == 3 and layered)
+    -- (A take on no layer: RECORD, EDIT, and LAYERS to go back to.)
+    local count = (layered and v.sample and v.sample.take) and 4 or tab_count(v)
+    local there = i <= count and not (i == 3 and layered)
     deckard.led("SCREEN_" .. i, asking(v) and "off" or (on and "on" or (there and "dim" or "off")))
   end
   local b = buttons(v)
@@ -654,12 +656,14 @@ end
 -- `layers`: the sound has layers, so display button 4 goes between ZONE and LAYERS and
 -- says both: the tab showing (or ZONE, from another tab) in the row's letters, the other
 -- small under it.
-local function draw_tabs(screen, theme, tab, count, layered, layers)
+local function draw_tabs(screen, theme, tab, count, layered, layers, take)
   screen:frame(4, 4, 472, 24, "button", theme.corner)
   local xs, ws = { 4, 121, 240, 359 }, { 117, 119, 119, 117 }
   local names = { TABS[1], TABS[2], TABS[3], TABS[4] }
   local under = layers and "LAYERS" or nil
   if layered then names[3] = "" end
+  -- (A take on no layer has no ZONE: display button 4 is LAYERS.)
+  if take then names[4], under = "LAYERS", nil end
   if tab == 5 then
     -- (LAYERS is display button 4's other tab; SHIFT: what 1 and 2 do to the layers.)
     names[4], under = "LAYERS", "ZONE"
@@ -925,7 +929,8 @@ function page.draw(screen, theme)
     screen:label(480, 116, 480, 40, "all changes to this sound.", { font = "roboto-bold", size = 26, color = "text" }, "center", "center")
     return
   end
-  draw_tabs(screen, theme, v.tab, tab_count(v), in_layers(v), in_layers(v))
+  local take = in_layers(v) and v.sample and v.sample.take
+  draw_tabs(screen, theme, v.tab, take and 4 or tab_count(v), in_layers(v), in_layers(v), take)
   if specs[5] and specs[5].arrows then specs[5].left, specs[5].right = not specs[5].disabled, not specs[5].disabled end
   widgets.buttons(screen, theme, specs)
   widgets.info_bar(screen, theme, widgets.focus_info(s))

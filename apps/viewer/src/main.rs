@@ -9077,10 +9077,26 @@ impl App {
                 return;
             }
         }
+        // A layer has no play mode, tempo or Motion of its own: those are Advanced's.
+        if matches!(a, S::Meta(_) | S::PlayMode(_) | S::Tap(_) | S::ToProject(_) | S::Motion(_))
+            && self.doc.as_ref().is_some_and(|d| layers::can_layer(d.borrow().project(), self.group, self.sound))
+        {
+            return;
+        }
+        // LAYERS (and any tab but RECORD and EDIT) leaves a take on no layer.
+        if matches!(a, S::Tab(t) if t > 1) {
+            self.take_shown = None;
+        }
         match a {
-            S::Sampler(mode) => self.ask_sampler_mode(mode),
+            S::Sampler(mode) => self.ask_sampler_mode(mode, false),
             S::SamplerAnswer(ok) => self.answer_sampler_mode(ok),
-            S::Open(on) => self.sampling_open = on,
+            S::Open(on) => {
+                self.sampling_open = on;
+                // (The question is the open page's.)
+                if !on {
+                    self.sampler_ask = None;
+                }
+            }
             S::Tab(i) => {
                 self.sampling.tab = i;
                 if i == 2 && self.sampling.slices.is_empty() {
@@ -9824,6 +9840,11 @@ impl App {
     fn add_zones(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() else { return };
+        // (In Layers what comes in is a layer.)
+        if layers::can_layer(doc.borrow().project(), self.group, self.sound) {
+            let at = layers::layers_in(doc.borrow().project(), self.group, self.sound).len();
+            return self.layer_files(at, &files);
+        }
         let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
         let mut specs: Vec<deckard_doc::ZoneSpec> =
             (0..n).map(|k| deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Zone(k), file: None, set: Vec::new() }).collect();
@@ -10141,7 +10162,7 @@ impl App {
             let d = d.borrow();
             let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), false, None);
             (
-                sampling_hw::pages(record, &self.sampling, d.project(), at),
+                sampling_hw::pages(record, &self.sampling, d.project(), at, false),
                 sampling_hw::sample_view(&self.sampling, d.project(), at, focus_slice),
             )
         });
@@ -10180,7 +10201,7 @@ impl App {
                 use record_knobs::Apply as R;
                 if a == R::Sampler {
                     let mode = deckard_model::new_sampler::SamplerMode::ALL[at.min(2)];
-                    return self.sampling_act(SamplingAct::Sampler(mode));
+                    return self.ask_sampler_mode(mode, true);
                 }
                 SamplingAct::Record(match a {
                     R::Param(p, None) => RecordAct::Set(p, value.round() as i64),
@@ -10208,7 +10229,9 @@ impl App {
             }
             Some(Apply::Selection(end)) => {
                 let len = self.sampling.len();
-                let (a, b) = self.sampling.selection.unwrap_or_else(|| self.play_range_of_focused().unwrap_or((0, len)));
+                // (A take on no layer: all of it, not the layer's range behind it.)
+                let whole = self.shown_take().map(|_| (0, len));
+                let (a, b) = self.sampling.selection.or(whole).unwrap_or_else(|| self.play_range_of_focused().unwrap_or((0, len)));
                 let v = value.round().max(0.0) as usize;
                 let (a, b) = if end { (a, v.max(a + 1)) } else { (v.min(b.saturating_sub(1)), b) };
                 SamplingAct::Select(Some((a, b.min(len))))
@@ -10961,7 +10984,9 @@ impl App {
     fn finish_auto(&mut self, done: Vec<recorder::AutoTake>, focus: (usize, usize)) {
         let Some(doc) = self.doc.clone() else { return };
         let (g, from) = focus;
-        let has_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(from)).is_some_and(|x| x.sampler.is_some());
+        // (A sound in Layers has no key-mapped zones: the notes go to the next free sound.)
+        let has_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(from)).is_some_and(|x| x.sampler.is_some())
+            && !layers::can_layer(doc.borrow().project(), g, from);
         let s = if has_sampler { from } else { self.next_free_sound(g, from, false) };
         if !self.ensure_sampler(g, s) {
             return;
@@ -11792,6 +11817,10 @@ impl App {
                         if has { deckard_doc::ZoneFrom::Zone(0) } else { deckard_doc::ZoneFrom::Template },
                     );
                     d.set_zones(g, s, &[spec], "Load Sample")?;
+                    // (In Layers what comes in is a layer.)
+                    if layers::can_layer(d.project(), g, s) {
+                        layers::make_layered(d, g, s, "Load Sample")?;
+                    }
                     if let Some(stem) = path.file_stem() {
                         d.rename(deckard_doc::Target::Sound(g, s), &stem.to_string_lossy())?;
                     }

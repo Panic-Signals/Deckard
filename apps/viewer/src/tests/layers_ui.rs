@@ -76,7 +76,6 @@ fn the_tab_is_offered_where_it_can_be() {
     }
     let p = project_of_app(&app);
     assert!(!tab_shown(&p, 0, 1, 4, false, false), "not a Sampler Preview");
-    assert!(!tab_shown(&p, 0, 0, 4, true, true), "a take");
 }
 
 #[test]
