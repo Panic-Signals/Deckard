@@ -29,12 +29,16 @@ fail() {
 tracked() { git ls-files --error-unmatch -- "$1" > /dev/null 2>&1; }
 
 # A list file's entries, without comments and blank lines.
-entries() { [ -f "$1" ] && grep -vE '^[[:space:]]*(#|$)' "$1" || true; }
+entries() { [ -f "$1" ] && tr -d '\r' < "$1" | grep -vE '^[[:space:]]*(#|$)' || true; }
 
 # The files with a limit of their own: "<path> <max lines>" per line.
 limit_paths=()
 limit_maxes=()
 while IFS= read -r line; do
+    if [[ ! "$line" =~ ^.+\ [0-9]+$ ]]; then
+        fail "$LIMITS: bad entry '$line' (expected \"<path> <max lines>\")"
+        continue
+    fi
     limit_paths+=("${line% *}")
     limit_maxes+=("${line##* }")
 done < <(entries "$LIMITS")
@@ -78,7 +82,7 @@ while IFS= read -r file; do
     fi
     while IFS=: read -r number _; do
         fail "$file:$number: inline test; tests go in their own file"
-    done < <(grep -nE '^[[:space:]]*#\[([A-Za-z_][A-Za-z0-9_]*::)*test\]' "$file" || true)
+    done < <(grep -anE '^[[:space:]]*#\[([A-Za-z_][A-Za-z0-9_]*::)*test\]' "$file" || true)
 done < <(entries "$NO_TESTS")
 
 if [ "$failed" -ne 0 ]; then

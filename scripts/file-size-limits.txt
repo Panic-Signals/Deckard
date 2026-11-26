@@ -1,13 +1,14 @@
 # Source files over the 3000-line cap, each with the most lines it may have:
 # "<path> <max lines>" (scripts/check-file-sizes.sh; DEVELOPMENT.md, "Where code goes").
 #
-# A limit is the file's length when it was last set, rounded up to the next 250. A pull
-# request that moves code out of a file lowers its limit here, and removes the line once
-# the file is at 3000 or under. Don't add a file to get round the cap: split it.
+# A limit is the file's length when it was last set plus 250, rounded up to the next 250:
+# room for the pull requests already open, not for a new feature. A pull request that
+# moves code out of a file lowers its limit here, and removes the line once the file is
+# at 3000 or under. Don't add a file to get round the cap: split it.
 
-apps/viewer/src/layout.rs 9000
-apps/viewer/src/layout/sampling.rs 3500
-apps/viewer/src/main.rs 22250
-crates/engine/src/lib.rs 16500
-crates/engine/src/sampler.rs 3500
-crates/surface/src/tests.rs 4750
+apps/viewer/src/layout.rs 9250
+apps/viewer/src/layout/sampling.rs 3750
+apps/viewer/src/main.rs 22500
+crates/engine/src/lib.rs 16750
+crates/engine/src/sampler.rs 3750
+crates/surface/src/tests.rs 5000

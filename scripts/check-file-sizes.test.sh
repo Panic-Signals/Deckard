@@ -176,4 +176,33 @@ lines a.rs 3001
 run
 expect points-at-the-docs 1 "DEVELOPMENT.md"
 
+repo
+lines big.rs 5000
+echo "big.rs" > "$tmp/scripts/file-size-limits.txt"
+run
+expect limit-without-a-number 1 "scripts/file-size-limits.txt: bad entry 'big.rs'"
+
+repo
+lines big.rs 3501
+printf '# The limits.\r\nbig.rs 3500\r\n' > "$tmp/scripts/file-size-limits.txt"
+run
+expect crlf-limits-file 1 "big.rs: 3501 lines, over its limit of 3500"
+
+repo
+{ seq 1 6; echo "    #[test]"; } > "$tmp/lib.rs"
+printf 'lib.rs\r\n' > "$tmp/scripts/no-inline-tests.txt"
+run
+expect crlf-no-tests-file 1 "lib.rs:7: inline test"
+
+repo
+seq 1 3001 | perl -pe 's/\n/\r\n/' > "$tmp/a.rs"
+run
+expect crlf-source-over 1 "a.rs: 3001 lines, over the 3000-line cap"
+
+repo
+{ printf 'const Z: &str = "\0";\n'; echo "#[test]"; echo "fn t() {}"; } > "$tmp/lib.rs"
+echo "lib.rs" > "$tmp/scripts/no-inline-tests.txt"
+run
+expect nul-byte-in-source 1 "lib.rs:2: inline test"
+
 exit "$failed"

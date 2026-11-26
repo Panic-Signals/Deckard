@@ -99,9 +99,10 @@ step runs on Linux), reading `scripts/file-size-limits.txt`:
 - The default cap for any file not listed is 3,000 lines. A new file can't be added to
   the list to get round it; the script fails if a listed file is under the default cap
   (the entry must then be removed).
-- A listed file's limit is its length when the limit was last set, rounded up to the
-  next 250 lines. That leaves room for a small fix and for two pull requests that each
-  add a few lines.
+- A listed file's limit is its length when the limit was last set plus 250, rounded up
+  to the next 250 lines. That leaves room for a small fix and for the pull requests
+  already open. (Rounding up alone, the first draft, left the engine's `lib.rs` 5 lines
+  of room.)
 - Each pull request that moves code out of a listed file lowers that file's limit in the
   same pull request.
 - The failure message names the file, its length and its limit, and says where new code

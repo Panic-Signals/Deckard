@@ -16,7 +16,7 @@
 - Pull request bodies follow `.github/pull_request_template.md`; type is "Other"; Manual is "None". Use the repository's `pull-request` skill.
 - Tasks 4 and 5 change no behaviour: no test is added, removed, renamed or edited. The only permitted edits to moved text are indentation, what `cargo fmt` does as a result of the new indentation, `use` lines a file needs to see what it saw before, and `pub(super)`/`pub(crate)` on a helper another file now calls.
 - Default cap for any `.rs` file not in the limits file: 3,000 lines.
-- A listed file's limit is its line count at the time it is set, rounded up to the next multiple of 250.
+- A listed file's limit is its line count at the time it is set plus 250, rounded up to the next multiple of 250 (revised after review: rounding alone left `lib.rs` 5 lines of room).
 - Every pull request passes `mise run lint`, `cargo build --workspace --all-targets --locked` and `cargo test --workspace --locked --no-fail-fast`, and `scripts/check-platforms.sh` on a Mac.
 - Run cargo through mise (`mise run …` or `mise exec -- cargo …`).
 - Commit messages end with the session's `Co-Authored-By` line. Do not push or open a pull request without Josh's go-ahead for that pull request.

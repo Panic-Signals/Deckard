@@ -13,9 +13,11 @@ Run tasks through mise (`mise run build`, `mise run test`, `mise run lint`), not
 every edit to them risks a merge conflict. The reasons and the check that enforces this
 are in [DEVELOPMENT.md, "Where code goes"](DEVELOPMENT.md#where-code-goes).
 
-- Put tests in their own file: `<topic>_tests.rs` beside the code, or a file in the
-  crate's `tests/` module folder, declared with `#[cfg(test)] mod …;`. Never write a test
-  inline in `main.rs` or a crate's `lib.rs`.
+- Put tests in their own file: `src/<topic>_tests.rs` beside the code (as
+  `apps/viewer/src/chop_tests.rs` is), declared with `#[cfg(test)] mod <topic>_tests;`.
+  Never write a test inline in `main.rs` or a crate's `lib.rs`. A crate's top-level
+  `tests/` folder is for Cargo's integration tests and can't see private items: unit
+  tests don't go there.
 - Put a feature's code in that feature's file, as its own `impl App` or `impl Engine`
   block or its own type. Add a new file when no existing one fits.
 - Put a feature's state in the feature's own struct where it has one. Don't add a field

@@ -257,12 +257,16 @@ crate's `lib.rs`, and that it doesn't push a file over its size limit (DEVELOPME
    covers that file yet:
 
    ```sh
-   git diff main...HEAD -- '*/main.rs' '*/lib.rs' | grep -nE '^\+\s*#\[([a-z_]+::)*test\]'
+   git diff origin/main...HEAD -- '*/main.rs' '*/lib.rs' | grep -nE '^\+\s*#\[([a-z_]+::)*test\]'
    ```
 
-3. Move each one into the test file for its topic: an existing `<topic>_tests.rs` beside
-   the code or a file in the crate's `tests/` module folder if one fits, otherwise a new
-   `<topic>_tests.rs` declared with `#[cfg(test)] mod <topic>_tests;`. The test's body
+   No output means there is nothing to move.
+
+3. Move each one into the test file for its topic: an existing `src/<topic>_tests.rs`
+   beside the code if one fits (`apps/viewer/src/chop_tests.rs`, for one), otherwise a
+   new `src/<topic>_tests.rs` declared with `#[cfg(test)] mod <topic>_tests;`. Not the
+   crate's top-level `tests/` folder: that is for Cargo's integration tests, which can't
+   see private items. The test's body
    doesn't change; give the file the `use` lines it needs (the neighbouring test files
    show which).
 4. If a file is over its limit because of this branch's own additions, move the code
