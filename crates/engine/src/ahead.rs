@@ -332,18 +332,16 @@ impl Player {
                     if let Some(smp) = fresh.smp.as_mut() {
                         smp.all_notes_off();
                     }
-                    if let Some(inst) = fresh.inst.as_ref()
-                        && let Ok(mut pl) = inst.plugin.lock()
-                    {
-                        pl.all_notes_off();
+                    if let Some(inst) = fresh.inst.as_ref() {
+                        inst.plugin.audio_all_notes_off();
                     }
                     self.offs.clear();
                 } else if !fresh.keep[1]
                     && let Some(old_inst) = old.inst.as_ref()
                 {
                     let same = fresh.inst.as_ref().is_some_and(|n| Arc::ptr_eq(&n.plugin, &old_inst.plugin));
-                    if !same && let Ok(mut pl) = old_inst.plugin.lock() {
-                        pl.all_notes_off();
+                    if !same {
+                        old_inst.plugin.audio_all_notes_off();
                     }
                 }
                 std::mem::swap(&mut fresh.scratch, &mut old.scratch);
@@ -396,12 +394,12 @@ impl Player {
                     if inst.muted || skip > 0.0 {
                         return;
                     }
-                    if let Ok(mut pl) = inst.plugin.lock() {
+                    if let Ok(mut pl) = inst.plugin.try_audio() {
                         pl.note_on(pitch, velocity);
-                    }
-                    self.offs.retain(|o| o.2 != pitch);
-                    if let Some(g) = gate {
-                        self.offs.push((pos + g, 0, pitch));
+                        self.offs.retain(|o| o.2 != pitch);
+                        if let Some(g) = gate {
+                            self.offs.push((pos + g, 0, pitch));
+                        }
                     }
                 } else if let Some(smp) = p.smp.as_mut() {
                     // (A note joined late comes live, but is its pattern's.)
@@ -422,10 +420,8 @@ impl Player {
                 if let Some(smp) = p.smp.as_mut() {
                     smp.release_note(pitch);
                 }
-                if let Some(inst) = &p.inst
-                    && let Ok(mut pl) = inst.plugin.lock()
-                {
-                    pl.note_off(pitch);
+                if let Some(inst) = &p.inst {
+                    inst.plugin.audio_note_off(pitch);
                 }
                 self.offs.retain(|o| o.2 != pitch);
             }
@@ -438,14 +434,8 @@ impl Player {
                 if let Some(smp) = p.smp.as_mut() {
                     smp.control(kind);
                 }
-                if let Some(inst) = &p.inst
-                    && let Ok(mut pl) = inst.plugin.lock()
-                {
-                    match kind {
-                        MidiKind::Controller { number, value } => pl.control_change(number, value),
-                        MidiKind::PitchBend(v) => pl.pitch_bend(v),
-                        MidiKind::ChannelPressure(v) => pl.channel_pressure(v),
-                    }
+                if let Some(inst) = &p.inst {
+                    crate::plugin_control(&inst.plugin, kind);
                 }
             }
             Ev::Position { .. } => {}
@@ -453,10 +443,8 @@ impl Player {
                 if let Some(smp) = p.smp.as_mut() {
                     smp.fade_all();
                 }
-                if let Some(inst) = &p.inst
-                    && let Ok(mut pl) = inst.plugin.lock()
-                {
-                    pl.all_notes_off();
+                if let Some(inst) = &p.inst {
+                    inst.plugin.audio_all_notes_off();
                 }
                 self.offs.clear();
             }
@@ -476,10 +464,8 @@ impl Player {
                     }
                     if let Some(smp) = p.smp.as_mut() {
                         smp.note_off(id, pitch);
-                    } else if let Some(inst) = &p.inst
-                        && let Ok(mut pl) = inst.plugin.lock()
-                    {
-                        pl.note_off(pitch);
+                    } else if let Some(inst) = &p.inst {
+                        inst.plugin.audio_note_off(pitch);
                     }
                     false
                 });
@@ -651,10 +637,8 @@ impl Driver {
                 // Replaced: notes the players' plug-ins hold end (the next engine may
                 // play the same instances).
                 for p in &players {
-                    if let Some(inst) = p.parts.as_ref().and_then(|x| x.inst.as_ref())
-                        && let Ok(mut pl) = inst.plugin.lock()
-                    {
-                        pl.all_notes_off();
+                    if let Some(inst) = p.parts.as_ref().and_then(|x| x.inst.as_ref()) {
+                        inst.plugin.audio_all_notes_off();
                     }
                 }
             })

@@ -27,9 +27,11 @@ mod replicant;
 pub mod runloop;
 pub mod scan;
 pub mod seh;
+mod shared;
 pub mod state;
 pub mod tap;
 pub use seh::set_fault_logger;
+pub use shared::{Shared, SharedPlugin};
 
 use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream};
 use module::Module;
@@ -204,8 +206,6 @@ struct Vst3 {
 // VST3 objects may be used from any thread as long as calls are not concurrent, which
 // the mutex around each instance ensures. Processing happens on the audio thread.
 unsafe impl Send for Vst3 {}
-
-pub type Shared = Arc<Mutex<Plugin>>;
 
 /// One running plug-in: a VST3, one of DECKARD's own ([`native`]) or an Audio Unit
 /// ([`au`]).
@@ -1479,7 +1479,7 @@ impl Host {
 
     /// Put `plugin` in `slot`.
     pub fn insert(&mut self, slot: Slot, plugin: Plugin) -> Shared {
-        let shared = Arc::new(Mutex::new(plugin));
+        let shared = plugin.shared();
         self.instances.insert(slot, shared.clone());
         shared
     }
@@ -1527,7 +1527,7 @@ impl Host {
             let mut p = Plugin::native(class, id, name, sample_rate);
             p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
             p.warm_up();
-            let shared = Arc::new(Mutex::new(p));
+            let shared = p.shared();
             self.instances.insert(slot, shared.clone());
             return Ok(shared);
         }
@@ -1550,7 +1550,7 @@ impl Host {
         let mut p = made.map_err(|e| format!("{name}: {e}"))?;
         p.load_chunk(chunk).map_err(|e| format!("{name}: {e}"))?;
         p.warm_up();
-        let shared = Arc::new(Mutex::new(p));
+        let shared = p.shared();
         self.instances.insert(slot, shared.clone());
         Ok(shared)
     }
@@ -1564,7 +1564,7 @@ impl Host {
             return Some(Err(format!("{name}: {e}")));
         }
         p.warm_up();
-        Some(Ok(Arc::new(Mutex::new(p))))
+        Some(Ok(p.shared()))
     }
 
     /// Install a pre-built native instance into `slot`, keeping an unchanged existing one.

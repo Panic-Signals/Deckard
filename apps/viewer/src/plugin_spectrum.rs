@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use deckard_doc::Chain;
@@ -12,7 +12,7 @@ pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const STALE_AFTER: Duration = Duration::from_millis(250);
 
 enum Source {
-    Hosted { instance: Weak<Mutex<deckard_plugins::Plugin>>, pending: Option<Tap> },
+    Hosted { instance: Weak<deckard_plugins::SharedPlugin>, pending: Option<Tap> },
     Internal { board: Weak<EqSpectrum>, owner: Owner, generation: u64 },
 }
 

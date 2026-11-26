@@ -1827,7 +1827,7 @@ impl FxChain {
                         sc_filter.process(&mut self.sl[..n], &mut self.sr[..n]);
                     }
                     let started = std::time::Instant::now();
-                    let Ok(mut p) = shared.lock() else {
+                    let Ok(mut p) = shared.try_audio() else {
                         skipped();
                         continue;
                     };
@@ -2096,8 +2096,8 @@ fn taps(tap: Option<&Tap>, g: usize, s: usize) -> bool {
     }
 }
 
-/// Plug-in blocks the audio thread skipped (an instance whose mutex was poisoned by a
-/// panic; each one a gap in that plug-in's sound). For diagnostics.
+/// Plug-in blocks skipped because the instance was busy or its mutex was poisoned.
+/// For diagnostics.
 pub static PLUGIN_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The slowest single plug-in call on the audio thread since [`take_slowest`] was last
@@ -3854,10 +3854,8 @@ impl Engine {
         // Notes held by plug-ins that are gone or muted now end.
         let kept = |p: &Shared| fresh.instruments.iter().flatten().flatten().any(|i| !i.muted && Arc::ptr_eq(&i.plugin, p));
         for i in self.instruments.iter().flatten().flatten() {
-            if !kept(&i.plugin)
-                && let Ok(mut p) = i.plugin.lock()
-            {
-                p.all_notes_off();
+            if !kept(&i.plugin) {
+                i.plugin.audio_all_notes_off();
             }
         }
 
@@ -4183,10 +4181,8 @@ impl Engine {
         if let Some(Some(snd)) = self.sounds.get_mut(group).and_then(|r| r.get_mut(sound)) {
             snd.fade_all();
         }
-        if let Some(Some(inst)) = self.instruments.get(group).and_then(|r| r.get(sound))
-            && let Ok(mut p) = inst.plugin.lock()
-        {
-            p.all_notes_off();
+        if let Some(Some(inst)) = self.instruments.get(group).and_then(|r| r.get(sound)) {
+            inst.plugin.audio_all_notes_off();
         }
         let now = self.time;
         for o in self.note_offs.iter_mut().filter(|o| (o.1, o.2) == (group, sound) && o.0 > now) {
@@ -4795,9 +4791,7 @@ impl Engine {
     /// using the same instances).
     pub fn release_plugins(&mut self) {
         for i in self.instruments.iter().flatten().flatten() {
-            if let Ok(mut p) = i.plugin.lock() {
-                p.all_notes_off();
-            }
+            i.plugin.audio_all_notes_off();
         }
         self.note_offs.clear();
     }
@@ -4820,9 +4814,12 @@ impl Engine {
         for i in self.instruments.iter().flatten().flatten() {
             // A Zhora is waited for (the screens hold it only for moments): a gate left
             // up on a modular drones.
-            let held = if i.cv_only { i.plugin.lock().ok() } else { i.plugin.try_lock().ok() };
-            if let Some(mut p) = held {
-                p.all_notes_off();
+            if i.cv_only {
+                if let Ok(mut p) = i.plugin.lock() {
+                    p.all_notes_off();
+                }
+            } else {
+                i.plugin.audio_all_notes_off();
             }
         }
         if let Some(r) = &mut self.repeater {
@@ -5090,10 +5087,8 @@ impl Engine {
         if let Some(Some(s)) = self.sounds.get_mut(group).and_then(|g| g.get_mut(sound)) {
             s.release_note(pitch);
         }
-        if let Some(Some(inst)) = self.instruments.get(group).and_then(|g| g.get(sound))
-            && let Ok(mut p) = inst.plugin.lock()
-        {
-            p.note_off(pitch);
+        if let Some(Some(inst)) = self.instruments.get(group).and_then(|g| g.get(sound)) {
+            inst.plugin.audio_note_off(pitch);
         }
         self.note_offs.retain(|o| !(o.1 == group && o.2 == sound && o.3 == pitch));
     }
@@ -6838,14 +6833,8 @@ impl Engine {
             if let Some(Some(s)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound)) {
                 s.control(kind);
             }
-            if let Some(Some(inst)) = self.instruments.get(e.group).and_then(|g| g.get(e.sound))
-                && let Ok(mut p) = inst.plugin.lock()
-            {
-                match kind {
-                    MidiKind::Controller { number, value } => p.control_change(number, value),
-                    MidiKind::PitchBend(v) => p.pitch_bend(v),
-                    MidiKind::ChannelPressure(v) => p.channel_pressure(v),
-                }
+            if let Some(Some(inst)) = self.instruments.get(e.group).and_then(|g| g.get(e.sound)) {
+                plugin_control(&inst.plugin, kind);
             }
             return;
         }
@@ -6853,9 +6842,9 @@ impl Engine {
             if inst.muted {
                 return;
             }
-            // Other threads hold an instance only for moments (a parameter, a note), so
-            // the audio thread waits for it rather than drop the note.
-            if let Ok(mut p) = inst.plugin.lock() {
+            // Drop missed attacks so they do not sound late, while leaving any
+            // earlier note's release scheduled when the instance is busy.
+            if let Ok(mut p) = inst.plugin.try_audio() {
                 p.note_on(e.pitch, e.velocity);
                 self.note_offs.retain(|o| !(o.1 == e.group && o.2 == e.sound && o.3 == e.pitch));
                 if e.length != HELD {
@@ -7071,9 +7060,7 @@ impl Engine {
             }
             match instruments.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref) {
                 Some(i) => {
-                    if let Ok(mut p) = i.plugin.lock() {
-                        p.note_off(pitch);
-                    }
+                    i.plugin.audio_note_off(pitch);
                     false
                 }
                 None => false,
@@ -7688,6 +7675,15 @@ struct JobPtrs {
 unsafe impl Send for JobPtrs {}
 unsafe impl Sync for JobPtrs {}
 
+fn plugin_control(plugin: &Shared, kind: MidiKind) {
+    let (number, value) = match kind {
+        MidiKind::Controller { number, value } => (usize::from(number.min(127)), u16::from(value)),
+        MidiKind::PitchBend(value) => (129, value),
+        MidiKind::ChannelPressure(value) => (128, u16::from(value)),
+    };
+    plugin.audio_control(number, value);
+}
+
 /// Render one sound for `frames` frames into `b`: its Sampler voices (or the input it
 /// takes), then its plug-in instrument, each through the sound's effects. A Zhora makes
 /// only CV: its return, the input, goes through the effects alone.
@@ -7789,13 +7785,15 @@ fn render_sound(
             let n = (frames - done).min(MAX_BLOCK);
             let t = at_frame(done);
             let started = std::time::Instant::now();
-            let Ok(mut p) = inst.plugin.lock() else {
+            let mut p = inst.plugin.try_audio().ok();
+            let (l, r) = if let Some(p) = p.as_mut() {
+                let out = p.process(n, &t);
+                timed(&inst.plugin, started);
+                out
+            } else {
                 skipped();
-                done += n;
-                continue;
+                (&[][..], &[][..])
             };
-            let (l, r) = p.process(n, &t);
-            timed(&inst.plugin, started);
             let m = l.len().min(r.len()).min(n);
             match chain.as_deref_mut() {
                 Some(c) => {
@@ -7809,9 +7807,11 @@ fn render_sound(
                             c.r[f] += b.inp[(inp_at + done + f) * 2 + 1];
                         }
                     }
-                    take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
-                    if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
-                        hear(&p, owner, inst.scan, n, board);
+                    if let Some(p) = p.as_ref() {
+                        take_strips(p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
+                        if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
+                            hear(p, owner, inst.scan, n, board);
+                        }
                     }
                     drop(p);
                     c.run(n, &t, sc, done);
@@ -7831,9 +7831,11 @@ fn render_sound(
                             buf[(done + f) * 2 + 1] += b.inp[(inp_at + done + f) * 2 + 1];
                         }
                     }
-                    take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
-                    if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
-                        hear(&p, owner, inst.scan, n, board);
+                    if let Some(p) = p.as_ref() {
+                        take_strips(p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
+                        if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
+                            hear(p, owner, inst.scan, n, board);
+                        }
                     }
                 }
             }
@@ -13862,7 +13864,7 @@ mod tests {
 
     pub(crate) fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
         let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).expect("an id");
-        Arc::new(Mutex::new(deckard_plugins::Plugin::native(class, id, class.name, 1000.0)))
+        deckard_plugins::Plugin::native(class, id, class.name, 1000.0).shared()
     }
 
     /// [`Split`] as an effect in `owner`'s slot of `p`, listening as the engine sets it.
@@ -13904,6 +13906,90 @@ mod tests {
 
     fn about(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[derive(Default)]
+    struct HeldTestInstrument(u128);
+
+    impl deckard_plugins::native::Engine for HeldTestInstrument {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, pitch: u8, _: u8) {
+            self.0 |= 1 << pitch;
+        }
+        fn note_off(&mut self, pitch: u8) {
+            self.0 &= !(1 << pitch);
+        }
+        fn reset(&mut self) {
+            self.0 = 0;
+        }
+        fn process(&mut self, l: &mut [f32], r: &mut [f32], _: &Transport) {
+            let level = self.0.count_ones() as f32 / 8.0;
+            l.fill(level);
+            r.fill(level);
+        }
+    }
+
+    static HELD_TEST_INSTRUMENT: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: [9; 16],
+        name: "Held Test Instrument",
+        instrument: true,
+        params: &[],
+        pages: &[],
+        make: |_| Box::<HeldTestInstrument>::default(),
+        scope: false,
+    };
+
+    // Hold the instance as the UI would. The timeout lets a blocking regression
+    // fail on its output instead of hanging the test suite.
+    fn with_editor_lock(plugin: &Shared, f: impl FnOnce()) {
+        std::thread::scope(|scope| {
+            let (ready, acquired) = std::sync::mpsc::channel();
+            let (done, release) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let _lock = plugin.lock().unwrap();
+                ready.send(()).unwrap();
+                let _ = release.recv_timeout(std::time::Duration::from_secs(3));
+            });
+            acquired.recv().unwrap();
+            f();
+            let _ = done.send(());
+        });
+    }
+
+    #[test]
+    fn busy_instrument_keeps_input_running_and_releases_only_the_ended_notes() {
+        let mut e = split_engine(|_| {});
+        let plugin = split_plugin(&HELD_TEST_INSTRUMENT);
+        e.sounds[0][0] = None;
+        e.instruments[0][0] = Some(InstrumentRt::new(plugin.clone(), (1.0, 1.0), false));
+        e.note_hold(0, 0, 60, 127);
+        e.note_hold(0, 0, 72, 127);
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.5));
+        with_editor_lock(&plugin, || {
+            e.note_release(0, 0, 60); // Preserve this off.
+            e.note_hold(0, 0, 65, 127); // A missed on never plays late.
+            assert!(about(split_block(&mut e, 0.25).0.0, 0.25));
+        });
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.375), "only pitch 72 remains");
+        with_editor_lock(&plugin, || {
+            e.stop();
+            assert!(about(split_block(&mut e, 0.25).0.0, 0.25));
+        });
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.25), "stop releases the remaining pitch");
+    }
+
+    #[test]
+    fn busy_master_effect_passes_the_dry_mix() {
+        let mut e = split_engine(|_| {});
+        let FxUnit::Plugin { plugin, .. } = &e.master_fx.as_ref().unwrap().units[0].fx else { unreachable!() };
+        let plugin = plugin.clone();
+        let mut telemetry = Telemetry::default();
+        with_editor_lock(&plugin, || {
+            assert!(about(split_block(&mut e, 0.25).0.0, 0.25), "the dry mix passes the busy effect");
+            assert!(heard_now(&mut e, &mut telemetry).is_empty(), "the busy effect did not render");
+        });
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.25));
+        assert_eq!(heard_now(&mut e, &mut telemetry), [master_heard(1), master_heard(2)]);
     }
 
     fn heard_now(e: &mut Engine, t: &mut Telemetry) -> Vec<Heard> {

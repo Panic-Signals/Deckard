@@ -17,9 +17,7 @@ impl Engine {
             self.lfo_release(g, s, None);
             self.send_live(g, s, crate::ahead::Ev::Stop);
             if let Some(i) = self.instruments.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref) {
-                if let Ok(mut p) = i.plugin.lock() {
-                    p.all_notes_off();
-                }
+                i.plugin.audio_all_notes_off();
             }
             if let Some(smp) = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut) {
                 smp.fade_all();
