@@ -6,6 +6,7 @@
 --                     (an empty one); CHANNEL: the previous / next page group (Input,
 --                     Output, Groove, Macro). The jog wheel's left / right the same.
 --   jog wheel press   PLUG-IN: the plug-in browser (pages/module.lua) for the slot
+--   display 8         BROWSE: the same plug-in browser
 --   LEFT / RIGHT      the previous / next page
 --   right screen      the focused plug-in's picture; the built-in EQ's or Filter's curve, on both pages;
 --                     CHANNEL's Generate page: Euclidean, its rhythm as a circle; Random,
@@ -120,6 +121,8 @@ function control.button(name, down)
       deckard.level(n)
     elseif n == 5 or n == 6 then
       step(c, n == 6)
+    elseif n == 8 and c.plugins then
+      deckard.show_page("module")
     end
   end
   return true

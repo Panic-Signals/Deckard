@@ -396,16 +396,33 @@ fn display_buttons_by_mode() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_5").is_empty(), "the first slot");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Slot(1)], "on to the +");
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Slot(1)]);
-    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
     // CHANNEL: display 5 / 6 and the jog wheel's left / right the page groups.
     v.control.modules_visible = false;
     v.control.page_groups = 4;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    assert_eq!(s.page(), "control", "CHANNEL has no BROWSE button");
     assert!(press(&mut s, &v, "BUTTON_SCREEN_5").is_empty(), "Input is the first");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::PageGroup(1)]);
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::PageGroup(1)]);
     v.control.page_group = 3;
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::PageGroup(2)]);
     assert!(press(&mut s, &v, "BUTTON_SCREEN_6").is_empty(), "Macro is the last");
+}
+
+#[test]
+fn control_browse_button_opens_the_plugin_browser() {
+    for slot_index in [Some(0), None] {
+        let (mut s, mut v) = (Surface::new(), view());
+        v.control.slot_index = slot_index;
+        assert!(s.screen_text(&v).iter().any(|text| text == "BROWSE"));
+        assert!(hold(&mut s, &v, "BUTTON_SCREEN_8", false).is_empty());
+        assert_eq!(s.page(), "control", "release alone must not open the browser");
+        assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+        assert_eq!(s.page(), "module", "BROWSE opens the focused slot: {slot_index:?}");
+        press(&mut s, &v, "BUTTON_SCREEN_7");
+        assert_eq!(s.page(), "control", "CANCEL returns to Control");
+        assert_eq!(s.error(), None);
+    }
 }
 
 /// CHANNEL's arrow label names the page group; PLUG-IN's the slot, EMPTY on the "+".
@@ -2688,6 +2705,8 @@ fn holding_a_step_modulates_it() {
     );
     // The Control page's buttons: the next slot.
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Slot(1)]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    assert_eq!(s.page(), "step_mod", "Step Mod hides BROWSE and must not open it");
     // Let go: no step taken, and back to the Step page with the last.
     assert_eq!(s.event(&Event::PadOff(6), &v, at(900)), [Action::StepModAt(Some((480, 240)))]);
     assert_eq!(s.event(&Event::PadOff(3), &v, at(900)), [Action::StepModAt(None)]);
