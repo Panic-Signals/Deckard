@@ -141,16 +141,18 @@ The check is what enforces the rules; the instructions are there so an agent get
 right the first time instead of finding out from CI.
 
 **Move-only pull requests.** (My call; Josh to confirm.) A pull request labelled
-`move-only` skips the Patch coverage job. The label is for pull requests that only move
+`move-only` is not held to Patch coverage's 70%. The label is for pull requests that only move
 code and make the visibility edits a move needs. A maintainer applies it (contributors
 don't add labels), after checking the move is verbatim. The pull request body says it is
 move-only and gives the before and after test counts. `ci.yml`'s `coverage` job gains
-the condition; DEVELOPMENT.md's Patch coverage paragraph describes the label.
+the exception; DEVELOPMENT.md's Patch coverage paragraph describes the label.
 
-CI runs on `pull_request`, which doesn't fire when a label is added, so a label added
-after opening wouldn't be seen. The workflow gains the `labeled` and `unlabeled` event
-types, and the build and test jobs skip themselves on those two events, so adding a
-label re-evaluates only the coverage job.
+The coverage job reads the pull request's labels as they are when it runs (`gh pr
+view`), not from the event that started it, and with `move-only` it reports coverage
+without the 70% floor. A maintainer who adds the label after the job has failed re-runs
+that one job. (An earlier draft re-ran CI on label events and skipped the build jobs on
+them; that was dropped because a skipped build would replace a failed one in the pull
+request's checks.)
 
 If the label isn't wanted, the fallback is to leave the coverage check as it is and have
 a maintainer merge move pull requests over its failure. Phase 2 is the same either way;

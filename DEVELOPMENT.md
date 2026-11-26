@@ -229,6 +229,10 @@ to the crate's and is shown in About DECKARD.
   `cargo llvm-cov --workspace --cobertura --output-path coverage.xml` and
   `diff-cover coverage.xml --compare-branch=main --fail-under=70`. Tests that skip
   themselves without a Maschine install still count against you on CI.
+  A pull request that only moves code between files is labelled `move-only` and isn't
+  held to the 70%, since a moved line counts as a new one; a maintainer adds the label
+  after checking that nothing but the code's place changed, then re-runs the Patch
+  coverage job if it had already failed.
 - **Release builds:** `release.yml` builds all three when a release is published,
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps

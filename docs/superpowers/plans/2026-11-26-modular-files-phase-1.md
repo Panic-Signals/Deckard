@@ -27,7 +27,7 @@
 2. **A file without a trailing newline, or with CRLF line endings.** The count must match what an editor shows (count lines, not newline bytes), so a 3,000-line file with no final newline is 3,000. (Task 1, case `no-trailing-newline`.)
 3. **Untracked and build-output files.** `target/`, a contributor's scratch `.rs` files and anything git-ignored must not be counted; only `git ls-files '*.rs'`. (Task 1, case `untracked-ignored`.)
 4. **`#[test]` in text that isn't a test.** A listed no-inline-tests file may mention `#[test]` in a comment or string; only a line that is the attribute itself (optional leading whitespace, then `#[test]` or `#[tokio::test]`-style `#[…::test]`) counts. (Task 1, case `test-in-comment`.)
-5. **A label added to a pull request while its build is running.** The label event must not cancel the running build and test jobs. (Task 3, concurrency group.)
+5. **A label added after the coverage job has failed.** Re-running that one job must see the label; it reads the labels when it runs, not from the event that started the run. (Task 3.)
 
 ---
 
@@ -157,34 +157,7 @@ Expected: lint passes; `AGENTS.md` under 40 lines; `CLAUDE.md` is 1 line.
 **Interfaces:**
 - Produces: the label name `move-only`, used by tasks 4 and 5's pull requests.
 
-- [ ] **Step 1: Change the workflow's trigger and concurrency.**
-
-```yaml
-on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-
-concurrency:
-  # A label change gets a group of its own, so it never cancels a running build.
-  group: ci-${{ github.ref }}-${{ (github.event.action == 'labeled' || github.event.action == 'unlabeled') && 'label' || 'code' }}
-  cancel-in-progress: true
-```
-
-- [ ] **Step 2: Make the `build` job skip label events:** `if: github.event.action != 'labeled' && github.event.action != 'unlabeled'`.
-
-- [ ] **Step 3: Replace the `coverage` job's `if`** so that it runs on a pull request's code events and when the `move-only` label itself is removed, and is skipped whenever the pull request carries `move-only`, and on label events about any other label:
-
-```yaml
-    if: >-
-      github.event_name == 'pull_request'
-      && !contains(github.event.pull_request.labels.*.name, 'move-only')
-      && ((github.event.action != 'labeled' && github.event.action != 'unlabeled')
-          || github.event.label.name == 'move-only')
-```
-
-  Update the comment above the job: a pull request labelled `move-only` (code moved, not changed) skips it, because diff-cover counts a moved line as a new one.
+- [ ] **Steps 1 to 3 (revised while executing): lift the 70% for a labelled pull request, in the enforcing step only.** The triggers, the concurrency group and the `build` job don't change. In the `coverage` job's "At least 70% of changed lines covered" step, read the pull request's labels as they are now (`gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels`, with `GH_TOKEN: ${{ github.token }}` and `PR: ${{ github.event.pull_request.number }}`), and pass `--fail-under=0` to diff-cover when `move-only` is among them, `70` otherwise. Coverage is still measured and reported. A maintainer who adds the label after the job failed re-runs that job. The first draft of this task re-ran CI on label events with the build jobs skipped; a skipped build would have replaced a failed one in the pull request's checks, so it was dropped.
 
 - [ ] **Step 4: Document it.** In DEVELOPMENT.md's Patch coverage bullet, add two sentences: what `move-only` is for, and that a maintainer applies it after checking the move is verbatim. In the `pull-request` skill, under the Type table: a move-only pull request is "Other", says "move-only" in its summary, and gives the test counts before and after.
 

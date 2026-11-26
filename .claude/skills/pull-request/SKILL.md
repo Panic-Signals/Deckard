@@ -27,6 +27,10 @@ Tick exactly one box:
 | Documentation | Only docs: README, DEVELOPMENT.md, `docs/`, the manual, comments | `documentation` |
 | Other | Build, CI, tests, refactoring, dependencies: nothing a user would notice | `internal` |
 
+A pull request that only moves code between files (DEVELOPMENT.md, "Where code goes") is
+**Other**. Say "move-only" in the summary and give the number of tests before and after,
+so a maintainer can add the `move-only` label, which lifts the Patch coverage check's 70%.
+
 If a change both fixes a bug and adds a feature, pick the one a user would notice
 more, and mention the other in the summary. If the change mixes unrelated work,
 split it into separate pull requests.
