@@ -14,6 +14,8 @@ pub mod kontakt;
 pub mod module;
 pub mod native;
 pub mod nks;
+#[cfg(windows)]
+mod reaktor_preset;
 pub mod spectrum;
 pub mod tuner;
 pub mod zhora;

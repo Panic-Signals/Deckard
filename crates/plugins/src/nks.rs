@@ -547,11 +547,26 @@ fn native_preset_for_plugin(ext: &str, plugin: &str, bytes: &[u8], installed: &[
         .ok_or_else(|| format!("{plugin} isn't installed as VST3"))?;
     let cid = hex16(&e.cid).ok_or("the plug-in has no class id")?;
     let id = e.maschine_id().ok_or("the plug-in has no id")?;
-    let component = wrap_nisound_preset(ext, bytes).unwrap_or_else(|| bytes.to_vec());
+    // A Reaktor snapshot is its ensemble's: put in Reaktor's own state with the ensemble
+    // open, and the slot named after it ("Monark", not "Reaktor 6").
+    #[cfg(windows)]
+    let reaktor = if ext == "nrkt" {
+        let effect = plugin.ends_with("FX");
+        Some(crate::reaktor_preset::wrap(bytes, |ensemble| {
+            let opened = reaktor_ens::state(ensemble, None, effect, installed)?;
+            Ok(crate::state::unwrap_chunk(&opened.chunk, Format::Vst3)?.component)
+        })?)
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let reaktor: Option<(String, Vec<u8>)> = None;
+    let component =
+        reaktor.as_ref().map(|r| r.1.clone()).unwrap_or_else(|| wrap_nisound_preset(ext, bytes).unwrap_or_else(|| bytes.to_vec()));
     let pages = parse_dsiny(bytes);
     let state = State { component, controller: Vec::new() };
     let chunk = wrap_chunk(&state, Format::Vst3, &cid);
-    Ok(Resolved { id, name: e.name.clone(), chunk, pages })
+    Ok(Resolved { id, name: reaktor.map_or_else(|| e.name.clone(), |r| r.0), chunk, pages })
 }
 
 /// Resolve a native preset at `path` from disk. Multi-snapshot Reaktor `.ens` / `.rkplr`
