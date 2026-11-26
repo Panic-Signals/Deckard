@@ -8,18 +8,20 @@ use deckard_engine::sample::Sample;
 use std::sync::Arc;
 
 pub const TABS: [&str; 5] = ["RECORD", "EDIT", "SLICE", "ZONE", "LAYERS"];
+/// The order the tabs are drawn in: LAYERS where SLICE would be (a sound has one or the
+/// other), before ZONE.
+pub const TAB_ORDER: [usize; 5] = [0, 1, 2, 4, 3];
 
 pub mod layers;
 
 /// Which of the tabs sound (`g`, `s`) offers, its sample a zone's (`zone`) or an Audio
 /// plug-in's take (`take`): only RECORD without a sample; RECORD and EDIT for a take;
-/// LAYERS for a New Sampler without slices (even an empty one), which once it has a
-/// layer has no SLICE.
+/// LAYERS for a Sampler Preview in Layers (even an empty one), which has no SLICE.
 pub fn tab_shown(p: &Project, g: usize, s: usize, tab: usize, zone: bool, take: bool) -> bool {
     match tab {
         0 => true,
-        4 => !take && crate::layers::can_layer(p, g, s),
-        2 => zone && !take && !crate::layers::layered(p, g, s),
+        4 => crate::layers::can_layer(p, g, s),
+        2 => zone && !take && !crate::layers::can_layer(p, g, s),
         1 => zone,
         _ => zone && !take,
     }
@@ -447,6 +449,11 @@ pub struct LaneView {
 
 #[derive(Debug, Clone)]
 pub enum SamplingAct {
+    /// TYPE: the focused Sampler Preview's mode asked for. A sound with a sample asks
+    /// first ([`SamplingAct::SamplerAnswer`]): the change loses its changes.
+    Sampler(deckard_model::new_sampler::SamplerMode),
+    /// The mode change asked for: gone ahead with (`true`), or dropped.
+    SamplerAnswer(bool),
     /// A layer of the focused sound (its lane, from 0).
     Layer(usize, LayerAct),
     /// Its layers' morph, and what's the sound's.
@@ -568,6 +575,8 @@ pub enum RecordAct {
     DeleteTake(usize),
     /// Take `.0` onto lane `.1` of the focused sound (past its layers: a new one).
     TakeToLayer(usize, usize),
+    /// The focused take onto the layer LAYER was turned to.
+    ApplyLayer,
 }
 
 fn sact(a: SamplingAct) -> Act {
@@ -604,7 +613,16 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::BLACK);
     let gcol = sound_color(p, app.group, app.sound);
-    let edited = edited(p, (app.group, app.sound, app.zone));
+    // In Layers a take on no layer is edited before it has one: shown as a take is
+    // (RECORD and EDIT), though no zone holds it.
+    let edited = match app.shown_take() {
+        Some((_, file)) => {
+            let sample = deckard_model::SampleRef { kind: 0, path: file.to_string_lossy().into(), ..Default::default() };
+            let z = deckard_model::Zone { sample, ..Default::default() };
+            Some((usize::MAX, z, Target::Zone(app.group, app.sound, usize::MAX), true))
+        }
+        None => edited(p, (app.group, app.sound, app.zone)),
+    };
     let (zi, zone, zt, take) = match &edited {
         Some((zi, z, t, take)) => (*zi, Some(z), *t, *take),
         None => (0, None, Target::Zone(app.group, app.sound, 0), false),
@@ -617,7 +635,8 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 37.0));
     painter.rect_filled(header, 0.0, s00());
     let mut x = header.left() + 12.0;
-    for (i, name) in TABS.iter().enumerate() {
+    for i in TAB_ORDER {
+        let name = &TABS[i];
         if !shown(i) {
             continue;
         }
@@ -671,6 +690,47 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             }
         }
     }
+    // TYPE: which sampler a Sampler Preview is.
+    if let Some(mode) = crate::layers::mode_of(p, app.group, app.sound) {
+        use deckard_model::new_sampler::SamplerMode;
+        let (w, gap) = (64.0, 4.0);
+        let right = header.right() - if tab == 3 && zone.is_some() { 152.0 } else { 12.0 };
+        let x0 = right - 3.0 * w - 2.0 * gap;
+        painter.text(Pos2::new(x0 - 8.0, header.top() + 19.0), Align2::RIGHT_CENTER, "TYPE", font(10.0), white(142));
+        let busy = app.recorder.busy();
+        for (k, m) in SamplerMode::ALL.into_iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(x0 + k as f32 * (w + gap), header.top() + 9.0), Vec2::new(w, 20.0));
+            let tip = match m {
+                SamplerMode::Original => "Original: what Maschine's Sampler does, and no more",
+                SamplerMode::Advanced => "Advanced: Sync and Keys, stems on a zone's lanes, reverse, slices that play on",
+                SamplerMode::Layers => "Layers: every sample is a layer, morphed between",
+            };
+            let resp = ui.interact(r, ui.id().with(("sampler-mode", k)), if busy { Sense::hover() } else { Sense::click() }).on_hover_text(
+                if busy {
+                    "The mode can't be changed while recording".to_string()
+                } else {
+                    format!("{tip}. Changing the mode of a sound with a sample keeps that sample and loses its other changes")
+                },
+            );
+            let on = m == mode;
+            painter.rect_filled(
+                r,
+                2.0,
+                if on {
+                    s03()
+                } else if resp.hovered() && !busy {
+                    s02()
+                } else {
+                    s01()
+                },
+            );
+            painter.text(r.center(), Align2::CENTER_CENTER, m.name().to_uppercase(), font(10.0), if on { white(245) } else { white(142) });
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sampler-mode", k)), r));
+            if resp.clicked() && !on {
+                acts.push(sact(SamplingAct::Sampler(m)));
+            }
+        }
+    }
     // Info bar: play, name, duration, stereo/mono.
     let info = Rect::from_min_size(Pos2::new(rect.left(), header.bottom() + 1.0), Vec2::new(rect.width(), 16.0));
     painter.rect_filled(info, 0.0, s00());
@@ -712,7 +772,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             white(142),
         );
         // A New Sampler zone: what analysis found (its tempo, its root, how it plays).
-        if !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some()) {
+        if !take && crate::layers::own(p, app.group, app.sound) {
             painter.text(
                 Pos2::new(d.right() + 12.0, info.center().y),
                 Align2::LEFT_CENTER,
@@ -744,7 +804,7 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     }
     let mut body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
     // A New Sampler zone's tempo and pitch, over its EDIT and SLICE pages.
-    let new_sampler = !take && p.groups.get(app.group).and_then(|g| g.sounds.get(app.sound)).is_some_and(|x| x.new_sampler.is_some());
+    let new_sampler = !take && crate::layers::advanced(p, app.group, app.sound);
     if let (true, 1 | 2, Some(z), Some(s)) = (new_sampler, tab, zone, &st.sample) {
         let bar = Rect::from_min_size(body.min, Vec2::new(body.width(), 62.0));
         beat_bar(ui, app, bar, z, zt, s.frames.len() as f64 / s.rate.max(1) as f64, gcol, acts);
@@ -2023,7 +2083,7 @@ fn edit_tab(
         if op == EditOp::Stems && stems.is_none() {
             ui.interact(r, ui.id().with("stems-menu"), Sense::click())
                 .on_hover_text(
-                    "Separate into stems: onto a Sampler Preview zone's lanes, else a new group (Shift, or right-click for more)",
+                    "Separate into stems: onto the zone's lanes in a Sampler Preview in Advanced, else a new group (Shift, or right-click for more)",
                 )
                 .context_menu(|ui| {
                     if ui.button("Separate onto the zone's lanes").clicked() {
@@ -2238,14 +2298,8 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
                 f
             },
             {
-                let to_end = st.slices_to_end(app.doc.as_ref().is_some_and(|d| {
-                    d.borrow()
-                        .project()
-                        .groups
-                        .get(app.group)
-                        .and_then(|g| g.sounds.get(app.sound))
-                        .is_some_and(|x| x.new_sampler.is_some())
-                }));
+                let to_end =
+                    st.slices_to_end(app.doc.as_ref().is_some_and(|d| crate::layers::own(d.borrow().project(), app.group, app.sound)));
                 let mut f = choice_field("EACH PLAYS TO", vec!["Next slice".into(), "Sample end".into()], usize::from(to_end), |k| {
                     sact(SamplingAct::SliceToEnd(k == 1))
                 });
@@ -2795,8 +2849,13 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         let mut f = choice_field("LAYER", options, at, move |k| {
             sact(SamplingAct::Record(RecordAct::Set(RecParam::Layer, values.get(k).copied().unwrap_or(0))))
         });
-        f.tip = "The layer the next take goes to: one it has (its sample replaced, its settings kept), or a new one";
+        f.tip = "The layer this take plays on. Pick one, then APPLY: a layer's sample is replaced, its settings kept; None takes it off";
         fields.push(f);
+        // Chosen, not yet done: APPLY puts the take there.
+        if crate::layers::layer_pending(p, app.group, app.sound, rec).is_some() {
+            let apply = || sact(SamplingAct::Record(RecordAct::ApplyLayer));
+            fields.push(Field { value: "APPLY".into(), tip: "Put the take on the layer chosen", ..toggle_field("TAKE", false, apply) });
+        }
     }
     let y = footer.top() + 6.0;
     let mut nx = group_box(ui, &painter, footer.left() + 8.0, y, "RECORDING", &fields, acts);
@@ -2924,7 +2983,7 @@ pub enum RecParam {
     Mode,
     Length,
     Target,
-    /// The lane a take goes to; `MAX_LAYERS`: a new layer.
+    /// The layer chosen for the focused take (`RecorderView::layer_choice`).
     Layer,
     Monitor,
     Channel,
@@ -3042,9 +3101,11 @@ pub struct RecorderView {
     /// 1, 2, 4, 8 or 16 bars, or FREE; Loop's target: Take, Sound or Pattern.
     pub length: usize,
     pub target: usize,
-    /// The layer a take goes to on a sound with layers: its lane, or `MAX_LAYERS` for a
-    /// new one.
-    pub layer: usize,
+    /// The layer RECORD's LAYER was turned to for the focused take, until APPLY puts it
+    /// there: `layers::NO_LAYER`, a lane, or `MAX_LAYERS` for a new one.
+    pub layer_choice: Option<i64>,
+    /// The sound (group, sound) it was chosen on.
+    pub layer_at: (usize, usize),
     pub monitor: bool,
     pub auto: AutoParams,
     /// MIDI outputs there are (Auto ▸ MIDI To).
@@ -3063,6 +3124,18 @@ pub struct RecorderView {
 }
 
 impl RecorderView {
+    /// RECORD's LAYER turned to `v` for the focused take, on sound `at`.
+    pub fn choose_layer(&mut self, at: (usize, usize), v: i64) {
+        self.set(RecParam::Layer, v);
+        self.layer_at = at;
+    }
+
+    /// The layer chosen for the focused take on sound `at` (one chosen on another sound
+    /// isn't a choice here).
+    pub fn layer_choice_for(&self, at: (usize, usize)) -> Option<i64> {
+        self.layer_choice.filter(|_| self.layer_at == at)
+    }
+
     /// Set a parameter, keeping Maschine's rules: Note On ≤ Sample, Lo ≤ Hi (moving the
     /// other), strides within 1..=max(1, Hi − Lo).
     pub fn set(&mut self, p: RecParam, v: i64) {
@@ -3074,10 +3147,13 @@ impl RecorderView {
             RecParam::ExtMono => self.ext_mono = v.clamp(0, 31) as usize,
             RecParam::Internal => self.internal = internal_from(v),
             RecParam::AutoSound => self.auto_sound = (v >= 0).then_some((v as usize / 16, v as usize % 16)),
-            RecParam::Mode => self.mode = v.clamp(0, 3) as usize,
+            RecParam::Mode => {
+                self.mode = v.clamp(0, 3) as usize;
+                self.layer_choice = None;
+            }
             RecParam::Length => self.length = v.clamp(0, 5) as usize,
             RecParam::Target => self.target = v.clamp(0, 2) as usize,
-            RecParam::Layer => self.layer = v.clamp(0, deckard_model::layers::MAX_LAYERS as i64) as usize,
+            RecParam::Layer => self.layer_choice = Some(v.clamp(crate::layers::NO_LAYER, deckard_model::layers::MAX_LAYERS as i64)),
             RecParam::Monitor => self.monitor = v != 0,
             RecParam::Channel => a.channel = v.clamp(1, 16) as u8,
             RecParam::NoteOnMs => {

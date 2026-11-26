@@ -337,6 +337,42 @@ mod app_tests {
 
     /// A New Sampler loaded with a 120 BPM loop: analysed on its own, and the zone shows
     /// the tempo with no undo step for it.
+    /// In Original a loop isn't looked at (it plays as a Sampler plays it); made Advanced,
+    /// it stays in Repitch until Sync is chosen.
+    #[test]
+    fn an_original_zone_is_not_put_in_sync() {
+        use deckard_model::new_sampler::{NewSampler, SamplerMode};
+        let dir = tempfile::tempdir().unwrap();
+        let rate = 44_100u32;
+        let beat = rate as usize / 2;
+        let frames: Vec<[f32; 2]> =
+            (0..beat * 16).map(|i| if i % beat < 200 { [0.8 * (1.0 - (i % beat) as f32 / 200.0); 2] } else { [0.0; 2] }).collect();
+        let file = dir.path().join("Clicks.wav");
+        deckard_engine::edit::write_wav_channels(&file, &deckard_engine::sample::Sample { rate, frames }, 2).unwrap();
+        let mut doc = deckard_doc::Document::new_project().unwrap();
+        if doc.project().groups[0].sounds[0].slots.is_empty() {
+            doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+        }
+        let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+        doc.set_zones(0, 0, &[spec], "Load").unwrap();
+        doc.set_new_sampler(0, 0, Some(&NewSampler { mode: SamplerMode::Original, ..Default::default() })).unwrap();
+        let mut app = App { analysis: super::Jobs::new(None), ..App::default() };
+        app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+        let meta =
+            |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].meta.clone();
+        let follow = |app: &mut App| {
+            for _ in 0..150 {
+                app.follow_analysis();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        follow(&mut app);
+        assert_eq!(meta(&app), None, "Original: what a Sampler knows of it");
+        app.doc.as_ref().unwrap().borrow_mut().set_sampler_mode(0, 0, SamplerMode::Advanced, None).unwrap();
+        follow(&mut app);
+        assert_eq!(meta(&app).map(|m| (m.mode, m.bpm)), Some((PlayMode::Repitch, None)), "as it played");
+    }
+
     #[test]
     fn a_new_sampler_learns_its_loop() {
         let dir = tempfile::tempdir().unwrap();

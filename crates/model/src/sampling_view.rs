@@ -58,6 +58,11 @@ pub struct LayerView {
     pub window: [f64; 4],
     pub envelope: [f64; 4],
     pub detail: Vec<(f32, f32)>,
+    /// Where it plays now, of its sample's length (0..1); None while it doesn't.
+    pub head: Option<f64>,
+    /// Its loop's start and end, of its sample's length (0..1); None while it doesn't
+    /// loop.
+    pub loop_points: Option<(f64, f64)>,
 }
 
 /// The morph of a sound's layers: whether it runs, where it is now, and its shape
@@ -150,6 +155,13 @@ pub enum SamplingCall {
     LayerMute(usize),
     LayerSolo(usize),
     RemoveLayer(usize),
+    /// RECORD's APPLY: the focused take onto the layer LAYER was turned to.
+    ApplyTakeLayer,
+    /// Sampler Preview's mode asked for (0 Original, 1 Advanced, 2 Layers): a sound with
+    /// a sample asks first ([`SamplingCall::SamplerAnswer`]).
+    SamplerMode(u8),
+    /// The mode change asked for: gone ahead with (`true`), or dropped.
+    SamplerAnswer(bool),
     LayerLevel(f64),
     SpreadLayers,
 }

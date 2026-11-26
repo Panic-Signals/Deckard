@@ -157,6 +157,14 @@ pub struct SamplingView {
     /// How many recordings have been taken, and the one focused.
     pub takes: usize,
     pub take: Option<usize>,
+    /// RECORD's LAYER was turned for the focused take, and APPLY hasn't put it there yet.
+    pub layer_pending: bool,
+    /// The focused sound's Sampler Preview mode (0 Original, 1 Advanced, 2 Layers); None:
+    /// it isn't one.
+    pub sampler: Option<u8>,
+    /// A mode asked for that waits for its confirmation (changing it loses the sound's
+    /// changes).
+    pub sampler_ask: Option<u8>,
     /// Each take's mini waveform: (min, max) columns.
     pub take_waves: Vec<std::sync::Arc<Vec<(f32, f32)>>>,
     /// A stem separation running.
