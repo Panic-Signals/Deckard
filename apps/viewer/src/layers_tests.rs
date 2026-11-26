@@ -982,7 +982,7 @@ fn edit_page_three_is_loop_in_every_mode() {
             let l = app.sampling_surface_view().sample.unwrap().layers[0].clone();
             let (a, b) = l.loop_points.expect("loops");
             assert!((a - 0.25).abs() < 0.001 && (b - 0.75).abs() < 0.001, "{a} {b}");
-            doc.borrow_mut().set("Loop", zt, "loop_active", mxprj::decode::Value::Bool(false)).unwrap();
+            doc.borrow_mut().set("Loop", zt, "loop_active", mxprj::decode::Value::Int(0)).unwrap();
             assert_eq!(app.sampling_surface_view().sample.unwrap().layers[0].loop_points, None);
         }
     }
