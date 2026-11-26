@@ -904,3 +904,86 @@ fn the_knob_always_asks() {
     answer(&mut app, true);
     assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Advanced, 2), "nothing lost");
 }
+
+/// A take just recorded on a sound with layers is on no layer, and is what EDIT works
+/// on: NORMALIZE makes the take louder (in the take list too) and leaves the layers,
+/// and the take put on a layer is the louder one.
+#[test]
+fn a_take_just_recorded_is_what_edit_works_on() {
+    use crate::layout::sampling::{EditOp, RecParam, RecordAct, SamplingAct};
+    let (dir, mut app) = three();
+    app.path = Some(dir.path().join("p.mxprj"));
+    app.sampling_open = true;
+    let frames = (0..4800).map(|i| [0.1 * (i as f32 * 0.05).sin(); 2]).collect();
+    let sample = deckard_engine::sample::Sample { rate: 48_000, frames };
+    app.finish_recording(crate::recorder::Finished::Take { sample, channels: 2, mode: 0, ticks: 960.0, focus: (0, 0) });
+    let take = app.recorder.view.takes[0].clone();
+    assert_eq!(app.shown_take(), Some((0, take.clone())), "the new take is shown");
+    app.update_sampling();
+    let peak = |app: &App| {
+        let v = &app.recorder.view;
+        v.take_waves[&v.takes[0]].iter().fold(0f32, |m, w| m.max(w.1))
+    };
+    assert!(peak(&app) < 0.11);
+    let before = names(&app);
+    app.sampling_act(SamplingAct::Edit(EditOp::Normalize));
+    assert_ne!(app.recorder.view.takes[0], take, "{}", app.status);
+    assert!(peak(&app) > 0.9, "the take's wave is the louder one: {}", peak(&app));
+    assert_eq!(names(&app), before, "the layers aren't touched");
+    // On a new layer: the louder file, and its picture.
+    record(&mut app, RecordAct::Set(RecParam::Layer, MAX_LAYERS as i64));
+    record(&mut app, RecordAct::ApplyLayer);
+    let edited = app.recorder.view.takes[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(names(&app).last(), Some(&edited), "{}", app.status);
+    app.update_sampling();
+    let v = app.sampling_surface_view();
+    let l = v.sample.as_ref().unwrap().layers.last().unwrap().clone();
+    assert!(l.detail.iter().fold(0f32, |m, w| m.max(w.1)) > 0.9, "the layer's picture is the louder one");
+}
+
+/// EDIT's third knob page is LOOP in every mode (the zone's or layer's loop), after
+/// PLAY RANGE and SELECTION RANGE; turning ACTIVE loops it.
+#[test]
+fn edit_page_three_is_loop_in_every_mode() {
+    for mode in SamplerMode::ALL {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_in(mode);
+        app.sampling_open = true;
+        let f = tone(dir.path(), "a.wav", 220.0);
+        if mode == SamplerMode::Layers {
+            app.layer_files(0, &[f]);
+        } else {
+            let doc = app.doc.clone().unwrap();
+            let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(f), set: Vec::new() };
+            doc.borrow_mut().set_zones(0, 0, &[spec], "Load").unwrap();
+        }
+        app.update_sampling();
+        let v = app.sampling_surface_view();
+        let pages: Vec<&str> = v.pages[1].iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(pages[..3], ["PLAY RANGE", "SELECTION RANGE", "LOOP"], "{mode:?}");
+        let knobs: Vec<(&str, &str)> = v.pages[1][2].knobs.iter().map(|k| (k.key.as_str(), k.name.as_str())).collect();
+        assert_eq!(
+            knobs,
+            [("Edit.Loop", "ACTIVE"), ("Edit.LoopStart", "START"), ("Edit.LoopEnd", "END"), ("Edit.XFade", "XFADE")],
+            "{mode:?}"
+        );
+        let p = app.sampling_pages().unwrap();
+        app.record_apply = p.apply;
+        app.sampling_knob("Edit.Loop", 1.0);
+        assert!(zones(&app)[0].loop_active, "{mode:?}: {}", app.status);
+        // The controller's view says where a layer loops (of its sample), while it does.
+        if mode == SamplerMode::Layers {
+            let doc = app.doc.clone().unwrap();
+            let zt = deckard_doc::Target::Zone(0, 0, 0);
+            for (field, v) in [("loop_range/low", 24_000), ("loop_range/high", 72_000)] {
+                doc.borrow_mut().set("Loop", zt.clone(), field, mxprj::decode::Value::Int(v)).unwrap();
+            }
+            app.update_sampling();
+            let l = app.sampling_surface_view().sample.unwrap().layers[0].clone();
+            let (a, b) = l.loop_points.expect("loops");
+            assert!((a - 0.25).abs() < 0.001 && (b - 0.75).abs() < 0.001, "{a} {b}");
+            doc.borrow_mut().set("Loop", zt, "loop_active", mxprj::decode::Value::Bool(false)).unwrap();
+            assert_eq!(app.sampling_surface_view().sample.unwrap().layers[0].loop_points, None);
+        }
+    }
+}

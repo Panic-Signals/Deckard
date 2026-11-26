@@ -792,6 +792,95 @@ fn knob_seven_picks_the_layer_and_eight_its_level() {
     }
 }
 
+/// On LAYERS each layer shown has its envelope drawn over its waveform (as the window
+/// has): a longer attack changes that layer's row and no other.
+#[test]
+fn a_layers_envelope_is_drawn_over_it() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let before = s.picture(&v);
+    let mut slow = layered(4, 3, 0);
+    slow.sampling.sample.as_mut().unwrap().layers[1].envelope = [2.0, 0.5, 0.4, 1.0];
+    let after = s.picture(&slow);
+    // (The four rows are 36 high from y 60, on the right display.)
+    let changed = |y0: usize| {
+        (y0..y0 + 36)
+            .flat_map(|y| (480..960).map(move |x| (x, y)))
+            .filter(|&(x, y)| before[y * crate::screen::WIDTH + x] != after[y * crate::screen::WIDTH + x])
+            .count()
+    };
+    assert!(changed(96) > 20, "layer 2's envelope moved: {}", changed(96));
+    assert_eq!((changed(60), changed(132)), (0, 0), "the others' didn't");
+}
+
+/// With the morph off, LAYERS' left display is the focused layer's envelope, large
+/// (the windows on the morph mean nothing then); with it on, the windows as ever.
+#[test]
+fn morph_off_shows_the_focused_layers_envelope_on_the_left() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 1));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let with = |on: bool, env: [f64; 4], focus: usize| {
+        let mut v = layered(4, 3, focus);
+        let smp = v.sampling.sample.as_mut().unwrap();
+        smp.morph.as_mut().unwrap().on = on;
+        smp.layers[1].envelope = env;
+        v
+    };
+    // (The left display's picture, between the bars and the knobs.)
+    let left = |s: &mut Surface, v: &View| -> Vec<[u8; 4]> {
+        let px = s.picture(v);
+        (60..204).flat_map(|y| px[y * crate::screen::WIDTH..y * crate::screen::WIDTH + 480].to_vec()).collect()
+    };
+    let (quick, slow) = ([0.005, 0.0, 1.0, 0.05], [2.0, 0.5, 0.4, 1.0]);
+    assert_ne!(left(&mut s, &with(false, quick, 1)), left(&mut s, &with(false, slow, 1)), "the focused layer's envelope");
+    assert_eq!(left(&mut s, &with(false, quick, 0)), left(&mut s, &with(false, slow, 0)), "not another layer's");
+    assert_eq!(left(&mut s, &with(true, quick, 1)), left(&mut s, &with(true, slow, 1)), "morph on: the windows");
+    let text = s.screen_text(&with(false, slow, 1));
+    assert!(text.iter().any(|t| t == "ENVELOPE 2") && !text.iter().any(|t| t == "MORPH OFF"), "{text:?}");
+}
+
+/// A layer that plays has its playhead on its own row's waveform (680 to 869 across),
+/// where it is in the sample; one that doesn't has none.
+#[test]
+fn a_playing_layer_has_its_playhead_on_its_row() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let before = s.picture(&v);
+    let mut playing = layered(4, 3, 0);
+    playing.sampling.sample.as_mut().unwrap().layers[2].head = Some(0.5);
+    let after = s.picture(&playing);
+    let changed: Vec<(usize, usize)> = (0..crate::screen::HEIGHT)
+        .flat_map(|y| (0..crate::screen::WIDTH).map(move |x| (x, y)))
+        .filter(|&(x, y)| before[y * crate::screen::WIDTH + x] != after[y * crate::screen::WIDTH + x])
+        .collect();
+    assert!(changed.len() >= 20, "a line down the row: {}", changed.len());
+    assert!(changed.iter().all(|&(x, y)| x == 680 + 94 && (132..168).contains(&y)), "layer 3's row, half way: {changed:?}");
+}
+
+/// A layer that loops has a line at each loop point: on its row (680 to 869 across) on
+/// the right display and, with the morph off and it focused, on the left display's
+/// large waveform (8 to 471 across).
+#[test]
+fn a_looping_layer_has_its_loop_points_on_both_displays() {
+    let (mut s, v) = (Surface::new(), layered(4, 3, 0));
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let columns = |s: &mut Surface, morph: bool| -> std::collections::BTreeSet<usize> {
+        let with = |looped: bool| {
+            let mut v = layered(4, 3, 1);
+            let smp = v.sampling.sample.as_mut().unwrap();
+            smp.morph.as_mut().unwrap().on = morph;
+            smp.layers[1].loop_points = looped.then_some((0.25, 0.75));
+            v
+        };
+        let (before, after) = (s.picture(&with(false)), s.picture(&with(true)));
+        (0..before.len()).filter(|&i| before[i] != after[i]).map(|i| i % crate::screen::WIDTH).collect()
+    };
+    let right = [680 + 47, 680 + 141];
+    assert_eq!(columns(&mut s, true).into_iter().collect::<Vec<_>>(), right, "morph on: its row only");
+    let left = [8 + 115, 8 + 347];
+    assert_eq!(columns(&mut s, false).into_iter().collect::<Vec<_>>(), [left[0], left[1], right[0], right[1]], "morph off: both");
+}
+
 /// LAYERS leaves the pads to the sounds.
 #[test]
 fn the_pads_still_play_on_layers() {

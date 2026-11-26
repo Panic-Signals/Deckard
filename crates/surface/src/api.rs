@@ -2253,6 +2253,10 @@ fn sampling(lua: &Lua, v: &crate::SamplingView) -> mlua::Result<Table> {
             lt.set("level", l.level.as_str())?;
             lt.set("window", lua.create_sequence_from(l.window)?)?;
             lt.set("envelope", lua.create_sequence_from(l.envelope)?)?;
+            lt.set("head", l.head)?;
+            if let Some((a, b)) = l.loop_points {
+                lt.set("loop", lua.create_sequence_from([a, b])?)?;
+            }
             layers.set(i + 1, lt)?;
         }
         st.set("layers", layers)?;

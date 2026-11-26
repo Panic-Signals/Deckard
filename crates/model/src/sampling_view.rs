@@ -58,6 +58,11 @@ pub struct LayerView {
     pub window: [f64; 4],
     pub envelope: [f64; 4],
     pub detail: Vec<(f32, f32)>,
+    /// Where it plays now, of its sample's length (0..1); None while it doesn't.
+    pub head: Option<f64>,
+    /// Its loop's start and end, of its sample's length (0..1); None while it doesn't
+    /// loop.
+    pub loop_points: Option<(f64, f64)>,
 }
 
 /// The morph of a sound's layers: whether it runs, where it is now, and its shape

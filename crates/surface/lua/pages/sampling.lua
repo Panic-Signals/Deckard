@@ -260,6 +260,9 @@ local LAYER_COLOURS = {
   { 176, 124, 240 }, { 76, 201, 214 }, { 230, 210, 74 }, { 240, 116, 82 },
 }
 
+-- A layer's loop points.
+local LOOP_COLOUR = { 255, 200, 60 }
+
 -- The focused sound's layers (none yet, or not a sound in Layers).
 local function layers_of(v)
   return v.sample and v.sample.layers or {}
@@ -856,6 +859,41 @@ local function draw_layers(screen, theme, s)
   local x0, y0, w, h = 8, 68, 464, 128
   screen:rect(0, 60, 480, 144, { 24, 24, 24 })
   local morph = s.morph or {}
+  local focused = s.layers[s.layer]
+  if not morph.on and focused then
+    -- The morph off: the windows mean nothing, so the focused layer's envelope, large,
+    -- over its waveform.
+    local c = LAYER_COLOURS[s.layer] or { 200, 200, 200 }
+    local dim = widgets.blend(c, { 24, 24, 24 }, 0.35)
+    local peaks = deckard.peaks("layer" .. s.layer)
+    local cols = #peaks // 2
+    local mid, half = y0 + 14 + (h - 14) / 2, (h - 14) / 2
+    for col = 0, w - 1 do
+      local j = math.min(math.max(cols - 1, 0), col * cols // w) * 2
+      local lo, hi = peaks[j + 1], peaks[j + 2]
+      if lo then
+        local top = math.floor(mid - hi * half)
+        local bottom = math.ceil(mid - lo * half)
+        screen:rect(x0 + col, top, 1, math.max(1, bottom - top), dim)
+      end
+    end
+    local e = focused.envelope or {}
+    local at, dc, su, rl = e[1] or 0, e[2] or 0, e[3] or 1, e[4] or 0
+    local hold = math.max(at + dc + rl, 0.25)
+    local total = at + dc + hold + rl
+    local function ex(t) return x0 + t / total * (w - 1) end
+    local function ey(val) return y0 + h - val * (h - 16) end
+    local ec = theme.colors.text
+    screen:line(ex(0), ey(0), ex(at), ey(1), 2, ec)
+    screen:line(ex(at), ey(1), ex(at + dc), ey(su), 2, ec)
+    screen:line(ex(at + dc), ey(su), ex(at + dc + hold), ey(su), 2, ec)
+    screen:line(ex(at + dc + hold), ey(su), ex(total), ey(0), 2, ec)
+    for _, at in ipairs(focused.loop or {}) do
+      screen:rect(math.floor(x0 + at * (w - 1)), y0 + 14, 1, h - 14, LOOP_COLOUR)
+    end
+    if focused.head then screen:rect(math.floor(x0 + focused.head * (w - 1)), y0 + 14, 1, h - 14, ec) end
+    screen:label(x0, y0 - 6, w, 14, "ENVELOPE " .. s.layer, { size = 11, color = "weak" }, "left", "top")
+  else
   local shifts = morph.round and { -1, 0, 1 } or { 0 }
   -- A line of the window between morph positions `a` and `b`, kept inside the strip.
   local function seg(a, ya, b, yb, width, c)
@@ -882,6 +920,7 @@ local function draw_layers(screen, theme, s)
   screen:rect(px, y0 - 4, 2, h + 8, { edge[1], edge[2], edge[3], morph.on and 255 or 90 })
   if not morph.on then
     screen:label(x0, y0, w, 14, "MORPH OFF", { size = 11, color = "weak" }, "left", "top")
+  end
   end
 
   local bank = layer_bank(s)
@@ -911,6 +950,27 @@ local function draw_layers(screen, theme, s)
           local bottom = math.ceil(y + 17 - lo * 15)
           screen:rect(wx + col, top, 1, math.max(1, bottom - top), wc)
         end
+      end
+      -- Where it loops: a line at each end.
+      for _, at in ipairs(l.loop or {}) do
+        screen:rect(math.floor(wx + at * (ww - 1)), y + 2, 1, 31, LOOP_COLOUR)
+      end
+      -- Where it plays now.
+      if l.head then screen:rect(math.floor(wx + l.head * (ww - 1)), y + 2, 1, 31, theme.colors.text) end
+      -- Its envelope over it (as the window's): attack, decay to the sustain level,
+      -- held, release.
+      local e = l.envelope
+      if e then
+        local at, dc, su, rl = e[1] or 0, e[2] or 0, e[3] or 1, e[4] or 0
+        local hold = math.max(at + dc + rl, 0.25)
+        local total = at + dc + hold + rl
+        local ec = on and { 255, 255, 255, 220 } or { 255, 255, 255, 110 }
+        local function ex(t) return wx + t / total * (ww - 1) end
+        local function ey(val) return y + 32 - val * 29 end
+        screen:line(ex(0), ey(0), ex(at), ey(1), 1, ec)
+        screen:line(ex(at), ey(1), ex(at + dc), ey(su), 1, ec)
+        screen:line(ex(at + dc), ey(su), ex(at + dc + hold), ey(su), 1, ec)
+        screen:line(ex(at + dc + hold), ey(su), ex(total), ey(0), 1, ec)
       end
       screen:label(876, y, 76, 35, l.level, st, "right", "center")
     else

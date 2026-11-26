@@ -388,6 +388,19 @@ pub fn sample_view(st: &SamplingState, p: &Project, (g, s, zi): (usize, usize, u
                 window: l.window,
                 envelope: [l.attack, l.decay, l.sustain, l.release],
                 detail,
+                loop_points: st.layers.get(k).and_then(Option::as_ref).filter(|_| lz.loop_active && lz.loop_range.1 > lz.loop_range.0).map(
+                    |view| {
+                        let n = view.sample.frames.len().max(1) as f64;
+                        ((lz.loop_range.0 as f64 / n).clamp(0.0, 1.0), (lz.loop_range.1 as f64 / n).clamp(0.0, 1.0))
+                    },
+                ),
+                head: st
+                    .layer_heads
+                    .get(k)
+                    .copied()
+                    .flatten()
+                    .zip(st.layers.get(k).and_then(Option::as_ref))
+                    .map(|(at, view)| (at as f64 / view.sample.frames.len().max(1) as f64).clamp(0.0, 1.0)),
             })
         })
         .collect();
@@ -487,6 +500,29 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
     if take {
         return out;
     }
+
+    // EDIT's third page, in every mode: the zone's (a layer's) loop. (ZONE has it too.)
+    let (la, lb) = z.loop_range;
+    let loop_page = |prefix: &str| {
+        vec![
+            (on_off(&format!("{prefix}.Loop"), "ACTIVE", z.loop_active), Apply::Zone("loop_active")),
+            frames(&format!("{prefix}.LoopStart"), "START", la, (0.0, last), Apply::Zone("loop_range/low")),
+            frames(&format!("{prefix}.LoopEnd"), "END", lb, (0.0, last), Apply::Zone("loop_range/high")),
+            (
+                knob(
+                    &format!("{prefix}.XFade"),
+                    "XFADE",
+                    z.x_fade.max(0).to_string(),
+                    z.x_fade as f64,
+                    (0.0, (lb - la).max(0) as f64),
+                    1.0,
+                    frame_turn,
+                ),
+                Apply::Zone("x_fade"),
+            ),
+        ]
+    };
+    page(&mut out, 1, "LOOP", loop_page("Edit"));
 
     // A New Sampler zone: how it plays, its tempo and its pitch (roadmap 1d; the
     // display buttons have ×2, ½ and TO PROJECT under SHIFT).
@@ -617,22 +653,7 @@ pub fn pages(record: Knobs, st: &SamplingState, p: &Project, (g, s, zi): (usize,
             frames("Zone.End", "END", hi, (end_min, last), Apply::Zone("play_range/high")),
         ],
     );
-    let (la, lb) = z.loop_range;
-    let xfade_max = (lb - la).max(0) as f64;
-    page(
-        &mut out,
-        3,
-        "LOOP",
-        vec![
-            (on_off("Zone.Loop", "ACTIVE", z.loop_active), Apply::Zone("loop_active")),
-            frames("Zone.LoopStart", "START", la, (0.0, last), Apply::Zone("loop_range/low")),
-            frames("Zone.LoopEnd", "END", lb, (0.0, last), Apply::Zone("loop_range/high")),
-            (
-                knob("Zone.XFade", "XFADE", z.x_fade.max(0).to_string(), z.x_fade as f64, (0.0, xfade_max), 1.0, frame_turn),
-                Apply::Zone("x_fade"),
-            ),
-        ],
-    );
+    page(&mut out, 3, "LOOP", loop_page("Zone"));
     let gain_db = 20.0 * (2.3948107 * z.gain.powi(5) + 0.767467 * z.gain * z.gain).max(1e-9).log10();
     let note = |k: i64| crate::recorder::note_name(k.clamp(0, 127) as u8);
     page(

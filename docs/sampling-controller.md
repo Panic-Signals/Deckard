@@ -142,6 +142,15 @@ every timer tick and redraws the buttons when it changes.
 - DECKARD's choice: in Layers, display button 3 is LAYERS where SLICE would be (a
   sound in Layers has no slices), so the tabs read RECORD, EDIT, LAYERS, ZONE, in the
   window too. A take on no layer has RECORD, EDIT and LAYERS.
+- DECKARD's choice: on LAYERS each layer's row (the right display) has its envelope
+  over its waveform, a line where it plays and, while it loops, a line at each loop
+  point. With the morph off the left display is the focused layer's waveform and
+  envelope, large ("ENVELOPE n"), with the same lines, in place of the windows.
+- DECKARD's choice: EDIT's third knob page is LOOP (ACTIVE, START, END, XFADE) in every
+  mode, the same settings as ZONE's LOOP page; in Layers it is the focused layer's.
+- DECKARD's choice: in Layers a take just recorded onto a sound that has layers is on
+  no layer, and is what EDIT shows and works on until it has one (as one picked in the
+  list).
 - **Takes on pads off** (default): pads play the sounds as usual (sound pad mode), and the
   pad LEDs are the normal sound LEDs.
 - **Takes on pads on**: pad n focuses take `n + 16·bank`, loads it into the sound and

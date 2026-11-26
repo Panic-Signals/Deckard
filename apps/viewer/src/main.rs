@@ -10655,6 +10655,15 @@ impl App {
                         self.put_audio_take(g, s, &path, sample.frames.len(), sample.rate, ticks, 0, true, "Record");
                     } else {
                         self.take_into(g, s, &path, sample.frames.len());
+                        // In Layers, a take that waits for its layer is what EDIT works
+                        // on meanwhile (as one picked in the list).
+                        let waits = self.doc.as_ref().is_some_and(|d| {
+                            let d = d.borrow();
+                            layers::can_layer(d.project(), g, s) && layers::take_layer(d.project(), g, s, &path).is_none()
+                        });
+                        if waits && (g, s) == (self.group, self.sound) {
+                            self.take_shown = Some((g, s));
+                        }
                     }
                 }
                 if let Some(doc) = &self.doc
@@ -19631,9 +19640,8 @@ mod tests {
         h.run_steps(3);
         h.state_mut().convert_instrument(true);
         // (Converted, it is in Original, which has no MUNGE: Advanced has.)
-        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Sampler(
-            deckard_model::new_sampler::SamplerMode::Advanced,
-        )));
+        h.state_mut()
+            .arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Sampler(deckard_model::new_sampler::SamplerMode::Advanced)));
         h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(1)));
         h.run_steps(3);
         let tool = |h: &Harness<'static, App>, id: &str| -> egui::Rect {

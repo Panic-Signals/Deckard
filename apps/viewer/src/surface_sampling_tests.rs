@@ -38,7 +38,7 @@ fn the_sampling_page_shows_the_focused_sample() {
     let v = app.surface_view().sampling;
     let s = v.sample.expect("the tone is shown");
     assert_eq!((s.name.as_str(), s.frames, s.overview.len()), ("Tone.wav", 44_100, 480));
-    assert_eq!(v.pages[1].iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["PLAY RANGE", "SELECTION RANGE"]);
+    assert_eq!(v.pages[1].iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["PLAY RANGE", "SELECTION RANGE", "LOOP"]);
     assert_eq!(v.pages[3].len(), 5, "ZONE's five pages");
     assert!(!v.pages[0].is_empty(), "RECORD's knobs");
     app.surface_act(A::Sampling(false));

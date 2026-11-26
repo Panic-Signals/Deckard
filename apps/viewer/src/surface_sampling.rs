@@ -15,7 +15,7 @@ fn mode_number(m: deckard_model::new_sampler::SamplerMode) -> u8 {
 
 impl App {
     /// The knob pages of every tab, with what each knob sets.
-    fn sampling_pages(&self) -> Option<sampling_hw::Pages> {
+    pub(crate) fn sampling_pages(&self) -> Option<sampling_hw::Pages> {
         let d = self.doc.as_ref()?.borrow();
         let asked = self.sampler_ask.map(|a| a.1);
         let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), true, asked);
