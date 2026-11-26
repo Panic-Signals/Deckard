@@ -2327,6 +2327,8 @@ pub struct Engine {
     mode: Mode,
     /// What to play when the current pass ends (a scene launched while playing).
     queued: Option<(Mode, Timeline)>,
+    /// The arrangement loop range in ticks; an empty range means the whole timeline.
+    loop_range: (i64, i64),
     /// A jump within the timeline: at tick `.0`, continue from tick `.1` (a section
     /// picked while the song plays).
     jump: Option<(i64, i64)>,
@@ -3624,6 +3626,7 @@ impl Engine {
             timeline,
             mode,
             queued: None,
+            loop_range: (0, 0),
             jump: None,
             samples,
             sounds,
@@ -4540,6 +4543,16 @@ impl Engine {
         self.next = self.timeline.events.iter().position(|e| e.tick >= to).unwrap_or(self.timeline.events.len());
         self.jump = None;
         self.recue();
+    }
+
+    pub fn set_loop_range(&mut self, start: i64, end: i64) {
+        let start = start.max(0);
+        self.loop_range = (start, end.max(start));
+    }
+
+    fn loop_range(&self) -> (i64, i64) {
+        let end = if self.loop_range.1 > self.loop_range.0 { self.loop_range.1 } else { self.timeline.length };
+        (self.loop_range.0.min(end), end.min(self.timeline.length))
     }
 
     /// The Audio plug-ins' loops as they'd be where the song now is (the last cue before
@@ -6127,12 +6140,14 @@ impl Engine {
         self.midi_inputs_ahead(frames);
         self.follow_scene_tempo();
         let mut tps = 1.0 / self.samples_per_tick();
-        let mut end = self.frame_of(self.timeline.length);
+        let (loop_start, loop_end) = self.loop_range();
+        let start_frame = self.frame_of(loop_start);
+        let mut end = self.frame_of(loop_end);
         let mut done = 0;
         while done < frames {
             if self.follow_scene_tempo() {
                 tps = 1.0 / self.samples_per_tick();
-                end = self.frame_of(self.timeline.length);
+                end = self.frame_of(self.loop_range().1);
             }
             self.ahead_returns();
             self.fire_note_offs();
@@ -6166,7 +6181,7 @@ impl Engine {
                     }
                 }
                 let switch_now = switch.map(|at| self.frame_of(at)).filter(|&f| self.frame >= f);
-                if switch_now.is_some() || (self.next >= self.timeline.events.len() && self.frame >= end) {
+                if switch_now.is_some() || (self.frame >= end && (self.looping || self.next >= self.timeline.events.len())) {
                     if let Some((mode, timeline)) = self.queued.take() {
                         self.frame -= switch_now.unwrap_or(end).min(self.frame);
                         self.next = 0;
@@ -6174,13 +6189,14 @@ impl Engine {
                         self.mode = mode;
                         self.timeline = timeline;
                         self.recue();
-                        end = self.frame_of(self.timeline.length);
+                        end = self.frame_of(self.loop_range().1);
                         continue;
                     }
                     if self.looping && end > 0 {
-                        self.frame -= end;
-                        self.next = 0;
+                        self.frame = start_frame + self.frame.saturating_sub(end);
+                        self.next = self.timeline.events.iter().position(|e| e.tick >= loop_start).unwrap_or(self.timeline.events.len());
                         self.pass += 1;
+                        self.recue();
                         continue;
                     }
                     self.sequencing = false;

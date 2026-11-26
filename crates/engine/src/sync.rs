@@ -142,8 +142,11 @@ impl Engine {
         self.set_tempo(f.tempo);
         let spt = self.samples_per_tick();
         let q = self.quantum() * PPQ as f64;
-        let len = self.timeline.length as f64;
-        let wrap = |t: f64| if self.looping && len > 0.0 { t.rem_euclid(len) } else { t.max(0.0) };
+        let (loop_start, loop_end) = self.loop_range();
+        let len = (loop_end - loop_start) as f64;
+        let wrap = |t: f64| {
+            if self.looping && len > 0.0 { loop_start as f64 + (t - loop_start as f64).rem_euclid(len) } else { t.max(0.0) }
+        };
         let clock = f.beat * PPQ as f64;
         if std::mem::take(&mut self.sync.pending_start) {
             if f.absolute {

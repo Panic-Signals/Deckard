@@ -1029,6 +1029,8 @@ pub struct App {
     /// The song panel shows the Song view (sections) instead of the Ideas view
     /// (scenes), as Maschine's IDEAS/SONG switch; PLAY follows it.
     song_view: bool,
+    /// The Song-mode loop range in ticks; this is transport state, not project data.
+    song_loop: Option<(i64, i64)>,
     /// The pattern editor shows the focused sound as a piano roll.
     piano_roll: bool,
     /// The scale notes are written in: (root note, MIDI 60 = C3; bank; scale in it), as
@@ -1769,6 +1771,8 @@ impl App {
         self.zone_of = None;
         self.lock_morph = None;
         self.lock_active = false;
+        self.looping = false;
+        self.song_loop = None;
         self.lock_plugins = Default::default();
         modulation::register();
         self.stop();
@@ -4200,9 +4204,13 @@ impl App {
 
     /// Play `mode`; the arrangement from the focused section.
     fn play(&mut self, mode: Mode) {
-        let start = match (mode, self.section) {
-            (Mode::Arrangement, Some(i)) => self.doc.as_ref().map_or(0, |d| d.borrow().project().section_start(i)),
-            _ => 0,
+        let start = if mode == Mode::Arrangement && self.looping {
+            self.song_loop.map_or(0, |(start, _)| start)
+        } else {
+            match (mode, self.section) {
+                (Mode::Arrangement, Some(i)) => self.doc.as_ref().map_or(0, |d| d.borrow().project().section_start(i)),
+                _ => 0,
+            }
         };
         self.play_from(mode, start);
     }
@@ -4233,6 +4241,11 @@ impl App {
             engine.sync_start_within(late);
         }
         engine.looping = looping;
+        if mode == Mode::Arrangement
+            && let Some((start, end)) = self.song_loop
+        {
+            engine.set_loop_range(start, end);
+        }
         engine.metronome = self.metronome;
         if start > 0 {
             engine.seek(start);
@@ -4304,8 +4317,22 @@ impl App {
     /// Loop on or off, for what plays now too.
     fn set_looping(&mut self, on: bool) {
         self.looping = on;
+        if on && self.song_view {
+            if let Some(doc) = &self.doc {
+                self.song_loop = Some((0, doc.borrow().project().arrangement_length().max(0)));
+            }
+        }
+        self.store_screen();
+        if let Some(doc) = &self.doc {
+            doc.borrow_mut().mark_unsaved();
+        }
         if let (Some(mode), Some(Ok(out))) = (self.playing, &self.output) {
             out.set_looping(self.loops(mode));
+            if mode == Mode::Arrangement
+                && let Some((start, end)) = self.song_loop
+            {
+                out.set_loop_range(start, end);
+            }
         }
         if let Some(Ok(c)) = &mut self.controller {
             c.set_looping(on);
@@ -5138,6 +5165,19 @@ impl App {
         self.parked = Some(Playhead { mode, queued: None, position: to as f64, played: to as f64 });
         self.placed_head = true;
         self.sync_transport();
+    }
+
+    pub(crate) fn set_song_loop(&mut self, start: i64, end: i64) {
+        let Some(doc) = self.doc.clone() else { return };
+        let length = doc.borrow().project().arrangement_length().max(0);
+        let start = start.clamp(0, length);
+        let end = end.clamp(start, length);
+        self.song_loop = Some((start, end));
+        self.store_screen();
+        doc.borrow_mut().mark_unsaved();
+        if let (Some(Mode::Arrangement), Some(Ok(out))) = (self.playing, &self.output) {
+            out.set_loop_range(start, end);
+        }
     }
 
     /// A knob moved while writing modulation (docs/superpowers/plans/
@@ -12424,9 +12464,17 @@ impl App {
             layout::ChainTab::Group => "group",
             layout::ChainTab::Sound => "sound",
         };
+        let (loop_start, loop_end) = self.song_loop.unwrap_or((0, 0));
         let mut t = format!(
-            "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\n",
-            self.song_view as u8, self.mixer as u8, self.mixer_sounds as u8, self.piano_roll as u8, self.prop_set
+            "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\nsong_loop {} {} {}\n",
+            self.song_view as u8,
+            self.mixer as u8,
+            self.mixer_sounds as u8,
+            self.piano_roll as u8,
+            self.prop_set,
+            self.looping as u8,
+            loop_start,
+            loop_end,
         );
         let mut chains: Vec<_> = self.chain_pages.iter().collect();
         chains.sort_by_key(|(c, _)| format!("{c:?}"));
@@ -12453,6 +12501,15 @@ impl App {
             let flag = |i: usize| w.get(i).map(|v| *v == "1");
             match w.first().copied() {
                 Some("song") => self.song_view = flag(1).unwrap_or(self.song_view),
+                Some("song_loop") => {
+                    self.looping = flag(1).unwrap_or(false);
+                    if let (Some(start), Some(end)) =
+                        (w.get(2).and_then(|v| v.parse::<i64>().ok()), w.get(3).and_then(|v| v.parse::<i64>().ok()))
+                        && end > start
+                    {
+                        self.song_loop = Some((start.max(0), end));
+                    }
+                }
                 Some("mixer") => self.mixer = flag(1).unwrap_or(self.mixer),
                 Some("mixer_sounds") => self.mixer_sounds = flag(1).unwrap_or(self.mixer_sounds),
                 Some("piano_roll") => self.piano_roll = flag(1).unwrap_or(self.piano_roll),
