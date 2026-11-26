@@ -935,6 +935,8 @@ fn a_take_just_recorded_is_what_edit_works_on() {
     record(&mut app, RecordAct::ApplyLayer);
     let edited = app.recorder.view.takes[0].file_name().unwrap().to_string_lossy().into_owned();
     assert_eq!(names(&app).last(), Some(&edited), "{}", app.status);
+    // (The layers' pictures are loaded while LAYERS shows.)
+    app.sampling.tab = 4;
     app.update_sampling();
     let v = app.sampling_surface_view();
     let l = v.sample.as_ref().unwrap().layers.last().unwrap().clone();
@@ -978,6 +980,8 @@ fn edit_page_three_is_loop_in_every_mode() {
             for (field, v) in [("loop_range/low", 24_000), ("loop_range/high", 72_000)] {
                 doc.borrow_mut().set("Loop", zt.clone(), field, mxprj::decode::Value::Int(v)).unwrap();
             }
+            // (The layers' pictures, and so their lengths, are loaded while LAYERS shows.)
+            app.sampling.tab = 4;
             app.update_sampling();
             let l = app.sampling_surface_view().sample.unwrap().layers[0].clone();
             let (a, b) = l.loop_points.expect("loops");
