@@ -24,6 +24,7 @@ mod leds;
 mod names;
 mod screen;
 mod sources;
+pub mod theme_file;
 pub mod widget;
 
 pub use screen::{FONTS, PICTURE_ALPHA, Picture};
@@ -1354,6 +1355,36 @@ impl Surface {
         }
     }
 
+    /// Load the current theme again, even when its name did not change. Saving over
+    /// the theme that is already showing would otherwise leave the old colours up.
+    pub fn reload_theme(&mut self) -> bool {
+        self.load()
+    }
+
+    /// A named colour of the theme that is showing, if that theme set one.
+    pub fn rgb(&self, name: &str) -> Option<[u8; 3]> {
+        self.run.as_ref()?.lua.app_data_ref::<screen::ThemeCache>()?.rgb(name)
+    }
+
+    /// Paint `look` onto the theme that is showing, and drop the last picture so the
+    /// screens take the new colours on the next draw. Nothing is written to disk.
+    pub fn apply_look(&mut self, look: theme_file::Look) -> bool {
+        let Some(run) = &self.run else { return false };
+        let lua = &run.lua;
+        let Ok(theme) = lua.named_registry_value::<Table>("deckard.theme") else { return false };
+        let Ok(colors) = theme.get::<Table>("colors") else { return false };
+        for (name, rgb) in theme_file::painted(&look) {
+            let Ok(t) = rgb_table(lua, rgb) else { return false };
+            if colors.set(name, t).is_err() {
+                return false;
+            }
+        }
+        let Ok(cache) = screen::ThemeCache::from_theme(&theme) else { return false };
+        lua.set_app_data(cache);
+        self.last_ops = None;
+        true
+    }
+
     /// The LCD's colour. Reloads when that theme is the one showing, so the screens
     /// pick the pair up.
     pub fn set_lcd(&mut self, mode: &str) {
@@ -1876,7 +1907,7 @@ impl Surface {
                     colors.set(k, run.lua.create_sequence_from(c)?)?;
                 }
             }
-            let (field, ink, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
+            let (field, text, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
                 Some(cache) => (cache.background, cache.text, cache.accent),
                 None => {
                     let colors: Table = theme.get("colors")?;
@@ -1887,6 +1918,11 @@ impl Surface {
                     )
                 }
             };
+            // Plug-in pictures take the accent on their orange knobs and sit on the
+            // field. Their light pixels stay white or black with that field: the Text
+            // colour is for labels, not for the picture. The LCD theme is the exception,
+            // because its one ink is the only colour that reads on its paper.
+            let ink = plug_picture_ink(&self.theme, field, text);
             let mut pic = screen::Picture::new(field);
             pic.restyle_plugs = true;
             pic.plug_field = field;
@@ -1972,6 +2008,15 @@ fn merge(lua: &Lua, base: &Table, over: &Table, deep: bool) -> mlua::Result<Valu
         out.set(k, v)?;
     }
     Ok(Value::Table(out))
+}
+
+/// The light parts of a plug-in picture. Not the theme's text colour.
+pub(crate) fn plug_picture_ink(theme: &str, field: [u8; 3], text: [u8; 3]) -> [u8; 3] {
+    if theme == "lcd" {
+        return text;
+    }
+    let light = u16::from(field[0]) * 3 + u16::from(field[1]) * 6 + u16::from(field[2]);
+    if light > 1400 { [0, 0, 0] } else { [255, 255, 255] }
 }
 
 /// `{r, g, b}` as a Lua array (1-based), which `themes/lcd.lua` mixes.

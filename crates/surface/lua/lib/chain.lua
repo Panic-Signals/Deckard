@@ -26,8 +26,16 @@ end
 
 -- A hosted plug-in's picture, as DECKARD has none of its own: a synthesizer for an
 -- instrument, an effect pedal for an effect.
+-- White on a dark field, black on a light one. Not the theme's text colour: that
+-- is for labels, and a plug-in's picture should not follow it.
+local function picture_ink(theme)
+  local c = theme.colors.background or { 0, 0, 0 }
+  local light = c[1] * 3 + c[2] * 6 + c[3]
+  if light > 1400 then return { 0, 0, 0 } else return { 255, 255, 255 } end
+end
+
 local function generic(screen, theme, x, y, w, h, instrument)
-  local body, edge, knob = "panel", "button", "text"
+  local body, edge, knob = "panel", "button", picture_ink(theme)
   if instrument then
     -- A synth: a panel of knobs over a keyboard.
     local sw = math.min(w, math.floor(h * 3.2))
@@ -42,7 +50,7 @@ local function generic(screen, theme, x, y, w, h, instrument)
     local ky, kh = y + math.floor(h * 0.45), h - math.floor(h * 0.45) - 3
     local keys = math.max(7, sw // 9)
     local kw = (sw - 6) / keys
-    screen:rect(sx + 3, ky, sw - 6, kh, "text")
+    screen:rect(sx + 3, ky, sw - 6, kh, knob)
     for k = 1, keys - 1 do
       screen:line(sx + 3 + k * kw, ky, sx + 3 + k * kw, ky + kh, 1, "button")
       if k % 7 ~= 3 and k % 7 ~= 0 then

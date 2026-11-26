@@ -656,7 +656,7 @@ fn an_edit_of_the_same_size_reloads() {
 #[test]
 fn themes_switch() {
     let (mut s, v) = (Surface::new(), view());
-    assert_eq!(s.themes(), ["deep", "lcd", "maschine", "palenight", "palenight_blue_green", "solarized_dark"]);
+    assert_eq!(s.themes(), shipped_themes());
     assert_eq!(s.theme(), "maschine");
     let (_, maschine) = s.screens(&v).unwrap();
     s.set_theme("solarized_dark");
@@ -686,7 +686,60 @@ fn a_users_theme_is_listed() {
     std::fs::create_dir_all(dir.join("themes")).unwrap();
     std::fs::write(dir.join("themes/mine.lua"), crate::SHIPPED.iter().find(|(p, _)| *p == "themes/maschine.lua").unwrap().1).unwrap();
     let s = Surface::with_user_dir(Some(dir.clone()));
-    assert_eq!(s.themes(), ["deep", "lcd", "maschine", "mine", "palenight", "palenight_blue_green", "solarized_dark"]);
+    let mut names = shipped_themes();
+    names.push("mine".into());
+    names.sort();
+    assert_eq!(s.themes(), names);
+}
+
+/// The hand-written themes plus the palettes the editor ships, in the order the
+/// combo lists them.
+fn shipped_themes() -> Vec<String> {
+    let mut names =
+        vec!["deep".into(), "lcd".into(), "maschine".into(), "palenight".into(), "palenight_blue_green".into(), "solarized_dark".into()];
+    names.extend(crate::theme_file::stock().iter().map(|t| t.id.to_string()));
+    names.sort();
+    names
+}
+
+#[test]
+fn a_plug_in_picture_does_not_take_the_text_colour() {
+    assert_eq!(crate::plug_picture_ink("nord", [10, 12, 16], [255, 0, 0]), [255, 255, 255]);
+    assert_eq!(crate::plug_picture_ink("nord", [230, 230, 230], [255, 0, 0]), [0, 0, 0]);
+    assert_eq!(crate::plug_picture_ink("lcd", [240, 220, 40], [20, 20, 20]), [20, 20, 20]);
+}
+
+#[test]
+fn a_stock_theme_loads() {
+    let (mut s, v) = (Surface::new(), view());
+    s.set_theme("nord");
+    assert_eq!((s.theme(), s.error()), ("nord", None));
+    assert_eq!(s.draw_picture(&v).background, [46, 52, 64]);
+}
+
+#[test]
+fn a_look_recolours_the_screens_before_it_is_saved() {
+    let (mut s, v) = (Surface::new(), view());
+    let look = crate::theme_file::parse(&crate::theme_file::lua(
+        "Try",
+        &crate::theme_file::Look {
+            background: [10, 20, 30],
+            text: [240, 240, 240],
+            weak: [120, 130, 140],
+            accent: [20, 200, 80],
+            record: [220, 40, 40],
+            on_colour: [10, 20, 30],
+            button: [40, 50, 60],
+            button_text: [240, 240, 240],
+            selected: [20, 200, 80],
+            selected_text: [10, 20, 30],
+        },
+    ))
+    .unwrap();
+    assert!(s.apply_look(look));
+    let picture = s.draw_picture(&v);
+    assert_eq!(picture.background, [10, 20, 30]);
+    assert_eq!(s.rgb("accent"), Some([20, 200, 80]));
 }
 
 #[test]

@@ -116,6 +116,13 @@ pub struct ThemeCache {
 }
 
 impl ThemeCache {
+    /// One named colour, as the screens are painting it.
+    pub(crate) fn rgb(&self, name: &str) -> Option<[u8; 3]> {
+        self.colors.get(name).map(|p| p.rgb)
+    }
+}
+
+impl ThemeCache {
     pub fn from_theme(theme: &Table) -> mlua::Result<ThemeCache> {
         let mut colors = HashMap::new();
         if let Some(ct) = theme.get::<Option<Table>>("colors")? {

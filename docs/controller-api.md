@@ -408,7 +408,16 @@ A theme, `themes/<name>.lua`, is the stylesheet every page draws with. It holds:
 
 Because pages draw only with these names, changing a theme restyles every page. To make
 your own theme, copy one into `themes/` under a new name; it then shows in
-**Preferences ▸ Hardware ▸ Controller theme**.
+**Preferences ▸ Hardware ▸ Hardware theme**.
+
+**Preferences ▸ Hardware** lists the desktop theme, then the hardware theme. The
+editor under them has a Desktop tab (the window's background and text) and a Hardware
+tab (the Maschine's background, text, muted, accent, handles, buttons). The two do not
+share colours. **Save theme** on the Hardware tab writes `themes/<name>.lua` in the
+controller folder. **Export** saves that file to send to someone; **Import** loads a
+theme file you were sent. **Remove my copy** deletes only your file, so a theme that
+came with DECKARD comes back. A file you wrote by hand is left as it is until you save
+over that name.
 
 ## Plug-in mappings
 
