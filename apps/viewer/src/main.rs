@@ -21485,6 +21485,46 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert_eq!(project_of(&h).scenes[scene].name, "Intro");
     }
 
+    #[test]
+    fn pattern_loop_tail_is_drawn_at_a_shifted_pattern_start() {
+        let mut h = blank_harness(true);
+        a_pattern(&mut h);
+        let start = PPQ / 2;
+        let length = 4 * PPQ;
+        let tail = PPQ / 2;
+        let note = Note {
+            position: start + length - PPQ,
+            length: PPQ + tail,
+            sound: 0,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+            ratchet: Default::default(),
+            expr: None,
+        };
+        {
+            let mut doc = h.state().doc.as_ref().unwrap().borrow_mut();
+            doc.add_note(0, 0, note).unwrap();
+            doc.set_pattern_span(0, 0, start, length).unwrap();
+        }
+        for piano in [false, true] {
+            h.state_mut().piano_roll = piano;
+            h.run_steps(2);
+            let (grid, (shown_from, scale)): (egui::Rect, (f64, f32)) = h
+                .ctx
+                .data(|d| (d.get_temp(egui::Id::new("deckard-grid")).unwrap(), d.get_temp(egui::Id::new("deckard-grid-time")).unwrap()));
+            let x = |tick: i64| grid.left() + ((tick as f64 - shown_from) as f32) * scale;
+            let visible = h.output().shapes.iter().any(|s| {
+                matches!(&s.shape, egui::Shape::Rect(r) if r.fill.a() == 68
+                    && (r.rect.left() - x(start)).abs() < 0.01
+                    && (r.rect.right() - (x(start + tail) - 2.0)).abs() < 0.01
+                    && r.rect.intersects(grid))
+            });
+            assert!(visible, "continuation visible, piano roll = {piano}");
+            assert_eq!(notes_of(&h), [note]);
+        }
+    }
+
     /// Piano roll: the sound list stays (clicking a sound shows its notes), the note
     /// area has a keyboard and pitch rows, and drawing adds notes at the row's pitch.
     #[test]

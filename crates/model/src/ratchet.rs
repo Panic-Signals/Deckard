@@ -66,6 +66,21 @@ impl Ratchet {
         self.repeats <= 1
     }
 
+    /// How many ticks a note carries into the next pattern pass. Only hits
+    /// whose starts are inside the pattern play.
+    pub fn loop_tail(self, position: i64, length: i64, span: std::ops::Range<i64>) -> i64 {
+        if !span.contains(&position) || length <= span.end - position {
+            return 0;
+        }
+        let left = span.end - position;
+        let end = if self.is_plain() {
+            length
+        } else {
+            self.hits(length, 100).into_iter().rev().find(|hit| hit.offset < left).map_or(0, |hit| hit.offset + hit.length)
+        };
+        (end - left).clamp(0, span.end - span.start)
+    }
+
     /// The hits of a note `length` ticks long at `velocity`: the length split evenly (a
     /// note too short to give each a tick plays a hit a tick), the first at the note's
     /// velocity.

@@ -126,6 +126,23 @@ local function note_box(screen, theme, x0, x1, top, height, palette, n)
   end
 end
 
+-- Wrapped gates sit under the ordinary notes, without a stem or attack marker.
+local function note_tails(screen, theme, s, at, x, w, sounds, row)
+  local start = s.pattern_start
+  for _, n in ipairs(s.notes) do
+    if n.loop_tail then
+      local top, height = row(n)
+      if top then
+        local x0, x1 = math.max(x, at(start)), math.min(x + w, at(start + n.loop_tail))
+        if x0 < x1 then
+          local c = widgets.colour(theme, sounds[n.sound] and sounds[n.sound].palette or 16, false, true)
+          screen:rect(x0, top, x1 - x0, height, { c[1], c[2], c[3], 68 })
+        end
+      end
+    end
+  end
+end
+
 -- An Audio plug-in loop's colours (Maschine's ClipAudioLane): off, or Gate mode away
 -- from the sound's notes, grey.
 local LOOP_OFF = { 102, 102, 102, 140 }
@@ -227,6 +244,12 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
     local high = editor.pitch_top(s, rows)
     shade_rows(screen, theme, x, y + HEADER, w, ROLL_ROW, rows, high)
     loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER, h - HEADER, true)
+    note_tails(screen, theme, s, at, x, w, sounds, function(n)
+      local r = high - n.pitch + 1
+      if n.sound == s.sound and r >= 1 and r <= rows then
+        return y + HEADER + (r - 1) * ROLL_ROW, ROLL_ROW - 1
+      end
+    end)
     for _, n in ipairs(s.notes) do
       local r = high - n.pitch + 1
       if n.sound == s.sound and visible(n) and r >= 1 and r <= rows then
@@ -240,6 +263,9 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
     for n = 1, math.min(16, #sounds) do
       loop_lane(screen, theme, s, sounds, n, at, x, w, t0, t1, y + HEADER + (n - 1) * ROW + 1, ROW - 1, false)
     end
+    note_tails(screen, theme, s, at, x, w, sounds, function(n)
+      if n.sound <= 16 then return y + HEADER + (n.sound - 1) * ROW + 1, ROW - 1 end
+    end)
     for _, n in ipairs(s.notes) do
       if visible(n) and n.sound <= 16 then
         local x0, x1 = span_of(n)
@@ -250,6 +276,9 @@ function editor.draw(screen, theme, s, x, y, w, h, detail, from, to, probability
     -- The focused sound's notes in a row, and under each its velocity (or
     -- probability): a stem up from the bottom with a dot on top.
     loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER + 1, LANE, false)
+    note_tails(screen, theme, s, at, x, w, sounds, function(n)
+      if n.sound == s.sound then return y + HEADER + 1, LANE end
+    end)
     for _, n in ipairs(s.notes) do
       if n.sound == s.sound and visible(n) then
         local x0, x1 = span_of(n)
@@ -309,6 +338,10 @@ function editor.lanes(screen, theme, s, x, y, w, h, o)
   elseif o.high then
     loop_lane(screen, theme, s, sounds, s.sound, at, x, w, t0, t1, y + HEADER, o.rows * o.row, true)
   end
+  note_tails(screen, theme, s, at, x, w, sounds, function(n)
+    local r = o.row_of(n)
+    if r and r >= 1 and r <= o.rows then return y + HEADER + (r - 1) * o.row + 1, o.row - 1 end
+  end)
   for _, n in ipairs(s.notes) do
     local r = o.row_of(n)
     if r and r >= 1 and r <= o.rows and n.position < t1 and n.position + n.length > t0 then

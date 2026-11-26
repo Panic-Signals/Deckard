@@ -1474,6 +1474,7 @@ fn state_part(lua: &Lua, v: &Rc<View>, part: &str) -> mlua::Result<Value> {
         }
         "notes" => {
             let notes = lua.create_table()?;
+            let span = v.pattern_start..v.pattern_start + v.pattern_length;
             for (i, n) in v.notes.iter().enumerate() {
                 let nt = lua.create_table()?;
                 nt.set("sound", n.sound + 1)?;
@@ -1487,6 +1488,10 @@ fn state_part(lua: &Lua, v: &Rc<View>, part: &str) -> mlua::Result<Value> {
                 nt.set("ratchet_floor", n.ratchet.floor)?;
                 nt.set("ratchet_ceiling", n.ratchet.ceiling)?;
                 nt.set("selected", n.selected)?;
+                let tail = n.ratchet.loop_tail(n.position, n.length, span.clone());
+                if tail > 0 {
+                    nt.set("loop_tail", tail)?;
+                }
                 notes.set(i + 1, nt)?;
             }
             notes
