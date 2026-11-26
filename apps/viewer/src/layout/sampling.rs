@@ -8,6 +8,9 @@ use deckard_engine::sample::Sample;
 use std::sync::Arc;
 
 pub const TABS: [&str; 5] = ["RECORD", "EDIT", "SLICE", "ZONE", "LAYERS"];
+/// The order the tabs are drawn in: LAYERS where SLICE would be (a sound has one or the
+/// other), before ZONE.
+pub const TAB_ORDER: [usize; 5] = [0, 1, 2, 4, 3];
 
 pub mod layers;
 
@@ -446,7 +449,7 @@ pub struct LaneView {
 
 #[derive(Debug, Clone)]
 pub enum SamplingAct {
-    /// SAMPLER: the focused Sampler Preview's mode asked for. A sound with a sample asks
+    /// TYPE: the focused Sampler Preview's mode asked for. A sound with a sample asks
     /// first ([`SamplingAct::SamplerAnswer`]): the change loses its changes.
     Sampler(deckard_model::new_sampler::SamplerMode),
     /// The mode change asked for: gone ahead with (`true`), or dropped.
@@ -632,7 +635,8 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 37.0));
     painter.rect_filled(header, 0.0, s00());
     let mut x = header.left() + 12.0;
-    for (i, name) in TABS.iter().enumerate() {
+    for i in TAB_ORDER {
+        let name = &TABS[i];
         if !shown(i) {
             continue;
         }
@@ -686,13 +690,13 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             }
         }
     }
-    // SAMPLER: which sampler a Sampler Preview is.
+    // TYPE: which sampler a Sampler Preview is.
     if let Some(mode) = crate::layers::mode_of(p, app.group, app.sound) {
         use deckard_model::new_sampler::SamplerMode;
         let (w, gap) = (64.0, 4.0);
         let right = header.right() - if tab == 3 && zone.is_some() { 152.0 } else { 12.0 };
         let x0 = right - 3.0 * w - 2.0 * gap;
-        painter.text(Pos2::new(x0 - 8.0, header.top() + 19.0), Align2::RIGHT_CENTER, "SAMPLER", font(10.0), white(142));
+        painter.text(Pos2::new(x0 - 8.0, header.top() + 19.0), Align2::RIGHT_CENTER, "TYPE", font(10.0), white(142));
         let busy = app.recorder.busy();
         for (k, m) in SamplerMode::ALL.into_iter().enumerate() {
             let r = Rect::from_min_size(Pos2::new(x0 + k as f32 * (w + gap), header.top() + 9.0), Vec2::new(w, 20.0));

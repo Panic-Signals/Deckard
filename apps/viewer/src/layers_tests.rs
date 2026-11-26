@@ -679,7 +679,7 @@ fn answer(app: &mut App, ok: bool) {
     app.sampling_act(crate::layout::sampling::SamplingAct::SamplerAnswer(ok));
 }
 
-/// SAMPLER on a sound with samples asks first; Cancel leaves it, OK keeps the sample
+/// TYPE on a sound with samples asks first; Cancel leaves it, OK keeps the sample
 /// shown as the sound's only one, in one undo step.
 #[test]
 fn a_mode_change_asks_first() {
@@ -887,7 +887,7 @@ fn leaving_the_page_drops_the_question() {
     assert_eq!(app.sampler_ask, None);
 }
 
-/// (Review) The SAMPLER knob changes nothing until confirmed, Original made Advanced
+/// (Review) The TYPE knob changes nothing until confirmed, Original made Advanced
 /// too (a bumped knob mustn't change the sound); OK there keeps everything.
 #[test]
 fn the_knob_always_asks() {
@@ -898,8 +898,8 @@ fn the_knob_always_asks() {
         .map(|n| crate::new_zone(&tone(dir.path(), n, 220.0), 96_000, deckard_doc::ZoneFrom::Template))
         .collect();
     app.doc.as_ref().unwrap().borrow_mut().set_zones(0, 0, &specs, "Load").unwrap();
-    app.record_apply.insert("Sampler".into(), crate::sampling_hw::Apply::Record(crate::record_knobs::Apply::Sampler));
-    app.sampling_knob("Sampler", 1.0);
+    app.record_apply.insert("Type".into(), crate::sampling_hw::Apply::Record(crate::record_knobs::Apply::Sampler));
+    app.sampling_knob("Type", 1.0);
     assert_eq!((app.sampler_ask, mode(&app)), (Some(((0, 0), SamplerMode::Advanced)), SamplerMode::Original));
     answer(&mut app, true);
     assert_eq!((mode(&app), zones(&app).len()), (SamplerMode::Advanced, 2), "nothing lost");

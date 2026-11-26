@@ -118,8 +118,8 @@ every timer tick and redraws the buttons when it changes.
 
 ### 3.3 Pads
 
-- DECKARD's choice: a Sampler Preview has a mode, SAMPLER (the last knob page of
-  RECORD, three buttons in the window's header): Original (what the classic Sampler
+- DECKARD's choice: a Sampler Preview has a mode, TYPE (knob 5 on RECORD's first knob
+  page, shown on the right display; three buttons in the window's header): Original (what the classic Sampler
   does, and no more), Advanced (Sync and Keys, stems on a zone's lanes, slices that
   play on) or Layers (every sample is a layer). A sound with a sample is asked before
   its mode changes, since the change keeps the sample shown and loses the sound's other
@@ -139,10 +139,9 @@ every timer tick and redraws the buttons when it changes.
   the take's layer away. The take's right-click menu in the window still puts it on a
   layer at once. So display button 8 isn't BANK on DECKARD's own layer: the pads have
   the focused take's sixteen (SHIFT + 7 / 8, PREVIOUS / NEXT, walks through them).
-- DECKARD's choice: in Layers, display button 4 has both ZONE and LAYERS on it, the tab
-  showing in the row's letters and the other small under it, and goes between the two
-  (LAYERS alone until the sound has a sample); display button 3 does nothing, a sound
-  in Layers having no slices.
+- DECKARD's choice: in Layers, display button 3 is LAYERS where SLICE would be (a
+  sound in Layers has no slices), so the tabs read RECORD, EDIT, LAYERS, ZONE, in the
+  window too. A take on no layer has RECORD, EDIT and LAYERS.
 - **Takes on pads off** (default): pads play the sounds as usual (sound pad mode), and the
   pad LEDs are the normal sound LEDs.
 - **Takes on pads on**: pad n focuses take `n + 16·bank`, loads it into the sound and

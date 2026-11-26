@@ -2,17 +2,16 @@
 -- time, as Maschine's (docs/sampling-controller.md).
 --
 --   display 1-4       the tab: RECORD, EDIT, SLICE, ZONE
---   display 4 again   a Sampler Preview in Layers: between ZONE and LAYERS.
---                     The button has both names: the tab showing, the other small
---                     under it
+--   display 3         a Sampler Preview in Layers: LAYERS, where SLICE would be
 --   LAYERS            knobs 1-6 the page's (LAYER, ENVELOPE, MORPH, WINDOW), knob 7
 --                     the focused layer, knob 8 its LEVEL; 5-8 mute the four layers
 --                     shown (SHIFT: solo); SHIFT + 1 REMOVE the focused layer, SHIFT
 --                     + 2 SPREAD their windows evenly; the pads play the sounds. The
 --                     left display: every layer's window on the morph and where it
 --                     is; the right: the four layers. (A layered sound has no SLICE.)
---   SAMPLER           RECORD's last knob page: a Sampler Preview's mode (Original,
---                     Advanced, Layers). A sound with a sample asks first, across
+--   TYPE              RECORD's knob 5, on the right display, on the first knob page
+--                     only: a Sampler Preview's mode (Original, Advanced, Layers).
+--                     A sound with a sample asks first, across
 --                     both displays: 7 CANCEL, 8 OK, and nothing else acts
 --   RECORD 5-8        START (WAITING, STOP), DELETE (CANCEL), TAKES (the takes on the
 --                     pads, the focused take's sixteen), APPLY (the focused take onto
@@ -155,9 +154,27 @@ local function knob_page(v)
   return list[n], n, #list
 end
 
+-- TYPE (a Sampler Preview's mode): RECORD's knob 5 while its first knob page shows.
+-- The knob, where it is in the page, and the page's number; nil elsewhere.
+local function type_knob(v)
+  if v.tab ~= 1 then return end
+  local p, pn = knob_page(v)
+  for i, k in ipairs(p and p.knobs or {}) do
+    if k.key == "Type" then return k, i, pn end
+  end
+end
+
 -- How many tabs there are: an Audio plug-in's take has RECORD and EDIT only.
+-- The focused sound is a Sampler Preview in Layers: it has LAYERS and no SLICE, with
+-- layers or none yet.
+local function in_layers(v)
+  return v.sampler == "layers"
+end
+
+-- (A take on no layer in Layers: RECORD, EDIT, and LAYERS to go back to.)
 local function tab_count(v)
-  return (v.sample and v.sample.take) and 2 or #TABS
+  if v.sample and v.sample.take then return in_layers(v) and 3 or 2 end
+  return #TABS
 end
 
 local function sample_ok(v)
@@ -246,12 +263,6 @@ local LAYER_COLOURS = {
 -- The focused sound's layers (none yet, or not a sound in Layers).
 local function layers_of(v)
   return v.sample and v.sample.layers or {}
-end
-
--- The focused sound is a Sampler Preview in Layers: it has LAYERS and no SLICE, with
--- layers or none yet.
-local function in_layers(v)
-  return v.sampler == "layers"
 end
 
 -- A mode change waits for its answer (it loses the sound's changes): the displays ask,
@@ -430,11 +441,9 @@ function page.button(name, down)
         if layers > 0 then
           if n == 1 then deckard.sampling_call("remove_layer", v.sample.layer) else deckard.sampling_call("spread_layers") end
         end
-      elseif n == 4 and in_layers(v) and (v.tab == 4 or not v.sample or v.sample.take) then
-        -- (Between ZONE and LAYERS; without a sample there is no ZONE.)
-        deckard.sampling_tab(5)
       elseif n == 3 and in_layers(v) then
-        -- (A sound in Layers has no slices.)
+        -- (A sound in Layers has no slices: LAYERS is where SLICE would be.)
+        deckard.sampling_tab(5)
       elseif n <= tab_count(v) then
         deckard.sampling_tab(n)
       end
@@ -527,23 +536,26 @@ end
 function page.knob(n, amount)
   local v = view()
   if asking(v) then
-    -- (Only SAMPLER still turns: to another mode, or back to the sound's own.)
-    local p = v.tab ~= 5 and knob_page(v)
-    local k = n <= 4 and p and p.knobs[n]
-    if not (k and k.key == "Sampler") then return true end
+    -- (Only TYPE still turns: to another mode, or back to the sound's own.)
+    if not (n == 5 and type_knob(v)) then return true end
   end
   if v.tab == 5 then
     layer_knob(v, n, amount)
     return true
   end
   if n >= 5 then
+    local k, i, pn = type_knob(v)
+    if n == 5 and k and not busy(v) then
+      turn(k, amount, function(to) deckard.sampling_knob(pn, i, to) end)
+    end
     zoom_scroll(v, n, amount)
     return true
   end
   if busy(v) then return true end
   local p, pn = knob_page(v)
   local k = p and p.knobs[n]
-  if not k then return true end
+  -- (TYPE is knob 5's, wherever it is in the page.)
+  if not k or k.key == "Type" then return true end
   if k.slice then
     -- (The slice focused, a step at a time.)
     local count = v.sample and #v.sample.slices or 0
@@ -599,10 +611,10 @@ function page.leds()
   if not require("lib.util").sample_led(deckard.state()) then deckard.led("SAMPLE", "on") end
   local layered = in_layers(v)
   for i = 1, 4 do
-    local on = i == v.tab or (i == 4 and v.tab == 5)
-    -- (A take on no layer: RECORD, EDIT, and LAYERS to go back to.)
-    local count = (layered and v.sample and v.sample.take) and 4 or tab_count(v)
-    local there = i <= count and not (i == 3 and layered)
+    -- (In Layers display button 3 is LAYERS.)
+    local on = i == v.tab or (i == 3 and v.tab == 5)
+    if layered and i == 3 and v.tab == 3 then on = false end
+    local there = i <= tab_count(v)
     deckard.led("SCREEN_" .. i, asking(v) and "off" or (on and "on" or (there and "dim" or "off")))
   end
   local b = buttons(v)
@@ -653,22 +665,19 @@ local function split(text)
   return text or "", nil
 end
 
--- `layers`: the sound has layers, so display button 4 goes between ZONE and LAYERS and
--- says both: the tab showing (or ZONE, from another tab) in the row's letters, the other
--- small under it.
-local function draw_tabs(screen, theme, tab, count, layered, layers, take)
+-- `layered`: the sound is in Layers, so display button 3 is LAYERS, where SLICE would be.
+local function draw_tabs(screen, theme, tab, count, layered)
   screen:frame(4, 4, 472, 24, "button", theme.corner)
   local xs, ws = { 4, 121, 240, 359 }, { 117, 119, 119, 117 }
   local names = { TABS[1], TABS[2], TABS[3], TABS[4] }
-  local under = layers and "LAYERS" or nil
-  if layered then names[3] = "" end
-  -- (A take on no layer has no ZONE: display button 4 is LAYERS.)
-  if take then names[4], under = "LAYERS", nil end
+  if layered then
+    names[3] = "LAYERS"
+    if tab == 3 then tab = 0 end
+  end
   if tab == 5 then
-    -- (LAYERS is display button 4's other tab; SHIFT: what 1 and 2 do to the layers.)
-    names[4], under = "LAYERS", "ZONE"
+    -- (SHIFT: what 1 and 2 do to the layers.)
     if deckard.held("SHIFT") then names[1], names[2] = "REMOVE", "SPREAD" end
-    tab = 4
+    tab = 3
   end
   local st = theme.styles.default
   for i, name in ipairs(names) do
@@ -678,12 +687,7 @@ local function draw_tabs(screen, theme, tab, count, layered, layers, take)
       widgets.chase(screen, theme, xs[i], 4, ws[i], 24)
     end
     local colour = i == tab and "button_selected_text" or "button_text"
-    if i == 4 and under then
-      screen:label(xs[i], 4, ws[i], 15, name, { font = st.font, size = st.size, color = colour })
-      screen:label(xs[i], 18, ws[i], 9, under, { size = 8, color = colour })
-    else
-      screen:label(xs[i], 5, ws[i], 23, name, { font = st.font, size = st.size, color = colour })
-    end
+    screen:label(xs[i], 5, ws[i], 23, name, { font = st.font, size = st.size, color = colour })
   end
 end
 
@@ -924,13 +928,12 @@ function page.draw(screen, theme)
     -- The question, across both displays, and nothing else.
     widgets.buttons(screen, theme, specs)
     widgets.info_bar(screen, theme, widgets.focus_info(s))
-    screen:label(0, 90, 480, 20, "SAMPLER: " .. (ASK[v.sampler_ask] or ""), { size = 14, color = "weak" }, "center", "center")
+    screen:label(0, 90, 480, 20, "TYPE: " .. (ASK[v.sampler_ask] or ""), { size = 14, color = "weak" }, "center", "center")
     screen:label(0, 116, 480, 40, "Changing the mode loses", { font = "roboto-bold", size = 26, color = "text" }, "center", "center")
     screen:label(480, 116, 480, 40, "all changes to this sound.", { font = "roboto-bold", size = 26, color = "text" }, "center", "center")
     return
   end
-  local take = in_layers(v) and v.sample and v.sample.take
-  draw_tabs(screen, theme, v.tab, take and 4 or tab_count(v), in_layers(v), in_layers(v), take)
+  draw_tabs(screen, theme, v.tab, tab_count(v), in_layers(v))
   if specs[5] and specs[5].arrows then specs[5].left, specs[5].right = not specs[5].disabled, not specs[5].disabled end
   widgets.buttons(screen, theme, specs)
   widgets.info_bar(screen, theme, widgets.focus_info(s))
@@ -981,12 +984,16 @@ function page.draw(screen, theme)
     local params = {}
     for k = 1, 4 do
       local knob = p.knobs[k]
-      if knob then
+      if knob and knob.key ~= "Type" then
         local value, unit = split(knob.text)
         params[k] = { name = knob.name, value = value, unit = unit }
       end
     end
     widgets.params(screen, theme, 0, { { text = p.name, at = 1 } }, count > 1 and (n .. "/" .. count) or nil, params)
+  end
+  local kind = type_knob(v)
+  if kind then
+    widgets.params(screen, theme, 480, {}, nil, { { name = kind.name, value = kind.text } })
   end
   if v.tab == 5 and smp and #smp.layers > 0 then
     -- Knobs 5 and 6 of the page, then the focused layer and its level.

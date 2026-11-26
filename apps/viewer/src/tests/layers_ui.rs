@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::layers_tests::{tone, zones};
-use crate::layout::sampling::{layers::LANE_RECTS, tab_shown};
+use crate::layout::sampling::{TAB_ORDER, layers::LANE_RECTS, tab_shown};
 use deckard_model::layers::{Shape, spread};
 
 /// The window on a new project whose first sound is an empty New Sampler, its Sampling
@@ -76,6 +76,16 @@ fn the_tab_is_offered_where_it_can_be() {
     }
     let p = project_of_app(&app);
     assert!(!tab_shown(&p, 0, 1, 4, false, false), "not a Sampler Preview");
+}
+
+/// LAYERS is where SLICE would be, before ZONE: RECORD, EDIT, LAYERS, ZONE.
+#[test]
+fn layers_is_where_slice_was() {
+    use crate::layout::sampling::TABS;
+    let app = crate::layers_tests::app_in(deckard_model::new_sampler::SamplerMode::Layers);
+    let p = project_of_app(&app);
+    let names: Vec<&str> = TAB_ORDER.into_iter().filter(|&i| tab_shown(&p, 0, 0, i, true, false)).map(|i| TABS[i]).collect();
+    assert_eq!(names, ["RECORD", "EDIT", "LAYERS", "ZONE"]);
 }
 
 #[test]
@@ -316,7 +326,7 @@ fn the_record_footer_applies_a_takes_layer() {
     assert_eq!(h.state().recorder.view.layer_choice, None);
 }
 
-/// The header's SAMPLER picks the mode: a sound with samples is asked first, in a dialog
+/// The header's TYPE picks the mode: a sound with samples is asked first, in a dialog
 /// with the words agreed, OK and Cancel.
 #[test]
 fn the_header_has_sampler() {
@@ -327,7 +337,7 @@ fn the_header_has_sampler() {
     let mut h = layers_harness();
     let mode = |h: &Harness<'static, App>| project_of_app(h.state()).groups[0].sounds[0].new_sampler.unwrap().mode;
     let at = |h: &Harness<'static, App>, k: usize| -> Pos2 {
-        let r: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sampler-mode", k)))).expect("SAMPLER shown");
+        let r: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-sampler-mode", k)))).expect("TYPE shown");
         r.center()
     };
     h.state_mut().layer_files(0, &[tone(dir.path(), "a.wav", 110.0), tone(dir.path(), "b.wav", 220.0)]);

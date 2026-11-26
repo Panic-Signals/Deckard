@@ -24,7 +24,7 @@ pub enum Apply {
     Param(RecParam, Option<Vec<i64>>),
     Threshold,
     MidiTo(Vec<Option<String>>),
-    /// SAMPLER: the focused Sampler Preview's mode ([`SamplerMode::ALL`]).
+    /// TYPE: the focused Sampler Preview's mode ([`SamplerMode::ALL`]).
     Sampler,
 }
 
@@ -75,9 +75,9 @@ fn names(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
 }
 
-/// `layer`: with RECORD's LAYER and with SAMPLER, for a page that has an APPLY and a
+/// `layer`: with RECORD's LAYER and with TYPE, for a page that has an APPLY and a
 /// confirmation to go with them (NI's own scripts have no button for either). `asked`:
-/// the mode SAMPLER was turned to, while it waits for its confirmation.
+/// the mode TYPE was turned to, while it waits for its confirmation.
 pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usize), layer: bool, asked: Option<SamplerMode>) -> Knobs {
     let mut out = Knobs::default();
     let a = &rec.auto;
@@ -114,6 +114,13 @@ pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usiz
     // The focused take's layer, on a sound that can have layers.
     if layer && let Some((options, at, values)) = crate::layers::take_choices(p, focus.0, focus.1, rec) {
         recording.push(choice("Layer", "LAYER", &options, at, Apply::Param(RecParam::Layer, Some(values))));
+    }
+    // Which sampler a Sampler Preview is: the first page's last knob, which the
+    // controller has on knob 5 (the right display).
+    if layer && let Some(mode) = crate::layers::mode_of(p, focus.0, focus.1) {
+        let at = SamplerMode::ALL.iter().position(|m| *m == asked.unwrap_or(mode)).unwrap_or(1);
+        let names: Vec<String> = SamplerMode::ALL.iter().map(|m| m.name().to_string()).collect();
+        recording.push(choice("Type", "TYPE", &names, at, Apply::Sampler));
     }
     out.page("RECORDING", recording);
 
@@ -198,12 +205,6 @@ pub fn knobs(rec: &RecorderView, io: &Settings, p: &Project, focus: (usize, usiz
             ],
         );
     }
-    // Which sampler a Sampler Preview is.
-    if layer && let Some(mode) = crate::layers::mode_of(p, focus.0, focus.1) {
-        let at = SamplerMode::ALL.iter().position(|m| *m == asked.unwrap_or(mode)).unwrap_or(1);
-        let names: Vec<String> = SamplerMode::ALL.iter().map(|m| m.name().to_string()).collect();
-        out.page("SAMPLER", vec![choice("Sampler", "SAMPLER", &names, at, Apply::Sampler)]);
-    }
     out
 }
 
@@ -236,29 +237,33 @@ mod tests {
         app.recorder.view.focused = Some(0);
         let p = app.doc.as_ref().unwrap().borrow().project().clone();
         let keys = |layer: bool| knobs(&app.recorder.view, &app.settings, &p, (0, 0), layer, None).apply;
-        assert!(keys(true).contains_key("Layer") && keys(true).contains_key("Sampler"), "DECKARD's own page");
-        assert!(!keys(false).contains_key("Layer") && !keys(false).contains_key("Sampler"), "the scripts' page");
+        assert!(keys(true).contains_key("Layer") && keys(true).contains_key("Type"), "DECKARD's own page");
+        assert!(!keys(false).contains_key("Layer") && !keys(false).contains_key("Type"), "the scripts' page");
     }
 
-    /// RECORD's last knob page is SAMPLER, for a Sampler Preview: its mode, or the one
-    /// asked for while that waits for its confirmation. Turning it asks.
+    /// RECORD's first knob page ends in TYPE, for a Sampler Preview: its mode, or the
+    /// one asked for while that waits for its confirmation. Turning it asks. No other
+    /// page has it.
     #[test]
-    fn the_record_pages_have_sampler() {
+    fn the_first_record_page_has_type() {
         let (_dir, mut app) = crate::layers_tests::three();
         let page = |app: &crate::App| {
             let p = app.doc.as_ref().unwrap().borrow().project().clone();
             let asked = app.sampler_ask.map(|a| a.1);
-            knobs(&app.recorder.view, &app.settings, &p, (0, 0), true, asked).pages.last().cloned().unwrap()
+            let pages = knobs(&app.recorder.view, &app.settings, &p, (0, 0), true, asked).pages;
+            assert!(pages[1..].iter().all(|pg| pg.knobs.iter().all(|k| k.key != "Type")), "the first page only");
+            assert!(pages.iter().all(|pg| pg.name != "SAMPLER"));
+            (pages[0].name.clone(), pages[0].knobs.last().cloned().unwrap())
         };
-        let k = page(&app);
-        assert_eq!((k.name.as_str(), k.knobs[0].text.as_str(), k.knobs[0].max), ("SAMPLER", "Layers", 2.0));
-        app.record_apply.insert("Sampler".into(), crate::sampling_hw::Apply::Record(Apply::Sampler));
-        app.sampling_knob("Sampler", 1.0);
+        let (name, k) = page(&app);
+        assert_eq!((name.as_str(), k.key.as_str(), k.name.as_str(), k.text.as_str(), k.max), ("RECORDING", "Type", "TYPE", "Layers", 2.0));
+        app.record_apply.insert("Type".into(), crate::sampling_hw::Apply::Record(Apply::Sampler));
+        app.sampling_knob("Type", 1.0);
         assert_eq!(app.sampler_ask, Some(((0, 0), SamplerMode::Advanced)));
-        assert_eq!(page(&app).knobs[0].text, "Advanced", "the one asked for");
+        assert_eq!(page(&app).1.text, "Advanced", "the one asked for");
         assert_eq!(crate::layers_tests::zones(&app).len(), 3, "nothing yet");
-        // Not a Sampler Preview: no SAMPLER.
+        // Not a Sampler Preview: no TYPE.
         let p = app.doc.as_ref().unwrap().borrow().project().clone();
-        assert!(!knobs(&app.recorder.view, &app.settings, &p, (0, 1), true, None).apply.contains_key("Sampler"));
+        assert!(!knobs(&app.recorder.view, &app.settings, &p, (0, 1), true, None).apply.contains_key("Type"));
     }
 }

@@ -556,68 +556,61 @@ fn layered(tab: usize, n: usize, focus: usize) -> View {
     v
 }
 
-/// Display button 4 pressed again goes between ZONE and LAYERS: only for a sound with
-/// layers (a sliced or plain sound's stays on ZONE).
+/// In Layers, display button 3 is LAYERS where SLICE was (a sound in Layers has no
+/// slices), and button 4 is ZONE alone: no button with two tabs on it.
 #[test]
-fn button_four_goes_between_zone_and_layers() {
+fn button_three_is_layers_in_layers() {
     let (mut s, v) = (Surface::new(), layered(3, 3, 0));
     press(&mut s, &v, "BUTTON_SAMPLE");
-    assert!(s.screen_text(&v).iter().any(|t| t == "ZONE"));
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
     let v = layered(4, 3, 0);
     let text = s.screen_text(&v);
     assert!(text.iter().any(|t| t == "Layer 2.wav"), "{text:?}");
+    // Button 4 is ZONE, from LAYERS and pressed again on ZONE.
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
-    // From another tab, button 4 is ZONE as ever.
-    assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
-    // A layered sound has no SLICE.
-    assert!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3").is_empty());
-    // It is the mode that says so, not what the sound holds: in Layers without a sample
-    // there is no ZONE, and button 4 is LAYERS.
+    assert_eq!(press(&mut s, &layered(3, 3, 0), "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
+    assert_eq!(press(&mut s, &layered(1, 3, 0), "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
+    // It is the mode that says so, not what the sound holds: in Layers without a sample.
     let mut empty = view();
     empty.sampling.sampler = Some(2);
-    assert_eq!(press(&mut s, &empty, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
-    assert!(press(&mut s, &empty, "BUTTON_SCREEN_3").is_empty());
-    // The same zones in Advanced: ZONE stays ZONE, and SLICE is there.
+    assert_eq!(press(&mut s, &empty, "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
+    // The same zones in Advanced: SLICE is there.
     let mut advanced = layered(3, 1, 0);
     advanced.sampling.sampler = Some(1);
     assert_eq!(press(&mut s, &advanced, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     assert_eq!(press(&mut s, &advanced, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
     assert!(s.screen_text(&advanced).iter().any(|t| t == "SLICE"));
-    // Without layers: ZONE stays ZONE, and SLICE is there.
+    // Without layers: SLICE is there.
     let (mut s, v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(3)]);
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(2)]);
 }
 
-/// Button 4 says both where the sound has layers: the tab showing first (large), the
-/// other under it (small), so it reads as the toggle it is. Plain ZONE elsewhere.
+/// In Layers the tabs read RECORD, EDIT, LAYERS, ZONE: LAYERS before ZONE and no SLICE,
+/// whichever tab shows. Elsewhere no LAYERS.
 #[test]
-fn tab_button_4_says_zone_and_layers() {
+fn the_tabs_say_layers_where_slice_was() {
     let (mut s, v) = (Surface::new(), layered(3, 3, 0));
     press(&mut s, &v, "BUTTON_SAMPLE");
     let order = |s: &mut Surface, v: &View| {
         let text = s.screen_text(v);
         let at = |t: &str| text.iter().position(|x| x == t);
-        (at("ZONE"), at("LAYERS"))
+        (at("ZONE"), at("LAYERS"), at("SLICE"))
     };
-    let (zone, layers) = order(&mut s, &v);
-    assert!(zone.is_some() && layers.is_some() && zone < layers, "ZONE, LAYERS under it: {zone:?} {layers:?}");
-    let (zone, layers) = order(&mut s, &layered(4, 3, 0));
-    assert!(zone.is_some() && layers.is_some() && layers < zone, "LAYERS, ZONE under it: {zone:?} {layers:?}");
-    // From RECORD too, so it can be found.
-    let (zone, layers) = order(&mut s, &layered(0, 3, 0));
-    assert!(zone.is_some() && layers.is_some() && zone < layers);
+    for tab in [0, 3, 4] {
+        let (zone, layers, slice) = order(&mut s, &layered(tab, 3, 0));
+        assert!(zone.is_some() && layers.is_some() && layers < zone, "tab {tab}: LAYERS, ZONE: {layers:?} {zone:?}");
+        assert_eq!(slice, None, "tab {tab}");
+    }
     // In Layers with no sample yet, too.
     let mut empty = view();
     empty.sampling.sampler = Some(2);
     assert!(order(&mut s, &empty).1.is_some());
-    // The same zones in Advanced: ZONE alone.
+    // The same zones in Advanced: no LAYERS.
     let mut advanced = layered(3, 1, 0);
     advanced.sampling.sampler = Some(1);
     assert_eq!(order(&mut s, &advanced).1, None);
-    // No layers: no LAYERS.
     let (mut s, v) = (Surface::new(), sampled(3));
     press(&mut s, &v, "BUTTON_SAMPLE");
     assert_eq!(order(&mut s, &v).1, None);
@@ -661,7 +654,7 @@ fn the_mode_change_is_confirmed_on_the_displays() {
     press(&mut s, &v, "BUTTON_SAMPLE");
     v.sampling.sampler_ask = Some(1);
     let text = s.screen_text(&v);
-    for want in ["Changing the mode loses", "all changes to this sound.", "CANCEL", "OK", "SAMPLER: ADVANCED"] {
+    for want in ["Changing the mode loses", "all changes to this sound.", "CANCEL", "OK", "TYPE: ADVANCED"] {
         assert!(text.iter().any(|t| t == want), "{want}: {text:?}");
     }
     assert!(!text.iter().any(|t| t == "START" || t == "RECORD"), "{text:?}");
@@ -678,15 +671,62 @@ fn the_mode_change_is_confirmed_on_the_displays() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_2"), [Action::SamplingTab(1)]);
 }
 
-/// (Review) A take on no layer shown (RECORD and EDIT only): display button 4 is still
-/// LAYERS.
+/// TYPE (a Sampler Preview's mode) is RECORD's knob 5, on the right display, on the
+/// first knob page only; knobs 1 to 4 are RECORDING's as ever.
+#[test]
+fn type_is_record_knob_five_on_the_first_page() {
+    let (mut s, mut v) = (Surface::new(), layered(0, 3, 0));
+    let now = Instant::now();
+    let knob = |key: &str, name: &str, text: &str, value: f64| SamplingKnob {
+        key: key.into(),
+        name: name.into(),
+        text: text.into(),
+        value,
+        min: 0.0,
+        max: 2.0,
+        step: 1.0,
+        turn: 0.01,
+    };
+    v.sampling.pages[0] = vec![
+        KnobPage { name: "RECORDING".into(), knobs: vec![knob("Mode", "MODE", "Detect", 0.0), knob("Type", "TYPE", "Layers", 2.0)] },
+        KnobPage { name: "INPUT".into(), knobs: vec![knob("Source", "SOURCE", "Ext. Ster.", 0.0)] },
+    ];
+    press(&mut s, &v, "BUTTON_SAMPLE");
+    let text = s.screen_text(&v);
+    let at = |t: &str| text.iter().position(|x| x == t).unwrap_or_else(|| panic!("{t}: {text:?}"));
+    assert!(at("MODE") < at("TYPE") && at("TYPE") < at("Layers"), "{text:?}");
+    assert_eq!(text.iter().filter(|t| *t == "TYPE").count(), 1, "once, not among the left display's: {text:?}");
+    assert_eq!(s.event(&Event::Knob(4, -0.01), &v, now), [Action::SamplingKnob { page: 0, knob: 1, value: 1.0 }]);
+    assert!(s.event(&Event::Knob(1, -0.01), &v, now).is_empty(), "not knob 2");
+    // While it asks, only TYPE turns.
+    v.sampling.sampler_ask = Some(1);
+    assert!(s.event(&Event::Knob(0, 0.01), &v, now).is_empty());
+    assert_eq!(s.event(&Event::Knob(4, 0.01), &v, now), [Action::SamplingKnob { page: 0, knob: 1, value: 2.0 }]);
+    v.sampling.sampler_ask = None;
+    // The second page: no TYPE.
+    press(&mut s, &v, "BUTTON_RIGHT");
+    assert!(!s.screen_text(&v).iter().any(|t| t == "TYPE"));
+    assert!(s.event(&Event::Knob(4, -0.01), &v, now).is_empty());
+    if let Some(out) = std::env::var_os("DECKARD_TYPE_SHOT") {
+        press(&mut s, &v, "BUTTON_LEFT");
+        let px = s.picture(&v);
+        let mut e = png::Encoder::new(std::fs::File::create(out).unwrap(), crate::screen::WIDTH as u32, crate::screen::HEIGHT as u32);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&px.concat()).unwrap();
+    }
+}
+
+/// (Review) A take on no layer shown (RECORD and EDIT only): display button 3 is still
+/// LAYERS, and there is no ZONE.
 #[test]
 fn layers_is_a_button_away_from_a_take() {
     let (mut s, mut v) = (Surface::new(), layered(1, 3, 0));
     v.sampling.sample.as_mut().unwrap().take = true;
     press(&mut s, &v, "BUTTON_SAMPLE");
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_4"), [Action::SamplingTab(4)]);
-    assert!(press(&mut s, &v, "BUTTON_SCREEN_3").is_empty());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::SamplingTab(4)]);
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_4").is_empty());
+    assert!(!s.screen_text(&v).iter().any(|t| t == "ZONE"));
 }
 
 /// On LAYERS, display buttons 5 to 8 mute the four layers shown (those with the focused

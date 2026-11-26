@@ -1262,7 +1262,7 @@ pub struct App {
     asio_reopened: Option<std::time::Instant>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
-    /// SAMPLER: a mode asked for the sound (group, sound) that waits for its
+    /// TYPE: a mode asked for the sound (group, sound) that waits for its
     /// confirmation (the change loses the sound's changes).
     pub(crate) sampler_ask: Option<((usize, usize), deckard_model::new_sampler::SamplerMode)>,
     /// In Layers, a take was picked on the sound (group, sound): EDIT works on it while
@@ -3713,7 +3713,7 @@ impl App {
         }
     }
 
-    /// SAMPLER's question: a mode change keeps the sample shown and loses the rest.
+    /// TYPE's question: a mode change keeps the sample shown and loses the rest.
     fn sampler_mode_dialog(&mut self, ctx: &egui::Context) {
         if self.sampler_ask.is_none() {
             return;

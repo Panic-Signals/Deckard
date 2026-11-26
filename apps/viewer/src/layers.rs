@@ -203,7 +203,7 @@ impl App {
         (can_layer(d.project(), g, s) && take_layer(d.project(), g, s, take).is_none()).then(|| (i, take.clone()))
     }
 
-    /// SAMPLER: the focused sound's mode asked for. One with a sample asks first (the
+    /// TYPE: the focused sound's mode asked for. One with a sample asks first (the
     /// change keeps that sample and loses the rest): [`App::answer_sampler_mode`]. One
     /// without, and Original made Advanced (which loses nothing), change at once.
     /// `knob`: from the controller's knob, where nothing changes until confirmed (a
