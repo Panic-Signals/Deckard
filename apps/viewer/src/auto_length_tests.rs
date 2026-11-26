@@ -225,10 +225,10 @@ fn shift_rec_when_armed_counts_in() {
 }
 
 /// During recording into an empty Auto-length pattern, the MK3 touchstrip LED dots reset
-/// every bar when nothing was recorded during that bar, and keep spanning bars when
-/// notes or controls (such as pitch bend) are recorded.
+/// every bar until something is recorded, then show a pattern a bar longer as each bar
+/// after the first recorded one is reached, played into or not.
 #[test]
-fn mk3_strip_resets_every_bar_during_recording_when_nothing_was_recorded() {
+fn mk3_strip_extends_from_the_first_recorded_bar() {
     let mut app = app();
     app.controller = None;
     let bar = bar(&app);
@@ -284,14 +284,32 @@ fn mk3_strip_resets_every_bar_during_recording_when_nothing_was_recorded() {
     let (p, lit) = at(&mut app, 2 * bar);
     assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 2 continues after pitch bend in bar 1: {p} / {lit}");
 
-    // Nothing recorded in bar 2 -> bar 3 resets back to dot 1.
+    // Nothing recorded in bar 2 -> bar 3 still extends, as a 3-bar pattern's last bar.
     let (p, lit) = at(&mut app, 3 * bar);
-    assert!((p - 0.0).abs() < 1e-6 && lit == 1, "bar 3 reset after empty bar 2: {p} / {lit}");
+    assert!((p - 2.0 / 3.0).abs() < 1e-6 && lit == 17, "bar 3 after empty bar 2: {p} / {lit}");
 
-    // Record a note in bar 3 -> bar 4 continues without resetting.
+    // The first note, in bar 3: the pattern will start there, so the strip does.
     play(&mut app, (3 * bar + bar / 4) as f64, 120.0);
+    let (p, lit) = at(&mut app, 3 * bar + bar / 2);
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 3, its first note's: {p} / {lit}");
+
+    // Every bar after extends it, with nothing more played (a held chord, a rest).
     let (p, lit) = at(&mut app, 4 * bar);
-    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 4 continues after note in bar 3: {p} / {lit}");
+    assert!((p - 0.5).abs() < 1e-6 && lit == 13, "bar 4: {p} / {lit}");
+    let (p, lit) = at(&mut app, 5 * bar);
+    assert!((p - 2.0 / 3.0).abs() < 1e-6 && lit == 17, "bar 5: {p} / {lit}");
+    let (p, lit) = at(&mut app, 6 * bar);
+    assert!((p - 0.75).abs() < 1e-6 && lit == 19, "bar 6: {p} / {lit}");
+
+    // REC off keeps the pattern the strip started from.
+    app.set_recording(false, false);
+    let doc = app.doc.clone().unwrap();
+    let (start, len) = {
+        let d = doc.borrow();
+        let pt = &d.project().groups[0].patterns[0];
+        (pt.start, pt.length)
+    };
+    assert_eq!((start, len), (3 * bar, bar));
 }
 
 /// Deleting or clearing the growing pattern, deleting an earlier pattern in the same

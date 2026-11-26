@@ -4707,8 +4707,8 @@ impl App {
     }
 
     /// Progress (0..1) shown on the MK3 touchstrip: the focused group's pattern (or,
-    /// while growing an empty Auto-length take, resetting every bar when nothing was
-    /// recorded during that bar), or the current bar with no pattern.
+    /// while growing an empty Auto-length take, the bars since the first recorded one), or
+    /// the current bar with no pattern.
     fn strip_progress(&self, head: Option<Playhead>) -> Option<f64> {
         let (at, length) = self.pattern_at(self.group, head).or_else(|| self.bar_at(head))?;
         if self.recording
@@ -4716,13 +4716,12 @@ impl App {
             && self.group == grow.group
             && self.scene_pattern(self.group) == Some(grow.pattern)
         {
-            let rel = head
-                .and_then(|h| {
-                    let d = self.doc.as_ref()?.borrow();
-                    Self::mode_pattern_tick(d.project(), h.mode, h.position, grow.group, grow.pattern)
-                })
-                .unwrap_or(at);
-            return Some(grow.strip_progress(rel));
+            let d = self.doc.as_ref()?.borrow();
+            let p = d.project();
+            let rel = head.and_then(|h| Self::mode_pattern_tick(p, h.mode, h.position, grow.group, grow.pattern)).unwrap_or(at);
+            let pattern = p.groups.get(grow.group).and_then(|g| g.patterns.get(grow.pattern));
+            let first_note = pattern.and_then(|pt| pt.notes.iter().map(|n| n.position - pt.start).min());
+            return Some(grow.strip_progress(rel, first_note));
         }
         Some(at as f64 / length as f64)
     }
@@ -5762,7 +5761,6 @@ impl App {
         let mut grow = record::Grow::new(g, pi, bar);
         grow.before = len;
         if let Some(rel) = rel {
-            grow.advance_bar(rel);
             let _ = grow.reach(rel);
         }
         if doc.borrow_mut().set_pattern_length(g, pi, grow.length()).is_ok() {
@@ -5963,13 +5961,10 @@ impl App {
             }
             Self::mode_pattern_tick(p, mode, tick, g, pi)
         };
-        if let Some(rel) = rel {
-            grow.advance_bar(rel);
-            if let Some(len) = grow.reach(rel)
-                && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
-            {
-                self.status = format!("can't grow the pattern: {e}");
-            }
+        if let Some(len) = rel.and_then(|rel| grow.reach(rel))
+            && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
+        {
+            self.status = format!("can't grow the pattern: {e}");
         }
     }
 
