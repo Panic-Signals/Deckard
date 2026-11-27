@@ -65,6 +65,8 @@ pub struct Remote {
     pub macro_clip: Option<Macro>,
     /// A macro being renamed in its field, and the text so far.
     pub renaming: Option<(MacroSlot, String)>,
+    /// Editing hosted plug-in parameter pages (Learn, focus, inline rename).
+    pub plugin_pages: crate::plugin_pages::PluginPageEdit,
     /// The knob of every parameter id, for the document revision it was found for.
     edits: Option<(u64, HashMap<u64, Edit>)>,
     /// Remote values are being applied (macro Learn leaves them alone).
@@ -126,6 +128,8 @@ impl App {
                 self.remote.plugin_learn = None;
                 self.remote.macro_learn = None;
                 self.remote.renaming = None;
+                self.remote.plugin_pages.learn = None;
+                self.remote.plugin_pages.renaming = None;
             }
         }
     }
@@ -133,6 +137,9 @@ impl App {
     /// The Assignment area's keys: ⌘R, ⌘X, ⌘C, ⌘V on the focused macro (Pages tab, Macro
     /// properties shown, a macro clicked last); Esc stops learning. Returns whether it took the keys.
     pub(crate) fn remote_keys(&mut self, ctx: &egui::Context) -> bool {
+        if self.plugin_page_keys(ctx) {
+            return true;
+        }
         let learning = self.remote.midi_learn.is_some() || self.remote.plugin_learn.is_some() || self.remote.macro_learn.is_some();
         if learning && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.remote_act(RemoteAct::Cancel);

@@ -55,8 +55,22 @@ impl crate::App {
                 .iter()
                 .map(|pg| PluginPageSpec {
                     name: pg.name.clone(),
-                    knobs: pg.knobs.iter().map(|(info, _, section)| (info.id, section.clone())).collect(),
-                    custom_names: pg.knobs.iter().map(|(_, name, _)| name.clone()).collect(),
+                    knobs: pg
+                        .knobs
+                        .iter()
+                        .map(|k| match k {
+                            Some((info, _, section)) => (info.id, section.clone()),
+                            None => (u32::MAX, String::new()),
+                        })
+                        .collect(),
+                    custom_names: pg
+                        .knobs
+                        .iter()
+                        .map(|k| match k {
+                            Some((info, name, _)) if name != &info.title => name.clone(),
+                            _ => String::new(),
+                        })
+                        .collect(),
                 })
                 .collect()
         };
@@ -118,7 +132,7 @@ impl crate::App {
                 };
                 for (pi, page) in pages.iter().enumerate() {
                     let page_name = if page.name.is_empty() { format!("Page {}", pi + 1) } else { page.name.clone() };
-                    for (info, name, _) in &page.knobs {
+                    for (info, name, _) in page.knobs.iter().flatten() {
                         let mut path = prefix.clone();
                         let knob = if name.is_empty() { info.title.clone() } else { name.clone() };
                         path.extend([format!("{} - {}", i + 1, plugin.name), page_name.clone(), knob]);

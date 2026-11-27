@@ -16,6 +16,7 @@ mod assign;
 pub(crate) mod channel;
 pub(crate) mod expr_lane;
 pub(crate) mod mod_routes;
+mod plugin_pages;
 pub use channel::{GrooveButton, Level, RouteSet};
 pub mod browser;
 mod lfo_panel;
@@ -958,6 +959,8 @@ pub enum Act {
     Zhora(&'static str),
     /// The page of parameters slot `.1` of chain `.0` shows (its strip panel's own).
     PluginPageOf(deckard_doc::Chain, usize, usize),
+    /// Edit a hosted plug-in's parameter pages (learn, assign, rename, reset, add/delete page).
+    PluginPageEdit(crate::plugin_pages::PluginPageAct),
     Preferences,
     /// The Sampling view.
     Sampling(sampling::SamplingAct),
@@ -1525,6 +1528,7 @@ fn apply_with_mode(app: &mut App, acts: Vec<Act>, exact: bool) {
                 }
             }
             Act::PluginPage(n) => app.plugin_page = n,
+            Act::PluginPageEdit(a) => app.plugin_page_act(a),
             Act::PluginPageOf(c, i, n) => {
                 if app.plugin_focus == Some((c, i)) {
                     app.plugin_page = n;
@@ -3956,6 +3960,8 @@ pub enum KeyFocus {
     Groups,
     /// The focused macro in the Assignment area's Pages tab.
     Macros,
+    /// The focused parameter slot of a hosted plug-in in the Assignment area's Pages tab.
+    PluginPages,
 }
 
 fn item(ui: &mut Ui, label: &str, enabled: bool, act: impl FnOnce() -> Act, acts: &mut Vec<Act>) {
@@ -4826,8 +4832,9 @@ pub(crate) fn echo_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usi
     let page = app.view_page((chain, i));
     if let Some(view) = app.plugin_views.get_mut(&(chain, i)) {
         if let Some(pg) = view.pages.get(page) {
-            for (k, (info, ..)) in pg.knobs.iter().enumerate() {
-                if info.id == id
+            for (k, knob) in pg.knobs.iter().enumerate() {
+                if let Some((info, ..)) = knob
+                    && info.id == id
                     && let Some(slot) = view.values.get_mut(k)
                 {
                     slot.0 = v;
@@ -4980,7 +4987,11 @@ fn slot_page_as(app: &App, p: &Project, i: usize, live: bool) -> Option<SlotPage
         let mut knobs = Vec::new();
         let mut sections = Vec::new();
         if let Some(pg) = v.pages.get(page) {
-            for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
+            for (k, slot) in pg.knobs.iter().enumerate() {
+                let Some((info, label, section)) = slot else {
+                    knobs.push(None);
+                    continue;
+                };
                 let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                 let units = if info.units.is_empty() || text.ends_with(&info.units) { String::new() } else { format!(" {}", info.units) };
                 let edit = match pg.choices.get(k).filter(|c| !c.is_empty()) {
@@ -5102,7 +5113,9 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             Stroke::NONE,
         ));
         if resp.clicked() {
-            let tab = if open { None } else { Some(if app.channel && app.prop_set == 3 { AssignTab::Pages } else { AssignTab::Midi }) };
+            let pages_default =
+                (app.channel && app.prop_set == 3) || (!app.channel && app.slot.is_some_and(|i| app.is_editable_plugin(app.chain(), i)));
+            let tab = if open { None } else { Some(if pages_default { AssignTab::Pages } else { AssignTab::Midi }) };
             acts.push(Act::Remote(RemoteAct::Assign(tab)));
         }
     }
@@ -5212,6 +5225,8 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     // On the Macro page: the channel, the page, what each slot controls, and the targets.
     let mut macro_view: Option<MacroView> = None;
     let mut macro_tabs = false;
+    // On an editable hosted plug-in's parameter page: metadata for tabs, slots and Pages pane.
+    let mut plugin_page_view: Option<plugin_pages::PluginPageView> = None;
     if app.channel {
         let set = app.prop_set.min(3);
         heading = channel::SETS[set].to_string();
@@ -5321,7 +5336,12 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                             } else if let Some(pg) = v.pages.get(page) {
                                 zhora = app.zhora_view(p);
                                 tuner = app.tuner_view();
-                                for (k, (info, label, section)) in pg.knobs.iter().enumerate() {
+                                let count = if pg.own { pg.knobs.len() } else { 8 };
+                                for k in 0..count {
+                                    let Some((info, label, section)) = pg.knobs.get(k).and_then(Option::as_ref) else {
+                                        params.push(None);
+                                        continue;
+                                    };
                                     let (value, mut text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                     let name: Cow<'static, str> = knob_label(label).into();
                                     let steps = info.steps.max(1) as f64;
@@ -5360,8 +5380,36 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                                         sections.push((k, section.clone().into()));
                                     }
                                 }
+                                if !pr.id.starts_with(deckard_plugins::native::VENDOR) && !pg.own {
+                                    let mut knobs: [Option<(u32, String, String)>; 8] = Default::default();
+                                    for (k, slot) in pg.knobs.iter().take(8).enumerate() {
+                                        if let Some((info, label, section)) = slot {
+                                            knobs[k] = Some((info.id, label.clone(), section.clone()));
+                                        }
+                                    }
+                                    plugin_page_view = Some(plugin_pages::PluginPageView {
+                                        chain: app.chain(),
+                                        slot: i,
+                                        page,
+                                        plugin_id: pr.id.clone(),
+                                        has_saved: doc.has_saved_plugin_pages(app.chain(), i),
+                                        page_count: v.pages.len(),
+                                        knobs,
+                                    });
+                                }
                             } else if v.pages.is_empty() {
                                 note = Some("This plug-in has no parameters to show".into());
+                                if !pr.id.starts_with(deckard_plugins::native::VENDOR) {
+                                    plugin_page_view = Some(plugin_pages::PluginPageView {
+                                        chain: app.chain(),
+                                        slot: i,
+                                        page: 0,
+                                        plugin_id: pr.id.clone(),
+                                        has_saved: doc.has_saved_plugin_pages(app.chain(), i),
+                                        page_count: 0,
+                                        knobs: Default::default(),
+                                    });
+                                }
                             }
                         }
                         Some(v) => {
@@ -5458,19 +5506,23 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         // Left-aligned, after the heading.
         let heading_w = painter.layout_no_wrap(heading.clone(), font(12.0), ink()).size().x;
         let left = header.left() + 10.0 + heading_w + 24.0;
-        let tab_resps = page_tabs(
-            ui,
-            &painter,
-            Rect::from_min_max(Pos2::new(left, header.top()), Pos2::new(tabs_left, header.bottom())),
-            &names,
-            page,
-            act,
-            acts,
-        );
+        let tab_area = Rect::from_min_max(Pos2::new(left, header.top()), Pos2::new(tabs_left, header.bottom()));
+        let draw_area = if plugin_page_view.is_some() {
+            Rect::from_min_max(tab_area.min, Pos2::new((tab_area.right() - 24.0).max(tab_area.left()), tab_area.bottom()))
+        } else {
+            tab_area
+        };
+        let (tab_resps, tabs_next_x) = page_tabs(ui, &painter, draw_area, &names, page, act, acts);
+        if let Some(pv) = &plugin_page_view {
+            plugin_pages::tab_controls(ui, &painter, tab_area, &tab_resps, tabs_next_x, &names, pv, acts);
+        }
         // Macro pages: right-click a page for Rename, Delete, Clear All.
         if macro_tabs && let Some((level, ..)) = &macro_view {
             let ch = channel::macro_channel(*level);
-            for (i, resp) in tab_resps.iter().enumerate().take(names.len() - 1) {
+            for &(i, ref resp) in &tab_resps {
+                if i + 1 >= names.len() {
+                    continue;
+                }
                 resp.menu_on_right_click(|ui| {
                     let id = ui.id().with(("macro-page-name", i));
                     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| names[i].clone());
@@ -5541,15 +5593,22 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
     let knob_rects: Vec<Option<Rect>> = params
         .iter()
         .enumerate()
-        .map(|(i, k)| k.as_ref().map(|_| Rect::from_min_size(Pos2::new(slot_x(i), knob_y), Vec2::new(70.0, 84.0))))
+        .map(|(i, k)| {
+            (k.is_some() || plugin_page_view.is_some()).then(|| Rect::from_min_size(Pos2::new(slot_x(i), knob_y), Vec2::new(70.0, 84.0)))
+        })
         .collect();
     // Where the knobs are, for tests to point at.
     #[cfg(test)]
     ui.data_mut(|d| d.insert_temp(egui::Id::new("knob-rects"), knob_rects.clone()));
     for (i, k) in params.iter().enumerate() {
-        let Some((name, value, amount, edit)) = k else { continue };
         let r = Rect::from_min_size(Pos2::new(slot_x(i), knob_y), Vec2::new(70.0, 84.0));
-        // The name strip: right-click for the macro menu.
+        let Some((name, value, amount, edit)) = k else {
+            if let Some(pv) = &plugin_page_view {
+                plugin_pages::empty_slot(ui, app, &painter, r, pv, i, gcol, acts);
+            }
+            continue;
+        };
+        // The name strip: right-click for the macro / plug-in parameter menu.
         let strip = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
         let strip_resp = ui.interact(strip, ui.id().with(("param-name", i)), Sense::click());
         if let Some((level, page, _, targets)) = &macro_view {
@@ -5574,6 +5633,16 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                     .show(|ui| macro_target_menu(ui, app, *level, (ch, page, slot), targets, acts));
                 continue;
             }
+        } else if let Some(pv) = &plugin_page_view {
+            let pslot = (pv.chain, pv.slot, pv.page, i);
+            let assign_pages_open = assign_h > 0.0 && app.remote.assign == Some(AssignTab::Pages);
+            if !assign_pages_open && app.remote.plugin_pages.learn.as_ref().is_some_and(|l| l.slot == pslot) {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                if (ui.input(|x| x.time) * 2.0) as i64 % 2 == 0 {
+                    painter.rect_stroke(r.expand(2.0), 4.0, Stroke::new(1.5, gcol), StrokeKind::Outside);
+                }
+            }
+            strip_resp.menu_on_right_click(|ui| plugin_pages::slot_menu(ui, app, Some(doc), pv, i, acts));
         } else if let Some((t, f)) = edit.as_ref().and_then(channel::knob_param) {
             strip_resp.menu_on_right_click(|ui| param_macro_menu(ui, doc, t, f, acts));
         } else if let Some(Edit::Plugin(slot, id, _) | Edit::PluginIn(_, slot, id, _) | Edit::PluginChoice(slot, id, ..)) = *edit {
@@ -5597,7 +5666,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 // A list of chosen steps (a Zhora output's) shows the step `cur` at its place in it.
                 let at = values.as_ref().map_or(cur, |v| listed_at(v, steps, cur));
                 let set = move |k: usize| Act::PluginParam(slot, id, values.as_ref().map_or(k as f64 / steps as f64, |v| v[k]));
-                selector(ui, &painter, r, (i, name.as_ref(), value), &names, at, &set, gcol, acts);
+                let resp = selector(ui, &painter, r, (i, name.as_ref(), value), &names, at, &set, gcol, acts);
+                if let Some(pv) = &plugin_page_view {
+                    resp.menu_on_right_click(|ui| plugin_pages::slot_menu(ui, app, Some(doc), pv, i, acts));
+                }
             }
             continue;
         }
@@ -5642,7 +5714,11 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             // Drag up/down (Shift: fine); double-click to type; ⌘-click resets.
             let below = Rect::from_min_max(Pos2::new(r.left(), strip.bottom()), r.max);
             let resp = ui.interact(below, ui.id().with(("knob", i)), Sense::click_and_drag()).on_hover_text(
-                "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click to remove its modulation, the name for macros",
+                if plugin_page_view.is_some() {
+                    "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click for modulation and parameter options"
+                } else {
+                    "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click to remove its modulation, the name for macros"
+                },
             );
             if resp.hovered() || resp.dragged() {
                 painter.rect_filled(r, 4.0, white(10));
@@ -5680,14 +5756,23 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 let (from, moved) = ui.data(|d| d.get_temp::<(f32, f32)>(start_id)).unwrap_or((base, 0.0));
                 acts.push(Act::Modulate(*edit, (from + moved).clamp(0.0, 1.0), true));
             }
-            // ⌃-click (right-click) anywhere on the knob: its menu, to remove its
-            // modulation.
-            if modulation::mod_target(*edit).is_some() {
+            // ⌃-click (right-click) anywhere on the knob: remove its modulation, and on
+            // an editable hosted plug-in, the parameter slot menu below a divider.
+            let has_mod = modulation::mod_target(*edit).is_some();
+            if has_mod || plugin_page_view.is_some() {
                 let e = *edit;
                 resp.menu_on_right_click(|ui| {
-                    if ui.button("Remove Modulation").on_hover_text("Remove this knob's modulation from every pattern").clicked() {
-                        acts.push(Act::ClearModulation(e));
-                        ui.close();
+                    if has_mod {
+                        if ui.button("Remove Modulation").on_hover_text("Remove this knob's modulation from every pattern").clicked() {
+                            acts.push(Act::ClearModulation(e));
+                            ui.close();
+                        }
+                        if plugin_page_view.is_some() {
+                            ui.separator();
+                        }
+                    }
+                    if let Some(pv) = &plugin_page_view {
+                        plugin_pages::slot_menu(ui, app, Some(doc), pv, i, acts);
                     }
                 });
             }
@@ -5701,7 +5786,17 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             }
         }
         let bipolar = matches!(edit, Some(Edit::Param(_, _, lo, _, _)) if *lo < 0.0) || matches!(edit, Some(Edit::Pan(_)));
-        knob(&painter, r, name.as_ref(), value, amount, if edit.is_some() { gcol } else { white(142) }, bipolar);
+        let strip_rename = plugin_page_view.as_ref().and_then(|pv| {
+            let assign_pages_open = assign_h > 0.0 && app.remote.assign == Some(AssignTab::Pages);
+            let pslot = (pv.chain, pv.slot, pv.page, i);
+            app.remote.plugin_pages.renaming.as_ref().filter(|(at, _)| !assign_pages_open && *at == pslot).map(|(_, s)| (pslot, s.as_str()))
+        });
+        let shown_name = if strip_rename.is_some() { "" } else { name.as_ref() };
+        knob(&painter, r, shown_name, value, amount, if edit.is_some() { gcol } else { white(142) }, bipolar);
+        if let Some((pslot, start)) = strip_rename {
+            let edit_r = Rect::from_center_size(strip.center(), Vec2::new(strip.width() + 4.0, 18.0));
+            plugin_pages::rename_field(ui, edit_r, pslot, start, "plugin-strip-rename", acts);
+        }
         // A modulated knob: where the modulation has it now, a mark on the ring.
         if let Some(m) = edit.and_then(|e| app.mod_amount(e)) {
             let a = std::f32::consts::PI * (0.75 + 1.5 * m);
@@ -5732,6 +5827,7 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             knobs: knob_rects,
             params: &params,
             macro_view: macro_view.as_ref(),
+            plugin_view: plugin_page_view.as_ref(),
         };
         assign::area(ui, app, doc, &painter, fields, gcol, acts);
     }
@@ -6004,7 +6100,7 @@ fn selector(
     set: &dyn Fn(usize) -> Act,
     color: Color32,
     acts: &mut Vec<Act>,
-) {
+) -> Response {
     painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name, font(10.0), white(142));
     let up = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 25.0), Vec2::new(40.0, 14.0));
     let down = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 55.0), Vec2::new(40.0, 14.0));
@@ -6067,6 +6163,7 @@ fn selector(
             }
         }
     }
+    resp
 }
 
 /// A click on `resp` opens the list of `options` under it (the current one marked);
@@ -6095,8 +6192,10 @@ fn knob_label(name: &str) -> String {
     t.to_uppercase()
 }
 
-/// Page tabs from the left of `area` (the header, after its heading); those that
-/// don't fit are left out.
+/// Page tabs from the left of `area` (the header, after its heading). When the tabs
+/// don't all fit, keeps the active page visible and adds a dropdown button to reach
+/// every page. Returns each drawn tab's `(page_index, response)` and the x position
+/// after the last drawn tab (or the overflow dropdown).
 fn page_tabs(
     ui: &Ui,
     painter: &Painter,
@@ -6105,22 +6204,73 @@ fn page_tabs(
     page: usize,
     act: fn(usize) -> Act,
     acts: &mut Vec<Act>,
-) -> Vec<Response> {
-    let mut out = Vec::new();
+) -> (Vec<(usize, Response)>, f32) {
+    if names.is_empty() || area.width() <= 0.0 {
+        return (Vec::new(), area.left());
+    }
+    const GAP: f32 = 2.0;
+    const OVERFLOW_W: f32 = 22.0;
+    let widths: Vec<f32> = names.iter().map(|n| 14.0 + painter.layout_no_wrap(n.clone(), font(11.0), ink()).size().x).collect();
+    let total: f32 = widths.iter().sum::<f32>() + GAP * names.len().saturating_sub(1) as f32;
+    let overflow = names.len() > 1 && total > area.width();
+    let active = page.min(names.len() - 1);
+    let (start, end, tab_right) = if !overflow {
+        (0, names.len(), area.right())
+    } else {
+        let avail = (area.width() - OVERFLOW_W - GAP).max(0.0);
+        let tab_right = area.left() + avail;
+        let mut end = 0;
+        let mut used = 0.0;
+        while end < names.len() {
+            let step = widths[end] + if end > 0 { GAP } else { 0.0 };
+            if used + step > avail {
+                break;
+            }
+            used += step;
+            end += 1;
+        }
+        if active < end {
+            (0, end, tab_right)
+        } else if avail < 24.0 {
+            (0, 0, area.left())
+        } else {
+            let mut start = active;
+            let mut used = widths[active].min(avail);
+            while start > 0 {
+                let step = widths[start - 1] + GAP;
+                if used + step > avail {
+                    break;
+                }
+                used += step;
+                start -= 1;
+            }
+            let mut end = active + 1;
+            while end < names.len() {
+                let step = widths[end] + GAP;
+                if used + step > avail {
+                    break;
+                }
+                used += step;
+                end += 1;
+            }
+            (start, end, tab_right)
+        }
+    };
+    let mut out = Vec::with_capacity(end.saturating_sub(start));
     let mut x = area.left();
-    for (i, name) in names.iter().enumerate() {
-        let w = 14.0 + painter.layout_no_wrap(name.clone(), font(11.0), ink()).size().x;
-        if x + w > area.right() {
+    for (i, name) in names.iter().enumerate().take(end).skip(start) {
+        let w = widths[i].min((tab_right - x).max(0.0));
+        if w <= 0.0 {
             break;
         }
         let r = Rect::from_min_max(Pos2::new(x, area.top() + 4.0), Pos2::new(x + w, area.bottom() - 4.0));
-        let resp = ui.interact(r, ui.id().with(("page-tab", i)), Sense::click());
+        let resp = ui.interact(r, ui.id().with(("page-tab", i)), Sense::click_and_drag());
         let on = i == page;
-        let ink = if on || resp.hovered() { ink() } else { white(142) };
+        let col = if on || resp.hovered() { ink() } else { white(142) };
         if name == "+" {
-            plus_glyph(painter, r.center(), 11.0, ink);
+            plus_glyph(painter, r.center(), 11.0, col);
         } else {
-            painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
+            painter.with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, name, font(11.0), col);
         }
         if on {
             painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), area.bottom() - 1.0, Stroke::new(2.0, white(255)));
@@ -6128,10 +6278,43 @@ fn page_tabs(
         if resp.clicked() {
             acts.push(act(i));
         }
-        out.push(resp);
-        x += w + 2.0;
+        out.push((i, resp));
+        x += w + GAP;
     }
-    out
+    if overflow {
+        let bx = x.min((area.right() - OVERFLOW_W).max(area.left()));
+        let r = Rect::from_min_max(Pos2::new(bx, area.top() + 4.0), Pos2::new(bx + OVERFLOW_W, area.bottom() - 4.0));
+        let resp = ui.interact(r, ui.id().with("page-tabs-overflow"), Sense::click()).on_hover_text("All pages");
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "All pages"));
+        if resp.hovered() {
+            painter.rect_filled(r, 2.0, s02());
+        }
+        let m = r.center();
+        let col = if resp.hovered() { ink() } else { white(164) };
+        painter.add(egui::Shape::convex_polygon(
+            vec![m + Vec2::new(-4.0, -2.0), m + Vec2::new(4.0, -2.0), m + Vec2::new(0.0, 2.5)],
+            col,
+            Stroke::NONE,
+        ));
+        egui::Popup::menu(&resp).style(crate::layout::menu_style).id(ui.id().with("page-tabs-overflow-menu")).show(|ui| {
+            egui::ScrollArea::vertical().id_salt("page-tabs-overflow-list").max_height(320.0).show(ui, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    if name == "+" {
+                        ui.separator();
+                        if ui.button("Add Page").clicked() {
+                            acts.push(act(i));
+                            ui.close();
+                        }
+                    } else if ui.selectable_label(i == page, name).clicked() {
+                        acts.push(act(i));
+                        ui.close();
+                    }
+                }
+            });
+        });
+        x = r.right() + GAP;
+    }
+    (out, x)
 }
 
 /// The sound's chain: one row per slot (click: its pages; double-click: plug-in window;

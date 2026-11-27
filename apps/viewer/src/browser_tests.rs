@@ -119,7 +119,7 @@ fn unnamed_plugin_pages_derive_category_names_from_knobs() {
     };
     let page = |labels: &[&str]| crate::ViewPage {
         name: String::new(),
-        knobs: labels.iter().enumerate().map(|(i, l)| (info(i as u32, l), (*l).into(), String::new())).collect(),
+        knobs: labels.iter().enumerate().map(|(i, l)| Some((info(i as u32, l), (*l).into(), String::new()))).collect(),
         choices: Vec::new(),
         own: false,
     };
@@ -131,8 +131,8 @@ fn unnamed_plugin_pages_derive_category_names_from_knobs() {
     crate::name_unnamed_pages(&mut pages);
     assert_eq!(pages[0].name, "Macros / Engine");
     assert_eq!(pages[1].name, "Filter 1 / Filter 2");
-    assert_eq!(pages[1].knobs[0].2, "Filter 1");
-    assert_eq!(pages[1].knobs[3].2, "Filter 2");
+    assert_eq!(pages[1].knobs[0].as_ref().unwrap().2, "Filter 1");
+    assert_eq!(pages[1].knobs[3].as_ref().unwrap().2, "Filter 2");
     assert_eq!(pages[2].name, "Pitch Tracking / Pitch Shift");
 }
 

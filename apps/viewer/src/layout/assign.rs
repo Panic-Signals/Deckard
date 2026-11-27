@@ -18,20 +18,21 @@ pub(super) struct Fields<'a> {
     pub knobs: Vec<Option<Rect>>,
     pub params: &'a [Option<Knob>],
     pub macro_view: Option<&'a MacroView>,
+    pub plugin_view: Option<&'a super::plugin_pages::PluginPageView>,
 }
 
 pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter: &Painter, f: Fields, gcol: Color32, acts: &mut Vec<Act>) {
     let Some(tab) = app.remote.assign else { return };
     painter.hline(f.area.x_range(), f.area.top(), Stroke::new(1.0, Color32::BLACK));
-    // The tabs: PAGES (the Macro properties only), MIDI, MOD. HOST stays hidden until
-    // DECKARD runs as a plug-in: without a host its IDs do nothing.
+    // The tabs: PAGES (Macro properties and hosted plug-ins), MIDI, MOD. HOST stays hidden
+    // until DECKARD runs as a plug-in: without a host its IDs do nothing.
     let mut x = f.tabs.left() + 6.0;
     let sound_chain = match app.chain() {
         deckard_doc::Chain::Sound(g, s) if f.macro_view.is_none() => Some((g, s)),
         _ => None,
     };
     for (t, name, enabled) in [
-        (AssignTab::Pages, "PAGES", f.macro_view.is_some()),
+        (AssignTab::Pages, "PAGES", f.macro_view.is_some() || f.plugin_view.is_some()),
         (AssignTab::Midi, "MIDI", true),
         (AssignTab::Mod, "MOD", sound_chain.is_some()),
     ] {
@@ -71,7 +72,7 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
     };
     // Learning blinks.
     let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
-    if app.remote.midi_learn.is_some() || app.remote.macro_learn.is_some() {
+    if app.remote.midi_learn.is_some() || app.remote.macro_learn.is_some() || app.remote.plugin_pages.learn.is_some() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
     match (tab, f.macro_view) {
@@ -102,7 +103,10 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                     (Some(id), None) => super::plugin_macro_knob(app, doc, id).map_or("(Other)".into(), |k| k.0.to_string()),
                     (None, _) => "Select".into(),
                 };
-                let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(s02()));
+                let mut resp = ui.put(r, egui::Button::new(egui::RichText::new(&text).size(10.0)).fill(s02()).truncate());
+                if m.target.is_some() {
+                    resp = resp.on_hover_text(&text);
+                }
                 if resp.clicked() {
                     acts.push(Act::Remote(RemoteAct::Focus(slot)));
                 }
@@ -136,8 +140,12 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
             }
         }
         (AssignTab::Pages, None) => {
-            let at = Pos2::new(f.area.left() + 13.0, f.area.center().y);
-            painter.text(at, Align2::LEFT_CENTER, "Pages: for the Macro properties", font(11.0), white(90));
+            if let Some(pv) = f.plugin_view {
+                super::plugin_pages::assign_pages(ui, app, painter, f.area, &f.knobs, pv, gcol, acts);
+            } else {
+                let at = Pos2::new(f.area.left() + 13.0, f.area.center().y);
+                painter.text(at, Align2::LEFT_CENTER, "Pages: for Macro properties or hosted plug-ins", font(11.0), white(90));
+            }
         }
         (AssignTab::Midi | AssignTab::Host, mv) => {
             for i in 0..f.params.len() {
