@@ -135,6 +135,38 @@ fn a_new_release_shows_an_update_button_before_the_transport() {
     assert!(h.state().about.is_some(), "About opens, with its Update button");
 }
 
+/// In a narrower window the transport moves over to leave the update button its room,
+/// rather than the button going unseen; where there's no room at all, a green dot by
+/// the menus says there's a release.
+#[test]
+fn an_update_shows_in_a_narrow_window() {
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    h.state_mut().update.check = crate::update::Check::Available(crate::github::Release {
+        version: (9, 0, 0),
+        tag: "9.0.0".into(),
+        url: "https://github.com/Panic-Signals/Deckard/releases/tag/9.0.0".into(),
+        assets: Vec::new(),
+    });
+    let drawn = |h: &mut Harness<'static, crate::App>, width: f32| {
+        h.set_size(eframe::egui::vec2(width, 800.0));
+        h.run_steps(4);
+        for name in ["update", "update-dot"] {
+            h.ctx.data_mut(|d| d.remove::<Rect>(crate::layout::header_rect(name)));
+        }
+        h.run_steps(2);
+        let rect = |name| h.ctx.data(|d| d.get_temp::<Rect>(crate::layout::header_rect(name)));
+        (rect("update"), rect("update-dot"))
+    };
+    for width in [1440.0, 1366.0] {
+        let (button, dot) = drawn(&mut h, width);
+        let b = button.unwrap_or_else(|| panic!("the button is drawn at {width}"));
+        assert!(b.right() < at(&h, "restart").left(), "before the transport at {width}: {b:?}");
+        assert!(dot.is_none(), "the button says it at {width}");
+    }
+    let (button, dot) = drawn(&mut h, 1000.0);
+    assert!(button.is_none() && dot.is_some(), "no room for the button: the dot ({button:?}, {dot:?})");
+}
+
 /// Launched on a newer release than the last one run: it asks to open the release notes
 /// (once); the same release, or a first run, doesn't.
 #[test]

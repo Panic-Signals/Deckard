@@ -2194,7 +2194,12 @@ pub fn header(app: &mut App, ui: &mut Ui) {
             });
             let centred = full.center().x - group / 2.0;
             // (The right group's own spacing already ends it with a gap.)
-            let (lo, hi) = (left_end + 8.0, right_start - group);
+            let hi = right_start - group;
+            // A new release's button has its room kept before the transport: all of it
+            // where that fits, else its icon alone (it went unseen in a laptop's window).
+            let rooms = if app.update.available().is_some() { update_button_rooms(ui) } else { [0.0; 2] };
+            let room = rooms.into_iter().find(|r| left_end + r + 8.0 <= hi).unwrap_or(0.0);
+            let lo = left_end + room + 8.0;
             let mid_left = if lo <= hi { centred.clamp(lo, hi) } else { centred };
             // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
             // and a new release's button.
@@ -2217,6 +2222,13 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     white(142),
                     Stroke::NONE,
                 ));
+                // Where the update button has no room at all (a narrow window), a green dot
+                // by the menus' arrow says there's a release: Help ▸ About has it.
+                if app.update.available().is_some() && room == 0.0 {
+                    let dot = Rect::from_center_size(Pos2::new(c.x + 9.0, r.center().y - 6.0), Vec2::splat(7.0));
+                    ui.painter().circle_filled(dot.center(), 3.5, Color32::from_rgb(0x2e, 0x9e, 0x4f));
+                    note_rect(ui, "update-dot", dot);
+                }
                 let menus = crate::menu::menus(app);
                 let mut chosen = Vec::new();
                 egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| {
@@ -2605,17 +2617,33 @@ fn link_button(ui: &mut Ui, view: Option<(u64, f64)>) -> Response {
     })
 }
 
+/// The gap either side of the header's update button.
+const UPDATE_GAP: f32 = 10.0;
+/// The update button's width with its icon alone.
+const UPDATE_ICON_ONLY: f32 = 10.0 + 14.0 + 10.0;
+
+/// The room the header's update button takes with its gaps: in full, and with its icon
+/// alone.
+fn update_button_rooms(ui: &Ui) -> [f32; 2] {
+    let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), ink());
+    [UPDATE_ICON_ONLY + 6.0 + text.size().x, UPDATE_ICON_ONLY].map(|w| UPDATE_GAP + w + UPDATE_GAP)
+}
+
 /// A new release's button in the header: green, with an update icon and "Update
-/// available"; `None` (not drawn) when it doesn't fit before `before` (the transport).
+/// available", or the icon alone where only that fits before `before` (the transport);
+/// `None` (not drawn) when neither does.
 fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> {
     const GREEN: Color32 = Color32::from_rgb(0x2e, 0x9e, 0x4f);
     const GREEN_HOVER: Color32 = Color32::from_rgb(0x38, 0xb4, 0x5c);
     let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), ink());
-    let size = Vec2::new(10.0 + 14.0 + 6.0 + text.size().x + 10.0, 22.0);
-    let gap = 10.0;
-    if ui.cursor().left() + gap + size.x + gap > before {
+    let gap = UPDATE_GAP;
+    let fits = |w: f32| ui.cursor().left() + gap + w + gap <= before + 0.5;
+    let full = UPDATE_ICON_ONLY + 6.0 + text.size().x;
+    let words = fits(full);
+    if !words && !fits(UPDATE_ICON_ONLY) {
         return None;
     }
+    let size = Vec2::new(if words { full } else { UPDATE_ICON_ONLY }, 22.0);
     ui.add_space(gap);
     let (r, resp) = ui.allocate_exact_size(size, Sense::click());
     let p = ui.painter();
@@ -2632,7 +2660,9 @@ fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> 
         ink(),
         Stroke::NONE,
     ));
-    p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, ink());
+    if words {
+        p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, ink());
+    }
     note_rect(ui, "update", r);
     Some(resp.on_hover_text(format!("DECKARD {version} is out: click to see it and update (Help ▸ About)")))
 }
