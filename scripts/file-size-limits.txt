@@ -8,7 +8,7 @@
 
 apps/viewer/src/layout.rs 9250
 apps/viewer/src/layout/sampling.rs 3750
-apps/viewer/src/main.rs 22750
+apps/viewer/src/main.rs 15250
 crates/engine/src/lib.rs 8250
 crates/engine/src/sampler.rs 3750
 crates/surface/src/tests.rs 5000
