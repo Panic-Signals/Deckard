@@ -22,6 +22,7 @@ unsafe impl Sync for UiParams {}
 pub struct SharedPlugin {
     ui_params: Option<UiParams>,
     faulted: Option<Arc<AtomicBool>>,
+    cid: [u8; 16],
     plugin: Mutex<Plugin>,
     offs: [AtomicU64; 2],
     stop: AtomicBool,
@@ -44,9 +45,11 @@ impl Plugin {
     pub fn shared(self) -> Shared {
         let ui_params = self.params().map(UiParams);
         let faulted = self.faulted_flag();
+        let cid = self.id.cid;
         Arc::new(SharedPlugin {
             ui_params,
             faulted,
+            cid,
             plugin: Mutex::new(self),
             offs: Default::default(),
             stop: AtomicBool::new(false),
@@ -64,6 +67,11 @@ impl SharedPlugin {
 
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, Plugin>> {
         self.plugin.try_lock()
+    }
+
+    /// The plug-in's class id, without taking the instance.
+    pub fn cid(&self) -> [u8; 16] {
+        self.cid
     }
 
     /// A handle to read and change a VST3's or Audio Unit's parameters without locking

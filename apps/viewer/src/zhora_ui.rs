@@ -491,11 +491,11 @@ impl App {
         let Some(doc) = self.doc.clone() else { return false };
         let (mut stored, mut tuning) = (Vec::new(), false);
         for (slot, p) in self.samples.plugins.instances().filter(|(s, _)| which(s)) {
-            let p = if wait { p.lock().ok() } else { p.try_lock().ok() };
-            let Some(mut p) = p else { continue };
-            if p.id.cid != deckard_plugins::zhora::CLASS.cid {
+            if p.cid() != deckard_plugins::zhora::CLASS.cid {
                 continue;
             }
+            let p = if wait { p.lock().ok() } else { p.try_lock().ok() };
+            let Some(mut p) = p else { continue };
             tuning |= p.readout().is_some_and(|r| r.state == TuneState::Tuning);
             if !p.changed_by_itself() {
                 continue;

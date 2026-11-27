@@ -4862,12 +4862,17 @@ fn plugin_knob(app: &App, doc: &deckard_doc::Document, chain: deckard_doc::Chain
     let info = {
         let mut cache = app.plugin_params.borrow_mut();
         if cache.get(&(chain, slot)).is_none_or(|(k, _)| *k != plugin_id) {
-            let g = p.try_lock().ok()?;
-            let mut list = g.parameter_list(false);
-            // (Named as its page names them: a plug-in's own pages by the short names.)
-            if !g.pages().is_empty() {
-                list.iter_mut().filter(|i| !i.short.is_empty()).for_each(|i| i.title = i.short.clone());
-            }
+            let list = if let Some(list) = p.params().and_then(|h| h.parameter_list(false)) {
+                list
+            } else {
+                let g = p.try_lock().ok()?;
+                let mut list = g.parameter_list(false);
+                // (Named as its page names them: a plug-in's own pages by the short names.)
+                if !g.pages().is_empty() {
+                    list.iter_mut().filter(|i| !i.short.is_empty()).for_each(|i| i.title = i.short.clone());
+                }
+                list
+            };
             cache.insert((chain, slot), (plugin_id, list));
         }
         cache.get(&(chain, slot))?.1.iter().find(|i| i.id == param)?.clone()
