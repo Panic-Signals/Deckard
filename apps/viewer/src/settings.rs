@@ -68,8 +68,12 @@ pub struct Settings {
     pub scrolling_color: u32,
     /// Remove leading and trailing low-level silence when exporting a selection.
     pub scrolling_remove_silence: bool,
+    /// Whether fades are applied at selection edges.
+    pub scrolling_fade_enabled: bool,
     /// Fade duration applied at selection edges, in milliseconds.
     pub scrolling_fade_ms: u32,
+    /// The instrument used when a scrolling-sampler selection is dropped.
+    pub scrolling_drop_audio: bool,
     /// The browser's FILES tab: folders pinned to its top.
     pub favorite_folders: Vec<PathBuf>,
     /// The browser's `+ ROUTING` and `+ PATTERNS`: loading a group brings its routing
@@ -419,7 +423,9 @@ impl Default for Settings {
             scrolling_palette: 0,
             scrolling_color: 0xb9bfc3,
             scrolling_remove_silence: false,
+            scrolling_fade_enabled: true,
             scrolling_fade_ms: 5,
+            scrolling_drop_audio: true,
             midi_off: BTreeSet::new(),
             mpe: Default::default(),
             mpe_out: Default::default(),
@@ -534,7 +540,9 @@ impl Settings {
                     s.scrolling_color = u32::from_str_radix(v.trim_start_matches('#'), 16).unwrap_or(0xb9bfc3) & 0x00ff_ffff
                 }
                 "scrolling_remove_silence" => s.scrolling_remove_silence = v == "true",
+                "scrolling_fade_enabled" => s.scrolling_fade_enabled = v != "false",
                 "scrolling_fade_ms" => s.scrolling_fade_ms = v.parse().unwrap_or(5).clamp(1, 10),
+                "scrolling_drop_audio" => s.scrolling_drop_audio = v != "false",
                 "dir" => dirs.push(PathBuf::from(v)),
                 "favorite_folder" => s.favorite_folders.push(PathBuf::from(v)),
                 "load_group_routing" => s.load_group_routing = v != "false",
@@ -852,7 +860,7 @@ impl Settings {
     /// The settings as saved: lines of `key = value`.
     pub fn to_text(&self) -> String {
         let mut out = format!(
-            "use_vst3 = {}\nuse_vst2 = {}\nuse_au = {}\nscan_on_start = {}\nshow_waveform = {}\nscrolling_sampler = {}\nscrolling_seconds = {}\nscrolling_palette = {}\nscrolling_color = {:06x}\nscrolling_remove_silence = {}\nscrolling_fade_ms = {}\n",
+            "use_vst3 = {}\nuse_vst2 = {}\nuse_au = {}\nscan_on_start = {}\nshow_waveform = {}\nscrolling_sampler = {}\nscrolling_seconds = {}\nscrolling_palette = {}\nscrolling_color = {:06x}\nscrolling_remove_silence = {}\nscrolling_fade_enabled = {}\nscrolling_fade_ms = {}\nscrolling_drop_audio = {}\n",
             self.use_vst3,
             self.use_vst2,
             self.use_au,
@@ -863,7 +871,9 @@ impl Settings {
             self.scrolling_palette,
             self.scrolling_color,
             self.scrolling_remove_silence,
-            self.scrolling_fade_ms
+            self.scrolling_fade_enabled,
+            self.scrolling_fade_ms,
+            self.scrolling_drop_audio
         );
         if !self.bridge_windows {
             out += "bridge_windows = false\n";

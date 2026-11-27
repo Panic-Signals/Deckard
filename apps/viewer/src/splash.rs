@@ -396,15 +396,13 @@ mod tests {
 
     #[test]
     fn the_buttons_open_their_links() {
-        let mut h = Harness::builder()
-            .with_size(egui::vec2(1000.0, 700.0))
-            .build_ui_state(
-                |ui, boot: &mut Boot| {
-                    let ctx = ui.ctx().clone();
-                    show(&ctx, ui, boot);
-                },
-                Boot::new(all_steps(None)),
-            );
+        let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
+            |ui, boot: &mut Boot| {
+                let ctx = ui.ctx().clone();
+                show(&ctx, ui, boot);
+            },
+            Boot::new(all_steps(None)),
+        );
         h.run_steps(2);
         for (label, url) in
             [("GitHub", GITHUB_URL.to_string()), ("Discord", DISCORD_URL.into()), ("Release notes", release_notes_link(VERSION))]

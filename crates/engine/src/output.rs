@@ -625,6 +625,7 @@ impl Output {
         let monitor: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Stats::default());
         let scrolling = Arc::new(crate::scrolling::Scrolling::default());
+        scrolling.prepare(rate);
         // (Room made here, so publishing doesn't allocate on the audio thread.)
         let telemetry: Arc<Mutex<crate::Telemetry>> = Arc::new(Mutex::new(crate::Telemetry::with_room()));
         let sender = Sender {

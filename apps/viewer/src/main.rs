@@ -2864,6 +2864,14 @@ impl App {
                     self.settings.save();
                 }
                 ui.label("Fade to zero crossing");
+                let mut fade_enabled = self.settings.scrolling_fade_enabled;
+                ui.checkbox(&mut fade_enabled, "Enable");
+                ui.end_row();
+                if fade_enabled != self.settings.scrolling_fade_enabled {
+                    self.settings.scrolling_fade_enabled = fade_enabled;
+                    self.settings.save();
+                }
+                ui.label("Fade duration");
                 let mut fade = self.settings.scrolling_fade_ms;
                 egui::ComboBox::from_id_salt("scrolling-fade").selected_text(format!("{fade} ms")).show_ui(ui, |ui| {
                     for value in 1..=10 {
@@ -2875,6 +2883,19 @@ impl App {
                     self.settings.scrolling_fade_ms = fade;
                     self.settings.save();
                 }
+            }
+            ui.label("Dropped selection instrument");
+            let mut drop_audio = self.settings.scrolling_drop_audio;
+            egui::ComboBox::from_id_salt("scrolling-drop-instrument")
+                .selected_text(if drop_audio { "Audio" } else { "Sampler" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut drop_audio, true, "Audio");
+                    ui.selectable_value(&mut drop_audio, false, "Sampler");
+                });
+            ui.end_row();
+            if drop_audio != self.settings.scrolling_drop_audio {
+                self.settings.scrolling_drop_audio = drop_audio;
+                self.settings.save();
             }
             ui.label("Buffer size");
             crate::layout::combo("buffer-size").selected_text(format!("{size} samples ({:.1} ms)", ms(size))).show_ui(ui, |ui| {
@@ -12481,6 +12502,23 @@ impl App {
         };
     }
 
+    fn drop_scrolling_sample(&mut self, g: usize, s: usize, file: &Path) {
+        let smp = match deckard_engine::sample::Sample::load(file) {
+            Ok(smp) => smp,
+            Err(e) => {
+                self.status = format!("can't read {}: {e}", file.display());
+                return;
+            }
+        };
+        if self.settings.scrolling_drop_audio {
+            if let Err(e) = self.load_scrolling_loop(g, s, file, &smp) {
+                self.status = format!("can't load {}: {e}", file.display());
+            }
+        } else {
+            self.load_take(g, s, file, smp.frames.len());
+        }
+    }
+
     /// Add `file` to sound `s`'s Sampler as a new zone, on the key above its others, and
     /// focus it (one undo step).
     fn add_zone(&mut self, g: usize, s: usize, file: &Path, frames: usize) -> Result<(), String> {
@@ -12512,18 +12550,40 @@ impl App {
     /// sound named after it unless named by hand. One undo step.
     fn load_loop(&mut self, g: usize, s: usize, file: &Path, smp: &deckard_engine::sample::Sample) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
-        let name = file.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned());
-        let (tempo, bar) = {
-            let d = doc.borrow();
-            (d.project().tempo, d.project().bar_length().max(1))
-        };
-        let beats = loops::beats(&name, smp.frames.len(), smp.rate, tempo);
+        let tempo = doc.borrow().project().tempo;
+        let beats = loops::beats(
+            &file.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned()),
+            smp.frames.len(),
+            smp.rate,
+            tempo,
+        );
+        self.load_loop_with_beats(g, s, file, smp, beats)
+    }
+
+    fn load_loop_with_beats(
+        &mut self,
+        g: usize,
+        s: usize,
+        file: &Path,
+        smp: &deckard_engine::sample::Sample,
+        beats: f64,
+    ) -> Result<(), String> {
+        let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let already_audio = self.is_audio_sound(g, s);
+        let bar = doc.borrow().project().bar_length().max(1);
         let focused = (g == self.group).then_some(self.pattern);
         let spec = deckard_doc::TakeSpec { file: file.to_path_buf(), frames: smp.frames.len(), rate: smp.rate, beats };
         let heard = self.heard_scene();
         doc.borrow_mut().transaction("Load Loop", |d| {
-            d.audio_only(g, s)?;
-            d.set_takes(g, s, &[spec], "Load Loop")?;
+            if !already_audio {
+                d.audio_only(g, s)?;
+            }
+            let take = if already_audio {
+                d.add_take(g, s, &spec, "Load Loop")?
+            } else {
+                d.set_takes(g, s, &[spec], "Load Loop")?;
+                0
+            };
             let pi = match focused.filter(|&p| p < d.project().groups[g].patterns.len()) {
                 Some(p) => p,
                 None if d.project().groups[g].patterns.is_empty() => {
@@ -12533,7 +12593,7 @@ impl App {
                 }
                 None => 0,
             };
-            d.set_audio_in(g, s, &[pi], Some(0), "Load Loop")?;
+            d.set_audio_in(g, s, &[pi], Some(take), "Load Loop")?;
             // Long enough to hear it all: whole bars.
             let need = ((beats * PPQ as f64 / bar as f64).ceil() as i64).max(1) * bar;
             let len = d.project().groups[g].patterns[pi].length;
@@ -12553,6 +12613,13 @@ impl App {
             self.chain_tab = layout::ChainTab::Sound;
         }
         Ok(())
+    }
+
+    fn load_scrolling_loop(&mut self, g: usize, s: usize, file: &Path, smp: &deckard_engine::sample::Sample) -> Result<(), String> {
+        let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let tempo = doc.borrow().project().tempo;
+        let beats = loops::beats_at_tempo(smp.frames.len(), smp.rate, tempo);
+        self.load_loop_with_beats(g, s, file, smp, beats)
     }
 
     /// A recorded take put on sound (`g`, `s`) (a take clicked, or dragged onto a sound's
@@ -14542,6 +14609,7 @@ impl eframe::App for App {
             self.close_output();
             deckard_engine::devices::shut_down();
         }
+        scrolling_sampler::cleanup_temporary_files();
     }
 
     /// While the window is covered or minimized eframe runs no `ui`, only this: keep the
@@ -14995,7 +15063,7 @@ impl App {
         {
             let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
             if let Some(&(_, (g, s))) = rows.iter().find(|(r, _)| r.contains(p)) {
-                self.drop_samples((g, s), std::slice::from_ref(&dragged.0));
+                self.drop_scrolling_sample(g, s, &dragged.0);
             }
         }
         if self.save_dialog.is_some() {

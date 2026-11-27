@@ -2,9 +2,57 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 const PYRAMID: usize = 128;
+const QUEUE_SECONDS: usize = 4;
+
+struct CaptureQueue {
+    samples: Vec<AtomicU32>,
+    read: AtomicUsize,
+    written: AtomicUsize,
+}
+
+impl CaptureQueue {
+    fn new(rate: u32) -> Self {
+        let frames = (rate as usize * QUEUE_SECONDS).max(PYRAMID).next_multiple_of(PYRAMID);
+        Self { samples: (0..frames * 2).map(|_| AtomicU32::new(0)).collect(), read: AtomicUsize::new(0), written: AtomicUsize::new(0) }
+    }
+
+    fn push(&self, stereo: &[f32], frames: usize) {
+        let capacity = self.samples.len() / 2;
+        let read = self.read.load(Ordering::Acquire);
+        let written = self.written.load(Ordering::Relaxed);
+        let available = capacity.saturating_sub(written.saturating_sub(read));
+        let count = frames.min(available);
+        for frame in 0..count {
+            let index = (written + frame) % capacity * 2;
+            self.samples[index].store(stereo[frame * 2].to_bits(), Ordering::Relaxed);
+            self.samples[index + 1].store(stereo[frame * 2 + 1].to_bits(), Ordering::Relaxed);
+        }
+        self.written.store(written + count, Ordering::Release);
+    }
+
+    fn reset(&self) {
+        let written = self.written.load(Ordering::Acquire);
+        self.read.store(written, Ordering::Release);
+    }
+
+    fn drain(&self, data: &mut Data) {
+        let capacity = self.samples.len() / 2;
+        let read = self.read.load(Ordering::Relaxed);
+        let written = self.written.load(Ordering::Acquire);
+        for frame in read..written {
+            let index = frame % capacity * 2;
+            let target = (data.total as usize) % data.left.len();
+            data.left[target] = f32::from_bits(self.samples[index].load(Ordering::Relaxed));
+            data.right[target] = f32::from_bits(self.samples[index + 1].load(Ordering::Relaxed));
+            data.total += 1;
+        }
+        self.read.store(written, Ordering::Release);
+    }
+}
 
 struct Data {
     left: Vec<f32>,
@@ -19,6 +67,7 @@ pub struct Scrolling {
     paused: AtomicBool,
     seconds: Mutex<f32>,
     data: Mutex<Data>,
+    queue: OnceLock<CaptureQueue>,
 }
 
 impl Default for Scrolling {
@@ -28,11 +77,31 @@ impl Default for Scrolling {
             paused: AtomicBool::new(false),
             seconds: Mutex::new(120.0),
             data: Mutex::new(Data { left: Vec::new(), right: Vec::new(), total: 0, rate: 0, enabled: false }),
+            queue: OnceLock::new(),
         }
     }
 }
 
 impl Scrolling {
+    fn capacity(seconds: f32, rate: u32) -> usize {
+        ((seconds * rate as f32) as usize).max(PYRAMID).next_multiple_of(PYRAMID)
+    }
+
+    /// Prepare the rolling storage before the audio callback starts using it.
+    pub fn prepare(&self, rate: u32) {
+        let Ok(seconds) = self.seconds.lock().map(|seconds| *seconds) else { return };
+        let Ok(mut data) = self.data.lock() else { return };
+        let capacity = Self::capacity(seconds, rate);
+        if data.left.len() == capacity && data.rate == rate {
+            return;
+        }
+        data.left = vec![0.0; capacity];
+        data.right = vec![0.0; capacity];
+        data.total = 0;
+        data.rate = rate;
+        let _ = self.queue.set(CaptureQueue::new(rate));
+    }
+
     pub fn sync(&self, enabled: bool, seconds: f32) {
         let changed = self.enabled.swap(enabled, Ordering::Relaxed) != enabled;
         if !enabled {
@@ -43,20 +112,27 @@ impl Scrolling {
             if (*wanted - seconds).abs() > f32::EPSILON {
                 *wanted = seconds;
                 if let Ok(mut data) = self.data.lock() {
+                    let capacity = Self::capacity(seconds, data.rate);
                     data.left.clear();
                     data.right.clear();
+                    if data.rate != 0 {
+                        data.left.resize(capacity, 0.0);
+                        data.right.resize(capacity, 0.0);
+                    }
                     data.total = 0;
-                    data.rate = 0;
+                    if let Some(queue) = self.queue.get() {
+                        queue.reset();
+                    }
                 }
                 return;
             }
         }
         if changed && let Ok(mut data) = self.data.lock() {
             data.enabled = enabled;
-            data.left.clear();
-            data.right.clear();
             data.total = 0;
-            data.rate = 0;
+            if let Some(queue) = self.queue.get() {
+                queue.reset();
+            }
         }
     }
 
@@ -64,21 +140,20 @@ impl Scrolling {
         if !self.enabled.load(Ordering::Relaxed) || self.paused.load(Ordering::Relaxed) || frames == 0 {
             return;
         }
+        let Some(queue) = self.queue.get() else { return };
+        if queue.samples.len() / 2 < frames || rate == 0 {
+            return;
+        }
+        queue.push(stereo, frames);
+    }
+
+    fn drain(&self) {
+        let Some(queue) = self.queue.get() else { return };
         let Ok(mut data) = self.data.try_lock() else { return };
-        let seconds = self.seconds.try_lock().map_or(120.0, |s| *s);
-        let capacity = ((seconds * rate as f32) as usize).max(PYRAMID).next_multiple_of(PYRAMID);
-        if data.left.len() != capacity || data.rate != rate {
-            data.left = vec![0.0; capacity];
-            data.right = vec![0.0; capacity];
-            data.total = 0;
-            data.rate = rate;
+        if data.left.is_empty() {
+            return;
         }
-        for (frame, pair) in stereo.chunks_exact(2).take(frames).enumerate() {
-            let index = ((data.total as usize + frame) % capacity) as usize;
-            data.left[index] = pair[0];
-            data.right[index] = pair[1];
-        }
-        data.total += frames as u64;
+        queue.drain(&mut data);
     }
 
     pub fn paused(&self) -> bool {
@@ -90,6 +165,7 @@ impl Scrolling {
     }
 
     pub fn snapshot(&self, columns: usize) -> (Vec<(f32, f32)>, u64, u32) {
+        self.drain();
         let (total, rate) = match self.data.lock() {
             Ok(data) => (data.total, data.rate),
             Err(_) => return (vec![(0.0, 0.0); columns], 0, 0),
@@ -100,11 +176,13 @@ impl Scrolling {
     }
 
     pub fn available_frames(&self) -> u64 {
+        self.drain();
         let Ok(data) = self.data.lock() else { return 0 };
         data.total.min(data.left.len() as u64)
     }
 
     pub fn snapshot_range(&self, from: u64, len: u64, columns: usize) -> Option<Vec<(f32, f32)>> {
+        self.drain();
         let Ok(data) = self.data.lock() else { return None };
         if data.left.is_empty() || columns == 0 {
             return Some(vec![(0.0, 0.0); columns]);
@@ -137,6 +215,7 @@ impl Scrolling {
     }
 
     pub fn clear(&self) {
+        self.drain();
         if let Ok(mut data) = self.data.lock() {
             data.left.clear();
             data.right.clear();
@@ -148,6 +227,7 @@ impl Scrolling {
     /// Render an absolute frame range to a temporary stereo WAV for drag-out.
     /// The capture remains session-only; the file is merely a hand-off to the UI.
     pub fn export_wav(&self, path: &Path, from: u64, len: u64, remove_silence: bool, fade_ms: u32) -> Result<(), String> {
+        self.drain();
         let data = self.data.lock().map_err(|_| "scrolling sampler is busy".to_string())?;
         if data.left.is_empty() || data.rate == 0 || len == 0 {
             return Err("the selection is empty".into());
@@ -174,7 +254,10 @@ impl Scrolling {
                 samples = samples[first_live..last_live].to_vec();
             }
         }
-        let fade_frames = ((fade_ms.clamp(1, 10) as u64 * u64::from(rate)) / 1000) as usize;
+        if !samples.iter().any(|(l, r)| l.abs().max(r.abs()) > 0.001) {
+            return Err("the selection is silent".into());
+        }
+        let fade_frames = ((fade_ms.min(10) as u64 * u64::from(rate)) / 1000) as usize;
         let fade_frames = fade_frames.min(samples.len() / 2);
         for i in 0..fade_frames {
             let gain = i as f32 / fade_frames.max(1) as f32;

@@ -21,9 +21,15 @@ pub fn beats(name: &str, frames: usize, rate: u32, song_tempo: f64) -> f64 {
     2f64.powf(at_song.max(1.0).log2().round()).clamp(1.0, 128.0)
 }
 
+/// The exact duration of a sample expressed as beats at the song tempo.
+pub fn beats_at_tempo(frames: usize, rate: u32, song_tempo: f64) -> f64 {
+    let seconds = frames as f64 / f64::from(rate.max(1));
+    if seconds <= 0.0 { 4.0 } else { seconds * song_tempo.max(1.0) / 60.0 }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{beats, tempo_in_name};
+    use super::{beats, beats_at_tempo, tempo_in_name};
 
     #[test]
     fn tempos_from_names() {
@@ -48,5 +54,10 @@ mod tests {
         assert_eq!(beats("211_D&B1.WAV", 64_181, 44_100, 134.0), 4.0);
         // Under a bar: whole power-of-two beats.
         assert_eq!(beats("hit.wav", 44_100, 44_100, 120.0), 2.0);
+    }
+
+    #[test]
+    fn exact_length_uses_song_tempo() {
+        assert_eq!(beats_at_tempo(44_100, 44_100, 100.0), 5.0 / 3.0);
     }
 }

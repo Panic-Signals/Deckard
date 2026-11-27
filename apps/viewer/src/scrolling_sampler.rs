@@ -1,17 +1,38 @@
 use eframe::egui::{Align2, Color32, FontId, Pos2, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone)]
 pub struct DraggedSelection(pub PathBuf);
 
-pub const HEIGHT: f32 = 49.0;
+pub const HEIGHT: f32 = 29.0;
+const WAVE_HEIGHT: f32 = 25.0;
+
+static NEXT_SELECTION_ID: AtomicU64 = AtomicU64::new(0);
+
+fn temporary_directory() -> PathBuf {
+    std::env::temp_dir().join("deckard-scrolling-sampler").join(std::process::id().to_string())
+}
+
+pub fn cleanup_temporary_files() {
+    let directory = temporary_directory();
+    let parent = directory.parent().map(PathBuf::from);
+    let _ = std::fs::remove_dir_all(directory);
+    if let Some(parent) = parent {
+        let _ = std::fs::remove_dir(parent);
+    }
+}
+
+fn effective_fade_ms(app: &crate::App) -> u32 {
+    if app.settings.scrolling_fade_enabled { app.settings.scrolling_fade_ms } else { 0 }
+}
 
 pub fn panel(ui: &mut Ui, app: &mut crate::App) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HEIGHT), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, Color32::from_rgb(0x18, 0x18, 0x18));
     painter.rect_stroke(rect, 2.0, Stroke::new(1.0, Color32::from_rgb(0x32, 0x32, 0x32)), StrokeKind::Inside);
-    let wave = rect.shrink2(Vec2::new(12.0, 12.0));
+    let wave = eframe::egui::Rect::from_center_size(rect.center(), Vec2::new((rect.width() - 24.0).max(0.0), WAVE_HEIGHT));
     let response = ui.interact(wave, ui.id().with("scrolling-wave"), Sense::click_and_drag());
     let Some(scrolling) = app.output.as_ref().and_then(|output| output.as_ref().ok()).map(|output| output.scrolling()) else {
         painter.text(wave.center(), Align2::CENTER_CENTER, "Audio output unavailable", FontId::proportional(12.0), Color32::GRAY);
@@ -128,15 +149,19 @@ pub fn panel(ui: &mut Ui, app: &mut crate::App) {
     {
         response.dnd_set_drag_payload(DraggedSelection(path));
     }
-    if let Some((start, end)) = app.scroll_selection.filter(|(start, end)| end > start) {
-        queue_cached_selection(app, &scrolling, start, end);
-    }
     if response.drag_stopped() {
         app.scroll_drag_start = None;
         app.scroll_resize_edge = None;
     }
     if ui.input(|i| i.pointer.any_released()) {
         app.scroll_dragging_selection = false;
+    }
+    if !app.scroll_dragging_selection
+        && app.scroll_drag_start.is_none()
+        && app.scroll_resize_edge.is_none()
+        && let Some((start, end)) = app.scroll_selection.filter(|(start, end)| end > start)
+    {
+        queue_cached_selection(app, &scrolling, start, end);
     }
     let peaks = scrolling.snapshot_range(from, visible, wave.width().max(1.0) as usize).unwrap_or(all);
     let mid = wave.center().y;
@@ -149,7 +174,7 @@ pub fn panel(ui: &mut Ui, app: &mut crate::App) {
         let y_bottom = mid - lo.clamp(-1.0, 1.0) * amp;
         top.push(Pos2::new(x, y_top));
         bottom.push(Pos2::new(x, y_bottom));
-        let fill = waveform_color(app.settings.scrolling_palette, app.settings.scrolling_color, i, peaks.len(), 32);
+        let fill = waveform_color(app.settings.scrolling_palette, app.settings.scrolling_color, i, peaks.len(), 51);
         painter.rect_filled(
             eframe::egui::Rect::from_min_max(
                 Pos2::new(x - 0.5, y_top.min(y_bottom)),
@@ -172,20 +197,16 @@ pub fn panel(ui: &mut Ui, app: &mut crate::App) {
         let selection = eframe::egui::Rect::from_x_y_ranges(left.min(right)..=left.max(right), wave.y_range());
         painter.rect_filled(selection, 0.0, Color32::from_rgba_unmultiplied(80, 180, 220, 45));
         painter.rect_stroke(selection, 0.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 210, 240, 220)), StrokeKind::Inside);
-        for x in [selection.left(), selection.right()] {
-            let grip =
-                eframe::egui::Rect::from_center_size(Pos2::new(x, selection.center().y), Vec2::new(4.0, selection.height().min(18.0)));
-            painter.rect_filled(grip, 1.0, Color32::from_rgba_unmultiplied(150, 225, 250, 230));
-            painter.rect_stroke(grip, 1.0, Stroke::new(1.0, Color32::from_rgb(220, 245, 255)), StrokeKind::Inside);
-        }
     }
-    painter.text(
-        Pos2::new(rect.right() - 8.0, rect.top() + 7.0),
-        Align2::RIGHT_TOP,
-        format!("{visible_seconds:.1} / {} s", app.settings.scrolling_seconds),
-        FontId::proportional(11.0),
-        Color32::GRAY,
-    );
+    if visible_seconds < app.settings.scrolling_seconds as f32 - 0.05 {
+        painter.text(
+            Pos2::new(rect.right() - 6.0, rect.top() + 2.0),
+            Align2::RIGHT_TOP,
+            format!("{visible_seconds:.1} / {} s", app.settings.scrolling_seconds),
+            FontId::proportional(9.0),
+            Color32::GRAY,
+        );
+    }
     if scrolling.paused() {
         painter.text(
             wave.right_center() - Vec2::new(4.0, 0.0),
@@ -203,8 +224,8 @@ fn cached_selection_path(
     start: u64,
     end: u64,
 ) -> Option<PathBuf> {
-    let settings_match = app.scroll_cached_remove_silence == app.settings.scrolling_remove_silence
-        && app.scroll_cached_fade_ms == app.settings.scrolling_fade_ms;
+    let settings_match =
+        app.scroll_cached_remove_silence == app.settings.scrolling_remove_silence && app.scroll_cached_fade_ms == effective_fade_ms(app);
     if app.scroll_cached_selection == Some((start, end)) && settings_match {
         if let Some(path) = app.scroll_cached_path.as_ref().filter(|path| path.is_file()) {
             return Some(path.clone());
@@ -215,18 +236,18 @@ fn cached_selection_path(
 }
 
 fn queue_cached_selection(app: &mut crate::App, scrolling: &std::sync::Arc<deckard_engine::scrolling::Scrolling>, start: u64, end: u64) {
-    let settings_match = app.scroll_cached_remove_silence == app.settings.scrolling_remove_silence
-        && app.scroll_cached_fade_ms == app.settings.scrolling_fade_ms;
+    let settings_match =
+        app.scroll_cached_remove_silence == app.settings.scrolling_remove_silence && app.scroll_cached_fade_ms == effective_fade_ms(app);
     if app.scroll_cached_selection == Some((start, end)) && settings_match || app.scroll_export.is_some() {
         return;
     }
-    let path = std::env::temp_dir().join(format!(
-        "deckard-scrolling-selection-{}-{}.wav",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
-    ));
+    let directory = temporary_directory();
+    let _ = std::fs::create_dir_all(&directory);
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let sequence = NEXT_SELECTION_ID.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!("selection-{timestamp}-{sequence}.wav"));
     let remove_silence = app.settings.scrolling_remove_silence;
-    let fade_ms = app.settings.scrolling_fade_ms;
+    let fade_ms = effective_fade_ms(app);
     let scrolling = std::sync::Arc::clone(scrolling);
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -251,6 +272,12 @@ fn poll_cached_selection(app: &mut crate::App) {
         app.scroll_cached_fade_ms = fade_ms;
     } else {
         let _ = std::fs::remove_file(path);
+        if result.as_ref().err().is_some_and(|error| error == "the selection is silent") {
+            app.scroll_cached_selection = Some((start, end));
+            app.scroll_cached_remove_silence = remove_silence;
+            app.scroll_cached_fade_ms = fade_ms;
+            app.scroll_cached_path = None;
+        }
     }
 }
 
