@@ -181,3 +181,34 @@ fn a_new_release_offers_its_release_notes_once() {
     assert_eq!(app.whats_new.as_deref(), Some("0.3.0"));
     assert_eq!(app.settings.last_version, "0.3.0");
 }
+
+/// NEW on the MK3 with unsaved changes: the question is asked on its displays too, and
+/// answered there (DON'T SAVE starts the new project; CANCEL keeps this one).
+#[test]
+fn the_mk3_asks_about_unsaved_changes_and_takes_the_answer() {
+    use deckard_mk3::Event as Mk3;
+    let press = |h: &mut Harness<'static, crate::App>, name: &'static str| {
+        let mut reqs = Vec::new();
+        h.state_mut().mk3_events(vec![Mk3::Button(name, true), Mk3::Button(name, false)], &mut reqs);
+        h.run_steps(3);
+    };
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    let was = h.state().path.clone();
+    assert!(was.is_some());
+    h.state().doc.as_ref().unwrap().borrow_mut().mark_unsaved();
+    press(&mut h, "BUTTON_FILE");
+    press(&mut h, "BUTTON_SCREEN_2");
+    assert!(h.state().confirm.is_some(), "NEW asks");
+    let ask = h.state().surface_view().ask.expect("the MK3 is told the question");
+    assert!(ask.question.starts_with("Save changes to") && !ask.revert, "{ask:?}");
+    // CANCEL: this project stays, the question goes.
+    press(&mut h, "BUTTON_SCREEN_8");
+    assert!(h.state().confirm.is_none() && h.state().path == was);
+    assert!(h.state().surface_view().ask.is_none());
+    // DON'T SAVE: the new project.
+    press(&mut h, "BUTTON_SCREEN_2");
+    assert!(h.state().confirm.is_some());
+    press(&mut h, "BUTTON_SCREEN_6");
+    assert!(h.state().confirm.is_none());
+    assert!(h.state().path.is_none() && !h.state().dirty(), "an untitled new project");
+}

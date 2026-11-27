@@ -463,6 +463,20 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     {
         let sh = shared.clone();
         d.set(
+            "ask",
+            lua.create_function(move |_, what: String| {
+                const WHAT: [&str; 3] = ["save", "discard", "cancel"];
+                let Some(&what) = WHAT.iter().find(|w| **w == what) else {
+                    return Err(mlua::Error::runtime(format!("no answer \"{what}\" ({})", WHAT.join(", "))));
+                };
+                act(&sh, Action::Ask(what));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
             "setting",
             lua.create_function(move |_, (name, step, index): (String, i64, Option<usize>)| {
                 const NAMES: [&str; 35] = [
@@ -1313,6 +1327,12 @@ const GROUP_PARTS: &[&str] = &["patterns", "sounds"];
 fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("project", v.project.as_str())?;
+    if let Some(a) = &v.ask {
+        let at = lua.create_table()?;
+        at.set("question", a.question.as_str())?;
+        at.set("revert", a.revert)?;
+        t.set("ask", at)?;
+    }
     t.set("scene_name", v.scene_name.as_str())?;
     t.set("scene_palette", v.scene_color)?;
     t.set("lfo_focus", v.lfo_focus)?;
@@ -1985,6 +2005,7 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         follow,
         grid,
         recent,
+        ask,
         settings,
         lock,
         lfo_focus,
@@ -2049,6 +2070,7 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         && *follow == new.follow
         && *grid == new.grid
         && *recent == new.recent
+        && *ask == new.ask
         && *settings == new.settings
         && *lock == new.lock
         && *lfo_focus == new.lfo_focus

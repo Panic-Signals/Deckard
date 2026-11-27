@@ -1507,6 +1507,9 @@ pub struct App {
     recent: Vec<PathBuf>,
     /// What to do once the user has said what happens to unsaved changes.
     confirm: Option<Pending>,
+    /// The question's answer from the controller (0 save, 1 don't, 2 cancel), for the
+    /// dialog to act on.
+    confirm_choice: Option<u8>,
     /// Just updated to this release: asks whether to open its release notes.
     whats_new: Option<String>,
     /// The About box is open.
@@ -2430,6 +2433,17 @@ impl App {
             self.session_kept = (self.doc_generation, doc.borrow().revision());
         }
         true
+    }
+
+    /// The question about unsaved changes that waits, as the dialog words it, and
+    /// whether it's Revert's (nothing to save).
+    fn confirm_question(&self) -> Option<(String, bool)> {
+        let then = self.confirm.as_ref()?;
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
+        Some(match then {
+            Pending::Revert => (format!("Discard all changes to \"{name}\" since it was last saved?"), true),
+            _ => (format!("Save changes to \"{name}\"?"), false),
+        })
     }
 
     fn dirty(&self) -> bool {
@@ -4028,13 +4042,12 @@ impl App {
                 self.whats_new = None;
             }
         }
+        // (An answer from the controller with no question left to answer is dropped.)
+        let answered = self.confirm_choice.take();
         if let Some(then) = self.confirm.clone() {
-            let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
-            let question = match then {
-                Pending::Revert => format!("Discard all changes to \"{name}\" since it was last saved?"),
-                _ => format!("Save changes to \"{name}\"?"),
-            };
-            let mut choice = None;
+            let question = self.confirm_question().map_or_else(String::new, |q| q.0);
+            // (Revert has no Save to press.)
+            let mut choice = answered.filter(|c| *c != 0 || !matches!(then, Pending::Revert));
             egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
                 crate::layout::fit_dialog(ui, |ui| {
                     crate::layout::dialog_style(ui);
@@ -6530,6 +6543,7 @@ impl App {
             random: self.random_view(c.level, c.page, head),
         };
         let mut v = View {
+            ask: self.confirm_question().map(|(question, revert)| deckard_surface::AskView { question, revert }),
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
             settings: self.surface_settings.clone(),
             // (The strip hides while this is open, so a script declines an ENCODER press there.)
@@ -7386,6 +7400,13 @@ impl App {
                 "bank" => self.lock_bank(n == 1),
                 setting => self.lock_setting(setting, n as f64),
             },
+            A::Ask(what) => {
+                self.confirm_choice = match what {
+                    "save" => Some(0),
+                    "discard" => Some(1),
+                    _ => Some(2),
+                }
+            }
             A::File(what, n) => {
                 use menu::Command as C;
                 let cmd = match what {

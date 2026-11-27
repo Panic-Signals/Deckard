@@ -4739,3 +4739,37 @@ fn render_browse_and_chain() {
     }
     assert_eq!(s.error(), None);
 }
+
+/// A question about unsaved changes (NEW or LOAD with changes not saved) is asked on
+/// the displays too, over whatever page shows: SAVE, DON'T SAVE, CANCEL.
+#[test]
+fn unsaved_changes_are_asked_about_on_the_displays() {
+    let (mut s, mut v) = (Surface::new(), view());
+    press(&mut s, &v, "BUTTON_FILE");
+    v.ask = Some(AskView { question: "Save changes to \"Song\"?".into(), revert: false });
+    let text = s.screen_text(&v);
+    for want in ["Save changes to \"Song\"?", "SAVE", "DON'T SAVE", "CANCEL"] {
+        assert!(text.iter().any(|t| t == want), "{want}: {text:?}");
+    }
+    assert!(!text.iter().any(|t| t == "EXPORT AUDIO"), "the page under it waits: {text:?}");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_2").is_empty(), "NEW isn't pressed again under the question");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::Ask("save")]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Ask("discard")]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::Ask("cancel")]);
+    let leds = s.leds(&v);
+    assert_eq!(leds.get("LED_SCREEN_BUTTON_5"), Some(crate::leds::ON));
+    assert_eq!(s.page(), "file", "the page comes back once it's answered");
+    v.ask = None;
+    assert!(s.screen_text(&v).iter().any(|t| t == "EXPORT AUDIO"));
+}
+
+/// Reverting has one way on: REVERT or CANCEL.
+#[test]
+fn reverting_is_asked_about_on_the_displays() {
+    let (mut s, mut v) = (Surface::new(), view());
+    v.ask = Some(AskView { question: "Discard all changes to \"Song\" since it was last saved?".into(), revert: true });
+    let text = s.screen_text(&v);
+    assert!(text.iter().any(|t| t == "REVERT") && !text.iter().any(|t| t == "SAVE"), "{text:?}");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_5").is_empty());
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Ask("discard")]);
+}
