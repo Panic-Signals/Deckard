@@ -69,6 +69,10 @@ impl Engine {
         for note in &mut self.held_keys {
             note.group = moved(note.group, a, b);
         }
+        // (A group's sounds keep their mod wheels where it goes.)
+        for wheel in &mut self.mod_wheels {
+            wheel.0 = moved(wheel.0, a, b);
+        }
         for (_, event) in &mut self.live {
             remap_live(event, a, b);
         }
