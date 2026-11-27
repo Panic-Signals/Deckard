@@ -214,11 +214,13 @@ pub struct Vst3Editor {
 /// The plug-in's editor view for `platform`, and its size.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn create_view(plugin: &Shared, platform: FIDString, platform_name: &str) -> Result<(ComPtr<IPlugView>, i32, i32), String> {
-    let view = {
-        let p = plugin.lock().map_err(|_| "the plug-in is unavailable")?;
-        let c = p.controller().ok_or("the plug-in has no editor")?;
-        unsafe { ComPtr::from_raw(c.createView(c"editor".as_ptr())) }.ok_or("the plug-in has no editor")?
-    };
+    // The instance is held only to take its controller: making the view can take a
+    // plug-in a long while, and the audio thread skips an instance that is held (an
+    // effect passes dry, an instrument is silent). The view's other calls are made
+    // unheld too.
+    let c = plugin.lock().map_err(|_| "the plug-in is unavailable")?.controller().cloned();
+    let c = c.ok_or("the plug-in has no editor")?;
+    let view = unsafe { ComPtr::from_raw(c.createView(c"editor".as_ptr())) }.ok_or("the plug-in has no editor")?;
     if unsafe { view.isPlatformTypeSupported(platform) } != kResultOk {
         return Err(format!("the plug-in's editor doesn't support {platform_name} windows"));
     }
@@ -831,6 +833,21 @@ mod tests {
         assert_eq!(sized.load(Ordering::SeqCst), 1);
         frame.apply_pending(&view);
         assert_eq!(sized.load(Ordering::SeqCst), 1, "once");
+    }
+
+    /// Opening an editor holds the instance only to look at it: whether or not a view is
+    /// made, the audio thread can take the instance straight after.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[test]
+    fn opening_an_editor_leaves_the_instance_free() {
+        let class = &crate::tuner::CLASS;
+        let id = crate::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+        let plugin = crate::Plugin::native(class, id, class.name, 48_000.0).shared();
+        match create_view(&plugin, c"".as_ptr(), "test") {
+            Err(e) => assert_eq!(e, "the plug-in has no editor"),
+            Ok(_) => panic!("a native plug-in has no VST3 editor"),
+        }
+        assert!(plugin.try_audio().is_ok());
     }
 
     /// On Linux the frame is the plug-in's run loop too: it must answer a query for it.
