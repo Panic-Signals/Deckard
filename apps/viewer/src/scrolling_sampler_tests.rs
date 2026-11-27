@@ -54,3 +54,43 @@ fn enabled_capture_shows_selection_and_drop_controls() {
     assert!(harness.query_by_label("Fade duration").is_some());
     assert!(harness.query_by_label("Dropped selection instrument").is_some());
 }
+
+#[test]
+fn scrolling_sampler_preferences_update_saved_choices() {
+    let mut harness = enabled_audio_preferences();
+    harness.get_by_value("120 seconds").click();
+    harness.run_steps(1);
+    harness.get_by_label("300 seconds").click();
+    harness.get_by_value("Theme").click();
+    harness.run_steps(1);
+    harness.get_by_label("Custom").click();
+    harness.run_steps(1);
+    harness.get_by_label("Remove leading and trailing silence").click();
+    harness.run_steps(1);
+    harness.run_steps(3);
+
+    assert_eq!(harness.state().settings.scrolling_seconds, 300);
+    assert_eq!(harness.state().settings.scrolling_palette, 1);
+    assert!(harness.state().settings.scrolling_remove_silence);
+    assert!(harness.state().settings.scrolling_fade_enabled);
+    assert_eq!(harness.state().settings.scrolling_fade_ms, 5);
+    assert!(harness.state().settings.scrolling_drop_audio);
+}
+
+#[test]
+fn scrolling_sampler_preferences_toggle_fade() {
+    let mut harness = enabled_audio_preferences();
+    harness.get_by_label("Enable").click();
+    harness.run_steps(3);
+    assert!(!harness.state().settings.scrolling_fade_enabled);
+}
+
+#[test]
+fn scrolling_sampler_preferences_choose_drop_mode() {
+    let mut harness = enabled_audio_preferences();
+    harness.get_by_value("Audio").click();
+    harness.run_steps(1);
+    harness.get_by_label("Sampler").click();
+    harness.run_steps(3);
+    assert!(!harness.state().settings.scrolling_drop_audio);
+}
