@@ -126,25 +126,26 @@ local function kind_icon(screen, x, y, instrument, fx, keys)
   end
 end
 
--- A bypassed slot's mark over its kind's icon at `x, y`: the icon faded, and the signal's
--- path in front of it stepping down past it and back up, to an arrow. It's wider than
--- the icon: the slot's name moves `MARK_W` further right.
-local MARK_W = 6
+-- A bypassed slot's mark around its kind's icon at `x, y`: the icon faded, and the
+-- signal's path stepping down round it, along under it and back up, to an arrow. It's
+-- wider than the icon: the icon moves `MARK_SHIFT` and the slot's name `MARK_W` right.
+-- (On half pixels, so each line is one pixel wide; clear of the icon by a pixel.)
+local MARK_SHIFT, MARK_W = 3, 9
 local function bypass_mark(screen, theme, x, y)
   local bg = theme.colors.background or { 0, 0, 0 }
-  screen:rect(x - 1, y - 1, 14, 14, { bg[1], bg[2], bg[3], 190 })
-  local path = { { x - 3, y + 3 }, { x + 1, y + 3 }, { x + 1, y + 11 }, { x + 11, y + 11 }, { x + 11, y + 3 }, { x + 15, y + 3 } }
-  -- (Edged in the background, so it stands out from the icon under it.)
-  for _, ink in ipairs({ { 3.4, "background" }, { 1.4, "text" } }) do
-    for i = 2, #path do
-      local a, b = path[i - 1], path[i]
-      screen:line(a[1], a[2], b[1], b[2], ink[1], ink[2])
-    end
+  screen:rect(x, y, 12, 12, { bg[1], bg[2], bg[3], 120 })
+  local path = { { x - 4.5, y + 3.5 }, { x - 1.5, y + 3.5 }, { x - 1.5, y + 12.5 }, { x + 13.5, y + 12.5 }, { x + 13.5, y + 3.5 }, { x + 16, y + 3.5 } }
+  for i = 2, #path do
+    local a, b = path[i - 1], path[i]
+    screen:line(a[1], a[2], b[1], b[2], 1, "text")
   end
-  screen:triangle(x + 15, y, 4, 7, "right", "text")
+  screen:triangle(x + 16, y, 4, 7, "right", "text")
 end
 
--- How far a slot's name moves right for its bypass mark.
+-- How far a slot's icon, and its name, move right for its bypass mark.
+local function mark_shift(slot)
+  return slot.active == false and MARK_SHIFT or 0
+end
 local function mark_w(slot)
   return slot.active == false and MARK_W or 0
 end
@@ -190,8 +191,9 @@ local function draw_large(screen, theme, c)
     local size, name_w, w = slot_size(screen, slot)
     if x + w > SCREEN_W then overflow(i - 1); return end
     local focused = i == c.slot_index
-    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
-    if slot.active == false then bypass_mark(screen, theme, x + 13, 72) end
+    local ix = x + 13 + mark_shift(slot)
+    kind_icon(screen, ix, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
+    if slot.active == false then bypass_mark(screen, theme, ix, 72) end
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
     screen:label(x + 29 + mark_w(slot), 71, name_w, 17, slot.name, { color = colour }, "left", "center")
     if focused then
@@ -294,8 +296,9 @@ local function draw_strip(screen, theme, c, right)
     -- lit with its name.)
     local dim = theme.colors.chain_idle and not focused
     local icon = focused and theme.colors.chain_idle and "text" or paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa })
-    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil)
-    if slot.active == false then bypass_mark(screen, theme, x + 4, NAME_Y + 1) end
+    local ix = x + 4 + mark_shift(slot)
+    kind_icon(screen, ix, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil)
+    if slot.active == false then bypass_mark(screen, theme, ix, NAME_Y + 1) end
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
     local m = mark_w(slot)
     screen:label(x + 20 + m, NAME_Y, name_w, 14, slot.name, { size = 11, color = colour }, "left", "center")
