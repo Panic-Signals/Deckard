@@ -11572,13 +11572,10 @@ impl App {
     /// Save a sound, group or preset: again where it was (Save), or through the dialog.
     fn save_item(&mut self, what: deckard_doc::FileItem, mode: SaveMode) {
         use deckard_doc::FileItem;
-        let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
         if mode == SaveMode::Save
-            && let Some(s) = self.saved.get(&what).cloned()
-            && s.id.is_some()
-            && s.id == id
+            && let Some((file, s)) = self.save_again(what)
         {
-            self.write_item(what, s);
+            self.write_item(file, s);
             return;
         }
         let Some(doc) = self.doc.clone() else { return };
@@ -12153,7 +12150,9 @@ impl App {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
             if matches!(ext.as_str(), "nksf" | "nksfx") {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                return self.load_nks_preset(&item.name, (g, s), &bytes);
+                return self
+                    .load_nks_preset(&item.name, (g, s), &bytes)
+                    .map(|()| self.remember_slot_preset(item, (g, s), self.slot, &bytes));
             }
             if !matches!(ext.as_str(), "mxinst" | "mxfx") {
                 if let Some(res) =
@@ -12197,6 +12196,7 @@ impl App {
                     }
                 };
                 drop(d);
+                self.remember_slot_preset(item, (g, s), slot, &bytes);
                 if matches!(item.kind, Kind::Sound) {
                     self.remember_preset_source(deckard_doc::FileItem::Sound(g, s), item, preset_load::editable_preset_info(item, &bytes));
                 }

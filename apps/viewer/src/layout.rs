@@ -3996,11 +3996,11 @@ fn color_menu(ui: &mut Ui, current: Color, targets: Vec<Target>, acts: &mut Vec<
 }
 
 /// Open…, Save, Save As…, Save with Samples… of a sound's or group's menu.
-fn file_items(ui: &mut Ui, app: &App, what: deckard_doc::FileItem, acts: &mut Vec<Act>) {
+fn file_items(ui: &mut Ui, what: deckard_doc::FileItem, acts: &mut Vec<Act>) {
     use crate::SaveMode;
     item(ui, "Open...", true, || Act::OpenItem(what), acts);
-    let saved = app.saved.contains_key(&what);
-    item(ui, "Save", true, || Act::SaveItem(what, if saved { SaveMode::Save } else { SaveMode::SaveAs }), acts);
+    // Save writes its file again, or asks where when there's none (`App::save_again`).
+    item(ui, "Save", true, || Act::SaveItem(what, SaveMode::Save), acts);
     item(ui, "Save As...", true, || Act::SaveItem(what, SaveMode::SaveAs), acts);
     item(ui, "Save with Samples...", true, || Act::SaveItem(what, SaveMode::WithSamples), acts);
 }
@@ -4009,7 +4009,7 @@ fn file_items(ui: &mut Ui, app: &App, what: deckard_doc::FileItem, acts: &mut Ve
 fn sound_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, s: usize, acts: &mut Vec<Act>) {
     ui.set_min_width(170.0);
     let what = deckard_doc::FileItem::Sound(g, s);
-    file_items(ui, app, what, acts);
+    file_items(ui, what, acts);
     if !app.song_view {
         item(ui, "Bounce", app.bounce.running.is_none(), || Act::Bounce(g, s), acts);
     }
@@ -4036,7 +4036,7 @@ fn sound_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, s: usize, acts: &mu
 fn group_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, acts: &mut Vec<Act>) {
     ui.set_min_width(170.0);
     let batch = p.groups.get(g).map_or(0, |x| x.channel.midi_batch) as usize;
-    file_items(ui, app, deckard_doc::FileItem::Group(g), acts);
+    file_items(ui, deckard_doc::FileItem::Group(g), acts);
     ui.separator();
     item(ui, "Import MIDI...", true, || Act::ImportGroupMidi(g), acts);
     item(ui, "Export MIDI...", true, || Act::ExportGroupMidi(g), acts);

@@ -1,5 +1,6 @@
 //! Group LOAD acknowledges immediately; parsing/edit preparation does not own the UI thread.
 use super::*;
+use deckard_doc::FileItem;
 use deckard_library::Item;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -14,11 +15,55 @@ pub(super) fn editable_preset_info(item: &Item, bytes: &[u8]) -> Option<mxprj::s
     if !item.user || std::fs::metadata(&item.path).ok()?.permissions().readonly() {
         return None;
     }
-    let mut info = mxprj::Project::parse(bytes).ok()?.sound_info().unwrap_or_default();
+    let mut info = if is_nks(&item.path) {
+        let nisi = deckard_plugins::nks::parse(bytes).ok()?.info;
+        let mut info = mxprj::sound_info::SoundInfo::default();
+        (info.name, info.author, info.bank) = (nisi.name, nisi.author, nisi.bankchain);
+        info.set_tags(&nisi.types, &nisi.characters);
+        info
+    } else {
+        mxprj::Project::parse(bytes).ok()?.sound_info().unwrap_or_default()
+    };
     if info.name.is_empty() {
         info.name = item.name.clone();
     }
     Some(info)
+}
+
+fn is_nks(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("nksf") || e.eq_ignore_ascii_case("nksfx"))
+}
+
+impl App {
+    /// Remember a user's instrument or effect preset (NKS or Maschine's own) as the
+    /// file of the slot it loaded into, so Save writes it again. A product's own
+    /// preset format isn't one DECKARD writes, so Save asks where for those.
+    pub(super) fn remember_slot_preset(&mut self, item: &Item, (g, s): (usize, usize), slot: Option<usize>, bytes: &[u8]) {
+        use deckard_library::Kind;
+        let (Kind::Instrument | Kind::Effect, Some(slot)) = (item.kind, slot) else { return };
+        let what = FileItem::Slot(g, s, slot);
+        let writable = if is_nks(&item.path) {
+            self.nks_plugin(what).is_some()
+        } else {
+            item.path.extension().is_some_and(|e| e == "mxinst" || e == "mxfx")
+        };
+        self.remember_preset_source(what, item, editable_preset_info(item, bytes).filter(|_| writable));
+    }
+
+    /// What Save writes, and its file, when it writes again without asking: `what`'s
+    /// own file, or for a sound without one, the user preset its instrument was
+    /// loaded from (which named the sound).
+    pub(super) fn save_again(&self, what: FileItem) -> Option<(FileItem, Saved)> {
+        let doc = self.doc.as_ref()?.borrow();
+        let own = |w: FileItem| self.saved.get(&w).filter(|s| s.id.is_some() && s.id == doc.file_item_id(w)).map(|s| (w, s.clone()));
+        own(what).or_else(|| match what {
+            FileItem::Sound(g, s) => {
+                let instrument = doc.project().groups.get(g)?.sounds.get(s)?.slots.first()?.is_instrument();
+                own(FileItem::Slot(g, s, 0)).filter(|_| instrument)
+            }
+            _ => None,
+        })
+    }
 }
 
 pub(crate) struct GroupLoad {
@@ -191,6 +236,57 @@ mod tests {
         app.save_item(what, SaveMode::Save);
         assert!(app.save_dialog.is_some(), "factory presets use the Save dialog");
         assert_eq!(std::fs::read(&item.path).unwrap(), original);
+    }
+
+    /// A user's NKS instrument preset names the sound it loads into: the sound's Save
+    /// writes that preset again, as the instrument's does. An effect's doesn't stand
+    /// for the sound, and a factory preset isn't written over.
+    #[test]
+    fn saving_a_sound_made_by_a_user_nks_instrument_replaces_the_preset() {
+        use deckard_doc::FileItem;
+        use deckard_library::Kind;
+        let (mut app, dir, _) = fixture();
+        let synth = "000102030405060708090A0B0C0D0E0F";
+        let entry = |name: &str, instrument: bool, cid: &str| deckard_plugins::scan::Entry {
+            kind: deckard_plugins::scan::Kind::Vst3,
+            vendor: "Vendor".into(),
+            name: name.into(),
+            instrument,
+            location: String::new(),
+            cid: cid.into(),
+        };
+        app.catalog.entries = vec![entry("Synth", true, synth), entry("Verb", false, "101112131415161718191A1B1C1D1E1F")];
+        let uid = |hex: &str| Some(std::array::from_fn(|i| u32::from_str_radix(&hex[i * 8..i * 8 + 8], 16).unwrap()));
+        let preset = |file: &str, kind: Kind, plugin: &str, cid: &str, user: bool| {
+            let path = dir.path().join(file);
+            std::fs::write(&path, deckard_plugins::nks::fixture(uid(cid), 0, plugin, b"lead state")).unwrap();
+            Item { kind, user, name: "_SEQ-DJFAM".into(), path, ..Default::default() }
+        };
+        let parse = |item: &Item| deckard_plugins::nks::parse(&std::fs::read(&item.path).unwrap()).unwrap();
+
+        let lead = preset("_SEQ-DJFAM.nksf", Kind::Instrument, "Synth", synth, true);
+        app.load_item(&lead, Some((0, 0))).unwrap();
+        assert_eq!(parse(&lead).info.name, "", "the fixture's NISI is empty");
+        app.save_item(FileItem::Sound(0, 0), SaveMode::Save);
+        assert!(app.save_dialog.is_none(), "{}", app.status);
+        assert_eq!(app.status, format!("saved {}", lead.path.display()));
+        let saved = parse(&lead);
+        assert_eq!((saved.info.name.as_str(), saved.info.device_type.as_str()), ("_SEQ-DJFAM", "INST"));
+        assert!(saved.state.windows(10).any(|w| w == b"lead state"));
+
+        let factory = preset("Factory Lead.nksf", Kind::Instrument, "Synth", synth, false);
+        app.load_item(&factory, Some((0, 0))).unwrap();
+        app.save_item(FileItem::Sound(0, 0), SaveMode::Save);
+        assert!(app.save_dialog.take().is_some(), "factory presets use the Save dialog");
+        assert_eq!(parse(&factory).info.name, "");
+
+        let verb = preset("Hall.nksfx", Kind::Effect, "Verb", "101112131415161718191A1B1C1D1E1F", true);
+        app.load_item(&verb, Some((0, 1))).unwrap();
+        app.save_item(FileItem::Sound(0, 1), SaveMode::Save);
+        assert!(app.save_dialog.take().is_some(), "an effect isn't the sound");
+        app.save_item(FileItem::Slot(0, 1, 0), SaveMode::Save);
+        assert!(app.save_dialog.is_none(), "{}", app.status);
+        assert_eq!(parse(&verb).info.device_type, "FX");
     }
 
     #[test]
