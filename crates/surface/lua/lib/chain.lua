@@ -113,8 +113,9 @@ end
 -- instrument's).
 local SIZES = { Sampler = { 160, 42 }, EQ = { 90, 40 }, Compressor = { 62, 40 } }
 
--- A slot's kind, as a small icon: keys for an instrument, FX for an effect.
-local function kind_icon(screen, x, y, instrument, fx, keys)
+-- A slot's kind, as a small icon: keys for an instrument, FX for an effect. Bypassed,
+-- crossed out.
+local function kind_icon(screen, x, y, instrument, fx, keys, bypassed)
   if instrument then
     for k = 0, 2 do
       screen:rect(x + k * 4, y, 2, 7, keys or "text")
@@ -123,6 +124,13 @@ local function kind_icon(screen, x, y, instrument, fx, keys)
   else
     screen:frame(x, y, 12, 12, fx, 0.5)
     screen:label(x, y + 1, 12, 11, "FX", { size = 8, color = fx })
+  end
+  if bypassed then
+    -- (Edged in the background, so it stands out from the icon under it.)
+    for _, ink in ipairs({ { 3.6, "background" }, { 1.6, "text" } }) do
+      screen:line(x - 1, y - 1, x + 13, y + 13, ink[1], ink[2])
+      screen:line(x + 13, y - 1, x - 1, y + 13, ink[1], ink[2])
+    end
   end
 end
 
@@ -167,7 +175,7 @@ local function draw_large(screen, theme, c)
     local size, name_w, w = slot_size(screen, slot)
     if x + w > SCREEN_W then overflow(i - 1); return end
     local focused = i == c.slot_index
-    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
+    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }), nil, slot.active == false)
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
     screen:label(x + 29, 71, name_w, 17, slot.name, { color = colour }, "left", "center")
     if focused then
@@ -270,7 +278,7 @@ local function draw_strip(screen, theme, c, right)
     -- lit with its name.)
     local dim = theme.colors.chain_idle and not focused
     local icon = focused and theme.colors.chain_idle and "text" or paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa })
-    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil)
+    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil, slot.active == false)
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
     screen:label(x + 20, NAME_Y, name_w, 14, slot.name, { size = 11, color = colour }, "left", "center")
     if focused then

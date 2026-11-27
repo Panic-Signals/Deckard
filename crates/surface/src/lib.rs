@@ -2213,6 +2213,8 @@ fn pad_setup(t: &Table) -> mlua::Result<PadSetup> {
 }
 
 #[cfg(test)]
+mod chain_strip_tests;
+#[cfg(test)]
 mod chord_tests;
 #[cfg(test)]
 mod device_tests;
