@@ -134,8 +134,10 @@ file for its topic, not into those two:
 
 - **Tests go in their own file:** `src/<topic>_tests.rs` beside the code (as
   `apps/viewer/src/chop_tests.rs` is), declared with `#[cfg(test)] mod <topic>_tests;`.
-  The engine's are in `crates/engine/src/tests/`, one file per topic, with the fixtures
-  they share in its `mod.rs`; a new engine test goes in the topic file it fits.
+  The tests that used to be inline in the engine's `lib.rs` and the app's `main.rs` are in
+  `crates/engine/src/tests/` and `apps/viewer/src/tests/`, one file per topic, with the
+  fixtures they share in the folder's `mod.rs`. A new test goes in one of those topic
+  files if it fits there, otherwise in a `<topic>_tests.rs` of its own.
   Never inline in `main.rs` or a crate's `lib.rs`. A crate's top-level `tests/` folder
   is for Cargo's integration tests, which can't see private items; unit tests don't go
   there.
