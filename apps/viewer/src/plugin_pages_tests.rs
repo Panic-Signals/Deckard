@@ -509,3 +509,128 @@ fn ui_empty_slot_picker_strip_rename_and_page_tab_menu() {
     h.run_steps(3);
     assert_eq!(saved_pages(h.state())[page].params[0].name, "Peak");
 }
+
+/// Long parameter names in the Assignment area's Pages strip truncate on one line rather
+/// than wrapping and overflowing the 22 px button height.
+#[test]
+fn ui_long_parameter_names_truncate_to_single_line() {
+    let mut app = app_with_hosted_plugin();
+    let long_name = "Swing clk 1 (Impromptu Clocked)";
+    layout::apply_acts(&mut app, vec![Act::PluginPageEdit(PluginPageAct::RenameParam((CHAIN, 0, 0, 0), Some(long_name.into())))]);
+    sync_fake_view(&mut app);
+    let mut h = Harness::builder().with_size(egui::vec2(1500.0, 930.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut App| {
+            sync_fake_view(app);
+            app.frame(ui);
+        },
+        app,
+    );
+    h.run_steps(3);
+    h.get_by_label("Assignment area").click();
+    h.run_steps(3);
+    let rect = h.get_by_label(long_name).rect();
+    assert!(rect.height() <= 23.0, "long name wrapped and overflowed the strip: {rect:?}");
+    assert!(rect.width() <= 72.0, "button grew wider than its knob column: {rect:?}");
+}
+
+/// When a plug-in has more pages than fit in the Control area header, an "All pages"
+/// dropdown appears alongside `+` and switches to any hidden page.
+#[test]
+fn ui_page_tabs_overflow_dropdown_reaches_every_page() {
+    let mut app = app_with_hosted_plugin();
+    for _ in 0..10 {
+        layout::apply_acts(&mut app, vec![Act::PluginPageEdit(PluginPageAct::AddPage(CHAIN, 0))]);
+        sync_fake_view(&mut app);
+    }
+    let count = saved_pages(&app).len();
+    assert_eq!(count, 12);
+    for i in 0..count {
+        layout::apply_acts(&mut app, vec![Act::PluginPageEdit(PluginPageAct::RenamePage(CHAIN, 0, i, format!("VCO Select {}", i + 1)))]);
+    }
+    sync_fake_view(&mut app);
+
+    let mut h = Harness::builder().with_size(egui::vec2(1050.0, 930.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut App| {
+            sync_fake_view(app);
+            app.frame(ui);
+        },
+        app,
+    );
+    h.run_steps(3);
+    layout::apply_acts(h.state_mut(), vec![Act::PluginPage(0)]);
+    h.run_steps(3);
+    assert_eq!(h.state().plugin_page, 0);
+
+    let overflow_rect = h.get_by_label("All pages").rect();
+    let add_rect = h.get_by_label("Add parameter page").rect();
+    assert!(overflow_rect.right() <= add_rect.left() + 1.0, "overflow button overlapped +: {overflow_rect:?} vs {add_rect:?}");
+
+    // Open the overflow dropdown and jump to a hidden page.
+    h.get_by_label("All pages").click();
+    h.run_steps(3);
+    h.get_by_label("VCO Select 8").click();
+    h.run_steps(3);
+    assert_eq!(h.state().plugin_page, 7);
+}
+
+/// Right-clicking a knob's dial or value on an editable hosted plug-in shows
+/// Remove Modulation at the top above the same parameter slot options as the name strip.
+#[test]
+fn ui_right_click_dial_and_value_shows_remove_modulation_then_slot_menu() {
+    let app = app_with_hosted_plugin();
+    let mut h = Harness::builder().with_size(egui::vec2(1500.0, 930.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut App| {
+            sync_fake_view(app);
+            app.frame(ui);
+        },
+        app,
+    );
+    h.run_steps(3);
+    h.get_by_label("Assignment area").click();
+    h.run_steps(3);
+
+    let rects: Vec<Option<egui::Rect>> = h.ctx.data(|d| d.get_temp(egui::Id::new("knob-rects"))).unwrap_or_default();
+    let slot0 = rects[0].expect("slot 0 rect");
+    let slot1 = rects[1].expect("slot 1 rect");
+
+    // Right-click on the dial of slot 0 (Cutoff).
+    let dial_pos = egui::pos2(slot0.center().x, slot0.top() + 42.0);
+    h.hover_at(dial_pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: dial_pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        });
+        h.step();
+    }
+    h.run_steps(3);
+    let mod_rect = h.get_by_label("Remove Modulation").rect();
+    let learn_rect = h.get_by_label("Learn").rect();
+    assert!(mod_rect.bottom() < learn_rect.top(), "Remove Modulation should sit above divider and Learn: {mod_rect:?} vs {learn_rect:?}");
+    let _ = h.get_by_label("Rename ⌘R");
+    h.get_by_label("Reset").click();
+    h.run_steps(3);
+    assert_eq!(saved_pages(h.state())[0].params[0].id, u32::MAX);
+
+    // Right-click on the value readout at the bottom of slot 1 (Resonance).
+    let val_pos = egui::pos2(slot1.center().x, slot1.bottom() - 8.0);
+    h.hover_at(val_pos);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: val_pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        });
+        h.step();
+    }
+    h.run_steps(3);
+    let _ = h.get_by_label("Remove Modulation");
+    h.get_by_label("Reset").click();
+    h.run_steps(3);
+    assert_eq!(saved_pages(h.state())[0].params[1].id, u32::MAX);
+}

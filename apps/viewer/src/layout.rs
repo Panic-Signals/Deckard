@@ -5512,14 +5512,17 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
         } else {
             tab_area
         };
-        let tab_resps = page_tabs(ui, &painter, draw_area, &names, page, act, acts);
+        let (tab_resps, tabs_next_x) = page_tabs(ui, &painter, draw_area, &names, page, act, acts);
         if let Some(pv) = &plugin_page_view {
-            plugin_pages::tab_controls(ui, &painter, tab_area, &tab_resps, &names, pv, acts);
+            plugin_pages::tab_controls(ui, &painter, tab_area, &tab_resps, tabs_next_x, &names, pv, acts);
         }
         // Macro pages: right-click a page for Rename, Delete, Clear All.
         if macro_tabs && let Some((level, ..)) = &macro_view {
             let ch = channel::macro_channel(*level);
-            for (i, resp) in tab_resps.iter().enumerate().take(names.len() - 1) {
+            for &(i, ref resp) in &tab_resps {
+                if i + 1 >= names.len() {
+                    continue;
+                }
                 resp.menu_on_right_click(|ui| {
                     let id = ui.id().with(("macro-page-name", i));
                     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| names[i].clone());
@@ -5663,7 +5666,10 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 // A list of chosen steps (a Zhora output's) shows the step `cur` at its place in it.
                 let at = values.as_ref().map_or(cur, |v| listed_at(v, steps, cur));
                 let set = move |k: usize| Act::PluginParam(slot, id, values.as_ref().map_or(k as f64 / steps as f64, |v| v[k]));
-                selector(ui, &painter, r, (i, name.as_ref(), value), &names, at, &set, gcol, acts);
+                let resp = selector(ui, &painter, r, (i, name.as_ref(), value), &names, at, &set, gcol, acts);
+                if let Some(pv) = &plugin_page_view {
+                    resp.menu_on_right_click(|ui| plugin_pages::slot_menu(ui, app, Some(doc), pv, i, acts));
+                }
             }
             continue;
         }
@@ -5708,7 +5714,11 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
             // Drag up/down (Shift: fine); double-click to type; ⌘-click resets.
             let below = Rect::from_min_max(Pos2::new(r.left(), strip.bottom()), r.max);
             let resp = ui.interact(below, ui.id().with(("knob", i)), Sense::click_and_drag()).on_hover_text(
-                "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click to remove its modulation, the name for macros",
+                if plugin_page_view.is_some() {
+                    "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click for modulation and parameter options"
+                } else {
+                    "Drag to change (Shift: fine), double-click to type a value, ⌘-click to reset; right-click to remove its modulation, the name for macros"
+                },
             );
             if resp.hovered() || resp.dragged() {
                 painter.rect_filled(r, 4.0, white(10));
@@ -5746,14 +5756,23 @@ fn chain_area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, a
                 let (from, moved) = ui.data(|d| d.get_temp::<(f32, f32)>(start_id)).unwrap_or((base, 0.0));
                 acts.push(Act::Modulate(*edit, (from + moved).clamp(0.0, 1.0), true));
             }
-            // ⌃-click (right-click) anywhere on the knob: its menu, to remove its
-            // modulation.
-            if modulation::mod_target(*edit).is_some() {
+            // ⌃-click (right-click) anywhere on the knob: remove its modulation, and on
+            // an editable hosted plug-in, the parameter slot menu below a divider.
+            let has_mod = modulation::mod_target(*edit).is_some();
+            if has_mod || plugin_page_view.is_some() {
                 let e = *edit;
                 resp.menu_on_right_click(|ui| {
-                    if ui.button("Remove Modulation").on_hover_text("Remove this knob's modulation from every pattern").clicked() {
-                        acts.push(Act::ClearModulation(e));
-                        ui.close();
+                    if has_mod {
+                        if ui.button("Remove Modulation").on_hover_text("Remove this knob's modulation from every pattern").clicked() {
+                            acts.push(Act::ClearModulation(e));
+                            ui.close();
+                        }
+                        if plugin_page_view.is_some() {
+                            ui.separator();
+                        }
+                    }
+                    if let Some(pv) = &plugin_page_view {
+                        plugin_pages::slot_menu(ui, app, Some(doc), pv, i, acts);
                     }
                 });
             }
@@ -6081,7 +6100,7 @@ fn selector(
     set: &dyn Fn(usize) -> Act,
     color: Color32,
     acts: &mut Vec<Act>,
-) {
+) -> Response {
     painter.text(Pos2::new(r.center().x, r.top() + 8.0), Align2::CENTER_CENTER, name, font(10.0), white(142));
     let up = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 25.0), Vec2::new(40.0, 14.0));
     let down = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 55.0), Vec2::new(40.0, 14.0));
@@ -6144,6 +6163,7 @@ fn selector(
             }
         }
     }
+    resp
 }
 
 /// A click on `resp` opens the list of `options` under it (the current one marked);
@@ -6172,8 +6192,10 @@ fn knob_label(name: &str) -> String {
     t.to_uppercase()
 }
 
-/// Page tabs from the left of `area` (the header, after its heading); those that
-/// don't fit are left out.
+/// Page tabs from the left of `area` (the header, after its heading). When the tabs
+/// don't all fit, keeps the active page visible and adds a dropdown button to reach
+/// every page. Returns each drawn tab's `(page_index, response)` and the x position
+/// after the last drawn tab (or the overflow dropdown).
 fn page_tabs(
     ui: &Ui,
     painter: &Painter,
@@ -6182,22 +6204,73 @@ fn page_tabs(
     page: usize,
     act: fn(usize) -> Act,
     acts: &mut Vec<Act>,
-) -> Vec<Response> {
-    let mut out = Vec::new();
+) -> (Vec<(usize, Response)>, f32) {
+    if names.is_empty() || area.width() <= 0.0 {
+        return (Vec::new(), area.left());
+    }
+    const GAP: f32 = 2.0;
+    const OVERFLOW_W: f32 = 22.0;
+    let widths: Vec<f32> = names.iter().map(|n| 14.0 + painter.layout_no_wrap(n.clone(), font(11.0), ink()).size().x).collect();
+    let total: f32 = widths.iter().sum::<f32>() + GAP * names.len().saturating_sub(1) as f32;
+    let overflow = names.len() > 1 && total > area.width();
+    let active = page.min(names.len() - 1);
+    let (start, end, tab_right) = if !overflow {
+        (0, names.len(), area.right())
+    } else {
+        let avail = (area.width() - OVERFLOW_W - GAP).max(0.0);
+        let tab_right = area.left() + avail;
+        let mut end = 0;
+        let mut used = 0.0;
+        while end < names.len() {
+            let step = widths[end] + if end > 0 { GAP } else { 0.0 };
+            if used + step > avail {
+                break;
+            }
+            used += step;
+            end += 1;
+        }
+        if active < end {
+            (0, end, tab_right)
+        } else if avail < 24.0 {
+            (0, 0, area.left())
+        } else {
+            let mut start = active;
+            let mut used = widths[active].min(avail);
+            while start > 0 {
+                let step = widths[start - 1] + GAP;
+                if used + step > avail {
+                    break;
+                }
+                used += step;
+                start -= 1;
+            }
+            let mut end = active + 1;
+            while end < names.len() {
+                let step = widths[end] + GAP;
+                if used + step > avail {
+                    break;
+                }
+                used += step;
+                end += 1;
+            }
+            (start, end, tab_right)
+        }
+    };
+    let mut out = Vec::with_capacity(end.saturating_sub(start));
     let mut x = area.left();
-    for (i, name) in names.iter().enumerate() {
-        let w = 14.0 + painter.layout_no_wrap(name.clone(), font(11.0), ink()).size().x;
-        if x + w > area.right() {
+    for (i, name) in names.iter().enumerate().take(end).skip(start) {
+        let w = widths[i].min((tab_right - x).max(0.0));
+        if w <= 0.0 {
             break;
         }
         let r = Rect::from_min_max(Pos2::new(x, area.top() + 4.0), Pos2::new(x + w, area.bottom() - 4.0));
         let resp = ui.interact(r, ui.id().with(("page-tab", i)), Sense::click_and_drag());
         let on = i == page;
-        let ink = if on || resp.hovered() { ink() } else { white(142) };
+        let col = if on || resp.hovered() { ink() } else { white(142) };
         if name == "+" {
-            plus_glyph(painter, r.center(), 11.0, ink);
+            plus_glyph(painter, r.center(), 11.0, col);
         } else {
-            painter.text(r.center(), Align2::CENTER_CENTER, name, font(11.0), ink);
+            painter.with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, name, font(11.0), col);
         }
         if on {
             painter.hline(r.shrink2(Vec2::new(4.0, 0.0)).x_range(), area.bottom() - 1.0, Stroke::new(2.0, white(255)));
@@ -6205,10 +6278,43 @@ fn page_tabs(
         if resp.clicked() {
             acts.push(act(i));
         }
-        out.push(resp);
-        x += w + 2.0;
+        out.push((i, resp));
+        x += w + GAP;
     }
-    out
+    if overflow {
+        let bx = x.min((area.right() - OVERFLOW_W).max(area.left()));
+        let r = Rect::from_min_max(Pos2::new(bx, area.top() + 4.0), Pos2::new(bx + OVERFLOW_W, area.bottom() - 4.0));
+        let resp = ui.interact(r, ui.id().with("page-tabs-overflow"), Sense::click()).on_hover_text("All pages");
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "All pages"));
+        if resp.hovered() {
+            painter.rect_filled(r, 2.0, s02());
+        }
+        let m = r.center();
+        let col = if resp.hovered() { ink() } else { white(164) };
+        painter.add(egui::Shape::convex_polygon(
+            vec![m + Vec2::new(-4.0, -2.0), m + Vec2::new(4.0, -2.0), m + Vec2::new(0.0, 2.5)],
+            col,
+            Stroke::NONE,
+        ));
+        egui::Popup::menu(&resp).style(crate::layout::menu_style).id(ui.id().with("page-tabs-overflow-menu")).show(|ui| {
+            egui::ScrollArea::vertical().id_salt("page-tabs-overflow-list").max_height(320.0).show(ui, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    if name == "+" {
+                        ui.separator();
+                        if ui.button("Add Page").clicked() {
+                            acts.push(act(i));
+                            ui.close();
+                        }
+                    } else if ui.selectable_label(i == page, name).clicked() {
+                        acts.push(act(i));
+                        ui.close();
+                    }
+                }
+            });
+        });
+        x = r.right() + GAP;
+    }
+    (out, x)
 }
 
 /// The sound's chain: one row per slot (click: its pages; double-click: plug-in window;

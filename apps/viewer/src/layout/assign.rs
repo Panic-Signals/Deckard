@@ -103,7 +103,10 @@ pub(super) fn area(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, painter:
                     (Some(id), None) => super::plugin_macro_knob(app, doc, id).map_or("(Other)".into(), |k| k.0.to_string()),
                     (None, _) => "Select".into(),
                 };
-                let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(s02()));
+                let mut resp = ui.put(r, egui::Button::new(egui::RichText::new(&text).size(10.0)).fill(s02()).truncate());
+                if m.target.is_some() {
+                    resp = resp.on_hover_text(&text);
+                }
                 if resp.clicked() {
                     acts.push(Act::Remote(RemoteAct::Focus(slot)));
                 }

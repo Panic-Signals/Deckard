@@ -27,28 +27,31 @@ pub(super) fn tab_controls(
     ui: &mut Ui,
     painter: &Painter,
     tab_area: Rect,
-    tab_resps: &[Response],
+    tab_resps: &[(usize, Response)],
+    next_x: f32,
     names: &[String],
     pv: &PluginPageView,
     acts: &mut Vec<Act>,
 ) {
-    let shown_pages = pv.page_count.min(tab_resps.len());
+    let editable: Vec<(usize, &Response)> = tab_resps.iter().filter(|(i, _)| *i < pv.page_count).map(|(i, r)| (*i, r)).collect();
     // Drag a parameter page tab horizontally to reorder pages (never Side-Chain Input).
-    if shown_pages > 1 {
-        for (i, resp) in tab_resps.iter().enumerate().take(shown_pages) {
+    if editable.len() > 1 {
+        for (pos_idx, &(i, resp)) in editable.iter().enumerate() {
             if (resp.dragged() || resp.drag_stopped())
                 && let Some(pos) = ui.ctx().pointer_latest_pos()
             {
-                let to = tab_resps[..shown_pages]
+                let to_pos = editable
                     .iter()
-                    .position(|r| pos.x < r.rect.center().x)
-                    .map_or(shown_pages - 1, |idx| if idx > i { idx - 1 } else { idx });
+                    .position(|(_, r)| pos.x < r.rect.center().x)
+                    .map_or(editable.len() - 1, |idx| if idx > pos_idx { idx - 1 } else { idx });
+                let to = editable[to_pos].0;
                 if resp.drag_stopped() {
                     if to != i {
                         acts.push(Act::PluginPageEdit(PluginPageAct::MovePage(pv.chain, pv.slot, i, to)));
                     }
                 } else {
-                    let drop_x = if to > i { tab_resps[to].rect.right() + 1.0 } else { tab_resps[to].rect.left() - 1.0 };
+                    let drop_x =
+                        if to_pos > pos_idx { editable[to_pos].1.rect.right() + 1.0 } else { editable[to_pos].1.rect.left() - 1.0 };
                     ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("plugin-page-drop"))).vline(
                         drop_x,
                         tab_area.y_range().min + 4.0..=tab_area.y_range().max - 4.0,
@@ -59,7 +62,7 @@ pub(super) fn tab_controls(
         }
     }
     // Right-click menu on each parameter page tab (never on Side-Chain Input).
-    for (i, resp) in tab_resps.iter().enumerate().take(shown_pages) {
+    for &(i, resp) in &editable {
         let current_name = names.get(i).cloned().unwrap_or_default();
         resp.menu_on_right_click(|ui| {
             let id = ui.id().with(("plugin-page-name", pv.slot, i));
@@ -110,9 +113,9 @@ pub(super) fn tab_controls(
         });
     }
     // "+" button to add a new empty parameter page, placed after the last drawn tab
-    // (pinned at the right edge of `tab_area` if many pages filled the bar).
+    // (or the overflow dropdown) and pinned at the right edge of `tab_area`.
     let plus_w = 22.0;
-    let x = tab_resps.last().map_or(tab_area.left(), |r| r.rect.right() + 2.0).min(tab_area.right() - plus_w);
+    let x = next_x.min(tab_area.right() - plus_w);
     if x >= tab_area.left() && x + plus_w <= tab_area.right() + 1.0 {
         let r = Rect::from_min_max(Pos2::new(x, tab_area.top() + 4.0), Pos2::new(x + plus_w, tab_area.bottom() - 4.0));
         let resp = ui.interact(r, ui.id().with(("plugin-page-add", pv.slot)), Sense::click()).on_hover_text("Add parameter page");
@@ -388,7 +391,10 @@ pub(super) fn assign_pages(
             "Select".to_string()
         };
         let fill = if slot_learning { gcol } else { s02() };
-        let resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(fill));
+        let mut resp = ui.put(r, egui::Button::new(egui::RichText::new(text).size(10.0)).fill(fill).truncate());
+        if !slot_learning && let Some((_, label, _)) = &pv.knobs[i] {
+            resp = resp.on_hover_text(label);
+        }
         if resp.clicked() {
             acts.push(Act::PluginPageEdit(PluginPageAct::Focus(slot)));
             if slot_learning {
