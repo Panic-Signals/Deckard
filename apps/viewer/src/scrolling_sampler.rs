@@ -2,6 +2,10 @@ use eframe::egui::{Align2, Color32, FontId, Pos2, Sense, Stroke, StrokeKind, Ui,
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+#[path = "scrolling_sampler_unit_tests.rs"]
+mod unit_tests;
+
 #[derive(Clone)]
 pub struct DraggedSelection(pub PathBuf);
 

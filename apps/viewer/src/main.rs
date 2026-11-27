@@ -41,6 +41,8 @@ mod controller;
 #[cfg(test)]
 mod controller_quality_tests;
 mod controller_timing;
+#[cfg(test)]
+mod scrolling_sampler_tests;
 /// A zone's meta after an edit took its sample from `old_len` frames to `new_len`:
 /// its warp markers go; stretched (`stretched`), its tempo follows; cut, its length in
 /// beats does, and its grid moves by the `shift` frames taken from the front.
