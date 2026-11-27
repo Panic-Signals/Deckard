@@ -214,12 +214,10 @@ pub struct Vst3Editor {
 /// The plug-in's editor view for `platform`, and its size.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn create_view(plugin: &Shared, platform: FIDString, platform_name: &str) -> Result<(ComPtr<IPlugView>, i32, i32), String> {
-    // The instance is held only to take its controller: making the view can take a
+    // Read the controller without locking the audio instance: making the view can take a
     // plug-in a long while, and the audio thread skips an instance that is held (an
-    // effect passes dry, an instrument is silent). The view's other calls are made
-    // unheld too.
-    let c = plugin.lock().map_err(|_| "the plug-in is unavailable")?.controller().cloned();
-    let c = c.ok_or("the plug-in has no editor")?;
+    // effect passes dry, an instrument is silent).
+    let c = plugin.controller().ok_or("the plug-in has no editor")?;
     let view = unsafe { ComPtr::from_raw(c.createView(c"editor".as_ptr())) }.ok_or("the plug-in has no editor")?;
     if unsafe { view.isPlatformTypeSupported(platform) } != kResultOk {
         return Err(format!("the plug-in's editor doesn't support {platform_name} windows"));

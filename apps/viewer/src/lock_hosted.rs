@@ -43,8 +43,14 @@ impl App {
             .plugins
             .instances()
             .filter_map(|(_, instance)| {
-                let p = instance.lock().ok()?;
-                let values = p.parameters().iter().map(|info| (info.id, info.steps, p.knob_value(info.id))).collect();
+                let values = if let Some(params) = instance.params()
+                    && let Some(list) = params.parameters()
+                {
+                    list.iter().map(|info| (info.id, info.steps, params.value(info.id))).collect()
+                } else {
+                    let p = instance.lock().ok()?;
+                    p.parameters().iter().map(|info| (info.id, info.steps, p.knob_value(info.id))).collect()
+                };
                 Some(HostedSnapshot { instance: Arc::downgrade(instance), values })
             })
             .collect()
@@ -64,8 +70,12 @@ impl App {
                 if !self.samples.plugins.instances().any(|(_, current)| Arc::ptr_eq(current, &instance)) {
                     return None;
                 }
-                let p = instance.lock().ok()?;
-                let from = snapshot.values.iter().map(|(id, _, _)| p.knob_value(*id)).collect();
+                let from = if let Some(params) = instance.params() {
+                    snapshot.values.iter().map(|(id, _, _)| params.value(*id)).collect()
+                } else {
+                    let p = instance.lock().ok()?;
+                    snapshot.values.iter().map(|(id, _, _)| p.knob_value(*id)).collect()
+                };
                 Some(HostedGlide { snapshot: snapshot.clone(), from })
             })
             .collect()
@@ -135,6 +145,29 @@ impl App {
             if !self.samples.plugins.instances().any(|(_, current)| Arc::ptr_eq(current, &instance)) {
                 continue;
             }
+            if let Some(params) = instance.params() {
+                let changes: Vec<_> = glide
+                    .snapshot
+                    .values
+                    .iter()
+                    .zip(&glide.from)
+                    .filter_map(|(&(id, steps, target), &from)| {
+                        if steps != 0 && t < 1.0 {
+                            return None;
+                        }
+                        let value = from + (target - from) * t;
+                        (value.is_finite() && (params.value(id) - value).abs() > 1e-9).then_some((id, value))
+                    })
+                    .collect();
+                if changes.is_empty() {
+                    continue;
+                }
+                changed = true;
+                for (id, value) in changes {
+                    params.set(id, value);
+                }
+                continue;
+            }
             let Ok(mut p) = instance.lock() else { continue };
             let changes: Vec<_> = glide
                 .snapshot
@@ -153,15 +186,8 @@ impl App {
                 continue;
             }
             changed = true;
-            if let Some(params) = p.params() {
-                drop(p);
-                for (id, value) in changes {
-                    params.set(id, value);
-                }
-            } else {
-                for (id, value) in changes {
-                    p.set_param(id, value);
-                }
+            for (id, value) in changes {
+                p.set_param(id, value);
             }
         }
         if changed {

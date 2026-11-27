@@ -261,6 +261,13 @@ impl Plugin {
         }
     }
 
+    pub(crate) fn faulted_flag(&self) -> Option<Arc<AtomicBool>> {
+        match &self.kind {
+            Kind::Vst3(p) => Some(p.faulted.clone()),
+            _ => None,
+        }
+    }
+
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
         Plugin {
@@ -970,36 +977,7 @@ impl Vst3 {
     /// Every parameter of the plug-in, or (`automatable`) those [`Plugin::parameters`]
     /// lists.
     pub fn parameter_list(&self, automatable: bool) -> Vec<ParamInfo> {
-        let Some(c) = &self.controller else { return Vec::new() };
-        let n = unsafe { c.getParameterCount() };
-        let mut out = Vec::new();
-        let mut fallback = Vec::new();
-        for i in 0..n {
-            let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
-            if unsafe { c.getParameterInfo(i, &mut info) } != kResultOk {
-                continue;
-            }
-            use ParameterInfo_::ParameterFlags_::*;
-            let f = info.flags;
-            let skip = f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) != 0;
-            if automatable && skip {
-                continue;
-            }
-            let param = ParamInfo {
-                id: info.id,
-                title: string128(&info.title),
-                short: string128(&info.shortTitle),
-                units: string128(&info.units),
-                steps: info.stepCount,
-                default: info.defaultNormalizedValue,
-            };
-            if automatable && f & kCanAutomate == 0 {
-                fallback.push(param);
-            } else {
-                out.push(param);
-            }
-        }
-        if out.is_empty() { fallback } else { out }
+        self.controller.as_ref().map_or_else(Vec::new, |c| vst3_parameter_list(c, automatable))
     }
 
     /// Whether the plug-in reports any `kCanAutomate` parameter.
@@ -1375,8 +1353,10 @@ impl Drop for Vst3 {
 
 /// A plug-in's parameters, reached without holding the instance: a VST3's through its
 /// controller (see [`Plugin::params`]).
+#[derive(Clone)]
 pub struct Params(ParamsOf);
 
+#[derive(Clone)]
 enum ParamsOf {
     Vst3 {
         controller: ComPtr<IEditController>,
@@ -1388,6 +1368,39 @@ enum ParamsOf {
 }
 
 impl Params {
+    /// The VST3 edit controller, when this handle is for a VST3.
+    pub fn controller(&self) -> Option<ComPtr<IEditController>> {
+        match &self.0 {
+            ParamsOf::Vst3 { controller, .. } => Some(controller.clone()),
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(_) => None,
+        }
+    }
+
+    /// Whether a VST3's state was marked dirty since `take_dirty`, without locking the
+    /// audio instance (`None` for Audio Units, whose dirty flag lives on the instance).
+    pub fn is_dirty(&self) -> Option<bool> {
+        match &self.0 {
+            ParamsOf::Vst3 { edits, .. } => Some(edits.lock().is_ok_and(|e| e.dirty)),
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(_) => None,
+        }
+    }
+
+    /// List parameters through the VST3 controller without locking the audio instance
+    /// (`None` for Audio Units, whose list lives on the instance).
+    pub fn parameter_list(&self, automatable: bool) -> Option<Vec<ParamInfo>> {
+        match &self.0 {
+            ParamsOf::Vst3 { controller, .. } => Some(vst3_parameter_list(controller, automatable)),
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(_) => None,
+        }
+    }
+
+    /// Automatable parameters via the controller (see [`Params::parameter_list`]).
+    pub fn parameters(&self) -> Option<Vec<ParamInfo>> {
+        self.parameter_list(true)
+    }
     /// A parameter's value (normalized 0..1).
     pub fn value(&self, id: u32) -> f64 {
         match &self.0 {
@@ -1447,6 +1460,38 @@ pub struct ParamInfo {
 fn string128(s: &[u16]) -> String {
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
     String::from_utf16_lossy(&s[..end])
+}
+
+fn vst3_parameter_list(c: &ComPtr<IEditController>, automatable: bool) -> Vec<ParamInfo> {
+    let n = unsafe { c.getParameterCount() };
+    let mut out = Vec::new();
+    let mut fallback = Vec::new();
+    for i in 0..n {
+        let mut info: ParameterInfo = unsafe { std::mem::zeroed() };
+        if unsafe { c.getParameterInfo(i, &mut info) } != kResultOk {
+            continue;
+        }
+        use ParameterInfo_::ParameterFlags_::*;
+        let f = info.flags;
+        let skip = f & (kIsHidden | kIsReadOnly | kIsBypass | kIsProgramChange) != 0;
+        if automatable && skip {
+            continue;
+        }
+        let param = ParamInfo {
+            id: info.id,
+            title: string128(&info.title),
+            short: string128(&info.shortTitle),
+            units: string128(&info.units),
+            steps: info.stepCount,
+            default: info.defaultNormalizedValue,
+        };
+        if automatable && f & kCanAutomate == 0 {
+            fallback.push(param);
+        } else {
+            out.push(param);
+        }
+    }
+    if out.is_empty() { fallback } else { out }
 }
 
 /// Which plug-in slot of the project an instance plays.
@@ -1585,7 +1630,7 @@ impl Host {
     pub fn loaded(&self, slot: Slot, plugin_id: &str, name: &str) -> Option<Shared> {
         let id = PluginId::parse(plugin_id, name)?;
         let shared = self.instances.get(&slot)?;
-        let same = shared.lock().ok()?.id.cid == id.cid;
+        let same = shared.cid() == id.cid;
         same.then(|| shared.clone())
     }
 

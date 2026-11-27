@@ -4786,30 +4786,23 @@ pub(crate) fn listed_at(values: &[f64], steps: i32, step: usize) -> usize {
 fn set_plugin_param(app: &mut App, chain: deckard_doc::Chain, i: usize, id: u32, v: f64) {
     let mut native = false;
     let mut new_text = None;
-    if let Ok(p) = app.slot_plugin_in(chain, i)
-        && let Ok(mut g) = p.lock()
-    {
-        // A VST3 through its controller, not holding the instance while the plug-in
-        // takes it in (the audio thread would wait).
-        match g.params() {
-            Some(h) => {
+    if let Ok(p) = app.slot_plugin_in(chain, i) {
+        // A VST3/AU through its controller, never locking the audio instance.
+        if let Some(h) = p.params() {
+            h.set(id, v);
+            new_text = Some(h.text(id, v));
+        } else if let Ok(mut g) = p.lock() {
+            // A Tune that just finished on it is its own undo step first, so this
+            // edit's undo can't take the new table back with it.
+            if g.changed_by_itself() {
                 drop(g);
-                h.set(id, v);
-                new_text = Some(h.text(id, v));
+                let key = app.plugin_slot_key(chain, i);
+                app.store_finished_tunes(|s| *s == key, true);
+                g = p.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             }
-            None => {
-                // A Tune that just finished on it is its own undo step first, so this
-                // edit's undo can't take the new table back with it.
-                if g.changed_by_itself() {
-                    drop(g);
-                    let key = app.plugin_slot_key(chain, i);
-                    app.store_finished_tunes(|s| *s == key, true);
-                    g = p.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                }
-                g.set_param(id, v);
-                new_text = Some(g.param_text(id, v));
-                native = g.is_native();
-            }
+            g.set_param(id, v);
+            new_text = Some(g.param_text(id, v));
+            native = g.is_native();
         }
     }
     // DECKARD's own plug-ins save into the project as they change (an undo step, like
@@ -4869,31 +4862,33 @@ fn plugin_knob(app: &App, doc: &deckard_doc::Document, chain: deckard_doc::Chain
     let info = {
         let mut cache = app.plugin_params.borrow_mut();
         if cache.get(&(chain, slot)).is_none_or(|(k, _)| *k != plugin_id) {
-            let g = p.try_lock().ok()?;
-            let mut list = g.parameter_list(false);
-            // (Named as its page names them: a plug-in's own pages by the short names.)
-            if !g.pages().is_empty() {
-                list.iter_mut().filter(|i| !i.short.is_empty()).for_each(|i| i.title = i.short.clone());
-            }
+            let list = if let Some(list) = p.params().and_then(|h| h.parameter_list(false)) {
+                list
+            } else {
+                let g = p.try_lock().ok()?;
+                let mut list = g.parameter_list(false);
+                // (Named as its page names them: a plug-in's own pages by the short names.)
+                if !g.pages().is_empty() {
+                    list.iter_mut().filter(|i| !i.short.is_empty()).for_each(|i| i.title = i.short.clone());
+                }
+                list
+            };
             cache.insert((chain, slot), (plugin_id, list));
         }
         cache.get(&(chain, slot))?.1.iter().find(|i| i.id == param)?.clone()
     };
-    // (A VST3's value from its controller, not holding the instance: the audio thread
-    // would wait.)
-    let (value, text) = match p.try_lock() {
-        Ok(g) => match g.params() {
-            Some(h) => {
-                drop(g);
-                let v = h.value(param);
-                (v, h.text(param, v))
-            }
-            None => {
+    // (A VST3/AU's value from its controller, never locking the audio instance.)
+    let (value, text) = if let Some(h) = p.params() {
+        let v = h.value(param);
+        (v, h.text(param, v))
+    } else {
+        match p.try_lock() {
+            Ok(g) => {
                 let v = g.param_value(param);
                 (v, g.param_text(param, v))
             }
-        },
-        Err(_) => (info.default, String::new()),
+            Err(_) => (info.default, String::new()),
+        }
     };
     let units = if info.units.is_empty() || text.ends_with(&info.units) { String::new() } else { format!(" {}", info.units) };
     let edit = Edit::PluginIn(chain, slot, param, info.default);

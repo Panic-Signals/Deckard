@@ -217,3 +217,35 @@ fn hosted_lock_refreshes_every_visible_plugin_panel() {
         assert_eq!(view.page, usize::MAX, "LOCK refreshes each strip, including the unfocused slot");
     }
 }
+
+/// Steady-state `follow_plugin_chunk` must not lock the audio mutex once the document
+/// revision has been synced.
+#[test]
+fn follow_plugin_chunk_skips_locking_when_revision_is_unchanged() {
+    let mut app = App::default();
+    app.new_project();
+    let class = &deckard_plugins::tuner::CLASS;
+    let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+    let shared = deckard_plugins::Plugin::native(class, id, class.name, 48_000.0).shared();
+    let rev = app.doc.as_ref().unwrap().borrow().revision();
+    let _audio = shared.lock().unwrap();
+    assert_eq!(
+        app.follow_plugin_chunk((Chain::Master, 0), &shared, rev),
+        Some(rev),
+        "unchanged revision returns immediately without locking the plug-in"
+    );
+}
+
+/// `store_finished_tunes` runs periodically across every loaded plug-in: it must check
+/// `cid()` before locking so non-Zhora plug-ins are never locked (even with `wait = true`).
+#[test]
+fn store_finished_tunes_skips_non_zhora_without_locking() {
+    let mut app = App::default();
+    app.new_project();
+    let class = &deckard_plugins::tuner::CLASS;
+    let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+    let plugin = deckard_plugins::Plugin::native(class, id, class.name, 48_000.0);
+    let shared = app.samples.plugins.insert(deckard_plugins::Slot::Master { slot: 0 }, plugin);
+    let _audio = shared.lock().unwrap();
+    assert!(!app.store_finished_tunes(|_| true, true));
+}

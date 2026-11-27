@@ -488,6 +488,9 @@ pub struct PluginView {
     pub(crate) seen: std::time::Instant,
     /// The slot's plug-in (its id in the project) when made: another there drops it.
     plugin_id: String,
+    /// The document revision whose chunk was last synced to the instance (so steady-state
+    /// refreshes never lock the audio instance).
+    chunk_rev: u64,
     /// The instance it reads (another in the slot rebuilds the view).
     instance: std::sync::Weak<deckard_plugins::SharedPlugin>,
     pub error: Option<String>,
@@ -5397,10 +5400,13 @@ impl App {
             return Some(v);
         }
         let (slot, id) = (target.slot?, target.field.parse::<u32>().ok()?);
-        if let Some(inst) = self.samples.plugins.existing(self.plugin_slot_key(c, slot))
-            && let Ok(g) = inst.try_lock()
-        {
-            return Some(g.knob_value(id));
+        if let Some(inst) = self.samples.plugins.existing(self.plugin_slot_key(c, slot)) {
+            if let Some(h) = inst.params() {
+                return Some(h.value(id));
+            }
+            if let Ok(g) = inst.try_lock() {
+                return Some(g.knob_value(id));
+            }
         }
         let v = self.plugin_views.get(&(c, slot))?;
         let k = v.pages.get(v.page)?.knobs.iter().position(|(info, ..)| info.id == id)?;
@@ -5441,6 +5447,14 @@ impl App {
             }
             let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, slot))?;
             let key = (std::sync::Arc::as_ptr(&inst) as *const () as usize, id, steps);
+            if let Some(h) = inst.params() {
+                if let Some(names) = self.step_names.borrow().get(&key) {
+                    return Some(names.clone());
+                }
+                let names: Vec<String> = (0..=steps).map(|s| h.text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect();
+                self.step_names.borrow_mut().insert(key, names.clone());
+                return Some(names);
+            }
             let Ok(p) = inst.try_lock() else { return self.step_names.borrow().get(&key).cloned() };
             let names: Vec<String> = (0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect();
             self.step_names.borrow_mut().insert(key, names.clone());
@@ -5462,7 +5476,7 @@ impl App {
         let slot_i = target.slot?;
         if let Edit::PluginIn(c, i, id, _) = edit {
             let inst = self.samples.plugins.existing(self.plugin_slot_key(c, i))?;
-            let text = inst.try_lock().ok()?.param_text(id, at);
+            let text = inst.params().map(|h| h.text(id, at)).or_else(|| inst.try_lock().ok().map(|p| p.param_text(id, at)))?;
             let units = self
                 .plugin_views
                 .get(&(c, i))
@@ -12929,6 +12943,7 @@ impl App {
             refreshed: now,
             seen: now,
             plugin_id: pr.id.clone(),
+            chunk_rev: u64::MAX,
             instance,
             error,
             sent: Vec::new(),
@@ -12969,16 +12984,22 @@ impl App {
     /// Load the project's state for slot `key` into its instance `p` if it differs from
     /// what the instance was loaded from or last saved (as [`deckard_plugins::Host::instance`]
     /// does, so it's no edit); not while the audio thread holds it (again next time).
-    fn follow_plugin_chunk(&mut self, key: (deckard_doc::Chain, usize), p: &deckard_plugins::Shared) {
-        let Some(doc) = self.doc.clone() else { return };
+    /// Returns the document revision synced, if the check ran (or was already current).
+    fn follow_plugin_chunk(&mut self, key: (deckard_doc::Chain, usize), p: &deckard_plugins::Shared, synced_rev: u64) -> Option<u64> {
+        let doc = self.doc.clone()?;
         let d = doc.borrow();
-        let Some(pr) = d.chain_slots(key.0).and_then(|s| s.get(key.1)).and_then(|s| s.plugin.as_ref()) else { return };
-        let Ok(mut g) = p.try_lock() else { return };
+        let rev = d.revision();
+        if rev == synced_rev {
+            return Some(rev);
+        }
+        let pr = d.chain_slots(key.0).and_then(|s| s.get(key.1)).and_then(|s| s.plugin.as_ref())?;
+        let Ok(mut g) = p.try_lock() else { return None };
         if g.chunk() != pr.chunk.as_slice()
             && let Err(e) = g.load_chunk(&pr.chunk)
         {
             self.status = format!("{}: {e}", pr.name);
         }
+        Some(rev)
     }
 
     /// Read view `key`'s shown page's values again (false: the plug-in was busy, or
@@ -13000,28 +13021,28 @@ impl App {
         }
         // The focused plug-in takes the project's state when it changed there (an undo):
         // the engine does that once it runs, and nothing else did before.
-        if self.plugin_focus == Some(key) {
-            self.follow_plugin_chunk(key, &p);
-        }
+        let synced_rev = v.chunk_rev;
+        let new_chunk_rev = if self.plugin_focus == Some(key) { self.follow_plugin_chunk(key, &p, synced_rev) } else { None };
         let v = self.plugin_views.get_mut(&key).unwrap();
+        if let Some(rev) = new_chunk_rev {
+            v.chunk_rev = rev;
+        }
         let page = v.shown;
         let ids: Vec<u32> = v.pages.get(page).map_or(Vec::new(), |pg| pg.knobs.iter().map(|(i, ..)| i.id).collect());
-        // A VST3's values come from its controller without holding the instance
-        // (the audio thread would wait); DECKARD's own read instantly under it.
+        // A VST3/AU's values come from its controller without ever locking the audio
+        // instance; DECKARD's own read instantly under it.
         let sent = &mut v.sent;
-        let values = p.try_lock().ok().map(|g| match g.params() {
-            Some(h) => {
-                drop(g);
-                let mut values: Vec<_> = ids.iter().map(|&id| (h.value(id), h.text(id, h.value(id)))).collect();
-                hold_sent(&mut values, &ids, sent, now, |id, v| h.text(id, v));
-                (values, Vec::new())
-            }
-            None => {
+        let values = if let Some(h) = p.params() {
+            let mut values: Vec<_> = ids.iter().map(|&id| (h.value(id), h.text(id, h.value(id)))).collect();
+            hold_sent(&mut values, &ids, sent, now, |id, v| h.text(id, v));
+            Some((values, Vec::new()))
+        } else {
+            p.try_lock().ok().map(|g| {
                 let mut values: Vec<_> = ids.iter().map(|&id| (g.param_value(id), g.param_text(id, g.param_value(id)))).collect();
                 hold_sent(&mut values, &ids, sent, now, |id, v| g.param_text(id, v));
                 (values, ids.iter().map(|&id| g.param_label(id)).collect())
-            }
-        });
+            })
+        };
         let Some((values, labels)) = values else { return false };
         if let Some(pg) = v.pages.get_mut(page).filter(|pg| pg.own) {
             for ((_, label, _), new) in pg.knobs.iter_mut().zip(labels) {
@@ -14022,6 +14043,9 @@ impl App {
         let Some(doc) = self.doc.clone() else { return };
         let mut stored = Vec::new();
         for (slot, p) in self.samples.plugins.instances().filter(|(s, _)| which(s)) {
+            if p.is_dirty() == Some(false) {
+                continue;
+            }
             let Ok(mut p) = p.lock() else { continue };
             if !p.take_dirty() {
                 continue;
