@@ -1600,6 +1600,24 @@ fn the_grid_cycle_buttons_step_down_a_column() {
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::Grid("step_snap", 0)], "1/16T down to OFF");
 }
 
+/// Pad Mode's octave and semitone buttons set the focused sound's base key in the
+/// project (what its pad plays), and BASE KEY shows the project's.
+#[test]
+fn pad_modes_octave_and_semitone_buttons_set_the_sounds_base_key() {
+    let (mut s, mut v) = (Surface::new(), view());
+    press(&mut s, &v, "BUTTON_PAD_MODE");
+    assert_eq!(s.page(), "pad_mode");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SoundSetting("base_key", 72)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SoundSetting("base_key", 48)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SoundSetting("base_key", 61)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SoundSetting("base_key", 59)]);
+    let (g, snd) = (v.group, v.sound);
+    v.groups[g].sounds[snd].base_key = 127;
+    assert!(s.screen_text(&v).iter().any(|t| t == "G8"), "{:?}", s.screen_text(&v));
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "no higher than the top note");
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_6").is_empty());
+}
+
 #[test]
 fn macro_shows_the_channels_macros() {
     let (mut s, v) = (Surface::new(), view());
@@ -4682,22 +4700,4 @@ fn render_browse_and_chain() {
         press(&mut s, &v, "BUTTON_PAD_MODE");
     }
     assert_eq!(s.error(), None);
-}
-
-/// Pad Mode's octave and semitone buttons set the focused sound's base key in the
-/// project (what its pad plays), and BASE KEY shows the project's.
-#[test]
-fn pad_modes_octave_and_semitone_buttons_set_the_sounds_base_key() {
-    let (mut s, mut v) = (Surface::new(), view());
-    press(&mut s, &v, "BUTTON_PAD_MODE");
-    assert_eq!(s.page(), "pad_mode");
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::SoundSetting("base_key", 72)]);
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_5"), [Action::SoundSetting("base_key", 48)]);
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::SoundSetting("base_key", 61)]);
-    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_7"), [Action::SoundSetting("base_key", 59)]);
-    let (g, snd) = (v.group, v.sound);
-    v.groups[g].sounds[snd].base_key = 127;
-    assert!(s.screen_text(&v).iter().any(|t| t == "G8"), "{:?}", s.screen_text(&v));
-    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty(), "no higher than the top note");
-    assert!(press(&mut s, &v, "BUTTON_SCREEN_6").is_empty());
 }

@@ -153,6 +153,8 @@ mod module_ui;
 mod ni_agent;
 mod ni_services;
 #[cfg(test)]
+mod pad_base_key_tests;
+#[cfg(test)]
 mod pad_blink_tests;
 #[cfg(test)]
 mod pad_light_tests;
