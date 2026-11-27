@@ -13956,6 +13956,35 @@ mod tests {
         });
     }
 
+    /// A plug-in the UI holds for an instant (reading a value) is waited for, so its
+    /// block isn't skipped (an effect went dry for the block: a click in a reverb's
+    /// tail); one held on and on is given up on quickly, so the audio never stalls.
+    #[test]
+    fn a_plugin_held_for_an_instant_is_waited_for_and_a_long_hold_is_not() {
+        let plugin = split_plugin(&HELD_TEST_INSTRUMENT);
+        for _ in 0..20 {
+            std::thread::scope(|scope| {
+                let (ready, acquired) = std::sync::mpsc::channel();
+                let held = &plugin;
+                scope.spawn(move || {
+                    let _lock = held.lock().unwrap();
+                    ready.send(()).unwrap();
+                    let until = std::time::Instant::now() + std::time::Duration::from_micros(150);
+                    while std::time::Instant::now() < until {
+                        std::hint::spin_loop();
+                    }
+                });
+                acquired.recv().unwrap();
+                assert!(plugin.try_audio().is_ok(), "held for 150 µs: waited for");
+            });
+        }
+        with_editor_lock(&plugin, || {
+            let started = std::time::Instant::now();
+            assert!(plugin.try_audio().is_err(), "held on: skipped");
+            assert!(started.elapsed() < std::time::Duration::from_millis(20), "without stalling: {:?}", started.elapsed());
+        });
+    }
+
     #[test]
     fn busy_instrument_keeps_input_running_and_releases_only_the_ended_notes() {
         let mut e = split_engine(|_| {});

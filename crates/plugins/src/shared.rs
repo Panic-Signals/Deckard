@@ -1,11 +1,15 @@
-//! The UI can hold an instance while creating its editor. Renderers skip that instance
-//! while it is busy, but releases must still reach it once it can process again.
+//! The UI can hold an instance while creating its editor. Renderers wait a moment for a
+//! busy instance, then skip it, but releases must still reach it once it can process again.
 
 use crate::Plugin;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, LockResult, Mutex, MutexGuard, TryLockResult};
 
 pub type Shared = Arc<SharedPlugin>;
+
+/// How long the audio thread waits for an instance held elsewhere before it gives the
+/// block up: well over what reading or setting a value takes, well under a block.
+pub const AUDIO_WAIT: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// A plug-in and the MIDI state that must survive a missed render block.
 pub struct SharedPlugin {
@@ -41,8 +45,17 @@ impl SharedPlugin {
 
     /// Acquire the instance without waiting, applying deferred releases and controls
     /// before accepting a fresh event or processing new audio.
+    ///
+    /// An instance held elsewhere is waited for, [`AUDIO_WAIT`] at most: the UI holds one
+    /// for an instant at a time (to read a value, to set one), and giving its block up
+    /// leaves an effect dry for that block, which clicks (a reverb's tail cut and back).
+    /// One held longer (its editor opening) is given up on, so the audio never stalls.
     pub fn try_audio(&self) -> TryLockResult<MutexGuard<'_, Plugin>> {
-        let mut p = self.try_lock()?;
+        let mut p = match self.try_lock() {
+            Ok(p) => p,
+            Err(std::sync::TryLockError::WouldBlock) => self.wait_for_audio()?,
+            Err(e) => return Err(e),
+        };
         if !self.pending.load(Ordering::Acquire) || !self.pending.swap(false, Ordering::AcqRel) {
             return Ok(p);
         }
@@ -65,6 +78,21 @@ impl SharedPlugin {
             }
         }
         Ok(p)
+    }
+
+    /// Keep trying a held instance until [`AUDIO_WAIT`] is up. Spinning, not sleeping:
+    /// the wait is far shorter than a scheduler's turn.
+    fn wait_for_audio(&self) -> TryLockResult<MutexGuard<'_, Plugin>> {
+        let until = std::time::Instant::now() + AUDIO_WAIT;
+        loop {
+            for _ in 0..64 {
+                std::hint::spin_loop();
+            }
+            match self.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < until => {}
+                other => return other,
+            }
+        }
     }
 
     pub fn audio_note_off(&self, pitch: i64) {
