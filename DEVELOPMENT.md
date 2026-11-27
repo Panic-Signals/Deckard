@@ -99,8 +99,8 @@ cargo test --offline -p <crate> [filter]      # e.g. -p deckard-doc, -p deckard 
 Run the full suite once, at the end of a branch. CI runs it on all three systems.
 
 - **Formatting:** `cargo fmt` uses `rustfmt.toml` (140 columns). CI's lint step runs
-  `cargo fmt --all --check`, together with actionlint on the workflows and shellcheck
-  on the scripts (`mise run lint`).
+  `cargo fmt --all --check`, together with actionlint on the workflows, shellcheck
+  on the scripts and the file size check (`mise run lint`; [Where code goes](#where-code-goes)).
 - **Tests that need local data:** tests that need a Maschine install or projects skip
   themselves when it isn't there.
 - **Settings:** tests use a settings folder of their own, never the user's.
@@ -125,6 +125,38 @@ Run the full suite once, at the end of a branch. CI runs it on all three systems
 | `crates/library` | `deckard-library` | The browser's library: NI's index (read-only) and DECKARD's own |
 | `crates/stems` | `deckard-stems` | Stem separation (Demucs v4 through demucs-rs) |
 | `crates/stretch` | `deckard-stretch` | Time-stretching and pitch-shifting (Signalsmith Stretch, vendored) |
+
+## Where code goes
+
+`apps/viewer/src/main.rs` and `crates/engine/src/lib.rs` take most of the project's
+edits, and two pull requests that edit the same lines conflict. So new code goes into a
+file for its topic, not into those two:
+
+- **Tests go in their own file:** `src/<topic>_tests.rs` beside the code (as
+  `apps/viewer/src/chop_tests.rs` is), declared with `#[cfg(test)] mod <topic>_tests;`.
+  Never inline in `main.rs` or a crate's `lib.rs`. A crate's top-level `tests/` folder
+  is for Cargo's integration tests, which can't see private items; unit tests don't go
+  there.
+- **A feature's code goes in that feature's file**, as its own `impl App` or
+  `impl Engine` block or its own type. Add a file when none fits.
+- **A feature's state goes in the feature's own struct** where it has one, not in a new
+  field on `App` or `Engine`.
+- **A dispatcher arm is one call** into the feature's file (`surface_act`,
+  `sampling_act`, `arrange` and the like).
+- **Don't move or reformat code you aren't changing.** Code is moved out of the large
+  files one topic at a time, in pull requests that do nothing else.
+
+`scripts/check-file-sizes.sh` (part of `mise run lint`, so CI runs it) enforces two
+things. A `.rs` file may have at most 3,000 lines; the files that are over that today are
+listed in `scripts/file-size-limits.txt` with the most lines each may have, a little over
+its present length, and a pull request that moves code out of one lowers its limit. And
+a file listed in `scripts/no-inline-tests.txt` must not have a line that starts with
+`#[test]`; a file joins that list when its tests have been moved out. The other rules
+are for whoever writes and reviews the code.
+
+Commits that only move code are listed in `.git-blame-ignore-revs`. Run
+`git config blame.ignoreRevsFile .git-blame-ignore-revs` once, and `git blame` looks
+past them.
 
 ## Documentation map
 
@@ -201,6 +233,10 @@ to the crate's and is shown in About DECKARD.
   `cargo llvm-cov --workspace --cobertura --output-path coverage.xml` and
   `diff-cover coverage.xml --compare-branch=main --fail-under=70`. Tests that skip
   themselves without a Maschine install still count against you on CI.
+  A pull request that only moves code between files is labelled `move-only` and isn't
+  held to the 70%, since a moved line counts as a new one; a maintainer adds the label
+  after checking that nothing but the code's place changed, then re-runs the Patch
+  coverage job if it had already failed.
 - **Release builds:** `release.yml` builds all three when a release is published,
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps

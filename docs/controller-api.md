@@ -187,6 +187,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `scale` | Keyboard and Chords mode's scale: `{ bank, kind }`, places in `deckard.scales`. |
 | `grid` | The song's grids, each value its place in Maschine's list from 0: `perform` (0 Off, 1 Bar, 1/2, 1/4, 1/8, 1/16, Section), `arrange` (1 Bar, 1/2, 1/4, 1/8, 1/16) with `arrange_snap` and `quick` (`true`/`false`), `step` (1 Bar … 1/128, then 1 Bar T … 1/64T) with `step_snap` and `step_ticks` (its step in ticks), `nudge` (Step, Step/2 … Step/16). |
 | `recent` | The projects opened lately, most recent first (their names). |
+| `ask` | The app's question about unsaved changes while it waits for its answer (after NEW, LOAD, Revert or Quit with changes not saved), else nil: `question` (as the app's dialog words it) and `revert` (true for Revert: nothing to save). While it waits, `pages/ask.lua` shows in place of the page, which comes back once it's answered here or on the computer. |
 | `settings` | What the Settings page shows: `values` (each setting's value as shown, by the name `deckard.setting` takes: `count_in`, `quantize`, `driver`, `device`, `sample_rate`, `buffer_size`, `in_route_1` … `in_route_32`, `out_route_1` …, `midi_sync`, `clock_offset`, `default_input`, `link_start_stop`, `sensitivity`, `display_brightness`, `metronome_volume`, `metronome_auto`), `midi_inputs` and `midi_outputs` (`{ name, on }`), `audio_status` (the device's status line, its three latencies, their total), `link` and `link_peers`. Filled only while the `settings` page shows. |
 | `lock` | Lock: `active` (LOCK took a snapshot to recall), `slots` (`slots[n]` is `true` when slot `n` holds one, from 1; 16 a bank), `focus` (the focused slot, or `nil`), `bank` (shown, from 1) and `banks` (1-4), `morph`, and `mode` (0 Travel, 1 Target), `time` (1/2 Bar, 1 Bar, 2, 4, 8, 16 Bars) and `grid` (1/8, 1/4, 1/2, Bar) as places in those lists from 0. |
 | `note_repeat` | Note Repeat and the Arp: `settings` by name (`type`, `rate`, `rate_unit`, `sequence`, `octaves`, `dynamic`, `gate`, `retrigger`, `repeat`, `offset`, `inversion`, `min_key`, `max_key`), each `{ name, text, value, min, max, step, turn }` (`turn`: how far a knob turns for a step); `presets` (the four rates' names, display buttons 5-8) and `preset` (the one chosen, from 1); `hold`; `locked` (LOCK: on off the page too); `active` (on now). |
@@ -206,7 +207,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 | `sections[i]`, `section` | The arrangement's sections (`{ scene, start, length, auto }`: the scene it plays or `nil`, where it starts and how long it is in ticks, its length following its scene's) and the focused one (`nil` with none). |
 | `pattern`, `pattern_start`, `pattern_length`, `pattern_auto`, `pattern_position` | The focused group's focused pattern: where it starts and how long it is (ticks), whether its length is Auto, and where playback is in it (`nil` unless the scene plays it). |
 | `notes[i]` | That pattern's notes: `{ sound, position, length, pitch, velocity, probability, selected }`. |
-| `browser` | The library, as BROWSE shows it (below). It's filled only while the `browse` page is on screen. |
+| `browser` | The library, as BROWSE shows it (below). It's filled only while the `browse` page is on screen, or Quick Browse's list on the Control page. |
 | `control` | The software's Control area, as below. |
 
 `state().control` holds:
@@ -215,6 +216,7 @@ Groups, sounds, knobs, pages and display buttons count from 1.
 |---|---|
 | `level` | 1 Master, 2 Group, 3 Sound. |
 | `plugins` | `true` when the plug-ins are shown, `false` for the channel properties. |
+| `quick_browse` | `true` while Quick Browse's list shows (see `deckard.browse_quick`). |
 | `page_group`, `page_groups` | The channel properties' page group, and how many there are. |
 | `slot`, `slots`, `slot_index` | The focused slot's name, how many slots there are, and which is focused (`nil` on the "+" after the last). |
 | `chain[i]` | Each slot: `{ name, instrument, active, plugin, picture }` (`plugin`: a hosted plug-in, with an editor window; `picture`: the key of DECKARD's picture of one of its own plug-ins, for `screen:image`). |
@@ -315,6 +317,7 @@ and `positions`.
 | `deckard.follow(on)` | Follow playback on or off. |
 | `deckard.grid(name, value)` | Set one of `state.grid`'s grids: a place in its list, or `true`/`false` for `arrange_snap`, `quick` and `step_snap`. |
 | `deckard.file(what, n)` | A File command: `new`, `save`, `save_copy`, `export_audio`, `save_group`, `save_sound`, or `load` (recent project `n`, from 1). |
+| `deckard.ask(answer)` | Answer `state().ask`: `save` (then go on), `discard` (go on without saving) or `cancel`. |
 | `deckard.setting(name, step, index)` | A step (`step` +1 or -1; on or off for a switch) of one of the app's settings: `count_in`, `numerator`, `denominator`, `quantize`, `device`, `buffer_size`, `in_route` / `out_route` (channel `index`, from 1), `midi_sync`, `clock_offset`, `default_input`, `midi_in` / `midi_out` (port `index`, from 1), `link`, `link_start_stop`, `sensitivity`, `display_brightness`, `metronome_volume` (0–100 %), `metronome_auto` (the metronome clicks while recording), `metronome_ticks` (the note value it clicks on: 1/1 … 1/32), `velocity_scaling`, `led_brightness`, `strip_position`, `touch_auto_write`, `reload_last` (open the last project at start), `auto_backup` (keep it as it's edited), `duplicate` (duplicating a scene copies its patterns too), `link_duplicates` (a duplicated section plays the same scene), `pattern_length` (new patterns' length, a bar a step; `pattern_length_fine` a sixteenth), `pattern_grow` (an empty pattern grows as it's recorded into). Saved at once. |
 | `deckard.lock(what, n)` | Lock: `button` (LOCK: take or recall), `pad` (pad `n` of the bank shown: recall its snapshot or take one), `update`, `delete` (the focused snapshot), `delete_slot` (slot `n`, from 1), `bank` (`n` +1 the next, -1 the previous; past the last a new one), or a setting: `morph` (`true`/`false`), `morph_mode`, `morph_time`, `morph_grid` (places from 0). |
 | `deckard.note_repeat(what, value)` | Note Repeat: a setting of `note_repeat.settings` to `value` (as its `value` counts), `hold` or `locked` (`true`/`false`), or `preset` (1-4: the preset's rate plays). It plays while the page named `note_repeat` shows, or while locked. |
@@ -353,6 +356,8 @@ and `positions`.
 | `deckard.browse_load()`, `deckard.browse_prehear()`, `deckard.browse_set_favorite()` | Load or prehear the focused result, or make it a favourite (or not). |
 | `deckard.load_module(n)` | Load `control.modules[n]` in place of the focused slot, or into the "+"; `nil` takes the focused slot out. |
 | `deckard.browse_favorites()` | Show only favourites, or everything. |
+| `deckard.browse_locate()` | Quick Browse in the library: recall the search that found the focused sound's sample (its Sampler's focused zone) or preset, else the filters that list it, and focus it. |
+| `deckard.browse_quick(on)` | The same, for the Control page: its list shows (`state().browser` holds the results while `control.quick_browse` is `true`), or closes (`false`). Leaving the Control page, or another sound focused, closes it. |
 
 ### Lights
 

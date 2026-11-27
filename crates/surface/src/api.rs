@@ -463,6 +463,20 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     {
         let sh = shared.clone();
         d.set(
+            "ask",
+            lua.create_function(move |_, what: String| {
+                const WHAT: [&str; 3] = ["save", "discard", "cancel"];
+                let Some(&what) = WHAT.iter().find(|w| **w == what) else {
+                    return Err(mlua::Error::runtime(format!("no answer \"{what}\" ({})", WHAT.join(", "))));
+                };
+                act(&sh, Action::Ask(what));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let sh = shared.clone();
+        d.set(
             "setting",
             lua.create_function(move |_, (name, step, index): (String, i64, Option<usize>)| {
                 const NAMES: [&str; 35] = [
@@ -619,6 +633,8 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
     request!("browse_favorites", () => Action::Browse(Browse::Favorites));
     request!("browse_set_favorite", () => Action::Browse(Browse::SetFavorite));
     request!("browse_prehear", () => Action::Browse(Browse::Prehear));
+    request!("browse_locate", () => Action::Browse(Browse::Locate));
+    request!("browse_quick", (on: bool) => Action::Browse(Browse::Quick(on)));
     request!("browse_routing", (on: bool) => Action::Browse(Browse::Routing(on)));
     request!("browse_patterns", (on: bool) => Action::Browse(Browse::Patterns(on)));
     request!("song_view", (on: bool) => Action::SongView(on));
@@ -1312,6 +1328,12 @@ const GROUP_PARTS: &[&str] = &["patterns", "sounds"];
 fn state(lua: &Lua, v: &Rc<View>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("project", v.project.as_str())?;
+    if let Some(a) = &v.ask {
+        let at = lua.create_table()?;
+        at.set("question", a.question.as_str())?;
+        at.set("revert", a.revert)?;
+        t.set("ask", at)?;
+    }
     t.set("scene_name", v.scene_name.as_str())?;
     t.set("scene_palette", v.scene_color)?;
     t.set("lfo_focus", v.lfo_focus)?;
@@ -1675,6 +1697,7 @@ fn control(lua: &Lua, c: &crate::ControlView) -> mlua::Result<Table> {
     let ct = lua.create_table()?;
     ct.set("level", c.level + 1)?;
     ct.set("plugins", c.modules_visible)?;
+    ct.set("quick_browse", c.quick_browse)?;
     ct.set("page_group", c.page_group + 1)?;
     ct.set("page_groups", c.page_groups)?;
     ct.set("slot", c.slot.as_deref())?;
@@ -1983,6 +2006,7 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         follow,
         grid,
         recent,
+        ask,
         settings,
         lock,
         lfo_focus,
@@ -2047,6 +2071,7 @@ fn can_patch_state_in_place(old: &View, new: &View) -> bool {
         && *follow == new.follow
         && *grid == new.grid
         && *recent == new.recent
+        && *ask == new.ask
         && *settings == new.settings
         && *lock == new.lock
         && *lfo_focus == new.lfo_focus

@@ -1291,8 +1291,11 @@ pub struct App {
     surface: deckard_surface::Surface,
     /// Its last script error, as shown in the status bar.
     surface_error: Option<String>,
-    /// Whether the MK3 showed its Browse page last frame (leaving it stops prehear).
+    /// Whether the MK3 showed its Browse page (or Quick Browse's list) last frame
+    /// (leaving it stops prehear).
     surface_was_browsing: bool,
+    /// Quick Browse's list shows on the MK3's Control page, for this group and sound.
+    quick_browse: Option<(usize, usize)>,
     /// The scripts' last screens sent to the MK3 (their draw count).
     mk3_screens_sent: u64,
     /// Commands sent to the output when the last edit went (see `follow_edits`).
@@ -1506,6 +1509,9 @@ pub struct App {
     recent: Vec<PathBuf>,
     /// What to do once the user has said what happens to unsaved changes.
     confirm: Option<Pending>,
+    /// The question's answer from the controller (0 save, 1 don't, 2 cancel), for the
+    /// dialog to act on.
+    confirm_choice: Option<u8>,
     /// Just updated to this release: asks whether to open its release notes.
     whats_new: Option<String>,
     /// The About box is open.
@@ -2429,6 +2435,17 @@ impl App {
             self.session_kept = (self.doc_generation, doc.borrow().revision());
         }
         true
+    }
+
+    /// The question about unsaved changes that waits, as the dialog words it, and
+    /// whether it's Revert's (nothing to save).
+    fn confirm_question(&self) -> Option<(String, bool)> {
+        let then = self.confirm.as_ref()?;
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
+        Some(match then {
+            Pending::Revert => (format!("Discard all changes to \"{name}\" since it was last saved?"), true),
+            _ => (format!("Save changes to \"{name}\"?"), false),
+        })
     }
 
     fn dirty(&self) -> bool {
@@ -4027,13 +4044,12 @@ impl App {
                 self.whats_new = None;
             }
         }
+        // (An answer from the controller with no question left to answer is dropped.)
+        let answered = self.confirm_choice.take();
         if let Some(then) = self.confirm.clone() {
-            let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
-            let question = match then {
-                Pending::Revert => format!("Discard all changes to \"{name}\" since it was last saved?"),
-                _ => format!("Save changes to \"{name}\"?"),
-            };
-            let mut choice = None;
+            let question = self.confirm_question().map_or_else(String::new, |q| q.0);
+            // (Revert has no Save to press.)
+            let mut choice = answered.filter(|c| *c != 0 || !matches!(then, Pending::Revert));
             egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
                 crate::layout::fit_dialog(ui, |ui| {
                     crate::layout::dialog_style(ui);
@@ -6491,6 +6507,7 @@ impl App {
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
+            quick_browse: self.quick_browse.is_some(),
             page_group: c.page_group,
             page_groups: c.page_groups,
             slot: c.focus_slot.and_then(|i| c.slots.get(i)).map(|s| s.name.clone()),
@@ -6551,6 +6568,7 @@ impl App {
             random: self.random_view(c.level, c.page, head),
         };
         let mut v = View {
+            ask: self.confirm_question().map(|(question, revert)| deckard_surface::AskView { question, revert }),
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
             settings: self.surface_settings.clone(),
             // (The strip hides while this is open, so a script declines an ENCODER press there.)
@@ -6580,8 +6598,9 @@ impl App {
             sampling: self.sampling_surface_view(),
             ..Default::default()
         };
-        // (Only while BROWSE shows, or the JAM has the panel open: the results can be long.)
-        if self.surface.page() == "browse" || (self.jam_device.is_some() && self.browser.open) {
+        // (Only while BROWSE or Quick Browse's list shows, or the JAM has the panel open:
+        // the results can be long.)
+        if self.surface.page() == "browse" || self.quick_browse.is_some() || (self.jam_device.is_some() && self.browser.open) {
             let b = self.browser.view();
             for name in &b.products {
                 plugin_pictures::ensure_browser_product(&self.surface, name);
@@ -7169,6 +7188,14 @@ impl App {
                     B::Prehear => C::Prehear,
                     B::Routing(on) => C::Routing(on),
                     B::Patterns(on) => C::Patterns(on),
+                    B::Locate => {
+                        self.browse_locate();
+                        return;
+                    }
+                    B::Quick(on) => {
+                        self.quick_browse = (on && self.browse_locate()).then_some((self.group, self.sound));
+                        return;
+                    }
                     B::SetFavorite => {
                         let i = self.browser.selected.unwrap_or(0);
                         let Some(on) = self.browser.results.items.get(i).map(|r| !r.favorite) else { return };
@@ -7398,6 +7425,13 @@ impl App {
                 "bank" => self.lock_bank(n == 1),
                 setting => self.lock_setting(setting, n as f64),
             },
+            A::Ask(what) => {
+                self.confirm_choice = match what {
+                    "save" => Some(0),
+                    "discard" => Some(1),
+                    _ => Some(2),
+                }
+            }
             A::File(what, n) => {
                 use menu::Command as C;
                 let cmd = match what {
@@ -11825,6 +11859,26 @@ impl App {
         }
     }
 
+    /// The controller's magnifier: the library on the focused sound's sample (its Sampler's
+    /// focused zone), else its preset by name, with that result focused and the filters
+    /// set to its own (user or factory, product, top-level type).
+    /// Whether it had something to look for.
+    fn browse_locate(&mut self) -> bool {
+        let Some(doc) = self.doc.clone() else { return false };
+        let target = {
+            let d = doc.borrow();
+            d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|snd| browser::locate_target(snd, self.zone))
+        };
+        let Some((kind, name)) = target else { return false };
+        if !self.browser.started() {
+            self.browse(browser::BrowseAct::Toggle);
+            self.browse(browser::BrowseAct::Toggle);
+        }
+        self.browser.touch();
+        self.browser.locate_item(kind, name);
+        true
+    }
+
     /// What the browser asks for.
     fn browse(&mut self, a: browser::BrowseAct) {
         use browser::BrowseAct as B;
@@ -11894,6 +11948,8 @@ impl App {
             B::Load(i, target) => {
                 let Some(item) = b.results.items.get(i).cloned() else { return };
                 b.selected = Some(i);
+                // (For Quick Browse to recall.)
+                b.searches.remember(&item, &b.query);
                 self.stop_prehear();
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
@@ -12046,9 +12102,14 @@ impl App {
         }
     }
 
-    /// The MK3 left its Browse page: what it was prehearing stops.
+    /// The MK3 left its Browse page, or Quick Browse's list closed: what it was
+    /// prehearing stops. The list closes with the Control page, or when another sound is
+    /// focused.
     fn stop_prehear_after_browse(&mut self) {
-        let browsing = self.surface.page() == "browse";
+        if self.quick_browse.is_some_and(|at| at != (self.group, self.sound) || self.surface.page() != "control") {
+            self.quick_browse = None;
+        }
+        let browsing = self.surface.page() == "browse" || self.quick_browse.is_some();
         if self.surface_was_browsing && !browsing {
             self.stop_prehear();
         }

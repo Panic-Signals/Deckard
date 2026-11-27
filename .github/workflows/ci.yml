@@ -45,6 +45,10 @@ jobs:
   # Measured on Linux only: the rest of the code is the same on every system. Tests that
   # need a Maschine install or projects skip themselves here, so their lines count as
   # not covered.
+  #
+  # A pull request labelled move-only (code moved between files, not changed) is measured
+  # and reported but not held to the 70%: a moved line counts as a new one here, whether
+  # or not a test ever ran it.
   coverage:
     name: Patch coverage
     if: github.event_name == 'pull_request'
@@ -75,13 +79,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The labels as they are now, not as they were when the run started: after adding
+      # move-only, re-running this job is enough.
       - name: At least 70% of changed lines covered
         run: |
           python -m pip install diff-cover==11.0.1
-          diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=70 \
+          under=70
+          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -qx move-only; then
+            echo "Labelled move-only: reporting coverage without the 70% floor."
+            under=0
+          fi
+          diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under="$under" \
             --format markdown:coverage.md
         env:
           BASE_REF: ${{ github.base_ref }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
       - name: Report
         if: always()
         run: test -f coverage.md && cat coverage.md >> "$GITHUB_STEP_SUMMARY" || true

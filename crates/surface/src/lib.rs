@@ -30,6 +30,15 @@ pub mod widget;
 pub use screen::{FONTS, PICTURE_ALPHA, Picture};
 pub use sources::SHIPPED;
 
+/// The app's question about unsaved changes (before New, Open, Revert or Quit).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AskView {
+    /// As the app's dialog words it.
+    pub question: String,
+    /// Reverting: there is nothing to save, only to go on or not.
+    pub revert: bool,
+}
+
 /// What the layer shows of the app, filled by the app each frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct View {
@@ -83,6 +92,8 @@ pub struct View {
     pub grid: GridView,
     /// The projects opened lately, most recent first (their names).
     pub recent: Vec<String>,
+    /// The question about unsaved changes that waits for its answer, if one does.
+    pub ask: Option<AskView>,
     /// What the Settings page (SETTINGS) shows.
     pub settings: SettingsView,
     /// Lock's snapshots and settings.
@@ -243,6 +254,11 @@ pub enum Browse {
     Routing(bool),
     /// Load a group with (`true`) or without (`false`) its patterns (`+ PATTERNS`).
     Patterns(bool),
+    /// Show the library at the focused sound's sample, or else its preset.
+    Locate,
+    /// Quick Browse on the Control page: the list that found the focused sound's sample
+    /// or preset, scrolled to it (`true`), or closed (`false`).
+    Quick(bool),
 }
 
 /// The song's grids, as Maschine's Grid page lists them (each value its place in the
@@ -582,6 +598,9 @@ pub struct ControlView {
     pub level: usize,
     /// Plug-ins shown (else the channel's properties).
     pub modules_visible: bool,
+    /// Quick Browse's list shows over the right screen (the browser's results are in
+    /// [`View::browser`]).
+    pub quick_browse: bool,
     pub page_group: usize,
     pub page_groups: usize,
     /// The focused slot's name, if any.
@@ -928,6 +947,9 @@ pub enum Action {
     /// `save_group` / `save_sound` (the focused one), or `load` recent project `n`
     /// (from 0, as [`View::recent`]).
     File(&'static str, usize),
+    /// The answer to [`View::ask`]: `save` (then go on), `discard` (go on without
+    /// saving) or `cancel`.
+    Ask(&'static str),
     /// One of the song's grids (`perform`, `arrange`, `arrange_snap`, `quick`, `step`,
     /// `step_snap`, `nudge`), as [`GridView`]'s fields (on / off as 1 / 0).
     Grid(&'static str, i64),
@@ -1613,7 +1635,11 @@ impl Surface {
 
     /// The shown page's table (if it loads) and the global one, in that order.
     fn tables(&self, run: &Run) -> Vec<Table> {
-        let page = run.shared.borrow().page.clone();
+        // (A question about unsaved changes shows over the page until it's answered.)
+        let page = {
+            let sh = run.shared.borrow();
+            if sh.view.ask.is_some() { "ask".to_string() } else { sh.page.clone() }
+        };
         let mut out = Vec::new();
         match page_table(&run.lua, &page) {
             Ok(Some(t)) => out.push(t),
