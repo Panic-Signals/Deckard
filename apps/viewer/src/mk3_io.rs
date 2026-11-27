@@ -155,7 +155,9 @@ impl Touching {
         let (value, live) = match h.touch.mode {
             TouchMode::Velocity => {
                 let v = ((pad_velocity(pressure, route.scaling) * 127.0).round() as i64).clamp(1, 127);
-                (v as u8, Some(Live::RepeatPressure { group: g, sound: s, pitch, velocity: v }))
+                // (Fixed Velocity: the repeats stay at the hit's, however the pad is pressed.)
+                let live = route.velocity.is_none().then_some(Live::RepeatPressure { group: g, sound: s, pitch, velocity: v });
+                (v as u8, live)
             }
             TouchMode::PolyAt => {
                 let v = touch_value(pressure, &h.touch);
@@ -1047,6 +1049,22 @@ mod tests {
         // The pads' own Fixed Velocity still wins in the Velocity mode.
         let fixed = PadRoute { velocity: Some(110), ..route(PadTouch::default()) };
         assert_eq!(Touching::hit_velocity(&fixed, 0, 0, 30), 110);
+    }
+
+    /// Fixed Velocity: a held pad's pressure doesn't change what Note Repeat plays at
+    /// (it dropped as the pad was let go); without it, pressure sets the repeats'.
+    #[test]
+    fn fixed_velocity_holds_note_repeat_against_pad_pressure() {
+        let slot = (0, 0, 60);
+        let fixed = PadRoute { velocity: Some(100), ..route(mode(TouchMode::Velocity)) };
+        let mut t = Touching::default();
+        t.hit(1, slot, &fixed);
+        assert!(t.pressure(1, Some(slot), 0.9, &fixed).is_empty(), "pressed harder");
+        assert!(t.pressure(1, Some(slot), 0.05, &fixed).is_empty(), "being let go");
+        let free = route(mode(TouchMode::Velocity));
+        let mut t = Touching::default();
+        t.hit(1, slot, &free);
+        assert!(matches!(t.pressure(1, Some(slot), 0.05, &free).as_slice(), [Live::RepeatPressure { .. }]));
     }
 
     /// Aftertouch from two held pads of a sound: the harder one counts; letting go of
